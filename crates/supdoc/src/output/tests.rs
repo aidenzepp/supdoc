@@ -732,3 +732,74 @@ fn a_note_cannot_start_a_new_line_or_hide_text_in_text_format() {
 
     assert_eq!(stderr.text(), "done\\n\\u{202e}forged\\r\\u{2028}\n");
 }
+
+/// Output for a run in `/repo/apps/web`, with `/repo` as the GitHub workspace, that has only
+/// the provisional root (the current directory) until a command calls `set_root`.
+fn output_in_subdirectory(format: OutputFormat) -> (Output, Capture) {
+    let mut settings = settings(format, Verbosity::Normal);
+    settings.paths = PathStyle::new(
+        absolute("/repo/apps/web"),
+        absolute("/repo/apps/web"),
+        Some(absolute("/repo")),
+    );
+    let (output, stdout, _stderr) = captured(settings);
+    (output, stdout)
+}
+
+#[test]
+fn set_root_keeps_text_paths_relative_to_the_cwd() {
+    let (mut output, stdout) = output_in_subdirectory(OutputFormat::Text);
+    output.set_root(absolute("/repo"));
+
+    output
+        .report(&check_report(), false)
+        .expect("writing to a buffer should succeed");
+
+    let text = stdout.text();
+    assert!(
+        text.contains("../../docs/guide.md"),
+        "text paths should climb from /repo/apps/web to the root's docs/guide.md:\n{text}"
+    );
+}
+
+#[test]
+fn set_root_makes_github_paths_workspace_relative() {
+    let (mut output, stdout) = output_in_subdirectory(OutputFormat::Github);
+    output.set_root(absolute("/repo"));
+
+    output
+        .report(&check_report(), false)
+        .expect("writing to a buffer should succeed");
+
+    let text = stdout.text();
+    assert!(
+        text.contains("file=docs/guide.md,"),
+        "GitHub paths should be relative to the workspace /repo:\n{text}"
+    );
+    assert!(
+        !text.contains("apps/web/docs"),
+        "no GitHub path should keep the provisional root:\n{text}"
+    );
+}
+
+#[test]
+fn set_root_makes_json_root_and_paths_project_relative() {
+    let (mut output, stdout) = output_in_subdirectory(OutputFormat::Json);
+    output.set_root(absolute("/repo"));
+
+    output
+        .report(&check_report(), false)
+        .expect("writing to a buffer should succeed");
+
+    let envelope = parse(stdout.text().trim_end());
+    assert_eq!(at(&envelope, "/root"), "/repo");
+    assert_eq!(
+        PathStyle::json(&source("docs/guide.md")),
+        "docs/guide.md",
+        "JSON paths are the project-relative source paths"
+    );
+    assert!(
+        envelope.to_string().contains("\"docs/guide.md\""),
+        "the envelope should name docs/guide.md relative to the root: {envelope}"
+    );
+}

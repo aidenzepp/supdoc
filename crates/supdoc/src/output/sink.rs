@@ -8,6 +8,7 @@ use crate::output::json::{Envelope, FatalJson, FindingJson};
 use crate::output::paths::PathStyle;
 use crate::output::report::Report;
 use crate::output::{github, jsonl, text};
+use crate::path::AbsolutePath;
 
 /// What `main` decides about output before any command runs.
 #[derive(Debug, Clone)]
@@ -96,6 +97,13 @@ impl Output {
             Box::new(anstream::AutoStream::new(io::stdout(), choice)),
             Box::new(anstream::AutoStream::new(io::stderr(), choice)),
         )
+    }
+
+    /// Sets the project root once `Config::load` has found it. Everything written after this
+    /// call, including the JSON `root`, uses it; text paths stay relative to the current
+    /// directory.
+    pub fn set_root(&mut self, root: AbsolutePath) {
+        self.settings.paths.set_root(root);
     }
 
     /// Whether a reader closed the pipe. The caller should exit 0.

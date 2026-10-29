@@ -7,7 +7,8 @@ use crate::path::AbsolutePath;
 
 /// Turns project-relative paths into the form each consumer can use directly.
 ///
-/// Built once in `main` from the current directory, the project root and `$GITHUB_WORKSPACE`.
+/// Built once in `main` from the current directory and `$GITHUB_WORKSPACE`, with the current
+/// directory standing in for the project root until [`PathStyle::set_root`] is told the real one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathStyle {
     /// The current directory: text output is relative to it so terminals can link it.
@@ -37,6 +38,12 @@ impl PathStyle {
     #[must_use]
     pub fn root(&self) -> &AbsolutePath {
         &self.root
+    }
+
+    /// Replaces the project root once a command has found it, keeping the current directory and
+    /// `$GITHUB_WORKSPACE`.
+    pub fn set_root(&mut self, root: AbsolutePath) {
+        self.root = root;
     }
 
     /// A source file as text output shows it: relative to the current directory.
