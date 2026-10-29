@@ -15,9 +15,7 @@
 use std::fs;
 use std::io::{self, Write};
 use std::ops::Range;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
 
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -26,6 +24,7 @@ use crate::config::{CONFIG_FILE_NAME, Config, ConfigError};
 use crate::finding::{Finding, Location, Severity};
 use crate::link::destination::parse_destination;
 use crate::link::{LinkKey, SourcePath, Target};
+use crate::lock::io::write_atomically;
 use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
 use crate::namespace::NamespaceName;
 use crate::output::json::{Envelope, LocationJson};
@@ -48,9 +47,6 @@ const COMMAND: &str = "namespace rename";
 
 /// The note that closes a preview, after the counts.
 const PREVIEW_NOTE: &str = "Nothing written. Run the same command with --yes to apply.";
-
-/// How many fresh temporary names to try before giving up on writing a file.
-const TEMP_ATTEMPTS: u32 = 8;
 
 /// Runs `supdoc namespace rename OLD NEW`: previews every edit, or with `--yes` makes them.
 ///
@@ -178,7 +174,7 @@ impl Plan {
         for source in &self.sources {
             let renamed =
                 replace_ranges(&source.text, source.prefixes(&self.old), self.new.as_str());
-            write_atomically(source.file.as_path(), renamed.as_bytes()).map_err(|error| {
+            replace_file(source.file.as_path(), renamed.as_bytes()).map_err(|error| {
                 self.write_failed(source.source.as_str(), &error.to_string(), &written)
             })?;
             written.push(source.source.to_string());
@@ -195,7 +191,7 @@ impl Plan {
             std::iter::once(self.config.key.clone()),
             self.new.as_str(),
         );
-        write_atomically(self.config.file.as_path(), renamed.as_bytes())
+        replace_file(self.config.file.as_path(), renamed.as_bytes())
             .map_err(|error| self.write_failed(&self.config.shown, &error.to_string(), &written))
     }
 
@@ -632,61 +628,15 @@ fn holds(file: &AbsolutePath, text: &str) -> bool {
         && fs::read(file.as_path()).is_ok_and(|bytes| bytes == text.as_bytes())
 }
 
-/// Writes `bytes` to a new file beside `target` and renames it into place, keeping `target`'s
-/// permissions. The temporary file is created exclusively, so a planted path is never written
-/// through.
+/// Writes `bytes` over `target` atomically, keeping `target`'s permissions.
 ///
 /// # Errors
 ///
-/// Fails if `target` can't be inspected, or the temporary file can't be created, written or
-/// renamed; `target` is then unchanged.
-fn write_atomically(target: &Path, bytes: &[u8]) -> io::Result<()> {
+/// Fails if `target` can't be inspected, or the replacement can't be written; `target` is then
+/// unchanged.
+fn replace_file(target: &Path, bytes: &[u8]) -> io::Result<()> {
     let permissions = fs::metadata(target)?.permissions();
-    let (mut file, temp) = create_exclusive_temp(target)?;
-    let written = file
-        .write_all(bytes)
-        .and_then(|()| file.set_permissions(permissions))
-        .and_then(|()| file.sync_all());
-    drop(file);
-    let finished = written.and_then(|()| fs::rename(&temp, target));
-    if finished.is_err() {
-        drop(fs::remove_file(&temp));
-    }
-    finished
-}
-
-/// Creates a new file at the first unused scratch name beside `target`.
-///
-/// # Errors
-///
-/// Fails on any error other than a taken name, or when every attempt finds its name taken.
-fn create_exclusive_temp(target: &Path) -> io::Result<(fs::File, PathBuf)> {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    for attempt in 0..TEMP_ATTEMPTS {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.subsec_nanos());
-        let mut name = target.file_name().unwrap_or_default().to_os_string();
-        name.push(format!(
-            ".{}.{}.{nanos:x}.{attempt}.tmp",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed),
-        ));
-        let temp = target.with_file_name(name);
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)
-        {
-            Ok(file) => return Ok((file, temp)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        format!("no unused temporary file name found after {TEMP_ATTEMPTS} attempts"),
-    ))
+    write_atomically(target, bytes, Some(&permissions))
 }
 
 /// The error for an OLD that no config defines, naming the likely intended one and every
@@ -900,6 +850,7 @@ impl Report for RenameReport {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
     use clap::Parser as _;

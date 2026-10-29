@@ -8,14 +8,13 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Write as _};
+use std::io;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
 
 use crate::finding::{Finding, Fix, Severity};
 use crate::link::{LinkKey, SourcePath, SymbolPath, Target, TargetPath};
+use crate::lock::io::write_atomically;
 use crate::lock::model::Lockfile;
 use crate::path::AbsolutePath;
 use crate::scan::model::{Scan, TargetState};
@@ -31,9 +30,6 @@ const CODE_FILE_CHANGED: &str = "fix/file-changed";
 
 /// Finding code: a file could not be rewritten.
 const CODE_WRITE_FAILED: &str = "fix/write-failed";
-
-/// How many fresh temporary names to try before giving up on a file.
-const TEMP_ATTEMPTS: u32 = 8;
 
 /// The edits `supdoc fix` would make. The preview is this value rendered (05 C2).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -328,62 +324,8 @@ fn rewrite_file(path: &Path, planned: &[&PlannedFix]) -> Result<(), Skip> {
             .splice(range, planned.fix.replacement.bytes())
             .collect();
     }
-    write_atomically(path, &bytes, &metadata.permissions())?;
+    write_atomically(path, &bytes, Some(&metadata.permissions()))?;
     Ok(())
-}
-
-/// Writes `bytes` to a new file beside `target` and renames it into place, keeping `permissions`.
-/// The temporary file is created exclusively, so a planted path or link is never written through.
-///
-/// # Errors
-///
-/// Fails if the temporary file cannot be created, written or renamed; `target` is then unchanged.
-fn write_atomically(target: &Path, bytes: &[u8], permissions: &fs::Permissions) -> io::Result<()> {
-    let (mut file, temp) = create_exclusive_temp(target)?;
-    let written = file
-        .write_all(bytes)
-        .and_then(|()| file.set_permissions(permissions.clone()))
-        .and_then(|()| file.sync_all());
-    drop(file);
-    let finished = written.and_then(|()| fs::rename(&temp, target));
-    if finished.is_err() {
-        drop(fs::remove_file(&temp));
-    }
-    finished
-}
-
-/// Creates a new file at the first unused scratch name beside `target`.
-///
-/// # Errors
-///
-/// Fails on any error other than a taken name, or when every attempt finds its name taken.
-fn create_exclusive_temp(target: &Path) -> io::Result<(fs::File, PathBuf)> {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    for attempt in 0..TEMP_ATTEMPTS {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.subsec_nanos());
-        let mut name = target.file_name().unwrap_or_default().to_os_string();
-        name.push(format!(
-            ".{}.{}.{nanos:x}.{attempt}.tmp",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed),
-        ));
-        let temp = target.with_file_name(name);
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)
-        {
-            Ok(file) => return Ok((file, temp)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        format!("no unused temporary file name found after {TEMP_ATTEMPTS} attempts"),
-    ))
 }
 
 /// The `fix/file-changed` finding for `file`, which had `count` fixes.

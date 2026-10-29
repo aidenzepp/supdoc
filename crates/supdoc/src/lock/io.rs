@@ -48,13 +48,7 @@ impl Lockfile {
             path: path.clone(),
             error,
         };
-        let (file, temp) =
-            create_exclusive_temp(|attempt| temp_path_beside(path.as_path(), attempt))
-                .map_err(to_error)?;
-        write_then_rename(file, &temp, path.as_path(), self.render().as_bytes()).map_err(|error| {
-            drop(fs::remove_file(&temp));
-            to_error(error)
-        })
+        write_atomically(path.as_path(), self.render().as_bytes(), None).map_err(to_error)
     }
 }
 
@@ -105,21 +99,30 @@ fn create_exclusive_temp(
     ))
 }
 
-/// Writes `bytes` to the open `file`, flushes them to disk, then renames `temp` over `target`.
+/// Writes `bytes` to a new file beside `target` and renames it into place, so an interrupted
+/// run never leaves half a file. With `permissions`, the new file gets them before the rename;
+/// without, it keeps the default for a new file. The temporary file is created exclusively, so a
+/// planted path or symlink is never written through.
 ///
 /// # Errors
 ///
-/// Fails if any step fails; `target` is only replaced by the final rename.
-fn write_then_rename(
-    mut file: fs::File,
-    temp: &Path,
+/// Fails if the temporary file cannot be created, written or renamed; `target` is then unchanged.
+pub(crate) fn write_atomically(
     target: &Path,
     bytes: &[u8],
+    permissions: Option<&fs::Permissions>,
 ) -> io::Result<()> {
-    file.write_all(bytes)?;
-    file.sync_all()?;
+    let (mut file, temp) = create_exclusive_temp(|attempt| temp_path_beside(target, attempt))?;
+    let written = file
+        .write_all(bytes)
+        .and_then(|()| permissions.map_or(Ok(()), |kept| file.set_permissions(kept.clone())))
+        .and_then(|()| file.sync_all());
     drop(file);
-    fs::rename(temp, target)
+    let finished = written.and_then(|()| fs::rename(&temp, target));
+    if finished.is_err() {
+        drop(fs::remove_file(&temp));
+    }
+    finished
 }
 
 #[cfg(test)]
