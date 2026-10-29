@@ -716,8 +716,8 @@ fn unread_source(
     CliError::new(
         "cli/rename-unreadable-source",
         format!(
-            "cannot read {source} to rename its links; nothing was written ({})",
-            error.code()
+            "{}; its links can't be renamed, so nothing was written",
+            error.message_naming(source)
         ),
         format!(
             "{} Then run `supdoc namespace rename {old} {new}` again",
@@ -1453,8 +1453,15 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
             ("cli/rename-unreadable-source", 1)
         );
         assert!(
-            error.message().contains("docs/broken.md"),
-            "{}",
+            error.message().starts_with("docs/broken.md is not UTF-8"),
+            "the message should name the file relative to the root: {}",
+            error.message()
+        );
+        assert!(
+            !error
+                .message()
+                .contains(project.root().display().to_string().as_str()),
+            "the message should not name the absolute temp root: {}",
             error.message()
         );
         assert_eq!(

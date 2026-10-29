@@ -370,10 +370,7 @@ mod tests {
 
         assert_eq!((defaults.limit, defaults.target.is_none()), (100, true));
         assert_eq!(given.limit, 0);
-        assert_eq!(
-            given.target.map(|target| target.to_string()),
-            Some("auth:src/session.rs#login".to_owned())
-        );
+        assert_eq!(given.target.as_deref(), Some("auth:src/session.rs#login"));
         assert_eq!(given.state.len(), 2);
     }
 

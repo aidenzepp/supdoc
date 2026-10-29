@@ -340,12 +340,16 @@ fn unreadable_source(source: &SourcePath, error: &ReadError) -> Finding {
         line: 1,
         column: 1,
     };
-    Finding::new(error.code(), Severity::Warning, error.to_string())
-        .with_location(start)
-        .with_help(format!(
-            "Links in {source} weren't checked. {}",
-            error.help()
-        ))
+    Finding::new(
+        error.code(),
+        Severity::Warning,
+        error.message_naming(source),
+    )
+    .with_location(start)
+    .with_help(format!(
+        "Links in {source} weren't checked. {}",
+        error.help()
+    ))
 }
 
 #[cfg(test)]
@@ -806,6 +810,13 @@ mod tests {
 
         let codes: Vec<&str> = scan.findings.iter().map(|finding| finding.code).collect();
         assert_eq!(codes, vec!["read/not-utf8"]);
+        assert!(
+            scan.findings
+                .iter()
+                .all(|finding| finding.message.starts_with("docs/bad.md is not UTF-8")),
+            "the warning should name the file relative to the root: {:?}",
+            scan.findings
+        );
         assert_eq!(
             scan.unread_sources,
             BTreeSet::from(["docs/bad.md"

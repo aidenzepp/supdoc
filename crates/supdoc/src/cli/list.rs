@@ -4,6 +4,7 @@
 //! reconcile → filter by TARGET and --state → cap at --limit`, with effects only at the two ends.
 
 use std::io::{self, Write};
+use std::path::Path;
 
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -23,21 +24,23 @@ use crate::scan::model::Scope;
 
 use super::args::ListArgs;
 use super::check::LinkJson;
-use super::project::{load_config, read_lock};
+use super::project::{absolute, load_config, path_outside, read_lock};
 use super::{CliError, Context, Outcome};
 
 /// Runs `supdoc list`: prints each link in the chosen states, optionally only those pointing at
 /// `TARGET`, up to `--limit`, then the summary of every match.
 ///
 /// A missing `supdoc.lock` is an empty one, so every link is `new`. `TARGET` is read relative to
-/// the current directory, and `ns:path` names the same file as the plain path to it. It is not an
+/// the current directory, so `./src/lib.rs`, `../src/lib.rs` and an absolute path inside the
+/// project all work, and `ns:path` names the same file as the plain path to it. It is not an
 /// error for `TARGET` to name a file that doesn't exist or has no links.
 ///
 /// # Errors
 ///
 /// Returns the config's own error (78, or 74 when unreadable), the lockfile's own error (78 when
-/// invalid, 74 when unreadable), `scan/root-unreadable` (74), and `cli/list-output` when the
-/// report cannot be written (74).
+/// invalid, 74 when unreadable), `cli/path-outside-project` (2) for a plain `TARGET` outside the
+/// project, `cli/target-invalid` (2) for a `TARGET` that isn't a target, `scan/root-unreadable`
+/// (74), and `cli/list-output` when the report cannot be written (74).
 pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let config = load_config(context, output, "list")?;
     let lock = read_lock(config.root())?;
@@ -53,10 +56,12 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
     )?;
     let model = reconcile(&scan, &lock, &Scope::All);
 
-    let wanted = args
+    let target = args
         .target
-        .as_ref()
-        .map(|target| Wanted::new(target, &config, &context.cwd));
+        .as_deref()
+        .map(|typed| parse_target(typed, &config, &context.cwd))
+        .transpose()?;
+    let wanted = target.as_ref().map(|target| Wanted::new(target, &config));
     let matched: Vec<LinkReport> = model
         .links
         .into_iter()
@@ -82,7 +87,7 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
             ))
             .map_err(|error| output_failed(&error))?;
     } else if total == 0 {
-        let note = match &args.target {
+        let note = match &target {
             Some(target) => format!("No links to {target}."),
             None => "No links found.".to_owned(),
         };
@@ -99,6 +104,56 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
 /// Never fails; the `Result` matches the commands that are not built yet.
 pub fn schema() -> Result<schemars::Schema, CliError> {
     Ok(schemars::schema_for!(Envelope<'static, ListReport>))
+}
+
+/// The `TARGET` as typed, made into a [`LinkRef`] whose plain path is relative to the project root.
+///
+/// A plain path is taken relative to `cwd` and normalized, so `./src/lib.rs` and an absolute path
+/// inside the project name the same file as `src/lib.rs`. A `ns:path` is left alone.
+///
+/// # Errors
+///
+/// Returns `cli/path-outside-project` for a plain path outside the project and
+/// `cli/target-invalid` for text that is not a target. Both exit 2.
+fn parse_target(typed: &str, config: &Config, cwd: &AbsolutePath) -> Result<LinkRef, CliError> {
+    let (path, symbol) = match typed.split_once('#') {
+        Some((path, symbol)) => (path, Some(symbol)),
+        None => (typed, None),
+    };
+    let namespaced = path.split_once(':').is_some_and(|(name, rest)| {
+        !rest.is_empty() && name.parse::<crate::namespace::NamespaceName>().is_ok()
+    });
+    let rewritten;
+    let text = if namespaced {
+        typed
+    } else {
+        let absolute = absolute(cwd, Path::new(path));
+        let relative = absolute
+            .strip_prefix(config.root())
+            .ok_or_else(|| path_outside(Path::new(path), config.root()))?;
+        let inside = relative
+            .to_str()
+            .filter(|inside| !inside.is_empty())
+            .ok_or_else(|| target_invalid(typed, "it must name a file inside the project"))?;
+        let inside = inside.replace(std::path::MAIN_SEPARATOR, "/");
+        rewritten = match symbol {
+            Some(symbol) => format!("{inside}#{symbol}"),
+            None => inside,
+        };
+        &rewritten
+    };
+    text.parse::<LinkRef>()
+        .map_err(|error| target_invalid(typed, &error.to_string()))
+}
+
+/// The error for a `TARGET` that is not `path`, `path#symbol` or `ns:path#symbol`.
+fn target_invalid(typed: &str, reason: &str) -> CliError {
+    CliError::new(
+        "cli/target-invalid",
+        format!("`{typed}` is not a link target: {reason}"),
+        "Write TARGET as `path`, `path#symbol` or `ns:path#symbol`",
+        CliError::USAGE_EXIT_CODE,
+    )
 }
 
 /// The error for a report that could not be written.
@@ -266,10 +321,10 @@ enum SymbolFilter {
 }
 
 impl Wanted {
-    /// Resolves what `target` names: relative to `cwd` for a plain path, then in the file itself
-    /// for a symbol.
-    fn new(target: &LinkRef, config: &Config, cwd: &AbsolutePath) -> Self {
-        let place = Place::of(&target.target, cwd, config);
+    /// Resolves what `target` names: a plain path is relative to the project root, as
+    /// [`parse_target`] leaves it, then the symbol is looked up in the file itself.
+    fn new(target: &LinkRef, config: &Config) -> Self {
+        let place = Place::of(&target.target, config.root(), config);
         let symbol = match (&target.symbol, &place) {
             (None, _) => SymbolFilter::Any,
             (Some(typed), Place::Unlocated(_)) => SymbolFilter::Text(typed.clone()),
@@ -439,6 +494,11 @@ mod tests {
 
         fn root(&self) -> AbsolutePath {
             AbsolutePath::new(self.dir.path()).expect("a temp directory should be absolute")
+        }
+
+        /// The absolute path of `relative` under the root.
+        fn absolute(&self, relative: &str) -> String {
+            self.dir.path().join(relative).display().to_string()
         }
 
         fn write(&self, relative: &str, text: &str) {
@@ -642,6 +702,39 @@ mod tests {
                 .starts_with("new       a.md:1  ->  src/lib.rs#add\n"),
             "text paths are relative to the current directory: {}",
             text.stdout
+        );
+    }
+
+    #[test]
+    fn list_target_accepts_dot_slash_and_an_absolute_path_inside_the_root() {
+        let project = Project::new();
+        project.write("docs/a.md", "[add](../src/lib.rs#add).\n");
+        let absolute = format!("{}#add", project.absolute("src/lib.rs"));
+
+        let dotted = project.list(&["--json", "list", "./src/lib.rs#add"]);
+        let absolute = project.list(&["--json", "list", &absolute]);
+
+        assert_eq!(
+            dotted.listed(),
+            ["docs/a.md src/lib.rs#add new"],
+            "stdout: {}",
+            dotted.stdout
+        );
+        assert_eq!(absolute.listed(), dotted.listed());
+    }
+
+    #[test]
+    fn list_target_outside_the_root_is_the_path_error() {
+        let project = Project::new();
+
+        let run = project.list(&["--json", "list", "/elsewhere/src/lib.rs"]);
+
+        let error = run
+            .result
+            .expect_err("a target outside the project should be refused");
+        assert_eq!(
+            (error.code(), error.exit_code()),
+            ("cli/path-outside-project", 2)
         );
     }
 

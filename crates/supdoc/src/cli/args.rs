@@ -14,7 +14,7 @@ use super::examples::{
     NAMESPACE_RENAME_EXAMPLES, RESOLVE_EXAMPLES, SCHEMA_EXAMPLES, SKILL_EXAMPLES,
     SKILL_INSTALL_EXAMPLES, TOP_EXAMPLES, UPDATE_EXAMPLES,
 };
-use crate::link::{LinkRef, SymbolPath};
+use crate::link::SymbolPath;
 use crate::namespace::NamespaceName;
 use crate::output::OutputFormat;
 use crate::state::LinkState;
@@ -239,8 +239,8 @@ pub struct FixArgs {
 #[derive(Debug, Args)]
 pub struct ListArgs {
     /// Only links to this target: `path`, `path#symbol` or `ns:path#symbol`
-    #[arg(value_name = "TARGET")]
-    pub target: Option<LinkRef>,
+    #[arg(value_name = "TARGET", value_hint = ValueHint::AnyPath)]
+    pub target: Option<String>,
     /// Only links in these states
     #[arg(
         long,
