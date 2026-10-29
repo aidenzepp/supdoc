@@ -14,7 +14,7 @@ use crate::check::model::{LinkReport, Report as CheckModel};
 use crate::check::reconcile::{self, check_outcome, reconcile};
 use crate::finding::{Finding, Location};
 use crate::link::LinkKey;
-use crate::output::json::FindingJson;
+use crate::output::json::{Envelope, FindingJson};
 use crate::output::summary::render_summary;
 use crate::output::text::{render_finding, visible};
 use crate::output::{Output, OutputError, Report, Summary, TextContext, Verbosity};
@@ -61,6 +61,16 @@ pub fn run(args: &CheckArgs, context: &Context, output: &mut Output) -> Result<O
         .report(&report, outcome == Outcome::Clean)
         .map_err(|error| output_failed(&error))?;
     Ok(outcome)
+}
+
+/// The JSON Schema of `supdoc check`'s `--json` output: the whole envelope, with `data` typed as
+/// [`CheckReport`].
+///
+/// # Errors
+///
+/// Never fails; the `Result` matches the commands that are not built yet.
+pub fn schema() -> Result<schemars::Schema, CliError> {
+    Ok(schemars::schema_for!(Envelope<'static, CheckReport>))
 }
 
 /// The error for a report that could not be written.
@@ -724,23 +734,43 @@ mod tests {
         assert_eq!((run.stdout.as_str(), run.stderr.as_str()), ("", ""));
     }
 
+    /// Every way `json` breaks the schema `schema()` publishes for `supdoc check`.
+    fn schema_violations(json: &serde_json::Value) -> Vec<String> {
+        let schema = schema().expect("check is built, so it has a schema");
+        let schema = serde_json::to_value(schema).expect("the check schema should serialize");
+        let validator = jsonschema::validator_for(&schema)
+            .expect("the generated schema should be a valid JSON Schema");
+        validator
+            .iter_errors(json)
+            .map(|error| error.to_string())
+            .collect()
+    }
+
     #[test]
     fn check_json_validates_against_its_schema() {
         let project = Project::new();
-        let run = project.check(&["--json", "check"]);
-        let schema = serde_json::to_value(schemars::schema_for!(CheckReport))
-            .expect("the check schema should serialize");
-        let validator = jsonschema::validator_for(&schema)
-            .expect("the generated schema should be a valid JSON Schema");
+        let json = project.check(&["--json", "check"]).json();
 
-        let json = run.json();
-        let data = at(&json, "/data");
+        let errors = schema_violations(&json);
 
-        let errors: Vec<String> = validator
-            .iter_errors(&data)
-            .map(|e| e.to_string())
-            .collect();
+        assert!(errors.is_empty(), "schema violations: {errors:?} in {json}");
+    }
 
-        assert!(errors.is_empty(), "schema violations: {errors:?} in {data}");
+    #[test]
+    fn check_schema_rejects_an_envelope_without_its_schema_version() {
+        let project = Project::new();
+        let mut json = project.check(&["--json", "check"]).json();
+        let _version = json
+            .as_object_mut()
+            .expect("the envelope should be a JSON object")
+            .remove("schema_version")
+            .expect("the envelope should carry schema_version");
+
+        let errors = schema_violations(&json);
+
+        assert!(
+            !errors.is_empty(),
+            "an envelope without schema_version should fail the schema: {json}"
+        );
     }
 }

@@ -16,3 +16,12 @@ pub fn run(
 ) -> Result<Outcome, CliError> {
     Err(CliError::not_built("skill install"))
 }
+
+/// The JSON Schema of `supdoc skill install`'s `--json` output.
+///
+/// # Errors
+///
+/// Returns `cli/not-built` until the command is built.
+pub fn schema() -> Result<schemars::Schema, CliError> {
+    Err(CliError::not_built("skill install"))
+}

@@ -9,6 +9,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::config::CONFIG_FILE_NAME;
+use crate::output::json::Envelope;
 use crate::output::{Output, OutputError, Report, TextContext};
 use crate::path::{AbsolutePath, RelativePath};
 
@@ -79,6 +80,16 @@ pub fn run(args: &InitArgs, context: &Context, output: &mut Output) -> Result<Ou
             .map_err(|error| output_failed(&target, &error))?;
     }
     Ok(Outcome::Clean)
+}
+
+/// The JSON Schema of `supdoc init`'s `--json` output: the whole envelope, with `data` typed as
+/// the starter report.
+///
+/// # Errors
+///
+/// Never fails; the `Result` matches the commands that are not built yet.
+pub fn schema() -> Result<schemars::Schema, CliError> {
+    Ok(schemars::schema_for!(Envelope<'static, StarterReport>))
 }
 
 /// Where the starter config goes: the current directory.
@@ -203,17 +214,21 @@ mod tests {
         }
     }
 
-    /// Text output rooted in `cwd`, writing to the given streams.
-    fn output_to(cwd: &AbsolutePath, stdout: Box<dyn Write>, stderr: Box<dyn Write>) -> Output {
-        let settings = OutputSettings {
+    /// Plain text settings rooted in `cwd`.
+    fn text_settings(cwd: &AbsolutePath) -> OutputSettings {
+        OutputSettings {
             format: OutputFormat::Text,
             verbosity: Verbosity::Normal,
             color: false,
             unicode: false,
             width: 80,
             paths: PathStyle::new(cwd.clone(), cwd.clone(), None),
-        };
-        Output::new(settings, stdout, stderr)
+        }
+    }
+
+    /// Text output rooted in `cwd`, writing to the given streams.
+    fn output_to(cwd: &AbsolutePath, stdout: Box<dyn Write>, stderr: Box<dyn Write>) -> Output {
+        Output::new(text_settings(cwd), stdout, stderr)
     }
 
     /// Runs init in `context`, returning its outcome and what it wrote to stdout and stderr.
@@ -387,5 +402,35 @@ mod tests {
         let outcome = run(&args, &context, &mut output).expect("a closed pipe is not an error");
 
         assert_eq!(outcome, Outcome::Clean);
+    }
+
+    #[test]
+    fn init_dry_run_json_validates_against_its_schema() {
+        let dir = tempfile::tempdir().expect("a temp directory should be created");
+        let (args, context) = context_in(&dir, &["--json", "--dry-run"]);
+        let stdout = Capture::default();
+        let settings = OutputSettings {
+            format: context.global.format(),
+            ..text_settings(&context.cwd)
+        };
+        let mut output = Output::new(
+            settings,
+            Box::new(stdout.clone()),
+            Box::new(Capture::default()),
+        );
+        let _outcome = run(&args, &context, &mut output).expect("the dry run should succeed");
+        let json: serde_json::Value = serde_json::from_str(&stdout.text())
+            .unwrap_or_else(|error| panic!("stdout should be JSON ({error}): {}", stdout.text()));
+        let schema = serde_json::to_value(schema().expect("init is built, so it has a schema"))
+            .expect("the init schema should serialize");
+        let validator = jsonschema::validator_for(&schema)
+            .expect("the generated schema should be a valid JSON Schema");
+
+        let errors: Vec<String> = validator
+            .iter_errors(&json)
+            .map(|error| error.to_string())
+            .collect();
+
+        assert!(errors.is_empty(), "schema violations: {errors:?} in {json}");
     }
 }

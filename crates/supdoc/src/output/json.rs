@@ -11,7 +11,10 @@ use crate::path::AbsolutePath;
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// The one object every command writes under `--json`, with the same top-level keys each time.
-#[derive(Debug, Serialize)]
+///
+/// Its schema is the one `supdoc schema` prints, so the JSON written and the schema published
+/// come from this one type.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct Envelope<'a, R: Report> {
     /// [`SCHEMA_VERSION`].
     schema_version: u32,
