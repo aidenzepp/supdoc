@@ -1,0 +1,11 @@
+/target
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# agent-generated planning artifacts
+docs/superpowers/
+
+# maintainer notes (local only)
+.notes/
