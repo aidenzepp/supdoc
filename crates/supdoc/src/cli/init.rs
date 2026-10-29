@@ -5,7 +5,11 @@
 use std::fs::OpenOptions;
 use std::io::{self, Write as _};
 
+use schemars::JsonSchema;
+use serde::Serialize;
+
 use crate::config::CONFIG_FILE_NAME;
+use crate::output::{Output, OutputError, Report, TextContext};
 use crate::path::{AbsolutePath, RelativePath};
 
 use super::args::InitArgs;
@@ -37,28 +41,48 @@ exclude = []
 # auth = \"services/auth\"
 ";
 
+/// The starter config as output data, shown by `--dry-run`.
+#[derive(Debug, Serialize, JsonSchema)]
+struct StarterReport {
+    /// The file contents, written as is in text output.
+    contents: &'static str,
+}
+
+impl Report for StarterReport {
+    fn command(&self) -> &'static str {
+        "init"
+    }
+
+    fn render_text(&self, _context: &TextContext, out: &mut dyn io::Write) -> io::Result<()> {
+        out.write_all(self.contents.as_bytes())
+    }
+}
+
 /// Runs `supdoc init` in the current directory.
 ///
-/// With `--dry-run`, prints the starter file to standard output and writes nothing.
+/// With `--dry-run`, prints the starter file through `output` and writes nothing. Notes go
+/// through `output` too, so `--quiet` and the data formats silence them.
 ///
 /// # Errors
 ///
 /// Returns `cli/init-exists` when `supdoc.config.toml` already exists, and `cli/init-write` when
-/// the file cannot be created.
-pub fn run(args: &InitArgs, context: &Context) -> Result<Outcome, CliError> {
+/// the file cannot be created or the output cannot be written.
+pub fn run(args: &InitArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let target = target(&context.cwd);
-    let quiet = context.global.quiet;
 
     if args.dry_run {
         refuse_if_present(&target)?;
-        emit(&mut io::stdout().lock(), STARTER);
-        note(
-            quiet,
-            "Nothing written. Run `supdoc init` to write supdoc.config.toml.\n",
-        );
+        output
+            .report(&StarterReport { contents: STARTER }, true)
+            .map_err(|error| output_failed(&target, &error))?;
+        output
+            .note("Nothing written. Run `supdoc init` to write supdoc.config.toml.")
+            .map_err(|error| output_failed(&target, &error))?;
     } else {
         write_new(&target)?;
-        note(quiet, &format!("Wrote {CONFIG_FILE_NAME}\n"));
+        output
+            .note(&format!("Wrote {CONFIG_FILE_NAME}"))
+            .map_err(|error| output_failed(&target, &error))?;
     }
     Ok(Outcome::Clean)
 }
@@ -125,27 +149,93 @@ fn write_failed(target: &AbsolutePath, error: &io::Error) -> CliError {
     )
 }
 
-/// Writes `text` to `sink`, ignoring failure: data that cannot be delivered (a closed pipe) is
-/// not worth failing a command that otherwise succeeded.
-fn emit(sink: &mut impl io::Write, text: &str) {
-    drop(sink.write_all(text.as_bytes()).and_then(|()| sink.flush()));
-}
-
-/// Tells the user what happened on standard error, unless `--quiet` asks for data only.
-fn note(quiet: bool, text: &str) {
-    if !quiet {
-        emit(&mut io::stderr().lock(), text);
-    }
+/// The error for output that could not be written.
+fn output_failed(target: &AbsolutePath, error: &OutputError) -> CliError {
+    CliError::new(
+        "cli/init-write",
+        format!("cannot report on {}: {error}", target.display()),
+        "check that standard output and standard error are open and writable",
+        IO_EXIT_CODE,
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use clap::Parser as _;
 
     use crate::cli::args::{Cli, Command};
     use crate::config::Config;
+    use crate::output::{OutputFormat, OutputSettings, PathStyle, Verbosity};
 
     use super::*;
+
+    /// A writer that keeps what it is given, shared with the test that reads it back.
+    #[derive(Clone, Default)]
+    struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Capture {
+        fn text(&self) -> String {
+            let bytes = self.0.lock().expect("the capture lock should be free");
+            String::from_utf8(bytes.clone()).expect("captured output should be UTF-8")
+        }
+    }
+
+    impl Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("the capture lock should be free")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A writer whose reader has hung up.
+    struct ClosedPipe;
+
+    impl Write for ClosedPipe {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Text output rooted in `cwd`, writing to the given streams.
+    fn output_to(cwd: &AbsolutePath, stdout: Box<dyn Write>, stderr: Box<dyn Write>) -> Output {
+        let settings = OutputSettings {
+            format: OutputFormat::Text,
+            verbosity: Verbosity::Normal,
+            color: false,
+            unicode: false,
+            width: 80,
+            paths: PathStyle::new(cwd.clone(), cwd.clone(), None),
+        };
+        Output::new(settings, stdout, stderr)
+    }
+
+    /// Runs init in `context`, returning its outcome and what it wrote to stdout and stderr.
+    fn run_captured(
+        args: &InitArgs,
+        context: &Context,
+    ) -> (Result<Outcome, CliError>, String, String) {
+        let (stdout, stderr) = (Capture::default(), Capture::default());
+        let mut output = output_to(
+            &context.cwd,
+            Box::new(stdout.clone()),
+            Box::new(stderr.clone()),
+        );
+        let result = run(args, context, &mut output);
+        (result, stdout.text(), stderr.text())
+    }
 
     /// A context rooted in `dir`, built from a real command line so the flags are genuine.
     fn context_in(dir: &tempfile::TempDir, flags: &[&str]) -> (InitArgs, Context) {
@@ -173,7 +263,8 @@ mod tests {
     fn starter_config_loads_as_a_valid_config() {
         let dir = tempfile::tempdir().expect("a temp directory should be created");
         let (args, context) = context_in(&dir, &[]);
-        let outcome = run(&args, &context).expect("init should write into an empty directory");
+        let (result, _, _) = run_captured(&args, &context);
+        let outcome = result.expect("init should write into an empty directory");
         assert_eq!(outcome, Outcome::Clean);
 
         let file = AbsolutePath::new(&config_path(&dir)).expect("the config path is absolute");
@@ -195,7 +286,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp directory should be created");
         let (args, context) = context_in(&dir, &[]);
 
-        let outcome = run(&args, &context).expect("init should write into an empty directory");
+        let (result, _, _) = run_captured(&args, &context);
+        let outcome = result.expect("init should write into an empty directory");
 
         assert_eq!(outcome, Outcome::Clean);
         let written = std::fs::read_to_string(config_path(&dir)).expect("the config should exist");
@@ -211,7 +303,8 @@ mod tests {
             .expect("the existing config should be written");
         let (args, context) = context_in(&dir, &[]);
 
-        let error = run(&args, &context).expect_err("init should refuse to overwrite");
+        let (result, _, _) = run_captured(&args, &context);
+        let error = result.expect_err("init should refuse to overwrite");
 
         assert_eq!(error.code(), "cli/init-exists");
         assert_eq!(error.exit_code(), 1);
@@ -227,7 +320,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp directory should be created");
         let (args, context) = context_in(&dir, &["--dry-run"]);
 
-        let outcome = run(&args, &context).expect("a dry run should succeed");
+        let (result, _, _) = run_captured(&args, &context);
+        let outcome = result.expect("a dry run should succeed");
 
         assert_eq!(outcome, Outcome::Clean);
         assert!(
@@ -242,7 +336,8 @@ mod tests {
         std::fs::write(config_path(&dir), "").expect("the existing config should be written");
         let (args, context) = context_in(&dir, &["--dry-run"]);
 
-        let error = run(&args, &context).expect_err("a dry run should report the refusal");
+        let (result, _, _) = run_captured(&args, &context);
+        let error = result.expect_err("a dry run should report the refusal");
 
         assert_eq!(error.code(), "cli/init-exists");
     }
@@ -254,8 +349,49 @@ mod tests {
         context.cwd =
             AbsolutePath::new(&dir.path().join("gone")).expect("a nested path should be absolute");
 
-        let error = run(&args, &context).expect_err("a missing directory cannot hold a config");
+        let (result, _, _) = run_captured(&args, &context);
+        let error = result.expect_err("a missing directory cannot hold a config");
 
         assert_eq!((error.code(), error.exit_code()), ("cli/init-write", 74));
+    }
+
+    #[test]
+    fn dry_run_prints_the_starter_on_stdout_and_the_note_on_stderr() {
+        let dir = tempfile::tempdir().expect("a temp directory should be created");
+        let (args, context) = context_in(&dir, &["--dry-run"]);
+
+        let (_, stdout, stderr) = run_captured(&args, &context);
+
+        assert_eq!(stdout, STARTER, "stdout carries the data");
+        assert!(
+            stderr.starts_with("Nothing written."),
+            "stderr carries the note, got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn writing_the_file_notes_it_on_stderr_and_prints_no_data() {
+        let dir = tempfile::tempdir().expect("a temp directory should be created");
+        let (args, context) = context_in(&dir, &[]);
+
+        let (_, stdout, stderr) = run_captured(&args, &context);
+
+        assert_eq!(stdout, "", "a real run prints no data");
+        assert_eq!(stderr, format!("Wrote {CONFIG_FILE_NAME}\n"), "the note");
+    }
+
+    #[test]
+    fn a_closed_pipe_on_a_dry_run_is_a_clean_exit() {
+        let dir = tempfile::tempdir().expect("a temp directory should be created");
+        let (args, context) = context_in(&dir, &["--dry-run"]);
+        let mut output = output_to(
+            &context.cwd,
+            Box::new(ClosedPipe),
+            Box::new(Capture::default()),
+        );
+
+        let outcome = run(&args, &context, &mut output).expect("a closed pipe is not an error");
+
+        assert_eq!(outcome, Outcome::Clean);
     }
 }
