@@ -98,7 +98,7 @@ impl Planned {
     ) -> Result<Self, CliError> {
         let config = load_config(context, output, "fix")?;
         let scope = scope(paths, &context.cwd, config.root())?;
-        let lock = read_lock(config.root())?;
+        let lock = read_lock(&config)?;
         let scan = scan(&config, &scope)?;
         let broken = scan
             .links

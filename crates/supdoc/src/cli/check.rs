@@ -39,7 +39,7 @@ use super::{CliError, Context, Outcome};
 pub fn run(args: &CheckArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let config = load_config(context, output, "check")?;
     let scope = scope(&args.paths, &context.cwd, config.root())?;
-    let lock = read_lock(config.root())?;
+    let lock = read_lock(&config)?;
     let scan =
         crate::scan::assemble::run(&config, &Languages::builtin(), &scope).map_err(|error| {
             CliError::new(

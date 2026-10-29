@@ -125,7 +125,7 @@ impl Plan {
         output: &mut Output,
     ) -> Result<Self, CliError> {
         let config = load_config(context, output, COMMAND)?;
-        let lock = read_lock(config.root())?;
+        let lock = read_lock(&config)?;
         let nearest = defining_file(&config, old, new)?;
         let config_edit = ConfigEdit::read(nearest, config.root(), old, new)?;
         let parent = parent_definition(&config, old)?;

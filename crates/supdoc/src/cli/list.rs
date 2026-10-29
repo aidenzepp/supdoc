@@ -43,7 +43,7 @@ use super::{CliError, Context, Outcome};
 /// (74), and `cli/list-output` when the report cannot be written (74).
 pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let config = load_config(context, output, "list")?;
-    let lock = read_lock(config.root())?;
+    let lock = read_lock(&config)?;
     let scan = crate::scan::assemble::run(&config, &Languages::builtin(), &Scope::All).map_err(
         |error| {
             CliError::new(

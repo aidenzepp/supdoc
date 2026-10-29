@@ -152,16 +152,21 @@ pub(crate) fn lock_path(root: &AbsolutePath) -> AbsolutePath {
     })
 }
 
-/// The lockfile in the project root, or an empty one when there is none yet (06 "What each
-/// command touches").
+/// The lockfile in `config`'s root, or an empty one when there is none yet (06 "What each command
+/// touches"), refusing one recorded under different hash settings than `config` resolves to (B.5).
+///
+/// Every command but `update` reads the lock through here, so a `passed` verdict always means the
+/// target's bytes, read under the lock's recorded settings, hash to the recorded value.
 ///
 /// # Errors
 ///
-/// Returns the lockfile's own error: 74 when it can't be read, 78 when its text is invalid.
-pub(crate) fn read_lock(root: &AbsolutePath) -> Result<Lockfile, CliError> {
-    Lockfile::read(&lock_path(root))
-        .map(Option::unwrap_or_default)
-        .map_err(|error| lock_failure(&error))
+/// Returns the lockfile's own error (74 when it can't be read, 78 when its text is invalid), or
+/// `lock/settings-mismatch` (78) when the recorded settings differ from the configured ones.
+pub(crate) fn read_lock(config: &Config) -> Result<Lockfile, CliError> {
+    match read_lock_for_update(config)? {
+        (lock, None) => Ok(lock),
+        (_, Some(change)) => Err(settings_mismatch(config, change)),
+    }
 }
 
 /// The lockfile in `config`'s root, and how the hash settings it records differ from the ones
@@ -259,6 +264,30 @@ mod tests {
     use super::*;
     use crate::cli::args::Cli;
     use crate::output::{OutputSettings, PathStyle, Verbosity};
+
+    #[test]
+    fn read_lock_refuses_mismatched_settings_with_78() {
+        let dir = tempfile::tempdir().expect("a fresh temp directory should be created");
+        fs::write(
+            dir.path().join("supdoc.config.toml"),
+            "[features.hash]\nline-endings = \"exact\"\n",
+        )
+        .expect("the fixture config should be written");
+        fs::write(
+            dir.path().join("supdoc.lock"),
+            "version = 1\n\n[features.hash]\nline-endings = \"normalize\"\n",
+        )
+        .expect("the fixture lock should be written");
+        let root = AbsolutePath::new(dir.path()).expect("a temp directory should be absolute");
+        let config = Config::load(&root).expect("the fixture config should load");
+
+        let error = read_lock(&config).expect_err("a lock under other settings should be refused");
+
+        assert_eq!(
+            (error.code(), error.exit_code()),
+            ("lock/settings-mismatch", 78)
+        );
+    }
 
     #[test]
     fn config_error_help_names_the_command_passed_in() {
