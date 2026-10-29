@@ -23,9 +23,11 @@ pub enum Outcome {
 /// Gives every [`LinkKey`] in `scope` the state the 05 table says.
 ///
 /// Pure: reads nothing but its arguments. Links outside `scope` are not judged, and neither are
-/// lock entries written in sources that couldn't be read this run (05 C5). A source with a link
-/// error, a link too malformed to have a key, is treated the same way: that link may be an edit
-/// of a locked one, so none of the source's entries are judged obsolete while the error remains.
+/// lock entries written in sources that couldn't be read this run (05 C5). A source with a broken
+/// link is treated the same way, whether the link is too malformed to have a key (a link error)
+/// or has a key whose target can't be resolved (such as an unknown namespace): that link may be
+/// an edit of a locked one, so none of the source's entries are judged obsolete while it
+/// remains broken. Other sources are unaffected.
 #[must_use]
 pub fn reconcile(scan: &Scan, lock: &Lockfile, scope: &Scope) -> Report {
     let scanned: Vec<(&LinkKey, &ScannedLink)> = scan
@@ -34,12 +36,18 @@ pub fn reconcile(scan: &Scan, lock: &Lockfile, scope: &Scope) -> Report {
         .filter(|(key, _)| scope.contains(&key.source))
         .collect();
 
-    let sources_with_link_errors: BTreeSet<&SourcePath> = scan
+    let keyless_error_sources = scan
         .findings
         .iter()
         .filter(|finding| finding.code.starts_with("link/") && finding.severity == Severity::Error)
-        .filter_map(|finding| finding.location.as_ref().map(|location| &location.file))
-        .collect();
+        .filter_map(|finding| finding.location.as_ref().map(|location| &location.file));
+    let broken_link_sources = scan
+        .links
+        .iter()
+        .filter(|(_, link)| matches!(link.target, TargetState::Broken { .. }))
+        .map(|(key, _)| &key.source);
+    let sources_with_broken_links: BTreeSet<&SourcePath> =
+        keyless_error_sources.chain(broken_link_sources).collect();
 
     let unlocked: Vec<&LinkKey> = scanned
         .iter()
@@ -54,7 +62,7 @@ pub fn reconcile(scan: &Scan, lock: &Lockfile, scope: &Scope) -> Report {
         .filter(|key| scope.contains(&key.source))
         .filter(|key| !scan.links.contains_key(key))
         .filter(|key| !scan.unread_sources.contains(&key.source))
-        .filter(|key| !sources_with_link_errors.contains(&key.source))
+        .filter(|key| !sources_with_broken_links.contains(&key.source))
         .collect();
     let moves = detect_moves(&unlocked, &removed);
 
@@ -550,6 +558,37 @@ mod tests {
                 "{code}: the link error still fails the check",
             );
         }
+    }
+
+    #[test]
+    fn broken_link_leaves_the_sources_entries_unjudged() {
+        let locked = key("docs/edited.md", Some("add"));
+        let typo = LinkKey {
+            target: "atuh:src/lib.rs"
+                .parse()
+                .expect("the fixture target should be valid"),
+            ..key("docs/edited.md", Some("add"))
+        };
+        let removed = key("docs/gone.md", Some("add"));
+        let scan = scan_of(vec![(typo.clone(), broken())]);
+
+        let report = reconcile(
+            &scan,
+            &lock_of(&[(&locked, b"v1"), (&removed, b"v1")]),
+            &Scope::All,
+        );
+
+        assert_eq!(state_of(&report, &typo), Some(LinkState::Broken));
+        assert_eq!(
+            state_of(&report, &locked),
+            None,
+            "an entry in a source with a broken link must stay unjudged",
+        );
+        assert_eq!(
+            state_of(&report, &removed),
+            Some(LinkState::Obsolete),
+            "a sibling source's removed link is still obsolete",
+        );
     }
 
     #[test]
