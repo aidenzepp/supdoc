@@ -1,0 +1,287 @@
+{
+  "$defs": {
+    "FindingJson": {
+      "description": "A finding as JSON shows it.",
+      "properties": {
+        "fix": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FixJson"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The one correct edit, when there is exactly one."
+        },
+        "help": {
+          "description": "What to do next.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "The stable code, such as `link/failed`.",
+          "type": "string"
+        },
+        "location": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocationJson"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where it is. Left out of a link's nested finding, which shares the link's location."
+        },
+        "message": {
+          "description": "What happened, in one line.",
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/SeverityJson",
+          "description": "How bad it is."
+        }
+      },
+      "required": [
+        "kind",
+        "severity",
+        "message"
+      ],
+      "type": "object"
+    },
+    "FixJson": {
+      "description": "An exact edit as JSON shows it, with byte offsets so a script can apply it without recounting.",
+      "properties": {
+        "end": {
+          "description": "End byte offset.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "file": {
+          "description": "The file to edit, relative to the project root.",
+          "type": "string"
+        },
+        "replacement": {
+          "description": "The new text.",
+          "type": "string"
+        },
+        "start": {
+          "description": "Start byte offset.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "file",
+        "start",
+        "end",
+        "replacement"
+      ],
+      "type": "object"
+    },
+    "LocationJson": {
+      "description": "A place in a file as JSON shows it.",
+      "properties": {
+        "column": {
+          "description": "1-based column, in characters.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "end": {
+          "description": "End byte offset.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "file": {
+          "description": "The file, relative to the project root.",
+          "type": "string"
+        },
+        "line": {
+          "description": "1-based line.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "start": {
+          "description": "Start byte offset.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "file",
+        "line",
+        "column",
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "RenameChange": {
+      "description": "One edit a rename makes.",
+      "properties": {
+        "after": {
+          "description": "The same after.",
+          "type": "string"
+        },
+        "before": {
+          "description": "The config line, destination or lock entry before.",
+          "type": "string"
+        },
+        "file": {
+          "description": "The file, relative to the project root.",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/RenameKind",
+          "description": "What is edited."
+        },
+        "location": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocationJson"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where in the file: the key or the destination. Left out for lock entries."
+        }
+      },
+      "required": [
+        "kind",
+        "file",
+        "before",
+        "after"
+      ],
+      "type": "object"
+    },
+    "RenameKind": {
+      "description": "What kind of thing a [`RenameChange`] edits.",
+      "oneOf": [
+        {
+          "const": "config",
+          "description": "The namespace's key in the config.",
+          "type": "string"
+        },
+        {
+          "const": "link",
+          "description": "A link's destination in a source.",
+          "type": "string"
+        },
+        {
+          "const": "lock",
+          "description": "An entry in `supdoc.lock`.",
+          "type": "string"
+        }
+      ]
+    },
+    "RenameReport": {
+      "description": "What `supdoc namespace rename` changed, or would change.",
+      "properties": {
+        "applied": {
+          "description": "`false` for a preview, which wrote nothing.",
+          "type": "boolean"
+        },
+        "changes": {
+          "description": "Every edit: the config key, then each link, then each lock entry.",
+          "items": {
+            "$ref": "#/$defs/RenameChange"
+          },
+          "type": "array"
+        },
+        "new": {
+          "description": "Its new name.",
+          "type": "string"
+        },
+        "old": {
+          "description": "The namespace's old name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "applied",
+        "old",
+        "new",
+        "changes"
+      ],
+      "type": "object"
+    },
+    "SeverityJson": {
+      "description": "A severity as JSON shows it.",
+      "oneOf": [
+        {
+          "const": "error",
+          "description": "Fails `check`.",
+          "type": "string"
+        },
+        {
+          "const": "warning",
+          "description": "Reported; fails `check` only under `--deny-warnings`.",
+          "type": "string"
+        },
+        {
+          "const": "note",
+          "description": "Information only.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The one object every command writes under `--json`, with the same top-level keys each time.\n\nIts schema is the one `supdoc schema` prints, so the JSON written and the schema published\ncome from this one type.",
+  "properties": {
+    "command": {
+      "description": "The command that produced `data`.",
+      "type": "string"
+    },
+    "data": {
+      "$ref": "#/$defs/RenameReport",
+      "description": "The command's own payload."
+    },
+    "findings": {
+      "description": "Findings that aren't about one link.",
+      "items": {
+        "$ref": "#/$defs/FindingJson"
+      },
+      "type": "array"
+    },
+    "ok": {
+      "description": "`true` exactly when the exit code is 0.",
+      "type": "boolean"
+    },
+    "root": {
+      "description": "The absolute project root, which every other path is relative to.",
+      "type": "string"
+    },
+    "schema_version": {
+      "description": "[`SCHEMA_VERSION`].",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "truncated": {
+      "description": "Whether results were left out.",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "command",
+    "ok",
+    "root",
+    "data",
+    "findings",
+    "truncated"
+  ],
+  "title": "Envelope",
+  "type": "object"
+}
