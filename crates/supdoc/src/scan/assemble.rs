@@ -579,6 +579,56 @@ mod tests {
         assert_eq!(fixed_text(&project.read("docs/guide.md"), fix), "ad");
     }
 
+    /// The message and help of the broken link at `docs/guide.md` to `src/lib.rs#symbol`, joined.
+    fn resolve_text(project: &Project, symbol: &str) -> String {
+        let scan = project.scan();
+        let finding = broken(&scan, &key("docs/guide.md", "src/lib.rs", Some(symbol)));
+        format!(
+            "{}\n{}",
+            finding.message,
+            finding.help.as_deref().unwrap_or_default()
+        )
+    }
+
+    #[test]
+    fn not_found_names_the_file_relative_to_the_root_not_absolutely() {
+        for root in [None, Some("sub/project")] {
+            let project = Project::at(root, "");
+            project.write("src/lib.rs", LIB);
+            project.write("docs/guide.md", "See [add](../src/lib.rs#ad).\n");
+
+            let text = resolve_text(&project, "ad");
+
+            assert_eq!(
+                text,
+                "no symbol `ad` in src/lib.rs\n\
+                 Did you mean `add`, `sub`? `supdoc resolve src/lib.rs` lists every symbol",
+                "root {root:?}: the message and help should name the file from the project root"
+            );
+            assert!(
+                !text.contains(project.dir.path().to_string_lossy().as_ref()),
+                "root {root:?}: no temp-dir prefix should leak into: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn ambiguous_names_the_file_relative_to_the_root_not_absolutely() {
+        let project = Project::at(Some("sub/project"), "");
+        project.write(
+            "src/lib.rs",
+            "struct A;\nstruct B;\nimpl A { fn new() {} }\nimpl B { fn new() {} }\n",
+        );
+        project.write("docs/guide.md", "See [new](../src/lib.rs#new).\n");
+
+        let text = resolve_text(&project, "new");
+
+        assert_eq!(
+            text,
+            "`new` matches 2 symbols in src/lib.rs\nWrite one of the full paths: `A.new`, `B.new`"
+        );
+    }
+
     #[test]
     fn two_near_matches_give_no_fix() {
         let project = Project::new();

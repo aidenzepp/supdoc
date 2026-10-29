@@ -240,7 +240,7 @@ fn target_states(
                             syntax_errors,
                         },
                         Err(error) => TargetState::Broken {
-                            finding: resolve_failed(&error, table, first),
+                            finding: resolve_failed(&error, config.root(), table, first),
                         },
                     }
                 }
@@ -451,8 +451,26 @@ fn read_failed(error: &ReadError, first: &Occurrence) -> Finding {
 
 /// The finding for a symbol that doesn't resolve. A `resolve/not-found` gets a fix when exactly
 /// one symbol in the file is a close match (03: the fixer never guesses).
-fn resolve_failed(error: &ResolveError, table: &SymbolTable, first: &Occurrence) -> Finding {
-    let finding = broken(error.code(), error.to_string(), error.help(), first);
+///
+/// The message and help name the file relative to the project `root`, so no finding carries a
+/// machine-specific absolute path. A file outside the root keeps its absolute path, which is the
+/// only way to name it.
+fn resolve_failed(
+    error: &ResolveError,
+    root: &AbsolutePath,
+    table: &SymbolTable,
+    first: &Occurrence,
+) -> Finding {
+    let shown = match error.file().strip_prefix(root) {
+        Some(relative) => relative.display().to_string(),
+        None => error.file().display().to_string(),
+    };
+    let finding = broken(
+        error.code(),
+        error.message_naming(&shown),
+        error.help_naming(&shown),
+        first,
+    );
     let ResolveError::NotFound { query, .. } = error else {
         return finding;
     };

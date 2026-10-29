@@ -4,6 +4,8 @@
 //! Each error has a stable `code()` and a `help()` that says what to do next. Both are about one
 //! file, so callers turn them into findings rather than stopping the run.
 
+use std::fmt::{self, Display, Formatter};
+
 use crate::link::SymbolPath;
 use crate::path::AbsolutePath;
 
@@ -111,10 +113,9 @@ impl ReadError {
 }
 
 /// Why a symbol path names no single symbol in a file.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveError {
     /// Nothing in the file has that path.
-    #[error("no symbol `{query}` in {}", .file.display())]
     NotFound {
         /// The file searched.
         file: AbsolutePath,
@@ -125,7 +126,6 @@ pub enum ResolveError {
     },
 
     /// Several symbols answer to that path; supdoc never picks one (03 R5a).
-    #[error("`{query}` matches {} symbols in {}", .candidates.len(), .file.display())]
     Ambiguous {
         /// The file searched.
         file: AbsolutePath,
@@ -146,12 +146,29 @@ impl ResolveError {
         }
     }
 
-    /// What to do next.
+    /// What to do next, naming the file by its absolute path.
     #[must_use]
     pub fn help(&self) -> String {
+        self.help_naming(&self.file().display())
+    }
+
+    /// The message, naming the file as `shown` instead of by its absolute path.
+    #[must_use]
+    pub fn message_naming(&self, shown: &dyn Display) -> String {
         match self {
-            Self::NotFound { file, nearest, .. } => {
-                let list = format!("`supdoc resolve {}` lists every symbol", file.display());
+            Self::NotFound { query, .. } => format!("no symbol `{query}` in {shown}"),
+            Self::Ambiguous {
+                query, candidates, ..
+            } => format!("`{query}` matches {} symbols in {shown}", candidates.len()),
+        }
+    }
+
+    /// What to do next, naming the file as `shown` instead of by its absolute path.
+    #[must_use]
+    pub fn help_naming(&self, shown: &dyn Display) -> String {
+        match self {
+            Self::NotFound { nearest, .. } => {
+                let list = format!("`supdoc resolve {shown}` lists every symbol");
                 if nearest.is_empty() {
                     format!("The file has no symbols with a similar name. {list}")
                 } else {
@@ -163,7 +180,23 @@ impl ResolveError {
             }
         }
     }
+
+    /// The file searched.
+    #[must_use]
+    pub fn file(&self) -> &AbsolutePath {
+        match self {
+            Self::NotFound { file, .. } | Self::Ambiguous { file, .. } => file,
+        }
+    }
 }
+
+impl Display for ResolveError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message_naming(&self.file().display()))
+    }
+}
+
+impl std::error::Error for ResolveError {}
 
 /// `` `a`, `b`, `c` ``
 fn quoted(paths: &[SymbolPath]) -> String {
