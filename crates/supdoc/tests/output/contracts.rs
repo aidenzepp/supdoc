@@ -313,7 +313,6 @@ fn dumb_terminal_and_color_never_use_ascii_glyphs() {
 }
 
 #[test]
-#[ignore = "known defect, need filed to mind: LinkKey's Display draws `→` into obsolete and moved messages"]
 fn obsolete_and_moved_messages_use_ascii_glyphs_on_a_dumb_terminal() {
     for project in [Project::dirty(), Project::moved()] {
         let run = project.run_with(&["check", "--color", "never"], &[("TERM", "dumb")]);

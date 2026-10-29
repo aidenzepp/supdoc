@@ -8,4 +8,4 @@ exit: 1
 --- stderr
 error[resolve/not-found]: no symbol `ad` in [ROOT]/src/lib.rs
  |
- = help: Did you mean `add`, `mul`, `sub`? `supdoc resolve [ROOT]/src/lib.rs` lists every symbol
+ = help: did you mean `add`, `mul`, `sub`? `supdoc resolve [ROOT]/src/lib.rs` lists every symbol

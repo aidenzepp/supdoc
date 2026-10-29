@@ -11,7 +11,7 @@ error[resolve/not-found]: no symbol `ad` in src/lib.rs
 3 | See [ad](../src/lib.rs#ad).
   |     ^^^^^^^^^^^^^^^^^^^^^^
   |
-  = help: Did you mean `add`, `mul`, `sub`? `supdoc resolve src/lib.rs` lists every symbol
+  = help: did you mean `add`, `mul`, `sub`? `supdoc resolve src/lib.rs` lists every symbol
 
 error[link/failed]: `src/lib.rs#add` changed since this doc was confirmed
  --> docs/guide.md:3:5
@@ -21,7 +21,7 @@ error[link/failed]: `src/lib.rs#add` changed since this doc was confirmed
   |
   = help: reread this, and if it's still accurate run `supdoc update docs/guide.md --yes`
 
-warning[link/obsolete]: supdoc.lock has an entry for `docs/old.md → src/lib.rs#sub`, which no longer exists
+warning[link/obsolete]: supdoc.lock has an entry for `docs/old.md -> src/lib.rs#sub`, which no longer exists
  |
  = help: run `supdoc update --state obsolete --yes`
 

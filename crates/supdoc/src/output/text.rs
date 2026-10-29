@@ -31,7 +31,7 @@ pub fn render_finding(
         Severity::Warning => Level::WARNING,
         Severity::Note => Level::NOTE,
     };
-    let message = visible(&finding.message);
+    let message = glyphs(context, visible(&finding.message));
     let mut group = Group::with_title(level.primary_title(message.as_str()).id(finding.code));
     if let Some(location) = &finding.location {
         let path = visible(&context.paths.text(&location.file));
@@ -54,9 +54,19 @@ pub fn render_finding(
         };
     }
     if let Some(help) = &finding.help {
-        group = group.element(Level::HELP.message(visible(help)));
+        group = group.element(Level::HELP.message(glyphs(context, visible(help))));
     }
     writeln!(out, "{}\n", renderer(context).render(&[group]))
+}
+
+/// `text` with each `→` spelled `->` when `context` draws in ASCII (07 G12). Finding messages
+/// embed link keys, whose `Display` is Unicode, so the swap happens here at the output layer.
+fn glyphs(context: &TextContext, text: String) -> String {
+    if context.unicode {
+        text
+    } else {
+        text.replace('→', "->")
+    }
 }
 
 /// The renderer for `context`: styled or plain, Unicode or ASCII, at the terminal's width.

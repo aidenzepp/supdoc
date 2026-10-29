@@ -1,10 +1,16 @@
 //! GitHub Actions workflow commands, shown on the PR diff (07 "GitHub output").
 
 use std::io::{self, Write};
+use std::path::Path;
 
 use crate::finding::{Finding, Severity};
+use crate::link::SourcePath;
+use crate::lock::model::LOCK_FILE_NAME;
 use crate::output::format::Verbosity;
 use crate::output::paths::PathStyle;
+
+/// The code of a finding about a lockfile entry whose link is gone.
+const OBSOLETE_CODE: &str = "link/obsolete";
 
 /// Writes one `::error`, `::warning` or `::notice` line per finding the verbosity shows.
 ///
@@ -41,6 +47,14 @@ pub fn annotation(paths: &PathStyle, finding: &Finding) -> String {
         ));
         properties.push(format!("line={}", location.line));
         properties.push(format!("col={}", location.column));
+    } else if finding.code == OBSOLETE_CODE {
+        // An obsolete link is written nowhere; the only file that still names it is the lockfile.
+        if let Ok(lockfile) = SourcePath::from_relative(Path::new(LOCK_FILE_NAME)) {
+            properties.push(format!(
+                "file={}",
+                escape_property(&paths.github(&lockfile))
+            ));
+        }
     }
     properties.push(format!(
         "title={}",

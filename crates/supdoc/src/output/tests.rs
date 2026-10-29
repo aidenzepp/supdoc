@@ -286,13 +286,38 @@ fn github_output_maps_severity_and_ends_with_the_summary_line() {
         "::error file=docs/guide.md,line=3,col=5,title=supdoc link/failed::"
     ));
     assert!(starts(1, "::error file=docs/api.md,line=3,col=3,"));
-    assert!(starts(2, "::warning title=supdoc link/obsolete::"));
+    assert!(starts(
+        2,
+        "::warning file=supdoc.lock,title=supdoc link/obsolete::"
+    ));
     assert_eq!(
         lines.last().copied(),
         Some("Links  1 failed, 1 broken, 38 passed, 1 obsolete")
     );
     let note = Finding::new("link/moved", Severity::Note, "moved");
     assert!(annotation(&paths(), &note).starts_with("::notice title=supdoc link/moved::moved"));
+}
+
+#[test]
+fn an_obsolete_annotation_names_the_lockfile() {
+    let style = PathStyle::new(
+        absolute("/repo/apps/web"),
+        absolute("/repo/apps/web"),
+        Some(absolute("/repo")),
+    );
+    let obsolete = Finding::new(
+        "link/obsolete",
+        Severity::Warning,
+        "supdoc.lock has an entry for `docs/old.md → src/old.rs#parse`, which no longer exists",
+    )
+    .with_help("run `supdoc update --state obsolete --yes`");
+
+    assert!(
+        annotation(&style, &obsolete)
+            .starts_with("::warning file=apps/web/supdoc.lock,title=supdoc link/obsolete::"),
+        "an obsolete annotation should point at the lockfile: {}",
+        annotation(&style, &obsolete)
+    );
 }
 
 #[test]

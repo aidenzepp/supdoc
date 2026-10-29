@@ -170,13 +170,13 @@ impl ResolveError {
             Self::NotFound { nearest, .. } => {
                 let list = format!("`supdoc resolve {shown}` lists every symbol");
                 if nearest.is_empty() {
-                    format!("The file has no symbols with a similar name. {list}")
+                    format!("the file has no symbols with a similar name. {list}")
                 } else {
-                    format!("Did you mean {}? {list}", quoted(nearest))
+                    format!("did you mean {}? {list}", quoted(nearest))
                 }
             }
             Self::Ambiguous { candidates, .. } => {
-                format!("Write one of the full paths: {}", quoted(candidates))
+                format!("write one of the full paths: {}", quoted(candidates))
             }
         }
     }
@@ -236,7 +236,7 @@ mod tests {
         );
         assert_eq!(
             error.help(),
-            "Did you mean `Config.Display.fmt`, `Config.port`? \
+            "did you mean `Config.Display.fmt`, `Config.port`? \
              `supdoc resolve /repo/src/lib.rs` lists every symbol",
         );
     }
@@ -256,7 +256,7 @@ mod tests {
         );
         assert_eq!(
             error.help(),
-            "Write one of the full paths: `Foo.new`, `Bar.new`"
+            "write one of the full paths: `Foo.new`, `Bar.new`"
         );
     }
 

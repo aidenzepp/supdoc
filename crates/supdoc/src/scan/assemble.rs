@@ -602,7 +602,7 @@ mod tests {
             assert_eq!(
                 text,
                 "no symbol `ad` in src/lib.rs\n\
-                 Did you mean `add`, `sub`? `supdoc resolve src/lib.rs` lists every symbol",
+                 did you mean `add`, `sub`? `supdoc resolve src/lib.rs` lists every symbol",
                 "root {root:?}: the message and help should name the file from the project root"
             );
             assert!(
@@ -625,7 +625,7 @@ mod tests {
 
         assert_eq!(
             text,
-            "`new` matches 2 symbols in src/lib.rs\nWrite one of the full paths: `A.new`, `B.new`"
+            "`new` matches 2 symbols in src/lib.rs\nwrite one of the full paths: `A.new`, `B.new`"
         );
     }
 
