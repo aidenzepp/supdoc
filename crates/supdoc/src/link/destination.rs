@@ -5,6 +5,7 @@
 //! 1. `scheme://...`, `mailto:`, `tel:`, `data:` and `name::path` are not supdoc links.
 //! 2. Any other `prefix:` is a configured namespace or an [`LinkError::UnknownNamespace`].
 //! 3. A leading `/` is the project root; anything else is relative to the source file's directory.
+//!    Every path is then normalized lexically (`.`, `..`), so one file has one spelling.
 //! 4. Without a `#fragment`, only a file some cartridge reads is a (whole-file) link.
 //! 5. With a fragment, `#heading` alone (the same file) is not tracked; otherwise it is a symbol.
 //!
@@ -124,9 +125,9 @@ pub fn parse_destination(
         }));
     };
     let relative = match (&namespace, decoded_path.strip_prefix('/')) {
-        (Some(_), _) => decoded_path,
-        (None, Some(from_root)) => from_root.to_owned(),
-        (None, None) => join_to_source_directory(source, &decoded_path),
+        (Some(_), _) => normalize(Vec::new(), &decoded_path),
+        (None, Some(from_root)) => normalize(Vec::new(), from_root),
+        (None, None) => normalize(source_directory(source), &decoded_path),
     };
 
     if fragment.is_none()
@@ -240,13 +241,19 @@ fn unknown_namespace(
     }
 }
 
-/// Resolves `relative` against the directory holding `source`, lexically, keeping a leading `..`
-/// when the path climbs out of the project root (a target may, 02 L5).
-///
-/// Empty segments are kept so [`TargetPath`] rejects them with its own message.
-fn join_to_source_directory(source: &SourcePath, relative: &str) -> String {
+/// The directories above `source`'s file name, outermost first.
+fn source_directory(source: &SourcePath) -> Vec<&str> {
     let mut segments: Vec<&str> = source.as_str().split('/').collect();
     let _file_name = segments.pop();
+    segments
+}
+
+/// Resolves `relative` below `base`, lexically, so one file has one spelling (and one lock key)
+/// however a link reaches it. A leading `..` is kept when the path climbs out of the project root
+/// (a target may, 02 L5).
+///
+/// Empty segments are kept so [`TargetPath`] rejects them with its own message.
+fn normalize<'a>(mut segments: Vec<&'a str>, relative: &'a str) -> String {
     for segment in relative.split('/') {
         match segment {
             "." => {}
@@ -489,6 +496,23 @@ mod tests {
         assert_eq!(
             parse_in("guide.md", "src/lib.rs"),
             Some(Ok(link("src/lib.rs", None)))
+        );
+    }
+
+    #[test]
+    fn root_relative_and_relative_spellings_of_one_file_share_a_key() {
+        let from_root = parse_in("docs/guide.md", "/docs/../src/lib.rs#add");
+        assert_eq!(from_root, Some(Ok(link("src/lib.rs", Some("add")))));
+        assert_eq!(from_root, parse_in("docs/guide.md", "../src/lib.rs#add"));
+    }
+
+    #[test]
+    fn dot_segments_are_normalized_in_root_relative_and_namespaced_paths() {
+        assert_eq!(parse("/./src/lib.rs"), Some(Ok(link("src/lib.rs", None))),);
+        assert_eq!(parse("auth:./lib.rs"), Some(Ok(link("auth:lib.rs", None))),);
+        assert_eq!(
+            parse("auth:src/../lib.rs#f"),
+            Some(Ok(link("auth:lib.rs", Some("f")))),
         );
     }
 
