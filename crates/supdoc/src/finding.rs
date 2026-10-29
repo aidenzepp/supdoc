@@ -6,28 +6,23 @@ use std::ops::Range;
 use crate::link::SourcePath;
 
 /// One problem, linter style. Produced by the scanner and checks, rendered by output.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
     /// Stable code from the owning module: `read/missing`, `link/unknown-namespace`,
-    /// `scan/case-mismatch`. Never reworded. Serialized as `kind` (07 G4).
-    #[serde(rename = "kind")]
+    /// `scan/case-mismatch`. Never reworded.
     pub code: &'static str,
     /// How bad it is.
     pub severity: Severity,
     /// Where it is, when it is about one place in a source file.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<Location>,
     /// What happened, in one line.
     pub message: String,
     /// What to do next.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub help: Option<String>,
     /// An exact edit, present only when there's exactly one correct fix. The fixer never guesses.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub fix: Option<Fix>,
     /// The source lines this finding covers, captured when it is created so rendering never reads
     /// files (07 G11).
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub snippet: Option<Snippet>,
 }
 
@@ -96,12 +91,11 @@ pub enum Severity {
 }
 
 /// One place in a source file.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Location {
     /// The source file.
     pub file: SourcePath,
-    /// Byte range, for fixes. Serialized as `start` and `end` beside `line` and `column`.
-    #[serde(flatten)]
+    /// Byte range, for fixes.
     pub range: Range<usize>,
     /// 1-based line of `range.start`, for humans.
     pub line: u32,
@@ -132,19 +126,18 @@ impl Location {
 }
 
 /// Replace `range` in `file` with `replacement`. Applied by `supdoc fix --yes` (05).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fix {
     /// The source file to edit.
     pub file: SourcePath,
-    /// The bytes to replace. Serialized as `start` and `end`.
-    #[serde(flatten)]
+    /// The bytes to replace.
     pub range: Range<usize>,
     /// The new text.
     pub replacement: String,
 }
 
 /// The whole lines a finding's range covers, captured when the finding is created (07 G11).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snippet {
     /// 1-based line number of the first line of `text`.
     pub first_line: u32,
