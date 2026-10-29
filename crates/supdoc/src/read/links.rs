@@ -34,6 +34,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ops::Range;
 
 use tree_sitter::{Node, Parser, Tree};
 
@@ -43,7 +44,8 @@ use crate::read::cartridge::{MarkdownRegion, SourceFile};
 /// Every link in `file`'s Markdown regions, in file order (03 R9, R14).
 ///
 /// Destinations are returned as written, after reference resolution and without the `<…>` that
-/// may wrap them. Reading them is `parse_destination`'s job.
+/// may wrap them, with the file bytes they are written at. Reading them is `parse_destination`'s
+/// job.
 #[must_use]
 pub fn links(file: &SourceFile) -> Vec<RawLink> {
     let Some(mut parser) = inline_parser() else {
@@ -162,6 +164,7 @@ impl<'tree> Found<'tree> {
             text: reader.child(node, "link_text").into_owned(),
             destination: unwrap_angle_brackets(&reader.child(node, "link_destination")).to_owned(),
             range: node.byte_range(),
+            destination_range: inline_destination_range(node, reader.text),
         });
         let references = self.references.iter().filter_map(|&node| {
             if definitions.is_definition_site(node.start_byte()) {
@@ -170,41 +173,64 @@ impl<'tree> Found<'tree> {
             let link_text = reader.child(node, "link_text");
             // `[text][label]` names its label; `[label][]` and `[label]` use their text.
             let label = child(node, "link_label").map(|label| reader.node(label));
-            let destination = definitions.get(label.as_deref().unwrap_or(&link_text))?;
+            let definition = definitions.get(label.as_deref().unwrap_or(&link_text))?;
             Some(RawLink {
                 text: link_text.into_owned(),
-                destination: destination.to_owned(),
+                destination: definition.destination.clone(),
                 range: node.byte_range(),
+                destination_range: definition.range.clone(),
             })
         });
         inline.chain(references).collect()
     }
 }
 
+/// The file bytes of an inline link's destination, without `<…>`. A link written with no
+/// destination, `[text]()`, gets the empty range just inside its `(`.
+fn inline_destination_range(node: Node<'_>, text: &str) -> Range<usize> {
+    if let Some(destination) = child(node, "link_destination") {
+        return unwrap_angle_range(destination.byte_range(), text);
+    }
+    let open = child(node, "(").map_or(node.end_byte(), |open| open.end_byte());
+    open..open
+}
+
+/// A reference definition's destination.
+#[derive(Debug)]
+struct Definition {
+    /// The destination as written, without `<…>`.
+    destination: String,
+    /// Where `destination` is written in the file, in bytes.
+    range: Range<usize>,
+}
+
 /// Reference definitions by normalized label.
 #[derive(Debug, Default)]
 struct Definitions {
-    /// Normalized label → destination, without `<…>`. The first definition of a label wins.
-    destinations: HashMap<String, String>,
+    /// Normalized label → destination. The first definition of a label wins.
+    destinations: HashMap<String, Definition>,
     /// Where each definition's `[label]` starts, so the definition isn't read as a link itself.
     sites: Vec<usize>,
 }
 
 impl Definitions {
-    /// Records `[label]: destination` written at byte `site`, unless the label is already defined.
-    fn add(&mut self, label: &str, destination: &str, site: usize) {
+    /// Records `[label]: destination` written at byte `site`, its destination at the file bytes
+    /// `written` of `text`, unless the label is already defined.
+    fn add(&mut self, label: &str, written: Range<usize>, text: &str, site: usize) {
         self.sites.push(site);
         let _first = self
             .destinations
             .entry(normalize_label(label))
-            .or_insert_with(|| unwrap_angle_brackets(destination).to_owned());
+            .or_insert_with(|| {
+                let range = unwrap_angle_range(written, text);
+                let destination = text.get(range.clone()).unwrap_or_default().to_owned();
+                Definition { destination, range }
+            });
     }
 
-    /// The destination defined for `label`, matched the way the Markdown spec matches labels.
-    fn get(&self, label: &str) -> Option<&str> {
-        self.destinations
-            .get(&normalize_label(label))
-            .map(String::as_str)
+    /// The definition for `label`, matched the way the Markdown spec matches labels.
+    fn get(&self, label: &str) -> Option<&Definition> {
+        self.destinations.get(&normalize_label(label))
     }
 
     /// Whether a definition's `[label]` starts at byte `start`.
@@ -229,8 +255,11 @@ fn document_definitions(file: &SourceFile) -> Option<Definitions> {
     while let Some(node) = pending.pop() {
         if node.kind_id() == kind {
             let label = child(node, "link_label").map_or("", |label| node_text(label, text));
-            let destination = child_text(node, "link_destination", text);
-            definitions.add(label, destination, node.start_byte());
+            let destination = child(node, "link_destination")
+                .map_or(node.end_byte()..node.end_byte(), |destination| {
+                    destination.byte_range()
+                });
+            definitions.add(label, destination, text, node.start_byte());
             continue;
         }
         let mut cursor = node.walk();
@@ -269,12 +298,15 @@ fn comment_definitions(references: &[Node<'_>], reader: RegionText<'_>) -> Defin
         let starts_line = text
             .get(line_start..start)
             .is_some_and(|prefix| prefix.chars().all(is_comment_decoration));
+        // The destination's offsets are counted from just after the `:`.
+        let colon_end = node.end_byte() + 1;
         let destination = text
             .get(node.end_byte()..range.end_byte)
             .and_then(|after| after.strip_prefix(':'))
-            .and_then(definition_destination);
+            .and_then(definition_destination)
+            .map(|within| colon_end + within.start..colon_end + within.end);
         if let (true, Some(destination)) = (starts_line, destination) {
-            definitions.add(&reader.child(node, "link_text"), destination, start);
+            definitions.add(&reader.child(node, "link_text"), destination, text, start);
         }
     }
     definitions
@@ -286,16 +318,28 @@ fn is_comment_decoration(c: char) -> bool {
     !(c.is_alphanumeric() || matches!(c, '[' | ']' | '(' | ')' | '`' | '<' | '>'))
 }
 
-/// The destination after a definition's `:`: `<…>` or the next run of non-whitespace.
-fn definition_destination(after_colon: &str) -> Option<&str> {
+/// Where the destination after a definition's `:` is, in bytes of `after_colon`: `<…>` or the
+/// next run of non-whitespace.
+fn definition_destination(after_colon: &str) -> Option<Range<usize>> {
     let rest = after_colon.trim_start();
-    let end = if rest.starts_with('<') {
+    let start = after_colon.len() - rest.len();
+    let len = if rest.starts_with('<') {
         rest.find('>')? + 1
     } else {
         rest.find(char::is_whitespace).unwrap_or(rest.len())
     };
-    rest.get(..end)
-        .filter(|destination| !destination.is_empty())
+    (len > 0).then_some(start..start + len)
+}
+
+/// `range` of `text` without the `<…>` the Markdown spec allows around a destination, matching
+/// [`unwrap_angle_brackets`].
+fn unwrap_angle_range(range: Range<usize>, text: &str) -> Range<usize> {
+    let written = text.get(range.clone()).unwrap_or_default();
+    if written.len() >= 2 && written.starts_with('<') && written.ends_with('>') {
+        range.start + 1..range.end - 1
+    } else {
+        range
+    }
 }
 
 /// `destination` without the `<…>` the Markdown spec allows around it.
@@ -324,11 +368,6 @@ fn child<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
     let mut cursor = node.walk();
     node.children(&mut cursor)
         .find(|child| child.kind() == kind)
-}
-
-/// The text of `node`'s first child of `kind`, or `""` when it has none (`[](x.rs)` has no text).
-fn child_text<'text>(node: Node<'_>, kind: &str, text: &'text str) -> &'text str {
-    child(node, kind).map_or("", |child| node_text(child, text))
 }
 
 /// The text `node` covers.
@@ -416,12 +455,98 @@ mod tests {
                 text: "`add`".to_owned(),
                 destination: "../src/lib.rs#add".to_owned(),
                 range: 13..39,
+                destination_range: 21..38,
             }],
         );
         assert_eq!(
             text.get(13..39),
             Some("[`add`](../src/lib.rs#add)"),
             "the range covers the whole link",
+        );
+    }
+
+    /// Each link's destination as written in the file, read back through `destination_range`.
+    fn written_destinations(file: &SourceFile) -> Vec<String> {
+        links(file)
+            .into_iter()
+            .map(|link| {
+                let written = file.text().get(link.destination_range.clone());
+                written.unwrap_or_default().to_owned()
+            })
+            .collect()
+    }
+
+    /// The zero-based row of byte `at` in `text`.
+    fn row(text: &str, at: usize) -> Option<usize> {
+        text.get(..at).map(|before| before.matches('\n').count())
+    }
+
+    #[test]
+    fn full_reference_link_destination_range_is_in_its_definition_line() {
+        let text = "See [the x fn][xfn].\n\n[xfn]: auth:src/x.rs\n";
+        let file = markdown_file(text);
+
+        let found = links(&file);
+        let link = found
+            .first()
+            .expect("`[the x fn][xfn]` is defined, so it is a link");
+
+        assert_eq!(
+            text.get(link.destination_range.clone()),
+            Some("auth:src/x.rs")
+        );
+        assert_eq!(
+            row(text, link.destination_range.start),
+            Some(2),
+            "the range is in the definition on row 2, not in the link on row 0",
+        );
+    }
+
+    #[test]
+    fn comment_definition_destination_range_leaves_out_angle_brackets() {
+        let text =
+            "fn a() {}\n/// See [the x fn][xfn].\n///\n/// [xfn]: <auth:src/x.rs>\nfn f() {}\n";
+        let file = rust_file(text);
+
+        let found = links(&file);
+        let link = found
+            .first()
+            .expect("`[the x fn][xfn]` is defined, so it is a link");
+
+        assert_eq!(
+            text.get(link.destination_range.clone()),
+            Some("auth:src/x.rs")
+        );
+        assert_eq!(row(text, link.destination_range.start), Some(3));
+    }
+
+    #[test]
+    fn inline_link_in_a_rust_doc_comment_has_its_destination_file_bytes() {
+        let text =
+            "fn a() {}\n/// See [the session\n/// rules](<../docs/auth.md#sessions>).\nfn f() {}\n";
+        let file = rust_file(text);
+
+        let found = links(&file);
+        let link = found.first().expect("the two `///` lines hold one link");
+
+        assert_eq!(
+            text.get(link.destination_range.clone()),
+            Some("../docs/auth.md#sessions"),
+            "file coordinates, without the `<…>`",
+        );
+        assert_eq!(row(text, link.destination_range.start), Some(2));
+    }
+
+    #[test]
+    fn destination_range_reads_back_as_the_destination() {
+        let file = markdown_file(
+            "[a](a.rs) [b](<b c.rs>) [c][] [d][D] [e]\n\n[c]: c.rs\n[d]: <d e.rs> \"T\"\n[e]: e.rs\n",
+        );
+
+        assert_eq!(destinations(&file), written_destinations(&file));
+        assert_eq!(
+            destinations(&file),
+            ["a.rs", "b c.rs", "c.rs", "d e.rs", "e.rs"]
         );
     }
 

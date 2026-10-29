@@ -457,6 +457,10 @@ pub struct RawLink {
     pub destination: String,
     /// Where the link sits in the source file, in bytes.
     pub range: Range<usize>,
+    /// Where the destination is written in the source file, in bytes, without the `<…>` that may
+    /// wrap it: inside the link for an inline link, in its `[label]:` definition for a reference
+    /// link. Every use of one label shares its definition's range.
+    pub destination_range: Range<usize>,
 }
 
 /// Serializes a value as its `Display` text.

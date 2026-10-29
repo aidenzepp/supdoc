@@ -76,6 +76,16 @@ pub(crate) struct Occurrence {
     pub(crate) snippet: Option<Snippet>,
     /// The destination as written, when it can be found inside the link itself.
     pub(crate) written: Option<Written>,
+    /// Where the destination is written in the file, without `<…>`: in the link for an inline
+    /// link, in the shared `[label]:` definition for a reference link.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "namespace rename reads it to edit each destination once"
+        )
+    )]
+    pub(crate) destination_range: Range<usize>,
 }
 
 /// A link destination exactly as written in its source, and where.

@@ -385,6 +385,7 @@ mod tests {
             text: "text".to_owned(),
             destination: destination.to_owned(),
             range: 0..destination.len(),
+            destination_range: 0..destination.len(),
         };
         let source: SourcePath = source
             .parse()
