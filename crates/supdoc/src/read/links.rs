@@ -74,7 +74,11 @@ pub fn links(file: &SourceFile) -> Vec<RawLink> {
         .iter()
         .zip(&parsed)
         .map(|(found, (_, region))| {
-            comment_definitions(&found.references, RegionText { region, text })
+            comment_definitions(
+                &found.references,
+                RegionText { region, text },
+                document.is_some(),
+            )
         })
         .collect();
     if let Some(document) = &mut document {
@@ -307,8 +311,15 @@ fn document_definitions(file: &SourceFile) -> Option<Definitions> {
 ///
 /// The inline grammar reads `[id]: x.rs` as a shortcut link followed by text, so a definition is
 /// a `[label]` shortcut that starts its line (after only comment markers and whitespace), is
-/// followed directly by `:`, and then by a destination on the same line.
-fn comment_definitions(references: &[Node<'_>], reader: RegionText<'_>) -> Definitions {
+/// followed directly by `:`, and then by a destination on the same line. As in `CommonMark`, it
+/// also starts a block: it can't continue a paragraph, so the line before it is blank, another
+/// definition, a heading (`markdown`, where `#` is syntax) or the start of the region, and it
+/// can't sit inside a heading itself.
+fn comment_definitions(
+    references: &[Node<'_>],
+    reader: RegionText<'_>,
+    markdown: bool,
+) -> Definitions {
     let text = reader.text;
     let mut ordered: Vec<Node<'_>> = references
         .iter()
@@ -318,16 +329,17 @@ fn comment_definitions(references: &[Node<'_>], reader: RegionText<'_>) -> Defin
     ordered.sort_by_key(Node::start_byte);
 
     let mut definitions = Definitions::default();
+    let mut last_definition_line = None;
     for node in ordered {
         let start = node.start_byte();
         let Some(range) = reader.range_at(start) else {
             continue;
         };
-        let line_start = text
+        let physical_line_start = text
             .get(..start)
             .and_then(|before| before.rfind('\n'))
-            .map_or(0, |newline| newline + 1)
-            .max(range.start_byte);
+            .map_or(0, |newline| newline + 1);
+        let line_start = physical_line_start.max(range.start_byte);
         let starts_line = text
             .get(line_start..start)
             .is_some_and(|prefix| prefix.chars().all(is_comment_decoration));
@@ -338,11 +350,46 @@ fn comment_definitions(references: &[Node<'_>], reader: RegionText<'_>) -> Defin
             .and_then(|after| after.strip_prefix(':'))
             .and_then(definition_destination)
             .map(|within| colon_end + within.start..colon_end + within.end);
-        if let (true, Some(destination)) = (starts_line, destination) {
+        let starts_block = starts_line
+            && (!markdown
+                || (starts_block(text, line_start, range.start_byte, last_definition_line)
+                    && !in_heading(text, physical_line_start)));
+        if let (true, Some(destination)) = (starts_block, destination) {
+            last_definition_line = Some(line_start);
             definitions.add(&reader.child(node, "link_text"), destination, text, start);
         }
     }
     definitions
+}
+
+/// Whether the line at `line_start` can begin a block: it opens its region (`region_start`),
+/// or the line before it is blank or is the definition at `last_definition_line`.
+fn starts_block(
+    text: &str,
+    line_start: usize,
+    region_start: usize,
+    last_definition_line: Option<usize>,
+) -> bool {
+    if line_start <= region_start {
+        return true;
+    }
+    let before = &text[region_start..line_start - 1];
+    let previous_start = before
+        .rfind('\n')
+        .map_or(region_start, |at| region_start + at + 1);
+    text[previous_start..line_start - 1]
+        .chars()
+        .all(char::is_whitespace)
+        || last_definition_line == Some(previous_start)
+}
+
+/// Whether the line at `line_start`, which a region may begin partway along, is an ATX heading:
+/// 1-6 `#`s then a space before its text, so a `[label]: dest` in it is a link, not a definition.
+fn in_heading(text: &str, line_start: usize) -> bool {
+    let line = text.get(line_start..).unwrap_or_default();
+    let hashes = line.trim_start().trim_start_matches('#');
+    let count = line.trim_start().len() - hashes.len();
+    (1..=6).contains(&count) && hashes.starts_with(char::is_whitespace)
 }
 
 /// Whether `c` can sit before a definition on its line in a comment: whitespace or a comment
@@ -621,6 +668,35 @@ mod tests {
             pairs(&file),
             [pair("x", "a.md"), pair("yy", "b.md")],
             "`[x]: a.md` is a definition, not a task-list checkbox, and `[yy]` on the next line survives",
+        );
+    }
+
+    #[test]
+    fn mid_paragraph_and_heading_lines_define_nothing_and_the_real_definition_wins() {
+        let file = markdown_file(
+            "See [x] and [yy].\n\nsome text\n[x]: wrong.md\n\n# [yy]: wrong.md\n\n[x]: a.md\n[yy]: b.md\n",
+        );
+
+        assert_eq!(
+            pairs(&file),
+            [
+                pair("x", "a.md"),
+                pair("yy", "b.md"),
+                pair("x", "a.md"),
+                pair("yy", "b.md")
+            ],
+            "`[x]: wrong.md` continues a paragraph and `# [yy]: wrong.md` is a heading, so both are links, and every link uses the later real definitions",
+        );
+    }
+
+    #[test]
+    fn definition_after_a_heading_still_defines() {
+        let file = markdown_file("See [x].\n\n# Title\n[x]: a.md\n");
+
+        assert_eq!(
+            pairs(&file),
+            [pair("x", "a.md")],
+            "a definition directly under a heading starts its own block",
         );
     }
 
