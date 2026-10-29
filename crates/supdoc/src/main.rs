@@ -14,9 +14,10 @@ use std::path::{MAIN_SEPARATOR_STR, Path};
 use std::process::ExitCode;
 
 use clap::ColorChoice;
+use supdoc::cli::args::Cli;
 use supdoc::cli::args::GlobalArgs;
 use supdoc::cli::parse::{Parsed, Printout, Stream, parse_process};
-use supdoc::cli::{CliError, run};
+use supdoc::cli::{CliError, Context, run};
 use supdoc::finding::{Finding, Severity};
 use supdoc::output::format::supports_unicode;
 use supdoc::output::{Output, OutputSettings, PathStyle, Verbosity};
@@ -33,22 +34,32 @@ fn main() -> ExitCode {
 }
 
 /// Parses, runs and reports, and returns the process exit code.
+///
+/// Builds the one [`Output`] of the run, and every command prints through it.
 fn exit_code() -> u8 {
     let cli = match parse_process() {
         Parsed::Run(cli) => *cli,
         Parsed::Print(printout) => return print(&printout),
     };
-    let global = cli.global.clone();
+    let Cli { global, command } = cli;
 
-    match current_dir() {
-        Ok(cwd) => match run(cli, cwd.clone()) {
-            Ok(outcome) => outcome.exit_code(),
-            Err(error) => report(&global, cwd, &error),
-        },
+    let (cwd, failure) = match current_dir() {
+        Ok(cwd) => (cwd, None),
         Err(error) => match AbsolutePath::new(Path::new(MAIN_SEPARATOR_STR)) {
-            Some(root) => report(&global, root, &error),
-            None => IO_EXIT_CODE,
+            Some(root) => (root, Some(error)),
+            None => return IO_EXIT_CODE,
         },
+    };
+    let mut output = Output::stdio(settings(&global, cwd.clone()), choice(global.color));
+    let result = match failure {
+        Some(error) => Err(error),
+        None => run(&command, &Context { global, cwd }, &mut output),
+    };
+
+    match result {
+        Ok(_) if output.is_closed() => 0,
+        Ok(outcome) => outcome.exit_code(),
+        Err(error) => report(&mut output, &error),
     }
 }
 
@@ -99,10 +110,9 @@ fn write_all(mut sink: impl Write, text: &str) -> io::Result<()> {
 /// Prints `error` as a fatal error in the requested format and returns its exit code.
 ///
 /// A closed pipe is not a failure of supdoc, so it exits 0 (06 X13).
-fn report(global: &GlobalArgs, cwd: AbsolutePath, error: &CliError) -> u8 {
+fn report(output: &mut Output, error: &CliError) -> u8 {
     let finding =
         Finding::new(error.code(), Severity::Error, error.message()).with_help(error.help());
-    let mut output = Output::stdio(settings(global, cwd), choice(global.color));
     let written = output.fatal(&finding, error.exit_code());
     if output.is_closed() {
         0

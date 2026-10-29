@@ -48,9 +48,10 @@ pub mod schema;
 
 use std::fmt;
 
+use crate::output::Output;
 use crate::path::AbsolutePath;
 
-use args::{Cli, Command, ConfigCommand, GlobalArgs, Inspect, NamespaceCommand, SkillCommand};
+use args::{Command, ConfigCommand, GlobalArgs, Inspect, NamespaceCommand, SkillCommand};
 
 /// Everything a command receives besides its own arguments.
 #[derive(Debug)]
@@ -167,31 +168,30 @@ impl fmt::Display for CliError {
 
 impl std::error::Error for CliError {}
 
-/// Runs the parsed command line from `cwd`.
+/// Runs `command`, printing everything through `output`.
 ///
-/// This `match` is complete: it never changes when a command is built.
+/// This `match` is complete: it never changes when a command is built. A command that finds
+/// `output` closed returns its normal [`Outcome`]; `main` turns that into a clean exit (06 X13).
 ///
 /// # Errors
 ///
 /// Returns the command's own [`CliError`], or `cli/not-built` for a command that is not built.
-pub fn run(cli: Cli, cwd: AbsolutePath) -> Result<Outcome, CliError> {
-    let context = Context {
-        global: cli.global,
-        cwd,
-    };
-    match &cli.command {
-        Command::Check(args) => check::run(args, &context),
-        Command::Update(args) => update::run(args, &context),
-        Command::Fix(args) => fix::run(args, &context),
-        Command::List(args) => list::run(args, &context),
-        Command::Resolve(args) => resolve::run(args, &context),
-        Command::Init(args) => init::run(args, &context),
-        Command::Config(ConfigCommand::Show) => config::run(Inspect::ConfigShow, &context),
-        Command::Namespace(NamespaceCommand::List) => config::run(Inspect::NamespaceList, &context),
-        Command::Namespace(NamespaceCommand::Rename(args)) => rename::run(args, &context),
-        Command::Schema(args) => schema::run(args, &context),
-        Command::Completions(args) => completions::run(args, &context),
-        Command::Skill(SkillCommand::Install(args)) => skill::run(args, &context),
+pub fn run(command: &Command, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
+    match command {
+        Command::Check(args) => check::run(args, context, output),
+        Command::Update(args) => update::run(args, context, output),
+        Command::Fix(args) => fix::run(args, context, output),
+        Command::List(args) => list::run(args, context, output),
+        Command::Resolve(args) => resolve::run(args, context, output),
+        Command::Init(args) => init::run(args, context, output),
+        Command::Config(ConfigCommand::Show) => config::run(Inspect::ConfigShow, context, output),
+        Command::Namespace(NamespaceCommand::List) => {
+            config::run(Inspect::NamespaceList, context, output)
+        }
+        Command::Namespace(NamespaceCommand::Rename(args)) => rename::run(args, context, output),
+        Command::Schema(args) => schema::run(args, context, output),
+        Command::Completions(args) => completions::run(args, context, output),
+        Command::Skill(SkillCommand::Install(args)) => skill::run(args, context, output),
     }
 }
 
@@ -200,6 +200,8 @@ mod tests {
     use clap::{CommandFactory, Parser as _};
 
     use super::*;
+    use crate::cli::args::Cli;
+    use crate::output::{OutputSettings, PathStyle, Verbosity};
 
     /// One invocation per leaf subcommand, with the dispatch path it must take.
     const INVOCATIONS: [(&str, &[&str]); 12] = [
@@ -220,15 +222,28 @@ mod tests {
         ("skill install", &["supdoc", "skill", "install"]),
     ];
 
-    fn cwd() -> AbsolutePath {
-        AbsolutePath::new(&std::env::temp_dir()).expect("the temp directory should be absolute")
-    }
-
+    /// Runs `argv` with a fresh, empty directory as the current directory, so a built command
+    /// that writes files never touches a shared location.
     fn dispatch(argv: &[&str]) -> Result<Outcome, CliError> {
         let cli = Cli::try_parse_from(argv).unwrap_or_else(|error| {
             panic!("`{}` should parse: {error}", argv.join(" "));
         });
-        run(cli, cwd())
+        let dir = tempfile::tempdir().expect("a fresh temp directory should be created");
+        let cwd = AbsolutePath::new(dir.path()).expect("a temp directory should be absolute");
+        let settings = OutputSettings {
+            format: cli.global.format(),
+            verbosity: Verbosity::from_flags(cli.global.quiet, cli.global.verbose),
+            color: false,
+            unicode: false,
+            width: 80,
+            paths: PathStyle::new(cwd.clone(), cwd.clone(), None),
+        };
+        let mut output = Output::stdio(settings, anstream::ColorChoice::Never);
+        let context = Context {
+            global: cli.global,
+            cwd,
+        };
+        run(&cli.command, &context, &mut output)
     }
 
     #[test]
