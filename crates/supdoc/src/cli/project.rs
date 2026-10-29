@@ -4,16 +4,19 @@
 //! [`load_config`] sets the output root itself, so no command can load a config and then report
 //! paths against the wrong directory (X4).
 
+use std::fs;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use crate::config::Config;
+use crate::config::{Config, ConfigError};
+use crate::finding::{Location, Snippet};
 use crate::link::SourcePath;
 use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
 use crate::output::Output;
 use crate::path::AbsolutePath;
 use crate::scan::model::Scope;
 
-use super::{CliError, Context};
+use super::{CliError, Context, ErrorSite};
 
 /// The config `--config` names, or the one found by searching upward from the current directory.
 ///
@@ -32,14 +35,67 @@ pub(crate) fn load_config(
         Some(file) => Config::load_file(&absolute(&context.cwd, file)),
         None => Config::load(&context.cwd),
     };
-    let config = loaded.map_err(|error| {
-        let help = error.help().unwrap_or_else(|| {
-            format!("Correct the config as the message says, then run `supdoc {command}` again")
-        });
-        CliError::new(error.code(), error.to_string(), help, error.exit_code())
-    })?;
+    let config = loaded.map_err(|error| config_failure(&error, context, output, command))?;
     output.set_root(config.root().clone());
     Ok(config)
+}
+
+/// The fatal error for a config that did not load, pointing at the offending text when the config
+/// error knows where it is.
+fn config_failure(
+    error: &ConfigError,
+    context: &Context,
+    output: &mut Output,
+    command: &str,
+) -> CliError {
+    let help = error.help().unwrap_or_else(|| {
+        format!("Correct the config as the message says, then run `supdoc {command}` again")
+    });
+    let failure = CliError::new(error.code(), error.to_string(), help, error.exit_code());
+    match error_site(error, &context.cwd, output) {
+        Some(site) => failure.at(site),
+        None => failure,
+    }
+}
+
+/// The file and byte range a config error is about.
+fn config_span(error: &ConfigError) -> Option<(&AbsolutePath, Range<usize>)> {
+    match error {
+        ConfigError::Parse { path, error } => error.span().map(|span| (path, span)),
+        ConfigError::ExtendsMissing { file, span, .. }
+        | ConfigError::ExtendsDirectory { file, span, .. } => Some((file, span.clone())),
+        ConfigError::ExtendsLoop { chain, span } => chain
+            .len()
+            .checked_sub(2)
+            .and_then(|index| chain.get(index))
+            .map(|file| (file, span.clone())),
+        ConfigError::NotFound { .. } | ConfigError::Read { .. } => None,
+    }
+}
+
+/// Where `error` is, read back from the file so the message can show the line.
+///
+/// Source paths are relative to a root and cannot climb, so a file inside the current directory
+/// is shown relative to it, and a file outside it becomes its own directory's only file: the
+/// output root moves there, which keeps the text path correct relative to the current directory.
+fn error_site(error: &ConfigError, cwd: &AbsolutePath, output: &mut Output) -> Option<ErrorSite> {
+    let (file, span) = config_span(error)?;
+    let text = fs::read_to_string(file.as_path()).ok()?;
+    let (root, relative) = match file.strip_prefix(cwd) {
+        Some(inside) => (cwd.clone(), inside.to_path_buf()),
+        None => (
+            AbsolutePath::new(file.as_path().parent()?)?,
+            PathBuf::from(file.as_path().file_name()?),
+        ),
+    };
+    let location = Location::in_text(
+        SourcePath::from_relative(&relative).ok()?,
+        &text,
+        span.clone(),
+    )?;
+    let snippet = Snippet::capture(&text, span)?;
+    output.set_root(root);
+    Some(ErrorSite { location, snippet })
 }
 
 /// `path` as typed, made absolute against the current directory.
@@ -190,6 +246,50 @@ mod tests {
             error.help().contains("run `supdoc list` again"),
             "the fallback help should name the command that was run: {}",
             error.help()
+        );
+    }
+
+    #[test]
+    fn a_toml_syntax_error_carries_its_file_and_line() {
+        let dir = tempfile::tempdir().expect("a fresh temp directory should be created");
+        fs::write(
+            dir.path().join("supdoc.config.toml"),
+            "include = [\"docs\"]\nexclude = oops\n",
+        )
+        .expect("the fixture config should be written");
+        let cwd = AbsolutePath::new(dir.path()).expect("a temp directory should be absolute");
+        let cli = Cli::try_parse_from(["supdoc", "list"]).expect("`supdoc list` should parse");
+        let settings = OutputSettings {
+            format: cli.global.format(),
+            verbosity: Verbosity::from_flags(cli.global.quiet, cli.global.verbose),
+            color: false,
+            unicode: false,
+            width: 80,
+            paths: PathStyle::new(cwd.clone(), cwd.clone(), None),
+        };
+        let mut output = Output::stdio(settings, anstream::ColorChoice::Never);
+        let context = Context {
+            global: cli.global,
+            cwd,
+        };
+
+        let error = load_config(&context, &mut output, "list")
+            .expect_err("a config with a syntax error should not load");
+
+        let site = error.site().expect("a parse error should carry its site");
+        assert_eq!(
+            (
+                site.location.file.as_str(),
+                site.location.line,
+                site.location.column
+            ),
+            ("supdoc.config.toml", 2, 11),
+            "the site should point at the bad value"
+        );
+        assert!(
+            site.snippet.text.contains("exclude = oops"),
+            "the snippet should hold the offending line: {}",
+            site.snippet.text
         );
     }
 }

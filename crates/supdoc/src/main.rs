@@ -111,15 +111,25 @@ fn write_all(mut sink: impl Write, text: &str) -> io::Result<()> {
 ///
 /// A closed pipe is not a failure of supdoc, so it exits 0 (06 X13).
 fn report(output: &mut Output, error: &CliError) -> u8 {
-    let finding =
-        Finding::new(error.code(), Severity::Error, error.message()).with_help(error.help());
-    let written = output.fatal(&finding, error.exit_code());
+    let written = output.fatal(&fatal_finding(error), error.exit_code());
     if output.is_closed() {
         0
     } else if written.is_ok() {
         error.exit_code()
     } else {
         IO_EXIT_CODE
+    }
+}
+
+/// The finding a fatal error prints, pointing at its file and line when it has them.
+fn fatal_finding(error: &CliError) -> Finding {
+    let finding =
+        Finding::new(error.code(), Severity::Error, error.message()).with_help(error.help());
+    match error.site() {
+        Some(site) => finding
+            .with_location(site.location.clone())
+            .with_snippet(site.snippet.clone()),
+        None => finding,
     }
 }
 
@@ -156,5 +166,134 @@ fn settings(global: &GlobalArgs, cwd: AbsolutePath) -> OutputSettings {
         unicode: supports_unicode(color, term.as_deref()),
         width,
         paths: PathStyle::new(cwd.clone(), cwd, github_workspace),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use supdoc::cli::ErrorSite;
+    use supdoc::finding::{Location, Snippet};
+    use supdoc::link::SourcePath;
+    use supdoc::output::OutputFormat;
+
+    use super::*;
+
+    /// A writer whose bytes the test can read back after `Output` takes ownership of it.
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl Capture {
+        fn text(&self) -> String {
+            let bytes = self
+                .0
+                .lock()
+                .expect("the capture lock should not be poisoned");
+            String::from_utf8(bytes.clone()).expect("output should be UTF-8")
+        }
+    }
+
+    impl Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("the capture lock should not be poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A TOML syntax error on line 2 of `supdoc.config.toml`, as the config loader reports it.
+    fn syntax_error() -> CliError {
+        let text = "include = [\"docs\"]\nexclude = oops\n";
+        let start = text.find("oops").expect("the fixture should hold `oops`");
+        let range = start..start + "oops".len();
+        let file = SourcePath::from_relative(Path::new("supdoc.config.toml"))
+            .expect("the fixture path should be a source path");
+        let location =
+            Location::in_text(file, text, range.clone()).expect("the range should be locatable");
+        let snippet = Snippet::capture(text, range).expect("the range should be capturable");
+        CliError::new(
+            "config/parse",
+            "supdoc.config.toml: invalid value",
+            "Correct the config as the message says",
+            CliError::CONFIG_EXIT_CODE,
+        )
+        .at(ErrorSite { location, snippet })
+    }
+
+    /// Reports `error` in `format` and returns what reached stderr.
+    fn stderr_of(format: OutputFormat, error: &CliError) -> String {
+        let cwd = AbsolutePath::new(Path::new(MAIN_SEPARATOR_STR))
+            .expect("the filesystem root should be absolute");
+        let settings = OutputSettings {
+            format,
+            verbosity: Verbosity::Normal,
+            color: false,
+            unicode: false,
+            width: 80,
+            paths: PathStyle::new(cwd.clone(), cwd, None),
+        };
+        let stderr = Capture::default();
+        let mut output = Output::new(
+            settings,
+            Box::new(Capture::default()),
+            Box::new(stderr.clone()),
+        );
+
+        let _exit_code = report(&mut output, error);
+
+        stderr.text()
+    }
+
+    #[test]
+    fn a_fatal_error_with_a_site_shows_its_file_and_line_in_text() {
+        let text = stderr_of(OutputFormat::Text, &syntax_error());
+
+        assert!(
+            text.contains("--> supdoc.config.toml:2:11"),
+            "text should point at file:line:column: {text}"
+        );
+        assert!(
+            text.contains(
+                " --> supdoc.config.toml:2:11\n  |\n2 | exclude = oops\n  |           ^^^^\n  |\n  = help"
+            ),
+            "text should show the line once, with no stray ` |` line: {text}"
+        );
+    }
+
+    #[test]
+    fn a_fatal_error_with_a_site_carries_its_location_in_json() {
+        let text = stderr_of(OutputFormat::Json, &syntax_error());
+
+        let error: serde_json::Value =
+            serde_json::from_str(&text).expect("stderr should hold one JSON document");
+        assert_eq!(
+            error.get("location"),
+            Some(&serde_json::json!({"file": "supdoc.config.toml", "line": 2, "column": 11})),
+            "the JSON error should carry its location: {text}"
+        );
+    }
+
+    #[test]
+    fn a_fatal_error_without_a_site_has_no_location() {
+        let error = CliError::new("cli/no-cwd", "no directory", "run it elsewhere", 74);
+
+        let text = stderr_of(OutputFormat::Text, &error);
+        let json = stderr_of(OutputFormat::Json, &error);
+
+        assert!(
+            !text.contains("-->"),
+            "text should have no location: {text}"
+        );
+        assert!(
+            !json.contains("location"),
+            "JSON should have no location: {json}"
+        );
     }
 }

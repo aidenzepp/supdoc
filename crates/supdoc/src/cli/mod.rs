@@ -51,6 +51,7 @@ pub mod schema;
 
 use std::fmt;
 
+use crate::finding::{Location, Snippet};
 use crate::output::Output;
 use crate::path::AbsolutePath;
 
@@ -85,6 +86,16 @@ impl Outcome {
     }
 }
 
+/// The place in a file that a [`CliError`] is about, with its source line captured so rendering
+/// never reads files (07 G11).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ErrorSite {
+    /// The file, line and column.
+    pub location: Location,
+    /// The source lines to show under the message.
+    pub snippet: Snippet,
+}
+
 /// A command that could not finish: a stable code, what happened, what to do next, and the exit
 /// code to use (06 X7, 07 fatal error shape).
 ///
@@ -100,6 +111,8 @@ pub struct CliError {
     help: String,
     /// The process exit code.
     exit_code: u8,
+    /// Where in a file it happened, when it is about one place.
+    site: Option<Box<ErrorSite>>,
 }
 
 impl CliError {
@@ -116,6 +129,16 @@ impl CliError {
             message: message.into(),
             help: help.into(),
             exit_code,
+            site: None,
+        }
+    }
+
+    /// The same error, pointing at `site` in a file.
+    #[must_use]
+    pub fn at(self, site: ErrorSite) -> Self {
+        Self {
+            site: Some(Box::new(site)),
+            ..self
         }
     }
 
@@ -172,6 +195,12 @@ impl CliError {
     #[must_use]
     pub const fn exit_code(&self) -> u8 {
         self.exit_code
+    }
+
+    /// Where in a file it happened, if it is about one place.
+    #[must_use]
+    pub fn site(&self) -> Option<&ErrorSite> {
+        self.site.as_deref()
     }
 }
 
