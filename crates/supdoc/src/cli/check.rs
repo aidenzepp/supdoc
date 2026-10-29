@@ -52,6 +52,7 @@ const CONFIG_EXIT_CODE: u8 = 78;
 /// `cli/check-output` when the report cannot be written (74).
 pub fn run(args: &CheckArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let config = load_config(context)?;
+    output.set_root(config.root().clone());
     let scope = scope(&args.paths, &context.cwd, config.root())?;
     let lock = read_lock(config.root())?;
     let scan =
@@ -488,6 +489,19 @@ mod tests {
 
         /// Runs `supdoc <args>` from the project root. `args` must start with `check`.
         fn check(&self, args: &[&str]) -> Run {
+            Self::check_in(self.root(), args)
+        }
+
+        /// Runs `supdoc <args>` from the project directory `relative`, which must exist.
+        fn check_from(&self, relative: &str, args: &[&str]) -> Run {
+            let cwd = AbsolutePath::new(&self.dir.path().join(relative))
+                .expect("a directory under the root should be absolute");
+            Self::check_in(cwd, args)
+        }
+
+        /// Runs `supdoc <args>` from `cwd`, with output paths provisionally rooted there as
+        /// `main` roots them before any config loads.
+        fn check_in(cwd: AbsolutePath, args: &[&str]) -> Run {
             let command_line: Vec<&str> = std::iter::once("supdoc")
                 .chain(args.iter().copied())
                 .collect();
@@ -497,7 +511,6 @@ mod tests {
             let Command::Check(check_args) = &cli.command else {
                 panic!("`{}` should be a check command", command_line.join(" "));
             };
-            let cwd = self.root();
             let settings = OutputSettings {
                 format: cli.global.format(),
                 verbosity: Verbosity::from_flags(cli.global.quiet, cli.global.verbose),
@@ -778,6 +791,31 @@ mod tests {
         assert!(
             at(&link, "/finding").get("location").is_none(),
             "a nested finding leaves its location to the link: {link}"
+        );
+    }
+
+    #[test]
+    fn run_from_a_subdirectory_reports_paths_against_the_project_root() {
+        let project = Project::new();
+        project.write("supdoc.config.toml", "");
+
+        let json = project.check_from("docs", &["--json", "check"]).json();
+        let text = project.check_from("docs", &["check"]);
+
+        assert_eq!(
+            at(&json, "/root"),
+            project.root().as_path().to_string_lossy().as_ref(),
+            "the envelope root is the project root, not the current directory: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/links/0/source"),
+            "docs/guide.md",
+            "JSON paths stay relative to the project root: {json}"
+        );
+        assert!(
+            text.stdout.contains("guide.md:3:5") && !text.stdout.contains("docs/guide.md"),
+            "text paths are relative to the current directory: {}",
+            text.stdout
         );
     }
 

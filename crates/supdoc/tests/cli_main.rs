@@ -57,6 +57,9 @@ mod support {
 
 use support::{field, single_json_object, supdoc};
 
+/// A config path that cannot exist, so any config-loading command fails before it runs.
+const MISSING_CONFIG: &str = "/nonexistent/supdoc.config.toml";
+
 #[test]
 fn bare_supdoc_prints_help_to_stdout_and_exits_0() {
     let run = supdoc(&[]);
@@ -71,28 +74,28 @@ fn bare_supdoc_prints_help_to_stdout_and_exits_0() {
 }
 
 #[test]
-fn unbuilt_command_exits_70_with_the_not_built_error_on_stderr() {
-    let run = supdoc(&["check"]);
+fn missing_config_exits_78_with_the_error_on_stderr_only() {
+    let run = supdoc(&["check", "--config", MISSING_CONFIG]);
 
-    assert_eq!(run.code, Some(70), "stderr: {}", run.stderr);
+    assert_eq!(run.code, Some(78), "stderr: {}", run.stderr);
     assert_eq!(run.stdout, "", "an error should leave stdout empty");
     assert!(
-        run.stderr.contains("cli/not-built"),
-        "stderr should carry the cli/not-built code: {}",
+        run.stderr.contains("config/not-found"),
+        "stderr should carry the config/not-found code: {}",
         run.stderr
     );
 }
 
 #[test]
 fn json_error_is_one_object_and_nothing_else() {
-    let run = supdoc(&["--json", "check"]);
+    let run = supdoc(&["--json", "check", "--config", MISSING_CONFIG]);
 
-    assert_eq!(run.code, Some(70), "stderr: {}", run.stderr);
+    assert_eq!(run.code, Some(78), "stderr: {}", run.stderr);
     assert_eq!(run.stdout, "", "--json errors belong on stderr only");
     let error = single_json_object(&run.stderr);
     assert_eq!(field(&error, "error"), &serde_json::json!(true));
-    assert_eq!(field(&error, "kind"), "cli/not-built");
-    assert_eq!(field(&error, "exit_code"), 70);
+    assert_eq!(field(&error, "kind"), "config/not-found");
+    assert_eq!(field(&error, "exit_code"), 78);
 }
 
 #[test]
