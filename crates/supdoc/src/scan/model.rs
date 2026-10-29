@@ -42,8 +42,9 @@ impl Scope {
 pub struct Scan {
     /// One per [`LinkKey`] (04 S11), sorted.
     pub links: BTreeMap<LinkKey, ScannedLink>,
-    /// Problems not tied to one link (unreadable directories, excluded explicit paths), sorted
-    /// (04 S8). A link's own problem lives in its [`TargetState::Broken`]. Never fatal.
+    /// Problems not tied to one link (unreadable directories, excluded explicit paths, and links
+    /// too malformed to have a key, like an invalid symbol), sorted (04 S8). A link's own problem
+    /// lives in its [`TargetState::Broken`]. Never fatal.
     pub findings: Vec<Finding>,
     /// Sources that were walked but couldn't be read. Their lock entries are never judged
     /// obsolete (05 C5).

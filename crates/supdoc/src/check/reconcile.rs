@@ -94,8 +94,9 @@ pub fn reconcile(scan: &Scan, lock: &Lockfile, scope: &Scope) -> Report {
     report
 }
 
-/// Whether `check` passes (05 C3): `failed`, `broken` and `new` links fail it. `obsolete` links
-/// only warn, and `deny_warnings` makes them, and every warning finding, fail it too.
+/// Whether `check` passes (05 C3): `failed`, `broken` and `new` links fail it, and so does every
+/// error finding, such as a link too malformed to have a key (03 R10). `obsolete` links only
+/// warn, and `deny_warnings` makes them, and every warning finding, fail it too.
 #[must_use]
 pub fn check_outcome(report: &Report, deny_warnings: bool) -> Outcome {
     let failing_link = report.links.iter().any(|link| match link.state {
@@ -103,13 +104,16 @@ pub fn check_outcome(report: &Report, deny_warnings: bool) -> Outcome {
         LinkState::Obsolete => deny_warnings,
         LinkState::Passed => false,
     });
-    let denied_warning = deny_warnings
-        && report
-            .findings
-            .iter()
-            .any(|finding| finding.severity == Severity::Warning);
+    let failing_finding = report
+        .findings
+        .iter()
+        .any(|finding| match finding.severity {
+            Severity::Error => true,
+            Severity::Warning => deny_warnings,
+            Severity::Note => false,
+        });
 
-    if failing_link || denied_warning {
+    if failing_link || failing_finding {
         Outcome::Failing
     } else {
         Outcome::Clean
@@ -580,5 +584,26 @@ mod tests {
             .push(Finding::new("read/syntax-errors", Severity::Warning, "x"));
         assert_eq!(check_outcome(&warned, false), Outcome::Clean);
         assert_eq!(check_outcome(&warned, true), Outcome::Failing);
+    }
+
+    #[test]
+    fn error_finding_fails_check_and_note_does_not() {
+        let mut noted = report_with(&[LinkState::Passed]);
+        noted
+            .findings
+            .push(Finding::new("check/moved", Severity::Note, "x"));
+        assert_eq!(check_outcome(&noted, true), Outcome::Clean);
+
+        let mut errored = noted;
+        errored
+            .findings
+            .push(Finding::new("link/invalid-symbol", Severity::Error, "x"));
+        for deny_warnings in [false, true] {
+            assert_eq!(
+                check_outcome(&errored, deny_warnings),
+                Outcome::Failing,
+                "an error finding should fail the check (deny_warnings: {deny_warnings})",
+            );
+        }
     }
 }

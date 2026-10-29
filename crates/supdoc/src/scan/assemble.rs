@@ -4,19 +4,20 @@
 //! Only an unreadable project root stops the run. Every other problem, with one file or one link,
 //! becomes a finding and the scan goes on (S7).
 
-use std::collections::BTreeSet;
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 use crate::config::{CONFIG_FILE_NAME, Config};
 use crate::finding::{Finding, Fix, Location, Severity, Snippet};
 use crate::link::destination::{LinkError, parse_destination};
-use crate::link::{LinkKey, SourcePath};
+use crate::link::{LinkKey, RawLink, SourcePath};
 use crate::namespace::NamespaceName;
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile};
 use crate::read::error::ReadError;
 use crate::read::links::links;
-use crate::scan::model::{Scan, Scope};
+use crate::scan::model::{Scan, ScannedLink, Scope, TargetState};
 use crate::scan::targets::{self, CODE_UNKNOWN_NAMESPACE, Occurrence, Parsed, Written};
 use crate::scan::walk::walk;
 
@@ -99,7 +100,7 @@ fn assemble(
     let mut findings = walked.findings;
     let mut parsed = Parsed::default();
     let mut unread_sources = BTreeSet::new();
-    let mut occurrences = Vec::new();
+    let mut found = SourceLinks::default();
     for (path, _cartridge) in &walked.sources {
         // The walk only returns files beneath the root whose paths are valid source paths.
         let Some(source) = path
@@ -109,11 +110,7 @@ fn assemble(
             continue;
         };
         match parsed.read(path, languages) {
-            Ok(file) => {
-                let (found, problems) = source_links(config, languages, &source, file);
-                occurrences.extend(found);
-                findings.extend(problems);
-            }
+            Ok(file) => source_links(config, languages, &source, file, &mut found),
             Err(error) => {
                 findings.push(unreadable_source(&source, &error));
                 let _new = unread_sources.insert(source);
@@ -121,7 +118,9 @@ fn assemble(
         }
     }
 
-    let links = targets::resolve(config, languages, &mut parsed, occurrences);
+    let mut links = targets::resolve(config, languages, &mut parsed, found.occurrences);
+    add_broken(&mut links, found.broken);
+    findings.extend(found.unkeyed);
     findings.sort_by(|left, right| {
         position(left)
             .cmp(&position(right))
@@ -145,17 +144,26 @@ fn position(finding: &Finding) -> Option<(&SourcePath, usize, usize)> {
         .map(|location| (&location.file, location.range.start, location.range.end))
 }
 
-/// Every supdoc link in `file`, in file order, and a finding for each one that is meant for
-/// supdoc but can't be read (03 R10).
+/// The supdoc links read from sources, in file order, before any target is read.
+#[derive(Debug, Default)]
+struct SourceLinks {
+    /// Links that parsed, still to be resolved.
+    occurrences: Vec<Occurrence>,
+    /// Links meant for supdoc but wrong (03 R10) that still have a key: broken as written.
+    broken: Vec<(LinkKey, Location, Finding)>,
+    /// Links meant for supdoc but too malformed to have a key: only their finding is left.
+    unkeyed: Vec<Finding>,
+}
+
+/// Adds every supdoc link in `file` to `found`, in file order (03 R10).
 fn source_links(
     config: &Config,
     languages: &Languages,
     source: &SourcePath,
     file: &SourceFile,
-) -> (Vec<Occurrence>, Vec<Finding>) {
+    found: &mut SourceLinks,
+) {
     let text = file.text();
-    let mut occurrences = Vec::new();
-    let mut findings = Vec::new();
     for raw in links(file) {
         let Some(parsed) = parse_destination(&raw, source, config.namespaces(), languages) else {
             continue;
@@ -167,7 +175,7 @@ fn source_links(
         let snippet = Snippet::capture(text, raw.range.clone());
         let written = Written::locate(text, &raw.range, &raw.destination);
         match parsed {
-            Ok(link) => occurrences.push(Occurrence {
+            Ok(link) => found.occurrences.push(Occurrence {
                 key: LinkKey {
                     source: source.clone(),
                     target: link.target,
@@ -178,17 +186,62 @@ fn source_links(
                 written,
             }),
             Err(error) => {
-                findings.push(link_finding(
-                    config,
-                    &error,
-                    location,
-                    snippet,
-                    written.as_ref(),
-                ));
+                let key = unknown_namespace_key(config, languages, &raw, source, &error);
+                let finding =
+                    link_finding(config, &error, location.clone(), snippet, written.as_ref());
+                match key {
+                    Some(key) => found.broken.push((key, location, finding)),
+                    None => found.unkeyed.push(finding),
+                }
             }
         }
     }
-    (occurrences, findings)
+}
+
+/// The key `raw` would have if its unknown namespace were configured, so a locked link whose
+/// namespace was renamed or removed in config is broken rather than obsolete (05 C1, C3).
+///
+/// `None` for every other link error, and when the rest of the destination is wrong too: an
+/// invalid path or symbol can't be written as a key.
+fn unknown_namespace_key(
+    config: &Config,
+    languages: &Languages,
+    raw: &RawLink,
+    source: &SourcePath,
+    error: &LinkError,
+) -> Option<LinkKey> {
+    let LinkError::UnknownNamespace { prefix, .. } = error else {
+        return None;
+    };
+    let namespace: NamespaceName = prefix.parse().ok()?;
+    let mut namespaces = config.namespaces().clone();
+    // Parsing never reads a namespace's directory, so the root stands in for the missing one.
+    let _absent = namespaces.insert(namespace, config.root().clone());
+    let link = parse_destination(raw, source, &namespaces, languages)?.ok()?;
+    Some(LinkKey {
+        source: source.clone(),
+        target: link.target,
+        symbol: link.symbol,
+    })
+}
+
+/// Adds each keyed link error to `links` as a broken link. A link written more than once keeps
+/// every location, and the finding of the place it is first written.
+fn add_broken(
+    links: &mut BTreeMap<LinkKey, ScannedLink>,
+    broken: Vec<(LinkKey, Location, Finding)>,
+) {
+    for (key, location, finding) in broken {
+        match links.entry(key) {
+            Entry::Occupied(mut link) => link.get_mut().locations.push(location),
+            Entry::Vacant(slot) => {
+                let _link = slot.insert(ScannedLink {
+                    locations: vec![location],
+                    target: TargetState::Broken { finding },
+                });
+            }
+        }
+    }
 }
 
 /// The finding for a destination that is meant for supdoc but wrong. An unknown namespace gets a
@@ -305,8 +358,11 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::check::reconcile::{Outcome, check_outcome, reconcile};
+    use crate::hash::Hash;
     use crate::link::Target;
-    use crate::scan::model::{ScannedLink, TargetState};
+    use crate::lock::model::Lockfile;
+    use crate::state::LinkState;
 
     /// Two functions, `add` and `sub`.
     const LIB: &str = "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\n\
@@ -547,13 +603,14 @@ mod tests {
         let scan = project.scan();
 
         assert_eq!(
-            scan.links.len(),
-            0,
-            "a link through no namespace has no key"
+            scan.findings,
+            Vec::new(),
+            "the link's problem lives on the link"
         );
-        let [finding] = scan.findings.as_slice() else {
-            panic!("expected one finding, got {:?}", scan.findings);
-        };
+        let finding = broken(
+            &scan,
+            &key("docs/guide.md", "atuh:src/lib.rs", Some("login")),
+        );
         assert_eq!(finding.code, "link/unknown-namespace");
         let fix = finding
             .fix
@@ -570,11 +627,76 @@ mod tests {
 
         let scan = project.scan();
 
-        let [finding] = scan.findings.as_slice() else {
-            panic!("expected one finding, got {:?}", scan.findings);
-        };
+        let finding = broken(
+            &scan,
+            &key("docs/guide.md", "billing:src/lib.rs", Some("x")),
+        );
         assert_eq!(finding.code, "link/unknown-namespace");
         assert_eq!(finding.fix, None);
+    }
+
+    // Link errors fail `check` (03 R10, 05 C3)
+
+    /// Whether `check` passes on `project`, given `lock`, without and with `--deny-warnings`.
+    fn outcomes(project: &Project, lock: &Lockfile) -> [Outcome; 2] {
+        let report = reconcile(&project.scan(), lock, &Scope::All);
+        [check_outcome(&report, false), check_outcome(&report, true)]
+    }
+
+    #[test]
+    fn every_link_error_fails_check() {
+        let cases = [
+            ("link/unknown-namespace", "[a](atuh:src/lib.rs#add)"),
+            ("link/invalid-symbol", "[a](../src/lib.rs#a..b)"),
+            ("link/invalid-path", "[a](../src//lib.rs#add)"),
+            (
+                "link/text-fragment-unsupported",
+                "[a](../src/lib.rs#add:~:text=b)",
+            ),
+        ];
+        for (code, link) in cases {
+            let project = Project::with_config("[namespaces]\nauth = \"src\"\n");
+            project.write("src/lib.rs", LIB);
+            project.write("docs/guide.md", &format!("See {link}.\n"));
+
+            let scan = project.scan();
+            let codes: Vec<&str> = scan
+                .links
+                .values()
+                .filter_map(|link| match &link.target {
+                    TargetState::Broken { finding } => Some(finding.code),
+                    TargetState::Present { .. } => None,
+                })
+                .chain(scan.findings.iter().map(|finding| finding.code))
+                .collect();
+            assert_eq!(codes, [code], "{link} should report only {code}");
+            assert_eq!(
+                outcomes(&project, &Lockfile::default()),
+                [Outcome::Failing; 2],
+                "{code} should fail check, with and without --deny-warnings",
+            );
+        }
+    }
+
+    #[test]
+    fn locked_link_whose_namespace_was_removed_is_broken_not_obsolete() {
+        let project = Project::new();
+        project.write("services/auth/login.rs", "pub fn login() {}\n");
+        project.write("docs/guide.md", "See [login](auth:login.rs#login).\n");
+        let locked = key("docs/guide.md", "auth:login.rs", Some("login"));
+        let lock: Lockfile = [(locked.clone(), Hash::digest(b"pub fn login() {}"))]
+            .into_iter()
+            .collect();
+
+        let report = reconcile(&project.scan(), &lock, &Scope::All);
+
+        let states: Vec<(LinkKey, LinkState)> = report
+            .links
+            .iter()
+            .map(|link| (link.key.clone(), link.state))
+            .collect();
+        assert_eq!(states, [(locked, LinkState::Broken)]);
+        assert_eq!(outcomes(&project, &lock), [Outcome::Failing; 2]);
     }
 
     #[test]
