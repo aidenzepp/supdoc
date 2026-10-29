@@ -207,14 +207,19 @@ mod tests {
 
     #[test]
     fn a_named_command_that_is_not_built_says_so() {
-        let error = schema_value(SchemaTarget::Update).expect_err("update is not built");
+        for target in SchemaTarget::value_variants() {
+            let Err(error) = schema_value(*target) else {
+                continue;
+            };
 
-        assert_eq!(error.code(), CliError::NOT_BUILT);
-        assert!(
-            error.message().contains("supdoc update"),
-            "{}",
-            error.message()
-        );
+            assert_eq!(error.code(), CliError::NOT_BUILT, "`{}`", name(*target));
+            let spoken = format!("supdoc {}", name(*target).replace('-', " "));
+            assert!(
+                error.message().contains(&spoken),
+                "the not-built error should name `{spoken}`: {}",
+                error.message()
+            );
+        }
     }
 
     #[test]
