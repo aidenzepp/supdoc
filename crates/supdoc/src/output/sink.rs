@@ -151,6 +151,16 @@ impl Output {
         self.write(Stream::Stdout, &bytes)
     }
 
+    /// Writes `artifact`, a script or a schema, to stdout exactly as given. The output format
+    /// never changes it: an artifact is the file the user asked for, not a report about it.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a write fails for any reason but a closed pipe.
+    pub fn artifact(&mut self, artifact: &str) -> Result<(), OutputError> {
+        self.write(Stream::Stdout, artifact.as_bytes())
+    }
+
     /// Writes a finding about the run itself to stderr. Quiet hides everything but errors.
     ///
     /// # Errors

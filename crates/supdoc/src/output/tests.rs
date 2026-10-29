@@ -863,3 +863,23 @@ fn set_root_makes_json_root_and_paths_project_relative() {
         "the envelope should name docs/guide.md relative to the root: {envelope}"
     );
 }
+
+#[test]
+fn an_artifact_is_written_raw_under_every_format() {
+    let artifact = "{\"$schema\": \"x\"}\n# not a report\n";
+    for format in [
+        OutputFormat::Text,
+        OutputFormat::Json,
+        OutputFormat::Jsonl,
+        OutputFormat::Github,
+    ] {
+        let (mut output, stdout, stderr) = captured(settings(format, Verbosity::Quiet));
+
+        output
+            .artifact(artifact)
+            .expect("writing to a buffer should succeed");
+
+        assert_eq!(stdout.text(), artifact, "{format:?} should write it as is");
+        assert_eq!(stderr.text(), "", "{format:?} should not touch stderr");
+    }
+}

@@ -2,34 +2,13 @@
 //!
 //! Completions never load the config, so they work in a broken project.
 
-use std::io::{self, Write};
-
 use clap::CommandFactory as _;
 use clap_complete::Shell;
-use schemars::JsonSchema;
-use serde::Serialize;
 
-use crate::output::{Output, OutputError, Report, TextContext};
+use crate::output::{Output, OutputError};
 
 use super::args::{Cli, CompletionsArgs};
 use super::{CliError, Context, Outcome};
-
-/// The completion script as output data.
-#[derive(Debug, Serialize, JsonSchema)]
-struct ScriptReport {
-    /// The script text, written as is in text output.
-    script: String,
-}
-
-impl Report for ScriptReport {
-    fn command(&self) -> &'static str {
-        "completions"
-    }
-
-    fn render_text(&self, _context: &TextContext, out: &mut dyn Write) -> io::Result<()> {
-        out.write_all(self.script.as_bytes())
-    }
-}
 
 /// Runs `supdoc completions`, printing the script through `output`.
 ///
@@ -45,11 +24,8 @@ pub fn run(
     _context: &Context,
     output: &mut Output,
 ) -> Result<Outcome, CliError> {
-    let report = ScriptReport {
-        script: script(args.shell),
-    };
     output
-        .report(&report, true)
+        .artifact(&script(args.shell))
         .map_err(|error| write_failed(args.shell, &error))?;
     Ok(Outcome::Clean)
 }
@@ -74,6 +50,8 @@ fn script(shell: Shell) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{self, Write};
+
     use clap::Parser as _;
 
     use crate::cli::args::Command;
@@ -120,10 +98,15 @@ mod tests {
         }
     }
 
-    /// Text output rooted in `cwd`, writing to the given streams.
-    fn output_to(cwd: &AbsolutePath, stdout: Box<dyn Write>, stderr: Box<dyn Write>) -> Output {
+    /// Output in `format` rooted in `cwd`, writing to the given streams.
+    fn output_in(
+        format: OutputFormat,
+        cwd: &AbsolutePath,
+        stdout: Box<dyn Write>,
+        stderr: Box<dyn Write>,
+    ) -> Output {
         let settings = OutputSettings {
-            format: OutputFormat::Text,
+            format,
             verbosity: Verbosity::Normal,
             color: false,
             unicode: false,
@@ -131,6 +114,11 @@ mod tests {
             paths: PathStyle::new(cwd.clone(), cwd.clone(), None),
         };
         Output::new(settings, stdout, stderr)
+    }
+
+    /// Text output rooted in `cwd`, writing to the given streams.
+    fn output_to(cwd: &AbsolutePath, stdout: Box<dyn Write>, stderr: Box<dyn Write>) -> Output {
+        output_in(OutputFormat::Text, cwd, stdout, stderr)
     }
 
     fn zsh_args() -> (CompletionsArgs, Context) {
@@ -164,6 +152,35 @@ mod tests {
         assert_eq!(outcome, Outcome::Clean);
         assert_eq!(stdout.text(), script(args.shell), "stdout is the script");
         assert_eq!(stderr.text(), "", "completions say nothing on stderr");
+    }
+
+    #[test]
+    fn the_script_is_the_same_under_every_output_format() {
+        let (args, context) = zsh_args();
+        for format in [
+            OutputFormat::Text,
+            OutputFormat::Json,
+            OutputFormat::Jsonl,
+            OutputFormat::Github,
+        ] {
+            let (stdout, stderr) = (Capture::default(), Capture::default());
+            let mut output = output_in(
+                format,
+                &context.cwd,
+                Box::new(stdout.clone()),
+                Box::new(stderr.clone()),
+            );
+
+            let outcome = run(&args, &context, &mut output).expect("completions should succeed");
+
+            assert_eq!(outcome, Outcome::Clean, "{format:?} should exit 0");
+            assert_eq!(
+                stdout.text(),
+                script(args.shell),
+                "{format:?} should print the raw script"
+            );
+            assert_eq!(stderr.text(), "", "{format:?} says nothing on stderr");
+        }
     }
 
     #[test]
