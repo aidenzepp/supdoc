@@ -15,7 +15,6 @@ use std::path::Path;
 
 use crate::config::{CONFIG_FILE_NAME, Config};
 use crate::finding::{Finding, Fix, Location, Severity, Snippet};
-use crate::hash::HashSettings;
 use crate::link::{LinkKey, Target};
 use crate::output::paths::relative_to;
 use crate::path::AbsolutePath;
@@ -231,6 +230,7 @@ fn target_states(
         Err(error) => return broken_by(&|first| read_failed(&error, config.root(), first)),
     };
 
+    let settings = config.hash_settings();
     let mut table: Option<SymbolTable> = None;
     keyed
         .into_iter()
@@ -239,14 +239,14 @@ fn target_states(
             let syntax_errors = file.has_syntax_errors();
             let state = match &key.symbol {
                 None => TargetState::Present {
-                    hash: hash_file(file, HashSettings::default()),
+                    hash: hash_file(file, settings),
                     syntax_errors,
                 },
                 Some(symbol) => {
                     let table = table.get_or_insert_with(|| file.language().symbols(file));
                     match table.resolve(file.path(), symbol) {
                         Ok(found) => TargetState::Present {
-                            hash: hash_symbol(file, found, HashSettings::default()),
+                            hash: hash_symbol(file, found, settings),
                             syntax_errors,
                         },
                         Err(error) => TargetState::Broken {
@@ -544,6 +544,8 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::config::Config;
+    use crate::hash::{HashSettings, LineEndings};
     use crate::link::SourcePath;
 
     fn absolute(raw: &str) -> AbsolutePath {
@@ -603,6 +605,62 @@ mod tests {
                 "no language for `.png` files (logo.png)",
             ],
             "read findings should name the file from the project root"
+        );
+    }
+
+    /// The hash `resolve` records for a CRLF Rust file linked whole, under `config_text`.
+    fn hash_of_crlf_target(config_text: &str) -> crate::hash::Hash {
+        let dir = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        std::fs::write(dir.path().join("supdoc.config.toml"), config_text)
+            .expect("the fixture config should be writable");
+        std::fs::write(dir.path().join("a.rs"), "fn a() {\r\n}\r\n")
+            .expect("the fixture target should be writable");
+        let config = Config::load(
+            &AbsolutePath::new(dir.path()).expect("a temp dir path should be absolute"),
+        )
+        .expect("the fixture config should load");
+        let occurrence = occurrence("a.rs");
+        let key = occurrence.key.clone();
+        let links = resolve(
+            &config,
+            &Languages::builtin(),
+            &mut Parsed::default(),
+            vec![occurrence],
+        );
+        match links.get(&key).map(|link| &link.target) {
+            Some(TargetState::Present { hash, .. }) => *hash,
+            other => panic!("expected a present target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn crlf_target_hashes_follow_configured_line_endings() {
+        let expected = |line_endings| {
+            let dir = tempfile::TempDir::new().expect("a temp dir should be creatable");
+            let path = dir.path().join("a.rs");
+            std::fs::write(&path, "fn a() {\r\n}\r\n").expect("the fixture should be writable");
+            let languages = Languages::builtin();
+            let file = SourceFile::read(
+                AbsolutePath::new(&path).expect("a temp dir path should be absolute"),
+                &languages,
+            )
+            .expect("the fixture should read");
+            hash_file(&file, HashSettings { line_endings })
+        };
+
+        assert_eq!(
+            hash_of_crlf_target(""),
+            expected(LineEndings::Normalize),
+            "the default should normalize"
+        );
+        assert_eq!(
+            hash_of_crlf_target("[features.hash]\nline-endings = \"exact\"\n"),
+            expected(LineEndings::Exact),
+            "exact should hash every byte"
+        );
+        assert_ne!(
+            expected(LineEndings::Normalize),
+            expected(LineEndings::Exact)
         );
     }
 }

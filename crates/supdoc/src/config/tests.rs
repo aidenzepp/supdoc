@@ -825,3 +825,140 @@ fn contains_judges_a_dangling_symlink_by_where_it_points() {
         "a missing file in the root"
     );
 }
+
+// Features: [features.hash] line-endings
+
+use crate::hash::LineEndings;
+
+#[test]
+fn line_endings_defaults_to_normalize() {
+    let dir = tree(&[("supdoc.config.toml", "")]);
+
+    assert_eq!(
+        load_from(&dir, ".").hash_settings().line_endings,
+        LineEndings::Normalize
+    );
+}
+
+#[test]
+fn line_endings_exact_is_read() {
+    let dir = tree(&[(
+        "supdoc.config.toml",
+        "[features.hash]\nline-endings = \"exact\"\n",
+    )]);
+
+    assert_eq!(
+        load_from(&dir, ".").hash_settings().line_endings,
+        LineEndings::Exact
+    );
+}
+
+#[test]
+fn child_line_endings_overrides_parent() {
+    let dir = tree(&[
+        (
+            "supdoc.config.toml",
+            "[features.hash]\nline-endings = \"exact\"\n",
+        ),
+        (
+            "child/supdoc.config.toml",
+            "extends = \"../supdoc.config.toml\"\n[features.hash]\nline-endings = \"normalize\"\n",
+        ),
+    ]);
+
+    assert_eq!(
+        load_from(&dir, "child").hash_settings().line_endings,
+        LineEndings::Normalize
+    );
+}
+
+#[test]
+fn unset_child_line_endings_inherits_parent() {
+    let dir = tree(&[
+        (
+            "supdoc.config.toml",
+            "[features.hash]\nline-endings = \"exact\"\n",
+        ),
+        (
+            "child/supdoc.config.toml",
+            "extends = \"../supdoc.config.toml\"\n",
+        ),
+    ]);
+
+    assert_eq!(
+        load_from(&dir, "child").hash_settings().line_endings,
+        LineEndings::Exact
+    );
+}
+
+#[test]
+fn empty_features_hash_table_inherits_parent() {
+    let dir = tree(&[
+        (
+            "supdoc.config.toml",
+            "[features.hash]\nline-endings = \"exact\"\n",
+        ),
+        (
+            "child/supdoc.config.toml",
+            "extends = \"../supdoc.config.toml\"\n[features.hash]\n",
+        ),
+    ]);
+
+    assert_eq!(
+        load_from(&dir, "child").hash_settings().line_endings,
+        LineEndings::Exact
+    );
+}
+
+#[test]
+fn unknown_line_endings_value_is_parse_error_listing_both_values() {
+    let dir = tree(&[(
+        "supdoc.config.toml",
+        "[features.hash]\nline-endings = \"crlf\"\n",
+    )]);
+    let error = load_error(&dir, "supdoc.config.toml");
+
+    assert_eq!(error.code(), "config/parse", "got {error:?}");
+    let message = error.to_string();
+    assert!(
+        message.contains("unknown variant `crlf`")
+            && message.contains("`normalize`")
+            && message.contains("`exact`"),
+        "the message should name the bad value and both choices, got {message}"
+    );
+}
+
+#[test]
+fn unknown_features_key_is_parse_error() {
+    for text in [
+        "[features]\ncache = true\n",
+        "[features.hash]\neol = \"x\"\n",
+    ] {
+        let dir = tree(&[("supdoc.config.toml", text)]);
+        let error = load_error(&dir, "supdoc.config.toml");
+
+        assert_eq!(error.code(), "config/parse", "{text:?} gave {error:?}");
+    }
+}
+
+#[test]
+fn line_endings_provenance_names_the_defining_file() {
+    let dir = tree(&[
+        (
+            "supdoc.config.toml",
+            "[features.hash]\nline-endings = \"exact\"\n",
+        ),
+        (
+            "child/supdoc.config.toml",
+            "extends = \"../supdoc.config.toml\"\n",
+        ),
+    ]);
+    let inherited = load_from(&dir, "child");
+    let default = tree(&[("supdoc.config.toml", "")]);
+
+    assert_eq!(
+        inherited.line_endings_defined_in(),
+        Some(&at(&dir, "supdoc.config.toml"))
+    );
+    assert_eq!(load_from(&default, ".").line_endings_defined_in(), None);
+}

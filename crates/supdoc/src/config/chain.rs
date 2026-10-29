@@ -194,7 +194,7 @@ fn config_inside(extends: &RelativePath, directory: &AbsolutePath) -> Option<Rel
 
 /// Combines the layers, child first, into one config rooted at `root`.
 ///
-/// Each key comes from the nearest layer that sets it. Namespaces merge by name, nearer wins.
+/// Each key comes from the nearest layer that sets it, including each key under `[features]`. Namespaces merge by name, nearer wins.
 /// Every path is anchored at the directory of the layer that wrote it.
 pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Config {
     let mut files = Vec::with_capacity(layers.len());
@@ -202,6 +202,7 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Config {
     let mut exclude = None;
     let mut namespaces = BTreeMap::new();
     let mut namespace_files = BTreeMap::new();
+    let mut line_endings = None;
     for Layer { file, raw } in layers {
         let base = directory_of(&file);
         for (name, relative) in raw.namespaces {
@@ -220,6 +221,13 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Config {
                 .exclude
                 .map(|list| AnchoredPatterns::written_by(file.clone(), base.clone(), list));
         }
+        if line_endings.is_none() {
+            line_endings = raw
+                .features
+                .and_then(|features| features.hash)
+                .and_then(|hash| hash.line_endings)
+                .map(|value| (value, file.clone()));
+        }
         files.push(file);
     }
     let include = include
@@ -232,6 +240,7 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Config {
         exclude,
         namespaces,
         namespace_files,
+        line_endings,
     }
 }
 

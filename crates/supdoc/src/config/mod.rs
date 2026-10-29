@@ -14,6 +14,7 @@ mod tests;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::hash::{HashSettings, LineEndings};
 use crate::namespace::NamespaceName;
 use crate::path::AbsolutePath;
 
@@ -42,6 +43,8 @@ pub struct Config {
     namespaces: BTreeMap<NamespaceName, AbsolutePath>,
     /// The config file that defined each namespace in `namespaces`, under the same names.
     namespace_files: BTreeMap<NamespaceName, AbsolutePath>,
+    /// The nearest `[features.hash] line-endings` and the file that set it, if any file did.
+    line_endings: Option<(LineEndings, AbsolutePath)>,
 }
 
 impl Config {
@@ -86,6 +89,7 @@ impl Config {
             exclude: None,
             namespaces: BTreeMap::new(),
             namespace_files: BTreeMap::new(),
+            line_endings: None,
         }
     }
 
@@ -163,6 +167,25 @@ impl Config {
     #[must_use]
     pub fn namespace_defined_in(&self, name: &NamespaceName) -> Option<&AbsolutePath> {
         self.namespace_files.get(name)
+    }
+
+    /// The resolved hash settings: each key from the nearest config that sets it, else the
+    /// default.
+    #[must_use]
+    pub fn hash_settings(&self) -> HashSettings {
+        HashSettings {
+            line_endings: self
+                .line_endings
+                .as_ref()
+                .map(|(value, _)| *value)
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The config file that set `line-endings`, or `None` when the default applies.
+    #[must_use]
+    pub fn line_endings_defined_in(&self) -> Option<&AbsolutePath> {
+        self.line_endings.as_ref().map(|(_, file)| file)
     }
 }
 

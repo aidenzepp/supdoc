@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::hash::LineEndings;
 use crate::namespace::NamespaceName;
 use crate::path::RelativePath;
 
@@ -23,4 +24,23 @@ pub(crate) struct RawConfig {
     /// Short names for directories, relative to the file that wrote them.
     #[serde(default)]
     pub(crate) namespaces: BTreeMap<NamespaceName, RelativePath>,
+    /// `None` inherits every toggle from the parent.
+    pub(crate) features: Option<RawFeatures>,
+}
+
+/// The `[features]` table: one sub-table per area (01 D10).
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawFeatures {
+    /// `None` inherits the hash toggles from the parent.
+    pub(crate) hash: Option<RawHashFeatures>,
+}
+
+/// The `[features.hash]` table.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawHashFeatures {
+    /// `None` inherits the parent's setting.
+    #[serde(rename = "line-endings")]
+    pub(crate) line_endings: Option<LineEndings>,
 }
