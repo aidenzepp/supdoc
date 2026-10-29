@@ -169,7 +169,11 @@ pub(crate) fn resolve(
     let mut links = BTreeMap::new();
     for (target, keyed) in by_target {
         for (key, state, occurrences) in target_states(config, languages, parsed, &target, keyed) {
+            let snippet = occurrences
+                .first()
+                .and_then(|occurrence| occurrence.snippet.clone());
             let link = ScannedLink {
+                snippet,
                 locations: occurrences
                     .into_iter()
                     .map(|occurrence| occurrence.location)

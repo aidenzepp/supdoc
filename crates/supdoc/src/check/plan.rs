@@ -133,6 +133,7 @@ mod tests {
                 .map(|(key, target)| {
                     let link = ScannedLink {
                         locations: Vec::new(),
+                        snippet: None,
                         target,
                     };
                     (key, link)

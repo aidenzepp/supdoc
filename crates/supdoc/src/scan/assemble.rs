@@ -236,6 +236,7 @@ fn add_broken(
             Entry::Occupied(mut link) => link.get_mut().locations.push(location),
             Entry::Vacant(slot) => {
                 let _link = slot.insert(ScannedLink {
+                    snippet: finding.snippet.clone(),
                     locations: vec![location],
                     target: TargetState::Broken { finding },
                 });

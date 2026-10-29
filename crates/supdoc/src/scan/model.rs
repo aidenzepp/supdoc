@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::finding::{Finding, Location};
+use crate::finding::{Finding, Location, Snippet};
 use crate::hash::Hash;
 use crate::link::{LinkKey, SourcePath};
 
@@ -56,6 +56,8 @@ pub struct Scan {
 pub struct ScannedLink {
     /// Every place this link appears in its source. Never empty.
     pub locations: Vec<Location>,
+    /// The source lines of the first location, captured at scan time (07 G11), when they could be.
+    pub snippet: Option<Snippet>,
     /// What the target looks like right now.
     pub target: TargetState,
 }

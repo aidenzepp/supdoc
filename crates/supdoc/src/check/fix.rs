@@ -472,6 +472,7 @@ mod tests {
         (
             key(source, old),
             ScannedLink {
+                snippet: None,
                 locations: vec![location(link_range)],
                 target: TargetState::Broken { finding },
             },
@@ -584,6 +585,7 @@ mod tests {
         let existing = (
             key("docs/a.md", "add"),
             ScannedLink {
+                snippet: None,
                 locations: Vec::new(),
                 target: TargetState::Present {
                     hash: Hash::digest(b"body"),
@@ -640,6 +642,7 @@ mod tests {
                 replacement: fixed.to_owned(),
             });
         let link = ScannedLink {
+            snippet: None,
             locations: vec![location],
             target: TargetState::Broken { finding },
         };

@@ -186,10 +186,19 @@ fn at_first_location(finding: Finding, link: &ScannedLink) -> Finding {
     }
 }
 
+/// Puts `finding` at the link's first location, with the source lines that location covers.
+fn at_first_site(finding: Finding, link: &ScannedLink) -> Finding {
+    let finding = at_first_location(finding, link);
+    match link.snippet.clone() {
+        Some(snippet) => finding.with_snippet(snippet),
+        None => finding,
+    }
+}
+
 /// The finding for a link whose code changed since it was confirmed.
 fn failed_finding(key: &LinkKey, link: &ScannedLink) -> Finding {
     let reference = reference_of(key);
-    at_first_location(
+    at_first_site(
         Finding::new(
             "link/failed",
             Severity::Error,
@@ -205,7 +214,7 @@ fn failed_finding(key: &LinkKey, link: &ScannedLink) -> Finding {
 
 /// The finding for a link with no lock entry.
 fn new_finding(link: &ScannedLink) -> Finding {
-    at_first_location(
+    at_first_site(
         Finding::new(
             "link/new",
             Severity::Error,
@@ -276,7 +285,7 @@ fn syntax_error_finding(target: &Target) -> Finding {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::finding::Location;
+    use crate::finding::{Location, Snippet};
 
     fn key(source: &str, symbol: Option<&str>) -> LinkKey {
         LinkKey {
@@ -292,7 +301,9 @@ mod tests {
     fn written_in(key: &LinkKey, target: TargetState) -> ScannedLink {
         let location = Location::in_text(key.source.clone(), "[a](b)", 0..6)
             .expect("the fixture range should be locatable");
+        let snippet = Snippet::capture("[a](b)", 0..6);
         ScannedLink {
+            snippet,
             locations: vec![location],
             target,
         }
@@ -363,6 +374,70 @@ mod tests {
         assert_eq!(state_of(&report, &add), Some(LinkState::Failed));
         let finding = report.links.first().and_then(|link| link.finding.as_ref());
         assert_eq!(finding.map(|finding| finding.code), Some("link/failed"));
+    }
+
+    #[test]
+    fn new_and_failed_findings_carry_the_snippet_covering_the_link() {
+        let new = key("docs/guide.md", Some("add"));
+        let failed = key("docs/guide.md", Some("sub"));
+        let scan = scan_of(vec![
+            (new.clone(), present(b"v1")),
+            (failed.clone(), present(b"v2")),
+        ]);
+
+        let report = reconcile(&scan, &lock_of(&[(&failed, b"v1")]), &Scope::All);
+
+        for (link_key, code) in [(&new, "link/new"), (&failed, "link/failed")] {
+            let finding = report
+                .links
+                .iter()
+                .find(|link| &link.key == link_key)
+                .and_then(|link| link.finding.as_ref())
+                .expect("the link should have a finding");
+            assert_eq!(finding.code, code);
+            let snippet = finding
+                .snippet
+                .as_ref()
+                .expect("the finding should carry the link's source snippet");
+            assert_eq!(snippet.text.get(snippet.highlight.clone()), Some("[a](b)"));
+        }
+    }
+
+    #[test]
+    fn check_text_shows_the_link_excerpt_for_a_new_link() {
+        use crate::output::text::render_finding;
+        use crate::output::{PathStyle, TextContext, Verbosity};
+        use crate::path::AbsolutePath;
+
+        let root = AbsolutePath::new(std::path::Path::new("/repo"))
+            .expect("the fixture root should be absolute");
+        let context = TextContext {
+            color: false,
+            unicode: false,
+            width: 80,
+            paths: PathStyle::new(root.clone(), root, None),
+            verbosity: Verbosity::Normal,
+        };
+        let add = key("docs/guide.md", Some("add"));
+        let report = reconcile(
+            &scan_of(vec![(add, present(b"v1"))]),
+            &Lockfile::default(),
+            &Scope::All,
+        );
+        let finding = report
+            .links
+            .first()
+            .and_then(|link| link.finding.as_ref())
+            .expect("an unlocked link should have a finding");
+
+        let mut bytes = Vec::new();
+        render_finding(&context, finding, &mut bytes).expect("writing to a buffer should succeed");
+        let text = String::from_utf8(bytes).expect("output should be UTF-8");
+
+        assert!(
+            text.contains("[a](b)") && text.contains("link/new"),
+            "the rendered finding should show the link's source excerpt:\n{text}"
+        );
     }
 
     #[test]
