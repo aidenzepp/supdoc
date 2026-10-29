@@ -11,7 +11,7 @@ error[resolve/not-found]: no symbol `ad` in src/lib.rs
 3 | See [ad](../src/lib.rs#ad).
   |     ^^^^^^^^^^^^^^^^^^^^^^
   |
-  = help: did you mean `add`, `mul`, `sub`? `supdoc resolve src/lib.rs` lists every symbol
+  = help: did you mean `add`, `mul`, `sub`? run `supdoc resolve src/lib.rs` from the project root to list its symbols
 
 error[link/failed]: `src/lib.rs#add` changed since this doc was confirmed
  --> docs/guide.md:3:5

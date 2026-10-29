@@ -497,7 +497,7 @@ fn resolve_failed(
     let finding = broken(
         error.code(),
         error.message_naming(&shown),
-        error.help_naming(&shown),
+        error.help_from_root(&shown),
         first,
     );
     let ResolveError::NotFound { query, .. } = error else {

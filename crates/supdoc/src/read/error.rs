@@ -202,9 +202,22 @@ impl ResolveError {
     /// What to do next, naming the file as `shown` instead of by its absolute path.
     #[must_use]
     pub fn help_naming(&self, shown: &dyn Display) -> String {
+        self.help_listing(&format!("`supdoc resolve {shown}` lists every symbol"))
+    }
+
+    /// What to do next, for a `shown` path relative to the project root. A scan cannot know the
+    /// caller's directory, so the hint says where to run the command.
+    #[must_use]
+    pub fn help_from_root(&self, shown: &dyn Display) -> String {
+        self.help_listing(&format!(
+            "run `supdoc resolve {shown}` from the project root to list its symbols"
+        ))
+    }
+
+    /// The help text, with `list` as the sentence that says how to list the file's symbols.
+    fn help_listing(&self, list: &str) -> String {
         match self {
             Self::NotFound { nearest, .. } => {
-                let list = format!("`supdoc resolve {shown}` lists every symbol");
                 if nearest.is_empty() {
                     format!("the file has no symbols with a similar name. {list}")
                 } else {

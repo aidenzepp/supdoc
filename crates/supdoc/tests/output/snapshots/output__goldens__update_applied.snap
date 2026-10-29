@@ -14,7 +14,7 @@ error[resolve/not-found]: no symbol `ad` in src/lib.rs
 3 | See [ad](../src/lib.rs#ad).
   |     ^^^^^^^^^^^^^^^^^^^^^^
   |
-  = help: did you mean `add`, `mul`, `sub`? `supdoc resolve src/lib.rs` lists every symbol. Update can't record a broken link; repair it with `supdoc fix docs/api.md --yes`
+  = help: did you mean `add`, `mul`, `sub`? run `supdoc resolve src/lib.rs` from the project root to list its symbols. Update can't record a broken link; repair it with `supdoc fix docs/api.md --yes`
 
 --- stderr
 supdoc.lock: 1 accepted, 1 recorded, 1 removed

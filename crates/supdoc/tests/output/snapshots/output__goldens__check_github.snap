@@ -5,7 +5,7 @@ expression: project.run(args).transcript()
 $ supdoc check --output github
 exit: 1
 --- stdout
-::error file=docs/api.md,line=3,col=5,title=supdoc resolve/not-found::no symbol `ad` in src/lib.rs. Did you mean `add`, `mul`, `sub`? `supdoc resolve src/lib.rs` lists every symbol
+::error file=docs/api.md,line=3,col=5,title=supdoc resolve/not-found::no symbol `ad` in src/lib.rs. Did you mean `add`, `mul`, `sub`? run `supdoc resolve src/lib.rs` from the project root to list its symbols
 ::error file=docs/guide.md,line=3,col=5,title=supdoc link/failed::`src/lib.rs#add` changed since this doc was confirmed. Reread this, and if it's still accurate run `supdoc update docs/guide.md --yes`
 ::warning file=supdoc.lock,title=supdoc link/obsolete::supdoc.lock has an entry for `docs/old.md → src/lib.rs#sub`, which no longer exists. Run `supdoc update --state obsolete --yes`
 ::error file=docs/setup.md,line=3,col=5,title=supdoc link/new::this link isn't recorded in supdoc.lock yet. Once it's accurate, run `supdoc update --state new --yes`
