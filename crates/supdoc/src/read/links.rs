@@ -327,6 +327,30 @@ mod tests {
             .collect()
     }
 
+    fn builtin_file(path: &str, text: &str) -> SourceFile {
+        let path = AbsolutePath::new(Path::new(path)).expect("the fixture path should be absolute");
+        let language = crate::read::cartridge::Languages::builtin()
+            .for_path(path.as_path())
+            .expect("the built-in registry should cover the fixture extension");
+        SourceFile::parse(path, text.to_owned(), language)
+            .expect("tree-sitter should return a tree")
+    }
+
+    /// Each link as `(text, destination, source slice)`, in the order `links` returned them.
+    fn spans(file: &SourceFile) -> Vec<(String, String, String)> {
+        links(file)
+            .into_iter()
+            .map(|link| {
+                let slice = file.text().get(link.range.clone()).unwrap_or_default();
+                (link.text, link.destination, slice.to_owned())
+            })
+            .collect()
+    }
+
+    fn span(text: &str, destination: &str, slice: &str) -> (String, String, String) {
+        (text.to_owned(), destination.to_owned(), slice.to_owned())
+    }
+
     #[test]
     fn inline_grammar_loads() {
         assert!(
@@ -528,5 +552,39 @@ mod tests {
         let file = rust_file("/// Returns a [`Vec`] of [`Config`]s.\nfn f() {}\n");
 
         assert_eq!(links(&file), []);
+    }
+
+    #[test]
+    fn ts_block_comment_link_is_extracted() {
+        let file = builtin_file(
+            "/repo/src/a.ts",
+            "// [a](a.md)\n/** [b](b.md) */\n/* [c](c.md) */\nfunction f() {}\n",
+        );
+
+        assert_eq!(
+            spans(&file),
+            [
+                span("a", "a.md", "[a](a.md)"),
+                span("b", "b.md", "[b](b.md)"),
+                span("c", "c.md", "[c](c.md)"),
+            ],
+        );
+    }
+
+    #[test]
+    fn python_docstring_and_hash_comment_links_are_extracted() {
+        let file = builtin_file(
+            "/repo/src/a.py",
+            "\"\"\"Module [guide](guide.md).\"\"\"\n# [host](host.md)\ndef f():\n    \"\"\"Adds [two](two.md).\"\"\"\n",
+        );
+
+        assert_eq!(
+            spans(&file),
+            [
+                span("guide", "guide.md", "[guide](guide.md)"),
+                span("host", "host.md", "[host](host.md)"),
+                span("two", "two.md", "[two](two.md)"),
+            ],
+        );
     }
 }
