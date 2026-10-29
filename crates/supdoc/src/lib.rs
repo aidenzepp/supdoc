@@ -102,6 +102,9 @@ pub mod cartridges {
 
     /// Markdown.
     pub mod markdown {
+        /// The Markdown cartridge.
+        pub mod cartridge;
+
         /// Headings as GitHub anchors and dotted symbol paths.
         pub mod symbols;
 

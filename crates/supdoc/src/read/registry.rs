@@ -17,7 +17,11 @@ impl Languages {
 
 /// Every built-in cartridge, or the error that kept it from compiling.
 fn builtins() -> Vec<Result<&'static dyn Cartridge, &'static QueryFileError>> {
-    vec![crate::cartridges::rust::cartridge().map(|rust| rust as &'static dyn Cartridge)]
+    vec![
+        crate::cartridges::rust::cartridge().map(|rust| rust as &'static dyn Cartridge),
+        crate::cartridges::markdown::cartridge::cartridge()
+            .map(|markdown| markdown as &'static dyn Cartridge),
+    ]
 }
 
 #[cfg(test)]
