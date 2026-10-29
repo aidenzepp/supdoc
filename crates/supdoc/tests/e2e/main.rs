@@ -39,6 +39,8 @@ mod support;
 #[cfg(test)]
 mod commands;
 #[cfg(test)]
+mod containment;
+#[cfg(test)]
 mod json;
 #[cfg(test)]
 mod languages;

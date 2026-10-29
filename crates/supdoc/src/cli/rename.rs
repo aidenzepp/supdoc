@@ -871,6 +871,9 @@ mod tests {
     use crate::state::LinkState;
 
     /// A config naming two namespaces, with comments that a rename must keep.
+    /// A parent config whose namespace lies inside `app/`, so `app/` may inherit it.
+    const INHERITED_CONFIG: &str = "[namespaces]\nauth = \"app/services/auth\"\n";
+
     const CONFIG: &str = "\
 # Shared code lives beside the docs.
 [namespaces]
@@ -1324,6 +1327,8 @@ web = \"services/web\"
     #[test]
     fn namespace_rename_inherited_namespace_is_refused_naming_its_file() {
         let project = Project::new();
+        // A namespace is inherited only when it names a directory inside the child's root.
+        project.write(CONFIG_FILE_NAME, INHERITED_CONFIG);
         project.write(
             "app/supdoc.config.toml",
             "extends = \"../supdoc.config.toml\"\n",
@@ -1348,8 +1353,9 @@ web = \"services/web\"
     #[test]
     fn namespace_rename_of_a_name_also_in_a_parent_renames_only_the_local_one() {
         let project = Project::new();
+        project.write(CONFIG_FILE_NAME, INHERITED_CONFIG);
         let child =
-            "extends = \"../supdoc.config.toml\"\n\n[namespaces]\nauth = \"../services/auth\"\n";
+            "extends = \"../supdoc.config.toml\"\n\n[namespaces]\nauth = \"services/auth\"\n";
         project.write("app/supdoc.config.toml", child);
 
         let run = project.rename_from("app", &["namespace", "rename", "auth", "identity", "--yes"]);
@@ -1361,7 +1367,7 @@ web = \"services/web\"
         );
         assert_eq!(
             project.read(CONFIG_FILE_NAME),
-            CONFIG,
+            INHERITED_CONFIG,
             "the parent is left as it is"
         );
         assert!(

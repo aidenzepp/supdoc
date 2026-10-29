@@ -253,7 +253,7 @@ fn inherited_namespace_resolves_from_defining_config() {
     let dir = tree(&[
         (
             "supdoc.config.toml",
-            "[namespaces]\nauth = \"services/auth\"",
+            "[namespaces]\nauth = \"apps/web/services/auth\"",
         ),
         (
             "apps/web/supdoc.config.toml",
@@ -265,7 +265,7 @@ fn inherited_namespace_resolves_from_defining_config() {
     assert_eq!(config.root(), &at(&dir, "apps/web"));
     assert_eq!(
         config.namespace(&name("auth")),
-        Some(&at(&dir, "services/auth"))
+        Some(&at(&dir, "apps/web/services/auth"))
     );
     assert!(config.scans(&at(&dir, "apps/web/docs/guide.md")));
 }
@@ -376,7 +376,7 @@ fn malformed_toml_is_parse_error_without_help() {
 
 #[test]
 fn extends_missing_names_file_value_and_resolved_path() {
-    let text = "extends = \"../../supdoc.confg.toml\"\n";
+    let text = "extends = \"../../shared/supdoc.config.toml\"\n";
     let dir = tree(&[("apps/web/supdoc.config.toml", text)]);
     let error = load_error(&dir, "apps/web/supdoc.config.toml");
 
@@ -391,9 +391,15 @@ fn extends_missing_names_file_value_and_resolved_path() {
         panic!("expected extends-missing, got {error:?}");
     };
     assert_eq!(file, &at(&dir, "apps/web/supdoc.config.toml"));
-    assert_eq!(extends.as_path(), Path::new("../../supdoc.confg.toml"));
-    assert_eq!(resolved, &at(&dir, "supdoc.confg.toml"));
-    assert_eq!(text.get(span.clone()), Some("\"../../supdoc.confg.toml\""));
+    assert_eq!(
+        extends.as_path(),
+        Path::new("../../shared/supdoc.config.toml")
+    );
+    assert_eq!(resolved, &at(&dir, "shared/supdoc.config.toml"));
+    assert_eq!(
+        text.get(span.clone()),
+        Some("\"../../shared/supdoc.config.toml\"")
+    );
 }
 
 #[test]
@@ -473,9 +479,15 @@ fn extends_loop_reports_every_file_in_order() {
 #[test]
 fn extends_loop_that_does_not_include_the_start_reports_only_the_loop() {
     let dir = tree(&[
-        ("start.toml", "extends = \"b.toml\"\n"),
-        ("b.toml", "extends = \"c.toml\"\n"),
-        ("c.toml", "extends = \"b.toml\"\n"),
+        ("start.toml", "extends = \"b/supdoc.config.toml\"\n"),
+        (
+            "b/supdoc.config.toml",
+            "extends = \"../c/supdoc.config.toml\"\n",
+        ),
+        (
+            "c/supdoc.config.toml",
+            "extends = \"../b/supdoc.config.toml\"\n",
+        ),
     ]);
     let error = load_error(&dir, "start.toml");
 
@@ -484,7 +496,11 @@ fn extends_loop_that_does_not_include_the_start_reports_only_the_loop() {
     };
     assert_eq!(
         chain,
-        &[at(&dir, "b.toml"), at(&dir, "c.toml"), at(&dir, "b.toml")]
+        &[
+            at(&dir, "b/supdoc.config.toml"),
+            at(&dir, "c/supdoc.config.toml"),
+            at(&dir, "b/supdoc.config.toml"),
+        ]
     );
 }
 
@@ -499,10 +515,17 @@ fn file_extending_itself_is_a_loop() {
 #[cfg(unix)]
 #[test]
 fn extends_loop_through_a_symlink_is_caught() {
-    let dir = tree(&[("real.toml", "extends = \"link.toml\"\n")]);
-    std::os::unix::fs::symlink(dir.path().join("real.toml"), dir.path().join("link.toml"))
-        .expect("the symlink should be creatable");
-    let error = load_error(&dir, "real.toml");
+    let dir = tree(&[(
+        "real/supdoc.config.toml",
+        "extends = \"../link/supdoc.config.toml\"\n",
+    )]);
+    fs::create_dir(dir.path().join("link")).expect("the fixture directory should be creatable");
+    std::os::unix::fs::symlink(
+        dir.path().join("real/supdoc.config.toml"),
+        dir.path().join("link/supdoc.config.toml"),
+    )
+    .expect("the symlink should be creatable");
+    let error = load_error(&dir, "real/supdoc.config.toml");
 
     assert_eq!(error.code(), "config/extends-loop");
 }
@@ -558,6 +581,17 @@ fn every_error_has_a_code_and_message_names_a_file() {
             chain: vec![file.clone(), file.clone()],
             span: 0..1,
         },
+        ConfigError::ExtendsNotConfig {
+            file: file.clone(),
+            extends: RelativePath::try_from("../.env".to_owned()).expect("relative"),
+            span: 0..1,
+        },
+        ConfigError::NamespaceOutsideRoot {
+            file: file.clone(),
+            name: name("shared"),
+            directory: file.clone(),
+            root: file.clone(),
+        },
     ];
     let mut codes = Vec::new();
     for error in &errors {
@@ -575,21 +609,22 @@ fn every_error_has_a_code_and_message_names_a_file() {
 
 // Provenance: which file defined each key
 
-/// A two-level chain: `child` extends `mid` extends `root`. `root` sets include, exclude and
-/// namespaces `shared` and `deep`; `mid` overrides `exclude` and `shared`; `child` sets only `own`.
+/// A two-level chain: `child` extends `mid` extends the top config. The top sets include, exclude
+/// and namespaces `shared` and `deep`; `mid` overrides `exclude` and `shared`; `child` sets only
+/// `own`. Every namespace names a directory inside `child`, the root.
 fn provenance_chain() -> TempDir {
     tree(&[
         (
-            "root.toml",
-            "include = [\"docs\", \"notes/**\"]\nexclude = [\"old\"]\n[namespaces]\nshared = \"from-root\"\ndeep = \"deep\"\n",
+            "supdoc.config.toml",
+            "include = [\"docs\", \"notes/**\"]\nexclude = [\"old\"]\n[namespaces]\nshared = \"child/from-root\"\ndeep = \"child/deep\"\n",
         ),
         (
-            "mid/mid.toml",
-            "extends = \"../root.toml\"\nexclude = [\"drafts\", \"tmp/\"]\n[namespaces]\nshared = \"from-mid\"\n",
+            "mid/supdoc.config.toml",
+            "extends = \"../supdoc.config.toml\"\nexclude = [\"drafts\", \"tmp/\"]\n[namespaces]\nshared = \"../child/from-mid\"\n",
         ),
         (
             "child/supdoc.config.toml",
-            "extends = \"../mid/mid.toml\"\n[namespaces]\nown = \"own\"\n",
+            "extends = \"../mid/supdoc.config.toml\"\n[namespaces]\nown = \"own\"\n",
         ),
     ])
 }
@@ -603,7 +638,7 @@ fn include_definition_names_the_grandparent_that_set_it_with_raw_patterns() {
         .include_definition()
         .expect("a file in the chain sets include");
     assert_eq!(definition.patterns(), ["docs", "notes/**"]);
-    assert_eq!(definition.file(), &at(&dir, "root.toml"));
+    assert_eq!(definition.file(), &at(&dir, "supdoc.config.toml"));
 }
 
 #[test]
@@ -615,7 +650,7 @@ fn exclude_definition_names_the_nearest_file_that_set_it_with_raw_patterns() {
         .exclude_definition()
         .expect("a file in the chain sets exclude");
     assert_eq!(definition.patterns(), ["drafts", "tmp/"]);
-    assert_eq!(definition.file(), &at(&dir, "mid/mid.toml"));
+    assert_eq!(definition.file(), &at(&dir, "mid/supdoc.config.toml"));
 }
 
 #[test]
@@ -628,8 +663,11 @@ fn namespace_defined_in_names_the_nearest_file_defining_each_namespace() {
         defined_in("own"),
         Some(at(&dir, "child/supdoc.config.toml"))
     );
-    assert_eq!(defined_in("shared"), Some(at(&dir, "mid/mid.toml")));
-    assert_eq!(defined_in("deep"), Some(at(&dir, "root.toml")));
+    assert_eq!(
+        defined_in("shared"),
+        Some(at(&dir, "mid/supdoc.config.toml"))
+    );
+    assert_eq!(defined_in("deep"), Some(at(&dir, "supdoc.config.toml")));
     assert_eq!(defined_in("absent"), None);
 }
 
@@ -643,4 +681,147 @@ fn unset_keys_have_no_definition() {
 
     let defaults = load_from(&tree(&[]), ".");
     assert_eq!(defaults.include_definition(), None);
+}
+
+// Containment: a hostile config can't make supdoc read or name files outside the project
+
+#[test]
+fn extends_naming_another_file_is_refused_without_printing_it() {
+    let secret = "DB_PASSWORD=hunter2";
+    let dir = tree(&[
+        ("home/.env", secret),
+        ("project/supdoc.config.toml", "extends = \"../home/.env\"\n"),
+    ]);
+    let error = load_error(&dir, "project/supdoc.config.toml");
+
+    assert_eq!(error.code(), "config/extends-not-config", "got {error:?}");
+    assert_eq!(error.exit_code(), 78);
+    let shown = format!("{error} {}", error.help().unwrap_or_default());
+    assert!(
+        !shown.contains("hunter2"),
+        "the secret must not be shown: {shown}"
+    );
+}
+
+#[test]
+fn extends_naming_a_missing_file_of_another_name_is_refused_the_same_way() {
+    let dir = tree(&[("project/supdoc.config.toml", "extends = \"../home/.env\"\n")]);
+    let error = load_error(&dir, "project/supdoc.config.toml");
+
+    assert_eq!(
+        error.code(),
+        "config/extends-not-config",
+        "a missing file and a present one must look the same: {error:?}",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn extends_through_a_symlink_named_like_a_config_is_judged_by_the_real_file() {
+    let dir = tree(&[
+        ("home/.env", "DB_PASSWORD=hunter2"),
+        (
+            "project/supdoc.config.toml",
+            "extends = \"base/supdoc.config.toml\"\n",
+        ),
+    ]);
+    fs::create_dir(dir.path().join("project/base"))
+        .expect("the fixture directory should be creatable");
+    std::os::unix::fs::symlink(
+        dir.path().join("home/.env"),
+        dir.path().join("project/base/supdoc.config.toml"),
+    )
+    .expect("the symlink should be creatable");
+    let error = load_error(&dir, "project/supdoc.config.toml");
+
+    assert_eq!(error.code(), "config/extends-not-config", "got {error:?}");
+    assert!(!error.to_string().contains("hunter2"), "{error}");
+}
+
+#[test]
+fn namespace_outside_the_root_is_a_config_error() {
+    let dir = tree(&[(
+        "project/supdoc.config.toml",
+        "[namespaces]\nup = \"../secrets\"",
+    )]);
+    let error = load_error(&dir, "project/supdoc.config.toml");
+
+    assert_eq!(
+        error.code(),
+        "config/namespace-outside-root",
+        "got {error:?}"
+    );
+    assert_eq!(error.exit_code(), 78);
+    assert!(error.to_string().contains("`up`"), "{error}");
+}
+
+#[test]
+fn inherited_namespace_outside_the_child_root_is_a_config_error() {
+    let dir = tree(&[
+        (
+            "supdoc.config.toml",
+            "[namespaces]\nshared = \"packages/shared\"",
+        ),
+        (
+            "apps/web/supdoc.config.toml",
+            "extends = \"../../supdoc.config.toml\"\n",
+        ),
+    ]);
+    let error = Config::load(&at(&dir, "apps/web"))
+        .expect_err("a parent's namespace outside the child's root should be refused");
+
+    assert_eq!(
+        error.code(),
+        "config/namespace-outside-root",
+        "got {error:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn namespace_symlinked_outside_the_root_is_a_config_error() {
+    let dir = tree(&[
+        ("outside/lib.rs", "fn f() {}"),
+        (
+            "project/supdoc.config.toml",
+            "[namespaces]\nlib = \"vendor\"",
+        ),
+    ]);
+    std::os::unix::fs::symlink(
+        dir.path().join("outside"),
+        dir.path().join("project/vendor"),
+    )
+    .expect("the symlink should be creatable");
+    let error = load_error(&dir, "project/supdoc.config.toml");
+
+    assert_eq!(
+        error.code(),
+        "config/namespace-outside-root",
+        "got {error:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn contains_judges_a_dangling_symlink_by_where_it_points() {
+    let dir = tree(&[("project/supdoc.config.toml", "")]);
+    let root = dir.path().join("project");
+    std::os::unix::fs::symlink(dir.path().join("gone.rs"), root.join("out.rs"))
+        .expect("the symlink should be creatable");
+    std::os::unix::fs::symlink(root.join("gone.rs"), root.join("in.rs"))
+        .expect("the symlink should be creatable");
+    let config = load_from(&dir, "project");
+
+    assert!(
+        !config.contains(&root.join("out.rs")),
+        "points outside the root"
+    );
+    assert!(
+        config.contains(&root.join("in.rs")),
+        "points at a missing file in the root"
+    );
+    assert!(
+        config.contains(&root.join("src/missing.rs")),
+        "a missing file in the root"
+    );
 }

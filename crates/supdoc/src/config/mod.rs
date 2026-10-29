@@ -3,6 +3,7 @@
 //! Every check happens while the TOML is read, so a loaded [`Config`] holds only valid values.
 
 mod chain;
+mod confine;
 mod error;
 mod pattern;
 mod raw;
@@ -11,6 +12,7 @@ mod raw;
 mod tests;
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use crate::namespace::NamespaceName;
 use crate::path::AbsolutePath;
@@ -28,6 +30,8 @@ pub const CONFIG_FILE_NAME: &str = "supdoc.config.toml";
 pub struct Config {
     /// The directory of the config that was found, not of anything it extends.
     root: AbsolutePath,
+    /// `root` with every symlink followed: the boundary supdoc reads inside.
+    real_root: PathBuf,
     /// Config files in the chain, child first. Empty when running on defaults.
     files: Vec<AbsolutePath>,
     /// Files to read links from.
@@ -67,13 +71,16 @@ impl Config {
     /// [`Config::load`] does.
     pub fn load_file(file: &AbsolutePath) -> Result<Self, ConfigError> {
         let layers = chain::read_chain(file)?;
-        Ok(chain::merge(chain::directory_of(file), layers))
+        let config = chain::merge(chain::directory_of(file), layers);
+        chain::confine_namespaces(&config)?;
+        Ok(config)
     }
 
     /// The config used when no file is found: scan everything beneath `root`.
     fn defaults(root: &AbsolutePath) -> Self {
         Self {
             root: root.clone(),
+            real_root: real_root(root),
             files: Vec::new(),
             include: AnchoredPatterns::built_in(root.clone(), PatternList::everything()),
             exclude: None,
@@ -86,6 +93,17 @@ impl Config {
     #[must_use]
     pub fn root(&self) -> &AbsolutePath {
         &self.root
+    }
+
+    /// Whether `path` lies inside the project root once every symlink along it is followed.
+    ///
+    /// A dangling symlink counts where it points, and a path whose real location can't be worked
+    /// out counts as outside, so nothing outside the root is ever read through it.
+    ///
+    /// Effect: reads file metadata and symlinks along `path`.
+    #[must_use]
+    pub fn contains(&self, path: &Path) -> bool {
+        confine::real_location(path).is_some_and(|real| real.starts_with(&self.real_root))
     }
 
     /// The config files in the chain, child first. Empty when running on defaults.
@@ -146,4 +164,11 @@ impl Config {
     pub fn namespace_defined_in(&self, name: &NamespaceName) -> Option<&AbsolutePath> {
         self.namespace_files.get(name)
     }
+}
+
+/// `root` with every symlink followed, or `root` as written when it can't be resolved.
+///
+/// Effect: reads the filesystem.
+fn real_root(root: &AbsolutePath) -> PathBuf {
+    confine::real_location(root.as_path()).unwrap_or_else(|| root.as_path().to_path_buf())
 }

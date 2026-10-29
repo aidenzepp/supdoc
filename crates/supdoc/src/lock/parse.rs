@@ -39,7 +39,8 @@ struct RawLockfile {
 struct RawLink {
     /// The file the link is written in.
     source: SourcePath,
-    /// Where the link points.
+    /// Where the link points, never above the project root or its namespace's directory.
+    #[serde(deserialize_with = "contained_target")]
     target: Target,
     /// The symbol, or `None` for a whole-file link.
     symbol: Option<SymbolPath>,
@@ -61,6 +62,28 @@ fn current_version<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<
             "unsupported lockfile format {version}: this supdoc reads format {FORMAT_VERSION}"
         )))
     }
+}
+
+/// Reads a target, refusing one that climbs with `..`: supdoc reads nothing outside the project
+/// root, so a hand-written lock can't name such a file either.
+///
+/// # Errors
+///
+/// Fails if the value is not a target, or if any of its segments is `..`.
+fn contained_target<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Target, D::Error> {
+    let target = Target::deserialize(deserializer)?;
+    if target
+        .path()
+        .as_str()
+        .split('/')
+        .any(|segment| segment == "..")
+    {
+        return Err(D::Error::custom(format_args!(
+            "target `{target}` climbs out of the project root with `..`, and supdoc tracks only \
+             files inside it"
+        )));
+    }
+    Ok(target)
 }
 
 /// The 1-based line containing byte `offset` of `text`.
@@ -449,10 +472,17 @@ hash = \"41aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d2\"
     }
 
     #[test]
-    fn target_with_parent_segment_is_accepted() {
-        let text = file(&[entry("docs/a.md", "../shared/x.rs", None, HASH_A)]);
+    fn target_with_parent_segment_is_rejected() {
+        for target in ["../shared/x.rs", "src/../../x.rs", "auth:../x.rs"] {
+            let text = file(&[entry("docs/a.md", target, None, HASH_A)]);
 
-        assert_eq!(parse(&text).len(), 1);
+            let error = parse_error(&text);
+            assert_eq!(error.code(), "lock/parse", "`{target}` should be rejected");
+            assert!(
+                error.to_string().contains("outside") || error.to_string().contains("climbs"),
+                "the error should say the target leaves the root: {error}",
+            );
+        }
     }
 
     #[test]

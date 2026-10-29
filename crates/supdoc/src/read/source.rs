@@ -1,7 +1,8 @@
 //! Reading a file into a [`SourceFile`]: the size and UTF-8 checks, then one parse (03 Parsing).
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, Read};
+use std::path::{Path, PathBuf};
 
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Cartridge, Languages, SourceFile};
@@ -29,7 +30,9 @@ impl SourceFile {
     }
 
     /// Reads `path` from the filesystem and parses it with the cartridge `languages` picks for
-    /// its extension.
+    /// the extension of the file it really is.
+    ///
+    /// A symlink is judged by the file it points at, so `env.py -> .env` is not read as Python.
     ///
     /// # Errors
     ///
@@ -39,8 +42,9 @@ impl SourceFile {
     /// - [`ReadError::NotUtf8`] when it isn't UTF-8.
     /// - [`ReadError::Internal`] when tree-sitter returns no tree.
     pub fn read(path: AbsolutePath, languages: &Languages) -> Result<Self, ReadError> {
-        let Some(language) = languages.for_path(path.as_path()) else {
-            return Err(unsupported(path, languages));
+        let real = real_file(&path);
+        let Some(language) = languages.for_path(&real) else {
+            return Err(unsupported(path, &real, languages));
         };
         let bytes = read_capped(&path)?;
         let text = String::from_utf8(bytes).map_err(|error| ReadError::NotUtf8 {
@@ -99,10 +103,18 @@ fn read_capped(path: &AbsolutePath) -> Result<Vec<u8>, ReadError> {
     Ok(bytes)
 }
 
-/// The error for a file whose extension no cartridge in `languages` reads.
-fn unsupported(path: AbsolutePath, languages: &Languages) -> ReadError {
-    let extension = path
-        .as_path()
+/// The file `path` really is once symlinks are followed, or `path` itself when that can't be
+/// found (it is missing, and reading it says so).
+///
+/// Effect: follows symlinks along `path`.
+fn real_file(path: &AbsolutePath) -> PathBuf {
+    fs::canonicalize(path.as_path()).unwrap_or_else(|_| path.as_path().to_path_buf())
+}
+
+/// The error for `path`, whose real file `real` has an extension no cartridge in `languages`
+/// reads.
+fn unsupported(path: AbsolutePath, real: &Path, languages: &Languages) -> ReadError {
+    let extension = real
         .extension()
         .map(|extension| extension.to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -205,6 +217,47 @@ mod tests {
             .expect_err("a file that doesn't exist can't be read");
 
         assert_eq!(error.code(), "read/missing", "got {error:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_is_read_by_the_extension_of_the_file_it_points_at() {
+        let dir = temp_dir();
+        fs::write(dir.path().join(".env"), "DB_PASSWORD=hunter2\n")
+            .expect("the fixture should be writable");
+        let link = absolute_in(&dir, "env.py");
+        std::os::unix::fs::symlink(dir.path().join(".env"), link.as_path())
+            .expect("the symlink should be creatable");
+
+        let error = SourceFile::read(link, &Languages::builtin())
+            .expect_err("a .env file behind a .py name must not be parsed as Python");
+
+        assert_eq!(error.code(), "read/unsupported-language", "got {error:?}");
+        assert!(
+            !error.to_string().contains("hunter2"),
+            "the error must not show the file's contents: {error}",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_to_a_file_with_a_cartridge_extension_is_read_by_it() {
+        let dir = temp_dir();
+        fs::write(dir.path().join("real.rs"), "fn add() {}\n")
+            .expect("the fixture should be writable");
+        let link = absolute_in(&dir, "alias.txt");
+        std::os::unix::fs::symlink(dir.path().join("real.rs"), link.as_path())
+            .expect("the symlink should be creatable");
+
+        let file = SourceFile::read(link.clone(), &Languages::builtin())
+            .expect("a symlink to a Rust file should read as Rust");
+
+        assert_eq!(
+            file.path(),
+            &link,
+            "the file keeps the path it was asked for"
+        );
+        assert_eq!(file.language().id().as_str(), "rust");
     }
 
     #[test]

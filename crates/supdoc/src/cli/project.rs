@@ -63,13 +63,16 @@ fn config_span(error: &ConfigError) -> Option<(&AbsolutePath, Range<usize>)> {
     match error {
         ConfigError::Parse { path, error } => error.span().map(|span| (path, span)),
         ConfigError::ExtendsMissing { file, span, .. }
-        | ConfigError::ExtendsDirectory { file, span, .. } => Some((file, span.clone())),
+        | ConfigError::ExtendsDirectory { file, span, .. }
+        | ConfigError::ExtendsNotConfig { file, span, .. } => Some((file, span.clone())),
         ConfigError::ExtendsLoop { chain, span } => chain
             .len()
             .checked_sub(2)
             .and_then(|index| chain.get(index))
             .map(|file| (file, span.clone())),
-        ConfigError::NotFound { .. } | ConfigError::Read { .. } => None,
+        ConfigError::NotFound { .. }
+        | ConfigError::Read { .. }
+        | ConfigError::NamespaceOutsideRoot { .. } => None,
     }
 }
 

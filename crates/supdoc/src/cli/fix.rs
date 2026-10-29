@@ -1211,9 +1211,4 @@ mod tests {
     fn case_fix_of_a_link_climbing_to_the_root_then_passes_check() {
         assert_case_fix_then_check_passes("../SRC/lib.rs", "src/lib.rs");
     }
-
-    #[test]
-    fn case_fix_of_a_link_outside_the_root_then_passes_check() {
-        assert_case_fix_then_check_passes("../../Shared/Math.rs", "../shared/math.rs");
-    }
 }

@@ -51,22 +51,6 @@ fn config_exclude_keeps_links_in_excluded_docs_out_of_the_lockfile() {
 }
 
 #[test]
-fn a_child_config_inherits_its_parents_namespaces_through_extends() {
-    let project = Project::fixture("monorepo");
-
-    let _ = project
-        .supdoc_in("services/web", &["update", "--yes"])
-        .assert_exit(0);
-
-    assert_eq!(
-        project.locked_links("services/web/supdoc.lock"),
-        links(&["shared:src/lib.rs#greet", "src/lib.rs#handler"]),
-        "`shared` comes from the parent config"
-    );
-    let _ = project.supdoc_in("services/web", &["check"]).assert_exit(0);
-}
-
-#[test]
 fn namespace_list_shows_each_name_and_its_folder() {
     let project = Project::fixture("namespaced");
 

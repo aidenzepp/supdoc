@@ -3,6 +3,7 @@
 use std::fmt::Write as _;
 use std::ops::Range;
 
+use crate::namespace::NamespaceName;
 use crate::path::{AbsolutePath, RelativePath};
 
 /// Exit status for a config problem the user fixes by editing files (06 X7).
@@ -76,6 +77,37 @@ pub enum ConfigError {
         suggestion: Option<RelativePath>,
     },
 
+    /// `extends` names a file that isn't called `supdoc.config.toml`, before or after following
+    /// symlinks. supdoc refuses it without reading it.
+    #[error(
+        "{} extends `{}`, which isn't a supdoc.config.toml file",
+        .file.display(), .extends
+    )]
+    ExtendsNotConfig {
+        /// The config that wrote `extends`.
+        file: AbsolutePath,
+        /// The value as written.
+        extends: RelativePath,
+        /// Byte range of the value inside `file`.
+        span: Range<usize>,
+    },
+
+    /// A namespace names a directory outside the project root.
+    #[error(
+        "{} sets namespace `{name}` to {}, which is outside the project root {}",
+        .file.display(), .directory.display(), .root.display()
+    )]
+    NamespaceOutsideRoot {
+        /// The config that defined the namespace.
+        file: AbsolutePath,
+        /// The namespace.
+        name: NamespaceName,
+        /// The directory it names, as written from `file`.
+        directory: AbsolutePath,
+        /// The project root.
+        root: AbsolutePath,
+    },
+
     /// A chain of `extends` comes back to a file it already visited.
     #[error("extends loop: {}", display_chain(.chain))]
     ExtendsLoop {
@@ -97,6 +129,8 @@ impl ConfigError {
             Self::ExtendsMissing { .. } => "config/extends-missing",
             Self::ExtendsDirectory { .. } => "config/extends-directory",
             Self::ExtendsLoop { .. } => "config/extends-loop",
+            Self::ExtendsNotConfig { .. } => "config/extends-not-config",
+            Self::NamespaceOutsideRoot { .. } => "config/namespace-outside-root",
         }
     }
 
@@ -125,6 +159,17 @@ impl ConfigError {
                 None => "Point `extends` at a supdoc.config.toml file, not a directory".to_owned(),
             }),
             Self::ExtendsLoop { .. } => Some("Remove `extends` from one of these files".to_owned()),
+            Self::ExtendsNotConfig { .. } => Some(
+                "Point `extends` at a file named supdoc.config.toml. supdoc reads no other file \
+                 through `extends`"
+                    .to_owned(),
+            ),
+            Self::NamespaceOutsideRoot { .. } => Some(
+                "Point the namespace at a directory inside the project root, or move the project's \
+                 supdoc.config.toml up to a directory that holds both. supdoc reads nothing outside \
+                 the root"
+                    .to_owned(),
+            ),
         }
     }
 
@@ -137,7 +182,9 @@ impl ConfigError {
             | Self::Parse { .. }
             | Self::ExtendsMissing { .. }
             | Self::ExtendsDirectory { .. }
-            | Self::ExtendsLoop { .. } => EXIT_CONFIG,
+            | Self::ExtendsLoop { .. }
+            | Self::ExtendsNotConfig { .. }
+            | Self::NamespaceOutsideRoot { .. } => EXIT_CONFIG,
         }
     }
 }

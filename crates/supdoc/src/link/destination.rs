@@ -6,6 +6,8 @@
 //! 2. Any other `prefix:` is a configured namespace or an [`LinkError::UnknownNamespace`].
 //! 3. A leading `/` is the project root; anything else is relative to the source file's directory.
 //!    Every path is then normalized lexically (`.`, `..`), so one file has one spelling.
+//!    A path that still climbs (`../x`, `/../x`, `ns:../x`) leaves the project root or the
+//!    namespace's directory, and is a [`LinkError::OutsideRoot`] decided without the filesystem.
 //! 4. Without a `#fragment`, only a file some cartridge reads is a (whole-file) link.
 //! 5. With a fragment, `#heading` alone (the same file) is not tracked; otherwise it is a symbol.
 //!
@@ -70,6 +72,17 @@ pub enum LinkError {
         fragment: String,
         /// What is wrong with it, as a phrase (`a segment is empty`).
         reason: &'static str,
+    },
+    /// The path climbs above the project root, or above its namespace's directory, with `..`.
+    ///
+    /// supdoc reads nothing outside the root, so this is decided from the text alone: a missing
+    /// file and a present one look the same.
+    #[error("{}", outside_root_message(.destination, .namespace.as_ref()))]
+    OutsideRoot {
+        /// The destination as written.
+        destination: String,
+        /// The namespace the path climbs out of, if it is namespaced.
+        namespace: Option<NamespaceName>,
     },
     /// The fragment carries a text fragment (`:~:`), which is not built yet.
     #[error("text fragments (`:~:`) aren't supported yet")]
@@ -136,8 +149,24 @@ pub fn parse_destination(
     {
         return None;
     }
+    if relative == ".." || relative.starts_with("../") {
+        return Some(Err(LinkError::OutsideRoot {
+            destination: destination.to_owned(),
+            namespace,
+        }));
+    }
 
     Some(build(destination, namespace, &relative, fragment))
+}
+
+/// The message for a destination whose path climbs out of where it may point.
+fn outside_root_message(destination: &str, namespace: Option<&NamespaceName>) -> String {
+    match namespace {
+        Some(namespace) => {
+            format!("`{destination}` climbs out of the `{namespace}` namespace's directory")
+        }
+        None => format!("`{destination}` points outside the project root"),
+    }
 }
 
 /// Builds the link from its already-separated, already-routed parts.
@@ -249,8 +278,8 @@ fn source_directory(source: &SourcePath) -> Vec<&str> {
 }
 
 /// Resolves `relative` below `base`, lexically, so one file has one spelling (and one lock key)
-/// however a link reaches it. A leading `..` is kept when the path climbs out of the project root
-/// (a target may, 02 L5).
+/// however a link reaches it. A leading `..` is kept when the path climbs out of the project root,
+/// so the caller can reject it.
 ///
 /// Empty segments are kept so [`TargetPath`] rejects them with its own message.
 fn normalize<'a>(mut segments: Vec<&'a str>, relative: &'a str) -> String {
@@ -445,8 +474,19 @@ mod tests {
     #[test]
     fn namespaced_path_is_not_joined_to_the_source_directory() {
         assert_eq!(
+            parse_in("a/b/c.md", "auth:x.rs"),
+            Some(Ok(link("auth:x.rs", None))),
+        );
+    }
+
+    #[test]
+    fn namespaced_path_climbing_out_of_its_directory_is_outside_root() {
+        assert_eq!(
             parse_in("a/b/c.md", "auth:../x.rs"),
-            Some(Ok(link("auth:../x.rs", None))),
+            Some(Err(LinkError::OutsideRoot {
+                destination: "auth:../x.rs".to_owned(),
+                namespace: Some("auth".parse().expect("the fixture name should be valid")),
+            })),
         );
     }
 
@@ -518,15 +558,28 @@ mod tests {
     }
 
     #[test]
-    fn relative_path_may_climb_out_of_the_project_root() {
-        assert_eq!(
-            parse_in("docs/guide.md", "../../shared/x.rs"),
-            Some(Ok(link("../shared/x.rs", None))),
-        );
-        assert_eq!(
-            parse_in("guide.md", "../../x.rs"),
-            Some(Ok(link("../../x.rs", None))),
-        );
+    fn path_climbing_out_of_the_project_root_is_outside_root() {
+        for (source, destination) in [
+            ("docs/guide.md", "../../outside.rs"),
+            ("guide.md", "../outside.rs#API_KEY"),
+            ("docs/guide.md", "/../outside.rs"),
+            ("docs/guide.md", "/../../home/settings.rs#DEBUG"),
+            ("docs/deep/guide.md", "/docs/../../outside.rs"),
+        ] {
+            assert_eq!(
+                parse_in(source, destination),
+                Some(Err(LinkError::OutsideRoot {
+                    destination: destination.to_owned(),
+                    namespace: None,
+                })),
+                "{destination} in {source}",
+            );
+        }
+    }
+
+    #[test]
+    fn climbing_link_to_a_file_no_cartridge_reads_is_still_not_tracked() {
+        assert_eq!(parse_in("guide.md", "../logo.png"), None);
     }
 
     #[test]

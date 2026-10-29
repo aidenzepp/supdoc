@@ -510,7 +510,7 @@ mod tests {
     #[test]
     fn config_show_names_the_file_each_key_came_from_in_an_extends_chain() {
         let project = chain_project(
-            "include = [\"docs\"]\nexclude = [\"docs/drafts\"]\n[namespaces]\nauth = \"services/auth\"\n",
+            "include = [\"docs\"]\nexclude = [\"docs/drafts\"]\n[namespaces]\nauth = \"child/services/auth\"\n",
             "[namespaces]\nweb = \"apps/web\"\n",
         );
 
@@ -535,7 +535,7 @@ mod tests {
         assert_eq!(
             at(&json, "/data/namespaces"),
             serde_json::json!([
-                { "name": "auth", "path": "../services/auth",
+                { "name": "auth", "path": "services/auth",
                   "from": "../supdoc.config.toml", "exists": false },
                 { "name": "web", "path": "apps/web",
                   "from": "supdoc.config.toml", "exists": false },
@@ -598,7 +598,7 @@ mod tests {
     #[test]
     fn config_show_child_namespace_override_names_the_child() {
         let project = chain_project(
-            "[namespaces]\nauth = \"parent/auth\"\nweb = \"parent/web\"\n",
+            "[namespaces]\nauth = \"child/parent/auth\"\nweb = \"child/parent/web\"\n",
             "[namespaces]\nauth = \"child/auth\"\n",
         );
 
@@ -651,7 +651,7 @@ mod tests {
     #[test]
     fn config_show_json_validates_against_its_schema() {
         let project = chain_project(
-            "include = [\"docs\"]\n[namespaces]\nauth = \"services/auth\"\n",
+            "include = [\"docs\"]\n[namespaces]\nauth = \"child/services/auth\"\n",
             "",
         );
         let json = run_in_child(&project, &["--json", "config", "show"]).json();
@@ -685,7 +685,7 @@ mod tests {
     #[test]
     fn namespace_list_includes_inherited_namespaces_resolved_from_their_config() {
         let project = chain_project(
-            "[namespaces]\nshared = \"lib/shared\"\n",
+            "[namespaces]\nshared = \"child/lib/shared\"\n",
             "[namespaces]\nown = \"own\"\n",
         );
 
@@ -697,7 +697,7 @@ mod tests {
             serde_json::json!([
                 { "name": "own", "path": "own",
                   "from": "supdoc.config.toml", "exists": false },
-                { "name": "shared", "path": "../lib/shared",
+                { "name": "shared", "path": "lib/shared",
                   "from": "../supdoc.config.toml", "exists": false },
             ]),
             "the parent's namespace resolves against the parent's directory: {json}"

@@ -1,13 +1,16 @@
 //! Finding a config, reading its `extends` chain and merging the layers.
 //!
-//! `discover` and `read_chain` are the only functions here that touch the filesystem. `merge` is
-//! pure.
+//! `discover`, `read_chain` and `confine_namespaces` are the only functions here that touch the
+//! filesystem. `merge` reads only to find the root's real location.
+//!
+//! supdoc may run on an untrusted checkout whose config is hostile, so `extends` reads nothing but
+//! a file named `supdoc.config.toml`, and a namespace may not name a directory outside the root.
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::fs;
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 
 use crate::path::{AbsolutePath, RelativePath};
 
@@ -117,25 +120,54 @@ fn read_text(file: &AbsolutePath, is_start: bool) -> Result<String, ConfigError>
     })
 }
 
-/// Resolves an `extends` value from the file that wrote it, checking it names a file.
+/// Resolves an `extends` value from the file that wrote it, checking it names a config file.
+///
+/// The value must be named `supdoc.config.toml`, and so must the file it really is once symlinks
+/// are followed. Both are checked before anything is read, so a hostile `extends` can never make
+/// supdoc print another file's lines in a parse error.
 ///
 /// # Errors
 ///
-/// `ExtendsMissing` or `ExtendsDirectory` when the target isn't a file, `Read` for other failures.
+/// `ExtendsNotConfig` for any other name, `ExtendsMissing` or `ExtendsDirectory` when the target
+/// isn't a file, `Read` for other failures.
 fn resolve_extends(
     from: &AbsolutePath,
     extends: &toml::Spanned<RelativePath>,
 ) -> Result<AbsolutePath, ConfigError> {
     let value = extends.get_ref();
     let resolved = directory_of(from).join(value);
+    let directory = || ConfigError::ExtendsDirectory {
+        file: from.clone(),
+        extends: value.clone(),
+        span: extends.span(),
+        suggestion: config_inside(value, &resolved),
+    };
+    let not_config = || ConfigError::ExtendsNotConfig {
+        file: from.clone(),
+        extends: value.clone(),
+        span: extends.span(),
+    };
+    match value.as_path().components().next_back() {
+        None | Some(Component::CurDir | Component::ParentDir) => return Err(directory()),
+        Some(Component::Normal(name)) if name == CONFIG_FILE_NAME => {}
+        Some(_) => return Err(not_config()),
+    }
     match fs::metadata(resolved.as_path()) {
-        Ok(metadata) if metadata.is_dir() => Err(ConfigError::ExtendsDirectory {
-            file: from.clone(),
-            extends: value.clone(),
-            span: extends.span(),
-            suggestion: config_inside(value, &resolved),
-        }),
-        Ok(_) => Ok(resolved),
+        Ok(metadata) if metadata.is_dir() => Err(directory()),
+        Ok(_) => match fs::canonicalize(resolved.as_path()) {
+            Ok(real)
+                if real
+                    .file_name()
+                    .is_some_and(|name| name == CONFIG_FILE_NAME) =>
+            {
+                Ok(resolved)
+            }
+            Ok(_) => Err(not_config()),
+            Err(error) => Err(ConfigError::Read {
+                path: resolved,
+                error,
+            }),
+        },
         Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
             Err(ConfigError::ExtendsMissing {
                 file: from.clone(),
@@ -193,6 +225,7 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Config {
     let include = include
         .unwrap_or_else(|| AnchoredPatterns::built_in(root.clone(), PatternList::everything()));
     Config {
+        real_root: super::real_root(&root),
         root,
         files,
         include,
@@ -200,4 +233,30 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Config {
         namespaces,
         namespace_files,
     }
+}
+
+/// Checks every namespace names a directory inside the project root, once symlinks are followed.
+///
+/// A missing directory is still allowed (01 D7): where it would be is what counts.
+///
+/// # Errors
+///
+/// `NamespaceOutsideRoot` for the first namespace, by name, whose directory lies outside.
+pub(super) fn confine_namespaces(config: &Config) -> Result<(), ConfigError> {
+    let outside = config
+        .namespaces()
+        .iter()
+        .find(|(_, directory)| !config.contains(directory.as_path()));
+    let Some((name, directory)) = outside else {
+        return Ok(());
+    };
+    Err(ConfigError::NamespaceOutsideRoot {
+        file: config
+            .namespace_defined_in(name)
+            .cloned()
+            .unwrap_or_else(|| config.root().clone()),
+        name: name.clone(),
+        directory: directory.clone(),
+        root: config.root().clone(),
+    })
 }

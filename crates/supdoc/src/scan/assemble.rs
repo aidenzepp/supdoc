@@ -278,6 +278,11 @@ fn link_finding(
             "Write the symbol as names joined by `.`, like `Config.validate`".to_owned(),
             None,
         ),
+        LinkError::OutsideRoot { .. } => (
+            targets::CODE_OUTSIDE_ROOT,
+            targets::OUTSIDE_ROOT_HELP.to_owned(),
+            None,
+        ),
         LinkError::TextFragmentUnsupported { .. } => (
             "link/text-fragment-unsupported",
             "Remove the `:~:` text fragment from the link. supdoc can't read text fragments yet"
@@ -899,18 +904,119 @@ mod tests {
         assert_present(&scan, &key("docs/guide.md", "build/out.rs", Some("sub")));
     }
 
+    /// A secret outside the project, as a runner might hold one.
+    const SECRET: &str = "API_KEY = \"s3cr3t\"\nDEBUG = True\n";
+
+    /// Fails unless `finding` is `link/outside-root` and shows nothing read from outside.
+    fn assert_outside_root(finding: &Finding) {
+        assert_eq!(finding.code, "link/outside-root", "{finding:?}");
+        let shown = format!("{finding:?}");
+        for leak in ["s3cr3t", "API_KEY = ", "DEBUG"] {
+            assert!(
+                !shown.contains(leak),
+                "`{leak}` was read from outside: {shown}"
+            );
+        }
+    }
+
     #[test]
-    fn target_outside_root_resolves() {
+    fn climbing_links_are_outside_root_and_never_keyed() {
         let project = Project::at(Some("project"), "");
-        project.write_outside("shared/math.rs", LIB);
-        project.write("docs/guide.md", "See [add](../../shared/math.rs#add).\n");
+        project.write_outside("home/settings.py", SECRET);
+        project.write(
+            "docs/guide.md",
+            "[a](../../home/settings.py#API_KEY)\n\n[b](/../home/settings.py#API_KEY)\n\n\
+             [c](../../home/settings.py#API_KEX)\n\n[d](../../missing.py#X)\n",
+        );
 
         let scan = project.scan();
 
-        assert_present(
-            &scan,
-            &key("docs/guide.md", "../shared/math.rs", Some("add")),
+        assert_eq!(
+            scan.links.len(),
+            0,
+            "nothing outside is keyed: {:?}",
+            scan.links
         );
+        assert_eq!(scan.findings.len(), 4, "{:?}", scan.findings);
+        for finding in &scan.findings {
+            assert_outside_root(finding);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_to_a_file_outside_the_root_is_not_read() {
+        let project = Project::at(Some("project"), "");
+        project.write_outside("home/settings.py", SECRET);
+        project.write("docs/guide.md", "[a](pw.py)\n\n[b](pw.py#API_KEX)\n");
+        std::os::unix::fs::symlink(
+            project.dir.path().join("home/settings.py"),
+            project.root.join("docs/pw.py"),
+        )
+        .expect("the symlink should be creatable");
+
+        let scan = project.scan();
+
+        for key in [
+            key("docs/guide.md", "docs/pw.py", None),
+            key("docs/guide.md", "docs/pw.py", Some("API_KEX")),
+        ] {
+            assert_outside_root(broken(&scan, &key));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_directory_outside_the_root_is_not_read() {
+        let project = Project::at(Some("project"), "");
+        project.write_outside("home/settings.py", SECRET);
+        project.write("docs/guide.md", "[a](/vendor/settings.py#API_KEY)\n");
+        std::os::unix::fs::symlink(project.dir.path().join("home"), project.root.join("vendor"))
+            .expect("the symlink should be creatable");
+
+        let scan = project.scan();
+
+        let finding = broken(
+            &scan,
+            &key("docs/guide.md", "vendor/settings.py", Some("API_KEY")),
+        );
+        assert_outside_root(finding);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_pointing_outside_looks_like_any_other_outside_link() {
+        let project = Project::at(Some("project"), "");
+        project.write("docs/guide.md", "[a](gone.py#X)\n");
+        std::os::unix::fs::symlink(
+            project.dir.path().join("home/gone.py"),
+            project.root.join("docs/gone.py"),
+        )
+        .expect("the symlink should be creatable");
+
+        let scan = project.scan();
+
+        assert_outside_root(broken(
+            &scan,
+            &key("docs/guide.md", "docs/gone.py", Some("X")),
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_inside_the_root_still_resolves() {
+        let project = Project::new();
+        project.write("src/math.rs", LIB);
+        project.write("docs/guide.md", "See [add](alias.rs#add).\n");
+        std::os::unix::fs::symlink(
+            project.root.join("src/math.rs"),
+            project.root.join("docs/alias.rs"),
+        )
+        .expect("the symlink should be creatable");
+
+        let scan = project.scan();
+
+        assert_present(&scan, &key("docs/guide.md", "docs/alias.rs", Some("add")));
     }
 
     #[test]

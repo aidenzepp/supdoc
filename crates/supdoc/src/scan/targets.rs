@@ -1,7 +1,7 @@
 //! Grouping links by target and reading each target once (04, From links to targets, steps 3-6).
 //!
-//! Every distinct target is located on disk, checked for case (S12) and for being a directory
-//! (S13), then read through [`Parsed`] so a file that is also a source is never parsed twice (S9).
+//! Every distinct target is located on disk, checked to lie inside the project root once symlinks
+//! are followed, checked for case (S12) and for being a directory (S13), then read through [`Parsed`] so a file that is also a source is never parsed twice (S9).
 //! Each link into it then hashes the whole file or the one symbol it names. Anything that goes
 //! wrong becomes that link's [`TargetState::Broken`] finding, with a [`Fix`] only when exactly one
 //! edit is right.
@@ -27,6 +27,13 @@ const CODE_CASE_MISMATCH: &str = "scan/case-mismatch";
 
 /// Finding code for a namespace the config doesn't define (03 R10).
 pub(crate) const CODE_UNKNOWN_NAMESPACE: &str = "link/unknown-namespace";
+
+/// Finding code for a link whose target lies outside the project root.
+pub(crate) const CODE_OUTSIDE_ROOT: &str = "link/outside-root";
+
+/// What to do about a link whose target lies outside the project root.
+pub(crate) const OUTSIDE_ROOT_HELP: &str = "Link to a file inside the project root, or move \
+     supdoc.config.toml up to a directory that holds both. supdoc reads nothing outside the root";
 
 /// Files parsed during one run, keyed by path (04 S9). Owned by one scan, never global.
 #[derive(Debug, Default)]
@@ -211,6 +218,7 @@ fn target_states(
     let path = match locate(config, target) {
         Located::Directory => return Vec::new(),
         Located::UnknownNamespace => return broken_by(&|first| unknown_namespace(target, first)),
+        Located::OutsideRoot => return broken_by(&|first| outside_root(target, first)),
         Located::CaseMismatch(real) => {
             return broken_by(&|first| case_mismatch(target, &real, first));
         }
@@ -263,11 +271,18 @@ enum Located {
     /// The namespace isn't in the config. `parse_destination` rejects these first, so a scan
     /// never meets one, but a target is never resolved against a guessed directory.
     UnknownNamespace,
+    /// The target lies outside the project root once symlinks are followed, or climbs out with
+    /// `..`. Nothing about it is read: no contents, no hash, no symbol names.
+    OutsideRoot,
 }
 
 /// Finds `target` on disk: against the root, or against its namespace's directory (01).
 ///
-/// Effect: lists the directories along the path to compare its case with the real names.
+/// The target must lie inside the project root once every symlink along it is followed, so an
+/// in-root symlink to a file outside, even a dangling one, is [`Located::OutsideRoot`].
+///
+/// Effect: follows symlinks along the path and lists the in-root directories along it to compare
+/// its case with the real names.
 fn locate(config: &Config, target: &Target) -> Located {
     let (base, path) = match target {
         Target::Path(path) => (config.root(), path),
@@ -277,27 +292,23 @@ fn locate(config: &Config, target: &Target) -> Located {
         },
     };
     let segments: Vec<&str> = path.as_str().split('/').collect();
-    let climbs = segments
-        .iter()
-        .take_while(|segment| **segment == "..")
-        .count();
-    let (up, down) = segments.split_at(climbs);
-
+    if segments.contains(&"..") {
+        return Located::OutsideRoot;
+    }
     // Joining a relative path onto an absolute one is always absolute, so the base never stands
     // in for the file.
-    let start =
-        AbsolutePath::new(&base.as_path().join(up.join("/"))).unwrap_or_else(|| base.clone());
-    if let Some(real) = real_case(start.as_path(), down) {
-        let real: Vec<&str> = up
-            .iter()
-            .copied()
-            .chain(real.iter().map(String::as_str))
-            .collect();
-        return Located::CaseMismatch(real.join("/"));
-    }
-
     let file =
         AbsolutePath::new(&base.as_path().join(path.as_str())).unwrap_or_else(|| base.clone());
+    if !config.contains(base.as_path()) || !config.contains(file.as_path()) {
+        return Located::OutsideRoot;
+    }
+
+    if let Some(real) = real_case(config, base.as_path(), &segments) {
+        if !config.contains(&base.as_path().join(real.join("/"))) {
+            return Located::OutsideRoot;
+        }
+        return Located::CaseMismatch(real.join("/"));
+    }
     if fs::metadata(file.as_path()).is_ok_and(|metadata| metadata.is_dir()) {
         return Located::Directory;
     }
@@ -308,14 +319,14 @@ fn locate(config: &Config, target: &Target) -> Located {
 /// spelled with different case.
 ///
 /// `None` when every name matches exactly, when one is missing or matches several entries
-/// case-insensitively, when a directory can't be listed, or when `..` follows a name: reading the
-/// file then reports what is wrong.
-fn real_case(start: &Path, segments: &[&str]) -> Option<Vec<String>> {
+/// case-insensitively, or when a directory can't be listed or lies outside the project root:
+/// reading the file then reports what is wrong.
+fn real_case(config: &Config, start: &Path, segments: &[&str]) -> Option<Vec<String>> {
     let mut directory = start.to_path_buf();
     let mut real = Vec::with_capacity(segments.len());
     let mut differs = false;
     for segment in segments {
-        if *segment == ".." {
+        if !config.contains(&directory) {
             return None;
         }
         let names: Vec<_> = fs::read_dir(&directory)
@@ -429,6 +440,18 @@ fn recased(written: &str, real: &str) -> Option<String> {
         let joined: Vec<&str> = dots.iter().chain(real_names).copied().collect();
         format!("{anchor}{}", joined.join("/"))
     })
+}
+
+/// A `link/outside-root` finding for a target that lies outside the project root.
+///
+/// The message names only the target as written: nothing outside the root is read to build it.
+fn outside_root(target: &Target, first: &Occurrence) -> Finding {
+    broken(
+        CODE_OUTSIDE_ROOT,
+        format!("`{target}` is outside the project root"),
+        OUTSIDE_ROOT_HELP.to_owned(),
+        first,
+    )
 }
 
 /// A `link/unknown-namespace` finding for a namespace the config doesn't define.
