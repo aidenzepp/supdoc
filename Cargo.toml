@@ -22,3 +22,7 @@ expect_used = "deny"
 panic = "deny"
 dbg_macro = "deny"
 indexing_slicing = "deny"
+# All output goes through one output module, so --json stdout carries only JSON (anc.dev P2).
+# That module writes through stdout/stderr handles, which these lints don't flag.
+print_stdout = "deny"
+print_stderr = "deny"
