@@ -376,23 +376,10 @@ pub enum SkillCommand {
 /// Arguments of `supdoc skill install`.
 #[derive(Debug, Args)]
 pub struct SkillInstallArgs {
-    /// The agent runtime to install for [default: every detected runtime]
-    #[arg(value_enum, value_name = "HOST")]
-    pub host: Option<SkillHost>,
+    /// Install into the user's home instead of the current project
+    #[arg(short, long, env = "SUPDOC_GLOBAL", value_parser = FalseyValueParser::new())]
+    pub global: bool,
     /// Preview or apply.
     #[command(flatten)]
     pub confirm: Confirm,
-}
-
-/// Agent runtimes that can load a skill (06 X16).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum SkillHost {
-    /// Claude Code
-    Claude,
-    /// Codex
-    Codex,
-    /// Cursor
-    Cursor,
-    /// `OpenCode`
-    Opencode,
 }

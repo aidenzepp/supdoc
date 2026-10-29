@@ -64,6 +64,10 @@ pub struct Context {
     pub global: GlobalArgs,
     /// The current directory, read once by `main` (01).
     pub cwd: AbsolutePath,
+    /// The user's home directory (`HOME`), read once by `main`.
+    pub home: Option<AbsolutePath>,
+    /// Claude Code's config directory (`CLAUDE_CONFIG_DIR`), read once by `main`.
+    pub claude_config_dir: Option<AbsolutePath>,
 }
 
 /// How a command that ran to completion ended (06 X7).
@@ -286,6 +290,8 @@ mod tests {
         let context = Context {
             global: cli.global,
             cwd,
+            home: None,
+            claude_config_dir: None,
         };
         run(&cli.command, &context, &mut output)
     }

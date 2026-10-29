@@ -142,8 +142,8 @@ Examples:
 /// Shown after `supdoc skill install --help`.
 pub const SKILL_INSTALL_EXAMPLES: &str = "\
 Examples:
-  # Preview the install for every detected agent runtime
+  # Preview the install into the current project
   supdoc skill install
 
-  # Install for Claude Code
-  supdoc skill install claude --yes";
+  # Install into your home directory
+  supdoc skill install --global --yes";

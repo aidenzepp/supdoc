@@ -785,6 +785,36 @@ mod tests {
     }
 
     #[test]
+    fn skill_install_takes_no_positional_and_accepts_global_flags() {
+        let printout = parse_printout(&["skill", "install", "claude"]);
+        assert_eq!(printout.exit_code, 2, "{}", printout.text);
+        for flag in ["-g", "--global"] {
+            let parsed = parse_in_child(&["supdoc", "skill", "install", flag], &[]);
+            assert!(parsed.contains("global: true"), "{flag}: {parsed}");
+        }
+        let plain = parse_in_child(&["supdoc", "skill", "install"], &[]);
+        assert!(plain.contains("global: false"), "{plain}");
+    }
+
+    #[test]
+    fn supdoc_global_env_follows_the_falsey_parser() {
+        for (value, expected) in [
+            ("1", true),
+            ("true", true),
+            ("0", false),
+            ("false", false),
+            ("", false),
+        ] {
+            let parsed =
+                parse_in_child(&["supdoc", "skill", "install"], &[("SUPDOC_GLOBAL", value)]);
+            assert!(
+                parsed.contains(&format!("global: {expected}")),
+                "SUPDOC_GLOBAL={value:?} should give global: {expected}: {parsed}"
+            );
+        }
+    }
+
+    #[test]
     fn truthy_env_values_turn_flags_on() {
         let parsed = parse_in_child(
             &["supdoc", "update"],

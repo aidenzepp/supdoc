@@ -9,6 +9,7 @@
     )
 )]
 
+use std::ffi::OsString;
 use std::io::{self, IsTerminal, Write};
 use std::path::{MAIN_SEPARATOR_STR, Path};
 use std::process::ExitCode;
@@ -51,9 +52,17 @@ fn exit_code() -> u8 {
         },
     };
     let mut output = Output::stdio(settings(&global, cwd.clone()), choice(global.color));
-    let result = match failure {
-        Some(error) => Err(error),
-        None => run(&command, &Context { global, cwd }, &mut output),
+    let result = if let Some(error) = failure {
+        Err(error)
+    } else {
+        let (home, claude_config_dir) = home_dirs(|name| std::env::var_os(name));
+        let context = Context {
+            global,
+            cwd,
+            home,
+            claude_config_dir,
+        };
+        run(&command, &context, &mut output)
     };
 
     match result {
@@ -80,6 +89,20 @@ fn current_dir() -> Result<AbsolutePath, CliError> {
                 IO_EXIT_CODE,
             )
         })
+}
+
+/// `HOME` and `CLAUDE_CONFIG_DIR`, read once for the whole run.
+///
+/// An unset, empty or relative value is `None`.
+fn home_dirs(
+    var: impl Fn(&str) -> Option<OsString>,
+) -> (Option<AbsolutePath>, Option<AbsolutePath>) {
+    let dir = |name: &str| {
+        var(name)
+            .filter(|value| !value.is_empty())
+            .and_then(|value| AbsolutePath::new(Path::new(&value)))
+    };
+    (dir("HOME"), dir("CLAUDE_CONFIG_DIR"))
 }
 
 /// Writes help, a version or a usage error to its stream and returns its exit code.
@@ -295,5 +318,40 @@ mod tests {
             !json.contains("location"),
             "JSON should have no location: {json}"
         );
+    }
+
+    fn lookup(vars: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
+        move |name| {
+            vars.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| OsString::from(value))
+        }
+    }
+
+    #[test]
+    fn context_carries_home_and_claude_config_dir() {
+        let (home, claude) = home_dirs(lookup(&[
+            ("HOME", "/home/me"),
+            ("CLAUDE_CONFIG_DIR", "/home/me/.claude-alt"),
+        ]));
+
+        assert_eq!(
+            home.as_ref().map(AsRef::<Path>::as_ref),
+            Some(Path::new("/home/me"))
+        );
+        assert_eq!(
+            claude.as_ref().map(AsRef::<Path>::as_ref),
+            Some(Path::new("/home/me/.claude-alt"))
+        );
+    }
+
+    #[test]
+    fn unset_or_empty_claude_config_dir_is_none() {
+        let (home, unset) = home_dirs(lookup(&[("HOME", "/home/me")]));
+        let (_, empty) = home_dirs(lookup(&[("HOME", "/home/me"), ("CLAUDE_CONFIG_DIR", "")]));
+
+        assert!(home.is_some(), "HOME should be read");
+        assert!(unset.is_none(), "unset CLAUDE_CONFIG_DIR should be None");
+        assert!(empty.is_none(), "empty CLAUDE_CONFIG_DIR should be None");
     }
 }
