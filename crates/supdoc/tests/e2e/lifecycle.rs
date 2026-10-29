@@ -238,3 +238,50 @@ fn updating_the_file_with_the_whole_file_link_accepts_it_while_a_symbol_link_els
     assert_eq!(at(failed, "/target"), "src/lib.rs", "{report}");
     assert_eq!(at(failed, "/symbol"), "add", "{report}");
 }
+
+#[test]
+fn switching_line_endings_to_exact_refuses_until_update_migrates_the_lock() {
+    let project = Project::fixture("basic");
+    let lib = project.read("src/lib.rs");
+    std::fs::write(project.path("src/lib.rs"), lib.replace('\n', "\r\n"))
+        .expect("src/lib.rs should be writable");
+    project.record();
+    let _ = project.supdoc(&["check"]).assert_exit(0);
+    std::fs::write(
+        project.path("supdoc.config.toml"),
+        "[features.hash]\nline-endings = \"exact\"\n",
+    )
+    .expect("supdoc.config.toml should be writable");
+
+    let refused = project.supdoc(&["check"]);
+    let _ = refused.assert_exit(78);
+    assert!(
+        refused.stdout.contains("lock/settings-mismatch")
+            || refused.stderr.contains("lock/settings-mismatch"),
+        "check should refuse with lock/settings-mismatch:\nstdout:\n{}\nstderr:\n{}",
+        refused.stdout,
+        refused.stderr
+    );
+
+    let recorded = project.read("supdoc.lock");
+    let preview = project.supdoc(&["update"]);
+    let _ = preview.assert_exit(0);
+    assert!(
+        preview.stdout.contains("settings") && preview.stdout.contains("line-endings"),
+        "the preview should show the settings row: {}",
+        preview.stdout
+    );
+    assert_eq!(
+        project.read("supdoc.lock"),
+        recorded,
+        "a preview should not write supdoc.lock"
+    );
+
+    let _ = project.supdoc(&["update", "--yes"]).assert_exit(0);
+    let _ = project.supdoc(&["check"]).assert_exit(0);
+    let lock = project.read("supdoc.lock");
+    assert!(
+        lock.contains("line-endings = \"exact\""),
+        "the migrated lock should record line-endings = \"exact\":\n{lock}"
+    );
+}
