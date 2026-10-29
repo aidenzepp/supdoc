@@ -1,0 +1,13 @@
+---
+source: crates/supdoc/tests/output/goldens.rs
+expression: project.run(args).transcript()
+---
+$ supdoc update
+exit: 0
+--- stdout
+settings  line-endings  normalize -> exact
+accept  docs/guide.md:3  ->  src/lib.rs#add   failed -> passed
+accept  docs/guide.md:4  ->  core:lib.rs#mul  failed -> passed
+accept  docs/old.md:3    ->  src/lib.rs#sub   failed -> passed
+--- stderr
+Nothing written. Run the same command with --yes to apply.

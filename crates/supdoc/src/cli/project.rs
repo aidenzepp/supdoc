@@ -8,9 +8,11 @@ use std::fs;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+use crate::check::plan::SettingsChange;
 use crate::config::{Config, ConfigError};
 use crate::finding::{Location, Snippet};
 use crate::link::SourcePath;
+use crate::lock::error::{LockError, SettingsMismatch};
 use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
 use crate::output::Output;
 use crate::path::AbsolutePath;
@@ -159,14 +161,56 @@ pub(crate) fn lock_path(root: &AbsolutePath) -> AbsolutePath {
 pub(crate) fn read_lock(root: &AbsolutePath) -> Result<Lockfile, CliError> {
     Lockfile::read(&lock_path(root))
         .map(Option::unwrap_or_default)
-        .map_err(|error| {
-            CliError::new(
-                error.code(),
-                error.to_string(),
-                error.help(),
-                error.exit_code(),
-            )
-        })
+        .map_err(|error| lock_failure(&error))
+}
+
+/// The lockfile in `config`'s root, and how the hash settings it records differ from the ones
+/// `config` resolves to, if they do (02 L10).
+///
+/// A missing lockfile is an empty one under `config`'s settings, so a fresh project never
+/// differs.
+///
+/// # Errors
+///
+/// Returns the lockfile's own error: 74 when it can't be read, 78 when its text is invalid.
+pub(crate) fn read_lock_for_update(
+    config: &Config,
+) -> Result<(Lockfile, Option<SettingsChange>), CliError> {
+    let configured = config.hash_settings();
+    let read = Lockfile::read(&lock_path(config.root())).map_err(|error| lock_failure(&error))?;
+    let Some(lock) = read else {
+        let mut empty = Lockfile::default();
+        empty.set_hash_settings(configured);
+        return Ok((empty, None));
+    };
+    let change = SettingsChange::between(lock.hash_settings(), configured);
+    Ok((lock, change))
+}
+
+/// The `lock/settings-mismatch` error (78) for a command that can't re-record the lockfile under
+/// `config`'s hash settings, as `change` says they differ from the recorded ones.
+pub(crate) fn settings_mismatch(config: &Config, change: SettingsChange) -> CliError {
+    let mismatch = SettingsMismatch {
+        recorded: change.from.line_endings,
+        configured: change.to.line_endings,
+        configured_in: config.line_endings_defined_in().cloned(),
+    };
+    CliError::new(
+        mismatch.code(),
+        mismatch.to_string(),
+        mismatch.help(),
+        mismatch.exit_code(),
+    )
+}
+
+/// The command's error for a lockfile that could not be read.
+fn lock_failure(error: &LockError) -> CliError {
+    CliError::new(
+        error.code(),
+        error.to_string(),
+        error.help(),
+        error.exit_code(),
+    )
 }
 
 /// The error for a `[PATH]` that doesn't exist (06 error table).

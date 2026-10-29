@@ -3,6 +3,11 @@
 //! The run is `config::load → Lockfile::read → scan → reconcile → plan_update`, then a preview,
 //! or under `--yes` one atomic write of the planned lockfile. A preview runs every step a real run
 //! does, up to that write (05 C2, 06a K8).
+//!
+//! When the lockfile records other hash settings than the config resolves to, a full update (no
+//! `[PATHS]`, every state from `failed`, `new` and `obsolete`) is the migration: the scan hashes
+//! under the config's settings, links whose hash that changes are accepted as `failed`, and the
+//! lockfile is re-recorded under the new settings. A narrower update refuses (B.5).
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
@@ -11,19 +16,21 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::check::model::{LinkReport, Report as CheckModel};
-use crate::check::plan::{LockChange, UpdatePlan, plan_update};
+use crate::check::plan::{LockChange, SettingsChange, UpdatePlan, plan_update};
 use crate::check::reconcile::reconcile;
 use crate::finding::Finding;
+use crate::hash::LineEndings;
 use crate::link::LinkKey;
 use crate::output::json::Envelope;
 use crate::output::text::{render_finding, visible};
 use crate::output::{Output, OutputError, PathStyle, Report, Summary, TextContext};
 use crate::read::cartridge::Languages;
+use crate::scan::model::Scope;
 use crate::state::LinkState;
 
 use super::args::{UpdateArgs, WriteMode};
 use super::check::LinkLocationJson;
-use super::project::{load_config, lock_path, read_lock, scope};
+use super::project::{load_config, lock_path, read_lock_for_update, scope, settings_mismatch};
 use super::{CliError, Context, Outcome};
 
 /// The closing note of a preview that has changes (06a K7).
@@ -31,6 +38,10 @@ const PREVIEW_NOTE: &str = "Nothing written. Run the same command with --yes to 
 
 /// The closing note when the plan is empty (06a Q6).
 const NOTHING_NOTE: &str = "Nothing to update.";
+
+/// The states a settings migration must select, so no entry keeps a hash from the old settings
+/// that the run could have re-recorded (B.5).
+const MIGRATION_STATES: [LinkState; 3] = [LinkState::Failed, LinkState::New, LinkState::Obsolete];
 
 /// Runs `supdoc update`: prints every lockfile change the selected states call for, and writes
 /// them under `--yes` (05 C2, C9).
@@ -43,12 +54,19 @@ const NOTHING_NOTE: &str = "Nothing to update.";
 ///
 /// Returns the config's own error (78, or 74 when unreadable), `cli/path-missing`,
 /// `cli/path-outside-project` or `cli/path-invalid` for a bad `[PATH]` (2), the lockfile's own
-/// error (78 when invalid, 74 when unreadable or unwritable), `scan/root-unreadable` (74), and
-/// `cli/update-output` when the report cannot be written (74).
+/// error (78 when invalid, 74 when unreadable or unwritable), `lock/settings-mismatch` (78) when
+/// the lockfile's hash settings differ from the config's and the run is narrowed by `[PATHS]` or
+/// `--state`, `scan/root-unreadable` (74), and `cli/update-output` when the report cannot be
+/// written (74).
 pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let config = load_config(context, output, "update")?;
     let scope = scope(&args.paths, &context.cwd, config.root())?;
-    let lock = read_lock(config.root())?;
+    let (lock, settings_change) = read_lock_for_update(&config)?;
+    if let Some(change) = settings_change
+        && !migrates_every_entry(&scope, &args.state)
+    {
+        return Err(settings_mismatch(&config, change));
+    }
     let scan =
         crate::scan::assemble::run(&config, &Languages::builtin(), &scope).map_err(|error| {
             CliError::new(
@@ -60,7 +78,7 @@ pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<
         })?;
 
     let model = reconcile(&scan, &lock, &scope);
-    let plan = plan_update(&model, &scan, &lock, &args.state);
+    let plan = plan_update(&model, &scan, &lock, &args.state, config.hash_settings());
     let applied = args.confirm.mode() == WriteMode::Apply;
     if applied && let Some(next) = &plan.next {
         next.write(&lock_path(config.root())).map_err(|error| {
@@ -83,6 +101,12 @@ pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<
         .note(&report.closing_note(output.unicode()))
         .map_err(|error| output_failed(&error))?;
     Ok(Outcome::Clean)
+}
+
+/// Whether an update over `scope` with `states` re-records every entry it can, so it may move the
+/// lockfile to new hash settings: no `[PATHS]` and every state from [`MIGRATION_STATES`] (B.5).
+fn migrates_every_entry(scope: &Scope, states: &[LinkState]) -> bool {
+    matches!(scope, Scope::All) && MIGRATION_STATES.iter().all(|state| states.contains(state))
 }
 
 /// The JSON Schema of `supdoc update`'s `--json` output: the whole envelope, with `data` typed as
@@ -112,6 +136,9 @@ pub(crate) struct UpdateReport {
     applied: bool,
     /// The `--state` values in effect.
     states: Vec<LinkState>,
+    /// The hash settings the lockfile is re-recorded under. Left out when they don't change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    settings_change: Option<SettingsChangeJson>,
     /// One per lockfile change, in plan order.
     changes: Vec<ChangeJson>,
     /// How many links in scope were in each state before the update.
@@ -145,6 +172,7 @@ impl UpdateReport {
         Self {
             applied,
             states: states.to_vec(),
+            settings_change: plan.settings.map(SettingsChangeJson::from),
             changes: rows.iter().map(ChangeJson::from).collect(),
             summary: Summary::tally(model.links.iter().map(|link| link.state)),
             findings: model
@@ -162,9 +190,10 @@ impl UpdateReport {
         }
     }
 
-    /// What the run says on stderr when it is done (06a K7, Q6).
+    /// What the run says on stderr when it is done (06a K7, Q6). A settings change alone is a
+    /// change (B.5).
     fn closing_note(&self, unicode: bool) -> String {
-        if self.rows.is_empty() && self.findings.is_empty() {
+        if self.rows.is_empty() && self.findings.is_empty() && self.settings_change.is_none() {
             NOTHING_NOTE.to_owned()
         } else if self.applied {
             self.applied_note(unicode)
@@ -173,15 +202,22 @@ impl UpdateReport {
         }
     }
 
-    /// `supdoc.lock: 1 accepted · 1 recorded · 1 removed`, leaving out actions that didn't occur.
-    /// Without `unicode` the counts are separated by `, ` so the note is plain ASCII (07 G12).
+    /// `supdoc.lock: 1 accepted · 1 recorded · 1 removed`, leaving out actions that didn't occur,
+    /// and led by `line-endings set to normalize` when the settings changed. Without `unicode` the
+    /// parts are separated by `, ` so the note is plain ASCII (07 G12).
     fn applied_note(&self, unicode: bool) -> String {
+        let settings = self
+            .settings_change
+            .map(|change| format!("line-endings set to {}", change.line_endings.to));
         let counts = [Action::Accept, Action::Record, Action::Remove]
             .into_iter()
             .filter_map(|action| {
                 let count = self.rows.iter().filter(|row| row.action == action).count();
                 (count > 0).then(|| format!("{count} {}", action.past_tense()))
-            })
+            });
+        let counts = settings
+            .into_iter()
+            .chain(counts)
             .collect::<Vec<_>>()
             .join(if unicode { " · " } else { ", " });
         format!("{}: {counts}", crate::lock::model::LOCK_FILE_NAME)
@@ -202,12 +238,43 @@ impl Report for UpdateReport {
     }
 
     fn render_text(&self, context: &TextContext, out: &mut dyn Write) -> io::Result<()> {
+        if let Some(change) = self.settings_change {
+            render_settings_row(context, change, out)?;
+        }
         render_rows(context, &self.rows, out)?;
         for finding in &self.findings {
             render_finding(context, finding, out)?;
         }
         Ok(())
     }
+}
+
+/// How the lockfile's hash settings change, as JSON shows it:
+/// `{"line_endings": {"from": "exact", "to": "normalize"}}` (B-Q6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+pub(crate) struct SettingsChangeJson {
+    /// `[features.hash] line-endings`.
+    line_endings: LineEndingsChange,
+}
+
+impl From<SettingsChange> for SettingsChangeJson {
+    fn from(change: SettingsChange) -> Self {
+        Self {
+            line_endings: LineEndingsChange {
+                from: change.from.line_endings,
+                to: change.to.line_endings,
+            },
+        }
+    }
+}
+
+/// One setting's recorded value and the value it is re-recorded with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+pub(crate) struct LineEndingsChange {
+    /// The value the lockfile records.
+    from: LineEndings,
+    /// The value the config resolves to.
+    to: LineEndings,
 }
 
 /// What a lockfile change does to its entry.
@@ -308,6 +375,22 @@ impl ChangeRow {
             moved_from: link.and_then(|link| link.moved_from.clone()),
         }
     }
+}
+
+/// Writes the settings line that leads a migration's rows, as `settings  line-endings  exact ->
+/// normalize` (B.5).
+///
+/// # Errors
+///
+/// Fails if writing to `out` fails.
+fn render_settings_row(
+    context: &TextContext,
+    change: SettingsChangeJson,
+    out: &mut dyn Write,
+) -> io::Result<()> {
+    let arrow = if context.unicode { "→" } else { "->" };
+    let LineEndingsChange { from, to } = change.line_endings;
+    writeln!(out, "settings  line-endings  {from} {arrow} {to}")
 }
 
 /// Writes one aligned line per change, as `accept  docs/guide.md:3  →  src/lib.rs#add  failed →
@@ -426,6 +509,12 @@ mod tests {
     /// `LIB` with `add`'s body changed, so a recorded link to it fails.
     const LIB_CHANGED: &str = "pub fn add(a: i32, b: i32) -> i32 {\n    a - b\n}\n";
 
+    /// `LIB` with Windows line endings, which hash differently under `exact` and `normalize`.
+    const LIB_CRLF: &str = "pub fn add(a: i32, b: i32) -> i32 {\r\n    a + b\r\n}\r\n";
+
+    /// A config that hashes every byte as is.
+    const EXACT_CONFIG: &str = "[features.hash]\nline-endings = \"exact\"\n";
+
     /// A buffer `Output` writes into and the test reads back.
     #[derive(Clone, Default)]
     struct Capture(Arc<Mutex<Vec<u8>>>);
@@ -541,12 +630,14 @@ mod tests {
             Lockfile::read(&path).expect("the lockfile should be readable and valid")
         }
 
-        /// Records every present link's current hash in `supdoc.lock`, independently of `update`.
+        /// Records every present link's current hash in `supdoc.lock` under the config's hash
+        /// settings, independently of `update`.
         fn record_all(&self) {
             let config = Config::load(&self.root()).expect("the fixture config should load");
             let scan = crate::scan::assemble::run(&config, &Languages::builtin(), &Scope::All)
                 .expect("the fixture project should scan");
             let mut lock = Lockfile::default();
+            lock.set_hash_settings(config.hash_settings());
             for (key, link) in scan.links {
                 if let TargetState::Present { hash, .. } = link.target {
                     let _previous = lock.insert(key, hash);
@@ -1063,6 +1154,176 @@ mod tests {
                 run.result.as_ref().err().map(CliError::code)
             );
         }
+    }
+
+    /// A project whose lockfile records `line-endings = "exact"` while the config resolves to the
+    /// default, `normalize`. `docs/guide.md` links to `add` in a CRLF `src/lib.rs`, whose hash
+    /// the new setting changes; `docs/plain.md` links to `sub` in an LF `src/plain.rs`, whose hash
+    /// it doesn't.
+    fn project_recorded_exact() -> Project {
+        let project = Project::new();
+        project.write("src/lib.rs", LIB_CRLF);
+        project.write(
+            "src/plain.rs",
+            "pub fn sub(a: i32, b: i32) -> i32 {\n    a - b\n}\n",
+        );
+        project.write("docs/plain.md", "[sub](../src/plain.rs#sub)\n");
+        project.write("supdoc.config.toml", EXACT_CONFIG);
+        project.record_all();
+        project.write("supdoc.config.toml", "");
+        project
+    }
+
+    /// The `line_endings` the lockfile on disk records.
+    fn recorded_line_endings(project: &Project) -> LineEndings {
+        project
+            .lock()
+            .expect("the fixture lockfile should exist")
+            .hash_settings()
+            .line_endings
+    }
+
+    #[test]
+    fn mismatch_full_update_previews_settings_row_and_writes_nothing() {
+        let project = project_recorded_exact();
+        let before = project.files();
+
+        let text = project.update(&["update"]);
+        let json = project.update(&["--json", "update"]);
+
+        assert_eq!(text.exit_code(), 0, "stderr: {}", text.stderr);
+        assert_eq!(
+            text.stdout,
+            "settings  line-endings  exact -> normalize\n\
+             accept  docs/guide.md:3  ->  src/lib.rs#add  failed -> passed\n",
+            "the settings row leads; the LF link still passes and has no row"
+        );
+        assert_eq!(text.stderr, format!("{PREVIEW_NOTE}\n"));
+        let json = json.json();
+        assert_eq!(
+            at(&json, "/data/settings_change"),
+            serde_json::json!({ "line_endings": { "from": "exact", "to": "normalize" } }),
+        );
+        let errors = schema_violations(&json);
+        assert!(errors.is_empty(), "schema violations: {errors:?} in {json}");
+        assert_eq!(project.files(), before, "a preview must not write any file");
+    }
+
+    #[test]
+    fn mismatch_full_update_yes_rewrites_header_and_accepts_crlf_links() {
+        let project = project_recorded_exact();
+        let lock_before = project.lock().expect("the fixture lockfile should exist");
+
+        let run = project.update(&["--json", "update", "--yes"]);
+
+        assert_eq!(run.exit_code(), 0, "stderr: {}", run.stderr);
+        assert_eq!(
+            change_summaries(&run.json()),
+            [(
+                "\"accept\"".to_owned(),
+                "\"failed\"".to_owned(),
+                "\"docs/guide.md\"".to_owned()
+            )],
+            "only the CRLF link's hash changes under normalize"
+        );
+        assert_eq!(recorded_line_endings(&project), LineEndings::Normalize);
+        let lock_after = project.lock().expect("the lockfile should still exist");
+        let plain = lock_before
+            .iter()
+            .find(|(key, _)| key.source.as_str() == "docs/plain.md")
+            .expect("the LF link should be recorded");
+        assert_eq!(
+            lock_after.get(plain.0),
+            Some(plain.1),
+            "the LF hash is the same"
+        );
+        assert_eq!(
+            project.check_all(),
+            Summary {
+                passed: 2,
+                ..Summary::default()
+            },
+        );
+    }
+
+    #[test]
+    fn mismatch_with_paths_is_settings_mismatch_78() {
+        let project = project_recorded_exact();
+        let before = project.files();
+
+        let run = project.update(&["update", "docs/guide.md", "--yes"]);
+
+        let error = run
+            .result
+            .as_ref()
+            .expect_err("a narrowed update can't migrate the lockfile");
+        assert_eq!(
+            (error.code(), run.exit_code()),
+            ("lock/settings-mismatch", 78)
+        );
+        assert_eq!(
+            error.to_string(),
+            "supdoc.lock was written with line-endings = \"exact\", but the default is \
+             \"normalize\""
+        );
+        assert_eq!(run.stdout, "");
+        assert_eq!(project.files(), before, "nothing is written on a mismatch");
+    }
+
+    #[test]
+    fn mismatch_with_narrowed_state_is_settings_mismatch_78() {
+        let project = project_recorded_exact();
+        let before = project.files();
+
+        for state in ["failed", "new", "obsolete"] {
+            let run = project.update(&["update", "--state", state, "--yes"]);
+
+            let error = run
+                .result
+                .as_ref()
+                .expect_err("an update without every migration state can't migrate");
+            assert_eq!(
+                (error.code(), run.exit_code()),
+                ("lock/settings-mismatch", 78),
+                "--state {state}"
+            );
+        }
+        assert_eq!(project.files(), before, "nothing is written on a mismatch");
+    }
+
+    #[test]
+    fn settings_only_change_counts_as_a_change() {
+        let project = Project::new();
+        project.write("supdoc.config.toml", EXACT_CONFIG);
+        project.record_all();
+        project.write("supdoc.config.toml", "");
+        let lock_before = project.lock().expect("the fixture lockfile should exist");
+
+        let preview = project.update(&["update"]);
+        let applied = project.update(&["update", "--yes"]);
+
+        assert_eq!(
+            preview.stdout,
+            "settings  line-endings  exact -> normalize\n"
+        );
+        assert_eq!(preview.stderr, format!("{PREVIEW_NOTE}\n"));
+        assert_eq!(applied.exit_code(), 0, "stderr: {}", applied.stderr);
+        assert_eq!(
+            applied.stderr,
+            "supdoc.lock: line-endings set to normalize\n"
+        );
+        assert_eq!(recorded_line_endings(&project), LineEndings::Normalize);
+        let lock_after = project.lock().expect("the lockfile should still exist");
+        assert!(
+            lock_after.iter().eq(lock_before.iter()),
+            "an LF-only project keeps every hash"
+        );
+        let again = project.update(&["update"]);
+        assert_eq!(
+            again.stderr,
+            format!("{NOTHING_NOTE}\n"),
+            "the migration is done"
+        );
     }
 
     /// Every way `json` breaks the schema `schema()` publishes for `supdoc update`.

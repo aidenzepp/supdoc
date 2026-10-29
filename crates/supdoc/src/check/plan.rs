@@ -3,7 +3,7 @@
 //! The preview is this value rendered, and `--yes` writes [`UpdatePlan::next`].
 
 use super::model::{LinkReport, Report};
-use crate::hash::Hash;
+use crate::hash::{Hash, HashSettings};
 use crate::link::LinkKey;
 use crate::lock::model::Lockfile;
 use crate::scan::model::{Scan, TargetState};
@@ -14,9 +14,29 @@ use crate::state::LinkState;
 pub struct UpdatePlan {
     /// Every lock entry that would change, in report order.
     pub changes: Vec<LockChange>,
+    /// The hash settings the lockfile is re-recorded under, when they differ from the ones it
+    /// records (B.5). A change of settings alone is a change: `next` is then `Some`.
+    pub settings: Option<SettingsChange>,
     /// The lockfile after the changes, or `None` when there is nothing to do, so the file isn't
     /// rewritten and its modification time and git status stay quiet.
     pub next: Option<Lockfile>,
+}
+
+/// The lockfile's recorded hash settings, and the different ones the config resolves to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettingsChange {
+    /// The settings the lockfile records.
+    pub from: HashSettings,
+    /// The settings the config resolves to, which the scan hashed with.
+    pub to: HashSettings,
+}
+
+impl SettingsChange {
+    /// The change from `from` to `to`, or `None` when they are the same.
+    #[must_use]
+    pub fn between(from: HashSettings, to: HashSettings) -> Option<Self> {
+        (from != to).then_some(Self { from, to })
+    }
 }
 
 /// One change to the lockfile.
@@ -30,20 +50,29 @@ pub enum LockChange {
     Remove(LinkKey),
 }
 
-/// Plans what `update` would do for the links in `states` (05 C9).
+/// Plans what `update` would do for the links in `states` (05 C9), re-recording the lockfile
+/// under `settings`, the hash settings `scan` hashed with.
 ///
 /// `broken` links are never recorded: there is no code to hash (05 C7). A link that moved keys
 /// brings its old entry's hash along. That hash is replaced by the current one only when `failed`
 /// is selected, so moving a link never accepts drift by itself. Moving needs `new` to be selected.
+///
+/// When `settings` differ from the lock's, every link whose hash they change looks `failed`, and
+/// is accepted like any other. Entries the plan leaves alone keep their old hashes under the new
+/// settings (B-Q4), so the caller plans a settings change only for a full update: no `[PATHS]`
+/// and every state from `failed`, `new` and `obsolete` selected (B.5).
 #[must_use]
 pub fn plan_update(
     report: &Report,
     scan: &Scan,
     lock: &Lockfile,
     states: &[LinkState],
+    settings: HashSettings,
 ) -> UpdatePlan {
     let selected = |state: LinkState| states.contains(&state);
+    let settings_change = SettingsChange::between(lock.hash_settings(), settings);
     let mut next = lock.clone();
+    next.set_hash_settings(settings);
     let mut changes = Vec::new();
 
     for link in &report.links {
@@ -71,8 +100,9 @@ pub fn plan_update(
     }
 
     UpdatePlan {
-        next: (!changes.is_empty()).then_some(next),
+        next: (!changes.is_empty() || settings_change.is_some()).then_some(next),
         changes,
+        settings: settings_change,
     }
 }
 
@@ -107,6 +137,7 @@ mod tests {
     use super::*;
     use crate::check::reconcile::reconcile;
     use crate::finding::{Finding, Severity};
+    use crate::hash::LineEndings;
     use crate::scan::model::{ScannedLink, Scope};
 
     fn key(source: &str, symbol: &str) -> LinkKey {
@@ -152,7 +183,7 @@ mod tests {
 
     fn plan(scan: &Scan, lock: &Lockfile, states: &[LinkState]) -> UpdatePlan {
         let report = reconcile(scan, lock, &Scope::All);
-        plan_update(&report, scan, lock, states)
+        plan_update(&report, scan, lock, states, lock.hash_settings())
     }
 
     const DEFAULT_STATES: [LinkState; 3] = [LinkState::Failed, LinkState::New, LinkState::Obsolete];
@@ -255,6 +286,33 @@ mod tests {
 
         assert_eq!(plan.changes, []);
         assert_eq!(plan.next, None, "nothing to do means no rewrite");
+    }
+
+    #[test]
+    fn update_plan_under_new_settings_rewrites_the_header_without_entry_changes() {
+        let add = key("docs/a.md", "add");
+        let scan = scan_of(vec![(add.clone(), present(b"v1"))]);
+        let lock = lock_of(&[(&add, b"v1")]);
+        let exact = HashSettings {
+            line_endings: LineEndings::Exact,
+        };
+        let report = reconcile(&scan, &lock, &Scope::All);
+
+        let plan = plan_update(&report, &scan, &lock, &DEFAULT_STATES, exact);
+
+        assert_eq!(plan.changes, [], "the one link still passes");
+        assert_eq!(
+            plan.settings,
+            Some(SettingsChange {
+                from: HashSettings::default(),
+                to: exact
+            })
+        );
+        let next = plan
+            .next
+            .expect("a settings change alone should rewrite the lockfile");
+        assert_eq!(next.hash_settings(), exact);
+        assert_eq!(next.get(&add), Some(Hash::digest(b"v1")));
     }
 
     #[test]

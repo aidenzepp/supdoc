@@ -61,6 +61,21 @@ fn update_applied_text_matches_golden() {
 }
 
 #[test]
+fn update_settings_preview_text_matches_golden() {
+    // `clean` records under the default, normalize. Switching to exact with CRLF code makes every
+    // link's hash change, so the migration preview has the settings row and one accept per link.
+    let project = Project::clean();
+    project.write(
+        "supdoc.config.toml",
+        "# Project settings\n[namespaces]\ncore = \"src\"\n\n[features.hash]\nline-endings = \"exact\"\n",
+    );
+    let lib = std::fs::read_to_string(project.path().join("src/lib.rs"))
+        .expect("the fixture's src/lib.rs should be readable");
+    project.write("src/lib.rs", &lib.replace('\n', "\r\n"));
+    golden("update_settings_preview", &project, &["update"]);
+}
+
+#[test]
 fn fix_preview_text_matches_golden() {
     golden("fix_preview", &Project::dirty(), &["fix"]);
 }

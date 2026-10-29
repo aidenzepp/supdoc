@@ -162,6 +162,39 @@
       ],
       "type": "object"
     },
+    "LineEndings": {
+      "description": "How line endings are treated before hashing (01 D10, 03 R6).",
+      "oneOf": [
+        {
+          "const": "normalize",
+          "description": "Each CR immediately followed by LF is dropped before hashing (B.4).",
+          "type": "string"
+        },
+        {
+          "const": "exact",
+          "description": "Every byte is hashed as is.",
+          "type": "string"
+        }
+      ]
+    },
+    "LineEndingsChange": {
+      "description": "One setting's recorded value and the value it is re-recorded with.",
+      "properties": {
+        "from": {
+          "$ref": "#/$defs/LineEndings",
+          "description": "The value the lockfile records."
+        },
+        "to": {
+          "$ref": "#/$defs/LineEndings",
+          "description": "The value the config resolves to."
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "type": "object"
+    },
     "LinkKey": {
       "description": "Identity of one lock entry (02 L2). Field order is the sort order (02 L1).",
       "properties": {
@@ -298,6 +331,19 @@
       ],
       "type": "object"
     },
+    "SettingsChangeJson": {
+      "description": "How the lockfile's hash settings change, as JSON shows it:\n`{\"line_endings\": {\"from\": \"exact\", \"to\": \"normalize\"}}` (B-Q6).",
+      "properties": {
+        "line_endings": {
+          "$ref": "#/$defs/LineEndingsChange",
+          "description": "`[features.hash] line-endings`."
+        }
+      },
+      "required": [
+        "line_endings"
+      ],
+      "type": "object"
+    },
     "SeverityJson": {
       "description": "A severity as JSON shows it.",
       "oneOf": [
@@ -386,6 +432,17 @@
             "$ref": "#/$defs/ChangeJson"
           },
           "type": "array"
+        },
+        "settings_change": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SettingsChangeJson"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The hash settings the lockfile is re-recorded under. Left out when they don't change."
         },
         "states": {
           "description": "The `--state` values in effect.",
