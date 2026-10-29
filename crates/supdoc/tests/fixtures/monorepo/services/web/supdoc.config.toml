@@ -1,0 +1,2 @@
+extends = "../../supdoc.config.toml"
+include = ["docs"]
