@@ -184,7 +184,6 @@ fn source_links(
                 location,
                 snippet,
                 written,
-                destination_range: raw.destination_range.clone(),
             }),
             Err(error) => {
                 let key = unknown_namespace_key(config, languages, &raw, source, &error);
@@ -355,7 +354,6 @@ mod tests {
         )
     )]
 
-    use std::ops::Range;
     use std::path::{Path, PathBuf};
 
     use tempfile::TempDir;
@@ -489,39 +487,6 @@ mod tests {
     }
 
     // Scanning
-
-    #[test]
-    fn two_uses_of_one_label_share_their_definition_destination_range() {
-        let text = "See [add][a] and [again][a].\n\n[a]: ../src/lib.rs#add\n";
-        let project = Project::new();
-        project.write("src/lib.rs", LIB);
-        project.write("docs/guide.md", text);
-        let languages = Languages::builtin();
-        let path = AbsolutePath::new(&project.root.join("docs/guide.md"))
-            .expect("the temporary directory should be absolute");
-        let file = SourceFile::read(path, &languages).expect("the fixture source should read");
-        let source: SourcePath = "docs/guide.md"
-            .parse()
-            .expect("the fixture source path should be valid");
-        let mut found = SourceLinks::default();
-
-        source_links(&project.config(), &languages, &source, &file, &mut found);
-
-        let ranges: Vec<Range<usize>> = found
-            .occurrences
-            .iter()
-            .map(|occurrence| occurrence.destination_range.clone())
-            .collect();
-        assert_eq!(
-            ranges.len(),
-            2,
-            "both uses are links: {:?}",
-            found.occurrences
-        );
-        assert_eq!(ranges.first(), ranges.last(), "one definition, one range");
-        let written = ranges.first().and_then(|range| text.get(range.clone()));
-        assert_eq!(written, Some("../src/lib.rs#add"));
-    }
 
     #[test]
     fn markdown_and_code_comment_links_both_appear() {
