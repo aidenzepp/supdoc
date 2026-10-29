@@ -1,0 +1,13 @@
+---
+source: crates/supdoc/tests/output/goldens.rs
+expression: project.run(args).transcript()
+---
+$ supdoc fix
+exit: 0
+--- stdout
+docs/api.md:3:5
+  - [ad](../src/lib.rs#ad)
+  + [ad](../src/lib.rs#add)
+
+--- stderr
+1 fix in 1 file. Nothing written. Run the same command with --yes to apply.

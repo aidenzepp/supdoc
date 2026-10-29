@@ -1,0 +1,14 @@
+---
+source: crates/supdoc/tests/output/goldens.rs
+expression: project.run(args).transcript()
+---
+$ supdoc fix --yes
+exit: 0
+--- stdout
+docs/api.md:3:5
+  - [ad](../src/lib.rs#ad)
+  + [ad](../src/lib.rs#add)
+  = now new
+
+--- stderr
+Fixed 1 link in 1 file.

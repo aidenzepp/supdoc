@@ -24,3 +24,22 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+
+  anc:
+    name: anc audit (agent-native CLI standard)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install anc
+        run: cargo install agentnative --version 0.6.0 --locked
+      - name: Build
+        run: cargo build --workspace
+      - name: Audit
+        # anc exits 1 when only SHOULD/MAY audits warn, 2 when a MUST audit fails, and 3 when an
+        # audit could not run. Warnings are reported in the log; MUST failures fail the job.
+        run: |
+          status=0
+          anc audit . || status=$?
+          if [ "$status" -ge 2 ]; then exit "$status"; fi

@@ -1,0 +1,37 @@
+---
+source: crates/supdoc/tests/output/goldens.rs
+expression: project.run(args).transcript()
+---
+$ supdoc check --verbose
+exit: 1
+--- stdout
+error[resolve/not-found]: no symbol `ad` in [ROOT]/src/lib.rs
+ --> docs/api.md:3:5
+  |
+3 | See [ad](../src/lib.rs#ad).
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: Did you mean `add`, `mul`, `sub`? `supdoc resolve [ROOT]/src/lib.rs` lists every symbol
+
+error[link/failed]: `src/lib.rs#add` changed since this doc was confirmed
+ --> docs/guide.md:3:5
+  |
+3 | The [add](../src/lib.rs#add) function sums.
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: reread this, and if it's still accurate run `supdoc update docs/guide.md --yes`
+
+passed  docs/guide.md -> core:lib.rs#mul
+
+passed  docs/old.md -> src/lib.rs#sub
+
+error[link/new]: this link isn't recorded in supdoc.lock yet
+ --> docs/setup.md:3:5
+  |
+3 | The [mul](../src/lib.rs#mul) function multiplies.
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: once it's accurate, run `supdoc update --state new --yes`
+
+Links  1 failed, 1 broken, 1 new, 2 passed
+--- stderr

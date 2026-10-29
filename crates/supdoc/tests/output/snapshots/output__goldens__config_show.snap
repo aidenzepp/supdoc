@@ -1,0 +1,13 @@
+---
+source: crates/supdoc/tests/output/goldens.rs
+expression: project.run(args).transcript()
+---
+$ supdoc config show
+exit: 0
+--- stdout
+config     supdoc.config.toml
+lockfile   supdoc.lock
+include    **  (default)
+exclude    (none)  (default)
+namespace  core -> src  (supdoc.config.toml)
+--- stderr

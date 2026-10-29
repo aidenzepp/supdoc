@@ -1,0 +1,15 @@
+---
+source: crates/supdoc/tests/output/goldens.rs
+expression: project.run(args).transcript()
+---
+$ supdoc chek
+exit: 2
+--- stdout
+--- stderr
+error: unrecognized subcommand 'chek'
+
+  tip: some similar subcommands exist: 'schema', 'check'
+
+Usage: supdoc [OPTIONS] <COMMAND>
+
+For more information, try '--help'.

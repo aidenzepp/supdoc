@@ -1,0 +1,14 @@
+---
+source: crates/supdoc/tests/output/goldens.rs
+expression: project.run(args).transcript()
+---
+$ supdoc list
+exit: 0
+--- stdout
+broken    docs/api.md:3  ->  src/lib.rs#ad
+failed    docs/guide.md:3  ->  src/lib.rs#add
+passed    docs/guide.md:4  ->  core:lib.rs#mul
+obsolete  docs/old.md  ->  src/lib.rs#sub
+new       docs/setup.md:3  ->  src/lib.rs#mul
+Links  1 failed, 1 broken, 1 new, 1 passed, 1 obsolete
+--- stderr

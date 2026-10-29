@@ -1,0 +1,5 @@
+# Settings for `anc audit .` (anc.dev), which CI runs (06 X17).
+
+[p6]
+# supdoc's action verbs (06 X2), beyond anc's built-in list of standard names.
+domain_verbs = ["check", "fix", "resolve"]

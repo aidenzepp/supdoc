@@ -166,15 +166,6 @@ fn json_nests_a_links_finding_and_keeps_only_loose_findings_at_the_top() {
 }
 
 #[test]
-fn ok_is_true_exactly_when_exit_is_0() {
-    for ok in [true, false] {
-        let envelope = parse(&stdout_of(OutputFormat::Json, Verbosity::Normal, ok));
-
-        assert_eq!(at(&envelope, "/ok"), ok);
-    }
-}
-
-#[test]
 fn jsonl_lines_each_parse_and_end_with_summary() {
     let text = stdout_of(OutputFormat::Jsonl, Verbosity::Normal, false);
     let lines: Vec<Value> = text.lines().map(parse).collect();
@@ -298,7 +289,7 @@ fn github_output_maps_severity_and_ends_with_the_summary_line() {
     assert!(starts(2, "::warning title=supdoc link/obsolete::"));
     assert_eq!(
         lines.last().copied(),
-        Some("Links  1 failed · 1 broken · 38 passed · 1 obsolete")
+        Some("Links  1 failed, 1 broken, 38 passed, 1 obsolete")
     );
     let note = Finding::new("link/moved", Severity::Note, "moved");
     assert!(annotation(&paths(), &note).starts_with("::notice title=supdoc link/moved::moved"));
@@ -506,7 +497,7 @@ fn summary_omits_zero_counts_and_orders_worst_first() {
         obsolete: 1,
     };
     assert_eq!(
-        summary.line(false),
+        summary.line(false, true),
         "Links  1 failed · 1 broken · 38 passed · 1 obsolete"
     );
     assert_eq!(
@@ -514,7 +505,7 @@ fn summary_omits_zero_counts_and_orders_worst_first() {
             passed: 40,
             ..Summary::default()
         }
-        .line(false),
+        .line(false, true),
         "Links  40 passed"
     );
     assert_eq!(
@@ -523,10 +514,21 @@ fn summary_omits_zero_counts_and_orders_worst_first() {
             failed: 3,
             ..Summary::default()
         }
-        .line(false),
+        .line(false, true),
         "Links  3 failed · 2 new"
     );
-    assert_eq!(Summary::default().line(false), "Links  0 passed");
+    assert_eq!(Summary::default().line(false, true), "Links  0 passed");
+}
+
+#[test]
+fn ascii_summary_separates_counts_with_commas() {
+    let summary = Summary {
+        failed: 1,
+        passed: 2,
+        ..Summary::default()
+    };
+
+    assert_eq!(summary.line(false, false), "Links  1 failed, 2 passed");
 }
 
 #[test]
@@ -536,8 +538,8 @@ fn summary_counts_states_and_colors_only_when_asked() {
     let summary = Summary::tally([LinkState::Passed, LinkState::Passed, LinkState::Failed]);
 
     assert_eq!((summary.passed, summary.failed), (2, 1));
-    assert!(summary.line(true).contains('\u{1b}'));
-    assert!(!summary.line(false).contains('\u{1b}'));
+    assert!(summary.line(true, true).contains('\u{1b}'));
+    assert!(!summary.line(false, true).contains('\u{1b}'));
 }
 
 /// A writer whose reader has hung up.

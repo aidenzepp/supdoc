@@ -26,4 +26,4 @@ warning[scan/unreadable-dir]: skipped /repo/private: permission denied
  |
  = help: fix the directory's permissions, or add it to `exclude` in supdoc.config.toml
 
-Links  1 failed · 1 broken · 38 passed · 1 obsolete
+Links  1 failed, 1 broken, 38 passed, 1 obsolete

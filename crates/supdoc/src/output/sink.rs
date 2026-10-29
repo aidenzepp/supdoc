@@ -144,7 +144,7 @@ impl Output {
                 if let Some(summary) = report.summary()
                     && self.settings.verbosity.shows_summary()
                 {
-                    writeln!(bytes, "{}", summary.line(false))?;
+                    writeln!(bytes, "{}", summary.line(false, self.settings.unicode))?;
                 }
             }
         }

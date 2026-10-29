@@ -1,0 +1,12 @@
+---
+source: crates/supdoc/tests/output/goldens.rs
+expression: project.run(args).transcript()
+---
+$ supdoc namespace rename core base
+exit: 0
+--- stdout
+config  supdoc.config.toml:3  core = "src"  ->  base = "src"
+link  docs/guide.md:4:11  core:lib.rs#mul  ->  base:lib.rs#mul
+lock  supdoc.lock  1 entry
+--- stderr
+1 config entry, 1 link in 1 file, 1 lock entry. Nothing written. Run the same command with --yes to apply.

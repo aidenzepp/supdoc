@@ -9,7 +9,7 @@
     )
 )]
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, IsTerminal, Write};
 use std::path::{MAIN_SEPARATOR_STR, Path};
 use std::process::ExitCode;
@@ -165,17 +165,34 @@ fn choice(color: ColorChoice) -> anstream::ColorChoice {
     }
 }
 
-/// What `Output` needs, decided once from the flags and the terminal.
-fn settings(global: &GlobalArgs, cwd: AbsolutePath) -> OutputSettings {
-    let color = match global.color {
+/// Whether text output carries color (06 X13).
+///
+/// `--color always` and `never` decide alone. `auto` colors only when stdout, the stream the data
+/// goes to, is a terminal, `NO_COLOR` is unset or empty, and `TERM` isn't `dumb`.
+fn color_on(
+    choice: ColorChoice,
+    stdout_is_terminal: bool,
+    no_color: Option<&OsStr>,
+    term: Option<&str>,
+) -> bool {
+    match choice {
         ColorChoice::Always => true,
         ColorChoice::Never => false,
         ColorChoice::Auto => {
-            io::stderr().is_terminal()
-                && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())
+            stdout_is_terminal && no_color.is_none_or(OsStr::is_empty) && term != Some("dumb")
         }
-    };
+    }
+}
+
+/// What `Output` needs, decided once from the flags and the terminal.
+fn settings(global: &GlobalArgs, cwd: AbsolutePath) -> OutputSettings {
     let term = std::env::var("TERM").ok();
+    let color = color_on(
+        global.color,
+        io::stdout().is_terminal(),
+        std::env::var_os("NO_COLOR").as_deref(),
+        term.as_deref(),
+    );
     let width = std::env::var("COLUMNS")
         .ok()
         .and_then(|columns| columns.parse().ok())
@@ -343,6 +360,45 @@ mod tests {
             claude.as_ref().map(AsRef::<Path>::as_ref),
             Some(Path::new("/home/me/.claude-alt"))
         );
+    }
+
+    #[test]
+    fn auto_color_follows_the_stdout_terminal() {
+        let auto = |terminal| color_on(ColorChoice::Auto, terminal, None, Some("xterm"));
+
+        assert!(auto(true), "a terminal stdout should be colored");
+        assert!(!auto(false), "a piped or redirected stdout should be plain");
+    }
+
+    #[test]
+    fn no_color_and_dumb_term_turn_auto_color_off() {
+        let no_color = OsString::from("1");
+        let empty = OsString::new();
+
+        assert!(!color_on(
+            ColorChoice::Auto,
+            true,
+            Some(&no_color),
+            Some("xterm")
+        ));
+        assert!(
+            color_on(ColorChoice::Auto, true, Some(&empty), Some("xterm")),
+            "an empty NO_COLOR should not turn color off"
+        );
+        assert!(!color_on(ColorChoice::Auto, true, None, Some("dumb")));
+    }
+
+    #[test]
+    fn color_always_and_never_ignore_the_terminal_and_environment() {
+        let no_color = OsString::from("1");
+
+        assert!(color_on(
+            ColorChoice::Always,
+            false,
+            Some(&no_color),
+            Some("dumb")
+        ));
+        assert!(!color_on(ColorChoice::Never, true, None, Some("xterm")));
     }
 
     #[test]

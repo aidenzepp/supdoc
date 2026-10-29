@@ -1,0 +1,12 @@
+---
+source: crates/supdoc/tests/output/goldens.rs
+expression: project.run(args).transcript()
+---
+$ supdoc check
+exit: 0
+--- stdout
+note[check/moved]: docs/legacy.md:3 → src/lib.rs#sub carried its history from docs/old.md
+--> docs/legacy.md:3:5
+
+Links  3 passed
+--- stderr

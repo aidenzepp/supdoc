@@ -1,0 +1,11 @@
+---
+source: crates/supdoc/tests/output/goldens.rs
+expression: project.run(args).transcript()
+---
+$ supdoc init
+exit: 1
+--- stdout
+--- stderr
+error[cli/init-exists]: [ROOT]/supdoc.config.toml already exists
+ |
+ = help: The existing file wasn't changed. Edit it directly, or delete it and run `supdoc init`.

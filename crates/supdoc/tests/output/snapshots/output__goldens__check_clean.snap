@@ -1,0 +1,9 @@
+---
+source: crates/supdoc/tests/output/goldens.rs
+expression: project.run(args).transcript()
+---
+$ supdoc check
+exit: 0
+--- stdout
+Links  3 passed
+--- stderr

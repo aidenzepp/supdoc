@@ -1,0 +1,20 @@
+---
+source: crates/supdoc/tests/output/goldens.rs
+expression: project.run(args).transcript()
+---
+$ supdoc update
+exit: 0
+--- stdout
+accept  docs/guide.md:3  ->  src/lib.rs#add  failed -> passed
+remove  docs/old.md      ->  src/lib.rs#sub  obsolete
+record  docs/setup.md:3  ->  src/lib.rs#mul  new
+error[resolve/not-found]: no symbol `ad` in [ROOT]/src/lib.rs
+ --> docs/api.md:3:5
+  |
+3 | See [ad](../src/lib.rs#ad).
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: update can't record a broken link; repair it with `supdoc fix docs/api.md --yes`
+
+--- stderr
+Nothing written. Run the same command with --yes to apply.

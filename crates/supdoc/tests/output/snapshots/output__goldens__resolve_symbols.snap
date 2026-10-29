@@ -1,0 +1,11 @@
+---
+source: crates/supdoc/tests/output/goldens.rs
+expression: project.run(args).transcript()
+---
+$ supdoc resolve src/lib.rs
+exit: 0
+--- stdout
+src/lib.rs#add
+src/lib.rs#mul
+src/lib.rs#sub
+--- stderr

@@ -1,0 +1,24 @@
+---
+source: crates/supdoc/tests/output/goldens.rs
+expression: project.run(args).transcript()
+---
+$ supdoc init --dry-run
+exit: 0
+--- stdout
+# supdoc.config.toml. Every key is optional.
+
+# Files to scan for links. Globs, relative to this file's directory.
+# Each pattern also matches everything beneath it. The default is everything.
+# include = ["**"]
+
+# Removed from include. Exclude always wins.
+# exclude = []
+
+# Another config to inherit from, relative to this file.
+# extends = "../../supdoc.config.toml"
+
+# Short names for directories, relative to this file.
+# [namespaces]
+# auth = "services/auth"
+--- stderr
+Nothing written. Run `supdoc init` to write supdoc.config.toml.

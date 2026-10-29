@@ -58,9 +58,10 @@ impl Summary {
 
     /// `Links  1 failed · 1 broken · 38 passed · 1 obsolete`: worst first, zero counts left out.
     ///
-    /// A run with no links at all says `0 passed`, so the line is never empty.
+    /// A run with no links at all says `0 passed`, so the line is never empty. Without `unicode`
+    /// the counts are separated by `, ` instead of `·`, so the line is plain ASCII (07 G12).
     #[must_use]
-    pub fn line(&self, color: bool) -> String {
+    pub fn line(&self, color: bool, unicode: bool) -> String {
         const WORST_FIRST: [LinkState; 5] = [
             LinkState::Failed,
             LinkState::Broken,
@@ -76,7 +77,8 @@ impl Summary {
         if parts.is_empty() {
             parts.push(paint(color, LinkState::Passed, "0 passed"));
         }
-        format!("Links  {}", parts.join(" · "))
+        let separator = if unicode { " · " } else { ", " };
+        format!("Links  {}", parts.join(separator))
     }
 }
 
@@ -108,5 +110,5 @@ pub fn render_summary(
     if !context.verbosity.shows_summary() {
         return Ok(());
     }
-    writeln!(out, "{}", summary.line(context.color))
+    writeln!(out, "{}", summary.line(context.color, context.unicode))
 }
