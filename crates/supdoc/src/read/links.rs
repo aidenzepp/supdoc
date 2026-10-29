@@ -828,4 +828,55 @@ mod tests {
             ],
         );
     }
+
+    /// Pinned from `printf` of the file's bytes piped to `shasum -a 256`, not from supdoc.
+    const HASH_WITH_B: &str = "a75d72742a6c0fb87ad0e9a2abd32c4f7bc13863cfb597f3d7b7652c78675779";
+    /// The same bytes with `b.md` spelled `c.md`.
+    const HASH_WITH_C: &str = "a415e4296c9a189b7b6ae079968e260507e2290831ed281d5a90406615201863";
+
+    #[test]
+    fn comment_link_resolves_relative_to_the_code_file() {
+        let file = rust_file("fn a() {}\n\n// see [b](../docs/b.md)\n");
+        let raw = links(&file)
+            .into_iter()
+            .next()
+            .expect("the comment holds one link");
+        let source = crate::link::SourcePath::from_relative(Path::new("src/server.rs"))
+            .expect("the fixture source path should be relative");
+
+        let parsed = crate::link::destination::parse_destination(
+            &raw,
+            &source,
+            &std::collections::BTreeMap::new(),
+            &crate::read::cartridge::Languages::builtin(),
+        );
+
+        let expected = crate::link::destination::ParsedLink {
+            target: "docs/b.md"
+                .parse()
+                .expect("the expected target should be valid"),
+            symbol: None,
+        };
+        assert_eq!(
+            parsed,
+            Some(Ok(expected)),
+            "`../docs/b.md` written in `src/server.rs` is `docs/b.md` from the project root",
+        );
+    }
+
+    #[test]
+    fn editing_a_comment_link_changes_whole_file_hash_of_its_file() {
+        let before = rust_file("fn a() {}\n\n// see [b](../docs/b.md)\n");
+        let after = rust_file("fn a() {}\n\n// see [b](../docs/c.md)\n");
+
+        assert_eq!(
+            crate::read::hash::hash_file(&before).to_string(),
+            HASH_WITH_B
+        );
+        assert_eq!(
+            crate::read::hash::hash_file(&after).to_string(),
+            HASH_WITH_C,
+            "a whole-file hash covers comments, so editing a link in one changes it (03 R6)",
+        );
+    }
 }

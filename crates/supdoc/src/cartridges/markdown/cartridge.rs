@@ -79,6 +79,7 @@ mod tests {
     use crate::link::SymbolPath;
     use crate::path::AbsolutePath;
     use crate::read::cartridge::{Languages, SourceFile};
+    use crate::read::hash::hash_symbol;
     use crate::read::links::links;
 
     const GUIDE: &str =
@@ -134,6 +135,38 @@ mod tests {
             links(&file).len(),
             1,
             "the one link in the body should be read through the registered cartridge"
+        );
+    }
+
+    /// The hex SHA-256 of the section `raw` names in `GUIDE`.
+    fn section_hash(raw: &str) -> String {
+        let file = registered_file("guide.md");
+        let query: SymbolPath = raw.parse().expect("the fixture symbol should be valid");
+        let table = file.language().symbols(&file);
+        let symbol = table
+            .resolve(file.path(), &query)
+            .unwrap_or_else(|error| panic!("`{raw}` should resolve: {error}"));
+        hash_symbol(&file, symbol).to_string()
+    }
+
+    /// Pinned from `printf` of the section's bytes piped to `shasum -a 256`, not from supdoc: a
+    /// section runs from its heading to the next heading of the same or a higher level.
+    #[test]
+    fn markdown_section_hashes_are_pinned_to_independent_sha256() {
+        assert_eq!(
+            section_hash("whats-new"),
+            "0f1311f2de2734964c2ff0a1df8bef599fec308f179542477797cb323ecfcb06",
+            "`## What's new` through the blank line before `## Fixes`",
+        );
+        assert_eq!(
+            section_hash("fixes"),
+            "24a186ba602b4335f8a11d784b44b4421711733df8d922231ed52965208e2380",
+            "`## Fixes` to the end of the file",
+        );
+        assert_eq!(
+            section_hash("news"),
+            "8aeceb4240bb33ae5c1aa610838fdb9a7c5b66c0e88b808c8570d2fd38f068a3",
+            "`# News` holds both subsections, so it is the whole file",
         );
     }
 }
