@@ -151,43 +151,4 @@ pub mod check {
 pub mod output;
 
 /// The command-line interface: arguments and commands.
-pub mod cli {
-    /// Command-line argument definitions.
-    pub mod args;
-
-    /// Example invocations shown in help.
-    pub mod examples;
-
-    /// Parsing arguments, including JSON usage errors.
-    pub mod parse;
-
-    /// `supdoc init`.
-    pub mod init;
-
-    /// `supdoc completions`.
-    pub mod completions;
-
-    /// `supdoc resolve`.
-    pub mod resolve;
-
-    /// `supdoc config show` and `supdoc namespace list`.
-    pub mod config;
-
-    /// `supdoc check`.
-    pub mod check;
-
-    /// `supdoc update`.
-    pub mod update;
-
-    /// `supdoc list`.
-    pub mod list;
-
-    /// `supdoc fix`.
-    pub mod fix;
-
-    /// `supdoc namespace rename`.
-    pub mod rename;
-
-    /// `supdoc skill install`.
-    pub mod skill;
-}
+pub mod cli;
