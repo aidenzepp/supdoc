@@ -15,7 +15,7 @@ link changes, `supdoc check` fails until someone rereads the doc and confirms it
 - `[text](src/lib.rs)` links a whole file. `[text](src/lib.rs#add)` links one symbol.
 - Nested symbols use dots: `#Config.validate`. Markdown headings are symbols too:
   `docs/guide.md#install`.
-- Paths are relative to the file the link is written in. A leading `/` means the project root.
+- Paths are relative to the file the link is written in. A leading `/` means the project root. Links stay inside the project root; for a monorepo, put `supdoc.config.toml` at the repo root.
 - `name:path#symbol` uses a namespace from `supdoc.config.toml`, such as `auth:src/session.rs#login`.
 - Links in code comments work the same way.
 - Before writing a symbol link, confirm it resolves: `supdoc resolve src/lib.rs add`. Without a

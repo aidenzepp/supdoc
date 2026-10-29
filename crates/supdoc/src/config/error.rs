@@ -203,11 +203,11 @@ fn parse_help(message: &str) -> Option<String> {
                 .to_owned(),
         )
     } else if message.contains("is an absolute path") {
-        Some("Write the path relative to this config file, such as `../srv/auth`".to_owned())
+        Some("Write the path relative to this config file, such as `services/auth`".to_owned())
     } else if message.ends_with("leaves this config's directory") {
         Some(
-            "Move the pattern into a config at or above that directory, or use a namespace for \
-             links into it"
+            "Links, namespaces and extends stay inside the project root. For a monorepo, put \
+             supdoc.config.toml at the repo root"
                 .to_owned(),
         )
     } else {
