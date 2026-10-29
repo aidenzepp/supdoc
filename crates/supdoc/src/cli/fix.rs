@@ -19,6 +19,7 @@ use crate::check::reconcile::reconcile;
 use crate::config::Config;
 use crate::finding::{Finding, Fix};
 use crate::link::{LinkKey, SourcePath};
+use crate::lock::error::LockError;
 use crate::lock::model::Lockfile;
 use crate::output::json::Envelope;
 use crate::output::text::{render_finding, visible};
@@ -33,6 +34,9 @@ use super::{CliError, Context, Outcome};
 
 /// The code of the finding for a source file `apply_fixes` could not write.
 const CODE_WRITE_FAILED: &str = "fix/write-failed";
+
+/// The code of the fatal error for sources rewritten while the lockfile could not be written.
+const CODE_LOCK_WRITE_FAILED: &str = "fix/lock-write-failed";
 
 /// The code of the finding for a source file that changed between the scan and the write.
 const CODE_FILE_CHANGED: &str = "fix/file-changed";
@@ -135,7 +139,12 @@ impl Planned {
             .plan
             .fixes
             .iter()
-            .map(|planned| FixRecord::new(planned, None))
+            .map(|planned| {
+                let moved = planned.moved.clone().filter(|(old, new)| {
+                    self.lock.get(old).is_some() && self.lock.get(new).is_none()
+                });
+                FixRecord::new(planned, moved, None)
+            })
             .collect();
         let report = FixReport {
             applied: false,
@@ -161,24 +170,23 @@ impl Planned {
     ///
     /// # Errors
     ///
-    /// Returns the lockfile's own error when it cannot be written, the re-scan's own error,
-    /// `cli/fix-output` when the report cannot be written, and `fix/write-failed` (74) after the
-    /// report when a source file could not be written.
+    /// Returns the re-scan's own error, `cli/fix-output` when the report cannot be written, and
+    /// after the report `fix/lock-write-failed` (74) when the lockfile could not be written
+    /// (the fixed files are named) or `fix/write-failed` (74) when a source file could not be.
     fn apply(self, output: &mut Output) -> Result<Outcome, CliError> {
         let root = self.config.root();
         let FixResult { applied, skipped } = apply_fixes(&self.plan, root);
 
         let mut lock = self.lock.clone();
-        move_lock_entries(&mut lock, &applied);
-        if lock != self.lock {
-            lock.write(&lock_path(root)).map_err(|error| {
-                CliError::new(
-                    error.code(),
-                    error.to_string(),
-                    error.help(),
-                    error.exit_code(),
-                )
-            })?;
+        let mut moved = move_lock_entries(&mut lock, &applied);
+        let mut lock_failure = None;
+        if lock != self.lock
+            && let Err(error) = lock.write(&lock_path(root))
+        {
+            // The write is atomic, so the lockfile on disk is still the one that was read.
+            lock = self.lock.clone();
+            moved.clear();
+            lock_failure = Some(error);
         }
 
         let done: Vec<&PlannedFix> = self
@@ -201,7 +209,8 @@ impl Planned {
             .iter()
             .zip(new_ranges(&done))
             .map(|(planned, range)| {
-                FixRecord::new(planned, state_at(&states, &planned.fix.file, range))
+                let moved = planned.moved.clone().filter(|pair| moved.contains(pair));
+                FixRecord::new(planned, moved, state_at(&states, &planned.fix.file, range))
             })
             .collect();
 
@@ -217,7 +226,7 @@ impl Planned {
             fixes,
             findings: skipped,
         };
-        let ok = write_failed == 0 && !file_changed;
+        let ok = write_failed == 0 && !file_changed && lock_failure.is_none();
         output
             .report(&report, ok)
             .map_err(|error| output_failed(&error))?;
@@ -234,7 +243,11 @@ impl Planned {
             output.note(&note).map_err(|error| output_failed(&error))?;
         }
 
-        if write_failed > 0 {
+        if let Some(error) = lock_failure {
+            let changed: BTreeSet<&SourcePath> =
+                done.iter().map(|planned| &planned.fix.file).collect();
+            Err(lock_unwritten(&error, &changed))
+        } else if write_failed > 0 {
             Err(sources_unwritten(write_failed))
         } else if file_changed {
             Ok(Outcome::Failing)
@@ -342,6 +355,26 @@ fn sources_unwritten(files: usize) -> CliError {
     )
 }
 
+/// The error for source files that were rewritten while the lockfile could not be written.
+///
+/// The lockfile is untouched, so it still holds each fixed link's history under its old key.
+/// Rerunning `fix` finds nothing left to fix, so the help offers the two ways forward that work.
+fn lock_unwritten(error: &LockError, files: &BTreeSet<&SourcePath>) -> CliError {
+    let names: Vec<&str> = files.iter().map(|file| file.as_str()).collect();
+    CliError::new(
+        CODE_LOCK_WRITE_FAILED,
+        format!(
+            "fixed {}, but supdoc.lock could not be written: {error}",
+            names.join(", ")
+        ),
+        "supdoc.lock is unchanged and still holds the old links' history. \
+         Make it writable, then either restore those files and run `supdoc fix --yes` again \
+         to carry the history over, or run `supdoc update --yes` on them to lock the fixed \
+         links afresh without it",
+        CliError::IO_EXIT_CODE,
+    )
+}
+
 /// The error for a report that could not be written.
 fn output_failed(error: &OutputError) -> CliError {
     CliError::new(
@@ -433,8 +466,13 @@ pub(crate) struct FixRecord {
 }
 
 impl FixRecord {
-    /// The record of `planned`, with the state its link has after the fix when known.
-    fn new(planned: &PlannedFix, state: Option<LinkState>) -> Self {
+    /// The record of `planned`, with the lock entry that moved (or, in a preview, would move) and
+    /// the state its link has after the fix when known.
+    fn new(
+        planned: &PlannedFix,
+        moved: Option<(LinkKey, LinkKey)>,
+        state: Option<LinkState>,
+    ) -> Self {
         let Fix {
             file,
             range,
@@ -478,10 +516,7 @@ impl FixRecord {
             before,
             after: replacement.clone(),
             cause: finding.code.to_owned(),
-            moved: planned.moved.as_ref().map(|(from, to)| MovedJson {
-                from: from.clone(),
-                to: to.clone(),
-            }),
+            moved: moved.map(|(from, to)| MovedJson { from, to }),
             state,
             source: file.clone(),
             old_link,
@@ -793,6 +828,7 @@ mod tests {
     #[test]
     fn fix_preview_json_lists_each_fix_with_byte_range_and_applied_false() {
         let project = Project::new();
+        project.record_before_rename();
         let before = project.files();
 
         let run = project.run(&["--json", "fix"]);
@@ -820,6 +856,71 @@ mod tests {
             }]),
         );
         assert_eq!(project.files(), before, "a preview writes nothing");
+    }
+
+    #[test]
+    fn fix_json_without_a_lockfile_reports_no_move() {
+        let project = Project::new();
+
+        for args in [&["--json", "fix"][..], &["--json", "fix", "--yes"][..]] {
+            let run = project.run(args);
+
+            assert_eq!(run.exit_code(), 0, "stderr: {}", run.stderr);
+            assert_eq!(
+                run.json().pointer("/data/fixes/0/moved"),
+                None,
+                "`supdoc {}` has no lock entry to move, so it should report none",
+                args.join(" ")
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fix_yes_with_unwritable_lockfile_names_the_fixed_files_and_keeps_the_lock() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let project = Project::new();
+        project.record_before_rename();
+        let lock_before =
+            fs::read(project.path(LOCK_FILE_NAME)).expect("the lockfile should exist");
+        let root = project.path("");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o555))
+            .expect("the fixture root should become read-only");
+
+        let run = project.run(&["--json", "fix", "--yes"]);
+
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755))
+            .expect("the fixture root should become writable again");
+        assert_eq!(run.exit_code(), 74, "stderr: {}", run.stderr);
+        let json = run.json();
+        assert_eq!(at(&json, "/data/fixes/0/file"), "docs/guide.md");
+        assert_eq!(
+            json.pointer("/data/fixes/0/moved"),
+            None,
+            "no entry moved, so the report must not claim one did"
+        );
+        let error = run
+            .result
+            .as_ref()
+            .expect_err("a lockfile failure is fatal");
+        assert_eq!(error.code(), "fix/lock-write-failed");
+        assert!(
+            error.message().contains("docs/guide.md"),
+            "the error should name the fixed file: {}",
+            error.message()
+        );
+        assert!(
+            error.help().contains("supdoc update --yes") && error.help().contains("history"),
+            "the help should say how to recover the history: {}",
+            error.help()
+        );
+        assert_eq!(project.read("docs/guide.md"), FIXED_GUIDE);
+        assert_eq!(
+            fs::read(project.path(LOCK_FILE_NAME)).expect("the lockfile should still exist"),
+            lock_before,
+            "the lockfile is left as it was"
+        );
     }
 
     #[test]

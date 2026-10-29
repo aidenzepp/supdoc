@@ -359,15 +359,19 @@ fn write_failed(file: &SourcePath, error: &io::Error) -> Finding {
 /// Moves the lock entry of every rewritten link to its new key (05 C6), so a fixed link keeps its
 /// history: unchanged code reports `passed`, changed code reports `failed`.
 ///
-/// An entry is never overwritten: if the new key already has one, both stay as they are.
-pub fn move_lock_entries(lock: &mut Lockfile, applied: &[AppliedFix]) {
+/// An entry is never overwritten: if the new key already has one, both stay as they are. Returns
+/// the moves that happened, so a caller reports only those.
+pub fn move_lock_entries(lock: &mut Lockfile, applied: &[AppliedFix]) -> Vec<(LinkKey, LinkKey)> {
+    let mut moved = Vec::new();
     for (old, new) in applied.iter().filter_map(|applied| applied.moved.as_ref()) {
         if lock.get(new).is_none()
             && let Some(hash) = lock.remove(old)
         {
             let _previous = lock.insert(new.clone(), hash);
+            moved.push((old.clone(), new.clone()));
         }
     }
+    moved
 }
 
 #[cfg(test)]
@@ -605,7 +609,7 @@ mod tests {
                 moved: planned.moved.clone(),
             })
             .collect();
-        move_lock_entries(&mut lock, &applied);
+        let _moved = move_lock_entries(&mut lock, &applied);
         assert_eq!(
             lock.get(&link_key(new)),
             Some(hash),
@@ -812,7 +816,11 @@ mod tests {
             moved: Some((key("docs/a.md", "ad"), key("docs/a.md", "add"))),
         }];
 
-        move_lock_entries(&mut lock, &applied);
+        let moved = move_lock_entries(&mut lock, &applied);
+        assert_eq!(
+            moved,
+            vec![(key("docs/a.md", "ad"), key("docs/a.md", "add"))]
+        );
 
         assert_eq!(lock.get(&key("docs/a.md", "add")), Some(hash));
         assert_eq!(lock.get(&key("docs/a.md", "ad")), None);
@@ -838,7 +846,12 @@ mod tests {
             moved: Some((key("docs/a.md", "ad"), key("docs/a.md", "add"))),
         }];
 
-        move_lock_entries(&mut lock, &applied);
+        let moved = move_lock_entries(&mut lock, &applied);
+        assert_eq!(
+            moved,
+            vec![],
+            "nothing should be reported moved when the new key was taken"
+        );
 
         assert_eq!(lock.get(&key("docs/a.md", "add")), Some(kept_hash));
         assert_eq!(lock.get(&key("docs/a.md", "ad")), Some(old_hash));
