@@ -632,3 +632,103 @@ fn a_message_cannot_forge_a_workflow_command_under_github_format() {
     );
     assert!(emitted.contains("done%0A::error::forged"), "{emitted}");
 }
+
+fn rendered_text(finding: &Finding) -> String {
+    let mut bytes = Vec::new();
+    render_finding(&context(Verbosity::Normal), finding, &mut bytes)
+        .expect("writing to a buffer should succeed");
+    String::from_utf8(bytes).expect("output should be UTF-8")
+}
+
+#[test]
+fn bidi_and_invisible_characters_are_rendered_escaped_in_every_text_field() {
+    let hostile = [
+        ('\u{202E}', "\\u{202e}"),
+        ('\u{2066}', "\\u{2066}"),
+        ('\u{200B}', "\\u{200b}"),
+        ('\u{2028}', "\\u{2028}"),
+    ];
+    for (character, escaped) in hostile {
+        let text = format!("see a{character}b [x](a.rs#b)\n");
+        let finding = finding_on(
+            &format!("docs/a{character}.md"),
+            &text,
+            "[x](a.rs#b)",
+            "link/failed",
+            Severity::Error,
+            &format!("bad{character}message"),
+            &format!("help{character}text"),
+        );
+
+        let with_snippet = rendered_text(&finding);
+        let without_snippet = rendered_text(&Finding {
+            snippet: None,
+            ..finding
+        });
+
+        for rendered in [with_snippet, without_snippet] {
+            assert!(!rendered.contains(character), "{escaped}: {rendered:?}");
+            for field in ["bad", "help", "docs/a"] {
+                assert!(
+                    rendered.contains(&format!("{field}{escaped}")),
+                    "{escaped} in {field}: {rendered}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_snippet_escapes_bidi_characters_and_carriage_returns() {
+    let text = "see a\u{202E}b\r [x](a.rs#b)\n";
+    let finding = finding_on(
+        "docs/a.md",
+        text,
+        "[x](a.rs#b)",
+        "link/failed",
+        Severity::Error,
+        "bad",
+        "help",
+    );
+
+    let rendered = rendered_text(&finding);
+
+    assert!(!rendered.contains('\u{202E}'), "{rendered:?}");
+    assert!(!rendered.contains('\r'), "{rendered:?}");
+    assert!(
+        rendered.contains("see a\\u{202e}b\\r [x](a.rs#b)"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn newlines_in_a_message_or_help_do_not_start_a_new_output_line() {
+    let finding = Finding::new("link/failed", Severity::Error, "bad\nerror: forged\rmore")
+        .with_help("try\nhelp: forged\r");
+
+    let rendered = rendered_text(&finding);
+
+    assert!(!rendered.contains('\r'), "{rendered:?}");
+    assert!(
+        rendered.contains("bad\\nerror: forged\\rmore"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("try\\nhelp: forged\\r"), "{rendered}");
+    assert!(
+        rendered
+            .lines()
+            .all(|line| !line.starts_with("error: forged") && !line.starts_with("help: forged")),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn a_note_cannot_start_a_new_line_or_hide_text_in_text_format() {
+    let (mut output, _stdout, stderr) = captured(settings(OutputFormat::Text, Verbosity::Normal));
+
+    output
+        .note("done\n\u{202E}forged\r\u{2028}")
+        .expect("writing to a buffer should succeed");
+
+    assert_eq!(stderr.text(), "done\\n\\u{202e}forged\\r\\u{2028}\n");
+}

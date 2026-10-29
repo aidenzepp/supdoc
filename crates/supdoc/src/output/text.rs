@@ -74,19 +74,22 @@ fn renderer(context: &TextContext) -> Renderer {
     base.decor_style(decor).term_width(context.width)
 }
 
-/// `text` with every control character except newline and tab spelled out, so text from
-/// untrusted files can't drive the terminal (an ESC becomes the four characters `\x1b`).
+/// `text` for a single line of output, with every control, bidirectional-control, format and
+/// line-separator character (newline and carriage return included, tab excepted) spelled out, so
+/// text from untrusted files can't drive the terminal, reorder or hide what is shown, or fake an
+/// extra line (an ESC becomes the six characters `\u{1b}`).
 #[must_use]
 pub fn visible(text: &str) -> String {
     let mut shown = String::with_capacity(text.len());
     for character in text.chars() {
-        push_visible(&mut shown, character);
+        push_visible(&mut shown, character, false);
     }
     shown
 }
 
-/// [`visible`] for `text`, with the byte range `span` moved to cover the same characters in the
-/// result. Offsets that aren't in `text` are clamped to its end.
+/// Like [`visible`] for snippet `text`, which keeps its newlines because the renderer owns line
+/// layout, with the byte range `span` moved to cover the same characters in the result. Offsets
+/// that aren't in `text` are clamped to its end.
 fn visible_with_span(text: &str, span: &Range<usize>) -> (String, Range<usize>) {
     let mut shown = String::with_capacity(text.len());
     let (mut start, mut end) = (None, None);
@@ -97,18 +100,36 @@ fn visible_with_span(text: &str, span: &Range<usize>) -> (String, Range<usize>) 
         if offset >= span.end && end.is_none() {
             end = Some(shown.len());
         }
-        push_visible(&mut shown, character);
+        push_visible(&mut shown, character, true);
     }
     let start = start.unwrap_or(shown.len());
     let end = end.unwrap_or(shown.len());
     (shown, start..end)
 }
 
-/// Appends `character`, spelled out if it is a control character other than newline or tab.
-fn push_visible(shown: &mut String, character: char) {
-    if character.is_control() && character != '\n' && character != '\t' {
-        shown.push_str(&character.escape_default().to_string());
-    } else {
+/// Appends `character`, spelled out if [`needs_escape`] says it can't be shown as itself.
+/// `keep_newline` lets `\n` through for multi-line text.
+fn push_visible(shown: &mut String, character: char, keep_newline: bool) {
+    if (character == '\n' && keep_newline) || !needs_escape(character) {
         shown.push(character);
+    } else {
+        shown.push_str(&character.escape_default().to_string());
     }
+}
+
+/// Whether `character` could drive the terminal or mislead a reader: a control character other
+/// than tab, a bidirectional override or isolate, an invisible format character, or a line or
+/// paragraph separator.
+const fn needs_escape(character: char) -> bool {
+    matches!(
+        character,
+        '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{00AD}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{FEFF}'
+            | '\u{2028}'
+            | '\u{2029}'
+    ) || (character.is_control() && character != '\t')
 }
