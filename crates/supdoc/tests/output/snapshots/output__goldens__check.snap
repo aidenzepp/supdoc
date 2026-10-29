@@ -5,13 +5,13 @@ expression: project.run(args).transcript()
 $ supdoc check
 exit: 1
 --- stdout
-error[resolve/not-found]: no symbol `ad` in [ROOT]/src/lib.rs
+error[resolve/not-found]: no symbol `ad` in src/lib.rs
  --> docs/api.md:3:5
   |
 3 | See [ad](../src/lib.rs#ad).
   |     ^^^^^^^^^^^^^^^^^^^^^^
   |
-  = help: Did you mean `add`, `mul`, `sub`? `supdoc resolve [ROOT]/src/lib.rs` lists every symbol
+  = help: Did you mean `add`, `mul`, `sub`? `supdoc resolve src/lib.rs` lists every symbol
 
 error[link/failed]: `src/lib.rs#add` changed since this doc was confirmed
  --> docs/guide.md:3:5
