@@ -4,10 +4,12 @@
 //! Cartridges only decide *where* links can be ([`Cartridge::markdown_regions`]); this module
 //! decides *how* they are written.
 //!
-//! Each region is parsed on its own by tree-sitter-md's inline grammar, restricted to the region
-//! with `Parser::set_included_ranges`. The inline parser reads the original text in place, so
-//! every node already carries the file's own offsets, and a link in a `.rs` comment reports its
-//! real line with no offset arithmetic.
+//! Each region is parsed on its own by tree-sitter-md's inline grammar, restricted to the region's
+//! ranges with `Parser::set_included_ranges`. The inline parser reads the original text in place,
+//! so every node already carries the file's own offsets, and a link in a `.rs` comment reports its
+//! real line with no offset arithmetic. A run of line comments is one region of several ranges, its
+//! markers left out, so a link may wrap from one comment line to the next. Its text is read
+//! through the region, without the markers between its lines.
 //!
 //! What counts as a link:
 //!
@@ -22,18 +24,21 @@
 //!
 //! - In a Markdown file, everywhere in the document. Definitions come from the block grammar's
 //!   `link_reference_definition` nodes.
-//! - In a code file, only inside the comment that holds it (*comments aren't one document*). A
+//! - In a code file, only inside the region that holds it (*comments aren't one document*): one
+//!   block comment or docstring, or one run of adjacent line comments of the same kind. A
 //!   definition there is a `[label]: destination` that starts its line, after nothing but comment
-//!   markers and whitespace (`/// [id]: x.rs`, ` * [id]: x.rs`, `# [id]: x.rs`).
+//!   markers and whitespace (`/// [id]: x.rs`, ` * [id]: x.rs`, `# [id]: x.rs`), with its
+//!   destination on the same line.
 //!
 //! [`Cartridge::markdown_regions`]: crate::read::cartridge::Cartridge::markdown_regions
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use tree_sitter::{Node, Parser, Tree};
 
 use crate::link::RawLink;
-use crate::read::cartridge::SourceFile;
+use crate::read::cartridge::{MarkdownRegion, SourceFile};
 
 /// Every link in `file`'s Markdown regions, in file order (03 R9, R14).
 ///
@@ -50,15 +55,19 @@ pub fn links(file: &SourceFile) -> Vec<RawLink> {
 
     let mut links = Vec::new();
     for region in file.language().markdown_regions(file) {
-        let Some(tree) = parse_region(&mut parser, text, region) else {
+        let Some(tree) = parse_region(&mut parser, text, &region) else {
             continue;
         };
         let found = Found::collect(tree.root_node());
+        let reader = RegionText {
+            region: &region,
+            text,
+        };
         if let Some(definitions) = &document {
-            links.extend(found.resolve(definitions, text));
+            links.extend(found.resolve(definitions, reader));
         } else {
-            let local = comment_definitions(&found.references, text, region.start_byte);
-            links.extend(found.resolve(&local, text));
+            let local = comment_definitions(&found.references, reader);
+            links.extend(found.resolve(&local, reader));
         }
     }
     links.sort_by_key(|link| (link.range.start, link.range.end));
@@ -74,13 +83,45 @@ fn inline_parser() -> Option<Parser> {
     Some(parser)
 }
 
-/// Parses only `region` of `text` with the inline grammar. The tree keeps `text`'s offsets.
+/// Parses only `region`'s ranges of `text`, together, with the inline grammar. The tree keeps
+/// `text`'s offsets.
 ///
-/// `None` if tree-sitter rejects the range or returns no tree; supdoc sets no timeout or
-/// cancellation, so neither happens for a region a cartridge produced from the file's own tree.
-fn parse_region(parser: &mut Parser, text: &str, region: tree_sitter::Range) -> Option<Tree> {
-    parser.set_included_ranges(&[region]).ok()?;
+/// `None` if tree-sitter rejects the ranges or returns no tree. [`MarkdownRegion`] holds only
+/// ranges tree-sitter accepts, and supdoc sets no timeout or cancellation, so neither happens.
+fn parse_region(parser: &mut Parser, text: &str, region: &MarkdownRegion) -> Option<Tree> {
+    parser.set_included_ranges(region.ranges()).ok()?;
     parser.parse(text, None)
+}
+
+/// A file's text read through one region, so a node that spans a run of line comments reads
+/// without the markers between its lines.
+#[derive(Debug, Clone, Copy)]
+struct RegionText<'a> {
+    /// The region the inline tree was parsed from.
+    region: &'a MarkdownRegion,
+    /// The whole file.
+    text: &'a str,
+}
+
+impl<'a> RegionText<'a> {
+    /// The text `node` covers inside the region.
+    fn node(self, node: Node<'_>) -> Cow<'a, str> {
+        self.region.text_within(node.byte_range(), self.text)
+    }
+
+    /// The text of `node`'s first child of `kind`, or `""` when it has none (`[](x.rs)` has no
+    /// text).
+    fn child(self, node: Node<'_>, kind: &str) -> Cow<'a, str> {
+        child(node, kind).map_or(Cow::Borrowed(""), |child| self.node(child))
+    }
+
+    /// The region's range that holds byte `at`.
+    fn range_at(self, at: usize) -> Option<&'a tree_sitter::Range> {
+        self.region
+            .ranges()
+            .iter()
+            .find(|range| range.start_byte <= at && at < range.end_byte)
+    }
 }
 
 /// What one region's inline tree holds, before references are resolved.
@@ -116,23 +157,22 @@ impl<'tree> Found<'tree> {
 
     /// The region's links: every inline link, and every reference whose label `definitions`
     /// knows. A reference that is itself a definition (`[id]: x.rs` in a comment) is not a link.
-    fn resolve(&self, definitions: &Definitions, text: &str) -> Vec<RawLink> {
+    fn resolve(&self, definitions: &Definitions, reader: RegionText<'_>) -> Vec<RawLink> {
         let inline = self.inline.iter().map(|&node| RawLink {
-            text: child_text(node, "link_text", text).to_owned(),
-            destination: unwrap_angle_brackets(child_text(node, "link_destination", text))
-                .to_owned(),
+            text: reader.child(node, "link_text").into_owned(),
+            destination: unwrap_angle_brackets(&reader.child(node, "link_destination")).to_owned(),
             range: node.byte_range(),
         });
         let references = self.references.iter().filter_map(|&node| {
             if definitions.is_definition_site(node.start_byte()) {
                 return None;
             }
-            let link_text = child_text(node, "link_text", text);
+            let link_text = reader.child(node, "link_text");
             // `[text][label]` names its label; `[label][]` and `[label]` use their text.
-            let label = child(node, "link_label").map_or(link_text, |label| node_text(label, text));
-            let destination = definitions.get(label)?;
+            let label = child(node, "link_label").map(|label| reader.node(label));
+            let destination = definitions.get(label.as_deref().unwrap_or(&link_text))?;
             Some(RawLink {
-                text: link_text.to_owned(),
+                text: link_text.into_owned(),
                 destination: destination.to_owned(),
                 range: node.byte_range(),
             })
@@ -201,12 +241,13 @@ fn document_definitions(file: &SourceFile) -> Option<Definitions> {
     Some(definitions)
 }
 
-/// The definitions written inside one comment region that starts at byte `region_start`.
+/// The definitions written inside one comment region.
 ///
 /// The inline grammar reads `[id]: x.rs` as a shortcut link followed by text, so a definition is
 /// a `[label]` shortcut that starts its line (after only comment markers and whitespace), is
-/// followed directly by `:`, and then by a destination.
-fn comment_definitions(references: &[Node<'_>], text: &str, region_start: usize) -> Definitions {
+/// followed directly by `:`, and then by a destination on the same line.
+fn comment_definitions(references: &[Node<'_>], reader: RegionText<'_>) -> Definitions {
+    let text = reader.text;
     let mut ordered: Vec<Node<'_>> = references
         .iter()
         .copied()
@@ -217,20 +258,23 @@ fn comment_definitions(references: &[Node<'_>], text: &str, region_start: usize)
     let mut definitions = Definitions::default();
     for node in ordered {
         let start = node.start_byte();
+        let Some(range) = reader.range_at(start) else {
+            continue;
+        };
         let line_start = text
             .get(..start)
             .and_then(|before| before.rfind('\n'))
             .map_or(0, |newline| newline + 1)
-            .max(region_start);
+            .max(range.start_byte);
         let starts_line = text
             .get(line_start..start)
             .is_some_and(|prefix| prefix.chars().all(is_comment_decoration));
         let destination = text
-            .get(node.end_byte()..)
+            .get(node.end_byte()..range.end_byte)
             .and_then(|after| after.strip_prefix(':'))
             .and_then(definition_destination);
         if let (true, Some(destination)) = (starts_line, destination) {
-            definitions.add(child_text(node, "link_text", text), destination, start);
+            definitions.add(&reader.child(node, "link_text"), destination, start);
         }
     }
     definitions
@@ -517,15 +561,87 @@ mod tests {
     }
 
     #[test]
-    fn reference_definition_in_another_comment_does_not_apply() {
+    fn rust_link_wrapped_across_two_line_comments_is_one_link() {
+        let text =
+            "fn a() {}\n/// See [the session\n/// rules](../docs/auth.md#sessions).\nfn f() {}\n";
+        let file = rust_file(text);
+
+        let found = links(&file);
+        let link = found.first().expect("the two `///` lines hold one link");
+
+        assert_eq!(
+            (link.text.as_str(), link.destination.as_str()),
+            ("the session\n rules", "../docs/auth.md#sessions"),
+            "the link text is read without the `///` between its lines",
+        );
+        assert_eq!(
+            text.get(link.range.clone()),
+            Some("[the session\n/// rules](../docs/auth.md#sessions)"),
+            "the range is the file's own, from `[` on row 1 to `)` on row 2",
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+    }
+
+    #[test]
+    fn reference_definition_on_another_line_of_the_same_comment_run_applies() {
         let file = rust_file(
-            "/// See [the rules][rules].\n/// [rules]: ../docs/auth.md#rules\nfn f() {}\n",
+            "/// See [the rules][rules] and [Rules].\n///\n/// [rules]: ../docs/auth.md#rules\nfn f() {}\n",
         );
 
         assert_eq!(
-            links(&file),
-            [],
-            "each `///` line is its own comment, so the definition is in another region",
+            pairs(&file),
+            [
+                pair("the rules", "../docs/auth.md#rules"),
+                pair("Rules", "../docs/auth.md#rules"),
+            ],
+            "adjacent `///` lines are one region, so the definition applies to the whole run",
+        );
+    }
+
+    #[test]
+    fn blank_line_code_or_another_comment_kind_splits_a_comment_run() {
+        for text in [
+            "/// See [the rules][rules].\n\n/// [rules]: ../docs/auth.md#rules\nfn f() {}\n",
+            "/// See [the rules][rules].\nfn f() {}\n/// [rules]: ../docs/auth.md#rules\nfn g() {}\n",
+            "/// See [the rules][rules].\n// [rules]: ../docs/auth.md#rules\nfn f() {}\n",
+            "/// See [the\n\n/// rules](../docs/auth.md#rules).\nfn f() {}\n",
+        ] {
+            let file = rust_file(text);
+
+            assert_eq!(
+                links(&file),
+                [],
+                "the comments are separate regions: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ts_line_comment_run_joins_a_wrapped_link_and_a_definition() {
+        let text = "// See [the\n// guide](guide.md) and [api].\n//\n// [api]: api.md#f\nfunction f() {}\n";
+        let file = builtin_file("/repo/src/a.ts", text);
+
+        assert_eq!(
+            spans(&file),
+            [
+                span("the\n guide", "guide.md", "[the\n// guide](guide.md)"),
+                span("api", "api.md#f", "[api]"),
+            ],
+        );
+    }
+
+    #[test]
+    fn python_hash_comment_run_joins_a_wrapped_link_and_a_definition() {
+        let text = "# See [the\n# guide](guide.md) and [api].\n# [api]: api.md#f\n\n# [api]\ndef f():\n    pass\n";
+        let file = builtin_file("/repo/src/a.py", text);
+
+        assert_eq!(
+            spans(&file),
+            [
+                span("the\n guide", "guide.md", "[the\n# guide](guide.md)"),
+                span("api", "api.md#f", "[api]"),
+            ],
+            "the `[api]` after the blank line is in another run, where `api` is undefined",
         );
     }
 

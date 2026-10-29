@@ -296,7 +296,7 @@ mod tests {
 
     use super::*;
     use crate::path::AbsolutePath;
-    use crate::read::cartridge::{Cartridge, CompiledQueries, LanguageId};
+    use crate::read::cartridge::{Cartridge, CompiledQueries, LanguageId, MarkdownRegion};
     use crate::read::hash::hash_symbol;
 
     /// A Markdown cartridge with no queries, enough to parse the block grammar.
@@ -335,7 +335,7 @@ mod tests {
             heading_symbols(file)
         }
 
-        fn markdown_regions(&self, _file: &SourceFile) -> Vec<tree_sitter::Range> {
+        fn markdown_regions(&self, _file: &SourceFile) -> Vec<MarkdownRegion> {
             Vec::new()
         }
     }

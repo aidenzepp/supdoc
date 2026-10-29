@@ -301,7 +301,9 @@ mod tests {
     use std::sync::OnceLock;
 
     use super::*;
-    use crate::read::cartridge::{Cartridge, CompiledQueries, LanguageId, SourceFile, SymbolTable};
+    use crate::read::cartridge::{
+        Cartridge, CompiledQueries, LanguageId, MarkdownRegion, SourceFile, SymbolTable,
+    };
 
     /// A data-only cartridge that claims `extensions`; only its extensions matter here.
     #[derive(Debug)]
@@ -342,7 +344,7 @@ mod tests {
             SymbolTable::default()
         }
 
-        fn markdown_regions(&self, _file: &SourceFile) -> Vec<tree_sitter::Range> {
+        fn markdown_regions(&self, _file: &SourceFile) -> Vec<MarkdownRegion> {
             Vec::new()
         }
     }

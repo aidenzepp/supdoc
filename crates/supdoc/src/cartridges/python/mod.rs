@@ -11,7 +11,7 @@ use tree_sitter::Node;
 
 use crate::link::SymbolPath;
 use crate::read::cartridge::{
-    Cartridge, CompiledQueries, LanguageId, SourceFile, Symbol, SymbolTable,
+    Cartridge, CompiledQueries, LanguageId, MarkdownRegion, SourceFile, Symbol, SymbolTable,
 };
 use crate::read::query::{QueryCartridge, QueryFileError};
 
@@ -84,7 +84,7 @@ impl Cartridge for PythonCartridge {
         SymbolTable::new(symbols)
     }
 
-    fn markdown_regions(&self, file: &SourceFile) -> Vec<tree_sitter::Range> {
+    fn markdown_regions(&self, file: &SourceFile) -> Vec<MarkdownRegion> {
         self.queries.markdown_regions(file)
     }
 }
@@ -272,14 +272,15 @@ def outer():
             .expect("a symbol's range should be valid for its file")
     }
 
-    fn region_texts(file: &SourceFile) -> Vec<&str> {
+    /// Each region's text, comment markers left out, in file order.
+    fn region_texts(file: &SourceFile) -> Vec<String> {
         file.language()
             .markdown_regions(file)
             .iter()
-            .map(|range| {
-                file.text()
-                    .get(range.start_byte..range.end_byte)
-                    .expect("a region should be a valid range of the file")
+            .map(|region| {
+                region
+                    .text_within(0..file.text().len(), file.text())
+                    .into_owned()
             })
             .collect()
     }
@@ -516,12 +517,14 @@ def outer():
             "the module docstring: {texts:?}"
         );
         assert!(
-            texts.contains(&"\"\"\"Adds two numbers.\"\"\""),
+            texts
+                .iter()
+                .any(|text| text == "\"\"\"Adds two numbers.\"\"\""),
             "a function docstring: {texts:?}"
         );
         assert!(
-            texts.contains(&"# [host](host.md)"),
-            "a `#` comment: {texts:?}"
+            texts.iter().any(|text| text == " [host](host.md)\n"),
+            "a `#` comment, its body after the marker through the end of its line: {texts:?}"
         );
     }
 
@@ -529,7 +532,7 @@ def outer():
     fn python_docstring_follows_leading_comments() {
         let file = parse("# header\n\"\"\"Doc.\"\"\"\n");
 
-        assert_eq!(region_texts(&file), ["# header", "\"\"\"Doc.\"\"\""]);
+        assert_eq!(region_texts(&file), [" header\n", "\"\"\"Doc.\"\"\""]);
     }
 
     #[test]

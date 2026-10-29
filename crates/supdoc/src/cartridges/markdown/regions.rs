@@ -8,7 +8,7 @@
 
 use tree_sitter::Node;
 
-use crate::read::cartridge::SourceFile;
+use crate::read::cartridge::{MarkdownRegion, SourceFile};
 
 /// Block-grammar node kinds whose text is inline Markdown.
 ///
@@ -16,17 +16,18 @@ use crate::read::cartridge::SourceFile;
 /// child, so it is listed too: a link in a table is part of the body like any other.
 const INLINE_KINDS: [&str; 2] = ["inline", "pipe_table_cell"];
 
-/// The ranges of `file`'s Markdown body where links are read, in file order.
+/// The regions of `file`'s Markdown body where links are read, in file order. Each is one node's
+/// range.
 ///
 /// Meant for a file parsed by tree-sitter-md's block grammar; any other tree has no such nodes and
 /// yields no regions.
 #[must_use]
-pub fn markdown_regions(file: &SourceFile) -> Vec<tree_sitter::Range> {
+pub fn markdown_regions(file: &SourceFile) -> Vec<MarkdownRegion> {
     let mut regions = Vec::new();
     let mut pending: Vec<Node<'_>> = vec![file.tree().root_node()];
     while let Some(node) = pending.pop() {
         if INLINE_KINDS.contains(&node.kind()) {
-            regions.push(node.range());
+            regions.push(MarkdownRegion::from(node.range()));
             continue;
         }
         let mut cursor = node.walk();
@@ -83,7 +84,7 @@ pub(crate) mod tests {
             SymbolTable::default()
         }
 
-        fn markdown_regions(&self, file: &SourceFile) -> Vec<tree_sitter::Range> {
+        fn markdown_regions(&self, file: &SourceFile) -> Vec<MarkdownRegion> {
             markdown_regions(file)
         }
     }
@@ -102,13 +103,13 @@ pub(crate) mod tests {
             .expect("tree-sitter should return a tree")
     }
 
-    fn region_texts(file: &SourceFile) -> Vec<&str> {
+    fn region_texts(file: &SourceFile) -> Vec<String> {
         markdown_regions(file)
             .iter()
-            .map(|range| {
-                file.text()
-                    .get(range.start_byte..range.end_byte)
-                    .expect("a region should be a valid range of the file")
+            .map(|region| {
+                region
+                    .text_within(0..file.text().len(), file.text())
+                    .into_owned()
             })
             .collect()
     }
@@ -150,6 +151,7 @@ pub(crate) mod tests {
         let regions = markdown_regions(&file);
         let second = regions
             .get(1)
+            .and_then(|region| region.ranges().first())
             .expect("the heading and the paragraph are two regions");
 
         assert_eq!(second.start_byte, 9);

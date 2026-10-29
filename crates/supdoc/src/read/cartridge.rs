@@ -4,6 +4,7 @@
 //! Constructors that need the reading machinery (`SourceFile::parse`, `SymbolTable::resolve`,
 //! `Languages::builtin`) live in the sibling modules; this module fixes the shapes they share.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::ops::Range;
@@ -33,10 +34,10 @@ pub trait Cartridge: Send + Sync + fmt::Debug {
     /// The symbols `file` exposes (03 R4). Query-driven cartridges run `tags.scm`.
     fn symbols(&self, file: &SourceFile) -> SymbolTable;
 
-    /// The regions of `file` written in Markdown, where links are read (03 R9, R14).
+    /// The regions of `file` written in Markdown, where links are read, in file order (03 R9, R14).
     /// Query-driven cartridges return the `injections.scm` captures whose `injection.language` is
-    /// `markdown_inline`.
-    fn markdown_regions(&self, file: &SourceFile) -> Vec<tree_sitter::Range>;
+    /// `markdown_inline`, with each run of adjacent line comments joined into one region.
+    fn markdown_regions(&self, file: &SourceFile) -> Vec<MarkdownRegion>;
 }
 
 /// A cartridge's stable id: `"rust"`, `"markdown"`.
@@ -184,6 +185,73 @@ impl SymbolTable {
     }
 }
 
+/// One place in a file where links are read, parsed as one piece of inline Markdown (03 R9, R14).
+///
+/// Usually one byte range: a paragraph, a block comment, a docstring. A run of adjacent line
+/// comments is one region of several ranges, one per comment body without its marker, so a link
+/// or a reference definition can span its lines while every node keeps the file's own offsets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkdownRegion {
+    /// Non-empty, in file order and not overlapping: what `Parser::set_included_ranges` accepts.
+    ranges: Vec<tree_sitter::Range>,
+}
+
+impl MarkdownRegion {
+    /// `ranges` read together as one region.
+    ///
+    /// `None` if `ranges` is empty, or a range ends before it starts or overlaps the one before it.
+    #[must_use]
+    pub fn new(ranges: Vec<tree_sitter::Range>) -> Option<Self> {
+        let well_formed = ranges
+            .iter()
+            .all(|range| range.start_byte <= range.end_byte);
+        let ordered = ranges
+            .iter()
+            .zip(ranges.iter().skip(1))
+            .all(|(before, after)| before.end_byte <= after.start_byte);
+        (!ranges.is_empty() && well_formed && ordered).then_some(Self { ranges })
+    }
+
+    /// The ranges, in file order.
+    #[must_use]
+    pub fn ranges(&self) -> &[tree_sitter::Range] {
+        &self.ranges
+    }
+
+    /// The part of `text[span]` that lies inside this region, its pieces joined.
+    ///
+    /// For a run of line comments this is the text without the markers between its lines, which
+    /// is how a link that wraps across lines reads.
+    #[must_use]
+    pub fn text_within<'text>(&self, span: Range<usize>, text: &'text str) -> Cow<'text, str> {
+        let mut pieces = self.ranges.iter().filter_map(|range| {
+            let start = span.start.max(range.start_byte);
+            let end = span.end.min(range.end_byte);
+            text.get(start..end).filter(|piece| !piece.is_empty())
+        });
+        let Some(first) = pieces.next() else {
+            return Cow::Borrowed("");
+        };
+        match pieces.next() {
+            None => Cow::Borrowed(first),
+            Some(second) => {
+                let mut joined = [first, second].concat();
+                joined.extend(pieces);
+                Cow::Owned(joined)
+            }
+        }
+    }
+}
+
+impl From<tree_sitter::Range> for MarkdownRegion {
+    /// A region of one range.
+    fn from(range: tree_sitter::Range) -> Self {
+        Self {
+            ranges: vec![range],
+        }
+    }
+}
+
 /// Every cartridge supdoc knows about, looked up by file extension.
 ///
 /// Passed in explicitly, never reached through a global, so a project-specific set can be built
@@ -284,7 +352,7 @@ mod tests {
             SymbolTable::default()
         }
 
-        fn markdown_regions(&self, _file: &SourceFile) -> Vec<tree_sitter::Range> {
+        fn markdown_regions(&self, _file: &SourceFile) -> Vec<MarkdownRegion> {
             Vec::new()
         }
     }

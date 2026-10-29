@@ -7,7 +7,9 @@ use std::sync::LazyLock;
 
 use crate::cartridges::markdown::regions::markdown_regions;
 use crate::cartridges::markdown::symbols::heading_symbols;
-use crate::read::cartridge::{Cartridge, CompiledQueries, LanguageId, SourceFile, SymbolTable};
+use crate::read::cartridge::{
+    Cartridge, CompiledQueries, LanguageId, MarkdownRegion, SourceFile, SymbolTable,
+};
 use crate::read::query::QueryFileError;
 
 /// The Markdown language: block grammar, headings as symbols, body text as link regions.
@@ -65,7 +67,7 @@ impl Cartridge for Markdown {
         heading_symbols(file)
     }
 
-    fn markdown_regions(&self, file: &SourceFile) -> Vec<tree_sitter::Range> {
+    fn markdown_regions(&self, file: &SourceFile) -> Vec<MarkdownRegion> {
         markdown_regions(file)
     }
 }
