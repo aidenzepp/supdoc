@@ -7,7 +7,6 @@
 //! Code's config directory. Each copy is a real file written atomically. A copy that already
 //! holds the embedded text is left alone; a different one is replaced only under `--yes`.
 
-use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
@@ -38,9 +37,6 @@ const PROJECT_CLAUDE_SKILL: &str = ".claude/skills/supdoc/SKILL.md";
 
 /// Claude Code's config directory beneath `HOME` when `CLAUDE_CONFIG_DIR` is not set.
 const DEFAULT_CLAUDE_DIR: &str = ".claude";
-
-/// The environment variable that moves Claude Code's config directory.
-const CLAUDE_CONFIG_DIR_VAR: &str = "CLAUDE_CONFIG_DIR";
 
 /// Where the skill goes beneath Claude Code's config directory.
 const CLAUDE_DIR_SKILL: &str = "skills/supdoc/SKILL.md";
@@ -116,9 +112,7 @@ pub fn schema() -> Result<schemars::Schema, CliError> {
 ///
 /// # Errors
 ///
-/// Returns `cli/skill-no-home` when `global` is set and `HOME` is not, and
-/// `cli/skill-relative-claude-dir` when `CLAUDE_CONFIG_DIR` is a relative path, which `main`
-/// would otherwise drop without a word and install into `~/.claude` instead.
+/// Returns `cli/skill-no-home` when `global` is set and `HOME` is not.
 fn destinations(global: bool, context: &Context) -> Result<[AbsolutePath; 2], CliError> {
     if !global {
         let root = project_root(context);
@@ -128,7 +122,6 @@ fn destinations(global: bool, context: &Context) -> Result<[AbsolutePath; 2], Cl
         ]);
     }
     let home = context.home.as_ref().ok_or_else(no_home)?;
-    reject_relative_claude_dir(std::env::var_os(CLAUDE_CONFIG_DIR_VAR).as_deref())?;
     let claude_dir = context
         .claude_config_dir
         .clone()
@@ -322,29 +315,6 @@ fn no_home() -> CliError {
         "Set HOME to your home directory, or drop `--global` to install into the project",
         CliError::USAGE_EXIT_CODE,
     )
-}
-
-/// Refuses a relative `CLAUDE_CONFIG_DIR`. `main` keeps only absolute values, so a relative one
-/// would silently send the Claude Code copy to the default directory.
-///
-/// # Errors
-///
-/// Returns `cli/skill-relative-claude-dir` when `value` is a non-empty relative path.
-fn reject_relative_claude_dir(value: Option<&OsStr>) -> Result<(), CliError> {
-    match value {
-        Some(dir) if !dir.is_empty() && !Path::new(dir).is_absolute() => Err(CliError::new(
-            "cli/skill-relative-claude-dir",
-            format!(
-                "{CLAUDE_CONFIG_DIR_VAR} is `{}`, which is not an absolute path",
-                dir.to_string_lossy()
-            ),
-            format!(
-                "Set {CLAUDE_CONFIG_DIR_VAR} to an absolute path, or unset it to use ~/.claude"
-            ),
-            CliError::USAGE_EXIT_CODE,
-        )),
-        _ => Ok(()),
-    }
 }
 
 /// The error for a copy of the skill that could not be written.
@@ -637,29 +607,6 @@ mod tests {
             !world.home_file(".claude").exists(),
             "~/.claude should be untouched when CLAUDE_CONFIG_DIR is set"
         );
-    }
-
-    #[test]
-    fn a_relative_claude_config_dir_is_a_usage_error() {
-        let error = reject_relative_claude_dir(Some(OsStr::new("rel/claude")))
-            .expect_err("a relative CLAUDE_CONFIG_DIR should be refused");
-
-        assert_eq!(error.code(), "cli/skill-relative-claude-dir");
-        assert_eq!(error.exit_code(), CliError::USAGE_EXIT_CODE);
-        assert!(
-            error.to_string().contains("rel/claude"),
-            "the message should name the value: {error}"
-        );
-    }
-
-    #[test]
-    fn unset_empty_and_absolute_claude_config_dirs_are_accepted() {
-        for value in [None, Some(OsStr::new("")), Some(OsStr::new("/abs/claude"))] {
-            assert!(
-                reject_relative_claude_dir(value).is_ok(),
-                "{value:?} should be accepted"
-            );
-        }
     }
 
     #[test]
