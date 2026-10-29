@@ -565,3 +565,70 @@ fn a_finding_without_a_snippet_still_shows_its_location() {
     assert!(text.contains("--> docs/guide.md:4:7"), "{text}");
     assert!(text.contains("= help: restore the file"), "{text}");
 }
+
+#[test]
+fn control_characters_from_files_are_rendered_escaped_in_text() {
+    let text = "see \u{1b}[31m[x](a.rs#b)\n";
+    let finding = finding_on(
+        "docs/a.md",
+        text,
+        "[x](a.rs#b)",
+        "link/failed",
+        Severity::Error,
+        "bad \u{1b}]0;pwned\u{7} message",
+        "try \u{1b}[2J instead",
+    );
+    let mut bytes = Vec::new();
+
+    render_finding(&context(Verbosity::Normal), &finding, &mut bytes)
+        .expect("writing to a buffer should succeed");
+
+    let rendered = String::from_utf8(bytes).expect("output should be UTF-8");
+    assert!(!rendered.contains('\u{1b}'), "{rendered:?}");
+    assert!(!rendered.contains('\u{7}'), "{rendered:?}");
+    assert!(
+        rendered.contains("bad \\u{1b}]0;pwned\\u{7} message"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("try \\u{1b}[2J instead"), "{rendered}");
+    assert!(
+        rendered.contains("see \\u{1b}[31m[x](a.rs#b)"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn a_message_cannot_forge_a_workflow_command_under_github_format() {
+    let hostile = Finding::new(
+        "link/failed",
+        Severity::Error,
+        "oops\n::error::x\r::warning::y",
+    );
+    let (mut output, stdout, stderr) = captured(settings(OutputFormat::Github, Verbosity::Normal));
+
+    output
+        .diag(&hostile)
+        .expect("writing to a buffer should succeed");
+    output
+        .fatal(&hostile, 1)
+        .expect("writing to a buffer should succeed");
+    output
+        .note("done\n::error::forged")
+        .expect("writing to a buffer should succeed");
+
+    let emitted = stderr.text();
+    assert_eq!(stdout.text(), "");
+    let commands: Vec<&str> = emitted
+        .lines()
+        .filter(|line| line.starts_with("::"))
+        .collect();
+    assert_eq!(emitted.lines().count(), 3, "{emitted}");
+    assert_eq!(
+        commands,
+        vec![
+            "::error title=supdoc link/failed::oops%0A::error::x%0D::warning::y",
+            "::error title=supdoc link/failed::oops%0A::error::x%0D::warning::y",
+        ]
+    );
+    assert!(emitted.contains("done%0A::error::forged"), "{emitted}");
+}

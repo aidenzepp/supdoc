@@ -156,6 +156,12 @@ impl Output {
         if self.settings.format.is_json() {
             serde_json::to_writer(&mut bytes, &FindingJson::from(finding))?;
             bytes.push(b'\n');
+        } else if self.settings.format == OutputFormat::Github {
+            writeln!(
+                bytes,
+                "{}",
+                github::annotation(&self.settings.paths, finding)
+            )?;
         } else {
             text::render_finding(&self.settings.text_context(), finding, &mut bytes)?;
         }
@@ -172,6 +178,11 @@ impl Output {
         if !self.settings.verbosity.shows_summary() || self.settings.format.is_json() {
             return Ok(());
         }
+        let note = if self.settings.format == OutputFormat::Github {
+            github::escape_data(note)
+        } else {
+            text::visible(note)
+        };
         self.write(Stream::Stderr, format!("{note}\n").as_bytes())
     }
 
@@ -186,6 +197,12 @@ impl Output {
         if self.settings.format.is_json() {
             serde_json::to_writer(&mut bytes, &FatalJson::new(finding, exit_code))?;
             bytes.push(b'\n');
+        } else if self.settings.format == OutputFormat::Github {
+            writeln!(
+                bytes,
+                "{}",
+                github::annotation(&self.settings.paths, finding)
+            )?;
         } else {
             let context = TextContext {
                 verbosity: Verbosity::Normal,
