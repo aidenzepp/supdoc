@@ -34,6 +34,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::ops::Range;
 
 use tree_sitter::{Node, Parser, Tree};
@@ -53,24 +54,39 @@ pub fn links(file: &SourceFile) -> Vec<RawLink> {
         return Vec::new();
     };
     let text = file.text();
-    let document = document_definitions(file);
+    let mut document = document_definitions(file);
+
+    let mut parsed = Vec::new();
+    for region in file.language().markdown_regions(file) {
+        if let Some(tree) = parse_region(&mut parser, text, &region) {
+            parsed.push((tree, region));
+        }
+    }
+
+    // The block grammar reads a one-character definition, `[x]: a.md`, as a task-list marker and
+    // drops it, so a Markdown file's definitions are also read from its regions, as comments'
+    // are, before any link resolves.
+    let found: Vec<Found<'_>> = parsed
+        .iter()
+        .map(|(tree, _)| Found::collect(tree.root_node()))
+        .collect();
+    let local: Vec<Definitions> = found
+        .iter()
+        .zip(&parsed)
+        .map(|(found, (_, region))| {
+            comment_definitions(&found.references, RegionText { region, text })
+        })
+        .collect();
+    if let Some(document) = &mut document {
+        for definitions in &local {
+            document.absorb(definitions);
+        }
+    }
 
     let mut links = Vec::new();
-    for region in file.language().markdown_regions(file) {
-        let Some(tree) = parse_region(&mut parser, text, &region) else {
-            continue;
-        };
-        let found = Found::collect(tree.root_node());
-        let reader = RegionText {
-            region: &region,
-            text,
-        };
-        if let Some(definitions) = &document {
-            links.extend(found.resolve(definitions, reader));
-        } else {
-            let local = comment_definitions(&found.references, reader);
-            links.extend(found.resolve(&local, reader));
-        }
+    for ((found, (_, region)), local) in found.iter().zip(&parsed).zip(&local) {
+        let reader = RegionText { region, text };
+        links.extend(found.resolve(document.as_ref().unwrap_or(local), reader));
     }
     links.sort_by_key(|link| (link.range.start, link.range.end));
     links
@@ -196,7 +212,7 @@ fn inline_destination_range(node: Node<'_>, text: &str) -> Range<usize> {
 }
 
 /// A reference definition's destination.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Definition {
     /// The destination as written, without `<…>`.
     destination: String,
@@ -226,6 +242,23 @@ impl Definitions {
                 let destination = text.get(range.clone()).unwrap_or_default().to_owned();
                 Definition { destination, range }
             });
+    }
+
+    /// Takes `other`'s definitions, keeping the earlier one in the file when a label is in both.
+    fn absorb(&mut self, other: &Self) {
+        self.sites.extend(&other.sites);
+        for (label, definition) in &other.destinations {
+            match self.destinations.entry(label.clone()) {
+                Entry::Occupied(mut held) => {
+                    if definition.range.start < held.get().range.start {
+                        let _later = held.insert(definition.clone());
+                    }
+                }
+                Entry::Vacant(free) => {
+                    let _first = free.insert(definition.clone());
+                }
+            }
+        }
     }
 
     /// The definition for `label`, matched the way the Markdown spec matches labels.
@@ -578,6 +611,39 @@ mod tests {
         );
 
         assert_eq!(destinations(&file), ["r.rs"]);
+    }
+
+    #[test]
+    fn one_character_label_defines_a_markdown_reference() {
+        let file = markdown_file("See [x] and [yy].\n\n[x]: a.md\n[yy]: b.md\n");
+
+        assert_eq!(
+            pairs(&file),
+            [pair("x", "a.md"), pair("yy", "b.md")],
+            "`[x]: a.md` is a definition, not a task-list checkbox, and `[yy]` on the next line survives",
+        );
+    }
+
+    #[test]
+    fn task_list_items_define_nothing() {
+        let file = markdown_file("- [x] done\n* [ ] todo\n\nSee [x].\n");
+
+        assert!(
+            links(&file).is_empty(),
+            "task-list items are not definitions, so `[x]` has no destination",
+        );
+    }
+
+    #[test]
+    fn one_character_label_defines_a_reference_in_a_rust_comment_run() {
+        let file =
+            rust_file("/// See [x] and [yy].\n///\n/// [x]: a.md\n/// [yy]: b.md\nfn f() {}\n");
+
+        assert_eq!(
+            pairs(&file),
+            [pair("x", "a.md"), pair("yy", "b.md")],
+            "one-character labels define links in `///` runs too",
+        );
     }
 
     #[test]
