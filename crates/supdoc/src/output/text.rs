@@ -118,18 +118,104 @@ fn push_visible(shown: &mut String, character: char, keep_newline: bool) {
 }
 
 /// Whether `character` could drive the terminal or mislead a reader: a control character other
-/// than tab, a bidirectional override or isolate, an invisible format character, or a line or
-/// paragraph separator.
+/// than tab, any format character (Unicode general category Cf, which covers the bidirectional
+/// marks, overrides and isolates, the zero-width and invisible operators, and the tag
+/// characters), or a line or paragraph separator.
 const fn needs_escape(character: char) -> bool {
     matches!(
         character,
-        '\u{202A}'..='\u{202E}'
-            | '\u{2066}'..='\u{2069}'
-            | '\u{00AD}'
+        '\u{00AD}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061C}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08E2}'
+            | '\u{180E}'
             | '\u{200B}'..='\u{200F}'
-            | '\u{2060}'..='\u{2064}'
-            | '\u{FEFF}'
             | '\u{2028}'
             | '\u{2029}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0000}'..='\u{E007F}'
     ) || (character.is_control() && character != '\t')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::output::fixtures::{context, finding_on};
+    use crate::output::format::Verbosity;
+
+    fn rendered(finding: &Finding) -> String {
+        let mut bytes = Vec::new();
+        render_finding(&context(Verbosity::Normal), finding, &mut bytes)
+            .expect("writing to a buffer should succeed");
+        String::from_utf8(bytes).expect("output should be UTF-8")
+    }
+
+    #[test]
+    fn format_characters_are_escaped_in_message_path_and_snippet() {
+        let samples = [
+            ('\u{061C}', "\\u{61c}"),
+            ('\u{E0041}', "\\u{e0041}"),
+            ('\u{E0001}', "\\u{e0001}"),
+            ('\u{180E}', "\\u{180e}"),
+            ('\u{206A}', "\\u{206a}"),
+            ('\u{FFF9}', "\\u{fff9}"),
+            ('\u{0600}', "\\u{600}"),
+            ('\u{110BD}', "\\u{110bd}"),
+            ('\u{1D173}', "\\u{1d173}"),
+        ];
+        for (character, escaped) in samples {
+            let text = format!("see a{character}b [x](a.rs#b)\n");
+            let finding = finding_on(
+                &format!("docs/a{character}.md"),
+                &text,
+                "[x](a.rs#b)",
+                "link/failed",
+                Severity::Error,
+                &format!("bad{character}message"),
+                "help",
+            );
+
+            let with_snippet = rendered(&finding);
+            let without_snippet = rendered(&Finding {
+                snippet: None,
+                ..finding
+            });
+
+            for output in [&with_snippet, &without_snippet] {
+                assert!(!output.contains(character), "{escaped}: {output:?}");
+                assert!(
+                    output.contains(&format!("bad{escaped}message")),
+                    "{escaped} in message: {output}"
+                );
+                assert!(
+                    output.contains(&format!("docs/a{escaped}.md")),
+                    "{escaped} in path: {output}"
+                );
+            }
+            assert!(
+                with_snippet.contains(&format!("see a{escaped}b [x](a.rs#b)")),
+                "{escaped} in snippet: {with_snippet}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_text_is_not_escaped() {
+        assert_eq!(
+            visible("caf\u{e9} \u{4e2d}\u{6587}\ttab"),
+            "caf\u{e9} \u{4e2d}\u{6587}\ttab"
+        );
+    }
 }
