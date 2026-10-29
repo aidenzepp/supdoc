@@ -6,7 +6,7 @@ use super::model::{LinkReport, Report};
 use super::moves::{Moves, detect_moves};
 use crate::finding::{Finding, Severity};
 use crate::hash::Hash;
-use crate::link::{LinkKey, LinkRef, Target};
+use crate::link::{LinkKey, LinkRef, SourcePath, Target};
 use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
 use crate::scan::model::{Scan, ScannedLink, Scope, TargetState};
 use crate::state::LinkState;
@@ -23,13 +23,22 @@ pub enum Outcome {
 /// Gives every [`LinkKey`] in `scope` the state the 05 table says.
 ///
 /// Pure: reads nothing but its arguments. Links outside `scope` are not judged, and neither are
-/// lock entries written in sources that couldn't be read this run (05 C5).
+/// lock entries written in sources that couldn't be read this run (05 C5). A source with a link
+/// error, a link too malformed to have a key, is treated the same way: that link may be an edit
+/// of a locked one, so none of the source's entries are judged obsolete while the error remains.
 #[must_use]
 pub fn reconcile(scan: &Scan, lock: &Lockfile, scope: &Scope) -> Report {
     let scanned: Vec<(&LinkKey, &ScannedLink)> = scan
         .links
         .iter()
         .filter(|(key, _)| scope.contains(&key.source))
+        .collect();
+
+    let sources_with_link_errors: BTreeSet<&SourcePath> = scan
+        .findings
+        .iter()
+        .filter(|finding| finding.code.starts_with("link/") && finding.severity == Severity::Error)
+        .filter_map(|finding| finding.location.as_ref().map(|location| &location.file))
         .collect();
 
     let unlocked: Vec<&LinkKey> = scanned
@@ -45,6 +54,7 @@ pub fn reconcile(scan: &Scan, lock: &Lockfile, scope: &Scope) -> Report {
         .filter(|key| scope.contains(&key.source))
         .filter(|key| !scan.links.contains_key(key))
         .filter(|key| !scan.unread_sources.contains(&key.source))
+        .filter(|key| !sources_with_link_errors.contains(&key.source))
         .collect();
     let moves = detect_moves(&unlocked, &removed);
 
@@ -425,6 +435,46 @@ mod tests {
             "an unreadable source must keep its entries: {:?}",
             report.links,
         );
+    }
+
+    fn malformed_link_in(source: &str, code: &'static str) -> Finding {
+        let source: SourcePath = source.parse().expect("the fixture source should be valid");
+        let location = Location::in_text(source, "[a](b)", 0..6)
+            .expect("the fixture range should be locatable");
+        Finding::new(code, Severity::Error, "malformed link").with_location(location)
+    }
+
+    #[test]
+    fn malformed_link_edit_leaves_the_sources_entries_unjudged_and_check_failing() {
+        for code in ["link/invalid-path", "link/invalid-symbol"] {
+            let edited = key("docs/edited.md", Some("add"));
+            let removed = key("docs/gone.md", Some("add"));
+            let mut scan = Scan::default();
+            scan.findings
+                .push(malformed_link_in("docs/edited.md", code));
+
+            let report = reconcile(
+                &scan,
+                &lock_of(&[(&edited, b"v1"), (&removed, b"v1")]),
+                &Scope::All,
+            );
+
+            assert_eq!(
+                state_of(&report, &edited),
+                None,
+                "{code}: an entry in a source with a link error must stay unjudged",
+            );
+            assert_eq!(
+                state_of(&report, &removed),
+                Some(LinkState::Obsolete),
+                "{code}: a sibling source's removed link is still obsolete",
+            );
+            assert_eq!(
+                check_outcome(&report, false),
+                Outcome::Failing,
+                "{code}: the link error still fails the check",
+            );
+        }
     }
 
     #[test]
