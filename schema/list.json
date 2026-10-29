@@ -1,0 +1,392 @@
+{
+  "$defs": {
+    "FindingJson": {
+      "description": "A finding as JSON shows it.",
+      "properties": {
+        "fix": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FixJson"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The one correct edit, when there is exactly one."
+        },
+        "help": {
+          "description": "What to do next.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "The stable code, such as `link/failed`.",
+          "type": "string"
+        },
+        "location": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocationJson"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where it is. Left out of a link's nested finding, which shares the link's location."
+        },
+        "message": {
+          "description": "What happened, in one line.",
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/SeverityJson",
+          "description": "How bad it is."
+        }
+      },
+      "required": [
+        "kind",
+        "severity",
+        "message"
+      ],
+      "type": "object"
+    },
+    "FixJson": {
+      "description": "An exact edit as JSON shows it, with byte offsets so a script can apply it without recounting.",
+      "properties": {
+        "end": {
+          "description": "End byte offset.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "file": {
+          "description": "The file to edit, relative to the project root.",
+          "type": "string"
+        },
+        "replacement": {
+          "description": "The new text.",
+          "type": "string"
+        },
+        "start": {
+          "description": "Start byte offset.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "file",
+        "start",
+        "end",
+        "replacement"
+      ],
+      "type": "object"
+    },
+    "LinkJson": {
+      "description": "One link as `check --json` and `list --json` show it (07 \"JSON output\").\n\n`source`, `target` and `symbol` sit beside the state. The explaining finding is nested\nwithout a location, since `locations` already says where the link is.",
+      "properties": {
+        "finding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FindingJson"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The finding that explains the state. Left out for `passed`."
+        },
+        "locations": {
+          "description": "Every place it appears in its source. Empty only for `obsolete`.",
+          "items": {
+            "$ref": "#/$defs/LinkLocationJson"
+          },
+          "type": "array"
+        },
+        "source": {
+          "$ref": "#/$defs/SourcePath",
+          "description": "The file the link is written in."
+        },
+        "state": {
+          "$ref": "#/$defs/LinkState",
+          "description": "The link's state."
+        },
+        "symbol": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SymbolPath"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`None` = whole file. `Option`'s ordering puts whole-file entries first. Left out of JSON\nwhen `None`."
+        },
+        "target": {
+          "$ref": "#/$defs/Target",
+          "description": "The file the link points at."
+        }
+      },
+      "required": [
+        "state",
+        "source",
+        "target",
+        "locations"
+      ],
+      "type": "object"
+    },
+    "LinkLocationJson": {
+      "description": "Where a link appears in its source. The file is the link's `source`, so it isn't repeated.",
+      "properties": {
+        "column": {
+          "description": "1-based column, in characters.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "end": {
+          "description": "End byte offset.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "line": {
+          "description": "1-based line.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "start": {
+          "description": "Start byte offset.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "line",
+        "column",
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "LinkState": {
+      "description": "Where one link stands, in snapshot-testing terms (05 C1).\n\nThe same values name states everywhere: in reports, in `--state` filters on `update` and\n`list`, and in JSON output.",
+      "oneOf": [
+        {
+          "const": "passed",
+          "description": "The target's hash matches the lock entry.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "The target's hash differs from the lock entry: the code changed since the doc was confirmed.",
+          "type": "string"
+        },
+        {
+          "const": "broken",
+          "description": "The target file, symbol or namespace can't be found.",
+          "type": "string"
+        },
+        {
+          "const": "new",
+          "description": "The link has no lock entry yet.",
+          "type": "string"
+        },
+        {
+          "const": "obsolete",
+          "description": "A lock entry whose link no longer exists.",
+          "type": "string"
+        }
+      ]
+    },
+    "ListReport": {
+      "description": "What `list` prints: the counts of every match, the links to show, and the scan's findings not\ntied to one link (07 G8).\n\nJSON puts `summary` and `links` under `data`; the envelope carries the loose findings.",
+      "properties": {
+        "links": {
+          "description": "The links shown, at most `--limit`, each with the finding that explains its state.",
+          "items": {
+            "$ref": "#/$defs/LinkJson"
+          },
+          "type": "array"
+        },
+        "summary": {
+          "$ref": "#/$defs/Summary",
+          "description": "How many links are in each state, counting every match, not only those shown."
+        }
+      },
+      "required": [
+        "summary",
+        "links"
+      ],
+      "type": "object"
+    },
+    "LocationJson": {
+      "description": "A place in a file as JSON shows it.",
+      "properties": {
+        "column": {
+          "description": "1-based column, in characters.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "end": {
+          "description": "End byte offset.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "file": {
+          "description": "The file, relative to the project root.",
+          "type": "string"
+        },
+        "line": {
+          "description": "1-based line.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "start": {
+          "description": "Start byte offset.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "file",
+        "line",
+        "column",
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "SeverityJson": {
+      "description": "A severity as JSON shows it.",
+      "oneOf": [
+        {
+          "const": "error",
+          "description": "Fails `check`.",
+          "type": "string"
+        },
+        {
+          "const": "warning",
+          "description": "Reported; fails `check` only under `--deny-warnings`.",
+          "type": "string"
+        },
+        {
+          "const": "note",
+          "description": "Information only.",
+          "type": "string"
+        }
+      ]
+    },
+    "SourcePath": {
+      "description": "A file path relative to the project root, with `/` separators.",
+      "type": "string"
+    },
+    "Summary": {
+      "description": "How many links are in each state.",
+      "properties": {
+        "broken": {
+          "description": "Links whose target can't be found.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "failed": {
+          "description": "Links whose target changed since the doc was confirmed.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "new": {
+          "description": "Links with no lock entry yet.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "obsolete": {
+          "description": "Lock entries whose link no longer exists.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "passed": {
+          "description": "Links whose target still matches the lockfile.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "passed",
+        "failed",
+        "broken",
+        "new",
+        "obsolete"
+      ],
+      "type": "object"
+    },
+    "SymbolPath": {
+      "description": "A dotted symbol path such as `Config.validate`.",
+      "type": "string"
+    },
+    "Target": {
+      "description": "Where a link points: `path` or `namespace:path`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The one object every command writes under `--json`, with the same top-level keys each time.\n\nIts schema is the one `supdoc schema` prints, so the JSON written and the schema published\ncome from this one type.",
+  "properties": {
+    "command": {
+      "description": "The command that produced `data`.",
+      "type": "string"
+    },
+    "data": {
+      "$ref": "#/$defs/ListReport",
+      "description": "The command's own payload."
+    },
+    "findings": {
+      "description": "Findings that aren't about one link.",
+      "items": {
+        "$ref": "#/$defs/FindingJson"
+      },
+      "type": "array"
+    },
+    "ok": {
+      "description": "`true` exactly when the exit code is 0.",
+      "type": "boolean"
+    },
+    "root": {
+      "description": "The absolute project root, which every other path is relative to.",
+      "type": "string"
+    },
+    "schema_version": {
+      "description": "[`SCHEMA_VERSION`].",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "truncated": {
+      "description": "Whether results were left out.",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "command",
+    "ok",
+    "root",
+    "data",
+    "findings",
+    "truncated"
+  ],
+  "title": "Envelope",
+  "type": "object"
+}
