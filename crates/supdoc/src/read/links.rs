@@ -1012,11 +1012,11 @@ mod tests {
         let after = rust_file("fn a() {}\n\n// see [b](../docs/c.md)\n");
 
         assert_eq!(
-            crate::read::hash::hash_file(&before).to_string(),
+            crate::read::hash::hash_file(&before, crate::hash::HashSettings::default()).to_string(),
             HASH_WITH_B
         );
         assert_eq!(
-            crate::read::hash::hash_file(&after).to_string(),
+            crate::read::hash::hash_file(&after, crate::hash::HashSettings::default()).to_string(),
             HASH_WITH_C,
             "a whole-file hash covers comments, so editing a link in one changes it (03 R6)",
         );

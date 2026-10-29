@@ -15,6 +15,7 @@ use std::path::Path;
 
 use crate::config::{CONFIG_FILE_NAME, Config};
 use crate::finding::{Finding, Fix, Location, Severity, Snippet};
+use crate::hash::HashSettings;
 use crate::link::{LinkKey, Target};
 use crate::output::paths::relative_to;
 use crate::path::AbsolutePath;
@@ -238,14 +239,14 @@ fn target_states(
             let syntax_errors = file.has_syntax_errors();
             let state = match &key.symbol {
                 None => TargetState::Present {
-                    hash: hash_file(file),
+                    hash: hash_file(file, HashSettings::default()),
                     syntax_errors,
                 },
                 Some(symbol) => {
                     let table = table.get_or_insert_with(|| file.language().symbols(file));
                     match table.resolve(file.path(), symbol) {
                         Ok(found) => TargetState::Present {
-                            hash: hash_symbol(file, found),
+                            hash: hash_symbol(file, found, HashSettings::default()),
                             syntax_errors,
                         },
                         Err(error) => TargetState::Broken {

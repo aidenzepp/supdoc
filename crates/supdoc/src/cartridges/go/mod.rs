@@ -40,6 +40,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::hash::HashSettings;
     use crate::link::SymbolPath;
     use crate::path::AbsolutePath;
     use crate::read::cartridge::{SourceFile, Symbol, SymbolTable};
@@ -191,13 +192,18 @@ func (r *Ring[T]) Push(item T) {
 
         for (path, hash) in pinned {
             assert_eq!(
-                hash_symbol(&file, resolved(&file, &table, path)).to_string(),
+                hash_symbol(
+                    &file,
+                    resolved(&file, &table, path),
+                    HashSettings::default()
+                )
+                .to_string(),
                 hash,
                 "a grammar upgrade moved `{path}`'s node boundaries (02 L8)"
             );
         }
         assert_eq!(
-            hash_file(&file).to_string(),
+            hash_file(&file, HashSettings::default()).to_string(),
             "3627b03fd4a8f1d285fb811e66831ac7daf345e10a98b15c37bad51fc633a6b2",
             "the whole-file hash changed"
         );
@@ -231,7 +237,7 @@ func (r *Ring[T]) Push(item T) {
         let (before_table, after_table) = (symbols(&before), symbols(&after));
 
         let hash = |file: &SourceFile, table: &SymbolTable, path| {
-            hash_symbol(file, resolved(file, table, path))
+            hash_symbol(file, resolved(file, table, path), HashSettings::default())
         };
 
         assert_eq!(

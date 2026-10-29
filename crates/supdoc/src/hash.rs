@@ -105,6 +105,44 @@ impl serde::Serialize for Hash {
     }
 }
 
+/// How line endings are treated before hashing (01 D10, 03 R6).
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Deserialize,
+    serde::Serialize,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum LineEndings {
+    /// Each CR immediately followed by LF is dropped before hashing (B.4).
+    #[default]
+    Normalize,
+    /// Every byte is hashed as is.
+    Exact,
+}
+
+impl fmt::Display for LineEndings {
+    /// The same text as the TOML value: `normalize` or `exact`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Normalize => "normalize",
+            Self::Exact => "exact",
+        })
+    }
+}
+
+/// Every setting that changes a hash. Recorded in `supdoc.lock` (02 L10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HashSettings {
+    /// How line endings are treated before hashing.
+    pub line_endings: LineEndings,
+}
+
 /// A string is not 64 hex characters.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("invalid hash `{input}`: expected 64 hex characters")]
@@ -159,6 +197,21 @@ mod tests {
         let hash = Hash::digest(b"fn add() {}");
 
         assert_eq!(Hash::from_bytes(*hash.as_bytes()), hash);
+    }
+
+    #[test]
+    fn line_endings_display_matches_its_toml_value() {
+        for value in [LineEndings::Normalize, LineEndings::Exact] {
+            assert_eq!(
+                serde_json::to_string(&value).expect("line endings should serialize"),
+                format!("\"{value}\""),
+            );
+        }
+    }
+
+    #[test]
+    fn default_hash_settings_normalize_line_endings() {
+        assert_eq!(HashSettings::default().line_endings, LineEndings::Normalize);
     }
 
     #[test]

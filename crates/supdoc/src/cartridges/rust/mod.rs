@@ -40,7 +40,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::hash::Hash;
+    use crate::hash::{Hash, HashSettings};
     use crate::link::SymbolPath;
     use crate::path::AbsolutePath;
     use crate::read::cartridge::{SourceFile, Symbol, SymbolTable};
@@ -218,7 +218,12 @@ pub mod util {
             .map(|(path, _)| {
                 (
                     *path,
-                    hash_symbol(&file, resolved(&file, &table, path)).to_string(),
+                    hash_symbol(
+                        &file,
+                        resolved(&file, &table, path),
+                        HashSettings::default(),
+                    )
+                    .to_string(),
                 )
             })
             .collect();
@@ -231,7 +236,7 @@ pub mod util {
             "a grammar upgrade moved a symbol's node boundaries (02 L8)"
         );
         assert_eq!(
-            hash_file(&file).to_string(),
+            hash_file(&file, HashSettings::default()).to_string(),
             "6329bcd6afe6c766f02e3289df8aee117259a968938ac6866492a98989270a44",
             "the whole-file hash changed"
         );
@@ -275,7 +280,7 @@ pub mod util {
         let (before_table, after_table) = (symbols(&before), symbols(&after));
 
         let hash = |file: &SourceFile, table: &SymbolTable, path| {
-            hash_symbol(file, resolved(file, table, path))
+            hash_symbol(file, resolved(file, table, path), HashSettings::default())
         };
 
         assert_eq!(
@@ -448,7 +453,11 @@ pub mod util {
         let table = symbols(&file);
 
         assert_eq!(
-            hash_symbol(&file, resolved(&file, &table, "add")),
+            hash_symbol(
+                &file,
+                resolved(&file, &table, "add"),
+                HashSettings::default()
+            ),
             Hash::digest(b"fn add() { 1 }"),
         );
     }

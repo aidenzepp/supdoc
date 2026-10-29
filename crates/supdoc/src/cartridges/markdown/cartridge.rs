@@ -76,6 +76,7 @@ impl Cartridge for Markdown {
 mod tests {
     use std::path::Path;
 
+    use crate::hash::HashSettings;
     use crate::link::SymbolPath;
     use crate::path::AbsolutePath;
     use crate::read::cartridge::{Languages, SourceFile};
@@ -146,7 +147,7 @@ mod tests {
         let symbol = table
             .resolve(file.path(), &query)
             .unwrap_or_else(|error| panic!("`{raw}` should resolve: {error}"));
-        hash_symbol(&file, symbol).to_string()
+        hash_symbol(&file, symbol, HashSettings::default()).to_string()
     }
 
     /// Pinned from `printf` of the section's bytes piped to `shasum -a 256`, not from supdoc: a

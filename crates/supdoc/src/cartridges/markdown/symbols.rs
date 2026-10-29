@@ -295,6 +295,7 @@ mod tests {
     use std::sync::OnceLock;
 
     use super::*;
+    use crate::hash::HashSettings;
     use crate::path::AbsolutePath;
     use crate::read::cartridge::{Cartridge, CompiledQueries, LanguageId, MarkdownRegion};
     use crate::read::hash::hash_symbol;
@@ -448,7 +449,7 @@ mod tests {
                     &query.parse().expect("the query should be valid"),
                 )
                 .expect("the query should resolve");
-            hash_symbol(file, symbol)
+            hash_symbol(file, symbol, HashSettings::default())
         };
 
         assert_ne!(

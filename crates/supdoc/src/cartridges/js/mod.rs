@@ -40,6 +40,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::hash::HashSettings;
     use crate::link::SymbolPath;
     use crate::path::AbsolutePath;
     use crate::read::cartridge::{Languages, SourceFile, Symbol, SymbolTable};
@@ -191,13 +192,18 @@ function outer() {
 
         for (path, hash) in pinned {
             assert_eq!(
-                hash_symbol(&file, resolved(&file, &table, path)).to_string(),
+                hash_symbol(
+                    &file,
+                    resolved(&file, &table, path),
+                    HashSettings::default()
+                )
+                .to_string(),
                 hash,
                 "a grammar upgrade moved `{path}`'s node boundaries (02 L8)"
             );
         }
         assert_eq!(
-            hash_file(&file).to_string(),
+            hash_file(&file, HashSettings::default()).to_string(),
             "e53ae02c65b0ef81525d81f00824a0f2e9b038b0485b844a7739476cb1559268",
             "the whole-file hash changed"
         );
@@ -240,7 +246,7 @@ function outer() {
         let (before_table, after_table) = (symbols(&before), symbols(&after));
 
         let hash = |file: &SourceFile, table: &SymbolTable, path| {
-            hash_symbol(file, resolved(file, table, path))
+            hash_symbol(file, resolved(file, table, path), HashSettings::default())
         };
 
         assert_eq!(

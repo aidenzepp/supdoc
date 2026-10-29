@@ -40,6 +40,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::hash::HashSettings;
     use crate::link::SymbolPath;
     use crate::path::AbsolutePath;
     use crate::read::cartridge::{Cartridge, SourceFile, Symbol, SymbolTable};
@@ -201,7 +202,12 @@ namespace util {
             .map(|(path, _)| {
                 (
                     *path,
-                    hash_symbol(&file, resolved(&file, &table, path)).to_string(),
+                    hash_symbol(
+                        &file,
+                        resolved(&file, &table, path),
+                        HashSettings::default(),
+                    )
+                    .to_string(),
                 )
             })
             .collect();
@@ -214,7 +220,7 @@ namespace util {
             "a grammar upgrade moved a symbol's node boundaries (02 L8)"
         );
         assert_eq!(
-            hash_file(&file).to_string(),
+            hash_file(&file, HashSettings::default()).to_string(),
             "a1dc2945fa95b1beace1bca7c5c452fe34362ec788d3159fcbaedd4ae323d81d",
             "the whole-file hash changed"
         );
@@ -258,7 +264,7 @@ namespace util {
         let (before_table, after_table) = (symbols(&before), symbols(&after));
 
         let hash = |file: &SourceFile, table: &SymbolTable, path| {
-            hash_symbol(file, resolved(file, table, path))
+            hash_symbol(file, resolved(file, table, path), HashSettings::default())
         };
 
         assert_eq!(

@@ -193,6 +193,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::hash::HashSettings;
     use crate::link::SymbolPath;
     use crate::path::AbsolutePath;
     use crate::read::error::ResolveError;
@@ -355,7 +356,12 @@ def outer():
             .map(|(path, _)| {
                 (
                     *path,
-                    hash_symbol(&file, resolved(&file, &table, path)).to_string(),
+                    hash_symbol(
+                        &file,
+                        resolved(&file, &table, path),
+                        HashSettings::default(),
+                    )
+                    .to_string(),
                 )
             })
             .collect();
@@ -368,7 +374,7 @@ def outer():
             "a grammar upgrade moved a symbol's node boundaries (02 L8)"
         );
         assert_eq!(
-            hash_file(&file).to_string(),
+            hash_file(&file, HashSettings::default()).to_string(),
             "31a0358069808a3562e770e5d2624c9c9a65c8c472e06a19ff37e0dfa6df29fa",
             "the whole-file hash changed"
         );
@@ -406,7 +412,7 @@ def outer():
         let (before_table, after_table) = (symbols(&before), symbols(&after));
 
         let hash = |file: &SourceFile, table: &SymbolTable, path| {
-            hash_symbol(file, resolved(file, table, path))
+            hash_symbol(file, resolved(file, table, path), HashSettings::default())
         };
 
         assert_eq!(
@@ -498,7 +504,7 @@ def outer():
 
         let hash = |file: &SourceFile| {
             let table = symbols(file);
-            hash_symbol(file, resolved(file, &table, "f"))
+            hash_symbol(file, resolved(file, &table, "f"), HashSettings::default())
         };
 
         assert_ne!(hash(&before), hash(&after));
