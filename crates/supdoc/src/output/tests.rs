@@ -865,21 +865,35 @@ fn set_root_makes_json_root_and_paths_project_relative() {
 }
 
 #[test]
-fn an_artifact_is_written_raw_under_every_format() {
-    let artifact = "{\"$schema\": \"x\"}\n# not a report\n";
-    for format in [
-        OutputFormat::Text,
-        OutputFormat::Json,
-        OutputFormat::Jsonl,
-        OutputFormat::Github,
-    ] {
+fn an_artifact_is_raw_in_text_and_github_and_wrapped_in_json() {
+    let artifact = "# not a report\n";
+    let report = ScalarFixture {
+        applied: false,
+        file: artifact.to_owned(),
+        ok: String::new(),
+        changes: Vec::new(),
+    };
+    for format in [OutputFormat::Text, OutputFormat::Github] {
         let (mut output, stdout, stderr) = captured(settings(format, Verbosity::Quiet));
 
         output
-            .artifact(artifact)
+            .artifact(&report, artifact, true)
             .expect("writing to a buffer should succeed");
 
-        assert_eq!(stdout.text(), artifact, "{format:?} should write it as is");
+        assert_eq!(stdout.text(), artifact, "{format:?} should write it raw");
         assert_eq!(stderr.text(), "", "{format:?} should not touch stderr");
+    }
+    for format in [OutputFormat::Json, OutputFormat::Jsonl] {
+        let (mut output, stdout, _stderr) = captured(settings(format, Verbosity::Quiet));
+
+        output
+            .artifact(&report, artifact, true)
+            .expect("writing to a buffer should succeed");
+
+        assert!(
+            stdout.text().contains("\"file\":\"# not a report\\n\""),
+            "{format:?} should carry the artifact as report data: {}",
+            stdout.text()
+        );
     }
 }

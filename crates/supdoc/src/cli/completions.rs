@@ -2,13 +2,34 @@
 //!
 //! Completions never load the config, so they work in a broken project.
 
+use std::io::{self, Write};
+
 use clap::CommandFactory as _;
 use clap_complete::Shell;
+use schemars::JsonSchema;
+use serde::Serialize;
 
-use crate::output::{Output, OutputError};
+use crate::output::{Output, OutputError, Report, TextContext};
 
 use super::args::{Cli, CompletionsArgs};
 use super::{CliError, Context, Outcome};
+
+/// The completion script as output data.
+#[derive(Debug, Serialize, JsonSchema)]
+struct ScriptReport {
+    /// The script text, written as is in text and GitHub output.
+    script: String,
+}
+
+impl Report for ScriptReport {
+    fn command(&self) -> &'static str {
+        "completions"
+    }
+
+    fn render_text(&self, _context: &TextContext, out: &mut dyn Write) -> io::Result<()> {
+        out.write_all(self.script.as_bytes())
+    }
+}
 
 /// Runs `supdoc completions`, printing the script through `output`.
 ///
@@ -24,8 +45,11 @@ pub fn run(
     _context: &Context,
     output: &mut Output,
 ) -> Result<Outcome, CliError> {
+    let report = ScriptReport {
+        script: script(args.shell),
+    };
     output
-        .artifact(&script(args.shell))
+        .artifact(&report, &report.script, true)
         .map_err(|error| write_failed(args.shell, &error))?;
     Ok(Outcome::Clean)
 }
@@ -154,33 +178,79 @@ mod tests {
         assert_eq!(stderr.text(), "", "completions say nothing on stderr");
     }
 
-    #[test]
-    fn the_script_is_the_same_under_every_output_format() {
+    /// What `completions zsh` writes to stdout under `format`, and its stderr.
+    fn run_under(format: OutputFormat) -> (String, String) {
         let (args, context) = zsh_args();
-        for format in [
-            OutputFormat::Text,
-            OutputFormat::Json,
-            OutputFormat::Jsonl,
-            OutputFormat::Github,
-        ] {
-            let (stdout, stderr) = (Capture::default(), Capture::default());
-            let mut output = output_in(
-                format,
-                &context.cwd,
-                Box::new(stdout.clone()),
-                Box::new(stderr.clone()),
-            );
+        let (stdout, stderr) = (Capture::default(), Capture::default());
+        let mut output = output_in(
+            format,
+            &context.cwd,
+            Box::new(stdout.clone()),
+            Box::new(stderr.clone()),
+        );
 
-            let outcome = run(&args, &context, &mut output).expect("completions should succeed");
+        let outcome = run(&args, &context, &mut output).expect("completions should succeed");
 
-            assert_eq!(outcome, Outcome::Clean, "{format:?} should exit 0");
+        assert_eq!(outcome, Outcome::Clean, "{format:?} should exit 0");
+        (stdout.text(), stderr.text())
+    }
+
+    #[test]
+    fn text_and_github_print_the_identical_raw_script() {
+        let (args, _context) = zsh_args();
+        for format in [OutputFormat::Text, OutputFormat::Github] {
+            let (stdout, stderr) = run_under(format);
+
             assert_eq!(
-                stdout.text(),
+                stdout,
                 script(args.shell),
                 "{format:?} should print the raw script"
             );
-            assert_eq!(stderr.text(), "", "{format:?} says nothing on stderr");
+            assert_eq!(stderr, "", "{format:?} says nothing on stderr");
         }
+    }
+
+    #[test]
+    fn json_wraps_the_script_in_one_envelope() {
+        let (args, _context) = zsh_args();
+        let (stdout, _stderr) = run_under(OutputFormat::Json);
+
+        let envelope: serde_json::Value =
+            serde_json::from_str(&stdout).expect("--json should print one JSON object");
+
+        assert_eq!(stdout.lines().count(), 1, "the envelope is one line");
+        assert_eq!(
+            envelope.pointer("/command"),
+            Some(&serde_json::json!("completions"))
+        );
+        assert_eq!(
+            envelope.pointer("/data/script"),
+            Some(&serde_json::json!(script(args.shell))),
+            "data.script should be the script"
+        );
+    }
+
+    #[test]
+    fn jsonl_summary_line_carries_the_script() {
+        let (args, _context) = zsh_args();
+        let (stdout, _stderr) = run_under(OutputFormat::Jsonl);
+
+        let last = stdout
+            .lines()
+            .last()
+            .expect("--jsonl should print at least a summary line");
+        let summary: serde_json::Value =
+            serde_json::from_str(last).expect("the summary line should be JSON");
+
+        assert_eq!(
+            summary.pointer("/type"),
+            Some(&serde_json::json!("summary"))
+        );
+        assert_eq!(
+            summary.pointer("/script"),
+            Some(&serde_json::json!(script(args.shell))),
+            "the summary line should contain script"
+        );
     }
 
     #[test]

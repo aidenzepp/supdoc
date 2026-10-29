@@ -151,14 +151,24 @@ impl Output {
         self.write(Stream::Stdout, &bytes)
     }
 
-    /// Writes `artifact`, a script or a schema, to stdout exactly as given. The output format
-    /// never changes it: an artifact is the file the user asked for, not a report about it.
+    /// Writes an artifact, a script or a schema. Text and GitHub output print `raw` exactly as
+    /// given, because the artifact is the file the user asked for. The JSON formats wrap it by
+    /// writing `report`, which carries the same artifact as data.
     ///
     /// # Errors
     ///
-    /// Fails if a write fails for any reason but a closed pipe.
-    pub fn artifact(&mut self, artifact: &str) -> Result<(), OutputError> {
-        self.write(Stream::Stdout, artifact.as_bytes())
+    /// Fails if the report can't be turned into JSON or a write fails for any reason but a
+    /// closed pipe.
+    pub fn artifact<R: Report>(
+        &mut self,
+        report: &R,
+        raw: &str,
+        ok: bool,
+    ) -> Result<(), OutputError> {
+        match self.settings.format {
+            OutputFormat::Text | OutputFormat::Github => self.write(Stream::Stdout, raw.as_bytes()),
+            OutputFormat::Json | OutputFormat::Jsonl => self.report(report, ok),
+        }
     }
 
     /// Writes a finding about the run itself to stderr. Quiet hides everything but errors.
