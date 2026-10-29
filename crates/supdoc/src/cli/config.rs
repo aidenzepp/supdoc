@@ -4,13 +4,13 @@
 //! Both are read-only. Each runs `load_config → report`, and the two share the namespace row.
 
 use std::io::{self, Write};
-use std::path::{Component, PathBuf};
 
 use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::config::{Config, PatternDefinition};
 use crate::output::json::Envelope;
+use crate::output::paths::relative_to;
 use crate::output::text::visible;
 use crate::output::{Output, OutputError, Report, TextContext, Verbosity};
 use crate::path::AbsolutePath;
@@ -119,9 +119,9 @@ impl ConfigShowReport {
             files: config
                 .files()
                 .iter()
-                .map(|file| root_relative(root, file))
+                .map(|file| relative_to(root, file))
                 .collect(),
-            lockfile: root_relative(root, &lock_path(root)),
+            lockfile: relative_to(root, &lock_path(root)),
             include: PatternsJson::new(
                 root,
                 config.include_definition(),
@@ -239,7 +239,7 @@ impl PatternsJson {
         match definition {
             Some(definition) => Self {
                 patterns: definition.patterns().to_vec(),
-                from: Some(root_relative(root, definition.file())),
+                from: Some(relative_to(root, definition.file())),
                 file: Some(definition.file().clone()),
             },
             None => Self {
@@ -282,8 +282,8 @@ fn namespace_rows(config: &Config) -> Vec<NamespaceJson> {
             let defined_in = config.namespace_defined_in(name).unwrap_or(root);
             NamespaceJson {
                 name: name.to_string(),
-                path: root_relative(root, folder),
-                from: root_relative(root, defined_in),
+                path: relative_to(root, folder),
+                from: relative_to(root, defined_in),
                 exists: folder.as_path().is_dir(),
                 folder: folder.clone(),
                 defined_in: defined_in.clone(),
@@ -328,29 +328,6 @@ const fn arrow(context: &TextContext) -> &'static str {
 /// `path` as text output shows it: relative to the current directory.
 fn shown(context: &TextContext, path: &AbsolutePath) -> String {
     visible(&context.paths.text_absolute(path))
-}
-
-/// `path` relative to the project `root`, climbing with `..` where it lies outside, as JSON
-/// shows paths (K5).
-fn root_relative(root: &AbsolutePath, path: &AbsolutePath) -> String {
-    let base: Vec<Component<'_>> = root.as_path().components().collect();
-    let target: Vec<Component<'_>> = path.as_path().components().collect();
-    let shared = base
-        .iter()
-        .zip(&target)
-        .take_while(|(left, right)| left == right)
-        .count();
-    let mut relative = PathBuf::new();
-    for _ in base.iter().skip(shared) {
-        relative.push("..");
-    }
-    for part in target.iter().skip(shared) {
-        relative.push(part.as_os_str());
-    }
-    if relative.as_os_str().is_empty() {
-        relative.push(".");
-    }
-    relative.to_string_lossy().into_owned()
 }
 
 #[cfg(test)]

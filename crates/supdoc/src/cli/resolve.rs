@@ -5,7 +5,7 @@
 //! resolve`, with effects only at the two ends.
 
 use std::io::{self, Write};
-use std::path::{Component, Path};
+use std::path::Path;
 use std::str::FromStr;
 
 use schemars::JsonSchema;
@@ -16,6 +16,7 @@ use crate::finding::{Finding, Severity};
 use crate::link::SymbolPath;
 use crate::namespace::NamespaceName;
 use crate::output::json::Envelope;
+use crate::output::paths::relative_to;
 use crate::output::text::{render_finding, visible};
 use crate::output::{Output, OutputError, Report, TextContext};
 use crate::path::AbsolutePath;
@@ -44,14 +45,14 @@ pub fn run(
 ) -> Result<Outcome, CliError> {
     let config = load_config(context, output, "resolve")?;
     let path = locate(&config, &context.cwd, &args.file)?;
-    let file =
-        SourceFile::read(path, &Languages::builtin()).map_err(|error| read_failed(&error))?;
+    let file = SourceFile::read(path, &Languages::builtin())
+        .map_err(|error| read_failed(&error, config.root()))?;
     let table = file.language().symbols(&file);
 
     let (symbols, query, truncated) = if let Some(query) = &args.symbol {
         let symbol = table
             .resolve(file.path(), query)
-            .map_err(|error| resolve_failed(&error))?;
+            .map_err(|error| resolve_failed(&error, config.root(), &args.file))?;
         (vec![SymbolJson::new(&file, symbol)], Some(query), false)
     } else {
         let total = table.iter().count();
@@ -65,7 +66,7 @@ pub fn run(
     };
     let listed = symbols.len();
     let findings = if file.has_syntax_errors() {
-        vec![syntax_errors(&file, &context.cwd)]
+        vec![syntax_errors(&file, config.root())]
     } else {
         Vec::new()
     };
@@ -112,8 +113,9 @@ pub fn schema() -> Result<schemars::Schema, CliError> {
 ///
 /// # Errors
 ///
-/// Returns `link/unknown-namespace` for a namespace the config doesn't define, and
-/// `cli/path-missing` for a file that doesn't exist. Both exit 2.
+/// Returns `link/unknown-namespace` for a namespace the config doesn't define,
+/// `cli/path-missing` for a file that doesn't exist, and `cli/path-invalid` for a directory. All
+/// exit 2.
 fn locate(config: &Config, cwd: &AbsolutePath, typed: &Path) -> Result<AbsolutePath, CliError> {
     let namespaced = typed.to_str().and_then(|text| {
         let (name, rest) = text.split_once(':')?;
@@ -133,7 +135,20 @@ fn locate(config: &Config, cwd: &AbsolutePath, typed: &Path) -> Result<AbsoluteP
     if found.as_path().symlink_metadata().is_err() {
         return Err(path_missing(typed));
     }
+    if found.as_path().is_dir() {
+        return Err(directory(typed));
+    }
     Ok(found)
+}
+
+/// The error for a `FILE` that is a directory: `resolve` reads one file.
+fn directory(typed: &Path) -> CliError {
+    CliError::new(
+        "cli/path-invalid",
+        format!("{} is a directory, not a file", typed.display()),
+        "Name one file inside it; `supdoc resolve` lists the symbols of a single file",
+        CliError::USAGE_EXIT_CODE,
+    )
 }
 
 /// The error for a namespace the config doesn't define, naming the closest defined one.
@@ -164,7 +179,9 @@ fn unknown_namespace(config: &Config, name: &NamespaceName) -> CliError {
 }
 
 /// The error for a file that couldn't be read, with the read error's own code and help.
-fn read_failed(error: &ReadError) -> CliError {
+///
+/// The message names the file relative to the project `root`, as JSON shows paths (K5).
+fn read_failed(error: &ReadError, root: &AbsolutePath) -> CliError {
     let exit_code = match error {
         ReadError::Missing { .. } => CliError::USAGE_EXIT_CODE,
         ReadError::Io { .. } => CliError::IO_EXIT_CODE,
@@ -173,16 +190,26 @@ fn read_failed(error: &ReadError) -> CliError {
         | ReadError::TooLarge { .. }
         | ReadError::UnsupportedLanguage { .. } => CliError::REFUSED_EXIT_CODE,
     };
-    CliError::new(error.code(), error.to_string(), error.help(), exit_code)
+    let shown = relative_to(root, error.path());
+    CliError::new(
+        error.code(),
+        error.message_naming(&shown),
+        error.help(),
+        exit_code,
+    )
 }
 
 /// The error for a `SYMBOL` that names no single symbol, with the resolve error's own code and
 /// help.
-fn resolve_failed(error: &ResolveError) -> CliError {
+///
+/// The message names the file relative to the project `root`, as JSON shows paths (K5). The help's
+/// `supdoc resolve` command repeats `typed`, the `FILE` as written, so it runs where this one did.
+fn resolve_failed(error: &ResolveError, root: &AbsolutePath, typed: &Path) -> CliError {
+    let shown = relative_to(root, error.file());
     CliError::new(
         error.code(),
-        error.to_string(),
-        error.help(),
+        error.message_naming(&shown),
+        error.help_naming(&typed.display()),
         CliError::REFUSED_EXIT_CODE,
     )
 }
@@ -198,38 +225,18 @@ fn output_failed(error: &OutputError) -> CliError {
 }
 
 /// The warning that `file` has syntax errors, so its symbols may be incomplete (03 R8).
-fn syntax_errors(file: &SourceFile, cwd: &AbsolutePath) -> Finding {
+///
+/// It names the file relative to the project `root`, as JSON shows paths (K5).
+fn syntax_errors(file: &SourceFile, root: &AbsolutePath) -> Finding {
     Finding::new(
         "read/syntax-errors",
         Severity::Warning,
         format!(
             "{} has syntax errors; its symbols may be incomplete",
-            relative_to(cwd, file.path())
+            relative_to(root, file.path())
         ),
     )
     .with_help("Fix the syntax errors, then run `supdoc resolve` again")
-}
-
-/// `target` written relative to the directory `base`, climbing with `..` where needed.
-fn relative_to(base: &AbsolutePath, target: &AbsolutePath) -> String {
-    let base_parts: Vec<Component<'_>> = base.as_path().components().collect();
-    let target_parts: Vec<Component<'_>> = target.as_path().components().collect();
-    let shared = base_parts
-        .iter()
-        .zip(&target_parts)
-        .take_while(|(left, right)| left == right)
-        .count();
-    let climbs = std::iter::repeat_n("..".to_owned(), base_parts.len() - shared);
-    let descents = target_parts
-        .iter()
-        .skip(shared)
-        .map(|part| part.as_os_str().to_string_lossy().into_owned());
-    let parts: Vec<String> = climbs.chain(descents).collect();
-    if parts.is_empty() {
-        ".".to_owned()
-    } else {
-        parts.join("/")
-    }
 }
 
 /// What `resolve` prints: the symbols of one file, or the one symbol asked for.
@@ -434,8 +441,23 @@ mod tests {
         /// Runs `supdoc <args>` from the project root. `args` must start with `resolve` or a
         /// global flag.
         fn resolve(&self, args: &[&str]) -> Run {
-            let cwd =
-                AbsolutePath::new(self.dir.path()).expect("a temp directory should be absolute");
+            self.resolve_from("", args)
+        }
+
+        /// The temp directory's own name, which any absolute path into the project contains.
+        fn temp_name(&self) -> String {
+            self.dir
+                .path()
+                .file_name()
+                .expect("a temp directory should have a name")
+                .to_string_lossy()
+                .into_owned()
+        }
+
+        /// Runs `supdoc <args>` from the directory `relative` under the root.
+        fn resolve_from(&self, relative: &str, args: &[&str]) -> Run {
+            let cwd = AbsolutePath::new(&self.dir.path().join(relative))
+                .expect("a directory under the root should be absolute");
             let command_line: Vec<&str> = std::iter::once("supdoc")
                 .chain(args.iter().copied())
                 .collect();
@@ -669,5 +691,72 @@ mod tests {
         assert!(errors.is_empty(), "schema violations: {errors:?} in {json}");
         assert_eq!(at(&json, "/data/file"), "src/lib.rs", "json: {json}");
         assert_eq!(at(&json, "/command"), "resolve", "json: {json}");
+    }
+
+    #[test]
+    fn resolve_errors_from_a_subdirectory_name_the_file_from_the_root() {
+        let project = Project::new();
+        project.write("docs/guide.md", "# Guide\n");
+        fs::write(project.dir.path().join("src/latin1.rs"), b"// caf\xe9\n")
+            .expect("the non-UTF-8 fixture should be written");
+        project.write("logo.png", "not an image");
+
+        let not_found =
+            project.resolve_from("docs", &["resolve", "../src/lib.rs", "Config.validat"]);
+        let not_utf8 = project.resolve_from("docs", &["resolve", "../src/latin1.rs"]);
+        let no_language = project.resolve_from("docs", &["resolve", "../logo.png"]);
+
+        let shown = |run: &Run| format!("{}\n{}", run.error().message(), run.error().help());
+        assert_eq!(
+            shown(&not_found),
+            "no symbol `Config.validat` in src/lib.rs\n\
+             did you mean `Config.validate`, `Config.port`, `Config`? \
+             `supdoc resolve ../src/lib.rs` lists every symbol",
+            "the message names the file from the root; the help repeats FILE as typed so it runs"
+        );
+        assert_eq!(
+            not_utf8.error().message(),
+            "src/latin1.rs is not UTF-8 (first invalid byte at offset 6)"
+        );
+        assert_eq!(
+            no_language.error().message(),
+            "no language for `.png` files (logo.png)"
+        );
+        for run in [&not_found, &not_utf8, &no_language] {
+            assert!(
+                !shown(run).contains(&project.temp_name()),
+                "no temp-dir prefix should leak into: {}",
+                shown(run)
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_syntax_warning_names_the_file_from_the_root_in_json() {
+        let project = Project::new();
+        project.write("docs/guide.md", "# Guide\n");
+        project.write("src/broken.rs", "pub fn fine() {}\n\npub fn broken( {\n");
+
+        let run = project.resolve_from("docs", &["--json", "resolve", "../src/broken.rs"]);
+
+        assert_eq!(run.exit_code(), 0, "stderr: {}", run.stderr);
+        let json = run.json();
+        assert_eq!(
+            at(&json, "/findings/0/message"),
+            "src/broken.rs has syntax errors; its symbols may be incomplete",
+            "JSON paths are relative to the project root, not the current directory: {json}"
+        );
+    }
+
+    #[test]
+    fn resolve_directory_is_usage_error_exit_2() {
+        let project = Project::new();
+
+        let run = project.resolve(&["resolve", "src"]);
+
+        assert_eq!(run.exit_code(), 2);
+        let error = run.error();
+        assert_eq!(error.code(), "cli/path-invalid");
+        assert_eq!(error.message(), "src is a directory, not a file");
     }
 }

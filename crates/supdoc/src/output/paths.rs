@@ -1,6 +1,6 @@
 //! How a path is shown in each format (07 G7).
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
 use crate::link::SourcePath;
 use crate::path::AbsolutePath;
@@ -55,7 +55,7 @@ impl PathStyle {
     /// An absolute path as text output shows it: relative to the current directory.
     #[must_use]
     pub fn text_absolute(&self, path: &AbsolutePath) -> String {
-        shown(&relative_to(&self.cwd, path))
+        relative_to(&self.cwd, path)
     }
 
     /// A source file as a GitHub annotation shows it: relative to `$GITHUB_WORKSPACE`, or to the
@@ -86,8 +86,13 @@ impl PathStyle {
     }
 }
 
-/// `target` written relative to the directory `base`, climbing with `..` where needed.
-fn relative_to(base: &AbsolutePath, target: &AbsolutePath) -> PathBuf {
+/// `target` written relative to the directory `base`, climbing with `..` where it lies outside,
+/// with `/` between segments on every platform. `.` when the two are the same.
+///
+/// The one place supdoc turns an absolute path into a relative one for display: text output
+/// passes the current directory as `base`, and JSON and finding messages pass the project root.
+#[must_use]
+pub(crate) fn relative_to(base: &AbsolutePath, target: &AbsolutePath) -> String {
     let base_parts: Vec<Component<'_>> = base.as_path().components().collect();
     let target_parts: Vec<Component<'_>> = target.as_path().components().collect();
     let shared = base_parts
@@ -95,20 +100,48 @@ fn relative_to(base: &AbsolutePath, target: &AbsolutePath) -> PathBuf {
         .zip(&target_parts)
         .take_while(|(left, right)| left == right)
         .count();
-    let mut relative = PathBuf::new();
-    for _ in base_parts.iter().skip(shared) {
-        relative.push("..");
+    let climbs = std::iter::repeat_n("..".to_owned(), base_parts.len() - shared);
+    let descents = target_parts
+        .iter()
+        .skip(shared)
+        .map(|part| part.as_os_str().to_string_lossy().into_owned());
+    let parts: Vec<String> = climbs.chain(descents).collect();
+    if parts.is_empty() {
+        ".".to_owned()
+    } else {
+        parts.join("/")
     }
-    for part in target_parts.iter().skip(shared) {
-        relative.push(part.as_os_str());
-    }
-    if relative.as_os_str().is_empty() {
-        relative.push(".");
-    }
-    relative
 }
 
 /// A path as text. Paths are shown as the operating system writes them.
 fn shown(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn absolute(raw: &str) -> AbsolutePath {
+        AbsolutePath::new(Path::new(raw)).expect("the fixture path should be absolute")
+    }
+
+    #[test]
+    fn relative_to_descends_climbs_and_joins_with_slashes() {
+        let root = absolute("/repo");
+
+        assert_eq!(
+            relative_to(&root, &absolute("/repo/src/lib.rs")),
+            "src/lib.rs"
+        );
+        assert_eq!(
+            relative_to(&absolute("/repo/docs"), &absolute("/repo/src/lib.rs")),
+            "../src/lib.rs"
+        );
+        assert_eq!(
+            relative_to(&root, &absolute("/elsewhere/a.md")),
+            "../elsewhere/a.md"
+        );
+        assert_eq!(relative_to(&root, &root), ".");
+    }
 }

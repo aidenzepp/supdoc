@@ -17,7 +17,7 @@ use crate::finding::Finding;
 use crate::link::LinkKey;
 use crate::output::json::Envelope;
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, OutputError, Report, Summary, TextContext};
+use crate::output::{Output, OutputError, PathStyle, Report, Summary, TextContext};
 use crate::read::cartridge::Languages;
 use crate::state::LinkState;
 
@@ -73,7 +73,9 @@ pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<
         })?;
     }
 
-    let report = UpdateReport::new(&model, &plan, &args.state, applied);
+    // `supdoc fix PATH` takes `PATH` relative to the current directory, so hints name it from there.
+    let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
+    let report = UpdateReport::new(&model, &plan, &args.state, applied, &paths);
     output
         .report(&report, true)
         .map_err(|error| output_failed(&error))?;
@@ -124,8 +126,15 @@ pub(crate) struct UpdateReport {
 }
 
 impl UpdateReport {
-    /// The report of `plan`, made from `model`, the reconciled links it was planned from.
-    fn new(model: &CheckModel, plan: &UpdatePlan, states: &[LinkState], applied: bool) -> Self {
+    /// The report of `plan`, made from `model`, the reconciled links it was planned from. `paths`
+    /// names each broken link's source in its `supdoc fix` hint, relative to the current directory.
+    fn new(
+        model: &CheckModel,
+        plan: &UpdatePlan,
+        states: &[LinkState],
+        applied: bool,
+        paths: &PathStyle,
+    ) -> Self {
         let links: BTreeMap<&LinkKey, &LinkReport> =
             model.links.iter().map(|link| (&link.key, link)).collect();
         let rows: Vec<ChangeRow> = plan
@@ -142,7 +151,12 @@ impl UpdateReport {
                 .findings
                 .iter()
                 .cloned()
-                .chain(model.links.iter().filter_map(broken_finding))
+                .chain(
+                    model
+                        .links
+                        .iter()
+                        .filter_map(|link| broken_finding(link, paths)),
+                )
                 .collect(),
             rows,
         }
@@ -353,7 +367,10 @@ fn render_rows(context: &TextContext, rows: &[ChangeRow], out: &mut dyn Write) -
 
 /// The cause of a broken link, as a top-level finding pointing at `supdoc fix`, or `None` for a
 /// link in any other state (05 C7, 06a U5).
-fn broken_finding(link: &LinkReport) -> Option<Finding> {
+///
+/// The hint names the link's source as `paths` shows text: relative to the current directory, so
+/// the command runs where this one did.
+fn broken_finding(link: &LinkReport, paths: &PathStyle) -> Option<Finding> {
     if link.state != LinkState::Broken {
         return None;
     }
@@ -365,7 +382,7 @@ fn broken_finding(link: &LinkReport) -> Option<Finding> {
     }
     let pointer = format!(
         "update can't record a broken link; repair it with `supdoc fix {} --yes`",
-        link.key.source
+        paths.text(&link.key.source)
     );
     let help = match finding.help.take() {
         Some(own) if own.ends_with(['.', '?', '!']) => format!("{own} {}", sentence(&pointer)),
@@ -495,6 +512,16 @@ mod tests {
             AbsolutePath::new(self.dir.path()).expect("a temp directory should be absolute")
         }
 
+        /// The temp directory's own name, which any absolute path into the project contains.
+        fn temp_name(&self) -> String {
+            self.dir
+                .path()
+                .file_name()
+                .expect("a temp directory should have a name")
+                .to_string_lossy()
+                .into_owned()
+        }
+
         fn write(&self, relative: &str, text: &str) {
             let path = self.dir.path().join(relative);
             if let Some(parent) = path.parent() {
@@ -557,7 +584,14 @@ mod tests {
 
         /// Like [`Self::update`], drawing with Unicode when `unicode` is set and ASCII otherwise.
         fn update_drawing(&self, args: &[&str], unicode: bool) -> Run {
-            let cwd = self.root();
+            self.update_in("", args, unicode)
+        }
+
+        /// Runs `supdoc <args>` from the directory `relative` under the root, drawing with Unicode
+        /// when `unicode` is set.
+        fn update_in(&self, relative: &str, args: &[&str], unicode: bool) -> Run {
+            let cwd = AbsolutePath::new(&self.dir.path().join(relative))
+                .expect("a directory under the root should be absolute");
             let command_line: Vec<&str> = std::iter::once("supdoc")
                 .chain(args.iter().copied())
                 .collect();
@@ -826,6 +860,36 @@ mod tests {
         assert!(
             text.stdout.contains("supdoc fix docs/broken.md --yes"),
             "text shows the finding too: {}",
+            text.stdout
+        );
+    }
+
+    #[test]
+    fn update_fix_hint_names_the_source_from_a_subdirectory() {
+        let project = Project::new();
+        project.write("supdoc.config.toml", "");
+        project.write(
+            "docs/broken.md",
+            "See [gone](../src/lib.rs#subtract) here.\n",
+        );
+
+        let text = project.update_in("docs", &["update"], false);
+        let json = project.update_in("docs", &["--json", "update"], false);
+
+        assert_eq!(text.exit_code(), 0, "stderr: {}", text.stderr);
+        assert!(
+            text.stdout.contains("`supdoc fix broken.md --yes`"),
+            "from docs/ the hint should name the file as `fix` takes it there: {}",
+            text.stdout
+        );
+        let help = at(&json.json(), "/findings/0/help").to_string();
+        assert!(
+            help.contains("`supdoc fix broken.md --yes`"),
+            "the JSON hint is the same runnable command: {help}"
+        );
+        assert!(
+            !text.stdout.contains(&project.temp_name()) && !help.contains(&project.temp_name()),
+            "no temp-dir prefix should leak into: {}{help}",
             text.stdout
         );
     }

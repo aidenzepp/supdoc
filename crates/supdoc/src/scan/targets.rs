@@ -16,6 +16,7 @@ use std::path::Path;
 use crate::config::{CONFIG_FILE_NAME, Config};
 use crate::finding::{Finding, Fix, Location, Severity, Snippet};
 use crate::link::{LinkKey, Target};
+use crate::output::paths::relative_to;
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile, SymbolTable};
 use crate::read::error::{ReadError, ResolveError};
@@ -226,7 +227,7 @@ fn target_states(
     };
     let file = match parsed.read(&path, languages) {
         Ok(file) => file,
-        Err(error) => return broken_by(&|first| read_failed(&error, first)),
+        Err(error) => return broken_by(&|first| read_failed(&error, config.root(), first)),
     };
 
     let mut table: Option<SymbolTable> = None;
@@ -468,26 +469,31 @@ fn unknown_namespace(target: &Target, first: &Occurrence) -> Finding {
 }
 
 /// The finding for a target that couldn't be read, with the error's own code and help.
-fn read_failed(error: &ReadError, first: &Occurrence) -> Finding {
-    broken(error.code(), error.to_string(), error.help(), first)
+///
+/// The message names the file relative to the project `root`, so no finding carries a
+/// machine-specific absolute path.
+fn read_failed(error: &ReadError, root: &AbsolutePath, first: &Occurrence) -> Finding {
+    let shown = relative_to(root, error.path());
+    broken(
+        error.code(),
+        error.message_naming(&shown),
+        error.help(),
+        first,
+    )
 }
 
 /// The finding for a symbol that doesn't resolve. A `resolve/not-found` gets a fix when exactly
 /// one symbol in the file is a close match (03: the fixer never guesses).
 ///
 /// The message and help name the file relative to the project `root`, so no finding carries a
-/// machine-specific absolute path. A file outside the root keeps its absolute path, which is the
-/// only way to name it.
+/// machine-specific absolute path. A file outside the root climbs out of it with `..`.
 fn resolve_failed(
     error: &ResolveError,
     root: &AbsolutePath,
     table: &SymbolTable,
     first: &Occurrence,
 ) -> Finding {
-    let shown = match error.file().strip_prefix(root) {
-        Some(relative) => relative.display().to_string(),
-        None => error.file().display().to_string(),
-    };
+    let shown = relative_to(root, error.file());
     let finding = broken(
         error.code(),
         error.message_naming(&shown),
@@ -529,5 +535,73 @@ pub(crate) fn close_match<'c>(
     match close.as_slice() {
         [only] => Some(only),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::link::SourcePath;
+
+    fn absolute(raw: &str) -> AbsolutePath {
+        AbsolutePath::new(Path::new(raw)).expect("the fixture path should be absolute")
+    }
+
+    /// The first place `docs/a.md` links to `target`.
+    fn occurrence(target: &str) -> Occurrence {
+        let source: SourcePath = "docs/a.md"
+            .parse()
+            .expect("the fixture source should be valid");
+        Occurrence {
+            key: LinkKey {
+                source: source.clone(),
+                target: target.parse().expect("the fixture target should be valid"),
+                symbol: None,
+            },
+            location: Location {
+                file: source,
+                range: 0..1,
+                line: 1,
+                column: 1,
+            },
+            snippet: None,
+            written: None,
+        }
+    }
+
+    #[test]
+    fn read_failures_name_the_file_relative_to_the_root_not_absolutely() {
+        let root = absolute("/home/me/project");
+        let errors = [
+            ReadError::Missing {
+                path: absolute("/home/me/project/src/nope.rs"),
+            },
+            ReadError::NotUtf8 {
+                path: absolute("/home/me/project/src/bad.rs"),
+                offset: 3,
+            },
+            ReadError::UnsupportedLanguage {
+                path: absolute("/home/me/project/logo.png"),
+                extension: "png".to_owned(),
+                supported: vec!["rs"],
+            },
+        ];
+
+        let messages: Vec<String> = errors
+            .iter()
+            .map(|error| read_failed(error, &root, &occurrence("src/nope.rs")).message)
+            .collect();
+
+        assert_eq!(
+            messages,
+            [
+                "src/nope.rs does not exist",
+                "src/bad.rs is not UTF-8 (first invalid byte at offset 3)",
+                "no language for `.png` files (logo.png)",
+            ],
+            "read findings should name the file from the project root"
+        );
     }
 }

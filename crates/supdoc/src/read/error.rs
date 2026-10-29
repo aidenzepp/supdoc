@@ -10,17 +10,15 @@ use crate::link::SymbolPath;
 use crate::path::AbsolutePath;
 
 /// Why a file couldn't be read and parsed.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum ReadError {
     /// The file doesn't exist.
-    #[error("{} does not exist", .path.display())]
     Missing {
         /// The file that was looked for.
         path: AbsolutePath,
     },
 
     /// The filesystem refused the read.
-    #[error("cannot read {}: {error}", .path.display())]
     Io {
         /// The file being read.
         path: AbsolutePath,
@@ -29,7 +27,6 @@ pub enum ReadError {
     },
 
     /// The file isn't UTF-8 (03 R13).
-    #[error("{} is not UTF-8 (first invalid byte at offset {offset})", .path.display())]
     NotUtf8 {
         /// The file being read.
         path: AbsolutePath,
@@ -38,7 +35,6 @@ pub enum ReadError {
     },
 
     /// The file is over the size limit (03 R13).
-    #[error("{} is {size} bytes; the limit is {limit}", .path.display())]
     TooLarge {
         /// The file being read.
         path: AbsolutePath,
@@ -49,7 +45,6 @@ pub enum ReadError {
     },
 
     /// No cartridge reads files with this extension.
-    #[error("no language for `.{extension}` files ({})", .path.display())]
     UnsupportedLanguage {
         /// The file being read.
         path: AbsolutePath,
@@ -60,7 +55,6 @@ pub enum ReadError {
     },
 
     /// tree-sitter produced no tree. supdoc sets no timeout or cancellation, so this is a bug.
-    #[error("tree-sitter returned no tree for {} (supdoc bug)", .path.display())]
     Internal {
         /// The file being parsed.
         path: AbsolutePath,
@@ -78,6 +72,40 @@ impl ReadError {
             Self::TooLarge { .. } => "read/too-large",
             Self::UnsupportedLanguage { .. } => "read/unsupported-language",
             Self::Internal { .. } => "read/internal",
+        }
+    }
+
+    /// The file that couldn't be read.
+    #[must_use]
+    pub fn path(&self) -> &AbsolutePath {
+        match self {
+            Self::Missing { path }
+            | Self::Io { path, .. }
+            | Self::NotUtf8 { path, .. }
+            | Self::TooLarge { path, .. }
+            | Self::UnsupportedLanguage { path, .. }
+            | Self::Internal { path } => path,
+        }
+    }
+
+    /// The message, naming the file as `shown` instead of by its absolute path.
+    #[must_use]
+    pub fn message_naming(&self, shown: &dyn Display) -> String {
+        match self {
+            Self::Missing { .. } => format!("{shown} does not exist"),
+            Self::Io { error, .. } => format!("cannot read {shown}: {error}"),
+            Self::NotUtf8 { offset, .. } => {
+                format!("{shown} is not UTF-8 (first invalid byte at offset {offset})")
+            }
+            Self::TooLarge { size, limit, .. } => {
+                format!("{shown} is {size} bytes; the limit is {limit}")
+            }
+            Self::UnsupportedLanguage { extension, .. } => {
+                format!("no language for `.{extension}` files ({shown})")
+            }
+            Self::Internal { .. } => {
+                format!("tree-sitter returned no tree for {shown} (supdoc bug)")
+            }
         }
     }
 
@@ -111,6 +139,14 @@ impl ReadError {
         }
     }
 }
+
+impl Display for ReadError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message_naming(&self.path().display()))
+    }
+}
+
+impl std::error::Error for ReadError {}
 
 /// Why a symbol path names no single symbol in a file.
 #[derive(Debug, Clone, PartialEq, Eq)]
