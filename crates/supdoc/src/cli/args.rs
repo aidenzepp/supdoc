@@ -9,9 +9,10 @@ use clap::builder::FalseyValueParser;
 use clap::{ArgAction, Args, ColorChoice, Parser, Subcommand, ValueEnum, ValueHint};
 
 use super::examples::{
-    CHECK_EXAMPLES, COMPLETIONS_EXAMPLES, CONFIG_SHOW_EXAMPLES, FIX_EXAMPLES, INIT_EXAMPLES,
-    LIST_EXAMPLES, NAMESPACE_LIST_EXAMPLES, NAMESPACE_RENAME_EXAMPLES, RESOLVE_EXAMPLES,
-    SCHEMA_EXAMPLES, SKILL_INSTALL_EXAMPLES, TOP_EXAMPLES, UPDATE_EXAMPLES,
+    CHECK_EXAMPLES, COMPLETIONS_EXAMPLES, CONFIG_EXAMPLES, CONFIG_SHOW_EXAMPLES, FIX_EXAMPLES,
+    INIT_EXAMPLES, LIST_EXAMPLES, NAMESPACE_EXAMPLES, NAMESPACE_LIST_EXAMPLES,
+    NAMESPACE_RENAME_EXAMPLES, RESOLVE_EXAMPLES, SCHEMA_EXAMPLES, SKILL_EXAMPLES,
+    SKILL_INSTALL_EXAMPLES, TOP_EXAMPLES, UPDATE_EXAMPLES,
 };
 use crate::link::{LinkRef, SymbolPath};
 use crate::namespace::NamespaceName;
@@ -141,10 +142,10 @@ pub enum Command {
     #[command(after_help = INIT_EXAMPLES)]
     Init(InitArgs),
     /// Inspect configuration
-    #[command(subcommand)]
+    #[command(subcommand, after_help = CONFIG_EXAMPLES)]
     Config(ConfigCommand),
     /// Inspect or rename namespaces
-    #[command(subcommand)]
+    #[command(subcommand, after_help = NAMESPACE_EXAMPLES)]
     Namespace(NamespaceCommand),
     /// Print the JSON Schema of a command's --json output (read-only)
     #[command(after_help = SCHEMA_EXAMPLES)]
@@ -153,7 +154,7 @@ pub enum Command {
     #[command(after_help = COMPLETIONS_EXAMPLES)]
     Completions(CompletionsArgs),
     /// Install supdoc's agent skill
-    #[command(subcommand)]
+    #[command(subcommand, after_help = SKILL_EXAMPLES)]
     Skill(SkillCommand),
 }
 

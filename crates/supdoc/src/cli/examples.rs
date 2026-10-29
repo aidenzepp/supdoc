@@ -147,3 +147,33 @@ Examples:
 
   # Install into your home directory
   supdoc skill install --global --yes";
+
+/// Shown after `supdoc config --help`.
+pub const CONFIG_EXAMPLES: &str = "\
+Examples:
+  # The resolved config and the file each value came from
+  supdoc config show
+
+  # Machine-readable
+  supdoc config show --json";
+
+/// Shown after `supdoc namespace --help`.
+pub const NAMESPACE_EXAMPLES: &str = "\
+Examples:
+  # Namespaces and the directories they map to
+  supdoc namespace list
+
+  # Machine-readable
+  supdoc namespace list --json
+
+  # Preview renaming `auth` to `identity` everywhere
+  supdoc namespace rename auth identity";
+
+/// Shown after `supdoc skill --help`.
+pub const SKILL_EXAMPLES: &str = "\
+Examples:
+  # Preview the install into the current project
+  supdoc skill install
+
+  # Install into your home directory
+  supdoc skill install --global --yes";
