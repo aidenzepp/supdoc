@@ -3,8 +3,9 @@
 //! Parsing never prints and never exits: [`parse_from`] returns what to show, so `main` is the only
 //! code that touches the process and tests can inspect every outcome (06 `main`, X8).
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 
+use clap::builder::{FalseyValueParser, TypedValueParser as _};
 use clap::error::ErrorKind;
 use clap::{Parser, ValueEnum};
 
@@ -178,12 +179,12 @@ fn requested_format(args: &[OsString], env: impl Fn(&str) -> Option<String>) -> 
         }
     }
 
+    // The same parser clap applies to these variables, so both agree on which values are truthy.
     let truthy = |name: &str| {
         env(name).is_some_and(|value| {
-            matches!(
-                value.to_ascii_lowercase().as_str(),
-                "y" | "yes" | "t" | "true" | "on" | "1"
-            )
+            FalseyValueParser::new()
+                .parse_ref(&clap::Command::new("supdoc"), None, OsStr::new(&value))
+                .unwrap_or(false)
         })
     };
     let output = output
@@ -665,7 +666,22 @@ mod tests {
         assert!(is_json(&[("SUPDOC_OUTPUT", "json")], &["chek"]));
         assert!(is_json(&[("SUPDOC_JSONL", "1")], &["chek"]));
         assert!(is_json(&[("SUPDOC_JSON", "true")], &["chek"]));
-        assert!(!is_json(&[("SUPDOC_JSON", "0")], &["chek"]));
+        for truthy in ["2", "yes", "on", "anything", "TRUE"] {
+            assert!(
+                is_json(&[("SUPDOC_JSON", truthy)], &["chek"]),
+                "SUPDOC_JSON={truthy} should request JSON"
+            );
+            assert!(
+                is_json(&[("SUPDOC_JSONL", truthy)], &["chek"]),
+                "SUPDOC_JSONL={truthy} should request JSON"
+            );
+        }
+        for falsey in ["0", "false", "no", "off", ""] {
+            assert!(
+                !is_json(&[("SUPDOC_JSON", falsey)], &["chek"]),
+                "SUPDOC_JSON={falsey:?} should not request JSON"
+            );
+        }
         assert!(
             !is_json(&[("SUPDOC_OUTPUT", "json")], &["chek", "--output", "text"]),
             "an --output argument should beat SUPDOC_OUTPUT"
