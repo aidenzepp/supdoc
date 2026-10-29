@@ -8,7 +8,8 @@ use std::ffi::OsString;
 use clap::error::ErrorKind;
 use clap::{Parser, ValueEnum};
 
-use super::args::{Cli, OutputFormat};
+use super::args::{Cli, resolve_format};
+use crate::output::OutputFormat;
 
 /// What parsing the command line produced.
 #[derive(Debug)]
@@ -154,7 +155,7 @@ fn split_clap_message(rendered: &str) -> (&str, String) {
 
 /// The format the command line asks for, read from the raw arguments and environment.
 ///
-/// Mirrors [`OutputFormat::resolve`]: `--jsonl` beats `--json`, which beats `--output`, and an
+/// Mirrors [`resolve_format`]: `--jsonl` beats `--json`, which beats `--output`, and an
 /// argument beats the environment variable for the same flag. Anything unreadable counts as text.
 fn requested_format(args: &[OsString], env: impl Fn(&str) -> Option<String>) -> OutputFormat {
     let mut json = false;
@@ -192,7 +193,7 @@ fn requested_format(args: &[OsString], env: impl Fn(&str) -> Option<String>) -> 
         .and_then(|value| OutputFormat::from_str(&value, false).ok())
         .unwrap_or(OutputFormat::Text);
 
-    OutputFormat::resolve(
+    resolve_format(
         output,
         json || truthy("SUPDOC_JSON"),
         jsonl || truthy("SUPDOC_JSONL"),

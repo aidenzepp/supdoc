@@ -15,6 +15,7 @@ use super::examples::{
 };
 use crate::link::{LinkRef, SymbolPath};
 use crate::namespace::NamespaceName;
+use crate::output::OutputFormat;
 use crate::state::LinkState;
 
 /// Keep documentation in step with the code it describes.
@@ -102,40 +103,19 @@ impl GlobalArgs {
     /// clap conflict, because a conflict could fire from `SUPDOC_OUTPUT` alone.
     #[must_use]
     pub fn format(&self) -> OutputFormat {
-        OutputFormat::resolve(self.output, self.json, self.jsonl)
+        resolve_format(self.output, self.json, self.jsonl)
     }
 }
 
-/// How results are printed (06 X5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum OutputFormat {
-    /// Human-readable, with source excerpts
-    Text,
-    /// One JSON document on stdout (see `supdoc schema`)
-    Json,
-    /// One JSON object per line, for streaming
-    Jsonl,
-    /// GitHub Actions annotations, shown on the PR diff
-    Github,
-}
-
-impl OutputFormat {
-    /// Applies the precedence `--jsonl` > `--json` > `--output`.
-    #[must_use]
-    pub const fn resolve(output: Self, json: bool, jsonl: bool) -> Self {
-        if jsonl {
-            Self::Jsonl
-        } else if json {
-            Self::Json
-        } else {
-            output
-        }
-    }
-
-    /// Whether the format is machine-readable JSON, which also decides how errors are printed.
-    #[must_use]
-    pub const fn is_json(self) -> bool {
-        matches!(self, Self::Json | Self::Jsonl)
+/// Applies the precedence `--jsonl` > `--json` > `--output` (06 X5).
+#[must_use]
+pub(super) const fn resolve_format(output: OutputFormat, json: bool, jsonl: bool) -> OutputFormat {
+    if jsonl {
+        OutputFormat::Jsonl
+    } else if json {
+        OutputFormat::Json
+    } else {
+        output
     }
 }
 
