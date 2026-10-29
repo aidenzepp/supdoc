@@ -39,13 +39,14 @@ fn config_in(dir: &AbsolutePath) -> Option<AbsolutePath> {
 
 /// Walks up from `start` to the nearest directory holding a config file (01 D1).
 pub(super) fn discover(start: &AbsolutePath) -> Option<AbsolutePath> {
-    let mut dir = start.clone();
-    loop {
-        if let Some(candidate) = config_in(&dir).filter(|file| file.as_path().is_file()) {
+    let mut dir = Some(start.clone());
+    while let Some(current) = dir {
+        if let Some(candidate) = config_in(&current).filter(|file| file.as_path().is_file()) {
             return Some(candidate);
         }
-        dir = dir.parent()?;
+        dir = current.parent();
     }
+    None
 }
 
 /// Reads `file` and every config it extends, child first.
