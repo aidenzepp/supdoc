@@ -458,14 +458,14 @@ mod tests {
     }
 
     #[test]
-    fn colon_after_a_slash_is_part_of_the_path_not_a_prefix() {
-        let path = TargetPath::try_from("docs/src/a:b.rs".to_owned())
-            .expect("a colon is allowed inside a target path");
+    fn colon_in_the_path_part_is_an_invalid_path() {
         assert_eq!(
             parse("src/a:b.rs"),
-            Some(Ok(ParsedLink {
-                target: Target::Path(path),
-                symbol: None,
+            Some(Err(LinkError::InvalidPath {
+                destination: "src/a:b.rs".to_owned(),
+                error: LinkPathError::Colon {
+                    path: "docs/src/a:b.rs".to_owned(),
+                },
             })),
         );
     }

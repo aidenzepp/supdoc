@@ -98,6 +98,9 @@ impl TryFrom<String> for TargetPath {
 
     fn try_from(path: String) -> Result<Self, Self::Error> {
         check_link_path(&path, ParentSegments::Allowed)?;
+        if path.contains(':') {
+            return Err(LinkPathError::Colon { path });
+        }
         Ok(Self(path))
     }
 }
@@ -181,6 +184,14 @@ pub enum LinkPathError {
     /// A source path climbs out of the project root.
     #[error("`{path}` uses `..`; a source must be inside the project root")]
     ParentSegment {
+        /// The rejected path.
+        path: String,
+    },
+    /// A target path contains `:`, which the lockfile reserves for namespace prefixes.
+    #[error(
+        "`{path}` contains `:`; rename the file or directory, because `:` is reserved for namespace prefixes"
+    )]
+    Colon {
         /// The rejected path.
         path: String,
     },
@@ -484,6 +495,24 @@ mod tests {
 
     fn symbol(raw: &str) -> SymbolPath {
         raw.parse().expect("the fixture symbol should be valid")
+    }
+
+    #[test]
+    fn target_path_rejects_a_colon() {
+        assert_eq!(
+            "docs/a:b.rs".parse::<TargetPath>(),
+            Err(LinkPathError::Colon {
+                path: "docs/a:b.rs".to_owned(),
+            }),
+        );
+    }
+
+    #[test]
+    fn namespaced_target_round_trips_with_the_colon_rule_on_the_path_only() {
+        let target: Target = "auth:src/x.rs"
+            .parse()
+            .expect("a namespaced target should parse");
+        assert_eq!(target.to_string(), "auth:src/x.rs");
     }
 
     #[test]
