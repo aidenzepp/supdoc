@@ -7,6 +7,10 @@
           "$ref": "#/$defs/PatternsJson",
           "description": "The files removed from `include`."
         },
+        "features": {
+          "$ref": "#/$defs/FeaturesJson",
+          "description": "The feature settings in effect."
+        },
         "files": {
           "description": "The config files in the chain, child first. Empty when running on defaults.",
           "items": {
@@ -35,7 +39,21 @@
         "lockfile",
         "include",
         "exclude",
-        "namespaces"
+        "namespaces",
+        "features"
+      ],
+      "type": "object"
+    },
+    "FeaturesJson": {
+      "description": "The `[features]` settings in effect.",
+      "properties": {
+        "hash": {
+          "$ref": "#/$defs/HashFeatureJson",
+          "description": "The `[features.hash]` settings."
+        }
+      },
+      "required": [
+        "hash"
       ],
       "type": "object"
     },
@@ -120,6 +138,54 @@
         "start",
         "end",
         "replacement"
+      ],
+      "type": "object"
+    },
+    "HashFeatureJson": {
+      "description": "The `[features.hash]` table as `config show` reports it.",
+      "properties": {
+        "line_endings": {
+          "$ref": "#/$defs/LineEndingsJson",
+          "description": "How line endings are treated when hashing."
+        }
+      },
+      "required": [
+        "line_endings"
+      ],
+      "type": "object"
+    },
+    "LineEndings": {
+      "description": "How line endings are treated before hashing (01 D10, 03 R6).",
+      "oneOf": [
+        {
+          "const": "normalize",
+          "description": "Each CR immediately followed by LF is dropped before hashing (B.4).",
+          "type": "string"
+        },
+        {
+          "const": "exact",
+          "description": "Every byte is hashed as is.",
+          "type": "string"
+        }
+      ]
+    },
+    "LineEndingsJson": {
+      "description": "The `line-endings` setting and the file that set it.",
+      "properties": {
+        "file": {
+          "description": "The config file that set it, relative to the project root. `null` for the default.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "$ref": "#/$defs/LineEndings",
+          "description": "`normalize` or `exact`."
+        }
+      },
+      "required": [
+        "value"
       ],
       "type": "object"
     },

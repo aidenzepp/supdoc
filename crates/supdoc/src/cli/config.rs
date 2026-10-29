@@ -9,6 +9,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::config::{Config, PatternDefinition};
+use crate::hash::LineEndings;
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
 use crate::output::text::visible;
@@ -103,6 +104,8 @@ pub(crate) struct ConfigShowReport {
     exclude: PatternsJson,
     /// Every namespace, by name.
     namespaces: Vec<NamespaceJson>,
+    /// The feature settings in effect.
+    features: FeaturesJson,
     /// The files in the chain, for text output.
     #[serde(skip)]
     chain: Vec<AbsolutePath>,
@@ -129,6 +132,7 @@ impl ConfigShowReport {
             ),
             exclude: PatternsJson::new(root, config.exclude_definition(), Vec::new()),
             namespaces: namespace_rows(config),
+            features: FeaturesJson::new(config),
             chain: config.files().to_vec(),
             lock: lock_path(root),
         }
@@ -154,6 +158,12 @@ impl Report for ConfigShowReport {
         writeln!(out, "lockfile   {}", shown(context, &self.lock))?;
         render_patterns(context, "include", &self.include, out)?;
         render_patterns(context, "exclude", &self.exclude, out)?;
+        let line_endings = &self.features.hash.line_endings;
+        let origin = match &line_endings.defined_in {
+            Some(file) => format!("(from {})", shown(context, file)),
+            None => "(default)".to_owned(),
+        };
+        writeln!(out, "line-endings  {}  {origin}", line_endings.value)?;
         for namespace in &self.namespaces {
             writeln!(
                 out,
@@ -249,6 +259,49 @@ impl PatternsJson {
             },
         }
     }
+}
+
+/// The `[features]` settings in effect.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct FeaturesJson {
+    /// The `[features.hash]` settings.
+    hash: HashFeatureJson,
+}
+
+impl FeaturesJson {
+    /// The feature settings `config` resolves to.
+    fn new(config: &Config) -> Self {
+        let root = config.root();
+        let defined_in = config.line_endings_defined_in();
+        Self {
+            hash: HashFeatureJson {
+                line_endings: LineEndingsJson {
+                    value: config.hash_settings().line_endings,
+                    file: defined_in.map(|file| relative_to(root, file)),
+                    defined_in: defined_in.cloned(),
+                },
+            },
+        }
+    }
+}
+
+/// The `[features.hash]` table as `config show` reports it.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct HashFeatureJson {
+    /// How line endings are treated when hashing.
+    line_endings: LineEndingsJson,
+}
+
+/// The `line-endings` setting and the file that set it.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct LineEndingsJson {
+    /// `normalize` or `exact`.
+    value: LineEndings,
+    /// The config file that set it, relative to the project root. `null` for the default.
+    file: Option<String>,
+    /// The file that set it, for text output.
+    #[serde(skip)]
+    defined_in: Option<AbsolutePath>,
 }
 
 /// One namespace as `config show` and `namespace list` show it.

@@ -46,6 +46,12 @@ supdoc works without a config. `supdoc init` writes a `supdoc.config.toml` with 
 short name, so `auth:src/session.rs#login` works from any file. supdoc searches upward from the current
 directory for the config, and `supdoc.lock` sits beside it.
 
+`[features.hash]` sets `line-endings`. The default, `"normalize"`, drops the CR of each CRLF before hashing, so
+a checkout with Windows line endings still matches the lock. `"exact"` hashes every byte as is. `supdoc config
+show` prints the value in effect and the file that set it.
+
+Don't run supdoc on an untrusted PR after writing secrets into the checkout.
+
 ## Agent skill
 
 [`SKILL.md`](SKILL.md) teaches coding agents to use supdoc: find the docs behind code before changing it, and

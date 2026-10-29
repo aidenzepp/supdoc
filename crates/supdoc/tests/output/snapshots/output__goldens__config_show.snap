@@ -9,5 +9,6 @@ config     supdoc.config.toml
 lockfile   supdoc.lock
 include    **  (default)
 exclude    (none)  (default)
+line-endings  normalize  (default)
 namespace  core -> src  (supdoc.config.toml)
 --- stderr

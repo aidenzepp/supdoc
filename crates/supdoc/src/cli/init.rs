@@ -38,6 +38,11 @@ const STARTER: &str = "\
 # Short names for directories, relative to this file.
 # [namespaces]
 # auth = \"services/auth\"
+
+# How files are hashed. \"normalize\" drops the CR of each CRLF, so a checkout with other line
+# endings still matches the lock. \"exact\" hashes every byte as is.
+# [features.hash]
+# line-endings = \"normalize\"
 ";
 
 /// The starter config as output data, reported on a dry run and on a real write.
