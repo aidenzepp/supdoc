@@ -498,6 +498,8 @@ mod tests {
             let context = Context {
                 global: cli.global.clone(),
                 cwd,
+                home: None,
+                claude_config_dir: None,
             };
             let result = run(list_args, &context, &mut output);
             Run {
