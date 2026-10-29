@@ -313,7 +313,7 @@ fn namespace_help(prefix: &str, close: Option<&str>, config: &Config) -> String 
              {CONFIG_FILE_NAME}, or remove the prefix"
         ),
         Some(close) => format!(
-            "Did you mean `{close}`? `supdoc fix` can change it. Configured namespaces: {}",
+            "did you mean `{close}`? `supdoc fix` can change it. Configured namespaces: {}",
             configured.join(", ")
         ),
         None => format!(

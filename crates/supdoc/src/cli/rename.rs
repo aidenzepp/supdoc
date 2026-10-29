@@ -657,7 +657,7 @@ fn unknown_namespace(config: &Config, old: &NamespaceName) -> CliError {
             "No namespaces are configured. Define one under `[namespaces]` in {CONFIG_FILE_NAME} \
              first"
         ),
-        Some(close) => format!("Did you mean `{close}`? Configured namespaces: {listed}"),
+        Some(close) => format!("did you mean `{close}`? Configured namespaces: {listed}"),
         None => format!("Configured namespaces: {listed}"),
     };
     CliError::new(
@@ -1288,7 +1288,7 @@ web = \"services/web\"
         assert!(error.message().contains("`atuh`"), "{}", error.message());
         assert_eq!(
             error.help(),
-            "Did you mean `auth`? Configured namespaces: `auth`, `web`"
+            "did you mean `auth`? Configured namespaces: `auth`, `web`"
         );
         assert_eq!(project.files(), before);
     }

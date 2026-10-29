@@ -78,7 +78,7 @@ pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<
         .report(&report, true)
         .map_err(|error| output_failed(&error))?;
     output
-        .note(&report.closing_note())
+        .note(&report.closing_note(output.unicode()))
         .map_err(|error| output_failed(&error))?;
     Ok(Outcome::Clean)
 }
@@ -143,18 +143,19 @@ impl UpdateReport {
     }
 
     /// What the run says on stderr when it is done (06a K7, Q6).
-    fn closing_note(&self) -> String {
+    fn closing_note(&self, unicode: bool) -> String {
         if self.rows.is_empty() {
             NOTHING_NOTE.to_owned()
         } else if self.applied {
-            self.applied_note()
+            self.applied_note(unicode)
         } else {
             PREVIEW_NOTE.to_owned()
         }
     }
 
     /// `supdoc.lock: 1 accepted · 1 recorded · 1 removed`, leaving out actions that didn't occur.
-    fn applied_note(&self) -> String {
+    /// Without `unicode` the counts are separated by `, ` so the note is plain ASCII (07 G12).
+    fn applied_note(&self, unicode: bool) -> String {
         let counts = [Action::Accept, Action::Record, Action::Remove]
             .into_iter()
             .filter_map(|action| {
@@ -162,7 +163,7 @@ impl UpdateReport {
                 (count > 0).then(|| format!("{count} {}", action.past_tense()))
             })
             .collect::<Vec<_>>()
-            .join(" · ");
+            .join(if unicode { " · " } else { ", " });
         format!("{}: {counts}", crate::lock::model::LOCK_FILE_NAME)
     }
 }
@@ -356,10 +357,24 @@ fn broken_finding(link: &LinkReport) -> Option<Finding> {
     {
         finding = finding.with_location(location.clone());
     }
-    Some(finding.with_help(format!(
+    let pointer = format!(
         "update can't record a broken link; repair it with `supdoc fix {} --yes`",
         link.key.source
-    )))
+    );
+    let help = match finding.help.take() {
+        Some(own) if own.ends_with(['.', '?', '!']) => format!("{own} {}", sentence(&pointer)),
+        Some(own) => format!("{own}. {}", sentence(&pointer)),
+        None => pointer,
+    };
+    Some(finding.with_help(help))
+}
+
+/// `text` with its first letter capitalized, to follow another sentence.
+fn sentence(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
 }
 
 #[cfg(test)]
@@ -531,6 +546,11 @@ mod tests {
 
         /// Runs `supdoc <args>` from the project root. `args` must hold an `update` command.
         fn update(&self, args: &[&str]) -> Run {
+            self.update_drawing(args, false)
+        }
+
+        /// Like [`Self::update`], drawing with Unicode when `unicode` is set and ASCII otherwise.
+        fn update_drawing(&self, args: &[&str], unicode: bool) -> Run {
             let cwd = self.root();
             let command_line: Vec<&str> = std::iter::once("supdoc")
                 .chain(args.iter().copied())
@@ -545,7 +565,7 @@ mod tests {
                 format: cli.global.format(),
                 verbosity: Verbosity::from_flags(cli.global.quiet, cli.global.verbose),
                 color: false,
-                unicode: false,
+                unicode,
                 width: 80,
                 paths: PathStyle::new(cwd.clone(), cwd.clone(), None),
             };
@@ -672,6 +692,18 @@ mod tests {
 
         assert_eq!(applied.stdout, preview.stdout);
         assert_eq!(
+            applied.stderr, "supdoc.lock: 1 accepted, 1 recorded, 1 removed\n",
+            "the ASCII note has no `·`"
+        );
+    }
+
+    #[test]
+    fn update_text_applied_note_separates_counts_with_a_dot_under_unicode() {
+        let project = project_with_failed_new_and_obsolete();
+
+        let applied = project.update_drawing(&["update", "--yes"], true);
+
+        assert_eq!(
             applied.stderr,
             "supdoc.lock: 1 accepted · 1 recorded · 1 removed\n"
         );
@@ -773,6 +805,10 @@ mod tests {
         assert!(
             help.contains("supdoc fix docs/broken.md --yes"),
             "the help should point at fix: {help}"
+        );
+        assert!(
+            help.contains("did you mean"),
+            "the finding's own hint should stay: {help}"
         );
         assert!(
             change_summaries(&json)

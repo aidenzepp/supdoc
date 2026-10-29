@@ -106,6 +106,12 @@ impl Output {
         self.settings.paths.set_root(root);
     }
 
+    /// Whether text output draws with Unicode instead of ASCII (07 G12).
+    #[must_use]
+    pub const fn unicode(&self) -> bool {
+        self.settings.unicode
+    }
+
     /// Whether a reader closed the pipe. The caller should exit 0.
     #[must_use]
     pub fn is_closed(&self) -> bool {

@@ -146,7 +146,7 @@ fn unknown_namespace(config: &Config, name: &NamespaceName) -> CliError {
     let nearest = crate::scan::targets::close_match(name.as_str(), defined.iter().copied());
     let help = match (nearest, defined.is_empty()) {
         (Some(nearest), _) => format!(
-            "Did you mean `{nearest}`? Defined namespaces: {}",
+            "did you mean `{nearest}`? Defined namespaces: {}",
             defined.join(", ")
         ),
         (None, false) => format!("Defined namespaces: {}", defined.join(", ")),
