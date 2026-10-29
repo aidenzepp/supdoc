@@ -54,6 +54,20 @@ impl fmt::Display for NamespaceName {
     }
 }
 
+impl schemars::JsonSchema for NamespaceName {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "NamespaceName".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "A namespace name: an ASCII letter, then letters, digits, `-` or `_`, at least 2 characters.",
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]+$",
+        })
+    }
+}
+
 impl serde::Serialize for NamespaceName {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.0)

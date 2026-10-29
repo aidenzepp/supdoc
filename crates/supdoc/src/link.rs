@@ -374,13 +374,17 @@ impl SymbolPathError {
 }
 
 /// Identity of one lock entry (02 L2). Field order is the sort order (02 L1).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, schemars::JsonSchema,
+)]
 pub struct LinkKey {
     /// The file the link is written in.
     pub source: SourcePath,
     /// The file the link points at.
     pub target: Target,
-    /// `None` = whole file. `Option`'s ordering puts whole-file entries first.
+    /// `None` = whole file. `Option`'s ordering puts whole-file entries first. Left out of JSON
+    /// when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub symbol: Option<SymbolPath>,
 }
 
@@ -467,6 +471,29 @@ macro_rules! serialize_as_display {
 }
 
 serialize_as_display!(SourcePath, TargetPath, Target, SymbolPath, LinkRef);
+
+/// Describes a value that serializes as its text, as a plain JSON string.
+macro_rules! string_schema {
+    ($($type:ty => $description:literal),+ $(,)?) => {$(
+        impl schemars::JsonSchema for $type {
+            fn schema_name() -> std::borrow::Cow<'static, str> {
+                stringify!($type).into()
+            }
+
+            fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+                schemars::json_schema!({ "type": "string", "description": $description })
+            }
+        }
+    )+};
+}
+
+string_schema! {
+    SourcePath => "A file path relative to the project root, with `/` separators.",
+    TargetPath => "A path a link points at, with `/` separators.",
+    Target => "Where a link points: `path` or `namespace:path`.",
+    SymbolPath => "A dotted symbol path such as `Config.validate`.",
+    LinkRef => "A link target as typed on the command line: `path`, `path#symbol` or `ns:path#symbol`.",
+}
 
 impl fmt::Display for SourcePath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

@@ -64,6 +64,25 @@ impl AbsolutePath {
     }
 }
 
+impl serde::Serialize for AbsolutePath {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(&self.0.display())
+    }
+}
+
+impl schemars::JsonSchema for AbsolutePath {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "AbsolutePath".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "An absolute, lexically normalized filesystem path.",
+        })
+    }
+}
+
 impl AsRef<Path> for AbsolutePath {
     fn as_ref(&self) -> &Path {
         &self.0
@@ -132,6 +151,25 @@ impl TryFrom<String> for RelativePath {
 pub struct RelativePathError {
     /// The rejected path, as written.
     path: PathBuf,
+}
+
+impl serde::Serialize for RelativePath {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(&self.0.display())
+    }
+}
+
+impl schemars::JsonSchema for RelativePath {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "RelativePath".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "A filesystem path with no root or drive, written relative to some file.",
+        })
+    }
 }
 
 impl fmt::Display for RelativePath {

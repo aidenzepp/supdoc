@@ -85,6 +85,20 @@ impl fmt::Debug for Hash {
     }
 }
 
+impl schemars::JsonSchema for Hash {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Hash".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "A SHA-256 digest as 64 lowercase hex characters.",
+            "pattern": "^[0-9a-f]{64}$",
+        })
+    }
+}
+
 impl serde::Serialize for Hash {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_str(self)
