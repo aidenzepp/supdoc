@@ -21,7 +21,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::config::{CONFIG_FILE_NAME, Config, ConfigError};
-use crate::finding::{Finding, Location, Severity};
+use crate::finding::{Finding, Location};
 use crate::link::destination::parse_destination;
 use crate::link::{LinkKey, SourcePath, Target};
 use crate::lock::io::write_atomically;
@@ -55,7 +55,8 @@ const PREVIEW_NOTE: &str = "Nothing written. Run the same command with --yes to 
 /// Returns the config's own error (78, or 74 when unreadable), the lockfile's own error (78 when
 /// invalid, 74 when unreadable), `cli/rename-unknown-namespace` when OLD isn't defined,
 /// `cli/rename-target-exists` when NEW already is, `cli/rename-inherited` when OLD comes only from
-/// a config this one extends, `cli/rename-file-changed` when a file changed between planning and
+/// a config this one extends, `cli/rename-unreadable-source` when a source can't be read,
+/// `cli/rename-file-changed` when a file changed between planning and
 /// writing (all 1), `cli/rename-write` when a file can't be written, and `cli/rename-output` when
 /// the report can't be written (both 74).
 pub fn run(args: &RenameArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
@@ -103,7 +104,7 @@ struct Plan {
     sources: Vec<SourceEdit>,
     /// The lockfile as read and the entries that move.
     lock: LockEdit,
-    /// Problems met while reading sources, such as a file that couldn't be read.
+    /// Problems met while walking the project.
     findings: Vec<Finding>,
 }
 
@@ -114,8 +115,9 @@ impl Plan {
     /// # Errors
     ///
     /// Returns the config's or the lockfile's own error, `cli/rename-unknown-namespace`,
-    /// `cli/rename-target-exists`, `cli/rename-inherited`, or `cli/rename-file-changed` when the
-    /// config no longer defines OLD once it is read again.
+    /// `cli/rename-target-exists`, `cli/rename-inherited`, `cli/rename-unreadable-source` when a
+    /// source can't be read, or `cli/rename-file-changed` when the config no longer defines OLD
+    /// once it is read again.
     fn build(
         old: &NamespaceName,
         new: &NamespaceName,
@@ -130,7 +132,7 @@ impl Plan {
 
         let languages = Languages::builtin();
         let walked = walk(&config, &languages, &Scope::All);
-        let mut findings = walked.findings;
+        let findings = walked.findings;
         let mut sources = Vec::new();
         for (path, _cartridge) in &walked.sources {
             // The walk only returns files beneath the root whose paths are valid source paths.
@@ -144,7 +146,7 @@ impl Plan {
                 Ok(file) => {
                     sources.extend(SourceEdit::find(&config, &languages, source, &file, old));
                 }
-                Err(error) => findings.push(unread_source(&source, &error)),
+                Err(error) => return Err(unread_source(&source, old, new, &error)),
             }
         }
 
@@ -703,20 +705,26 @@ fn inherited(old: &NamespaceName, defined_in: &AbsolutePath) -> CliError {
     )
 }
 
-/// The warning for a walked source that couldn't be read, so its links weren't renamed.
-fn unread_source(source: &SourcePath, error: &ReadError) -> Finding {
-    let start = Location {
-        file: source.clone(),
-        range: 0..0,
-        line: 1,
-        column: 1,
-    };
-    Finding::new(error.code(), Severity::Warning, error.to_string())
-        .with_location(start)
-        .with_help(format!(
-            "Links in {source} weren't renamed. {}",
+/// The error for a walked source that couldn't be read. Its links can't be checked for OLD, so
+/// the whole rename is refused rather than moving lock entries past a file left unrenamed.
+fn unread_source(
+    source: &SourcePath,
+    old: &NamespaceName,
+    new: &NamespaceName,
+    error: &ReadError,
+) -> CliError {
+    CliError::new(
+        "cli/rename-unreadable-source",
+        format!(
+            "cannot read {source} to rename its links; nothing was written ({})",
+            error.code()
+        ),
+        format!(
+            "{} Then run `supdoc namespace rename {old} {new}` again",
             error.help()
-        ))
+        ),
+        CliError::REFUSED_EXIT_CODE,
+    )
 }
 
 /// The error for a report that could not be written.
@@ -1414,6 +1422,39 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
             project.files(),
             before,
             "nothing is written, the edit is kept"
+        );
+    }
+
+    #[test]
+    fn namespace_rename_refuses_everything_when_a_source_is_unreadable() {
+        let project = Project::new();
+        project.record_all();
+        project.write("docs/broken.md", "See [login](auth:login.rs#login).\n");
+        std::fs::write(
+            project.root().as_path().join("docs/broken.md"),
+            b"See [login](auth:login.rs#login).\n\xff\xfe",
+        )
+        .expect("the broken doc should be writable");
+        let before = project.files();
+
+        let run = project.rename(&["namespace", "rename", "auth", "identity", "--yes"]);
+
+        let error = run
+            .result
+            .expect_err("an unreadable source should refuse the rename");
+        assert_eq!(
+            (error.code(), error.exit_code()),
+            ("cli/rename-unreadable-source", 1)
+        );
+        assert!(
+            error.message().contains("docs/broken.md"),
+            "{}",
+            error.message()
+        );
+        assert_eq!(
+            project.files(),
+            before,
+            "no file, lock or config change is written"
         );
     }
 
