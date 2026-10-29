@@ -57,6 +57,9 @@ fn digest_range(text: &[u8], range: Range<usize>, settings: HashSettings) -> Has
 }
 
 #[cfg(test)]
+mod crlf;
+
+#[cfg(test)]
 mod tests {
     use std::path::Path;
 
