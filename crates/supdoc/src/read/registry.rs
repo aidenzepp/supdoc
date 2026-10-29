@@ -25,6 +25,7 @@ fn builtins() -> Vec<Result<&'static dyn Cartridge, &'static QueryFileError>> {
         crate::cartridges::go::cartridge().map(|go| go as &'static dyn Cartridge),
         crate::cartridges::js::cartridge().map(|js| js as &'static dyn Cartridge),
         crate::cartridges::tsx::cartridge().map(|tsx| tsx as &'static dyn Cartridge),
+        crate::cartridges::python::cartridge().map(|python| python as &'static dyn Cartridge),
     ]
 }
 
