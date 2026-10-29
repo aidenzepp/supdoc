@@ -1,5 +1,6 @@
 //! Lockfile errors: what failed, a stable code, and what to do next (02 Errors).
 
+use crate::hash::LineEndings;
 use crate::link::LinkKey;
 use crate::path::AbsolutePath;
 
@@ -158,6 +159,57 @@ impl LockError {
     }
 }
 
+/// `supdoc.lock` was written with different hash settings than the config resolves to (02 L10).
+///
+/// Comparing hashes across settings would report links as changed when only the rule changed, so
+/// every command except a full `supdoc update` stops here, before the scan and before any write.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "supdoc.lock was written with line-endings = \"{recorded}\", but {} \"{configured}\"",
+    configured_by(.configured_in.as_ref())
+)]
+pub struct SettingsMismatch {
+    /// The setting the lock records.
+    pub recorded: LineEndings,
+    /// The setting the config resolves to.
+    pub configured: LineEndings,
+    /// The config file that set it, or `None` when the default applies.
+    pub configured_in: Option<AbsolutePath>,
+}
+
+/// Who chose the configured value: `<file> sets`, or `the default is`.
+fn configured_by(file: Option<&AbsolutePath>) -> String {
+    file.map_or_else(
+        || "the default is".to_owned(),
+        |file| format!("{} sets", file.display()),
+    )
+}
+
+impl SettingsMismatch {
+    /// A stable identifier for machine-readable output.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        "lock/settings-mismatch"
+    }
+
+    /// What to do about it: migrate the lock to the config, or set the config to the lock.
+    #[must_use]
+    pub fn help(&self) -> String {
+        format!(
+            "Run `supdoc update` with no paths and no --state to preview re-recording every link \
+             with line-endings = \"{}\", then add --yes. To keep the lockfile as it is, set \
+             [features.hash] line-endings = \"{}\" in supdoc.config.toml",
+            self.configured, self.recorded
+        )
+    }
+
+    /// The process exit status (06 X7): 78, a config or lockfile problem.
+    #[must_use]
+    pub const fn exit_code(&self) -> u8 {
+        EXIT_CONFIG
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +243,53 @@ mod tests {
         assert!(
             errors.iter().all(|error| !error.help().is_empty()),
             "every parse error should say what to do next"
+        );
+    }
+
+    fn mismatch(configured_in: Option<&str>) -> SettingsMismatch {
+        SettingsMismatch {
+            recorded: LineEndings::Exact,
+            configured: LineEndings::Normalize,
+            configured_in: configured_in.map(|path| {
+                AbsolutePath::new(std::path::Path::new(path))
+                    .expect("the fixture config path should be absolute")
+            }),
+        }
+    }
+
+    #[test]
+    fn settings_mismatch_is_lock_settings_mismatch_with_exit_78() {
+        let error = mismatch(None);
+
+        assert_eq!(error.code(), "lock/settings-mismatch");
+        assert_eq!(error.exit_code(), 78);
+    }
+
+    #[test]
+    fn settings_mismatch_names_the_file_that_set_the_value() {
+        assert_eq!(
+            mismatch(Some("/repo/supdoc.config.toml")).to_string(),
+            "supdoc.lock was written with line-endings = \"exact\", but \
+             /repo/supdoc.config.toml sets \"normalize\""
+        );
+    }
+
+    #[test]
+    fn settings_mismatch_names_the_default_when_no_file_sets_it() {
+        assert_eq!(
+            mismatch(None).to_string(),
+            "supdoc.lock was written with line-endings = \"exact\", but the default is \
+             \"normalize\""
+        );
+    }
+
+    #[test]
+    fn settings_mismatch_help_offers_update_or_keeping_the_lock_setting() {
+        assert_eq!(
+            mismatch(None).help(),
+            "Run `supdoc update` with no paths and no --state to preview re-recording every link \
+             with line-endings = \"normalize\", then add --yes. To keep the lockfile as it is, \
+             set [features.hash] line-endings = \"exact\" in supdoc.config.toml"
         );
     }
 }
