@@ -9,3 +9,6 @@ docs/superpowers/
 
 # maintainer notes (local only)
 .notes/
+
+# per-task git worktrees and scratch (each has its own target/)
+/work/
