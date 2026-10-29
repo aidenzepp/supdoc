@@ -1092,6 +1092,66 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn fix_yes_with_a_changed_file_and_an_unwritable_file_exits_74() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let project = Project::new();
+        project.write("locked/other.md", "The [add](../src/lib.rs#ad) again.\n");
+        project.write("notes/third.md", "The [add](../src/lib.rs#ad) once more.\n");
+        let mut session = project.session(&["--json", "fix", "--yes"]);
+        let (paths, mode) = {
+            let args = session.fix_args();
+            (args.paths.clone(), args.confirm.mode())
+        };
+        let planned = Planned::scan(&paths, &session.context, &mut session.output)
+            .expect("the fixture project should plan");
+        let edited = format!("Edited after the scan.\n{GUIDE}");
+        project.write("docs/guide.md", &edited);
+        let locked = project.path("locked");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555))
+            .expect("the fixture directory should become read-only");
+
+        let result = planned.finish(mode, &mut session.output);
+
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755))
+            .expect("the fixture directory should become writable again");
+        let run = session.finished(result);
+        assert_eq!(
+            run.exit_code(),
+            74,
+            "a write failure outranks a changed file (F5); stderr: {}",
+            run.stderr
+        );
+        let json = run.json();
+        assert_eq!(at(&json, "/ok"), false);
+        let kinds: BTreeSet<String> = at(&json, "/findings")
+            .as_array()
+            .expect("the findings should be an array")
+            .iter()
+            .map(|finding| at(finding, "/kind").to_string())
+            .collect();
+        assert_eq!(
+            kinds,
+            ["\"fix/file-changed\"", "\"fix/write-failed\""]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            "both failures should be reported"
+        );
+        assert_eq!(project.read("docs/guide.md"), edited);
+        assert_eq!(
+            project.read("locked/other.md"),
+            "The [add](../src/lib.rs#ad) again.\n"
+        );
+        assert_eq!(
+            project.read("notes/third.md"),
+            "The [add](../src/lib.rs#add) once more.\n",
+            "the third file is still fixed"
+        );
+    }
+
     #[test]
     fn fix_without_lockfile_does_not_create_one() {
         let project = Project::new();

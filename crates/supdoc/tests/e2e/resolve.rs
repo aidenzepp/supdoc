@@ -179,3 +179,77 @@ fn resolve_lists_bash_symbols() {
         "src/deploy.sh",
     );
 }
+
+#[test]
+fn resolve_non_utf8_file_exits_1_with_read_not_utf8() {
+    let project = Project::fixture("basic");
+    std::fs::write(project.path("src/binary.rs"), [0xff_u8, 0xfe, 0x00])
+        .expect("the binary file should be writable");
+
+    let run = project.supdoc(&["--json", "resolve", "src/binary.rs"]);
+
+    let _ = run.assert_exit(1);
+    assert_eq!(
+        at(
+            &serde_json::from_str(&run.stderr).unwrap_or_default(),
+            "/kind"
+        ),
+        "read/not-utf8",
+        "a file that is not UTF-8 should be refused (R6); stderr: {}",
+        run.stderr
+    );
+}
+
+#[test]
+fn resolve_file_over_16_mib_exits_1_with_read_too_large() {
+    let project = Project::fixture("basic");
+    let big = std::fs::File::create(project.path("src/big.rs"))
+        .expect("the big file should be creatable");
+    big.set_len(16 * 1024 * 1024 + 1)
+        .expect("the big file should be extendable");
+
+    let run = project.supdoc(&["--json", "resolve", "src/big.rs"]);
+
+    let _ = run.assert_exit(1);
+    assert_eq!(
+        at(
+            &serde_json::from_str(&run.stderr).unwrap_or_default(),
+            "/kind"
+        ),
+        "read/too-large",
+        "a file over 16 MiB should be refused (R6); stderr: {}",
+        run.stderr
+    );
+}
+
+#[test]
+fn resolve_file_outside_the_root_is_allowed_and_json_uses_dotdot() {
+    let project = Project::fixture("basic");
+    let outside = tempfile::tempdir().expect("a second temporary directory should be creatable");
+    let file = outside.path().join("elsewhere.rs");
+    std::fs::write(&file, "pub fn zed() {}\n").expect("the outside file should be writable");
+    let file = file
+        .to_str()
+        .expect("the temp directory path should be UTF-8");
+
+    let report = project
+        .supdoc(&["--json", "resolve", file])
+        .assert_exit(0)
+        .json();
+
+    let shown = at(&report, "/data/file")
+        .as_str()
+        .unwrap_or_else(|| panic!("`/data/file` should be a string: {report}"));
+    assert!(
+        shown.starts_with("../") && shown.ends_with("/elsewhere.rs"),
+        "a file outside the root should be named with `..` (R16), got {shown:?}"
+    );
+    assert_lists(
+        &array_at(&report, "/data/symbols")
+            .iter()
+            .filter_map(|symbol| symbol.pointer("/path")?.as_str().map(str::to_owned))
+            .collect(),
+        &["zed"],
+        shown,
+    );
+}

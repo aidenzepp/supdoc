@@ -2,8 +2,7 @@
 //! as a reviewed snapshot diff (07 G13).
 //!
 //! `schema` and `completions` print generated documents (JSON Schema, a shell script), which
-//! their own tests and `schema/*.json` already pin, so they have no golden here. `skill install`
-//! has no golden yet either.
+//! their own tests and `schema/*.json` already pin, so they have no golden here.
 
 use crate::support::Project;
 
@@ -163,4 +162,37 @@ fn usage_error_text_matches_golden() {
 #[test]
 fn usage_error_json_matches_golden() {
     golden("usage_json", &Project::empty(), &["--json", "chek"]);
+}
+
+#[test]
+fn skill_install_preview_text_matches_golden() {
+    golden(
+        "skill_install_preview",
+        &Project::empty(),
+        &["skill", "install"],
+    );
+}
+
+#[test]
+fn skill_install_applied_text_matches_golden() {
+    golden(
+        "skill_install_applied",
+        &Project::empty(),
+        &["skill", "install", "--yes"],
+    );
+}
+
+#[test]
+fn skill_install_global_preview_text_matches_golden() {
+    let project = Project::empty();
+    let home = project.path().join("home");
+    let home = home
+        .to_str()
+        .expect("the temp directory path should be UTF-8");
+    insta::assert_snapshot!(
+        "skill_install_global_preview",
+        project
+            .run_with(&["skill", "install", "--global"], &[("HOME", home)])
+            .transcript()
+    );
 }

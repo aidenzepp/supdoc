@@ -1,0 +1,11 @@
+---
+source: crates/supdoc/tests/output/goldens.rs
+expression: project.run(args).transcript()
+---
+$ supdoc skill install
+exit: 0
+--- stdout
+create     .agents/skills/supdoc/SKILL.md
+create     .claude/skills/supdoc/SKILL.md
+--- stderr
+Nothing written. Run the same command with --yes to apply.

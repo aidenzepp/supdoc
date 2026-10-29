@@ -1,7 +1,7 @@
 //! Namespaced links, config `include`/`exclude` and `extends`, and the namespace commands (docref's
 //! namespace and config tests).
 
-use crate::support::{Project, links};
+use crate::support::{Project, array_at, links};
 
 #[test]
 fn namespaced_and_plain_links_are_recorded_in_their_written_form_and_pass() {
@@ -62,6 +62,40 @@ fn namespace_list_shows_each_name_and_its_folder() {
         "the list should map auth to services/auth: {}",
         run.stdout
     );
+}
+
+#[test]
+fn config_show_marks_a_missing_namespace_folder_as_not_existing() {
+    let project = Project::fixture("namespaced");
+    std::fs::write(
+        project.path("supdoc.config.toml"),
+        "[namespaces]\nauth = \"services/auth\"\nghost = \"services/ghost\"\n",
+    )
+    .expect("the config should be writable");
+
+    let report = project
+        .supdoc(&["--json", "config", "show"])
+        .assert_exit(0)
+        .json();
+
+    let exists = |name: &str| -> serde_json::Value {
+        array_at(&report, "/data/namespaces")
+            .iter()
+            .find(|namespace| {
+                namespace
+                    .pointer("/name")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(name)
+            })
+            .and_then(|namespace| namespace.pointer("/exists").cloned())
+            .unwrap_or_else(|| panic!("`config show` should list namespace {name}: {report}"))
+    };
+    assert_eq!(
+        exists("auth"),
+        true,
+        "services/auth is in the fixture (CS4)"
+    );
+    assert_eq!(exists("ghost"), false, "services/ghost is not (CS4)");
 }
 
 #[test]

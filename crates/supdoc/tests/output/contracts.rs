@@ -353,3 +353,355 @@ fn completions_and_schema_work_with_a_broken_config() {
         );
     }
 }
+
+/// One way to make `supdoc` print a message that carries a `help`, and the code it should have.
+struct HelpCase {
+    /// The code (`kind` in JSON) the run should print.
+    kind: &'static str,
+    /// Builds the project the run happens in, starting from [`Project::clean`].
+    setup: fn(&Project),
+    /// The arguments, before `--json`.
+    args: &'static [&'static str],
+    /// Whether the run needs `HOME` pointing at an empty directory inside the project.
+    home: bool,
+}
+
+/// Every `(kind, help)` pair under `value`: any object with both a `kind` and a `help` string.
+fn collect_helps(value: &serde_json::Value, found: &mut Vec<(String, String)>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let (Some(kind), Some(help)) = (
+                map.get("kind").and_then(serde_json::Value::as_str),
+                map.get("help").and_then(serde_json::Value::as_str),
+            ) {
+                found.push((kind.to_owned(), help.to_owned()));
+            }
+            for child in map.values() {
+                collect_helps(child, found);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                collect_helps(child, found);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether `help` quotes at least one non-empty backtick span: a command or a concrete value.
+fn quotes_a_command_or_value(help: &str) -> bool {
+    help.split('`')
+        .skip(1)
+        .step_by(2)
+        .any(|span| !span.trim().is_empty())
+}
+
+/// Whether `help` sends the reader elsewhere instead of saying what to do (07 G3).
+fn points_elsewhere(help: &str) -> bool {
+    const POINTERS: &[&str] = &[
+        "see the docs",
+        "see docs",
+        "see the documentation",
+        "documentation",
+        "refer to",
+        "consult",
+        "readme",
+        "http",
+    ];
+    let lowered = help.to_lowercase();
+    help.split_whitespace().count() < 3 || POINTERS.iter().any(|pointer| lowered.contains(pointer))
+}
+
+/// The codes whose remedy is a command or a value the user can type, so their help must quote it
+/// (07 G3's examples: `supdoc update docs/guide.md --yes`, `did you mean log_in?`).
+const QUOTED_REMEDIES: &[&str] = &[
+    "link/failed",
+    "link/new",
+    "link/obsolete",
+    "resolve/not-found",
+];
+
+/// Every message with a `help` that a user can be made to see, one way to reach each.
+const HELP_CASES: &[HelpCase] = &[
+    HelpCase {
+        kind: "link/failed",
+        setup: |p| {
+            p.write(
+                "src/lib.rs",
+                "pub fn add() {}\npub fn mul() {}\npub fn sub() {}\n",
+            );
+        },
+        args: &["check"],
+        home: false,
+    },
+    HelpCase {
+        kind: "link/new",
+        setup: |p| p.write("docs/new.md", "# N\n\nSee [add](../src/lib.rs#add).\n"),
+        args: &["check"],
+        home: false,
+    },
+    HelpCase {
+        kind: "link/obsolete",
+        setup: |p| {
+            std::fs::remove_file(p.path().join("docs/old.md")).expect("old.md should be removable");
+        },
+        args: &["check"],
+        home: false,
+    },
+    HelpCase {
+        kind: "resolve/not-found",
+        setup: |p| p.write("docs/guide.md", "[x](../src/lib.rs#ad)\n"),
+        args: &["check"],
+        home: false,
+    },
+    HelpCase {
+        kind: "link/unknown-namespace",
+        setup: |p| p.write("docs/guide.md", "[x](nons:lib.rs#add)\n"),
+        args: &["check"],
+        home: false,
+    },
+    HelpCase {
+        kind: "link/invalid-symbol",
+        setup: |p| p.write("docs/guide.md", "[x](../src/lib.rs#a..b)\n"),
+        args: &["check"],
+        home: false,
+    },
+    HelpCase {
+        kind: "link/invalid-path",
+        setup: |p| p.write("docs/guide.md", "[x](../src//lib.rs#add)\n"),
+        args: &["check"],
+        home: false,
+    },
+    HelpCase {
+        kind: "link/outside-root",
+        setup: |p| p.write("docs/guide.md", "[x](../../../elsewhere.rs#add)\n"),
+        args: &["check"],
+        home: false,
+    },
+    HelpCase {
+        kind: "link/text-fragment-unsupported",
+        setup: |p| p.write("docs/guide.md", "[x](../src/lib.rs#:~:text=add)\n"),
+        args: &["check"],
+        home: false,
+    },
+    HelpCase {
+        kind: "read/not-utf8",
+        setup: |p| {
+            std::fs::write(p.path().join("src/bin.rs"), [0xff_u8, 0xfe])
+                .expect("bin.rs should be writable");
+            p.write("docs/guide.md", "[x](../src/bin.rs#add)\n");
+        },
+        args: &["check"],
+        home: false,
+    },
+    HelpCase {
+        kind: "read/unsupported-language",
+        setup: |p| {
+            p.write("src/data.xyz", "x");
+            p.write("docs/guide.md", "[x](../src/data.xyz#add)\n");
+        },
+        args: &["check"],
+        home: false,
+    },
+    HelpCase {
+        kind: "read/syntax-errors",
+        setup: |p| p.write("src/bad.rs", "fn ( {{{{"),
+        args: &["resolve", "src/bad.rs"],
+        home: false,
+    },
+    HelpCase {
+        kind: "read/missing",
+        setup: |p| p.write("docs/guide.md", "[x](../src/gone.rs#add)\n"),
+        args: &["check"],
+        home: false,
+    },
+    HelpCase {
+        kind: "config/parse",
+        setup: |p| p.write("supdoc.config.toml", "include = 3\n"),
+        args: &["check"],
+        home: false,
+    },
+    HelpCase {
+        kind: "config/not-found",
+        setup: |_| {},
+        args: &["check", "--config", "nope.toml"],
+        home: false,
+    },
+    HelpCase {
+        kind: "config/extends-missing",
+        setup: |p| {
+            p.write(
+                "supdoc.config.toml",
+                "extends = \"sub/supdoc.config.toml\"\n",
+            );
+        },
+        args: &["check"],
+        home: false,
+    },
+    HelpCase {
+        kind: "config/extends-loop",
+        setup: |p| {
+            p.write(
+                "supdoc.config.toml",
+                "extends = \"sub/supdoc.config.toml\"\n",
+            );
+            p.write(
+                "sub/supdoc.config.toml",
+                "extends = \"../supdoc.config.toml\"\n",
+            );
+        },
+        args: &["check"],
+        home: false,
+    },
+    HelpCase {
+        kind: "config/extends-directory",
+        setup: |p| {
+            std::fs::create_dir_all(p.path().join("sub/supdoc.config.toml"))
+                .expect("the directory should be creatable");
+            p.write(
+                "supdoc.config.toml",
+                "extends = \"sub/supdoc.config.toml\"\n",
+            );
+        },
+        args: &["check"],
+        home: false,
+    },
+    HelpCase {
+        kind: "config/namespace-outside-root",
+        setup: |p| {
+            p.write(
+                "supdoc.config.toml",
+                "[namespaces]\ncore = \"../elsewhere\"\n",
+            );
+        },
+        args: &["check"],
+        home: false,
+    },
+    HelpCase {
+        kind: "lock/parse",
+        setup: |p| p.write("supdoc.lock", "not = [toml"),
+        args: &["check"],
+        home: false,
+    },
+    HelpCase {
+        kind: "lock/newer-version",
+        setup: |p| p.write("supdoc.lock", "version = 999\n"),
+        args: &["check"],
+        home: false,
+    },
+    HelpCase {
+        kind: "scan/explicit-path-excluded",
+        setup: |p| p.write("supdoc.config.toml", "exclude = [\"docs/old.md\"]\n"),
+        args: &["check", "docs/old.md"],
+        home: false,
+    },
+    HelpCase {
+        kind: "scan/explicit-path-ignored",
+        setup: |p| p.write(".gitignore", "docs/old.md\n"),
+        args: &["check", "docs/old.md"],
+        home: false,
+    },
+    HelpCase {
+        kind: "cli/path-missing",
+        setup: |_| {},
+        args: &["check", "docs/nope.md"],
+        home: false,
+    },
+    HelpCase {
+        kind: "cli/path-outside-project",
+        setup: |_| {},
+        args: &["check", "/"],
+        home: false,
+    },
+    HelpCase {
+        kind: "cli/init-exists",
+        setup: |_| {},
+        args: &["init"],
+        home: false,
+    },
+    HelpCase {
+        kind: "cli/rename-unknown-namespace",
+        setup: |_| {},
+        args: &["namespace", "rename", "nope", "other"],
+        home: false,
+    },
+    HelpCase {
+        kind: "cli/rename-target-exists",
+        setup: |p| {
+            p.write(
+                "supdoc.config.toml",
+                "[namespaces]\ncore = \"src\"\nbase = \"docs\"\n",
+            );
+        },
+        args: &["namespace", "rename", "core", "base"],
+        home: false,
+    },
+    HelpCase {
+        kind: "resolve/not-found",
+        setup: |_| {},
+        args: &["resolve", "src/lib.rs", "ad"],
+        home: false,
+    },
+    HelpCase {
+        kind: "cli/skill-exists",
+        setup: |p| p.write(".agents/skills/supdoc/SKILL.md", "different"),
+        args: &["skill", "install"],
+        home: false,
+    },
+    HelpCase {
+        kind: "cli/skill-no-home",
+        setup: |_| {},
+        args: &["skill", "install", "--global"],
+        home: false,
+    },
+];
+
+#[test]
+fn every_help_names_a_command_or_value() {
+    let mut problems = Vec::new();
+    for case in HELP_CASES {
+        let project = Project::clean();
+        (case.setup)(&project);
+        let home_dir = project.path().join("home");
+        let home = home_dir.to_str().expect("the temp path should be UTF-8");
+        let mut args = case.args.to_vec();
+        args.push("--json");
+        let env: &[(&str, &str)] = if case.home { &[("HOME", home)] } else { &[] };
+        let run = project.run_with(&args, env);
+
+        let mut helps = Vec::new();
+        for stream in [&run.stdout, &run.stderr] {
+            for line in stream.lines() {
+                if let Ok(document) = serde_json::from_str::<serde_json::Value>(line) {
+                    collect_helps(&document, &mut helps);
+                }
+            }
+        }
+        if !helps.iter().any(|(kind, _)| kind == case.kind) {
+            problems.push(format!(
+                "`supdoc {}` should print `{}` with a help; saw {helps:?}; stderr: {}",
+                run.args,
+                case.kind,
+                run.stderr.trim()
+            ));
+        }
+        for (kind, help) in &helps {
+            if points_elsewhere(help) {
+                problems.push(format!(
+                    "the help of `{kind}` (from `supdoc {}`) should say what to do, not send the reader elsewhere (07 G3): {help:?}",
+                    run.args
+                ));
+            }
+            if QUOTED_REMEDIES.contains(&kind.as_str()) && !quotes_a_command_or_value(help) {
+                problems.push(format!(
+                    "the help of `{kind}` (from `supdoc {}`) should quote a runnable command or concrete value (07 G3): {help:?}",
+                    run.args
+                ));
+            }
+        }
+    }
+    problems.sort();
+    problems.dedup();
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}

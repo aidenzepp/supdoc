@@ -21,6 +21,10 @@
 //!   answers to its numbered GitHub anchor (`example-1`) instead of being ambiguous (03 R12). The
 //!   ambiguity test moved to a Rust method name two types share; the `scoped` fixture gained `Server`
 //!   for it.
+//! - docref's `wholefile_update_bare_path` (`update src/lib.rs` accepts the whole-file link while `add`
+//!   stays stale) is `updating_the_file_with_the_whole_file_link_accepts_it_while_a_symbol_link_elsewhere_stays_failed`:
+//!   with no narrowing by target, the two links sit in different docs and `update docs/guide.md --yes`
+//!   accepts one.
 //! - Not ported, because supdoc has no such command: `namespace remove` (2 tests), `namespace add`
 //!   (1 test) and `watch` (2 tests, "Later" in 06).
 

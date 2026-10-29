@@ -1,0 +1,11 @@
+---
+source: crates/supdoc/tests/output/goldens.rs
+expression: "project.run_with(&[\"skill\", \"install\", \"--global\"],\n&[(\"HOME\", home)]).transcript()"
+---
+$ supdoc skill install --global
+exit: 0
+--- stdout
+create     [ROOT]/home/.agents/skills/supdoc/SKILL.md
+create     [ROOT]/home/.claude/skills/supdoc/SKILL.md
+--- stderr
+Nothing written. Run the same command with --yes to apply.

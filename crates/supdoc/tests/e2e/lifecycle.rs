@@ -206,3 +206,35 @@ fn whole_file_link_fails_on_any_edit_while_a_link_to_an_untouched_symbol_passes(
         "the failed link should be the whole-file one: {failed}"
     );
 }
+
+#[test]
+fn updating_the_file_with_the_whole_file_link_accepts_it_while_a_symbol_link_elsewhere_stays_failed()
+ {
+    let project = Project::fixture("wholefile");
+    std::fs::write(
+        project.path("docs/guide.md"),
+        "# Guide\n\nThe [core library](../src/lib.rs) contains the main logic.\n",
+    )
+    .expect("the guide should be writable");
+    std::fs::write(
+        project.path("docs/api.md"),
+        "# API\n\nThe [`add`](../src/lib.rs#add) function applies the offset.\n",
+    )
+    .expect("the api doc should be writable");
+    project.record();
+    project.replace("src/lib.rs", "x + y", "x * y");
+
+    let _ = project
+        .supdoc(&["update", "docs/guide.md", "--yes"])
+        .assert_exit(0);
+
+    let report = project.supdoc(&["--json", "check"]).assert_exit(1).json();
+    assert_eq!(
+        at(&report, "/data/summary/failed"),
+        1,
+        "only the symbol link should still fail: {report}"
+    );
+    let failed = at(&report, "/data/links/0");
+    assert_eq!(at(failed, "/target"), "src/lib.rs", "{report}");
+    assert_eq!(at(failed, "/symbol"), "add", "{report}");
+}
