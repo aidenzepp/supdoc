@@ -1,5 +1,9 @@
 {
   "$defs": {
+    "AbsolutePath": {
+      "description": "An absolute, lexically normalized filesystem path.",
+      "type": "string"
+    },
     "FindingJson": {
       "description": "A finding as JSON shows it.",
       "properties": {
@@ -146,14 +150,24 @@
       ]
     },
     "StarterReport": {
-      "description": "The starter config as output data, shown by `--dry-run`.",
+      "description": "The starter config as output data, reported on a dry run and on a real write.",
       "properties": {
+        "applied": {
+          "description": "Whether the file was written. False on `--dry-run`.",
+          "type": "boolean"
+        },
         "contents": {
           "description": "The file contents, written as is in text output.",
           "type": "string"
+        },
+        "path": {
+          "$ref": "#/$defs/AbsolutePath",
+          "description": "Where the starter is, or would be, written."
         }
       },
       "required": [
+        "applied",
+        "path",
         "contents"
       ],
       "type": "object"
