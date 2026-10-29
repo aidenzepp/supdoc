@@ -218,17 +218,24 @@ fn rewritten_key(key: &LinkKey, code: &str, replacement: &str) -> Option<LinkKey
             })
         }
         CODE_CASE_MISMATCH => {
-            // A case fix changes letters only, so the replacement has the same real segments as
-            // the old path; segments such as `..` only climb out of the source's directory.
+            // A case fix changes letters only, so the replacement's names are the trailing names
+            // of the old key path; the segments before them (a directory the link climbs out of
+            // or descends into, `..` past the root) are kept as the key has them.
             let written = replacement
                 .split('/')
                 .filter(|part| !matches!(*part, "" | "." | ".."));
-            let segments: Vec<&str> = written.collect();
-            let old = key.target.path().as_str();
-            if segments.len() != old.split('/').count() {
-                return None;
-            }
-            let path: TargetPath = segments.join("/").parse().ok()?;
+            let names: Vec<&str> = written.collect();
+            let old: Vec<&str> = key.target.path().as_str().split('/').collect();
+            let kept = old.len().checked_sub(names.len())?;
+            let path: TargetPath = old
+                .get(..kept)?
+                .iter()
+                .chain(&names)
+                .copied()
+                .collect::<Vec<&str>>()
+                .join("/")
+                .parse()
+                .ok()?;
             let target = match &key.target {
                 Target::Path(_) => Target::Path(path),
                 Target::Namespaced { namespace, .. } => Target::Namespaced {
@@ -611,40 +618,99 @@ mod tests {
         );
     }
 
-    #[test]
-    fn case_fix_moves_the_key_to_the_real_path() {
-        let text = "[x](../SRC/lib.rs#add)\n";
-        let old_key = LinkKey {
-            source: "docs/a.md"
-                .parse()
-                .expect("the fixture source should be valid"),
-            target: "SRC/lib.rs"
-                .parse()
-                .expect("the fixture target should be valid"),
+    /// A case fix of `written` to `fixed` in `source`, moving the key `old` to `new`; asserts the
+    /// lock entry follows it.
+    fn assert_case_fix_moves(source: &str, written: &str, fixed: &str, old: &str, new: &str) {
+        let text = format!("[x]({written}#add)\n");
+        let link_key = |path: &str| LinkKey {
+            source: source.parse().expect("the fixture source should be valid"),
+            target: path.parse().expect("the fixture target should be valid"),
             symbol: Some("add".parse().expect("the fixture symbol should be valid")),
         };
-        let range = 4..16;
-        let file: SourcePath = "docs/a.md"
-            .parse()
-            .expect("the fixture source should be valid");
-        let location = Location::in_text(file.clone(), text, range.clone())
+        let range = 4..4 + written.len();
+        let file: SourcePath = source.parse().expect("the fixture source should be valid");
+        let location = Location::in_text(file.clone(), &text, range.clone())
             .expect("the fixture range should locate");
         let finding = Finding::new(CODE_CASE_MISMATCH, Severity::Error, "case differs")
             .with_location(location.clone())
-            .with_snippet(Snippet::capture(text, range.clone()).expect("the range should capture"))
+            .with_snippet(Snippet::capture(&text, range.clone()).expect("the range should capture"))
             .with_fix(Fix {
                 file,
                 range,
-                replacement: "../src/lib.rs".to_owned(),
+                replacement: fixed.to_owned(),
             });
         let link = ScannedLink {
             locations: vec![location],
             target: TargetState::Broken { finding },
         };
+        let plan = plan_fixes(&scan_of([(link_key(old), link)]));
+        assert_eq!(
+            first(&plan).moved,
+            Some((link_key(old), link_key(new))),
+            "the key for `{written}` in {source} should move to the real path"
+        );
 
-        let plan = plan_fixes(&scan_of([(old_key.clone(), link)]));
+        let hash = Hash::digest(b"body");
+        let mut lock: Lockfile = [(link_key(old), hash)].into_iter().collect();
+        let applied: Vec<AppliedFix> = plan
+            .fixes
+            .iter()
+            .map(|planned| AppliedFix {
+                fix: planned.fix.clone(),
+                moved: planned.moved.clone(),
+            })
+            .collect();
+        move_lock_entries(&mut lock, &applied);
+        assert_eq!(
+            lock.get(&link_key(new)),
+            Some(hash),
+            "the lock entry for `{written}` in {source} should keep its history"
+        );
+        assert_eq!(lock.get(&link_key(old)), None);
+    }
 
-        assert_eq!(first(&plan).moved, Some((old_key, key("docs/a.md", "add"))));
+    #[test]
+    fn case_fix_moves_the_key_of_a_link_climbing_to_the_root() {
+        assert_case_fix_moves(
+            "docs/a.md",
+            "../SRC/lib.rs",
+            "../src/lib.rs",
+            "SRC/lib.rs",
+            "src/lib.rs",
+        );
+    }
+
+    #[test]
+    fn case_fix_moves_the_key_of_a_same_directory_link() {
+        assert_case_fix_moves(
+            "docs/a.md",
+            "LIB.rs",
+            "lib.rs",
+            "docs/LIB.rs",
+            "docs/lib.rs",
+        );
+    }
+
+    #[test]
+    fn case_fix_moves_the_key_of_a_subdirectory_link() {
+        assert_case_fix_moves(
+            "docs/a.md",
+            "Api/LIB.rs",
+            "api/lib.rs",
+            "docs/Api/LIB.rs",
+            "docs/api/lib.rs",
+        );
+    }
+
+    #[test]
+    fn case_fix_moves_the_key_of_an_outside_root_link() {
+        assert_case_fix_moves(
+            "docs/a.md",
+            "../../Shared/Math.rs",
+            "../../shared/math.rs",
+            "../Shared/Math.rs",
+            "../shared/math.rs",
+        );
     }
 
     #[test]
