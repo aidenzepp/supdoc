@@ -29,7 +29,8 @@ use crate::state::LinkState;
 /// and fails when a documented target changed, so someone rereads the docs. `supdoc update`
 /// records the new hashes once the docs are confirmed accurate.
 ///
-/// Reads never write. Commands that write preview unless given `--yes`. With `--json` every
+/// Reads never write. `update`, `fix`, `namespace rename` and `skill install` preview unless given `--yes`; `init` writes
+/// immediately (`--dry-run` previews it). With `--json` every
 /// result, and every error, is a JSON document. Exit codes: 0 clean, 1 failing or refused,
 /// 2 usage error, 70 supdoc bug, 74 I/O error, 78 config or lockfile error.
 #[derive(Debug, Parser)]

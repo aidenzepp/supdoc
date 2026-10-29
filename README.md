@@ -34,7 +34,8 @@ symbols too: `[setup](docs/guide.md#install)`.
 | `supdoc completions SHELL` | Prints a shell completion script |
 | `supdoc skill install` | Installs supdoc's agent skill |
 
-Commands that write preview their changes unless given `--yes`. Every command accepts `--json` and `--jsonl`
+`update`, `fix`, `namespace rename` and `skill install` preview their changes unless given `--yes`.
+`init` writes immediately; use `--dry-run` to preview it. Every command accepts `--json` and `--jsonl`
 for machine-readable output. Exit codes: 0 clean, 1 failing or refused, 2 usage error, 70 supdoc bug, 74 I/O
 error, 78 config or lockfile error.
 

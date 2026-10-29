@@ -3,7 +3,7 @@
 //!
 //! `schema` and `completions` print generated documents (JSON Schema, a shell script), which
 //! their own tests and `schema/*.json` already pin, so they have no golden here. `skill install`
-//! gets its golden with the command itself (H3).
+//! has no golden yet either.
 
 use crate::support::Project;
 
