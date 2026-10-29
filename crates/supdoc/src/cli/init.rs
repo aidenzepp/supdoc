@@ -81,13 +81,15 @@ pub fn run(args: &InitArgs, context: &Context, output: &mut Output) -> Result<Ou
     };
 
     if args.dry_run {
+        require_parent_directory(&target)?;
         refuse_if_present(&target)?;
         output
             .artifact(&report(false), STARTER, true)
             .map_err(|error| output_failed(&target, &error))?;
         output
             .note(&format!(
-                "Nothing written. Run `supdoc init` to write {label}."
+                "Nothing written. Run `{}` to write {label}.",
+                command(context)
             ))
             .map_err(|error| output_failed(&target, &error))?;
     } else {
@@ -122,6 +124,35 @@ fn target(context: &Context) -> AbsolutePath {
         .unwrap_or_else(|| Path::new(CONFIG_FILE_NAME));
     AbsolutePath::new(&context.cwd.as_path().join(requested))
         .unwrap_or_else(|| unreachable!("a path joined onto an absolute directory is absolute"))
+}
+
+/// The `supdoc init` command that writes what a dry run previewed: with `-c PATH` when the
+/// preview was for that path, so running it writes the same file.
+fn command(context: &Context) -> String {
+    context.global.config.as_deref().map_or_else(
+        || "supdoc init".to_owned(),
+        |path| format!("supdoc init -c {}", path.display()),
+    )
+}
+
+/// Fails with `cli/init-write` when `target`'s directory is missing or is not a directory, the
+/// same error a real run reports when it cannot create the file there.
+///
+/// # Errors
+///
+/// Returns `cli/init-write` when the parent directory cannot be found or is not a directory.
+fn require_parent_directory(target: &AbsolutePath) -> Result<(), CliError> {
+    let Some(parent) = target.as_path().parent() else {
+        return Ok(());
+    };
+    match std::fs::metadata(parent) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(write_failed(
+            target,
+            &io::Error::from(io::ErrorKind::NotADirectory),
+        )),
+        Err(error) => Err(write_failed(target, &error)),
+    }
 }
 
 /// `target` as a person reads it in a note: relative to `cwd` when it is beneath it.
@@ -505,6 +536,39 @@ mod tests {
         let error = result.expect_err("a missing directory cannot hold a config");
 
         assert_eq!((error.code(), error.exit_code()), ("cli/init-write", 74));
+    }
+
+    #[test]
+    fn dry_run_with_config_flag_names_the_same_command_in_its_note() {
+        let dir = tempfile::tempdir().expect("a temp directory should be created");
+        let (args, context) = context_in(&dir, &["--dry-run", "-c", "sub/x.toml"]);
+        std::fs::create_dir(dir.path().join("sub")).expect("the sub directory should be created");
+
+        let (_, _, stderr) = run_captured(&args, &context);
+
+        assert_eq!(
+            stderr, "Nothing written. Run `supdoc init -c sub/x.toml` to write sub/x.toml.\n",
+            "the note repeats the -c flag"
+        );
+    }
+
+    #[test]
+    fn dry_run_reports_a_missing_parent_directory_like_a_real_run() {
+        let dir = tempfile::tempdir().expect("a temp directory should be created");
+        let (dry_args, dry_context) = context_in(&dir, &["--dry-run", "-c", "gone/x.toml"]);
+        let (real_args, real_context) = context_in(&dir, &["-c", "gone/x.toml"]);
+
+        let (dry, _, dry_stdout) = run_captured(&dry_args, &dry_context);
+        let (real, _, _) = run_captured(&real_args, &real_context);
+        let dry = dry.expect_err("the preview should fail on a missing directory");
+        let real = real.expect_err("the real run should fail on a missing directory");
+
+        assert_eq!(
+            (dry.code(), dry.exit_code(), dry.to_string()),
+            (real.code(), real.exit_code(), real.to_string()),
+            "the preview and the real run fail the same way"
+        );
+        assert_eq!(dry_stdout, "", "no note claims success");
     }
 
     #[test]
