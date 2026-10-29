@@ -8,6 +8,7 @@ use std::ffi::OsString;
 use clap::error::ErrorKind;
 use clap::{Parser, ValueEnum};
 
+use super::CliError;
 use super::args::{Cli, resolve_format};
 use crate::output::OutputFormat;
 
@@ -42,9 +43,6 @@ pub enum Stream {
 
 /// The code of the error printed when the command line cannot be parsed.
 pub const USAGE_ERROR_CODE: &str = "cli/usage";
-
-/// The exit code of a usage error (06 X7).
-const USAGE_EXIT_CODE: u8 = 2;
 
 /// Parses the process's own arguments and environment.
 #[must_use]
@@ -85,12 +83,12 @@ fn printout(error: &clap::Error, format: OutputFormat) -> Printout {
         _ if format.is_json() => Printout {
             stream: Stream::Stderr,
             text: usage_error_json(&text),
-            exit_code: USAGE_EXIT_CODE,
+            exit_code: CliError::USAGE_EXIT_CODE,
         },
         _ => Printout {
             stream: Stream::Stderr,
             text: ensure_newline(text),
-            exit_code: USAGE_EXIT_CODE,
+            exit_code: CliError::USAGE_EXIT_CODE,
         },
     }
 }
@@ -120,7 +118,7 @@ fn usage_error_json(rendered: &str) -> String {
         kind: USAGE_ERROR_CODE,
         message,
         help,
-        exit_code: USAGE_EXIT_CODE,
+        exit_code: CliError::USAGE_EXIT_CODE,
     };
     // Serializing plain strings and numbers cannot fail; the fallback keeps stderr valid JSON anyway.
     let mut line = serde_json::to_string(&error).unwrap_or_else(|_| {

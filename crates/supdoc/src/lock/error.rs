@@ -3,6 +3,12 @@
 use crate::link::LinkKey;
 use crate::path::AbsolutePath;
 
+/// Exit status for a lockfile the user fixes by editing it (06 X7).
+const EXIT_CONFIG: u8 = 78;
+
+/// Exit status for a lockfile that can't be read or written (06 X7).
+const EXIT_IO: u8 = 74;
+
 /// Why lockfile text could not be turned into a [`Lockfile`](super::model::Lockfile).
 ///
 /// Parsing changes nothing on disk, so every variant leaves the lockfile as it was.
@@ -139,6 +145,15 @@ impl LockError {
             Self::Write { .. } => {
                 "The existing lockfile was not changed. Make the directory writable and rerun"
             }
+        }
+    }
+
+    /// The process exit status for this error (06 X7): 78 when the text is invalid, else 74.
+    #[must_use]
+    pub const fn exit_code(&self) -> u8 {
+        match self {
+            Self::Parse { .. } => EXIT_CONFIG,
+            Self::Read { .. } | Self::Write { .. } => EXIT_IO,
         }
     }
 }

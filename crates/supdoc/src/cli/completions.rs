@@ -14,9 +14,6 @@ use crate::output::{Output, OutputError, Report, TextContext};
 use super::args::{Cli, CompletionsArgs};
 use super::{CliError, Context, Outcome};
 
-/// The exit code for an I/O error (06 X7).
-const IO_EXIT_CODE: u8 = 74;
-
 /// The completion script as output data.
 #[derive(Debug, Serialize, JsonSchema)]
 struct ScriptReport {
@@ -63,7 +60,7 @@ fn write_failed(shell: Shell, error: &OutputError) -> CliError {
         "cli/completions-write",
         format!("could not write the {shell} completion script: {error}"),
         "check that standard output is open and writable, or redirect it to a file",
-        IO_EXIT_CODE,
+        CliError::IO_EXIT_CODE,
     )
 }
 

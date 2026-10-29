@@ -6,38 +6,24 @@
 //! This module also owns the wire form of one link, [`LinkJson`], which `list` shares.
 
 use std::io::{self, Write};
-use std::path::PathBuf;
 
 use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::check::model::{LinkReport, Report as CheckModel};
 use crate::check::reconcile::{self, check_outcome, reconcile};
-use crate::config::Config;
 use crate::finding::{Finding, Location};
-use crate::link::{LinkKey, SourcePath};
-use crate::lock::error::LockError;
-use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
+use crate::link::LinkKey;
 use crate::output::json::FindingJson;
 use crate::output::summary::render_summary;
 use crate::output::text::{render_finding, visible};
 use crate::output::{Output, OutputError, Report, Summary, TextContext, Verbosity};
-use crate::path::AbsolutePath;
 use crate::read::cartridge::Languages;
-use crate::scan::model::Scope;
 use crate::state::LinkState;
 
 use super::args::CheckArgs;
+use super::project::{load_config, read_lock, scope};
 use super::{CliError, Context, Outcome};
-
-/// The exit code for a usage error, such as a missing `[PATH]` (06 X7).
-const USAGE_EXIT_CODE: u8 = 2;
-
-/// The exit code for an I/O failure (06 X7).
-const IO_EXIT_CODE: u8 = 74;
-
-/// The exit code for a config or lockfile problem (06 X7).
-const CONFIG_EXIT_CODE: u8 = 78;
 
 /// Runs `supdoc check`: prints every link that needs attention, the findings not tied to one
 /// link, and the summary line, then says whether the check passed (05 C3).
@@ -51,13 +37,17 @@ const CONFIG_EXIT_CODE: u8 = 78;
 /// error (78 when invalid, 74 when unreadable), `scan/root-unreadable` (74), and
 /// `cli/check-output` when the report cannot be written (74).
 pub fn run(args: &CheckArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
-    let config = load_config(context)?;
-    output.set_root(config.root().clone());
+    let config = load_config(context, output, "check")?;
     let scope = scope(&args.paths, &context.cwd, config.root())?;
     let lock = read_lock(config.root())?;
     let scan =
         crate::scan::assemble::run(&config, &Languages::builtin(), &scope).map_err(|error| {
-            CliError::new(error.code(), error.to_string(), error.help(), IO_EXIT_CODE)
+            CliError::new(
+                error.code(),
+                error.to_string(),
+                error.help(),
+                error.exit_code(),
+            )
         })?;
 
     let model = reconcile(&scan, &lock, &scope);
@@ -73,133 +63,13 @@ pub fn run(args: &CheckArgs, context: &Context, output: &mut Output) -> Result<O
     Ok(outcome)
 }
 
-/// The config `--config` names, or the one found by searching upward from the current directory.
-///
-/// # Errors
-///
-/// Returns the config's own error, with its code, help and exit code.
-fn load_config(context: &Context) -> Result<Config, CliError> {
-    let loaded = match &context.global.config {
-        Some(file) => Config::load_file(&absolute(&context.cwd, file)),
-        None => Config::load(&context.cwd),
-    };
-    loaded.map_err(|error| {
-        let help = error.help().unwrap_or_else(|| {
-            "Correct the config as the message says, then run `supdoc check` again".to_owned()
-        });
-        CliError::new(error.code(), error.to_string(), help, error.exit_code())
-    })
-}
-
-/// `path` as typed, made absolute against the current directory.
-fn absolute(cwd: &AbsolutePath, path: &std::path::Path) -> AbsolutePath {
-    // Joining onto an absolute directory always gives an absolute path.
-    AbsolutePath::new(&cwd.as_path().join(path)).unwrap_or_else(|| cwd.clone())
-}
-
-/// The part of the project `[PATHS]` names: everything when none are given, or when one of them
-/// is the project root itself (04 S10).
-///
-/// # Errors
-///
-/// Returns `cli/path-missing` for a path that doesn't exist, `cli/path-outside-project` for one
-/// that isn't inside the project root, and `cli/path-invalid` for one no source path can name.
-/// All exit 2.
-fn scope(paths: &[PathBuf], cwd: &AbsolutePath, root: &AbsolutePath) -> Result<Scope, CliError> {
-    let mut sources = Vec::with_capacity(paths.len());
-    for typed in paths {
-        let path = absolute(cwd, typed);
-        if path.as_path().symlink_metadata().is_err() {
-            return Err(path_missing(typed));
-        }
-        let Some(inside) = path.strip_prefix(root) else {
-            return Err(path_outside(typed, root));
-        };
-        if inside.as_os_str().is_empty() {
-            return Ok(Scope::All);
-        }
-        let source =
-            SourcePath::from_relative(inside).map_err(|error| path_invalid(typed, &error))?;
-        sources.push(source);
-    }
-    Ok(if sources.is_empty() {
-        Scope::All
-    } else {
-        Scope::Paths(sources)
-    })
-}
-
-/// The lockfile in the project root, or an empty one when there is none yet (06 "What each
-/// command touches").
-///
-/// # Errors
-///
-/// Returns the lockfile's own error: 74 when it can't be read, 78 when its text is invalid.
-fn read_lock(root: &AbsolutePath) -> Result<Lockfile, CliError> {
-    let path = AbsolutePath::new(&root.as_path().join(LOCK_FILE_NAME)).unwrap_or_else(|| {
-        unreachable!("the lockfile name joined onto an absolute root is absolute")
-    });
-    match Lockfile::read(&path) {
-        Ok(lock) => Ok(lock.unwrap_or_default()),
-        Err(error) => {
-            let exit_code = match error {
-                LockError::Parse { .. } => CONFIG_EXIT_CODE,
-                LockError::Read { .. } | LockError::Write { .. } => IO_EXIT_CODE,
-            };
-            Err(CliError::new(
-                error.code(),
-                error.to_string(),
-                error.help(),
-                exit_code,
-            ))
-        }
-    }
-}
-
-/// The error for a `[PATH]` that doesn't exist (06 error table).
-fn path_missing(typed: &std::path::Path) -> CliError {
-    CliError::new(
-        "cli/path-missing",
-        format!("{} does not exist", typed.display()),
-        "Check the path. Paths are relative to the current directory",
-        USAGE_EXIT_CODE,
-    )
-}
-
-/// The error for a `[PATH]` outside the project, whose links `check` can't name.
-fn path_outside(typed: &std::path::Path, root: &AbsolutePath) -> CliError {
-    CliError::new(
-        "cli/path-outside-project",
-        format!(
-            "{} is outside the project at {}",
-            typed.display(),
-            root.display()
-        ),
-        format!(
-            "Pass a path inside {}, or run supdoc from the project that contains it",
-            root.display()
-        ),
-        USAGE_EXIT_CODE,
-    )
-}
-
-/// The error for a `[PATH]` inside the project that no link source could have.
-fn path_invalid(typed: &std::path::Path, error: &impl std::fmt::Display) -> CliError {
-    CliError::new(
-        "cli/path-invalid",
-        format!("{} can't be checked: {error}", typed.display()),
-        "Pass a file or directory whose path supdoc.lock could record, or leave out [PATHS] to check the whole project",
-        USAGE_EXIT_CODE,
-    )
-}
-
 /// The error for a report that could not be written.
 fn output_failed(error: &OutputError) -> CliError {
     CliError::new(
         "cli/check-output",
         format!("cannot write the check report: {error}"),
         "Check that standard output and standard error are open and writable",
-        IO_EXIT_CODE,
+        CliError::IO_EXIT_CODE,
     )
 }
 
@@ -352,15 +222,18 @@ impl From<&Location> for LinkLocationJson {
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
     use clap::Parser as _;
 
     use super::*;
     use crate::cli::args::{Cli, Command};
+    use crate::config::Config;
+    use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
     use crate::output::{OutputSettings, PathStyle};
-    use crate::scan::model::TargetState;
+    use crate::path::AbsolutePath;
+    use crate::scan::model::{Scope, TargetState};
 
     /// A file that documents `add` in `src/lib.rs`.
     const GUIDE: &str = "# Guide\n\nThe [add](../src/lib.rs#add) function sums.\n";

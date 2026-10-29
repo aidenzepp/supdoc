@@ -13,6 +13,9 @@ pub mod examples;
 /// Parsing arguments, including JSON usage errors.
 pub mod parse;
 
+/// Setup shared by every command that loads the config.
+pub mod project;
+
 /// `supdoc init`.
 pub mod init;
 
@@ -134,6 +137,18 @@ impl CliError {
 
     /// The exit code for a supdoc bug (06 X7).
     pub const BUG_EXIT_CODE: u8 = 70;
+
+    /// The exit code for a usage error, such as a missing `[PATH]` (06 X7).
+    pub const USAGE_EXIT_CODE: u8 = 2;
+
+    /// The exit code for a refused change, such as an existing config (06 X7).
+    pub const REFUSED_EXIT_CODE: u8 = 1;
+
+    /// The exit code for an I/O failure (06 X7).
+    pub const IO_EXIT_CODE: u8 = 74;
+
+    /// The exit code for a config or lockfile problem (06 X7).
+    pub const CONFIG_EXIT_CODE: u8 = 78;
 
     /// The stable code.
     #[must_use]

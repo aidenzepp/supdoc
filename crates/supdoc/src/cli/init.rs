@@ -15,12 +15,6 @@ use crate::path::{AbsolutePath, RelativePath};
 use super::args::InitArgs;
 use super::{CliError, Context, Outcome};
 
-/// The exit code for an I/O error (06 X7).
-const IO_EXIT_CODE: u8 = 74;
-
-/// The exit code for a refused write (06 X7).
-const REFUSED_EXIT_CODE: u8 = 1;
-
 /// The file `supdoc init` writes. It loads as a valid config (see the tests), and its live keys
 /// spell out the defaults so that editing them is the obvious next step.
 const STARTER: &str = "\
@@ -135,7 +129,7 @@ fn exists(target: &AbsolutePath) -> CliError {
         "cli/init-exists",
         format!("{} already exists", target.display()),
         "The existing file wasn't changed. Edit it directly, or delete it and run `supdoc init`.",
-        REFUSED_EXIT_CODE,
+        CliError::REFUSED_EXIT_CODE,
     )
 }
 
@@ -145,7 +139,7 @@ fn write_failed(target: &AbsolutePath, error: &io::Error) -> CliError {
         "cli/init-write",
         format!("cannot write {}: {error}", target.display()),
         "check that the directory exists and that you can write to it",
-        IO_EXIT_CODE,
+        CliError::IO_EXIT_CODE,
     )
 }
 
@@ -155,7 +149,7 @@ fn output_failed(target: &AbsolutePath, error: &OutputError) -> CliError {
         "cli/init-write",
         format!("cannot report on {}: {error}", target.display()),
         "check that standard output and standard error are open and writable",
-        IO_EXIT_CODE,
+        CliError::IO_EXIT_CODE,
     )
 }
 

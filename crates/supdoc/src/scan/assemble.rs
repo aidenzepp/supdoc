@@ -20,6 +20,9 @@ use crate::scan::model::{Scan, Scope};
 use crate::scan::targets::{self, CODE_UNKNOWN_NAMESPACE, Occurrence, Parsed, Written};
 use crate::scan::walk::walk;
 
+/// Exit status for a scan that couldn't read the project (06 X7).
+const EXIT_IO: u8 = 74;
+
 /// Why a scan couldn't run at all (04 S7). Every smaller problem is a finding instead.
 #[derive(Debug, thiserror::Error)]
 pub enum ScanError {
@@ -49,6 +52,14 @@ impl ScanError {
             Self::RootUnreadable { .. } => {
                 "Check the directory's permissions, or run from a directory you can read"
             }
+        }
+    }
+
+    /// The process exit status for this error (06 X7): 74, since the project can't be read.
+    #[must_use]
+    pub const fn exit_code(&self) -> u8 {
+        match self {
+            Self::RootUnreadable { .. } => EXIT_IO,
         }
     }
 }
