@@ -1,0 +1,385 @@
+{
+  "$defs": {
+    "FindingJson": {
+      "description": "A finding as JSON shows it.",
+      "properties": {
+        "fix": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FixJson"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The one correct edit, when there is exactly one."
+        },
+        "help": {
+          "description": "What to do next.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "The stable code, such as `link/failed`.",
+          "type": "string"
+        },
+        "location": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocationJson"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where it is. Left out of a link's nested finding, which shares the link's location."
+        },
+        "message": {
+          "description": "What happened, in one line.",
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/SeverityJson",
+          "description": "How bad it is."
+        }
+      },
+      "required": [
+        "kind",
+        "severity",
+        "message"
+      ],
+      "type": "object"
+    },
+    "FixJson": {
+      "description": "An exact edit as JSON shows it, with byte offsets so a script can apply it without recounting.",
+      "properties": {
+        "end": {
+          "description": "End byte offset.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "file": {
+          "description": "The file to edit, relative to the project root.",
+          "type": "string"
+        },
+        "replacement": {
+          "description": "The new text.",
+          "type": "string"
+        },
+        "start": {
+          "description": "Start byte offset.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "file",
+        "start",
+        "end",
+        "replacement"
+      ],
+      "type": "object"
+    },
+    "FixRecord": {
+      "description": "One edit: where it is, the bytes it replaces and writes, and the finding it repairs.",
+      "properties": {
+        "after": {
+          "description": "The bytes written instead.",
+          "type": "string"
+        },
+        "before": {
+          "description": "The bytes replaced, as scanned.",
+          "type": "string"
+        },
+        "cause": {
+          "description": "The code of the finding repaired, such as `resolve/not-found` or `scan/case-mismatch`.",
+          "type": "string"
+        },
+        "column": {
+          "description": "1-based column of the link, in characters.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "end": {
+          "description": "End byte offset of the replaced bytes.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "file": {
+          "description": "The source file, relative to the project root.",
+          "type": "string"
+        },
+        "line": {
+          "description": "1-based line of the link.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "moved": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MovedJson"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The lock entry this fix carries to the link's new key."
+        },
+        "start": {
+          "description": "Start byte offset of the replaced bytes.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LinkState"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The link's state after the fix, from a fresh scan. Only after `--yes`."
+        }
+      },
+      "required": [
+        "file",
+        "line",
+        "column",
+        "start",
+        "end",
+        "before",
+        "after",
+        "cause"
+      ],
+      "type": "object"
+    },
+    "FixReport": {
+      "description": "`supdoc fix`: the planned or applied edits, and the files left alone.",
+      "properties": {
+        "applied": {
+          "description": "`false` for a preview, `true` once the fixes were written (K9).",
+          "type": "boolean"
+        },
+        "fixes": {
+          "description": "One per planned fix in a preview; one per written fix after `--yes`. Sorted by file, then\nposition.",
+          "items": {
+            "$ref": "#/$defs/FixRecord"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "applied",
+        "fixes"
+      ],
+      "type": "object"
+    },
+    "LinkKey": {
+      "description": "Identity of one lock entry (02 L2). Field order is the sort order (02 L1).",
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/SourcePath",
+          "description": "The file the link is written in."
+        },
+        "symbol": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SymbolPath"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`None` = whole file. `Option`'s ordering puts whole-file entries first. Left out of JSON\nwhen `None`."
+        },
+        "target": {
+          "$ref": "#/$defs/Target",
+          "description": "The file the link points at."
+        }
+      },
+      "required": [
+        "source",
+        "target"
+      ],
+      "type": "object"
+    },
+    "LinkState": {
+      "description": "Where one link stands, in snapshot-testing terms (05 C1).\n\nThe same values name states everywhere: in reports, in `--state` filters on `update` and\n`list`, and in JSON output.",
+      "oneOf": [
+        {
+          "const": "passed",
+          "description": "The target's hash matches the lock entry.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "The target's hash differs from the lock entry: the code changed since the doc was confirmed.",
+          "type": "string"
+        },
+        {
+          "const": "broken",
+          "description": "The target file, symbol or namespace can't be found.",
+          "type": "string"
+        },
+        {
+          "const": "new",
+          "description": "The link has no lock entry yet.",
+          "type": "string"
+        },
+        {
+          "const": "obsolete",
+          "description": "A lock entry whose link no longer exists.",
+          "type": "string"
+        }
+      ]
+    },
+    "LocationJson": {
+      "description": "A place in a file as JSON shows it.",
+      "properties": {
+        "column": {
+          "description": "1-based column, in characters.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "end": {
+          "description": "End byte offset.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "file": {
+          "description": "The file, relative to the project root.",
+          "type": "string"
+        },
+        "line": {
+          "description": "1-based line.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "start": {
+          "description": "Start byte offset.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "file",
+        "line",
+        "column",
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "MovedJson": {
+      "description": "The lock entry a fix carries from a link's old key to its new one (05 C6).",
+      "properties": {
+        "from": {
+          "$ref": "#/$defs/LinkKey",
+          "description": "The key before the fix."
+        },
+        "to": {
+          "$ref": "#/$defs/LinkKey",
+          "description": "The key after it."
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "type": "object"
+    },
+    "SeverityJson": {
+      "description": "A severity as JSON shows it.",
+      "oneOf": [
+        {
+          "const": "error",
+          "description": "Fails `check`.",
+          "type": "string"
+        },
+        {
+          "const": "warning",
+          "description": "Reported; fails `check` only under `--deny-warnings`.",
+          "type": "string"
+        },
+        {
+          "const": "note",
+          "description": "Information only.",
+          "type": "string"
+        }
+      ]
+    },
+    "SourcePath": {
+      "description": "A file path relative to the project root, with `/` separators.",
+      "type": "string"
+    },
+    "SymbolPath": {
+      "description": "A dotted symbol path such as `Config.validate`.",
+      "type": "string"
+    },
+    "Target": {
+      "description": "Where a link points: `path` or `namespace:path`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The one object every command writes under `--json`, with the same top-level keys each time.\n\nIts schema is the one `supdoc schema` prints, so the JSON written and the schema published\ncome from this one type.",
+  "properties": {
+    "command": {
+      "description": "The command that produced `data`.",
+      "type": "string"
+    },
+    "data": {
+      "$ref": "#/$defs/FixReport",
+      "description": "The command's own payload."
+    },
+    "findings": {
+      "description": "Findings that aren't about one link.",
+      "items": {
+        "$ref": "#/$defs/FindingJson"
+      },
+      "type": "array"
+    },
+    "ok": {
+      "description": "`true` exactly when the exit code is 0.",
+      "type": "boolean"
+    },
+    "root": {
+      "description": "The absolute project root, which every other path is relative to.",
+      "type": "string"
+    },
+    "schema_version": {
+      "description": "[`SCHEMA_VERSION`].",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "truncated": {
+      "description": "Whether results were left out.",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "command",
+    "ok",
+    "root",
+    "data",
+    "findings",
+    "truncated"
+  ],
+  "title": "Envelope",
+  "type": "object"
+}
