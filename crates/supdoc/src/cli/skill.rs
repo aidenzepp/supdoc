@@ -7,17 +7,17 @@
 //! Code's config directory. Each copy is a real file written atomically. A copy that already
 //! holds the embedded text is left alone; a different one is replaced only under `--yes`.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
 
 use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::config::CONFIG_FILE_NAME;
 use crate::finding::{Finding, Severity};
+use crate::lock::io::write_atomically;
 use crate::output::json::Envelope;
 use crate::output::text::{render_finding, visible};
 use crate::output::{Output, OutputError, Report, TextContext};
@@ -28,7 +28,7 @@ use super::project::absolute;
 use super::{CliError, Context, Outcome};
 
 /// The skill, embedded so the installed copy always matches this binary.
-const SKILL: &str = include_str!("../../../../SKILL.md");
+const SKILL: &str = include_str!("../../SKILL.md");
 
 /// Where the skill goes beneath the shared agents base: the project root or `HOME`.
 const AGENTS_SKILL: &str = ".agents/skills/supdoc/SKILL.md";
@@ -39,11 +39,11 @@ const PROJECT_CLAUDE_SKILL: &str = ".claude/skills/supdoc/SKILL.md";
 /// Claude Code's config directory beneath `HOME` when `CLAUDE_CONFIG_DIR` is not set.
 const DEFAULT_CLAUDE_DIR: &str = ".claude";
 
+/// The environment variable that moves Claude Code's config directory.
+const CLAUDE_CONFIG_DIR_VAR: &str = "CLAUDE_CONFIG_DIR";
+
 /// Where the skill goes beneath Claude Code's config directory.
 const CLAUDE_DIR_SKILL: &str = "skills/supdoc/SKILL.md";
-
-/// How many fresh temporary names to try before giving up on writing a file.
-const TEMP_ATTEMPTS: u32 = 8;
 
 /// The closing note of a preview that would change something (06a K7).
 const PREVIEW_NOTE: &str = "Nothing written. Run the same command with --yes to apply.";
@@ -68,24 +68,29 @@ pub fn run(
     output: &mut Output,
 ) -> Result<Outcome, CliError> {
     let applied = args.confirm.mode() == WriteMode::Apply;
+    let base = if args.global {
+        context.cwd.clone()
+    } else {
+        project_root(context)
+    };
     let changes: Vec<SkillChange> = destinations(args.global, context)?
         .into_iter()
         .map(|path| SkillChange {
             action: inspect(&path),
-            shown: label(&path, &context.cwd),
+            shown: label(&path, &base),
             path,
         })
         .collect();
 
     if applied {
         for change in changes.iter().filter(|change| change.action.writes()) {
-            write_atomically(change.path.as_path(), SKILL.as_bytes())
+            install_file(change.path.as_path(), SKILL.as_bytes())
                 .map_err(|error| write_failed(&change.path, &error))?;
         }
     }
 
     if !args.global {
-        output.set_root(project_root(context));
+        output.set_root(base);
     }
     let report = SkillInstallReport::new(applied, changes);
     output
@@ -111,7 +116,9 @@ pub fn schema() -> Result<schemars::Schema, CliError> {
 ///
 /// # Errors
 ///
-/// Returns `cli/skill-no-home` when `global` is set and `HOME` is not.
+/// Returns `cli/skill-no-home` when `global` is set and `HOME` is not, and
+/// `cli/skill-relative-claude-dir` when `CLAUDE_CONFIG_DIR` is a relative path, which `main`
+/// would otherwise drop without a word and install into `~/.claude` instead.
 fn destinations(global: bool, context: &Context) -> Result<[AbsolutePath; 2], CliError> {
     if !global {
         let root = project_root(context);
@@ -121,6 +128,7 @@ fn destinations(global: bool, context: &Context) -> Result<[AbsolutePath; 2], Cl
         ]);
     }
     let home = context.home.as_ref().ok_or_else(no_home)?;
+    reject_relative_claude_dir(std::env::var_os(CLAUDE_CONFIG_DIR_VAR).as_deref())?;
     let claude_dir = context
         .claude_config_dir
         .clone()
@@ -150,9 +158,9 @@ fn beneath(base: &AbsolutePath, relative: &str) -> AbsolutePath {
         .unwrap_or_else(|| unreachable!("a path joined onto an absolute directory is absolute"))
 }
 
-/// `path` as a person reads it: relative to `cwd` when it is beneath it, absolute otherwise.
-fn label(path: &AbsolutePath, cwd: &AbsolutePath) -> String {
-    path.strip_prefix(cwd).map_or_else(
+/// `path` as a person reads it: relative to `base` when it is beneath it, absolute otherwise.
+fn label(path: &AbsolutePath, base: &AbsolutePath) -> String {
+    path.strip_prefix(base).map_or_else(
         || path.display().to_string(),
         |relative| relative.display().to_string(),
     )
@@ -194,7 +202,7 @@ impl SkillInstallReport {
             changes
                 .iter()
                 .filter(|change| change.action == SkillAction::Replace)
-                .map(|change| exists(&change.path))
+                .map(|change| exists(&change.shown))
                 .collect()
         };
         Self {
@@ -277,15 +285,15 @@ impl SkillAction {
     }
 }
 
-/// Writes `bytes` to a new file beside `target`, creating its directories, and renames it into
-/// place. An existing regular file keeps its permissions; a symlink is replaced, never written
-/// through. The temporary file is created exclusively, so a planted path is never written through.
+/// Writes `bytes` to `target`, creating its directories, through the shared temp-and-rename
+/// writer. An existing regular file keeps its permissions; a symlink is replaced, never written
+/// through.
 ///
 /// # Errors
 ///
-/// Fails if a directory or the temporary file can't be created, written or renamed; `target` is
-/// then unchanged.
-fn write_atomically(target: &Path, bytes: &[u8]) -> io::Result<()> {
+/// Fails if a directory cannot be created or the file cannot be written; `target` is then
+/// unchanged.
+fn install_file(target: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -293,59 +301,15 @@ fn write_atomically(target: &Path, bytes: &[u8]) -> io::Result<()> {
         .ok()
         .filter(fs::Metadata::is_file)
         .map(|metadata| metadata.permissions());
-    let (mut file, temp) = create_exclusive_temp(target)?;
-    let written = file
-        .write_all(bytes)
-        .and_then(|()| permissions.map_or(Ok(()), |kept| file.set_permissions(kept)))
-        .and_then(|()| file.sync_all());
-    drop(file);
-    let finished = written.and_then(|()| fs::rename(&temp, target));
-    if finished.is_err() {
-        drop(fs::remove_file(&temp));
-    }
-    finished
-}
-
-/// Creates a new file at the first unused scratch name beside `target`.
-///
-/// # Errors
-///
-/// Fails on any error other than a taken name, or when every attempt finds its name taken.
-fn create_exclusive_temp(target: &Path) -> io::Result<(fs::File, PathBuf)> {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    for attempt in 0..TEMP_ATTEMPTS {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.subsec_nanos());
-        let mut name = target.file_name().unwrap_or_default().to_os_string();
-        name.push(format!(
-            ".{}.{}.{nanos:x}.{attempt}.tmp",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed),
-        ));
-        let temp = target.with_file_name(name);
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)
-        {
-            Ok(file) => return Ok((file, temp)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        format!("no unused temporary file name found after {TEMP_ATTEMPTS} attempts"),
-    ))
+    write_atomically(target, bytes, permissions.as_ref())
 }
 
 /// The warning for a different `SKILL.md` a preview would replace (06 error table, Q25).
-fn exists(path: &AbsolutePath) -> Finding {
+fn exists(shown: &str) -> Finding {
     Finding::new(
         "cli/skill-exists",
         Severity::Warning,
-        format!("{} already exists with different contents", path.display()),
+        format!("{shown} already exists with different contents"),
     )
     .with_help("Re-run with `--yes` to replace it")
 }
@@ -358,6 +322,29 @@ fn no_home() -> CliError {
         "Set HOME to your home directory, or drop `--global` to install into the project",
         CliError::USAGE_EXIT_CODE,
     )
+}
+
+/// Refuses a relative `CLAUDE_CONFIG_DIR`. `main` keeps only absolute values, so a relative one
+/// would silently send the Claude Code copy to the default directory.
+///
+/// # Errors
+///
+/// Returns `cli/skill-relative-claude-dir` when `value` is a non-empty relative path.
+fn reject_relative_claude_dir(value: Option<&OsStr>) -> Result<(), CliError> {
+    match value {
+        Some(dir) if !dir.is_empty() && !Path::new(dir).is_absolute() => Err(CliError::new(
+            "cli/skill-relative-claude-dir",
+            format!(
+                "{CLAUDE_CONFIG_DIR_VAR} is `{}`, which is not an absolute path",
+                dir.to_string_lossy()
+            ),
+            format!(
+                "Set {CLAUDE_CONFIG_DIR_VAR} to an absolute path, or unset it to use ~/.claude"
+            ),
+            CliError::USAGE_EXIT_CODE,
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// The error for a copy of the skill that could not be written.
@@ -382,8 +369,9 @@ fn output_failed(error: &OutputError) -> CliError {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, UNIX_EPOCH};
 
     use clap::Parser as _;
 
@@ -652,6 +640,29 @@ mod tests {
     }
 
     #[test]
+    fn a_relative_claude_config_dir_is_a_usage_error() {
+        let error = reject_relative_claude_dir(Some(OsStr::new("rel/claude")))
+            .expect_err("a relative CLAUDE_CONFIG_DIR should be refused");
+
+        assert_eq!(error.code(), "cli/skill-relative-claude-dir");
+        assert_eq!(error.exit_code(), CliError::USAGE_EXIT_CODE);
+        assert!(
+            error.to_string().contains("rel/claude"),
+            "the message should name the value: {error}"
+        );
+    }
+
+    #[test]
+    fn unset_empty_and_absolute_claude_config_dirs_are_accepted() {
+        for value in [None, Some(OsStr::new("")), Some(OsStr::new("/abs/claude"))] {
+            assert!(
+                reject_relative_claude_dir(value).is_ok(),
+                "{value:?} should be accepted"
+            );
+        }
+    }
+
+    #[test]
     fn skill_install_global_without_home_is_a_usage_error() {
         let world = World::new();
         let cli = Cli::try_parse_from(["supdoc", "skill", "install", "--global", "--yes"])
@@ -729,6 +740,26 @@ mod tests {
             .filter_map(|finding| finding.get("kind").and_then(serde_json::Value::as_str))
             .collect();
         assert_eq!(codes, ["cli/skill-exists"]);
+    }
+
+    #[test]
+    fn skill_install_exists_warning_names_the_project_relative_path_from_a_subdirectory() {
+        let world = World::new();
+        plant(&world.project_file(CONFIG_FILE_NAME), "");
+        plant(&world.project_file(AGENTS_SKILL), "my own skill\n");
+        let nested = world.project_file("docs/guide");
+        fs::create_dir_all(&nested).expect("the nested directory should be created");
+
+        let run = world.install_in(&nested, None, &["--json"]);
+
+        let json = run.json();
+        let message = at(&json, "/findings/0/message")
+            .as_str()
+            .expect("the finding message should be text");
+        assert_eq!(
+            message,
+            format!("{AGENTS_SKILL} already exists with different contents")
+        );
     }
 
     #[test]
@@ -824,6 +855,16 @@ mod tests {
             .collect();
 
         assert!(errors.is_empty(), "schema violations: {errors:?} in {json}");
+    }
+
+    #[test]
+    fn the_repository_root_skill_is_identical_to_the_embedded_one() {
+        let root_copy = include_str!("../../../../SKILL.md");
+
+        assert_eq!(
+            root_copy, SKILL,
+            "SKILL.md at the repository root should match crates/supdoc/SKILL.md"
+        );
     }
 
     #[test]

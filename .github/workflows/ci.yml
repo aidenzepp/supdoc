@@ -24,6 +24,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Package
+        run: cargo package -p supdoc --locked
 
   anc:
     name: anc audit (agent-native CLI standard)
