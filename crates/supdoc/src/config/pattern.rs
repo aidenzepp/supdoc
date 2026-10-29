@@ -44,6 +44,15 @@ impl PatternList {
         }
     }
 
+    /// The patterns as written, in order. Empty for the list that matches everything, which no
+    /// config file wrote.
+    pub(crate) fn written(&self) -> &[String] {
+        match &self.0 {
+            Matcher::Everything => &[],
+            Matcher::Globs { written, .. } => written,
+        }
+    }
+
     /// The first pattern, as written, that `relative` matches, or `None` when none does.
     ///
     /// The list that matches everything has no written pattern, so it reports `None` too.
@@ -155,6 +164,8 @@ pub(crate) enum PatternError {
 /// glob. That keeps directories named like `[id]` from being read as glob syntax.
 #[derive(Debug, Clone)]
 pub(crate) struct AnchoredPatterns {
+    /// The config file that wrote the patterns. `None` for the built-in default.
+    file: Option<AbsolutePath>,
     /// The directory of the config that wrote the patterns.
     base: AbsolutePath,
     /// The patterns, relative to `base`.
@@ -162,9 +173,30 @@ pub(crate) struct AnchoredPatterns {
 }
 
 impl AnchoredPatterns {
-    /// Anchors `list` at `base`.
-    pub(crate) fn new(base: AbsolutePath, list: PatternList) -> Self {
-        Self { base, list }
+    /// Anchors `list`, written by `file`, at `base`.
+    pub(crate) fn written_by(file: AbsolutePath, base: AbsolutePath, list: PatternList) -> Self {
+        Self {
+            file: Some(file),
+            base,
+            list,
+        }
+    }
+
+    /// Anchors the built-in default `list` at `base`, with no file behind it.
+    pub(crate) fn built_in(base: AbsolutePath, list: PatternList) -> Self {
+        Self {
+            file: None,
+            base,
+            list,
+        }
+    }
+
+    /// The patterns as written and the file that wrote them, or `None` for the built-in default.
+    pub(crate) fn definition(&self) -> Option<PatternDefinition<'_>> {
+        self.file.as_ref().map(|file| PatternDefinition {
+            patterns: self.list.written(),
+            file,
+        })
     }
 
     /// Whether `path` is under `base` and matches a pattern there.
@@ -178,5 +210,28 @@ impl AnchoredPatterns {
     pub(crate) fn first_match(&self, path: &AbsolutePath) -> Option<&str> {
         path.strip_prefix(&self.base)
             .and_then(|relative| self.list.first_match(relative))
+    }
+}
+
+/// The raw `include` or `exclude` patterns of a config, and the file that wrote them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PatternDefinition<'a> {
+    /// The patterns exactly as written, in order.
+    patterns: &'a [String],
+    /// The config file that set the key, which may be a parent reached through `extends`.
+    file: &'a AbsolutePath,
+}
+
+impl<'a> PatternDefinition<'a> {
+    /// The patterns exactly as written, in order.
+    #[must_use]
+    pub fn patterns(&self) -> &'a [String] {
+        self.patterns
+    }
+
+    /// The config file that set the key.
+    #[must_use]
+    pub fn file(&self) -> &'a AbsolutePath {
+        self.file
     }
 }

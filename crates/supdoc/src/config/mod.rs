@@ -18,6 +18,7 @@ use crate::path::AbsolutePath;
 use pattern::{AnchoredPatterns, PatternList};
 
 pub use error::ConfigError;
+pub use pattern::PatternDefinition;
 
 /// The file name supdoc looks for in each directory.
 pub const CONFIG_FILE_NAME: &str = "supdoc.config.toml";
@@ -35,6 +36,8 @@ pub struct Config {
     exclude: Option<AnchoredPatterns>,
     /// Namespace directories, each resolved from the config that wrote it.
     namespaces: BTreeMap<NamespaceName, AbsolutePath>,
+    /// The config file that defined each namespace in `namespaces`, under the same names.
+    namespace_files: BTreeMap<NamespaceName, AbsolutePath>,
 }
 
 impl Config {
@@ -72,9 +75,10 @@ impl Config {
         Self {
             root: root.clone(),
             files: Vec::new(),
-            include: AnchoredPatterns::new(root.clone(), PatternList::everything()),
+            include: AnchoredPatterns::built_in(root.clone(), PatternList::everything()),
             exclude: None,
             namespaces: BTreeMap::new(),
+            namespace_files: BTreeMap::new(),
         }
     }
 
@@ -120,5 +124,26 @@ impl Config {
     #[must_use]
     pub fn namespaces(&self) -> &BTreeMap<NamespaceName, AbsolutePath> {
         &self.namespaces
+    }
+
+    /// The `include` patterns as written and the file that set them, or `None` when no config
+    /// file sets `include` and the default (everything) applies.
+    #[must_use]
+    pub fn include_definition(&self) -> Option<PatternDefinition<'_>> {
+        self.include.definition()
+    }
+
+    /// The `exclude` patterns as written and the file that set them, or `None` when no config
+    /// file sets `exclude`.
+    #[must_use]
+    pub fn exclude_definition(&self) -> Option<PatternDefinition<'_>> {
+        self.exclude.as_ref()?.definition()
+    }
+
+    /// The config file that defined the namespace `name`, or `None` if the config doesn't define
+    /// it. When several files in the chain define it, this is the nearest one.
+    #[must_use]
+    pub fn namespace_defined_in(&self, name: &NamespaceName) -> Option<&AbsolutePath> {
+        self.namespace_files.get(name)
     }
 }

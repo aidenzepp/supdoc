@@ -4,6 +4,7 @@
 //! pure.
 
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::PathBuf;
@@ -167,32 +168,35 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Config {
     let mut include = None;
     let mut exclude = None;
     let mut namespaces = BTreeMap::new();
+    let mut namespace_files = BTreeMap::new();
     for Layer { file, raw } in layers {
         let base = directory_of(&file);
         for (name, relative) in raw.namespaces {
-            let _kept = namespaces
-                .entry(name)
-                .or_insert_with(|| base.join(&relative));
+            if let Entry::Vacant(slot) = namespaces.entry(name.clone()) {
+                let _inserted = slot.insert(base.join(&relative));
+                let _recorded = namespace_files.insert(name, file.clone());
+            }
         }
         if include.is_none() {
             include = raw
                 .include
-                .map(|list| AnchoredPatterns::new(base.clone(), list));
+                .map(|list| AnchoredPatterns::written_by(file.clone(), base.clone(), list));
         }
         if exclude.is_none() {
             exclude = raw
                 .exclude
-                .map(|list| AnchoredPatterns::new(base.clone(), list));
+                .map(|list| AnchoredPatterns::written_by(file.clone(), base.clone(), list));
         }
         files.push(file);
     }
-    let include =
-        include.unwrap_or_else(|| AnchoredPatterns::new(root.clone(), PatternList::everything()));
+    let include = include
+        .unwrap_or_else(|| AnchoredPatterns::built_in(root.clone(), PatternList::everything()));
     Config {
         root,
         files,
         include,
         exclude,
         namespaces,
+        namespace_files,
     }
 }

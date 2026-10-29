@@ -572,3 +572,75 @@ fn every_error_has_a_code_and_message_names_a_file() {
     codes.dedup();
     assert_eq!(codes.len(), errors.len(), "codes must be unique");
 }
+
+// Provenance: which file defined each key
+
+/// A two-level chain: `child` extends `mid` extends `root`. `root` sets include, exclude and
+/// namespaces `shared` and `deep`; `mid` overrides `exclude` and `shared`; `child` sets only `own`.
+fn provenance_chain() -> TempDir {
+    tree(&[
+        (
+            "root.toml",
+            "include = [\"docs\", \"notes/**\"]\nexclude = [\"old\"]\n[namespaces]\nshared = \"from-root\"\ndeep = \"deep\"\n",
+        ),
+        (
+            "mid/mid.toml",
+            "extends = \"../root.toml\"\nexclude = [\"drafts\", \"tmp/\"]\n[namespaces]\nshared = \"from-mid\"\n",
+        ),
+        (
+            "child/supdoc.config.toml",
+            "extends = \"../mid/mid.toml\"\n[namespaces]\nown = \"own\"\n",
+        ),
+    ])
+}
+
+#[test]
+fn include_definition_names_the_grandparent_that_set_it_with_raw_patterns() {
+    let dir = provenance_chain();
+    let config = load_from(&dir, "child");
+
+    let definition = config
+        .include_definition()
+        .expect("a file in the chain sets include");
+    assert_eq!(definition.patterns(), ["docs", "notes/**"]);
+    assert_eq!(definition.file(), &at(&dir, "root.toml"));
+}
+
+#[test]
+fn exclude_definition_names_the_nearest_file_that_set_it_with_raw_patterns() {
+    let dir = provenance_chain();
+    let config = load_from(&dir, "child");
+
+    let definition = config
+        .exclude_definition()
+        .expect("a file in the chain sets exclude");
+    assert_eq!(definition.patterns(), ["drafts", "tmp/"]);
+    assert_eq!(definition.file(), &at(&dir, "mid/mid.toml"));
+}
+
+#[test]
+fn namespace_defined_in_names_the_nearest_file_defining_each_namespace() {
+    let dir = provenance_chain();
+    let config = load_from(&dir, "child");
+
+    let defined_in = |raw: &str| config.namespace_defined_in(&name(raw)).cloned();
+    assert_eq!(
+        defined_in("own"),
+        Some(at(&dir, "child/supdoc.config.toml"))
+    );
+    assert_eq!(defined_in("shared"), Some(at(&dir, "mid/mid.toml")));
+    assert_eq!(defined_in("deep"), Some(at(&dir, "root.toml")));
+    assert_eq!(defined_in("absent"), None);
+}
+
+#[test]
+fn unset_keys_have_no_definition() {
+    let dir = tree(&[("supdoc.config.toml", "")]);
+    let config = load_from(&dir, ".");
+
+    assert_eq!(config.include_definition(), None);
+    assert_eq!(config.exclude_definition(), None);
+
+    let defaults = load_from(&tree(&[]), ".");
+    assert_eq!(defaults.include_definition(), None);
+}
