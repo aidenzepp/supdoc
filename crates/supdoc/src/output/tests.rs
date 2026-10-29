@@ -1,0 +1,567 @@
+//! Contract tests for output (07 "Tests"): every format of a report, rendered from constructed
+//! values.
+
+use std::collections::BTreeSet;
+use std::io::{self, Write};
+
+use serde_json::Value;
+
+use crate::finding::{Finding, Location, Severity};
+use crate::output::fixtures::{
+    Capture, absolute, captured, check_report, context, finding_on, paths, settings, source,
+};
+use crate::output::format::{OutputFormat, Verbosity, supports_unicode};
+use crate::output::github::{annotation, escape_data, escape_property};
+use crate::output::json::{Envelope, FatalJson, FindingJson};
+use crate::output::paths::PathStyle;
+use crate::output::sink::{Output, OutputError};
+use crate::output::summary::Summary;
+use crate::output::text::render_finding;
+
+/// What `Output` wrote to stdout for `report` in `format`.
+fn stdout_of(format: OutputFormat, verbosity: Verbosity, ok: bool) -> String {
+    let (mut output, stdout, _stderr) = captured(settings(format, verbosity));
+    output
+        .report(&check_report(), ok)
+        .expect("writing to a buffer should succeed");
+    stdout.text()
+}
+
+/// The value at JSON pointer `pointer`.
+fn at<'a>(value: &'a Value, pointer: &str) -> &'a Value {
+    value
+        .pointer(pointer)
+        .unwrap_or_else(|| panic!("{value} should have a value at `{pointer}`"))
+}
+
+fn parse(line: &str) -> Value {
+    serde_json::from_str(line)
+        .unwrap_or_else(|error| panic!("`{line}` should be valid JSON: {error}"))
+}
+
+#[test]
+fn check_text_matches_golden() {
+    let text = stdout_of(OutputFormat::Text, Verbosity::Normal, false);
+
+    insta::assert_snapshot!(text);
+}
+
+#[test]
+fn fatal_error_text_matches_golden() {
+    let config = "extends = \"../../supdoc.confg.toml\"\n";
+    let finding = finding_on(
+        "apps/web/supdoc.config.toml",
+        config,
+        "\"../../supdoc.confg.toml\"",
+        "config/extends-missing",
+        Severity::Error,
+        "apps/web/supdoc.config.toml extends `../../supdoc.confg.toml`, but no file exists at /repo/supdoc.confg.toml",
+        "point `extends` at an existing supdoc.config.toml, relative to this file",
+    );
+    let (mut output, _stdout, stderr) = captured(settings(OutputFormat::Text, Verbosity::Normal));
+
+    output
+        .fatal(&finding, 78)
+        .expect("writing to a buffer should succeed");
+
+    insta::assert_snapshot!(stderr.text());
+}
+
+#[test]
+fn every_report_json_validates_against_its_schema() {
+    let report = check_report();
+    let schema = serde_json::to_value(schemars::schema_for!(crate::output::fixtures::CheckFixture))
+        .expect("a schema should serialize");
+    let validator = jsonschema::validator_for(&schema).expect("the schema should compile");
+    let envelope = parse(&stdout_of(OutputFormat::Json, Verbosity::Normal, false));
+
+    let errors: Vec<String> = validator
+        .iter_errors(at(&envelope, "/data"))
+        .map(|error| error.to_string())
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "data should match its schema: {errors:?}"
+    );
+
+    let finding_schema = serde_json::to_value(schemars::schema_for!(FindingJson))
+        .expect("a schema should serialize");
+    let finding_validator =
+        jsonschema::validator_for(&finding_schema).expect("the schema should compile");
+    for finding in &at(&envelope, "/findings")
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+    {
+        assert!(
+            finding_validator.is_valid(finding),
+            "{finding} should match the finding schema"
+        );
+    }
+    assert_eq!(
+        at(&envelope, "/findings").as_array().map(Vec::len),
+        Some(report.loose.len())
+    );
+
+    let fatal_schema =
+        serde_json::to_value(schemars::schema_for!(FatalJson)).expect("a schema should serialize");
+    let fatal_validator =
+        jsonschema::validator_for(&fatal_schema).expect("the schema should compile");
+    let fatal = serde_json::to_value(FatalJson::new(
+        report
+            .loose
+            .first()
+            .expect("the fixture has a loose finding"),
+        78,
+    ))
+    .expect("a fatal error should serialize");
+    assert!(
+        fatal_validator.is_valid(&fatal),
+        "{fatal} should match its schema"
+    );
+}
+
+#[test]
+fn envelope_has_the_same_top_level_keys_for_every_command() {
+    let expected: BTreeSet<&str> = [
+        "schema_version",
+        "command",
+        "ok",
+        "root",
+        "data",
+        "findings",
+        "truncated",
+    ]
+    .into();
+    for command in ["check", "list", "update"] {
+        let mut report = check_report();
+        report.command = command;
+        let envelope = Envelope::new(&report, false, &absolute("/repo"));
+        let value = serde_json::to_value(&envelope).expect("an envelope should serialize");
+        let keys: BTreeSet<&str> = value
+            .as_object()
+            .expect("an envelope should be an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+
+        assert_eq!(keys, expected, "top-level keys for `{command}`");
+        assert_eq!(at(&value, "/command"), command);
+        assert_eq!(at(&value, "/schema_version"), 1);
+        assert_eq!(at(&value, "/root"), "/repo");
+    }
+}
+
+#[test]
+fn json_nests_a_links_finding_and_keeps_only_loose_findings_at_the_top() {
+    let envelope = parse(&stdout_of(OutputFormat::Json, Verbosity::Normal, false));
+
+    assert_eq!(at(&envelope, "/data/links/0/finding/kind"), "link/failed");
+    assert_eq!(at(&envelope, "/findings/0/kind"), "scan/unreadable-dir");
+    assert!(envelope.pointer("/findings/0/location").is_none());
+    assert_eq!(at(&envelope, "/truncated"), false);
+}
+
+#[test]
+fn ok_is_true_exactly_when_exit_is_0() {
+    for ok in [true, false] {
+        let envelope = parse(&stdout_of(OutputFormat::Json, Verbosity::Normal, ok));
+
+        assert_eq!(at(&envelope, "/ok"), ok);
+    }
+}
+
+#[test]
+fn jsonl_lines_each_parse_and_end_with_summary() {
+    let text = stdout_of(OutputFormat::Jsonl, Verbosity::Normal, false);
+    let lines: Vec<Value> = text.lines().map(parse).collect();
+
+    let types: Vec<&str> = lines
+        .iter()
+        .map(|line| at(line, "/type").as_str().expect("every line has a `type`"))
+        .collect();
+    assert_eq!(
+        types,
+        ["link", "link", "link", "link", "finding", "summary"],
+        "one record per link, then loose findings, then the summary"
+    );
+    let summary = lines.last().expect("there should be a summary line");
+    assert_eq!(at(summary, "/command"), "check");
+    assert_eq!(at(summary, "/ok"), false);
+    assert_eq!(at(summary, "/passed"), 38);
+    assert_eq!(at(summary, "/failed"), 1);
+    assert_eq!(at(summary, "/schema_version"), 1);
+}
+
+#[test]
+fn github_lines_escape_percent_newline_colon_comma() {
+    assert_eq!(
+        escape_data("100%\r\nsure: yes, really"),
+        "100%25%0D%0Asure: yes, really"
+    );
+    assert_eq!(escape_property("a:b,c%d\ne"), "a%3Ab%2Cc%25d%0Ae");
+
+    let text = "see [x](a.rs#b)\n";
+    let finding = finding_on(
+        "docs/a,b: c.md",
+        text,
+        "[x](a.rs#b)",
+        "link/failed",
+        Severity::Error,
+        "50% changed\nsecond line",
+        "run `supdoc update --yes`",
+    );
+    let line = annotation(&paths(), &finding);
+
+    assert_eq!(
+        line,
+        "::error file=docs/a%2Cb%3A c.md,line=1,col=5,title=supdoc link/failed::50%25 changed%0Asecond line. Run `supdoc update --yes`"
+    );
+    assert_eq!(line.lines().count(), 1, "an annotation is exactly one line");
+}
+
+#[test]
+fn github_output_maps_severity_and_ends_with_the_summary_line() {
+    let text = stdout_of(OutputFormat::Github, Verbosity::Normal, false);
+    let lines: Vec<&str> = text.lines().collect();
+
+    let starts = |index: usize, prefix: &str| {
+        lines
+            .get(index)
+            .is_some_and(|line| line.starts_with(prefix))
+    };
+    assert!(starts(
+        0,
+        "::error file=docs/guide.md,line=3,col=5,title=supdoc link/failed::"
+    ));
+    assert!(starts(1, "::error file=docs/api.md,line=3,col=3,"));
+    assert!(starts(2, "::warning title=supdoc link/obsolete::"));
+    assert_eq!(
+        lines.last().copied(),
+        Some("Links  1 failed · 1 broken · 38 passed · 1 obsolete")
+    );
+    let note = Finding::new("link/moved", Severity::Note, "moved");
+    assert!(annotation(&paths(), &note).starts_with("::notice title=supdoc link/moved::moved"));
+}
+
+#[test]
+fn github_paths_are_relative_to_workspace() {
+    let style = PathStyle::new(
+        absolute("/repo/apps/web"),
+        absolute("/repo/apps/web"),
+        Some(absolute("/repo")),
+    );
+
+    assert_eq!(
+        style.github(&source("docs/guide.md")),
+        "apps/web/docs/guide.md"
+    );
+}
+
+#[test]
+fn github_paths_fall_back_to_the_project_root_without_a_workspace() {
+    let style = PathStyle::new(absolute("/repo"), absolute("/repo/apps/web"), None);
+
+    assert_eq!(style.github(&source("docs/guide.md")), "docs/guide.md");
+}
+
+#[test]
+fn text_paths_are_relative_to_cwd() {
+    let root = absolute("/repo/apps/web");
+    let guide = source("docs/guide.md");
+    let from = |cwd: &str| PathStyle::new(absolute(cwd), root.clone(), None).text(&guide);
+
+    assert_eq!(from("/repo/apps/web"), "docs/guide.md");
+    assert_eq!(from("/repo/apps/web/docs"), "guide.md");
+    assert_eq!(from("/repo/apps/web/src"), "../docs/guide.md");
+    assert_eq!(from("/repo"), "apps/web/docs/guide.md");
+}
+
+#[test]
+fn json_paths_are_relative_to_the_project_root() {
+    assert_eq!(PathStyle::json(&source("docs/guide.md")), "docs/guide.md");
+}
+
+#[test]
+fn findings_on_stdout_fatal_errors_on_stderr() {
+    let (mut output, stdout, stderr) = captured(settings(OutputFormat::Text, Verbosity::Normal));
+    let fatal = Finding::new("config/not-found", Severity::Error, "no config file")
+        .with_help("run `supdoc init`");
+
+    output
+        .report(&check_report(), false)
+        .expect("writing to a buffer should succeed");
+    output
+        .fatal(&fatal, 78)
+        .expect("writing to a buffer should succeed");
+
+    assert!(stdout.text().contains("error[link/failed]"));
+    assert!(!stdout.text().contains("config/not-found"));
+    assert!(
+        stderr
+            .text()
+            .contains("error[config/not-found]: no config file")
+    );
+    assert!(!stderr.text().contains("link/failed"));
+}
+
+#[test]
+fn fatal_errors_are_json_on_stderr_under_json_formats() {
+    for format in [OutputFormat::Json, OutputFormat::Jsonl] {
+        let (mut output, stdout, stderr) = captured(settings(format, Verbosity::Normal));
+        let text = "extends = \"x.toml\"\n";
+        let fatal = finding_on(
+            "supdoc.config.toml",
+            text,
+            "\"x.toml\"",
+            "config/extends-missing",
+            Severity::Error,
+            "no file",
+            "point `extends` at a file",
+        );
+
+        output
+            .fatal(&fatal, 78)
+            .expect("writing to a buffer should succeed");
+
+        let error = parse(stderr.text().trim_end());
+        assert_eq!(at(&error, "/error"), true);
+        assert_eq!(at(&error, "/kind"), "config/extends-missing");
+        assert_eq!(at(&error, "/exit_code"), 78);
+        assert_eq!(at(&error, "/location/file"), "supdoc.config.toml");
+        assert_eq!(at(&error, "/location/column"), 11);
+        assert_eq!(stdout.text(), "", "nothing goes to stdout for {format:?}");
+    }
+}
+
+#[test]
+fn preview_on_stdout_nothing_written_note_on_stderr() {
+    let (mut output, stdout, stderr) = captured(settings(OutputFormat::Text, Verbosity::Normal));
+
+    output
+        .report(&check_report(), false)
+        .expect("writing to a buffer should succeed");
+    output
+        .note("Nothing written. Run the same command with --yes to apply.")
+        .expect("writing to a buffer should succeed");
+
+    assert!(!stdout.text().contains("Nothing written"));
+    assert_eq!(
+        stderr.text(),
+        "Nothing written. Run the same command with --yes to apply.\n"
+    );
+}
+
+#[test]
+fn quiet_shows_only_errors_and_no_summary() {
+    let text = stdout_of(OutputFormat::Text, Verbosity::Quiet, false);
+
+    assert!(text.contains("error[link/failed]"));
+    assert!(text.contains("error[resolve/not-found]"));
+    assert!(
+        !text.contains("warning["),
+        "warnings are hidden under -q:\n{text}"
+    );
+    assert!(!text.contains("Links"), "no summary under -q:\n{text}");
+
+    let (mut output, _stdout, stderr) = captured(settings(OutputFormat::Text, Verbosity::Quiet));
+    output
+        .note("Nothing written.")
+        .expect("writing to a buffer should succeed");
+    output
+        .diag(&Finding::new("scan/x", Severity::Warning, "hidden"))
+        .expect("writing to a buffer should succeed");
+    output
+        .diag(&Finding::new("scan/y", Severity::Error, "shown"))
+        .expect("writing to a buffer should succeed");
+    assert!(stderr.text().contains("error[scan/y]: shown"));
+    assert!(!stderr.text().contains("Nothing written"));
+    assert!(!stderr.text().contains("hidden"));
+}
+
+#[test]
+fn verbose_lists_passed_links() {
+    let normal = stdout_of(OutputFormat::Text, Verbosity::Normal, false);
+    let verbose = stdout_of(OutputFormat::Text, Verbosity::Verbose, false);
+
+    assert!(!normal.contains("passed  docs/setup.md"));
+    assert!(verbose.contains("passed  docs/setup.md -> src/config.rs"));
+}
+
+#[test]
+fn dumb_terminal_uses_ascii_glyphs() {
+    assert!(supports_unicode(true, Some("xterm-256color")));
+    assert!(supports_unicode(true, None));
+    assert!(!supports_unicode(true, Some("dumb")));
+    assert!(!supports_unicode(false, Some("xterm-256color")));
+
+    let render = |unicode: bool| {
+        let mut context = context(Verbosity::Normal);
+        context.unicode = unicode;
+        let mut bytes = Vec::new();
+        render_finding(
+            &context,
+            check_report()
+                .links
+                .first()
+                .expect("the fixture has links")
+                .raw
+                .as_ref()
+                .expect("the first link carries a finding"),
+            &mut bytes,
+        )
+        .expect("writing to a buffer should succeed");
+        String::from_utf8(bytes).expect("output should be UTF-8")
+    };
+
+    assert!(render(false).is_ascii(), "ASCII mode should be pure ASCII");
+    assert!(
+        !render(true).is_ascii(),
+        "Unicode mode should draw box characters"
+    );
+}
+
+#[test]
+fn color_adds_ansi_codes_and_plain_does_not() {
+    let finding = check_report().loose.remove(0);
+    let render = |color: bool| {
+        let mut context = context(Verbosity::Normal);
+        context.color = color;
+        let mut bytes = Vec::new();
+        render_finding(&context, &finding, &mut bytes).expect("writing to a buffer should succeed");
+        String::from_utf8(bytes).expect("output should be UTF-8")
+    };
+
+    assert!(render(true).contains('\u{1b}'));
+    assert!(!render(false).contains('\u{1b}'));
+}
+
+#[test]
+fn summary_omits_zero_counts_and_orders_worst_first() {
+    let summary = Summary {
+        passed: 38,
+        failed: 1,
+        broken: 1,
+        new: 0,
+        obsolete: 1,
+    };
+    assert_eq!(
+        summary.line(false),
+        "Links  1 failed · 1 broken · 38 passed · 1 obsolete"
+    );
+    assert_eq!(
+        Summary {
+            passed: 40,
+            ..Summary::default()
+        }
+        .line(false),
+        "Links  40 passed"
+    );
+    assert_eq!(
+        Summary {
+            new: 2,
+            failed: 3,
+            ..Summary::default()
+        }
+        .line(false),
+        "Links  3 failed · 2 new"
+    );
+    assert_eq!(Summary::default().line(false), "Links  0 passed");
+}
+
+#[test]
+fn summary_counts_states_and_colors_only_when_asked() {
+    use crate::state::LinkState;
+
+    let summary = Summary::tally([LinkState::Passed, LinkState::Passed, LinkState::Failed]);
+
+    assert_eq!((summary.passed, summary.failed), (2, 1));
+    assert!(summary.line(true).contains('\u{1b}'));
+    assert!(!summary.line(false).contains('\u{1b}'));
+}
+
+/// A writer whose reader has hung up.
+struct ClosedPipe;
+
+impl Write for ClosedPipe {
+    fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+        Err(io::ErrorKind::BrokenPipe.into())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A writer that fails for a reason other than a closed pipe.
+struct FullDisk;
+
+impl Write for FullDisk {
+    fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+        Err(io::Error::other("no space left on device"))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_closed_pipe_is_a_quiet_clean_stop() {
+    let stderr = Capture::default();
+    let mut output = Output::new(
+        settings(OutputFormat::Text, Verbosity::Normal),
+        Box::new(ClosedPipe),
+        Box::new(stderr.clone()),
+    );
+
+    output
+        .report(&check_report(), false)
+        .expect("a closed pipe should not be an error");
+
+    assert!(output.is_closed());
+    output
+        .note("later")
+        .expect("writes after a closed pipe are dropped");
+    assert_eq!(stderr.text(), "", "nothing more is written once closed");
+}
+
+#[test]
+fn other_write_failures_are_reported() {
+    let mut output = Output::new(
+        settings(OutputFormat::Text, Verbosity::Normal),
+        Box::new(FullDisk),
+        Box::new(Capture::default()),
+    );
+
+    let error = output
+        .report(&check_report(), false)
+        .expect_err("a failed write should be an error");
+
+    assert!(matches!(error, OutputError::Write(_)));
+    assert!(!output.is_closed());
+}
+
+#[test]
+fn a_finding_without_a_snippet_still_shows_its_location() {
+    let finding = Finding::new(
+        "read/missing",
+        Severity::Error,
+        "src/gone.rs does not exist",
+    )
+    .with_location(Location {
+        file: source("docs/guide.md"),
+        range: 10..20,
+        line: 4,
+        column: 7,
+    })
+    .with_help("restore the file or run `supdoc fix docs/guide.md`");
+    let mut bytes = Vec::new();
+
+    render_finding(&context(Verbosity::Normal), &finding, &mut bytes)
+        .expect("writing to a buffer should succeed");
+
+    let text = String::from_utf8(bytes).expect("output should be UTF-8");
+    assert!(text.contains("--> docs/guide.md:4:7"), "{text}");
+    assert!(text.contains("= help: restore the file"), "{text}");
+}

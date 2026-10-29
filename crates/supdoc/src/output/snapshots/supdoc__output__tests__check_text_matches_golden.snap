@@ -1,0 +1,29 @@
+---
+source: crates/supdoc/src/output/tests.rs
+expression: text
+---
+error[link/failed]: `src/lib.rs#add` changed since this doc was confirmed
+ --> docs/guide.md:3:5
+  |
+3 | The [`add`](../src/lib.rs#add) function applies the offset.
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: reread this, and if it's still accurate run `supdoc update docs/guide.md --yes`
+
+error[resolve/not-found]: no symbol `login` in src/auth.rs
+ --> docs/api.md:3:3
+  |
+3 | - [login](../src/auth.rs#login) starts a session.
+  |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: did you mean `log_in`? Run `supdoc fix docs/api.md --yes`
+
+warning[link/obsolete]: supdoc.lock has an entry for a link that no longer exists
+ |
+ = help: run `supdoc update --state obsolete --yes`
+
+warning[scan/unreadable-dir]: skipped /repo/private: permission denied
+ |
+ = help: fix the directory's permissions, or add it to `exclude` in supdoc.config.toml
+
+Links  1 failed · 1 broken · 38 passed · 1 obsolete
