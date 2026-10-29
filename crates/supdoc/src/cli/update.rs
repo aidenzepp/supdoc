@@ -114,7 +114,8 @@ pub(crate) struct UpdateReport {
     changes: Vec<ChangeJson>,
     /// How many links in scope were in each state before the update.
     summary: Summary,
-    /// The broken links update can't record, each as its cause finding.
+    /// The scan's own findings (a malformed link, say), then the broken links update can't
+    /// record, each as its cause finding.
     #[serde(skip)]
     findings: Vec<Finding>,
     /// The same changes for text output, which shows where each link is written.
@@ -137,14 +138,19 @@ impl UpdateReport {
             states: states.to_vec(),
             changes: rows.iter().map(ChangeJson::from).collect(),
             summary: Summary::tally(model.links.iter().map(|link| link.state)),
-            findings: model.links.iter().filter_map(broken_finding).collect(),
+            findings: model
+                .findings
+                .iter()
+                .cloned()
+                .chain(model.links.iter().filter_map(broken_finding))
+                .collect(),
             rows,
         }
     }
 
     /// What the run says on stderr when it is done (06a K7, Q6).
     fn closing_note(&self, unicode: bool) -> String {
-        if self.rows.is_empty() {
+        if self.rows.is_empty() && self.findings.is_empty() {
             NOTHING_NOTE.to_owned()
         } else if self.applied {
             self.applied_note(unicode)
@@ -821,6 +827,33 @@ mod tests {
             text.stdout.contains("supdoc fix docs/broken.md --yes"),
             "text shows the finding too: {}",
             text.stdout
+        );
+    }
+
+    #[test]
+    fn update_shows_a_malformed_link_error_instead_of_nothing_to_update() {
+        let project = Project::new();
+        project.write("docs/guide.md", "See [add](../src//lib.rs#add) here.\n");
+
+        let json = project.update(&["--json", "update"]);
+        let text = project.update(&["update"]);
+
+        assert_eq!(json.exit_code(), 0, "stderr: {}", json.stderr);
+        let findings = at(&json.json(), "/findings");
+        assert_eq!(
+            at(&findings, "/0/kind"),
+            "link/invalid-path",
+            "the malformed link is a top-level finding: {findings}"
+        );
+        assert!(
+            text.stdout.contains("link/invalid-path"),
+            "text shows the link error: {}",
+            text.stdout
+        );
+        assert!(
+            !text.stderr.contains(NOTHING_NOTE) && !json.stderr.contains(NOTHING_NOTE),
+            "a run with findings is not `Nothing to update.`: {}",
+            text.stderr
         );
     }
 
