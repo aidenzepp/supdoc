@@ -39,11 +39,10 @@ pub struct Walk {
 /// Effect: reads directory listings and ignore files.
 #[must_use]
 pub fn walk(config: &Config, languages: &Languages, scope: &Scope) -> Walk {
-    let root = config.root();
     let mut sources = Vec::new();
     let mut findings = Vec::new();
 
-    for entry in walker(root, scope) {
+    for entry in walker(config, scope) {
         match entry {
             Ok(entry) => {
                 if let Some(source) = as_source(config, languages, scope, &entry) {
@@ -66,28 +65,36 @@ pub fn walk(config: &Config, languages: &Languages, scope: &Scope) -> Walk {
 }
 
 /// A walker over the root that applies every directory-level rule, in sorted order.
-fn walker(root: &AbsolutePath, scope: &Scope) -> ignore::Walk {
-    let root_for_filter = root.clone();
+fn walker(config: &Config, scope: &Scope) -> ignore::Walk {
+    let root = config.root();
+    let config_for_filter = config.clone();
     let scope_for_filter = scope.clone();
     WalkBuilder::new(root.as_path())
         .hidden(false)
         .require_git(false)
         .follow_links(false)
         .sort_by_file_path(Path::cmp)
-        .filter_entry(move |entry| descend_into(&root_for_filter, &scope_for_filter, entry))
+        .filter_entry(move |entry| descend_into(&config_for_filter, &scope_for_filter, entry))
         .build()
 }
 
 /// Whether the walk keeps `entry`. Only directories are refused here; files are judged by
-/// [`as_source`].
-fn descend_into(root: &AbsolutePath, scope: &Scope, entry: &DirEntry) -> bool {
+/// [`as_source`]. A directory that `exclude` names is never entered, so nothing under it is read
+/// and no finding can come from inside it.
+fn descend_into(config: &Config, scope: &Scope, entry: &DirEntry) -> bool {
     let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
     if !is_dir || entry.depth() == 0 {
         return true;
     }
     !is_vcs_dir(entry.path())
         && !is_nested_project(entry.path())
-        && may_hold_sources(root, scope, entry.path())
+        && !is_excluded_dir(config, entry.path())
+        && may_hold_sources(config.root(), scope, entry.path())
+}
+
+/// Whether the config's `exclude` names the directory `dir`.
+fn is_excluded_dir(config: &Config, dir: &Path) -> bool {
+    AbsolutePath::new(dir).is_some_and(|dir| config.excluded_by(&dir).is_some())
 }
 
 /// Whether `dir` is named like a version-control directory (04 S2).
@@ -213,24 +220,39 @@ fn explicit_path_warning(
     if let Some(rule) = ignored_by {
         return Some(ignored(listed, &rule));
     }
+    let excluded_by = config.excluded_by(&path);
+    if let Some(pattern) = excluded_by.filter(|_| is_source_file || kind.is_dir()) {
+        return Some(excluded(listed, Some(pattern)));
+    }
     if is_source_file && !config.scans(&path) {
-        return Some(excluded(listed));
+        return Some(excluded(listed, None));
     }
     // Skipped by something the matchers above can't see, like the global git excludes file.
     (is_source_file && !walked).then(|| ignored(listed, "an ignore file"))
 }
 
-/// The finding for an explicit path that the config excludes.
-fn excluded(listed: &SourcePath) -> Finding {
-    Finding::new(
-        "scan/explicit-path-excluded",
-        Severity::Warning,
-        format!(
-            "{listed} was named on the command line but is excluded by `include` or `exclude` in {CONFIG_FILE_NAME}",
-            listed = listed.as_str(),
-        ),
-    )
-    .with_help("Remove it from `exclude` to check it, or stop passing it")
+/// The finding for an explicit path that the config excludes, naming the `exclude` pattern when
+/// one matched and otherwise blaming `include`.
+fn excluded(listed: &SourcePath, pattern: Option<&str>) -> Finding {
+    let listed = listed.as_str();
+    match pattern {
+        Some(pattern) => Finding::new(
+            "scan/explicit-path-excluded",
+            Severity::Warning,
+            format!(
+                "{listed} was named on the command line but is excluded by `{pattern}` in `exclude` in {CONFIG_FILE_NAME}",
+            ),
+        )
+        .with_help("Remove that pattern from `exclude` to check it, or stop passing it"),
+        None => Finding::new(
+            "scan/explicit-path-excluded",
+            Severity::Warning,
+            format!(
+                "{listed} was named on the command line but is not matched by `include` in {CONFIG_FILE_NAME}",
+            ),
+        )
+        .with_help("Add it to `include` to check it, or stop passing it"),
+    }
 }
 
 /// The finding for an explicit path that an ignore file skips, naming that `rule`.
@@ -612,6 +634,99 @@ mod tests {
             finding.message.contains(CONFIG_FILE_NAME),
             "message was: {}",
             finding.message
+        );
+    }
+
+    #[test]
+    fn explicit_excluded_path_names_the_exact_pattern() {
+        let project = Project::new();
+        project.write(
+            CONFIG_FILE_NAME,
+            "exclude = [\"other\", \"docs/*.rs\", \"docs\"]\n",
+        );
+        project.write("docs/old.rs", "");
+
+        let walk = project.walk(&paths(&["docs/old.rs"]));
+
+        let message = &walk
+            .findings
+            .first()
+            .expect("one warning was expected")
+            .message;
+        assert!(
+            message.contains("excluded by `docs/*.rs` in `exclude`"),
+            "message was: {message}"
+        );
+    }
+
+    #[test]
+    fn explicit_path_missing_from_include_blames_include() {
+        let project = Project::new();
+        project.write(CONFIG_FILE_NAME, "include = [\"src\"]\n");
+        project.write("docs/a.rs", "");
+
+        let walk = project.walk(&paths(&["docs/a.rs"]));
+
+        let message = &walk
+            .findings
+            .first()
+            .expect("one warning was expected")
+            .message;
+        assert!(
+            message.contains("not matched by `include`"),
+            "message was: {message}"
+        );
+    }
+
+    #[test]
+    fn explicit_excluded_directory_names_the_exact_pattern() {
+        let project = Project::new();
+        project.write(CONFIG_FILE_NAME, "exclude = [\"vendor\"]\n");
+        project.write("vendor/a.rs", "");
+
+        let walk = project.walk(&paths(&["vendor"]));
+
+        assert!(walk.sources.is_empty());
+        assert_eq!(codes(&walk), ["scan/explicit-path-excluded"]);
+        let message = &walk
+            .findings
+            .first()
+            .expect("one warning was expected")
+            .message;
+        assert!(
+            message.contains("excluded by `vendor` in `exclude`"),
+            "message was: {message}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn excluded_directory_is_never_descended() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let project = Project::new();
+        project.write(CONFIG_FILE_NAME, "exclude = [\"vendor\"]\n");
+        project.write("vendor/locked/a.rs", "");
+        project.write("open/b.rs", "");
+        let locked = project.dir.path().join("vendor/locked");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000))
+            .expect("the fixture directory permissions should be settable");
+
+        let walk = project.walk(&Scope::All);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755))
+            .expect("the fixture directory permissions should be restorable");
+
+        assert_eq!(
+            walk.sources
+                .iter()
+                .map(|(path, _)| project.relative(path))
+                .collect::<Vec<_>>(),
+            ["open/b.rs"],
+        );
+        assert!(
+            walk.findings.is_empty(),
+            "unexpected findings: {:?}",
+            walk.findings
         );
     }
 

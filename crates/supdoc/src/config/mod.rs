@@ -23,7 +23,7 @@ pub use error::ConfigError;
 pub const CONFIG_FILE_NAME: &str = "supdoc.config.toml";
 
 /// A fully resolved config. Constructed only by [`Config::load`] and [`Config::load_file`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Config {
     /// The directory of the config that was found, not of anything it extends.
     root: AbsolutePath,
@@ -98,6 +98,14 @@ impl Config {
                 .exclude
                 .as_ref()
                 .is_some_and(|exclude| exclude.matches(path))
+    }
+
+    /// The `exclude` pattern, as written, that excludes `path` (a file or a directory), or `None`
+    /// when no pattern does. Patterns match everything beneath what they name, so a path inside
+    /// an excluded directory is excluded by that directory's pattern.
+    #[must_use]
+    pub fn excluded_by(&self, path: &AbsolutePath) -> Option<&str> {
+        self.exclude.as_ref()?.first_match(path)
     }
 
     /// The directory a namespace names, or `None` if the config doesn't define it.

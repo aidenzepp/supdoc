@@ -12,17 +12,22 @@ use crate::path::AbsolutePath;
 /// Compiled globs, relative to the directory of the config that wrote them (01 D3).
 ///
 /// Every pattern also matches everything beneath what it matches, and `*` never crosses `/`.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 #[serde(try_from = "Vec<String>")]
 pub(crate) struct PatternList(Matcher);
 
 /// What a [`PatternList`] matches with.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Matcher {
     /// Every path. The default `include` (`**`), without compiling a glob that could fail.
     Everything,
     /// The compiled patterns. An empty set matches nothing.
-    Globs(GlobSet),
+    Globs {
+        /// Two globs per pattern: the pattern, then the pattern with everything beneath it.
+        set: GlobSet,
+        /// The patterns as written, in order.
+        written: Vec<String>,
+    },
 }
 
 impl PatternList {
@@ -35,7 +40,22 @@ impl PatternList {
     pub(crate) fn is_match(&self, relative: &Path) -> bool {
         match &self.0 {
             Matcher::Everything => true,
-            Matcher::Globs(set) => set.is_match(relative),
+            Matcher::Globs { set, .. } => set.is_match(relative),
+        }
+    }
+
+    /// The first pattern, as written, that `relative` matches, or `None` when none does.
+    ///
+    /// The list that matches everything has no written pattern, so it reports `None` too.
+    pub(crate) fn first_match(&self, relative: &Path) -> Option<&str> {
+        match &self.0 {
+            Matcher::Everything => None,
+            Matcher::Globs { set, written } => set
+                .matches(relative)
+                .into_iter()
+                .min()
+                .and_then(|glob| written.get(glob / 2))
+                .map(String::as_str),
         }
     }
 }
@@ -56,7 +76,7 @@ impl TryFrom<Vec<String>> for PatternList {
             pattern: error.glob().unwrap_or_default().to_owned(),
             reason: error.kind().to_string(),
         })?;
-        Ok(Self(Matcher::Globs(set)))
+        Ok(Self(Matcher::Globs { set, written: raw }))
     }
 }
 
@@ -133,7 +153,7 @@ pub(crate) enum PatternError {
 ///
 /// Matching strips `base` and tests the rest, so the directory itself is never compiled into a
 /// glob. That keeps directories named like `[id]` from being read as glob syntax.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct AnchoredPatterns {
     /// The directory of the config that wrote the patterns.
     base: AbsolutePath,
@@ -151,5 +171,12 @@ impl AnchoredPatterns {
     pub(crate) fn matches(&self, path: &AbsolutePath) -> bool {
         path.strip_prefix(&self.base)
             .is_some_and(|relative| self.list.is_match(relative))
+    }
+
+    /// The first pattern, as written, that matches `path`, or `None` when `path` is outside
+    /// `base` or no pattern matches.
+    pub(crate) fn first_match(&self, path: &AbsolutePath) -> Option<&str> {
+        path.strip_prefix(&self.base)
+            .and_then(|relative| self.list.first_match(relative))
     }
 }
