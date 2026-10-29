@@ -1,9 +1,12 @@
-//! `supdoc init`: writes a starter `supdoc.config.toml` and nothing else (05 C10).
+//! `supdoc init`: writes a starter config and nothing else (05 C10).
 //!
-//! The lockfile is created by the first `update --yes`. An existing config is never touched.
+//! The starter goes to `-c PATH` when given, otherwise to `supdoc.config.toml` in the current
+//! directory. The lockfile is created by the first `update --yes`. An existing file is never
+//! touched.
 
 use std::fs::OpenOptions;
 use std::io::{self, Write as _};
+use std::path::Path;
 
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -11,22 +14,23 @@ use serde::Serialize;
 use crate::config::CONFIG_FILE_NAME;
 use crate::output::json::Envelope;
 use crate::output::{Output, OutputError, Report, TextContext};
-use crate::path::{AbsolutePath, RelativePath};
+use crate::path::AbsolutePath;
 
 use super::args::InitArgs;
 use super::{CliError, Context, Outcome};
 
-/// The file `supdoc init` writes. It loads as a valid config (see the tests), and its live keys
-/// spell out the defaults so that editing them is the obvious next step.
+/// The file `supdoc init` writes. It loads as a valid config (see the tests). Every key is
+/// commented out, so none of them is live: a live `include` or `exclude` would replace the
+/// patterns of a config it later extends.
 const STARTER: &str = "\
 # supdoc.config.toml. Every key is optional.
 
 # Files to scan for links. Globs, relative to this file's directory.
-# Each pattern also matches everything beneath it.
-include = [\"**\"]
+# Each pattern also matches everything beneath it. The default is everything.
+# include = [\"**\"]
 
 # Removed from include. Exclude always wins.
-exclude = []
+# exclude = []
 
 # Another config to inherit from, relative to this file.
 # extends = \"../../supdoc.config.toml\"
@@ -36,9 +40,13 @@ exclude = []
 # auth = \"services/auth\"
 ";
 
-/// The starter config as output data, shown by `--dry-run`.
+/// The starter config as output data, reported on a dry run and on a real write.
 #[derive(Debug, Serialize, JsonSchema)]
 struct StarterReport {
+    /// Whether the file was written. False on `--dry-run`.
+    applied: bool,
+    /// Where the starter is, or would be, written.
+    path: AbsolutePath,
     /// The file contents, written as is in text output.
     contents: &'static str,
 }
@@ -53,30 +61,42 @@ impl Report for StarterReport {
     }
 }
 
-/// Runs `supdoc init` in the current directory.
+/// Runs `supdoc init`, writing to `-c PATH` or to `supdoc.config.toml` in the current directory.
 ///
-/// With `--dry-run`, prints the starter file through `output` and writes nothing. Notes go
-/// through `output` too, so `--quiet` and the data formats silence them.
+/// The starter is reported through `output` on both paths: raw in text and GitHub output, inside
+/// the envelope in the JSON formats. With `--dry-run` nothing is written. Notes go through
+/// `output` too, so `--quiet` and the data formats silence them.
 ///
 /// # Errors
 ///
-/// Returns `cli/init-exists` when `supdoc.config.toml` already exists, and `cli/init-write` when
-/// the file cannot be created or the output cannot be written.
+/// Returns `cli/init-exists` when the target file already exists, and `cli/init-write` when the
+/// file cannot be created or the output cannot be written.
 pub fn run(args: &InitArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
-    let target = target(&context.cwd);
+    let target = target(context);
+    let label = label(&target, &context.cwd);
+    let report = |applied| StarterReport {
+        applied,
+        path: target.clone(),
+        contents: STARTER,
+    };
 
     if args.dry_run {
         refuse_if_present(&target)?;
         output
-            .report(&StarterReport { contents: STARTER }, true)
+            .artifact(&report(false), STARTER, true)
             .map_err(|error| output_failed(&target, &error))?;
         output
-            .note("Nothing written. Run `supdoc init` to write supdoc.config.toml.")
+            .note(&format!(
+                "Nothing written. Run `supdoc init` to write {label}."
+            ))
             .map_err(|error| output_failed(&target, &error))?;
     } else {
         write_new(&target)?;
         output
-            .note(&format!("Wrote {CONFIG_FILE_NAME}"))
+            .artifact(&report(true), "", true)
+            .map_err(|error| output_failed(&target, &error))?;
+        output
+            .note(&format!("Wrote {label}"))
             .map_err(|error| output_failed(&target, &error))?;
     }
     Ok(Outcome::Clean)
@@ -92,11 +112,24 @@ pub fn schema() -> Result<schemars::Schema, CliError> {
     Ok(schemars::schema_for!(Envelope<'static, StarterReport>))
 }
 
-/// Where the starter config goes: the current directory.
-fn target(cwd: &AbsolutePath) -> AbsolutePath {
-    let name = RelativePath::try_from(CONFIG_FILE_NAME.to_owned())
-        .unwrap_or_else(|_| unreachable!("the config file name is a relative path"));
-    cwd.join(&name)
+/// Where the starter config goes: `-c PATH` resolved against the current directory, otherwise
+/// the default config file name in the current directory.
+fn target(context: &Context) -> AbsolutePath {
+    let requested = context
+        .global
+        .config
+        .as_deref()
+        .unwrap_or_else(|| Path::new(CONFIG_FILE_NAME));
+    AbsolutePath::new(&context.cwd.as_path().join(requested))
+        .unwrap_or_else(|| unreachable!("a path joined onto an absolute directory is absolute"))
+}
+
+/// `target` as a person reads it in a note: relative to `cwd` when it is beneath it.
+fn label(target: &AbsolutePath, cwd: &AbsolutePath) -> String {
+    target.strip_prefix(cwd).map_or_else(
+        || target.display().to_string(),
+        |relative| relative.display().to_string(),
+    )
 }
 
 /// Fails with `cli/init-exists` when something is already at `target`.
@@ -287,6 +320,114 @@ mod tests {
         assert!(
             config.namespaces().is_empty(),
             "the starter defines no namespaces"
+        );
+    }
+
+    #[test]
+    fn starter_keeps_no_key_live_so_extends_inherits_the_parent_patterns() {
+        let dir = tempfile::tempdir().expect("a temp directory should be created");
+        std::fs::write(config_path(&dir), "exclude = [\"vendor\"]\n")
+            .expect("the parent config should be written");
+        let child = dir.path().join("child/grandchild");
+        std::fs::create_dir_all(&child).expect("the child directory should be created");
+        let extending = STARTER.replace("# extends = ", "extends = ");
+        assert_ne!(
+            extending, STARTER,
+            "the starter should have an extends line"
+        );
+        let child_config = child.join(CONFIG_FILE_NAME);
+        std::fs::write(&child_config, extending).expect("the child config should be written");
+
+        let file = AbsolutePath::new(&child_config).expect("the child path is absolute");
+        let config = Config::load_file(&file).expect("the extending starter should load");
+
+        let vendor = AbsolutePath::new(&dir.path().join("vendor/lib.md"))
+            .expect("the vendor path is absolute");
+        assert!(
+            config.excluded_by(&vendor).is_some(),
+            "the parent's exclude should apply to the child"
+        );
+    }
+
+    #[test]
+    fn starter_has_no_live_include_or_exclude() {
+        let live: Vec<&str> = STARTER
+            .lines()
+            .filter(|line| line.starts_with("include =") || line.starts_with("exclude ="))
+            .collect();
+        assert!(live.is_empty(), "live keys in the starter: {live:?}");
+    }
+
+    #[test]
+    fn config_flag_writes_the_starter_there() {
+        let dir = tempfile::tempdir().expect("a temp directory should be created");
+        std::fs::create_dir(dir.path().join("sub")).expect("the sub directory should be created");
+        let (args, context) = context_in(&dir, &["-c", "sub/x.toml"]);
+
+        let (result, _, stderr) = run_captured(&args, &context);
+        let _outcome = result.expect("init should write to the requested path");
+
+        let written = std::fs::read_to_string(dir.path().join("sub/x.toml"))
+            .expect("the starter should be at the requested path");
+        assert_eq!(written, STARTER, "contents at the requested path");
+        assert!(
+            !config_path(&dir).exists(),
+            "the default file must not be written when -c names another"
+        );
+        assert_eq!(stderr, "Wrote sub/x.toml\n", "the note names the path");
+    }
+
+    #[test]
+    fn config_flag_refuses_when_the_path_exists() {
+        let dir = tempfile::tempdir().expect("a temp directory should be created");
+        std::fs::create_dir(dir.path().join("sub")).expect("the sub directory should be created");
+        std::fs::write(dir.path().join("sub/x.toml"), "# mine\n")
+            .expect("the existing file should be written");
+        let (args, context) = context_in(&dir, &["-c", "sub/x.toml"]);
+
+        let (result, _, _) = run_captured(&args, &context);
+        let error = result.expect_err("init should refuse to overwrite the -c path");
+
+        assert_eq!(error.code(), "cli/init-exists");
+        let after = std::fs::read_to_string(dir.path().join("sub/x.toml"))
+            .expect("the existing file should remain");
+        assert_eq!(after, "# mine\n", "the existing file is untouched");
+    }
+
+    #[test]
+    fn real_write_json_reports_applied_path_and_contents() {
+        let dir = tempfile::tempdir().expect("a temp directory should be created");
+        let (args, context) = context_in(&dir, &["--json"]);
+        let stdout = Capture::default();
+        let settings = OutputSettings {
+            format: context.global.format(),
+            ..text_settings(&context.cwd)
+        };
+        let mut output = Output::new(
+            settings,
+            Box::new(stdout.clone()),
+            Box::new(Capture::default()),
+        );
+
+        let _outcome =
+            run(&args, &context, &mut output).expect("init should write into an empty directory");
+
+        let json: serde_json::Value = serde_json::from_str(&stdout.text())
+            .unwrap_or_else(|error| panic!("stdout should be JSON ({error}): {}", stdout.text()));
+        assert_eq!(
+            json.pointer("/data/applied"),
+            Some(&true.into()),
+            "applied in {json}"
+        );
+        assert_eq!(
+            json.pointer("/data/contents"),
+            Some(&STARTER.into()),
+            "contents in {json}"
+        );
+        assert!(
+            json.pointer("/data/path")
+                .is_some_and(serde_json::Value::is_string),
+            "path in {json}"
         );
     }
 
