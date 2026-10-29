@@ -26,3 +26,32 @@ indexing_slicing = "deny"
 # That module writes through stdout/stderr handles, which these lints don't flag.
 print_stdout = "deny"
 print_stderr = "deny"
+
+# Every dependency is declared here once (08 build DAG, T0) so later tasks never edit this file.
+[workspace.dependencies]
+annotate-snippets = "0.12.17"
+anstream = "1.0.0"
+clap = { version = "4.6.7", features = ["derive", "env", "wrap_help"] }
+clap_complete = "4.6.11"
+globset = "0.4.21"
+ignore = "0.4.34"
+schemars = "1.2.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+strsim = "0.11.1"
+thiserror = "2.0.21"
+toml = "1.1.8"
+toml_edit = "0.25.17"
+tree-sitter = "0.27.1"
+tree-sitter-bash = "0.25.1"
+tree-sitter-go = "0.25.0"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-md = { version = "0.5.4", features = ["parser"] }
+tree-sitter-python = "0.25.0"
+tree-sitter-rust = "0.24.2"
+tree-sitter-typescript = "0.23.2"
+# Dev only. Schemas are validated locally, so the HTTP resolver is left out.
+insta = "1.49.0"
+jsonschema = { version = "0.60.2", default-features = false }
+tempfile = "3.27.0"
