@@ -56,7 +56,47 @@ pub fn render_finding(
     if let Some(help) = &finding.help {
         group = group.element(Level::HELP.message(glyphs(context, visible(help))));
     }
-    writeln!(out, "{}\n", renderer(context).render(&[group]))
+    let mut rendered = renderer(context).render(&[group]);
+    if let (Some(location), Some(snippet)) = (&finding.location, &finding.snippet) {
+        rendered = with_source_column(
+            &rendered,
+            &visible(&context.paths.text(&location.file)),
+            snippet,
+            location.column,
+        );
+    }
+    writeln!(out, "{rendered}\n")
+}
+
+/// `rendered` with the column in its `--> path:line:column` header set to `column`.
+///
+/// The renderer counts the column in the escaped snippet, where each escaped character is several
+/// characters wide, so a control or bidirectional character before the link pushes the column
+/// past the one in the source file. Leaves `rendered` as it is if the header isn't found.
+fn with_source_column(
+    rendered: &str,
+    path: &str,
+    snippet: &crate::finding::Snippet,
+    column: u32,
+) -> String {
+    let before = snippet
+        .text
+        .get(..snippet.highlight.start)
+        .unwrap_or_default();
+    let line = usize::try_from(snippet.first_line)
+        .unwrap_or(1)
+        .saturating_add(before.matches('\n').count());
+    let header = format!("{path}:{line}:");
+    let Some((title, rest)) = rendered.split_once('\n') else {
+        return rendered.to_owned();
+    };
+    let Some(at) = rest.find(&header).map(|at| at + header.len()) else {
+        return rendered.to_owned();
+    };
+    let digits = rest[at..]
+        .find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(rest.len() - at);
+    format!("{title}\n{}{column}{}", &rest[..at], &rest[at + digits..])
 }
 
 /// `text` with each `→` spelled `->` when `context` draws in ASCII (07 G12). Finding messages
@@ -97,20 +137,29 @@ pub fn visible(text: &str) -> String {
     shown
 }
 
+/// Whether `character`, followed by `next`, is the `\r` of a `\r\n` line ending or of the text's
+/// last line, which the renderer ends itself.
+fn is_line_ending_cr(character: char, next: Option<char>) -> bool {
+    character == '\r' && matches!(next, None | Some('\n'))
+}
+
 /// Like [`visible`] for snippet `text`, which keeps its newlines because the renderer owns line
 /// layout, with the byte range `span` moved to cover the same characters in the result. Offsets
 /// that aren't in `text` are clamped to its end.
 fn visible_with_span(text: &str, span: &Range<usize>) -> (String, Range<usize>) {
     let mut shown = String::with_capacity(text.len());
     let (mut start, mut end) = (None, None);
-    for (offset, character) in text.char_indices() {
+    let mut characters = text.char_indices().peekable();
+    while let Some((offset, character)) = characters.next() {
         if offset >= span.start && start.is_none() {
             start = Some(shown.len());
         }
         if offset >= span.end && end.is_none() {
             end = Some(shown.len());
         }
-        push_visible(&mut shown, character, true);
+        if !is_line_ending_cr(character, characters.peek().map(|&(_, next)| next)) {
+            push_visible(&mut shown, character, true);
+        }
     }
     let start = start.unwrap_or(shown.len());
     let end = end.unwrap_or(shown.len());
@@ -219,6 +268,50 @@ mod tests {
                 "{escaped} in snippet: {with_snippet}"
             );
         }
+    }
+
+    #[test]
+    fn snippet_from_a_crlf_file_shows_no_carriage_return() {
+        for text in [
+            "see [x](a.rs#b)\r\nnext\n",
+            "see [x](a.rs#b)\r\n",
+            "see [x](a.rs#b)\r",
+        ] {
+            let finding = finding_on(
+                "docs/a.md",
+                text,
+                "[x](a.rs#b)",
+                "link/failed",
+                Severity::Error,
+                "bad",
+                "help",
+            );
+
+            let output = rendered(&finding);
+
+            assert!(!output.contains("\\r"), "{text:?}: {output}");
+            assert!(
+                output.contains("1 | see [x](a.rs#b)\n"),
+                "{text:?}: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn column_in_header_ignores_escapes_before_the_link() {
+        let finding = finding_on(
+            "docs/a.md",
+            "x\nsee \u{202e}\u{1b}y [x](a.rs#b)\r\n",
+            "[x](a.rs#b)",
+            "link/failed",
+            Severity::Error,
+            "bad",
+            "help",
+        );
+
+        let output = rendered(&finding);
+
+        assert!(output.contains("--> docs/a.md:2:9\n"), "{output}");
     }
 
     #[test]
