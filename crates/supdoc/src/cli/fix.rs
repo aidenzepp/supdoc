@@ -769,6 +769,8 @@ mod tests {
             let context = Context {
                 global: cli.global.clone(),
                 cwd,
+                home: None,
+                claude_config_dir: None,
             };
             Session {
                 cli,
