@@ -10,10 +10,13 @@ use crate::finding::{Finding, Location, Severity};
 use crate::output::fixtures::{
     Capture, absolute, captured, check_report, context, finding_on, paths, settings, source,
 };
+use crate::output::format::TextContext;
 use crate::output::format::{OutputFormat, Verbosity, supports_unicode};
 use crate::output::github::{annotation, escape_data, escape_property};
 use crate::output::json::{Envelope, FatalJson, FindingJson};
+use crate::output::jsonl;
 use crate::output::paths::PathStyle;
+use crate::output::report::Report;
 use crate::output::sink::{Output, OutputError};
 use crate::output::summary::Summary;
 use crate::output::text::render_finding;
@@ -191,6 +194,63 @@ fn jsonl_lines_each_parse_and_end_with_summary() {
     assert_eq!(at(summary, "/passed"), 38);
     assert_eq!(at(summary, "/failed"), 1);
     assert_eq!(at(summary, "/schema_version"), 1);
+}
+
+/// A report with data scalars, like `update`'s, and one `changes` array.
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct ScalarFixture {
+    applied: bool,
+    file: String,
+    ok: String,
+    changes: Vec<String>,
+}
+
+impl Report for ScalarFixture {
+    fn command(&self) -> &'static str {
+        "update"
+    }
+
+    fn render_text(&self, _context: &TextContext, _out: &mut dyn Write) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn scalar_fixture_lines() -> Vec<Value> {
+    let report = ScalarFixture {
+        applied: false,
+        file: "supdoc.lock".to_owned(),
+        ok: "data's own ok".to_owned(),
+        changes: vec!["one".to_owned(), "two".to_owned()],
+    };
+    jsonl::lines(&report, true)
+}
+
+#[test]
+fn jsonl_summary_keeps_the_data_scalars_after_the_change_records() {
+    let lines = scalar_fixture_lines();
+
+    let types: Vec<&str> = lines
+        .iter()
+        .map(|line| at(line, "/type").as_str().expect("every line has a `type`"))
+        .collect();
+    assert_eq!(types, ["change", "change", "summary"]);
+    let summary = lines.last().expect("there should be a summary line");
+    assert_eq!(at(summary, "/applied"), false);
+    assert_eq!(at(summary, "/file"), "supdoc.lock");
+    assert!(
+        summary.get("changes").is_none(),
+        "arrays are records, never summary fields: {summary}"
+    );
+}
+
+#[test]
+fn jsonl_summary_envelope_keys_win_over_same_named_data_scalars() {
+    let lines = scalar_fixture_lines();
+
+    let summary = lines.last().expect("there should be a summary line");
+    assert_eq!(at(summary, "/ok"), true);
+    assert_eq!(at(summary, "/command"), "update");
+    assert_eq!(at(summary, "/type"), "summary");
 }
 
 #[test]

@@ -56,9 +56,12 @@ pub fn lines<R: Report>(report: &R, ok: bool) -> Vec<Value> {
     lines
 }
 
-/// The closing line: the command, whether it succeeded, the link counts, and the schema version.
+/// The closing line: the report's top-level scalar fields, the command, whether it succeeded, the
+/// link counts, and the schema version.
+///
+/// The summary's own keys win over a report field of the same name.
 fn summary_line<R: Report>(report: &R, ok: bool) -> Value {
-    let mut fields = Map::new();
+    let mut fields = scalar_fields(report);
     let _type = fields.insert("type".to_owned(), Value::String("summary".to_owned()));
     let _command = fields.insert("command".to_owned(), Value::from(report.command()));
     let _ok = fields.insert("ok".to_owned(), Value::Bool(ok));
@@ -67,6 +70,19 @@ fn summary_line<R: Report>(report: &R, ok: bool) -> Value {
     }
     let _version = fields.insert("schema_version".to_owned(), Value::from(SCHEMA_VERSION));
     Value::Object(fields)
+}
+
+/// The top-level bool, string and number fields of the serialized report.
+///
+/// Arrays, objects and nulls are left out; arrays become records instead.
+fn scalar_fields<R: serde::Serialize + ?Sized>(report: &R) -> Map<String, Value> {
+    let Ok(Value::Object(fields)) = serde_json::to_value(report) else {
+        return Map::new();
+    };
+    fields
+        .into_iter()
+        .filter(|(_, value)| matches!(value, Value::Bool(_) | Value::String(_) | Value::Number(_)))
+        .collect()
 }
 
 /// `value` with a `type` field. A non-object value is kept under `value`.
