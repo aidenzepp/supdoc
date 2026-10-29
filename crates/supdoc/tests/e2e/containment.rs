@@ -158,7 +158,7 @@ fn lockfile_target_climbing_out_of_the_root_is_a_parse_error() {
     let project = web_project();
     fs::write(
         project.path("services/web/supdoc.lock"),
-        "# supdoc lockfile\nversion = 1\n\n[[link]]\nsource = \"docs/guide.md\"\n\
+        "# supdoc lockfile\nversion = 1\n\n[features.hash]\nline-endings = \"normalize\"\n\n[[link]]\nsource = \"docs/guide.md\"\n\
          target = \"../../settings.py\"\nhash = \"9f2c8e4b9f2c8e4b9f2c8e4b9f2c8e4b9f2c8e4b9f2c8e4b9f2c8e4b9f2c8e4b\"\n",
     )
     .expect("the lockfile should be writable");
@@ -167,4 +167,10 @@ fn lockfile_target_climbing_out_of_the_root_is_a_parse_error() {
 
     assert_ne!(run.code, Some(0), "{}", run.stderr);
     assert!(run.stderr.contains("lock/parse"), "{}", run.stderr);
+    assert!(
+        run.stderr
+            .contains("target `../../settings.py` climbs out of the project root"),
+        "{}",
+        run.stderr
+    );
 }
