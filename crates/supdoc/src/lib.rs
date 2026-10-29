@@ -122,11 +122,7 @@ pub mod scan {
     pub mod walk;
 
     /// Assembling a scan from sources, links and targets.
-    #[expect(
-        clippy::module_inception,
-        reason = "the build plan names this file scan/scan.rs; it holds the scan() entry point"
-    )]
-    pub mod scan;
+    pub mod assemble;
 
     /// Grouping links by target and resolving each target once.
     pub mod targets;
