@@ -1,0 +1,80 @@
+{
+  "$defs": {
+    "FatalLocationJson": {
+      "description": "Where a fatal error happened.",
+      "properties": {
+        "column": {
+          "description": "1-based column, in characters.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "file": {
+          "description": "The file, relative to the project root.",
+          "type": "string"
+        },
+        "line": {
+          "description": "1-based line.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "file",
+        "line",
+        "column"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A fatal error as JSON shows it, written to stderr (06 X8).",
+  "properties": {
+    "error": {
+      "description": "Always `true`, so a reader can tell this object from a report.",
+      "type": "boolean"
+    },
+    "exit_code": {
+      "description": "The process exit code.",
+      "format": "uint8",
+      "maximum": 255,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "help": {
+      "description": "What to do next.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "kind": {
+      "description": "The stable code, such as `config/extends-missing`.",
+      "type": "string"
+    },
+    "location": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FatalLocationJson"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Where it happened, when it is about one place in a file."
+    },
+    "message": {
+      "description": "What happened, in one line.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "error",
+    "kind",
+    "message",
+    "exit_code"
+  ],
+  "title": "FatalJson",
+  "type": "object"
+}

@@ -227,6 +227,7 @@
   "description": "The one object every command writes under `--json`, with the same top-level keys each time.\n\nIts schema is the one `supdoc schema` prints, so the JSON written and the schema published\ncome from this one type.",
   "properties": {
     "command": {
+      "const": "resolve",
       "description": "The command that produced `data`.",
       "type": "string"
     },
