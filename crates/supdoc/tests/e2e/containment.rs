@@ -495,3 +495,28 @@ fn skill_install_refuses_an_agents_directory_symlinked_out_of_the_root() {
         "a refusal should write neither copy"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_named_path_ignored_by_a_gitignore_symlinked_out_of_the_root_is_not_quoted() {
+    let project = web_project();
+    // `gui*.md` matches the guide; no path the run names contains it.
+    fs::write(project.path("rules"), "gui*.md\n").expect("the outside rules should be writable");
+    std::os::unix::fs::symlink(
+        project.path("rules"),
+        project.path("services/web/.gitignore"),
+    )
+    .expect("the symlink should be creatable");
+
+    let run = project.supdoc_in("services/web", &["check", "docs/guide.md"]);
+
+    for stream in [&run.stdout, &run.stderr] {
+        assert!(
+            !stream.contains("gui*.md"),
+            "`supdoc {}` printed a line from a file outside the root\nstdout:\n{}\nstderr:\n{}",
+            run.args,
+            run.stdout,
+            run.stderr
+        );
+    }
+}

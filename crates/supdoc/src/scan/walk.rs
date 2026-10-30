@@ -248,7 +248,7 @@ fn explicit_path_warning(
         return None;
     }
 
-    let ignored_by = ignore_rule(root, &path, kind.is_dir());
+    let ignored_by = ignore_rule(config, &path, kind.is_dir());
     let is_source_file = kind.is_file() && languages.for_path(path.as_path()).is_some();
     let walked = sources
         .binary_search_by(|(source, _)| source.cmp(&path))
@@ -322,12 +322,19 @@ fn is_inside_skipped_dir(root: &AbsolutePath, listed: &SourcePath) -> bool {
     })
 }
 
-/// Describes the first ignore-file rule that skips `path`, or `None` when no ignore file the walk
-/// reads (other than the global excludes file) does.
+/// Describes the first ignore-file rule that skips `path`, or `None` when no ignore file it reads
+/// does.
+///
+/// Only ignore files from the root down to `path` count, and only those that still lie inside the
+/// root once symlinks are followed, so the rule it quotes never comes from outside (04 S15).
+/// Parent directories' ignore files and the global excludes file are never read here.
 ///
 /// Matchers run from the deepest directory to the root and from `.ignore` to `.gitignore`, the
 /// order the walker gives them precedence in, and the first rule that speaks decides.
-fn ignore_rule(root: &AbsolutePath, path: &AbsolutePath, is_dir: bool) -> Option<String> {
+///
+/// Effect: reads ignore files and file metadata beneath the root.
+fn ignore_rule(config: &Config, path: &AbsolutePath, is_dir: bool) -> Option<String> {
+    let root = config.root();
     let relative = path.strip_prefix(root)?;
     let mut dirs = vec![root.as_path().to_path_buf()];
     let mut current = root.as_path().to_path_buf();
@@ -337,12 +344,13 @@ fn ignore_rule(root: &AbsolutePath, path: &AbsolutePath, is_dir: bool) -> Option
     }
 
     let mut matchers = vec![matcher(
+        config,
         root.as_path(),
         &root.as_path().join(".git/info/exclude"),
     )];
     for dir in &dirs {
-        matchers.push(matcher(dir, &dir.join(".gitignore")));
-        matchers.push(matcher(dir, &dir.join(".ignore")));
+        matchers.push(matcher(config, dir, &dir.join(".gitignore")));
+        matchers.push(matcher(config, dir, &dir.join(".ignore")));
     }
 
     matchers
@@ -367,11 +375,35 @@ fn ignore_rule(root: &AbsolutePath, path: &AbsolutePath, is_dir: bool) -> Option
         .flatten()
 }
 
-/// The matcher for `ignore_file`, whose patterns apply beneath `dir`.
-fn matcher(dir: &Path, ignore_file: &Path) -> Option<Gitignore> {
+/// The matcher for `ignore_file`, whose patterns apply beneath `dir`, or `None` when it can't be
+/// built or the file may not be read ([`may_read`]).
+fn matcher(config: &Config, dir: &Path, ignore_file: &Path) -> Option<Gitignore> {
+    if !may_read(config, ignore_file) {
+        return None;
+    }
     let mut builder = GitignoreBuilder::new(dir);
     let _partial_error = builder.add(ignore_file);
     builder.build().ok()
+}
+
+/// Whether `ignore_file`, a path beneath the root, still lies inside the root once symlinks are
+/// followed (04 S15).
+///
+/// Only a path with a symlink somewhere below the root, the file itself or a directory on the
+/// way to it, is resolved; an ordinary path costs one `lstat` per component.
+///
+/// Effect: reads file metadata along `ignore_file`.
+fn may_read(config: &Config, ignore_file: &Path) -> bool {
+    let root = config.root().as_path();
+    let Ok(relative) = ignore_file.strip_prefix(root) else {
+        return false;
+    };
+    let mut current = root.to_path_buf();
+    let through_symlink = relative.components().any(|component| {
+        current.push(component);
+        fs::symlink_metadata(&current).is_ok_and(|metadata| metadata.file_type().is_symlink())
+    });
+    !through_symlink || config.contains(ignore_file)
 }
 
 #[cfg(test)]
@@ -821,6 +853,121 @@ mod tests {
             walk.findings.is_empty(),
             "unexpected findings: {:?}",
             walk.findings
+        );
+    }
+
+    /// An ignore-file line that matches `out.rs`, distinct from any path the tests name.
+    #[cfg(unix)]
+    const RULE: &str = "ou*.rs";
+
+    /// A directory outside the project root holding `ignore` (a file of [`RULE`]) and
+    /// `build/.gitignore` (the same) beside `build/out.rs`.
+    #[cfg(unix)]
+    fn outside_dir() -> TempDir {
+        let outside = TempDir::new().expect("a temporary outside directory should be creatable");
+        fs::create_dir(outside.path().join("build"))
+            .expect("the outside fixture directory should be creatable");
+        for file in ["ignore", "build/.gitignore"] {
+            fs::write(outside.path().join(file), format!("{RULE}\n"))
+                .expect("the outside ignore file should be writable");
+        }
+        fs::write(outside.path().join("build/out.rs"), "")
+            .expect("the outside source should be writable");
+        outside
+    }
+
+    /// Symlinks `link`, relative to the project root, to `target`.
+    #[cfg(unix)]
+    fn symlink_in(project: &Project, link: &str, target: &Path) {
+        std::os::unix::fs::symlink(target, project.dir.path().join(link))
+            .expect("the fixture symlink should be creatable");
+    }
+
+    /// Every finding message of `walk`, one per line.
+    #[cfg(unix)]
+    fn messages(walk: &Walk) -> String {
+        walk.findings
+            .iter()
+            .map(|finding| finding.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_path_warning_never_quotes_a_gitignore_symlinked_out_of_the_root() {
+        let outside = outside_dir();
+        let project = Project::new();
+        project.write("out.rs", "");
+        symlink_in(&project, ".gitignore", &outside.path().join("ignore"));
+
+        let walk = project.walk(&paths(&["out.rs"]));
+
+        assert!(
+            !messages(&walk).contains(RULE),
+            "a line from outside the root was printed:\n{}",
+            messages(&walk)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_path_warning_never_quotes_an_ignore_file_behind_a_directory_symlinked_out() {
+        let outside = outside_dir();
+        let project = Project::new();
+        symlink_in(&project, "build", &outside.path().join("build"));
+
+        let walk = project.walk(&paths(&["build/out.rs"]));
+
+        assert!(
+            !messages(&walk).contains(RULE),
+            "a line from outside the root was printed:\n{}",
+            messages(&walk)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_path_warning_never_quotes_a_git_exclude_symlinked_out_of_the_root() {
+        let outside = outside_dir();
+        let project = Project::new();
+        project.write("out.rs", "");
+        fs::create_dir_all(project.dir.path().join(".git/info"))
+            .expect("the fixture git directory should be creatable");
+        symlink_in(
+            &project,
+            ".git/info/exclude",
+            &outside.path().join("ignore"),
+        );
+
+        let walk = project.walk(&paths(&["out.rs"]));
+
+        assert!(
+            !messages(&walk).contains(RULE),
+            "a line from outside the root was printed:\n{}",
+            messages(&walk)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_path_warning_still_quotes_a_gitignore_symlinked_inside_the_root() {
+        let project = Project::new();
+        project.write("out.rs", "");
+        project.write("rules/ignore", &format!("{RULE}\n"));
+        symlink_in(
+            &project,
+            ".gitignore",
+            &project.dir.path().join("rules/ignore"),
+        );
+
+        let walk = project.walk(&paths(&["out.rs"]));
+
+        assert_eq!(codes(&walk), ["scan-explicit-path-ignored"]);
+        assert!(
+            messages(&walk).contains(&format!("`{RULE}` in .gitignore")),
+            "the in-root rule should be named:\n{}",
+            messages(&walk)
         );
     }
 
