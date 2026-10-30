@@ -835,6 +835,68 @@ fn a_git_exclude_whitelist_overrides_the_global_excludes_file() {
     );
 }
 
+/// Runs `supdoc update --yes` from `dir` with a global excludes file of `pattern` in an isolated
+/// home, and returns the web project's lockfile.
+fn lock_with_global_pattern(project: &Project, dir: &str, pattern: &str) -> String {
+    let home = tempfile::tempdir().expect("a home directory should be creatable");
+    fs::create_dir_all(home.path().join(".config/git"))
+        .expect("the git config directory should be creatable");
+    fs::write(
+        home.path().join(".config/git/ignore"),
+        format!("{pattern}\n"),
+    )
+    .expect("the global excludes file should be writable");
+    write(project, "services/web/docs/keep.md", SCRATCH);
+
+    let run = project.supdoc_in_with(dir, &["update", "--yes"], &[("HOME", home.path())]);
+
+    let _ = run.assert_exit(0);
+    lock_of_web(project)
+}
+
+#[test]
+fn an_anchored_global_pattern_counts_from_the_work_tree_top_whatever_the_working_directory() {
+    for dir in ["services/web", "services/web/docs"] {
+        let project = monorepo_with_git();
+
+        let locked = lock_with_global_pattern(&project, dir, "services/web/docs/gui*.md");
+
+        assert!(
+            locked.contains("docs/keep.md") && !locked.contains("docs/guide.md"),
+            "git anchors a global pattern at the work tree top, so it hides the guide from `{dir}`:\n{locked}"
+        );
+    }
+}
+
+#[test]
+fn an_anchored_global_pattern_counts_from_the_root_outside_a_repository() {
+    for dir in ["services/web", "services/web/docs"] {
+        let project = web_project();
+
+        let locked = lock_with_global_pattern(&project, dir, "docs/gui*.md");
+
+        assert!(
+            locked.contains("docs/keep.md") && !locked.contains("docs/guide.md"),
+            "with no repository the pattern counts from the root, so it hides the guide from `{dir}`:\n{locked}"
+        );
+    }
+}
+
+#[test]
+fn a_separate_git_dir_brings_its_info_exclude_file_unquoted() {
+    let project = web_project();
+    // A submodule or `--separate-git-dir` checkout: a `.git` file naming the git directory, which
+    // has no `commondir`, so it is the shared directory itself.
+    write(&project, "outside.git/info/exclude", "gui*.md\n");
+    write(
+        &project,
+        "services/web/.git",
+        &format!("gitdir: {}\n", project.path("outside.git").display()),
+    );
+
+    assert_followed_and_never_quoted(&project);
+}
+
 #[test]
 fn a_worktrees_shared_exclude_file_applies_and_is_never_quoted() {
     let project = web_project();

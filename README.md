@@ -59,13 +59,24 @@ Threat model, for a checkout you don't trust:
 - Outside the project root, supdoc reads only its own inputs: a `supdoc.config.toml` reached through
   `extends` or as a project config symlinked to an outside file of that name, whose lines can appear in
   config errors, and ignore files: those in the directories above the project, up to the top of its git
-  work tree, plus the global excludes file, and a `.git/info/exclude` reached through a `.git` symlink or
-  a worktree `.git` file's `gitdir` and `commondir`. It never quotes a rule line from an ignore file
-  outside the root.
+  work tree, plus the global excludes file, and a `.git/info/exclude` reached through a `.git` symlink,
+  a symlinked `.git/info` or `info/exclude`, or a `.git` file's `gitdir` and `commondir`. It never quotes
+  a rule line from an ignore file outside the root.
 - It reads, hashes, lists symbols from and quotes no other file outside the root, linked files included.
 - It doesn't promise to hide whether a path outside the root exists. An out-and-back symlink can change
   which error or exit code appears. That is accepted: on ordinary `pull_request` CI, a PR can already run
   commands.
+
+### Differences from git
+
+supdoc reads ignore files as git does, with these known exceptions:
+
+- Rules match case-sensitively whatever `core.ignorecase` says, so a checkout scans the same on a
+  case-insensitive laptop and on Linux CI.
+- `core.excludesFile` is read only from the user and system git config, not from a repository's own config
+  or the files it includes. Use `.git/info/exclude` for a per-repository exclude.
+- A `.git` entry git can't use, such as a dangling symlink or an empty directory, still marks the top of
+  the work tree, where git searches further up. supdoc then checks more files, never fewer.
 
 ## Agent skill
 
