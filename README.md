@@ -60,8 +60,11 @@ Threat model, for a checkout you don't trust:
   `extends` or as a project config symlinked to an outside file of that name, whose lines can appear in
   config errors, and ignore files: those in the directories above the project, up to the top of its git
   work tree, plus the global excludes file, and a `.git/info/exclude` reached through a `.git` symlink,
-  a symlinked `.git/info` or `info/exclude`, or a `.git` file's `gitdir` and `commondir`. It never quotes
-  a rule line from an ignore file outside the root.
+  a symlinked `.git/info` or `info/exclude`, or a `.git` file's `gitdir` and `commondir`. To find the
+  global excludes file it reads the git config files that can name it: `~/.gitconfig` and
+  `$XDG_CONFIG_HOME/git/config` (or the file `GIT_CONFIG_GLOBAL` names) for the user, `/etc/gitconfig`
+  (or the file `GIT_CONFIG_SYSTEM` names) for the system. It never quotes a rule line from an ignore file
+  outside the root, or a line from a git config.
 - It reads, hashes, lists symbols from and quotes no other file outside the root, linked files included.
 - It doesn't promise to hide whether a path outside the root exists. An out-and-back symlink can change
   which error or exit code appears. That is accepted: on ordinary `pull_request` CI, a PR can already run
@@ -80,6 +83,21 @@ supdoc reads ignore files as git does, with these known exceptions:
   the top of the work tree here, where git searches further up.
 - Inside a nested repository or submodule, the global excludes file's anchored patterns still count from the
   project's work-tree top, not from the nested repository's own top as git run there counts them.
+- supdoc also reads `.ignore` files, which git doesn't. They apply in the project root and the directories
+  above it up to the top of the work tree, and beneath the root. A `.ignore` rule outranks every `.gitignore`
+  rule, so a `!pattern` in a `.ignore` brings back a file a `.gitignore` hides.
+  They still apply past a nested repository's top, where `.gitignore` rules stop.
+- supdoc judges the files and directories beneath the project root, never the root itself or the directories
+  above it. When a rule above the root ignores the root, or a directory on the way to it (`pkgs/` with the
+  root at `pkgs/web`), git ignores every file beneath it and supdoc still checks them, as ripgrep does:
+  running supdoc in a directory asks it to check that directory. A rule above the root that matches the
+  files themselves, such as `*.gen.md`, still applies.
+- supdoc applies the ignore rules inside the root to every file, whether or not git tracks it. It doesn't
+  read git's index, and git doesn't ignore a tracked file.
+
+Outside any git repository, with no `.git` in the root or above it, there is no work tree to stop at. supdoc
+applies the project's own `.gitignore` and `.ignore` files and the global excludes file, and reads none above
+the project root.
 
 ## Agent skill
 
