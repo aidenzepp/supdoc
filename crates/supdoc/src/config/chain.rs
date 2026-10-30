@@ -43,10 +43,11 @@ fn config_in(dir: &AbsolutePath) -> Option<AbsolutePath> {
 
 /// Walks up from `start` to the nearest directory holding a config file (01 D1).
 ///
-/// A directory holds one when it has a regular file or a symlink with the config's name, decided
-/// without following the symlink, as the scan decides a nested project (04 S4). Whether a
-/// symlink's target exists must not change which config is found, or the exit status would
-/// reveal paths outside the root.
+/// A directory holds one when its entry named `supdoc.config.toml` is a regular file or a
+/// symlink, decided with `symlink_metadata` so the link is never followed to decide. Any other
+/// entry, such as a real directory or a FIFO, is skipped, unlike `scan/walk.rs`, which counts
+/// any entry with that name as a nested project. Whether a symlink's target exists must not
+/// change which config is found, or the exit status would reveal paths outside the root.
 ///
 /// A symlink must lead to a file really named `supdoc.config.toml`, the rule `extends` follows
 /// too. It is checked before anything is read, so a hostile checkout can't make supdoc print
