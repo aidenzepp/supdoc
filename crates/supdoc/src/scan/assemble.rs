@@ -73,7 +73,7 @@ impl ScanError {
                                             from a directory you can read"
                 .to_owned(),
             Self::RootIgnoreFileOutsideRoot { file, .. } => format!(
-                "supdoc reads nothing outside the project root. {}",
+                "supdoc won't follow the project's own ignore files out of the root. {}",
                 file.remedy()
             ),
         }
