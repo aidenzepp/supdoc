@@ -404,8 +404,16 @@ fn render_settings_row(
 /// Fails if writing to `out` fails.
 fn render_rows(context: &TextContext, rows: &[ChangeRow], out: &mut dyn Write) -> io::Result<()> {
     let arrow = if context.unicode { "→" } else { "->" };
-    let cells: Vec<[String; 4]> = rows
-        .iter()
+    // Printed by file then position (S8); `changes` in JSON and the lockfile keep `LinkKey` order.
+    let mut ordered: Vec<&ChangeRow> = rows.iter().collect();
+    ordered.sort_by_key(|row| {
+        (
+            &row.key.source,
+            row.locations.first().map(|first| (first.start, first.end)),
+        )
+    });
+    let cells: Vec<[String; 4]> = ordered
+        .into_iter()
         .map(|row| {
             let mut written_at = context.paths.text(&row.key.source);
             if let Some(first) = row.locations.first() {
@@ -834,6 +842,27 @@ mod tests {
              remove  docs/old.md      ->  src/lib.rs#add  obsolete\n",
         );
         assert_eq!(run.stderr, format!("{PREVIEW_NOTE}\n"));
+    }
+
+    #[test]
+    fn update_text_rows_follow_the_document_not_link_key_order() {
+        let project = Project::new();
+        project.write("src/a.rs", "pub fn add() {}\n");
+        project.write("src/b.rs", "pub fn sub() {}\n");
+        project.write(
+            "docs/g.md",
+            "# Notes\n\n[b](../src/b.rs#sub)\n\n[a](../src/a.rs#add)\n",
+        );
+
+        let run = project.update(&["update"]);
+
+        assert_eq!(
+            run.stdout,
+            "record  docs/g.md:3      ->  src/b.rs#sub    new\n\
+             record  docs/g.md:5      ->  src/a.rs#add    new\n\
+             record  docs/guide.md:3  ->  src/lib.rs#add  new\n",
+            "rows should list line 3 before line 5, though `src/a.rs` sorts first",
+        );
     }
 
     #[test]
