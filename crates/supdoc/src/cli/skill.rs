@@ -17,7 +17,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::config::confine::real_location;
-use crate::config::discover_config;
+use crate::config::{ConfigError, discover_config};
 use crate::finding::{Finding, Severity};
 use crate::lock::error::shell_quote;
 use crate::lock::io::write_atomically;
@@ -61,9 +61,11 @@ const INSTALLED_NOTE: &str = "Installed the supdoc skill.";
 ///
 /// # Errors
 ///
-/// Returns the config error (78) when the config entry found while looking for the project root
-/// is a symlink that does not lead to a `supdoc.config.toml`, before anything is written or
-/// previewed, `cli-skill-no-home` when `--global` is given and `HOME` is not set,
+/// Returns the config error (78) when `--config` names a missing path, a dangling symlink or a
+/// path through a file, the config read error (74) when it names a directory or its metadata
+/// cannot be read, and the config error (78) when the config entry found while looking for the
+/// project root is a symlink that does not lead to a `supdoc.config.toml`, all before anything is
+/// written or previewed, `cli-skill-no-home` when `--global` is given and `HOME` is not set,
 /// `cli-skill-outside-root` when a project copy would be written through a symlink out of the
 /// project, before anything is written or previewed, `cli-skill-write` when a copy cannot be
 /// written, and `cli-skill-output` when the report cannot be written.
@@ -156,11 +158,15 @@ fn destinations(
 ///
 /// # Errors
 ///
-/// Returns the config error (78) when discovery stops at a symlinked `supdoc.config.toml` that
-/// does not lead to a file of that name.
+/// Returns the config error (78) when `--config` names a path that does not exist, a symlink that
+/// leads nowhere, or a path through a file, and the config read error (74) when it names a
+/// directory or its metadata cannot be read. Discovery returns the config error (78) when it
+/// stops at a symlinked `supdoc.config.toml` that does not lead to a file of that name.
 fn project_root(context: &Context, output: &mut Output) -> Result<AbsolutePath, CliError> {
     if let Some(file) = &context.global.config {
         let file = absolute(&context.cwd, file);
+        check_config_exists(&file)
+            .map_err(|error| config_failure(&error, context, output, "skill install"))?;
         return Ok(file.parent().unwrap_or(file));
     }
     let found = discover_config(&context.cwd)
@@ -168,6 +174,38 @@ fn project_root(context: &Context, output: &mut Output) -> Result<AbsolutePath, 
     Ok(found
         .and_then(|file| file.parent())
         .unwrap_or_else(|| context.cwd.clone()))
+}
+
+/// Refuses a `--config` that is not an existing file, from its metadata alone: the file is never
+/// opened, read or named-checked, since only its location decides the root.
+///
+/// Effect: reads the file's metadata, following symlinks.
+///
+/// # Errors
+///
+/// [`ConfigError::NotFound`] when the path is missing, a dangling symlink, or beneath a file,
+/// and [`ConfigError::Read`] for a directory or any other metadata failure.
+fn check_config_exists(file: &AbsolutePath) -> Result<(), ConfigError> {
+    let read_failure = |error| ConfigError::Read {
+        path: file.clone(),
+        error,
+    };
+    match fs::metadata(file.as_path()) {
+        Ok(metadata) if metadata.is_dir() => Err(read_failure(io::Error::new(
+            io::ErrorKind::IsADirectory,
+            "is a directory",
+        ))),
+        Ok(_) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Err(ConfigError::NotFound { path: file.clone() })
+        }
+        Err(error) => Err(read_failure(error)),
+    }
 }
 
 /// `relative` joined onto `base`.

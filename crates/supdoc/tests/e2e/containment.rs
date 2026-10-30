@@ -596,6 +596,144 @@ fn skill_install_refuses_an_agents_directory_symlinked_out_of_the_root() {
     );
 }
 
+/// Asserts that `supdoc skill install <args>` run in `services/web` refused with `code` and
+/// `exit`, and left no skill copy under the project or the directory `-c` pointed at.
+fn assert_skill_install_refused(project: &Project, args: &[&str], code: &str, exit: i32) {
+    let run = project.supdoc_in("services/web", args);
+
+    let _ = run.assert_exit(exit);
+    assert!(
+        run.stderr.contains(code),
+        "`supdoc {}` should fail with {code}\nstdout:\n{}\nstderr:\n{}",
+        run.args,
+        run.stdout,
+        run.stderr
+    );
+    for created in [".agents", ".claude"] {
+        assert!(
+            !project.path("services/web").join(created).exists() && !project.path(created).exists(),
+            "a refused `supdoc {}` should create no {created}",
+            run.args
+        );
+    }
+}
+
+#[test]
+fn skill_install_refuses_a_config_that_does_not_exist() {
+    let project = web_project();
+    fs::create_dir(project.path("elsewhere")).expect("the directory should be creatable");
+
+    for args in [
+        &[
+            "skill",
+            "install",
+            "-c",
+            "../../elsewhere/supdoc.config.toml",
+        ][..],
+        &[
+            "skill",
+            "install",
+            "--yes",
+            "-c",
+            "../../elsewhere/supdoc.config.toml",
+        ],
+    ] {
+        assert_skill_install_refused(&project, args, "config-not-found", 78);
+    }
+    assert!(
+        !project.path("elsewhere/.agents").exists(),
+        "nothing should be created beside the missing config"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn skill_install_refuses_a_config_symlink_that_dangles() {
+    let project = web_project();
+    fs::create_dir(project.path("elsewhere")).expect("the directory should be creatable");
+    std::os::unix::fs::symlink("gone.toml", project.path("elsewhere/link.toml"))
+        .expect("the symlink should be creatable");
+
+    assert_skill_install_refused(
+        &project,
+        &[
+            "skill",
+            "install",
+            "--yes",
+            "-c",
+            "../../elsewhere/link.toml",
+        ],
+        "config-not-found",
+        78,
+    );
+    assert!(
+        !project.path("elsewhere/.agents").exists(),
+        "nothing should be created beside the dangling symlink"
+    );
+}
+
+#[test]
+fn skill_install_refuses_a_config_beneath_a_file() {
+    let project = web_project();
+
+    assert_skill_install_refused(
+        &project,
+        &[
+            "skill",
+            "install",
+            "--yes",
+            "-c",
+            "../../settings.py/supdoc.config.toml",
+        ],
+        "config-not-found",
+        78,
+    );
+}
+
+#[test]
+fn skill_install_refuses_a_config_that_is_a_directory() {
+    let project = web_project();
+    fs::create_dir(project.path("elsewhere")).expect("the directory should be creatable");
+
+    assert_skill_install_refused(
+        &project,
+        &["skill", "install", "--yes", "-c", "../../elsewhere"],
+        "config-read",
+        74,
+    );
+    assert!(
+        !project.path("elsewhere/.agents").exists(),
+        "nothing should be created inside the directory"
+    );
+}
+
+#[test]
+fn skill_install_accepts_an_existing_file_of_any_name_as_the_config() {
+    let project = web_project();
+    fs::create_dir(project.path("elsewhere")).expect("the directory should be creatable");
+    fs::write(project.path("elsewhere/anything.txt"), "not toml {{")
+        .expect("the file should be writable");
+
+    let run = project.supdoc_in(
+        "services/web",
+        &[
+            "skill",
+            "install",
+            "--yes",
+            "-c",
+            "../../elsewhere/anything.txt",
+        ],
+    );
+
+    let _ = run.assert_exit(0);
+    assert!(
+        project
+            .path("elsewhere/.agents/skills/supdoc/SKILL.md")
+            .exists(),
+        "the skill should be installed beside the named file"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn a_named_path_beside_a_gitignore_symlinked_out_of_the_root_is_not_quoted() {
