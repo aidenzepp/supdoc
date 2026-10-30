@@ -326,14 +326,15 @@ fn a_found_config_symlinked_to_another_config_file_still_loads() {
     assert!(run.stdout.contains("docs/guide.md"), "{}", run.stdout);
 }
 
+/// Writes `extends` into the web project's config, points `services/web/x/supdoc.config.toml` at
+/// an outside file, an outside directory and nothing in turn, and fails unless every format
+/// refuses all three alike as `config-extends-not-config`.
 #[cfg(unix)]
-#[test]
-fn an_extends_symlinked_out_of_the_root_is_refused_alike_whatever_its_target_is() {
-    let project = web_project();
+fn assert_extends_link_refused_alike(project: &Project, extends: &str) {
     fs::create_dir(project.path("outside-dir")).expect("the outside directory should be creatable");
     fs::write(
         project.path("services/web/supdoc.config.toml"),
-        "extends = \"x/supdoc.config.toml\"\n",
+        format!("extends = \"{extends}\"\n"),
     )
     .expect("the config should be writable");
     fs::create_dir(project.path("services/web/x")).expect("the link directory should be creatable");
@@ -360,7 +361,7 @@ fn an_extends_symlinked_out_of_the_root_is_refused_alike_whatever_its_target_is(
         assert_no_secret(file_run);
         assert!(
             format!("{}{}", file_run.stdout, file_run.stderr).contains("config-extends-not-config"),
-            "`supdoc {}` should refuse the extends\nstdout:\n{}\nstderr:\n{}",
+            "`supdoc {}` with `extends = \"{extends}\"` should refuse it\nstdout:\n{}\nstderr:\n{}",
             file_run.args,
             file_run.stdout,
             file_run.stderr
@@ -369,12 +370,32 @@ fn an_extends_symlinked_out_of_the_root_is_refused_alike_whatever_its_target_is(
             assert_eq!(
                 (&other.code, &other.stdout, &other.stderr),
                 (&file_run.code, &file_run.stdout, &file_run.stderr),
-                "`supdoc {}` with `extends` linked to {target} must match the link to `.env`: \
-                 the result must not reveal what the link's target is",
+                "`supdoc {}` with `extends = \"{extends}\"` linked to {target} must match the \
+                 link to `.env`: the result must not reveal what the link's target is",
                 file_run.args
             );
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn an_extends_symlinked_out_of_the_root_is_refused_alike_whatever_its_target_is() {
+    assert_extends_link_refused_alike(&web_project(), "x/supdoc.config.toml");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_extends_through_an_outside_alias_of_the_root_is_refused_alike_whatever_its_target_is() {
+    let project = web_project();
+    // A link outside the root that leads back into it spells an in-root path from outside.
+    std::os::unix::fs::symlink(
+        project.path("services/web"),
+        project.path("services/alias-to-web"),
+    )
+    .expect("the symlink should be creatable");
+
+    assert_extends_link_refused_alike(&project, "../alias-to-web/x/supdoc.config.toml");
 }
 
 #[cfg(unix)]

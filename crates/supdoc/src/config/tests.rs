@@ -376,7 +376,7 @@ fn malformed_toml_is_parse_error_without_help() {
 
 #[test]
 fn extends_missing_names_file_value_and_resolved_path() {
-    let text = "extends = \"../../shared/supdoc.config.toml\"\n";
+    let text = "extends = \"shared/supdoc.config.toml\"\n";
     let dir = tree(&[("apps/web/supdoc.config.toml", text)]);
     let error = load_error(&dir, "apps/web/supdoc.config.toml");
 
@@ -391,22 +391,19 @@ fn extends_missing_names_file_value_and_resolved_path() {
         panic!("expected extends-missing, got {error:?}");
     };
     assert_eq!(file, &at(&dir, "apps/web/supdoc.config.toml"));
-    assert_eq!(
-        extends.as_path(),
-        Path::new("../../shared/supdoc.config.toml")
-    );
-    assert_eq!(resolved, &at(&dir, "shared/supdoc.config.toml"));
+    assert_eq!(extends.as_path(), Path::new("shared/supdoc.config.toml"));
+    assert_eq!(resolved, &at(&dir, "apps/web/shared/supdoc.config.toml"));
     assert_eq!(
         text.get(span.clone()),
-        Some("\"../../shared/supdoc.config.toml\"")
+        Some("\"shared/supdoc.config.toml\"")
     );
 }
 
 #[test]
 fn extends_directory_suggests_config_inside_it() {
     let dir = tree(&[
-        ("supdoc.config.toml", ""),
-        ("apps/web/supdoc.config.toml", "extends = \"../..\"\n"),
+        ("apps/web/base/supdoc.config.toml", ""),
+        ("apps/web/supdoc.config.toml", "extends = \"base/x/..\"\n"),
     ]);
     let error = load_error(&dir, "apps/web/supdoc.config.toml");
 
@@ -416,11 +413,11 @@ fn extends_directory_suggests_config_inside_it() {
     };
     assert_eq!(
         suggestion.as_ref().map(RelativePath::as_path),
-        Some(Path::new("../../supdoc.config.toml")),
+        Some(Path::new("base/x/../supdoc.config.toml")),
     );
     assert_eq!(
         error.help().as_deref(),
-        Some("Use `extends = \"../../supdoc.config.toml\"`"),
+        Some("Use `extends = \"base/x/../supdoc.config.toml\"`"),
     );
 }
 
@@ -861,7 +858,130 @@ fn extends_climbing_out_of_the_root_ignores_whether_outside_entries_are_symlinks
         refusal_shown(&absent, "absent"),
         "a symlink outside the root must not change the error, or it reveals what exists there"
     );
-    assert_eq!(absent.code(), "config-extends-missing", "got {absent:?}");
+    assert_eq!(absent.code(), "config-extends-not-config", "got {absent:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn extends_beside_a_sub_project_is_refused_alike_whatever_the_target_is() {
+    let dir = tree(&[("home/.env", "DB_PASSWORD=hunter2")]);
+    fs::create_dir(dir.path().join("home/secrets"))
+        .expect("the fixture directory should be creatable");
+    // `mono/sub` is the project. `mono/evil` belongs to the checkout but lies outside that root.
+    let refusal = |mono: &str, target: &str| {
+        let mono_dir = dir.path().join(mono);
+        fs::create_dir_all(mono_dir.join("sub")).expect("the fixture project should be creatable");
+        fs::create_dir_all(mono_dir.join("evil"))
+            .expect("the fixture directory should be creatable");
+        fs::write(
+            mono_dir.join("sub/supdoc.config.toml"),
+            "extends = \"../evil/supdoc.config.toml\"\n",
+        )
+        .expect("the fixture config should be writable");
+        std::os::unix::fs::symlink(
+            dir.path().join("home").join(target),
+            mono_dir.join("evil/supdoc.config.toml"),
+        )
+        .expect("the symlink should be creatable");
+        let error = load_error(&dir, &format!("{mono}/sub/supdoc.config.toml"));
+        refusal_shown(&error, mono)
+    };
+
+    let to_file = refusal("mono-to-file", ".env");
+
+    assert_eq!(to_file.0, "config-extends-not-config", "got {to_file:?}");
+    assert_eq!(
+        refusal("mono-to-nothing", "absent.env"),
+        to_file,
+        "a dangling link"
+    );
+    assert_eq!(
+        refusal("mono-to-directory", "secrets"),
+        to_file,
+        "a link to a directory"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn extends_naming_a_directory_suggests_nothing_through_a_symlinked_config() {
+    let dir = tree(&[("home/.env", "DB_PASSWORD=hunter2")]);
+    fs::create_dir(dir.path().join("home/secrets"))
+        .expect("the fixture directory should be creatable");
+    let refusal = |project: &str, extends: &str, link: &str, target: &str| {
+        let project_dir = dir.path().join(project);
+        fs::create_dir_all(project_dir.join("sub/x"))
+            .expect("the fixture project should be creatable");
+        fs::write(
+            project_dir.join("supdoc.config.toml"),
+            format!("extends = \"{extends}\"\n"),
+        )
+        .expect("the fixture config should be writable");
+        let link = project_dir.join(link);
+        fs::create_dir_all(link.parent().expect("the link should have a parent"))
+            .expect("the link's directory should be creatable");
+        std::os::unix::fs::symlink(dir.path().join("home").join(target), &link)
+            .expect("the symlink should be creatable");
+        let error = load_error(&dir, &format!("{project}/supdoc.config.toml"));
+        refusal_shown(&error, project)
+    };
+    // A value ending in `..`, and a real directory named like the config, each holding a link.
+    let layouts = [
+        ("dots", "sub/x/..", "sub/supdoc.config.toml"),
+        (
+            "named",
+            "d/supdoc.config.toml",
+            "d/supdoc.config.toml/supdoc.config.toml",
+        ),
+    ];
+
+    for (layout, extends, link) in layouts {
+        let to_file = refusal(&format!("{layout}-to-file"), extends, link, ".env");
+
+        assert_eq!(to_file.0, "config-extends-directory", "got {to_file:?}");
+        assert_eq!(
+            to_file.2.as_deref(),
+            Some("Point `extends` at a supdoc.config.toml file, not a directory"),
+            "`extends = \"{extends}\"` must not suggest a config that is a link out of the root"
+        );
+        assert_eq!(
+            refusal(&format!("{layout}-to-nothing"), extends, link, "absent.env"),
+            to_file,
+            "`extends = \"{extends}\"` with a dangling link"
+        );
+        assert_eq!(
+            refusal(&format!("{layout}-to-directory"), extends, link, "secrets"),
+            to_file,
+            "`extends = \"{extends}\"` with a link to a directory"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn extends_climbing_into_an_unsearchable_directory_looks_like_a_missing_one() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let extends = "extends = \"../outside/x/supdoc.config.toml\"\n";
+    let dir = tree(&[
+        ("locked/project/supdoc.config.toml", extends),
+        ("absent/project/supdoc.config.toml", extends),
+    ]);
+    let outside = dir.path().join("locked/outside");
+    fs::create_dir(&outside).expect("the fixture directory should be creatable");
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o000))
+        .expect("the fixture directory should be lockable");
+
+    let locked = load_error(&dir, "locked/project/supdoc.config.toml");
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o755))
+        .expect("the fixture directory should be unlockable");
+    let absent = load_error(&dir, "absent/project/supdoc.config.toml");
+
+    assert_eq!(
+        refusal_shown(&locked, "locked"),
+        refusal_shown(&absent, "absent"),
+        "an unsearchable directory outside the root must look like a missing one"
+    );
 }
 
 #[cfg(unix)]
