@@ -813,7 +813,7 @@ fn unread_dir_help(cause: UnreadCause) -> String {
                                with `chmod u+rx` on it"
             .to_owned(),
         UnreadCause::IgnoreFileOutsideRoot(file) => format!(
-            "supdoc reads nothing outside the project root. {}",
+            "supdoc won't follow the project's own ignore files out of the root. {}",
             file.remedy()
         ),
     }
@@ -1759,8 +1759,8 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
         );
         assert!(
             error.help().starts_with(
-                "supdoc reads nothing outside the project root. Replace the symlink with a \
-                 regular file holding its rules"
+                "supdoc won't follow the project's own ignore files out of the root. Replace the \
+                 symlink with a regular file holding its rules"
             ) && !error.help().contains("chmod"),
             "the help should fix the symlink, not permissions: {}",
             error.help()
@@ -1787,6 +1787,13 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
             "the same refusal and exit status as `check` and `update`"
         );
         assert!(!error.help().contains("chmod"), "{}", error.help());
+        assert!(
+            error
+                .help()
+                .starts_with("supdoc won't follow the project's own ignore files out of the root."),
+            "the help should state the ignore-file rule, not a blanket one: {}",
+            error.help()
+        );
         assert_eq!(project.files(), before, "nothing is written");
     }
 

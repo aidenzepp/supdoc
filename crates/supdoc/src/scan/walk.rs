@@ -125,8 +125,8 @@ impl UnreadDir {
             UnreadCause::IgnoreFileOutsideRoot(file) => {
                 Finding::new("scan-ignore-file-outside-root", Severity::Warning, skipped).with_help(
                     format!(
-                        "Links in that directory weren't checked, since supdoc reads nothing \
-                         outside the root. {}. Or add the directory to `exclude` in \
+                        "Links in that directory weren't checked, since supdoc won't follow the \
+                         project's own ignore files out of the root. {}. Or add the directory to `exclude` in \
                          `{CONFIG_FILE_NAME}`",
                         file.remedy()
                     ),
@@ -1172,6 +1172,16 @@ mod tests {
         );
         assert_eq!(codes(&walk), ["scan-ignore-file-outside-root"]);
         assert!(!messages(&walk).contains(RULE), "{}", messages(&walk));
+        let help = walk
+            .findings
+            .first()
+            .and_then(|finding| finding.help.as_deref())
+            .unwrap_or_default();
+        assert!(
+            help.contains("won't follow the project's own ignore files out of the root")
+                && !help.contains("reads nothing outside"),
+            "the help should state the ignore-file rule, not a blanket one: {help}"
+        );
     }
 
     #[cfg(unix)]
