@@ -413,3 +413,40 @@ fn a_nested_config_symlinked_out_of_the_root_scans_alike_whether_or_not_its_targ
         "the scan must not reveal whether the nested config's target exists"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn skill_install_refuses_an_agents_directory_symlinked_out_of_the_root() {
+    let project = web_project();
+    fs::create_dir(project.path("elsewhere")).expect("the outside directory should be creatable");
+    std::os::unix::fs::symlink("../../elsewhere", project.path("services/web/.agents"))
+        .expect("the symlink should be creatable");
+    let landing = fs::canonicalize(project.path("elsewhere"))
+        .expect("the outside directory should resolve")
+        .join("skills/supdoc/SKILL.md");
+
+    for args in [&["skill", "install"][..], &["skill", "install", "--yes"]] {
+        let run = project.supdoc_in("services/web", args);
+
+        let _ = run.assert_exit(1);
+        assert!(
+            run.stderr.contains("cli-skill-outside-root")
+                && run.stderr.contains(&landing.display().to_string()),
+            "`supdoc {}` should refuse and name where the skill would land\nstdout:\n{}\nstderr:\n{}",
+            run.args,
+            run.stdout,
+            run.stderr
+        );
+    }
+    let written: Vec<_> = fs::read_dir(project.path("elsewhere"))
+        .expect("the outside directory should be readable")
+        .collect();
+    assert!(
+        written.is_empty(),
+        "nothing should be written outside the root: {written:?}"
+    );
+    assert!(
+        !project.path("services/web/.claude").exists(),
+        "a refusal should write neither copy"
+    );
+}
