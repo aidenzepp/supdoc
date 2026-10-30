@@ -5,6 +5,7 @@
 //! paths against the wrong directory (X4).
 
 use std::fs;
+use std::io::ErrorKind;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -140,8 +141,9 @@ pub(crate) fn absolute(cwd: &AbsolutePath, path: &Path) -> AbsolutePath {
 /// # Errors
 ///
 /// Returns `cli-path-missing` for a path that doesn't exist, `cli-path-outside-project` for one
-/// that isn't inside the project root, and `cli-path-invalid` for one no source path can name.
-/// All exit 2.
+/// that isn't inside the project root, and `cli-path-invalid` for one no source path can name
+/// (all exit 2), and `cli-path-unreadable` (74) for one that can't be looked up for any other
+/// reason, such as a parent directory it has no permission to search.
 pub(crate) fn scope(
     paths: &[PathBuf],
     cwd: &AbsolutePath,
@@ -150,9 +152,7 @@ pub(crate) fn scope(
     let mut sources = Vec::with_capacity(paths.len());
     for typed in paths {
         let path = absolute(cwd, typed);
-        if path.as_path().symlink_metadata().is_err() {
-            return Err(path_missing(typed, cwd));
-        }
+        ensure_exists(&path, typed, cwd)?;
         let Some(inside) = path.strip_prefix(root) else {
             return Err(path_outside(typed, root));
         };
@@ -248,6 +248,49 @@ pub(crate) fn lock_failure(error: &LockError, root: &AbsolutePath, cwd: &Absolut
         error.help_from(cwd),
         error.exit_code(),
     )
+}
+
+/// Succeeds when `path`, which the user typed as `typed`, can be looked up.
+///
+/// # Errors
+///
+/// Returns `cli-path-missing` (2) when nothing is there or a parent isn't a directory, and
+/// `cli-path-unreadable` (74) when the lookup failed for any other reason, so a path supdoc
+/// couldn't check is never reported as absent.
+pub(crate) fn ensure_exists(
+    path: &AbsolutePath,
+    typed: &Path,
+    cwd: &AbsolutePath,
+) -> Result<(), CliError> {
+    match path.as_path().symlink_metadata() {
+        Ok(_) => Ok(()),
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+            Err(path_missing(typed, cwd))
+        }
+        Err(error) => Err(path_unreadable(typed, &error)),
+    }
+}
+
+/// The error for a `[PATH]` that couldn't be looked up, with the system's reason.
+///
+/// The help names permissions, not `ls`, because listing the parent fails for the same reason.
+fn path_unreadable(typed: &Path, error: &std::io::Error) -> CliError {
+    CliError::new(
+        "cli-path-unreadable",
+        format!("can't read {}: {}", typed.display(), cause(error)),
+        format!(
+            "Check the permissions on `{}` and on each directory above it",
+            typed.display()
+        ),
+        CliError::IO_EXIT_CODE,
+    )
+}
+
+/// `error`'s reason in lowercase, without the `(os error N)` suffix.
+fn cause(error: &std::io::Error) -> String {
+    let text = error.to_string();
+    let text = text.split(" (os error").next().unwrap_or(&text);
+    text.to_lowercase()
 }
 
 /// The error for a `[PATH]` that doesn't exist (06 error table).

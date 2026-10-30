@@ -981,6 +981,14 @@ mod helps {
         case("cli-usage", |_| {}, &["check", "--no-such-flag"]),
         case("cli-path-missing", |_| {}, &["check", "docs/nope.md"]),
         case("cli-path-missing", |_| {}, &["resolve", "nope.rs"]),
+        case(
+            "cli-path-unreadable",
+            |p| {
+                p.write("docs/private/a.md", "# A\n");
+                chmod(p, "docs/private", 0o000);
+            },
+            &["check", "docs/private/a.md"],
+        ),
         case("cli-path-outside-project", |_| {}, &["check", "/"]),
         case("cli-path-invalid", |_| {}, &["resolve", "src"]),
         case("cli-target-invalid", |_| {}, &["list", "src/lib.rs#a..b"]),

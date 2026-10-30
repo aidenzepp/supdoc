@@ -25,7 +25,7 @@ use crate::read::cartridge::{Languages, SourceFile, Symbol};
 use crate::read::error::{ReadError, ResolveError};
 
 use super::args::ResolveArgs;
-use super::project::{absolute, invocation, load_config, path_missing};
+use super::project::{absolute, ensure_exists, invocation, load_config};
 use super::{CliError, Context, Outcome};
 
 /// Runs `supdoc resolve`: prints every symbol in `FILE`, or the one `SYMBOL` names.
@@ -35,7 +35,8 @@ use super::{CliError, Context, Outcome};
 /// # Errors
 ///
 /// Returns the config's own error (78, or 74 when unreadable), `cli-path-missing` for a missing
-/// `FILE` and `link-unknown-namespace` for an undefined namespace (both 2), the file's own read
+/// `FILE` and `link-unknown-namespace` for an undefined namespace (both 2), `cli-path-unreadable`
+/// (74) for a `FILE` that can't be looked up, the file's own read
 /// error (1, or 74 for I/O and 70 for a supdoc bug), `resolve-not-found` or `resolve-ambiguous`
 /// for a `SYMBOL` that names no single symbol (1), and `cli-resolve-output` when the report
 /// cannot be written (74).
@@ -120,8 +121,8 @@ pub fn schema() -> Result<schemars::Schema, CliError> {
 /// # Errors
 ///
 /// Returns `link-unknown-namespace` for a namespace the config doesn't define,
-/// `cli-path-missing` for a file that doesn't exist, and `cli-path-invalid` for a directory. All
-/// exit 2.
+/// `cli-path-missing` for a file that doesn't exist, and `cli-path-invalid` for a directory (all
+/// exit 2), and `cli-path-unreadable` (74) for one that can't be looked up for any other reason.
 fn locate(config: &Config, cwd: &AbsolutePath, typed: &Path) -> Result<AbsolutePath, CliError> {
     let namespaced = typed.to_str().and_then(|text| {
         let (name, rest) = text.split_once(':')?;
@@ -138,9 +139,7 @@ fn locate(config: &Config, cwd: &AbsolutePath, typed: &Path) -> Result<AbsoluteP
         }
         None => absolute(cwd, typed),
     };
-    if found.as_path().symlink_metadata().is_err() {
-        return Err(path_missing(typed, cwd));
-    }
+    ensure_exists(&found, typed, cwd)?;
     if found.as_path().is_dir() {
         return Err(directory(typed));
     }
