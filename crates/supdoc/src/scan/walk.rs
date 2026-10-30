@@ -1,11 +1,10 @@
 //! Walking the project tree to find the files a scan reads links from (04 S1-S6, S10).
 
-use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::path::Path;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::{DirEntry, Match, WalkBuilder};
@@ -156,18 +155,17 @@ pub fn walk(config: &Config, languages: &Languages, scope: &Scope) -> Walk {
 /// A walker over the root that applies every directory-level rule, in sorted order. Each
 /// directory it refuses for an ignore file that leads outside the root goes into `refused`.
 ///
-/// The walker's own `.git/info/exclude` reading is off: it follows a `.git` file's `gitdir:` line
-/// to a git directory anywhere, with no symlink involved, so [`GitExcludes`] applies them instead.
+/// Git's exclude files are the walker's own: it follows a `.git` file's `gitdir:` line and the
+/// shared `commondir` as git does, wherever they lead. Neither can come from a checkout's
+/// content, since git refuses to stage or check out any `.git` path (04 S15).
 fn walker(config: &Config, scope: &Scope, refused: &Arc<Mutex<Vec<UnreadDir>>>) -> ignore::Walk {
     let root = config.root();
     let config_for_filter = config.clone();
     let scope_for_filter = scope.clone();
-    let excludes = GitExcludes::new(config);
     let refused = Arc::clone(refused);
     WalkBuilder::new(root.as_path())
         .hidden(false)
         .require_git(false)
-        .git_exclude(false)
         .follow_links(false)
         .sort_by_file_path(Path::cmp)
         .filter_entry(move |entry| {
@@ -175,13 +173,7 @@ fn walker(config: &Config, scope: &Scope, refused: &Arc<Mutex<Vec<UnreadDir>>>) 
                 return false;
             }
             let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
-            if entry.depth() == 0 {
-                return true;
-            }
-            if excludes.skips(entry.path(), is_dir) {
-                return false;
-            }
-            if !is_dir {
+            if entry.depth() == 0 || !is_dir {
                 return true;
             }
             let Some(dir) = unread_for_outside_ignore_file(&config_for_filter, entry.path()) else {
@@ -196,69 +188,10 @@ fn walker(config: &Config, scope: &Scope, refused: &Arc<Mutex<Vec<UnreadDir>>>) 
         .build()
 }
 
-/// The `.git/info/exclude` files the walk honors (04 S1), each read at most once.
-///
-/// Only a real `.git` directory inside the root counts, never a `.git` file (a worktree's or a
-/// submodule's), whose `gitdir:` line can name a directory anywhere (04 S15), so a worktree's
-/// shared exclude file no longer applies. As in the walker, the nearest exclude file with a rule
-/// for a path decides. The walker applies `.ignore` and `.gitignore` rules first, but a `!rule`
-/// in them no longer overrides an exclude rule.
-struct GitExcludes {
-    /// The project, for its root and containment check.
-    config: Config,
-    /// Each directory met so far, with its exclude file's rules if it has any.
-    by_dir: Mutex<HashMap<PathBuf, Option<Arc<Gitignore>>>>,
-}
-
-impl GitExcludes {
-    /// Exclude rules for `config`'s project, none read yet.
-    fn new(config: &Config) -> Self {
-        Self {
-            config: config.clone(),
-            by_dir: Mutex::new(HashMap::new()),
-        }
-    }
-
-    /// Whether an exclude file in `path`'s directory or one above it, up to the root, skips it.
-    ///
-    /// Effect: reads the exclude files of directories not met before.
-    fn skips(&self, path: &Path, is_dir: bool) -> bool {
-        let root = self.config.root().as_path();
-        for dir in path.ancestors().skip(1) {
-            if !dir.starts_with(root) {
-                break;
-            }
-            let Some(exclude) = self.exclude_in(dir) else {
-                continue;
-            };
-            match exclude.matched(path, is_dir) {
-                Match::Ignore(_) => return true,
-                Match::Whitelist(_) => return false,
-                Match::None => {}
-            }
-        }
-        false
-    }
-
-    /// `dir`'s exclude rules, read on first use.
-    fn exclude_in(&self, dir: &Path) -> Option<Arc<Gitignore>> {
-        if let Some(known) = self.by_dir().get(dir) {
-            return known.clone();
-        }
-        let exclude = git_exclude(&self.config, dir).map(Arc::new);
-        let _previous = self.by_dir().insert(dir.to_path_buf(), exclude.clone());
-        exclude
-    }
-
-    /// The directories met so far. A panic elsewhere leaves the map whole, so poisoning is
-    /// ignored.
-    fn by_dir(&self) -> MutexGuard<'_, HashMap<PathBuf, Option<Arc<Gitignore>>>> {
-        self.by_dir.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-}
-
 /// The rules of `dir/.git/info/exclude` when `.git` is a real directory, not a symlink or a
-/// `.git` file, and the exclude file lies inside the root ([`matcher`]).
+/// `.git` file, and the exclude file lies inside the root ([`matcher`]): the only exclude file
+/// whose rules may be quoted. The walker also applies the exclude file a `.git` file leads to,
+/// which may lie anywhere, so a path it skips is blamed on "an ignore file" instead.
 ///
 /// Effect: reads file metadata in `dir` and the exclude file.
 fn git_exclude(config: &Config, dir: &Path) -> Option<Gitignore> {
@@ -432,7 +365,8 @@ fn explicit_path_warning(
     if is_source_file && !config.scans(&path) {
         return Some(excluded(listed, None));
     }
-    // Skipped by something the matchers above can't see, like the global git excludes file.
+    // Skipped by something the matchers above can't see, like the global git excludes file or
+    // the exclude file a `.git` file leads to.
     (is_source_file && !walked).then(|| ignored(listed, "an ignore file"))
 }
 
@@ -1021,7 +955,6 @@ mod tests {
     }
 
     /// An ignore-file line that matches `out.rs`, distinct from any path the tests name.
-    #[cfg(unix)]
     const RULE: &str = "ou*.rs";
 
     /// A directory outside the project root holding `ignore` (a file of [`RULE`]) and
@@ -1048,7 +981,6 @@ mod tests {
     }
 
     /// Every finding message of `walk`, one per line.
-    #[cfg(unix)]
     fn messages(walk: &Walk) -> String {
         walk.findings
             .iter()
@@ -1209,7 +1141,7 @@ mod tests {
     }
 
     #[test]
-    fn git_file_pointing_out_of_the_root_does_not_bring_its_exclude_file() {
+    fn git_file_pointing_out_of_the_root_brings_its_exclude_file_unquoted() {
         let outside = outside_git_dir();
         let project = Project::new();
         project.write(".git", &format!("gitdir: {}\n", outside.path().display()));
@@ -1219,15 +1151,25 @@ mod tests {
         );
         project.write("out.rs", "");
         project.write("vendor/out.rs", "");
+        project.write("vendor/kept.rs", "");
 
-        let walk = project.walk(&Scope::All);
+        let walk = project.walk(&paths(&["out.rs", "vendor/out.rs", "vendor/kept.rs"]));
 
         assert_eq!(
             project.sources(&Scope::All),
-            ["out.rs", "vendor/out.rs"],
-            "an exclude file outside the root must not hide sources"
+            ["vendor/kept.rs"],
+            "git follows a `.git` file to its exclude file, and so does the walk"
         );
-        assert!(walk.findings.is_empty(), "{:?}", walk.findings);
+        assert!(walk.unread_dirs.is_empty(), "{:?}", walk.unread_dirs);
+        assert_eq!(
+            codes(&walk),
+            ["scan-explicit-path-ignored", "scan-explicit-path-ignored"]
+        );
+        assert!(
+            !messages(&walk).contains(RULE),
+            "a line from outside the root was printed:\n{}",
+            messages(&walk)
+        );
     }
 
     #[cfg(unix)]

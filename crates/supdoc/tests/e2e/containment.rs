@@ -598,3 +598,130 @@ fn a_root_gitignore_symlinked_out_of_the_root_refuses_the_scan_and_keeps_the_loc
         );
     }
 }
+
+/// Writes `text` to `relative` in `project`, creating its directories.
+fn write(project: &Project, relative: &str, text: &str) {
+    let path = project.path(relative);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("the fixture directory should be creatable");
+    }
+    fs::write(path, text).expect("the fixture file should be writable");
+}
+
+/// A doc with one link, for a file the tests hide with an ignore rule.
+const SCRATCH: &str = "The [`handler`](../src/lib.rs#handler) function.\n";
+
+#[test]
+fn a_gitignore_whitelist_overrides_a_git_exclude_rule_and_keeps_the_lock_entry() {
+    let project = web_project();
+    write(&project, "services/web/docs/keep.md", SCRATCH);
+    let _ = project
+        .supdoc_in("services/web", &["update", "--yes"])
+        .assert_exit(0);
+    let kept = "source = \"docs/keep.md\"";
+    assert!(project.read("services/web/supdoc.lock").contains(kept));
+    // As in git, the `.gitignore` whitelist outranks the exclude file's rule.
+    write(&project, "services/web/.git/info/exclude", "docs/*.md\n");
+    write(&project, "services/web/.gitignore", "!docs/keep.md\n");
+
+    let _ = project
+        .supdoc_in("services/web", &["update", "--yes"])
+        .assert_exit(0);
+
+    let locked = project.read("services/web/supdoc.lock");
+    assert!(
+        locked.contains(kept),
+        "keep.md is walked, so its entry stays:\n{locked}"
+    );
+}
+
+#[test]
+fn a_git_exclude_whitelist_overrides_the_global_excludes_file() {
+    let project = web_project();
+    let home = tempfile::tempdir().expect("a home directory should be creatable");
+    fs::create_dir_all(home.path().join(".config/git"))
+        .expect("the git config directory should be creatable");
+    fs::write(home.path().join(".config/git/ignore"), "docs/*.md\n")
+        .expect("the global excludes file should be writable");
+    write(&project, "services/web/docs/keep.md", SCRATCH);
+    write(
+        &project,
+        "services/web/.git/info/exclude",
+        "!docs/keep.md\n",
+    );
+
+    let run = project.supdoc_in_with(
+        "services/web",
+        &["--json", "list"],
+        &[("HOME", home.path())],
+    );
+
+    let sources: Vec<_> = array_at(&run.json(), "/data/links")
+        .iter()
+        .map(|link| at(link, "/source").as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert!(
+        sources.contains(&"docs/keep.md".to_owned()),
+        "the exclude whitelist outranks the global rule, as in git\n{}\n{}",
+        run.stdout,
+        run.stderr
+    );
+}
+
+#[test]
+fn a_worktrees_shared_exclude_file_applies_and_is_never_quoted() {
+    let project = web_project();
+    let _ = project
+        .supdoc_in("services/web", &["update", "--yes"])
+        .assert_exit(0);
+    // `git worktree add` leaves a `.git` file naming the worktree's git directory, whose
+    // `commondir` leads to the main repository's, outside the root.
+    write(
+        &project,
+        "services/web/.git",
+        &format!(
+            "gitdir: {}\n",
+            project.path("main.git/worktrees/web").display()
+        ),
+    );
+    write(&project, "main.git/worktrees/web/commondir", "../..\n");
+    write(&project, "main.git/info/exclude", "scr*.md\n");
+    write(&project, "services/web/docs/scratch.md", SCRATCH);
+
+    let check = project.supdoc_in("services/web", &["check"]);
+    let named = project.supdoc_in("services/web", &["check", "docs/scratch.md"]);
+
+    assert!(!check.stdout.contains("scratch.md"), "{}", check.stdout);
+    assert!(
+        named.stdout.contains("ignored by an ignore file"),
+        "{}",
+        named.stdout
+    );
+    for run in [&check, &named] {
+        assert!(
+            !run.stdout.contains("scr*.md") && !run.stderr.contains("scr*.md"),
+            "`supdoc {}` printed a line from outside the root\n{}\n{}",
+            run.args,
+            run.stdout,
+            run.stderr
+        );
+    }
+}
+
+#[test]
+fn a_parent_repositorys_exclude_file_applies_to_a_root_in_a_subdirectory() {
+    let project = web_project();
+    let _ = project
+        .supdoc_in("services/web", &["update", "--yes"])
+        .assert_exit(0);
+    write(&project, ".git/info/exclude", "scratch.md\n");
+    write(&project, "services/web/docs/scratch.md", SCRATCH);
+
+    let run = project.supdoc_in("services/web", &["check"]);
+
+    assert!(
+        !run.stdout.contains("scratch.md"),
+        "the parent's exclude rule hides scratch.md\n{}",
+        run.stdout
+    );
+}
