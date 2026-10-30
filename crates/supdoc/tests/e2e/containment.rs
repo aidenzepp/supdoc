@@ -1088,6 +1088,7 @@ fn a_gitignore_above_the_work_tree_top_does_not_apply_but_one_at_the_top_does() 
 #[test]
 fn a_dangling_gitignore_above_the_root_changes_nothing() {
     let project = web_project();
+    fs::create_dir(project.path(".git")).expect("the monorepo's git directory should be creatable");
     std::os::unix::fs::symlink(project.path("gone"), project.path(".gitignore"))
         .expect("the symlink should be creatable");
 
