@@ -185,14 +185,17 @@ fn skill_install_applied_text_matches_golden() {
 #[test]
 fn skill_install_global_preview_text_matches_golden() {
     let project = Project::empty();
-    let home = project.path().join("home");
-    let home = home
+    // Outside the project, so the product prints it the same way wherever the temp dir lives.
+    let home_dir = tempfile::tempdir().expect("a home directory should be created");
+    let home = home_dir
+        .path()
         .to_str()
         .expect("the temp directory path should be UTF-8");
     insta::assert_snapshot!(
         "skill_install_global_preview",
         project
             .run_with(&["skill", "install", "--global"], &[("HOME", home)])
+            .with_home(home_dir.path())
             .transcript()
     );
 }

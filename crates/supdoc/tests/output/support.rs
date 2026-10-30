@@ -150,6 +150,7 @@ impl Project {
             stderr: String::from_utf8(output.stderr).expect("stderr should be UTF-8"),
             code: output.status.code(),
             root: self.path().to_path_buf(),
+            home: None,
         }
     }
 
@@ -177,9 +178,17 @@ pub(crate) struct Run {
     pub(crate) code: Option<i32>,
     /// The project root the run happened in, replaced by `[ROOT]` in transcripts.
     root: PathBuf,
+    /// A home directory outside the project, replaced by `[HOME]` in transcripts.
+    home: Option<PathBuf>,
 }
 
 impl Run {
+    /// This run with `home`, a directory outside the project, spelled `[HOME]` in its transcript.
+    pub(crate) fn with_home(mut self, home: &Path) -> Self {
+        self.home = Some(home.to_path_buf());
+        self
+    }
+
     /// The command, exit code, stdout and stderr as one stable text, with the temporary
     /// project root spelled `[ROOT]` so the transcript is the same on every machine.
     pub(crate) fn transcript(&self) -> String {
@@ -190,20 +199,23 @@ impl Run {
             "$ supdoc {}\nexit: {code}\n--- stdout\n{}--- stderr\n{}",
             self.args, self.stdout, self.stderr
         );
-        redact_root(&text, &self.root)
+        let text = redact_path(&text, &self.root, "[ROOT]");
+        self.home
+            .as_deref()
+            .map_or(text.clone(), |home| redact_path(&text, home, "[HOME]"))
     }
 }
 
-/// `text` with every spelling of `root` replaced by `[ROOT]`: the canonical path first (on
+/// `text` with every spelling of `path` replaced by `token`: the canonical path first (on
 /// macOS the temp directory is reached through the `/private` symlink), then the path as given.
-fn redact_root(text: &str, root: &Path) -> String {
-    let canonical = fs::canonicalize(root).expect("the project root should be canonicalizable");
+fn redact_path(text: &str, path: &Path, token: &str) -> String {
+    let canonical = fs::canonicalize(path).expect("the redacted path should be canonicalizable");
     let mut redacted = text.to_owned();
-    for spelling in [canonical.as_path(), root] {
+    for spelling in [canonical.as_path(), path] {
         let spelling = spelling
             .to_str()
             .expect("the temp directory path should be UTF-8");
-        redacted = redacted.replace(spelling, "[ROOT]");
+        redacted = redacted.replace(spelling, token);
     }
     redacted
 }
