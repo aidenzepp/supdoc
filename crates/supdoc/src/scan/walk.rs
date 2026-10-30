@@ -191,6 +191,18 @@ fn walker(config: &Config, scope: &Scope, rules: &Arc<IgnoreRules>) -> ignore::W
 /// The directories above the root apply only up to the top of its git work tree, the nearest
 /// directory holding a `.git`, the root itself included, as git reads no `.gitignore` above that
 /// top. With the root at the top, or no `.git` in the root or above it, no directory above applies.
+/// The global excludes file's anchored patterns count from that top, or from the root with no
+/// `.git`, whatever directory supdoc runs from.
+///
+/// A `.git` marks the top as git decides ([`holds_git`]): a `.git` file always does, and a `.git`
+/// directory only with git's repository layout, so a missing or dangling `.git`, or a directory
+/// git rejects, is passed over and the search goes on upward.
+///
+/// Known differences from git: rules match case-sensitively whatever `core.ignorecase` says, and
+/// `core.excludesFile` is read only from the user and system git config, never from a repository's
+/// own config or the files it includes. A `.git` directory's `HEAD` isn't read, so one with
+/// `objects` and `refs` but a corrupt `HEAD` still marks the top here, where git searches further
+/// up.
 ///
 /// Inside the root, a `.ignore` or `.gitignore` that is a symlink is not read, whatever it points
 /// to. Above the root, every ignore file is followed, symlinks included, and none is ever quoted.
@@ -278,14 +290,27 @@ impl IgnoreRules {
     /// it, and reads ignore files, git files and git config.
     fn new(root: &AbsolutePath) -> Self {
         let canonical_root = fs::canonicalize(root.as_path()).ok();
-        let above = canonical_root.as_deref().and_then(|canonical| {
-            let top = canonical.ancestors().position(holds_git)?;
-            let parents: Vec<&Path> = canonical.ancestors().take(top + 1).skip(1).collect();
-            parents.into_iter().rev().fold(None, |parent, dir| {
-                Some(Arc::new(Level::above(dir, parent)))
-            })
-        });
-        let (global, _unreadable) = Gitignore::global();
+        let top = canonical_root
+            .as_deref()
+            .and_then(|canonical| canonical.ancestors().position(holds_git));
+        let above = canonical_root
+            .as_deref()
+            .zip(top)
+            .and_then(|(canonical, top)| {
+                let parents: Vec<&Path> = canonical.ancestors().take(top + 1).skip(1).collect();
+                parents.into_iter().rev().fold(None, |parent, dir| {
+                    Some(Arc::new(Level::above(dir, parent)))
+                })
+            });
+        // The global excludes anchor at the top of the git work tree, or at the root with none, so
+        // an anchored pattern means the same wherever supdoc runs from.
+        let anchor = canonical_root
+            .as_deref()
+            .zip(top)
+            .and_then(|(canonical, top)| canonical.ancestors().nth(top))
+            .or(canonical_root.as_deref())
+            .unwrap_or_else(|| root.as_path());
+        let (global, _unreadable) = GitignoreBuilder::new(anchor).build_global();
         Self {
             root: root.as_path().to_path_buf(),
             canonical_root,
@@ -357,7 +382,12 @@ impl IgnoreRules {
             }
             current = level.parent.as_deref();
         }
-        let global = rule(&self.global, path, is_dir, false);
+        let global = rule(
+            &self.global,
+            resolved.as_deref().unwrap_or(path),
+            is_dir,
+            false,
+        );
         ignore.or(gitignore).or(exclude).or(global)
     }
 
@@ -438,12 +468,33 @@ impl Level {
     }
 }
 
-/// Whether `dir` holds a `.git` entry of any kind, a directory, a file or a symlink, and so is
-/// the top of a git work tree.
+/// Whether `dir` is the top of a git work tree, as git decides it: `dir/.git`, followed through
+/// symlinks, is a file (a gitfile, which git either uses or refuses to run past), or a git
+/// directory ([`is_git_dir`]). A missing or dangling `.git`, or a directory git rejects, isn't, and
+/// git searches further up.
 ///
-/// Effect: reads file metadata in `dir`.
+/// Effect: reads file metadata in `dir` and its `.git` directory.
 fn holds_git(dir: &Path) -> bool {
-    fs::symlink_metadata(dir.join(".git")).is_ok()
+    let dot_git = dir.join(".git");
+    match fs::metadata(&dot_git) {
+        Err(_) => false,
+        Ok(metadata) if metadata.is_file() => true,
+        Ok(_) => is_git_dir(&dot_git),
+    }
+}
+
+/// Whether `git_dir` has the layout git accepts as a repository: a `HEAD` that is a file or a
+/// symlink, not a directory, and `objects` and `refs` directories, followed through symlinks.
+/// `HEAD` isn't read, so whether it names a commit, which git also checks, goes unchecked: above
+/// the root it lies outside the project, and supdoc reads no outside file but its config and
+/// ignore inputs.
+///
+/// Effect: reads file metadata in `git_dir`.
+fn is_git_dir(git_dir: &Path) -> bool {
+    fs::symlink_metadata(git_dir.join("HEAD"))
+        .is_ok_and(|metadata| metadata.is_file() || metadata.is_symlink())
+        && fs::metadata(git_dir.join("objects")).is_ok_and(|metadata| metadata.is_dir())
+        && fs::metadata(git_dir.join("refs")).is_ok_and(|metadata| metadata.is_dir())
 }
 
 /// The rules of `file`, which apply beneath `dir`. A missing or unreadable file has none, and a
@@ -459,9 +510,10 @@ fn rules_in(dir: &Path, file: &Path) -> Gitignore {
 /// The rules of `dir`'s git exclude file, and whether they may be quoted.
 ///
 /// The file is `info/exclude` in the git directory `dir/.git` leads to: the directory itself or
-/// where a `.git` symlink points, or for a `.git` file the shared directory ([`common_dir`]) of
-/// the git directory it names. Each is followed wherever it leads, as git follows it: none can
-/// come from a checkout's content, since git refuses to check out any `.git` path (04 S15).
+/// where a `.git` symlink points, when git accepts it as one ([`is_git_dir`]), or for a `.git` file
+/// the shared directory ([`common_dir`]) of the git directory it names. Each is followed wherever
+/// it leads, as git follows it: none can come from a checkout's content, since git refuses to
+/// check out any `.git` path (04 S15).
 ///
 /// Its rules may be quoted only when `.git`, `.git/info` and the exclude file are a real
 /// directory, directory and file, no symlink among them, so the file lies inside `dir`.
@@ -477,8 +529,10 @@ fn git_exclude(dir: &Path) -> (Gitignore, bool) {
             return (Gitignore::empty(), false);
         };
         common
-    } else {
+    } else if is_git_dir(&dot_git) {
         dot_git.clone()
+    } else {
+        return (Gitignore::empty(), false);
     };
     let exclude = git_dir.join("info").join("exclude");
     let quotable = is_real_dir(&dot_git)
@@ -489,14 +543,22 @@ fn git_exclude(dir: &Path) -> (Gitignore, bool) {
 
 /// The shared git directory of the worktree whose `.git` file in `dir` is `dot_git`: its
 /// `gitdir:` line names the worktree's own git directory, whose `commondir` file names the shared
-/// one. Each relative path counts from where git reads it, `dir` and the worktree's git directory.
-/// `None` when either file is missing or malformed, so no exclude file applies, as for the walker.
+/// one. With no `commondir` file, as in a submodule or a `--separate-git-dir` repository, the
+/// named git directory is itself the shared one, as in git. Each relative path counts from where
+/// git reads it, `dir` and the worktree's git directory. `None` when `dot_git` is unreadable or has
+/// no `gitdir: ` line, or a `commondir` file is there but unreadable or empty, so no exclude file
+/// applies.
 ///
 /// Effect: reads `dot_git` and the `commondir` file.
 fn common_dir(dir: &Path, dot_git: &Path) -> Option<PathBuf> {
     let line = first_line(dot_git)?;
     let git_dir = dir.join(line.strip_prefix("gitdir: ")?);
-    let common = first_line(&git_dir.join("commondir"))?;
+    let commondir = git_dir.join("commondir");
+    if fs::symlink_metadata(&commondir).is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+    {
+        return Some(git_dir);
+    }
+    let common = first_line(&commondir)?;
     Some(git_dir.join(common))
 }
 
@@ -867,6 +929,17 @@ mod tests {
 
     fn codes(walk: &Walk) -> Vec<&'static str> {
         walk.findings.iter().map(|finding| finding.code).collect()
+    }
+
+    /// Makes `git_dir` a git directory git accepts as a repository, without running git: a `HEAD`
+    /// naming a branch, and empty `objects` and `refs` directories.
+    fn make_git_dir(git_dir: &Path) {
+        for dir in ["objects", "refs"] {
+            fs::create_dir_all(git_dir.join(dir))
+                .expect("the fixture git directory should be creatable");
+        }
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n")
+            .expect("the fixture git HEAD should be writable");
     }
 
     #[test]
@@ -1320,7 +1393,8 @@ mod tests {
         let outside = outside_dir();
         let project = Project::new();
         project.write("out.rs", "");
-        fs::create_dir_all(project.dir.path().join(".git/info"))
+        make_git_dir(&project.dir.path().join(".git"));
+        fs::create_dir(project.dir.path().join(".git/info"))
             .expect("the fixture git directory should be creatable");
         symlink_in(
             &project,
@@ -1423,11 +1497,12 @@ mod tests {
         assert!(!messages(&walk).contains(RULE), "{}", messages(&walk));
     }
 
-    /// A git directory outside the root whose `info/exclude` holds [`RULE`].
+    /// A git directory outside the root, one git accepts, whose `info/exclude` holds [`RULE`].
     #[cfg(unix)]
     fn outside_exclude() -> TempDir {
         let outside = TempDir::new().expect("a temporary outside directory should be creatable");
-        fs::create_dir_all(outside.path().join("git/info"))
+        make_git_dir(&outside.path().join("git"));
+        fs::create_dir(outside.path().join("git/info"))
             .expect("the outside git directory should be creatable");
         fs::write(outside.path().join("git/info/exclude"), format!("{RULE}\n"))
             .expect("the outside exclude file should be writable");
@@ -1509,6 +1584,74 @@ mod tests {
         );
     }
 
+    /// Asserts that a `.git` file naming `gitdir` brings the exclude file of `.hidden-git`, which
+    /// hides `out.rs`, without quoting its line.
+    fn assert_gitfile_exclude_applies_unquoted(gitdir: &str) {
+        let project = Project::new();
+        project.write(".git", &format!("gitdir: {gitdir}\n"));
+        project.write(".hidden-git/info/exclude", &format!("{RULE}\n"));
+        project.write("out.rs", "");
+        project.write("kept.rs", "");
+
+        let walk = project.walk(&paths(&["out.rs", "kept.rs"]));
+
+        assert_eq!(
+            project.sources(&Scope::All),
+            ["kept.rs"],
+            "git reads the exclude file of the git directory the `.git` file names"
+        );
+        assert_eq!(codes(&walk), ["scan-explicit-path-ignored"]);
+        assert!(
+            !messages(&walk).contains(RULE),
+            "an exclude line reached through a `.git` file was printed:\n{}",
+            messages(&walk)
+        );
+    }
+
+    #[test]
+    fn a_submodule_git_file_without_commondir_brings_its_exclude_file_unquoted() {
+        assert_gitfile_exclude_applies_unquoted(".hidden-git");
+    }
+
+    #[test]
+    fn a_git_file_with_a_roundabout_relative_gitdir_is_counted_from_its_own_directory() {
+        assert_gitfile_exclude_applies_unquoted(".hidden-git/../.hidden-git");
+    }
+
+    #[test]
+    fn a_worktree_git_file_with_a_relative_gitdir_follows_commondir() {
+        let project = Project::new();
+        project.write(".git", "gitdir: .hidden-git/worktrees/w\n");
+        project.write(".hidden-git/worktrees/w/commondir", "../..\n");
+        project.write(".hidden-git/info/exclude", &format!("{RULE}\n"));
+        project.write("out.rs", "");
+        project.write("kept.rs", "");
+
+        let walk = project.walk(&paths(&["out.rs", "kept.rs"]));
+
+        assert_eq!(
+            project.sources(&Scope::All),
+            ["kept.rs"],
+            "the worktree's `commondir`, counted from its git directory, holds the exclude file"
+        );
+        assert!(
+            !messages(&walk).contains(RULE),
+            "an exclude line reached through a `.git` file was printed:\n{}",
+            messages(&walk)
+        );
+    }
+
+    #[test]
+    fn a_git_file_whose_commondir_is_empty_brings_no_exclude_file() {
+        let project = Project::new();
+        project.write(".git", "gitdir: .hidden-git\n");
+        project.write(".hidden-git/commondir", "");
+        project.write(".hidden-git/info/exclude", &format!("{RULE}\n"));
+        project.write("out.rs", "");
+
+        assert_eq!(project.sources(&Scope::All), ["out.rs"]);
+    }
+
     #[cfg(unix)]
     #[test]
     fn root_whose_ignore_file_is_symlinked_out_is_walked_with_one_warning() {
@@ -1541,8 +1684,7 @@ mod tests {
         }
         fs::write(above.path().join("project").join(CONFIG_FILE_NAME), "")
             .expect("the fixture config should be writable");
-        fs::create_dir(above.path().join(".git"))
-            .expect("the parent's git directory should be creatable");
+        make_git_dir(&above.path().join(".git"));
         // A monorepo's shared `.ignore`, say: outside the checkout, so followed as git would.
         std::os::unix::fs::symlink(outside.path().join("ignore"), above.path().join(".ignore"))
             .expect("the fixture symlink should be creatable");
@@ -1597,8 +1739,10 @@ mod tests {
         assert_eq!(codes(&walk), ["scan-ignore-file-symlink"]);
     }
 
-    /// Writes `.git/info/exclude` in `project` as a real directory and file, holding `rules`.
+    /// Writes `.git/info/exclude` in `project` as a real directory and file, holding `rules`, in a
+    /// git directory git accepts.
     fn write_exclude(project: &Project, rules: &str) {
+        make_git_dir(&project.dir.path().join(".git"));
         project.write(".git/info/exclude", rules);
     }
 

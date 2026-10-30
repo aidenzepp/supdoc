@@ -775,6 +775,20 @@ fn write(project: &Project, relative: &str, text: &str) {
     fs::write(path, text).expect("the fixture file should be writable");
 }
 
+/// Makes `relative` in `project` a git directory git accepts as a repository, without running
+/// git: a `HEAD` naming a branch, and empty `objects` and `refs` directories.
+fn make_git_dir(project: &Project, relative: &str) {
+    write(
+        project,
+        &format!("{relative}/HEAD"),
+        "ref: refs/heads/main\n",
+    );
+    for dir in ["objects", "refs"] {
+        fs::create_dir_all(project.path(&format!("{relative}/{dir}")))
+            .expect("the fixture git directory should be creatable");
+    }
+}
+
 /// A doc with one link, for a file the tests hide with an ignore rule.
 const SCRATCH: &str = "The [`handler`](../src/lib.rs#handler) function.\n";
 
@@ -788,6 +802,7 @@ fn a_gitignore_whitelist_overrides_a_git_exclude_rule_and_keeps_the_lock_entry()
     let kept = "source = \"docs/keep.md\"";
     assert!(project.read("services/web/supdoc.lock").contains(kept));
     // As in git, the `.gitignore` whitelist outranks the exclude file's rule.
+    make_git_dir(&project, "services/web/.git");
     write(&project, "services/web/.git/info/exclude", "docs/*.md\n");
     write(&project, "services/web/.gitignore", "!docs/keep.md\n");
 
@@ -811,6 +826,7 @@ fn a_git_exclude_whitelist_overrides_the_global_excludes_file() {
     fs::write(home.path().join(".config/git/ignore"), "docs/*.md\n")
         .expect("the global excludes file should be writable");
     write(&project, "services/web/docs/keep.md", SCRATCH);
+    make_git_dir(&project, "services/web/.git");
     write(
         &project,
         "services/web/.git/info/exclude",
@@ -833,6 +849,68 @@ fn a_git_exclude_whitelist_overrides_the_global_excludes_file() {
         run.stdout,
         run.stderr
     );
+}
+
+/// Runs `supdoc update --yes` from `dir` with a global excludes file of `pattern` in an isolated
+/// home, and returns the web project's lockfile.
+fn lock_with_global_pattern(project: &Project, dir: &str, pattern: &str) -> String {
+    let home = tempfile::tempdir().expect("a home directory should be creatable");
+    fs::create_dir_all(home.path().join(".config/git"))
+        .expect("the git config directory should be creatable");
+    fs::write(
+        home.path().join(".config/git/ignore"),
+        format!("{pattern}\n"),
+    )
+    .expect("the global excludes file should be writable");
+    write(project, "services/web/docs/keep.md", SCRATCH);
+
+    let run = project.supdoc_in_with(dir, &["update", "--yes"], &[("HOME", home.path())]);
+
+    let _ = run.assert_exit(0);
+    lock_of_web(project)
+}
+
+#[test]
+fn an_anchored_global_pattern_counts_from_the_work_tree_top_whatever_the_working_directory() {
+    for dir in ["services/web", "services/web/docs"] {
+        let project = monorepo_with_git();
+
+        let locked = lock_with_global_pattern(&project, dir, "services/web/docs/gui*.md");
+
+        assert!(
+            locked.contains("docs/keep.md") && !locked.contains("docs/guide.md"),
+            "git anchors a global pattern at the work tree top, so it hides the guide from `{dir}`:\n{locked}"
+        );
+    }
+}
+
+#[test]
+fn an_anchored_global_pattern_counts_from_the_root_outside_a_repository() {
+    for dir in ["services/web", "services/web/docs"] {
+        let project = web_project();
+
+        let locked = lock_with_global_pattern(&project, dir, "docs/gui*.md");
+
+        assert!(
+            locked.contains("docs/keep.md") && !locked.contains("docs/guide.md"),
+            "with no repository the pattern counts from the root, so it hides the guide from `{dir}`:\n{locked}"
+        );
+    }
+}
+
+#[test]
+fn a_separate_git_dir_brings_its_info_exclude_file_unquoted() {
+    let project = web_project();
+    // A submodule or `--separate-git-dir` checkout: a `.git` file naming the git directory, which
+    // has no `commondir`, so it is the shared directory itself.
+    write(&project, "outside.git/info/exclude", "gui*.md\n");
+    write(
+        &project,
+        "services/web/.git",
+        &format!("gitdir: {}\n", project.path("outside.git").display()),
+    );
+
+    assert_followed_and_never_quoted(&project);
 }
 
 #[test]
@@ -881,6 +959,7 @@ fn a_parent_repositorys_exclude_file_applies_to_a_root_in_a_subdirectory() {
     let _ = project
         .supdoc_in("services/web", &["update", "--yes"])
         .assert_exit(0);
+    make_git_dir(&project, ".git");
     write(&project, ".git/info/exclude", "scratch.md\n");
     write(&project, "services/web/docs/scratch.md", SCRATCH);
 
@@ -936,6 +1015,7 @@ fn assert_followed_and_never_quoted(project: &Project) {
 /// hides the guide.
 #[cfg(unix)]
 fn git_dir_symlinked_out(project: &Project, link: &str) {
+    make_git_dir(project, "outside.git");
     write(project, "outside.git/info/exclude", "gui*.md\n");
     std::os::unix::fs::symlink(project.path("outside.git"), project.path(link))
         .expect("the symlink should be creatable");
@@ -965,8 +1045,7 @@ fn a_root_whose_git_dir_is_symlinked_out_applies_its_exclude_file_unquoted() {
 fn a_root_whose_git_info_is_symlinked_out_applies_its_exclude_file_unquoted() {
     let project = web_project();
     write(&project, "outside.git/info/exclude", "gui*.md\n");
-    fs::create_dir_all(project.path("services/web/.git"))
-        .expect("the git directory should be creatable");
+    make_git_dir(&project, "services/web/.git");
     std::os::unix::fs::symlink(
         project.path("outside.git/info"),
         project.path("services/web/.git/info"),
@@ -1018,7 +1097,7 @@ fn a_parent_repository_whose_git_dir_is_symlinked_elsewhere_applies_its_exclude_
 /// the ignore files of the directories above the project apply.
 fn monorepo_with_git() -> Project {
     let project = web_project();
-    fs::create_dir(project.path(".git")).expect("the monorepo's git directory should be creatable");
+    make_git_dir(&project, ".git");
     project
 }
 
@@ -1044,8 +1123,7 @@ fn assert_guide_recorded(project: &Project, why: &str) {
 fn a_gitignore_above_a_repository_root_does_not_apply() {
     let project = web_project();
     fs::write(project.path(".gitignore"), "*\n").expect("the gitignore should be writable");
-    fs::create_dir(project.path("services/web/.git"))
-        .expect("the git directory should be creatable");
+    make_git_dir(&project, "services/web/.git");
 
     assert_guide_recorded(
         &project,
@@ -1067,7 +1145,7 @@ fn a_gitignore_above_a_project_outside_any_repository_does_not_apply() {
 #[test]
 fn a_gitignore_above_the_work_tree_top_does_not_apply_but_one_at_the_top_does() {
     let project = web_project();
-    fs::create_dir(project.path("services/.git")).expect("the git directory should be creatable");
+    make_git_dir(&project, "services/.git");
     fs::write(project.path(".gitignore"), "gui*.md\n").expect("the gitignore should be writable");
     fs::write(project.path("services/.gitignore"), "scr*.md\n")
         .expect("the gitignore should be writable");
@@ -1088,7 +1166,7 @@ fn a_gitignore_above_the_work_tree_top_does_not_apply_but_one_at_the_top_does() 
 #[test]
 fn a_dangling_gitignore_above_the_root_changes_nothing() {
     let project = web_project();
-    fs::create_dir(project.path(".git")).expect("the monorepo's git directory should be creatable");
+    make_git_dir(&project, ".git");
     std::os::unix::fs::symlink(project.path("gone"), project.path(".gitignore"))
         .expect("the symlink should be creatable");
 
@@ -1101,6 +1179,86 @@ fn a_dangling_gitignore_above_the_root_changes_nothing() {
             .contains("docs/guide.md"),
         "nothing hides the guide\n{}",
         run.stderr
+    );
+}
+
+/// A `.git` entry git can't use, which it passes over in its search for the work tree top.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy)]
+enum UnusableGit {
+    /// An empty directory.
+    EmptyDir,
+    /// A symlink to nothing.
+    Dangling,
+}
+
+/// Every [`UnusableGit`].
+#[cfg(unix)]
+const UNUSABLE_GITS: [UnusableGit; 2] = [UnusableGit::EmptyDir, UnusableGit::Dangling];
+
+/// The web project, whose own `.git` is `unusable`, inside a repository whose work tree is the
+/// whole `monorepo` fixture, the top git finds.
+#[cfg(unix)]
+fn monorepo_with_unusable_web_git(unusable: UnusableGit) -> Project {
+    let project = monorepo_with_git();
+    let dot_git = project.path("services/web/.git");
+    match unusable {
+        UnusableGit::EmptyDir => {
+            fs::create_dir(&dot_git).expect("the empty git directory should be creatable");
+        }
+        UnusableGit::Dangling => std::os::unix::fs::symlink(project.path("gone"), &dot_git)
+            .expect("the dangling symlink should be creatable"),
+    }
+    project
+}
+
+#[cfg(unix)]
+#[test]
+fn a_gitignore_above_a_git_entry_git_cannot_use_applies_up_to_the_real_top() {
+    for unusable in UNUSABLE_GITS {
+        let project = monorepo_with_unusable_web_git(unusable);
+        fs::write(project.path(".gitignore"), "gui*.md\n")
+            .expect("the gitignore should be writable");
+        write(&project, "services/web/docs/keep.md", SCRATCH);
+
+        let run = project.supdoc_in("services/web", &["update", "--yes"]);
+
+        let _ = run.assert_exit(0);
+        let locked = lock_of_web(&project);
+        assert!(
+            locked.contains("docs/keep.md") && !locked.contains("docs/guide.md"),
+            "git passes over a {unusable:?} `.git` to the monorepo's top, whose `.gitignore` hides \
+             the guide:\n{locked}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn an_anchored_global_pattern_counts_from_the_real_top_past_a_git_entry_git_cannot_use() {
+    for unusable in UNUSABLE_GITS {
+        let project = monorepo_with_unusable_web_git(unusable);
+
+        let locked =
+            lock_with_global_pattern(&project, "services/web", "services/web/docs/gui*.md");
+
+        assert!(
+            locked.contains("docs/keep.md") && !locked.contains("docs/guide.md"),
+            "git passes over a {unusable:?} `.git` and anchors the pattern at the monorepo's top, \
+             so it hides the guide:\n{locked}"
+        );
+    }
+}
+
+#[test]
+fn a_git_directory_holding_only_an_exclude_file_hides_nothing() {
+    let project = monorepo_with_git();
+    // Git rejects a `.git` without `HEAD`, `objects` and `refs`, so never reads its exclude file.
+    write(&project, "services/web/.git/info/exclude", "gui*.md\n");
+
+    assert_guide_recorded(
+        &project,
+        "git passes over a `.git` it rejects, so the exclude file inside it hides nothing",
     );
 }
 
