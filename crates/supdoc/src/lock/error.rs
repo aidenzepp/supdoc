@@ -38,6 +38,9 @@ pub enum ParseLockError {
         line: Option<usize>,
         /// The underlying TOML or field error.
         error: toml::de::Error,
+        /// Whether the error is the `[features.hash]` table, or a key in it, being absent
+        /// (rather than a `[[link]]` entry missing the same key).
+        missing_features: bool,
     },
 
     /// Two entries have the same key but different hashes.
@@ -50,14 +53,6 @@ pub enum ParseLockError {
         /// The 1-based line of the second entry.
         second_line: usize,
     },
-}
-
-/// Whether a TOML `message` says the `[features.hash]` table, or the `line-endings` key it
-/// requires, is missing.
-fn names_missing_features(message: &str) -> bool {
-    ["features", "hash", "line-endings"]
-        .iter()
-        .any(|field| message == format!("missing field `{field}`"))
 }
 
 /// The TOML message, followed by its line when known.
@@ -106,7 +101,10 @@ impl ParseLockError {
                 "Upgrade supdoc with `cargo install supdoc`. This lockfile was written by a \
                  newer release"
             }
-            Self::Toml { error, .. } if names_missing_features(error.message()) => {
+            Self::Toml {
+                missing_features: true,
+                ..
+            } => {
                 "Add `[features.hash]` and `line-endings = \"normalize\"` under `version = 1`, \
                  as every lockfile supdoc writes has, then run `supdoc check`. Or delete \
                  `supdoc.lock` and run `supdoc update --yes` to record the links again"

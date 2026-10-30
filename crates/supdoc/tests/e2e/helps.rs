@@ -267,6 +267,27 @@ fn lock_without_hash_features_help_names_the_table_and_the_recovery() {
 }
 
 #[test]
+fn link_entry_without_hash_does_not_get_the_features_help() {
+    let project = project();
+    project.record();
+    let lock = project.read("supdoc.lock");
+    let kept: Vec<&str> = lock
+        .lines()
+        .filter(|line| !line.starts_with("hash ="))
+        .collect();
+    write(&project, "supdoc.lock", &kept.join("\n"));
+
+    let run = project.supdoc(&["check"]);
+
+    let _ = run.assert_exit(78);
+    assert!(
+        !run.stderr.contains("[features.hash]"),
+        "a link entry missing `hash` is not a missing features table:\n{}",
+        run.stderr
+    );
+}
+
+#[test]
 fn rename_config_failure_help_repeats_the_whole_command() {
     let project = project();
     write(&project, "supdoc.config.toml", "include = \n");
