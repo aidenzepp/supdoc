@@ -186,7 +186,13 @@ pub fn walk(config: &Config, languages: &Languages, scope: &Scope) -> Walk {
     unread_dirs.sort();
     findings.extend(unread_dirs.iter().map(UnreadDir::finding));
 
-    findings.extend(explicit_path_warnings(config, languages, scope, &sources));
+    findings.extend(explicit_path_warnings(
+        config,
+        languages,
+        scope,
+        &sources,
+        &unread_dirs,
+    ));
     findings.sort_by(|left, right| {
         left.code
             .cmp(right.code)
@@ -365,18 +371,26 @@ fn path_of(error: &ignore::Error) -> Option<&Path> {
 }
 
 /// Warnings for each explicitly named path that the walk skipped because of the config or an
-/// ignore file (04 S10).
+/// ignore file (04 S10). A path beneath one of `unread_dirs` gets none: that directory's own
+/// warning already explains it.
 fn explicit_path_warnings(
     config: &Config,
     languages: &Languages,
     scope: &Scope,
     sources: &[(AbsolutePath, &'static dyn Cartridge)],
+    unread_dirs: &[UnreadDir],
 ) -> Vec<Finding> {
     let Scope::Paths(listed) = scope else {
         return Vec::new();
     };
     listed
         .iter()
+        .filter(|path| {
+            let path = config.root().as_path().join(path.as_str());
+            !unread_dirs
+                .iter()
+                .any(|dir| path.starts_with(dir.path.as_path()))
+        })
         .filter_map(|path| explicit_path_warning(config, languages, sources, path))
         .collect()
 }
@@ -1150,6 +1164,24 @@ mod tests {
         );
         assert_eq!(codes(&walk), ["scan-ignore-file-outside-root"]);
         assert!(!messages(&walk).contains(RULE), "{}", messages(&walk));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn named_path_under_a_directory_left_unread_is_explained_only_by_that() {
+        let outside = outside_dir();
+        let project = Project::new();
+        project.write("docs/out.rs", "");
+        symlink_in(&project, "docs/.gitignore", &outside.path().join("ignore"));
+
+        let walk = project.walk(&paths(&["docs/out.rs"]));
+
+        assert_eq!(
+            codes(&walk),
+            ["scan-ignore-file-outside-root"],
+            "no ignore rule skipped it:\n{}",
+            messages(&walk)
+        );
     }
 
     #[cfg(unix)]
