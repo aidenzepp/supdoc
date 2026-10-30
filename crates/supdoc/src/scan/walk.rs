@@ -21,9 +21,9 @@ use crate::scan::model::Scope;
 /// Directories of version-control systems, never walked (04 S2).
 const VCS_DIRS: [&str; 4] = [".git", ".hg", ".svn", ".jj"];
 
-/// An ignore file a directory can hold that a checkout can plant. Inside the project root, one
-/// that is a symlink is not read, wherever it points, as git doesn't read one in its work tree
-/// (04 S15). Git's exclude files, reached through `.git`, are not among them: git refuses to check
+/// An ignore file a directory can hold that a checkout can plant. One that is a symlink is not
+/// read, wherever it points, as git doesn't read one in its work tree (04 S15): inside the project
+/// root, and in the directories above it, which lie inside the work tree too. Git's exclude files, reached through `.git`, are not among them: git refuses to check
 /// out any `.git` path, so they are followed as git follows them, symlinks included.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IgnoreFile {
@@ -204,8 +204,9 @@ fn walker(config: &Config, scope: &Scope, rules: &Arc<IgnoreRules>) -> ignore::W
 /// `objects` and `refs` but a corrupt `HEAD` still marks the top here, where git searches further
 /// up.
 ///
-/// Inside the root, a `.ignore` or `.gitignore` that is a symlink is not read, whatever it points
-/// to. Above the root, every ignore file is followed, symlinks included, and none is ever quoted.
+/// A `.ignore` or `.gitignore` that is a symlink is not read, whatever it points to, inside the
+/// root or above it, as every directory above lies inside the git work tree. Only inside the root
+/// is such a symlink reported, and no rule line from above the root is ever quoted.
 struct IgnoreRules {
     /// The project root, as the walk reaches it.
     root: PathBuf,
@@ -233,7 +234,8 @@ struct Level {
     exclude: Gitignore,
     /// Where it lies, which decides what paths its rules see and which may be quoted.
     place: Place,
-    /// Its ignore files that are symlinks, which were not read. Always empty above the root.
+    /// Its ignore files that are symlinks, which were not read. Left empty above the root, where
+    /// they are passed over without a report.
     symlinked: Vec<IgnoreFile>,
     /// The directory above it, if one applies.
     parent: Option<Arc<Self>>,
@@ -424,20 +426,7 @@ impl Level {
     ///
     /// Effect: reads file metadata in `dir`, its ignore files and its git exclude file.
     fn inside(dir: &Path, parent: Option<Arc<Self>>) -> Self {
-        let mut symlinked = Vec::new();
-        let mut own = |file: IgnoreFile| {
-            let path = dir.join(file.path());
-            match fs::symlink_metadata(&path) {
-                Err(_) => Gitignore::empty(),
-                Ok(metadata) if metadata.file_type().is_symlink() => {
-                    symlinked.push(file);
-                    Gitignore::empty()
-                }
-                Ok(_) => rules_in(dir, &path),
-            }
-        };
-        let ignore = own(IgnoreFile::Ignore);
-        let gitignore = own(IgnoreFile::Gitignore);
+        let (ignore, gitignore, symlinked) = own_ignore_files(dir);
         let (exclude, quote_exclude) = git_exclude(dir);
         Self {
             dir: dir.to_path_buf(),
@@ -451,21 +440,44 @@ impl Level {
     }
 
     /// The rules of `dir`, a directory above the root and at most the top of its git work tree.
-    /// Its ignore files lie outside the checkout, as a monorepo's shared `.gitignore` does, so
-    /// they are followed wherever they lead.
+    /// It lies inside that work tree, so a `.ignore` or `.gitignore` there that is a symlink is not
+    /// read either, and unlike inside the root it is not reported: git warns of it already.
     ///
-    /// Effect: reads `dir`'s ignore files and its git exclude file.
+    /// Effect: reads file metadata in `dir`, its ignore files and its git exclude file.
     fn above(dir: &Path, parent: Option<Arc<Self>>) -> Self {
+        let (ignore, gitignore, _unread_symlinks) = own_ignore_files(dir);
         Self {
             dir: dir.to_path_buf(),
-            ignore: rules_in(dir, &dir.join(IgnoreFile::Ignore.path())),
-            gitignore: rules_in(dir, &dir.join(IgnoreFile::Gitignore.path())),
+            ignore,
+            gitignore,
             exclude: git_exclude(dir).0,
             place: Place::Above,
             symlinked: Vec::new(),
             parent,
         }
     }
+}
+
+/// The rules of `dir`'s `.ignore` and `.gitignore`, and which of the two are symlinks. A symlink is
+/// not read, wherever it points (04 S15): only an `lstat` looks at it.
+///
+/// Effect: reads file metadata in `dir` and its ignore files.
+fn own_ignore_files(dir: &Path) -> (Gitignore, Gitignore, Vec<IgnoreFile>) {
+    let mut symlinked = Vec::new();
+    let mut own = |file: IgnoreFile| {
+        let path = dir.join(file.path());
+        match fs::symlink_metadata(&path) {
+            Err(_) => Gitignore::empty(),
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                symlinked.push(file);
+                Gitignore::empty()
+            }
+            Ok(_) => rules_in(dir, &path),
+        }
+    };
+    let ignore = own(IgnoreFile::Ignore);
+    let gitignore = own(IgnoreFile::Gitignore);
+    (ignore, gitignore, symlinked)
 }
 
 /// Whether `dir` is the top of a git work tree, as git decides it: `dir/.git`, followed through
@@ -1671,9 +1683,85 @@ mod tests {
         );
     }
 
+    /// Builds a git work tree whose top and middle directories each hold a `.gitignore` hiding
+    /// `top.rs` and `mid.rs`, with the project `mid/project` beneath them holding `k.rs`, `mid.rs`
+    /// and `top.rs`. With `linked`, both `.gitignore` files are symlinks to files elsewhere.
+    /// Returns the temporary directory, the outside directory and the project's config.
+    #[cfg(unix)]
+    fn stacked_gitignores(linked: bool) -> (TempDir, TempDir, Config) {
+        let outside = outside_dir();
+        let top = TempDir::new().expect("a temporary work tree should be creatable");
+        let project = top.path().join("mid/project");
+        fs::create_dir_all(&project).expect("the project directory should be creatable");
+        for file in ["k.rs", "mid.rs", "top.rs", CONFIG_FILE_NAME] {
+            fs::write(project.join(file), "").expect("the fixture file should be writable");
+        }
+        make_git_dir(&top.path().join(".git"));
+        for (dir, rule) in [
+            (top.path().to_path_buf(), "top.rs"),
+            (top.path().join("mid"), "mid.rs"),
+        ] {
+            let gitignore = dir.join(".gitignore");
+            if linked {
+                let target = outside.path().join(format!("{rule}.gitignore"));
+                fs::write(&target, format!("{rule}\n")).expect("the rules should be writable");
+                std::os::unix::fs::symlink(target, gitignore)
+                    .expect("the fixture symlink should be creatable");
+            } else {
+                fs::write(gitignore, format!("{rule}\n")).expect("the rules should be writable");
+            }
+        }
+        let config_path = AbsolutePath::new(&project.join(CONFIG_FILE_NAME))
+            .expect("the temporary directory should be absolute");
+        let config = Config::load_file(&config_path).expect("the fixture config should be valid");
+        (top, outside, config)
+    }
+
+    /// The names of the files `config`'s project walks, sorted, and its findings' codes.
+    #[cfg(unix)]
+    fn walked_names(config: &Config) -> (Vec<String>, Vec<&'static str>) {
+        let walked = walk(config, &Languages::builtin(), &Scope::All);
+        let names = walked
+            .sources
+            .iter()
+            .filter_map(|(path, _)| path.as_path().file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect();
+        (names, codes(&walked))
+    }
+
     #[cfg(unix)]
     #[test]
-    fn ignore_file_above_the_root_symlinked_elsewhere_applies_unquoted() {
+    fn gitignores_above_the_root_symlinked_inside_the_work_tree_are_not_read() {
+        let (_top, _outside, config) = stacked_gitignores(true);
+
+        let (names, findings) = walked_names(&config);
+
+        assert_eq!(
+            names,
+            ["k.rs", "mid.rs", "top.rs"],
+            "git treats a symlinked `.gitignore` in its work tree as absent, wherever it points"
+        );
+        assert!(
+            findings.is_empty(),
+            "no warning is given above the root: {findings:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn regular_gitignores_above_the_root_still_hide_their_files() {
+        let (_top, _outside, config) = stacked_gitignores(false);
+
+        let (names, findings) = walked_names(&config);
+
+        assert_eq!(names, ["k.rs"], "the control: regular files apply");
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ignore_file_above_the_root_symlinked_is_not_read() {
         let outside = outside_dir();
         let above = TempDir::new().expect("a temporary parent directory should be creatable");
         for file in ["project/out.rs", "project/kept.rs"] {
@@ -1685,7 +1773,6 @@ mod tests {
         fs::write(above.path().join("project").join(CONFIG_FILE_NAME), "")
             .expect("the fixture config should be writable");
         make_git_dir(&above.path().join(".git"));
-        // A monorepo's shared `.ignore`, say: outside the checkout, so followed as git would.
         std::os::unix::fs::symlink(outside.path().join("ignore"), above.path().join(".ignore"))
             .expect("the fixture symlink should be creatable");
         let config_path = AbsolutePath::new(&above.path().join("project").join(CONFIG_FILE_NAME))
@@ -1700,19 +1787,18 @@ mod tests {
             .iter()
             .filter_map(|(path, _)| path.as_path().file_name())
             .collect();
-        assert_eq!(walked, ["kept.rs"], "the parent's rule applies");
+        assert_eq!(
+            walked,
+            ["kept.rs", "out.rs"],
+            "the symlinked rules are not read"
+        );
         assert!(all.unread_dirs.is_empty(), "{:?}", all.unread_dirs);
         assert!(
             all.findings.is_empty(),
-            "a symlink above the root is followed without a warning: {:?}",
+            "a symlink above the root is passed over without a warning: {:?}",
             all.findings
         );
-        assert_eq!(codes(&one), ["scan-explicit-path-ignored"]);
-        assert!(
-            !messages(&one).contains(RULE),
-            "a line from outside the root was printed:\n{}",
-            messages(&one)
-        );
+        assert!(one.findings.is_empty(), "{:?}", one.findings);
     }
 
     #[cfg(unix)]

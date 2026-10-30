@@ -1195,7 +1195,7 @@ fn a_root_whose_git_info_is_symlinked_out_applies_its_exclude_file_unquoted() {
 
 #[cfg(unix)]
 #[test]
-fn a_dotfile_gitignore_above_the_root_symlinked_elsewhere_applies_unquoted() {
+fn a_dotfile_gitignore_above_the_root_symlinked_elsewhere_is_not_read() {
     let project = monorepo_with_git();
     // A dotfiles manager such as stow links the monorepo's `.gitignore` into a directory of its own.
     let dotfiles = tempfile::tempdir().expect("a dotfiles directory should be creatable");
@@ -1207,19 +1207,41 @@ fn a_dotfile_gitignore_above_the_root_symlinked_elsewhere_applies_unquoted() {
     )
     .expect("the symlink should be creatable");
 
-    assert_followed_and_never_quoted(&project);
+    assert_guide_recorded(
+        &project,
+        "git doesn't read a symlinked ignore file in its work tree, so its rule hides nothing",
+    );
+    let check = project.supdoc_in("services/web", &["check"]);
+    assert!(
+        !check.stdout.contains("scan-ignore-file-symlink")
+            && !check.stderr.contains("scan-ignore-file-symlink"),
+        "a symlinked ignore file above the root is passed over without a warning\n{}\n{}",
+        check.stdout,
+        check.stderr
+    );
 }
 
 #[cfg(unix)]
 #[test]
-fn a_shared_ignore_file_above_the_root_symlinked_within_the_checkout_applies_unquoted() {
+fn a_shared_ignore_file_above_the_root_symlinked_within_the_checkout_is_not_read() {
     let project = monorepo_with_git();
     // A monorepo whose root `.ignore` links to a shared file outside the subproject's root.
     write(&project, "tools/ignore", "gui*.md\n");
     std::os::unix::fs::symlink(project.path("tools/ignore"), project.path(".ignore"))
         .expect("the symlink should be creatable");
 
-    assert_followed_and_never_quoted(&project);
+    assert_guide_recorded(
+        &project,
+        "git doesn't read a symlinked ignore file in its work tree, so its rule hides nothing",
+    );
+    let check = project.supdoc_in("services/web", &["check"]);
+    assert!(
+        !check.stdout.contains("scan-ignore-file-symlink")
+            && !check.stderr.contains("scan-ignore-file-symlink"),
+        "a symlinked ignore file above the root is passed over without a warning\n{}\n{}",
+        check.stdout,
+        check.stderr
+    );
 }
 
 #[cfg(unix)]
