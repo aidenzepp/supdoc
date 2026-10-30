@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "Track links from documentation to code and report when the linked code changes"
 license = "MIT"
-license-file = "../../LICENSE"
 repository = "https://github.com/aidenzepp/supdoc"
 readme = "../../README.md"
 keywords = ["documentation", "links", "markdown", "tree-sitter", "cli"]
