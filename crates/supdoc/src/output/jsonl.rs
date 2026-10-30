@@ -72,17 +72,28 @@ fn summary_line<R: Report>(report: &R, ok: bool) -> Value {
     Value::Object(fields)
 }
 
-/// The top-level bool, string and number fields of the serialized report.
+/// The top-level bool, string and number fields of the serialized report, plus the line-endings
+/// change of `settings_change` as `line_endings_from` and `line_endings_to` when it is present.
 ///
-/// Arrays, objects and nulls are left out; arrays become records instead.
+/// Arrays, other objects and nulls are left out; arrays become records instead.
 fn scalar_fields<R: serde::Serialize + ?Sized>(report: &R) -> Map<String, Value> {
     let Ok(Value::Object(fields)) = serde_json::to_value(report) else {
         return Map::new();
     };
-    fields
+    let line_endings = fields
+        .get("settings_change")
+        .and_then(|change| change.get("line_endings"));
+    let from = line_endings.and_then(|change| change.get("from")).cloned();
+    let to = line_endings.and_then(|change| change.get("to")).cloned();
+    let mut scalars: Map<String, Value> = fields
         .into_iter()
         .filter(|(_, value)| matches!(value, Value::Bool(_) | Value::String(_) | Value::Number(_)))
-        .collect()
+        .collect();
+    if let (Some(from @ Value::String(_)), Some(to @ Value::String(_))) = (from, to) {
+        let _from = scalars.insert("line_endings_from".to_owned(), from);
+        let _to = scalars.insert("line_endings_to".to_owned(), to);
+    }
+    scalars
 }
 
 /// `value` with a `type` field. A non-object value is kept under `value`.
