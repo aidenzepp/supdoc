@@ -105,8 +105,12 @@ fn is_vcs_dir(dir: &Path) -> bool {
 }
 
 /// Whether `dir` has its own config, which makes it a separate project (04 S4).
+///
+/// Any entry with the config's name counts, a dangling symlink included, without following it:
+/// whether a symlink's target exists must not change the scan, or the scan would reveal paths
+/// outside the root.
 fn is_nested_project(dir: &Path) -> bool {
-    dir.join(CONFIG_FILE_NAME).exists()
+    fs::symlink_metadata(dir.join(CONFIG_FILE_NAME)).is_ok()
 }
 
 /// Whether anything under `dir` can be inside `scope`, so narrowing the walk (04 S10) never

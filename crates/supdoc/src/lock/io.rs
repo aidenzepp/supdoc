@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::error::LockError;
-use super::model::Lockfile;
+use super::model::{LOCK_FILE_NAME, Lockfile};
 use crate::path::AbsolutePath;
 
 impl Lockfile {
@@ -15,13 +15,14 @@ impl Lockfile {
     /// command decides what that means.
     ///
     /// The project root is `path`'s directory. A lockfile that is a symlink is read only if the
-    /// file it leads to lies inside that root once symlinks are followed (decision 6), so a
-    /// hostile checkout can't make supdoc print another file's text in a parse error.
+    /// file it leads to is named `supdoc.lock` and lies inside that root once symlinks are
+    /// followed (decision 6), so a hostile checkout can't make supdoc print another file's text
+    /// in a parse error.
     ///
     /// # Errors
     ///
-    /// `OutsideRoot` for a symlink that doesn't lead to a file inside the root, whether or not
-    /// its target exists. Otherwise fails if the file exists but cannot be read, or its text is
+    /// `OutsideRoot` for a symlink that doesn't lead to a `supdoc.lock` inside the root, whether
+    /// or not its target exists. Otherwise fails if the file exists but cannot be read, or its text is
     /// not a valid lockfile.
     pub fn read(path: &AbsolutePath) -> Result<Option<Self>, LockError> {
         let read_failed = |error| LockError::Read {
@@ -69,8 +70,8 @@ enum Located {
     /// The file to read: the path itself, or the real file a symlink there leads to inside the
     /// project root.
     Inside(PathBuf),
-    /// A symlink that doesn't lead to a file inside the root: dangling, looping or pointing
-    /// outside, deliberately not told apart.
+    /// A symlink that doesn't lead to a `supdoc.lock` inside the root: dangling, looping,
+    /// pointing outside or at a file of another name, deliberately not told apart.
     Outside,
 }
 
@@ -93,9 +94,17 @@ fn locate(path: &AbsolutePath) -> io::Result<Located> {
     let root = path.as_path().parent().map(fs::canonicalize);
     let real = fs::canonicalize(path.as_path());
     Ok(match (root, real) {
-        (Some(Ok(root)), Ok(real)) if real.starts_with(&root) => Located::Inside(real),
+        (Some(Ok(root)), Ok(real)) if real.starts_with(&root) && is_named_lockfile(&real) => {
+            Located::Inside(real)
+        }
         _ => Located::Outside,
     })
+}
+
+/// Whether `real` is named `supdoc.lock`, so a symlink to another in-root file such as `.env`
+/// is never parsed as a lockfile and quoted in the error.
+fn is_named_lockfile(real: &Path) -> bool {
+    real.file_name().is_some_and(|name| name == LOCK_FILE_NAME)
 }
 
 /// How many fresh names to try before giving up on creating a temporary file.

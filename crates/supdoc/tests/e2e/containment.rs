@@ -5,7 +5,7 @@
 
 use std::fs;
 
-use crate::support::{Project, array_at, links};
+use crate::support::{Project, array_at, at, links};
 
 /// A secret a CI runner might hold outside the checkout.
 const SECRET: &str = "API_KEY = \"s3cr3t\"\nDB_PASSWORD = \"hunter2\"\n";
@@ -294,4 +294,122 @@ fn the_config_flag_still_loads_a_file_of_any_name() {
 
     let _ = run.assert_exit(0);
     assert!(run.stdout.contains("ci.toml"), "{}", run.stdout);
+}
+
+/// Fails unless every format refuses the web project's lockfile as `lock-outside-root` without
+/// printing any key or value of [`SECRET`] or `leak`.
+fn assert_lockfile_refused_quietly(project: &Project, leak: &str) {
+    for args in ERROR_FORMATS {
+        let run = project.supdoc_in("services/web", args);
+
+        let _ = run.assert_exit(78);
+        assert_no_secret_key(&run);
+        let shown = format!("{}{}", run.stdout, run.stderr);
+        assert!(
+            shown.contains("lock-outside-root") && !shown.contains(leak),
+            "`supdoc {}` should refuse the lockfile without showing `{leak}`\nstdout:\n{}\nstderr:\n{}",
+            run.args,
+            run.stdout,
+            run.stderr
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_lockfile_symlinked_to_an_in_root_dotenv_file_is_refused_without_printing_it() {
+    let project = web_project();
+    fs::write(project.path("services/web/.env"), "API_KEY=\"s3cr3t\"\n")
+        .expect("the secret should be writable");
+    std::os::unix::fs::symlink(".env", project.path("services/web/supdoc.lock"))
+        .expect("the symlink should be creatable");
+
+    assert_lockfile_refused_quietly(&project, "API_KEY");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_lockfile_symlinked_to_an_in_root_file_with_a_lock_key_is_refused_without_printing_its_value() {
+    let project = web_project();
+    fs::write(
+        project.path("services/web/token.toml"),
+        "version = \"s3cr3t-token\"\n",
+    )
+    .expect("the secret should be writable");
+    std::os::unix::fs::symlink("token.toml", project.path("services/web/supdoc.lock"))
+        .expect("the symlink should be creatable");
+
+    assert_lockfile_refused_quietly(&project, "s3cr3t-token");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_lockfile_symlinked_to_an_in_root_supdoc_lock_still_loads() {
+    let project = web_project();
+    let _ = project
+        .supdoc_in("services/web", &["update", "--yes"])
+        .assert_exit(0);
+    fs::create_dir(project.path("services/web/kept")).expect("the directory should be creatable");
+    fs::rename(
+        project.path("services/web/supdoc.lock"),
+        project.path("services/web/kept/supdoc.lock"),
+    )
+    .expect("the lockfile should be movable");
+    std::os::unix::fs::symlink("kept/supdoc.lock", project.path("services/web/supdoc.lock"))
+        .expect("the symlink should be creatable");
+
+    let run = project.supdoc_in("services/web", &["--json", "check"]);
+
+    assert_eq!(
+        at(&run.json(), "/data/summary/passed"),
+        1,
+        "the recorded link should pass against the lockfile behind the symlink\n{}",
+        run.stdout
+    );
+}
+
+/// The web project's `check --json` with `docs/x/supdoc.config.toml` symlinked to `target`
+/// (relative to the fixture root) and a broken link beside it.
+#[cfg(unix)]
+fn check_with_nested_config_symlinked_to(target: &str) -> crate::support::Run {
+    let project = web_project();
+    fs::create_dir(project.path("services/web/docs/x")).expect("the directory should be creatable");
+    fs::write(
+        project.path("services/web/docs/x/p.md"),
+        "# P\n\n[gone](../../src/missing.rs)\n",
+    )
+    .expect("the doc should be writable");
+    std::os::unix::fs::symlink(
+        project.path(target),
+        project.path("services/web/docs/x/supdoc.config.toml"),
+    )
+    .expect("the symlink should be creatable");
+    project.supdoc_in("services/web", &["--json", "check"])
+}
+
+#[cfg(unix)]
+#[test]
+fn a_nested_config_symlinked_out_of_the_root_scans_alike_whether_or_not_its_target_exists() {
+    let present = check_with_nested_config_symlinked_to("settings.py");
+    let absent = check_with_nested_config_symlinked_to("no-such-file");
+
+    assert_no_secret(&present);
+    assert!(
+        !present.stdout.contains("missing.rs"),
+        "the directory with its own config is a separate project\n{}",
+        present.stdout
+    );
+    let report = |run: &crate::support::Run| {
+        let mut json = run.json();
+        // Each run has its own temporary root; only what the scan found is compared.
+        if let Some(root) = json.get_mut("root") {
+            *root = serde_json::Value::Null;
+        }
+        (run.code, json, run.stderr.clone())
+    };
+    assert_eq!(
+        report(&absent),
+        report(&present),
+        "the scan must not reveal whether the nested config's target exists"
+    );
 }

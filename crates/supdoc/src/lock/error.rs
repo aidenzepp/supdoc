@@ -108,10 +108,11 @@ pub enum LockError {
         error: std::io::Error,
     },
 
-    /// The lockfile is a symlink that doesn't lead to a file inside the project root, so supdoc
-    /// refuses it without reading it. The message is the same whether or not anything is there.
+    /// The lockfile is a symlink that doesn't lead to a `supdoc.lock` inside the project root,
+    /// so supdoc refuses it without reading it. The message is the same whether or not anything
+    /// is there.
     #[error(
-        "{} is a symlink that doesn't lead to a file inside the project root",
+        "{} is a symlink that doesn't lead to a supdoc.lock inside the project root",
         .path.display()
     )]
     OutsideRoot {
@@ -158,7 +159,7 @@ impl LockError {
                 "Give the current user read access, for example with `chmod u+r supdoc.lock`"
             }
             Self::OutsideRoot { .. } => {
-                "supdoc reads nothing outside the project root. Remove the symlink with \
+                "supdoc reads only a supdoc.lock inside the project root. Remove the symlink with \
                  `rm supdoc.lock`, then run `supdoc update --yes` to record the links again"
             }
             Self::Parse { error, .. } => error.help(),
