@@ -75,8 +75,9 @@ supdoc reads ignore files as git does, with these known exceptions:
   case-insensitive laptop and on Linux CI.
 - `core.excludesFile` is read only from the user and system git config, not from a repository's own config
   or the files it includes. Use `.git/info/exclude` for a per-repository exclude.
-- A `.git` entry git can't use, such as a dangling symlink or an empty directory, still marks the top of
-  the work tree, where git searches further up. supdoc then checks more files, never fewer.
+- A `.git` directory counts as a repository when it holds `HEAD`, `objects` and `refs`, as git checks.
+  supdoc doesn't read `HEAD` to check that it names a commit, so a `.git` with a corrupt `HEAD` still marks
+  the top of the work tree here, where git searches further up.
 
 ## Agent skill
 
