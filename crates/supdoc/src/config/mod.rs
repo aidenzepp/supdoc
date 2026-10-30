@@ -39,6 +39,19 @@ pub(crate) fn config_entry(dir: &Path) -> Option<std::fs::Metadata> {
         .filter(|entry| entry.is_file() || entry.is_symlink())
 }
 
+/// The config file [`Config::load`] would load when started from `start`, or `None` when there
+/// is none, without reading it.
+///
+/// Effect: reads directory entries and symlinks upward from `start`.
+///
+/// # Errors
+///
+/// [`ConfigError::SymlinkNotConfig`] when the nearest entry is a symlink that doesn't lead to a
+/// file named `supdoc.config.toml`.
+pub(crate) fn discover_config(start: &AbsolutePath) -> Result<Option<AbsolutePath>, ConfigError> {
+    chain::discover(start)
+}
+
 /// A fully resolved config. Constructed only by [`Config::load`] and [`Config::load_file`].
 #[derive(Debug, Clone)]
 pub struct Config {

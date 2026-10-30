@@ -16,8 +16,8 @@ use std::path::Path;
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::config::CONFIG_FILE_NAME;
 use crate::config::confine::real_location;
+use crate::config::discover_config;
 use crate::finding::{Finding, Severity};
 use crate::lock::error::shell_quote;
 use crate::lock::io::write_atomically;
@@ -28,7 +28,7 @@ use crate::output::{Output, OutputError, Report, TextContext};
 use crate::path::AbsolutePath;
 
 use super::args::{SkillInstallArgs, WriteMode};
-use super::project::absolute;
+use super::project::{absolute, config_failure};
 use super::{CliError, Context, Outcome};
 
 /// The skill, embedded so the installed copy always matches this binary.
@@ -61,7 +61,9 @@ const INSTALLED_NOTE: &str = "Installed the supdoc skill.";
 ///
 /// # Errors
 ///
-/// Returns `cli-skill-no-home` when `--global` is given and `HOME` is not set,
+/// Returns the config error (78) when the config entry found while looking for the project root
+/// is a symlink that does not lead to a `supdoc.config.toml`, before anything is written or
+/// previewed, `cli-skill-no-home` when `--global` is given and `HOME` is not set,
 /// `cli-skill-outside-root` when a project copy would be written through a symlink out of the
 /// project, before anything is written or previewed, `cli-skill-write` when a copy cannot be
 /// written, and `cli-skill-output` when the report cannot be written.
@@ -74,9 +76,9 @@ pub fn run(
     let base = if args.global {
         context.cwd.clone()
     } else {
-        project_root(context)
+        project_root(context, output)?
     };
-    let destinations = destinations(args.global, context)?;
+    let destinations = destinations(args.global, &base, context)?;
     if !args.global {
         for path in &destinations {
             contain(&base, path, &context.cwd)?;
@@ -126,12 +128,15 @@ pub fn schema() -> Result<schemars::Schema, CliError> {
 /// # Errors
 ///
 /// Returns `cli-skill-no-home` when `global` is set and `HOME` is not.
-fn destinations(global: bool, context: &Context) -> Result<[AbsolutePath; 2], CliError> {
+fn destinations(
+    global: bool,
+    root: &AbsolutePath,
+    context: &Context,
+) -> Result<[AbsolutePath; 2], CliError> {
     if !global {
-        let root = project_root(context);
         return Ok([
-            beneath(&root, AGENTS_SKILL),
-            beneath(&root, PROJECT_CLAUDE_SKILL),
+            beneath(root, AGENTS_SKILL),
+            beneath(root, PROJECT_CLAUDE_SKILL),
         ]);
     }
     let home = context.home.as_ref().ok_or_else(no_home)?;
@@ -146,16 +151,23 @@ fn destinations(global: bool, context: &Context) -> Result<[AbsolutePath; 2], Cl
 }
 
 /// The project root without loading the config: the directory of `--config` when given,
-/// otherwise the nearest directory at or above the current one holding `supdoc.config.toml`,
-/// otherwise the current directory.
-fn project_root(context: &Context) -> AbsolutePath {
+/// otherwise the directory of the config that discovery finds searching upward from the current
+/// directory, the same rule every other command follows, otherwise the current directory.
+///
+/// # Errors
+///
+/// Returns the config error (78) when discovery stops at a symlinked `supdoc.config.toml` that
+/// does not lead to a file of that name.
+fn project_root(context: &Context, output: &mut Output) -> Result<AbsolutePath, CliError> {
     if let Some(file) = &context.global.config {
         let file = absolute(&context.cwd, file);
-        return file.parent().unwrap_or(file);
+        return Ok(file.parent().unwrap_or(file));
     }
-    std::iter::successors(Some(context.cwd.clone()), AbsolutePath::parent)
-        .find(|dir| dir.as_path().join(CONFIG_FILE_NAME).is_file())
-        .unwrap_or_else(|| context.cwd.clone())
+    let found = discover_config(&context.cwd)
+        .map_err(|error| config_failure(&error, context, output, "skill install"))?;
+    Ok(found
+        .and_then(|file| file.parent())
+        .unwrap_or_else(|| context.cwd.clone()))
 }
 
 /// `relative` joined onto `base`.
@@ -456,6 +468,7 @@ mod tests {
     use clap::Parser as _;
 
     use crate::cli::args::{Cli, Command, SkillCommand};
+    use crate::config::CONFIG_FILE_NAME;
     use crate::output::{OutputSettings, PathStyle, Verbosity};
 
     use super::*;
@@ -1061,6 +1074,100 @@ mod tests {
             !world.project_file(".agents").exists(),
             "a refusal should write neither copy, even the one before it"
         );
+    }
+
+    /// A project with a real config at its root and a nested directory that `setup` fills in.
+    #[cfg(unix)]
+    fn nested_config_link(world: &World, setup: impl FnOnce(&Path)) -> PathBuf {
+        plant(&world.project_file(CONFIG_FILE_NAME), "");
+        let inner = world.project_file("inner");
+        fs::create_dir_all(&inner).expect("the nested directory should be created");
+        setup(&inner);
+        inner
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_install_refuses_a_config_symlink_that_is_not_a_config_and_creates_nothing() {
+        type Setup = fn(&Path);
+        let cases: [(&str, Setup); 4] = [
+            ("dangling", |inner| {
+                symlink(Path::new("missing.toml"), &inner.join(CONFIG_FILE_NAME));
+            }),
+            ("looping", |inner| {
+                symlink(Path::new(CONFIG_FILE_NAME), &inner.join(CONFIG_FILE_NAME));
+            }),
+            ("directory", |inner| {
+                fs::create_dir_all(inner.join("target"))
+                    .expect("the target directory should be created");
+                symlink(Path::new("target"), &inner.join(CONFIG_FILE_NAME));
+            }),
+            ("wrong name", |inner| {
+                plant(&inner.join("base.toml"), "");
+                symlink(Path::new("base.toml"), &inner.join(CONFIG_FILE_NAME));
+            }),
+        ];
+        for (name, setup) in cases {
+            for flags in [&["--yes"][..], &[][..]] {
+                let world = World::new();
+                let inner = nested_config_link(&world, setup);
+                let before = tree(world.project.path());
+
+                let run = world.install_in(&inner, None, flags);
+
+                let error = run
+                    .result
+                    .as_ref()
+                    .expect_err("a config symlink that is not a config should be refused");
+                assert_eq!(
+                    (error.code(), error.exit_code()),
+                    ("config-symlink-not-config", CliError::CONFIG_EXIT_CODE),
+                    "{name} target with {flags:?}"
+                );
+                assert_eq!(
+                    tree(world.project.path()),
+                    before,
+                    "{name} target with {flags:?} should create nothing"
+                );
+                assert_eq!(
+                    run.stdout, "",
+                    "{name} target with {flags:?} previews nothing"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_install_roots_at_a_config_symlink_that_leads_to_a_real_config() {
+        let world = World::new();
+        let inner = nested_config_link(&world, |inner| {
+            let real = inner.join("elsewhere/supdoc.config.toml");
+            plant(&real, "");
+            symlink(&real, &inner.join(CONFIG_FILE_NAME));
+        });
+
+        let run = world.install_in(&inner, None, &["--yes"]);
+
+        assert_eq!(run.exit_code(), 0, "stderr: {}", run.stderr);
+        assert_eq!(
+            contents(&inner.join(AGENTS_SKILL)).as_deref(),
+            Some(SKILL),
+            "the skill should go beside the symlinked config"
+        );
+        assert!(!world.project_file(AGENTS_SKILL).exists());
+    }
+
+    #[test]
+    fn skill_install_without_a_config_roots_at_the_current_directory() {
+        let world = World::new();
+        let nested = world.project_file("docs");
+        fs::create_dir_all(&nested).expect("the nested directory should be created");
+
+        let run = world.install_in(&nested, None, &["--yes"]);
+
+        assert_eq!(run.exit_code(), 0, "stderr: {}", run.stderr);
+        assert_eq!(contents(&nested.join(AGENTS_SKILL)).as_deref(), Some(SKILL));
     }
 
     #[cfg(unix)]

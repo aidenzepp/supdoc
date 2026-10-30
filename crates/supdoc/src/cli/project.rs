@@ -61,7 +61,7 @@ pub(crate) fn invocation(context: &Context, command: &str) -> String {
 ///
 /// The message and help name files relative to the current directory, as the location does: no
 /// project root is known yet, and a command in the help then runs as written.
-fn config_failure(
+pub(crate) fn config_failure(
     error: &ConfigError,
     context: &Context,
     output: &mut Output,
