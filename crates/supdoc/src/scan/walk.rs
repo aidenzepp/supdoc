@@ -98,12 +98,20 @@ impl UnreadDir {
 ///
 /// A directory that can't be read becomes a finding and the walk continues, including when it is
 /// the root itself: the caller decides whether an unreadable root is fatal. So does a directory
-/// beneath the root with an ignore file that leads outside it
-/// ([`UnreadCause::IgnoreFileOutsideRoot`]).
+/// with an ignore file that leads outside the root ([`UnreadCause::IgnoreFileOutsideRoot`]); when
+/// that directory is the root, nothing at all is walked.
 ///
 /// Effect: reads directory listings and ignore files.
 #[must_use]
 pub fn walk(config: &Config, languages: &Languages, scope: &Scope) -> Walk {
+    if let Some(root) = unread_for_outside_ignore_file(config, config.root().as_path()) {
+        return Walk {
+            sources: Vec::new(),
+            findings: vec![root.finding()],
+            unread_dirs: vec![root],
+        };
+    }
+
     let mut sources = Vec::new();
     let mut findings = Vec::new();
     let refused = Arc::new(Mutex::new(Vec::new()));
@@ -1220,6 +1228,25 @@ mod tests {
             "an exclude file outside the root must not hide sources"
         );
         assert!(walk.findings.is_empty(), "{:?}", walk.findings);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_whose_ignore_file_leads_out_of_the_root_walks_nothing() {
+        let outside = outside_dir();
+        let project = Project::new();
+        project.write("docs/a.rs", "");
+        symlink_in(&project, ".ignore", &outside.path().join("ignore"));
+
+        let walk = project.walk(&Scope::All);
+
+        assert!(walk.sources.is_empty(), "{:?}", walk.sources);
+        assert_eq!(
+            unread(&project, &walk),
+            [(String::new(), UnreadCause::IgnoreFileOutsideRoot(".ignore"))],
+            "the caller decides what an unwalkable root means",
+        );
+        assert_eq!(codes(&walk), ["scan-ignore-file-outside-root"]);
     }
 
     #[cfg(unix)]

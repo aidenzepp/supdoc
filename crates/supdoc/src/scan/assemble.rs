@@ -1,8 +1,8 @@
 //! The scan's entry point, [`run`]: walk the project, read every source once, extract its links,
 //! then resolve each target once (04).
 //!
-//! Only an unreadable project root stops the run. Every other problem, with one file or one link,
-//! becomes a finding and the scan goes on (S7).
+//! Only a project root that can't be read or walked stops the run. Every other problem, with one
+//! file or one link, becomes a finding and the scan goes on (S7).
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -19,10 +19,13 @@ use crate::read::error::ReadError;
 use crate::read::links::links;
 use crate::scan::model::{Scan, ScannedLink, Scope, TargetState};
 use crate::scan::targets::{self, CODE_UNKNOWN_NAMESPACE, Occurrence, Parsed, Written};
-use crate::scan::walk::walk;
+use crate::scan::walk::{UnreadCause, walk};
 
 /// Exit status for a scan that couldn't read the project (06 X7).
 const EXIT_IO: u8 = 74;
+
+/// Exit status for a scan refused because of what the project holds (06 X7).
+const EXIT_CONFIG: u8 = 78;
 
 /// Why a scan couldn't run at all (04 S7). Every smaller problem is a finding instead.
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +38,19 @@ pub enum ScanError {
         /// What the operating system reported.
         error: std::io::Error,
     },
+    /// One of the root's ignore files leads outside the root once symlinks are followed. The
+    /// walker would read it on entering the root, so nothing is walked (04 S15), and no result
+    /// would mean anything.
+    #[error(
+        "cannot walk the project root {}: its {file} leads outside the project root",
+        .root.display()
+    )]
+    RootIgnoreFileOutsideRoot {
+        /// The project root.
+        root: AbsolutePath,
+        /// The ignore file, relative to the root, such as `.gitignore`.
+        file: &'static str,
+    },
 }
 
 impl ScanError {
@@ -43,6 +59,7 @@ impl ScanError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::RootUnreadable { .. } => "scan-root-unreadable",
+            Self::RootIgnoreFileOutsideRoot { .. } => "scan-root-ignore-file-outside-root",
         }
     }
 
@@ -54,14 +71,21 @@ impl ScanError {
                 "Give the current user read access to the project root, for example with \
                  `chmod u+r` on it, or run from a directory you can read"
             }
+            Self::RootIgnoreFileOutsideRoot { .. } => {
+                "supdoc reads nothing outside the project root. Replace the symlink with a \
+                 regular file holding its rules, or delete it with `rm` if the project doesn't \
+                 need them"
+            }
         }
     }
 
-    /// The process exit status for this error (06 X7): 74, since the project can't be read.
+    /// The process exit status for this error (06 X7): 74 when the project can't be read, 78
+    /// when what it holds is refused.
     #[must_use]
     pub const fn exit_code(&self) -> u8 {
         match self {
             Self::RootUnreadable { .. } => EXIT_IO,
+            Self::RootIgnoreFileOutsideRoot { .. } => EXIT_CONFIG,
         }
     }
 }
@@ -74,7 +98,8 @@ impl ScanError {
 ///
 /// # Errors
 ///
-/// [`ScanError::RootUnreadable`] when the project root can't be listed.
+/// [`ScanError::RootUnreadable`] when the project root can't be listed, and
+/// [`ScanError::RootIgnoreFileOutsideRoot`] when one of its ignore files leads outside it.
 pub fn run(config: &Config, languages: &Languages, scope: &Scope) -> Result<Scan, ScanError> {
     assemble(config, languages, scope).map(|(scan, _parsed)| scan)
 }
@@ -98,6 +123,17 @@ fn assemble(
     }
 
     let walked = walk(config, languages, scope);
+    // An unwalked root would leave every lock entry looking obsolete (05 C5).
+    let root_refused = walked.unread_dirs.iter().find_map(|dir| match dir.cause {
+        UnreadCause::IgnoreFileOutsideRoot(file) if dir.path == *root => Some(file),
+        UnreadCause::IgnoreFileOutsideRoot(_) | UnreadCause::Io(_) => None,
+    });
+    if let Some(file) = root_refused {
+        return Err(ScanError::RootIgnoreFileOutsideRoot {
+            root: root.clone(),
+            file,
+        });
+    }
     let mut findings = walked.findings;
     let mut parsed = Parsed::default();
     let mut unread_sources = BTreeSet::new();
@@ -119,7 +155,7 @@ fn assemble(
         }
     }
 
-    // The root itself was read above, so every unread directory lies beneath it.
+    // The root itself was read and walked above, so every unread directory lies beneath it.
     let unread_dirs = walked
         .unread_dirs
         .iter()
