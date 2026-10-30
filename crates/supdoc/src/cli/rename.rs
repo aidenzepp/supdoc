@@ -724,9 +724,23 @@ fn unread_source(
             "{}; its links can't be renamed, so nothing was written",
             error.message_naming(source)
         ),
-        then_rerun(&error.help(), old, new),
+        then_rerun(&unread_source_help(error), old, new),
         CliError::REFUSED_EXIT_CODE,
     )
+}
+
+/// What to do about a source the rename couldn't read, before running it again. Never the read
+/// error's `exclude` route: a source excluded and then renamed past keeps OLD in its links while
+/// its lock entries move to NEW, the very state the refusal exists to prevent.
+fn unread_source_help(error: &ReadError) -> String {
+    match error {
+        ReadError::NotUtf8 { .. } => "Save the file as UTF-8".to_owned(),
+        ReadError::Missing { .. }
+        | ReadError::Io { .. }
+        | ReadError::TooLarge { .. }
+        | ReadError::UnsupportedLanguage { .. }
+        | ReadError::Internal { .. } => error.help(),
+    }
 }
 
 /// The error for a directory the walk couldn't read. The sources beneath it are as unknown as an
@@ -751,7 +765,7 @@ fn unread_dir(
         ),
         then_rerun(
             "Check that the current user can list the directory, for example with `chmod u+rx` \
-             on it, or add it to `exclude` in `supdoc.config.toml`",
+             on it",
             old,
             new,
         ),
@@ -1507,12 +1521,10 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
             "the message should not name the absolute temp root: {}",
             error.message()
         );
-        assert!(
-            error
-                .help()
-                .contains("`exclude` in `supdoc.config.toml`. Then run"),
-            "the read error's help and the rerun hint should be separate sentences: {}",
-            error.help()
+        assert_eq!(
+            error.help(),
+            "Save the file as UTF-8. Then run `supdoc namespace rename auth identity` again",
+            "the help should offer only fixing the file, then the rerun hint as its own sentence"
         );
         assert_eq!(
             project.files(),
@@ -1570,18 +1582,71 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
             "the message should name the directory relative to the root: {}",
             error.message()
         );
-        assert!(
-            error
-                .help()
-                .ends_with(". Then run `supdoc namespace rename auth identity` again"),
-            "the help should end with the rerun hint as its own sentence: {}",
-            error.help()
+        assert_eq!(
+            error.help(),
+            "Check that the current user can list the directory, for example with `chmod u+rx` \
+             on it. Then run `supdoc namespace rename auth identity` again",
+            "the help should offer only fixing the directory, then the rerun hint as its own \
+             sentence"
         );
         assert_eq!(
             project.files(),
             before,
             "no source, lock or config change is written"
         );
+    }
+
+    /// Excluding an unread source and renaming past it moves its lock entries to NEW while its
+    /// links still say OLD, so no refusal may suggest `exclude`.
+    #[test]
+    fn no_unread_refusal_help_suggests_excluding_the_path() {
+        let old: NamespaceName = "auth".parse().expect("`auth` is a valid namespace");
+        let new: NamespaceName = "identity".parse().expect("`identity` is a valid namespace");
+        let root = AbsolutePath::new(Path::new("/project")).expect("the root should be absolute");
+        let path = AbsolutePath::new(Path::new("/project/docs/a.md"))
+            .expect("the source path should be absolute");
+        let source = SourcePath::from_relative(Path::new("docs/a.md"))
+            .expect("docs/a.md is a valid source path");
+        let read_errors = [
+            ReadError::Missing { path: path.clone() },
+            ReadError::Io {
+                path: path.clone(),
+                error: io::Error::from(io::ErrorKind::PermissionDenied),
+            },
+            ReadError::NotUtf8 {
+                path: path.clone(),
+                offset: 0,
+            },
+            ReadError::TooLarge {
+                path: path.clone(),
+                size: 2,
+                limit: 1,
+            },
+            ReadError::UnsupportedLanguage {
+                path: path.clone(),
+                extension: "xyz".to_owned(),
+                supported: vec!["md"],
+            },
+            ReadError::Internal { path: path.clone() },
+        ];
+        let dir = UnreadDir {
+            path: AbsolutePath::new(Path::new("/project/docs"))
+                .expect("the directory should be absolute"),
+            cause: io::ErrorKind::PermissionDenied,
+        };
+
+        let refusals = read_errors
+            .iter()
+            .map(|error| (error.code(), unread_source(&source, &old, &new, error)))
+            .chain([("unread-dir", unread_dir(&dir, &root, &old, &new))]);
+
+        for (cause, refusal) in refusals {
+            assert!(
+                !refusal.help().contains("exclude"),
+                "the {cause} refusal help should not suggest `exclude`: {}",
+                refusal.help()
+            );
+        }
     }
 
     #[test]
