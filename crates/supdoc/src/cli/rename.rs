@@ -36,7 +36,7 @@ use crate::read::error::ReadError;
 use crate::read::links::links;
 use crate::scan::model::Scope;
 use crate::scan::targets::close_match;
-use crate::scan::walk::walk;
+use crate::scan::walk::{UnreadDir, walk};
 
 use super::args::{RenameArgs, WriteMode};
 use super::project::{load_config, lock_path, read_lock};
@@ -55,7 +55,8 @@ const PREVIEW_NOTE: &str = "Nothing written. Run the same command with --yes to 
 /// Returns the config's own error (78, or 74 when unreadable), the lockfile's own error (78 when
 /// invalid, 74 when unreadable), `cli-rename-unknown-namespace` when OLD isn't defined,
 /// `cli-rename-target-exists` when NEW already is, `cli-rename-inherited` when OLD comes only from
-/// a config this one extends, `cli-rename-unreadable-source` when a source can't be read,
+/// a config this one extends, `cli-rename-unreadable-source` when a source or a directory can't
+/// be read,
 /// `cli-rename-file-changed` when a file changed between planning and
 /// writing (all 1), `cli-rename-write` when a file can't be written, and `cli-rename-output` when
 /// the report can't be written (both 74).
@@ -116,7 +117,7 @@ impl Plan {
     ///
     /// Returns the config's or the lockfile's own error, `cli-rename-unknown-namespace`,
     /// `cli-rename-target-exists`, `cli-rename-inherited`, `cli-rename-unreadable-source` when a
-    /// source can't be read, or `cli-rename-file-changed` when the config no longer defines OLD
+    /// source or a directory can't be read, or `cli-rename-file-changed` when the config no longer defines OLD
     /// once it is read again.
     fn build(
         old: &NamespaceName,
@@ -132,6 +133,9 @@ impl Plan {
 
         let languages = Languages::builtin();
         let walked = walk(&config, &languages, &Scope::All);
+        if let Some(dir) = walked.unread_dirs.first() {
+            return Err(unread_dir(dir, config.root(), old, new));
+        }
         let findings = walked.findings;
         let mut sources = Vec::new();
         for (path, _cartridge) in &walked.sources {
@@ -720,12 +724,49 @@ fn unread_source(
             "{}; its links can't be renamed, so nothing was written",
             error.message_naming(source)
         ),
+        then_rerun(&error.help(), old, new),
+        CliError::REFUSED_EXIT_CODE,
+    )
+}
+
+/// The error for a directory the walk couldn't read. The sources beneath it are as unknown as an
+/// unread source's links, so the rename is refused for the same reason (05 C5).
+fn unread_dir(
+    dir: &UnreadDir,
+    root: &AbsolutePath,
+    old: &NamespaceName,
+    new: &NamespaceName,
+) -> CliError {
+    let shown = dir
+        .path
+        .strip_prefix(root)
+        .and_then(|relative| SourcePath::from_relative(relative).ok())
+        .map_or_else(|| dir.path.display().to_string(), |dir| dir.to_string());
+    CliError::new(
+        "cli-rename-unreadable-source",
         format!(
-            "{} Then run `supdoc namespace rename {old} {new}` again",
-            error.help()
+            "cannot read the directory {shown}: {}; the links beneath it can't be renamed, so \
+             nothing was written",
+            dir.cause
+        ),
+        then_rerun(
+            "Check that the current user can list the directory, for example with `chmod u+rx` \
+             on it, or add it to `exclude` in `supdoc.config.toml`",
+            old,
+            new,
         ),
         CliError::REFUSED_EXIT_CODE,
     )
+}
+
+/// `help`, followed by the sentence that says to run the rename again once it is followed.
+fn then_rerun(help: &str, old: &NamespaceName, new: &NamespaceName) -> String {
+    let end = if help.ends_with(['.', '?', '!']) {
+        ""
+    } else {
+        "."
+    };
+    format!("{help}{end} Then run `supdoc namespace rename {old} {new}` again")
 }
 
 /// The error for a report that could not be written.
@@ -1466,10 +1507,80 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
             "the message should not name the absolute temp root: {}",
             error.message()
         );
+        assert!(
+            error
+                .help()
+                .contains("`exclude` in `supdoc.config.toml`. Then run"),
+            "the read error's help and the rerun hint should be separate sentences: {}",
+            error.help()
+        );
         assert_eq!(
             project.files(),
             before,
             "no file, lock or config change is written"
+        );
+    }
+
+    /// Takes every permission away from a directory until dropped, then gives it back, so a
+    /// failing test still leaves its temporary project removable.
+    #[cfg(unix)]
+    struct Unreadable(PathBuf);
+
+    #[cfg(unix)]
+    impl Unreadable {
+        fn new(dir: PathBuf) -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o000))
+                .expect("the fixture directory permissions should be settable");
+            Self(dir)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for Unreadable {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _restored = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn namespace_rename_refuses_everything_when_a_directory_is_unreadable() {
+        let project = Project::new();
+        project.write("docs/sub/c.md", "See [login](auth:login.rs#login).\n");
+        project.record_all();
+        let before = project.files();
+
+        let unreadable = Unreadable::new(project.dir.path().join("docs/sub"));
+        let run = project.rename(&["namespace", "rename", "auth", "identity", "--yes"]);
+        drop(unreadable);
+
+        let error = run
+            .result
+            .expect_err("an unreadable directory should refuse the rename");
+        assert_eq!(
+            (error.code(), error.exit_code()),
+            ("cli-rename-unreadable-source", 1)
+        );
+        assert!(
+            error
+                .message()
+                .starts_with("cannot read the directory docs/sub:"),
+            "the message should name the directory relative to the root: {}",
+            error.message()
+        );
+        assert!(
+            error
+                .help()
+                .ends_with(". Then run `supdoc namespace rename auth identity` again"),
+            "the help should end with the rerun hint as its own sentence: {}",
+            error.help()
+        );
+        assert_eq!(
+            project.files(),
+            before,
+            "no source, lock or config change is written"
         );
     }
 

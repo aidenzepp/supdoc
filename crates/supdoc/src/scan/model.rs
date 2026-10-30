@@ -27,14 +27,18 @@ impl Scope {
     pub fn contains(&self, source: &SourcePath) -> bool {
         match self {
             Self::All => true,
-            Self::Paths(paths) => paths.iter().any(|listed| {
-                let (listed, source) = (listed.as_str(), source.as_str());
-                source
-                    .strip_prefix(listed)
-                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
-            }),
+            Self::Paths(paths) => paths.iter().any(|listed| lies_under(source, listed)),
         }
     }
+}
+
+/// Whether `source` is `path` itself or lies under it as a directory. Matches whole path
+/// segments, so `docs` holds `docs/a.md` but not `docs2/a.md`.
+fn lies_under(source: &SourcePath, path: &SourcePath) -> bool {
+    source
+        .as_str()
+        .strip_prefix(path.as_str())
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
 /// Every link found in one run, plus problems not tied to a single link.
@@ -49,6 +53,20 @@ pub struct Scan {
     /// Sources that were walked but couldn't be read. Their lock entries are never judged
     /// obsolete (05 C5).
     pub unread_sources: BTreeSet<SourcePath>,
+    /// Directories the walk couldn't read, relative to the root. Every source beneath one is
+    /// unread too, so its lock entries are never judged obsolete either (05 C5).
+    pub unread_dirs: BTreeSet<SourcePath>,
+}
+
+impl Scan {
+    /// Whether `source` couldn't be read: it failed to read itself, or it lies beneath a
+    /// directory the walk couldn't read. Its links are unknown, so none of its lock entries can
+    /// be judged (05 C5).
+    #[must_use]
+    pub fn is_unread(&self, source: &SourcePath) -> bool {
+        self.unread_sources.contains(source)
+            || self.unread_dirs.iter().any(|dir| lies_under(source, dir))
+    }
 }
 
 /// One link, wherever it appears in its source, and the current state of its target.
