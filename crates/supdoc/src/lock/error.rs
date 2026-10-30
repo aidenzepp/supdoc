@@ -81,7 +81,8 @@ impl ParseLockError {
                  supdoc re-sorts the file on its next write"
             }
             Self::NewerVersion { .. } => {
-                "Upgrade supdoc. This lockfile was written by a newer release"
+                "Upgrade supdoc with `cargo install supdoc`. This lockfile was written by a \
+                 newer release"
             }
             Self::Toml { .. } => {
                 "Fix that line or delete the entry, then run `supdoc check`. \
@@ -141,10 +142,13 @@ impl LockError {
     #[must_use]
     pub fn help(&self) -> &'static str {
         match self {
-            Self::Read { .. } => "Give the current user read access",
+            Self::Read { .. } => {
+                "Give the current user read access, for example with `chmod u+r supdoc.lock`"
+            }
             Self::Parse { error, .. } => error.help(),
             Self::Write { .. } => {
-                "The existing lockfile was not changed. Make the directory writable and rerun"
+                "The existing lockfile was not changed. Make the directory that holds \
+                 `supdoc.lock` writable, then run the same command again"
             }
         }
     }

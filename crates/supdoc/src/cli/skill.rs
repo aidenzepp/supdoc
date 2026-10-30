@@ -322,7 +322,13 @@ fn write_failed(path: &AbsolutePath, error: &io::Error) -> CliError {
     CliError::new(
         "cli/skill-write",
         format!("cannot write {}: {error}", path.display()),
-        "Check that you can create and write files in that directory",
+        format!(
+            "Check that you can create and write files in `{}`",
+            path.as_path()
+                .parent()
+                .unwrap_or_else(|| path.as_path())
+                .display()
+        ),
         CliError::IO_EXIT_CODE,
     )
 }
@@ -332,7 +338,8 @@ fn output_failed(error: &OutputError) -> CliError {
     CliError::new(
         "cli/skill-output",
         format!("cannot write the skill install report: {error}"),
-        "Check that standard output and standard error are open and writable",
+        "Check that standard output and standard error are open and writable, or redirect both \
+         to a file with `> supdoc.out 2>&1`",
         CliError::IO_EXIT_CODE,
     )
 }

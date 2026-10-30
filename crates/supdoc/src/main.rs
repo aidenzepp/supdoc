@@ -90,7 +90,7 @@ fn current_dir() -> Result<AbsolutePath, CliError> {
             CliError::new(
                 "cli/no-cwd",
                 "could not read the current directory",
-                "run supdoc from a directory that exists and that you can read",
+                "`cd` to a directory that exists and that you can read, then run supdoc again",
                 IO_EXIT_CODE,
             )
         })
@@ -131,7 +131,7 @@ fn reject_relative_claude_dir(command: &Command, value: Option<&OsStr>) -> Resul
                     dir.to_string_lossy()
                 ),
                 format!(
-                    "Set {CLAUDE_CONFIG_DIR} to an absolute path, or unset it to use ~/.claude"
+                    "Set `{CLAUDE_CONFIG_DIR}` to an absolute path, or unset it to use `~/.claude`"
                 ),
                 CliError::USAGE_EXIT_CODE,
             ))

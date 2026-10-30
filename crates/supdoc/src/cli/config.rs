@@ -86,7 +86,8 @@ fn output_failed(inspect: Inspect, error: &OutputError) -> CliError {
     CliError::new(
         code,
         format!("cannot write the {name} report: {error}"),
-        "Check that standard output and standard error are open and writable",
+        "Check that standard output and standard error are open and writable, or redirect both \
+         to a file with `> supdoc.out 2>&1`",
         CliError::IO_EXIT_CODE,
     )
 }

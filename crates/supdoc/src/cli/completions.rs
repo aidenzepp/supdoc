@@ -59,7 +59,10 @@ fn write_failed(shell: Shell, error: &OutputError) -> CliError {
     CliError::new(
         "cli/completions-write",
         format!("could not write the {shell} completion script: {error}"),
-        "check that standard output is open and writable, or redirect it to a file",
+        format!(
+            "check that standard output is open and writable, or redirect it to a file with \
+             `supdoc completions {shell} > supdoc.{shell}`"
+        ),
         CliError::IO_EXIT_CODE,
     )
 }

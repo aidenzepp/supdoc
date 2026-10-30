@@ -218,7 +218,8 @@ fn write_failed(target: &AbsolutePath, error: &io::Error) -> CliError {
     CliError::new(
         "cli/init-write",
         format!("cannot write {}: {error}", target.display()),
-        "check that the directory exists and that you can write to it",
+        "check that the directory exists and that you can write to it, then run `supdoc init` \
+         again",
         CliError::IO_EXIT_CODE,
     )
 }
@@ -228,7 +229,8 @@ fn output_failed(target: &AbsolutePath, error: &OutputError) -> CliError {
     CliError::new(
         "cli/init-write",
         format!("cannot report on {}: {error}", target.display()),
-        "check that standard output and standard error are open and writable",
+        "check that standard output and standard error are open and writable, or redirect both \
+         to a file with `> supdoc.out 2>&1`",
         CliError::IO_EXIT_CODE,
     )
 }

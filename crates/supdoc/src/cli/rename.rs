@@ -683,7 +683,8 @@ fn target_exists(config: &Config, old: &NamespaceName, new: &NamespaceName) -> C
     CliError::new(
         "cli/rename-target-exists",
         message,
-        "Choose a NEW name no namespace uses. Nothing was changed",
+        "Run `supdoc namespace list` to see the names in use, and choose a NEW name none of \
+         them has. Nothing was changed",
         CliError::REFUSED_EXIT_CODE,
     )
 }
@@ -697,7 +698,7 @@ fn inherited(old: &NamespaceName, defined_in: &AbsolutePath) -> CliError {
             defined_in.display()
         ),
         format!(
-            "Rename it from the project that owns {}; renaming it here would change projects \
+            "Rename it from the project that owns `{}`; renaming it here would change projects \
              that weren't scanned. Nothing was changed",
             defined_in.display()
         ),
@@ -732,7 +733,8 @@ fn output_failed(error: &OutputError) -> CliError {
     CliError::new(
         "cli/rename-output",
         format!("cannot write the rename report: {error}"),
-        "Check that standard output and standard error are open and writable",
+        "Check that standard output and standard error are open and writable, or redirect both \
+         to a file with `> supdoc.out 2>&1`",
         CliError::IO_EXIT_CODE,
     )
 }

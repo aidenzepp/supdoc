@@ -163,7 +163,10 @@ fn unreadable_dir(error: &ignore::Error) -> Option<Finding> {
             Severity::Warning,
             format!("skipped {}: {}", path.display(), cause.kind()),
         )
-        .with_help("Links in that directory weren't checked. Fix permissions or exclude it"),
+        .with_help(
+            "Links in that directory weren't checked. Fix its permissions, or add it to \
+             `exclude` in `supdoc.config.toml`",
+        ),
     )
 }
 
@@ -243,7 +246,9 @@ fn excluded(listed: &SourcePath, pattern: Option<&str>) -> Finding {
                 "{listed} was named on the command line but is excluded by `{pattern}` in `exclude` in {CONFIG_FILE_NAME}",
             ),
         )
-        .with_help("Remove that pattern from `exclude` to check it, or stop passing it"),
+        .with_help(format!(
+            "Remove `{pattern}` from `exclude` to check it, or stop passing it"
+        )),
         None => Finding::new(
             "scan/explicit-path-excluded",
             Severity::Warning,
@@ -251,7 +256,9 @@ fn excluded(listed: &SourcePath, pattern: Option<&str>) -> Finding {
                 "{listed} was named on the command line but is not matched by `include` in {CONFIG_FILE_NAME}",
             ),
         )
-        .with_help("Add it to `include` to check it, or stop passing it"),
+        .with_help(format!(
+            "Add `{listed}` to `include` to check it, or stop passing it"
+        )),
     }
 }
 
@@ -265,7 +272,10 @@ fn ignored(listed: &SourcePath, rule: &str) -> Finding {
             listed = listed.as_str(),
         ),
     )
-    .with_help("Remove it from the ignore file to check it, or stop passing it")
+    .with_help(format!(
+        "Remove that rule from its ignore file to check `{listed}`, or stop passing it",
+        listed = listed.as_str(),
+    ))
 }
 
 /// Whether `listed` or one of its parent directories is a version-control directory or a nested

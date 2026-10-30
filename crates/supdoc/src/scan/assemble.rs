@@ -51,7 +51,8 @@ impl ScanError {
     pub fn help(&self) -> &'static str {
         match self {
             Self::RootUnreadable { .. } => {
-                "Check the directory's permissions, or run from a directory you can read"
+                "Give the current user read access to the project root, for example with \
+                 `chmod u+r` on it, or run from a directory you can read"
             }
         }
     }

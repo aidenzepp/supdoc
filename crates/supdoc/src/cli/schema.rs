@@ -109,7 +109,8 @@ fn to_value(schema: schemars::Schema, what: &str) -> Result<Value, CliError> {
         CliError::new(
             "cli/schema-serialize",
             format!("could not turn the schema of `{what}` into JSON: {error}"),
-            "this is a supdoc bug; report it with the command you ran",
+            "this is a supdoc bug; report it with the command you ran and the output of \
+             `supdoc --version`",
             CliError::BUG_EXIT_CODE,
         )
     })
@@ -211,7 +212,8 @@ fn write_failed(error: &OutputError) -> CliError {
     CliError::new(
         "cli/schema-write",
         format!("could not write the schema: {error}"),
-        "check that standard output is open and writable, or redirect it to a file",
+        "check that standard output is open and writable, or redirect it to a file with \
+         `supdoc schema > supdoc.schema.json`",
         CliError::IO_EXIT_CODE,
     )
 }

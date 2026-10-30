@@ -34,7 +34,7 @@ pub(crate) const CODE_OUTSIDE_ROOT: &str = "link/outside-root";
 
 /// What to do about a link whose target lies outside the project root.
 pub(crate) const OUTSIDE_ROOT_HELP: &str = "Link to a file inside the project root, or move \
-     supdoc.config.toml up to a directory that holds both. supdoc reads nothing outside the root";
+     `supdoc.config.toml` up to a directory that holds both. supdoc reads nothing outside the root";
 
 /// Files parsed during one run, keyed by path (04 S9). Owned by one scan, never global.
 #[derive(Debug, Default)]

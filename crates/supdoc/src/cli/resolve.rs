@@ -159,12 +159,14 @@ fn unknown_namespace(config: &Config, name: &NamespaceName) -> CliError {
         .map(NamespaceName::as_str)
         .collect();
     let nearest = crate::scan::targets::close_match(name.as_str(), defined.iter().copied());
+    let listed = defined
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let help = match (nearest, defined.is_empty()) {
-        (Some(nearest), _) => format!(
-            "did you mean `{nearest}`? Defined namespaces: {}",
-            defined.join(", ")
-        ),
-        (None, false) => format!("Defined namespaces: {}", defined.join(", ")),
+        (Some(nearest), _) => format!("did you mean `{nearest}`? Defined namespaces: {listed}"),
+        (None, false) => format!("Defined namespaces: {listed}"),
         (None, true) => format!(
             "Define `{name}` under `[namespaces]` in {}",
             crate::config::CONFIG_FILE_NAME
@@ -219,7 +221,8 @@ fn output_failed(error: &OutputError) -> CliError {
     CliError::new(
         "cli/resolve-output",
         format!("cannot write the resolve report: {error}"),
-        "Check that standard output and standard error are open and writable",
+        "Check that standard output and standard error are open and writable, or redirect both \
+         to a file with `> supdoc.out 2>&1`",
         CliError::IO_EXIT_CODE,
     )
 }

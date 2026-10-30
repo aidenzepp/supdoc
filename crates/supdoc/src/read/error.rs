@@ -118,15 +118,21 @@ impl ReadError {
                                      the symbol still exists elsewhere"
                     .to_owned()
             }
-            Self::Io { .. } => "Check that the current user can read the file".to_owned(),
-            Self::NotUtf8 { .. } => "Save the file as UTF-8, or exclude it".to_owned(),
-            Self::TooLarge { .. } => "Link to a symbol in a smaller file. Generated files usually \
-                                      shouldn't be linked"
-                .to_owned(),
+            Self::Io { .. } => {
+                "Check that the current user can read the file, for example with `chmod u+r` on it"
+                    .to_owned()
+            }
+            Self::NotUtf8 { .. } => {
+                "Save the file as UTF-8, or add it to `exclude` in `supdoc.config.toml`".to_owned()
+            }
+            Self::TooLarge { limit, .. } => format!(
+                "Link to a symbol in a file under `{limit}` bytes. Generated files usually \
+                 shouldn't be linked"
+            ),
             Self::UnsupportedLanguage { supported, .. } => {
                 let listed = supported
                     .iter()
-                    .map(|extension| format!(".{extension}"))
+                    .map(|extension| format!("`.{extension}`"))
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!(
@@ -134,7 +140,9 @@ impl ReadError {
                 )
             }
             Self::Internal { .. } => {
-                "Report a bug, including the file's language and size".to_owned()
+                "Report a bug, including the output of `supdoc --version` and the file's \
+                 language and size"
+                    .to_owned()
             }
         }
     }
@@ -324,7 +332,7 @@ mod tests {
         );
         assert_eq!(
             error.help(),
-            "supdoc reads .md, .rs. A whole-file link to this type can't be tracked yet",
+            "supdoc reads `.md`, `.rs`. A whole-file link to this type can't be tracked yet",
         );
     }
 }

@@ -223,9 +223,22 @@ pub(crate) fn path_missing(typed: &Path) -> CliError {
     CliError::new(
         "cli/path-missing",
         format!("{} does not exist", typed.display()),
-        "Check the path. Paths are relative to the current directory",
+        format!(
+            "Check the path, which is relative to the current directory. `ls {}` lists what is \
+             there",
+            listing_dir(typed).display()
+        ),
         CliError::USAGE_EXIT_CODE,
     )
+}
+
+/// The directory a missing `typed` path would be in, as typed: its parent, or `.` when it has
+/// none.
+fn listing_dir(typed: &Path) -> &Path {
+    typed
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
 }
 
 /// The error for a `[PATH]` outside the project, whose links no command can name.
@@ -238,7 +251,7 @@ pub(crate) fn path_outside(typed: &Path, root: &AbsolutePath) -> CliError {
             root.display()
         ),
         format!(
-            "Pass a path inside {}, or run supdoc from the project that contains it",
+            "Pass a path inside `{}`, or run supdoc from the project that contains it",
             root.display()
         ),
         CliError::USAGE_EXIT_CODE,
@@ -250,7 +263,7 @@ pub(crate) fn path_invalid(typed: &Path, error: &impl std::fmt::Display) -> CliE
     CliError::new(
         "cli/path-invalid",
         format!("{} can't be checked: {error}", typed.display()),
-        "Pass a file or directory whose path supdoc.lock could record, or leave out [PATHS] to check the whole project",
+        "Pass a file or directory whose path `supdoc.lock` could record, or leave out `[PATHS]` to cover the whole project",
         CliError::USAGE_EXIT_CODE,
     )
 }

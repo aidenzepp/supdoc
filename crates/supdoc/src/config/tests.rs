@@ -308,7 +308,7 @@ fn unknown_key_is_parse_error_naming_key_and_valid_keys() {
     assert_eq!(parse_span_text(&error, text), "exlude");
     assert_eq!(
         error.help().as_deref(),
-        Some("Rename or remove the unknown key")
+        Some("Remove `exlude`, or rename it to one of the keys the message lists")
     );
 }
 

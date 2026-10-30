@@ -153,7 +153,7 @@ impl CliError {
             Self::NOT_BUILT,
             format!("`supdoc {command}` is not built yet"),
             format!(
-                "this build has the arguments of `supdoc {command}` but not its behavior; use a release that includes the command"
+                "this build has the arguments of `supdoc {command}` but not its behavior; install a release that includes the command with `cargo install supdoc`"
             ),
             Self::BUG_EXIT_CODE,
         )

@@ -166,8 +166,8 @@ impl ConfigError {
             ),
             Self::NamespaceOutsideRoot { .. } => Some(
                 "Point the namespace at a directory inside the project root, or move the project's \
-                 supdoc.config.toml up to a directory that holds both. supdoc reads nothing outside \
-                 the root"
+                 `supdoc.config.toml` up to a directory that holds both. supdoc reads nothing \
+                 outside the root"
                     .to_owned(),
             ),
         }
@@ -195,7 +195,10 @@ impl ConfigError {
 /// back. The unit tests pin each message so a reworded one fails here, not silently.
 fn parse_help(message: &str) -> Option<String> {
     if message.starts_with("unknown field") {
-        Some("Rename or remove the unknown key".to_owned())
+        let key = message.split('`').nth(1).unwrap_or_default();
+        Some(format!(
+            "Remove `{key}`, or rename it to one of the keys the message lists"
+        ))
     } else if message.starts_with("namespace names") {
         Some(
             "Rename the namespace to an ASCII letter followed by letters, digits, `-` or `_`, \
@@ -207,7 +210,7 @@ fn parse_help(message: &str) -> Option<String> {
     } else if message.ends_with("leaves this config's directory") {
         Some(
             "Links, namespaces and extends stay inside the project root. For a monorepo, put \
-             supdoc.config.toml at the repo root"
+             `supdoc.config.toml` at the repo root"
                 .to_owned(),
         )
     } else {
