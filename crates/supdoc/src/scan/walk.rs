@@ -76,7 +76,8 @@ pub struct Walk {
     /// Unreadable directories and explicitly named paths that are excluded or ignored, sorted.
     pub findings: Vec<Finding>,
     /// The directories the walk couldn't read, sorted by path. Nothing beneath one was walked, so
-    /// its sources and their links are unknown (05 C5).
+    /// its sources and their links are unknown (05 C5). When the walk never started, this is the
+    /// one directory, the root or one above it, whose ignore file stopped it.
     pub unread_dirs: Vec<UnreadDir>,
 }
 
@@ -146,16 +147,17 @@ impl UnreadDir {
 /// A directory that can't be read becomes a finding and the walk continues, including when it is
 /// the root itself: the caller decides whether an unreadable root is fatal. So does a directory
 /// with an ignore file that leads outside the root ([`UnreadCause::IgnoreFileOutsideRoot`]); when
-/// that directory is the root, nothing at all is walked.
+/// that directory is the root, or one above it whose ignore files the walker also reads, nothing
+/// at all is walked.
 ///
 /// Effect: reads directory listings and ignore files.
 #[must_use]
 pub fn walk(config: &Config, languages: &Languages, scope: &Scope) -> Walk {
-    if let Some(root) = unread_for_outside_ignore_file(config, config.root().as_path()) {
+    if let Some(stopped) = unwalkable_root(config) {
         return Walk {
             sources: Vec::new(),
-            findings: vec![root.finding()],
-            unread_dirs: vec![root],
+            findings: vec![stopped.finding()],
+            unread_dirs: vec![stopped],
         };
     }
 
@@ -255,6 +257,24 @@ fn git_exclude(config: &Config, dir: &Path) -> Option<Gitignore> {
         return None;
     }
     matcher(config, dir, &git.join("info/exclude"))
+}
+
+/// The root, or the directory above it nearest the root, with an ignore file that leads outside the
+/// root. The walker reads the ignore files of the root and of every directory above it before
+/// walking anything, and can't be told to skip one, so with such a file nothing may be walked.
+///
+/// Effect: reads file metadata in the root and each directory above it, and resolves symlinks
+/// only when one is there.
+fn unwalkable_root(config: &Config) -> Option<UnreadDir> {
+    let root = config.root().as_path();
+    unread_for_outside_ignore_file(config, root).or_else(|| {
+        // The walker reads the ignore files above the root's real location, so these are checked.
+        let real_root = fs::canonicalize(root).ok()?;
+        real_root
+            .ancestors()
+            .skip(1)
+            .find_map(|dir| unread_for_outside_ignore_file(config, dir))
+    })
 }
 
 /// `dir` as unread when one of its ignore files leads outside the root, so the walker must not
@@ -550,8 +570,8 @@ fn matcher(config: &Config, dir: &Path, ignore_file: &Path) -> Option<Gitignore>
     builder.build().ok()
 }
 
-/// Whether `relative`, beneath the in-root directory `base`, passes through a symlink that leads
-/// outside the root (04 S15). A missing path leads nowhere.
+/// Whether `relative`, beneath the directory `base`, passes through a symlink that leads outside
+/// the root (04 S15). A missing path leads nowhere.
 ///
 /// Only a path with a symlink somewhere below `base`, the file itself or a directory on the way
 /// to it, is resolved; an ordinary path costs one `lstat` per component.
@@ -1272,6 +1292,41 @@ mod tests {
             "the caller decides what an unwalkable root means",
         );
         assert_eq!(codes(&walk), ["scan-ignore-file-outside-root"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ignore_file_above_the_root_symlinked_elsewhere_walks_nothing() {
+        let outside = outside_dir();
+        let above = TempDir::new().expect("a temporary parent directory should be creatable");
+        fs::create_dir(above.path().join("project"))
+            .expect("the project directory should be creatable");
+        fs::write(above.path().join("project/out.rs"), "")
+            .expect("the fixture source should be writable");
+        fs::write(above.path().join("project").join(CONFIG_FILE_NAME), "")
+            .expect("the fixture config should be writable");
+        std::os::unix::fs::symlink(outside.path().join("ignore"), above.path().join(".ignore"))
+            .expect("the fixture symlink should be creatable");
+        let config_path = AbsolutePath::new(&above.path().join("project").join(CONFIG_FILE_NAME))
+            .expect("the temporary directory should be absolute");
+        let config = Config::load_file(&config_path).expect("the fixture config should be valid");
+
+        let walk = walk(&config, &Languages::builtin(), &Scope::All);
+
+        assert!(walk.sources.is_empty(), "{:?}", walk.sources);
+        let real_above = fs::canonicalize(above.path()).expect("the parent should resolve");
+        assert_eq!(
+            walk.unread_dirs
+                .iter()
+                .map(|dir| (dir.path.as_path(), dir.cause))
+                .collect::<Vec<_>>(),
+            [(
+                real_above.as_path(),
+                UnreadCause::IgnoreFileOutsideRoot(IgnoreFile::Ignore)
+            )],
+            "the caller decides what an unwalkable root means",
+        );
+        assert!(!messages(&walk).contains(RULE), "{}", messages(&walk));
     }
 
     #[cfg(unix)]

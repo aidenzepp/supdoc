@@ -774,3 +774,41 @@ fn a_root_whose_git_dir_is_symlinked_out_refuses_with_help_that_keeps_the_checko
     );
     assert!(!run.stderr.contains("gui*.md"), "{}", run.stderr);
 }
+
+#[cfg(unix)]
+#[test]
+fn an_ignore_file_above_the_root_symlinked_elsewhere_refuses_the_scan_and_keeps_the_lock() {
+    let project = web_project();
+    let _ = project
+        .supdoc_in("services/web", &["update", "--yes"])
+        .assert_exit(0);
+    let locked = project.read("services/web/supdoc.lock");
+    // Above the root, a checkout's `.gitignore` could otherwise point at any file and let its
+    // lines decide which sources are skipped.
+    fs::write(project.path("rules"), "gui*.md\n").expect("the outside rules should be writable");
+    std::os::unix::fs::symlink(project.path("rules"), project.path(".gitignore"))
+        .expect("the symlink should be creatable");
+
+    let check = project.supdoc_in("services/web", &["check", "docs/guide.md"]);
+    let update = project.supdoc_in("services/web", &["update", "--yes"]);
+
+    for run in [&check, &update] {
+        let _ = run.assert_exit(78);
+        assert!(
+            run.stderr.contains("scan-root-ignore-file-outside-root")
+                && run.stderr.contains("an ignore file above it"),
+            "`supdoc {}` should refuse the root\nstdout:\n{}\nstderr:\n{}",
+            run.args,
+            run.stdout,
+            run.stderr
+        );
+        assert!(
+            !run.stdout.contains("gui*.md") && !run.stderr.contains("gui*.md"),
+            "`supdoc {}` printed a line from outside the root\n{}\n{}",
+            run.args,
+            run.stdout,
+            run.stderr
+        );
+    }
+    assert_eq!(project.read("services/web/supdoc.lock"), locked);
+}

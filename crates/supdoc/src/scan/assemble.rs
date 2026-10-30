@@ -38,16 +38,15 @@ pub enum ScanError {
         /// What the operating system reported.
         error: std::io::Error,
     },
-    /// One of the root's ignore files leads outside the root once symlinks are followed. The
-    /// walker would read it on entering the root, so nothing is walked (04 S15), and no result
-    /// would mean anything.
-    #[error(
-        "cannot walk the project root {}: its {file} leads outside the project root",
-        .root.display()
-    )]
+    /// An ignore file of the root, or of a directory above it, leads outside the root once
+    /// symlinks are followed. The walker would read it before walking anything, so nothing is
+    /// walked (04 S15), and no result would mean anything.
+    #[error("cannot walk the project root {}: {}", .root.display(), refused_file(.root, .dir, *.file))]
     RootIgnoreFileOutsideRoot {
         /// The project root.
         root: AbsolutePath,
+        /// The directory holding the ignore file: the root or one above it.
+        dir: AbsolutePath,
         /// The ignore file.
         file: IgnoreFile,
     },
@@ -99,21 +98,39 @@ impl ScanError {
 /// # Errors
 ///
 /// [`ScanError::RootUnreadable`] when the project root can't be listed, and
-/// [`ScanError::RootIgnoreFileOutsideRoot`] when one of its ignore files leads outside it.
+/// [`ScanError::RootIgnoreFileOutsideRoot`] when an ignore file of the root or of a directory above
+/// it leads outside the root.
 pub fn run(config: &Config, languages: &Languages, scope: &Scope) -> Result<Scan, ScanError> {
     assemble(config, languages, scope).map(|(scan, _parsed)| scan)
 }
 
-/// The refusal for a walk of `root` that never started because one of the root's ignore files
-/// leads outside it, or `None` when the walk went ahead. Any caller judging what the walk found
+/// Which ignore file stopped the walk of `root`: `file` in `dir`, the root or a directory above it.
+fn refused_file(root: &AbsolutePath, dir: &AbsolutePath, file: IgnoreFile) -> String {
+    if dir == root {
+        format!("its {file} leads outside the project root")
+    } else {
+        format!(
+            "{}, an ignore file above it, leads outside the project root",
+            dir.as_path().join(file.path()).display()
+        )
+    }
+}
+
+/// The refusal for a walk of `root` that never started because an ignore file of the root or of
+/// a directory above it leads outside the root, or `None` when the walk went ahead. Any caller judging what the walk found
 /// must refuse in its place: an unwalked root would leave every lock entry looking obsolete (05
 /// C5).
 #[must_use]
 pub fn root_refusal(root: &AbsolutePath, walked: &Walk) -> Option<ScanError> {
     walked.unread_dirs.iter().find_map(|dir| match dir.cause {
-        UnreadCause::IgnoreFileOutsideRoot(file) if dir.path == *root => {
+        // Every directory the walk refuses lies beneath the root, as the walk met it. Any other
+        // is the root or a directory above it, perhaps spelled through the root's real location.
+        UnreadCause::IgnoreFileOutsideRoot(file)
+            if dir.path == *root || !dir.path.as_path().starts_with(root.as_path()) =>
+        {
             Some(ScanError::RootIgnoreFileOutsideRoot {
                 root: root.clone(),
+                dir: dir.path.clone(),
                 file,
             })
         }
