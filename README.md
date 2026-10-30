@@ -36,7 +36,9 @@ symbols too: `[setup](docs/guide.md#install)`.
 
 `update`, `fix`, `namespace rename` and `skill install` preview their changes unless given `--yes`.
 `init` writes immediately; use `--dry-run` to preview it. Every command accepts `--json` and `--jsonl`
-for machine-readable output. Exit codes: 0 clean, 1 failing or refused, 2 usage error, 70 supdoc bug, 74 I/O
+for machine-readable output. Adding optional fields, or new values of an existing enum (states, actions, kinds,
+JSONL record types), keeps `schema_version`; removing or renaming bumps it, so consumers must tolerate values they
+do not know. Exit codes: 0 clean, 1 failing or refused, 2 usage error, 70 supdoc bug, 74 I/O
 error, 78 config or lockfile error.
 
 ## Configuration
