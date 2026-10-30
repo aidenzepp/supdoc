@@ -24,6 +24,7 @@ use crate::lock::model::Lockfile;
 use crate::output::json::Envelope;
 use crate::output::text::{render_finding, visible};
 use crate::output::{Output, OutputError, PathStyle, Report, TextContext};
+use crate::path::AbsolutePath;
 use crate::read::cartridge::Languages;
 use crate::scan::model::{Scan, Scope, TargetState};
 use crate::state::LinkState;
@@ -98,7 +99,7 @@ impl Planned {
     ) -> Result<Self, CliError> {
         let config = load_config(context, output, "fix")?;
         let scope = scope(paths, &context.cwd, config.root())?;
-        let lock = read_lock(&config)?;
+        let lock = read_lock(&config, &context.cwd)?;
         let scan = scan(&config, &scope)?;
         let broken = scan
             .links
@@ -246,7 +247,7 @@ impl Planned {
         if let Some(error) = lock_failure {
             let changed: BTreeSet<&SourcePath> =
                 done.iter().map(|planned| &planned.fix.file).collect();
-            Err(lock_unwritten(&error, &changed))
+            Err(lock_unwritten(&error, root, &changed))
         } else if write_failed > 0 {
             Err(sources_unwritten(write_failed))
         } else if file_changed {
@@ -359,13 +360,19 @@ fn sources_unwritten(files: usize) -> CliError {
 ///
 /// The lockfile is untouched, so it still holds each fixed link's history under its old key.
 /// Rerunning `fix` finds nothing left to fix, so the help offers the two ways forward that work.
-fn lock_unwritten(error: &LockError, files: &BTreeSet<&SourcePath>) -> CliError {
+/// The message names the lockfile relative to the project `root`, as it names the fixed files.
+fn lock_unwritten(
+    error: &LockError,
+    root: &AbsolutePath,
+    files: &BTreeSet<&SourcePath>,
+) -> CliError {
     let names: Vec<&str> = files.iter().map(|file| file.as_str()).collect();
     CliError::new(
         CODE_LOCK_WRITE_FAILED,
         format!(
-            "fixed {}, but supdoc.lock could not be written: {error}",
-            names.join(", ")
+            "fixed {}, but supdoc.lock could not be written: {}",
+            names.join(", "),
+            error.message_from(root)
         ),
         "supdoc.lock is unchanged and still holds the old links' history. \
          Make it writable, then either restore those files and run `supdoc fix --yes` again \
@@ -570,7 +577,6 @@ mod tests {
     use crate::cli::args::{Cli, Command};
     use crate::lock::model::LOCK_FILE_NAME;
     use crate::output::{OutputSettings, Verbosity};
-    use crate::path::AbsolutePath;
 
     /// A guide whose link misspells `add` as `ad`, which has exactly one near match.
     const GUIDE: &str = "# Guide\n\nThe [add](../src/lib.rs#ad) function sums.\n";
@@ -909,6 +915,13 @@ mod tests {
         assert!(
             error.message().contains("docs/guide.md"),
             "the error should name the fixed file: {}",
+            error.message()
+        );
+        assert!(
+            error
+                .message()
+                .contains("could not be written: cannot write supdoc.lock: "),
+            "the error should name the lockfile relative to the root, not absolutely: {}",
             error.message()
         );
         assert!(

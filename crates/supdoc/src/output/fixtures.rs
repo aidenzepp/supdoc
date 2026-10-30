@@ -146,7 +146,7 @@ pub(super) fn check_report() -> CheckFixture {
     let loose = Finding::new(
         "scan-unreadable-dir",
         Severity::Warning,
-        "skipped /repo/private: permission denied",
+        "skipped private: permission denied",
     )
     .with_help("fix the directory's permissions, or add it to `exclude` in supdoc.config.toml");
     CheckFixture {

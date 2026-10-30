@@ -19,6 +19,7 @@ use serde::Serialize;
 use crate::config::CONFIG_FILE_NAME;
 use crate::config::confine::real_location;
 use crate::finding::{Finding, Severity};
+use crate::lock::error::shell_quote;
 use crate::lock::io::write_atomically;
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
@@ -78,7 +79,7 @@ pub fn run(
     let destinations = destinations(args.global, context)?;
     if !args.global {
         for path in &destinations {
-            contain(&base, path)?;
+            contain(&base, path, &context.cwd)?;
         }
     }
     let changes: Vec<SkillChange> = destinations
@@ -183,8 +184,9 @@ fn label(path: &AbsolutePath, base: &AbsolutePath) -> String {
 ///
 /// # Errors
 ///
-/// Returns `cli-skill-outside-root` naming the first directory that leads out.
-fn contain(root: &AbsolutePath, target: &AbsolutePath) -> Result<(), CliError> {
+/// Returns `cli-skill-outside-root` naming the first directory that leads out, in the help
+/// relative to `cwd` so its commands run as written.
+fn contain(root: &AbsolutePath, target: &AbsolutePath, cwd: &AbsolutePath) -> Result<(), CliError> {
     // Every project destination is beneath the root, so there is always a directory chain.
     let Some(directories) = target.strip_prefix(root).and_then(Path::parent) else {
         return Ok(());
@@ -195,7 +197,7 @@ fn contain(root: &AbsolutePath, target: &AbsolutePath) -> Result<(), CliError> {
         dir.push(component);
         match real_location(&dir) {
             Some(real) if real.starts_with(&real_root) => {}
-            real => return Err(outside_root(root, target, &dir, real.as_deref())),
+            real => return Err(outside_root(root, target, &dir, real.as_deref(), cwd)),
         }
     }
     Ok(())
@@ -352,13 +354,21 @@ fn exists(shown: &str) -> Finding {
 
 /// The refusal for a project copy that `link` would send out of `root`: to `real`, or somewhere
 /// that can't be worked out when `real` is `None`.
+///
+/// The message names the copy and the link as the report lines do, relative to `root`. The help
+/// names the link relative to `cwd`, so its `rm` and `mkdir` run as written.
 fn outside_root(
     root: &AbsolutePath,
     target: &AbsolutePath,
     link: &Path,
     real: Option<&Path>,
+    cwd: &AbsolutePath,
 ) -> CliError {
     let shown_link = link.strip_prefix(root.as_path()).unwrap_or(link).display();
+    let typed_link = AbsolutePath::new(link).map_or_else(
+        || shell_quote(&link.display().to_string()),
+        |link| shell_quote(&relative_to(cwd, &link)),
+    );
     let shown = label(target, root);
     let message = match real {
         Some(real) => {
@@ -382,10 +392,10 @@ fn outside_root(
         "cli-skill-outside-root",
         message,
         format!(
-            "Nothing was written. Point {shown_link} at a directory inside the project, or \
+            "Nothing was written. Point {typed_link} at a directory inside the project, or \
              install into your home directory with `supdoc skill install --global --yes`. To \
-             use a real directory instead, run `rm {shown_link}` (this removes only the link, \
-             not the directory it points to), then `mkdir {shown_link}`"
+             use a real directory instead, run `rm {typed_link}` (this removes only the link, \
+             not the directory it points to), then `mkdir {typed_link}`"
         ),
         CliError::REFUSED_EXIT_CODE,
     )
@@ -1000,6 +1010,35 @@ mod tests {
         assert!(
             !world.project_file(".claude").exists(),
             "a refusal should write neither copy"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_install_outside_root_help_names_the_link_from_a_subdirectory() {
+        let world = World::new();
+        plant(&world.project_file(CONFIG_FILE_NAME), "");
+        let elsewhere = tempfile::tempdir().expect("an outside temp directory should be created");
+        symlink(elsewhere.path(), &world.project_file(".agents"));
+        let docs = world.project_file("docs");
+        fs::create_dir_all(&docs).expect("the docs directory should be created");
+
+        let run = world.install_in(&docs, None, &[]);
+
+        let error = run
+            .result
+            .as_ref()
+            .expect_err("an install through a symlink out of the project should be refused");
+        assert_eq!(error.code(), "cli-skill-outside-root", "got {error:?}");
+        assert!(
+            error.message().contains(".agents is a symlink to "),
+            "the message should name the link as the report lines do: {}",
+            error.message()
+        );
+        assert!(
+            error.help().contains("`rm ../.agents`") && error.help().contains("`mkdir ../.agents`"),
+            "the help's commands should run from docs/: {}",
+            error.help()
         );
     }
 

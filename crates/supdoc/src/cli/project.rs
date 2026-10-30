@@ -181,14 +181,15 @@ pub(crate) fn lock_path(root: &AbsolutePath) -> AbsolutePath {
 /// touches"), refusing one recorded under different hash settings than `config` resolves to (B.5).
 ///
 /// Every command but `update` reads the lock through here, so a `passed` verdict always means the
-/// target's bytes, read under the lock's recorded settings, hash to the recorded value.
+/// target's bytes, read under the lock's recorded settings, hash to the recorded value. A help
+/// names the lockfile relative to `cwd`, the directory supdoc runs in, so it runs as written.
 ///
 /// # Errors
 ///
 /// Returns the lockfile's own error (74 when it can't be read, 78 when its text is invalid), or
 /// `lock-settings-mismatch` (78) when the recorded settings differ from the configured ones.
-pub(crate) fn read_lock(config: &Config) -> Result<Lockfile, CliError> {
-    match read_lock_for_update(config)? {
+pub(crate) fn read_lock(config: &Config, cwd: &AbsolutePath) -> Result<Lockfile, CliError> {
+    match read_lock_for_update(config, cwd)? {
         (lock, None) => Ok(lock),
         (_, Some(change)) => Err(settings_mismatch(config, change)),
     }
@@ -198,17 +199,18 @@ pub(crate) fn read_lock(config: &Config) -> Result<Lockfile, CliError> {
 /// `config` resolves to, if they do (02 L10).
 ///
 /// A missing lockfile is an empty one under `config`'s settings, so a fresh project never
-/// differs.
+/// differs. A help names the lockfile relative to `cwd`, the directory supdoc runs in.
 ///
 /// # Errors
 ///
 /// Returns the lockfile's own error: 74 when it can't be read, 78 when its text is invalid.
 pub(crate) fn read_lock_for_update(
     config: &Config,
+    cwd: &AbsolutePath,
 ) -> Result<(Lockfile, Option<SettingsChange>), CliError> {
     let configured = config.hash_settings();
     let read = Lockfile::read(&lock_path(config.root()))
-        .map_err(|error| lock_failure(&error, config.root()))?;
+        .map_err(|error| lock_failure(&error, config.root(), cwd))?;
     let Some(lock) = read else {
         let mut empty = Lockfile::default();
         empty.set_hash_settings(configured);
@@ -236,13 +238,14 @@ pub(crate) fn settings_mismatch(config: &Config, change: SettingsChange) -> CliE
     )
 }
 
-/// The command's error for a lockfile that could not be read, naming it in the message relative
-/// to the project `root`.
-fn lock_failure(error: &LockError, root: &AbsolutePath) -> CliError {
+/// The command's error for a lockfile that could not be read or written, naming it in the
+/// message relative to the project `root`, as the read messages name files, and in the help
+/// relative to `cwd`, so a command there runs as written.
+pub(crate) fn lock_failure(error: &LockError, root: &AbsolutePath, cwd: &AbsolutePath) -> CliError {
     CliError::new(
         error.code(),
         error.message_from(root),
-        error.help(),
+        error.help_from(cwd),
         error.exit_code(),
     )
 }
@@ -328,7 +331,8 @@ mod tests {
         let root = AbsolutePath::new(dir.path()).expect("a temp directory should be absolute");
         let config = Config::load(&root).expect("the fixture config should load");
 
-        let error = read_lock(&config).expect_err("a lock under other settings should be refused");
+        let error =
+            read_lock(&config, &root).expect_err("a lock under other settings should be refused");
 
         assert_eq!(
             (error.code(), error.exit_code()),
@@ -365,6 +369,11 @@ mod tests {
         fs::write(dir.path().join("supdoc.config.toml"), "")
             .expect("the fixture config should be written");
         dir
+    }
+
+    /// The `docs` directory of a project from [`project_with_docs`].
+    fn docs_of(dir: &tempfile::TempDir) -> AbsolutePath {
+        AbsolutePath::new(&dir.path().join("docs")).expect("a temp directory should be absolute")
     }
 
     #[test]
@@ -416,9 +425,10 @@ mod tests {
         let dir = project_with_docs();
         fs::write(dir.path().join("supdoc.lock"), "version = x\n")
             .expect("the fixture lock should be written");
-        let config = load_in(&dir.path().join("docs")).expect("the fixture config should load");
+        let docs = docs_of(&dir);
+        let config = load_in(docs.as_path()).expect("the fixture config should load");
 
-        let error = read_lock(&config).expect_err("a broken lock should be refused");
+        let error = read_lock(&config, &docs).expect_err("a broken lock should be refused");
 
         assert_eq!(
             (error.code(), error.message()),
@@ -443,9 +453,11 @@ mod tests {
             "version = 1\n\n[features.hash]\nline-endings = \"normalize\"\n",
         )
         .expect("the fixture lock should be written");
-        let config = load_in(&dir.path().join("docs")).expect("the fixture config should load");
+        let docs = docs_of(&dir);
+        let config = load_in(docs.as_path()).expect("the fixture config should load");
 
-        let error = read_lock(&config).expect_err("a lock under other settings should be refused");
+        let error =
+            read_lock(&config, &docs).expect_err("a lock under other settings should be refused");
 
         assert_eq!(
             error.message(),

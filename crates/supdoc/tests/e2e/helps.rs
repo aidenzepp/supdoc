@@ -3,7 +3,7 @@
 
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
-use std::path::PathBuf;
+use std::process::Command;
 
 use crate::support::{Project, Run};
 
@@ -20,14 +20,6 @@ fn write(project: &Project, relative: &str, text: &str) {
     fs::create_dir_all(path.parent().expect("a project path should have a parent"))
         .expect("the directory should be creatable");
     fs::write(path, text).expect("the file should be writable");
-}
-
-/// The absolute path `supdoc` prints for `relative` inside `project`: its temp directory resolved
-/// through any symlink, as the current directory is.
-fn printed(project: &Project, relative: &str) -> PathBuf {
-    fs::canonicalize(project.path("."))
-        .expect("the project root should resolve")
-        .join(relative)
 }
 
 /// The text of `run`'s output from the first `marker` to the next blank line.
@@ -95,7 +87,7 @@ fn missing_path_help_lists_the_nearest_directory_that_exists() {
 }
 
 #[test]
-fn unreadable_lock_help_names_the_lock_by_its_full_path() {
+fn unreadable_lock_help_names_the_lock_from_the_current_directory() {
     let project = project();
     project.record();
     let lock = project.path("supdoc.lock");
@@ -104,19 +96,26 @@ fn unreadable_lock_help_names_the_lock_by_its_full_path() {
 
     let run = project.supdoc_in("docs", &["check"]);
 
+    let _ = run.assert_exit(74);
+    let chmod = "`chmod u+r ../supdoc.lock`";
+    let named = run.stderr.contains(chmod);
+    let ran = Command::new("chmod")
+        .args(["u+r", "../supdoc.lock"])
+        .current_dir(project.path("docs"))
+        .status()
+        .expect("chmod should run");
     fs::set_permissions(&lock, fs::Permissions::from_mode(0o644))
         .expect("the lock should accept its permissions back");
-    let _ = run.assert_exit(74);
-    let chmod = format!("`chmod u+r {}`", printed(&project, "supdoc.lock").display());
     assert!(
-        run.stderr.contains(&chmod),
+        named,
         "from docs/ the help should name {chmod}:\n{}",
         run.stderr
     );
+    assert!(ran.success(), "the help's `chmod` should work from docs/");
 }
 
 #[test]
-fn lock_symlink_help_names_the_symlink_by_its_full_path() {
+fn lock_symlink_help_names_the_symlink_from_the_current_directory() {
     let project = project();
     write(&project, "base.lock", "");
     symlink("base.lock", project.path("supdoc.lock")).expect("the symlink should be creatable");
@@ -124,12 +123,18 @@ fn lock_symlink_help_names_the_symlink_by_its_full_path() {
     let run = project.supdoc_in("docs", &["check"]);
 
     let _ = run.assert_exit(78);
-    let rm = format!("`rm {}`", printed(&project, "supdoc.lock").display());
+    let rm = "`rm ../supdoc.lock`";
     assert!(
-        run.stderr.contains(&rm),
+        run.stderr.contains(rm),
         "from docs/ the help should name {rm}:\n{}",
         run.stderr
     );
+    fs::remove_file(project.path("docs/../supdoc.lock"))
+        .expect("the help's `rm` should work from docs/");
+    let _ = project
+        .supdoc_in("docs", &["update", "--yes"])
+        .assert_exit(0);
+    let _ = project.supdoc_in("docs", &["check"]).assert_exit(0);
 }
 
 #[test]

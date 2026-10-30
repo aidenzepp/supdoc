@@ -138,10 +138,10 @@ impl Plan {
         output: &mut Output,
     ) -> Result<Self, CliError> {
         let config = load_config(context, output, command)?;
-        let lock = read_lock(&config)?;
+        let lock = read_lock(&config, &context.cwd)?;
         let nearest = defining_file(&config, old, new)?;
-        let config_edit = ConfigEdit::read(nearest, config.root(), old, new)?;
-        let parent = parent_definition(&config, old)?;
+        let config_edit = ConfigEdit::read(nearest, config.root(), &context.cwd, old, new)?;
+        let parent = parent_definition(&config, old, &context.cwd)?;
 
         let languages = Languages::builtin();
         let walked = walk(&config, &languages, &Scope::All);
@@ -393,9 +393,10 @@ fn defining_file<'c>(
 fn parent_definition(
     config: &Config,
     name: &NamespaceName,
+    cwd: &AbsolutePath,
 ) -> Result<Option<AbsolutePath>, CliError> {
     for file in config.files().iter().skip(1) {
-        let text = read_config(file)?;
+        let text = read_config(file, cwd)?;
         if namespace_key(&text, name).is_some() {
             return Ok(Some(file.clone()));
         }
@@ -407,8 +408,9 @@ fn parent_definition(
 ///
 /// # Errors
 ///
-/// Returns the config's own read error (74).
-fn read_config(file: &AbsolutePath) -> Result<String, CliError> {
+/// Returns the config's own read error (74), naming the file relative to `cwd`, as every config
+/// error does.
+fn read_config(file: &AbsolutePath, cwd: &AbsolutePath) -> Result<String, CliError> {
     fs::read_to_string(file.as_path()).map_err(|error| {
         let error = ConfigError::Read {
             path: file.clone(),
@@ -416,8 +418,8 @@ fn read_config(file: &AbsolutePath) -> Result<String, CliError> {
         };
         CliError::new(
             error.code(),
-            error.to_string(),
-            error.help().unwrap_or_else(|| {
+            error.message_from(cwd),
+            error.help_from(cwd).unwrap_or_else(|| {
                 format!("Check that the file can be read, then run `supdoc {COMMAND}` again")
             }),
             error.exit_code(),
@@ -460,10 +462,11 @@ impl ConfigEdit {
     fn read(
         file: &AbsolutePath,
         root: &AbsolutePath,
+        cwd: &AbsolutePath,
         old: &NamespaceName,
         new: &NamespaceName,
     ) -> Result<Self, CliError> {
-        let text = read_config(file)?;
+        let text = read_config(file, cwd)?;
         let relative = file.strip_prefix(root).map(Path::to_path_buf);
         let shown = relative.as_deref().map_or_else(
             || file.display().to_string(),
@@ -1003,6 +1006,30 @@ web = \"services/web\"
         json.pointer(pointer)
             .unwrap_or_else(|| panic!("`{pointer}` should be in the JSON output: {json}"))
             .clone()
+    }
+
+    #[test]
+    fn config_read_error_names_the_config_from_the_current_directory() {
+        let dir = tempfile::tempdir().expect("a fresh temp directory should be created");
+        let root = AbsolutePath::new(dir.path()).expect("a temp directory should be absolute");
+        let docs = AbsolutePath::new(&dir.path().join("docs"))
+            .expect("a temp directory should be absolute");
+        let file = AbsolutePath::new(&dir.path().join("base.toml"))
+            .expect("a temp file path should be absolute");
+
+        let error = read_config(&file, &docs).expect_err("a missing config should not be read");
+
+        assert_eq!(error.code(), "config-read");
+        assert!(
+            error.message().starts_with("cannot read ../base.toml: "),
+            "the message should name the config from the current directory: {}",
+            error.message()
+        );
+        assert!(
+            !error.message().contains(&root.display().to_string()),
+            "the message should not name the config absolutely: {}",
+            error.message()
+        );
     }
 
     /// What one `supdoc namespace rename` run returned and printed.

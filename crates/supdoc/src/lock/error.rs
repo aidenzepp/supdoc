@@ -208,18 +208,20 @@ impl LockError {
         }
     }
 
-    /// What to do about it.
+    /// What to do about it, naming the lockfile relative to `cwd`, the directory supdoc runs
+    /// in, so a command in the help runs as written.
     #[must_use]
-    pub fn help(&self) -> String {
+    pub fn help_from(&self, cwd: &AbsolutePath) -> String {
+        let shown = || shell_quote(&relative_to(cwd, self.path()));
         match self {
-            Self::Read { path, .. } => format!(
+            Self::Read { .. } => format!(
                 "Give the current user read access, for example with `chmod u+r {}`",
-                shell_quote(&path.display().to_string())
+                shown()
             ),
-            Self::OutsideRoot { path } => format!(
+            Self::OutsideRoot { .. } => format!(
                 "supdoc reads only a supdoc.lock inside the project root. Remove the symlink with \
                  `rm {}`, then run `supdoc update --yes` to record the links again",
-                shell_quote(&path.display().to_string())
+                shown()
             ),
             Self::Parse { error, .. } => error.help().to_owned(),
             Self::Write { .. } => "The existing lockfile was not changed. Make the directory \
@@ -435,6 +437,30 @@ mod tests {
                 "supdoc.lock: unresolved merge conflict at line 3",
                 "cannot write supdoc.lock: permission denied",
             ]
+        );
+    }
+
+    #[test]
+    fn lock_helps_name_the_lockfile_relative_to_the_current_directory() {
+        let cwd = absolute("/repo/docs");
+        let path = absolute("/repo/supdoc.lock");
+        let read = LockError::Read {
+            path: path.clone(),
+            error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        };
+        let outside = LockError::OutsideRoot { path };
+
+        let helps = [read.help_from(&cwd), outside.help_from(&cwd)];
+
+        assert!(
+            helps[0].contains("`chmod u+r ../supdoc.lock`"),
+            "the read help should run from docs/: {}",
+            helps[0]
+        );
+        assert!(
+            helps[1].contains("`rm ../supdoc.lock`"),
+            "the symlink help should run from docs/: {}",
+            helps[1]
         );
     }
 
