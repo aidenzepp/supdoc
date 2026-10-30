@@ -597,7 +597,7 @@ fn skill_install_refuses_an_agents_directory_symlinked_out_of_the_root() {
 
 #[cfg(unix)]
 #[test]
-fn a_named_path_ignored_by_a_gitignore_symlinked_out_of_the_root_is_not_quoted() {
+fn a_named_path_beside_a_gitignore_symlinked_out_of_the_root_is_not_quoted() {
     let project = web_project();
     // `gui*.md` matches the guide; no path the run names contains it.
     fs::write(project.path("rules"), "gui*.md\n").expect("the outside rules should be writable");
@@ -620,14 +620,30 @@ fn a_named_path_ignored_by_a_gitignore_symlinked_out_of_the_root_is_not_quoted()
     }
 }
 
+/// The number of findings of `kind` in a `--json` run.
+fn count_of(run: &crate::support::Run, kind: &str) -> usize {
+    array_at(&run.json(), "/findings")
+        .iter()
+        .filter(|finding| finding["kind"].as_str() == Some(kind))
+        .count()
+}
+
+/// The sources of every link a `--json list` run reports.
+fn listed_sources(run: &crate::support::Run) -> Vec<String> {
+    array_at(&run.json(), "/data/links")
+        .iter()
+        .map(|link| at(link, "/source").as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
 #[cfg(unix)]
 #[test]
-fn a_directory_whose_gitignore_leads_out_of_the_root_keeps_its_lock_entries() {
+fn a_directory_whose_gitignore_is_symlinked_out_is_checked_without_its_rules() {
     let project = web_project();
     let _ = project
         .supdoc_in("services/web", &["update", "--yes"])
         .assert_exit(0);
-    // Outside the root, this rule would hide the guide and make its entries look obsolete.
+    // As in git, the symlink is treated as absent, so this rule hides nothing.
     fs::write(project.path("rules"), "gui*.md\n").expect("the outside rules should be writable");
     std::os::unix::fs::symlink(
         project.path("rules"),
@@ -636,27 +652,26 @@ fn a_directory_whose_gitignore_leads_out_of_the_root_keeps_its_lock_entries() {
     .expect("the symlink should be creatable");
 
     let run = project.supdoc_in("services/web", &["--json", "check"]);
+    let list = project.supdoc_in("services/web", &["--json", "list"]);
 
-    let kinds: Vec<_> = array_at(&run.json(), "/findings")
-        .iter()
-        .map(|finding| finding["kind"].as_str().unwrap_or_default().to_owned())
-        .collect();
-    assert!(
-        kinds.contains(&"scan-ignore-file-outside-root".to_owned()),
+    assert_eq!(
+        count_of(&run, "scan-ignore-file-symlink"),
+        1,
         "{}",
         run.stdout
     );
+    assert_eq!(count_of(&run, "link-obsolete"), 0, "{}", run.stdout);
     assert!(
-        !kinds.contains(&"link-obsolete".to_owned()),
-        "the guide's entries were judged without reading it\n{}",
-        run.stdout
+        listed_sources(&list).contains(&"docs/guide.md".to_owned()),
+        "the guide is walked and its links counted\n{}",
+        list.stdout
     );
     assert!(!run.stdout.contains("gui*.md"), "{}", run.stdout);
 }
 
 #[cfg(unix)]
 #[test]
-fn a_root_gitignore_symlinked_out_of_the_root_refuses_the_scan_and_keeps_the_lock() {
+fn a_root_gitignore_symlinked_out_of_the_root_is_not_read_and_the_scan_goes_on() {
     let project = web_project();
     let _ = project
         .supdoc_in("services/web", &["update", "--yes"])
@@ -672,30 +687,82 @@ fn a_root_gitignore_symlinked_out_of_the_root_refuses_the_scan_and_keeps_the_loc
     let check = project.supdoc_in("services/web", &["check"]);
     let update = project.supdoc_in("services/web", &["update", "--yes"]);
 
+    // The fixture's guide has a link into an undefined namespace, so `check` fails on that.
+    let _ = check.assert_exit(1);
+    let _ = update.assert_exit(0);
     for run in [&check, &update] {
-        let _ = run.assert_exit(78);
+        let shown = format!("{}{}", run.stdout, run.stderr);
+        assert_eq!(
+            shown.matches("scan-ignore-file-symlink").count(),
+            1,
+            "`supdoc {}` should warn once about the symlink\n{shown}",
+            run.args
+        );
         assert!(
-            run.stderr.contains("scan-root-ignore-file-outside-root"),
-            "`supdoc {}` should refuse the root\nstdout:\n{}\nstderr:\n{}",
-            run.args,
-            run.stdout,
-            run.stderr
+            !shown.contains("gui*.md"),
+            "`supdoc {}` printed a line from outside the root\n{shown}",
+            run.args
         );
     }
     assert_eq!(
         project.read("services/web/supdoc.lock"),
         locked,
-        "no entry was judged without walking the root"
+        "the guide is still walked, so its entries stay"
     );
-    for run in [&check, &update] {
-        assert!(
-            !run.stdout.contains("gui*.md") && !run.stderr.contains("gui*.md"),
-            "`supdoc {}` printed a line from outside the root\n{}\n{}",
-            run.args,
-            run.stdout,
-            run.stderr
-        );
-    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_package_whose_gitignore_links_to_the_monorepos_scans_with_one_warning() {
+    let project = web_project();
+    // The monorepo's own `.gitignore` sits above the package root and still applies.
+    fs::write(project.path(".gitignore"), "scr*.md\n").expect("the gitignore should be writable");
+    std::os::unix::fs::symlink("../../.gitignore", project.path("services/web/.gitignore"))
+        .expect("the symlink should be creatable");
+    write(&project, "services/web/docs/scratch.md", SCRATCH);
+
+    let run = project.supdoc_in("services/web", &["--json", "update", "--yes"]);
+    let list = project.supdoc_in("services/web", &["--json", "list"]);
+
+    let _ = run.assert_exit(0);
+    assert_eq!(
+        count_of(&run, "scan-ignore-file-symlink"),
+        1,
+        "{}",
+        run.stdout
+    );
+    let sources = listed_sources(&list);
+    assert!(
+        sources.contains(&"docs/guide.md".to_owned())
+            && !sources.contains(&"docs/scratch.md".to_owned()),
+        "the guide is counted, and the monorepo's rule above the root still hides scratch.md\n{}",
+        list.stdout
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_gitignore_symlinked_within_the_root_is_not_honoured() {
+    let project = web_project();
+    write(&project, "services/web/rules", "gui*.md\n");
+    std::os::unix::fs::symlink("../rules", project.path("services/web/docs/.gitignore"))
+        .expect("the symlink should be creatable");
+
+    let run = project.supdoc_in("services/web", &["--json", "update", "--yes"]);
+    let list = project.supdoc_in("services/web", &["--json", "list"]);
+
+    let _ = run.assert_exit(0);
+    assert_eq!(
+        count_of(&run, "scan-ignore-file-symlink"),
+        1,
+        "{}",
+        run.stdout
+    );
+    assert!(
+        listed_sources(&list).contains(&"docs/guide.md".to_owned()),
+        "git doesn't honour the symlink, so neither does supdoc\n{}",
+        list.stdout
+    );
 }
 
 /// Writes `text` to `relative` in `project`, creating its directories.
@@ -839,6 +906,14 @@ fn assert_followed_and_never_quoted(project: &Project) {
         assert!(
             !run.stdout.contains("gui*.md") && !run.stderr.contains("gui*.md"),
             "`supdoc {}` printed a line from outside the root\n{}\n{}",
+            run.args,
+            run.stdout,
+            run.stderr
+        );
+        assert!(
+            !run.stdout.contains("scan-ignore-file-symlink")
+                && !run.stderr.contains("scan-ignore-file-symlink"),
+            "`supdoc {}` warned about an ignore file it doesn't own\n{}\n{}",
             run.args,
             run.stdout,
             run.stderr

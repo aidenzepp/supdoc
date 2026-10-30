@@ -59,8 +59,7 @@ const MIGRATION_STATES: [LinkState; 3] = [LinkState::Failed, LinkState::New, Lin
 /// `cli-path-outside-project` or `cli-path-invalid` for a bad `[PATH]` (2), `cli-path-unreadable` (74) for one that can't be looked up, the lockfile's own
 /// error (78 when invalid, 74 when unreadable or unwritable), `lock-settings-mismatch` (78) when
 /// the lockfile's hash settings differ from the config's and the run is narrowed by `[PATHS]` or
-/// `--state`, `scan-root-unreadable` (74), `scan-root-ignore-file-outside-root` (78) when one of
-/// the root's ignore files leads outside it, and `cli-update-output` when the report cannot be
+/// `--state`, `scan-root-unreadable` (74), and `cli-update-output` when the report cannot be
 /// written (74).
 pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let config = load_config(context, output, &command_text(args))?;
