@@ -57,19 +57,27 @@ pub(crate) fn invocation(context: &Context, command: &str) -> String {
 
 /// The fatal error for a config that did not load, pointing at the offending text when the config
 /// error knows where it is.
+///
+/// The message and help name files relative to the current directory, as the location does: no
+/// project root is known yet, and a command in the help then runs as written.
 fn config_failure(
     error: &ConfigError,
     context: &Context,
     output: &mut Output,
     command: &str,
 ) -> CliError {
-    let help = error.help().unwrap_or_else(|| {
+    let help = error.help_from(&context.cwd).unwrap_or_else(|| {
         format!(
             "Correct the config as the message says, then run `{}` again",
             invocation(context, command)
         )
     });
-    let failure = CliError::new(error.code(), error.to_string(), help, error.exit_code());
+    let failure = CliError::new(
+        error.code(),
+        error.message_from(&context.cwd),
+        help,
+        error.exit_code(),
+    );
     match error_site(error, &context.cwd, output) {
         Some(site) => failure.at(site),
         None => failure,
@@ -199,7 +207,8 @@ pub(crate) fn read_lock_for_update(
     config: &Config,
 ) -> Result<(Lockfile, Option<SettingsChange>), CliError> {
     let configured = config.hash_settings();
-    let read = Lockfile::read(&lock_path(config.root())).map_err(|error| lock_failure(&error))?;
+    let read = Lockfile::read(&lock_path(config.root()))
+        .map_err(|error| lock_failure(&error, config.root()))?;
     let Some(lock) = read else {
         let mut empty = Lockfile::default();
         empty.set_hash_settings(configured);
@@ -211,6 +220,8 @@ pub(crate) fn read_lock_for_update(
 
 /// The `lock-settings-mismatch` error (78) for a command that can't re-record the lockfile under
 /// `config`'s hash settings, as `change` says they differ from the recorded ones.
+///
+/// The message names the config file that set the value relative to the project root.
 pub(crate) fn settings_mismatch(config: &Config, change: SettingsChange) -> CliError {
     let mismatch = SettingsMismatch {
         recorded: change.from.line_endings,
@@ -219,17 +230,18 @@ pub(crate) fn settings_mismatch(config: &Config, change: SettingsChange) -> CliE
     };
     CliError::new(
         mismatch.code(),
-        mismatch.to_string(),
+        mismatch.message_from(config.root()),
         mismatch.help(),
         mismatch.exit_code(),
     )
 }
 
-/// The command's error for a lockfile that could not be read.
-fn lock_failure(error: &LockError) -> CliError {
+/// The command's error for a lockfile that could not be read, naming it in the message relative
+/// to the project `root`.
+fn lock_failure(error: &LockError, root: &AbsolutePath) -> CliError {
     CliError::new(
         error.code(),
-        error.to_string(),
+        error.message_from(root),
         error.help(),
         error.exit_code(),
     )
@@ -321,6 +333,124 @@ mod tests {
         assert_eq!(
             (error.code(), error.exit_code()),
             ("lock-settings-mismatch", 78)
+        );
+    }
+
+    /// `load_config` for `supdoc list` run in `cwd`, with plain text output.
+    fn load_in(cwd: &Path) -> Result<Config, CliError> {
+        let cwd = AbsolutePath::new(cwd).expect("a temp directory should be absolute");
+        let cli = Cli::try_parse_from(["supdoc", "list"]).expect("`supdoc list` should parse");
+        let settings = OutputSettings {
+            format: cli.global.format(),
+            verbosity: Verbosity::from_flags(cli.global.quiet, cli.global.verbose),
+            color: false,
+            unicode: false,
+            width: 80,
+            paths: PathStyle::new(cwd.clone(), cwd.clone(), None),
+        };
+        let mut output = Output::stdio(settings, anstream::ColorChoice::Never);
+        let context = Context {
+            global: cli.global,
+            cwd,
+            home: None,
+            claude_config_dir: None,
+        };
+        load_config(&context, &mut output, "list")
+    }
+
+    /// A project with an empty config and a `docs` directory to run from.
+    fn project_with_docs() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("a fresh temp directory should be created");
+        fs::create_dir(dir.path().join("docs")).expect("the docs directory should be created");
+        fs::write(dir.path().join("supdoc.config.toml"), "")
+            .expect("the fixture config should be written");
+        dir
+    }
+
+    #[test]
+    fn config_errors_name_the_config_from_the_current_directory() {
+        let dir = project_with_docs();
+        fs::write(dir.path().join("supdoc.config.toml"), "include = oops\n")
+            .expect("the fixture config should be written");
+
+        let error = load_in(&dir.path().join("docs")).expect_err("a broken config should not load");
+
+        assert_eq!(
+            error.message(),
+            "../supdoc.config.toml: string values must be quoted, expected literal string",
+            "the message should name the config as the location does, not absolutely"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_symlink_help_runs_from_the_current_directory() {
+        let dir = project_with_docs();
+        fs::remove_file(dir.path().join("supdoc.config.toml"))
+            .expect("the fixture config should be replaced");
+        fs::write(dir.path().join("real.toml"), "").expect("the symlink target should be written");
+        std::os::unix::fs::symlink("real.toml", dir.path().join("supdoc.config.toml"))
+            .expect("the config symlink should be created");
+
+        let error = load_in(&dir.path().join("docs"))
+            .expect_err("a config symlinked to another name should be refused");
+
+        assert_eq!(
+            (error.code(), error.message()),
+            (
+                "config-symlink-not-config",
+                "../supdoc.config.toml is a symlink that doesn't lead to a supdoc.config.toml file"
+            )
+        );
+        assert!(
+            error
+                .help()
+                .contains("`rm ../supdoc.config.toml && supdoc -c ../supdoc.config.toml init`"),
+            "the help's command should run from the current directory: {}",
+            error.help()
+        );
+    }
+
+    #[test]
+    fn lock_errors_name_the_lockfile_from_the_root() {
+        let dir = project_with_docs();
+        fs::write(dir.path().join("supdoc.lock"), "version = x\n")
+            .expect("the fixture lock should be written");
+        let config = load_in(&dir.path().join("docs")).expect("the fixture config should load");
+
+        let error = read_lock(&config).expect_err("a broken lock should be refused");
+
+        assert_eq!(
+            (error.code(), error.message()),
+            (
+                "lock-parse",
+                "supdoc.lock: string values must be quoted, expected literal string (line 1)"
+            ),
+            "the message should name the lockfile relative to the root, not absolutely"
+        );
+    }
+
+    #[test]
+    fn settings_mismatch_names_the_config_from_the_root() {
+        let dir = project_with_docs();
+        fs::write(
+            dir.path().join("supdoc.config.toml"),
+            "[features.hash]\nline-endings = \"exact\"\n",
+        )
+        .expect("the fixture config should be written");
+        fs::write(
+            dir.path().join("supdoc.lock"),
+            "version = 1\n\n[features.hash]\nline-endings = \"normalize\"\n",
+        )
+        .expect("the fixture lock should be written");
+        let config = load_in(&dir.path().join("docs")).expect("the fixture config should load");
+
+        let error = read_lock(&config).expect_err("a lock under other settings should be refused");
+
+        assert_eq!(
+            error.message(),
+            "supdoc.lock was written with line-endings = \"normalize\", but supdoc.config.toml \
+             sets \"exact\""
         );
     }
 

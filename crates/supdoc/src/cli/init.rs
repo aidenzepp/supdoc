@@ -91,21 +91,21 @@ pub fn run(args: &InitArgs, context: &Context, output: &mut Output) -> Result<Ou
         refuse_if_present(&target, context)?;
         output
             .artifact(&report(false), STARTER, true)
-            .map_err(|error| output_failed(&target, &error))?;
+            .map_err(|error| output_failed(&label, &error))?;
         output
             .note(&format!(
                 "Nothing written. Run `{}` to write {label}.",
                 command(context)
             ))
-            .map_err(|error| output_failed(&target, &error))?;
+            .map_err(|error| output_failed(&label, &error))?;
     } else {
         write_new(&target, context)?;
         output
             .artifact(&report(true), "", true)
-            .map_err(|error| output_failed(&target, &error))?;
+            .map_err(|error| output_failed(&label, &error))?;
         output
             .note(&format!("Wrote {label}"))
-            .map_err(|error| output_failed(&target, &error))?;
+            .map_err(|error| output_failed(&label, &error))?;
     }
     Ok(Outcome::Clean)
 }
@@ -167,7 +167,7 @@ fn require_parent_directory(target: &AbsolutePath, context: &Context) -> Result<
     }
 }
 
-/// `target` as a person reads it in a note: relative to `cwd` when it is beneath it.
+/// `target` as a person reads it in a note or a message: relative to `cwd` when it is beneath it.
 fn label(target: &AbsolutePath, cwd: &AbsolutePath) -> String {
     target.strip_prefix(cwd).map_or_else(
         || target.display().to_string(),
@@ -210,11 +210,11 @@ fn write_new(target: &AbsolutePath, context: &Context) -> Result<(), CliError> {
         .map_err(|error| write_failed(target, &error, context))
 }
 
-/// The refusal for an existing config (06 error table).
+/// The refusal for an existing config (06 error table), naming it as the notes do.
 fn exists(target: &AbsolutePath, context: &Context) -> CliError {
     CliError::new(
         "cli-init-exists",
-        format!("{} already exists", target.display()),
+        format!("{} already exists", label(target, &context.cwd)),
         format!(
             "The existing file wasn't changed. Edit it directly, or delete it and run `{}`.",
             command(context)
@@ -223,11 +223,11 @@ fn exists(target: &AbsolutePath, context: &Context) -> CliError {
     )
 }
 
-/// The error for a config that could not be written.
+/// The error for a config that could not be written, naming it as the notes do.
 fn write_failed(target: &AbsolutePath, error: &io::Error, context: &Context) -> CliError {
     CliError::new(
         "cli-init-write",
-        format!("cannot write {}: {error}", target.display()),
+        format!("cannot write {}: {error}", label(target, &context.cwd)),
         format!(
             "check that the directory exists and that you can write to it, then run `{}` again",
             command(context)
@@ -236,11 +236,11 @@ fn write_failed(target: &AbsolutePath, error: &io::Error, context: &Context) -> 
     )
 }
 
-/// The error for output that could not be written.
-fn output_failed(target: &AbsolutePath, error: &OutputError) -> CliError {
+/// The error for output that could not be written, naming the config as the notes do.
+fn output_failed(label: &str, error: &OutputError) -> CliError {
     CliError::new(
         "cli-init-write",
-        format!("cannot report on {}: {error}", target.display()),
+        format!("cannot report on {label}: {error}"),
         "check that standard output and standard error are open and writable, or redirect both \
          to a file with `> supdoc.out 2>&1`",
         CliError::IO_EXIT_CODE,
@@ -444,6 +444,30 @@ mod tests {
         let after = std::fs::read_to_string(dir.path().join("sub/x.toml"))
             .expect("the existing file should remain");
         assert_eq!(after, "# mine\n", "the existing file is untouched");
+    }
+
+    #[test]
+    fn refusal_and_write_failure_name_the_path_from_the_current_directory() {
+        let dir = tempfile::tempdir().expect("a temp directory should be created");
+        std::fs::create_dir(dir.path().join("sub")).expect("the sub directory should be created");
+        std::fs::write(dir.path().join("sub/x.toml"), "# mine\n")
+            .expect("the existing file should be written");
+        let (exists_args, exists_context) = context_in(&dir, &["-c", "sub/x.toml"]);
+        let (missing_args, missing_context) = context_in(&dir, &["-c", "nope/x.toml"]);
+
+        let (exists, _, _) = run_captured(&exists_args, &exists_context);
+        let (missing, _, _) = run_captured(&missing_args, &missing_context);
+
+        let exists = exists.expect_err("init should refuse to overwrite the -c path");
+        let missing = missing.expect_err("init should fail without the -c path's directory");
+        assert_eq!(
+            [exists.message(), missing.message()],
+            [
+                "sub/x.toml already exists",
+                "cannot write nope/x.toml: No such file or directory (os error 2)",
+            ],
+            "the messages should name the file as typed, not by its absolute path"
+        );
     }
 
     #[test]

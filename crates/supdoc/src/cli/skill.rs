@@ -21,6 +21,7 @@ use crate::config::confine::real_location;
 use crate::finding::{Finding, Severity};
 use crate::lock::io::write_atomically;
 use crate::output::json::Envelope;
+use crate::output::paths::relative_to;
 use crate::output::text::{render_finding, visible};
 use crate::output::{Output, OutputError, Report, TextContext};
 use crate::path::AbsolutePath;
@@ -92,7 +93,7 @@ pub fn run(
     if applied {
         for change in changes.iter().filter(|change| change.action.writes()) {
             install_file(change.path.as_path(), SKILL.as_bytes())
-                .map_err(|error| write_failed(&change.path, &error))?;
+                .map_err(|error| write_failed(change, args.global, &context.cwd, &error))?;
         }
     }
 
@@ -401,17 +402,26 @@ fn no_home() -> CliError {
 }
 
 /// The error for a copy of the skill that could not be written.
-fn write_failed(path: &AbsolutePath, error: &io::Error) -> CliError {
+///
+/// The message names the file as the report lines do. The help names its directory so a person
+/// can use it from `cwd`: relative to it for a project install, absolute for `--global`, whose
+/// copies are outside the project.
+fn write_failed(
+    change: &SkillChange,
+    global: bool,
+    cwd: &AbsolutePath,
+    error: &io::Error,
+) -> CliError {
+    let directory = change.path.parent().unwrap_or_else(|| change.path.clone());
+    let shown_directory = if global {
+        directory.display().to_string()
+    } else {
+        relative_to(cwd, &directory)
+    };
     CliError::new(
         "cli-skill-write",
-        format!("cannot write {}: {error}", path.display()),
-        format!(
-            "Check that you can create and write files in `{}`",
-            path.as_path()
-                .parent()
-                .unwrap_or_else(|| path.as_path())
-                .display()
-        ),
+        format!("cannot write {}: {error}", change.shown),
+        format!("Check that you can create and write files in `{shown_directory}`"),
         CliError::IO_EXIT_CODE,
     )
 }
@@ -874,6 +884,31 @@ mod tests {
         let error = run.result.as_ref().expect_err("the write should fail");
         assert_eq!(error.code(), "cli-skill-write");
         assert_eq!(run.exit_code(), CliError::IO_EXIT_CODE);
+    }
+
+    #[test]
+    fn skill_install_write_failure_names_the_file_from_the_root_and_the_directory_from_the_cwd() {
+        let world = World::new();
+        plant(&world.project_file(CONFIG_FILE_NAME), "");
+        fs::create_dir(world.project_file("docs")).expect("the docs directory should be created");
+        // A file where a directory must go makes the write fail.
+        plant(&world.project_file(".agents/skills"), "not a directory\n");
+
+        let run = world.install_in(&world.project_file("docs"), None, &["--yes"]);
+
+        let error = run.result.as_ref().expect_err("the write should fail");
+        assert!(
+            error
+                .message()
+                .starts_with("cannot write .agents/skills/supdoc/SKILL.md: "),
+            "the message should name the copy relative to the root: {}",
+            error.message()
+        );
+        assert_eq!(
+            error.help(),
+            "Check that you can create and write files in `../.agents/skills/supdoc`",
+            "the help should name the directory so it can be used from the current directory"
+        );
     }
 
     /// Makes `link` a symlink to `destination`.

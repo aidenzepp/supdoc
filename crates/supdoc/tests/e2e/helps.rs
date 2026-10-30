@@ -143,13 +143,18 @@ fn config_symlink_help_names_the_config_and_keeps_it_for_init() {
     let run = project.supdoc_in("docs", &["check"]);
 
     let _ = run.assert_exit(78);
-    let config = printed(&project, "supdoc.config.toml");
-    let replace = format!("`rm {0} && supdoc -c {0} init`", config.display());
+    let replace = "`rm ../supdoc.config.toml && supdoc -c ../supdoc.config.toml init`";
     assert!(
-        run.stderr.contains(&replace),
+        run.stderr.contains(replace),
         "from docs/ the help should name {replace}:\n{}",
         run.stderr
     );
+    fs::remove_file(project.path("docs/../supdoc.config.toml"))
+        .expect("the help's `rm` should work from docs/");
+    let _ = project
+        .supdoc_in("docs", &["-c", "../supdoc.config.toml", "init"])
+        .assert_exit(0);
+    let _ = project.supdoc_in("docs", &["list"]).assert_exit(0);
 }
 
 #[test]
