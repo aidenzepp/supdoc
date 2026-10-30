@@ -262,6 +262,51 @@ fn a_found_config_symlinked_to_an_outside_dotenv_file_is_refused_without_printin
 
 #[cfg(unix)]
 #[test]
+fn a_found_config_symlinked_out_of_the_root_is_refused_alike_whatever_its_target_is() {
+    let project = web_project();
+    fs::create_dir(project.path("outside-dir")).expect("the outside directory should be creatable");
+    let config = project.path("services/web/supdoc.config.toml");
+    let link_to = |target: &str| -> Vec<_> {
+        // Renaming a fresh link over the config swaps the target without deleting anything.
+        let staged = project.path("services/web/staged-link");
+        std::os::unix::fs::symlink(project.path(target), &staged)
+            .expect("the symlink should be creatable");
+        fs::rename(&staged, &config).expect("the symlink should replace the config");
+        ERROR_FORMATS
+            .iter()
+            .map(|args| project.supdoc_in("services/web", args))
+            .collect()
+    };
+    let to_file = link_to(".env");
+    let to_directory = link_to("outside-dir");
+    let to_nothing = link_to("no-such-file");
+
+    for ((file_run, directory_run), missing_run) in
+        to_file.iter().zip(&to_directory).zip(&to_nothing)
+    {
+        let _ = file_run.assert_exit(78);
+        assert_no_secret(file_run);
+        assert!(
+            format!("{}{}", file_run.stdout, file_run.stderr).contains("config-symlink-not-config"),
+            "`supdoc {}` should refuse the config\nstdout:\n{}\nstderr:\n{}",
+            file_run.args,
+            file_run.stdout,
+            file_run.stderr
+        );
+        for (target, other) in [("a directory", directory_run), ("nothing", missing_run)] {
+            assert_eq!(
+                (&other.code, &other.stdout, &other.stderr),
+                (&file_run.code, &file_run.stdout, &file_run.stderr),
+                "`supdoc {}` with the config linked to {target} must match the link to `.env`: \
+                 the result must not reveal what the link's target is",
+                file_run.args
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn a_found_config_symlinked_to_another_config_file_still_loads() {
     let project = web_project();
     fs::create_dir(project.path("shared")).expect("the shared directory should be creatable");

@@ -760,6 +760,37 @@ fn found_config_symlinked_to_another_name_is_refused_without_reading_it() {
 
 #[cfg(unix)]
 #[test]
+fn found_config_symlinked_to_a_directory_or_nowhere_is_refused_like_one_to_another_name() {
+    let dir = tree(&[
+        ("supdoc.config.toml", "include = [\"docs\"]\n"),
+        ("home/.env", "DB_PASSWORD=hunter2"),
+        ("project/docs/a.md", ""),
+    ]);
+    fs::create_dir(dir.path().join("home/secrets"))
+        .expect("the fixture directory should be creatable");
+    let refusal = |target: &str| {
+        let link = format!("project-{target}");
+        fs::create_dir_all(dir.path().join(&link).join("docs"))
+            .expect("the fixture project should be creatable");
+        std::os::unix::fs::symlink(
+            dir.path().join("home").join(target),
+            dir.path().join(&link).join("supdoc.config.toml"),
+        )
+        .expect("the symlink should be creatable");
+        let error = Config::load(&at(&dir, &format!("{link}/docs")))
+            .expect_err("a config symlink that doesn't lead to a config should be refused");
+        (error.code(), error.exit_code(), error.help())
+    };
+
+    let to_file = refusal(".env");
+
+    assert_eq!(to_file.0, "config-symlink-not-config", "got {to_file:?}");
+    assert_eq!(refusal("secrets"), to_file, "a link to a directory");
+    assert_eq!(refusal("absent.env"), to_file, "a dangling link");
+}
+
+#[cfg(unix)]
+#[test]
 fn found_config_symlinked_to_another_config_file_loads_it() {
     let dir = tree(&[
         ("shared/supdoc.config.toml", "include = [\"docs\"]\n"),
