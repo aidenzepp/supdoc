@@ -229,6 +229,34 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../schema")
     }
 
+    /// The `schema/` directory, or `None` (after saying so) when the crate is packaged without it.
+    fn schema_dir_if_present() -> Option<PathBuf> {
+        let dir = schema_dir();
+        match std::fs::metadata(&dir) {
+            Ok(metadata) => {
+                assert!(metadata.is_dir(), "{} should be a directory", dir.display());
+                Some(dir)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                skip(&dir);
+                None
+            }
+            Err(error) => panic!("{} should be readable: {error}", dir.display()),
+        }
+    }
+
+    /// Reports that a repository-only test was skipped, since a packaged crate lacks the repository.
+    #[expect(
+        clippy::print_stderr,
+        reason = "a skipped test must say why; the test harness shows captured stderr on request"
+    )]
+    fn skip(missing: &std::path::Path) {
+        eprintln!(
+            "skipped: {} is absent outside the repository",
+            missing.display()
+        );
+    }
+
     /// Asserts `shipped` is exactly what `supdoc schema` prints for `file`'s schema.
     fn assert_file_current(file: &std::path::Path, schema: &Value, regenerate: &str) {
         let shipped = std::fs::read_to_string(file).unwrap_or_else(|error| {
@@ -244,12 +272,15 @@ mod tests {
 
     #[test]
     fn shipped_schema_files_match_what_each_built_command_publishes() {
+        let Some(dir) = schema_dir_if_present() else {
+            return;
+        };
         let mut checked = 0;
         for target in SchemaTarget::value_variants() {
             let Ok(schema) = schema_value(*target) else {
                 continue;
             };
-            let file = schema_dir().join(format!("{}.json", name(*target)));
+            let file = dir.join(format!("{}.json", name(*target)));
             assert_file_current(&file, &schema, &format!("supdoc schema {}", name(*target)));
             checked += 1;
         }
@@ -258,8 +289,11 @@ mod tests {
 
     #[test]
     fn the_shipped_error_schema_matches_the_fatal_error_type() {
+        let Some(dir) = schema_dir_if_present() else {
+            return;
+        };
         let schema = error_value().expect("the error schema should serialize");
-        let file = schema_dir().join(format!("{ERROR}.json"));
+        let file = dir.join(format!("{ERROR}.json"));
         assert_file_current(
             &file,
             &schema,
@@ -269,7 +303,10 @@ mod tests {
 
     #[test]
     fn every_schema_file_belongs_to_a_built_command_or_is_the_error() {
-        let entries = std::fs::read_dir(schema_dir()).expect("schema/ should exist");
+        let Some(dir) = schema_dir_if_present() else {
+            return;
+        };
+        let entries = std::fs::read_dir(dir).expect("schema/ should be readable");
         for entry in entries {
             let path = entry.expect("schema/ should be readable").path();
             let stem = path

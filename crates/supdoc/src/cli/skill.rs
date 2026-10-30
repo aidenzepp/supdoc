@@ -811,9 +811,29 @@ mod tests {
         assert!(errors.is_empty(), "schema violations: {errors:?} in {json}");
     }
 
+    /// Reports that a repository-only test was skipped, since a packaged crate lacks the repository.
+    #[expect(
+        clippy::print_stderr,
+        reason = "a skipped test must say why; the test harness shows captured stderr on request"
+    )]
+    fn skip(missing: &std::path::Path) {
+        eprintln!(
+            "skipped: {} is absent outside the repository",
+            missing.display()
+        );
+    }
+
     #[test]
     fn the_repository_root_skill_is_identical_to_the_embedded_one() {
-        let root_copy = include_str!("../../../../SKILL.md");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../SKILL.md");
+        let root_copy = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                skip(&path);
+                return;
+            }
+            Err(error) => panic!("{} should be readable: {error}", path.display()),
+        };
 
         assert_eq!(
             root_copy, SKILL,
