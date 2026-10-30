@@ -165,7 +165,8 @@ impl ConfigError {
                 show(file)
             ),
             Self::ExtendsNotConfig { file, extends, .. } => format!(
-                "{} extends `{extends}`, which isn't a supdoc.config.toml file",
+                "{} extends `{extends}`, which doesn't lead to a supdoc.config.toml supdoc can read \
+                 (it may be missing, a directory, or a link to another file)",
                 show(file)
             ),
             Self::SymlinkNotConfig { path } => format!(
@@ -231,8 +232,8 @@ impl ConfigError {
             }),
             Self::ExtendsLoop { .. } => Some("Remove `extends` from one of these files".to_owned()),
             Self::ExtendsNotConfig { .. } => Some(
-                "Point `extends` at a file named supdoc.config.toml. supdoc reads no other file \
-                 through `extends`"
+                "Check the path. `extends` is relative to this file and must reach a real \
+                 `supdoc.config.toml`."
                     .to_owned(),
             ),
             Self::SymlinkNotConfig { path } => {

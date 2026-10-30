@@ -736,6 +736,27 @@ fn extends_through_a_symlink_named_like_a_config_is_judged_by_the_real_file() {
     assert!(!error.to_string().contains("hunter2"), "{error}");
 }
 
+#[test]
+fn extends_naming_a_missing_config_does_not_tell_the_user_to_name_one() {
+    let dir = tree(&[(
+        "project/supdoc.config.toml",
+        "extends = \"../shared/supdoc.config.toml\"\n",
+    )]);
+    let error = load_error(&dir, "project/supdoc.config.toml");
+
+    let help = error.help().unwrap_or_default();
+    assert!(
+        !help.contains("named"),
+        "the value already names supdoc.config.toml, so the help must not ask for that: {help}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("which doesn't lead to a supdoc.config.toml supdoc can read"),
+        "got {error}"
+    );
+}
+
 /// What a refusal shows, with `project` written as `P` in its message and help so refusals from
 /// different fixture projects compare equal.
 fn refusal_shown(error: &ConfigError, project: &str) -> (&'static str, u8, Option<String>, String) {
