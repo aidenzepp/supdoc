@@ -551,6 +551,29 @@ mod tests {
     }
 
     #[test]
+    fn a_located_loose_finding_prints_before_a_later_link_finding_in_the_same_file() {
+        let project = Project::new();
+        project.write("src/a.rs", "pub fn add() {}\n");
+        project.write(
+            "docs/g.md",
+            "[outside](../../../outside.rs)\n\n[a](../src/a.rs#add)\n",
+        );
+
+        let run = project.check(&["check"]);
+
+        let line_of = |location: &str| {
+            run.stdout
+                .find(location)
+                .unwrap_or_else(|| panic!("{location} should be printed: {}", run.stdout))
+        };
+        assert!(
+            line_of("docs/g.md:1:") < line_of("docs/g.md:3:"),
+            "the loose `link-outside-root` at line 1 should print before the `link-new` at line 3: {}",
+            run.stdout,
+        );
+    }
+
+    #[test]
     fn missing_target_is_broken_and_fails_the_check() {
         let project = Project::new();
         project.record_all();
