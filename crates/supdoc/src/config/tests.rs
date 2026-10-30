@@ -739,6 +739,17 @@ fn extends_through_a_symlink_named_like_a_config_is_judged_by_the_real_file() {
     assert!(!error.to_string().contains("hunter2"), "{error}");
 }
 
+/// What a refusal shows, with `project` written as `P` in its message and help so refusals from
+/// different fixture projects compare equal.
+fn refusal_shown(error: &ConfigError, project: &str) -> (&'static str, u8, Option<String>, String) {
+    (
+        error.code(),
+        error.exit_code(),
+        error.help().map(|help| help.replace(project, "P")),
+        error.to_string().replace(project, "P"),
+    )
+}
+
 #[cfg(unix)]
 #[test]
 fn found_config_symlinked_to_another_name_is_refused_without_reading_it() {
@@ -779,7 +790,7 @@ fn found_config_symlinked_to_a_directory_or_nowhere_is_refused_like_one_to_anoth
         .expect("the symlink should be creatable");
         let error = Config::load(&at(&dir, &format!("{link}/docs")))
             .expect_err("a config symlink that doesn't lead to a config should be refused");
-        (error.code(), error.exit_code(), error.help())
+        refusal_shown(&error, &link)
     };
 
     let to_file = refusal(".env");
@@ -809,12 +820,7 @@ fn found_config_symlink_loops_are_refused_like_any_other_non_config_target() {
     let refusal = |project: &str| {
         let error = Config::load(&at(&dir, &format!("{project}/docs")))
             .expect_err("a looping config symlink should be refused");
-        (
-            error.code(),
-            error.exit_code(),
-            error.help(),
-            error.to_string().replace(project, "P"),
-        )
+        refusal_shown(&error, project)
     };
 
     let to_file = refusal("project-file");
