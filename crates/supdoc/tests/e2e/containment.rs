@@ -1253,6 +1253,40 @@ fn a_parent_repository_whose_git_dir_is_symlinked_elsewhere_applies_its_exclude_
     assert_followed_and_never_quoted(&project);
 }
 
+#[test]
+fn a_named_path_hidden_by_a_regular_ignore_file_above_the_root_is_blamed_unquoted() {
+    for file in [".gitignore", ".ignore"] {
+        let project = monorepo_with_git();
+        // A regular file the work tree holds above the root: it applies, but lies outside.
+        write(&project, file, "gui*.md\n");
+
+        let run = project.supdoc_in("services/web", &["--json", "check", "docs/guide.md"]);
+
+        let messages: Vec<_> = array_at(&run.json(), "/findings")
+            .iter()
+            .filter(|finding| finding["kind"].as_str() == Some("scan-explicit-path-ignored"))
+            .map(|finding| {
+                at(finding, "/message")
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(
+            messages,
+            ["docs/guide.md was named on the command line but is ignored by an ignore file"],
+            "a rule from {file} above the root is blamed without its line or its path\n{}",
+            run.stdout
+        );
+        let shown = format!("{}{}", run.stdout, run.stderr);
+        assert!(
+            !shown.contains("gui*.md") && !shown.contains(&format!("/{file}")),
+            "`supdoc {}` printed a line or path from {file} above the root\n{shown}",
+            run.args
+        );
+    }
+}
+
 /// The web project inside a git repository whose work tree is the whole `monorepo` fixture, so
 /// the ignore files of the directories above the project apply.
 fn monorepo_with_git() -> Project {
