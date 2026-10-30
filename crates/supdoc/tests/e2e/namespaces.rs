@@ -124,3 +124,38 @@ fn namespace_rename_rewrites_config_lockfile_and_links_and_check_still_passes() 
     );
     let _ = project.supdoc(&["check"]).assert_exit(0);
 }
+
+#[cfg(unix)]
+#[test]
+fn namespace_rename_prints_the_walk_findings_without_changing_its_other_lines() {
+    let project = Project::fixture("namespaced");
+    project.record();
+    let args = ["namespace", "rename", "auth", "authn"];
+    let plain = project.supdoc(&args);
+    let _ = plain.assert_exit(0);
+    std::fs::write(project.path("rules"), "gui*.md\n")
+        .expect("the outside rules should be writable");
+    std::os::unix::fs::symlink(project.path("rules"), project.path(".gitignore"))
+        .expect("the symlink should be creatable");
+
+    let preview = project.supdoc(&args);
+    let applied = project.supdoc(&["namespace", "rename", "auth", "authn", "--yes"]);
+
+    let _ = preview.assert_exit(0);
+    let _ = applied.assert_exit(0);
+    for run in [&preview, &applied] {
+        assert!(
+            run.stdout.starts_with(&plain.stdout),
+            "the config, link and lock lines should not change\nwithout:\n{}\nwith:\n{}",
+            plain.stdout,
+            run.stdout
+        );
+        assert_eq!(
+            run.stdout.matches("scan-ignore-file-symlink").count(),
+            1,
+            "`supdoc {}` should print the symlink warning once\n{}",
+            run.args,
+            run.stdout
+        );
+    }
+}
