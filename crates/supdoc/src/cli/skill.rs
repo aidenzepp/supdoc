@@ -826,9 +826,13 @@ mod tests {
     #[test]
     fn the_repository_root_skill_is_identical_to_the_embedded_one() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../SKILL.md");
-        let Ok(root_copy) = std::fs::read_to_string(&path) else {
-            skip(&path);
-            return;
+        let root_copy = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                skip(&path);
+                return;
+            }
+            Err(error) => panic!("{} should be readable: {error}", path.display()),
         };
 
         assert_eq!(

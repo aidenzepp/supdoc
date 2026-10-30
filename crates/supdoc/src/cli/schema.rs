@@ -232,11 +232,17 @@ mod tests {
     /// The `schema/` directory, or `None` (after saying so) when the crate is packaged without it.
     fn schema_dir_if_present() -> Option<PathBuf> {
         let dir = schema_dir();
-        if dir.is_dir() {
-            return Some(dir);
+        match std::fs::metadata(&dir) {
+            Ok(metadata) => {
+                assert!(metadata.is_dir(), "{} should be a directory", dir.display());
+                Some(dir)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                skip(&dir);
+                None
+            }
+            Err(error) => panic!("{} should be readable: {error}", dir.display()),
         }
-        skip(&dir);
-        None
     }
 
     /// Reports that a repository-only test was skipped, since a packaged crate lacks the repository.
