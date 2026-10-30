@@ -85,7 +85,7 @@ fn resolve_names_every_full_path_when_a_bare_name_is_ambiguous() {
 
     let _ = run.assert_exit(1);
     assert!(
-        run.stderr.contains("resolve/ambiguous")
+        run.stderr.contains("resolve-ambiguous")
             && run.stderr.contains("Config.validate")
             && run.stderr.contains("Server.validate"),
         "the error should offer both qualified paths: {}",
@@ -194,7 +194,7 @@ fn resolve_non_utf8_file_exits_1_with_read_not_utf8() {
             &serde_json::from_str(&run.stderr).unwrap_or_default(),
             "/kind"
         ),
-        "read/not-utf8",
+        "read-not-utf8",
         "a file that is not UTF-8 should be refused (R6); stderr: {}",
         run.stderr
     );
@@ -216,7 +216,7 @@ fn resolve_file_over_16_mib_exits_1_with_read_too_large() {
             &serde_json::from_str(&run.stderr).unwrap_or_default(),
             "/kind"
         ),
-        "read/too-large",
+        "read-too-large",
         "a file over 16 MiB should be refused (R6); stderr: {}",
         run.stderr
     );

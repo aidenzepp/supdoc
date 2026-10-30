@@ -43,7 +43,7 @@ fn check_json_lists_a_failed_link_with_its_finding() {
     let link = at(&report, "/data/links/0");
     assert_eq!(at(link, "/state"), "failed", "{report}");
     assert_eq!(at(link, "/symbol"), "A", "{report}");
-    assert_eq!(at(link, "/finding/kind"), "link/failed", "{report}");
+    assert_eq!(at(link, "/finding/kind"), "link-failed", "{report}");
 }
 
 #[test]
@@ -57,7 +57,7 @@ fn check_json_gives_a_broken_link_the_reason_it_broke() {
     assert_eq!(at(&report, "/data/summary/broken"), 1, "{report}");
     let link = at(&report, "/data/links/0");
     assert_eq!(at(link, "/state"), "broken", "{report}");
-    assert_eq!(at(link, "/finding/kind"), "resolve/not-found", "{report}");
+    assert_eq!(at(link, "/finding/kind"), "resolve-not-found", "{report}");
     assert!(
         at(link, "/finding/message")
             .as_str()

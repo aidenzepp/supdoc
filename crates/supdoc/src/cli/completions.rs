@@ -38,7 +38,7 @@ impl Report for ScriptReport {
 ///
 /// # Errors
 ///
-/// Returns `cli/completions-write` when standard output cannot be written for a reason other
+/// Returns `cli-completions-write` when standard output cannot be written for a reason other
 /// than a closed pipe.
 pub fn run(
     args: &CompletionsArgs,
@@ -57,7 +57,7 @@ pub fn run(
 /// The error for a script that could not be written.
 fn write_failed(shell: Shell, error: &OutputError) -> CliError {
     CliError::new(
-        "cli/completions-write",
+        "cli-completions-write",
         format!("could not write the {shell} completion script: {error}"),
         format!(
             "check that standard output is open and writable, or redirect it to a file with \

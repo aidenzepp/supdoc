@@ -33,7 +33,7 @@ fn check_fails_a_new_link_until_update_records_it() {
 
     let _ = check.assert_exit(1);
     assert!(
-        check.stdout.contains("link/new"),
+        check.stdout.contains("link-new"),
         "unrecorded links should be reported as new: {}",
         check.stdout
     );
@@ -49,7 +49,7 @@ fn check_fails_a_link_whose_symbol_changed() {
 
     let _ = check.assert_exit(1);
     assert!(
-        check.stdout.contains("link/failed") && check.stdout.contains("src/lib.rs#A"),
+        check.stdout.contains("link-failed") && check.stdout.contains("src/lib.rs#A"),
         "the edited constant's link should be reported as failed: {}",
         check.stdout
     );
@@ -65,7 +65,7 @@ fn check_reports_a_link_to_a_removed_symbol_as_broken() {
 
     let _ = check.assert_exit(1);
     assert!(
-        check.stdout.contains("resolve/not-found") && check.stdout.contains("1 broken"),
+        check.stdout.contains("resolve-not-found") && check.stdout.contains("1 broken"),
         "the link to the removed constant should be broken: {}",
         check.stdout
     );
@@ -256,9 +256,9 @@ fn switching_line_endings_to_exact_refuses_until_update_migrates_the_lock() {
     let refused = project.supdoc(&["check"]);
     let _ = refused.assert_exit(78);
     assert!(
-        refused.stdout.contains("lock/settings-mismatch")
-            || refused.stderr.contains("lock/settings-mismatch"),
-        "check should refuse with lock/settings-mismatch:\nstdout:\n{}\nstderr:\n{}",
+        refused.stdout.contains("lock-settings-mismatch")
+            || refused.stderr.contains("lock-settings-mismatch"),
+        "check should refuse with lock-settings-mismatch:\nstdout:\n{}\nstderr:\n{}",
         refused.stdout,
         refused.stderr
     );

@@ -81,14 +81,14 @@ fn exit_code() -> u8 {
 ///
 /// # Errors
 ///
-/// Returns `cli/no-cwd` when the directory is unreadable or not absolute.
+/// Returns `cli-no-cwd` when the directory is unreadable or not absolute.
 fn current_dir() -> Result<AbsolutePath, CliError> {
     std::env::current_dir()
         .ok()
         .and_then(|dir| AbsolutePath::new(&dir))
         .ok_or_else(|| {
             CliError::new(
-                "cli/no-cwd",
+                "cli-no-cwd",
                 "could not read the current directory",
                 "`cd` to a directory that exists and that you can read, then run supdoc again",
                 IO_EXIT_CODE,
@@ -117,7 +117,7 @@ fn home_dirs(
 ///
 /// # Errors
 ///
-/// Returns `cli/skill-relative-claude-dir` when `command` is `skill install --global` and
+/// Returns `cli-skill-relative-claude-dir` when `command` is `skill install --global` and
 /// `value` is a non-empty relative path.
 fn reject_relative_claude_dir(command: &Command, value: Option<&OsStr>) -> Result<(), CliError> {
     let global_install =
@@ -125,7 +125,7 @@ fn reject_relative_claude_dir(command: &Command, value: Option<&OsStr>) -> Resul
     match value {
         Some(dir) if global_install && !dir.is_empty() && !Path::new(dir).is_absolute() => {
             Err(CliError::new(
-                "cli/skill-relative-claude-dir",
+                "cli-skill-relative-claude-dir",
                 format!(
                     "{CLAUDE_CONFIG_DIR} is `{}`, which is not an absolute path",
                     dir.to_string_lossy()
@@ -295,7 +295,7 @@ mod tests {
             Location::in_text(file, text, range.clone()).expect("the range should be locatable");
         let snippet = Snippet::capture(text, range).expect("the range should be capturable");
         CliError::new(
-            "config/parse",
+            "config-parse",
             "supdoc.config.toml: invalid value",
             "Correct the config as the message says",
             CliError::CONFIG_EXIT_CODE,
@@ -358,7 +358,7 @@ mod tests {
 
     #[test]
     fn a_fatal_error_without_a_site_has_no_location() {
-        let error = CliError::new("cli/no-cwd", "no directory", "run it elsewhere", 74);
+        let error = CliError::new("cli-no-cwd", "no directory", "run it elsewhere", 74);
 
         let text = stderr_of(OutputFormat::Text, &error);
         let json = stderr_of(OutputFormat::Json, &error);
@@ -459,7 +459,7 @@ mod tests {
         let error = reject_relative_claude_dir(&command, Some(OsStr::new("rel/claude")))
             .expect_err("a relative CLAUDE_CONFIG_DIR should be refused");
 
-        assert_eq!(error.code(), "cli/skill-relative-claude-dir");
+        assert_eq!(error.code(), "cli-skill-relative-claude-dir");
         assert_eq!(error.exit_code(), CliError::USAGE_EXIT_CODE);
         assert!(
             error.to_string().contains("rel/claude"),

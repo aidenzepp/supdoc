@@ -94,7 +94,7 @@ fn load_file_with_missing_path_is_not_found_not_defaults() {
     let dir = tree(&[]);
     let error = load_error(&dir, "supdoc.config.toml");
 
-    assert_eq!(error.code(), "config/not-found");
+    assert_eq!(error.code(), "config-not-found");
     assert!(
         matches!(&error, ConfigError::NotFound { path } if *path == at(&dir, "supdoc.config.toml")),
         "the error should name the requested file: {error:?}",
@@ -302,7 +302,7 @@ fn unknown_key_is_parse_error_naming_key_and_valid_keys() {
     let error = load_error(&dir, "supdoc.config.toml");
     let message = error.to_string();
 
-    assert_eq!(error.code(), "config/parse");
+    assert_eq!(error.code(), "config-parse");
     assert!(message.contains("exlude"), "{message}");
     assert!(message.contains("exclude"), "{message}");
     assert_eq!(parse_span_text(&error, text), "exlude");
@@ -318,7 +318,7 @@ fn invalid_glob_is_parse_error_with_line() {
     let dir = tree(&[("supdoc.config.toml", text)]);
     let error = load_error(&dir, "supdoc.config.toml");
 
-    assert_eq!(error.code(), "config/parse");
+    assert_eq!(error.code(), "config-parse");
     assert!(error.to_string().contains("docs/["), "{error}");
     assert!(parse_span_text(&error, text).contains("docs/["));
     assert_eq!(error.help(), None, "the glob message is already the fix");
@@ -330,7 +330,7 @@ fn pattern_with_parent_segment_is_rejected() {
     let dir = tree(&[("supdoc.config.toml", text)]);
     let error = load_error(&dir, "supdoc.config.toml");
 
-    assert_eq!(error.code(), "config/parse");
+    assert_eq!(error.code(), "config-parse");
     assert!(error.to_string().contains("../shared"), "{error}");
     assert!(error.help().is_some());
 }
@@ -340,7 +340,7 @@ fn pattern_with_leading_slash_is_rejected() {
     let dir = tree(&[("supdoc.config.toml", "include = [\"/docs\"]\n")]);
     let error = load_error(&dir, "supdoc.config.toml");
 
-    assert_eq!(error.code(), "config/parse");
+    assert_eq!(error.code(), "config-parse");
     assert!(error.to_string().contains("/docs"), "{error}");
 }
 
@@ -350,7 +350,7 @@ fn single_letter_namespace_is_parse_error_with_line() {
     let dir = tree(&[("supdoc.config.toml", text)]);
     let error = load_error(&dir, "supdoc.config.toml");
 
-    assert_eq!(error.code(), "config/parse");
+    assert_eq!(error.code(), "config-parse");
     assert_eq!(parse_span_text(&error, text), "c");
     assert!(error.help().is_some());
 }
@@ -360,7 +360,7 @@ fn absolute_namespace_path_is_parse_error() {
     let dir = tree(&[("supdoc.config.toml", "[namespaces]\nauth = \"/srv/auth\"\n")]);
     let error = load_error(&dir, "supdoc.config.toml");
 
-    assert_eq!(error.code(), "config/parse");
+    assert_eq!(error.code(), "config-parse");
     assert!(error.to_string().contains("/srv/auth"), "{error}");
     assert!(error.help().is_some());
 }
@@ -370,7 +370,7 @@ fn malformed_toml_is_parse_error_without_help() {
     let dir = tree(&[("supdoc.config.toml", "include = [\n")]);
     let error = load_error(&dir, "supdoc.config.toml");
 
-    assert_eq!(error.code(), "config/parse");
+    assert_eq!(error.code(), "config-parse");
     assert_eq!(error.exit_code(), 78);
 }
 
@@ -380,7 +380,7 @@ fn extends_missing_names_file_value_and_resolved_path() {
     let dir = tree(&[("apps/web/supdoc.config.toml", text)]);
     let error = load_error(&dir, "apps/web/supdoc.config.toml");
 
-    assert_eq!(error.code(), "config/extends-missing");
+    assert_eq!(error.code(), "config-extends-missing");
     let ConfigError::ExtendsMissing {
         file,
         extends,
@@ -410,7 +410,7 @@ fn extends_directory_suggests_config_inside_it() {
     ]);
     let error = load_error(&dir, "apps/web/supdoc.config.toml");
 
-    assert_eq!(error.code(), "config/extends-directory");
+    assert_eq!(error.code(), "config-extends-directory");
     let ConfigError::ExtendsDirectory { suggestion, .. } = &error else {
         panic!("expected extends-directory, got {error:?}");
     };
@@ -461,7 +461,7 @@ fn extends_loop_reports_every_file_in_order() {
     ]);
     let error = load_error(&dir, "a/supdoc.config.toml");
 
-    assert_eq!(error.code(), "config/extends-loop");
+    assert_eq!(error.code(), "config-extends-loop");
     let ConfigError::ExtendsLoop { chain, .. } = &error else {
         panic!("expected extends-loop, got {error:?}");
     };
@@ -509,7 +509,7 @@ fn file_extending_itself_is_a_loop() {
     let dir = tree(&[("supdoc.config.toml", "extends = \"supdoc.config.toml\"\n")]);
     let error = load_error(&dir, "supdoc.config.toml");
 
-    assert_eq!(error.code(), "config/extends-loop");
+    assert_eq!(error.code(), "config-extends-loop");
 }
 
 #[cfg(unix)]
@@ -527,7 +527,7 @@ fn extends_loop_through_a_symlink_is_caught() {
     .expect("the symlink should be creatable");
     let error = load_error(&dir, "real/supdoc.config.toml");
 
-    assert_eq!(error.code(), "config/extends-loop");
+    assert_eq!(error.code(), "config-extends-loop");
 }
 
 #[cfg(unix)]
@@ -545,7 +545,7 @@ fn unreadable_config_is_read_error() {
     }
     let error = load_error(&dir, "supdoc.config.toml");
 
-    assert_eq!(error.code(), "config/read");
+    assert_eq!(error.code(), "config-read");
     assert_eq!(error.exit_code(), 74);
 }
 
@@ -595,7 +595,7 @@ fn every_error_has_a_code_and_message_names_a_file() {
     ];
     let mut codes = Vec::new();
     for error in &errors {
-        assert!(error.code().starts_with("config/"), "{error:?}");
+        assert!(error.code().starts_with("config-"), "{error:?}");
         assert!(
             error.to_string().contains(&file.display().to_string()),
             "message should name the file: {error}",
@@ -694,7 +694,7 @@ fn extends_naming_another_file_is_refused_without_printing_it() {
     ]);
     let error = load_error(&dir, "project/supdoc.config.toml");
 
-    assert_eq!(error.code(), "config/extends-not-config", "got {error:?}");
+    assert_eq!(error.code(), "config-extends-not-config", "got {error:?}");
     assert_eq!(error.exit_code(), 78);
     let shown = format!("{error} {}", error.help().unwrap_or_default());
     assert!(
@@ -710,7 +710,7 @@ fn extends_naming_a_missing_file_of_another_name_is_refused_the_same_way() {
 
     assert_eq!(
         error.code(),
-        "config/extends-not-config",
+        "config-extends-not-config",
         "a missing file and a present one must look the same: {error:?}",
     );
 }
@@ -734,7 +734,7 @@ fn extends_through_a_symlink_named_like_a_config_is_judged_by_the_real_file() {
     .expect("the symlink should be creatable");
     let error = load_error(&dir, "project/supdoc.config.toml");
 
-    assert_eq!(error.code(), "config/extends-not-config", "got {error:?}");
+    assert_eq!(error.code(), "config-extends-not-config", "got {error:?}");
     assert!(!error.to_string().contains("hunter2"), "{error}");
 }
 
@@ -748,7 +748,7 @@ fn namespace_outside_the_root_is_a_config_error() {
 
     assert_eq!(
         error.code(),
-        "config/namespace-outside-root",
+        "config-namespace-outside-root",
         "got {error:?}"
     );
     assert_eq!(error.exit_code(), 78);
@@ -772,7 +772,7 @@ fn inherited_namespace_outside_the_child_root_is_a_config_error() {
 
     assert_eq!(
         error.code(),
-        "config/namespace-outside-root",
+        "config-namespace-outside-root",
         "got {error:?}"
     );
 }
@@ -796,7 +796,7 @@ fn namespace_symlinked_outside_the_root_is_a_config_error() {
 
     assert_eq!(
         error.code(),
-        "config/namespace-outside-root",
+        "config-namespace-outside-root",
         "got {error:?}"
     );
 }
@@ -918,7 +918,7 @@ fn unknown_line_endings_value_is_parse_error_listing_both_values() {
     )]);
     let error = load_error(&dir, "supdoc.config.toml");
 
-    assert_eq!(error.code(), "config/parse", "got {error:?}");
+    assert_eq!(error.code(), "config-parse", "got {error:?}");
     let message = error.to_string();
     assert!(
         message.contains("unknown variant `crlf`")
@@ -937,7 +937,7 @@ fn unknown_features_key_is_parse_error() {
         let dir = tree(&[("supdoc.config.toml", text)]);
         let error = load_error(&dir, "supdoc.config.toml");
 
-        assert_eq!(error.code(), "config/parse", "{text:?} gave {error:?}");
+        assert_eq!(error.code(), "config-parse", "{text:?} gave {error:?}");
     }
 }
 

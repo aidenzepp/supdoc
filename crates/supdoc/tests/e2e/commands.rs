@@ -1,4 +1,4 @@
-//! Every command this build defines is built: none answers with `cli/not-built` (operator ruling on
+//! Every command this build defines is built: none answers with `cli-not-built` (operator ruling on
 //! H1). The commands and schema names come from the clap definition, so a new one is covered too.
 
 use clap::CommandFactory;
@@ -32,7 +32,7 @@ fn leaf_commands(command: &clap::Command, prefix: &str, found: &mut Vec<String>)
     }
 }
 
-/// Fails listing every run that was a usage error or answered `cli/not-built`.
+/// Fails listing every run that was a usage error or answered `cli-not-built`.
 fn assert_all_built(project: &Project, invocations: &[Vec<&str>]) {
     let mut unbuilt = Vec::new();
     for argv in invocations {

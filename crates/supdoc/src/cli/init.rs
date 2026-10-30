@@ -74,7 +74,7 @@ impl Report for StarterReport {
 ///
 /// # Errors
 ///
-/// Returns `cli/init-exists` when the target file already exists, and `cli/init-write` when the
+/// Returns `cli-init-exists` when the target file already exists, and `cli-init-write` when the
 /// file cannot be created or the output cannot be written.
 pub fn run(args: &InitArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let target = target(context);
@@ -140,12 +140,12 @@ fn command(context: &Context) -> String {
     )
 }
 
-/// Fails with `cli/init-write` when `target`'s directory is missing or is not a directory, the
+/// Fails with `cli-init-write` when `target`'s directory is missing or is not a directory, the
 /// same error a real run reports when it cannot create the file there.
 ///
 /// # Errors
 ///
-/// Returns `cli/init-write` when the parent directory cannot be found or is not a directory.
+/// Returns `cli-init-write` when the parent directory cannot be found or is not a directory.
 fn require_parent_directory(target: &AbsolutePath) -> Result<(), CliError> {
     let Some(parent) = target.as_path().parent() else {
         return Ok(());
@@ -168,11 +168,11 @@ fn label(target: &AbsolutePath, cwd: &AbsolutePath) -> String {
     )
 }
 
-/// Fails with `cli/init-exists` when something is already at `target`.
+/// Fails with `cli-init-exists` when something is already at `target`.
 ///
 /// # Errors
 ///
-/// Returns `cli/init-exists` when anything, including a dangling symlink, is at `target`.
+/// Returns `cli-init-exists` when anything, including a dangling symlink, is at `target`.
 fn refuse_if_present(target: &AbsolutePath) -> Result<(), CliError> {
     if target.as_path().symlink_metadata().is_ok() {
         Err(exists(target))
@@ -188,7 +188,7 @@ fn refuse_if_present(target: &AbsolutePath) -> Result<(), CliError> {
 ///
 /// # Errors
 ///
-/// Returns `cli/init-exists` when `target` exists, and `cli/init-write` when it cannot be written.
+/// Returns `cli-init-exists` when `target` exists, and `cli-init-write` when it cannot be written.
 fn write_new(target: &AbsolutePath) -> Result<(), CliError> {
     let mut file = OpenOptions::new()
         .write(true)
@@ -206,7 +206,7 @@ fn write_new(target: &AbsolutePath) -> Result<(), CliError> {
 /// The refusal for an existing config (06 error table).
 fn exists(target: &AbsolutePath) -> CliError {
     CliError::new(
-        "cli/init-exists",
+        "cli-init-exists",
         format!("{} already exists", target.display()),
         "The existing file wasn't changed. Edit it directly, or delete it and run `supdoc init`.",
         CliError::REFUSED_EXIT_CODE,
@@ -216,7 +216,7 @@ fn exists(target: &AbsolutePath) -> CliError {
 /// The error for a config that could not be written.
 fn write_failed(target: &AbsolutePath, error: &io::Error) -> CliError {
     CliError::new(
-        "cli/init-write",
+        "cli-init-write",
         format!("cannot write {}: {error}", target.display()),
         "check that the directory exists and that you can write to it, then run `supdoc init` \
          again",
@@ -227,7 +227,7 @@ fn write_failed(target: &AbsolutePath, error: &io::Error) -> CliError {
 /// The error for output that could not be written.
 fn output_failed(target: &AbsolutePath, error: &OutputError) -> CliError {
     CliError::new(
-        "cli/init-write",
+        "cli-init-write",
         format!("cannot report on {}: {error}", target.display()),
         "check that standard output and standard error are open and writable, or redirect both \
          to a file with `> supdoc.out 2>&1`",
@@ -428,7 +428,7 @@ mod tests {
         let (result, _, _) = run_captured(&args, &context);
         let error = result.expect_err("init should refuse to overwrite the -c path");
 
-        assert_eq!(error.code(), "cli/init-exists");
+        assert_eq!(error.code(), "cli-init-exists");
         let after = std::fs::read_to_string(dir.path().join("sub/x.toml"))
             .expect("the existing file should remain");
         assert_eq!(after, "# mine\n", "the existing file is untouched");
@@ -496,7 +496,7 @@ mod tests {
         let (result, _, _) = run_captured(&args, &context);
         let error = result.expect_err("init should refuse to overwrite");
 
-        assert_eq!(error.code(), "cli/init-exists");
+        assert_eq!(error.code(), "cli-init-exists");
         assert_eq!(error.exit_code(), 1);
         let after = std::fs::read_to_string(config_path(&dir)).expect("the config should remain");
         assert_eq!(
@@ -529,7 +529,7 @@ mod tests {
         let (result, _, _) = run_captured(&args, &context);
         let error = result.expect_err("a dry run should report the refusal");
 
-        assert_eq!(error.code(), "cli/init-exists");
+        assert_eq!(error.code(), "cli-init-exists");
     }
 
     #[test]
@@ -542,7 +542,7 @@ mod tests {
         let (result, _, _) = run_captured(&args, &context);
         let error = result.expect_err("a missing directory cannot hold a config");
 
-        assert_eq!((error.code(), error.exit_code()), ("cli/init-write", 74));
+        assert_eq!((error.code(), error.exit_code()), ("cli-init-write", 74));
     }
 
     #[test]

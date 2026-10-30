@@ -50,7 +50,7 @@
       ]
     },
     "kind": {
-      "description": "The stable code, such as `config/extends-missing`.",
+      "description": "The stable code, such as `config-extends-missing`.",
       "type": "string"
     },
     "location": {

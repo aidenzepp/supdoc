@@ -24,13 +24,13 @@ use crate::read::hash::{hash_file, hash_symbol};
 use crate::scan::model::{ScannedLink, TargetState};
 
 /// Finding code for a target path whose case differs from the real path (04 S12).
-const CODE_CASE_MISMATCH: &str = "scan/case-mismatch";
+const CODE_CASE_MISMATCH: &str = "scan-case-mismatch";
 
 /// Finding code for a namespace the config doesn't define (03 R10).
-pub(crate) const CODE_UNKNOWN_NAMESPACE: &str = "link/unknown-namespace";
+pub(crate) const CODE_UNKNOWN_NAMESPACE: &str = "link-unknown-namespace";
 
 /// Finding code for a link whose target lies outside the project root.
-pub(crate) const CODE_OUTSIDE_ROOT: &str = "link/outside-root";
+pub(crate) const CODE_OUTSIDE_ROOT: &str = "link-outside-root";
 
 /// What to do about a link whose target lies outside the project root.
 pub(crate) const OUTSIDE_ROOT_HELP: &str = "Link to a file inside the project root, or move \
@@ -378,7 +378,7 @@ fn fix_at(first: &Occurrence, range: Range<usize>, replacement: impl Into<String
     }
 }
 
-/// `scan/case-mismatch`: the path names a real file with different case, fixed by writing the
+/// `scan-case-mismatch`: the path names a real file with different case, fixed by writing the
 /// real case where the link's own spelling can be rewritten exactly.
 fn case_mismatch(target: &Target, real: &str, first: &Occurrence) -> Finding {
     let namespaced = target.namespace().is_some();
@@ -444,7 +444,7 @@ fn recased(written: &str, real: &str) -> Option<String> {
     })
 }
 
-/// A `link/outside-root` finding for a target that lies outside the project root.
+/// A `link-outside-root` finding for a target that lies outside the project root.
 ///
 /// The message names only the target as written: nothing outside the root is read to build it.
 fn outside_root(target: &Target, first: &Occurrence) -> Finding {
@@ -456,7 +456,7 @@ fn outside_root(target: &Target, first: &Occurrence) -> Finding {
     )
 }
 
-/// A `link/unknown-namespace` finding for a namespace the config doesn't define.
+/// A `link-unknown-namespace` finding for a namespace the config doesn't define.
 fn unknown_namespace(target: &Target, first: &Occurrence) -> Finding {
     let namespace = target
         .namespace()
@@ -483,7 +483,7 @@ fn read_failed(error: &ReadError, root: &AbsolutePath, first: &Occurrence) -> Fi
     )
 }
 
-/// The finding for a symbol that doesn't resolve. A `resolve/not-found` gets a fix when exactly
+/// The finding for a symbol that doesn't resolve. A `resolve-not-found` gets a fix when exactly
 /// one symbol in the file is a close match (03: the fixer never guesses).
 ///
 /// The message and help name the file relative to the project `root`, so no finding carries a

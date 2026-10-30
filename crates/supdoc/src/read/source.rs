@@ -173,7 +173,7 @@ mod tests {
             matches!(&error, ReadError::NotUtf8 { offset: 13, .. }),
             "the 0xff byte sits at offset 13, got {error:?}",
         );
-        assert_eq!(error.code(), "read/not-utf8");
+        assert_eq!(error.code(), "read-not-utf8");
         assert_eq!(
             error.to_string(),
             format!(
@@ -216,7 +216,7 @@ mod tests {
         let error = SourceFile::read(path, &Languages::builtin())
             .expect_err("a file that doesn't exist can't be read");
 
-        assert_eq!(error.code(), "read/missing", "got {error:?}");
+        assert_eq!(error.code(), "read-missing", "got {error:?}");
     }
 
     #[cfg(unix)]
@@ -232,7 +232,7 @@ mod tests {
         let error = SourceFile::read(link, &Languages::builtin())
             .expect_err("a .env file behind a .py name must not be parsed as Python");
 
-        assert_eq!(error.code(), "read/unsupported-language", "got {error:?}");
+        assert_eq!(error.code(), "read-unsupported-language", "got {error:?}");
         assert!(
             !error.to_string().contains("hunter2"),
             "the error must not show the file's contents: {error}",

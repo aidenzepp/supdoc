@@ -38,9 +38,9 @@ use super::{CliError, Context, Outcome};
 /// # Errors
 ///
 /// Returns the config's own error (78, or 74 when unreadable), the lockfile's own error (78 when
-/// invalid, 74 when unreadable), `cli/path-outside-project` (2) for a plain `TARGET` outside the
-/// project, `cli/target-invalid` (2) for a `TARGET` that isn't a target, `scan/root-unreadable`
-/// (74), and `cli/list-output` when the report cannot be written (74).
+/// invalid, 74 when unreadable), `cli-path-outside-project` (2) for a plain `TARGET` outside the
+/// project, `cli-target-invalid` (2) for a `TARGET` that isn't a target, `scan-root-unreadable`
+/// (74), and `cli-list-output` when the report cannot be written (74).
 pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let config = load_config(context, output, "list")?;
     let lock = read_lock(&config)?;
@@ -113,8 +113,8 @@ pub fn schema() -> Result<schemars::Schema, CliError> {
 ///
 /// # Errors
 ///
-/// Returns `cli/path-outside-project` for a plain path outside the project and
-/// `cli/target-invalid` for text that is not a target. Both exit 2.
+/// Returns `cli-path-outside-project` for a plain path outside the project and
+/// `cli-target-invalid` for text that is not a target. Both exit 2.
 fn parse_target(typed: &str, config: &Config, cwd: &AbsolutePath) -> Result<LinkRef, CliError> {
     let (path, symbol) = match typed.split_once('#') {
         Some((path, symbol)) => (path, Some(symbol)),
@@ -149,7 +149,7 @@ fn parse_target(typed: &str, config: &Config, cwd: &AbsolutePath) -> Result<Link
 /// The error for a `TARGET` that is not `path`, `path#symbol` or `ns:path#symbol`.
 fn target_invalid(typed: &str, reason: &str) -> CliError {
     CliError::new(
-        "cli/target-invalid",
+        "cli-target-invalid",
         format!("`{typed}` is not a link target: {reason}"),
         "Write TARGET as `path`, `path#symbol` or `ns:path#symbol`",
         CliError::USAGE_EXIT_CODE,
@@ -159,7 +159,7 @@ fn target_invalid(typed: &str, reason: &str) -> CliError {
 /// The error for a report that could not be written.
 fn output_failed(error: &OutputError) -> CliError {
     CliError::new(
-        "cli/list-output",
+        "cli-list-output",
         format!("cannot write the link list: {error}"),
         "Check that standard output and standard error are open and writable, or redirect both \
          to a file with `> supdoc.out 2>&1`",
@@ -735,7 +735,7 @@ mod tests {
             .expect_err("a target outside the project should be refused");
         assert_eq!(
             (error.code(), error.exit_code()),
-            ("cli/path-outside-project", 2)
+            ("cli-path-outside-project", 2)
         );
     }
 

@@ -52,11 +52,11 @@ const MIGRATION_STATES: [LinkState; 3] = [LinkState::Failed, LinkState::New, Lin
 ///
 /// # Errors
 ///
-/// Returns the config's own error (78, or 74 when unreadable), `cli/path-missing`,
-/// `cli/path-outside-project` or `cli/path-invalid` for a bad `[PATH]` (2), the lockfile's own
-/// error (78 when invalid, 74 when unreadable or unwritable), `lock/settings-mismatch` (78) when
+/// Returns the config's own error (78, or 74 when unreadable), `cli-path-missing`,
+/// `cli-path-outside-project` or `cli-path-invalid` for a bad `[PATH]` (2), the lockfile's own
+/// error (78 when invalid, 74 when unreadable or unwritable), `lock-settings-mismatch` (78) when
 /// the lockfile's hash settings differ from the config's and the run is narrowed by `[PATHS]` or
-/// `--state`, `scan/root-unreadable` (74), and `cli/update-output` when the report cannot be
+/// `--state`, `scan-root-unreadable` (74), and `cli-update-output` when the report cannot be
 /// written (74).
 pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let config = load_config(context, output, "update")?;
@@ -122,7 +122,7 @@ pub fn schema() -> Result<schemars::Schema, CliError> {
 /// The error for a report that could not be written.
 fn output_failed(error: &OutputError) -> CliError {
     CliError::new(
-        "cli/update-output",
+        "cli-update-output",
         format!("cannot write the update report: {error}"),
         "Check that standard output and standard error are open and writable, or redirect both \
          to a file with `> supdoc.out 2>&1`",
@@ -998,11 +998,11 @@ mod tests {
         let findings = at(&json.json(), "/findings");
         assert_eq!(
             at(&findings, "/0/kind"),
-            "link/invalid-path",
+            "link-invalid-path",
             "the malformed link is a top-level finding: {findings}"
         );
         assert!(
-            text.stdout.contains("link/invalid-path"),
+            text.stdout.contains("link-invalid-path"),
             "text shows the link error: {}",
             text.stdout
         );
@@ -1067,7 +1067,7 @@ mod tests {
         let run = project.update(&["update", "docs/nope.md", "--yes"]);
 
         let error = run.result.as_ref().expect_err("a missing path should fail");
-        assert_eq!(error.code(), "cli/path-missing");
+        assert_eq!(error.code(), "cli-path-missing");
         assert_eq!(run.exit_code(), 2);
         assert_eq!(run.stdout, "");
         assert!(
@@ -1260,7 +1260,7 @@ mod tests {
             .expect_err("a narrowed update can't migrate the lockfile");
         assert_eq!(
             (error.code(), run.exit_code()),
-            ("lock/settings-mismatch", 78)
+            ("lock-settings-mismatch", 78)
         );
         assert_eq!(
             error.to_string(),
@@ -1285,7 +1285,7 @@ mod tests {
                 .expect_err("an update without every migration state can't migrate");
             assert_eq!(
                 (error.code(), run.exit_code()),
-                ("lock/settings-mismatch", 78),
+                ("lock-settings-mismatch", 78),
                 "--state {state}"
             );
         }

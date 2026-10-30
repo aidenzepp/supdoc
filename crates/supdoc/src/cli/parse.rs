@@ -43,7 +43,7 @@ pub enum Stream {
 }
 
 /// The code of the error printed when the command line cannot be parsed.
-pub const USAGE_ERROR_CODE: &str = "cli/usage";
+pub const USAGE_ERROR_CODE: &str = "cli-usage";
 
 /// Parses the process's own arguments and environment.
 #[must_use]
@@ -123,7 +123,7 @@ fn usage_error_json(rendered: &str) -> String {
     };
     // Serializing plain strings and numbers cannot fail; the fallback keeps stderr valid JSON anyway.
     let mut line = serde_json::to_string(&error).unwrap_or_else(|_| {
-        r#"{"error":true,"kind":"cli/usage","message":"invalid command line","help":"run `supdoc --help`","exit_code":2}"#
+        r#"{"error":true,"kind":"cli-usage","message":"invalid command line","help":"run `supdoc --help`","exit_code":2}"#
             .to_owned()
     });
     line.push('\n');

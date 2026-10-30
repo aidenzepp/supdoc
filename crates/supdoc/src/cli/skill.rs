@@ -56,8 +56,8 @@ const INSTALLED_NOTE: &str = "Installed the supdoc skill.";
 ///
 /// # Errors
 ///
-/// Returns `cli/skill-no-home` when `--global` is given and `HOME` is not set, `cli/skill-write`
-/// when a copy cannot be written, and `cli/skill-output` when the report cannot be written.
+/// Returns `cli-skill-no-home` when `--global` is given and `HOME` is not set, `cli-skill-write`
+/// when a copy cannot be written, and `cli-skill-output` when the report cannot be written.
 pub fn run(
     args: &SkillInstallArgs,
     context: &Context,
@@ -112,7 +112,7 @@ pub fn schema() -> Result<schemars::Schema, CliError> {
 ///
 /// # Errors
 ///
-/// Returns `cli/skill-no-home` when `global` is set and `HOME` is not.
+/// Returns `cli-skill-no-home` when `global` is set and `HOME` is not.
 fn destinations(global: bool, context: &Context) -> Result<[AbsolutePath; 2], CliError> {
     if !global {
         let root = project_root(context);
@@ -181,7 +181,7 @@ pub(crate) struct SkillInstallReport {
     applied: bool,
     /// One per destination: the shared agents copy, then Claude Code's.
     changes: Vec<SkillChange>,
-    /// A `cli/skill-exists` warning for each different file a preview would replace.
+    /// A `cli-skill-exists` warning for each different file a preview would replace.
     #[serde(skip)]
     findings: Vec<Finding>,
 }
@@ -300,7 +300,7 @@ fn install_file(target: &Path, bytes: &[u8]) -> io::Result<()> {
 /// The warning for a different `SKILL.md` a preview would replace (06 error table, Q25).
 fn exists(shown: &str) -> Finding {
     Finding::new(
-        "cli/skill-exists",
+        "cli-skill-exists",
         Severity::Warning,
         format!("{shown} already exists with different contents"),
     )
@@ -310,7 +310,7 @@ fn exists(shown: &str) -> Finding {
 /// The error for `--global` without a home directory.
 fn no_home() -> CliError {
     CliError::new(
-        "cli/skill-no-home",
+        "cli-skill-no-home",
         "`--global` installs into your home directory, but HOME is not set",
         "Set HOME to your home directory, or drop `--global` to install into the project",
         CliError::USAGE_EXIT_CODE,
@@ -320,7 +320,7 @@ fn no_home() -> CliError {
 /// The error for a copy of the skill that could not be written.
 fn write_failed(path: &AbsolutePath, error: &io::Error) -> CliError {
     CliError::new(
-        "cli/skill-write",
+        "cli-skill-write",
         format!("cannot write {}: {error}", path.display()),
         format!(
             "Check that you can create and write files in `{}`",
@@ -336,7 +336,7 @@ fn write_failed(path: &AbsolutePath, error: &io::Error) -> CliError {
 /// The error for a report that could not be written.
 fn output_failed(error: &OutputError) -> CliError {
     CliError::new(
-        "cli/skill-output",
+        "cli-skill-output",
         format!("cannot write the skill install report: {error}"),
         "Check that standard output and standard error are open and writable, or redirect both \
          to a file with `> supdoc.out 2>&1`",
@@ -647,7 +647,7 @@ mod tests {
 
         let error = run(args, &context, &mut output).expect_err("--global needs HOME");
 
-        assert_eq!(error.code(), "cli/skill-no-home");
+        assert_eq!(error.code(), "cli-skill-no-home");
         assert_eq!(error.exit_code(), CliError::USAGE_EXIT_CODE);
     }
 
@@ -693,7 +693,7 @@ mod tests {
             .iter()
             .filter_map(|finding| finding.get("kind").and_then(serde_json::Value::as_str))
             .collect();
-        assert_eq!(codes, ["cli/skill-exists"]);
+        assert_eq!(codes, ["cli-skill-exists"]);
     }
 
     #[test]
@@ -789,7 +789,7 @@ mod tests {
         let run = world.install(&["--yes"]);
 
         let error = run.result.as_ref().expect_err("the write should fail");
-        assert_eq!(error.code(), "cli/skill-write");
+        assert_eq!(error.code(), "cli-skill-write");
         assert_eq!(run.exit_code(), CliError::IO_EXIT_CODE);
     }
 

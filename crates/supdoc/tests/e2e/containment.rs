@@ -56,7 +56,7 @@ fn extends_naming_a_non_config_file_is_refused_without_printing_it() {
 
     let _ = run.assert_exit(78);
     assert!(
-        run.stderr.contains("config/extends-not-config"),
+        run.stderr.contains("config-extends-not-config"),
         "{}",
         run.stderr
     );
@@ -84,7 +84,7 @@ fn links_climbing_out_of_the_root_are_not_read_or_recorded() {
     );
     let outside = array_at(&check.json(), "/findings")
         .iter()
-        .filter(|finding| finding["kind"] == "link/outside-root")
+        .filter(|finding| finding["kind"] == "link-outside-root")
         .count();
     assert_eq!(outside, 4, "{}", check.stdout);
 }
@@ -111,7 +111,7 @@ fn symlink_out_of_the_root_is_not_read_or_recorded() {
         "nothing behind the symlink is hashed"
     );
     assert!(
-        check.stdout.contains("link/outside-root"),
+        check.stdout.contains("link-outside-root"),
         "{}",
         check.stdout
     );
@@ -147,7 +147,7 @@ fn a_child_config_cannot_inherit_a_namespace_outside_its_root() {
 
     let _ = run.assert_exit(78);
     assert!(
-        run.stderr.contains("config/namespace-outside-root") && run.stderr.contains("`shared`"),
+        run.stderr.contains("config-namespace-outside-root") && run.stderr.contains("`shared`"),
         "{}",
         run.stderr
     );
@@ -166,7 +166,7 @@ fn lockfile_target_climbing_out_of_the_root_is_a_parse_error() {
     let run = project.supdoc_in("services/web", &["check"]);
 
     assert_ne!(run.code, Some(0), "{}", run.stderr);
-    assert!(run.stderr.contains("lock/parse"), "{}", run.stderr);
+    assert!(run.stderr.contains("lock-parse"), "{}", run.stderr);
     assert!(
         run.stderr
             .contains("target `../../settings.py` climbs out of the project root"),

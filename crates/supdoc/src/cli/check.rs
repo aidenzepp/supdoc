@@ -32,10 +32,10 @@ use super::{CliError, Context, Outcome};
 ///
 /// # Errors
 ///
-/// Returns the config's own error (78, or 74 when unreadable), `cli/path-missing`,
-/// `cli/path-outside-project` or `cli/path-invalid` for a bad `[PATH]` (2), the lockfile's own
-/// error (78 when invalid, 74 when unreadable), `scan/root-unreadable` (74), and
-/// `cli/check-output` when the report cannot be written (74).
+/// Returns the config's own error (78, or 74 when unreadable), `cli-path-missing`,
+/// `cli-path-outside-project` or `cli-path-invalid` for a bad `[PATH]` (2), the lockfile's own
+/// error (78 when invalid, 74 when unreadable), `scan-root-unreadable` (74), and
+/// `cli-check-output` when the report cannot be written (74).
 pub fn run(args: &CheckArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let config = load_config(context, output, "check")?;
     let scope = scope(&args.paths, &context.cwd, config.root())?;
@@ -76,7 +76,7 @@ pub fn schema() -> Result<schemars::Schema, CliError> {
 /// The error for a report that could not be written.
 fn output_failed(error: &OutputError) -> CliError {
     CliError::new(
-        "cli/check-output",
+        "cli-check-output",
         format!("cannot write the check report: {error}"),
         "Check that standard output and standard error are open and writable, or redirect both \
          to a file with `> supdoc.out 2>&1`",
@@ -440,7 +440,7 @@ mod tests {
 
         assert_eq!(run.exit_code(), 1, "stderr: {}", run.stderr);
         assert!(
-            run.stdout.contains("error[link/new]"),
+            run.stdout.contains("error[link-new]"),
             "stdout: {}",
             run.stdout
         );
@@ -464,7 +464,7 @@ mod tests {
 
         assert_eq!(run.exit_code(), 1, "stderr: {}", run.stderr);
         assert!(
-            run.stdout.contains("error[link/failed]"),
+            run.stdout.contains("error[link-failed]"),
             "stdout: {}",
             run.stdout
         );
@@ -506,7 +506,7 @@ mod tests {
 
         assert_eq!(lenient.exit_code(), 0, "stdout: {}", lenient.stdout);
         assert!(
-            lenient.stdout.contains("warning[link/obsolete]"),
+            lenient.stdout.contains("warning[link-obsolete]"),
             "stdout: {}",
             lenient.stdout
         );
@@ -581,7 +581,7 @@ mod tests {
         let run = project.check(&["check", "docs/nope.md"]);
 
         let error = run.result.expect_err("a missing path should be an error");
-        assert_eq!(error.code(), "cli/path-missing");
+        assert_eq!(error.code(), "cli-path-missing");
         assert!(
             error.message().contains("docs/nope.md"),
             "{}",
@@ -605,7 +605,7 @@ mod tests {
         let error = run
             .result
             .expect_err("a path outside the project should be an error");
-        assert_eq!(error.code(), "cli/path-outside-project");
+        assert_eq!(error.code(), "cli-path-outside-project");
         assert_eq!(error.exit_code(), 2);
     }
 
@@ -673,7 +673,7 @@ mod tests {
             }]),
             "a link location carries no `file`: the link's `source` names it",
         );
-        assert_eq!(at(&link, "/finding/kind"), "link/new");
+        assert_eq!(at(&link, "/finding/kind"), "link-new");
         assert!(
             at(&link, "/finding").get("location").is_none(),
             "a nested finding leaves its location to the link: {link}"

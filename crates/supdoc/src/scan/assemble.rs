@@ -38,11 +38,11 @@ pub enum ScanError {
 }
 
 impl ScanError {
-    /// The stable code for this error: `scan/root-unreadable`.
+    /// The stable code for this error: `scan-root-unreadable`.
     #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
-            Self::RootUnreadable { .. } => "scan/root-unreadable",
+            Self::RootUnreadable { .. } => "scan-root-unreadable",
         }
     }
 
@@ -268,14 +268,14 @@ fn link_finding(
             (CODE_UNKNOWN_NAMESPACE, help, fix)
         }
         LinkError::InvalidPath { .. } => (
-            "link/invalid-path",
+            "link-invalid-path",
             "Write the path with `/` between names, relative to this file or to the project \
              root with a leading `/`"
                 .to_owned(),
             None,
         ),
         LinkError::InvalidSymbol { .. } => (
-            "link/invalid-symbol",
+            "link-invalid-symbol",
             "Write the symbol as names joined by `.`, like `Config.validate`".to_owned(),
             None,
         ),
@@ -285,7 +285,7 @@ fn link_finding(
             None,
         ),
         LinkError::TextFragmentUnsupported { .. } => (
-            "link/text-fragment-unsupported",
+            "link-text-fragment-unsupported",
             "Remove the `:~:` text fragment from the link. supdoc can't read text fragments yet"
                 .to_owned(),
             None,
@@ -556,7 +556,7 @@ mod tests {
         let scan = project.scan();
 
         let finding = broken(&scan, &key("docs/guide.md", "src/gone.rs", None));
-        assert_eq!(finding.code, "read/missing");
+        assert_eq!(finding.code, "read-missing");
         assert_eq!(finding.severity, Severity::Error);
         let location = finding
             .location
@@ -575,7 +575,7 @@ mod tests {
         let scan = project.scan();
 
         let finding = broken(&scan, &key("docs/guide.md", "src/lib.rs", Some("ad")));
-        assert_eq!(finding.code, "resolve/not-found");
+        assert_eq!(finding.code, "resolve-not-found");
         let help = finding.help.as_deref().unwrap_or_default();
         assert!(
             help.contains("`add`"),
@@ -648,7 +648,7 @@ mod tests {
         let scan = project.scan();
 
         let finding = broken(&scan, &key("docs/guide.md", "src/lib.rs", Some("ad")));
-        assert_eq!(finding.code, "resolve/not-found");
+        assert_eq!(finding.code, "resolve-not-found");
         assert_eq!(
             finding.fix, None,
             "two close symbols leave nothing to choose"
@@ -672,7 +672,7 @@ mod tests {
             &scan,
             &key("docs/guide.md", "atuh:src/lib.rs", Some("login")),
         );
-        assert_eq!(finding.code, "link/unknown-namespace");
+        assert_eq!(finding.code, "link-unknown-namespace");
         let fix = finding
             .fix
             .as_ref()
@@ -692,7 +692,7 @@ mod tests {
             &scan,
             &key("docs/guide.md", "billing:src/lib.rs", Some("x")),
         );
-        assert_eq!(finding.code, "link/unknown-namespace");
+        assert_eq!(finding.code, "link-unknown-namespace");
         assert_eq!(finding.fix, None);
     }
 
@@ -707,11 +707,11 @@ mod tests {
     #[test]
     fn every_link_error_fails_check() {
         let cases = [
-            ("link/unknown-namespace", "[a](atuh:src/lib.rs#add)"),
-            ("link/invalid-symbol", "[a](../src/lib.rs#a..b)"),
-            ("link/invalid-path", "[a](../src//lib.rs#add)"),
+            ("link-unknown-namespace", "[a](atuh:src/lib.rs#add)"),
+            ("link-invalid-symbol", "[a](../src/lib.rs#a..b)"),
+            ("link-invalid-path", "[a](../src//lib.rs#add)"),
             (
-                "link/text-fragment-unsupported",
+                "link-text-fragment-unsupported",
                 "[a](../src/lib.rs#add:~:text=b)",
             ),
         ];
@@ -769,7 +769,7 @@ mod tests {
         let scan = project.scan();
 
         let finding = broken(&scan, &key("docs/guide.md", "SRC/lib.rs", Some("add")));
-        assert_eq!(finding.code, "scan/case-mismatch");
+        assert_eq!(finding.code, "scan-case-mismatch");
         assert_eq!(
             finding.message,
             "../SRC/lib.rs doesn't match the real path ../src/lib.rs (case differs)"
@@ -810,7 +810,7 @@ mod tests {
         let scan = project.scan();
 
         let codes: Vec<&str> = scan.findings.iter().map(|finding| finding.code).collect();
-        assert_eq!(codes, vec!["read/not-utf8"]);
+        assert_eq!(codes, vec!["read-not-utf8"]);
         assert!(
             scan.findings
                 .iter()
@@ -842,7 +842,7 @@ mod tests {
         fs::set_permissions(&project.root, fs::Permissions::from_mode(0o755))
             .expect("the root should be unlockable, so the temp dir can be removed");
         let error = result.expect_err("an unreadable root should stop the scan");
-        assert_eq!(error.code(), "scan/root-unreadable");
+        assert_eq!(error.code(), "scan-root-unreadable");
     }
 
     #[test]
@@ -919,9 +919,9 @@ mod tests {
     /// A secret outside the project, as a runner might hold one.
     const SECRET: &str = "API_KEY = \"s3cr3t\"\nDEBUG = True\n";
 
-    /// Fails unless `finding` is `link/outside-root` and shows nothing read from outside.
+    /// Fails unless `finding` is `link-outside-root` and shows nothing read from outside.
     fn assert_outside_root(finding: &Finding) {
-        assert_eq!(finding.code, "link/outside-root", "{finding:?}");
+        assert_eq!(finding.code, "link-outside-root", "{finding:?}");
         let shown = format!("{finding:?}");
         for leak in ["s3cr3t", "API_KEY = ", "DEBUG"] {
             assert!(
@@ -1072,9 +1072,9 @@ mod tests {
         assert_eq!(
             codes,
             vec![
-                "link/unknown-namespace",
-                "resolve/not-found",
-                "scan/case-mismatch"
+                "link-unknown-namespace",
+                "resolve-not-found",
+                "scan-case-mismatch"
             ],
         );
 

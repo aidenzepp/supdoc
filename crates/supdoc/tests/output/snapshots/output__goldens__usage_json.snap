@@ -6,4 +6,4 @@ $ supdoc --json chek
 exit: 2
 --- stdout
 --- stderr
-{"error":true,"kind":"cli/usage","message":"unrecognized subcommand 'chek'","help":"some similar subcommands exist: 'schema', 'check'; run `supdoc --help`, or `supdoc <command> --help`, to see valid usage","exit_code":2}
+{"error":true,"kind":"cli-usage","message":"unrecognized subcommand 'chek'","help":"some similar subcommands exist: 'schema', 'check'; run `supdoc --help`, or `supdoc <command> --help`, to see valid usage","exit_code":2}

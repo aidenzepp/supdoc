@@ -191,7 +191,7 @@ mod tests {
     /// One link in each state: `passed`, `failed`, `broken`, `new`, `obsolete`.
     fn one_of_each() -> (Scan, Lockfile) {
         let broken = TargetState::Broken {
-            finding: Finding::new("resolve/not-found", Severity::Error, "no symbol"),
+            finding: Finding::new("resolve-not-found", Severity::Error, "no symbol"),
         };
         let scan = scan_of(vec![
             (key("docs/a.md", "passed"), present(b"same")),

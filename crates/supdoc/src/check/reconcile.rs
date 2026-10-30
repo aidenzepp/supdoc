@@ -39,7 +39,7 @@ pub fn reconcile(scan: &Scan, lock: &Lockfile, scope: &Scope) -> Report {
     let keyless_error_sources = scan
         .findings
         .iter()
-        .filter(|finding| finding.code.starts_with("link/") && finding.severity == Severity::Error)
+        .filter(|finding| finding.code.starts_with("link-") && finding.severity == Severity::Error)
         .filter_map(|finding| finding.location.as_ref().map(|location| &location.file));
     let broken_link_sources = scan
         .links
@@ -208,7 +208,7 @@ fn failed_finding(key: &LinkKey, link: &ScannedLink) -> Finding {
     let reference = reference_of(key);
     at_first_site(
         Finding::new(
-            "link/failed",
+            "link-failed",
             Severity::Error,
             format!("`{reference}` changed since this doc was confirmed"),
         )
@@ -224,7 +224,7 @@ fn failed_finding(key: &LinkKey, link: &ScannedLink) -> Finding {
 fn new_finding(link: &ScannedLink) -> Finding {
     at_first_site(
         Finding::new(
-            "link/new",
+            "link-new",
             Severity::Error,
             format!("this link isn't recorded in {LOCK_FILE_NAME} yet"),
         )
@@ -236,7 +236,7 @@ fn new_finding(link: &ScannedLink) -> Finding {
 /// The finding for a lock entry whose link is gone.
 fn obsolete_finding(key: &LinkKey) -> Finding {
     Finding::new(
-        "link/obsolete",
+        "link-obsolete",
         Severity::Warning,
         format!("{LOCK_FILE_NAME} has an entry for `{key}`, which no longer exists"),
     )
@@ -247,7 +247,7 @@ fn obsolete_finding(key: &LinkKey) -> Finding {
 fn moved_note(key: &LinkKey, link: &ScannedLink, old: &LinkKey) -> Finding {
     at_first_location(
         Finding::new(
-            "check/moved",
+            "check-moved",
             Severity::Note,
             format!(
                 "{} carried its history from {}",
@@ -272,7 +272,7 @@ fn move_ambiguous_note(key: &LinkKey, link: &ScannedLink, candidates: &[LinkKey]
     };
     at_first_location(
         Finding::new(
-            "check/move-ambiguous",
+            "check-move-ambiguous",
             Severity::Note,
             format!("{} is new; {reason}", describe(key, link)),
         )
@@ -284,7 +284,7 @@ fn move_ambiguous_note(key: &LinkKey, link: &ScannedLink, candidates: &[LinkKey]
 /// The warning that a target file has syntax errors (03 R8, 05 C12).
 fn syntax_error_finding(target: &Target) -> Finding {
     Finding::new(
-        "read/syntax-errors",
+        "read-syntax-errors",
         Severity::Warning,
         format!("{target} has syntax errors; its links may report stale until it parses cleanly"),
     )
@@ -326,7 +326,7 @@ mod tests {
 
     fn broken() -> TargetState {
         TargetState::Broken {
-            finding: Finding::new("resolve/not-found", Severity::Error, "no symbol `add`"),
+            finding: Finding::new("resolve-not-found", Severity::Error, "no symbol `add`"),
         }
     }
 
@@ -381,7 +381,7 @@ mod tests {
 
         assert_eq!(state_of(&report, &add), Some(LinkState::Failed));
         let finding = report.links.first().and_then(|link| link.finding.as_ref());
-        assert_eq!(finding.map(|finding| finding.code), Some("link/failed"));
+        assert_eq!(finding.map(|finding| finding.code), Some("link-failed"));
     }
 
     #[test]
@@ -395,7 +395,7 @@ mod tests {
 
         let report = reconcile(&scan, &lock_of(&[(&failed, b"v1")]), &Scope::All);
 
-        for (link_key, code) in [(&new, "link/new"), (&failed, "link/failed")] {
+        for (link_key, code) in [(&new, "link-new"), (&failed, "link-failed")] {
             let finding = report
                 .links
                 .iter()
@@ -443,7 +443,7 @@ mod tests {
         let text = String::from_utf8(bytes).expect("output should be UTF-8");
 
         assert!(
-            text.contains("[a](b)") && text.contains("link/new"),
+            text.contains("[a](b)") && text.contains("link-new"),
             "the rendered finding should show the link's source excerpt:\n{text}"
         );
     }
@@ -459,7 +459,7 @@ mod tests {
         let finding = report.links.first().and_then(|link| link.finding.as_ref());
         assert_eq!(
             finding.map(|finding| finding.code),
-            Some("resolve/not-found"),
+            Some("resolve-not-found"),
             "a broken link carries the scan's own finding",
         );
     }
@@ -529,7 +529,7 @@ mod tests {
 
     #[test]
     fn malformed_link_edit_leaves_the_sources_entries_unjudged_and_check_failing() {
-        for code in ["link/invalid-path", "link/invalid-symbol"] {
+        for code in ["link-invalid-path", "link-invalid-symbol"] {
             let edited = key("docs/edited.md", Some("add"));
             let removed = key("docs/gone.md", Some("add"));
             let mut scan = Scan::default();
@@ -630,7 +630,7 @@ mod tests {
         );
         assert_eq!(
             report.findings.iter().map(|f| f.code).collect::<Vec<_>>(),
-            ["check/moved", "check/moved"],
+            ["check-moved", "check-moved"],
         );
     }
 
@@ -655,7 +655,7 @@ mod tests {
         assert_eq!(
             notes,
             [(
-                "check/move-ambiguous",
+                "check-move-ambiguous",
                 "docs/intro.md:1 → src/lib.rs#add is new; 2 removed links could have been its old location"
             )],
         );
@@ -675,7 +675,7 @@ mod tests {
 
         assert_eq!(
             report.findings.iter().map(|f| f.code).collect::<Vec<_>>(),
-            ["read/syntax-errors"],
+            ["read-syntax-errors"],
         );
     }
 
@@ -745,7 +745,7 @@ mod tests {
         let mut warned = report_with(&[LinkState::Passed]);
         warned
             .findings
-            .push(Finding::new("read/syntax-errors", Severity::Warning, "x"));
+            .push(Finding::new("read-syntax-errors", Severity::Warning, "x"));
         assert_eq!(check_outcome(&warned, false), Outcome::Clean);
         assert_eq!(check_outcome(&warned, true), Outcome::Failing);
     }
@@ -755,13 +755,13 @@ mod tests {
         let mut noted = report_with(&[LinkState::Passed]);
         noted
             .findings
-            .push(Finding::new("check/moved", Severity::Note, "x"));
+            .push(Finding::new("check-moved", Severity::Note, "x"));
         assert_eq!(check_outcome(&noted, true), Outcome::Clean);
 
         let mut errored = noted;
         errored
             .findings
-            .push(Finding::new("link/invalid-symbol", Severity::Error, "x"));
+            .push(Finding::new("link-invalid-symbol", Severity::Error, "x"));
         for deny_warnings in [false, true] {
             assert_eq!(
                 check_outcome(&errored, deny_warnings),

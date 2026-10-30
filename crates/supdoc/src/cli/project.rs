@@ -114,8 +114,8 @@ pub(crate) fn absolute(cwd: &AbsolutePath, path: &Path) -> AbsolutePath {
 ///
 /// # Errors
 ///
-/// Returns `cli/path-missing` for a path that doesn't exist, `cli/path-outside-project` for one
-/// that isn't inside the project root, and `cli/path-invalid` for one no source path can name.
+/// Returns `cli-path-missing` for a path that doesn't exist, `cli-path-outside-project` for one
+/// that isn't inside the project root, and `cli-path-invalid` for one no source path can name.
 /// All exit 2.
 pub(crate) fn scope(
     paths: &[PathBuf],
@@ -161,7 +161,7 @@ pub(crate) fn lock_path(root: &AbsolutePath) -> AbsolutePath {
 /// # Errors
 ///
 /// Returns the lockfile's own error (74 when it can't be read, 78 when its text is invalid), or
-/// `lock/settings-mismatch` (78) when the recorded settings differ from the configured ones.
+/// `lock-settings-mismatch` (78) when the recorded settings differ from the configured ones.
 pub(crate) fn read_lock(config: &Config) -> Result<Lockfile, CliError> {
     match read_lock_for_update(config)? {
         (lock, None) => Ok(lock),
@@ -192,7 +192,7 @@ pub(crate) fn read_lock_for_update(
     Ok((lock, change))
 }
 
-/// The `lock/settings-mismatch` error (78) for a command that can't re-record the lockfile under
+/// The `lock-settings-mismatch` error (78) for a command that can't re-record the lockfile under
 /// `config`'s hash settings, as `change` says they differ from the recorded ones.
 pub(crate) fn settings_mismatch(config: &Config, change: SettingsChange) -> CliError {
     let mismatch = SettingsMismatch {
@@ -221,7 +221,7 @@ fn lock_failure(error: &LockError) -> CliError {
 /// The error for a `[PATH]` that doesn't exist (06 error table).
 pub(crate) fn path_missing(typed: &Path) -> CliError {
     CliError::new(
-        "cli/path-missing",
+        "cli-path-missing",
         format!("{} does not exist", typed.display()),
         format!(
             "Check the path, which is relative to the current directory. `ls {}` lists what is \
@@ -244,7 +244,7 @@ fn listing_dir(typed: &Path) -> &Path {
 /// The error for a `[PATH]` outside the project, whose links no command can name.
 pub(crate) fn path_outside(typed: &Path, root: &AbsolutePath) -> CliError {
     CliError::new(
-        "cli/path-outside-project",
+        "cli-path-outside-project",
         format!(
             "{} is outside the project at {}",
             typed.display(),
@@ -261,7 +261,7 @@ pub(crate) fn path_outside(typed: &Path, root: &AbsolutePath) -> CliError {
 /// The error for a `[PATH]` inside the project that no link source could have.
 pub(crate) fn path_invalid(typed: &Path, error: &impl std::fmt::Display) -> CliError {
     CliError::new(
-        "cli/path-invalid",
+        "cli-path-invalid",
         format!("{} can't be checked: {error}", typed.display()),
         "Pass a file or directory whose path `supdoc.lock` could record, or leave out `[PATHS]` to cover the whole project",
         CliError::USAGE_EXIT_CODE,
@@ -298,7 +298,7 @@ mod tests {
 
         assert_eq!(
             (error.code(), error.exit_code()),
-            ("lock/settings-mismatch", 78)
+            ("lock-settings-mismatch", 78)
         );
     }
 
@@ -331,7 +331,7 @@ mod tests {
 
         assert_eq!(
             (error.code(), error.exit_code()),
-            ("config/parse", CliError::CONFIG_EXIT_CODE)
+            ("config-parse", CliError::CONFIG_EXIT_CODE)
         );
         assert!(
             error.help().contains("run `supdoc list` again"),

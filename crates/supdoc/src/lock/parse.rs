@@ -287,7 +287,7 @@ hash = \"41aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d2\"
             entry("docs/a.md", "src/lib.rs", None, HASH_A)
         ));
 
-        assert_eq!(error.code(), "lock/parse");
+        assert_eq!(error.code(), "lock-parse");
         assert!(
             error.to_string().contains("missing field `features`"),
             "the error should name the missing table, got: {error}"
@@ -322,7 +322,7 @@ hash = \"41aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d2\"
 
         let error = parse_error(text);
 
-        assert_eq!(error.code(), "lock/parse");
+        assert_eq!(error.code(), "lock-parse");
         assert_eq!(
             error.to_string(),
             "unknown variant `crlf`, expected `normalize` or `exact` (line 4)"
@@ -337,7 +337,7 @@ hash = \"41aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d2\"
         ] {
             let error = parse_error(&text);
 
-            assert_eq!(error.code(), "lock/parse", "{text}");
+            assert_eq!(error.code(), "lock-parse", "{text}");
             assert!(
                 error.to_string().contains("unknown field"),
                 "the error should name the unknown key, got: {error}"
@@ -468,7 +468,7 @@ hash = \"41aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d2\"
 
         let error = parse_error(&text);
 
-        assert_eq!(error.code(), "lock/duplicate");
+        assert_eq!(error.code(), "lock-duplicate");
         assert!(
             matches!(
                 error,
@@ -492,7 +492,7 @@ hash = \"41aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d2\"
 
         let error = parse_error(text);
 
-        assert_eq!(error.code(), "lock/conflict");
+        assert_eq!(error.code(), "lock-conflict");
         assert_eq!(error.to_string(), "unresolved merge conflict at line 2");
     }
 
@@ -502,7 +502,7 @@ hash = \"41aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d2\"
 
         let error = parse_error(text);
 
-        assert_eq!(error.code(), "lock/newer-version");
+        assert_eq!(error.code(), "lock-newer-version");
         assert_eq!(
             error.to_string(),
             "lockfile format 2 is newer than this supdoc supports (1)"
@@ -513,7 +513,7 @@ hash = \"41aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d2\"
     fn missing_version_is_rejected() {
         let error = parse_error(&entry("docs/a.md", "src/lib.rs", None, HASH_A));
 
-        assert_eq!(error.code(), "lock/parse");
+        assert_eq!(error.code(), "lock-parse");
         assert!(
             error.to_string().contains("version"),
             "the error should name the missing field, got: {error}"
@@ -524,7 +524,7 @@ hash = \"41aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d2\"
     fn version_zero_is_rejected() {
         let error = parse_error("version = 0\n");
 
-        assert_eq!(error.code(), "lock/parse");
+        assert_eq!(error.code(), "lock-parse");
     }
 
     #[test]
@@ -533,7 +533,7 @@ hash = \"41aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d2\"
 
         let error = parse_error(text);
 
-        assert_eq!(error.code(), "lock/parse");
+        assert_eq!(error.code(), "lock-parse");
         assert!(
             error.to_string().contains("extra"),
             "the error should name the unknown field, got: {error}"
@@ -547,7 +547,7 @@ hash = \"41aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d2\"
             entry("docs/a.md", "src/lib.rs", None, HASH_A)
         )]);
 
-        assert_eq!(parse_error(&text).code(), "lock/parse");
+        assert_eq!(parse_error(&text).code(), "lock-parse");
     }
 
     #[test]
@@ -574,7 +574,7 @@ hash = \"41aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d2\"
 
             let error = parse_error(&text);
 
-            assert_eq!(error.code(), "lock/parse", "hash `{bad}`");
+            assert_eq!(error.code(), "lock-parse", "hash `{bad}`");
             assert!(
                 error.to_string().contains("expected 64 hex characters")
                     && error.to_string().ends_with("(line 9)"),
@@ -587,7 +587,7 @@ hash = \"41aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d2\"
     fn source_with_parent_segment_is_rejected() {
         let text = file(&[entry("../docs/a.md", "src/lib.rs", None, HASH_A)]);
 
-        assert_eq!(parse_error(&text).code(), "lock/parse");
+        assert_eq!(parse_error(&text).code(), "lock-parse");
     }
 
     #[test]
@@ -596,7 +596,7 @@ hash = \"41aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d2\"
             let text = file(&[entry("docs/a.md", target, None, HASH_A)]);
 
             let error = parse_error(&text);
-            assert_eq!(error.code(), "lock/parse", "`{target}` should be rejected");
+            assert_eq!(error.code(), "lock-parse", "`{target}` should be rejected");
             assert!(
                 error.to_string().contains("outside") || error.to_string().contains("climbs"),
                 "the error should say the target leaves the root: {error}",
@@ -614,7 +614,7 @@ hash = \"41aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d2\"
 
             assert_eq!(
                 parse_error(&text).code(),
-                "lock/parse",
+                "lock-parse",
                 "`{source}` -> `{target}` should be rejected"
             );
         }
@@ -629,6 +629,6 @@ hash = \"41aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d2\"
             HASH_A,
         )]);
 
-        assert_eq!(parse_error(&text).code(), "lock/parse");
+        assert_eq!(parse_error(&text).code(), "lock-parse");
     }
 }

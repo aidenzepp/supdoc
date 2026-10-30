@@ -123,7 +123,7 @@ pub(super) fn check_report() -> CheckFixture {
         "docs/guide.md",
         guide,
         "[`add`](../src/lib.rs#add)",
-        "link/failed",
+        "link-failed",
         Severity::Error,
         "`src/lib.rs#add` changed since this doc was confirmed",
         "reread this, and if it's still accurate run `supdoc update docs/guide.md --yes`",
@@ -132,19 +132,19 @@ pub(super) fn check_report() -> CheckFixture {
         "docs/api.md",
         api,
         "[login](../src/auth.rs#login)",
-        "resolve/not-found",
+        "resolve-not-found",
         Severity::Error,
         "no symbol `login` in src/auth.rs",
         "did you mean `log_in`? Run `supdoc fix docs/api.md --yes`",
     );
     let obsolete = Finding::new(
-        "link/obsolete",
+        "link-obsolete",
         Severity::Warning,
         "supdoc.lock has an entry for a link that no longer exists",
     )
     .with_help("run `supdoc update --state obsolete --yes`");
     let loose = Finding::new(
-        "scan/unreadable-dir",
+        "scan-unreadable-dir",
         Severity::Warning,
         "skipped /repo/private: permission denied",
     )

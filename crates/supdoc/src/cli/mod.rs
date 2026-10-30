@@ -2,7 +2,7 @@
 //!
 //! [`run`] holds the one dispatch `match`. Each command lives in `cli/<command>.rs` and exposes a
 //! `run` function, so building a command means editing only its own file. Until a command is
-//! built, its `run` returns the `cli/not-built` error.
+//! built, its `run` returns the `cli-not-built` error.
 
 /// Command-line argument definitions.
 pub mod args;
@@ -107,7 +107,7 @@ pub struct ErrorSite {
 /// module's own `code()`, `help()` and `exit_code()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliError {
-    /// Stable code, never reworded: `config/extends-missing`, `cli/not-built`.
+    /// Stable code, never reworded: `config-extends-missing`, `cli-not-built`.
     code: &'static str,
     /// What happened, in one line.
     message: String,
@@ -160,7 +160,7 @@ impl CliError {
     }
 
     /// The code of [`CliError::not_built`].
-    pub const NOT_BUILT: &'static str = "cli/not-built";
+    pub const NOT_BUILT: &'static str = "cli-not-built";
 
     /// The exit code for a supdoc bug (06 X7).
     pub const BUG_EXIT_CODE: u8 = 70;
@@ -223,7 +223,7 @@ impl std::error::Error for CliError {}
 ///
 /// # Errors
 ///
-/// Returns the command's own [`CliError`], or `cli/not-built` for a command that is not built.
+/// Returns the command's own [`CliError`], or `cli-not-built` for a command that is not built.
 pub fn run(command: &Command, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     match command {
         Command::Check(args) => check::run(args, context, output),

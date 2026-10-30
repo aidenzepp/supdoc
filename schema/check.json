@@ -43,7 +43,7 @@
           ]
         },
         "kind": {
-          "description": "The stable code, such as `link/failed`.",
+          "description": "The stable code, such as `link-failed`.",
           "type": "string"
         },
         "location": {

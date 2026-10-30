@@ -65,10 +65,10 @@ impl ParseLockError {
     #[must_use]
     pub const fn code(&self) -> &'static str {
         match self {
-            Self::ConflictMarkers { .. } => "lock/conflict",
-            Self::NewerVersion { .. } => "lock/newer-version",
-            Self::Toml { .. } => "lock/parse",
-            Self::ConflictingDuplicate { .. } => "lock/duplicate",
+            Self::ConflictMarkers { .. } => "lock-conflict",
+            Self::NewerVersion { .. } => "lock-newer-version",
+            Self::Toml { .. } => "lock-parse",
+            Self::ConflictingDuplicate { .. } => "lock-duplicate",
         }
     }
 
@@ -132,9 +132,9 @@ impl LockError {
     #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
-            Self::Read { .. } => "lock/read",
+            Self::Read { .. } => "lock-read",
             Self::Parse { error, .. } => error.code(),
-            Self::Write { .. } => "lock/write",
+            Self::Write { .. } => "lock-write",
         }
     }
 
@@ -193,7 +193,7 @@ impl SettingsMismatch {
     /// A stable identifier for machine-readable output.
     #[must_use]
     pub const fn code(&self) -> &'static str {
-        "lock/settings-mismatch"
+        "lock-settings-mismatch"
     }
 
     /// What to do about it: migrate the lock to the config, or set the config to the lock.
@@ -242,7 +242,7 @@ mod tests {
 
         assert_eq!(
             codes,
-            ["lock/conflict", "lock/newer-version", "lock/duplicate"]
+            ["lock-conflict", "lock-newer-version", "lock-duplicate"]
         );
         assert!(
             errors.iter().all(|error| !error.help().is_empty()),
@@ -265,7 +265,7 @@ mod tests {
     fn settings_mismatch_is_lock_settings_mismatch_with_exit_78() {
         let error = mismatch(None);
 
-        assert_eq!(error.code(), "lock/settings-mismatch");
+        assert_eq!(error.code(), "lock-settings-mismatch");
         assert_eq!(error.exit_code(), 78);
     }
 

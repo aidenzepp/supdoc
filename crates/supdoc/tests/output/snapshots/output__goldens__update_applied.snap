@@ -8,7 +8,7 @@ exit: 0
 accept  docs/guide.md:3  ->  src/lib.rs#add  failed -> passed
 remove  docs/old.md      ->  src/lib.rs#sub  obsolete
 record  docs/setup.md:3  ->  src/lib.rs#mul  new
-error[resolve/not-found]: no symbol `ad` in src/lib.rs
+error[resolve-not-found]: no symbol `ad` in src/lib.rs
  --> docs/api.md:3:5
   |
 3 | See [ad](../src/lib.rs#ad).

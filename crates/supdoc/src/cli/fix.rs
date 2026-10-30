@@ -33,13 +33,13 @@ use super::project::{load_config, lock_path, read_lock, scope};
 use super::{CliError, Context, Outcome};
 
 /// The code of the finding for a source file `apply_fixes` could not write.
-const CODE_WRITE_FAILED: &str = "fix/write-failed";
+const CODE_WRITE_FAILED: &str = "fix-write-failed";
 
 /// The code of the fatal error for sources rewritten while the lockfile could not be written.
-const CODE_LOCK_WRITE_FAILED: &str = "fix/lock-write-failed";
+const CODE_LOCK_WRITE_FAILED: &str = "fix-lock-write-failed";
 
 /// The code of the finding for a source file that changed between the scan and the write.
-const CODE_FILE_CHANGED: &str = "fix/file-changed";
+const CODE_FILE_CHANGED: &str = "fix-file-changed";
 
 /// The note that closes a preview, after the count of fixes.
 const PREVIEW_NOTE: &str = "Nothing written. Run the same command with --yes to apply.";
@@ -53,10 +53,10 @@ const PREVIEW_NOTE: &str = "Nothing written. Run the same command with --yes to 
 ///
 /// # Errors
 ///
-/// Returns the config's own error (78, or 74 when unreadable), `cli/path-missing`,
-/// `cli/path-outside-project` or `cli/path-invalid` for a bad `[PATH]` (2), the lockfile's own
+/// Returns the config's own error (78, or 74 when unreadable), `cli-path-missing`,
+/// `cli-path-outside-project` or `cli-path-invalid` for a bad `[PATH]` (2), the lockfile's own
 /// error (78 when invalid, 74 when it can't be read or written), the scan's own error (74),
-/// `fix/write-failed` when a source file could not be written (74), and `cli/fix-output` when the
+/// `fix-write-failed` when a source file could not be written (74), and `cli-fix-output` when the
 /// report cannot be written (74).
 pub fn run(args: &FixArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     Planned::scan(&args.paths, context, output)?.finish(args.confirm.mode(), output)
@@ -119,8 +119,8 @@ impl Planned {
     ///
     /// # Errors
     ///
-    /// Returns `fix/write-failed` (74) after the report when a source file could not be written,
-    /// the lockfile's or the re-scan's own error, and `cli/fix-output` when the report cannot be
+    /// Returns `fix-write-failed` (74) after the report when a source file could not be written,
+    /// the lockfile's or the re-scan's own error, and `cli-fix-output` when the report cannot be
     /// written.
     fn finish(self, mode: WriteMode, output: &mut Output) -> Result<Outcome, CliError> {
         match mode {
@@ -133,7 +133,7 @@ impl Planned {
     ///
     /// # Errors
     ///
-    /// Returns `cli/fix-output` when the report cannot be written.
+    /// Returns `cli-fix-output` when the report cannot be written.
     fn preview(self, output: &mut Output) -> Result<Outcome, CliError> {
         let fixes: Vec<FixRecord> = self
             .plan
@@ -170,9 +170,9 @@ impl Planned {
     ///
     /// # Errors
     ///
-    /// Returns the re-scan's own error, `cli/fix-output` when the report cannot be written, and
-    /// after the report `fix/lock-write-failed` (74) when the lockfile could not be written
-    /// (the fixed files are named) or `fix/write-failed` (74) when a source file could not be.
+    /// Returns the re-scan's own error, `cli-fix-output` when the report cannot be written, and
+    /// after the report `fix-lock-write-failed` (74) when the lockfile could not be written
+    /// (the fixed files are named) or `fix-write-failed` (74) when a source file could not be.
     fn apply(self, output: &mut Output) -> Result<Outcome, CliError> {
         let root = self.config.root();
         let FixResult { applied, skipped } = apply_fixes(&self.plan, root);
@@ -340,7 +340,7 @@ fn nothing_to_fix(broken: usize) -> String {
 }
 
 /// The error that ends a run in which `files` source files could not be written. The report
-/// already carries a `fix/write-failed` finding for each one.
+/// already carries a `fix-write-failed` finding for each one.
 fn sources_unwritten(files: usize) -> CliError {
     let message = if files == 1 {
         "1 file could not be written; the other fixes were applied".to_owned()
@@ -378,7 +378,7 @@ fn lock_unwritten(error: &LockError, files: &BTreeSet<&SourcePath>) -> CliError 
 /// The error for a report that could not be written.
 fn output_failed(error: &OutputError) -> CliError {
     CliError::new(
-        "cli/fix-output",
+        "cli-fix-output",
         format!("cannot write the fix report: {error}"),
         "Check that standard output and standard error are open and writable, or redirect both \
          to a file with `> supdoc.out 2>&1`",
@@ -394,7 +394,7 @@ pub(crate) struct FixReport {
     /// One per planned fix in a preview; one per written fix after `--yes`. Sorted by file, then
     /// position.
     fixes: Vec<FixRecord>,
-    /// Files `--yes` left alone: `fix/file-changed` and `fix/write-failed`.
+    /// Files `--yes` left alone: `fix-file-changed` and `fix-write-failed`.
     #[serde(skip)]
     findings: Vec<Finding>,
 }
@@ -447,7 +447,7 @@ pub(crate) struct FixRecord {
     before: String,
     /// The bytes written instead.
     after: String,
-    /// The code of the finding repaired, such as `resolve/not-found` or `scan/case-mismatch`.
+    /// The code of the finding repaired, such as `resolve-not-found` or `scan-case-mismatch`.
     cause: String,
     /// The lock entry this fix carries to the link's new key.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -849,7 +849,7 @@ mod tests {
                 "end": start + 2,
                 "before": "ad",
                 "after": "add",
-                "cause": "resolve/not-found",
+                "cause": "resolve-not-found",
                 "moved": {
                     "from": {"source": "docs/guide.md", "target": "src/lib.rs", "symbol": "ad"},
                     "to": {"source": "docs/guide.md", "target": "src/lib.rs", "symbol": "add"},
@@ -905,7 +905,7 @@ mod tests {
             .result
             .as_ref()
             .expect_err("a lockfile failure is fatal");
-        assert_eq!(error.code(), "fix/lock-write-failed");
+        assert_eq!(error.code(), "fix-lock-write-failed");
         assert!(
             error.message().contains("docs/guide.md"),
             "the error should name the fixed file: {}",
@@ -1048,7 +1048,7 @@ mod tests {
         assert_eq!(run.exit_code(), 1, "stderr: {}", run.stderr);
         let json = run.json();
         assert_eq!(at(&json, "/ok"), false);
-        assert_eq!(at(&json, "/findings/0/kind"), "fix/file-changed");
+        assert_eq!(at(&json, "/findings/0/kind"), "fix-file-changed");
         assert_eq!(at(&json, "/data/fixes/0/file"), "docs/other.md");
         assert_eq!(
             project.read("docs/guide.md"),
@@ -1080,7 +1080,7 @@ mod tests {
         assert_eq!(run.exit_code(), 74, "stderr: {}", run.stderr);
         let json = run.json();
         assert_eq!(at(&json, "/ok"), false);
-        assert_eq!(at(&json, "/findings/0/kind"), "fix/write-failed");
+        assert_eq!(at(&json, "/findings/0/kind"), "fix-write-failed");
         assert_eq!(at(&json, "/data/fixes/0/file"), "notes/other.md");
         assert_eq!(
             project.read("docs/guide.md"),
@@ -1135,7 +1135,7 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            ["\"fix/file-changed\"", "\"fix/write-failed\""]
+            ["\"fix-file-changed\"", "\"fix-write-failed\""]
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),
@@ -1340,7 +1340,7 @@ mod tests {
         assert_eq!(fixed.exit_code(), 0, "fix of `{written}`: {}", fixed.stderr);
         assert_eq!(
             at(&fixed.json(), "/data/fixes/0/cause"),
-            "scan/case-mismatch"
+            "scan-case-mismatch"
         );
         assert_eq!(
             at(&fixed.json(), "/data/fixes/0/state"),

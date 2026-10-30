@@ -22,7 +22,7 @@
           ]
         },
         "kind": {
-          "description": "The stable code, such as `link/failed`.",
+          "description": "The stable code, such as `link-failed`.",
           "type": "string"
         },
         "location": {
@@ -96,7 +96,7 @@
           "type": "string"
         },
         "cause": {
-          "description": "The code of the finding repaired, such as `resolve/not-found` or `scan/case-mismatch`.",
+          "description": "The code of the finding repaired, such as `resolve-not-found` or `scan-case-mismatch`.",
           "type": "string"
         },
         "column": {

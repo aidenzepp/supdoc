@@ -24,7 +24,7 @@ use super::{CliError, Context, Outcome};
 ///
 /// # Errors
 ///
-/// Returns the config's own error (78, or 74 when unreadable) and `cli/config-output` when the
+/// Returns the config's own error (78, or 74 when unreadable) and `cli-config-output` when the
 /// report cannot be written (74).
 pub fn run(inspect: Inspect, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let config = load_config(context, output, command(inspect))?;
@@ -80,8 +80,8 @@ const fn command(inspect: Inspect) -> &'static str {
 /// The error for a report that could not be written.
 fn output_failed(inspect: Inspect, error: &OutputError) -> CliError {
     let (code, name) = match inspect {
-        Inspect::ConfigShow => ("cli/config-output", "config show"),
-        Inspect::NamespaceList => ("cli/namespace-output", "namespace list"),
+        Inspect::ConfigShow => ("cli-config-output", "config show"),
+        Inspect::NamespaceList => ("cli-namespace-output", "namespace list"),
     };
     CliError::new(
         code,
@@ -662,7 +662,7 @@ mod tests {
             .expect_err("a config with a wrong type should not load");
         assert_eq!(
             (error.code(), error.exit_code()),
-            ("config/parse", CliError::CONFIG_EXIT_CODE)
+            ("config-parse", CliError::CONFIG_EXIT_CODE)
         );
         assert_eq!(run.stdout, "", "a fatal error leaves stdout empty");
     }

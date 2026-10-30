@@ -52,7 +52,7 @@ impl<'a, R: Report> Envelope<'a, R> {
 /// A finding as JSON shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct FindingJson {
-    /// The stable code, such as `link/failed`.
+    /// The stable code, such as `link-failed`.
     pub kind: String,
     /// How bad it is.
     pub severity: SeverityJson,
@@ -171,7 +171,7 @@ impl From<&Fix> for FixJson {
 pub struct FatalJson {
     /// Always `true`, so a reader can tell this object from a report.
     pub error: bool,
-    /// The stable code, such as `config/extends-missing`.
+    /// The stable code, such as `config-extends-missing`.
     pub kind: String,
     /// What happened, in one line.
     pub message: String,

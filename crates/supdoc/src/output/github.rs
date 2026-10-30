@@ -10,7 +10,7 @@ use crate::output::format::Verbosity;
 use crate::output::paths::PathStyle;
 
 /// The code of a finding about a lockfile entry whose link is gone.
-const OBSOLETE_CODE: &str = "link/obsolete";
+const OBSOLETE_CODE: &str = "link-obsolete";
 
 /// Writes one `::error`, `::warning` or `::notice` line per finding the verbosity shows.
 ///

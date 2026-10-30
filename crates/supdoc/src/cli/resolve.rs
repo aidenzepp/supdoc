@@ -33,10 +33,10 @@ use super::{CliError, Context, Outcome};
 ///
 /// # Errors
 ///
-/// Returns the config's own error (78, or 74 when unreadable), `cli/path-missing` for a missing
-/// `FILE` and `link/unknown-namespace` for an undefined namespace (both 2), the file's own read
-/// error (1, or 74 for I/O and 70 for a supdoc bug), `resolve/not-found` or `resolve/ambiguous`
-/// for a `SYMBOL` that names no single symbol (1), and `cli/resolve-output` when the report
+/// Returns the config's own error (78, or 74 when unreadable), `cli-path-missing` for a missing
+/// `FILE` and `link-unknown-namespace` for an undefined namespace (both 2), the file's own read
+/// error (1, or 74 for I/O and 70 for a supdoc bug), `resolve-not-found` or `resolve-ambiguous`
+/// for a `SYMBOL` that names no single symbol (1), and `cli-resolve-output` when the report
 /// cannot be written (74).
 pub fn run(
     args: &ResolveArgs,
@@ -113,8 +113,8 @@ pub fn schema() -> Result<schemars::Schema, CliError> {
 ///
 /// # Errors
 ///
-/// Returns `link/unknown-namespace` for a namespace the config doesn't define,
-/// `cli/path-missing` for a file that doesn't exist, and `cli/path-invalid` for a directory. All
+/// Returns `link-unknown-namespace` for a namespace the config doesn't define,
+/// `cli-path-missing` for a file that doesn't exist, and `cli-path-invalid` for a directory. All
 /// exit 2.
 fn locate(config: &Config, cwd: &AbsolutePath, typed: &Path) -> Result<AbsolutePath, CliError> {
     let namespaced = typed.to_str().and_then(|text| {
@@ -144,7 +144,7 @@ fn locate(config: &Config, cwd: &AbsolutePath, typed: &Path) -> Result<AbsoluteP
 /// The error for a `FILE` that is a directory: `resolve` reads one file.
 fn directory(typed: &Path) -> CliError {
     CliError::new(
-        "cli/path-invalid",
+        "cli-path-invalid",
         format!("{} is a directory, not a file", typed.display()),
         "Name one file inside it; `supdoc resolve` lists the symbols of a single file",
         CliError::USAGE_EXIT_CODE,
@@ -173,7 +173,7 @@ fn unknown_namespace(config: &Config, name: &NamespaceName) -> CliError {
         ),
     };
     CliError::new(
-        "link/unknown-namespace",
+        "link-unknown-namespace",
         format!("unknown namespace `{name}`"),
         help,
         CliError::USAGE_EXIT_CODE,
@@ -219,7 +219,7 @@ fn resolve_failed(error: &ResolveError, root: &AbsolutePath, typed: &Path) -> Cl
 /// The error for a report that could not be written.
 fn output_failed(error: &OutputError) -> CliError {
     CliError::new(
-        "cli/resolve-output",
+        "cli-resolve-output",
         format!("cannot write the resolve report: {error}"),
         "Check that standard output and standard error are open and writable, or redirect both \
          to a file with `> supdoc.out 2>&1`",
@@ -232,7 +232,7 @@ fn output_failed(error: &OutputError) -> CliError {
 /// It names the file relative to the project `root`, as JSON shows paths (K5).
 fn syntax_errors(file: &SourceFile, root: &AbsolutePath) -> Finding {
     Finding::new(
-        "read/syntax-errors",
+        "read-syntax-errors",
         Severity::Warning,
         format!(
             "{} has syntax errors; its symbols may be incomplete",
@@ -544,7 +544,7 @@ mod tests {
         assert_eq!(run.exit_code(), 1);
         assert!(run.stdout.is_empty(), "stdout: {}", run.stdout);
         let error = run.error();
-        assert_eq!(error.code(), "resolve/not-found");
+        assert_eq!(error.code(), "resolve-not-found");
         assert!(
             error.help().contains("`Config.validate`"),
             "help: {}",
@@ -564,7 +564,7 @@ mod tests {
 
         assert_eq!(run.exit_code(), 1);
         let error = run.error();
-        assert_eq!(error.code(), "resolve/ambiguous");
+        assert_eq!(error.code(), "resolve-ambiguous");
         assert!(
             error.help().contains("`Foo.new`") && error.help().contains("`Bar.new`"),
             "help: {}",
@@ -591,7 +591,7 @@ mod tests {
 
         assert_eq!(run.exit_code(), 2);
         let error = run.error();
-        assert_eq!(error.code(), "link/unknown-namespace");
+        assert_eq!(error.code(), "link-unknown-namespace");
         assert!(error.help().contains("`auth`"), "help: {}", error.help());
     }
 
@@ -602,7 +602,7 @@ mod tests {
         let run = project.resolve(&["resolve", "src/nope.rs"]);
 
         assert_eq!(run.exit_code(), 2);
-        assert_eq!(run.error().code(), "cli/path-missing");
+        assert_eq!(run.error().code(), "cli-path-missing");
     }
 
     #[test]
@@ -613,7 +613,7 @@ mod tests {
         let run = project.resolve(&["resolve", "logo.png"]);
 
         assert_eq!(run.exit_code(), 1);
-        assert_eq!(run.error().code(), "read/unsupported-language");
+        assert_eq!(run.error().code(), "read-unsupported-language");
     }
 
     #[test]
@@ -650,7 +650,7 @@ mod tests {
         let json = run.json();
         assert_eq!(
             at(&json, "/findings/0/kind"),
-            "read/syntax-errors",
+            "read-syntax-errors",
             "json: {json}"
         );
         assert_eq!(at(&json, "/findings/0/severity"), "warning", "json: {json}");
@@ -759,7 +759,7 @@ mod tests {
 
         assert_eq!(run.exit_code(), 2);
         let error = run.error();
-        assert_eq!(error.code(), "cli/path-invalid");
+        assert_eq!(error.code(), "cli-path-invalid");
         assert_eq!(error.message(), "src is a directory, not a file");
     }
 }

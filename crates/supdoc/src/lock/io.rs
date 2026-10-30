@@ -211,7 +211,7 @@ mod tests {
 
         let error = Lockfile::read(&path).expect_err("a newer lockfile should be rejected");
 
-        assert_eq!(error.code(), "lock/newer-version");
+        assert_eq!(error.code(), "lock-newer-version");
         assert!(
             error.to_string().starts_with(&path.display().to_string()),
             "the error should lead with the path, got: {error}"
@@ -235,7 +235,7 @@ mod tests {
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755))
             .expect("the directory should become writable again");
         let error = result.expect_err("writing into a read-only directory should fail");
-        assert_eq!(error.code(), "lock/write");
+        assert_eq!(error.code(), "lock-write");
         assert_eq!(
             Lockfile::read(&path).expect("the old lockfile should still read"),
             Some(old)

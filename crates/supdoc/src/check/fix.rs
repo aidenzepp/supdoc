@@ -20,16 +20,16 @@ use crate::path::AbsolutePath;
 use crate::scan::model::{Scan, TargetState};
 
 /// Finding code: the symbol of a link has exactly one near match.
-const CODE_SYMBOL_NOT_FOUND: &str = "resolve/not-found";
+const CODE_SYMBOL_NOT_FOUND: &str = "resolve-not-found";
 
 /// Finding code: the link's path differs from the real path only by case.
-const CODE_CASE_MISMATCH: &str = "scan/case-mismatch";
+const CODE_CASE_MISMATCH: &str = "scan-case-mismatch";
 
 /// Finding code: a file changed between the scan and the fix.
-const CODE_FILE_CHANGED: &str = "fix/file-changed";
+const CODE_FILE_CHANGED: &str = "fix-file-changed";
 
 /// Finding code: a file could not be rewritten.
-const CODE_WRITE_FAILED: &str = "fix/write-failed";
+const CODE_WRITE_FAILED: &str = "fix-write-failed";
 
 /// The edits `supdoc fix` would make. The preview is this value rendered (05 C2).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -66,7 +66,7 @@ struct Expected {
 pub struct FixResult {
     /// Edits written to disk, in plan order.
     pub applied: Vec<AppliedFix>,
-    /// Why files were left alone: `fix/file-changed` and `fix/write-failed` findings.
+    /// Why files were left alone: `fix-file-changed` and `fix-write-failed` findings.
     pub skipped: Vec<Finding>,
 }
 
@@ -328,7 +328,7 @@ fn rewrite_file(path: &Path, planned: &[&PlannedFix]) -> Result<(), Skip> {
     Ok(())
 }
 
-/// The `fix/file-changed` finding for `file`, which had `count` fixes.
+/// The `fix-file-changed` finding for `file`, which had `count` fixes.
 fn file_changed(file: &SourcePath, count: usize) -> Finding {
     let fixes = if count == 1 {
         "its 1 fix was not applied".to_owned()
@@ -343,7 +343,7 @@ fn file_changed(file: &SourcePath, count: usize) -> Finding {
     .with_help("Run `supdoc fix --yes` again. Nothing in that file was modified")
 }
 
-/// The `fix/write-failed` finding for `file`.
+/// The `fix-write-failed` finding for `file`.
 fn write_failed(file: &SourcePath, error: &io::Error) -> Finding {
     Finding::new(
         CODE_WRITE_FAILED,

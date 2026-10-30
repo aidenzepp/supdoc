@@ -80,8 +80,8 @@ fn missing_config_exits_78_with_the_error_on_stderr_only() {
     assert_eq!(run.code, Some(78), "stderr: {}", run.stderr);
     assert_eq!(run.stdout, "", "an error should leave stdout empty");
     assert!(
-        run.stderr.contains("config/not-found"),
-        "stderr should carry the config/not-found code: {}",
+        run.stderr.contains("config-not-found"),
+        "stderr should carry the config-not-found code: {}",
         run.stderr
     );
 }
@@ -94,7 +94,7 @@ fn json_error_is_one_object_and_nothing_else() {
     assert_eq!(run.stdout, "", "--json errors belong on stderr only");
     let error = single_json_object(&run.stderr);
     assert_eq!(field(&error, "error"), &serde_json::json!(true));
-    assert_eq!(field(&error, "kind"), "config/not-found");
+    assert_eq!(field(&error, "kind"), "config-not-found");
     assert_eq!(field(&error, "exit_code"), 78);
 }
 
@@ -105,7 +105,7 @@ fn unknown_flag_exits_2_with_a_json_usage_error_under_json() {
     assert_eq!(run.code, Some(2), "stderr: {}", run.stderr);
     assert_eq!(run.stdout, "", "usage errors belong on stderr only");
     let error = single_json_object(&run.stderr);
-    assert_eq!(field(&error, "kind"), "cli/usage");
+    assert_eq!(field(&error, "kind"), "cli-usage");
     assert_eq!(field(&error, "exit_code"), 2);
 }
 

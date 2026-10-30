@@ -123,14 +123,14 @@ impl ConfigError {
     #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
-            Self::NotFound { .. } => "config/not-found",
-            Self::Read { .. } => "config/read",
-            Self::Parse { .. } => "config/parse",
-            Self::ExtendsMissing { .. } => "config/extends-missing",
-            Self::ExtendsDirectory { .. } => "config/extends-directory",
-            Self::ExtendsLoop { .. } => "config/extends-loop",
-            Self::ExtendsNotConfig { .. } => "config/extends-not-config",
-            Self::NamespaceOutsideRoot { .. } => "config/namespace-outside-root",
+            Self::NotFound { .. } => "config-not-found",
+            Self::Read { .. } => "config-read",
+            Self::Parse { .. } => "config-parse",
+            Self::ExtendsMissing { .. } => "config-extends-missing",
+            Self::ExtendsDirectory { .. } => "config-extends-directory",
+            Self::ExtendsLoop { .. } => "config-extends-loop",
+            Self::ExtendsNotConfig { .. } => "config-extends-not-config",
+            Self::NamespaceOutsideRoot { .. } => "config-namespace-outside-root",
         }
     }
 

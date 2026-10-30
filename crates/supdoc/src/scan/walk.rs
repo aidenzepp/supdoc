@@ -150,7 +150,7 @@ fn as_source(
     scope.contains(&relative).then_some((path, cartridge))
 }
 
-/// A `scan/unreadable-dir` warning for a directory the walker couldn't read.
+/// A `scan-unreadable-dir` warning for a directory the walker couldn't read.
 ///
 /// Other walker errors, such as a malformed ignore-file line, say nothing about what was skipped,
 /// so they produce no finding.
@@ -159,7 +159,7 @@ fn unreadable_dir(error: &ignore::Error) -> Option<Finding> {
     let cause = error.io_error()?;
     Some(
         Finding::new(
-            "scan/unreadable-dir",
+            "scan-unreadable-dir",
             Severity::Warning,
             format!("skipped {}: {}", path.display(), cause.kind()),
         )
@@ -240,7 +240,7 @@ fn excluded(listed: &SourcePath, pattern: Option<&str>) -> Finding {
     let listed = listed.as_str();
     match pattern {
         Some(pattern) => Finding::new(
-            "scan/explicit-path-excluded",
+            "scan-explicit-path-excluded",
             Severity::Warning,
             format!(
                 "{listed} was named on the command line but is excluded by `{pattern}` in `exclude` in {CONFIG_FILE_NAME}",
@@ -250,7 +250,7 @@ fn excluded(listed: &SourcePath, pattern: Option<&str>) -> Finding {
             "Remove `{pattern}` from `exclude` to check it, or stop passing it"
         )),
         None => Finding::new(
-            "scan/explicit-path-excluded",
+            "scan-explicit-path-excluded",
             Severity::Warning,
             format!(
                 "{listed} was named on the command line but is not matched by `include` in {CONFIG_FILE_NAME}",
@@ -265,7 +265,7 @@ fn excluded(listed: &SourcePath, pattern: Option<&str>) -> Finding {
 /// The finding for an explicit path that an ignore file skips, naming that `rule`.
 fn ignored(listed: &SourcePath, rule: &str) -> Finding {
     Finding::new(
-        "scan/explicit-path-ignored",
+        "scan-explicit-path-ignored",
         Severity::Warning,
         format!(
             "{listed} was named on the command line but is ignored by {rule}",
@@ -630,7 +630,7 @@ mod tests {
         let walk = project.walk(&paths(&["docs/old.rs"]));
 
         assert!(walk.sources.is_empty());
-        assert_eq!(codes(&walk), ["scan/explicit-path-excluded"]);
+        assert_eq!(codes(&walk), ["scan-explicit-path-excluded"]);
         let finding = walk.findings.first().expect("one warning was expected");
         assert_eq!(finding.severity, Severity::Warning);
         assert!(
@@ -697,7 +697,7 @@ mod tests {
         let walk = project.walk(&paths(&["vendor"]));
 
         assert!(walk.sources.is_empty());
-        assert_eq!(codes(&walk), ["scan/explicit-path-excluded"]);
+        assert_eq!(codes(&walk), ["scan-explicit-path-excluded"]);
         let message = &walk
             .findings
             .first()
@@ -750,7 +750,7 @@ mod tests {
         let walk = project.walk(&paths(&["build/out.rs"]));
 
         assert!(walk.sources.is_empty());
-        assert_eq!(codes(&walk), ["scan/explicit-path-ignored"]);
+        assert_eq!(codes(&walk), ["scan-explicit-path-ignored"]);
         let message = &walk
             .findings
             .first()
@@ -771,7 +771,7 @@ mod tests {
         let walk = project.walk(&paths(&["build/sub"]));
 
         assert!(walk.sources.is_empty());
-        assert_eq!(codes(&walk), ["scan/explicit-path-ignored"]);
+        assert_eq!(codes(&walk), ["scan-explicit-path-ignored"]);
     }
 
     #[test]
@@ -830,7 +830,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["open.rs"],
         );
-        assert_eq!(codes(&walk), ["scan/unreadable-dir"]);
+        assert_eq!(codes(&walk), ["scan-unreadable-dir"]);
         let message = &walk
             .findings
             .first()

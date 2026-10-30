@@ -53,11 +53,11 @@ const PREVIEW_NOTE: &str = "Nothing written. Run the same command with --yes to 
 /// # Errors
 ///
 /// Returns the config's own error (78, or 74 when unreadable), the lockfile's own error (78 when
-/// invalid, 74 when unreadable), `cli/rename-unknown-namespace` when OLD isn't defined,
-/// `cli/rename-target-exists` when NEW already is, `cli/rename-inherited` when OLD comes only from
-/// a config this one extends, `cli/rename-unreadable-source` when a source can't be read,
-/// `cli/rename-file-changed` when a file changed between planning and
-/// writing (all 1), `cli/rename-write` when a file can't be written, and `cli/rename-output` when
+/// invalid, 74 when unreadable), `cli-rename-unknown-namespace` when OLD isn't defined,
+/// `cli-rename-target-exists` when NEW already is, `cli-rename-inherited` when OLD comes only from
+/// a config this one extends, `cli-rename-unreadable-source` when a source can't be read,
+/// `cli-rename-file-changed` when a file changed between planning and
+/// writing (all 1), `cli-rename-write` when a file can't be written, and `cli-rename-output` when
 /// the report can't be written (both 74).
 pub fn run(args: &RenameArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let plan = Plan::build(&args.old, &args.new, context, output)?;
@@ -114,9 +114,9 @@ impl Plan {
     ///
     /// # Errors
     ///
-    /// Returns the config's or the lockfile's own error, `cli/rename-unknown-namespace`,
-    /// `cli/rename-target-exists`, `cli/rename-inherited`, `cli/rename-unreadable-source` when a
-    /// source can't be read, or `cli/rename-file-changed` when the config no longer defines OLD
+    /// Returns the config's or the lockfile's own error, `cli-rename-unknown-namespace`,
+    /// `cli-rename-target-exists`, `cli-rename-inherited`, `cli-rename-unreadable-source` when a
+    /// source can't be read, or `cli-rename-file-changed` when the config no longer defines OLD
     /// once it is read again.
     fn build(
         old: &NamespaceName,
@@ -167,8 +167,8 @@ impl Plan {
     ///
     /// # Errors
     ///
-    /// Returns `cli/rename-file-changed` (1) before writing anything when a file no longer holds
-    /// what was read, and `cli/rename-write` (74) when a write fails, naming what was already
+    /// Returns `cli-rename-file-changed` (1) before writing anything when a file no longer holds
+    /// what was read, and `cli-rename-write` (74) when a write fails, naming what was already
     /// written.
     fn apply(&self) -> Result<(), CliError> {
         self.verify()?;
@@ -201,7 +201,7 @@ impl Plan {
     ///
     /// # Errors
     ///
-    /// Returns `cli/rename-file-changed` naming the first such file.
+    /// Returns `cli-rename-file-changed` naming the first such file.
     fn verify(&self) -> Result<(), CliError> {
         for source in &self.sources {
             if !holds(&source.file, &source.text) {
@@ -303,7 +303,7 @@ impl Plan {
     /// The error for a file that no longer holds what was read.
     fn file_changed(&self, file: &str) -> CliError {
         CliError::new(
-            "cli/rename-file-changed",
+            "cli-rename-file-changed",
             format!(
                 "{file} changed or can't be read since the rename was planned; nothing was written"
             ),
@@ -329,7 +329,7 @@ impl Plan {
             )
         };
         CliError::new(
-            "cli/rename-write",
+            "cli-rename-write",
             format!("cannot write {file}: {error}"),
             help,
             CliError::IO_EXIT_CODE,
@@ -341,8 +341,8 @@ impl Plan {
 ///
 /// # Errors
 ///
-/// Returns `cli/rename-unknown-namespace` when OLD isn't defined (NR2), `cli/rename-target-exists`
-/// when NEW is, or equals OLD (NR3), and `cli/rename-inherited` when only a config further up
+/// Returns `cli-rename-unknown-namespace` when OLD isn't defined (NR2), `cli-rename-target-exists`
+/// when NEW is, or equals OLD (NR3), and `cli-rename-inherited` when only a config further up
 /// the `extends` chain defines OLD (NR4).
 fn defining_file<'c>(
     config: &'c Config,
@@ -431,7 +431,7 @@ impl ConfigEdit {
     ///
     /// # Errors
     ///
-    /// Returns the config's own read error, or `cli/rename-file-changed` when the file no longer
+    /// Returns the config's own read error, or `cli-rename-file-changed` when the file no longer
     /// defines OLD.
     fn read(
         file: &AbsolutePath,
@@ -447,7 +447,7 @@ impl ConfigEdit {
         );
         let Some(key) = namespace_key(&text, old) else {
             return Err(CliError::new(
-                "cli/rename-file-changed",
+                "cli-rename-file-changed",
                 format!("{shown} no longer defines `{old}`; nothing was written"),
                 format!("Run `supdoc namespace rename {old} {new}` again"),
                 CliError::REFUSED_EXIT_CODE,
@@ -663,7 +663,7 @@ fn unknown_namespace(config: &Config, old: &NamespaceName) -> CliError {
         None => format!("Configured namespaces: {listed}"),
     };
     CliError::new(
-        "cli/rename-unknown-namespace",
+        "cli-rename-unknown-namespace",
         format!("no namespace is named `{old}`"),
         help,
         CliError::REFUSED_EXIT_CODE,
@@ -681,7 +681,7 @@ fn target_exists(config: &Config, old: &NamespaceName, new: &NamespaceName) -> C
         None => format!("a namespace named `{new}` already exists"),
     };
     CliError::new(
-        "cli/rename-target-exists",
+        "cli-rename-target-exists",
         message,
         "Run `supdoc namespace list` to see the names in use, and choose a NEW name none of \
          them has. Nothing was changed",
@@ -692,7 +692,7 @@ fn target_exists(config: &Config, old: &NamespaceName, new: &NamespaceName) -> C
 /// The error for an OLD that only a config further up the `extends` chain defines (NR4, Q19).
 fn inherited(old: &NamespaceName, defined_in: &AbsolutePath) -> CliError {
     CliError::new(
-        "cli/rename-inherited",
+        "cli-rename-inherited",
         format!(
             "`{old}` is defined in {}, a config this project extends",
             defined_in.display()
@@ -715,7 +715,7 @@ fn unread_source(
     error: &ReadError,
 ) -> CliError {
     CliError::new(
-        "cli/rename-unreadable-source",
+        "cli-rename-unreadable-source",
         format!(
             "{}; its links can't be renamed, so nothing was written",
             error.message_naming(source)
@@ -731,7 +731,7 @@ fn unread_source(
 /// The error for a report that could not be written.
 fn output_failed(error: &OutputError) -> CliError {
     CliError::new(
-        "cli/rename-output",
+        "cli-rename-output",
         format!("cannot write the rename report: {error}"),
         "Check that standard output and standard error are open and writable, or redirect both \
          to a file with `> supdoc.out 2>&1`",
@@ -1297,7 +1297,7 @@ web = \"services/web\"
 
         assert_eq!(run.exit_code(), 1);
         let error = run.error();
-        assert_eq!(error.code(), "cli/rename-unknown-namespace");
+        assert_eq!(error.code(), "cli-rename-unknown-namespace");
         assert!(error.message().contains("`atuh`"), "{}", error.message());
         assert_eq!(
             error.help(),
@@ -1316,7 +1316,7 @@ web = \"services/web\"
 
         for (name, run) in [("taken", &taken), ("same", &same)] {
             assert_eq!(run.exit_code(), 1, "{name}");
-            assert_eq!(run.error().code(), "cli/rename-target-exists", "{name}");
+            assert_eq!(run.error().code(), "cli-rename-target-exists", "{name}");
         }
         assert!(
             taken.error().message().contains("`web`"),
@@ -1342,7 +1342,7 @@ web = \"services/web\"
 
         assert_eq!(run.exit_code(), 1);
         let error = run.error();
-        assert_eq!(error.code(), "cli/rename-inherited");
+        assert_eq!(error.code(), "cli-rename-inherited");
         let parent = project.root().as_path().join(CONFIG_FILE_NAME);
         assert!(
             error.message().contains(&parent.display().to_string()),
@@ -1419,7 +1419,7 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
 
         assert_eq!(
             (error.code(), error.exit_code()),
-            ("cli/rename-file-changed", 1)
+            ("cli-rename-file-changed", 1)
         );
         assert!(
             error.message().contains("docs/guide.md"),
@@ -1452,7 +1452,7 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
             .expect_err("an unreadable source should refuse the rename");
         assert_eq!(
             (error.code(), error.exit_code()),
-            ("cli/rename-unreadable-source", 1)
+            ("cli-rename-unreadable-source", 1)
         );
         assert!(
             error.message().starts_with("docs/broken.md is not UTF-8"),

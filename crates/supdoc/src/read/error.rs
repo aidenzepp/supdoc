@@ -62,16 +62,16 @@ pub enum ReadError {
 }
 
 impl ReadError {
-    /// The stable code for this error: `read/missing`, `read/not-utf8`, …
+    /// The stable code for this error: `read-missing`, `read-not-utf8`, …
     #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
-            Self::Missing { .. } => "read/missing",
-            Self::Io { .. } => "read/io",
-            Self::NotUtf8 { .. } => "read/not-utf8",
-            Self::TooLarge { .. } => "read/too-large",
-            Self::UnsupportedLanguage { .. } => "read/unsupported-language",
-            Self::Internal { .. } => "read/internal",
+            Self::Missing { .. } => "read-missing",
+            Self::Io { .. } => "read-io",
+            Self::NotUtf8 { .. } => "read-not-utf8",
+            Self::TooLarge { .. } => "read-too-large",
+            Self::UnsupportedLanguage { .. } => "read-unsupported-language",
+            Self::Internal { .. } => "read-internal",
         }
     }
 
@@ -181,12 +181,12 @@ pub enum ResolveError {
 }
 
 impl ResolveError {
-    /// The stable code for this error: `resolve/not-found` or `resolve/ambiguous`.
+    /// The stable code for this error: `resolve-not-found` or `resolve-ambiguous`.
     #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
-            Self::NotFound { .. } => "resolve/not-found",
-            Self::Ambiguous { .. } => "resolve/ambiguous",
+            Self::NotFound { .. } => "resolve-not-found",
+            Self::Ambiguous { .. } => "resolve-ambiguous",
         }
     }
 
@@ -286,7 +286,7 @@ mod tests {
             nearest: vec![symbol("Config.Display.fmt"), symbol("Config.port")],
         };
 
-        assert_eq!(error.code(), "resolve/not-found");
+        assert_eq!(error.code(), "resolve-not-found");
         assert_eq!(
             error.to_string(),
             "no symbol `Config.fmt` in /repo/src/lib.rs"
@@ -306,7 +306,7 @@ mod tests {
             candidates: vec![symbol("Foo.new"), symbol("Bar.new")],
         };
 
-        assert_eq!(error.code(), "resolve/ambiguous");
+        assert_eq!(error.code(), "resolve-ambiguous");
         assert_eq!(
             error.to_string(),
             "`new` matches 2 symbols in /repo/src/lib.rs"
@@ -325,7 +325,7 @@ mod tests {
             supported: vec!["md", "rs"],
         };
 
-        assert_eq!(error.code(), "read/unsupported-language");
+        assert_eq!(error.code(), "read-unsupported-language");
         assert_eq!(
             error.to_string(),
             "no language for `.png` files (/repo/logo.png)"

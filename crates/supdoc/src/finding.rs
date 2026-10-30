@@ -8,8 +8,8 @@ use crate::link::SourcePath;
 /// One problem, linter style. Produced by the scanner and checks, rendered by output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
-    /// Stable code from the owning module: `read/missing`, `link/unknown-namespace`,
-    /// `scan/case-mismatch`. Never reworded.
+    /// Stable code from the owning module: `read-missing`, `link-unknown-namespace`,
+    /// `scan-case-mismatch`. Never reworded.
     pub code: &'static str,
     /// How bad it is.
     pub severity: Severity,
@@ -259,7 +259,7 @@ mod tests {
         let snippet =
             Snippet::capture(GUIDE, range_of("add")).expect("the range should be capturable");
 
-        let finding = Finding::new("resolve/not-found", Severity::Error, "no symbol `sub`")
+        let finding = Finding::new("resolve-not-found", Severity::Error, "no symbol `sub`")
             .with_location(location.clone())
             .with_help("did you mean `minus`?")
             .with_fix(fix.clone())
@@ -268,7 +268,7 @@ mod tests {
         assert_eq!(
             finding,
             Finding {
-                code: "resolve/not-found",
+                code: "resolve-not-found",
                 severity: Severity::Error,
                 location: Some(location),
                 message: "no symbol `sub`".to_owned(),

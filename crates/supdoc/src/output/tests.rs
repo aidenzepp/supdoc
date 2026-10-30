@@ -56,7 +56,7 @@ fn fatal_error_text_matches_golden() {
         "apps/web/supdoc.config.toml",
         config,
         "\"../../supdoc.confg.toml\"",
-        "config/extends-missing",
+        "config-extends-missing",
         Severity::Error,
         "apps/web/supdoc.config.toml extends `../../supdoc.confg.toml`, but no file exists at /repo/supdoc.confg.toml",
         "point `extends` at an existing supdoc.config.toml, relative to this file",
@@ -159,8 +159,8 @@ fn envelope_has_the_same_top_level_keys_for_every_command() {
 fn json_nests_a_links_finding_and_keeps_only_loose_findings_at_the_top() {
     let envelope = parse(&stdout_of(OutputFormat::Json, Verbosity::Normal, false));
 
-    assert_eq!(at(&envelope, "/data/links/0/finding/kind"), "link/failed");
-    assert_eq!(at(&envelope, "/findings/0/kind"), "scan/unreadable-dir");
+    assert_eq!(at(&envelope, "/data/links/0/finding/kind"), "link-failed");
+    assert_eq!(at(&envelope, "/findings/0/kind"), "scan-unreadable-dir");
     assert!(envelope.pointer("/findings/0/location").is_none());
     assert_eq!(at(&envelope, "/truncated"), false);
 }
@@ -257,7 +257,7 @@ fn github_lines_escape_percent_newline_colon_comma() {
         "docs/a,b: c.md",
         text,
         "[x](a.rs#b)",
-        "link/failed",
+        "link-failed",
         Severity::Error,
         "50% changed\nsecond line",
         "run `supdoc update --yes`",
@@ -266,7 +266,7 @@ fn github_lines_escape_percent_newline_colon_comma() {
 
     assert_eq!(
         line,
-        "::error file=docs/a%2Cb%3A c.md,line=1,col=5,title=supdoc link/failed::50%25 changed%0Asecond line. Run `supdoc update --yes`"
+        "::error file=docs/a%2Cb%3A c.md,line=1,col=5,title=supdoc link-failed::50%25 changed%0Asecond line. Run `supdoc update --yes`"
     );
     assert_eq!(line.lines().count(), 1, "an annotation is exactly one line");
 }
@@ -283,19 +283,19 @@ fn github_output_maps_severity_and_ends_with_the_summary_line() {
     };
     assert!(starts(
         0,
-        "::error file=docs/guide.md,line=3,col=5,title=supdoc link/failed::"
+        "::error file=docs/guide.md,line=3,col=5,title=supdoc link-failed::"
     ));
     assert!(starts(1, "::error file=docs/api.md,line=3,col=3,"));
     assert!(starts(
         2,
-        "::warning file=supdoc.lock,title=supdoc link/obsolete::"
+        "::warning file=supdoc.lock,title=supdoc link-obsolete::"
     ));
     assert_eq!(
         lines.last().copied(),
         Some("Links  1 failed, 1 broken, 38 passed, 1 obsolete")
     );
-    let note = Finding::new("link/moved", Severity::Note, "moved");
-    assert!(annotation(&paths(), &note).starts_with("::notice title=supdoc link/moved::moved"));
+    let note = Finding::new("link-moved", Severity::Note, "moved");
+    assert!(annotation(&paths(), &note).starts_with("::notice title=supdoc link-moved::moved"));
 }
 
 #[test]
@@ -306,7 +306,7 @@ fn an_obsolete_annotation_names_the_lockfile() {
         Some(absolute("/repo")),
     );
     let obsolete = Finding::new(
-        "link/obsolete",
+        "link-obsolete",
         Severity::Warning,
         "supdoc.lock has an entry for `docs/old.md → src/old.rs#parse`, which no longer exists",
     )
@@ -314,7 +314,7 @@ fn an_obsolete_annotation_names_the_lockfile() {
 
     assert!(
         annotation(&style, &obsolete)
-            .starts_with("::warning file=apps/web/supdoc.lock,title=supdoc link/obsolete::"),
+            .starts_with("::warning file=apps/web/supdoc.lock,title=supdoc link-obsolete::"),
         "an obsolete annotation should point at the lockfile: {}",
         annotation(&style, &obsolete)
     );
@@ -361,7 +361,7 @@ fn json_paths_are_relative_to_the_project_root() {
 #[test]
 fn findings_on_stdout_fatal_errors_on_stderr() {
     let (mut output, stdout, stderr) = captured(settings(OutputFormat::Text, Verbosity::Normal));
-    let fatal = Finding::new("config/not-found", Severity::Error, "no config file")
+    let fatal = Finding::new("config-not-found", Severity::Error, "no config file")
         .with_help("run `supdoc init`");
 
     output
@@ -371,14 +371,14 @@ fn findings_on_stdout_fatal_errors_on_stderr() {
         .fatal(&fatal, 78)
         .expect("writing to a buffer should succeed");
 
-    assert!(stdout.text().contains("error[link/failed]"));
-    assert!(!stdout.text().contains("config/not-found"));
+    assert!(stdout.text().contains("error[link-failed]"));
+    assert!(!stdout.text().contains("config-not-found"));
     assert!(
         stderr
             .text()
-            .contains("error[config/not-found]: no config file")
+            .contains("error[config-not-found]: no config file")
     );
-    assert!(!stderr.text().contains("link/failed"));
+    assert!(!stderr.text().contains("link-failed"));
 }
 
 #[test]
@@ -390,7 +390,7 @@ fn fatal_errors_are_json_on_stderr_under_json_formats() {
             "supdoc.config.toml",
             text,
             "\"x.toml\"",
-            "config/extends-missing",
+            "config-extends-missing",
             Severity::Error,
             "no file",
             "point `extends` at a file",
@@ -402,7 +402,7 @@ fn fatal_errors_are_json_on_stderr_under_json_formats() {
 
         let error = parse(stderr.text().trim_end());
         assert_eq!(at(&error, "/error"), true);
-        assert_eq!(at(&error, "/kind"), "config/extends-missing");
+        assert_eq!(at(&error, "/kind"), "config-extends-missing");
         assert_eq!(at(&error, "/exit_code"), 78);
         assert_eq!(at(&error, "/location/file"), "supdoc.config.toml");
         assert_eq!(at(&error, "/location/column"), 11);
@@ -432,8 +432,8 @@ fn preview_on_stdout_nothing_written_note_on_stderr() {
 fn quiet_shows_only_errors_and_no_summary() {
     let text = stdout_of(OutputFormat::Text, Verbosity::Quiet, false);
 
-    assert!(text.contains("error[link/failed]"));
-    assert!(text.contains("error[resolve/not-found]"));
+    assert!(text.contains("error[link-failed]"));
+    assert!(text.contains("error[resolve-not-found]"));
     assert!(
         !text.contains("warning["),
         "warnings are hidden under -q:\n{text}"
@@ -445,12 +445,12 @@ fn quiet_shows_only_errors_and_no_summary() {
         .note("Nothing written.")
         .expect("writing to a buffer should succeed");
     output
-        .diag(&Finding::new("scan/x", Severity::Warning, "hidden"))
+        .diag(&Finding::new("scan-x", Severity::Warning, "hidden"))
         .expect("writing to a buffer should succeed");
     output
-        .diag(&Finding::new("scan/y", Severity::Error, "shown"))
+        .diag(&Finding::new("scan-y", Severity::Error, "shown"))
         .expect("writing to a buffer should succeed");
-    assert!(stderr.text().contains("error[scan/y]: shown"));
+    assert!(stderr.text().contains("error[scan-y]: shown"));
     assert!(!stderr.text().contains("Nothing written"));
     assert!(!stderr.text().contains("hidden"));
 }
@@ -632,7 +632,7 @@ fn other_write_failures_are_reported() {
 #[test]
 fn a_finding_without_a_snippet_still_shows_its_location() {
     let finding = Finding::new(
-        "read/missing",
+        "read-missing",
         Severity::Error,
         "src/gone.rs does not exist",
     )
@@ -660,7 +660,7 @@ fn control_characters_from_files_are_rendered_escaped_in_text() {
         "docs/a.md",
         text,
         "[x](a.rs#b)",
-        "link/failed",
+        "link-failed",
         Severity::Error,
         "bad \u{1b}]0;pwned\u{7} message",
         "try \u{1b}[2J instead",
@@ -687,7 +687,7 @@ fn control_characters_from_files_are_rendered_escaped_in_text() {
 #[test]
 fn a_message_cannot_forge_a_workflow_command_under_github_format() {
     let hostile = Finding::new(
-        "link/failed",
+        "link-failed",
         Severity::Error,
         "oops\n::error::x\r::warning::y",
     );
@@ -713,8 +713,8 @@ fn a_message_cannot_forge_a_workflow_command_under_github_format() {
     assert_eq!(
         commands,
         vec![
-            "::error title=supdoc link/failed::oops%0A::error::x%0D::warning::y",
-            "::error title=supdoc link/failed::oops%0A::error::x%0D::warning::y",
+            "::error title=supdoc link-failed::oops%0A::error::x%0D::warning::y",
+            "::error title=supdoc link-failed::oops%0A::error::x%0D::warning::y",
         ]
     );
     assert!(emitted.contains("done%0A::error::forged"), "{emitted}");
@@ -741,7 +741,7 @@ fn bidi_and_invisible_characters_are_rendered_escaped_in_every_text_field() {
             &format!("docs/a{character}.md"),
             &text,
             "[x](a.rs#b)",
-            "link/failed",
+            "link-failed",
             Severity::Error,
             &format!("bad{character}message"),
             &format!("help{character}text"),
@@ -772,7 +772,7 @@ fn a_snippet_escapes_bidi_characters_and_carriage_returns() {
         "docs/a.md",
         text,
         "[x](a.rs#b)",
-        "link/failed",
+        "link-failed",
         Severity::Error,
         "bad",
         "help",
@@ -790,7 +790,7 @@ fn a_snippet_escapes_bidi_characters_and_carriage_returns() {
 
 #[test]
 fn newlines_in_a_message_or_help_do_not_start_a_new_output_line() {
-    let finding = Finding::new("link/failed", Severity::Error, "bad\nerror: forged\rmore")
+    let finding = Finding::new("link-failed", Severity::Error, "bad\nerror: forged\rmore")
         .with_help("try\nhelp: forged\r");
 
     let rendered = rendered_text(&finding);

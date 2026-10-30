@@ -71,7 +71,7 @@ fn changing_a_struct_field_type_fails_its_link() {
 
     let _ = check.assert_exit(1);
     assert!(
-        check.stdout.contains("link/failed") && check.stdout.contains("src/lib.rs#Config.host"),
+        check.stdout.contains("link-failed") && check.stdout.contains("src/lib.rs#Config.host"),
         "the field's link should fail: {}",
         check.stdout
     );
@@ -87,7 +87,7 @@ fn removing_a_struct_field_breaks_its_link() {
 
     let _ = check.assert_exit(1);
     assert!(
-        check.stdout.contains("resolve/not-found") && check.stdout.contains("Config.host"),
+        check.stdout.contains("resolve-not-found") && check.stdout.contains("Config.host"),
         "the removed field's link should be broken: {}",
         check.stdout
     );

@@ -60,7 +60,7 @@ const ERROR: &str = "error";
 ///
 /// # Errors
 ///
-/// Returns `cli/not-built` for a named command that is not built yet, and `cli/schema-write` when
+/// Returns `cli-not-built` for a named command that is not built yet, and `cli-schema-write` when
 /// standard output cannot be written for a reason other than a closed pipe.
 pub fn run(
     args: &SchemaArgs,
@@ -82,7 +82,7 @@ pub fn run(
 ///
 /// # Errors
 ///
-/// Returns `cli/not-built` while the command is not built, and `cli/schema-serialize` if the
+/// Returns `cli-not-built` while the command is not built, and `cli-schema-serialize` if the
 /// schema cannot become JSON.
 fn schema_value(target: SchemaTarget) -> Result<Value, CliError> {
     let mut schema = to_value(schema_of(target)?, &name(target))?;
@@ -94,7 +94,7 @@ fn schema_value(target: SchemaTarget) -> Result<Value, CliError> {
 ///
 /// # Errors
 ///
-/// Returns `cli/schema-serialize` if the schema cannot become JSON.
+/// Returns `cli-schema-serialize` if the schema cannot become JSON.
 fn error_value() -> Result<Value, CliError> {
     to_value(schemars::schema_for!(FatalJson), ERROR)
 }
@@ -103,11 +103,11 @@ fn error_value() -> Result<Value, CliError> {
 ///
 /// # Errors
 ///
-/// Returns `cli/schema-serialize`, naming `what`, if the schema cannot become JSON.
+/// Returns `cli-schema-serialize`, naming `what`, if the schema cannot become JSON.
 fn to_value(schema: schemars::Schema, what: &str) -> Result<Value, CliError> {
     serde_json::to_value(schema).map_err(|error| {
         CliError::new(
-            "cli/schema-serialize",
+            "cli-schema-serialize",
             format!("could not turn the schema of `{what}` into JSON: {error}"),
             "this is a supdoc bug; report it with the command you ran and the output of \
              `supdoc --version`",
@@ -136,7 +136,7 @@ fn pin_command(schema: &mut Value, command: &str) {
 ///
 /// # Errors
 ///
-/// Returns `cli/not-built` while the command is not built.
+/// Returns `cli-not-built` while the command is not built.
 fn schema_of(target: SchemaTarget) -> Result<schemars::Schema, CliError> {
     match target {
         SchemaTarget::Check => check::schema(),
@@ -168,7 +168,7 @@ fn name(target: SchemaTarget) -> String {
 ///
 /// # Errors
 ///
-/// Returns `cli/schema-serialize` if a schema cannot become JSON.
+/// Returns `cli-schema-serialize` if a schema cannot become JSON.
 fn combined_schema() -> Result<Value, CliError> {
     let mut entries = Vec::new();
     for target in SchemaTarget::value_variants() {
@@ -210,7 +210,7 @@ fn pretty(value: &Value) -> String {
 /// The error for a schema that could not be written.
 fn write_failed(error: &OutputError) -> CliError {
     CliError::new(
-        "cli/schema-write",
+        "cli-schema-write",
         format!("could not write the schema: {error}"),
         "check that standard output is open and writable, or redirect it to a file with \
          `supdoc schema > supdoc.schema.json`",
@@ -347,7 +347,7 @@ mod tests {
         let validator = jsonschema::validator_for(&document).expect("a valid schema");
 
         let fatal = serde_json::json!({
-            "error": true, "kind": "config/missing", "message": "m", "exit_code": 2
+            "error": true, "kind": "config-missing", "message": "m", "exit_code": 2
         });
         let neither = serde_json::json!({"hello": "world"});
 

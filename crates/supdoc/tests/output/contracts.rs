@@ -427,11 +427,11 @@ mod helps {
     /// Codes with no binary scenario and no public constructor; their helps are checked by review.
     const UNREACHABLE: &[Unreachable] = &[
         Unreachable {
-            kind: "cli/rename-file-changed",
+            kind: "cli-rename-file-changed",
             why: "a file must change between planning and writing one rename",
         },
         Unreachable {
-            kind: "cli/schema-serialize",
+            kind: "cli-schema-serialize",
             why: "a built-in JSON Schema must fail to serialize, which is a supdoc bug",
         },
     ];
@@ -447,14 +447,14 @@ mod helps {
     /// Codes no binary run can print reliably, built through the library instead.
     const UNIT_CASES: &[UnitCase] = &[
         UnitCase {
-            kind: "cli/not-built",
+            kind: "cli-not-built",
             build: || {
                 let error = supdoc::cli::CliError::not_built("check");
                 (error.code().to_owned(), Some(error.help().to_owned()))
             },
         },
         UnitCase {
-            kind: "read/internal",
+            kind: "read-internal",
             build: || {
                 let path =
                     supdoc::path::AbsolutePath::new(std::path::Path::new("/project/src/lib.rs"))
@@ -464,7 +464,7 @@ mod helps {
             },
         },
         UnitCase {
-            kind: "fix/file-changed",
+            kind: "fix-file-changed",
             build: file_changed_during_fix,
         },
     ];
@@ -554,7 +554,7 @@ mod helps {
         }
     }
 
-    /// Every code in supdoc's production source: each `"area/name"` string literal outside
+    /// Every code in supdoc's production source: each `"area-name"` string literal outside
     /// `tests.rs`, `fixtures.rs`, comments and the `mod tests` that ends a file.
     fn source_codes() -> BTreeSet<String> {
         let mut codes = BTreeSet::new();
@@ -588,13 +588,16 @@ mod helps {
         codes
     }
 
-    /// Whether `text` has the shape of a code: `area/name`, lowercase, with `-` between words.
+    /// Whether `text` has the shape of a code: `area-name` in kebab-case, whose first word is one
+    /// of supdoc's code areas, such as `link-failed` or `cli-usage`.
     fn is_code(text: &str) -> bool {
-        let Some((area, name)) = text.split_once('/') else {
+        const AREAS: &[&str] = &[
+            "check", "cli", "config", "fix", "link", "lock", "read", "resolve", "scan",
+        ];
+        let Some((area, name)) = text.split_once('-') else {
             return false;
         };
-        !area.is_empty()
-            && area.chars().all(|c| c.is_ascii_lowercase())
+        AREAS.contains(&area)
             && name.starts_with(|c: char| c.is_ascii_lowercase())
             && name
                 .chars()
@@ -645,7 +648,7 @@ mod helps {
     /// Every message with a `help` that a user can be made to see, one way to reach each code.
     const HELP_CASES: &[HelpCase] = &[
         case(
-            "link/failed",
+            "link-failed",
             |p| {
                 p.write(
                     "src/lib.rs",
@@ -655,12 +658,12 @@ mod helps {
             &["check"],
         ),
         case(
-            "link/new",
+            "link-new",
             |p| p.write("docs/new.md", "# N\n\nSee [add](../src/lib.rs#add).\n"),
             &["check"],
         ),
         case(
-            "link/obsolete",
+            "link-obsolete",
             |p| {
                 std::fs::remove_file(p.path().join("docs/old.md"))
                     .expect("old.md should be removable");
@@ -668,17 +671,17 @@ mod helps {
             &["check"],
         ),
         case(
-            "resolve/not-found",
+            "resolve-not-found",
             |p| p.write("docs/guide.md", "[x](../src/lib.rs#ad)\n"),
             &["check"],
         ),
         case(
-            "resolve/not-found",
+            "resolve-not-found",
             |p| p.write("docs/guide.md", "[x](../src/lib.rs#zzzzzz)\n"),
             &["check"],
         ),
         case(
-            "resolve/ambiguous",
+            "resolve-ambiguous",
             |p| {
                 p.write(
                     "src/two.rs",
@@ -688,47 +691,47 @@ mod helps {
             &["resolve", "src/two.rs", "new"],
         ),
         case(
-            "link/unknown-namespace",
+            "link-unknown-namespace",
             |p| p.write("docs/guide.md", "[x](nons:lib.rs#add)\n"),
             &["check"],
         ),
         case(
-            "link/unknown-namespace",
+            "link-unknown-namespace",
             |p| p.write("docs/guide.md", "[x](cor:lib.rs#add)\n"),
             &["check"],
         ),
         case(
-            "link/unknown-namespace",
+            "link-unknown-namespace",
             |_| {},
             &["resolve", "nons:lib.rs"],
         ),
         case(
-            "link/invalid-symbol",
+            "link-invalid-symbol",
             |p| p.write("docs/guide.md", "[x](../src/lib.rs#a..b)\n"),
             &["check"],
         ),
         case(
-            "link/invalid-path",
+            "link-invalid-path",
             |p| p.write("docs/guide.md", "[x](../src//lib.rs#add)\n"),
             &["check"],
         ),
         case(
-            "link/outside-root",
+            "link-outside-root",
             |p| p.write("docs/guide.md", "[x](../../../elsewhere.rs#add)\n"),
             &["check"],
         ),
         case(
-            "link/text-fragment-unsupported",
+            "link-text-fragment-unsupported",
             |p| p.write("docs/guide.md", "[x](../src/lib.rs#:~:text=add)\n"),
             &["check"],
         ),
         case(
-            "scan/case-mismatch",
+            "scan-case-mismatch",
             |p| p.write("docs/guide.md", "[x](../src/LIB.rs#add)\n"),
             &["check"],
         ),
         case(
-            "check/moved",
+            "check-moved",
             |p| {
                 std::fs::rename(
                     p.path().join("docs/old.md"),
@@ -739,7 +742,7 @@ mod helps {
             &["check"],
         ),
         case(
-            "check/move-ambiguous",
+            "check-move-ambiguous",
             |p| {
                 std::fs::remove_file(p.path().join("docs/old.md"))
                     .expect("old.md should be removable");
@@ -749,7 +752,7 @@ mod helps {
             &["check"],
         ),
         case(
-            "read/not-utf8",
+            "read-not-utf8",
             |p| {
                 std::fs::write(p.path().join("src/bin.rs"), [0xff_u8, 0xfe])
                     .expect("bin.rs should be writable");
@@ -758,7 +761,7 @@ mod helps {
             &["check"],
         ),
         case(
-            "read/too-large",
+            "read-too-large",
             |p| {
                 let big = vec![b'/'; 16 * 1024 * 1024 + 1];
                 std::fs::write(p.path().join("src/big.rs"), big)
@@ -768,7 +771,7 @@ mod helps {
             &["check"],
         ),
         case(
-            "read/unsupported-language",
+            "read-unsupported-language",
             |p| {
                 p.write("src/data.xyz", "x");
                 p.write("docs/guide.md", "[x](../src/data.xyz#add)\n");
@@ -776,54 +779,54 @@ mod helps {
             &["check"],
         ),
         case(
-            "read/syntax-errors",
+            "read-syntax-errors",
             |p| p.write("src/bad.rs", "fn ( {{{{"),
             &["resolve", "src/bad.rs"],
         ),
         case(
-            "read/missing",
+            "read-missing",
             |p| p.write("docs/guide.md", "[x](../src/gone.rs#add)\n"),
             &["check"],
         ),
-        case("read/io", |p| chmod(p, "src/lib.rs", 0o000), &["check"]),
-        case("read/io", |p| chmod(p, "docs/old.md", 0o000), &["check"]),
+        case("read-io", |p| chmod(p, "src/lib.rs", 0o000), &["check"]),
+        case("read-io", |p| chmod(p, "docs/old.md", 0o000), &["check"]),
         case(
-            "config/parse",
+            "config-parse",
             |p| p.write("supdoc.config.toml", "include = 3\n"),
             &["check"],
         ),
         case(
-            "config/parse",
+            "config-parse",
             |p| p.write("supdoc.config.toml", "exlude = [\"x\"]\n"),
             &["check"],
         ),
         case(
-            "config/parse",
+            "config-parse",
             |p| p.write("supdoc.config.toml", "[namespaces]\nx = \"src\"\n"),
             &["check"],
         ),
         case(
-            "config/parse",
+            "config-parse",
             |p| p.write("supdoc.config.toml", "[namespaces]\ncore = \"/src\"\n"),
             &["check"],
         ),
         case(
-            "config/parse",
+            "config-parse",
             |p| p.write("supdoc.config.toml", "include = [\"../shared\"]\n"),
             &["check"],
         ),
         case(
-            "config/not-found",
+            "config-not-found",
             |_| {},
             &["check", "--config", "nope.toml"],
         ),
         case(
-            "config/read",
+            "config-read",
             |p| chmod(p, "supdoc.config.toml", 0o000),
             &["check"],
         ),
         case(
-            "config/extends-missing",
+            "config-extends-missing",
             |p| {
                 p.write(
                     "supdoc.config.toml",
@@ -833,7 +836,7 @@ mod helps {
             &["check"],
         ),
         case(
-            "config/extends-loop",
+            "config-extends-loop",
             |p| {
                 p.write(
                     "supdoc.config.toml",
@@ -847,7 +850,7 @@ mod helps {
             &["check"],
         ),
         case(
-            "config/extends-directory",
+            "config-extends-directory",
             |p| {
                 std::fs::create_dir_all(p.path().join("sub/supdoc.config.toml"))
                     .expect("the directory should be creatable");
@@ -859,7 +862,7 @@ mod helps {
             &["check"],
         ),
         case(
-            "config/extends-not-config",
+            "config-extends-not-config",
             |p| {
                 p.write("base.toml", "");
                 p.write("supdoc.config.toml", "extends = \"base.toml\"\n");
@@ -867,7 +870,7 @@ mod helps {
             &["check"],
         ),
         case(
-            "config/namespace-outside-root",
+            "config-namespace-outside-root",
             |p| {
                 p.write(
                     "supdoc.config.toml",
@@ -877,22 +880,22 @@ mod helps {
             &["check"],
         ),
         case(
-            "lock/parse",
+            "lock-parse",
             |p| p.write("supdoc.lock", "not = [toml"),
             &["check"],
         ),
         case(
-            "lock/newer-version",
+            "lock-newer-version",
             |p| p.write("supdoc.lock", "version = 999\n"),
             &["check"],
         ),
         case(
-            "lock/conflict",
+            "lock-conflict",
             |p| p.write("supdoc.lock", "version = 1\n<<<<<<< HEAD\n"),
             &["check"],
         ),
         case(
-            "lock/duplicate",
+            "lock-duplicate",
             |p| {
                 let path = p.path().join("supdoc.lock");
                 let recorded = std::fs::read_to_string(&path).expect("the lock should be readable");
@@ -900,9 +903,9 @@ mod helps {
             },
             &["check"],
         ),
-        case("lock/read", |p| chmod(p, "supdoc.lock", 0o000), &["check"]),
+        case("lock-read", |p| chmod(p, "supdoc.lock", 0o000), &["check"]),
         case(
-            "lock/write",
+            "lock-write",
             |p| {
                 p.write("docs/new.md", "# N\n\nSee [add](../src/lib.rs#add).\n");
                 chmod(p, ".", 0o555);
@@ -910,43 +913,43 @@ mod helps {
             &["update", "--yes"],
         ),
         case(
-            "lock/settings-mismatch",
+            "lock-settings-mismatch",
             |p| config_with(p, "[features.hash]\nline-endings = \"exact\"\n"),
             &["check"],
         ),
         case(
-            "scan/explicit-path-excluded",
+            "scan-explicit-path-excluded",
             |p| p.write("supdoc.config.toml", "exclude = [\"docs/old.md\"]\n"),
             &["check", "docs/old.md"],
         ),
         case(
-            "scan/explicit-path-excluded",
+            "scan-explicit-path-excluded",
             |p| p.write("supdoc.config.toml", "include = [\"docs/guide.md\"]\n"),
             &["check", "docs/old.md"],
         ),
         case(
-            "scan/explicit-path-ignored",
+            "scan-explicit-path-ignored",
             |p| p.write(".gitignore", "docs/old.md\n"),
             &["check", "docs/old.md"],
         ),
         case(
-            "scan/unreadable-dir",
+            "scan-unreadable-dir",
             |p| {
                 p.write("docs/private/a.md", "# A\n");
                 chmod(p, "docs/private", 0o000);
             },
             &["check"],
         ),
-        case("scan/root-unreadable", |p| chmod(p, ".", 0o300), &["check"]),
-        case("cli/usage", |_| {}, &["check", "--no-such-flag"]),
-        case("cli/path-missing", |_| {}, &["check", "docs/nope.md"]),
-        case("cli/path-missing", |_| {}, &["resolve", "nope.rs"]),
-        case("cli/path-outside-project", |_| {}, &["check", "/"]),
-        case("cli/path-invalid", |_| {}, &["resolve", "src"]),
-        case("cli/target-invalid", |_| {}, &["list", "src/lib.rs#a..b"]),
-        case("cli/init-exists", |_| {}, &["init"]),
+        case("scan-root-unreadable", |p| chmod(p, ".", 0o300), &["check"]),
+        case("cli-usage", |_| {}, &["check", "--no-such-flag"]),
+        case("cli-path-missing", |_| {}, &["check", "docs/nope.md"]),
+        case("cli-path-missing", |_| {}, &["resolve", "nope.rs"]),
+        case("cli-path-outside-project", |_| {}, &["check", "/"]),
+        case("cli-path-invalid", |_| {}, &["resolve", "src"]),
+        case("cli-target-invalid", |_| {}, &["list", "src/lib.rs#a..b"]),
+        case("cli-init-exists", |_| {}, &["init"]),
         case(
-            "cli/init-write",
+            "cli-init-write",
             |p| {
                 std::fs::remove_file(p.path().join("supdoc.config.toml"))
                     .expect("the config should be removable");
@@ -955,27 +958,27 @@ mod helps {
             &["init"],
         ),
         case(
-            "cli/rename-unknown-namespace",
+            "cli-rename-unknown-namespace",
             |_| {},
             &["namespace", "rename", "nope", "other"],
         ),
         case(
-            "cli/rename-unknown-namespace",
+            "cli-rename-unknown-namespace",
             |_| {},
             &["namespace", "rename", "cor", "other"],
         ),
         case(
-            "cli/rename-unknown-namespace",
+            "cli-rename-unknown-namespace",
             |p| p.write("supdoc.config.toml", ""),
             &["namespace", "rename", "core", "other"],
         ),
         case(
-            "cli/rename-target-exists",
+            "cli-rename-target-exists",
             |p| config_with(p, "base = \"docs\"\n"),
             &["namespace", "rename", "core", "base"],
         ),
         case(
-            "cli/rename-inherited",
+            "cli-rename-inherited",
             |p| {
                 p.write(
                     "base/supdoc.config.toml",
@@ -989,44 +992,44 @@ mod helps {
             &["namespace", "rename", "shared", "common"],
         ),
         case(
-            "cli/rename-unreadable-source",
+            "cli-rename-unreadable-source",
             |p| chmod(p, "docs/guide.md", 0o000),
             &["namespace", "rename", "core", "base"],
         ),
         case(
-            "cli/rename-write",
+            "cli-rename-write",
             |p| chmod(p, "docs", 0o555),
             &["namespace", "rename", "core", "base", "--yes"],
         ),
         case(
-            "cli/skill-exists",
+            "cli-skill-exists",
             |p| p.write(".agents/skills/supdoc/SKILL.md", "different"),
             &["skill", "install"],
         ),
         case(
-            "cli/skill-no-home",
+            "cli-skill-no-home",
             |_| {},
             &["skill", "install", "--global"],
         ),
         case(
-            "cli/skill-write",
+            "cli-skill-write",
             |p| chmod(p, ".", 0o555),
             &["skill", "install", "--yes"],
         ),
         HelpCase {
-            kind: "cli/skill-relative-claude-dir",
+            kind: "cli-skill-relative-claude-dir",
             setup: |_| {},
             args: &["skill", "install", "--global"],
             via: Via::RelativeClaudeDir,
         },
         HelpCase {
-            kind: "cli/no-cwd",
+            kind: "cli-no-cwd",
             setup: |_| {},
             args: &["check"],
             via: Via::RemovedCwd,
         },
         case(
-            "fix/write-failed",
+            "fix-write-failed",
             |p| {
                 fixable(p);
                 chmod(p, "docs", 0o555);
@@ -1034,7 +1037,7 @@ mod helps {
             &["fix", "--yes"],
         ),
         case(
-            "fix/lock-write-failed",
+            "fix-lock-write-failed",
             |p| {
                 p.write(
                     "src/lib.rs",
@@ -1044,20 +1047,20 @@ mod helps {
             },
             &["fix", "--yes"],
         ),
-        unwritable("cli/check-output", &["check"]),
-        unwritable("cli/update-output", &["update"]),
-        unwritable("cli/fix-output", &["fix"]),
-        unwritable("cli/list-output", &["list"]),
-        unwritable("cli/resolve-output", &["resolve", "src/lib.rs"]),
-        unwritable("cli/config-output", &["config", "show"]),
-        unwritable("cli/namespace-output", &["namespace", "list"]),
+        unwritable("cli-check-output", &["check"]),
+        unwritable("cli-update-output", &["update"]),
+        unwritable("cli-fix-output", &["fix"]),
+        unwritable("cli-list-output", &["list"]),
+        unwritable("cli-resolve-output", &["resolve", "src/lib.rs"]),
+        unwritable("cli-config-output", &["config", "show"]),
+        unwritable("cli-namespace-output", &["namespace", "list"]),
         unwritable(
-            "cli/rename-output",
+            "cli-rename-output",
             &["namespace", "rename", "core", "base"],
         ),
-        unwritable("cli/skill-output", &["skill", "install"]),
-        unwritable("cli/schema-write", &["schema"]),
-        unwritable("cli/completions-write", &["completions", "bash"]),
+        unwritable("cli-skill-output", &["skill", "install"]),
+        unwritable("cli-schema-write", &["schema"]),
+        unwritable("cli-completions-write", &["completions", "bash"]),
     ];
 
     /// `supdoc args`, run by `sh` in the project root after `prelude`, with an empty environment but
