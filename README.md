@@ -54,6 +54,17 @@ show` prints the value in effect and the file that set it.
 
 Don't run supdoc on an untrusted PR after writing secrets into the checkout.
 
+Threat model, for a checkout you don't trust:
+
+- Outside the project root, supdoc reads only its own inputs: a `supdoc.config.toml` reached through
+  `extends`, whose lines can appear in config errors, and the ignore files git would read above the
+  project, plus the global excludes file. It never quotes a rule line from an ignore file outside the
+  root.
+- It reads, hashes, lists symbols from and quotes no other file outside the root, linked files included.
+- It doesn't promise to hide whether a path outside the root exists. An out-and-back symlink can change
+  which error or exit code appears. That is accepted: on ordinary `pull_request` CI, a PR can already run
+  commands.
+
 ## Agent skill
 
 [`SKILL.md`](SKILL.md) teaches coding agents to use supdoc: find the docs behind code before changing it, and

@@ -1,5 +1,6 @@
 //! supdoc stays inside the project root, even when an untrusted checkout controls the docs, the
-//! config, symlinks and the lockfile: nothing outside is read, hashed, named or printed.
+//! config, symlinks and the lockfile: no outside file is read, hashed, named or printed, other
+//! than supdoc's own config and ignore inputs.
 //!
 //! The `monorepo` fixture's `services/web` is the project, so the fixture's own root is outside.
 

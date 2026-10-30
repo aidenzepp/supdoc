@@ -46,7 +46,7 @@ fn config_in(dir: &AbsolutePath) -> Option<AbsolutePath> {
 /// A directory holds one when its entry named `supdoc.config.toml` is a regular file or a
 /// symlink, decided with `symlink_metadata` so the link is never followed to decide. Any other
 /// entry, such as a real directory or a FIFO, is skipped. Whether a symlink's target exists must not
-/// change which config is found, or the exit status would reveal paths outside the root.
+/// change which config is found, so that the symlink gets one outcome whatever it leads to.
 ///
 /// A symlink must lead to a file really named `supdoc.config.toml`, the rule `extends` follows
 /// too. It is checked before anything is read, so a hostile checkout can't make supdoc print
@@ -246,14 +246,14 @@ fn resolve_extends(
 /// Whether `path` is provably the checkout's own: it lies beneath `root`, compared as text, and
 /// no entry from `root` down to `path`, `path` included, is a symlink.
 ///
-/// The threat is a checkout learning whether paths outside it exist. Telling missing from a
-/// directory from unreadable answers that question for any path the checkout can make supdoc
-/// look at, so those answers are given only for paths this function accepts, and everything else
-/// gets one outcome decided by [`leads_to_config`] alone.
+/// Telling missing from a directory from unreadable is a specific answer, given only for paths
+/// this function accepts. Everything else gets one outcome decided by [`leads_to_config`]
+/// alone, which keeps the rule simple and uniform. It is not a promise to hide whether a path
+/// outside the root exists: an out-and-back symlink can still change which error appears.
 ///
 /// The test fails closed. Text that leaves `root` is refused without looking: a case variant, a
 /// firmlink or a link outside that leads back into the root is refused too, which costs a
-/// specific error and reveals nothing. Within the root, each entry is inspected without following
+/// specific error and nothing more. Within the root, each entry is inspected without following
 /// it, from `root` downward, stopping at the first symlink, so every answer is a fact about an
 /// entry the checkout made. An entry that is missing or can't be inspected isn't a symlink.
 ///
