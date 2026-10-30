@@ -1,8 +1,10 @@
 //! Walking the project tree to find the files a scan reads links from (04 S1-S6, S10).
 
+use std::fmt;
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::{DirEntry, Match, WalkBuilder};
@@ -16,6 +18,9 @@ use crate::scan::model::Scope;
 
 /// Directories of version-control systems, never walked (04 S2).
 const VCS_DIRS: [&str; 4] = [".git", ".hg", ".svn", ".jj"];
+
+/// The ignore files the walker reads in each directory it enters, relative to that directory.
+const IGNORE_FILES: [&str; 3] = [".ignore", ".gitignore", ".git/info/exclude"];
 
 /// The files a scan reads links from, and the problems met while finding them.
 #[derive(Debug)]
@@ -35,22 +40,51 @@ pub struct Walk {
 pub struct UnreadDir {
     /// The directory, as the walk met it.
     pub path: AbsolutePath,
-    /// What the operating system reported, such as `permission denied`.
-    pub cause: io::ErrorKind,
+    /// Why it wasn't read.
+    pub cause: UnreadCause,
+}
+
+/// Why the walk didn't read a directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum UnreadCause {
+    /// Listing it failed, with what the operating system reported, such as `permission denied`.
+    Io(io::ErrorKind),
+    /// This ignore file in it, such as `.gitignore`, leads outside the project root once symlinks
+    /// are followed. The walker reads a directory's ignore files as it enters and can't be told to
+    /// skip one, so the directory isn't entered and the file never decides what is skipped (04
+    /// S15).
+    IgnoreFileOutsideRoot(&'static str),
+}
+
+impl fmt::Display for UnreadCause {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(kind) => write!(formatter, "{kind}"),
+            Self::IgnoreFileOutsideRoot(file) => {
+                write!(formatter, "its {file} leads outside the project root")
+            }
+        }
+    }
 }
 
 impl UnreadDir {
-    /// The `scan-unreadable-dir` warning for this directory.
+    /// The warning for this directory: `scan-unreadable-dir`, or `scan-ignore-file-outside-root`.
     fn finding(&self) -> Finding {
-        Finding::new(
-            "scan-unreadable-dir",
-            Severity::Warning,
-            format!("skipped {}: {}", self.path.display(), self.cause),
-        )
-        .with_help(
-            "Links in that directory weren't checked. Fix its permissions, or add it to \
-             `exclude` in `supdoc.config.toml`",
-        )
+        let skipped = format!("skipped {}: {}", self.path.display(), self.cause);
+        match self.cause {
+            UnreadCause::Io(_) => Finding::new("scan-unreadable-dir", Severity::Warning, skipped)
+                .with_help(
+                    "Links in that directory weren't checked. Fix its permissions, or add it to \
+                     `exclude` in `supdoc.config.toml`",
+                ),
+            UnreadCause::IgnoreFileOutsideRoot(_) => {
+                Finding::new("scan-ignore-file-outside-root", Severity::Warning, skipped).with_help(
+                    "Links in that directory weren't checked, since supdoc reads nothing \
+                         outside the root. Replace the symlink with the rules themselves, or add \
+                         the directory to `exclude` in `supdoc.config.toml`",
+                )
+            }
+        }
     }
 }
 
@@ -62,16 +96,18 @@ impl UnreadDir {
 /// files are walked. Targets are never looked up here, so none of these rules apply to them.
 ///
 /// A directory that can't be read becomes a finding and the walk continues, including when it is
-/// the root itself: the caller decides whether an unreadable root is fatal.
+/// the root itself: the caller decides whether an unreadable root is fatal. So does a directory
+/// beneath the root with an ignore file that leads outside it
+/// ([`UnreadCause::IgnoreFileOutsideRoot`]).
 ///
 /// Effect: reads directory listings and ignore files.
 #[must_use]
 pub fn walk(config: &Config, languages: &Languages, scope: &Scope) -> Walk {
     let mut sources = Vec::new();
     let mut findings = Vec::new();
-    let mut unread_dirs = Vec::new();
+    let refused = Arc::new(Mutex::new(Vec::new()));
 
-    for entry in walker(config, scope) {
+    for entry in walker(config, scope, &refused) {
         match entry {
             Ok(entry) => {
                 if let Some(source) = as_source(config, languages, scope, &entry) {
@@ -80,14 +116,19 @@ pub fn walk(config: &Config, languages: &Languages, scope: &Scope) -> Walk {
             }
             Err(error) => {
                 if let Some(dir) = unreadable_dir(&error) {
-                    findings.push(dir.finding());
-                    unread_dirs.push(dir);
+                    refused
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(dir);
                 }
             }
         }
     }
     sources.sort_by(|(left, _), (right, _)| left.cmp(right));
+    let mut unread_dirs =
+        std::mem::take(&mut *refused.lock().unwrap_or_else(PoisonError::into_inner));
     unread_dirs.sort();
+    findings.extend(unread_dirs.iter().map(UnreadDir::finding));
 
     findings.extend(explicit_path_warnings(config, languages, scope, &sources));
     findings.sort_by(|left, right| {
@@ -103,18 +144,51 @@ pub fn walk(config: &Config, languages: &Languages, scope: &Scope) -> Walk {
     }
 }
 
-/// A walker over the root that applies every directory-level rule, in sorted order.
-fn walker(config: &Config, scope: &Scope) -> ignore::Walk {
+/// A walker over the root that applies every directory-level rule, in sorted order. Each
+/// directory it refuses for an ignore file that leads outside the root goes into `refused`.
+fn walker(config: &Config, scope: &Scope, refused: &Arc<Mutex<Vec<UnreadDir>>>) -> ignore::Walk {
     let root = config.root();
     let config_for_filter = config.clone();
     let scope_for_filter = scope.clone();
+    let refused = Arc::clone(refused);
     WalkBuilder::new(root.as_path())
         .hidden(false)
         .require_git(false)
         .follow_links(false)
         .sort_by_file_path(Path::cmp)
-        .filter_entry(move |entry| descend_into(&config_for_filter, &scope_for_filter, entry))
+        .filter_entry(move |entry| {
+            if !descend_into(&config_for_filter, &scope_for_filter, entry) {
+                return false;
+            }
+            let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
+            if !is_dir || entry.depth() == 0 {
+                return true;
+            }
+            let Some(dir) = unread_for_outside_ignore_file(&config_for_filter, entry.path()) else {
+                return true;
+            };
+            refused
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(dir);
+            false
+        })
         .build()
+}
+
+/// `dir` as unread when one of its ignore files leads outside the root, so the walker must not
+/// enter it and read that file (04 S15). Only symlinks beneath `dir` are looked for: the walker
+/// never follows one to reach a directory, and the root counts as inside however it is reached.
+///
+/// Effect: reads file metadata in `dir`, and resolves symlinks only when one is there.
+fn unread_for_outside_ignore_file(config: &Config, dir: &Path) -> Option<UnreadDir> {
+    let file = IGNORE_FILES
+        .into_iter()
+        .find(|file| leads_outside(config, dir, Path::new(file)))?;
+    Some(UnreadDir {
+        path: AbsolutePath::new(dir)?,
+        cause: UnreadCause::IgnoreFileOutsideRoot(file),
+    })
 }
 
 /// Whether the walk keeps `entry`. Only directories are refused here; files are judged by
@@ -200,7 +274,7 @@ fn as_source(
 fn unreadable_dir(error: &ignore::Error) -> Option<UnreadDir> {
     // The walk starts at the absolute root, so every path it reports is absolute.
     let path = AbsolutePath::new(path_of(error)?)?;
-    let cause = error.io_error()?.kind();
+    let cause = UnreadCause::Io(error.io_error()?.kind());
     Some(UnreadDir { path, cause })
 }
 
@@ -376,9 +450,13 @@ fn ignore_rule(config: &Config, path: &AbsolutePath, is_dir: bool) -> Option<Str
 }
 
 /// The matcher for `ignore_file`, whose patterns apply beneath `dir`, or `None` when it can't be
-/// built or the file may not be read ([`may_read`]).
+/// built or it isn't beneath the root once symlinks are followed ([`leads_outside`]).
 fn matcher(config: &Config, dir: &Path, ignore_file: &Path) -> Option<Gitignore> {
-    if !may_read(config, ignore_file) {
+    let root = config.root().as_path();
+    let inside = ignore_file
+        .strip_prefix(root)
+        .is_ok_and(|relative| !leads_outside(config, root, relative));
+    if !inside {
         return None;
     }
     let mut builder = GitignoreBuilder::new(dir);
@@ -386,24 +464,20 @@ fn matcher(config: &Config, dir: &Path, ignore_file: &Path) -> Option<Gitignore>
     builder.build().ok()
 }
 
-/// Whether `ignore_file`, a path beneath the root, still lies inside the root once symlinks are
-/// followed (04 S15).
+/// Whether `relative`, beneath the in-root directory `base`, passes through a symlink that leads
+/// outside the root (04 S15). A missing path leads nowhere.
 ///
-/// Only a path with a symlink somewhere below the root, the file itself or a directory on the
-/// way to it, is resolved; an ordinary path costs one `lstat` per component.
+/// Only a path with a symlink somewhere below `base`, the file itself or a directory on the way
+/// to it, is resolved; an ordinary path costs one `lstat` per component.
 ///
-/// Effect: reads file metadata along `ignore_file`.
-fn may_read(config: &Config, ignore_file: &Path) -> bool {
-    let root = config.root().as_path();
-    let Ok(relative) = ignore_file.strip_prefix(root) else {
-        return false;
-    };
-    let mut current = root.to_path_buf();
+/// Effect: reads file metadata along the path.
+fn leads_outside(config: &Config, base: &Path, relative: &Path) -> bool {
+    let mut current = base.to_path_buf();
     let through_symlink = relative.components().any(|component| {
         current.push(component);
         fs::symlink_metadata(&current).is_ok_and(|metadata| metadata.file_type().is_symlink())
     });
-    !through_symlink || config.contains(ignore_file)
+    through_symlink && !config.contains(&base.join(relative))
 }
 
 #[cfg(test)]
@@ -971,6 +1045,85 @@ mod tests {
         );
     }
 
+    /// The walk's unread directories, relative to the root (`""` for the root), with their causes.
+    fn unread(project: &Project, walk: &Walk) -> Vec<(String, UnreadCause)> {
+        walk.unread_dirs
+            .iter()
+            .map(|dir| (project.relative(&dir.path), dir.cause))
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_whose_gitignore_leads_out_of_the_root_is_unread_not_ruled_by_it() {
+        let outside = outside_dir();
+        let project = Project::new();
+        project.write("docs/a.rs", "");
+        project.write("docs/out.rs", "");
+        project.write("src/out.rs", "");
+        symlink_in(&project, "docs/.gitignore", &outside.path().join("ignore"));
+
+        let walk = project.walk(&Scope::All);
+
+        assert_eq!(
+            project.sources(&Scope::All),
+            ["src/out.rs"],
+            "nothing beneath the directory is walked, and its siblings are"
+        );
+        assert_eq!(
+            unread(&project, &walk),
+            [(
+                "docs".to_owned(),
+                UnreadCause::IgnoreFileOutsideRoot(".gitignore")
+            )],
+            "the directory is recorded so its sources count as unread",
+        );
+        assert_eq!(codes(&walk), ["scan-ignore-file-outside-root"]);
+        assert!(!messages(&walk).contains(RULE), "{}", messages(&walk));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_whose_git_dir_leads_out_of_the_root_is_unread() {
+        let outside = outside_dir();
+        fs::create_dir_all(outside.path().join("git/info"))
+            .expect("the outside git directory should be creatable");
+        fs::write(outside.path().join("git/info/exclude"), format!("{RULE}\n"))
+            .expect("the outside exclude file should be writable");
+        let project = Project::new();
+        project.write("vendor/out.rs", "");
+        symlink_in(&project, "vendor/.git", &outside.path().join("git"));
+
+        let walk = project.walk(&Scope::All);
+
+        assert_eq!(
+            unread(&project, &walk),
+            [(
+                "vendor".to_owned(),
+                UnreadCause::IgnoreFileOutsideRoot(".git/info/exclude")
+            )],
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gitignore_symlinked_inside_the_root_still_applies() {
+        let project = Project::new();
+        project.write("docs/out.rs", "");
+        project.write("docs/keep.rs", "");
+        project.write("rules/ignore", &format!("{RULE}\n"));
+        symlink_in(
+            &project,
+            "docs/.gitignore",
+            &project.dir.path().join("rules/ignore"),
+        );
+
+        let walk = project.walk(&Scope::All);
+
+        assert_eq!(project.sources(&Scope::All), ["docs/keep.rs"]);
+        assert!(walk.unread_dirs.is_empty(), "{:?}", walk.unread_dirs);
+    }
+
     #[test]
     fn explicit_paths_the_walk_never_enters_give_no_warning() {
         let project = Project::new();
@@ -1017,7 +1170,10 @@ mod tests {
                 .iter()
                 .map(|dir| (project.relative(&dir.path), dir.cause))
                 .collect::<Vec<_>>(),
-            [("private".to_owned(), io::ErrorKind::PermissionDenied)],
+            [(
+                "private".to_owned(),
+                UnreadCause::Io(io::ErrorKind::PermissionDenied)
+            )],
             "the skipped directory is recorded so its sources count as unread",
         );
         let message = &walk

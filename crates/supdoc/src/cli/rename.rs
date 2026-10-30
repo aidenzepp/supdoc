@@ -935,6 +935,7 @@ mod tests {
     use crate::cli::args::{Cli, Command, NamespaceCommand};
     use crate::output::{OutputSettings, PathStyle, Verbosity};
     use crate::scan::model::TargetState;
+    use crate::scan::walk::UnreadCause;
     use crate::state::LinkState;
 
     /// A config naming two namespaces, with comments that a rename must keep.
@@ -1648,7 +1649,7 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
         let dir = UnreadDir {
             path: AbsolutePath::new(Path::new("/project/docs"))
                 .expect("the directory should be absolute"),
-            cause: io::ErrorKind::PermissionDenied,
+            cause: UnreadCause::Io(io::ErrorKind::PermissionDenied),
         };
 
         let refusals = read_errors

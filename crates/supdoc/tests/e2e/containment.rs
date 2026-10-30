@@ -520,3 +520,37 @@ fn a_named_path_ignored_by_a_gitignore_symlinked_out_of_the_root_is_not_quoted()
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn a_directory_whose_gitignore_leads_out_of_the_root_keeps_its_lock_entries() {
+    let project = web_project();
+    let _ = project
+        .supdoc_in("services/web", &["update", "--yes"])
+        .assert_exit(0);
+    // Outside the root, this rule would hide the guide and make its entries look obsolete.
+    fs::write(project.path("rules"), "gui*.md\n").expect("the outside rules should be writable");
+    std::os::unix::fs::symlink(
+        project.path("rules"),
+        project.path("services/web/docs/.gitignore"),
+    )
+    .expect("the symlink should be creatable");
+
+    let run = project.supdoc_in("services/web", &["--json", "check"]);
+
+    let kinds: Vec<_> = array_at(&run.json(), "/findings")
+        .iter()
+        .map(|finding| finding["kind"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert!(
+        kinds.contains(&"scan-ignore-file-outside-root".to_owned()),
+        "{}",
+        run.stdout
+    );
+    assert!(
+        !kinds.contains(&"link-obsolete".to_owned()),
+        "the guide's entries were judged without reading it\n{}",
+        run.stdout
+    );
+    assert!(!run.stdout.contains("gui*.md"), "{}", run.stdout);
+}
