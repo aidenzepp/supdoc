@@ -752,6 +752,129 @@ fn refusal_shown(error: &ConfigError, project: &str) -> (&'static str, u8, Optio
 
 #[cfg(unix)]
 #[test]
+fn extends_symlinked_out_of_the_root_is_refused_alike_whatever_the_target_is() {
+    let dir = tree(&[("home/.env", "DB_PASSWORD=hunter2")]);
+    fs::create_dir(dir.path().join("home/secrets"))
+        .expect("the fixture directory should be creatable");
+    let refusal = |project: &str, target: std::path::PathBuf| {
+        let link = dir.path().join(project).join("x/supdoc.config.toml");
+        fs::create_dir_all(dir.path().join(project).join("x"))
+            .expect("the fixture project should be creatable");
+        fs::write(
+            dir.path().join(project).join("supdoc.config.toml"),
+            "extends = \"x/supdoc.config.toml\"\n",
+        )
+        .expect("the fixture config should be writable");
+        std::os::unix::fs::symlink(target, &link).expect("the symlink should be creatable");
+        let error = load_error(&dir, &format!("{project}/supdoc.config.toml"));
+        refusal_shown(&error, project)
+    };
+    let home = |name: &str| dir.path().join("home").join(name);
+
+    let to_file = refusal("to-file", home(".env"));
+
+    assert_eq!(to_file.0, "config-extends-not-config", "got {to_file:?}");
+    assert_eq!(to_file.1, 78);
+    assert!(!to_file.3.contains("hunter2"), "{}", to_file.3);
+    assert_eq!(
+        refusal("to-nothing", home("absent.env")),
+        to_file,
+        "a dangling link"
+    );
+    assert_eq!(
+        refusal("to-directory", home("secrets")),
+        to_file,
+        "a link to a directory"
+    );
+    assert_eq!(
+        refusal(
+            "to-itself",
+            dir.path().join("to-itself/x/supdoc.config.toml")
+        ),
+        to_file,
+        "a looping link"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn extends_through_a_symlinked_directory_is_refused_alike_whatever_it_holds() {
+    let dir = tree(&[("home/env-dir/supdoc.config.toml/.keep", "")]);
+    fs::create_dir(dir.path().join("home/empty"))
+        .expect("the fixture directory should be creatable");
+    let refusal = |project: &str, target: &str| {
+        fs::create_dir_all(dir.path().join(project))
+            .expect("the fixture project should be creatable");
+        fs::write(
+            dir.path().join(project).join("supdoc.config.toml"),
+            "extends = \"x/supdoc.config.toml\"\n",
+        )
+        .expect("the fixture config should be writable");
+        std::os::unix::fs::symlink(
+            dir.path().join("home").join(target),
+            dir.path().join(project).join("x"),
+        )
+        .expect("the symlink should be creatable");
+        let error = load_error(&dir, &format!("{project}/supdoc.config.toml"));
+        refusal_shown(&error, project)
+    };
+
+    let holding_nothing = refusal("holds-nothing", "empty");
+
+    assert_eq!(
+        holding_nothing.0, "config-extends-not-config",
+        "got {holding_nothing:?}"
+    );
+    assert_eq!(
+        refusal("holds-a-directory", "env-dir"),
+        holding_nothing,
+        "a directory named like the config"
+    );
+    assert_eq!(
+        refusal("dangles", "absent"),
+        holding_nothing,
+        "a dangling directory link"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn extends_through_a_symlink_to_a_config_file_loads_it() {
+    let dir = tree(&[
+        ("shared/supdoc.config.toml", "include = [\"docs\"]\n"),
+        (
+            "project/supdoc.config.toml",
+            "extends = \"x/supdoc.config.toml\"\n",
+        ),
+    ]);
+    fs::create_dir(dir.path().join("project/x"))
+        .expect("the fixture directory should be creatable");
+    std::os::unix::fs::symlink(
+        dir.path().join("shared/supdoc.config.toml"),
+        dir.path().join("project/x/supdoc.config.toml"),
+    )
+    .expect("the symlink should be creatable");
+    std::os::unix::fs::symlink(dir.path().join("shared"), dir.path().join("project/y"))
+        .expect("the symlink should be creatable");
+
+    let through_file = Config::load_file(&at(&dir, "project/supdoc.config.toml"));
+    fs::write(
+        dir.path().join("project/supdoc.config.toml"),
+        "extends = \"y/supdoc.config.toml\"\n",
+    )
+    .expect("the fixture config should be writable");
+    let through_directory = Config::load_file(&at(&dir, "project/supdoc.config.toml"));
+
+    let config = through_file.expect("a link to a real config should load");
+    assert!(config.scans(&at(&dir, "project/x/docs/a.md")), "{config:?}");
+    assert!(
+        through_directory.is_ok(),
+        "a symlinked directory holding a real config should load: {through_directory:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn found_config_symlinked_to_another_name_is_refused_without_reading_it() {
     let dir = tree(&[
         ("home/.env", "DB_PASSWORD=hunter2"),

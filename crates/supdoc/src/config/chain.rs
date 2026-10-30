@@ -80,15 +80,15 @@ pub(super) fn discover(start: &AbsolutePath) -> Result<Option<AbsolutePath>, Con
     Ok(None)
 }
 
-/// Whether the symlink `link`, once every symlink is followed, is a file named
+/// Whether `path`, once every symlink along it is followed, is a file named
 /// `supdoc.config.toml`.
 ///
 /// Every failure to follow it counts as no, so a dangling link, a loop and a link to a directory
 /// all get the same answer as a link to a file with another name.
 ///
-/// Effect: reads symlinks along `link` and the metadata of where it leads.
-fn leads_to_config(link: &AbsolutePath) -> bool {
-    fs::canonicalize(link.as_path()).is_ok_and(|real| {
+/// Effect: reads symlinks along `path` and the metadata of where it leads.
+fn leads_to_config(path: &AbsolutePath) -> bool {
+    fs::canonicalize(path.as_path()).is_ok_and(|real| {
         real.file_name()
             .is_some_and(|name| name == CONFIG_FILE_NAME)
             && fs::metadata(&real).is_ok_and(|metadata| metadata.is_file())
@@ -183,10 +183,16 @@ fn read_text(file: &AbsolutePath, is_start: bool) -> Result<String, ConfigError>
 /// are followed. Both are checked before anything is read, so a hostile `extends` can never make
 /// supdoc print another file's lines in a parse error.
 ///
+/// When the value goes through a symlink, whether the link's target exists must not change the
+/// error, or the exit status would reveal paths outside the root: a link that is dangling,
+/// looping, or leads to a directory or to a file with another name is refused alike, as
+/// [`discover`] does for the config it finds.
+///
 /// # Errors
 ///
-/// `ExtendsNotConfig` for any other name, `ExtendsMissing` or `ExtendsDirectory` when the target
-/// isn't a file, `Read` for other failures.
+/// `ExtendsNotConfig` for any other name or for a symlink that doesn't lead to a config file,
+/// `ExtendsMissing` or `ExtendsDirectory` when a target reached without symlinks isn't a file,
+/// `Read` for other failures.
 fn resolve_extends(
     from: &AbsolutePath,
     extends: &toml::Spanned<RelativePath>,
@@ -208,6 +214,13 @@ fn resolve_extends(
         None | Some(Component::CurDir | Component::ParentDir) => return Err(directory()),
         Some(Component::Normal(name)) if name == CONFIG_FILE_NAME => {}
         Some(_) => return Err(not_config()),
+    }
+    if through_symlink(&directory_of(from), &resolved) {
+        return if leads_to_config(&resolved) {
+            Ok(resolved)
+        } else {
+            Err(not_config())
+        };
     }
     match fs::metadata(resolved.as_path()) {
         Ok(metadata) if metadata.is_dir() => Err(directory()),
@@ -232,6 +245,22 @@ fn resolve_extends(
             error,
         }),
     }
+}
+
+/// Whether reaching `resolved` from `base` follows a symlink: the final entry or any directory on
+/// the way that isn't `base` or one of its ancestors.
+///
+/// `resolved` is `base` joined lexically with an `extends` value, so `base` and its ancestors are
+/// where the value starts or climbs to, not entries it names. An entry that is missing or can't
+/// be inspected isn't a symlink, and every entry is inspected without following it.
+///
+/// Effect: reads the metadata of each entry between `base` and `resolved`.
+fn through_symlink(base: &AbsolutePath, resolved: &AbsolutePath) -> bool {
+    resolved
+        .as_path()
+        .ancestors()
+        .take_while(|entry| !base.as_path().starts_with(entry))
+        .any(|entry| fs::symlink_metadata(entry).is_ok_and(|metadata| metadata.is_symlink()))
 }
 
 /// `extends` pointing at the config file inside `directory`, if there is one.

@@ -326,6 +326,84 @@ fn a_found_config_symlinked_to_another_config_file_still_loads() {
     assert!(run.stdout.contains("docs/guide.md"), "{}", run.stdout);
 }
 
+#[cfg(unix)]
+#[test]
+fn an_extends_symlinked_out_of_the_root_is_refused_alike_whatever_its_target_is() {
+    let project = web_project();
+    fs::create_dir(project.path("outside-dir")).expect("the outside directory should be creatable");
+    fs::write(
+        project.path("services/web/supdoc.config.toml"),
+        "extends = \"x/supdoc.config.toml\"\n",
+    )
+    .expect("the config should be writable");
+    fs::create_dir(project.path("services/web/x")).expect("the link directory should be creatable");
+    let link = project.path("services/web/x/supdoc.config.toml");
+    let link_to = |target: &str| -> Vec<_> {
+        // Renaming a fresh link over the old one swaps the target without deleting anything.
+        let staged = project.path("services/web/x/staged-link");
+        std::os::unix::fs::symlink(project.path(target), &staged)
+            .expect("the symlink should be creatable");
+        fs::rename(&staged, &link).expect("the symlink should replace the last one");
+        ERROR_FORMATS
+            .iter()
+            .map(|args| project.supdoc_in("services/web", args))
+            .collect()
+    };
+    let to_file = link_to(".env");
+    let to_directory = link_to("outside-dir");
+    let to_nothing = link_to("no-such-file");
+
+    for ((file_run, directory_run), missing_run) in
+        to_file.iter().zip(&to_directory).zip(&to_nothing)
+    {
+        let _ = file_run.assert_exit(78);
+        assert_no_secret(file_run);
+        assert!(
+            format!("{}{}", file_run.stdout, file_run.stderr).contains("config-extends-not-config"),
+            "`supdoc {}` should refuse the extends\nstdout:\n{}\nstderr:\n{}",
+            file_run.args,
+            file_run.stdout,
+            file_run.stderr
+        );
+        for (target, other) in [("a directory", directory_run), ("nothing", missing_run)] {
+            assert_eq!(
+                (&other.code, &other.stdout, &other.stderr),
+                (&file_run.code, &file_run.stdout, &file_run.stderr),
+                "`supdoc {}` with `extends` linked to {target} must match the link to `.env`: \
+                 the result must not reveal what the link's target is",
+                file_run.args
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn an_extends_symlinked_to_another_config_file_still_loads() {
+    let project = web_project();
+    fs::create_dir(project.path("shared")).expect("the shared directory should be creatable");
+    fs::write(
+        project.path("shared/supdoc.config.toml"),
+        "include = [\"docs/guide.md\"]\n",
+    )
+    .expect("the shared config should be writable");
+    fs::write(
+        project.path("services/web/supdoc.config.toml"),
+        "extends = \"x/supdoc.config.toml\"\n",
+    )
+    .expect("the config should be writable");
+    fs::create_dir(project.path("services/web/x")).expect("the link directory should be creatable");
+    std::os::unix::fs::symlink(
+        project.path("shared/supdoc.config.toml"),
+        project.path("services/web/x/supdoc.config.toml"),
+    )
+    .expect("the symlink should be creatable");
+
+    let run = project.supdoc_in("services/web", &["check"]);
+
+    let _ = run.assert_exit(0);
+}
+
 #[test]
 fn the_config_flag_still_loads_a_file_of_any_name() {
     let project = web_project();

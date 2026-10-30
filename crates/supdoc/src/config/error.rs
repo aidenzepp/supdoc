@@ -46,7 +46,7 @@ pub enum ConfigError {
         error: toml::de::Error,
     },
 
-    /// `extends` names a file that doesn't exist.
+    /// `extends` names a file that doesn't exist, reached without following a symlink.
     ExtendsMissing {
         /// The config that wrote `extends`.
         file: AbsolutePath,
@@ -58,7 +58,7 @@ pub enum ConfigError {
         resolved: AbsolutePath,
     },
 
-    /// `extends` names a directory.
+    /// `extends` names a directory, reached without following a symlink.
     ExtendsDirectory {
         /// The config that wrote `extends`.
         file: AbsolutePath,
@@ -71,7 +71,9 @@ pub enum ConfigError {
     },
 
     /// `extends` names a file that isn't called `supdoc.config.toml`, before or after following
-    /// symlinks. supdoc refuses it without reading it.
+    /// symlinks, or goes through a symlink that doesn't lead to a `supdoc.config.toml` file. A
+    /// dangling link and one to a directory are this error too, so the target stays unknown.
+    /// supdoc refuses it without reading it.
     ExtendsNotConfig {
         /// The config that wrote `extends`.
         file: AbsolutePath,
