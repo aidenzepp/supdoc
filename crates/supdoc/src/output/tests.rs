@@ -58,7 +58,7 @@ fn fatal_error_text_matches_golden() {
         "\"../../supdoc.confg.toml\"",
         "config-extends-missing",
         Severity::Error,
-        "apps/web/supdoc.config.toml extends `../../supdoc.confg.toml`, but no file exists at /repo/supdoc.confg.toml",
+        "apps/web/supdoc.config.toml extends `../../supdoc.confg.toml`, but no file exists at supdoc.confg.toml",
         "point `extends` at an existing supdoc.config.toml, relative to this file",
     );
     let (mut output, _stdout, stderr) = captured(settings(OutputFormat::Text, Verbosity::Normal));

@@ -14,6 +14,7 @@ use serde::Serialize;
 use crate::config::CONFIG_FILE_NAME;
 use crate::lock::error::shell_quote;
 use crate::output::json::Envelope;
+use crate::output::paths::relative_to;
 use crate::output::{Output, OutputError, Report, TextContext};
 use crate::path::AbsolutePath;
 
@@ -167,12 +168,10 @@ fn require_parent_directory(target: &AbsolutePath, context: &Context) -> Result<
     }
 }
 
-/// `target` as a person reads it in a note or a message: relative to `cwd` when it is beneath it.
+/// `target` as a person reads it in a note or a message: relative to `cwd`, climbing out of it
+/// when `-c` names a file above it, as the config errors name files.
 fn label(target: &AbsolutePath, cwd: &AbsolutePath) -> String {
-    target.strip_prefix(cwd).map_or_else(
-        || target.display().to_string(),
-        |relative| relative.display().to_string(),
-    )
+    relative_to(cwd, target)
 }
 
 /// Fails with `cli-init-exists` when something is already at `target`.
@@ -467,6 +466,34 @@ mod tests {
                 "cannot write nope/x.toml: No such file or directory (os error 2)",
             ],
             "the messages should name the file as typed, not by its absolute path"
+        );
+    }
+
+    #[test]
+    fn refusal_and_write_failure_climb_out_of_a_subdirectory_as_typed() {
+        let dir = tempfile::tempdir().expect("a temp directory should be created");
+        std::fs::create_dir(dir.path().join("docs")).expect("the docs directory should be created");
+        std::fs::write(config_path(&dir), "# mine\n")
+            .expect("the existing config should be written");
+        let docs = AbsolutePath::new(&dir.path().join("docs")).expect("a nested path is absolute");
+        let in_docs = |flags: &[&str]| {
+            let (args, mut context) = context_in(&dir, flags);
+            context.cwd = docs.clone();
+            run_captured(&args, &context).0
+        };
+
+        let exists = in_docs(&["-c", "../supdoc.config.toml"]);
+        let missing = in_docs(&["-c", "../nope/x.toml"]);
+
+        let exists = exists.expect_err("init should refuse to overwrite the -c path");
+        let missing = missing.expect_err("init should fail without the -c path's directory");
+        assert_eq!(
+            [exists.message(), missing.message()],
+            [
+                "../supdoc.config.toml already exists",
+                "cannot write ../nope/x.toml: No such file or directory (os error 2)",
+            ],
+            "from a subdirectory the messages should name the file as typed, not absolutely"
         );
     }
 

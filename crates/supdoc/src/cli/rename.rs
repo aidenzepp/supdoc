@@ -24,6 +24,7 @@ use crate::config::{CONFIG_FILE_NAME, Config, ConfigError};
 use crate::finding::{Finding, Location};
 use crate::link::destination::parse_destination;
 use crate::link::{LinkKey, SourcePath, Target};
+use crate::lock::error::LockError;
 use crate::lock::io::write_atomically;
 use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
 use crate::namespace::NamespaceName;
@@ -209,7 +210,13 @@ impl Plan {
             self.lock
                 .next()
                 .write(&lock_path(&self.root))
-                .map_err(|error| self.write_failed(LOCK_FILE_NAME, &error.to_string(), &written))?;
+                .map_err(|error| {
+                    let reason = match &error {
+                        LockError::Write { error, .. } => error.to_string(),
+                        other => other.message_from(&self.root),
+                    };
+                    self.write_failed(LOCK_FILE_NAME, &reason, &written)
+                })?;
             written.push(LOCK_FILE_NAME.to_owned());
         }
         let renamed = replace_ranges(
@@ -467,11 +474,8 @@ impl ConfigEdit {
         new: &NamespaceName,
     ) -> Result<Self, CliError> {
         let text = read_config(file, cwd)?;
+        let shown = shown_from_root(file, root);
         let relative = file.strip_prefix(root).map(Path::to_path_buf);
-        let shown = relative.as_deref().map_or_else(
-            || file.display().to_string(),
-            |path| path.display().to_string(),
-        );
         let Some(key) = namespace_key(&text, old) else {
             return Err(CliError::new(
                 "cli-rename-file-changed",
@@ -703,7 +707,7 @@ fn target_exists(config: &Config, old: &NamespaceName, new: &NamespaceName) -> C
         _ if old == new => format!("`{new}` is already the namespace's name"),
         Some(file) => format!(
             "a namespace named `{new}` already exists, defined in {}",
-            file.display()
+            shown_from_root(file, config.root())
         ),
         None => format!("a namespace named `{new}` already exists"),
     };
@@ -713,6 +717,15 @@ fn target_exists(config: &Config, old: &NamespaceName, new: &NamespaceName) -> C
         "Run `supdoc namespace list` to see the names in use, and choose a NEW name none of \
          them has. Nothing was changed",
         CliError::REFUSED_EXIT_CODE,
+    )
+}
+
+/// `file` as rename's messages name it: relative to the project `root`, or absolute when it is
+/// outside the root, as a config the project extends often is.
+fn shown_from_root(file: &AbsolutePath, root: &AbsolutePath) -> String {
+    file.strip_prefix(root).map_or_else(
+        || file.display().to_string(),
+        |relative| relative.display().to_string(),
     )
 }
 
@@ -1446,6 +1459,19 @@ web = \"services/web\"
     }
 
     #[test]
+    fn namespace_rename_existing_new_names_the_defining_config_from_the_root() {
+        let project = Project::new();
+
+        let run = project.rename_from("docs", &["namespace", "rename", "auth", "web", "--yes"]);
+
+        assert_eq!(
+            run.error().message(),
+            "a namespace named `web` already exists, defined in supdoc.config.toml",
+            "the project's own config is named relative to the root, not absolutely"
+        );
+    }
+
+    #[test]
     fn namespace_rename_inherited_namespace_is_refused_naming_its_file() {
         let project = Project::new();
         // A namespace is inherited only when it names a directory inside the child's root.
@@ -1618,6 +1644,51 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
             use std::os::unix::fs::PermissionsExt as _;
             let _restored = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
         }
+    }
+
+    /// Makes a directory read-only until dropped, then gives write access back, so a failing
+    /// test still leaves its temporary project removable.
+    #[cfg(unix)]
+    struct ReadOnly(PathBuf);
+
+    #[cfg(unix)]
+    impl ReadOnly {
+        fn new(dir: PathBuf) -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o555))
+                .expect("the fixture directory permissions should be settable");
+            Self(dir)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ReadOnly {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _restored = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_write_failure_names_the_lockfile_once_and_relative() {
+        let project = Project::new();
+        project.record_all();
+        let plan = project.plan("auth", "identity");
+        let _read_only = ReadOnly::new(project.dir.path().to_path_buf());
+
+        let error = plan
+            .apply()
+            .expect_err("the lockfile can't be written into a read-only root");
+
+        assert_eq!(
+            (error.code(), error.message()),
+            (
+                "cli-rename-write",
+                "cannot write supdoc.lock: Permission denied (os error 13)"
+            ),
+            "the lockfile is named once, relative to the root"
+        );
     }
 
     #[cfg(unix)]
