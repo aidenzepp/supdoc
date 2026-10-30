@@ -14,6 +14,7 @@ use serde::Serialize;
 use crate::config::Config;
 use crate::finding::{Finding, Severity};
 use crate::link::SymbolPath;
+use crate::lock::error::shell_quote;
 use crate::namespace::NamespaceName;
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
@@ -24,7 +25,7 @@ use crate::read::cartridge::{Languages, SourceFile, Symbol};
 use crate::read::error::{ReadError, ResolveError};
 
 use super::args::ResolveArgs;
-use super::project::{absolute, load_config, path_missing};
+use super::project::{absolute, invocation, load_config, path_missing};
 use super::{CliError, Context, Outcome};
 
 /// Runs `supdoc resolve`: prints every symbol in `FILE`, or the one `SYMBOL` names.
@@ -43,10 +44,11 @@ pub fn run(
     context: &Context,
     output: &mut Output,
 ) -> Result<Outcome, CliError> {
-    let config = load_config(context, output, "resolve")?;
+    let command = command_text(args);
+    let config = load_config(context, output, &command)?;
     let path = locate(&config, &context.cwd, &args.file)?;
     let file = SourceFile::read(path, &Languages::builtin())
-        .map_err(|error| read_failed(&error, config.root()))?;
+        .map_err(|error| read_failed(&error, config.root(), &args.file))?;
     let table = file.language().symbols(&file);
 
     let (symbols, query, truncated) = if let Some(query) = &args.symbol {
@@ -66,7 +68,11 @@ pub fn run(
     };
     let listed = symbols.len();
     let findings = if file.has_syntax_errors() {
-        vec![syntax_errors(&file, config.root())]
+        vec![syntax_errors(
+            &file,
+            config.root(),
+            &invocation(context, &command),
+        )]
     } else {
         Vec::new()
     };
@@ -133,7 +139,7 @@ fn locate(config: &Config, cwd: &AbsolutePath, typed: &Path) -> Result<AbsoluteP
         None => absolute(cwd, typed),
     };
     if found.as_path().symlink_metadata().is_err() {
-        return Err(path_missing(typed));
+        return Err(path_missing(typed, cwd));
     }
     if found.as_path().is_dir() {
         return Err(directory(typed));
@@ -182,8 +188,9 @@ fn unknown_namespace(config: &Config, name: &NamespaceName) -> CliError {
 
 /// The error for a file that couldn't be read, with the read error's own code and help.
 ///
-/// The message names the file relative to the project `root`, as JSON shows paths (K5).
-fn read_failed(error: &ReadError, root: &AbsolutePath) -> CliError {
+/// The message names the file relative to the project `root`, as JSON shows paths (K5). A
+/// non-UTF-8 file's help repeats `typed`, the `FILE` as written.
+fn read_failed(error: &ReadError, root: &AbsolutePath, typed: &Path) -> CliError {
     let exit_code = match error {
         ReadError::Missing { .. } => CliError::USAGE_EXIT_CODE,
         ReadError::Io { .. } => CliError::IO_EXIT_CODE,
@@ -193,12 +200,15 @@ fn read_failed(error: &ReadError, root: &AbsolutePath) -> CliError {
         | ReadError::UnsupportedLanguage { .. } => CliError::REFUSED_EXIT_CODE,
     };
     let shown = relative_to(root, error.path());
-    CliError::new(
-        error.code(),
-        error.message_naming(&shown),
-        error.help(),
-        exit_code,
-    )
+    let help = match error {
+        // `exclude` only removes a file from the scan, and resolve reads FILE regardless.
+        ReadError::NotUtf8 { .. } => format!(
+            "Save `{}` as UTF-8, or resolve a file that is",
+            typed.display()
+        ),
+        _ => error.help(),
+    };
+    CliError::new(error.code(), error.message_naming(&shown), help, exit_code)
 }
 
 /// The error for a `SYMBOL` that names no single symbol, with the resolve error's own code and
@@ -227,10 +237,22 @@ fn output_failed(error: &OutputError) -> CliError {
     )
 }
 
+/// The command that repeats this run, as `supdoc resolve FILE [SYMBOL]` takes it, for helps that
+/// say to run it again.
+fn command_text(args: &ResolveArgs) -> String {
+    let mut command = format!("resolve {}", shell_quote(&args.file.display().to_string()));
+    if let Some(symbol) = &args.symbol {
+        command.push(' ');
+        command.push_str(&shell_quote(&symbol.to_string()));
+    }
+    command
+}
+
 /// The warning that `file` has syntax errors, so its symbols may be incomplete (03 R8).
 ///
-/// It names the file relative to the project `root`, as JSON shows paths (K5).
-fn syntax_errors(file: &SourceFile, root: &AbsolutePath) -> Finding {
+/// It names the file relative to the project `root`, as JSON shows paths (K5). Its help says to
+/// run `again`, the command that repeats this run.
+fn syntax_errors(file: &SourceFile, root: &AbsolutePath, again: &str) -> Finding {
     Finding::new(
         "read-syntax-errors",
         Severity::Warning,
@@ -239,7 +261,7 @@ fn syntax_errors(file: &SourceFile, root: &AbsolutePath) -> Finding {
             relative_to(root, file.path())
         ),
     )
-    .with_help("Fix the syntax errors, then run `supdoc resolve` again")
+    .with_help(format!("Fix the syntax errors, then run `{again}` again"))
 }
 
 /// What `resolve` prints: the symbols of one file, or the one symbol asked for.

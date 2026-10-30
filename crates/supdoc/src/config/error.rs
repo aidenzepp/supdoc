@@ -3,6 +3,7 @@
 use std::fmt::Write as _;
 use std::ops::Range;
 
+use crate::lock::error::shell_quote;
 use crate::namespace::NamespaceName;
 use crate::path::{AbsolutePath, RelativePath};
 
@@ -176,12 +177,14 @@ impl ConfigError {
                  through `extends`"
                     .to_owned(),
             ),
-            Self::SymlinkNotConfig { .. } => Some(
-                "supdoc reads no other file as the project's config. Replace the symlink with a \
-                 real config, for example `rm supdoc.config.toml && supdoc init`, or pass \
-                 `--config` with the file you mean"
-                    .to_owned(),
-            ),
+            Self::SymlinkNotConfig { path } => {
+                let config = shell_quote(&path.display().to_string());
+                Some(format!(
+                    "supdoc reads no other file as the project's config. Replace the symlink with \
+                     a real config, for example `rm {config} && supdoc -c {config} init`, or pass \
+                     `--config` with the file you mean"
+                ))
+            }
             Self::NamespaceOutsideRoot { .. } => Some(
                 "Point the namespace at a directory inside the project root, or move the project's \
                  `supdoc.config.toml` up to a directory that holds both. supdoc reads nothing \

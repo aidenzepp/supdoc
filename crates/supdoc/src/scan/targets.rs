@@ -478,7 +478,7 @@ fn read_failed(error: &ReadError, root: &AbsolutePath, first: &Occurrence) -> Fi
     broken(
         error.code(),
         error.message_naming(&shown),
-        error.help(),
+        error.target_help(&shown),
         first,
     )
 }

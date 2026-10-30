@@ -109,15 +109,29 @@ impl ReadError {
         }
     }
 
+    /// What to do next when the file is a link's target rather than a file being scanned, with
+    /// the file named as `shown`.
+    ///
+    /// The same as [`ReadError::help`] except for a file that is missing or not UTF-8. `exclude`
+    /// removes a file from the scan, which a link to it does not care about, so it is not offered.
+    #[must_use]
+    pub fn target_help(&self, shown: &str) -> String {
+        match self {
+            Self::Missing { .. } => {
+                format!("If `{shown}` moved, update the link to its new path")
+            }
+            Self::NotUtf8 { .. } => {
+                format!("Save `{shown}` as UTF-8, or point the link at a file that is")
+            }
+            _ => self.help(),
+        }
+    }
+
     /// What to do next.
     #[must_use]
     pub fn help(&self) -> String {
         match self {
-            Self::Missing { .. } => {
-                "If the file moved, update the link. `supdoc fix` can do it when \
-                                     the symbol still exists elsewhere"
-                    .to_owned()
-            }
+            Self::Missing { .. } => "If the file moved, update the link to its new path".to_owned(),
             Self::Io { .. } => {
                 "Check that the current user can read the file, for example with `chmod u+r` on it"
                     .to_owned()

@@ -21,6 +21,7 @@ use crate::check::reconcile::reconcile;
 use crate::finding::Finding;
 use crate::hash::LineEndings;
 use crate::link::LinkKey;
+use crate::lock::error::shell_quote;
 use crate::output::json::Envelope;
 use crate::output::text::{render_finding, visible};
 use crate::output::{Output, OutputError, PathStyle, Report, Summary, TextContext};
@@ -59,7 +60,7 @@ const MIGRATION_STATES: [LinkState; 3] = [LinkState::Failed, LinkState::New, Lin
 /// `--state`, `scan-root-unreadable` (74), and `cli-update-output` when the report cannot be
 /// written (74).
 pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
-    let config = load_config(context, output, "update")?;
+    let config = load_config(context, output, &command_text(args))?;
     let scope = scope(&args.paths, &context.cwd, config.root())?;
     let (lock, settings_change) = read_lock_for_update(&config)?;
     if let Some(change) = settings_change
@@ -450,11 +451,26 @@ fn render_rows(context: &TextContext, rows: &[ChangeRow], out: &mut dyn Write) -
     Ok(())
 }
 
-/// The cause of a broken link, as a top-level finding pointing at `supdoc fix`, or `None` for a
-/// link in any other state (05 C7, 06a U5).
+/// The command that repeats this run, as `supdoc update [PATH]... [--yes]` takes it, for helps
+/// that say to run it again.
+fn command_text(args: &UpdateArgs) -> String {
+    let mut command = String::from("update");
+    for path in &args.paths {
+        command.push(' ');
+        command.push_str(&shell_quote(&path.display().to_string()));
+    }
+    if args.confirm.mode() == WriteMode::Apply {
+        command.push_str(" --yes");
+    }
+    command
+}
+
+/// The cause of a broken link, as a top-level finding, or `None` for a link in any other state
+/// (05 C7, 06a U5).
 ///
-/// The hint names the link's source as `paths` shows text: relative to the current directory, so
-/// the command runs where this one did.
+/// Its help adds that update can't record the link. It points at `supdoc fix` only when the
+/// finding carries a fix, so the command repairs that cause, and names the link's source as
+/// `paths` shows text: relative to the current directory, so the command runs where this one did.
 fn broken_finding(link: &LinkReport, paths: &PathStyle) -> Option<Finding> {
     if link.state != LinkState::Broken {
         return None;
@@ -465,10 +481,14 @@ fn broken_finding(link: &LinkReport, paths: &PathStyle) -> Option<Finding> {
     {
         finding = finding.with_location(location.clone());
     }
-    let pointer = format!(
-        "update can't record a broken link; repair it with `supdoc fix {} --yes`",
-        paths.text(&link.key.source)
-    );
+    let pointer = if finding.fix.is_some() {
+        format!(
+            "update can't record a broken link; repair it with `supdoc fix {} --yes`",
+            shell_quote(&paths.text(&link.key.source))
+        )
+    } else {
+        "update can't record a broken link until it is repaired".to_owned()
+    };
     let help = match finding.help.take() {
         Some(own) if own.ends_with(['.', '?', '!']) => format!("{own} {}", sentence(&pointer)),
         Some(own) => format!("{own}. {}", sentence(&pointer)),
@@ -916,10 +936,7 @@ mod tests {
     #[test]
     fn update_reports_broken_links_as_findings_and_exits_0() {
         let project = Project::new();
-        project.write(
-            "docs/broken.md",
-            "See [gone](../src/lib.rs#subtract) here.\n",
-        );
+        project.write("docs/broken.md", "See [gone](../src/lib.rs#ad) here.\n");
 
         let run = project.update(&["--json", "update", "--yes"]);
         let text = project.update(&["update"]);
@@ -961,10 +978,7 @@ mod tests {
     fn update_fix_hint_names_the_source_from_a_subdirectory() {
         let project = Project::new();
         project.write("supdoc.config.toml", "");
-        project.write(
-            "docs/broken.md",
-            "See [gone](../src/lib.rs#subtract) here.\n",
-        );
+        project.write("docs/broken.md", "See [gone](../src/lib.rs#ad) here.\n");
 
         let text = project.update_in("docs", &["update"], false);
         let json = project.update_in("docs", &["--json", "update"], false);

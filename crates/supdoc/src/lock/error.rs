@@ -38,6 +38,9 @@ pub enum ParseLockError {
         line: Option<usize>,
         /// The underlying TOML or field error.
         error: toml::de::Error,
+        /// Whether the error is the `[features.hash]` table, or a key in it, being absent
+        /// (rather than a `[[link]]` entry missing the same key).
+        missing_features: bool,
     },
 
     /// Two entries have the same key but different hashes.
@@ -60,6 +63,20 @@ fn toml_message(line: Option<usize>, error: &toml::de::Error) -> String {
     }
 }
 
+/// `text` as one shell word: unchanged when it holds only characters the shell never treats
+/// specially, otherwise in single quotes, so a help can name a path with spaces and still run.
+pub(crate) fn shell_quote(text: &str) -> String {
+    let plain = !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+=:,@%".contains(c));
+    if plain {
+        text.to_owned()
+    } else {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
+}
+
 impl ParseLockError {
     /// A stable identifier for machine-readable output.
     #[must_use]
@@ -74,7 +91,7 @@ impl ParseLockError {
 
     /// What to do about it.
     #[must_use]
-    pub const fn help(&self) -> &'static str {
+    pub fn help(&self) -> &'static str {
         match self {
             Self::ConflictMarkers { .. } => {
                 "Resolve the conflict, keeping both sides' entries, then run `supdoc check`. \
@@ -83,6 +100,14 @@ impl ParseLockError {
             Self::NewerVersion { .. } => {
                 "Upgrade supdoc with `cargo install supdoc`. This lockfile was written by a \
                  newer release"
+            }
+            Self::Toml {
+                missing_features: true,
+                ..
+            } => {
+                "Add `[features.hash]` and `line-endings = \"normalize\"` under `version = 1`, \
+                 as every lockfile supdoc writes has, then run `supdoc check`. Or delete \
+                 `supdoc.lock` and run `supdoc update --yes` to record the links again"
             }
             Self::Toml { .. } => {
                 "Fix that line or delete the entry, then run `supdoc check`. \
@@ -153,20 +178,21 @@ impl LockError {
 
     /// What to do about it.
     #[must_use]
-    pub fn help(&self) -> &'static str {
+    pub fn help(&self) -> String {
         match self {
-            Self::Read { .. } => {
-                "Give the current user read access, for example with `chmod u+r supdoc.lock`"
-            }
-            Self::OutsideRoot { .. } => {
+            Self::Read { path, .. } => format!(
+                "Give the current user read access, for example with `chmod u+r {}`",
+                shell_quote(&path.display().to_string())
+            ),
+            Self::OutsideRoot { path } => format!(
                 "supdoc reads only a supdoc.lock inside the project root. Remove the symlink with \
-                 `rm supdoc.lock`, then run `supdoc update --yes` to record the links again"
-            }
-            Self::Parse { error, .. } => error.help(),
-            Self::Write { .. } => {
-                "The existing lockfile was not changed. Make the directory that holds \
-                 `supdoc.lock` writable, then run the same command again"
-            }
+                 `rm {}`, then run `supdoc update --yes` to record the links again",
+                shell_quote(&path.display().to_string())
+            ),
+            Self::Parse { error, .. } => error.help().to_owned(),
+            Self::Write { .. } => "The existing lockfile was not changed. Make the directory \
+                 that holds `supdoc.lock` writable, then run the same command again"
+                .to_owned(),
         }
     }
 
