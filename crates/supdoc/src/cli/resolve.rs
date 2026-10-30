@@ -48,7 +48,7 @@ pub fn run(
     let config = load_config(context, output, &command)?;
     let path = locate(&config, &context.cwd, &args.file)?;
     let file = SourceFile::read(path, &Languages::builtin())
-        .map_err(|error| read_failed(&error, config.root()))?;
+        .map_err(|error| read_failed(&error, config.root(), &args.file))?;
     let table = file.language().symbols(&file);
 
     let (symbols, query, truncated) = if let Some(query) = &args.symbol {
@@ -188,8 +188,9 @@ fn unknown_namespace(config: &Config, name: &NamespaceName) -> CliError {
 
 /// The error for a file that couldn't be read, with the read error's own code and help.
 ///
-/// The message names the file relative to the project `root`, as JSON shows paths (K5).
-fn read_failed(error: &ReadError, root: &AbsolutePath) -> CliError {
+/// The message names the file relative to the project `root`, as JSON shows paths (K5). A
+/// non-UTF-8 file's help repeats `typed`, the `FILE` as written.
+fn read_failed(error: &ReadError, root: &AbsolutePath, typed: &Path) -> CliError {
     let exit_code = match error {
         ReadError::Missing { .. } => CliError::USAGE_EXIT_CODE,
         ReadError::Io { .. } => CliError::IO_EXIT_CODE,
@@ -199,12 +200,15 @@ fn read_failed(error: &ReadError, root: &AbsolutePath) -> CliError {
         | ReadError::UnsupportedLanguage { .. } => CliError::REFUSED_EXIT_CODE,
     };
     let shown = relative_to(root, error.path());
-    CliError::new(
-        error.code(),
-        error.message_naming(&shown),
-        error.help(),
-        exit_code,
-    )
+    let help = match error {
+        // `exclude` only removes a file from the scan, and resolve reads FILE regardless.
+        ReadError::NotUtf8 { .. } => format!(
+            "Save `{}` as UTF-8, or resolve a file that is",
+            typed.display()
+        ),
+        _ => error.help(),
+    };
+    CliError::new(error.code(), error.message_naming(&shown), help, exit_code)
 }
 
 /// The error for a `SYMBOL` that names no single symbol, with the resolve error's own code and

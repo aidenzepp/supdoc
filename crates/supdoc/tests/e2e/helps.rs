@@ -265,3 +265,35 @@ fn lock_without_hash_features_help_names_the_table_and_the_recovery() {
         );
     }
 }
+
+#[test]
+fn rename_config_failure_help_repeats_the_whole_command() {
+    let project = project();
+    write(&project, "supdoc.config.toml", "include = \n");
+
+    let run = project.supdoc(&["namespace", "rename", "old", "new", "--yes"]);
+
+    let _ = run.assert_exit(78);
+    assert!(
+        run.stderr
+            .contains("run `supdoc namespace rename old new --yes` again"),
+        "rename needs OLD, NEW and --yes:\n{}",
+        run.stderr
+    );
+}
+
+#[test]
+fn resolve_non_utf8_file_help_does_not_offer_exclude() {
+    let project = project();
+    fs::write(project.path("src/bad.rs"), [0xff, 0xfe, b'\n'])
+        .expect("the file should be writable");
+
+    let run = project.supdoc(&["resolve", "src/bad.rs"]);
+
+    let _ = run.assert_exit(1);
+    assert!(
+        !run.stderr.contains("exclude"),
+        "excluding a file leaves resolve reading it:\n{}",
+        run.stderr
+    );
+}
