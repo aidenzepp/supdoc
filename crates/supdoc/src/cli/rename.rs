@@ -29,7 +29,7 @@ use crate::lock::io::write_atomically;
 use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
 use crate::namespace::NamespaceName;
 use crate::output::json::{Envelope, LocationJson};
-use crate::output::text::visible;
+use crate::output::text::{render_finding, visible};
 use crate::output::{Output, OutputError, Report, TextContext};
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile};
@@ -938,6 +938,9 @@ impl Report for RenameReport {
                 visible(&context.paths.text_absolute(&first.path)),
                 count(lock.len(), "entry", "entries"),
             )?;
+        }
+        for finding in &self.findings {
+            render_finding(context, finding, out)?;
         }
         Ok(())
     }
