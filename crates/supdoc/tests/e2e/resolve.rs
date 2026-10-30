@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::support::{Project, array_at, at, links};
+use crate::support::{Project, Run, array_at, at, links};
 
 /// The symbol paths `supdoc --json resolve <file>` lists, run from `project`'s root.
 fn listed_symbols(project: &Project, file: &str) -> BTreeSet<String> {
@@ -223,7 +223,7 @@ fn resolve_file_over_16_mib_exits_1_with_read_too_large() {
 }
 
 #[test]
-fn resolve_file_outside_the_root_is_allowed_and_json_uses_dotdot() {
+fn resolve_file_outside_the_root_is_refused_without_listing_it() {
     let project = Project::fixture("basic");
     let outside = tempfile::tempdir().expect("a second temporary directory should be creatable");
     let file = outside.path().join("elsewhere.rs");
@@ -232,24 +232,120 @@ fn resolve_file_outside_the_root_is_allowed_and_json_uses_dotdot() {
         .to_str()
         .expect("the temp directory path should be UTF-8");
 
-    let report = project
-        .supdoc(&["--json", "resolve", file])
-        .assert_exit(0)
-        .json();
+    for run in both_formats(&project, ".", &[file]) {
+        assert_refused_as_outside(&run, "zed");
+    }
+}
 
-    let shown = at(&report, "/data/file")
-        .as_str()
-        .unwrap_or_else(|| panic!("`/data/file` should be a string: {report}"));
+/// The `monorepo` fixture with `services/web` as a project whose config is `config`, and the
+/// issue #54 files in `services/outside`, next to the project and so outside its root.
+fn project_beside_outside_files(config: &str) -> Project {
+    let project = Project::fixture("monorepo");
+    std::fs::write(project.path("services/web/supdoc.config.toml"), config)
+        .expect("the config should be writable");
+    std::fs::create_dir(project.path("services/outside"))
+        .expect("the outside directory should be creatable");
+    for (name, text) in [
+        ("s.rs", "fn secret_api_key_xyz() {}\n"),
+        ("notes.md", "# private heading about salary\n"),
+        ("o.rs", "fn ok_one() {}\n"),
+    ] {
+        std::fs::write(project.path(&format!("services/outside/{name}")), text)
+            .expect("the outside file should be writable");
+    }
+    project
+}
+
+/// `supdoc resolve <args>` run from `dir` as text and as `--json`.
+fn both_formats(project: &Project, dir: &str, args: &[&str]) -> [Run; 2] {
+    let text = [&["resolve"][..], args].concat();
+    let json = [&["--json", "resolve"][..], args].concat();
+    [project.supdoc_in(dir, &text), project.supdoc_in(dir, &json)]
+}
+
+/// Fails unless `run` was refused with `cli-path-outside-project` (exit 2) and neither stream
+/// shows `leak`, a symbol or heading of the outside file.
+fn assert_refused_as_outside(run: &Run, leak: &str) {
+    let _ = run.assert_exit(2);
     assert!(
-        shown.starts_with("../") && shown.ends_with("/elsewhere.rs"),
-        "a file outside the root should be named with `..` (R16), got {shown:?}"
+        run.stderr.contains("cli-path-outside-project"),
+        "`supdoc {}` should be refused as outside the project; stderr:\n{}",
+        run.args,
+        run.stderr
     );
+    assert!(
+        !run.stdout.contains(leak) && !run.stderr.contains(leak),
+        "`supdoc {}` showed `{leak}` from a file outside the project\nstdout:\n{}\nstderr:\n{}",
+        run.args,
+        run.stdout,
+        run.stderr
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn resolve_through_a_symlink_out_of_the_root_lists_no_outside_symbol() {
+    let project = project_beside_outside_files("");
+    std::os::unix::fs::symlink("../../outside/s.rs", project.path("services/web/src/x.rs"))
+        .expect("the symlink should be creatable");
+
+    for run in both_formats(&project, "services/web", &["src/x.rs"]) {
+        assert_refused_as_outside(&run, "secret_api_key_xyz");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn resolve_through_a_markdown_symlink_out_of_the_root_lists_no_outside_heading() {
+    let project = project_beside_outside_files("");
+    std::os::unix::fs::symlink("../outside/notes.md", project.path("services/web/n.md"))
+        .expect("the symlink should be creatable");
+
+    for run in both_formats(&project, "services/web", &["n.md"]) {
+        assert_refused_as_outside(&run, "salary");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn resolve_of_a_missing_symbol_through_a_symlink_out_of_the_root_suggests_no_outside_symbol() {
+    let project = project_beside_outside_files("");
+    std::os::unix::fs::symlink("../../outside/o.rs", project.path("services/web/src/b.rs"))
+        .expect("the symlink should be creatable");
+
+    for run in both_formats(&project, "services/web", &["src/b.rs", "SECRET_TOKEN"]) {
+        assert_refused_as_outside(&run, "ok_one");
+    }
+}
+
+#[test]
+fn resolve_of_a_typed_path_climbing_out_of_the_root_is_refused() {
+    let project = project_beside_outside_files("");
+
+    for run in both_formats(&project, "services/web", &["../outside/s.rs"]) {
+        assert_refused_as_outside(&run, "secret_api_key_xyz");
+    }
+}
+
+#[test]
+fn resolve_of_a_namespaced_path_climbing_out_of_the_root_is_refused() {
+    let project = project_beside_outside_files("[namespaces]\nns = \"src\"\n");
+
+    for run in both_formats(&project, "services/web", &["ns:../../outside/s.rs"]) {
+        assert_refused_as_outside(&run, "secret_api_key_xyz");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn resolve_through_a_symlink_to_a_file_inside_the_root_still_lists_its_symbols() {
+    let project = Project::fixture("basic");
+    std::os::unix::fs::symlink("lib.rs", project.path("src/alias.rs"))
+        .expect("the symlink should be creatable");
+
     assert_lists(
-        &array_at(&report, "/data/symbols")
-            .iter()
-            .filter_map(|symbol| symbol.pointer("/path")?.as_str().map(str::to_owned))
-            .collect(),
-        &["zed"],
-        shown,
+        &listed_symbols(&project, "src/alias.rs"),
+        &["A", "add"],
+        "src/alias.rs",
     );
 }

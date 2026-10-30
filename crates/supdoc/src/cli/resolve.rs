@@ -25,7 +25,7 @@ use crate::read::cartridge::{Languages, SourceFile, Symbol};
 use crate::read::error::{ReadError, ResolveError};
 
 use super::args::ResolveArgs;
-use super::project::{absolute, ensure_exists, invocation, load_config};
+use super::project::{absolute, ensure_exists, invocation, load_config, path_outside};
 use super::{CliError, Context, Outcome};
 
 /// Runs `supdoc resolve`: prints every symbol in `FILE`, or the one `SYMBOL` names.
@@ -34,9 +34,10 @@ use super::{CliError, Context, Outcome};
 ///
 /// # Errors
 ///
-/// Returns the config's own error (78, or 74 when unreadable), `cli-path-missing` for a missing
-/// `FILE` and `link-unknown-namespace` for an undefined namespace (both 2), `cli-path-unreadable`
-/// (74) for a `FILE` that can't be looked up, the file's own read
+/// Returns the config's own error (78, or 74 when unreadable), `link-unknown-namespace` for an
+/// undefined namespace, `cli-path-outside-project` for a `FILE` outside the project root and
+/// `cli-path-missing` for a missing `FILE` (all 2), `cli-path-unreadable` (74) for a `FILE` that
+/// can't be looked up, the file's own read
 /// error (1, or 74 for I/O and 70 for a supdoc bug), `resolve-not-found` or `resolve-ambiguous`
 /// for a `SYMBOL` that names no single symbol (1), and `cli-resolve-output` when the report
 /// cannot be written (74).
@@ -118,11 +119,17 @@ pub fn schema() -> Result<schemars::Schema, CliError> {
 /// The file `typed` names: relative to the current directory, or, when written `namespace:path`,
 /// inside the namespace's directory.
 ///
+/// A file whose real location, every symlink followed, is outside the project root is refused
+/// before anything else looks at it, so nothing from it is read or printed (R1).
+///
+/// Effect: reads file metadata and symlinks along the path.
+///
 /// # Errors
 ///
 /// Returns `link-unknown-namespace` for a namespace the config doesn't define,
-/// `cli-path-missing` for a file that doesn't exist, and `cli-path-invalid` for a directory (all
-/// exit 2), and `cli-path-unreadable` (74) for one that can't be looked up for any other reason.
+/// `cli-path-outside-project` for a file outside the project root, `cli-path-missing` for a file
+/// that doesn't exist, and `cli-path-invalid` for a directory (all exit 2), and
+/// `cli-path-unreadable` (74) for one that can't be looked up for any other reason.
 fn locate(config: &Config, cwd: &AbsolutePath, typed: &Path) -> Result<AbsolutePath, CliError> {
     let namespaced = typed.to_str().and_then(|text| {
         let (name, rest) = text.split_once(':')?;
@@ -139,6 +146,9 @@ fn locate(config: &Config, cwd: &AbsolutePath, typed: &Path) -> Result<AbsoluteP
         }
         None => absolute(cwd, typed),
     };
+    if !config.contains(found.as_path()) {
+        return Err(path_outside(typed, config.root()));
+    }
     ensure_exists(&found, typed, cwd)?;
     if found.as_path().is_dir() {
         return Err(directory(typed));
