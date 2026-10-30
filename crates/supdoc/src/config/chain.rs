@@ -80,15 +80,15 @@ pub(super) fn discover(start: &AbsolutePath) -> Result<Option<AbsolutePath>, Con
     Ok(None)
 }
 
-/// Whether the symlink `link`, once every symlink is followed, is a file named
+/// Whether `path`, once every symlink along it is followed, is a file named
 /// `supdoc.config.toml`.
 ///
 /// Every failure to follow it counts as no, so a dangling link, a loop and a link to a directory
 /// all get the same answer as a link to a file with another name.
 ///
-/// Effect: reads symlinks along `link` and the metadata of where it leads.
-fn leads_to_config(link: &AbsolutePath) -> bool {
-    fs::canonicalize(link.as_path()).is_ok_and(|real| {
+/// Effect: reads symlinks along `path` and the metadata of where it leads.
+fn leads_to_config(path: &AbsolutePath) -> bool {
+    fs::canonicalize(path.as_path()).is_ok_and(|real| {
         real.file_name()
             .is_some_and(|name| name == CONFIG_FILE_NAME)
             && fs::metadata(&real).is_ok_and(|metadata| metadata.is_file())
@@ -117,6 +117,7 @@ fn really_config(file: &AbsolutePath) -> std::io::Result<bool> {
 ///
 /// Returns the first [`ConfigError`] found while reading, parsing or following `extends`.
 pub(super) fn read_chain(file: &AbsolutePath) -> Result<Vec<Layer>, ConfigError> {
+    let root = directory_of(file);
     let mut layers = Vec::new();
     // Each visited file with the name the filesystem knows it by, so a loop through a symlink
     // is still caught.
@@ -130,7 +131,7 @@ pub(super) fn read_chain(file: &AbsolutePath) -> Result<Vec<Layer>, ConfigError>
         })?;
         visited.push((identity(&current), current.clone()));
         if let Some(extends) = &raw.extends {
-            let target = resolve_extends(&current, extends)?;
+            let target = resolve_extends(&root, &current, extends)?;
             if let Some(start) = visited
                 .iter()
                 .position(|(known, _)| *known == identity(&target))
@@ -183,11 +184,17 @@ fn read_text(file: &AbsolutePath, is_start: bool) -> Result<String, ConfigError>
 /// are followed. Both are checked before anything is read, so a hostile `extends` can never make
 /// supdoc print another file's lines in a parse error.
 ///
+/// A value that leaves the root, or goes through a symlink, either leads to a
+/// `supdoc.config.toml` file or is refused alike, whatever is really there: see [`plain`] for
+/// why. Only a value that [`plain`] accepts is told apart as missing, a directory or unreadable.
+///
 /// # Errors
 ///
-/// `ExtendsNotConfig` for any other name, `ExtendsMissing` or `ExtendsDirectory` when the target
-/// isn't a file, `Read` for other failures.
+/// `ExtendsNotConfig` for any other name, or for a value [`plain`] refuses that doesn't lead to a
+/// config file; `ExtendsDirectory` for a value ending in `.` or `..`; and for a plain value,
+/// `ExtendsMissing` or `ExtendsDirectory` when it isn't a file, `Read` for other failures.
 fn resolve_extends(
+    root: &AbsolutePath,
     from: &AbsolutePath,
     extends: &toml::Spanned<RelativePath>,
 ) -> Result<AbsolutePath, ConfigError> {
@@ -197,7 +204,7 @@ fn resolve_extends(
         file: from.clone(),
         extends: value.clone(),
         span: extends.span(),
-        suggestion: config_inside(value, &resolved),
+        suggestion: config_inside(root, value, &resolved),
     };
     let not_config = || ConfigError::ExtendsNotConfig {
         file: from.clone(),
@@ -208,6 +215,13 @@ fn resolve_extends(
         None | Some(Component::CurDir | Component::ParentDir) => return Err(directory()),
         Some(Component::Normal(name)) if name == CONFIG_FILE_NAME => {}
         Some(_) => return Err(not_config()),
+    }
+    if !plain(root, &resolved) {
+        return if leads_to_config(&resolved) {
+            Ok(resolved)
+        } else {
+            Err(not_config())
+        };
     }
     match fs::metadata(resolved.as_path()) {
         Ok(metadata) if metadata.is_dir() => Err(directory()),
@@ -234,9 +248,53 @@ fn resolve_extends(
     }
 }
 
-/// `extends` pointing at the config file inside `directory`, if there is one.
-fn config_inside(extends: &RelativePath, directory: &AbsolutePath) -> Option<RelativePath> {
-    if !config_in(directory).is_some_and(|file| file.as_path().is_file()) {
+/// Whether `path` is provably the checkout's own: it lies beneath `root`, compared as text, and
+/// no entry from `root` down to `path`, `path` included, is a symlink.
+///
+/// The threat is a checkout learning whether paths outside it exist. Telling missing from a
+/// directory from unreadable answers that question for any path the checkout can make supdoc
+/// look at, so those answers are given only for paths this function accepts, and everything else
+/// gets one outcome decided by [`leads_to_config`] alone.
+///
+/// The test fails closed. Text that leaves `root` is refused without looking: a case variant, a
+/// firmlink or a link outside that leads back into the root is refused too, which costs a
+/// specific error and reveals nothing. Within the root, each entry is inspected without following
+/// it, from `root` downward, stopping at the first symlink, so every answer is a fact about an
+/// entry the checkout made. An entry that is missing or can't be inspected isn't a symlink.
+///
+/// The accepted cost: a value that leaves the root, such as a monorepo's
+/// `../shared/supdoc.config.toml`, still loads when a real config is there, but when it is
+/// missing, a directory or unreadable it reports `config-extends-not-config`, and a value ending
+/// in `..` that leaves the root gets no suggestion.
+///
+/// Effect: reads the metadata of entries beneath `root` on the way to `path`.
+fn plain(root: &AbsolutePath, path: &AbsolutePath) -> bool {
+    let Some(below) = path.strip_prefix(root) else {
+        return false;
+    };
+    if below.as_os_str().is_empty() {
+        return false;
+    }
+    let mut entry = root.as_path().to_path_buf();
+    below.components().all(|component| {
+        entry.push(component);
+        !fs::symlink_metadata(&entry).is_ok_and(|metadata| metadata.is_symlink())
+    })
+}
+
+/// `extends` pointing at the config file inside `directory`, if there is a [`plain`] one.
+///
+/// The file is inspected without following it, so a link there suggests nothing whatever it
+/// leads to.
+fn config_inside(
+    root: &AbsolutePath,
+    extends: &RelativePath,
+    directory: &AbsolutePath,
+) -> Option<RelativePath> {
+    let candidate = config_in(directory)?;
+    let is_plain_file = plain(root, &candidate)
+        && fs::symlink_metadata(candidate.as_path()).is_ok_and(|metadata| metadata.is_file());
+    if !is_plain_file {
         return None;
     }
     let suggested = extends.as_path().join(CONFIG_FILE_NAME);
