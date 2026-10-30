@@ -17,7 +17,7 @@ use crate::path::{AbsolutePath, RelativePath};
 
 use super::pattern::{AnchoredPatterns, PatternList};
 use super::raw::RawConfig;
-use super::{CONFIG_FILE_NAME, Config, ConfigError};
+use super::{CONFIG_FILE_NAME, Config, ConfigError, config_entry};
 
 /// One config file in an `extends` chain, as parsed.
 #[derive(Debug)]
@@ -45,8 +45,7 @@ fn config_in(dir: &AbsolutePath) -> Option<AbsolutePath> {
 ///
 /// A directory holds one when its entry named `supdoc.config.toml` is a regular file or a
 /// symlink, decided with `symlink_metadata` so the link is never followed to decide. Any other
-/// entry, such as a real directory or a FIFO, is skipped, unlike `scan/walk.rs`, which counts
-/// any entry with that name as a nested project. Whether a symlink's target exists must not
+/// entry, such as a real directory or a FIFO, is skipped. Whether a symlink's target exists must not
 /// change which config is found, or the exit status would reveal paths outside the root.
 ///
 /// A symlink must lead to a file really named `supdoc.config.toml`, the rule `extends` follows
@@ -62,18 +61,14 @@ fn config_in(dir: &AbsolutePath) -> Option<AbsolutePath> {
 pub(super) fn discover(start: &AbsolutePath) -> Result<Option<AbsolutePath>, ConfigError> {
     let mut dir = Some(start.clone());
     while let Some(current) = dir {
-        if let Some(candidate) = config_in(&current) {
-            match fs::symlink_metadata(candidate.as_path()) {
-                Ok(entry) if entry.file_type().is_symlink() => {
-                    return if leads_to_config(&candidate) {
-                        Ok(Some(candidate))
-                    } else {
-                        Err(ConfigError::SymlinkNotConfig { path: candidate })
-                    };
-                }
-                Ok(entry) if entry.is_file() => return Ok(Some(candidate)),
-                _ => {}
-            }
+        if let (Some(candidate), Some(entry)) =
+            (config_in(&current), config_entry(current.as_path()))
+        {
+            return if !entry.file_type().is_symlink() || leads_to_config(&candidate) {
+                Ok(Some(candidate))
+            } else {
+                Err(ConfigError::SymlinkNotConfig { path: candidate })
+            };
         }
         dir = current.parent();
     }

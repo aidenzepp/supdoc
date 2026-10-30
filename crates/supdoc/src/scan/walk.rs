@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::{DirEntry, Match, WalkBuilder};
 
-use crate::config::{CONFIG_FILE_NAME, Config};
+use crate::config::{CONFIG_FILE_NAME, Config, config_entry};
 use crate::finding::{Finding, Severity};
 use crate::link::SourcePath;
 use crate::output::paths::relative_to;
@@ -302,11 +302,11 @@ fn is_vcs_dir(dir: &Path) -> bool {
 
 /// Whether `dir` has its own config, which makes it a separate project (04 S4).
 ///
-/// Any entry with the config's name counts, a dangling symlink included, without following it:
-/// whether a symlink's target exists must not change the scan, or the scan would reveal paths
-/// outside the root.
+/// The same presence rule as the config search: an entry named `supdoc.config.toml` counts only
+/// when a no-follow check shows a regular file or a symlink, a dangling one included. A
+/// directory or a FIFO with that name does not make a nested project.
 fn is_nested_project(dir: &Path) -> bool {
-    fs::symlink_metadata(dir.join(CONFIG_FILE_NAME)).is_ok()
+    config_entry(dir).is_some()
 }
 
 /// Whether anything under `dir` can be inside `scope`, so narrowing the walk (04 S10) never
@@ -747,6 +747,15 @@ mod tests {
         .expect("the fixture symlink should be creatable");
 
         assert_eq!(project.sources(&Scope::All), ["real.rs"]);
+    }
+
+    #[test]
+    fn a_directory_named_like_the_config_does_not_make_a_nested_project() {
+        let project = Project::new();
+        project.write("inner/supdoc.config.toml/placeholder", "");
+        project.write("inner/a.rs", "");
+
+        assert_eq!(project.sources(&Scope::All), ["inner/a.rs"]);
     }
 
     #[test]

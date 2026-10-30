@@ -26,6 +26,19 @@ pub use pattern::PatternDefinition;
 /// The file name supdoc looks for in each directory.
 pub const CONFIG_FILE_NAME: &str = "supdoc.config.toml";
 
+/// The metadata of `dir`'s entry named `supdoc.config.toml`, if that entry counts as a config.
+///
+/// An entry counts only when a no-follow check (`symlink_metadata`) shows a regular file or a
+/// symlink. A directory, a FIFO or any other kind of entry with that name does not count, and
+/// no symlink is followed to decide.
+///
+/// Effect: reads the metadata of one directory entry.
+pub(crate) fn config_entry(dir: &Path) -> Option<std::fs::Metadata> {
+    std::fs::symlink_metadata(dir.join(CONFIG_FILE_NAME))
+        .ok()
+        .filter(|entry| entry.is_file() || entry.is_symlink())
+}
+
 /// A fully resolved config. Constructed only by [`Config::load`] and [`Config::load_file`].
 #[derive(Debug, Clone)]
 pub struct Config {

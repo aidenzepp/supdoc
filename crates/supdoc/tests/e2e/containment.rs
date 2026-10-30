@@ -956,3 +956,79 @@ fn a_dangling_gitignore_above_the_root_changes_nothing() {
         run.stderr
     );
 }
+
+/// The web project with a directory, not a file, named `supdoc.config.toml` inside `sub`, and a
+/// doc there linking to a source that does not exist.
+fn web_project_with_a_config_named_directory_in_sub() -> Project {
+    let project = web_project();
+    fs::write(project.path("services/web/supdoc.config.toml"), "")
+        .expect("the config should be writable");
+    fs::create_dir_all(project.path("services/web/sub/supdoc.config.toml"))
+        .expect("the directory should be creatable");
+    fs::create_dir(project.path("services/web/sub/docs"))
+        .expect("the directory should be creatable");
+    fs::write(
+        project.path("services/web/sub/docs/p.md"),
+        "# P\n\n[gone](nothere.rs)\n",
+    )
+    .expect("the doc should be writable");
+    project
+}
+
+/// The `source: kind` of each link finding in `run`'s `--json` output.
+fn link_findings(run: &crate::support::Run) -> Vec<String> {
+    array_at(&run.json(), "/data/links")
+        .iter()
+        .map(|link| {
+            format!(
+                "{}: {}",
+                link["source"].as_str().unwrap_or_default(),
+                link.pointer("/finding/kind")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_directory_named_like_the_config_is_not_a_nested_project_from_the_root() {
+    let project = web_project_with_a_config_named_directory_in_sub();
+
+    let run = project.supdoc_in("services/web", &["--json", "check"]);
+
+    assert!(
+        run.stdout.contains("sub/docs/nothere.rs"),
+        "the doc under `sub` should be scanned by the root project\n{}",
+        run.stdout
+    );
+    assert!(
+        link_findings(&run).contains(&"sub/docs/p.md: read-missing".to_owned()),
+        "{}",
+        run.stdout
+    );
+    let _ = run.assert_exit(1);
+}
+
+#[test]
+fn a_directory_named_like_the_config_reports_the_same_from_inside_it() {
+    let project = web_project_with_a_config_named_directory_in_sub();
+
+    let from_root = project.supdoc_in("services/web", &["--json", "check"]);
+    let from_sub = project.supdoc_in("services/web/sub", &["--json", "check"]);
+
+    let _ = from_sub.assert_exit(1);
+    assert_eq!(
+        (
+            at(&from_sub.json(), "/root").clone(),
+            link_findings(&from_sub)
+        ),
+        (
+            at(&from_root.json(), "/root").clone(),
+            link_findings(&from_root)
+        ),
+        "both runs should use the root project's config and find the same things\nfrom sub:\n{}\nfrom root:\n{}",
+        from_sub.stdout,
+        from_root.stdout
+    );
+}
