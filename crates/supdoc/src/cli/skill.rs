@@ -5,7 +5,9 @@
 //! nothing else. The project scope puts them under the project root, the config's directory or
 //! the current directory when there is no config. `--global` puts them under `HOME` and Claude
 //! Code's config directory. Each copy is a real file written atomically. A copy that already
-//! holds the embedded text is left alone; a different one is replaced only under `--yes`.
+//! holds the embedded text is left alone; a different one is replaced only under `--yes`. A
+//! project install writes nothing outside the project: it refuses a symlinked directory on the
+//! way to either copy that leads out of the root (04 S15), and follows one that stays inside.
 
 use std::fs;
 use std::io::{self, Write};
@@ -15,6 +17,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::config::CONFIG_FILE_NAME;
+use crate::config::confine::real_location;
 use crate::finding::{Finding, Severity};
 use crate::lock::io::write_atomically;
 use crate::output::json::Envelope;
@@ -56,8 +59,10 @@ const INSTALLED_NOTE: &str = "Installed the supdoc skill.";
 ///
 /// # Errors
 ///
-/// Returns `cli-skill-no-home` when `--global` is given and `HOME` is not set, `cli-skill-write`
-/// when a copy cannot be written, and `cli-skill-output` when the report cannot be written.
+/// Returns `cli-skill-no-home` when `--global` is given and `HOME` is not set,
+/// `cli-skill-outside-root` when a project copy would be written through a symlink out of the
+/// project, before anything is written or previewed, `cli-skill-write` when a copy cannot be
+/// written, and `cli-skill-output` when the report cannot be written.
 pub fn run(
     args: &SkillInstallArgs,
     context: &Context,
@@ -69,7 +74,13 @@ pub fn run(
     } else {
         project_root(context)
     };
-    let changes: Vec<SkillChange> = destinations(args.global, context)?
+    let destinations = destinations(args.global, context)?;
+    if !args.global {
+        for path in &destinations {
+            contain(&base, path)?;
+        }
+    }
+    let changes: Vec<SkillChange> = destinations
         .into_iter()
         .map(|path| SkillChange {
             action: inspect(&path),
@@ -157,6 +168,36 @@ fn label(path: &AbsolutePath, base: &AbsolutePath) -> String {
         || path.display().to_string(),
         |relative| relative.display().to_string(),
     )
+}
+
+/// Refuses `target` when a directory between `root` and it leads outside `root` once symlinks
+/// are followed, so a project install never writes outside the project (04 S15). A symlink that
+/// leads elsewhere inside `root` is followed. A dangling one counts where it points, and one whose
+/// real location can't be worked out counts as outside, as [`Config::contains`] decides for reads.
+///
+/// [`Config::contains`]: crate::config::Config::contains
+///
+/// Effect: reads file metadata and symlinks along the directories beneath `root` on the way to
+/// `target`.
+///
+/// # Errors
+///
+/// Returns `cli-skill-outside-root` naming the first directory that leads out.
+fn contain(root: &AbsolutePath, target: &AbsolutePath) -> Result<(), CliError> {
+    // Every project destination is beneath the root, so there is always a directory chain.
+    let Some(directories) = target.strip_prefix(root).and_then(Path::parent) else {
+        return Ok(());
+    };
+    let real_root = real_location(root.as_path()).unwrap_or_else(|| root.as_path().to_path_buf());
+    let mut dir = root.as_path().to_path_buf();
+    for component in directories.components() {
+        dir.push(component);
+        match real_location(&dir) {
+            Some(real) if real.starts_with(&real_root) => {}
+            real => return Err(outside_root(root, target, &dir, real.as_deref())),
+        }
+    }
+    Ok(())
 }
 
 /// What installing does to `path`. Only a regular file holding exactly the embedded skill is
@@ -280,7 +321,8 @@ impl SkillAction {
 
 /// Writes `bytes` to `target`, creating its directories, through the shared temp-and-rename
 /// writer. An existing regular file keeps its permissions; a symlink is replaced, never written
-/// through.
+/// through. Directories are created or followed as they are: a project install has already
+/// refused any that lead out of the project ([`contain`]).
 ///
 /// # Errors
 ///
@@ -305,6 +347,47 @@ fn exists(shown: &str) -> Finding {
         format!("{shown} already exists with different contents"),
     )
     .with_help("Re-run with `--yes` to replace it")
+}
+
+/// The refusal for a project copy that `link` would send out of `root`: to `real`, or somewhere
+/// that can't be worked out when `real` is `None`.
+fn outside_root(
+    root: &AbsolutePath,
+    target: &AbsolutePath,
+    link: &Path,
+    real: Option<&Path>,
+) -> CliError {
+    let shown_link = link.strip_prefix(root.as_path()).unwrap_or(link).display();
+    let shown = label(target, root);
+    let message = match real {
+        Some(real) => {
+            let landing = target
+                .as_path()
+                .strip_prefix(link)
+                .map_or_else(|_| real.to_path_buf(), |rest| real.join(rest));
+            format!(
+                "{shown} would be written to {}, outside the project root: {shown_link} is a \
+                 symlink to {}",
+                landing.display(),
+                real.display()
+            )
+        }
+        None => format!(
+            "{shown} would be written through {shown_link}, a symlink whose destination can't be \
+             worked out, so it may be outside the project root"
+        ),
+    };
+    CliError::new(
+        "cli-skill-outside-root",
+        message,
+        format!(
+            "Nothing was written. Point {shown_link} at a directory inside the project, or \
+             install into your home directory with `supdoc skill install --global --yes`. To \
+             use a real directory instead, run `rm {shown_link}` (this removes only the link, \
+             not the directory it points to), then `mkdir {shown_link}`"
+        ),
+        CliError::REFUSED_EXIT_CODE,
+    )
 }
 
 /// The error for `--global` without a home directory.
@@ -791,6 +874,178 @@ mod tests {
         let error = run.result.as_ref().expect_err("the write should fail");
         assert_eq!(error.code(), "cli-skill-write");
         assert_eq!(run.exit_code(), CliError::IO_EXIT_CODE);
+    }
+
+    /// Makes `link` a symlink to `destination`.
+    #[cfg(unix)]
+    fn symlink(destination: &Path, link: &Path) {
+        let parent = link.parent().expect("a symlink has a parent");
+        fs::create_dir_all(parent).expect("the symlink's directory should be created");
+        std::os::unix::fs::symlink(destination, link).expect("the symlink should be created");
+    }
+
+    /// Every file and directory under `dir`, relative to it.
+    #[cfg(unix)]
+    fn tree(dir: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(next) = pending.pop() {
+            for entry in fs::read_dir(&next).expect("the directory should be readable") {
+                let path = entry.expect("the entry should be readable").path();
+                if path.is_dir() {
+                    pending.push(path.clone());
+                }
+                found.push(
+                    path.strip_prefix(dir)
+                        .expect("an entry is beneath its directory")
+                        .to_path_buf(),
+                );
+            }
+        }
+        found
+    }
+
+    /// Fails unless `run` refused with `cli-skill-outside-root`, naming `link` and `destination`.
+    #[cfg(unix)]
+    fn assert_refused_outside(run: &Run, link: &str, destination: &Path) {
+        let error = run
+            .result
+            .as_ref()
+            .expect_err("an install through a symlink out of the project should be refused");
+        assert_eq!(error.code(), "cli-skill-outside-root", "got {error:?}");
+        assert_eq!(run.exit_code(), CliError::REFUSED_EXIT_CODE);
+        let real = fs::canonicalize(destination).expect("the destination should resolve");
+        assert!(
+            error
+                .message()
+                .contains(&format!("{link} is a symlink to {}", real.display())),
+            "the message should name the symlink and where it leads: {}",
+            error.message()
+        );
+        let help = error.help();
+        let global = help
+            .find("--global")
+            .expect("the help should offer `--global`");
+        let remove = help
+            .find(&format!("`rm {link}`"))
+            .expect("the help should offer removing the link as its own step");
+        assert!(
+            global < remove && help.contains("removes only the link") && !help.contains("&&"),
+            "the help should lead with the non-destructive routes, say `rm` removes only the \
+             link, and give separate steps: {help}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_install_refuses_an_agents_directory_symlinked_out_of_the_project() {
+        let world = World::new();
+        plant(&world.project_file(CONFIG_FILE_NAME), "");
+        let elsewhere = tempfile::tempdir().expect("an outside temp directory should be created");
+        symlink(elsewhere.path(), &world.project_file(".agents"));
+        let landing = fs::canonicalize(elsewhere.path())
+            .expect("the destination should resolve")
+            .join("skills/supdoc/SKILL.md");
+
+        for flags in [&[][..], &["--yes"]] {
+            let run = world.install(flags);
+
+            assert_refused_outside(&run, ".agents", elsewhere.path());
+            let message = run.result.as_ref().err().map(CliError::message);
+            assert!(
+                message.is_some_and(|text| text.contains(&landing.display().to_string())),
+                "the message should name where the file would land: {message:?}"
+            );
+        }
+        assert_eq!(
+            tree(elsewhere.path()),
+            Vec::<PathBuf>::new(),
+            "nothing should be written through the symlink"
+        );
+        assert!(
+            !world.project_file(".claude").exists(),
+            "a refusal should write neither copy"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_install_refuses_a_nested_claude_directory_symlinked_out_of_the_project() {
+        let world = World::new();
+        let elsewhere = tempfile::tempdir().expect("an outside temp directory should be created");
+        symlink(elsewhere.path(), &world.project_file(".claude/skills"));
+
+        let run = world.install(&["--yes"]);
+
+        assert_refused_outside(&run, ".claude/skills", elsewhere.path());
+        assert_eq!(
+            tree(elsewhere.path()),
+            Vec::<PathBuf>::new(),
+            "nothing should be written through the symlink"
+        );
+        assert!(
+            !world.project_file(".agents").exists(),
+            "a refusal should write neither copy, even the one before it"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_install_refuses_a_dangling_symlink_that_points_out_of_the_project() {
+        let world = World::new();
+        let elsewhere = tempfile::tempdir().expect("an outside temp directory should be created");
+        symlink(
+            &elsewhere.path().join("not-yet"),
+            &world.project_file(".agents"),
+        );
+
+        let run = world.install(&[]);
+
+        let error = run
+            .result
+            .as_ref()
+            .expect_err("a dangling symlink out of the project should be refused");
+        assert_eq!(error.code(), "cli-skill-outside-root", "got {error:?}");
+        assert!(
+            error.message().contains(".agents is a symlink to "),
+            "the message should name the symlink: {}",
+            error.message()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_install_follows_a_symlink_that_stays_inside_the_project() {
+        let world = World::new();
+        fs::create_dir_all(world.project_file("shared/agents"))
+            .expect("the shared directory should be created");
+        symlink(Path::new("shared/agents"), &world.project_file(".agents"));
+
+        let run = world.install(&["--yes"]);
+
+        assert_eq!(run.exit_code(), 0, "result: {:?}", run.result);
+        assert_eq!(
+            contents(&world.project_file("shared/agents/skills/supdoc/SKILL.md")).as_deref(),
+            Some(SKILL),
+            "the skill should be written through an in-project symlink"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_install_global_still_writes_through_a_symlinked_home_directory() {
+        let world = World::new();
+        let shared = tempfile::tempdir().expect("a shared temp directory should be created");
+        symlink(shared.path(), &world.home_file(".agents"));
+
+        let run = world.install(&["--global", "--yes"]);
+
+        assert_eq!(run.exit_code(), 0, "result: {:?}", run.result);
+        assert_eq!(
+            contents(&shared.path().join("skills/supdoc/SKILL.md")).as_deref(),
+            Some(SKILL),
+            "--global writes wherever the home directory's links lead, as before"
+        );
     }
 
     #[test]

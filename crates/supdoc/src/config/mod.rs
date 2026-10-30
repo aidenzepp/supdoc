@@ -3,7 +3,7 @@
 //! Every check happens while the TOML is read, so a loaded [`Config`] holds only valid values.
 
 mod chain;
-mod confine;
+pub(crate) mod confine;
 mod error;
 mod pattern;
 mod raw;

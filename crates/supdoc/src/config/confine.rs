@@ -13,7 +13,7 @@ const MAX_DANGLING_HOPS: u8 = 40;
 /// below a missing name); callers treat that as outside.
 ///
 /// Effect: reads file metadata and symlinks along `path`.
-pub(super) fn real_location(path: &Path) -> Option<PathBuf> {
+pub(crate) fn real_location(path: &Path) -> Option<PathBuf> {
     real_location_within(path, MAX_DANGLING_HOPS)
 }
 

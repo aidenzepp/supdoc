@@ -67,7 +67,9 @@ supdoc skill install --global --yes   # into your home directory
 Each writes two copies: `.agents/skills/supdoc/SKILL.md` for agents that read the shared directory, and
 `.claude/skills/supdoc/SKILL.md` for Claude Code. With `--global` they go under `$HOME`, and Claude Code's
 copy under `$CLAUDE_CONFIG_DIR` when it's set. Without `--yes`, the command shows what it would write. An
-existing `SKILL.md` with different contents is replaced only with `--yes`.
+existing `SKILL.md` with different contents is replaced only with `--yes`. A project install writes nothing
+outside the project: if `.agents` or `.claude` is a symlink that leads out of it, the command names the link
+and refuses.
 
 ## Development
 

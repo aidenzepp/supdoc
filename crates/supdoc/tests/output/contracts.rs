@@ -1037,6 +1037,14 @@ mod helps {
             |p| chmod(p, ".", 0o555),
             &["skill", "install", "--yes"],
         ),
+        case(
+            "cli-skill-outside-root",
+            |p| {
+                std::os::unix::fs::symlink("..", p.path().join(".agents"))
+                    .expect("the fixture symlink should be creatable");
+            },
+            &["skill", "install"],
+        ),
         HelpCase {
             kind: "cli-skill-relative-claude-dir",
             setup: |_| {},
