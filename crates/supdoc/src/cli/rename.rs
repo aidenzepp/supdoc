@@ -1729,7 +1729,6 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
             UnreadCause::Io(io::ErrorKind::PermissionDenied),
             UnreadCause::IgnoreFileOutsideRoot(IgnoreFile::Ignore),
             UnreadCause::IgnoreFileOutsideRoot(IgnoreFile::Gitignore),
-            UnreadCause::IgnoreFileOutsideRoot(IgnoreFile::GitExclude),
         ];
         let dirs = causes.map(|cause| UnreadDir {
             path: AbsolutePath::new(Path::new("/project/docs"))

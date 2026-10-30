@@ -19,20 +19,21 @@ use crate::scan::model::Scope;
 /// Directories of version-control systems, never walked (04 S2).
 const VCS_DIRS: [&str; 4] = [".git", ".hg", ".svn", ".jj"];
 
-/// An ignore file the walker reads in each directory it enters.
+/// An ignore file the walker reads in each directory it enters that a checkout can plant, so one
+/// reached through a symlink out of the root is refused (04 S15). Git's exclude files, reached
+/// through `.git`, are not among them: git refuses to check out any `.git` path, so they are
+/// followed as git follows them, symlinks included.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum IgnoreFile {
     /// `.ignore`.
     Ignore,
     /// `.gitignore`.
     Gitignore,
-    /// `.git/info/exclude`. A symlinked `.git` or `.git/info` leads it elsewhere too.
-    GitExclude,
 }
 
 impl IgnoreFile {
     /// Every ignore file, in the order the walk checks them.
-    const ALL: [Self; 3] = [Self::Ignore, Self::Gitignore, Self::GitExclude];
+    const ALL: [Self; 2] = [Self::Ignore, Self::Gitignore];
 
     /// Its path, relative to the directory it applies to.
     #[must_use]
@@ -40,22 +41,17 @@ impl IgnoreFile {
         match self {
             Self::Ignore => ".ignore",
             Self::Gitignore => ".gitignore",
-            Self::GitExclude => ".git/info/exclude",
         }
     }
 
-    /// What to do when it leads outside the project root. Never removal for git's exclude file,
-    /// whose symlink may be `.git` itself: removing that breaks the checkout.
+    /// What to do when it leads outside the project root. The file sits inside the root, so it
+    /// is the project's own: the symlink, never its target, is what to replace or remove.
     #[must_use]
     pub const fn remedy(self) -> &'static str {
         match self {
             Self::Ignore | Self::Gitignore => {
                 "Replace the symlink with a regular file holding its rules, or delete it with \
                  `rm` if the project doesn't need them"
-            }
-            Self::GitExclude => {
-                "Run supdoc in a checkout whose `.git` directory, and everything in it, lies \
-                 inside the project root rather than behind a symlink"
             }
         }
     }
@@ -76,8 +72,7 @@ pub struct Walk {
     /// Unreadable directories and explicitly named paths that are excluded or ignored, sorted.
     pub findings: Vec<Finding>,
     /// The directories the walk couldn't read, sorted by path. Nothing beneath one was walked, so
-    /// its sources and their links are unknown (05 C5). When the walk never started, this is the
-    /// one directory, the root or one above it, whose ignore file stopped it.
+    /// its sources and their links are unknown (05 C5).
     pub unread_dirs: Vec<UnreadDir>,
 }
 
@@ -147,17 +142,16 @@ impl UnreadDir {
 /// A directory that can't be read becomes a finding and the walk continues, including when it is
 /// the root itself: the caller decides whether an unreadable root is fatal. So does a directory
 /// with an ignore file that leads outside the root ([`UnreadCause::IgnoreFileOutsideRoot`]); when
-/// that directory is the root, or one above it whose ignore files the walker also reads, nothing
-/// at all is walked.
+/// that directory is the root, nothing at all is walked.
 ///
 /// Effect: reads directory listings and ignore files.
 #[must_use]
 pub fn walk(config: &Config, languages: &Languages, scope: &Scope) -> Walk {
-    if let Some(stopped) = unwalkable_root(config) {
+    if let Some(root) = unread_for_outside_ignore_file(config, config.root().as_path()) {
         return Walk {
             sources: Vec::new(),
-            findings: vec![stopped.finding()],
-            unread_dirs: vec![stopped],
+            findings: vec![root.finding()],
+            unread_dirs: vec![root],
         };
     }
 
@@ -211,9 +205,11 @@ pub fn walk(config: &Config, languages: &Languages, scope: &Scope) -> Walk {
 /// A walker over the root that applies every directory-level rule, in sorted order. Each
 /// directory it refuses for an ignore file that leads outside the root goes into `refused`.
 ///
-/// Git's exclude files are the walker's own: it follows a `.git` file's `gitdir:` line and the
-/// shared `commondir` as git does, wherever they lead. Neither can come from a checkout's
-/// content, since git refuses to stage or check out any `.git` path (04 S15).
+/// Git's exclude files are the walker's own: it follows a `.git` symlink, a `.git` file's
+/// `gitdir:` line and the shared `commondir` as git does, wherever they lead. None can come from a
+/// checkout's content, since git refuses to stage or check out any `.git` path (04 S15). So are
+/// the ignore files of the directories above the root and the global excludes file, which lie
+/// outside the checkout: they apply as in git, symlinked or not, and are never quoted.
 fn walker(config: &Config, scope: &Scope, refused: &Arc<Mutex<Vec<UnreadDir>>>) -> ignore::Walk {
     let root = config.root();
     let config_for_filter = config.clone();
@@ -257,24 +253,6 @@ fn git_exclude(config: &Config, dir: &Path) -> Option<Gitignore> {
         return None;
     }
     matcher(config, dir, &git.join("info/exclude"))
-}
-
-/// The root, or the directory above it nearest the root, with an ignore file that leads outside the
-/// root. The walker reads the ignore files of the root and of every directory above it before
-/// walking anything, and can't be told to skip one, so with such a file nothing may be walked.
-///
-/// Effect: reads file metadata in the root and each directory above it, and resolves symlinks
-/// only when one is there.
-fn unwalkable_root(config: &Config) -> Option<UnreadDir> {
-    let root = config.root().as_path();
-    unread_for_outside_ignore_file(config, root).or_else(|| {
-        // The walker reads the ignore files above the root's real location, so these are checked.
-        let real_root = fs::canonicalize(root).ok()?;
-        real_root
-            .ancestors()
-            .skip(1)
-            .find_map(|dir| unread_for_outside_ignore_file(config, dir))
-    })
 }
 
 /// `dir` as unread when one of its ignore files leads outside the root, so the walker must not
@@ -570,8 +548,8 @@ fn matcher(config: &Config, dir: &Path, ignore_file: &Path) -> Option<Gitignore>
     builder.build().ok()
 }
 
-/// Whether `relative`, beneath the directory `base`, passes through a symlink that leads outside
-/// the root (04 S15). A missing path leads nowhere.
+/// Whether `relative`, beneath the in-root directory `base`, passes through a symlink that leads
+/// outside the root (04 S15). A missing path leads nowhere.
 ///
 /// Only a path with a symlink somewhere below `base`, the file itself or a directory on the way
 /// to it, is resolved; an ordinary path costs one `lstat` per component.
@@ -1120,6 +1098,12 @@ mod tests {
 
         let walk = project.walk(&paths(&["out.rs"]));
 
+        assert!(walk.unread_dirs.is_empty(), "{:?}", walk.unread_dirs);
+        assert_eq!(
+            codes(&walk),
+            ["scan-explicit-path-ignored"],
+            "the exclude file applies as in git"
+        );
         assert!(
             !messages(&walk).contains(RULE),
             "a line from outside the root was printed:\n{}",
@@ -1204,26 +1188,44 @@ mod tests {
         );
     }
 
+    /// A git directory outside the root whose `info/exclude` holds [`RULE`].
     #[cfg(unix)]
-    #[test]
-    fn directory_whose_git_dir_leads_out_of_the_root_is_unread() {
-        let outside = outside_dir();
+    fn outside_exclude() -> TempDir {
+        let outside = TempDir::new().expect("a temporary outside directory should be creatable");
         fs::create_dir_all(outside.path().join("git/info"))
             .expect("the outside git directory should be creatable");
         fs::write(outside.path().join("git/info/exclude"), format!("{RULE}\n"))
             .expect("the outside exclude file should be writable");
+        outside
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_dir_symlinked_out_of_the_root_brings_its_exclude_file_unquoted() {
+        let outside = outside_exclude();
         let project = Project::new();
+        project.write("out.rs", "");
         project.write("vendor/out.rs", "");
+        project.write("vendor/kept.rs", "");
+        symlink_in(&project, ".git", &outside.path().join("git"));
         symlink_in(&project, "vendor/.git", &outside.path().join("git"));
 
-        let walk = project.walk(&Scope::All);
+        let walk = project.walk(&paths(&["out.rs", "vendor/out.rs", "vendor/kept.rs"]));
 
         assert_eq!(
-            unread(&project, &walk),
-            [(
-                "vendor".to_owned(),
-                UnreadCause::IgnoreFileOutsideRoot(IgnoreFile::GitExclude)
-            )],
+            project.sources(&Scope::All),
+            ["vendor/kept.rs"],
+            "git follows a symlinked `.git` to its exclude file, and so does the walk"
+        );
+        assert!(walk.unread_dirs.is_empty(), "{:?}", walk.unread_dirs);
+        assert_eq!(
+            codes(&walk),
+            ["scan-explicit-path-ignored", "scan-explicit-path-ignored"]
+        );
+        assert!(
+            !messages(&walk).contains(RULE),
+            "a line from outside the root was printed:\n{}",
+            messages(&walk)
         );
     }
 
@@ -1296,37 +1298,40 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn ignore_file_above_the_root_symlinked_elsewhere_walks_nothing() {
+    fn ignore_file_above_the_root_symlinked_elsewhere_applies_unquoted() {
         let outside = outside_dir();
         let above = TempDir::new().expect("a temporary parent directory should be creatable");
-        fs::create_dir(above.path().join("project"))
-            .expect("the project directory should be creatable");
-        fs::write(above.path().join("project/out.rs"), "")
-            .expect("the fixture source should be writable");
+        for file in ["project/out.rs", "project/kept.rs"] {
+            let path = above.path().join(file);
+            fs::create_dir_all(path.parent().expect("the fixture file has a parent"))
+                .expect("the project directory should be creatable");
+            fs::write(path, "").expect("the fixture source should be writable");
+        }
         fs::write(above.path().join("project").join(CONFIG_FILE_NAME), "")
             .expect("the fixture config should be writable");
+        // A dotfiles manager's `~/.ignore`, say: outside the checkout, so followed as git would.
         std::os::unix::fs::symlink(outside.path().join("ignore"), above.path().join(".ignore"))
             .expect("the fixture symlink should be creatable");
         let config_path = AbsolutePath::new(&above.path().join("project").join(CONFIG_FILE_NAME))
             .expect("the temporary directory should be absolute");
         let config = Config::load_file(&config_path).expect("the fixture config should be valid");
 
-        let walk = walk(&config, &Languages::builtin(), &Scope::All);
+        let all = walk(&config, &Languages::builtin(), &Scope::All);
+        let one = walk(&config, &Languages::builtin(), &paths(&["out.rs"]));
 
-        assert!(walk.sources.is_empty(), "{:?}", walk.sources);
-        let real_above = fs::canonicalize(above.path()).expect("the parent should resolve");
-        assert_eq!(
-            walk.unread_dirs
-                .iter()
-                .map(|dir| (dir.path.as_path(), dir.cause))
-                .collect::<Vec<_>>(),
-            [(
-                real_above.as_path(),
-                UnreadCause::IgnoreFileOutsideRoot(IgnoreFile::Ignore)
-            )],
-            "the caller decides what an unwalkable root means",
+        let walked: Vec<_> = all
+            .sources
+            .iter()
+            .filter_map(|(path, _)| path.as_path().file_name())
+            .collect();
+        assert_eq!(walked, ["kept.rs"], "the parent's rule applies");
+        assert!(all.unread_dirs.is_empty(), "{:?}", all.unread_dirs);
+        assert_eq!(codes(&one), ["scan-explicit-path-ignored"]);
+        assert!(
+            !messages(&one).contains(RULE),
+            "a line from outside the root was printed:\n{}",
+            messages(&one)
         );
-        assert!(!messages(&walk).contains(RULE), "{}", messages(&walk));
     }
 
     #[cfg(unix)]

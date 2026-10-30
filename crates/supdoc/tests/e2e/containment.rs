@@ -726,8 +726,39 @@ fn a_parent_repositorys_exclude_file_applies_to_a_root_in_a_subdirectory() {
     );
 }
 
+/// Asserts that the web project scans as git would have it with an ignore file it doesn't own
+/// hiding the guide: `check` and `update --yes` succeed without the guide, the named guide is
+/// blamed on "an ignore file", and no line of that file is printed.
+fn assert_followed_and_never_quoted(project: &Project) {
+    write(project, "services/web/docs/keep.md", SCRATCH);
+    let update = project.supdoc_in("services/web", &["update", "--yes"]);
+    let check = project.supdoc_in("services/web", &["check"]);
+    let named = project.supdoc_in("services/web", &["check", "docs/guide.md"]);
+
+    for run in [&update, &check, &named] {
+        let _ = run.assert_exit(0);
+        assert!(
+            !run.stdout.contains("gui*.md") && !run.stderr.contains("gui*.md"),
+            "`supdoc {}` printed a line from outside the root\n{}\n{}",
+            run.args,
+            run.stdout,
+            run.stderr
+        );
+    }
+    let locked = project.read("services/web/supdoc.lock");
+    assert!(
+        locked.contains("docs/keep.md") && !locked.contains("docs/guide.md"),
+        "the rule hides the guide, as in git, and nothing else:\n{locked}"
+    );
+    assert!(
+        named.stdout.contains("ignored by an ignore file"),
+        "{}",
+        named.stdout
+    );
+}
+
 /// Makes `link` in `project` a symlink to a git directory outside the root whose exclude file
-/// would hide the guide.
+/// hides the guide.
 #[cfg(unix)]
 fn git_dir_symlinked_out(project: &Project, link: &str) {
     write(project, "outside.git/info/exclude", "gui*.md\n");
@@ -737,78 +768,92 @@ fn git_dir_symlinked_out(project: &Project, link: &str) {
 
 #[cfg(unix)]
 #[test]
-fn a_subdirectory_whose_git_dir_is_symlinked_out_is_unread_with_help_that_keeps_the_checkout() {
+fn a_subdirectory_whose_git_dir_is_symlinked_out_applies_its_exclude_file_unquoted() {
     let project = web_project();
+    // Git refuses to check out a `.git` path, so a checkout can't plant this one.
     git_dir_symlinked_out(&project, "services/web/docs/.git");
 
-    let run = project.supdoc_in("services/web", &["--json", "check"]);
-
-    let report = run.json();
-    let refusal = array_at(&report, "/findings")
-        .iter()
-        .find(|finding| finding["kind"] == "scan-ignore-file-outside-root")
-        .unwrap_or_else(|| panic!("docs should be left unread\n{}", run.stdout));
-    let help = at(refusal, "/help").as_str().unwrap_or_default();
-    assert!(
-        help.contains("`.git` directory") && !help.contains("`rm`"),
-        "the help should not advise removing `.git`: {help}"
-    );
-    assert!(!run.stdout.contains("gui*.md"), "{}", run.stdout);
+    assert_followed_and_never_quoted(&project);
 }
 
 #[cfg(unix)]
 #[test]
-fn a_root_whose_git_dir_is_symlinked_out_refuses_with_help_that_keeps_the_checkout() {
+fn a_root_whose_git_dir_is_symlinked_out_applies_its_exclude_file_unquoted() {
     let project = web_project();
     git_dir_symlinked_out(&project, "services/web/.git");
 
-    let run = project.supdoc_in("services/web", &["check"]);
-
-    let _ = run.assert_exit(78);
-    assert!(
-        run.stderr.contains("scan-root-ignore-file-outside-root")
-            && run.stderr.contains("`.git` directory")
-            && !run.stderr.contains("`rm`"),
-        "the refusal should not advise removing `.git`:\n{}",
-        run.stderr
-    );
-    assert!(!run.stderr.contains("gui*.md"), "{}", run.stderr);
+    assert_followed_and_never_quoted(&project);
 }
 
 #[cfg(unix)]
 #[test]
-fn an_ignore_file_above_the_root_symlinked_elsewhere_refuses_the_scan_and_keeps_the_lock() {
+fn a_root_whose_git_info_is_symlinked_out_applies_its_exclude_file_unquoted() {
     let project = web_project();
-    let _ = project
-        .supdoc_in("services/web", &["update", "--yes"])
-        .assert_exit(0);
-    let locked = project.read("services/web/supdoc.lock");
-    // Above the root, a checkout's `.gitignore` could otherwise point at any file and let its
-    // lines decide which sources are skipped.
-    fs::write(project.path("rules"), "gui*.md\n").expect("the outside rules should be writable");
-    std::os::unix::fs::symlink(project.path("rules"), project.path(".gitignore"))
+    write(&project, "outside.git/info/exclude", "gui*.md\n");
+    fs::create_dir_all(project.path("services/web/.git"))
+        .expect("the git directory should be creatable");
+    std::os::unix::fs::symlink(
+        project.path("outside.git/info"),
+        project.path("services/web/.git/info"),
+    )
+    .expect("the symlink should be creatable");
+
+    assert_followed_and_never_quoted(&project);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dotfile_gitignore_above_the_root_symlinked_elsewhere_applies_unquoted() {
+    let project = web_project();
+    // A dotfiles manager such as stow links `~/.gitignore` into a directory of its own.
+    let dotfiles = tempfile::tempdir().expect("a dotfiles directory should be creatable");
+    fs::write(dotfiles.path().join("gitignore"), "gui*.md\n")
+        .expect("the dotfile should be writable");
+    std::os::unix::fs::symlink(
+        dotfiles.path().join("gitignore"),
+        project.path(".gitignore"),
+    )
+    .expect("the symlink should be creatable");
+
+    assert_followed_and_never_quoted(&project);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_shared_ignore_file_above_the_root_symlinked_within_the_checkout_applies_unquoted() {
+    let project = web_project();
+    // A monorepo whose root `.ignore` links to a shared file outside the subproject's root.
+    write(&project, "tools/ignore", "gui*.md\n");
+    std::os::unix::fs::symlink(project.path("tools/ignore"), project.path(".ignore"))
         .expect("the symlink should be creatable");
 
-    let check = project.supdoc_in("services/web", &["check", "docs/guide.md"]);
-    let update = project.supdoc_in("services/web", &["update", "--yes"]);
+    assert_followed_and_never_quoted(&project);
+}
 
-    for run in [&check, &update] {
-        let _ = run.assert_exit(78);
-        assert!(
-            run.stderr.contains("scan-root-ignore-file-outside-root")
-                && run.stderr.contains("an ignore file above it"),
-            "`supdoc {}` should refuse the root\nstdout:\n{}\nstderr:\n{}",
-            run.args,
-            run.stdout,
-            run.stderr
-        );
-        assert!(
-            !run.stdout.contains("gui*.md") && !run.stderr.contains("gui*.md"),
-            "`supdoc {}` printed a line from outside the root\n{}\n{}",
-            run.args,
-            run.stdout,
-            run.stderr
-        );
-    }
-    assert_eq!(project.read("services/web/supdoc.lock"), locked);
+#[cfg(unix)]
+#[test]
+fn a_parent_repository_whose_git_dir_is_symlinked_elsewhere_applies_its_exclude_unquoted() {
+    let project = web_project();
+    git_dir_symlinked_out(&project, ".git");
+
+    assert_followed_and_never_quoted(&project);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dangling_gitignore_above_the_root_changes_nothing() {
+    let project = web_project();
+    std::os::unix::fs::symlink(project.path("gone"), project.path(".gitignore"))
+        .expect("the symlink should be creatable");
+
+    let run = project.supdoc_in("services/web", &["update", "--yes"]);
+
+    let _ = run.assert_exit(0);
+    assert!(
+        project
+            .read("services/web/supdoc.lock")
+            .contains("docs/guide.md"),
+        "nothing hides the guide\n{}",
+        run.stderr
+    );
 }

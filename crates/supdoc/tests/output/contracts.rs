@@ -971,14 +971,6 @@ mod helps {
             &["check"],
         ),
         case(
-            "scan-root-ignore-file-outside-root",
-            |p| {
-                std::os::unix::fs::symlink("../outside.git", p.path().join(".git"))
-                    .expect("the symlink should be creatable");
-            },
-            &["check"],
-        ),
-        case(
             "scan-ignore-file-outside-root",
             |p| {
                 std::os::unix::fs::symlink("../../outside-rules", p.path().join("docs/.gitignore"))
