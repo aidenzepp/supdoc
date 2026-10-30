@@ -725,3 +725,52 @@ fn a_parent_repositorys_exclude_file_applies_to_a_root_in_a_subdirectory() {
         run.stdout
     );
 }
+
+/// Makes `link` in `project` a symlink to a git directory outside the root whose exclude file
+/// would hide the guide.
+#[cfg(unix)]
+fn git_dir_symlinked_out(project: &Project, link: &str) {
+    write(project, "outside.git/info/exclude", "gui*.md\n");
+    std::os::unix::fs::symlink(project.path("outside.git"), project.path(link))
+        .expect("the symlink should be creatable");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_subdirectory_whose_git_dir_is_symlinked_out_is_unread_with_help_that_keeps_the_checkout() {
+    let project = web_project();
+    git_dir_symlinked_out(&project, "services/web/docs/.git");
+
+    let run = project.supdoc_in("services/web", &["--json", "check"]);
+
+    let report = run.json();
+    let refusal = array_at(&report, "/findings")
+        .iter()
+        .find(|finding| finding["kind"] == "scan-ignore-file-outside-root")
+        .unwrap_or_else(|| panic!("docs should be left unread\n{}", run.stdout));
+    let help = at(refusal, "/help").as_str().unwrap_or_default();
+    assert!(
+        help.contains("`.git` directory") && !help.contains("`rm`"),
+        "the help should not advise removing `.git`: {help}"
+    );
+    assert!(!run.stdout.contains("gui*.md"), "{}", run.stdout);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_root_whose_git_dir_is_symlinked_out_refuses_with_help_that_keeps_the_checkout() {
+    let project = web_project();
+    git_dir_symlinked_out(&project, "services/web/.git");
+
+    let run = project.supdoc_in("services/web", &["check"]);
+
+    let _ = run.assert_exit(78);
+    assert!(
+        run.stderr.contains("scan-root-ignore-file-outside-root")
+            && run.stderr.contains("`.git` directory")
+            && !run.stderr.contains("`rm`"),
+        "the refusal should not advise removing `.git`:\n{}",
+        run.stderr
+    );
+    assert!(!run.stderr.contains("gui*.md"), "{}", run.stderr);
+}

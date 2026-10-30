@@ -19,8 +19,53 @@ use crate::scan::model::Scope;
 /// Directories of version-control systems, never walked (04 S2).
 const VCS_DIRS: [&str; 4] = [".git", ".hg", ".svn", ".jj"];
 
-/// The ignore files read in each directory the walk enters, relative to that directory.
-const IGNORE_FILES: [&str; 3] = [".ignore", ".gitignore", ".git/info/exclude"];
+/// An ignore file the walker reads in each directory it enters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum IgnoreFile {
+    /// `.ignore`.
+    Ignore,
+    /// `.gitignore`.
+    Gitignore,
+    /// `.git/info/exclude`. A symlinked `.git` or `.git/info` leads it elsewhere too.
+    GitExclude,
+}
+
+impl IgnoreFile {
+    /// Every ignore file, in the order the walk checks them.
+    const ALL: [Self; 3] = [Self::Ignore, Self::Gitignore, Self::GitExclude];
+
+    /// Its path, relative to the directory it applies to.
+    #[must_use]
+    pub const fn path(self) -> &'static str {
+        match self {
+            Self::Ignore => ".ignore",
+            Self::Gitignore => ".gitignore",
+            Self::GitExclude => ".git/info/exclude",
+        }
+    }
+
+    /// What to do when it leads outside the project root. Never removal for git's exclude file,
+    /// whose symlink may be `.git` itself: removing that breaks the checkout.
+    #[must_use]
+    pub const fn remedy(self) -> &'static str {
+        match self {
+            Self::Ignore | Self::Gitignore => {
+                "Replace the symlink with a regular file holding its rules, or delete it with \
+                 `rm` if the project doesn't need them"
+            }
+            Self::GitExclude => {
+                "Run supdoc in a checkout whose `.git` directory, and everything in it, lies \
+                 inside the project root rather than behind a symlink"
+            }
+        }
+    }
+}
+
+impl fmt::Display for IgnoreFile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.path())
+    }
+}
 
 /// The files a scan reads links from, and the problems met while finding them.
 #[derive(Debug)]
@@ -53,7 +98,7 @@ pub enum UnreadCause {
     /// are followed. The walker reads a directory's ignore files as it enters and can't be told to
     /// skip one, so the directory isn't entered and the file never decides what is skipped (04
     /// S15).
-    IgnoreFileOutsideRoot(&'static str),
+    IgnoreFileOutsideRoot(IgnoreFile),
 }
 
 impl fmt::Display for UnreadCause {
@@ -77,11 +122,14 @@ impl UnreadDir {
                     "Links in that directory weren't checked. Fix its permissions, or add it to \
                      `exclude` in `supdoc.config.toml`",
                 ),
-            UnreadCause::IgnoreFileOutsideRoot(_) => {
+            UnreadCause::IgnoreFileOutsideRoot(file) => {
                 Finding::new("scan-ignore-file-outside-root", Severity::Warning, skipped).with_help(
-                    "Links in that directory weren't checked, since supdoc reads nothing \
-                         outside the root. Replace the symlink with the rules themselves, or add \
-                         the directory to `exclude` in `supdoc.config.toml`",
+                    format!(
+                        "Links in that directory weren't checked, since supdoc reads nothing \
+                         outside the root. {}. Or add the directory to `exclude` in \
+                         `{CONFIG_FILE_NAME}`",
+                        file.remedy()
+                    ),
                 )
             }
         }
@@ -209,9 +257,9 @@ fn git_exclude(config: &Config, dir: &Path) -> Option<Gitignore> {
 ///
 /// Effect: reads file metadata in `dir`, and resolves symlinks only when one is there.
 fn unread_for_outside_ignore_file(config: &Config, dir: &Path) -> Option<UnreadDir> {
-    let file = IGNORE_FILES
+    let file = IgnoreFile::ALL
         .into_iter()
-        .find(|file| leads_outside(config, dir, Path::new(file)))?;
+        .find(|file| leads_outside(config, dir, Path::new(file.path())))?;
     Some(UnreadDir {
         path: AbsolutePath::new(dir)?,
         cause: UnreadCause::IgnoreFileOutsideRoot(file),
@@ -1096,7 +1144,7 @@ mod tests {
             unread(&project, &walk),
             [(
                 "docs".to_owned(),
-                UnreadCause::IgnoreFileOutsideRoot(".gitignore")
+                UnreadCause::IgnoreFileOutsideRoot(IgnoreFile::Gitignore)
             )],
             "the directory is recorded so its sources count as unread",
         );
@@ -1122,7 +1170,7 @@ mod tests {
             unread(&project, &walk),
             [(
                 "vendor".to_owned(),
-                UnreadCause::IgnoreFileOutsideRoot(".git/info/exclude")
+                UnreadCause::IgnoreFileOutsideRoot(IgnoreFile::GitExclude)
             )],
         );
     }
@@ -1185,7 +1233,10 @@ mod tests {
         assert!(walk.sources.is_empty(), "{:?}", walk.sources);
         assert_eq!(
             unread(&project, &walk),
-            [(String::new(), UnreadCause::IgnoreFileOutsideRoot(".ignore"))],
+            [(
+                String::new(),
+                UnreadCause::IgnoreFileOutsideRoot(IgnoreFile::Ignore)
+            )],
             "the caller decides what an unwalkable root means",
         );
         assert_eq!(codes(&walk), ["scan-ignore-file-outside-root"]);

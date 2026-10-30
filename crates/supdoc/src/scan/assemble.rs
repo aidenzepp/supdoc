@@ -19,7 +19,7 @@ use crate::read::error::ReadError;
 use crate::read::links::links;
 use crate::scan::model::{Scan, ScannedLink, Scope, TargetState};
 use crate::scan::targets::{self, CODE_UNKNOWN_NAMESPACE, Occurrence, Parsed, Written};
-use crate::scan::walk::{UnreadCause, walk};
+use crate::scan::walk::{IgnoreFile, UnreadCause, Walk, walk};
 
 /// Exit status for a scan that couldn't read the project (06 X7).
 const EXIT_IO: u8 = 74;
@@ -48,13 +48,14 @@ pub enum ScanError {
     RootIgnoreFileOutsideRoot {
         /// The project root.
         root: AbsolutePath,
-        /// The ignore file, relative to the root, such as `.gitignore`.
-        file: &'static str,
+        /// The ignore file.
+        file: IgnoreFile,
     },
 }
 
 impl ScanError {
-    /// The stable code for this error: `scan-root-unreadable`.
+    /// The stable code for this error: `scan-root-unreadable` or
+    /// `scan-root-ignore-file-outside-root`.
     #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
@@ -65,17 +66,16 @@ impl ScanError {
 
     /// What to do next.
     #[must_use]
-    pub fn help(&self) -> &'static str {
+    pub fn help(&self) -> String {
         match self {
-            Self::RootUnreadable { .. } => {
-                "Give the current user read access to the project root, for example with \
-                 `chmod u+r` on it, or run from a directory you can read"
-            }
-            Self::RootIgnoreFileOutsideRoot { .. } => {
-                "supdoc reads nothing outside the project root. Replace the symlink with a \
-                 regular file holding its rules, or delete it with `rm` if the project doesn't \
-                 need them"
-            }
+            Self::RootUnreadable { .. } => "Give the current user read access to the project \
+                                            root, for example with `chmod u+r` on it, or run \
+                                            from a directory you can read"
+                .to_owned(),
+            Self::RootIgnoreFileOutsideRoot { file, .. } => format!(
+                "supdoc reads nothing outside the project root. {}",
+                file.remedy()
+            ),
         }
     }
 
@@ -104,6 +104,23 @@ pub fn run(config: &Config, languages: &Languages, scope: &Scope) -> Result<Scan
     assemble(config, languages, scope).map(|(scan, _parsed)| scan)
 }
 
+/// The refusal for a walk of `root` that never started because one of the root's ignore files
+/// leads outside it, or `None` when the walk went ahead. Any caller judging what the walk found
+/// must refuse in its place: an unwalked root would leave every lock entry looking obsolete (05
+/// C5).
+#[must_use]
+pub fn root_refusal(root: &AbsolutePath, walked: &Walk) -> Option<ScanError> {
+    walked.unread_dirs.iter().find_map(|dir| match dir.cause {
+        UnreadCause::IgnoreFileOutsideRoot(file) if dir.path == *root => {
+            Some(ScanError::RootIgnoreFileOutsideRoot {
+                root: root.clone(),
+                file,
+            })
+        }
+        UnreadCause::IgnoreFileOutsideRoot(_) | UnreadCause::Io(_) => None,
+    })
+}
+
 /// [`run`], also handing back the files it parsed, so tests can see that none was parsed twice.
 ///
 /// # Errors
@@ -123,16 +140,8 @@ fn assemble(
     }
 
     let walked = walk(config, languages, scope);
-    // An unwalked root would leave every lock entry looking obsolete (05 C5).
-    let root_refused = walked.unread_dirs.iter().find_map(|dir| match dir.cause {
-        UnreadCause::IgnoreFileOutsideRoot(file) if dir.path == *root => Some(file),
-        UnreadCause::IgnoreFileOutsideRoot(_) | UnreadCause::Io(_) => None,
-    });
-    if let Some(file) = root_refused {
-        return Err(ScanError::RootIgnoreFileOutsideRoot {
-            root: root.clone(),
-            file,
-        });
+    if let Some(refusal) = root_refusal(root, &walked) {
+        return Err(refusal);
     }
     let mut findings = walked.findings;
     let mut parsed = Parsed::default();
