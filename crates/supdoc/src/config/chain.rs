@@ -43,31 +43,56 @@ fn config_in(dir: &AbsolutePath) -> Option<AbsolutePath> {
 
 /// Walks up from `start` to the nearest directory holding a config file (01 D1).
 ///
-/// The file found must really be a `supdoc.config.toml` once symlinks are followed, the rule
-/// `extends` follows too. It is checked before anything is read, so a hostile checkout can't
-/// make supdoc print another file's lines by linking the config to it. `--config` skips this:
-/// the caller chose that file (A-Q6).
+/// A directory holds one when its entry named `supdoc.config.toml` is a regular file or a
+/// symlink, decided with `symlink_metadata` so the link is never followed to decide. Any other
+/// entry, such as a real directory or a FIFO, is skipped, unlike `scan/walk.rs`, which counts
+/// any entry with that name as a nested project. Whether a symlink's target exists must not
+/// change which config is found, or the exit status would reveal paths outside the root.
+///
+/// A symlink must lead to a file really named `supdoc.config.toml`, the rule `extends` follows
+/// too. It is checked before anything is read, so a hostile checkout can't make supdoc print
+/// another file's lines by linking the config to it. `--config` skips this: the caller chose that
+/// file (A-Q6).
 ///
 /// # Errors
 ///
-/// `SymlinkNotConfig` when the file found is a symlink to a file with another name, `Read` when
-/// its real location can't be worked out.
+/// `SymlinkNotConfig` when the file found is a symlink that doesn't lead to a
+/// `supdoc.config.toml` file: one dangling, looping, pointing at a directory or at a file with
+/// another name are all alike.
 pub(super) fn discover(start: &AbsolutePath) -> Result<Option<AbsolutePath>, ConfigError> {
     let mut dir = Some(start.clone());
     while let Some(current) = dir {
-        if let Some(candidate) = config_in(&current).filter(|file| file.as_path().is_file()) {
-            return match really_config(&candidate) {
-                Ok(true) => Ok(Some(candidate)),
-                Ok(false) => Err(ConfigError::SymlinkNotConfig { path: candidate }),
-                Err(error) => Err(ConfigError::Read {
-                    path: candidate,
-                    error,
-                }),
-            };
+        if let Some(candidate) = config_in(&current) {
+            match fs::symlink_metadata(candidate.as_path()) {
+                Ok(entry) if entry.file_type().is_symlink() => {
+                    return if leads_to_config(&candidate) {
+                        Ok(Some(candidate))
+                    } else {
+                        Err(ConfigError::SymlinkNotConfig { path: candidate })
+                    };
+                }
+                Ok(entry) if entry.is_file() => return Ok(Some(candidate)),
+                _ => {}
+            }
         }
         dir = current.parent();
     }
     Ok(None)
+}
+
+/// Whether the symlink `link`, once every symlink is followed, is a file named
+/// `supdoc.config.toml`.
+///
+/// Every failure to follow it counts as no, so a dangling link, a loop and a link to a directory
+/// all get the same answer as a link to a file with another name.
+///
+/// Effect: reads symlinks along `link` and the metadata of where it leads.
+fn leads_to_config(link: &AbsolutePath) -> bool {
+    fs::canonicalize(link.as_path()).is_ok_and(|real| {
+        real.file_name()
+            .is_some_and(|name| name == CONFIG_FILE_NAME)
+            && fs::metadata(&real).is_ok_and(|metadata| metadata.is_file())
+    })
 }
 
 /// Whether `file`, once every symlink is followed, is a file named `supdoc.config.toml`.

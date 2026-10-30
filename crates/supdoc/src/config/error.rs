@@ -93,10 +93,13 @@ pub enum ConfigError {
         span: Range<usize>,
     },
 
-    /// The config found by searching upward is a symlink to a file that isn't called
+    /// The config found by searching upward is a symlink that doesn't lead to a file called
     /// `supdoc.config.toml`. supdoc refuses it without reading it.
+    ///
+    /// The message is the same whether the target is a file with another name, a directory or
+    /// missing, so it reveals nothing about paths outside the root.
     #[error(
-        "{} is a symlink to a file that isn't a supdoc.config.toml file",
+        "{} is a symlink that doesn't lead to a supdoc.config.toml file",
         .path.display()
     )]
     SymlinkNotConfig {
