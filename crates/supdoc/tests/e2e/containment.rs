@@ -1287,6 +1287,131 @@ fn a_named_path_hidden_by_a_regular_ignore_file_above_the_root_is_blamed_unquote
     }
 }
 
+/// A doc with one link, for a file two directories below the web project.
+const NESTED_DOC: &str = "The [`handler`](../../src/lib.rs#handler) function.\n";
+
+/// The web project as the top of its own repository, whose `.gitignore` hides `*.gen.md`, with an
+/// untracked repository `docs/nested` inside it whose exclude file hides `ne.md` (audit probe N4).
+/// `docs/nested` holds `a.gen.md`, `ne.md` and `k.md`; `docs` holds `top.gen.md` and `top.md`.
+fn web_with_nested_repo() -> Project {
+    let project = web_project();
+    make_git_dir(&project, "services/web/.git");
+    write(&project, "services/web/.gitignore", "*.gen.md\n");
+    make_git_dir(&project, "services/web/docs/nested/.git");
+    write(
+        &project,
+        "services/web/docs/nested/.git/info/exclude",
+        "ne.md\n",
+    );
+    for doc in ["nested/a.gen.md", "nested/ne.md", "nested/k.md"] {
+        write(&project, &format!("services/web/docs/{doc}"), NESTED_DOC);
+    }
+    for doc in ["top.gen.md", "top.md"] {
+        write(&project, &format!("services/web/docs/{doc}"), SCRATCH);
+    }
+    project
+}
+
+/// The sorted sources of the web project's `--json list`.
+fn web_sources(project: &Project) -> Vec<String> {
+    let mut sources = listed_sources(&project.supdoc_in("services/web", &["--json", "list"]));
+    sources.sort();
+    sources.dedup();
+    sources
+}
+
+#[test]
+fn a_nested_repository_applies_its_own_rules_and_not_the_outer_gitignore() {
+    let project = web_with_nested_repo();
+
+    assert_eq!(
+        web_sources(&project),
+        [
+            "docs/guide.md",
+            "docs/nested/a.gen.md",
+            "docs/nested/k.md",
+            "docs/top.md"
+        ],
+        "as git run inside docs/nested: its exclude file hides ne.md and the outer `*.gen.md` \
+         stops at it, while still hiding docs/top.gen.md"
+    );
+}
+
+#[test]
+fn a_submodule_applies_its_own_exclude_file_and_not_the_superprojects_gitignore() {
+    let project = monorepo_with_git();
+    // The superproject is the whole fixture; `docs/mod` is a submodule whose `.git` file names
+    // its git directory under the superproject's `.git/modules` (audit probe N5).
+    write(&project, ".gitignore", "*.sp.md\n");
+    make_git_dir(&project, ".git/modules/mod");
+    write(&project, ".git/modules/mod/info/exclude", "sm.md\n");
+    write(
+        &project,
+        "services/web/docs/mod/.git",
+        "gitdir: ../../../../.git/modules/mod\n",
+    );
+    for doc in ["mod/a.sp.md", "mod/sm.md", "mod/k.md"] {
+        write(&project, &format!("services/web/docs/{doc}"), NESTED_DOC);
+    }
+    for doc in ["top.sp.md", "top.md"] {
+        write(&project, &format!("services/web/docs/{doc}"), SCRATCH);
+    }
+
+    assert_eq!(
+        web_sources(&project),
+        [
+            "docs/guide.md",
+            "docs/mod/a.sp.md",
+            "docs/mod/k.md",
+            "docs/top.md"
+        ],
+        "as git run inside the submodule: its exclude file hides sm.md and the superproject's \
+         `*.sp.md` stops at it, while still hiding docs/top.sp.md"
+    );
+}
+
+#[test]
+fn an_outer_ignore_file_still_hides_files_inside_a_nested_repository() {
+    let project = web_with_nested_repo();
+    write(&project, "services/web/.ignore", "ig*.md\n");
+    write(&project, "services/web/docs/nested/ig.md", NESTED_DOC);
+
+    assert!(
+        !web_sources(&project).contains(&"docs/nested/ig.md".to_owned()),
+        "a `.ignore` is supdoc's own, so it crosses into a nested repository, as in the walker"
+    );
+}
+
+#[test]
+fn an_outer_rule_naming_a_nested_repository_still_skips_it() {
+    let project = web_with_nested_repo();
+    write(&project, "services/web/.gitignore", "/docs/nested/\n");
+
+    let sources = web_sources(&project);
+
+    assert!(
+        !sources
+            .iter()
+            .any(|source| source.starts_with("docs/nested/")),
+        "the directory itself is judged by the outer rules, so nothing beneath it is walked\n\
+         {sources:?}"
+    );
+}
+
+#[test]
+fn a_named_path_hidden_only_by_an_outer_gitignore_inside_a_nested_repository_is_not_warned() {
+    let project = web_with_nested_repo();
+
+    let run = project.supdoc_in("services/web", &["--json", "check", "docs/nested/a.gen.md"]);
+
+    assert_eq!(
+        count_of(&run, "scan-explicit-path-ignored"),
+        0,
+        "the outer `*.gen.md` stops at the nested repository, so the named file is checked\n{}",
+        run.stdout
+    );
+}
+
 /// The web project inside a git repository whose work tree is the whole `monorepo` fixture, so
 /// the ignore files of the directories above the project apply.
 fn monorepo_with_git() -> Project {

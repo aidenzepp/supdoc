@@ -78,6 +78,8 @@ supdoc reads ignore files as git does, with these known exceptions:
 - A `.git` directory counts as a repository when it holds `HEAD`, `objects` and `refs`, as git checks.
   supdoc doesn't read `HEAD` to check that it names a commit, so a `.git` with a corrupt `HEAD` still marks
   the top of the work tree here, where git searches further up.
+- Inside a nested repository or submodule, the global excludes file's anchored patterns still count from the
+  project's work-tree top, not from the nested repository's own top as git run there counts them.
 
 ## Agent skill
 
