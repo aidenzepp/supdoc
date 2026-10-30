@@ -13,7 +13,7 @@ use serde::Serialize;
 use crate::check::model::{LinkReport, Report as CheckModel};
 use crate::check::reconcile::{self, check_outcome, reconcile};
 use crate::finding::{Finding, Location};
-use crate::link::LinkKey;
+use crate::link::{LinkKey, SourcePath};
 use crate::output::json::{Envelope, FindingJson};
 use crate::output::summary::render_summary;
 use crate::output::text::{render_finding, visible};
@@ -136,24 +136,66 @@ impl Report for CheckReport {
     }
 
     fn annotated_findings(&self) -> Vec<&Finding> {
-        self.shown
-            .iter()
-            .filter_map(|link| link.finding.as_ref())
-            .chain(&self.loose)
+        self.in_document_order()
+            .into_iter()
+            .filter_map(|entry| match entry {
+                Entry::Link(link) => link.finding.as_ref(),
+                Entry::Loose(finding) => Some(finding),
+            })
             .collect()
     }
 
     fn render_text(&self, context: &TextContext, out: &mut dyn Write) -> io::Result<()> {
-        for link in &self.shown {
-            match &link.finding {
-                Some(finding) => render_finding(context, finding, out)?,
-                None => render_passed(context, &link.key, out)?,
+        for entry in self.in_document_order() {
+            match entry {
+                Entry::Link(link) => match &link.finding {
+                    Some(finding) => render_finding(context, finding, out)?,
+                    None => render_passed(context, &link.key, out)?,
+                },
+                Entry::Loose(finding) => render_finding(context, finding, out)?,
             }
         }
-        for finding in &self.loose {
-            render_finding(context, finding, out)?;
-        }
         render_summary(context, &self.summary, out)
+    }
+}
+
+/// One printed entry of a check: a link or a finding that belongs to no link.
+enum Entry<'a> {
+    /// A link, with its finding or its `passed` line.
+    Link(&'a LinkReport),
+    /// A finding not tied to one link.
+    Loose(&'a Finding),
+}
+
+impl Entry<'_> {
+    /// Where the entry sits, for ordering by file then position (S8). Entries about no one place
+    /// sort first.
+    fn position(&self) -> Option<(&SourcePath, usize, usize)> {
+        let location = match self {
+            Self::Link(link) => link.locations.first().or_else(|| {
+                link.finding
+                    .as_ref()
+                    .and_then(|finding| finding.location.as_ref())
+            }),
+            Self::Loose(finding) => finding.location.as_ref(),
+        };
+        location.map(|location| (&location.file, location.range.start, location.range.end))
+    }
+}
+
+impl CheckReport {
+    /// The links shown and the loose findings as one list ordered by file then position (S8),
+    /// whichever link or target each comes from. The `links` array and the lockfile keep `LinkKey`
+    /// order; only what is printed follows the document.
+    fn in_document_order(&self) -> Vec<Entry<'_>> {
+        let mut entries: Vec<Entry<'_>> = self
+            .shown
+            .iter()
+            .map(Entry::Link)
+            .chain(self.loose.iter().map(Entry::Loose))
+            .collect();
+        entries.sort_by(|left, right| left.position().cmp(&right.position()));
+        entries
     }
 }
 
@@ -472,6 +514,39 @@ mod tests {
             run.stdout.contains("docs/guide.md:3:5"),
             "stdout: {}",
             run.stdout
+        );
+    }
+
+    #[test]
+    fn findings_print_in_document_order_not_link_key_order() {
+        let project = Project::new();
+        project.write("src/a.rs", "pub fn add() {}\n");
+        project.write("src/b.rs", "pub fn sub() {}\n");
+        project.write(
+            "docs/g.md",
+            "# Notes\n\n[b](../src/b.rs#sub)\n\n[a](../src/a.rs#add)\n",
+        );
+        project.record_all();
+        project.write("src/a.rs", "pub fn add() { 1; }\n");
+        project.write("src/b.rs", "pub fn sub() { 2; }\n");
+
+        let run = project.check(&["check"]);
+
+        let line_of = |location: &str| {
+            run.stdout
+                .find(location)
+                .unwrap_or_else(|| panic!("{location} should be printed: {}", run.stdout))
+        };
+        assert!(
+            line_of("docs/g.md:3:1") < line_of("docs/g.md:5:1"),
+            "the finding at line 3 should print before line 5, though `src/a.rs` sorts first: {}",
+            run.stdout,
+        );
+        let json = project.check(&["--json", "check"]).json();
+        assert_eq!(
+            at(&json, "/data/links/0/target"),
+            "src/a.rs",
+            "the JSON `links` array keeps LinkKey order"
         );
     }
 
