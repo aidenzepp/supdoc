@@ -23,8 +23,9 @@ const VCS_DIRS: [&str; 4] = [".git", ".hg", ".svn", ".jj"];
 
 /// An ignore file a directory can hold that a checkout can plant. One that is a symlink is not
 /// read, wherever it points, as git doesn't read one in its work tree (04 S15): inside the project
-/// root, and in the directories above it, which lie inside the work tree too. Git's exclude files, reached through `.git`, are not among them: git refuses to check
-/// out any `.git` path, so they are followed as git follows them, symlinks included.
+/// root, and in the directories above it, which lie inside the work tree too. Git's exclude files,
+/// reached through `.git`, are not among them: git refuses to check out any `.git` path, so they
+/// are followed as git follows them, symlinks included.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IgnoreFile {
     /// `.ignore`.
@@ -194,6 +195,13 @@ fn walker(config: &Config, scope: &Scope, rules: &Arc<IgnoreRules>) -> ignore::W
 /// The global excludes file's anchored patterns count from that top, or from the root with no
 /// `.git`, whatever directory supdoc runs from.
 ///
+/// A directory beneath the root holding a `.git`, a nested repository or a submodule, is the top
+/// of the work tree its own files sit in, so for them the `.gitignore` and exclude rules stop
+/// there, its own included, as git run in that repository and the walker stop. Every `.ignore`
+/// still applies, up through the root and above it, and so does the global excludes file, still
+/// anchored at the project's top. The directory itself is judged by the rules above it, so an
+/// outer rule naming it still skips it.
+///
 /// A `.git` marks the top as git decides ([`holds_git`]): a `.git` file always does, and a `.git`
 /// directory only with git's repository layout, so a missing or dangling `.git`, or a directory
 /// git rejects, is passed over and the search goes on upward.
@@ -237,6 +245,10 @@ struct Level {
     /// Its ignore files that are symlinks, which were not read. Left empty above the root, where
     /// they are passed over without a report.
     symlinked: Vec<IgnoreFile>,
+    /// Whether it is the top of a git work tree nested beneath the root, past which the
+    /// `.gitignore` and exclude rules of the directories above don't apply. Never the root or a
+    /// directory above it, where the chain already ends at the top.
+    is_nested_top: bool,
     /// The directory above it, if one applies.
     parent: Option<Arc<Self>>,
 }
@@ -342,19 +354,23 @@ impl IgnoreRules {
         if let Some(level) = self.read_so_far().get(dir) {
             return Some(Arc::clone(level));
         }
-        let parent = if dir == self.root {
-            self.above.clone()
+        let (parent, is_nested_top) = if dir == self.root {
+            (self.above.clone(), false)
         } else {
-            dir.parent().and_then(|parent| self.level(parent))
+            (
+                dir.parent().and_then(|parent| self.level(parent)),
+                holds_git(dir),
+            )
         };
-        let level = Arc::new(Level::inside(dir, parent));
+        let level = Arc::new(Level::inside(dir, parent, is_nested_top));
         Some(Arc::clone(
             self.read_so_far().entry(dir.to_path_buf()).or_insert(level),
         ))
     }
 
     /// The deciding rule for `path` beneath the directory whose rules are `level`, as a
-    /// [`Match`]: ignored, whitelisted, or untouched.
+    /// [`Match`]: ignored, whitelisted, or untouched. Past a nested work tree's top, only `.ignore`
+    /// rules and the global excludes file still apply.
     fn matched<'a>(
         &'a self,
         level: Option<&'a Level>,
@@ -368,6 +384,7 @@ impl IgnoreRules {
             .map(|(canonical, relative)| canonical.join(relative));
         let (mut ignore, mut gitignore, mut exclude) = (Match::None, Match::None, Match::None);
         let mut current = level;
+        let mut passed_top = false;
         while let Some(level) = current {
             let (seen, quote_files, quote_exclude) = match level.place {
                 Place::Inside { quote_exclude } => (path, true, quote_exclude),
@@ -376,12 +393,13 @@ impl IgnoreRules {
             if ignore.is_none() {
                 ignore = rule(&level.ignore, seen, is_dir, quote_files);
             }
-            if gitignore.is_none() {
+            if gitignore.is_none() && !passed_top {
                 gitignore = rule(&level.gitignore, seen, is_dir, quote_files);
             }
-            if exclude.is_none() {
+            if exclude.is_none() && !passed_top {
                 exclude = rule(&level.exclude, seen, is_dir, quote_exclude);
             }
+            passed_top = passed_top || level.is_nested_top;
             current = level.parent.as_deref();
         }
         let global = rule(
@@ -423,9 +441,11 @@ fn rule<'a>(matcher: &'a Gitignore, path: &Path, is_dir: bool, quotable: bool) -
 impl Level {
     /// The rules of `dir`, the root or a directory beneath it. A `.ignore` or `.gitignore` there
     /// that is a symlink is not read, wherever it points (04 S15): only an `lstat` looks at it.
+    /// `is_nested_top` marks a directory beneath the root that is the top of its own git work
+    /// tree ([`holds_git`]).
     ///
     /// Effect: reads file metadata in `dir`, its ignore files and its git exclude file.
-    fn inside(dir: &Path, parent: Option<Arc<Self>>) -> Self {
+    fn inside(dir: &Path, parent: Option<Arc<Self>>, is_nested_top: bool) -> Self {
         let (ignore, gitignore, symlinked) = own_ignore_files(dir);
         let (exclude, quote_exclude) = git_exclude(dir);
         Self {
@@ -435,6 +455,7 @@ impl Level {
             exclude,
             place: Place::Inside { quote_exclude },
             symlinked,
+            is_nested_top,
             parent,
         }
     }
@@ -453,6 +474,7 @@ impl Level {
             exclude: git_exclude(dir).0,
             place: Place::Above,
             symlinked: Vec::new(),
+            is_nested_top: false,
             parent,
         }
     }
