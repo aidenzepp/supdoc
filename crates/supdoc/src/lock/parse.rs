@@ -123,7 +123,34 @@ fn line_at(text: &str, offset: usize) -> usize {
 /// Wraps a TOML error with the line it points at.
 fn toml_error(text: &str, error: toml::de::Error) -> ParseLockError {
     let line = error.span().map(|span| line_at(text, span.start));
-    ParseLockError::Toml { line, error }
+    ParseLockError::Toml {
+        line,
+        missing_features: features_are_missing(text, &error),
+        error,
+    }
+}
+
+/// Whether `error` is the `[features.hash]` table, or a key in it, being absent from `text`.
+///
+/// The message alone cannot say: a `[[link]]` entry missing `hash` words it the same way, so the
+/// features table itself is inspected.
+fn features_are_missing(text: &str, error: &toml::de::Error) -> bool {
+    let Ok(document) = text.parse::<toml::Table>() else {
+        return false;
+    };
+    let hash = document
+        .get("features")
+        .and_then(toml::Value::as_table)
+        .and_then(|features| features.get("hash"))
+        .and_then(toml::Value::as_table);
+    match error.message() {
+        "missing field `features`" => !document.contains_key("features"),
+        "missing field `hash`" => document.contains_key("features") && hash.is_none(),
+        "missing field `line-endings`" => {
+            hash.is_some_and(|hash| !hash.contains_key("line-endings"))
+        }
+        _ => false,
+    }
 }
 
 impl Lockfile {
