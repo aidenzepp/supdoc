@@ -1656,3 +1656,28 @@ fn a_directory_named_like_the_config_reports_the_same_from_inside_it() {
         from_root.stdout
     );
 }
+
+#[test]
+fn an_outer_rule_ignoring_the_root_or_a_directory_on_the_way_to_it_hides_nothing_beneath_it() {
+    for outer_rule in ["web/", "/services/"] {
+        let project = monorepo_with_git();
+        fs::write(project.path(".gitignore"), format!("{outer_rule}\n"))
+            .expect("the gitignore should be writable");
+
+        let sources = web_sources(&project);
+        let named = project.supdoc_in("services/web", &["--json", "check", "docs/guide.md"]);
+
+        assert!(
+            sources.contains(&"docs/guide.md".to_owned()),
+            "git ignores everything beneath `{outer_rule}`, but supdoc judges only what is beneath \
+             the root, so the guide is still a source\n{sources:?}"
+        );
+        assert_eq!(
+            count_of(&named, "scan-explicit-path-ignored"),
+            0,
+            "the root and the directories above it are never judged, so a named file beneath the \
+             root draws no warning under `{outer_rule}`\n{}",
+            named.stdout
+        );
+    }
+}

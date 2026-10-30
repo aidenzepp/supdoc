@@ -210,7 +210,9 @@ fn walker(config: &Config, scope: &Scope, rules: &Arc<IgnoreRules>) -> ignore::W
 /// `core.excludesFile` is read only from the user and system git config, never from a repository's
 /// own config or the files it includes. A `.git` directory's `HEAD` isn't read, so one with
 /// `objects` and `refs` but a corrupt `HEAD` still marks the top here, where git searches further
-/// up.
+/// up. The root and the directories above it are never judged themselves, so a rule above the root
+/// that ignores the root, or a directory on the way to it, hides nothing beneath it, where git
+/// ignores it all.
 ///
 /// A `.ignore` or `.gitignore` that is a symlink is not read, whatever it points to, inside the
 /// root or above it, as every directory above lies inside the git work tree. Only inside the root

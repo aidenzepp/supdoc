@@ -45,8 +45,8 @@ fn config_in(dir: &AbsolutePath) -> Option<AbsolutePath> {
 ///
 /// A directory holds one when its entry named `supdoc.config.toml` is a regular file or a
 /// symlink, decided with `symlink_metadata` so the link is never followed to decide. Any other
-/// entry, such as a real directory or a FIFO, is skipped. Whether a symlink's target exists must not
-/// change which config is found, so that the symlink gets one outcome whatever it leads to.
+/// entry, such as a real directory or a FIFO, is skipped. Whether a symlink's target exists doesn't
+/// change which config is found: the symlink is found, or refused with `SymlinkNotConfig`.
 ///
 /// A symlink must lead to a file really named `supdoc.config.toml`, the rule `extends` follows
 /// too. It is checked before anything is read, so a hostile checkout can't make supdoc print
