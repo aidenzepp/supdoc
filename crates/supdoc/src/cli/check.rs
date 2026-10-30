@@ -513,6 +513,49 @@ mod tests {
         assert_eq!(strict.exit_code(), 1, "stdout: {}", strict.stdout);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn entries_under_an_unreadable_directory_are_not_obsolete() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        /// Gives the directory its permissions back when dropped, even if the test fails.
+        struct Restore<'dir>(&'dir Path);
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                let _restored = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755));
+            }
+        }
+
+        let project = Project::new();
+        project.write("docs/sub/c.md", "See [add](../../src/lib.rs#add).\n");
+        project.record_all();
+        project.write("docs/guide.md", "# Guide\n\nNo links any more.\n");
+        let sub = project.dir.path().join("docs/sub");
+        fs::set_permissions(&sub, fs::Permissions::from_mode(0o000))
+            .expect("the fixture directory permissions should be settable");
+        let restore = Restore(&sub);
+
+        let run = project.check(&["--json", "check"]);
+        drop(restore);
+
+        let json = run.json();
+        let obsolete: Vec<String> = at(&json, "/data/links")
+            .as_array()
+            .expect("`data.links` should be an array")
+            .iter()
+            .filter(|link| link.get("state").and_then(|state| state.as_str()) == Some("obsolete"))
+            .filter_map(|link| link.get("source").and_then(|source| source.as_str()))
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            obsolete,
+            ["docs/guide.md"],
+            "only the entry whose link was deleted is obsolete; the unread directory keeps its \
+             entry: {json}"
+        );
+        assert_eq!(run.exit_code(), 0, "stdout: {}", run.stdout);
+    }
+
     #[test]
     fn check_never_writes_any_file() {
         for recorded in [false, true] {

@@ -61,7 +61,7 @@ pub fn reconcile(scan: &Scan, lock: &Lockfile, scope: &Scope) -> Report {
         .map(|(key, _)| key)
         .filter(|key| scope.contains(&key.source))
         .filter(|key| !scan.links.contains_key(key))
-        .filter(|key| !scan.unread_sources.contains(&key.source))
+        .filter(|key| !scan.is_unread(&key.source))
         .filter(|key| !sources_with_broken_links.contains(&key.source))
         .collect();
     let moves = detect_moves(&unlocked, &removed);
@@ -517,6 +517,41 @@ mod tests {
             report.links.is_empty(),
             "an unreadable source must keep its entries: {:?}",
             report.links,
+        );
+    }
+
+    #[test]
+    fn entries_beneath_an_unread_directory_are_not_obsolete_but_its_siblings_are() {
+        let beneath = key("docs/sub/c.md", Some("add"));
+        let deeper = key("docs/sub/deep/d.md", Some("add"));
+        let sharing_prefix = key("docs/subway.md", Some("add"));
+        let mut scan = Scan::default();
+        let _new = scan.unread_dirs.insert(
+            "docs/sub"
+                .parse()
+                .expect("the fixture directory should be valid"),
+        );
+
+        let report = reconcile(
+            &scan,
+            &lock_of(&[
+                (&beneath, b"v1"),
+                (&deeper, b"v1"),
+                (&sharing_prefix, b"v1"),
+            ]),
+            &Scope::All,
+        );
+
+        let obsolete: Vec<&str> = report
+            .links
+            .iter()
+            .filter(|link| link.state == LinkState::Obsolete)
+            .map(|link| link.key.source.as_str())
+            .collect();
+        assert_eq!(
+            obsolete,
+            ["docs/subway.md"],
+            "entries beneath `docs/sub` keep their state; `docs/subway.md` only shares its prefix"
         );
     }
 

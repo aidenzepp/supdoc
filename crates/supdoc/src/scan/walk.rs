@@ -1,6 +1,7 @@
 //! Walking the project tree to find the files a scan reads links from (04 S1-S6, S10).
 
 use std::fs;
+use std::io;
 use std::path::Path;
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -24,6 +25,33 @@ pub struct Walk {
     pub sources: Vec<(AbsolutePath, &'static dyn Cartridge)>,
     /// Unreadable directories and explicitly named paths that are excluded or ignored, sorted.
     pub findings: Vec<Finding>,
+    /// The directories the walk couldn't read, sorted by path. Nothing beneath one was walked, so
+    /// its sources and their links are unknown (05 C5).
+    pub unread_dirs: Vec<UnreadDir>,
+}
+
+/// A directory the walk couldn't read, so nothing beneath it was walked.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UnreadDir {
+    /// The directory, as the walk met it.
+    pub path: AbsolutePath,
+    /// What the operating system reported, such as `permission denied`.
+    pub cause: io::ErrorKind,
+}
+
+impl UnreadDir {
+    /// The `scan-unreadable-dir` warning for this directory.
+    fn finding(&self) -> Finding {
+        Finding::new(
+            "scan-unreadable-dir",
+            Severity::Warning,
+            format!("skipped {}: {}", self.path.display(), self.cause),
+        )
+        .with_help(
+            "Links in that directory weren't checked. Fix its permissions, or add it to \
+             `exclude` in `supdoc.config.toml`",
+        )
+    }
 }
 
 /// Walks the project beneath `config.root()` and returns its sources.
@@ -41,6 +69,7 @@ pub struct Walk {
 pub fn walk(config: &Config, languages: &Languages, scope: &Scope) -> Walk {
     let mut sources = Vec::new();
     let mut findings = Vec::new();
+    let mut unread_dirs = Vec::new();
 
     for entry in walker(config, scope) {
         match entry {
@@ -49,10 +78,16 @@ pub fn walk(config: &Config, languages: &Languages, scope: &Scope) -> Walk {
                     sources.push(source);
                 }
             }
-            Err(error) => findings.extend(unreadable_dir(&error)),
+            Err(error) => {
+                if let Some(dir) = unreadable_dir(&error) {
+                    findings.push(dir.finding());
+                    unread_dirs.push(dir);
+                }
+            }
         }
     }
     sources.sort_by(|(left, _), (right, _)| left.cmp(right));
+    unread_dirs.sort();
 
     findings.extend(explicit_path_warnings(config, languages, scope, &sources));
     findings.sort_by(|left, right| {
@@ -61,7 +96,11 @@ pub fn walk(config: &Config, languages: &Languages, scope: &Scope) -> Walk {
             .then_with(|| left.message.cmp(&right.message))
     });
 
-    Walk { sources, findings }
+    Walk {
+        sources,
+        findings,
+        unread_dirs,
+    }
 }
 
 /// A walker over the root that applies every directory-level rule, in sorted order.
@@ -154,24 +193,15 @@ fn as_source(
     scope.contains(&relative).then_some((path, cartridge))
 }
 
-/// A `scan-unreadable-dir` warning for a directory the walker couldn't read.
+/// The directory the walker couldn't read.
 ///
 /// Other walker errors, such as a malformed ignore-file line, say nothing about what was skipped,
-/// so they produce no finding.
-fn unreadable_dir(error: &ignore::Error) -> Option<Finding> {
-    let path = path_of(error)?;
-    let cause = error.io_error()?;
-    Some(
-        Finding::new(
-            "scan-unreadable-dir",
-            Severity::Warning,
-            format!("skipped {}: {}", path.display(), cause.kind()),
-        )
-        .with_help(
-            "Links in that directory weren't checked. Fix its permissions, or add it to \
-             `exclude` in `supdoc.config.toml`",
-        ),
-    )
+/// so they produce none.
+fn unreadable_dir(error: &ignore::Error) -> Option<UnreadDir> {
+    // The walk starts at the absolute root, so every path it reports is absolute.
+    let path = AbsolutePath::new(path_of(error)?)?;
+    let cause = error.io_error()?.kind();
+    Some(UnreadDir { path, cause })
 }
 
 /// The path a walker error names, if it names one.
@@ -835,6 +865,14 @@ mod tests {
             ["open.rs"],
         );
         assert_eq!(codes(&walk), ["scan-unreadable-dir"]);
+        assert_eq!(
+            walk.unread_dirs
+                .iter()
+                .map(|dir| (project.relative(&dir.path), dir.cause))
+                .collect::<Vec<_>>(),
+            [("private".to_owned(), io::ErrorKind::PermissionDenied)],
+            "the skipped directory is recorded so its sources count as unread",
+        );
         let message = &walk
             .findings
             .first()

@@ -119,6 +119,14 @@ fn assemble(
         }
     }
 
+    // The root itself was read above, so every unread directory lies beneath it.
+    let unread_dirs = walked
+        .unread_dirs
+        .iter()
+        .filter_map(|dir| dir.path.strip_prefix(root))
+        .filter_map(|relative| SourcePath::from_relative(relative).ok())
+        .collect();
+
     let mut links = targets::resolve(config, languages, &mut parsed, found.occurrences);
     add_broken(&mut links, found.broken);
     findings.extend(found.unkeyed);
@@ -132,6 +140,7 @@ fn assemble(
         links,
         findings,
         unread_sources,
+        unread_dirs,
     };
     Ok((scan, parsed))
 }
