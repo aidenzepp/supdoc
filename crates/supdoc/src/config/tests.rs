@@ -752,7 +752,7 @@ fn extends_naming_a_missing_config_does_not_tell_the_user_to_name_one() {
     assert!(
         error
             .to_string()
-            .contains("which doesnt lead to a supdoc.config.toml supdoc can read"),
+            .contains("which doesn't lead to a supdoc.config.toml supdoc can read"),
         "got {error}"
     );
 }
