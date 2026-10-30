@@ -174,3 +174,124 @@ fn lockfile_target_climbing_out_of_the_root_is_a_parse_error() {
         run.stderr
     );
 }
+
+/// Every way a run can print an error: text, JSON and GitHub annotations.
+const ERROR_FORMATS: [&[&str]; 3] = [
+    &["check"],
+    &["--json", "check"],
+    &["--output", "github", "check"],
+];
+
+/// Fails if either stream of `run` names a key of [`SECRET`], as a parse error quoting it would.
+fn assert_no_secret_key(run: &crate::support::Run) {
+    assert_no_secret(run);
+    for leak in ["API_KEY", "DB_PASSWORD"] {
+        assert!(
+            !run.stdout.contains(leak) && !run.stderr.contains(leak),
+            "`supdoc {}` named `{leak}`\nstdout:\n{}\nstderr:\n{}",
+            run.args,
+            run.stdout,
+            run.stderr
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_lockfile_symlinked_out_of_the_root_is_refused_alike_whether_or_not_its_target_exists() {
+    let project = web_project();
+    let lock = project.path("services/web/supdoc.lock");
+    std::os::unix::fs::symlink(project.path(".env"), &lock)
+        .expect("the symlink should be creatable");
+    let present: Vec<_> = ERROR_FORMATS
+        .iter()
+        .map(|args| project.supdoc_in("services/web", args))
+        .collect();
+    fs::remove_file(&lock).expect("the symlink should be removable");
+    std::os::unix::fs::symlink(project.path("no-such-file"), &lock)
+        .expect("the dangling symlink should be creatable");
+
+    for (with_target, args) in present.iter().zip(ERROR_FORMATS) {
+        let without_target = project.supdoc_in("services/web", args);
+
+        let _ = with_target.assert_exit(78);
+        assert_no_secret_key(with_target);
+        assert!(
+            format!("{}{}", with_target.stdout, with_target.stderr).contains("lock-outside-root"),
+            "`supdoc {}` should refuse the lockfile\nstdout:\n{}\nstderr:\n{}",
+            with_target.args,
+            with_target.stdout,
+            with_target.stderr
+        );
+        assert_eq!(
+            (
+                &without_target.code,
+                &without_target.stdout,
+                &without_target.stderr
+            ),
+            (&with_target.code, &with_target.stdout, &with_target.stderr),
+            "`supdoc {}` must not reveal whether the lockfile's target exists",
+            with_target.args
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_found_config_symlinked_to_an_outside_dotenv_file_is_refused_without_printing_it() {
+    let project = web_project();
+    let config = project.path("services/web/supdoc.config.toml");
+    fs::remove_file(&config).expect("the config should be removable");
+    std::os::unix::fs::symlink(project.path(".env"), &config)
+        .expect("the symlink should be creatable");
+
+    for args in ERROR_FORMATS {
+        let run = project.supdoc_in("services/web", args);
+
+        let _ = run.assert_exit(78);
+        assert_no_secret_key(&run);
+        assert!(
+            format!("{}{}", run.stdout, run.stderr).contains("config-symlink-not-config"),
+            "`supdoc {}` should refuse the config\nstdout:\n{}\nstderr:\n{}",
+            run.args,
+            run.stdout,
+            run.stderr
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_found_config_symlinked_to_another_config_file_still_loads() {
+    let project = web_project();
+    fs::create_dir(project.path("shared")).expect("the shared directory should be creatable");
+    fs::write(
+        project.path("shared/supdoc.config.toml"),
+        "include = [\"docs/guide.md\"]\n",
+    )
+    .expect("the shared config should be writable");
+    let config = project.path("services/web/supdoc.config.toml");
+    fs::remove_file(&config).expect("the config should be removable");
+    std::os::unix::fs::symlink(project.path("shared/supdoc.config.toml"), &config)
+        .expect("the symlink should be creatable");
+
+    let run = project.supdoc_in("services/web", &["config", "show"]);
+
+    let _ = run.assert_exit(0);
+    assert!(run.stdout.contains("docs/guide.md"), "{}", run.stdout);
+}
+
+#[test]
+fn the_config_flag_still_loads_a_file_of_any_name() {
+    let project = web_project();
+    fs::write(
+        project.path("services/web/ci.toml"),
+        "include = [\"docs\"]\n",
+    )
+    .expect("the flag's config should be writable");
+
+    let run = project.supdoc_in("services/web", &["--config", "ci.toml", "config", "show"]);
+
+    let _ = run.assert_exit(0);
+    assert!(run.stdout.contains("ci.toml"), "{}", run.stdout);
+}

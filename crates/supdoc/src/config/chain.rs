@@ -3,8 +3,9 @@
 //! `discover`, `read_chain` and `confine_namespaces` are the only functions here that touch the
 //! filesystem. `merge` reads only to find the root's real location.
 //!
-//! supdoc may run on an untrusted checkout whose config is hostile, so `extends` reads nothing but
-//! a file named `supdoc.config.toml`, and a namespace may not name a directory outside the root.
+//! supdoc may run on an untrusted checkout whose config is hostile, so neither the config found by
+//! walking up nor `extends` reads anything but a file named `supdoc.config.toml`, and a namespace
+//! may not name a directory outside the root.
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
@@ -41,15 +42,46 @@ fn config_in(dir: &AbsolutePath) -> Option<AbsolutePath> {
 }
 
 /// Walks up from `start` to the nearest directory holding a config file (01 D1).
-pub(super) fn discover(start: &AbsolutePath) -> Option<AbsolutePath> {
+///
+/// The file found must really be a `supdoc.config.toml` once symlinks are followed, the rule
+/// `extends` follows too. It is checked before anything is read, so a hostile checkout can't
+/// make supdoc print another file's lines by linking the config to it. `--config` skips this:
+/// the caller chose that file (A-Q6).
+///
+/// # Errors
+///
+/// `SymlinkNotConfig` when the file found is a symlink to a file with another name, `Read` when
+/// its real location can't be worked out.
+pub(super) fn discover(start: &AbsolutePath) -> Result<Option<AbsolutePath>, ConfigError> {
     let mut dir = Some(start.clone());
     while let Some(current) = dir {
         if let Some(candidate) = config_in(&current).filter(|file| file.as_path().is_file()) {
-            return Some(candidate);
+            return match really_config(&candidate) {
+                Ok(true) => Ok(Some(candidate)),
+                Ok(false) => Err(ConfigError::SymlinkNotConfig { path: candidate }),
+                Err(error) => Err(ConfigError::Read {
+                    path: candidate,
+                    error,
+                }),
+            };
         }
         dir = current.parent();
     }
-    None
+    Ok(None)
+}
+
+/// Whether `file`, once every symlink is followed, is a file named `supdoc.config.toml`.
+///
+/// Effect: reads symlinks along `file`.
+///
+/// # Errors
+///
+/// Fails when `file`'s real location can't be worked out.
+fn really_config(file: &AbsolutePath) -> std::io::Result<bool> {
+    let real = fs::canonicalize(file.as_path())?;
+    Ok(real
+        .file_name()
+        .is_some_and(|name| name == CONFIG_FILE_NAME))
 }
 
 /// Reads `file` and every config it extends, child first.
@@ -154,15 +186,9 @@ fn resolve_extends(
     }
     match fs::metadata(resolved.as_path()) {
         Ok(metadata) if metadata.is_dir() => Err(directory()),
-        Ok(_) => match fs::canonicalize(resolved.as_path()) {
-            Ok(real)
-                if real
-                    .file_name()
-                    .is_some_and(|name| name == CONFIG_FILE_NAME) =>
-            {
-                Ok(resolved)
-            }
-            Ok(_) => Err(not_config()),
+        Ok(_) => match really_config(&resolved) {
+            Ok(true) => Ok(resolved),
+            Ok(false) => Err(not_config()),
             Err(error) => Err(ConfigError::Read {
                 path: resolved,
                 error,

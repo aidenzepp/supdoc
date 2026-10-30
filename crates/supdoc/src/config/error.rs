@@ -92,6 +92,17 @@ pub enum ConfigError {
         span: Range<usize>,
     },
 
+    /// The config found by searching upward is a symlink to a file that isn't called
+    /// `supdoc.config.toml`. supdoc refuses it without reading it.
+    #[error(
+        "{} is a symlink to a file that isn't a supdoc.config.toml file",
+        .path.display()
+    )]
+    SymlinkNotConfig {
+        /// The config file as found, before following the symlink.
+        path: AbsolutePath,
+    },
+
     /// A namespace names a directory outside the project root.
     #[error(
         "{} sets namespace `{name}` to {}, which is outside the project root {}",
@@ -130,6 +141,7 @@ impl ConfigError {
             Self::ExtendsDirectory { .. } => "config-extends-directory",
             Self::ExtendsLoop { .. } => "config-extends-loop",
             Self::ExtendsNotConfig { .. } => "config-extends-not-config",
+            Self::SymlinkNotConfig { .. } => "config-symlink-not-config",
             Self::NamespaceOutsideRoot { .. } => "config-namespace-outside-root",
         }
     }
@@ -164,6 +176,12 @@ impl ConfigError {
                  through `extends`"
                     .to_owned(),
             ),
+            Self::SymlinkNotConfig { .. } => Some(
+                "supdoc reads no other file as the project's config. Replace the symlink with a \
+                 real config, for example `rm supdoc.config.toml && supdoc init`, or pass \
+                 `--config` with the file you mean"
+                    .to_owned(),
+            ),
             Self::NamespaceOutsideRoot { .. } => Some(
                 "Point the namespace at a directory inside the project root, or move the project's \
                  `supdoc.config.toml` up to a directory that holds both. supdoc reads nothing \
@@ -184,6 +202,7 @@ impl ConfigError {
             | Self::ExtendsDirectory { .. }
             | Self::ExtendsLoop { .. }
             | Self::ExtendsNotConfig { .. }
+            | Self::SymlinkNotConfig { .. }
             | Self::NamespaceOutsideRoot { .. } => EXIT_CONFIG,
         }
     }

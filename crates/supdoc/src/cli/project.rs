@@ -74,6 +74,7 @@ fn config_span(error: &ConfigError) -> Option<(&AbsolutePath, Range<usize>)> {
             .map(|file| (file, span.clone())),
         ConfigError::NotFound { .. }
         | ConfigError::Read { .. }
+        | ConfigError::SymlinkNotConfig { .. }
         | ConfigError::NamespaceOutsideRoot { .. } => None,
     }
 }

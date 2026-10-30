@@ -108,6 +108,17 @@ pub enum LockError {
         error: std::io::Error,
     },
 
+    /// The lockfile is a symlink that doesn't lead to a file inside the project root, so supdoc
+    /// refuses it without reading it. The message is the same whether or not anything is there.
+    #[error(
+        "{} is a symlink that doesn't lead to a file inside the project root",
+        .path.display()
+    )]
+    OutsideRoot {
+        /// The lockfile, as supdoc looked for it.
+        path: AbsolutePath,
+    },
+
     /// The file was read but its text is not a valid lockfile.
     #[error("{}: {error}", .path.display())]
     Parse {
@@ -133,6 +144,7 @@ impl LockError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Read { .. } => "lock-read",
+            Self::OutsideRoot { .. } => "lock-outside-root",
             Self::Parse { error, .. } => error.code(),
             Self::Write { .. } => "lock-write",
         }
@@ -145,6 +157,10 @@ impl LockError {
             Self::Read { .. } => {
                 "Give the current user read access, for example with `chmod u+r supdoc.lock`"
             }
+            Self::OutsideRoot { .. } => {
+                "supdoc reads nothing outside the project root. Remove the symlink with \
+                 `rm supdoc.lock`, then run `supdoc update --yes` to record the links again"
+            }
             Self::Parse { error, .. } => error.help(),
             Self::Write { .. } => {
                 "The existing lockfile was not changed. Make the directory that holds \
@@ -153,11 +169,12 @@ impl LockError {
         }
     }
 
-    /// The process exit status for this error (06 X7): 78 when the text is invalid, else 74.
+    /// The process exit status for this error (06 X7): 78 when the text is invalid or the file
+    /// is refused, else 74.
     #[must_use]
     pub const fn exit_code(&self) -> u8 {
         match self {
-            Self::Parse { .. } => EXIT_CONFIG,
+            Self::Parse { .. } | Self::OutsideRoot { .. } => EXIT_CONFIG,
             Self::Read { .. } | Self::Write { .. } => EXIT_IO,
         }
     }

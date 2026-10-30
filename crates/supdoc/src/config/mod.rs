@@ -58,7 +58,7 @@ impl Config {
     /// Returns a [`ConfigError`] if the config, or a file it extends, can't be read, parsed or
     /// followed.
     pub fn load(start: &AbsolutePath) -> Result<Self, ConfigError> {
-        match chain::discover(start) {
+        match chain::discover(start)? {
             Some(file) => Self::load_file(&file),
             None => Ok(Self::defaults(start)),
         }

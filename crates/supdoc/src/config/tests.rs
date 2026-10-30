@@ -586,6 +586,7 @@ fn every_error_has_a_code_and_message_names_a_file() {
             extends: RelativePath::try_from("../.env".to_owned()).expect("relative"),
             span: 0..1,
         },
+        ConfigError::SymlinkNotConfig { path: file.clone() },
         ConfigError::NamespaceOutsideRoot {
             file: file.clone(),
             name: name("shared"),
@@ -736,6 +737,62 @@ fn extends_through_a_symlink_named_like_a_config_is_judged_by_the_real_file() {
 
     assert_eq!(error.code(), "config-extends-not-config", "got {error:?}");
     assert!(!error.to_string().contains("hunter2"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn found_config_symlinked_to_another_name_is_refused_without_reading_it() {
+    let dir = tree(&[
+        ("home/.env", "DB_PASSWORD=hunter2"),
+        ("project/docs/a.md", ""),
+    ]);
+    std::os::unix::fs::symlink(
+        dir.path().join("home/.env"),
+        dir.path().join("project/supdoc.config.toml"),
+    )
+    .expect("the symlink should be creatable");
+
+    let error = Config::load(&at(&dir, "project/docs")).expect_err("the symlink should be refused");
+
+    assert_eq!(error.code(), "config-symlink-not-config", "got {error:?}");
+    assert!(!error.to_string().contains("hunter2"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn found_config_symlinked_to_another_config_file_loads_it() {
+    let dir = tree(&[
+        ("shared/supdoc.config.toml", "include = [\"docs\"]\n"),
+        ("project/docs/a.md", ""),
+    ]);
+    std::os::unix::fs::symlink(
+        dir.path().join("shared/supdoc.config.toml"),
+        dir.path().join("project/supdoc.config.toml"),
+    )
+    .expect("the symlink should be creatable");
+
+    let config = load_from(&dir, "project");
+
+    assert_eq!(config.root(), &at(&dir, "project"));
+    assert!(config.scans(&at(&dir, "project/docs/a.md")));
+}
+
+#[cfg(unix)]
+#[test]
+fn config_flag_loads_a_symlink_to_any_file_name() {
+    let dir = tree(&[("home/base.toml", "include = [\"docs\"]\n")]);
+    std::os::unix::fs::symlink(
+        dir.path().join("home/base.toml"),
+        dir.path().join("supdoc.config.toml"),
+    )
+    .expect("the symlink should be creatable");
+
+    let loaded = Config::load_file(&at(&dir, "supdoc.config.toml"));
+
+    assert!(
+        loaded.is_ok(),
+        "--config is trusted with any file: {loaded:?}"
+    );
 }
 
 #[test]

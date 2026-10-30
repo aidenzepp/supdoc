@@ -14,19 +14,29 @@ impl Lockfile {
     /// Reads and parses the lockfile at `path`. `Ok(None)` if the file doesn't exist; the
     /// command decides what that means.
     ///
+    /// The project root is `path`'s directory. A lockfile that is a symlink is read only if the
+    /// file it leads to lies inside that root once symlinks are followed (decision 6), so a
+    /// hostile checkout can't make supdoc print another file's text in a parse error.
+    ///
     /// # Errors
     ///
-    /// Fails if the file exists but cannot be read, or its text is not a valid lockfile.
+    /// `OutsideRoot` for a symlink that doesn't lead to a file inside the root, whether or not
+    /// its target exists. Otherwise fails if the file exists but cannot be read, or its text is
+    /// not a valid lockfile.
     pub fn read(path: &AbsolutePath) -> Result<Option<Self>, LockError> {
-        let text = match fs::read_to_string(path.as_path()) {
+        let read_failed = |error| LockError::Read {
+            path: path.clone(),
+            error,
+        };
+        let file = match locate(path).map_err(read_failed)? {
+            Located::Absent => return Ok(None),
+            Located::Inside(file) => file,
+            Located::Outside => return Err(LockError::OutsideRoot { path: path.clone() }),
+        };
+        let text = match fs::read_to_string(&file) {
             Ok(text) => text,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => {
-                return Err(LockError::Read {
-                    path: path.clone(),
-                    error,
-                });
-            }
+            Err(error) => return Err(read_failed(error)),
         };
         Self::parse(&text)
             .map(Some)
@@ -50,6 +60,42 @@ impl Lockfile {
         };
         write_atomically(path.as_path(), self.render().as_bytes(), None).map_err(to_error)
     }
+}
+
+/// Where the lockfile at a path really is, as far as reading it goes.
+enum Located {
+    /// Nothing is there.
+    Absent,
+    /// The file to read: the path itself, or the real file a symlink there leads to inside the
+    /// project root.
+    Inside(PathBuf),
+    /// A symlink that doesn't lead to a file inside the root: dangling, looping or pointing
+    /// outside, deliberately not told apart.
+    Outside,
+}
+
+/// Finds the file to read for the lockfile at `path`, whose directory is the project root.
+///
+/// Effect: reads metadata and symlinks along `path`.
+///
+/// # Errors
+///
+/// Fails if `path`'s own metadata can't be read for a reason other than its absence.
+fn locate(path: &AbsolutePath) -> io::Result<Located> {
+    let metadata = match fs::symlink_metadata(path.as_path()) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Located::Absent),
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_symlink() {
+        return Ok(Located::Inside(path.as_path().to_path_buf()));
+    }
+    let root = path.as_path().parent().map(fs::canonicalize);
+    let real = fs::canonicalize(path.as_path());
+    Ok(match (root, real) {
+        (Some(Ok(root)), Ok(real)) if real.starts_with(&root) => Located::Inside(real),
+        _ => Located::Outside,
+    })
 }
 
 /// How many fresh names to try before giving up on creating a temporary file.

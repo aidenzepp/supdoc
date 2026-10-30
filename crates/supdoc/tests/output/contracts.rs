@@ -870,6 +870,17 @@ mod helps {
             &["check"],
         ),
         case(
+            "config-symlink-not-config",
+            |p| {
+                let config = p.path().join("supdoc.config.toml");
+                let _removed = std::fs::remove_file(&config);
+                p.write("base.toml", "");
+                std::os::unix::fs::symlink("base.toml", &config)
+                    .expect("the symlink should be creatable");
+            },
+            &["check"],
+        ),
+        case(
             "config-namespace-outside-root",
             |p| {
                 p.write(
@@ -904,6 +915,16 @@ mod helps {
             &["check"],
         ),
         case("lock-read", |p| chmod(p, "supdoc.lock", 0o000), &["check"]),
+        case(
+            "lock-outside-root",
+            |p| {
+                let lock = p.path().join("supdoc.lock");
+                std::fs::remove_file(&lock).expect("the lockfile should be removable");
+                std::os::unix::fs::symlink("../outside.lock", &lock)
+                    .expect("the symlink should be creatable");
+            },
+            &["check"],
+        ),
         case(
             "lock-write",
             |p| {
