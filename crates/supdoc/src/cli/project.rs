@@ -12,7 +12,7 @@ use crate::check::plan::SettingsChange;
 use crate::config::{Config, ConfigError};
 use crate::finding::{Location, Snippet};
 use crate::link::SourcePath;
-use crate::lock::error::{LockError, SettingsMismatch};
+use crate::lock::error::{LockError, SettingsMismatch, shell_quote};
 use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
 use crate::output::Output;
 use crate::path::AbsolutePath;
@@ -23,7 +23,8 @@ use super::{CliError, Context, ErrorSite};
 /// The config `--config` names, or the one found by searching upward from the current directory.
 ///
 /// On success, `output` reports paths against the config's root from then on. `command` names the
-/// command in the fallback help, as in ``run `supdoc list` again``.
+/// command in the fallback help, as in ``run `supdoc list` again``: it is the whole command to
+/// run, arguments included, and the fallback adds `-c PATH` when the config came from there.
 ///
 /// # Errors
 ///
@@ -42,6 +43,18 @@ pub(crate) fn load_config(
     Ok(config)
 }
 
+/// The shell command that runs `command` from the current directory: `supdoc command`, with
+/// `-c PATH` in front when the run was pointed at a config, so it loads the same one.
+pub(crate) fn invocation(context: &Context, command: &str) -> String {
+    match context.global.config.as_deref() {
+        Some(file) => format!(
+            "supdoc -c {} {command}",
+            shell_quote(&file.display().to_string())
+        ),
+        None => format!("supdoc {command}"),
+    }
+}
+
 /// The fatal error for a config that did not load, pointing at the offending text when the config
 /// error knows where it is.
 fn config_failure(
@@ -51,7 +64,10 @@ fn config_failure(
     command: &str,
 ) -> CliError {
     let help = error.help().unwrap_or_else(|| {
-        format!("Correct the config as the message says, then run `supdoc {command}` again")
+        format!(
+            "Correct the config as the message says, then run `{}` again",
+            invocation(context, command)
+        )
     });
     let failure = CliError::new(error.code(), error.to_string(), help, error.exit_code());
     match error_site(error, &context.cwd, output) {
@@ -127,7 +143,7 @@ pub(crate) fn scope(
     for typed in paths {
         let path = absolute(cwd, typed);
         if path.as_path().symlink_metadata().is_err() {
-            return Err(path_missing(typed));
+            return Err(path_missing(typed, cwd));
         }
         let Some(inside) = path.strip_prefix(root) else {
             return Err(path_outside(typed, root));
@@ -220,25 +236,30 @@ fn lock_failure(error: &LockError) -> CliError {
 }
 
 /// The error for a `[PATH]` that doesn't exist (06 error table).
-pub(crate) fn path_missing(typed: &Path) -> CliError {
+///
+/// The help lists the nearest directory of `typed` that exists under `cwd`, so the command it
+/// names runs where this one did.
+pub(crate) fn path_missing(typed: &Path, cwd: &AbsolutePath) -> CliError {
     CliError::new(
         "cli-path-missing",
         format!("{} does not exist", typed.display()),
         format!(
             "Check the path, which is relative to the current directory. `ls {}` lists what is \
              there",
-            listing_dir(typed).display()
+            shell_quote(&listing_dir(typed, cwd).display().to_string())
         ),
         CliError::USAGE_EXIT_CODE,
     )
 }
 
-/// The directory a missing `typed` path would be in, as typed: its parent, or `.` when it has
-/// none.
-fn listing_dir(typed: &Path) -> &Path {
+/// The nearest ancestor of a missing `typed` path that exists under `cwd`, as typed: `.` when
+/// none of them does.
+fn listing_dir<'a>(typed: &'a Path, cwd: &AbsolutePath) -> &'a Path {
     typed
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
+        .ancestors()
+        .skip(1)
+        .filter(|ancestor| !ancestor.as_os_str().is_empty())
+        .find(|ancestor| absolute(cwd, ancestor).as_path().is_dir())
         .unwrap_or_else(|| Path::new("."))
 }
 

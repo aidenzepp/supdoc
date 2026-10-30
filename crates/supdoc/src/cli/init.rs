@@ -12,6 +12,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::config::CONFIG_FILE_NAME;
+use crate::lock::error::shell_quote;
 use crate::output::json::Envelope;
 use crate::output::{Output, OutputError, Report, TextContext};
 use crate::path::AbsolutePath;
@@ -86,8 +87,8 @@ pub fn run(args: &InitArgs, context: &Context, output: &mut Output) -> Result<Ou
     };
 
     if args.dry_run {
-        require_parent_directory(&target)?;
-        refuse_if_present(&target)?;
+        require_parent_directory(&target, context)?;
+        refuse_if_present(&target, context)?;
         output
             .artifact(&report(false), STARTER, true)
             .map_err(|error| output_failed(&target, &error))?;
@@ -98,7 +99,7 @@ pub fn run(args: &InitArgs, context: &Context, output: &mut Output) -> Result<Ou
             ))
             .map_err(|error| output_failed(&target, &error))?;
     } else {
-        write_new(&target)?;
+        write_new(&target, context)?;
         output
             .artifact(&report(true), "", true)
             .map_err(|error| output_failed(&target, &error))?;
@@ -136,7 +137,12 @@ fn target(context: &Context) -> AbsolutePath {
 fn command(context: &Context) -> String {
     context.global.config.as_deref().map_or_else(
         || "supdoc init".to_owned(),
-        |path| format!("supdoc init -c {}", path.display()),
+        |path| {
+            format!(
+                "supdoc init -c {}",
+                shell_quote(&path.display().to_string())
+            )
+        },
     )
 }
 
@@ -146,7 +152,7 @@ fn command(context: &Context) -> String {
 /// # Errors
 ///
 /// Returns `cli-init-write` when the parent directory cannot be found or is not a directory.
-fn require_parent_directory(target: &AbsolutePath) -> Result<(), CliError> {
+fn require_parent_directory(target: &AbsolutePath, context: &Context) -> Result<(), CliError> {
     let Some(parent) = target.as_path().parent() else {
         return Ok(());
     };
@@ -155,8 +161,9 @@ fn require_parent_directory(target: &AbsolutePath) -> Result<(), CliError> {
         Ok(_) => Err(write_failed(
             target,
             &io::Error::from(io::ErrorKind::NotADirectory),
+            context,
         )),
-        Err(error) => Err(write_failed(target, &error)),
+        Err(error) => Err(write_failed(target, &error, context)),
     }
 }
 
@@ -173,9 +180,9 @@ fn label(target: &AbsolutePath, cwd: &AbsolutePath) -> String {
 /// # Errors
 ///
 /// Returns `cli-init-exists` when anything, including a dangling symlink, is at `target`.
-fn refuse_if_present(target: &AbsolutePath) -> Result<(), CliError> {
+fn refuse_if_present(target: &AbsolutePath, context: &Context) -> Result<(), CliError> {
     if target.as_path().symlink_metadata().is_ok() {
-        Err(exists(target))
+        Err(exists(target, context))
     } else {
         Ok(())
     }
@@ -189,37 +196,42 @@ fn refuse_if_present(target: &AbsolutePath) -> Result<(), CliError> {
 /// # Errors
 ///
 /// Returns `cli-init-exists` when `target` exists, and `cli-init-write` when it cannot be written.
-fn write_new(target: &AbsolutePath) -> Result<(), CliError> {
+fn write_new(target: &AbsolutePath, context: &Context) -> Result<(), CliError> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(target.as_path())
         .map_err(|error| match error.kind() {
-            io::ErrorKind::AlreadyExists => exists(target),
-            _ => write_failed(target, &error),
+            io::ErrorKind::AlreadyExists => exists(target, context),
+            _ => write_failed(target, &error, context),
         })?;
     file.write_all(STARTER.as_bytes())
         .and_then(|()| file.flush())
-        .map_err(|error| write_failed(target, &error))
+        .map_err(|error| write_failed(target, &error, context))
 }
 
 /// The refusal for an existing config (06 error table).
-fn exists(target: &AbsolutePath) -> CliError {
+fn exists(target: &AbsolutePath, context: &Context) -> CliError {
     CliError::new(
         "cli-init-exists",
         format!("{} already exists", target.display()),
-        "The existing file wasn't changed. Edit it directly, or delete it and run `supdoc init`.",
+        format!(
+            "The existing file wasn't changed. Edit it directly, or delete it and run `{}`.",
+            command(context)
+        ),
         CliError::REFUSED_EXIT_CODE,
     )
 }
 
 /// The error for a config that could not be written.
-fn write_failed(target: &AbsolutePath, error: &io::Error) -> CliError {
+fn write_failed(target: &AbsolutePath, error: &io::Error, context: &Context) -> CliError {
     CliError::new(
         "cli-init-write",
         format!("cannot write {}: {error}", target.display()),
-        "check that the directory exists and that you can write to it, then run `supdoc init` \
-         again",
+        format!(
+            "check that the directory exists and that you can write to it, then run `{}` again",
+            command(context)
+        ),
         CliError::IO_EXIT_CODE,
     )
 }
