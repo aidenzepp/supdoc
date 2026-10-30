@@ -58,8 +58,10 @@ Threat model, for a checkout you don't trust:
 
 - Outside the project root, supdoc reads only its own inputs: a `supdoc.config.toml` reached through
   `extends` or as a project config symlinked to an outside file of that name, whose lines can appear in
-  config errors, and ignore files: those in the directories above the project, plus the global excludes
-  file. It never quotes a rule line from an ignore file outside the root.
+  config errors, and ignore files: those in the directories above the project, up to the top of its git
+  work tree, plus the global excludes file, and a `.git/info/exclude` reached through a `.git` symlink or
+  a worktree `.git` file's `gitdir` and `commondir`. It never quotes a rule line from an ignore file
+  outside the root.
 - It reads, hashes, lists symbols from and quotes no other file outside the root, linked files included.
 - It doesn't promise to hide whether a path outside the root exists. An out-and-back symlink can change
   which error or exit code appears. That is accepted: on ordinary `pull_request` CI, a PR can already run

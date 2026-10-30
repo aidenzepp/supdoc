@@ -103,9 +103,10 @@ impl UnreadDir {
 ///
 /// The rules apply in order to each entry (04, The walk): ignore files ([`IgnoreRules`]: each
 /// directory's `.ignore`, `.gitignore` and `.git/info/exclude`, those of the directories above the
-/// root, and the global excludes file, even outside a git repository), version-control
-/// directories, nested projects, symlinks, then `Config::scans` and the cartridge check. Hidden
-/// files are walked. Targets are never looked up here, so none of these rules apply to them.
+/// root up to the top of its git work tree, and the global excludes file, even outside a git
+/// repository), version-control directories, nested projects, symlinks, then `Config::scans` and
+/// the cartridge check. Hidden files are walked. Targets are never looked up here, so none of
+/// these rules apply to them.
 ///
 /// A directory that can't be read becomes a finding and the walk continues, including when it is
 /// the root itself: the caller decides whether an unreadable root is fatal. A `.ignore` or
@@ -187,6 +188,10 @@ fn walker(config: &Config, scope: &Scope, rules: &Arc<IgnoreRules>) -> ignore::W
 /// kind with a match wins, whitelist or not, and the global excludes file comes last. So a
 /// `!rule` in a `.gitignore` overrides the exclude file and the global excludes file, as in git.
 ///
+/// The directories above the root apply only up to the top of its git work tree, the nearest
+/// directory holding a `.git`, the root itself included, as git reads no `.gitignore` above that
+/// top. With the root at the top, or no `.git` in the root or above it, no directory above applies.
+///
 /// Inside the root, a `.ignore` or `.gitignore` that is a symlink is not read, whatever it points
 /// to. Above the root, every ignore file is followed, symlinks included, and none is ever quoted.
 struct IgnoreRules {
@@ -195,7 +200,8 @@ struct IgnoreRules {
     /// The root with every symlink resolved, which the directories above it are found from and
     /// matched against. `None` when it can't be resolved, and then no directory above applies.
     canonical_root: Option<PathBuf>,
-    /// The rules of the directory just above the root, linked to those above it.
+    /// The rules of the directory just above the root, linked to those above it up to the top of
+    /// the git work tree. `None` when no directory above applies.
     above: Option<Arc<Level>>,
     /// The global excludes file, such as `~/.config/git/ignore`.
     global: Gitignore,
@@ -264,14 +270,17 @@ impl Rule<'_> {
 }
 
 impl IgnoreRules {
-    /// The rules for a walk of `root`. Reads the ignore files of the directories above it and the
-    /// global excludes file now; the root's own, and those beneath it, as the walk asks.
+    /// The rules for a walk of `root`. Reads the ignore files of the directories above it, up to
+    /// the top of its git work tree, and the global excludes file now; the root's own, and those
+    /// beneath it, as the walk asks.
     ///
-    /// Effect: resolves `root`'s symlinks, and reads ignore files, git files and git config.
+    /// Effect: resolves `root`'s symlinks, reads file metadata in it and the directories above
+    /// it, and reads ignore files, git files and git config.
     fn new(root: &AbsolutePath) -> Self {
         let canonical_root = fs::canonicalize(root.as_path()).ok();
         let above = canonical_root.as_deref().and_then(|canonical| {
-            let parents: Vec<&Path> = canonical.ancestors().skip(1).collect();
+            let top = canonical.ancestors().position(holds_git)?;
+            let parents: Vec<&Path> = canonical.ancestors().take(top + 1).skip(1).collect();
             parents.into_iter().rev().fold(None, |parent, dir| {
                 Some(Arc::new(Level::above(dir, parent)))
             })
@@ -411,8 +420,9 @@ impl Level {
         }
     }
 
-    /// The rules of `dir`, a directory above the root. Its ignore files lie outside the checkout,
-    /// as a dotfiles manager's `~/.gitignore` does, so they are followed wherever they lead.
+    /// The rules of `dir`, a directory above the root and at most the top of its git work tree.
+    /// Its ignore files lie outside the checkout, as a monorepo's shared `.gitignore` does, so
+    /// they are followed wherever they lead.
     ///
     /// Effect: reads `dir`'s ignore files and its git exclude file.
     fn above(dir: &Path, parent: Option<Arc<Self>>) -> Self {
@@ -426,6 +436,14 @@ impl Level {
             parent,
         }
     }
+}
+
+/// Whether `dir` holds a `.git` entry of any kind, a directory, a file or a symlink, and so is
+/// the top of a git work tree.
+///
+/// Effect: reads file metadata in `dir`.
+fn holds_git(dir: &Path) -> bool {
+    fs::symlink_metadata(dir.join(".git")).is_ok()
 }
 
 /// The rules of `file`, which apply beneath `dir`. A missing or unreadable file has none, and a
@@ -1523,7 +1541,9 @@ mod tests {
         }
         fs::write(above.path().join("project").join(CONFIG_FILE_NAME), "")
             .expect("the fixture config should be writable");
-        // A dotfiles manager's `~/.ignore`, say: outside the checkout, so followed as git would.
+        fs::create_dir(above.path().join(".git"))
+            .expect("the parent's git directory should be creatable");
+        // A monorepo's shared `.ignore`, say: outside the checkout, so followed as git would.
         std::os::unix::fs::symlink(outside.path().join("ignore"), above.path().join(".ignore"))
             .expect("the fixture symlink should be creatable");
         let config_path = AbsolutePath::new(&above.path().join("project").join(CONFIG_FILE_NAME))
