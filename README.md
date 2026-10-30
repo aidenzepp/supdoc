@@ -1,11 +1,15 @@
 # supdoc
 
+> *Eh… what's up, doc?*
+>
+> supdoc knows: it tells you when the code behind your docs changed.
+
 Keep documentation in step with the code it describes.
 
 supdoc tracks links from documentation to code, such as `[text](src/lib.rs#symbol)`. It warns you when the
 code behind a link changes, so the docs can be updated with it.
 
-> **Status:** early development, ahead of the first release.
+> **Status:** v0.1, published on [crates.io](https://crates.io/crates/supdoc). Expect rough edges.
 
 ## How it works
 
