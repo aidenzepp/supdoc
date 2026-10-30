@@ -57,4 +57,6 @@ mod list;
 #[cfg(test)]
 mod namespaces;
 #[cfg(test)]
+mod paths;
+#[cfg(test)]
 mod resolve;

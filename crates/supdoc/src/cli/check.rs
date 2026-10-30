@@ -33,7 +33,7 @@ use super::{CliError, Context, Outcome};
 /// # Errors
 ///
 /// Returns the config's own error (78, or 74 when unreadable), `cli-path-missing`,
-/// `cli-path-outside-project` or `cli-path-invalid` for a bad `[PATH]` (2), the lockfile's own
+/// `cli-path-outside-project` or `cli-path-invalid` for a bad `[PATH]` (2), `cli-path-unreadable` (74) for one that can't be looked up, the lockfile's own
 /// error (78 when invalid, 74 when unreadable), `scan-root-unreadable` (74),
 /// `scan-root-ignore-file-outside-root` (78) when one of the root's ignore files leads outside it,
 /// and `cli-check-output` when the report cannot be written (74).

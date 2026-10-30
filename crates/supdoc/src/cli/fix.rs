@@ -55,7 +55,7 @@ const PREVIEW_NOTE: &str = "Nothing written. Run the same command with --yes to 
 /// # Errors
 ///
 /// Returns the config's own error (78, or 74 when unreadable), `cli-path-missing`,
-/// `cli-path-outside-project` or `cli-path-invalid` for a bad `[PATH]` (2), the lockfile's own
+/// `cli-path-outside-project` or `cli-path-invalid` for a bad `[PATH]` (2), `cli-path-unreadable` (74) for one that can't be looked up, the lockfile's own
 /// error (78 when invalid, 74 when it can't be read or written), the scan's own error (74),
 /// `fix-write-failed` when a source file could not be written (74), and `cli-fix-output` when the
 /// report cannot be written (74).
