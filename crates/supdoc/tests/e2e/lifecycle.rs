@@ -285,3 +285,75 @@ fn switching_line_endings_to_exact_refuses_until_update_migrates_the_lock() {
         "the migrated lock should record line-endings = \"exact\":\n{lock}"
     );
 }
+
+#[test]
+fn update_with_only_broken_links_left_says_nothing_to_update_with_and_without_yes() {
+    let project = Project::fixture("basic");
+    std::fs::write(project.path("docs/broken.md"), "[a](../src/lib.rs#nope)\n")
+        .expect("docs/broken.md should be writable");
+    project.record();
+
+    for args in [&["update"][..], &["update", "--yes"][..]] {
+        let run = project.supdoc(args);
+        let _ = run.assert_exit(0);
+        assert!(
+            run.stderr.contains("resolve-not-found") || run.stdout.contains("resolve-not-found"),
+            "`supdoc {}` should still report the broken link:\nstdout:\n{}\nstderr:\n{}",
+            run.args,
+            run.stdout,
+            run.stderr
+        );
+        assert_eq!(
+            run.stderr.lines().last(),
+            Some("Nothing to update."),
+            "`supdoc {}` has no rows to apply, so it should close with the empty-plan note:\n{}",
+            run.args,
+            run.stderr
+        );
+        assert!(
+            !run.stderr.contains("--yes to apply") && !run.stderr.contains("supdoc.lock: "),
+            "`supdoc {}` should not offer --yes or print an empty lock note:\n{}",
+            run.args,
+            run.stderr
+        );
+    }
+}
+
+#[test]
+fn update_jsonl_summary_carries_the_line_endings_change_only_when_the_settings_change() {
+    let project = Project::fixture("basic");
+    std::fs::write(
+        project.path("supdoc.config.toml"),
+        "[features.hash]\nline-endings = \"exact\"\n",
+    )
+    .expect("supdoc.config.toml should be writable");
+    project.record();
+    std::fs::write(project.path("supdoc.config.toml"), "")
+        .expect("supdoc.config.toml should be writable");
+
+    let summary_of = |run: &crate::support::Run| -> serde_json::Value {
+        let last = run
+            .stdout
+            .lines()
+            .last()
+            .unwrap_or_else(|| panic!("--jsonl should print lines:\n{}", run.stdout));
+        serde_json::from_str(last)
+            .unwrap_or_else(|error| panic!("the last line should be JSON ({error}): {last}"))
+    };
+
+    let migrating = project.supdoc(&["--jsonl", "update", "--yes"]);
+    let _ = migrating.assert_exit(0);
+    let migrated = summary_of(&migrating);
+    assert_eq!(at(&migrated, "/type"), "summary", "{migrated}");
+    assert_eq!(at(&migrated, "/line_endings_from"), "exact", "{migrated}");
+    assert_eq!(at(&migrated, "/line_endings_to"), "normalize", "{migrated}");
+
+    let settled = project.supdoc(&["--jsonl", "update", "--yes"]);
+    let _ = settled.assert_exit(0);
+    let unchanged = summary_of(&settled);
+    assert_eq!(at(&unchanged, "/type"), "summary", "{unchanged}");
+    assert!(
+        unchanged.get("line_endings_from").is_none() && unchanged.get("line_endings_to").is_none(),
+        "a run that changes no settings should carry no line-endings fields: {unchanged}"
+    );
+}

@@ -192,9 +192,10 @@ impl UpdateReport {
     }
 
     /// What the run says on stderr when it is done (06a K7, Q6). A settings change alone is a
-    /// change (B.5).
+    /// change (B.5). The note follows the plan, not the findings: broken links are printed above
+    /// it but leave the plan empty.
     fn closing_note(&self, unicode: bool) -> String {
-        if self.rows.is_empty() && self.findings.is_empty() && self.settings_change.is_none() {
+        if self.rows.is_empty() && self.settings_change.is_none() {
             NOTHING_NOTE.to_owned()
         } else if self.applied {
             self.applied_note(unicode)
@@ -987,7 +988,7 @@ mod tests {
     }
 
     #[test]
-    fn update_shows_a_malformed_link_error_instead_of_nothing_to_update() {
+    fn update_shows_a_malformed_link_error_and_closes_on_the_empty_plan() {
         let project = Project::new();
         project.write("docs/guide.md", "See [add](../src//lib.rs#add) here.\n");
 
@@ -1007,8 +1008,8 @@ mod tests {
             text.stdout
         );
         assert!(
-            !text.stderr.contains(NOTHING_NOTE) && !json.stderr.contains(NOTHING_NOTE),
-            "a run with findings is not `Nothing to update.`: {}",
+            text.stderr.contains(NOTHING_NOTE) && !text.stderr.contains("--yes to apply"),
+            "a finding leaves the plan empty, so the closing note is `Nothing to update.`: {}",
             text.stderr
         );
     }
