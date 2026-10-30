@@ -146,13 +146,18 @@ fn destinations(global: bool, context: &Context) -> Result<[AbsolutePath; 2], Cl
 /// The project root without loading the config: the directory of `--config` when given,
 /// otherwise the nearest directory at or above the current one holding `supdoc.config.toml`,
 /// otherwise the current directory.
+///
+/// Any entry with the config's name counts, a symlink included, without following it, as the
+/// scan decides nested projects (04 S4): where a symlinked config leads never moves the root.
+///
+/// Effect: reads file metadata in the current directory and its ancestors.
 fn project_root(context: &Context) -> AbsolutePath {
     if let Some(file) = &context.global.config {
         let file = absolute(&context.cwd, file);
         return file.parent().unwrap_or(file);
     }
     std::iter::successors(Some(context.cwd.clone()), AbsolutePath::parent)
-        .find(|dir| dir.as_path().join(CONFIG_FILE_NAME).is_file())
+        .find(|dir| fs::symlink_metadata(dir.as_path().join(CONFIG_FILE_NAME)).is_ok())
         .unwrap_or_else(|| context.cwd.clone())
 }
 
@@ -997,6 +1002,32 @@ mod tests {
             error.message().contains(".agents is a symlink to "),
             "the message should name the symlink: {}",
             error.message()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_install_project_root_is_a_symlinked_config_directory_wherever_the_link_leads() {
+        let world = World::new();
+        let elsewhere = tempfile::tempdir().expect("an outside temp directory should be created");
+        symlink(
+            &elsewhere.path().join("missing.toml"),
+            &world.project_file(CONFIG_FILE_NAME),
+        );
+        let nested = world.project_file("docs/guide");
+        fs::create_dir_all(&nested).expect("the nested directory should be created");
+
+        let run = world.install_in(&nested, None, &["--yes"]);
+
+        assert_eq!(run.exit_code(), 0, "result: {:?}", run.result);
+        assert_eq!(
+            contents(&world.project_file(AGENTS_SKILL)).as_deref(),
+            Some(SKILL),
+            "the config's directory is the root whether or not its symlink resolves"
+        );
+        assert!(
+            !nested.join(".agents").exists(),
+            "the current directory is not the root when a config entry is above it"
         );
     }
 
