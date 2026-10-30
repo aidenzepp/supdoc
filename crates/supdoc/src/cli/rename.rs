@@ -34,9 +34,10 @@ use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile};
 use crate::read::error::ReadError;
 use crate::read::links::links;
+use crate::scan::assemble::root_refusal;
 use crate::scan::model::Scope;
 use crate::scan::targets::close_match;
-use crate::scan::walk::{UnreadDir, walk};
+use crate::scan::walk::{UnreadCause, UnreadDir, walk};
 
 use super::args::{RenameArgs, WriteMode};
 use super::project::{load_config, lock_path, read_lock};
@@ -125,9 +126,10 @@ impl Plan {
     /// # Errors
     ///
     /// Returns the config's or the lockfile's own error, `cli-rename-unknown-namespace`,
-    /// `cli-rename-target-exists`, `cli-rename-inherited`, `cli-rename-unreadable-source` when a
-    /// source or a directory can't be read, or `cli-rename-file-changed` when the config no longer defines OLD
-    /// once it is read again.
+    /// `cli-rename-target-exists`, `cli-rename-inherited`, `scan-root-ignore-file-outside-root`
+    /// (78) when one of the root's ignore files leads outside it, `cli-rename-unreadable-source`
+    /// when a source or a directory can't be read, or `cli-rename-file-changed` when the config no
+    /// longer defines OLD once it is read again.
     fn build(
         old: &NamespaceName,
         new: &NamespaceName,
@@ -143,6 +145,14 @@ impl Plan {
 
         let languages = Languages::builtin();
         let walked = walk(&config, &languages, &Scope::All);
+        if let Some(refusal) = root_refusal(config.root(), &walked) {
+            return Err(CliError::new(
+                refusal.code(),
+                refusal.to_string(),
+                refusal.help(),
+                refusal.exit_code(),
+            ));
+        }
         if let Some(dir) = walked.unread_dirs.first() {
             return Err(unread_dir(dir, config.root(), old, new));
         }
@@ -753,8 +763,10 @@ fn unread_source_help(error: &ReadError) -> String {
     }
 }
 
-/// The error for a directory the walk couldn't read. The sources beneath it are as unknown as an
-/// unread source's links, so the rename is refused for the same reason (05 C5).
+/// The error for a directory the walk couldn't read, or refused to for an ignore file that leads
+/// outside the root. The sources beneath it are as unknown as an unread source's links, so the
+/// rename is refused for the same reason (05 C5). As for an unread source, the help never offers
+/// `exclude`.
 fn unread_dir(
     dir: &UnreadDir,
     root: &AbsolutePath,
@@ -773,14 +785,22 @@ fn unread_dir(
              nothing was written",
             dir.cause
         ),
-        then_rerun(
-            "Check that the current user can list the directory, for example with `chmod u+rx` \
-             on it",
-            old,
-            new,
-        ),
+        then_rerun(&unread_dir_help(dir.cause), old, new),
         CliError::REFUSED_EXIT_CODE,
     )
+}
+
+/// What to do about a directory the rename couldn't read, before running it again.
+fn unread_dir_help(cause: UnreadCause) -> String {
+    match cause {
+        UnreadCause::Io(_) => "Check that the current user can list the directory, for example \
+                               with `chmod u+rx` on it"
+            .to_owned(),
+        UnreadCause::IgnoreFileOutsideRoot(file) => format!(
+            "supdoc reads nothing outside the project root. {}",
+            file.remedy()
+        ),
+    }
 }
 
 /// `help`, followed by the sentence that says to run the rename again once it is followed.
@@ -935,6 +955,7 @@ mod tests {
     use crate::cli::args::{Cli, Command, NamespaceCommand};
     use crate::output::{OutputSettings, PathStyle, Verbosity};
     use crate::scan::model::TargetState;
+    use crate::scan::walk::IgnoreFile;
     use crate::state::LinkState;
 
     /// A config naming two namespaces, with comments that a rename must keep.
@@ -1612,6 +1633,65 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
         );
     }
 
+    /// Symlinks `link`, relative to the project root, to a file of rules outside it.
+    #[cfg(unix)]
+    fn symlink_out(project: &Project, outside: &tempfile::TempDir, link: &str) {
+        let rules = outside.path().join("rules");
+        fs::write(&rules, "gui*.md\n").expect("the outside rules should be written");
+        std::os::unix::fs::symlink(&rules, project.dir.path().join(link))
+            .expect("the fixture symlink should be created");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn namespace_rename_refused_for_an_ignore_file_out_of_the_root_says_how_to_fix_that() {
+        let project = Project::new();
+        let outside = tempfile::tempdir().expect("an outside directory should be created");
+        symlink_out(&project, &outside, "docs/.gitignore");
+        let before = project.files();
+
+        let run = project.rename(&["namespace", "rename", "auth", "identity", "--yes"]);
+
+        let error = run
+            .result
+            .expect_err("a directory left unread should refuse the rename");
+        assert_eq!(
+            (error.code(), error.exit_code()),
+            ("cli-rename-unreadable-source", 1)
+        );
+        assert!(
+            error.help().starts_with(
+                "supdoc reads nothing outside the project root. Replace the symlink with a \
+                 regular file holding its rules"
+            ) && !error.help().contains("chmod"),
+            "the help should fix the symlink, not permissions: {}",
+            error.help()
+        );
+        assert_eq!(project.files(), before, "nothing is written");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn namespace_rename_refuses_a_root_whose_ignore_file_leads_out_as_check_does() {
+        let project = Project::new();
+        let outside = tempfile::tempdir().expect("an outside directory should be created");
+        symlink_out(&project, &outside, ".ignore");
+        let before = project.files();
+
+        let run = project.rename(&["namespace", "rename", "auth", "identity", "--yes"]);
+
+        let error = run
+            .result
+            .expect_err("a root left unwalked should refuse the rename");
+        assert_eq!(
+            (error.code(), error.exit_code()),
+            ("scan-root-ignore-file-outside-root", 78),
+            "the same refusal and exit status as `check` and `update`"
+        );
+        assert!(!error.help().contains("chmod"), "{}", error.help());
+        assert_eq!(project.files(), before, "nothing is written");
+    }
+
     /// Excluding an unread source and renaming past it moves its lock entries to NEW while its
     /// links still say OLD, so no refusal may suggest `exclude`.
     #[test]
@@ -1645,16 +1725,24 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
             },
             ReadError::Internal { path: path.clone() },
         ];
-        let dir = UnreadDir {
+        let causes = [
+            UnreadCause::Io(io::ErrorKind::PermissionDenied),
+            UnreadCause::IgnoreFileOutsideRoot(IgnoreFile::Ignore),
+            UnreadCause::IgnoreFileOutsideRoot(IgnoreFile::Gitignore),
+        ];
+        let dirs = causes.map(|cause| UnreadDir {
             path: AbsolutePath::new(Path::new("/project/docs"))
                 .expect("the directory should be absolute"),
-            cause: io::ErrorKind::PermissionDenied,
-        };
+            cause,
+        });
 
         let refusals = read_errors
             .iter()
             .map(|error| (error.code(), unread_source(&source, &old, &new, error)))
-            .chain([("unread-dir", unread_dir(&dir, &root, &old, &new))]);
+            .chain(
+                dirs.iter()
+                    .map(|dir| ("unread-dir", unread_dir(dir, &root, &old, &new))),
+            );
 
         for (cause, refusal) in refusals {
             assert!(

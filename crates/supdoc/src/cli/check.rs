@@ -34,8 +34,9 @@ use super::{CliError, Context, Outcome};
 ///
 /// Returns the config's own error (78, or 74 when unreadable), `cli-path-missing`,
 /// `cli-path-outside-project` or `cli-path-invalid` for a bad `[PATH]` (2), the lockfile's own
-/// error (78 when invalid, 74 when unreadable), `scan-root-unreadable` (74), and
-/// `cli-check-output` when the report cannot be written (74).
+/// error (78 when invalid, 74 when unreadable), `scan-root-unreadable` (74),
+/// `scan-root-ignore-file-outside-root` (78) when one of the root's ignore files leads outside it,
+/// and `cli-check-output` when the report cannot be written (74).
 pub fn run(args: &CheckArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let config = load_config(context, output, "check")?;
     let scope = scope(&args.paths, &context.cwd, config.root())?;

@@ -92,10 +92,17 @@ impl Project {
 
     /// Runs `supdoc` with `args` from the project directory `dir`, with no inherited environment.
     pub(crate) fn supdoc_in(&self, dir: &str, args: &[&str]) -> Run {
+        self.supdoc_in_with(dir, args, &[])
+    }
+
+    /// Runs `supdoc` with `args` from the project directory `dir`, with only the environment
+    /// variables `vars`.
+    pub(crate) fn supdoc_in_with(&self, dir: &str, args: &[&str], vars: &[(&str, &Path)]) -> Run {
         let output = Command::new(env!("CARGO_BIN_EXE_supdoc"))
             .args(args)
             .current_dir(self.path(dir))
             .env_clear()
+            .envs(vars.iter().copied())
             .output()
             .expect("the supdoc binary should start");
         Run {

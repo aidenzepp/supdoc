@@ -40,7 +40,8 @@ use super::{CliError, Context, Outcome};
 /// Returns the config's own error (78, or 74 when unreadable), the lockfile's own error (78 when
 /// invalid, 74 when unreadable), `cli-path-outside-project` (2) for a plain `TARGET` outside the
 /// project, `cli-target-invalid` (2) for a `TARGET` that isn't a target, `scan-root-unreadable`
-/// (74), and `cli-list-output` when the report cannot be written (74).
+/// (74), `scan-root-ignore-file-outside-root` (78) when one of the root's ignore files leads
+/// outside it, and `cli-list-output` when the report cannot be written (74).
 pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let config = load_config(context, output, "list")?;
     let lock = read_lock(&config)?;
