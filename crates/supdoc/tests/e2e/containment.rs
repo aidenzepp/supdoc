@@ -715,7 +715,7 @@ fn a_root_gitignore_symlinked_out_of_the_root_is_not_read_and_the_scan_goes_on()
 #[cfg(unix)]
 #[test]
 fn a_package_whose_gitignore_links_to_the_monorepos_scans_with_one_warning() {
-    let project = web_project();
+    let project = monorepo_with_git();
     // The monorepo's own `.gitignore` sits above the package root and still applies.
     fs::write(project.path(".gitignore"), "scr*.md\n").expect("the gitignore should be writable");
     std::os::unix::fs::symlink("../../.gitignore", project.path("services/web/.gitignore"))
@@ -979,8 +979,8 @@ fn a_root_whose_git_info_is_symlinked_out_applies_its_exclude_file_unquoted() {
 #[cfg(unix)]
 #[test]
 fn a_dotfile_gitignore_above_the_root_symlinked_elsewhere_applies_unquoted() {
-    let project = web_project();
-    // A dotfiles manager such as stow links `~/.gitignore` into a directory of its own.
+    let project = monorepo_with_git();
+    // A dotfiles manager such as stow links the monorepo's `.gitignore` into a directory of its own.
     let dotfiles = tempfile::tempdir().expect("a dotfiles directory should be creatable");
     fs::write(dotfiles.path().join("gitignore"), "gui*.md\n")
         .expect("the dotfile should be writable");
@@ -996,7 +996,7 @@ fn a_dotfile_gitignore_above_the_root_symlinked_elsewhere_applies_unquoted() {
 #[cfg(unix)]
 #[test]
 fn a_shared_ignore_file_above_the_root_symlinked_within_the_checkout_applies_unquoted() {
-    let project = web_project();
+    let project = monorepo_with_git();
     // A monorepo whose root `.ignore` links to a shared file outside the subproject's root.
     write(&project, "tools/ignore", "gui*.md\n");
     std::os::unix::fs::symlink(project.path("tools/ignore"), project.path(".ignore"))
@@ -1012,6 +1012,76 @@ fn a_parent_repository_whose_git_dir_is_symlinked_elsewhere_applies_its_exclude_
     git_dir_symlinked_out(&project, ".git");
 
     assert_followed_and_never_quoted(&project);
+}
+
+/// The web project inside a git repository whose work tree is the whole `monorepo` fixture, so
+/// the ignore files of the directories above the project apply.
+fn monorepo_with_git() -> Project {
+    let project = web_project();
+    fs::create_dir(project.path(".git")).expect("the monorepo's git directory should be creatable");
+    project
+}
+
+/// The web project's `supdoc.lock`, or nothing when `update` found no link to write one for.
+fn lock_of_web(project: &Project) -> String {
+    fs::read_to_string(project.path("services/web/supdoc.lock")).unwrap_or_default()
+}
+
+/// Asserts that `update --yes` in the web project records the guide, so no rule hides it.
+fn assert_guide_recorded(project: &Project, why: &str) {
+    let run = project.supdoc_in("services/web", &["update", "--yes"]);
+
+    let _ = run.assert_exit(0);
+    assert!(
+        lock_of_web(project).contains("docs/guide.md"),
+        "{why}\n{}\n{}",
+        run.stdout,
+        run.stderr
+    );
+}
+
+#[test]
+fn a_gitignore_above_a_repository_root_does_not_apply() {
+    let project = web_project();
+    fs::write(project.path(".gitignore"), "*\n").expect("the gitignore should be writable");
+    fs::create_dir(project.path("services/web/.git"))
+        .expect("the git directory should be creatable");
+
+    assert_guide_recorded(
+        &project,
+        "git reads no `.gitignore` above the work tree, so the `*` above the repository hides nothing",
+    );
+}
+
+#[test]
+fn a_gitignore_above_a_project_outside_any_repository_does_not_apply() {
+    let project = web_project();
+    fs::write(project.path(".gitignore"), "*\n").expect("the gitignore should be writable");
+
+    assert_guide_recorded(
+        &project,
+        "with no `.git` in the root or above it, no `.gitignore` above the root applies",
+    );
+}
+
+#[test]
+fn a_gitignore_above_the_work_tree_top_does_not_apply_but_one_at_the_top_does() {
+    let project = web_project();
+    fs::create_dir(project.path("services/.git")).expect("the git directory should be creatable");
+    fs::write(project.path(".gitignore"), "gui*.md\n").expect("the gitignore should be writable");
+    fs::write(project.path("services/.gitignore"), "scr*.md\n")
+        .expect("the gitignore should be writable");
+    write(&project, "services/web/docs/scratch.md", SCRATCH);
+
+    let run = project.supdoc_in("services/web", &["update", "--yes"]);
+
+    let _ = run.assert_exit(0);
+    let locked = lock_of_web(&project);
+    assert!(
+        locked.contains("docs/guide.md") && !locked.contains("docs/scratch.md"),
+        "the work tree's top `.gitignore` hides scratch.md, and the one above the top hides \
+         nothing:\n{locked}"
+    );
 }
 
 #[cfg(unix)]
