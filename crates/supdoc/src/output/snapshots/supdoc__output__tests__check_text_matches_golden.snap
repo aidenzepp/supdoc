@@ -22,7 +22,7 @@ warning[link-obsolete]: supdoc.lock has an entry for a link that no longer exist
  |
  = help: run `supdoc update --state obsolete --yes`
 
-warning[scan-unreadable-dir]: skipped /repo/private: permission denied
+warning[scan-unreadable-dir]: skipped private: permission denied
  |
  = help: fix the directory's permissions, or add it to `exclude` in supdoc.config.toml
 

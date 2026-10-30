@@ -2,7 +2,7 @@
 source: crates/supdoc/src/output/tests.rs
 expression: stderr.text()
 ---
-error[config-extends-missing]: apps/web/supdoc.config.toml extends `../../supdoc.confg.toml`, but no file exists at /repo/supdoc.confg.toml
+error[config-extends-missing]: apps/web/supdoc.config.toml extends `../../supdoc.confg.toml`, but no file exists at supdoc.confg.toml
  --> apps/web/supdoc.config.toml:1:11
   |
 1 | extends = "../../supdoc.confg.toml"

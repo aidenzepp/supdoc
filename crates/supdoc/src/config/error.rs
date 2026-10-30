@@ -1,10 +1,11 @@
 //! Config errors: a stable code, a one-line message and a separate hint for each.
 
-use std::fmt::Write as _;
+use std::fmt;
 use std::ops::Range;
 
 use crate::lock::error::shell_quote;
 use crate::namespace::NamespaceName;
+use crate::output::paths::relative_to;
 use crate::path::{AbsolutePath, RelativePath};
 
 /// Exit status for a config problem the user fixes by editing files (06 X7).
@@ -15,21 +16,21 @@ const EXIT_IO: u8 = 74;
 
 /// Why a config could not be loaded.
 ///
-/// `Display` says what happened in one line. [`ConfigError::help`] says what to do next.
-#[derive(Debug, thiserror::Error)]
+/// `Display` says what happened in one line, naming files by their absolute paths.
+/// [`ConfigError::help`] says what to do next. [`ConfigError::message_from`] and
+/// [`ConfigError::help_from`] say the same with files named relative to the current directory.
+///
+/// No variant has a `source` field: the reason is already in the message, so a renderer walking
+/// `source()` would print it twice.
+#[derive(Debug)]
 pub enum ConfigError {
     /// `--config` named a file that isn't there.
-    #[error("no config file at {}", .path.display())]
     NotFound {
         /// The file that was asked for.
         path: AbsolutePath,
     },
 
     /// The file exists but couldn't be read (permissions, not UTF-8, ...).
-    ///
-    /// The field is `error`, not `source`: the reason is already in `Display`, so a renderer
-    /// walking `source()` would print it twice.
-    #[error("cannot read {}: {error}", .path.display())]
     Read {
         /// The file that could not be read.
         path: AbsolutePath,
@@ -38,7 +39,6 @@ pub enum ConfigError {
     },
 
     /// Malformed TOML, unknown key, bad glob, bad namespace name or absolute path.
-    #[error("{}: {}", .path.display(), .error.message())]
     Parse {
         /// The file that failed to parse.
         path: AbsolutePath,
@@ -47,10 +47,6 @@ pub enum ConfigError {
     },
 
     /// `extends` names a file that doesn't exist.
-    #[error(
-        "{} extends `{}`, but no file exists at {}",
-        .file.display(), .extends, .resolved.display()
-    )]
     ExtendsMissing {
         /// The config that wrote `extends`.
         file: AbsolutePath,
@@ -63,10 +59,6 @@ pub enum ConfigError {
     },
 
     /// `extends` names a directory.
-    #[error(
-        "{} extends `{}`, which is a directory, not a config file",
-        .file.display(), .extends
-    )]
     ExtendsDirectory {
         /// The config that wrote `extends`.
         file: AbsolutePath,
@@ -80,10 +72,6 @@ pub enum ConfigError {
 
     /// `extends` names a file that isn't called `supdoc.config.toml`, before or after following
     /// symlinks. supdoc refuses it without reading it.
-    #[error(
-        "{} extends `{}`, which isn't a supdoc.config.toml file",
-        .file.display(), .extends
-    )]
     ExtendsNotConfig {
         /// The config that wrote `extends`.
         file: AbsolutePath,
@@ -98,20 +86,12 @@ pub enum ConfigError {
     ///
     /// The message is the same whether the target is a file with another name, a directory or
     /// missing, so it reveals nothing about paths outside the root.
-    #[error(
-        "{} is a symlink that doesn't lead to a supdoc.config.toml file",
-        .path.display()
-    )]
     SymlinkNotConfig {
         /// The config file as found, before following the symlink.
         path: AbsolutePath,
     },
 
     /// A namespace names a directory outside the project root.
-    #[error(
-        "{} sets namespace `{name}` to {}, which is outside the project root {}",
-        .file.display(), .directory.display(), .root.display()
-    )]
     NamespaceOutsideRoot {
         /// The config that defined the namespace.
         file: AbsolutePath,
@@ -124,7 +104,6 @@ pub enum ConfigError {
     },
 
     /// A chain of `extends` comes back to a file it already visited.
-    #[error("extends loop: {}", display_chain(.chain))]
     ExtendsLoop {
         /// The files in the loop, in order. The last is the first again.
         chain: Vec<AbsolutePath>,
@@ -150,11 +129,80 @@ impl ConfigError {
         }
     }
 
-    /// What to do next, kept apart from `Display` so the message stays one line.
+    /// The message, naming each file relative to `cwd`, the directory supdoc runs in, as the
+    /// error's location does. No config loaded, so there is no project root to name them from.
+    /// A namespace's directory, which lies outside the root, and the root itself stay absolute.
+    #[must_use]
+    pub fn message_from(&self, cwd: &AbsolutePath) -> String {
+        self.describe(&|file| relative_to(cwd, file))
+    }
+
+    /// The message, naming each config file as `show` writes it.
+    fn describe(&self, show: &dyn Fn(&AbsolutePath) -> String) -> String {
+        match self {
+            Self::NotFound { path } => format!("no config file at {}", show(path)),
+            Self::Read { path, error } => format!("cannot read {}: {error}", show(path)),
+            Self::Parse { path, error } => format!("{}: {}", show(path), error.message()),
+            Self::ExtendsMissing {
+                file,
+                extends,
+                resolved,
+                ..
+            } => format!(
+                "{} extends `{extends}`, but no file exists at {}",
+                show(file),
+                show(resolved)
+            ),
+            Self::ExtendsDirectory { file, extends, .. } => format!(
+                "{} extends `{extends}`, which is a directory, not a config file",
+                show(file)
+            ),
+            Self::ExtendsNotConfig { file, extends, .. } => format!(
+                "{} extends `{extends}`, which isn't a supdoc.config.toml file",
+                show(file)
+            ),
+            Self::SymlinkNotConfig { path } => format!(
+                "{} is a symlink that doesn't lead to a supdoc.config.toml file",
+                show(path)
+            ),
+            Self::NamespaceOutsideRoot {
+                file,
+                name,
+                directory,
+                root,
+            } => format!(
+                "{} sets namespace `{name}` to {}, which is outside the project root {}",
+                show(file),
+                directory.display(),
+                root.display()
+            ),
+            Self::ExtendsLoop { chain, .. } => {
+                let files: Vec<String> = chain.iter().map(show).collect();
+                format!("extends loop: {}", files.join(" \u{2192} "))
+            }
+        }
+    }
+
+    /// What to do next, kept apart from `Display` so the message stays one line, naming any file
+    /// by its absolute path.
     ///
     /// `None` when the message is already the fix.
     #[must_use]
     pub fn help(&self) -> Option<String> {
+        self.hint(&|file| file.display().to_string())
+    }
+
+    /// What to do next, naming any file relative to `cwd`, the directory supdoc runs in, so a
+    /// command in the help runs as written.
+    ///
+    /// `None` when the message is already the fix.
+    #[must_use]
+    pub fn help_from(&self, cwd: &AbsolutePath) -> Option<String> {
+        self.hint(&|file| relative_to(cwd, file))
+    }
+
+    /// What to do next, naming any file as `show` writes it.
+    fn hint(&self, show: &dyn Fn(&AbsolutePath) -> String) -> Option<String> {
         match self {
             Self::NotFound { .. } => Some(
                 "Check the `--config` path, or leave out `--config` to search upward from the \
@@ -181,7 +229,7 @@ impl ConfigError {
                     .to_owned(),
             ),
             Self::SymlinkNotConfig { path } => {
-                let config = shell_quote(&path.display().to_string());
+                let config = shell_quote(&show(path));
                 Some(format!(
                     "supdoc reads no other file as the project's config. Replace the symlink with \
                      a real config, for example `rm {config} && supdoc -c {config} init`, or pass \
@@ -243,15 +291,10 @@ fn parse_help(message: &str) -> Option<String> {
     }
 }
 
-/// Joins a chain of config files with arrows, for the loop message.
-fn display_chain(chain: &[AbsolutePath]) -> String {
-    let mut text = String::new();
-    for (index, file) in chain.iter().enumerate() {
-        if index > 0 {
-            text.push_str(" \u{2192} ");
-        }
-        // Writing to a `String` cannot fail.
-        let _written = write!(text, "{}", file.display());
+impl fmt::Display for ConfigError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.describe(&|file| file.display().to_string()))
     }
-    text
 }
+
+impl std::error::Error for ConfigError {}

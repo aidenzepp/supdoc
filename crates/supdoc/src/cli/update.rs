@@ -31,7 +31,9 @@ use crate::state::LinkState;
 
 use super::args::{UpdateArgs, WriteMode};
 use super::check::LinkLocationJson;
-use super::project::{load_config, lock_path, read_lock_for_update, scope, settings_mismatch};
+use super::project::{
+    load_config, lock_failure, lock_path, read_lock_for_update, scope, settings_mismatch,
+};
 use super::{CliError, Context, Outcome};
 
 /// The closing note of a preview that has changes (06a K7).
@@ -63,7 +65,7 @@ const MIGRATION_STATES: [LinkState; 3] = [LinkState::Failed, LinkState::New, Lin
 pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let config = load_config(context, output, &command_text(args))?;
     let scope = scope(&args.paths, &context.cwd, config.root())?;
-    let (lock, settings_change) = read_lock_for_update(&config)?;
+    let (lock, settings_change) = read_lock_for_update(&config, &context.cwd)?;
     if let Some(change) = settings_change
         && !migrates_every_entry(&scope, &args.state)
     {
@@ -83,14 +85,8 @@ pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<
     let plan = plan_update(&model, &scan, &lock, &args.state, config.hash_settings());
     let applied = args.confirm.mode() == WriteMode::Apply;
     if applied && let Some(next) = &plan.next {
-        next.write(&lock_path(config.root())).map_err(|error| {
-            CliError::new(
-                error.code(),
-                error.to_string(),
-                error.help(),
-                error.exit_code(),
-            )
-        })?;
+        next.write(&lock_path(config.root()))
+            .map_err(|error| lock_failure(&error, config.root(), &context.cwd))?;
     }
 
     // `supdoc fix PATH` takes `PATH` relative to the current directory, so hints name it from there.

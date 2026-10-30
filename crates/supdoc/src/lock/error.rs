@@ -1,7 +1,10 @@
 //! Lockfile errors: what failed, a stable code, and what to do next (02 Errors).
 
+use std::fmt::{self, Display, Formatter};
+
 use crate::hash::LineEndings;
 use crate::link::LinkKey;
+use crate::output::paths::relative_to;
 use crate::path::AbsolutePath;
 
 /// Exit status for a lockfile the user fixes by editing it (06 X7).
@@ -122,10 +125,15 @@ impl ParseLockError {
 }
 
 /// Why the lockfile on disk could not be read or written.
-#[derive(Debug, thiserror::Error)]
+///
+/// `Display` names the lockfile by its absolute path. [`LockError::message_from`] names it
+/// relative to the project root, for output a user reads.
+///
+/// No variant has a `source` field: the reason is already in the message, so a renderer walking
+/// `source()` would print it twice.
+#[derive(Debug)]
 pub enum LockError {
     /// The file exists but could not be read.
-    #[error("cannot read {}: {error}", .path.display())]
     Read {
         /// The lockfile.
         path: AbsolutePath,
@@ -136,17 +144,12 @@ pub enum LockError {
     /// The lockfile is a symlink that doesn't lead to a `supdoc.lock` inside the project root,
     /// so supdoc refuses it without reading it. The message is the same whether or not anything
     /// is there.
-    #[error(
-        "{} is a symlink that doesn't lead to a supdoc.lock inside the project root",
-        .path.display()
-    )]
     OutsideRoot {
         /// The lockfile, as supdoc looked for it.
         path: AbsolutePath,
     },
 
     /// The file was read but its text is not a valid lockfile.
-    #[error("{}: {error}", .path.display())]
     Parse {
         /// The lockfile.
         path: AbsolutePath,
@@ -155,7 +158,6 @@ pub enum LockError {
     },
 
     /// The lockfile could not be written. The previous one, if any, is unchanged.
-    #[error("cannot write {}: {error}", .path.display())]
     Write {
         /// The lockfile.
         path: AbsolutePath,
@@ -176,18 +178,50 @@ impl LockError {
         }
     }
 
-    /// What to do about it.
+    /// The lockfile this error is about.
     #[must_use]
-    pub fn help(&self) -> String {
+    pub fn path(&self) -> &AbsolutePath {
         match self {
-            Self::Read { path, .. } => format!(
-                "Give the current user read access, for example with `chmod u+r {}`",
-                shell_quote(&path.display().to_string())
+            Self::Read { path, .. }
+            | Self::OutsideRoot { path }
+            | Self::Parse { path, .. }
+            | Self::Write { path, .. } => path,
+        }
+    }
+
+    /// The message, naming the lockfile relative to `root`, the project root, as the read
+    /// messages name files, so no message carries a machine-specific absolute path.
+    #[must_use]
+    pub fn message_from(&self, root: &AbsolutePath) -> String {
+        self.message_naming(&relative_to(root, self.path()))
+    }
+
+    /// The message, naming the lockfile as `shown`.
+    fn message_naming(&self, shown: &dyn Display) -> String {
+        match self {
+            Self::Read { error, .. } => format!("cannot read {shown}: {error}"),
+            Self::OutsideRoot { .. } => format!(
+                "{shown} is a symlink that doesn't lead to a supdoc.lock inside the project root"
             ),
-            Self::OutsideRoot { path } => format!(
+            Self::Parse { error, .. } => format!("{shown}: {error}"),
+            Self::Write { error, .. } => format!("cannot write {shown}: {error}"),
+        }
+    }
+
+    /// What to do about it, naming the lockfile relative to `cwd`, the directory supdoc runs
+    /// in, so a command in the help runs as written.
+    #[must_use]
+    pub fn help_from(&self, cwd: &AbsolutePath) -> String {
+        let shown = || shell_quote(&relative_to(cwd, self.path()));
+        match self {
+            Self::Read { .. } => format!(
+                "Give the current user read access, for example with `chmod u+r {}`",
+                shown()
+            ),
+            Self::OutsideRoot { .. } => format!(
                 "supdoc reads only a supdoc.lock inside the project root. Remove the symlink with \
                  `rm {}`, then run `supdoc update --yes` to record the links again",
-                shell_quote(&path.display().to_string())
+                shown()
             ),
             Self::Parse { error, .. } => error.help().to_owned(),
             Self::Write { .. } => "The existing lockfile was not changed. Make the directory \
@@ -207,15 +241,22 @@ impl LockError {
     }
 }
 
+impl Display for LockError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message_naming(&self.path().display()))
+    }
+}
+
+impl std::error::Error for LockError {}
+
 /// `supdoc.lock` was written with different hash settings than the config resolves to (02 L10).
 ///
 /// Comparing hashes across settings would report links as changed when only the rule changed, so
 /// every command except a full `supdoc update` stops here, before the scan and before any write.
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "supdoc.lock was written with line-endings = \"{recorded}\", but {} \"{configured}\"",
-    configured_by(.configured_in.as_ref())
-)]
+///
+/// `Display` names the config file by its absolute path; [`SettingsMismatch::message_from`] names
+/// it relative to the project root.
+#[derive(Debug)]
 pub struct SettingsMismatch {
     /// The setting the lock records.
     pub recorded: LineEndings,
@@ -225,15 +266,40 @@ pub struct SettingsMismatch {
     pub configured_in: Option<AbsolutePath>,
 }
 
-/// Who chose the configured value: `<file> sets`, or `the default is`.
-fn configured_by(file: Option<&AbsolutePath>) -> String {
-    file.map_or_else(
-        || "the default is".to_owned(),
-        |file| format!("{} sets", file.display()),
-    )
+impl Display for SettingsMismatch {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        let file = self.configured_in.as_ref().map(AbsolutePath::display);
+        formatter.write_str(&self.message_naming(file.as_ref().map(|file| file as &dyn Display)))
+    }
 }
 
+impl std::error::Error for SettingsMismatch {}
+
 impl SettingsMismatch {
+    /// The message, naming the config file that set the value relative to `root`, the project
+    /// root, so no message carries a machine-specific absolute path.
+    #[must_use]
+    pub fn message_from(&self, root: &AbsolutePath) -> String {
+        let file = self
+            .configured_in
+            .as_ref()
+            .map(|file| relative_to(root, file));
+        self.message_naming(file.as_ref().map(|file| file as &dyn Display))
+    }
+
+    /// The message, naming the config file that set the value as `file`, or the default when no
+    /// file did.
+    fn message_naming(&self, file: Option<&dyn Display>) -> String {
+        let configured_by = file.map_or_else(
+            || "the default is".to_owned(),
+            |file| format!("{file} sets"),
+        );
+        format!(
+            "supdoc.lock was written with line-endings = \"{}\", but {configured_by} \"{}\"",
+            self.recorded, self.configured
+        )
+    }
+
     /// A stable identifier for machine-readable output.
     #[must_use]
     pub const fn code(&self) -> &'static str {
@@ -319,6 +385,82 @@ mod tests {
             mismatch(Some("/repo/supdoc.config.toml")).to_string(),
             "supdoc.lock was written with line-endings = \"exact\", but \
              /repo/supdoc.config.toml sets \"normalize\""
+        );
+    }
+
+    #[test]
+    fn settings_mismatch_message_names_the_config_relative_to_the_root() {
+        let root = AbsolutePath::new(std::path::Path::new("/repo"))
+            .expect("the fixture root should be absolute");
+
+        assert_eq!(
+            mismatch(Some("/repo/supdoc.config.toml")).message_from(&root),
+            "supdoc.lock was written with line-endings = \"exact\", but supdoc.config.toml sets \
+             \"normalize\""
+        );
+    }
+
+    fn absolute(raw: &str) -> AbsolutePath {
+        AbsolutePath::new(std::path::Path::new(raw)).expect("the fixture path should be absolute")
+    }
+
+    #[test]
+    fn lock_messages_name_the_lockfile_relative_to_the_root() {
+        let root = absolute("/repo");
+        let path = absolute("/repo/supdoc.lock");
+        let errors = [
+            LockError::Read {
+                path: path.clone(),
+                error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            },
+            LockError::OutsideRoot { path: path.clone() },
+            LockError::Parse {
+                path: path.clone(),
+                error: Box::new(ParseLockError::ConflictMarkers { line: 3 }),
+            },
+            LockError::Write {
+                path,
+                error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            },
+        ];
+
+        let messages: Vec<String> = errors
+            .iter()
+            .map(|error| error.message_from(&root))
+            .collect();
+
+        assert_eq!(
+            messages,
+            [
+                "cannot read supdoc.lock: permission denied",
+                "supdoc.lock is a symlink that doesn't lead to a supdoc.lock inside the project root",
+                "supdoc.lock: unresolved merge conflict at line 3",
+                "cannot write supdoc.lock: permission denied",
+            ]
+        );
+    }
+
+    #[test]
+    fn lock_helps_name_the_lockfile_relative_to_the_current_directory() {
+        let cwd = absolute("/repo/docs");
+        let path = absolute("/repo/supdoc.lock");
+        let read = LockError::Read {
+            path: path.clone(),
+            error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        };
+        let outside = LockError::OutsideRoot { path };
+
+        let helps = [read.help_from(&cwd), outside.help_from(&cwd)];
+
+        assert!(
+            helps[0].contains("`chmod u+r ../supdoc.lock`"),
+            "the read help should run from docs/: {}",
+            helps[0]
+        );
+        assert!(
+            helps[1].contains("`rm ../supdoc.lock`"),
+            "the symlink help should run from docs/: {}",
+            helps[1]
         );
     }
 

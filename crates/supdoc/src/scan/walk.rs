@@ -12,6 +12,7 @@ use ignore::{DirEntry, Match, WalkBuilder};
 use crate::config::{CONFIG_FILE_NAME, Config};
 use crate::finding::{Finding, Severity};
 use crate::link::SourcePath;
+use crate::output::paths::relative_to;
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Cartridge, Languages};
 use crate::scan::model::Scope;
@@ -110,8 +111,11 @@ impl fmt::Display for UnreadCause {
 
 impl UnreadDir {
     /// The warning for this directory: `scan-unreadable-dir`, or `scan-ignore-file-outside-root`.
-    fn finding(&self) -> Finding {
-        let skipped = format!("skipped {}: {}", self.path.display(), self.cause);
+    ///
+    /// The message names the directory relative to the project `root`, as the read messages name
+    /// files, so no finding carries a machine-specific absolute path.
+    fn finding(&self, root: &AbsolutePath) -> Finding {
+        let skipped = format!("skipped {}: {}", relative_to(root, &self.path), self.cause);
         match self.cause {
             UnreadCause::Io(_) => Finding::new("scan-unreadable-dir", Severity::Warning, skipped)
                 .with_help(
@@ -150,7 +154,7 @@ pub fn walk(config: &Config, languages: &Languages, scope: &Scope) -> Walk {
     if let Some(root) = unread_for_outside_ignore_file(config, config.root().as_path()) {
         return Walk {
             sources: Vec::new(),
-            findings: vec![root.finding()],
+            findings: vec![root.finding(config.root())],
             unread_dirs: vec![root],
         };
     }
@@ -180,7 +184,7 @@ pub fn walk(config: &Config, languages: &Languages, scope: &Scope) -> Walk {
     let mut unread_dirs =
         std::mem::take(&mut *refused.lock().unwrap_or_else(PoisonError::into_inner));
     unread_dirs.sort();
-    findings.extend(unread_dirs.iter().map(UnreadDir::finding));
+    findings.extend(unread_dirs.iter().map(|dir| dir.finding(config.root())));
 
     findings.extend(explicit_path_warnings(
         config,
@@ -1410,9 +1414,9 @@ mod tests {
             .first()
             .expect("one warning was expected")
             .message;
-        assert!(
-            message.starts_with("skipped ") && message.ends_with("private: permission denied"),
-            "message was: {message}"
+        assert_eq!(
+            message, "skipped private: permission denied",
+            "the warning should name the directory relative to the root, not absolutely"
         );
     }
 }

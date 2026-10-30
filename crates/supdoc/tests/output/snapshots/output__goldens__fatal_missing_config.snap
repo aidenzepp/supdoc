@@ -6,6 +6,6 @@ $ supdoc check --config missing.toml
 exit: 78
 --- stdout
 --- stderr
-error[config-not-found]: no config file at [ROOT]/missing.toml
+error[config-not-found]: no config file at missing.toml
  |
  = help: Check the `--config` path, or leave out `--config` to search upward from the current directory
