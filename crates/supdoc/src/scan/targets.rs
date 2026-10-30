@@ -34,7 +34,7 @@ pub(crate) const CODE_OUTSIDE_ROOT: &str = "link-outside-root";
 
 /// What to do about a link whose target lies outside the project root.
 pub(crate) const OUTSIDE_ROOT_HELP: &str = "Link to a file inside the project root, or move \
-     `supdoc.config.toml` up to a directory that holds both. supdoc reads nothing outside the root";
+     `supdoc.config.toml` up to a directory that holds both";
 
 /// Files parsed during one run, keyed by path (04 S9). Owned by one scan, never global.
 #[derive(Debug, Default)]
@@ -661,6 +661,14 @@ mod tests {
         assert_ne!(
             expected(LineEndings::Normalize),
             expected(LineEndings::Exact)
+        );
+    }
+
+    #[test]
+    fn the_outside_root_help_makes_no_claim_about_what_supdoc_reads() {
+        assert!(
+            !OUTSIDE_ROOT_HELP.contains("reads nothing"),
+            "the help must not promise what supdoc reads outside the root: {OUTSIDE_ROOT_HELP}"
         );
     }
 }

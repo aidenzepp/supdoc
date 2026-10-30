@@ -605,6 +605,24 @@ fn every_error_has_a_code_and_message_names_a_file() {
     assert_eq!(codes.len(), errors.len(), "codes must be unique");
 }
 
+#[test]
+fn namespace_outside_root_help_makes_no_claim_about_what_supdoc_reads() {
+    let file = AbsolutePath::new(std::path::Path::new("/project/supdoc.config.toml"))
+        .expect("the fixture path should be absolute");
+    let error = ConfigError::NamespaceOutsideRoot {
+        file: file.clone(),
+        name: "shared".parse().expect("the fixture name should be valid"),
+        directory: file.clone(),
+        root: file,
+    };
+    let help = error.help().expect("the error should carry a help");
+
+    assert!(
+        !help.contains("reads nothing"),
+        "the help must not promise what supdoc reads outside the root: {help}"
+    );
+}
+
 // Provenance: which file defined each key
 
 /// A two-level chain: `child` extends `mid` extends the top config. The top sets include, exclude

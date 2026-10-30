@@ -91,8 +91,8 @@ fn current_version<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<
     }
 }
 
-/// Reads a target, refusing one that climbs with `..`: supdoc reads nothing outside the project
-/// root, so a hand-written lock can't name such a file either.
+/// Reads a target, refusing one that climbs with `..`: supdoc doesn't read link targets outside
+/// the project root, so a hand-written lock can't name such a file either.
 ///
 /// # Errors
 ///

@@ -77,8 +77,8 @@ pub enum ConfigError {
     /// symlinks, or leaves the root or goes through a symlink without leading to a
     /// `supdoc.config.toml` file. A value that leaves the root, or goes through a symlink, either
     /// leads to a supdoc.config.toml file or is refused alike: missing, a directory, a loop and
-    /// unreadable are all this error, so a checkout can't learn what exists outside it. supdoc
-    /// refuses it without reading it.
+    /// unreadable are all this error, so one outcome stands for every such value. supdoc refuses
+    /// it without reading it.
     ExtendsNotConfig {
         /// The config that wrote `extends`.
         file: AbsolutePath,
@@ -92,7 +92,7 @@ pub enum ConfigError {
     /// `supdoc.config.toml`. supdoc refuses it without reading it.
     ///
     /// The message is the same whether the target is a file with another name, a directory or
-    /// missing, so it reveals nothing about paths outside the root.
+    /// missing, so the three share one outcome.
     SymlinkNotConfig {
         /// The config file as found, before following the symlink.
         path: AbsolutePath,
@@ -246,8 +246,7 @@ impl ConfigError {
             }
             Self::NamespaceOutsideRoot { .. } => Some(
                 "Point the namespace at a directory inside the project root, or move the project's \
-                 `supdoc.config.toml` up to a directory that holds both. supdoc reads nothing \
-                 outside the root"
+                 `supdoc.config.toml` up to a directory that holds both"
                     .to_owned(),
             ),
         }

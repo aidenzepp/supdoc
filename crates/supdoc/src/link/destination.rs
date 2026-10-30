@@ -75,8 +75,8 @@ pub enum LinkError {
     },
     /// The path climbs above the project root, or above its namespace's directory, with `..`.
     ///
-    /// supdoc reads nothing outside the root, so this is decided from the text alone: a missing
-    /// file and a present one look the same.
+    /// supdoc doesn't read link targets outside the root, so this is decided from the text alone: a
+    /// missing file and a present one look the same.
     #[error("{}", outside_root_message(.destination, .namespace.as_ref()))]
     OutsideRoot {
         /// The destination as written.
