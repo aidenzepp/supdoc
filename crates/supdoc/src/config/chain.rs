@@ -117,6 +117,7 @@ fn really_config(file: &AbsolutePath) -> std::io::Result<bool> {
 ///
 /// Returns the first [`ConfigError`] found while reading, parsing or following `extends`.
 pub(super) fn read_chain(file: &AbsolutePath) -> Result<Vec<Layer>, ConfigError> {
+    let root = directory_of(file);
     let mut layers = Vec::new();
     // Each visited file with the name the filesystem knows it by, so a loop through a symlink
     // is still caught.
@@ -130,7 +131,7 @@ pub(super) fn read_chain(file: &AbsolutePath) -> Result<Vec<Layer>, ConfigError>
         })?;
         visited.push((identity(&current), current.clone()));
         if let Some(extends) = &raw.extends {
-            let target = resolve_extends(&current, extends)?;
+            let target = resolve_extends(&root, &current, extends)?;
             if let Some(start) = visited
                 .iter()
                 .position(|(known, _)| *known == identity(&target))
@@ -183,10 +184,12 @@ fn read_text(file: &AbsolutePath, is_start: bool) -> Result<String, ConfigError>
 /// are followed. Both are checked before anything is read, so a hostile `extends` can never make
 /// supdoc print another file's lines in a parse error.
 ///
-/// When the value goes through a symlink, whether the link's target exists must not change the
-/// error, or the exit status would reveal paths outside the root: a link that is dangling,
-/// looping, or leads to a directory or to a file with another name is refused alike, as
-/// [`discover`] does for the config it finds.
+/// When the value goes through a symlink inside `root`, whether the link's target exists must not
+/// change the error, or the exit status would reveal paths outside the root: a link that is
+/// dangling, looping, or leads to a directory or to a file with another name is refused alike, as
+/// [`discover`] does for the config it finds. Entries outside `root` are not the checkout's, so
+/// whether they are symlinks must not change the error either; a value that climbs out of the
+/// root is judged by where it leads, as if no symlink were on the way.
 ///
 /// # Errors
 ///
@@ -194,6 +197,7 @@ fn read_text(file: &AbsolutePath, is_start: bool) -> Result<String, ConfigError>
 /// `ExtendsMissing` or `ExtendsDirectory` when a target reached without symlinks isn't a file,
 /// `Read` for other failures.
 fn resolve_extends(
+    root: &AbsolutePath,
     from: &AbsolutePath,
     extends: &toml::Spanned<RelativePath>,
 ) -> Result<AbsolutePath, ConfigError> {
@@ -215,7 +219,7 @@ fn resolve_extends(
         Some(Component::Normal(name)) if name == CONFIG_FILE_NAME => {}
         Some(_) => return Err(not_config()),
     }
-    if through_symlink(&directory_of(from), &resolved) {
+    if through_symlink(root, &directory_of(from), &resolved) {
         return if leads_to_config(&resolved) {
             Ok(resolved)
         } else {
@@ -247,19 +251,22 @@ fn resolve_extends(
     }
 }
 
-/// Whether reaching `resolved` from `base` follows a symlink: the final entry or any directory on
-/// the way that isn't `base` or one of its ancestors.
+/// Whether reaching `resolved` from `base` follows a symlink inside `root`: the final entry or any
+/// directory on the way that lies beneath `root` and isn't `base` or one of its ancestors.
 ///
 /// `resolved` is `base` joined lexically with an `extends` value, so `base` and its ancestors are
-/// where the value starts or climbs to, not entries it names. An entry that is missing or can't
-/// be inspected isn't a symlink, and every entry is inspected without following it.
+/// where the value starts or climbs to, not entries it names. Only entries beneath `root` are
+/// inspected: the checkout controls those, and whether an entry outside is a symlink is a fact
+/// about the machine it must not learn. An entry that is missing or can't be inspected isn't a
+/// symlink, and every entry is inspected without following it.
 ///
-/// Effect: reads the metadata of each entry between `base` and `resolved`.
-fn through_symlink(base: &AbsolutePath, resolved: &AbsolutePath) -> bool {
+/// Effect: reads the metadata of each entry beneath `root` between `base` and `resolved`.
+fn through_symlink(root: &AbsolutePath, base: &AbsolutePath, resolved: &AbsolutePath) -> bool {
     resolved
         .as_path()
         .ancestors()
         .take_while(|entry| !base.as_path().starts_with(entry))
+        .filter(|entry| entry.starts_with(root.as_path()) && *entry != root.as_path())
         .any(|entry| fs::symlink_metadata(entry).is_ok_and(|metadata| metadata.is_symlink()))
 }
 

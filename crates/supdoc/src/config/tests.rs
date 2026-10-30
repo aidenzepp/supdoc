@@ -839,6 +839,33 @@ fn extends_through_a_symlinked_directory_is_refused_alike_whatever_it_holds() {
 
 #[cfg(unix)]
 #[test]
+fn extends_climbing_out_of_the_root_ignores_whether_outside_entries_are_symlinks() {
+    let extends = "extends = \"../outside/x/supdoc.config.toml\"\n";
+    let dir = tree(&[
+        ("linked/project/supdoc.config.toml", extends),
+        ("absent/project/supdoc.config.toml", extends),
+    ]);
+    fs::create_dir_all(dir.path().join("linked/outside/real"))
+        .expect("the fixture directory should be creatable");
+    std::os::unix::fs::symlink(
+        dir.path().join("linked/outside/real"),
+        dir.path().join("linked/outside/x"),
+    )
+    .expect("the symlink should be creatable");
+
+    let linked = load_error(&dir, "linked/project/supdoc.config.toml");
+    let absent = load_error(&dir, "absent/project/supdoc.config.toml");
+
+    assert_eq!(
+        refusal_shown(&linked, "linked"),
+        refusal_shown(&absent, "absent"),
+        "a symlink outside the root must not change the error, or it reveals what exists there"
+    );
+    assert_eq!(absent.code(), "config-extends-missing", "got {absent:?}");
+}
+
+#[cfg(unix)]
+#[test]
 fn extends_through_a_symlink_to_a_config_file_loads_it() {
     let dir = tree(&[
         ("shared/supdoc.config.toml", "include = [\"docs\"]\n"),
