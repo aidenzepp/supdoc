@@ -712,7 +712,7 @@ fn as_source(
     let cartridge = languages.for_path(path.as_path())?;
     let relative_path = path.strip_prefix(config.root())?;
     let Ok(relative) = SourcePath::from_relative(relative_path) else {
-        return Some(Err(invalid_source_path(&relative_path)));
+        return Some(Err(invalid_source_path(relative_path)));
     };
     scope.contains(&relative).then_some(Ok((path, cartridge)))
 }
