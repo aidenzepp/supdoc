@@ -82,6 +82,9 @@ fn missing_path_help_lists_the_nearest_directory_that_exists() {
 
 #[test]
 fn unreadable_lock_help_names_the_lock_from_the_current_directory() {
+    if !crate::permissions_restrict_this_user("unreadable_lock_help") {
+        return;
+    }
     let project = project();
     project.record();
     let lock = project.path("supdoc.lock");
