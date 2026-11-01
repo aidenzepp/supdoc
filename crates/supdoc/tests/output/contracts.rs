@@ -951,6 +951,14 @@ mod helps {
             &["check", "docs/old.md"],
         ),
         case(
+            "scan-explicit-path-symlinked",
+            |p| {
+                std::os::unix::fs::symlink("src", p.path().join("alias"))
+                    .expect("the symlink should be creatable");
+            },
+            &["check", "alias/lib.rs"],
+        ),
+        case(
             "scan-unreadable-dir",
             |p| {
                 p.write("docs/private/a.md", "# A\n");
