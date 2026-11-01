@@ -13,6 +13,7 @@ use crate::finding::{Finding, Fix, LineIndex, Location, Severity, Snippet};
 use crate::hash::HashSettings;
 use crate::link::destination::{LinkError, parse_destination};
 use crate::link::{LinkKey, RawLink, SourcePath};
+use crate::lock::error::shell_quote;
 use crate::namespace::NamespaceName;
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile};
@@ -51,10 +52,11 @@ impl ScanError {
     #[must_use]
     pub fn help(&self) -> String {
         match self {
-            Self::RootUnreadable { .. } => "Give the current user read access to the project \
-                                            root, for example with `chmod u+r` on it, or run \
-                                            from a directory you can read"
-                .to_owned(),
+            Self::RootUnreadable { root, .. } => format!(
+                "Give the current user read and search access to the project root, for example \
+                 with `chmod u+rx {}`",
+                shell_quote(&root.display().to_string())
+            ),
         }
     }
 
@@ -296,7 +298,8 @@ fn link_finding(
 ) -> Finding {
     let (code, help, fix) = match error {
         LinkError::UnknownNamespace { prefix, known, .. } => {
-            let close = targets::close_match(prefix, known.iter().map(NamespaceName::as_str));
+            let close =
+                crate::suggest::close_match(prefix, known.iter().map(NamespaceName::as_str));
             let fix = close.zip(written.and_then(|written| written.prefix_range(prefix)));
             let fix = fix.and_then(|(close, range)| {
                 Some(Fix {
@@ -890,6 +893,19 @@ mod tests {
             .expect("the root should be unlockable, so the temp dir can be removed");
         let error = result.expect_err("an unreadable root should stop the scan");
         assert_eq!(error.code(), "scan-root-unreadable");
+    }
+
+    #[test]
+    fn unreadable_root_help_gives_chmod_with_the_root_and_no_other_directory_advice() {
+        let error = ScanError::RootUnreadable {
+            root: AbsolutePath::new(Path::new("/work/my repo")).expect("the path is absolute"),
+            error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        };
+
+        let help = error.help();
+
+        assert!(help.contains("`chmod u+rx '/work/my repo'`"), "got: {help}");
+        assert!(!help.contains("another directory"), "got: {help}");
     }
 
     #[test]

@@ -99,7 +99,8 @@ pub enum ConfigError {
         path: AbsolutePath,
     },
 
-    /// A namespace names a directory outside the project root.
+    /// A namespace names a directory outside the project root, either as written or once a
+    /// symlink along it is followed.
     NamespaceOutsideRoot {
         /// The config that defined the namespace.
         file: AbsolutePath,
@@ -109,6 +110,9 @@ pub enum ConfigError {
         directory: AbsolutePath,
         /// The project root.
         root: AbsolutePath,
+        /// Whether `directory` as written lies inside the root and only a symlink along it leads
+        /// out. Where the symlink leads is never printed.
+        through_symlink: bool,
     },
 
     /// A chain of `extends` comes back to a file it already visited.
@@ -139,7 +143,7 @@ impl ConfigError {
 
     /// The message, naming each file relative to `cwd`, the directory supdoc runs in, as the
     /// error's location does. No config loaded, so there is no project root to name them from.
-    /// A namespace's directory, which lies outside the root, and the root itself stay absolute.
+    /// A namespace's directory that lies outside the root, and the root itself, stay absolute.
     #[must_use]
     pub fn message_from(&self, cwd: &AbsolutePath) -> String {
         self.describe(&|file| relative_to(cwd, file))
@@ -179,6 +183,20 @@ impl ConfigError {
                 name,
                 directory,
                 root,
+                through_symlink: true,
+            } => format!(
+                "{} sets namespace `{name}` to {}, which leads outside the project root {} \
+                 through a symlink",
+                show(file),
+                show(directory),
+                root.display()
+            ),
+            Self::NamespaceOutsideRoot {
+                file,
+                name,
+                directory,
+                root,
+                through_symlink: false,
             } => format!(
                 "{} sets namespace `{name}` to {}, which is outside the project root {}",
                 show(file),
@@ -246,7 +264,18 @@ impl ConfigError {
                      `--config` with the file you mean"
                 ))
             }
-            Self::NamespaceOutsideRoot { .. } => Some(
+            Self::NamespaceOutsideRoot {
+                through_symlink: true,
+                ..
+            } => Some(
+                "Point the namespace at a real directory inside the project root, not a symlink \
+                 that leads out of it"
+                    .to_owned(),
+            ),
+            Self::NamespaceOutsideRoot {
+                through_symlink: false,
+                ..
+            } => Some(
                 "Point the namespace at a directory inside the project root, or move the project's \
                  `supdoc.config.toml` up to a directory that holds both"
                     .to_owned(),
@@ -321,12 +350,21 @@ fn parse_help(message: &str) -> Option<String> {
         Some(form)
     } else if message.contains("is an absolute path") {
         Some("Write the path relative to this config file, such as `services/auth`".to_owned())
-    } else if message.ends_with("leaves this config's directory") {
-        Some(
-            "Links, namespaces and extends stay inside the project root. For a monorepo, put \
-             `supdoc.config.toml` at the repo root"
-                .to_owned(),
-        )
+    } else if message.starts_with("pattern `")
+        && message.ends_with("leaves this config's directory")
+    {
+        let pattern = message.split('`').nth(1).unwrap_or_default();
+        Some(format!(
+            "Patterns match only files under this config's directory. Remove `..`, or move the \
+             pattern into the config of a directory that holds `{pattern}`"
+        ))
+    } else if let Some((count, _)) =
+        message.split_once(" patterns are too many or too complex to match together")
+    {
+        Some(format!(
+            "Use fewer, broader patterns than these {count}: a pattern also matches everything \
+             beneath it, so `generated` covers every file under that directory"
+        ))
     } else {
         None
     }
