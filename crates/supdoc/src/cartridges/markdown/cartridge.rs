@@ -1,4 +1,4 @@
-//! Markdown, the cartridge that combines headings and body regions (03 R9, R12, R14).
+//! Markdown, the cartridge that combines headings and body regions.
 //!
 //! It is code rather than data: its symbols are [`heading_symbols`] and its link regions are
 //! [`markdown_regions`]. Its query files are empty, because neither answer comes from a query.

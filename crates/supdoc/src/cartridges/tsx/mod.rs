@@ -1,4 +1,4 @@
-//! TSX: pure data that names TypeScript-with-JSX symbols and finds links in comments (03 R3–R5).
+//! TSX: pure data that names TypeScript-with-JSX symbols and finds links in comments.
 //!
 //! Symbols come from `tags.scm` and link regions from `injections.scm`, both beside this file.
 //! The golden symbol list in the tests is the public contract: users type these paths into docs.
@@ -223,7 +223,7 @@ namespace util {
             .collect();
         assert_eq!(
             actual, expected,
-            "a grammar upgrade moved a symbol's node boundaries (02 L8)"
+            "a grammar upgrade moved a symbol's node boundaries"
         );
         assert_eq!(
             hash_file(&file, HashSettings::default()).to_string(),

@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::fs;
 use std::io::ErrorKind;
+use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
 use crate::namespace::NamespaceName;
@@ -18,7 +19,7 @@ use crate::path::{AbsolutePath, RelativePath, is_regular_file};
 
 use super::pattern::{AnchoredPatterns, PatternList};
 use super::raw::RawConfig;
-use super::{CONFIG_FILE_NAME, Config, ConfigError, Namespace, config_entry};
+use super::{CONFIG_FILE_NAME, Config, ConfigError, Namespace, NamespaceEscape, config_entry};
 
 /// One config file in an `extends` chain, as parsed.
 #[derive(Debug)]
@@ -306,7 +307,9 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Result<Config, Co
         let base = directory_of(&file);
         for (name, relative) in raw.namespaces {
             if let Entry::Vacant(slot) = written.entry(name) {
-                let _inserted = slot.insert((base.join(&relative), file.clone()));
+                let span = relative.span();
+                let dir = base.join(relative.get_ref());
+                let _inserted = slot.insert((dir, file.clone(), span));
             }
         }
         if include.is_none() {
@@ -331,8 +334,8 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Result<Config, Co
     let real_root = super::real_root(&root);
     let namespaces = written
         .into_iter()
-        .map(|(name, (dir, defined_in))| {
-            let namespace = confined(&root, &real_root, &name, dir, defined_in)?;
+        .map(|(name, (dir, defined_in, span))| {
+            let namespace = confined(&root, &real_root, &name, dir, (defined_in, span))?;
             Ok((name, namespace))
         })
         .collect::<Result<_, ConfigError>>()?;
@@ -358,25 +361,30 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Result<Config, Co
 /// # Errors
 ///
 /// `NamespaceOutsideRoot` when `dir` lies outside `real_root`, or where it lies can't be worked out.
+/// `written` is the config that defined the namespace and the byte range of its value there.
 fn confined(
     root: &AbsolutePath,
     real_root: &Path,
     name: &NamespaceName,
     dir: AbsolutePath,
-    defined_in: AbsolutePath,
+    written: (AbsolutePath, Range<usize>),
 ) -> Result<Namespace, ConfigError> {
-    let inside = super::confine::real_location(dir.as_path())
-        .is_some_and(|real| real.starts_with(real_root));
-    if !inside {
+    let (defined_in, span) = written;
+    let real = super::confine::real_location(dir.as_path());
+    let escape = match real {
+        Some(real) if real.starts_with(real_root) => return Ok(Namespace { dir, defined_in }),
+        // Written outside the root: that is the problem, whatever lies beyond it.
+        _ if dir.strip_prefix(root).is_none() => NamespaceEscape::AsWritten,
+        None => NamespaceEscape::Unresolvable,
         // Written inside the root, so only a symlink along it can lead out.
-        let through_symlink = dir.strip_prefix(root).is_some();
-        return Err(ConfigError::NamespaceOutsideRoot {
-            file: defined_in,
-            name: name.clone(),
-            directory: dir,
-            root: root.clone(),
-            through_symlink,
-        });
-    }
-    Ok(Namespace { dir, defined_in })
+        Some(_) => NamespaceEscape::ThroughSymlink,
+    };
+    Err(ConfigError::NamespaceOutsideRoot {
+        file: defined_in,
+        name: name.clone(),
+        directory: dir,
+        span,
+        root: root.clone(),
+        escape,
+    })
 }

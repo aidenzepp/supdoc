@@ -68,10 +68,6 @@ pub struct Context {
     pub global: GlobalArgs,
     /// The current directory, read once by `main` (01).
     pub cwd: AbsolutePath,
-    /// The user's home directory (`HOME`), read once by `main`.
-    pub home: Option<AbsolutePath>,
-    /// Claude Code's config directory (`CLAUDE_CONFIG_DIR`), read once by `main`.
-    pub claude_config_dir: Option<AbsolutePath>,
 }
 
 /// How a command that ran to completion ended (06 X7).
@@ -250,7 +246,12 @@ impl std::error::Error for CliError {}
 /// # Errors
 ///
 /// Returns the command's own [`CliError`].
-pub fn run(command: &Command, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
+pub fn run(
+    command: &Command,
+    skill_dirs: &skill::SkillDirs,
+    context: &Context,
+    output: &mut Output,
+) -> Result<Outcome, CliError> {
     match command {
         Command::Check(args) => check::run(args, context, output),
         Command::Update(args) => update::run(args, context, output),
@@ -265,6 +266,8 @@ pub fn run(command: &Command, context: &Context, output: &mut Output) -> Result<
         Command::Namespace(NamespaceCommand::Rename(args)) => rename::run(args, context, output),
         Command::Schema(args) => schema::run(args, context, output),
         Command::Completions(args) => completions::run(args, context, output),
-        Command::Skill(SkillCommand::Install(args)) => skill::run(args, context, output),
+        Command::Skill(SkillCommand::Install(args)) => {
+            skill::run(args, skill_dirs, context, output)
+        }
     }
 }

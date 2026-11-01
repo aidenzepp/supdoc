@@ -796,8 +796,12 @@ mod tests {
         /// Runs `supdoc <args>` from the project root, through the real dispatch.
         fn run(&self, args: &[&str]) -> Run {
             let mut session = self.session(args);
-            let result =
-                crate::cli::run(&session.cli.command, &session.context, &mut session.output);
+            let result = crate::cli::run(
+                &session.cli.command,
+                &crate::cli::skill::SkillDirs::from_vars(|_| None),
+                &session.context,
+                &mut session.output,
+            );
             session.finished(result)
         }
     }

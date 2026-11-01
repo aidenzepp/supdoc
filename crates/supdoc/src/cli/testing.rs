@@ -125,8 +125,6 @@ impl Session {
         let context = Context {
             global: cli.global.clone(),
             cwd,
-            home: None,
-            claude_config_dir: None,
         };
         Self {
             cli,

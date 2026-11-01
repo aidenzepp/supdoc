@@ -123,8 +123,6 @@ mod tests {
             Context {
                 global: cli.global,
                 cwd,
-                home: None,
-                claude_config_dir: None,
             },
         )
     }

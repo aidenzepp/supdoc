@@ -47,12 +47,6 @@ pub enum Stream {
 /// The code of the error printed when the command line cannot be parsed.
 pub const USAGE_ERROR_CODE: &str = "cli-usage";
 
-/// Parses the process's own arguments and environment.
-#[must_use]
-pub fn parse_process() -> Parsed {
-    parse_from(std::env::args_os(), |name| std::env::var(name).ok())
-}
-
 /// Parses `args` (the program name first).
 ///
 /// `env` looks up an environment variable by name. It only decides whether a usage error is

@@ -1,4 +1,4 @@
-; Go symbols (03 R4, R5a). Written in tree-sitter's tags.scm conventions plus the
+; Go symbols. Written in tree-sitter's tags.scm conventions plus the
 ; @supdoc.scope.name extension. Unlike the grammar's bundled tags.scm, this covers struct
 ; fields, interface methods, constants and variables, and names methods by their receiver.
 ; Package-level names only: a local `var` or `const` inside a function is not addressable.

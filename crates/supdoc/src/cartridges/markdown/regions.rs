@@ -1,4 +1,4 @@
-//! Where links live in a Markdown file: its body (03 R9, R14).
+//! Where links live in a Markdown file: its body.
 //!
 //! tree-sitter-md parses a document in two layers. The block grammar finds paragraphs, headings,
 //! lists, quotes and fences; its own `injections.scm` then marks every `inline` node as

@@ -80,7 +80,7 @@ impl Report for StarterReport {
 /// file cannot be created or the output cannot be written.
 pub fn run(args: &InitArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let target = target(context);
-    let label = label(&target, &context.cwd);
+    let label = relative_to(&context.cwd, &target);
     let report = |applied| StarterReport {
         applied,
         path: target.clone(),
@@ -168,12 +168,6 @@ fn require_parent_directory(target: &AbsolutePath, context: &Context) -> Result<
     }
 }
 
-/// `target` as a person reads it in a note or a message: relative to `cwd`, climbing out of it
-/// when `-c` names a file above it, as the config errors name files.
-fn label(target: &AbsolutePath, cwd: &AbsolutePath) -> String {
-    relative_to(cwd, target)
-}
-
 /// Fails with `cli-init-exists` when something is already at `target`.
 ///
 /// # Errors
@@ -230,7 +224,7 @@ fn temporary_sibling(target: &AbsolutePath) -> std::path::PathBuf {
 fn exists(target: &AbsolutePath, context: &Context) -> CliError {
     CliError::new(
         "cli-init-exists",
-        format!("{} already exists", label(target, &context.cwd)),
+        format!("{} already exists", relative_to(&context.cwd, target)),
         format!(
             "The existing file wasn't changed. Edit it directly, or delete it and run `{}`.",
             command(context)
@@ -260,7 +254,7 @@ fn write_failed(target: &AbsolutePath, error: &io::Error, context: &Context) -> 
         "cli-init-write",
         format!(
             "cannot write {}: {}",
-            label(target, &context.cwd),
+            relative_to(&context.cwd, target),
             cause(error)
         ),
         format!("{fix}, then run `{}` again", command(context)),
@@ -327,8 +321,6 @@ mod tests {
             Context {
                 global: cli.global,
                 cwd,
-                home: None,
-                claude_config_dir: None,
             },
         )
     }

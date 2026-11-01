@@ -1,4 +1,4 @@
-//! JavaScript, a data-only cartridge on its own grammar, not the TypeScript one (03 R1).
+//! JavaScript, a data-only cartridge on its own grammar, not the TypeScript one.
 //!
 //! Symbols come from `tags.scm` and link regions from `injections.scm`, both beside this file.
 //! The golden symbol list in the tests is the public contract: users type these paths into docs.
@@ -201,7 +201,7 @@ function outer() {
                 .expect("the symbol should lie in its own file")
                 .to_string(),
                 hash,
-                "a grammar upgrade moved `{path}`'s node boundaries (02 L8)"
+                "a grammar upgrade moved `{path}`'s node boundaries"
             );
         }
         assert_eq!(
