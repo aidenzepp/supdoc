@@ -193,7 +193,7 @@ fn unknown_namespace(config: &Config, name: &NamespaceName) -> CliError {
         .keys()
         .map(NamespaceName::as_str)
         .collect();
-    let nearest = crate::scan::targets::close_match(name.as_str(), defined.iter().copied());
+    let nearest = crate::suggest::close_match(name.as_str(), defined.iter().copied());
     let listed = defined
         .iter()
         .map(|name| format!("`{name}`"))

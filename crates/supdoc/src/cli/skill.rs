@@ -24,7 +24,7 @@ use crate::lock::io::write_atomically;
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, OutputError, Report, TextContext};
+use crate::output::{Output, OutputError, Report, TextContext, preview_note};
 use crate::path::AbsolutePath;
 
 use super::args::{SkillInstallArgs, WriteMode};
@@ -45,9 +45,6 @@ const DEFAULT_CLAUDE_DIR: &str = ".claude";
 
 /// Where the skill goes beneath Claude Code's config directory.
 const CLAUDE_DIR_SKILL: &str = "skills/supdoc/SKILL.md";
-
-/// The closing note of a preview that would change something (06a K7).
-const PREVIEW_NOTE: &str = "Nothing written. Run the same command with --yes to apply.";
 
 /// The closing note when every copy already holds the embedded skill.
 const UP_TO_DATE_NOTE: &str = "The supdoc skill is already installed and up to date.";
@@ -105,12 +102,25 @@ pub fn run(
     if !args.global {
         output.set_root(base);
     }
+    let apply_note = preview_note(
+        args.confirm.dry_run,
+        &command_line(
+            context,
+            "skill install",
+            &[] as &[&str],
+            if args.global {
+                &["--global", "--yes"]
+            } else {
+                &["--yes"]
+            },
+        ),
+    );
     let report = SkillInstallReport::new(applied, args.global, changes, context);
     output
         .report(&report, true)
         .map_err(|error| output_failed(&error))?;
     output
-        .note(report.closing_note())
+        .note(report.closing_note(&apply_note))
         .map_err(|error| output_failed(&error))?;
     Ok(Outcome::Clean)
 }
@@ -295,13 +305,13 @@ impl SkillInstallReport {
     }
 
     /// The note that ends the run.
-    fn closing_note(&self) -> &'static str {
+    fn closing_note<'a>(&self, apply_note: &'a str) -> &'a str {
         if !self.changes.iter().any(|change| change.action.writes()) {
             UP_TO_DATE_NOTE
         } else if self.applied {
             INSTALLED_NOTE
         } else {
-            PREVIEW_NOTE
+            apply_note
         }
     }
 }
@@ -687,7 +697,12 @@ mod tests {
             run.stdout,
             "create     .agents/skills/supdoc/SKILL.md\ncreate     .claude/skills/supdoc/SKILL.md\n",
         );
-        assert!(run.stderr.contains(PREVIEW_NOTE), "stderr: {}", run.stderr);
+        assert!(
+            run.stderr
+                .contains("Run `supdoc skill install --yes` to apply."),
+            "stderr: {}",
+            run.stderr
+        );
         assert!(
             !world.project_file(".agents").exists() && !world.project_file(".claude").exists(),
             "a preview should create no directory"
@@ -964,7 +979,12 @@ mod tests {
             "stderr: {}",
             run.stderr
         );
-        assert!(!run.stderr.contains(PREVIEW_NOTE), "stderr: {}", run.stderr);
+        assert!(
+            !run.stderr
+                .contains("Run `supdoc skill install --yes` to apply."),
+            "stderr: {}",
+            run.stderr
+        );
     }
 
     #[test]

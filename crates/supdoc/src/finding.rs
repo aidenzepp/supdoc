@@ -20,7 +20,7 @@ pub struct Finding {
     /// What to do next.
     pub help: Option<String>,
     /// An exact edit, present only when there's exactly one correct fix. The fixer never guesses.
-    pub fix: Option<Fix>,
+    pub fix: Option<Box<Fix>>,
     /// The source lines this finding covers, captured when it is created so rendering never reads
     /// files (07 G11).
     pub snippet: Option<Snippet>,
@@ -63,7 +63,7 @@ impl Finding {
     #[must_use]
     pub fn with_fix(self, fix: Fix) -> Self {
         Self {
-            fix: Some(fix),
+            fix: Some(Box::new(fix)),
             ..self
         }
     }
@@ -221,21 +221,31 @@ pub struct Fix {
     pub range: Range<usize>,
     /// The new text.
     pub replacement: String,
+    /// The bytes `range` held in the scanned text. `supdoc fix` applies the edit only if the file
+    /// still holds them. Never serialized: this type has no serde derive.
+    pub scanned: Box<str>,
 }
 
-/// The whole lines a finding's range covers, captured when the finding is created (07 G11).
+/// A bounded window of the lines a finding's range covers, captured when the finding is created (07 G11).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snippet {
     /// 1-based line number of the first line of `text`.
     pub first_line: u32,
-    /// The whole lines the finding's range covers, nothing more, without the final newline.
+    /// The covered lines, cut to a window around the range, without the final newline.
     pub text: String,
     /// The highlighted range, relative to `text`.
     pub highlight: Range<usize>,
 }
 
+/// Bytes of the covered lines kept on each side of the highlighted range.
+const SNIPPET_CONTEXT: usize = 200;
+
+/// Most bytes of the highlighted range a snippet keeps; a longer range is cut short.
+const SNIPPET_MAX_HIGHLIGHT: usize = 1024;
+
 impl Snippet {
-    /// Captures the lines of `text` that `range` covers.
+    /// Captures the lines of `text` that `range` covers, cut to a window of [`SNIPPET_CONTEXT`]
+    /// bytes around a range of at most [`SNIPPET_MAX_HIGHLIGHT`] bytes.
     ///
     /// `None` if `range` is reversed, runs past the end of `text`, or doesn't fall on character
     /// boundaries.
@@ -249,17 +259,50 @@ impl Snippet {
     pub fn capture_indexed(text: &str, index: &LineIndex, range: Range<usize>) -> Option<Self> {
         // Rejects a reversed range, one past the end, or one splitting a character.
         let _covered: &str = text.get(range.clone())?;
-        let start = index.line_start(range.start);
+        let line_start = index.line_start(range.start);
         let after = text.get(range.end..)?;
-        let end = after
+        let line_end = after
             .find('\n')
             .map_or(text.len(), |newline| range.end + newline);
+        let highlight_end = floor_boundary(
+            text,
+            range
+                .end
+                .min(range.start.saturating_add(SNIPPET_MAX_HIGHLIGHT)),
+        )
+        .max(range.start);
+        let start = ceil_boundary(
+            text,
+            line_start.max(range.start.saturating_sub(SNIPPET_CONTEXT)),
+        );
+        let end = floor_boundary(
+            text,
+            line_end.min(highlight_end.saturating_add(SNIPPET_CONTEXT)),
+        );
         Some(Self {
             first_line: u32::try_from(index.line_of(range.start)).ok()?,
             text: text.get(start..end)?.to_owned(),
-            highlight: (range.start - start)..(range.end - start),
+            highlight: (range.start - start)..(highlight_end - start),
         })
     }
+}
+
+/// The largest char boundary of `text` at or before `offset`.
+fn floor_boundary(text: &str, mut offset: usize) -> usize {
+    offset = offset.min(text.len());
+    while !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
+/// The smallest char boundary of `text` at or after `offset`.
+fn ceil_boundary(text: &str, mut offset: usize) -> usize {
+    offset = offset.min(text.len());
+    while !text.is_char_boundary(offset) {
+        offset += 1;
+    }
+    offset
 }
 
 #[cfg(test)]
@@ -278,6 +321,72 @@ mod tests {
             .find(needle)
             .expect("the needle should be in the fixture");
         start..start + needle.len()
+    }
+
+    /// Asserts `range` of `text` captures a window of at most `bound` bytes holding the
+    /// highlight (cut to `highlight_len`), starting on line `first_line`.
+    fn assert_window(text: &str, range: Range<usize>, highlight_len: usize, first_line: u32) {
+        let bound = 2 * SNIPPET_CONTEXT + SNIPPET_MAX_HIGHLIGHT + 8;
+        let index = LineIndex::new(text);
+        let snippet = Snippet::capture_indexed(text, &index, range.clone())
+            .expect("the range should be capturable");
+
+        assert!(
+            snippet.text.len() <= bound,
+            "snippet is {} bytes",
+            snippet.text.len()
+        );
+        assert_eq!(snippet.first_line, first_line);
+        assert_eq!(
+            snippet.text.get(snippet.highlight.clone()).map(str::len),
+            Some(highlight_len),
+            "the highlight should be on character boundaries"
+        );
+        assert_eq!(
+            snippet.text.get(snippet.highlight.clone()),
+            text.get(range.start..range.start + highlight_len)
+        );
+    }
+
+    #[test]
+    fn snippet_of_a_long_line_is_a_window() {
+        let anchor = "[a](b.rs#c)";
+        // Three-byte characters: the context distance (200) and the highlight cap (1024) are not
+        // multiples of 3, so every window edge lands inside a character and must be moved to a
+        // boundary. An edge left where it fell makes the capture fail.
+        let filler = "€".repeat(500_000);
+        let text = format!("{filler}{anchor}{filler}\nnext");
+        assert_window(
+            &text,
+            filler.len()..filler.len() + anchor.len(),
+            anchor.len(),
+            1,
+        );
+
+        // A highlight over the cap is cut short, on a boundary.
+        let wide = "€".repeat(5_000);
+        let text = format!("{filler}{wide}{filler}");
+        assert_window(
+            &text,
+            filler.len()..filler.len() + wide.len(),
+            SNIPPET_MAX_HIGHLIGHT - SNIPPET_MAX_HIGHLIGHT % 3,
+            1,
+        );
+
+        // A link within the context of each edge of its line keeps the whole edge.
+        let near = format!("{}{anchor}{}\n", "a".repeat(100), "b".repeat(100));
+        let text = format!("first\n{near}last");
+        let start = "first\n".len() + 100;
+        let index = LineIndex::new(&text);
+        let snippet = Snippet::capture_indexed(&text, &index, start..start + anchor.len())
+            .expect("the range should be capturable");
+        assert_eq!(snippet.text, near.trim_end());
+        assert_eq!(snippet.first_line, 2);
+
+        // Many findings on one huge line each copy only a window.
+        for offset in (0..1000).map(|i| i * 999) {
+            assert_window(&filler, offset..offset + 3, 3, 1);
+        }
     }
 
     #[test]
@@ -365,6 +474,7 @@ mod tests {
             file: source("docs/guide.md"),
             range: range_of("sub"),
             replacement: "minus".to_owned(),
+            scanned: "sub".into(),
         };
         let snippet =
             Snippet::capture(GUIDE, range_of("add")).expect("the range should be capturable");
@@ -383,7 +493,7 @@ mod tests {
                 location: Some(location),
                 message: "no symbol `sub`".to_owned(),
                 help: Some("did you mean `minus`?".to_owned()),
-                fix: Some(fix),
+                fix: Some(Box::new(fix)),
                 snippet: Some(snippet),
             },
         );

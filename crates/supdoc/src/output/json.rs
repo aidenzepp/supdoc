@@ -88,7 +88,7 @@ impl From<&Finding> for FindingJson {
             message: finding.message.clone(),
             help: finding.help.clone(),
             location: finding.location.as_ref().map(LocationJson::from),
-            fix: finding.fix.as_ref().map(FixJson::from),
+            fix: finding.fix.as_deref().map(FixJson::from),
         }
     }
 }

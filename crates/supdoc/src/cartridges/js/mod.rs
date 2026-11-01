@@ -40,6 +40,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::cartridges::rust::region_texts;
     use crate::hash::HashSettings;
     use crate::link::SymbolPath;
     use crate::path::AbsolutePath;
@@ -284,14 +285,17 @@ function outer() {
     fn javascript_line_and_block_comments_are_link_regions() {
         let file = parse("// [a](a.md)\n/** [b](b.md) */\n/* [c](c.md) */\nfunction f() {}\n");
 
-        assert_eq!(file.language().markdown_regions(&file).len(), 3);
+        assert_eq!(
+            region_texts(&file),
+            [" [a](a.md)\n", "/** [b](b.md) */", "/* [c](c.md) */"]
+        );
     }
 
     #[test]
     fn javascript_string_literals_are_not_link_regions() {
         let file = parse("const s = \"[a](b.js#c)\";\nconst t = `[a](b.js#c)`;\n");
 
-        assert_eq!(file.language().markdown_regions(&file).len(), 0);
+        assert_eq!(region_texts(&file), Vec::<&str>::new());
     }
 
     #[test]
