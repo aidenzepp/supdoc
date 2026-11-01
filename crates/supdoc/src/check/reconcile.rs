@@ -31,18 +31,19 @@ pub enum Outcome {
 /// an edit of a locked one, so none of the source's entries are judged obsolete while it
 /// remains broken. Other sources are unaffected.
 ///
-/// A command in a finding's help names its file relative to the project root. Use
-/// [`reconcile_in`] when the finding is shown, so the command runs from where the user is.
-#[must_use]
-pub fn reconcile(scan: &Scan, lock: &Lockfile, scope: &Scope) -> Report {
-    reconcile_with(scan, lock, scope, &|source| source.as_str().to_owned())
-}
-
-/// [`reconcile`] with the commands in findings' help naming files as `paths` shows them:
-/// relative to the current directory, so a command copied from the help runs where `check` did.
+/// The commands in findings' help name files as `paths` shows them: relative to the current
+/// directory, so a command copied from the help runs where the user is.
 #[must_use]
 pub fn reconcile_in(scan: &Scan, lock: &Lockfile, scope: &Scope, paths: &PathStyle) -> Report {
     reconcile_with(scan, lock, scope, &|source| paths.text(source))
+}
+
+/// [`reconcile_in`] for a run at the project root, for tests that don't look at help paths.
+#[cfg(test)]
+pub(crate) fn reconcile_at_root(scan: &Scan, lock: &Lockfile, scope: &Scope) -> Report {
+    let root = crate::path::AbsolutePath::new(std::path::Path::new("/repo"))
+        .expect("the fixture root should be absolute");
+    reconcile_in(scan, lock, scope, &PathStyle::new(root.clone(), root, None))
 }
 
 /// Reconciles, writing each source file in a help command as `command_path` gives it.
@@ -396,7 +397,7 @@ mod tests {
         let add = key("docs/guide.md", Some("add"));
         let scan = scan_of(vec![(add.clone(), present(b"v1"))]);
 
-        let report = reconcile(&scan, &lock_of(&[(&add, b"v1")]), &Scope::All);
+        let report = reconcile_at_root(&scan, &lock_of(&[(&add, b"v1")]), &Scope::All);
 
         assert_eq!(state_of(&report, &add), Some(LinkState::Passed));
         assert_eq!(
@@ -410,7 +411,7 @@ mod tests {
         let add = key("docs/guide.md", Some("add"));
         let scan = scan_of(vec![(add.clone(), present(b"v2"))]);
 
-        let report = reconcile(&scan, &lock_of(&[(&add, b"v1")]), &Scope::All);
+        let report = reconcile_at_root(&scan, &lock_of(&[(&add, b"v1")]), &Scope::All);
 
         assert_eq!(state_of(&report, &add), Some(LinkState::Failed));
         let finding = report.links.first().and_then(|link| link.finding.as_ref());
@@ -426,7 +427,7 @@ mod tests {
             (failed.clone(), present(b"v2")),
         ]);
 
-        let report = reconcile(&scan, &lock_of(&[(&failed, b"v1")]), &Scope::All);
+        let report = reconcile_at_root(&scan, &lock_of(&[(&failed, b"v1")]), &Scope::All);
 
         for (link_key, code) in [(&new, "link-new"), (&failed, "link-failed")] {
             let finding = report
@@ -460,7 +461,7 @@ mod tests {
             verbosity: Verbosity::Normal,
         };
         let add = key("docs/guide.md", Some("add"));
-        let report = reconcile(
+        let report = reconcile_at_root(
             &scan_of(vec![(add, present(b"v1"))]),
             &Lockfile::default(),
             &Scope::All,
@@ -486,7 +487,7 @@ mod tests {
         let add = key("docs/guide.md", Some("add"));
         let scan = scan_of(vec![(add.clone(), broken())]);
 
-        let report = reconcile(&scan, &lock_of(&[(&add, b"v1")]), &Scope::All);
+        let report = reconcile_at_root(&scan, &lock_of(&[(&add, b"v1")]), &Scope::All);
 
         assert_eq!(state_of(&report, &add), Some(LinkState::Broken));
         let finding = report.links.first().and_then(|link| link.finding.as_ref());
@@ -502,7 +503,7 @@ mod tests {
         let add = key("docs/guide.md", Some("add"));
         let scan = scan_of(vec![(add.clone(), present(b"v1"))]);
 
-        let report = reconcile(&scan, &Lockfile::default(), &Scope::All);
+        let report = reconcile_at_root(&scan, &Lockfile::default(), &Scope::All);
 
         assert_eq!(state_of(&report, &add), Some(LinkState::New));
     }
@@ -511,7 +512,7 @@ mod tests {
     fn lock_entry_without_link_is_obsolete() {
         let gone = key("docs/old.md", Some("add"));
 
-        let report = reconcile(&Scan::default(), &lock_of(&[(&gone, b"v1")]), &Scope::All);
+        let report = reconcile_at_root(&Scan::default(), &lock_of(&[(&gone, b"v1")]), &Scope::All);
 
         assert_eq!(state_of(&report, &gone), Some(LinkState::Obsolete));
         assert!(
@@ -529,7 +530,7 @@ mod tests {
                 .expect("the fixture source should be valid"),
         ]);
 
-        let report = reconcile(&Scan::default(), &lock_of(&[(&other, b"v1")]), &scope);
+        let report = reconcile_at_root(&Scan::default(), &lock_of(&[(&other, b"v1")]), &scope);
 
         assert!(
             report.links.is_empty(),
@@ -544,7 +545,7 @@ mod tests {
         let mut scan = Scan::default();
         let _new = scan.unread_sources.insert(locked.source.clone());
 
-        let report = reconcile(&scan, &lock_of(&[(&locked, b"v1")]), &Scope::All);
+        let report = reconcile_at_root(&scan, &lock_of(&[(&locked, b"v1")]), &Scope::All);
 
         assert!(
             report.links.is_empty(),
@@ -565,7 +566,7 @@ mod tests {
                 .expect("the fixture directory should be valid"),
         );
 
-        let report = reconcile(
+        let report = reconcile_at_root(
             &scan,
             &lock_of(&[
                 (&beneath, b"v1"),
@@ -609,7 +610,7 @@ mod tests {
             );
             scan.findings.push(finding);
 
-            let report = reconcile(
+            let report = reconcile_at_root(
                 &scan,
                 &lock_of(&[(&edited, b"v1"), (&removed, b"v1")]),
                 &Scope::All,
@@ -639,7 +640,7 @@ mod tests {
         let mut scan = Scan::default();
         let _new = scan.keyless_error_sources.insert(edited.source.clone());
 
-        let report = reconcile(&scan, &lock_of(&[(&edited, b"v1")]), &Scope::All);
+        let report = reconcile_at_root(&scan, &lock_of(&[(&edited, b"v1")]), &Scope::All);
 
         assert_eq!(
             state_of(&report, &edited),
@@ -660,7 +661,7 @@ mod tests {
         let removed = key("docs/gone.md", Some("add"));
         let scan = scan_of(vec![(typo.clone(), broken())]);
 
-        let report = reconcile(
+        let report = reconcile_at_root(
             &scan,
             &lock_of(&[(&locked, b"v1"), (&removed, b"v1")]),
             &Scope::All,
@@ -691,7 +692,7 @@ mod tests {
         ]);
         let lock = lock_of(&[(&old, b"add v1"), (&old_sub, b"sub v1")]);
 
-        let report = reconcile(&scan, &lock, &Scope::All);
+        let report = reconcile_at_root(&scan, &lock, &Scope::All);
 
         assert_eq!(state_of(&report, &unchanged), Some(LinkState::Passed));
         assert_eq!(
@@ -730,7 +731,7 @@ mod tests {
         let scan = scan_of(vec![(fresh.clone(), present(b"v1"))]);
         let lock = lock_of(&[(&first, b"v1"), (&second, b"v1")]);
 
-        let report = reconcile(&scan, &lock, &Scope::All);
+        let report = reconcile_at_root(&scan, &lock, &Scope::All);
 
         assert_eq!(state_of(&report, &fresh), Some(LinkState::New));
         assert_eq!(state_of(&report, &first), Some(LinkState::Obsolete));
@@ -759,7 +760,7 @@ mod tests {
         };
         let scan = scan_of(vec![(add.clone(), flagged.clone()), (sub.clone(), flagged)]);
 
-        let report = reconcile(&scan, &Lockfile::default(), &Scope::All);
+        let report = reconcile_at_root(&scan, &Lockfile::default(), &Scope::All);
 
         assert_eq!(
             report.findings.iter().map(|f| f.code).collect::<Vec<_>>(),
@@ -773,7 +774,7 @@ mod tests {
         let early = key("docs/a.md", Some("sub"));
         let scan = scan_of(vec![(late.clone(), present(b"v1"))]);
 
-        let report = reconcile(&scan, &lock_of(&[(&early, b"v1")]), &Scope::All);
+        let report = reconcile_at_root(&scan, &lock_of(&[(&early, b"v1")]), &Scope::All);
 
         assert_eq!(
             report

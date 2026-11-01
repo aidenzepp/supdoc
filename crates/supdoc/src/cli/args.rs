@@ -3,6 +3,7 @@
 //! Every flag has a `SUPDOC_*` environment variable (06 X6). Definition only: running a command
 //! lives in the sibling modules.
 
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use clap::builder::FalseyValueParser;
@@ -252,11 +253,59 @@ pub struct ListArgs {
     pub state: Vec<LinkState>,
     /// Show at most this many links; 0 means no limit
     #[arg(long, env = "SUPDOC_LIMIT", default_value_t = DEFAULT_LIMIT, value_name = "N")]
-    pub limit: usize,
+    pub limit: Limit,
 }
 
-/// How many results `list` and `resolve` show unless told otherwise (06 X11).
-pub const DEFAULT_LIMIT: usize = 100;
+/// How many results `list`, `resolve` and `namespace list` show unless told otherwise (06 X11).
+pub const DEFAULT_LIMIT: Limit = Limit::at_most(100);
+
+/// How many results a list-style command shows: a count, or everything (`--limit 0`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limit(Option<NonZeroUsize>);
+
+impl Limit {
+    /// A limit of `count` results; `0` shows everything.
+    #[must_use]
+    pub const fn at_most(count: usize) -> Self {
+        Self(NonZeroUsize::new(count))
+    }
+
+    /// No limit: every result is shown.
+    pub const UNLIMITED: Self = Self(None);
+
+    /// The first results of `items`, at most this many.
+    pub fn take<I: IntoIterator>(self, items: I) -> impl Iterator<Item = I::Item> {
+        items
+            .into_iter()
+            .take(self.0.map_or(usize::MAX, NonZeroUsize::get))
+    }
+
+    /// Whether `total` results do not all fit under this limit.
+    #[must_use]
+    pub fn truncated(self, total: usize) -> bool {
+        self.0.is_some_and(|limit| total > limit.get())
+    }
+
+    /// The note for a list that showed `shown` of `total` `noun`s, naming how to see them all.
+    #[must_use]
+    pub fn truncation_note(self, shown: usize, total: usize, noun: &str) -> String {
+        format!("Showing {shown} of {total} {noun}. Use --limit 0 to show all.")
+    }
+}
+
+impl std::str::FromStr for Limit {
+    type Err = std::num::ParseIntError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        text.parse().map(Self::at_most)
+    }
+}
+
+impl std::fmt::Display for Limit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.map_or(0, NonZeroUsize::get))
+    }
+}
 
 /// Arguments of `supdoc resolve`.
 #[derive(Debug, Args)]
@@ -269,7 +318,7 @@ pub struct ResolveArgs {
     pub symbol: Option<SymbolPath>,
     /// Show at most this many symbols; 0 means no limit
     #[arg(long, env = "SUPDOC_LIMIT", default_value_t = DEFAULT_LIMIT, value_name = "N")]
-    pub limit: usize,
+    pub limit: Limit,
 }
 
 /// Arguments of `supdoc init`.
@@ -307,7 +356,7 @@ pub enum NamespaceCommand {
 pub struct NamespaceListArgs {
     /// Show at most this many namespaces; 0 means no limit
     #[arg(long, env = "SUPDOC_LIMIT", default_value_t = DEFAULT_LIMIT, value_name = "N")]
-    pub limit: usize,
+    pub limit: Limit,
 }
 
 /// Arguments of `supdoc namespace rename`.

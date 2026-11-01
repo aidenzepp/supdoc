@@ -295,7 +295,7 @@ mod tests {
     use clap::{ColorChoice, CommandFactory};
 
     use super::*;
-    use crate::cli::args::{Command, ListArgs, SkillCommand};
+    use crate::cli::args::{Command, Limit, ListArgs, SkillCommand};
     use crate::state::LinkState;
 
     /// Parses `args` (without the program name) with an empty environment.
@@ -457,8 +457,11 @@ mod tests {
             panic!("expected list");
         };
 
-        assert_eq!((defaults.limit, defaults.target.is_none()), (100, true));
-        assert_eq!(given.limit, 0);
+        assert_eq!(
+            (defaults.limit, defaults.target.is_none()),
+            (Limit::at_most(100), true)
+        );
+        assert_eq!(given.limit, Limit::UNLIMITED);
         assert_eq!(given.target.as_deref(), Some("auth:src/session.rs#login"));
         assert_eq!(given.state.len(), 2);
     }
@@ -896,7 +899,7 @@ mod tests {
         yes: Option<bool>,
         dry_run: Option<bool>,
         global: Option<bool>,
-        limit: Option<usize>,
+        limit: Option<String>,
         states: Option<Vec<String>>,
     }
 
@@ -929,7 +932,7 @@ mod tests {
                     probe.states = Some(states(&args.state));
                 }
                 Command::List(args) => {
-                    probe.limit = Some(args.limit);
+                    probe.limit = Some(args.limit.to_string());
                     probe.states = Some(states(&args.state));
                 }
                 Command::Skill(SkillCommand::Install(args)) => probe.global = Some(args.global),
@@ -1083,7 +1086,7 @@ mod tests {
             &[("SUPDOC_LIMIT", "7"), ("SUPDOC_OUTPUT", "github")],
         );
 
-        assert_eq!(from_env.limit, Some(7), "{from_env:?}");
+        assert_eq!(from_env.limit.as_deref(), Some("7"), "{from_env:?}");
         assert_eq!(
             from_env.states,
             Some(vec!["Failed".to_owned(), "New".to_owned()]),
@@ -1097,7 +1100,7 @@ mod tests {
             "{from_env:?}"
         );
         assert_eq!(from_env.verbose, 2, "{from_env:?}");
-        assert_eq!(overridden.limit, Some(9), "{overridden:?}");
+        assert_eq!(overridden.limit.as_deref(), Some("9"), "{overridden:?}");
         assert_eq!(overridden.output, "Jsonl", "{overridden:?}");
     }
 
@@ -1133,7 +1136,7 @@ mod tests {
         assert!(!cli.global.quiet && cli.global.verbose == 0 && cli.global.config.is_none());
         assert!(matches!(
             cli.command,
-            Command::List(ListArgs { limit: 100, .. })
+            Command::List(ListArgs { limit, .. }) if limit == Limit::at_most(100)
         ));
     }
 

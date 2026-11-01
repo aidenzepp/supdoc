@@ -72,7 +72,9 @@ fn list_target_symbol_never_reads_outside_the_root_or_blocks_on_a_fifo() {
     assert_eq!(climbing.code, Some(2), "{}", climbing.stderr);
     assert!(
         climbing.stderr.contains("cli-target-invalid")
-            && climbing.stderr.contains("climbs out of the project root"),
+            && climbing
+                .stderr
+                .contains("only inside the `docs` namespace's directory"),
         "{}",
         climbing.stderr
     );

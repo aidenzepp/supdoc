@@ -256,10 +256,10 @@ fn unknown_namespace_key(
         return None;
     };
     let namespace: NamespaceName = prefix.parse().ok()?;
-    let mut namespaces = config.namespaces().clone();
-    // Parsing never reads a namespace's directory, so the root stands in for the missing one.
-    let _absent = namespaces.insert(namespace, config.root().clone());
-    let link = parse_destination(raw, source, &namespaces, languages)?.ok()?;
+    // Parsing reads only namespace names, so adding the missing name is all it takes.
+    let mut names: BTreeSet<NamespaceName> = config.namespaces().keys().cloned().collect();
+    let _absent = names.insert(namespace);
+    let link = parse_destination(raw, source, &names, languages)?.ok()?;
     Some(LinkKey {
         source: source.clone(),
         target: link.target,
@@ -414,7 +414,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::check::reconcile::{Outcome, check_outcome, reconcile};
+    use crate::check::reconcile::{Outcome, check_outcome, reconcile_at_root};
     use crate::hash::Hash;
     use crate::link::Target;
     use crate::lock::model::Lockfile;
@@ -750,7 +750,7 @@ mod tests {
 
     /// Whether `check` passes on `project`, given `lock`, without and with `--deny-warnings`.
     fn outcomes(project: &Project, lock: &Lockfile) -> [Outcome; 2] {
-        let report = reconcile(&project.scan(), lock, &Scope::All);
+        let report = reconcile_at_root(&project.scan(), lock, &Scope::All);
         [check_outcome(&report, false), check_outcome(&report, true)]
     }
 
@@ -799,7 +799,7 @@ mod tests {
             .into_iter()
             .collect();
 
-        let report = reconcile(&project.scan(), &lock, &Scope::All);
+        let report = reconcile_at_root(&project.scan(), &lock, &Scope::All);
 
         let states: Vec<(LinkKey, LinkState)> = report
             .links

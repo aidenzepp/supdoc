@@ -28,7 +28,7 @@ use crate::read::cartridge::{Languages, SourceFile, SymbolTable};
 use crate::read::error::ResolveError;
 use crate::scan::model::Scope;
 
-use super::args::ListArgs;
+use super::args::{Limit, ListArgs};
 use super::check::LinkJson;
 use super::project::{absolute, ensure_exists, load_config, path_outside, read_lock};
 use super::{CliError, Context, Outcome};
@@ -94,17 +94,17 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
         .collect();
 
     let total = matched.len();
-    let shown = if args.limit == 0 { total } else { args.limit };
-    let report = ListReport::new(&matched, shown, model.findings);
+    let report = ListReport::new(&matched, args.limit, model.findings);
     output
         .report(&report, true)
         .map_err(|error| output_failed(&error))?;
     if report.truncated {
         output
-            .note(&format!(
-                "Showing {} of {total} links. Use --limit 0 to show all.",
-                report.links.len()
-            ))
+            .note(
+                &args
+                    .limit
+                    .truncation_note(report.links.len(), total, "links"),
+            )
             .map_err(|error| output_failed(&error))?;
     } else if total == 0 {
         let note = match &target {
@@ -206,11 +206,11 @@ pub(crate) struct ListReport {
 }
 
 impl ListReport {
-    /// The report for `matched`, showing the first `shown` links.
-    fn new(matched: &[LinkReport], shown: usize, loose: Vec<Finding>) -> Self {
+    /// The report for `matched`, showing at most `limit` links.
+    fn new(matched: &[LinkReport], limit: Limit, loose: Vec<Finding>) -> Self {
         let summary = Summary::tally(matched.iter().map(|link| link.state));
-        let truncated = matched.len() > shown;
-        let listed: Vec<&LinkReport> = matched.iter().take(shown).collect();
+        let truncated = limit.truncated(matched.len());
+        let listed: Vec<&LinkReport> = limit.take(matched).collect();
         Self {
             summary,
             links: listed.iter().map(|link| LinkJson::from(*link)).collect(),
@@ -833,6 +833,28 @@ mod tests {
                 .starts_with("new       a.md:1  ->  src/lib.rs#add\n"),
             "text paths are relative to the current directory: {}",
             text.stdout
+        );
+    }
+
+    #[test]
+    fn list_link_failed_help_names_the_source_from_the_current_directory() {
+        let project = Project::new();
+        project.write("supdoc.config.toml", "");
+        project.write("docs/a.md", "See [add](../src/lib.rs#add).\n");
+        project.record_all();
+        project.write("src/lib.rs", &LIB.replace("a + b", "b + a"));
+
+        let run = project.list_from("docs", &["--json", "list"]);
+
+        let json = run.json();
+        let help = json
+            .pointer("/data/links/0/finding/help")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("the changed link should carry help: {json}"));
+        assert!(
+            help.contains("supdoc update a.md --yes")
+                && project.root().as_path().join("docs/a.md").exists(),
+            "from docs/ the help should name `a.md`, which exists there: {help}"
         );
     }
 
