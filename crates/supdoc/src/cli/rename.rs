@@ -30,7 +30,7 @@ use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
 use crate::namespace::NamespaceName;
 use crate::output::json::{Envelope, LocationJson};
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, OutputError, Report, TextContext};
+use crate::output::{Output, OutputError, Report, TextContext, preview_note};
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile};
 use crate::read::error::ReadError;
@@ -40,14 +40,11 @@ use crate::scan::walk::{UnreadCause, UnreadDir, walk};
 use crate::suggest::close_match;
 
 use super::args::{RenameArgs, WriteMode};
-use super::project::{load_config, lock_path, read_lock};
+use super::project::{command_line, load_config, lock_path, read_lock};
 use super::{CliError, Context, Outcome};
 
 /// The command as users type it, for help text and the JSON `command`.
 const COMMAND: &str = "namespace rename";
-
-/// The note that closes a preview, after the counts.
-const PREVIEW_NOTE: &str = "Nothing written. Run the same command with --yes to apply.";
 
 /// Runs `supdoc namespace rename OLD NEW`: previews every edit, or with `--yes` makes them.
 ///
@@ -73,7 +70,16 @@ pub fn run(args: &RenameArgs, context: &Context, output: &mut Output) -> Result<
     output
         .report(&plan.report(applied), true)
         .map_err(|error| output_failed(&error))?;
-    for note in plan.notes(applied) {
+    let apply_note = preview_note(
+        args.confirm.dry_run,
+        &command_line(
+            context,
+            "namespace rename",
+            &[args.old.to_string(), args.new.to_string()],
+            &["--yes"],
+        ),
+    );
+    for note in plan.notes(applied, &apply_note) {
         output.note(&note).map_err(|error| output_failed(&error))?;
     }
     Ok(Outcome::Clean)
@@ -285,7 +291,7 @@ impl Plan {
 
     /// The notes that close the run: the parent config left as it is, then the counts and what
     /// to do next, or that the rename is done.
-    fn notes(&self, applied: bool) -> Vec<String> {
+    fn notes(&self, applied: bool, apply_note: &str) -> Vec<String> {
         let mut notes = Vec::new();
         if let Some(parent) = &self.parent {
             notes.push(format!(
@@ -301,7 +307,7 @@ impl Plan {
         } else {
             let links: usize = self.sources.iter().map(|source| source.links.len()).sum();
             notes.push(format!(
-                "1 config entry, {} in {}, {}. {PREVIEW_NOTE}",
+                "1 config entry, {} in {}, {}. {apply_note}",
                 count(links, "link", "links"),
                 count(self.sources.len(), "file", "files"),
                 count(self.lock.moved.len(), "lock entry", "lock entries"),
@@ -1407,8 +1413,8 @@ web = \"services/web\"
         );
         assert_eq!(
             text.stderr,
-            "1 config entry, 1 link in 1 file, 1 lock entry. Nothing written. Run the same \
-             command with --yes to apply.\n"
+            "1 config entry, 1 link in 1 file, 1 lock entry. Nothing written. Run \
+             `supdoc namespace rename auth identity --yes` to apply.\n"
         );
     }
 

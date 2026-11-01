@@ -128,6 +128,13 @@ impl Written {
         })
     }
 
+    /// The source bytes at `range`, a part of this destination, as scanned.
+    pub(crate) fn text_at(&self, range: &Range<usize>) -> Option<Box<str>> {
+        let from = range.start.checked_sub(self.range.start)?;
+        let to = range.end.checked_sub(self.range.start)?;
+        self.text.get(from..to).map(Box::from)
+    }
+
     /// The range of `prefix` when the destination starts with `prefix:`.
     pub(crate) fn prefix_range(&self, prefix: &str) -> Option<Range<usize>> {
         self.text
@@ -380,13 +387,17 @@ fn broken(code: &'static str, message: String, help: String, first: &Occurrence)
     }
 }
 
-/// The edit replacing `range` in the occurrence's source with `replacement`.
-fn fix_at(first: &Occurrence, range: Range<usize>, replacement: impl Into<String>) -> Fix {
-    Fix {
+/// The edit replacing `range` in the occurrence's source with `replacement`, remembering the
+/// bytes `range` held in the scanned text. `None` when `range` is not inside the written
+/// destination.
+fn fix_at(first: &Occurrence, range: Range<usize>, replacement: impl Into<String>) -> Option<Fix> {
+    let scanned = first.written.as_ref()?.text_at(&range)?;
+    Some(Fix {
         file: first.location.file.clone(),
         range,
         replacement: replacement.into(),
-    }
+        scanned,
+    })
 }
 
 /// `scan-case-mismatch`: the path names a real file with different case, fixed by writing the
@@ -402,13 +413,16 @@ fn case_mismatch(target: &Target, real: &str, first: &Occurrence) -> Finding {
         Some((*path, range.clone(), replacement))
     });
     if let Some((path, range, replacement)) = rewrite {
-        return broken(
+        let finding = broken(
             CODE_CASE_MISMATCH,
             format!("{path} doesn't match the real path {replacement} (case differs)"),
             format!("Change the link to `{replacement}`. `supdoc fix` can do it"),
             first,
-        )
-        .with_fix(fix_at(first, range, replacement));
+        );
+        return match fix_at(first, range, replacement) {
+            Some(fix) => finding.with_fix(fix),
+            None => finding,
+        };
     }
     let real = match target.namespace() {
         Some(namespace) => format!("{namespace}:{real}"),
@@ -522,8 +536,11 @@ fn resolve_failed(
         .collect();
     let close = close_match(&query.to_string(), names.iter().map(String::as_str));
     let range = first.written.as_ref().and_then(Written::fragment_range);
-    match close.zip(range) {
-        Some((close, range)) => finding.with_fix(fix_at(first, range, close)),
+    match close
+        .zip(range)
+        .and_then(|(close, range)| fix_at(first, range, close))
+    {
+        Some(fix) => finding.with_fix(fix),
         None => finding,
     }
 }

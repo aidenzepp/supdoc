@@ -24,7 +24,7 @@ use crate::link::LinkKey;
 use crate::lock::error::shell_quote;
 use crate::output::json::Envelope;
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, OutputError, PathStyle, Report, Summary, TextContext};
+use crate::output::{Output, OutputError, PathStyle, Report, Summary, TextContext, preview_note};
 use crate::read::cartridge::Languages;
 use crate::scan::model::Scope;
 use crate::state::LinkState;
@@ -32,13 +32,10 @@ use crate::state::LinkState;
 use super::args::{UpdateArgs, WriteMode};
 use super::check::LinkLocationJson;
 use super::project::{
-    LockForUpdate, load_config, lock_failure, lock_path, read_lock_for_update, scope,
+    LockForUpdate, command_line, load_config, lock_failure, lock_path, read_lock_for_update, scope,
     settings_mismatch,
 };
 use super::{CliError, Context, Outcome};
-
-/// The closing note of a preview that has changes (06a K7).
-const PREVIEW_NOTE: &str = "Nothing written. Run the same command with --yes to apply.";
 
 /// The closing note when the plan is empty (06a Q6).
 const NOTHING_NOTE: &str = "Nothing to update.";
@@ -96,12 +93,25 @@ pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<
             .map_err(|error| lock_failure(&error, config.root(), &context.cwd))?;
     }
 
+    let apply_note = preview_note(
+        args.confirm.dry_run,
+        &command_line(
+            context,
+            "update",
+            &args
+                .paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>(),
+            &["--yes"],
+        ),
+    );
     let report = UpdateReport::new(&model, &plan, &args.state, applied, &paths);
     output
         .report(&report, true)
         .map_err(|error| output_failed(&error))?;
     output
-        .note(&report.closing_note(output.unicode()))
+        .note(&report.closing_note(output.unicode(), &apply_note))
         .map_err(|error| output_failed(&error))?;
     Ok(Outcome::Clean)
 }
@@ -194,13 +204,13 @@ impl UpdateReport {
     /// What the run says on stderr when it is done (06a K7, Q6). A settings change alone is a
     /// change (B.5). The note follows the plan, not the findings: broken links are printed above
     /// it but leave the plan empty.
-    fn closing_note(&self, unicode: bool) -> String {
+    fn closing_note(&self, unicode: bool, apply_note: &str) -> String {
         if self.rows.is_empty() && self.settings_change.is_none() {
             NOTHING_NOTE.to_owned()
         } else if self.applied {
             self.applied_note(unicode)
         } else {
-            PREVIEW_NOTE.to_owned()
+            apply_note.to_owned()
         }
     }
 
@@ -826,7 +836,10 @@ mod tests {
              record  docs/new.md:1    ->  src/lib.rs      new\n\
              remove  docs/old.md      ->  src/lib.rs#add  obsolete\n",
         );
-        assert_eq!(run.stderr, format!("{PREVIEW_NOTE}\n"));
+        assert_eq!(
+            run.stderr,
+            "Nothing written. Run `supdoc update --yes` to apply.\n"
+        );
     }
 
     #[test]
@@ -1228,7 +1241,10 @@ mod tests {
              accept  docs/guide.md:3  ->  src/lib.rs#add  failed -> passed\n",
             "the settings row leads; the LF link still passes and has no row"
         );
-        assert_eq!(text.stderr, format!("{PREVIEW_NOTE}\n"));
+        assert_eq!(
+            text.stderr,
+            "Nothing written. Run `supdoc update --yes` to apply.\n"
+        );
         let json = json.json();
         assert_eq!(
             at(&json, "/data/settings_change"),
@@ -1336,7 +1352,10 @@ mod tests {
             preview.stdout,
             "settings  line-endings  exact -> normalize\n"
         );
-        assert_eq!(preview.stderr, format!("{PREVIEW_NOTE}\n"));
+        assert_eq!(
+            preview.stderr,
+            "Nothing written. Run `supdoc update --yes` to apply.\n"
+        );
         assert_eq!(applied.exit_code(), 0, "stderr: {}", applied.stderr);
         assert_eq!(
             applied.stderr,
