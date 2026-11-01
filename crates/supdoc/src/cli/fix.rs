@@ -65,12 +65,9 @@ pub fn run(args: &FixArgs, context: &Context, output: &mut Output) -> Result<Out
 
 /// The JSON Schema of `supdoc fix`'s `--json` output: the whole envelope, with `data` typed as
 /// [`FixReport`].
-///
-/// # Errors
-///
-/// Never fails; the `Result` matches the commands that are not built yet.
-pub fn schema() -> Result<schemars::Schema, CliError> {
-    Ok(schemars::schema_for!(Envelope<'static, FixReport>))
+#[must_use]
+pub fn schema() -> schemars::Schema {
+    schemars::schema_for!(Envelope<'static, FixReport>)
 }
 
 /// A scanned project and the fixes it offers: everything a run does before its first write.
@@ -1244,7 +1241,7 @@ mod tests {
 
     /// Every way `json` breaks the schema `schema()` publishes for `supdoc fix`.
     fn schema_violations(json: &serde_json::Value) -> Vec<String> {
-        let schema = schema().expect("fix is built, so it has a schema");
+        let schema = schema();
         let schema = serde_json::to_value(schema).expect("the fix schema should serialize");
         let validator = jsonschema::validator_for(&schema)
             .expect("the generated schema should be a valid JSON Schema");

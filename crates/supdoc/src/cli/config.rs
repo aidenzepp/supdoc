@@ -58,15 +58,12 @@ pub fn run(inspect: Inspect, context: &Context, output: &mut Output) -> Result<O
 
 /// The JSON Schema of the `--json` output of `supdoc config show` or `supdoc namespace list`, as
 /// `inspect` says: the whole envelope, with `data` typed as the command's report.
-///
-/// # Errors
-///
-/// Never fails; the `Result` matches the commands that are not built yet.
-pub fn schema(inspect: Inspect) -> Result<schemars::Schema, CliError> {
-    Ok(match inspect {
+#[must_use]
+pub fn schema(inspect: Inspect) -> schemars::Schema {
+    match inspect {
         Inspect::ConfigShow => schemars::schema_for!(Envelope<'static, ConfigShowReport>),
         Inspect::NamespaceList => schemars::schema_for!(Envelope<'static, NamespaceListReport>),
-    })
+    }
 }
 
 /// The command `inspect` names, as a user types it after `supdoc`.
@@ -669,7 +666,7 @@ mod tests {
 
     /// Every way `json` breaks the schema `schema(inspect)` publishes.
     fn schema_violations(inspect: Inspect, json: &serde_json::Value) -> Vec<String> {
-        let schema = schema(inspect).expect("the inspect commands are built, so they have schemas");
+        let schema = schema(inspect);
         let schema = serde_json::to_value(schema).expect("the schema should serialize");
         let validator = jsonschema::validator_for(&schema)
             .expect("the generated schema should be a valid JSON Schema");

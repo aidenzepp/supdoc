@@ -1,5 +1,6 @@
-//! Every command this build defines is built: none answers with `cli-not-built` (operator ruling on
-//! H1). The commands and schema names come from the clap definition, so a new one is covered too.
+//! Every command this build defines runs: none answers with a usage error when given its required
+//! arguments. The commands and schema names come from the clap definition, so a new one is covered
+//! too.
 
 use clap::CommandFactory;
 use supdoc::cli::CliError;
@@ -32,30 +33,28 @@ fn leaf_commands(command: &clap::Command, prefix: &str, found: &mut Vec<String>)
     }
 }
 
-/// Fails listing every run that was a usage error or answered `cli-not-built`.
-fn assert_all_built(project: &Project, invocations: &[Vec<&str>]) {
-    let mut unbuilt = Vec::new();
+/// Fails listing every run that was a usage error.
+fn assert_none_is_a_usage_error(project: &Project, invocations: &[Vec<&str>]) {
+    let mut failures = Vec::new();
     for argv in invocations {
         let run = project.supdoc(argv);
         if run.code == Some(i32::from(CliError::USAGE_EXIT_CODE)) {
-            unbuilt.push(format!(
+            failures.push(format!(
                 "`supdoc {}` was a usage error, so this test can't tell whether it is built; add \
                  its required arguments to `required_arguments`: {}",
                 run.args, run.stderr
             ));
-        } else if run.stderr.contains(CliError::NOT_BUILT) {
-            unbuilt.push(format!("`supdoc {}`: {}", run.args, run.stderr.trim_end()));
         }
     }
     assert!(
-        unbuilt.is_empty(),
-        "every command should be built:\n{}",
-        unbuilt.join("\n")
+        failures.is_empty(),
+        "every command should run:\n{}",
+        failures.join("\n")
     );
 }
 
 #[test]
-fn no_command_answers_with_the_not_built_error() {
+fn no_command_is_a_usage_error() {
     let project = Project::fixture("namespaced");
     let mut commands = Vec::new();
     leaf_commands(&Cli::command(), "", &mut commands);
@@ -74,11 +73,11 @@ fn no_command_answers_with_the_not_built_error() {
         invocations.len() >= 12,
         "the clap definition should yield every command: {commands:?}"
     );
-    assert_all_built(&project, &invocations);
+    assert_none_is_a_usage_error(&project, &invocations);
 }
 
 #[test]
-fn no_command_schema_answers_with_the_not_built_error() {
+fn no_command_schema_is_a_usage_error() {
     let project = Project::fixture("namespaced");
     let cli = Cli::command();
     let names: Vec<String> = cli
@@ -103,5 +102,5 @@ fn no_command_schema_answers_with_the_not_built_error() {
         !invocations.is_empty(),
         "`supdoc schema` should name the commands it describes"
     );
-    assert_all_built(&project, &invocations);
+    assert_none_is_a_usage_error(&project, &invocations);
 }

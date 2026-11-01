@@ -117,12 +117,9 @@ pub fn run(
 
 /// The JSON Schema of `supdoc skill install`'s `--json` output: the whole envelope, with `data`
 /// typed as [`SkillInstallReport`].
-///
-/// # Errors
-///
-/// Never fails; the `Result` matches the commands that are not built yet.
-pub fn schema() -> Result<schemars::Schema, CliError> {
-    Ok(schemars::schema_for!(Envelope<'static, SkillInstallReport>))
+#[must_use]
+pub fn schema() -> schemars::Schema {
+    schemars::schema_for!(Envelope<'static, SkillInstallReport>)
 }
 
 /// The two files the skill goes to: the shared agents copy, then Claude Code's.
@@ -1272,8 +1269,7 @@ mod tests {
         let world = World::new();
         plant(&world.project_file(AGENTS_SKILL), "different\n");
         let json = world.install(&["--json"]).json();
-        let schema = serde_json::to_value(schema().expect("skill install is built"))
-            .expect("the schema should serialize");
+        let schema = serde_json::to_value(schema()).expect("the schema should serialize");
         let validator = jsonschema::validator_for(&schema)
             .expect("the generated schema should be a valid JSON Schema");
 

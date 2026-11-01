@@ -90,12 +90,9 @@ pub fn run(args: &RenameArgs, context: &Context, output: &mut Output) -> Result<
 
 /// The JSON Schema of `supdoc namespace rename`'s `--json` output: the whole envelope, with `data`
 /// typed as [`RenameReport`].
-///
-/// # Errors
-///
-/// Never fails; the `Result` matches the commands that are not built yet.
-pub fn schema() -> Result<schemars::Schema, CliError> {
-    Ok(schemars::schema_for!(Envelope<'static, RenameReport>))
+#[must_use]
+pub fn schema() -> schemars::Schema {
+    schemars::schema_for!(Envelope<'static, RenameReport>)
 }
 
 /// Every edit a rename makes, decided from the files as they were read.
@@ -1843,8 +1840,7 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
         let json = project
             .rename(&["--json", "namespace", "rename", "auth", "identity"])
             .json();
-        let schema = serde_json::to_value(schema().expect("namespace rename is built"))
-            .expect("the schema should serialize");
+        let schema = serde_json::to_value(schema()).expect("the schema should serialize");
         let validator = jsonschema::validator_for(&schema)
             .expect("the generated schema should be a valid JSON Schema");
 

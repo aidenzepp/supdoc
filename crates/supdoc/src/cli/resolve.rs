@@ -108,12 +108,9 @@ pub fn run(
 
 /// The JSON Schema of `supdoc resolve`'s `--json` output: the whole envelope, with `data` typed as
 /// [`ResolveReport`].
-///
-/// # Errors
-///
-/// Never fails; the `Result` matches the commands that are not built yet.
-pub fn schema() -> Result<schemars::Schema, CliError> {
-    Ok(schemars::schema_for!(Envelope<'static, ResolveReport>))
+#[must_use]
+pub fn schema() -> schemars::Schema {
+    schemars::schema_for!(Envelope<'static, ResolveReport>)
 }
 
 /// The file `typed` names: relative to the current directory, or, when written `namespace:path`,
@@ -757,8 +754,7 @@ mod tests {
         let project = Project::new();
         let json = project.resolve(&["--json", "resolve", "src/lib.rs"]).json();
 
-        let schema = serde_json::to_value(schema().expect("resolve is built, so it has a schema"))
-            .expect("the resolve schema should serialize");
+        let schema = serde_json::to_value(schema()).expect("the resolve schema should serialize");
         let validator = jsonschema::validator_for(&schema)
             .expect("the generated schema should be a valid JSON Schema");
         let errors: Vec<String> = validator

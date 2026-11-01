@@ -108,12 +108,9 @@ fn migrates_every_entry(scope: &Scope, states: &[LinkState]) -> bool {
 
 /// The JSON Schema of `supdoc update`'s `--json` output: the whole envelope, with `data` typed as
 /// [`UpdateReport`].
-///
-/// # Errors
-///
-/// Never fails; the `Result` matches the commands that are not built yet.
-pub fn schema() -> Result<schemars::Schema, CliError> {
-    Ok(schemars::schema_for!(Envelope<'static, UpdateReport>))
+#[must_use]
+pub fn schema() -> schemars::Schema {
+    schemars::schema_for!(Envelope<'static, UpdateReport>)
 }
 
 /// The error for a report that could not be written.
@@ -1369,7 +1366,7 @@ mod tests {
 
     /// Every way `json` breaks the schema `schema()` publishes for `supdoc update`.
     fn schema_violations(json: &serde_json::Value) -> Vec<String> {
-        let schema = schema().expect("update is built, so it has a schema");
+        let schema = schema();
         let schema = serde_json::to_value(schema).expect("the update schema should serialize");
         let validator = jsonschema::validator_for(&schema)
             .expect("the generated schema should be a valid JSON Schema");
