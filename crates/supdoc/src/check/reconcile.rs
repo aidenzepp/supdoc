@@ -7,7 +7,9 @@ use super::moves::{Moves, detect_moves};
 use crate::finding::{Finding, Severity};
 use crate::hash::Hash;
 use crate::link::{LinkKey, LinkRef, SourcePath, Target};
+use crate::lock::error::shell_quote;
 use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
+use crate::output::PathStyle;
 use crate::scan::model::{Scan, ScannedLink, Scope, TargetState};
 use crate::state::LinkState;
 
@@ -28,8 +30,28 @@ pub enum Outcome {
 /// or has a key whose target can't be resolved (such as an unknown namespace): that link may be
 /// an edit of a locked one, so none of the source's entries are judged obsolete while it
 /// remains broken. Other sources are unaffected.
+///
+/// A command in a finding's help names its file relative to the project root. Use
+/// [`reconcile_in`] when the finding is shown, so the command runs from where the user is.
 #[must_use]
 pub fn reconcile(scan: &Scan, lock: &Lockfile, scope: &Scope) -> Report {
+    reconcile_with(scan, lock, scope, &|source| source.as_str().to_owned())
+}
+
+/// [`reconcile`] with the commands in findings' help naming files as `paths` shows them:
+/// relative to the current directory, so a command copied from the help runs where `check` did.
+#[must_use]
+pub fn reconcile_in(scan: &Scan, lock: &Lockfile, scope: &Scope, paths: &PathStyle) -> Report {
+    reconcile_with(scan, lock, scope, &|source| paths.text(source))
+}
+
+/// Reconciles, writing each source file in a help command as `command_path` gives it.
+fn reconcile_with(
+    scan: &Scan,
+    lock: &Lockfile,
+    scope: &Scope,
+    command_path: &dyn Fn(&SourcePath) -> String,
+) -> Report {
     let scanned: Vec<(&LinkKey, &ScannedLink)> = scan
         .links
         .iter()
@@ -78,7 +100,14 @@ pub fn reconcile(scan: &Scan, lock: &Lockfile, scope: &Scope) -> Report {
                 if *syntax_errors {
                     let _new = syntax_error_targets.insert(&key.target);
                 }
-                present_state(key, link, *hash, lock, &moves, &mut report.findings)
+                present_state(
+                    key,
+                    link,
+                    *hash,
+                    (lock, &moves),
+                    command_path,
+                    &mut report.findings,
+                )
             }
         };
         report.links.push(LinkReport {
@@ -140,8 +169,8 @@ fn present_state(
     key: &LinkKey,
     link: &ScannedLink,
     hash: Hash,
-    lock: &Lockfile,
-    moves: &Moves,
+    (lock, moves): (&Lockfile, &Moves),
+    command_path: &dyn Fn(&SourcePath) -> String,
     notes: &mut Vec<Finding>,
 ) -> (LinkState, Option<Finding>) {
     let carried_from = moves.carried.get(key);
@@ -154,7 +183,10 @@ fn present_state(
     }
     match recorded {
         Some(recorded) if recorded == hash => (LinkState::Passed, None),
-        Some(_) => (LinkState::Failed, Some(failed_finding(key, link))),
+        Some(_) => (
+            LinkState::Failed,
+            Some(failed_finding(key, link, command_path)),
+        ),
         None => {
             if let Some(candidates) = moves.ambiguous.get(key) {
                 notes.push(move_ambiguous_note(key, link, candidates));
@@ -200,7 +232,11 @@ fn at_first_site(finding: Finding, link: &ScannedLink) -> Finding {
 }
 
 /// The finding for a link whose code changed since it was confirmed.
-fn failed_finding(key: &LinkKey, link: &ScannedLink) -> Finding {
+fn failed_finding(
+    key: &LinkKey,
+    link: &ScannedLink,
+    command_path: &dyn Fn(&SourcePath) -> String,
+) -> Finding {
     let reference = reference_of(key);
     at_first_site(
         Finding::new(
@@ -210,7 +246,7 @@ fn failed_finding(key: &LinkKey, link: &ScannedLink) -> Finding {
         )
         .with_help(format!(
             "reread this, and if it's still accurate run `supdoc update {} --yes`",
-            key.source
+            shell_quote(&command_path(&key.source))
         )),
         link,
     )

@@ -68,7 +68,6 @@ struct RawLink {
     /// The file the link is written in.
     source: SourcePath,
     /// Where the link points, never above the project root or its namespace's directory.
-    #[serde(deserialize_with = "contained_target")]
     target: Target,
     /// The symbol, or `None` for a whole-file link.
     symbol: Option<SymbolPath>,
@@ -90,28 +89,6 @@ fn current_version<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<
             "unsupported lockfile format {version}: this supdoc reads format {FORMAT_VERSION}"
         )))
     }
-}
-
-/// Reads a target, refusing one that climbs with `..`: supdoc doesn't read link targets outside
-/// the project root, so a hand-written lock can't name such a file either.
-///
-/// # Errors
-///
-/// Fails if the value is not a target, or if any of its segments is `..`.
-fn contained_target<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Target, D::Error> {
-    let target = Target::deserialize(deserializer)?;
-    if target
-        .path()
-        .as_str()
-        .split('/')
-        .any(|segment| segment == "..")
-    {
-        return Err(D::Error::custom(format_args!(
-            "target `{target}` climbs out of the project root with `..`, and supdoc tracks only \
-             files inside it"
-        )));
-    }
-    Ok(target)
 }
 
 /// Wraps a TOML error with the line it points at.

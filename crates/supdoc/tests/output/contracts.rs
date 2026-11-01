@@ -983,6 +983,11 @@ mod helps {
         case("cli-path-missing", |_| {}, &["check", "docs/nope.md"]),
         case("cli-path-missing", |_| {}, &["resolve", "nope.rs"]),
         case(
+            "cli-resolve-fragment",
+            |_| {},
+            &["resolve", "src/lib.rs#add"],
+        ),
+        case(
             "cli-path-unreadable",
             |p| {
                 p.write("docs/private/a.md", "# A\n");
