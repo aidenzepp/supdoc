@@ -24,18 +24,13 @@ fn error_of(run: &Run) -> serde_json::Value {
     })
 }
 
-/// A project whose `docs/private` directory can't be searched, or `None` when the test runs as a
-/// user the mode doesn't restrict (root), where the scenario can't happen.
-fn project_with_locked_directory() -> Option<Project> {
+/// A project whose `docs/private` directory can't be searched.
+fn project_with_locked_directory() -> Project {
     let project = Project::fixture("basic");
     fs::create_dir(project.path("docs/private")).expect("the directory should be creatable");
     fs::write(project.path("docs/private/c.md"), "# C\n").expect("the file should be writable");
     lock(&project, 0o000);
-    if fs::symlink_metadata(project.path("docs/private/c.md")).is_ok() {
-        unlock(&project);
-        return None;
-    }
-    Some(project)
+    project
 }
 
 /// Sets the mode of the project's `docs/private` directory.
@@ -54,9 +49,10 @@ fn unlock(project: &Project) {
 
 #[test]
 fn a_path_under_an_unreadable_directory_is_unreadable_not_missing() {
-    let Some(project) = project_with_locked_directory() else {
+    if !crate::permissions_restrict_this_user("a_path_under_an_unreadable_directory") {
         return;
-    };
+    }
+    let project = project_with_locked_directory();
 
     let runs = [
         project.supdoc(&["--json", "check", "docs/private/c.md"]),

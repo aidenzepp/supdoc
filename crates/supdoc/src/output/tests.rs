@@ -303,13 +303,13 @@ fn preview_on_stdout_nothing_written_note_on_stderr() {
         .report(&check_report(), false)
         .expect("writing to a buffer should succeed");
     output
-        .note("Nothing written. Run the same command with --yes to apply.")
+        .note("Nothing written. Run `supdoc update --yes` to apply.")
         .expect("writing to a buffer should succeed");
 
     assert!(!stdout.text().contains("Nothing written"));
     assert_eq!(
         stderr.text(),
-        "Nothing written. Run the same command with --yes to apply.\n"
+        "Nothing written. Run `supdoc update --yes` to apply.\n"
     );
 }
 
