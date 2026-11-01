@@ -8,6 +8,7 @@ use toml::Spanned;
 
 use super::error::ParseLockError;
 use super::model::{FORMAT_VERSION, Lockfile};
+use crate::finding::LineIndex;
 use crate::hash::{Hash, HashSettings, LineEndings};
 use crate::link::{LinkKey, SourcePath, SymbolPath, Target};
 
@@ -113,16 +114,11 @@ fn contained_target<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result
     Ok(target)
 }
 
-/// The 1-based line containing byte `offset` of `text`.
-fn line_at(text: &str, offset: usize) -> usize {
-    text.get(..offset)
-        .map_or(0, |before| before.matches('\n').count())
-        + 1
-}
-
 /// Wraps a TOML error with the line it points at.
 fn toml_error(text: &str, error: toml::de::Error) -> ParseLockError {
-    let line = error.span().map(|span| line_at(text, span.start));
+    let line = error
+        .span()
+        .map(|span| LineIndex::new(text).line_of(span.start));
     ParseLockError::Toml {
         line,
         missing_features: features_are_missing(text, &error),
@@ -180,9 +176,10 @@ impl Lockfile {
         }
 
         let raw: RawLockfile = toml::from_str(text).map_err(|error| toml_error(text, error))?;
+        let lines = LineIndex::new(text);
         let mut entries: BTreeMap<LinkKey, (Hash, usize)> = BTreeMap::new();
         for link in raw.link {
-            let line = line_at(text, link.span().start);
+            let line = lines.line_of(link.span().start);
             let RawLink {
                 source,
                 target,
