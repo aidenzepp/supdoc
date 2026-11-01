@@ -30,7 +30,9 @@ use crate::scan::model::Scope;
 
 use super::args::{Limit, ListArgs};
 use super::check::LinkJson;
-use super::project::{absolute, ensure_exists, load_config, path_outside, read_lock};
+use super::project::{
+    absolute, command_line, ensure_exists, load_config, path_outside_config, read_lock,
+};
 use super::{CliError, Context, Outcome};
 
 /// Runs `supdoc list`: prints each link in the chosen states, optionally only those pointing at
@@ -84,7 +86,7 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
         .collect();
     if linked.is_empty()
         && let (Some(target), Some(wanted), Some(typed)) = (&target, &wanted, &args.target)
-        && let Some(error) = wanted.refusal(target, typed, &config, &context.cwd)
+        && let Some(error) = wanted.refusal(target, typed, &config, context)
     {
         return Err(error);
     }
@@ -147,7 +149,7 @@ fn parse_target(typed: &str, config: &Config, cwd: &AbsolutePath) -> Result<Link
         let absolute = absolute(cwd, Path::new(path));
         let relative = absolute
             .strip_prefix(config.root())
-            .ok_or_else(|| path_outside(Path::new(path), config.root()))?;
+            .ok_or_else(|| path_outside_config(Path::new(path), config))?;
         let inside = relative
             .to_str()
             .filter(|inside| !inside.is_empty())
@@ -427,8 +429,9 @@ impl Wanted {
         target: &LinkRef,
         typed: &str,
         config: &Config,
-        cwd: &AbsolutePath,
+        context: &Context,
     ) -> Option<CliError> {
+        let cwd = &context.cwd;
         if let Some(name) = target.target.namespace()
             && config.namespace(name).is_none()
         {
@@ -437,7 +440,7 @@ impl Wanted {
         let typed_file = Path::new(typed.split_once('#').map_or(typed, |(file, _)| file));
         let file = match &self.place {
             Place::File(file) => file,
-            Place::Unlocated(_) => return Some(path_outside(typed_file, config.root())),
+            Place::Unlocated(_) => return Some(path_outside_config(typed_file, config)),
         };
         if let Err(error) = ensure_exists(file, typed_file, cwd) {
             let namespaced = target
@@ -455,7 +458,12 @@ impl Wanted {
             SymbolFilter::Unresolved { error, .. } => Some(CliError::new(
                 error.code(),
                 error.message_naming(&relative_to(config.root(), error.file())),
-                error.help_naming(&typed_file.display()),
+                error.help_running(&command_line(
+                    context,
+                    "resolve",
+                    &[typed_file.display().to_string()],
+                    &[],
+                )),
                 CliError::REFUSED_EXIT_CODE,
             )),
             SymbolFilter::Any | SymbolFilter::Text(_) | SymbolFilter::Resolved { .. } => None,
@@ -888,6 +896,32 @@ mod tests {
         assert_eq!(
             (error.code(), error.exit_code()),
             ("cli-path-outside-project", 2)
+        );
+    }
+
+    #[test]
+    fn list_target_outside_the_directory_without_a_config_says_no_config_was_found() {
+        let project = Project::new();
+        let config = project.dir.path().join(crate::config::CONFIG_FILE_NAME);
+        assert!(!config.exists(), "the fixture should have no config");
+
+        let run = project.list(&["list", "/elsewhere/src/lib.rs"]);
+
+        let error = run
+            .result
+            .expect_err("a target outside the directory should be refused");
+        assert_eq!(error.code(), "cli-path-outside-project");
+        assert!(
+            error
+                .message()
+                .ends_with("and no supdoc.config.toml was found above it"),
+            "the message should say no config was found: {}",
+            error.message()
+        );
+        assert!(
+            error.help().contains("supdoc -c <dir>/supdoc.config.toml"),
+            "the help should offer -c: {}",
+            error.help()
         );
     }
 

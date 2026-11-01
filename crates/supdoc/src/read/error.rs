@@ -227,7 +227,10 @@ impl ResolveError {
     /// What to do next, naming the file by its absolute path.
     #[must_use]
     pub fn help(&self) -> String {
-        self.help_naming(&self.file().display())
+        self.help_running(&format!(
+            "supdoc resolve {}",
+            shell_quote(&self.file().display().to_string())
+        ))
     }
 
     /// The message, naming the file as `shown` instead of by its absolute path.
@@ -241,13 +244,11 @@ impl ResolveError {
         }
     }
 
-    /// What to do next, naming the file as `shown` instead of by its absolute path.
+    /// What to do next, with `command` as the whole shell command that lists the file's symbols,
+    /// so a run that was given `-c` or a relative path repeats both.
     #[must_use]
-    pub fn help_naming(&self, shown: &dyn Display) -> String {
-        self.help_listing(&format!(
-            "`supdoc resolve {}` lists every symbol",
-            shell_quote(&shown.to_string())
-        ))
+    pub fn help_running(&self, command: &str) -> String {
+        self.help_listing(&format!("`{command}` lists every symbol"))
     }
 
     /// What to do next, for a `shown` path relative to the project root. A scan cannot know the
