@@ -760,6 +760,26 @@ fn extends_naming_another_file_is_refused_without_printing_it() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn extends_naming_a_fifo_is_refused_without_opening_it() {
+    let dir = tree(&[(
+        "supdoc.config.toml",
+        "extends = \"base/supdoc.config.toml\"\n",
+    )]);
+    fs::create_dir(dir.path().join("base")).expect("the fixture directory should be creatable");
+    let made = std::process::Command::new("mkfifo")
+        .arg(dir.path().join("base/supdoc.config.toml"))
+        .status()
+        .expect("mkfifo should run");
+    assert!(made.success(), "mkfifo should create the FIFO");
+
+    let error = load_error(&dir, "supdoc.config.toml");
+
+    assert_eq!(error.code(), "config-extends-not-config", "got {error:?}");
+    assert_eq!(error.exit_code(), 78);
+}
+
 #[test]
 fn extends_naming_a_missing_file_of_another_name_is_refused_the_same_way() {
     let dir = tree(&[("project/supdoc.config.toml", "extends = \"../home/.env\"\n")]);
