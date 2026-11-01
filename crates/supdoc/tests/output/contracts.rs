@@ -913,6 +913,15 @@ mod helps {
         ),
         case("lock-read", |p| chmod(p, "supdoc.lock", 0o000), &["check"]),
         case(
+            "lock-read",
+            |p| {
+                let lock = p.path().join("supdoc.lock");
+                std::fs::remove_file(&lock).expect("the lockfile should be removable");
+                std::fs::create_dir(&lock).expect("the directory should be creatable");
+            },
+            &["check"],
+        ),
+        case(
             "lock-outside-root",
             |p| {
                 let lock = p.path().join("supdoc.lock");
