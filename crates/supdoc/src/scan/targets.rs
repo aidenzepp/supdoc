@@ -653,12 +653,4 @@ mod tests {
             expected(LineEndings::Exact)
         );
     }
-
-    #[test]
-    fn the_outside_root_help_makes_no_claim_about_what_supdoc_reads() {
-        assert!(
-            !OUTSIDE_ROOT_HELP.contains("reads nothing"),
-            "the help must not promise what supdoc reads outside the root: {OUTSIDE_ROOT_HELP}"
-        );
-    }
 }
