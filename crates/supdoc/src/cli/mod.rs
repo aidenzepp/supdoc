@@ -48,6 +48,10 @@ pub mod skill;
 /// `supdoc schema`.
 pub mod schema;
 
+/// Test doubles the unit tests of this module share.
+#[cfg(test)]
+pub(crate) mod testing;
+
 use std::fmt;
 
 use crate::finding::{Location, Snippet};

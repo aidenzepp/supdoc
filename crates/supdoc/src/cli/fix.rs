@@ -641,14 +641,11 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex};
-
-    use clap::Parser as _;
 
     use super::*;
-    use crate::cli::args::{Cli, Command};
+    use crate::cli::args::Command;
+    use crate::cli::testing::{Run, Session, at};
     use crate::lock::model::LOCK_FILE_NAME;
-    use crate::output::{OutputSettings, Verbosity};
 
     /// A guide whose link misspells `add` as `ad`, which has exactly one near match.
     const GUIDE: &str = "# Guide\n\nThe [add](../src/lib.rs#ad) function sums.\n";
@@ -659,87 +656,12 @@ mod tests {
     /// The code the guide points at.
     const LIB: &str = "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n";
 
-    /// A buffer `Output` writes into and the test reads back.
-    #[derive(Clone, Default)]
-    struct Capture(Arc<Mutex<Vec<u8>>>);
-
-    impl Capture {
-        fn text(&self) -> String {
-            let bytes = self.0.lock().expect("the capture lock should be free");
-            String::from_utf8(bytes.clone()).expect("captured output should be UTF-8")
-        }
-    }
-
-    impl io::Write for Capture {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .expect("the capture lock should be free")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// The value at `pointer` (RFC 6901) in `json`, or a failure naming what is missing.
-    fn at(json: &serde_json::Value, pointer: &str) -> serde_json::Value {
-        json.pointer(pointer)
-            .unwrap_or_else(|| panic!("`{pointer}` should be in the JSON output: {json}"))
-            .clone()
-    }
-
-    /// What one `supdoc` run returned and printed.
-    struct Run {
-        result: Result<Outcome, CliError>,
-        stdout: String,
-        stderr: String,
-    }
-
-    impl Run {
-        /// The exit code the process would end with.
-        fn exit_code(&self) -> u8 {
-            match &self.result {
-                Ok(outcome) => outcome.exit_code(),
-                Err(error) => error.exit_code(),
-            }
-        }
-
-        /// stdout parsed as the one JSON document `--json` prints.
-        fn json(&self) -> serde_json::Value {
-            serde_json::from_str(&self.stdout)
-                .unwrap_or_else(|error| panic!("stdout should be JSON ({error}): {}", self.stdout))
-        }
-    }
-
-    /// One parsed command line with the output and context it runs with.
-    struct Session {
-        cli: Cli,
-        context: Context,
-        output: Output,
-        stdout: Capture,
-        stderr: Capture,
-    }
-
-    impl Session {
-        /// The arguments of the `fix` command this session parsed.
-        fn fix_args(&self) -> &FixArgs {
-            let Command::Fix(args) = &self.cli.command else {
-                panic!("the session should hold a fix command");
-            };
-            args
-        }
-
-        /// What the run printed, with `result`.
-        fn finished(self, result: Result<Outcome, CliError>) -> Run {
-            Run {
-                result,
-                stdout: self.stdout.text(),
-                stderr: self.stderr.text(),
-            }
-        }
+    /// The arguments of the `fix` command `session` parsed.
+    fn fix_args(session: &Session) -> &FixArgs {
+        let Command::Fix(args) = &session.cli.command else {
+            panic!("the session should hold a fix command");
+        };
+        args
     }
 
     /// A project in `<tempdir>/project`, so links can also point outside its root.
@@ -868,36 +790,7 @@ mod tests {
 
         /// Parses `supdoc <args>` to run from the project root.
         fn session(&self, args: &[&str]) -> Session {
-            let command_line: Vec<&str> = std::iter::once("supdoc")
-                .chain(args.iter().copied())
-                .collect();
-            let cli = Cli::try_parse_from(&command_line).unwrap_or_else(|error| {
-                panic!("`{}` should parse: {error}", command_line.join(" "))
-            });
-            let cwd = self.root();
-            let settings = OutputSettings {
-                format: cli.global.format(),
-                verbosity: Verbosity::from_flags(cli.global.quiet, cli.global.verbose),
-                color: false,
-                unicode: false,
-                width: 80,
-                paths: PathStyle::new(cwd.clone(), cwd.clone(), None),
-            };
-            let (stdout, stderr) = (Capture::default(), Capture::default());
-            let output = Output::new(settings, Box::new(stdout.clone()), Box::new(stderr.clone()));
-            let context = Context {
-                global: cli.global.clone(),
-                cwd,
-                home: None,
-                claude_config_dir: None,
-            };
-            Session {
-                cli,
-                context,
-                output,
-                stdout,
-                stderr,
-            }
+            Session::new(self.root(), args)
         }
 
         /// Runs `supdoc <args>` from the project root, through the real dispatch.
@@ -1184,7 +1077,7 @@ mod tests {
         project.write("docs/other.md", "The [add](../src/lib.rs#ad) again.\n");
         let mut session = project.session(&["--json", "fix", "--yes"]);
         let (paths, mode) = {
-            let args = session.fix_args();
+            let args = fix_args(&session);
             (args.paths.clone(), args.confirm.mode())
         };
         let planned = Planned::scan(&paths, &session.context, &mut session.output)
@@ -1253,7 +1146,7 @@ mod tests {
         project.write("notes/third.md", "The [add](../src/lib.rs#ad) once more.\n");
         let mut session = project.session(&["--json", "fix", "--yes"]);
         let (paths, mode) = {
-            let args = session.fix_args();
+            let args = fix_args(&session);
             (args.paths.clone(), args.confirm.mode())
         };
         let planned = Planned::scan(&paths, &session.context, &mut session.output)
