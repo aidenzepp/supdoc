@@ -56,6 +56,27 @@ pub(crate) fn invocation(context: &Context, command: &str) -> String {
     }
 }
 
+/// The shell command that runs `supdoc name OPERAND... FLAG...` from the current directory: every
+/// operand is quoted for the shell, and `-c PATH` leads when the run was pointed at a config, so
+/// the command acts on the same project and the same paths.
+pub(crate) fn command_line<S: AsRef<str>>(
+    context: &Context,
+    name: &str,
+    operands: &[S],
+    flags: &[&str],
+) -> String {
+    let mut command = name.to_owned();
+    for operand in operands {
+        command.push(' ');
+        command.push_str(&shell_quote(operand.as_ref()));
+    }
+    for flag in flags {
+        command.push(' ');
+        command.push_str(flag);
+    }
+    invocation(context, &command)
+}
+
 /// The fatal error for a config that did not load, pointing at the offending text when the config
 /// error knows where it is.
 ///
