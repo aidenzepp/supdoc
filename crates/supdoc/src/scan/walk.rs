@@ -788,9 +788,54 @@ fn explicit_path_warning(
     if is_source_file && !config.scans(&path) {
         return Some(excluded(listed, None));
     }
-    // Not reached for a reason the checks above don't name, such as a symlinked directory on the
-    // way to it, which the walk never enters.
-    (is_source_file && !walked).then(|| ignored(listed, "an ignore file"))
+    if is_source_file && !walked {
+        // The walk never enters a symlinked directory, so a path under one is not walked and no
+        // rule names it.
+        return Some(if has_symlinked_parent(root, listed) {
+            symlinked_parent(root, listed, &path)
+        } else {
+            ignored(listed, "an ignore file")
+        });
+    }
+    None
+}
+
+/// Whether a directory above `listed`, inside `root`, is a symlink.
+fn has_symlinked_parent(root: &AbsolutePath, listed: &SourcePath) -> bool {
+    let mut current = root.as_path().to_path_buf();
+    let mut segments = listed.as_str().split('/').peekable();
+    while let Some(segment) = segments.next() {
+        if segments.peek().is_none() {
+            break;
+        }
+        current.push(segment);
+        if fs::symlink_metadata(&current).is_ok_and(|metadata| metadata.is_symlink()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The finding for an explicit path reached through a symlinked directory, which the walk does
+/// not enter. It suggests the real path only when that lies inside the project.
+fn symlinked_parent(root: &AbsolutePath, listed: &SourcePath, path: &AbsolutePath) -> Finding {
+    let listed = listed.as_str();
+    let finding = Finding::new(
+        "scan-explicit-path-symlinked",
+        Severity::Warning,
+        format!(
+            "{listed} was named on the command line but is reached through a symlinked directory, which supdoc doesn't enter",
+        ),
+    );
+    let real = fs::canonicalize(path.as_path()).ok().and_then(|real| {
+        let real_root = fs::canonicalize(root.as_path()).ok()?;
+        let relative = real.strip_prefix(real_root).ok()?;
+        Some(relative.to_string_lossy().replace('\\', "/"))
+    });
+    match real {
+        Some(real) => finding.with_help(format!("Pass the real path `{real}` instead")),
+        None => finding.with_help("Pass the path of the real directory inside the project instead"),
+    }
 }
 
 /// The finding for an explicit path that the config excludes, naming the `exclude` pattern when
@@ -976,6 +1021,24 @@ mod tests {
         }
         fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n")
             .expect("the fixture git HEAD should be writable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_named_path_under_a_symlinked_directory_is_not_blamed_on_an_ignore_file() {
+        let project = Project::new();
+        project.write("real/a.rs", "");
+        std::os::unix::fs::symlink("real", project.dir.path().join("alias"))
+            .expect("the fixture symlink should be creatable");
+
+        let walk = project.walk(&paths(&["alias/a.rs"]));
+
+        assert_eq!(codes(&walk), ["scan-explicit-path-symlinked"]);
+        let finding = walk.findings.first().expect("one warning was expected");
+        assert_eq!(
+            finding.help.as_deref(),
+            Some("Pass the real path `real/a.rs` instead")
+        );
     }
 
     #[test]
