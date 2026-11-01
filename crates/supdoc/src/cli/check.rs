@@ -11,13 +11,13 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::check::model::{LinkReport, Report as CheckModel};
-use crate::check::reconcile::{self, check_outcome, reconcile};
+use crate::check::reconcile::{self, check_outcome, reconcile_in};
 use crate::finding::{Finding, Location};
 use crate::link::{LinkKey, SourcePath};
 use crate::output::json::{Envelope, FindingJson};
 use crate::output::summary::render_summary;
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, OutputError, Report, Summary, TextContext, Verbosity};
+use crate::output::{Output, OutputError, PathStyle, Report, Summary, TextContext, Verbosity};
 use crate::read::cartridge::Languages;
 use crate::state::LinkState;
 
@@ -50,7 +50,8 @@ pub fn run(args: &CheckArgs, context: &Context, output: &mut Output) -> Result<O
             )
         })?;
 
-    let model = reconcile(&scan, &lock, &scope);
+    let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
+    let model = reconcile_in(&scan, &lock, &scope, &paths);
     let outcome = match check_outcome(&model, args.deny_warnings) {
         reconcile::Outcome::Clean => Outcome::Clean,
         reconcile::Outcome::Failing => Outcome::Failing,
@@ -284,7 +285,7 @@ mod tests {
     use crate::cli::args::{Cli, Command};
     use crate::config::Config;
     use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
-    use crate::output::{OutputSettings, PathStyle};
+    use crate::output::OutputSettings;
     use crate::path::AbsolutePath;
     use crate::scan::model::{Scope, TargetState};
 
@@ -490,6 +491,36 @@ mod tests {
             run.stdout.ends_with("Links  1 new\n"),
             "stdout: {}",
             run.stdout
+        );
+    }
+
+    #[test]
+    fn failed_help_names_the_update_path_from_where_check_ran_quoted() {
+        let project = Project::new();
+        project.write("supdoc.config.toml", "");
+        project.write("my docs/guide.md", GUIDE);
+        project.record_all();
+        project.write(
+            "src/lib.rs",
+            "pub fn add(a: i32, b: i32) -> i32 {\n    a - b\n}\n",
+        );
+
+        let from_root = project.check(&["check"]);
+        let from_subdirectory = project.check_from("my docs", &["check"]);
+
+        assert!(
+            from_root
+                .stdout
+                .contains("`supdoc update 'my docs/guide.md' --yes`"),
+            "stdout: {}",
+            from_root.stdout
+        );
+        assert!(
+            from_subdirectory
+                .stdout
+                .contains("`supdoc update guide.md --yes`"),
+            "stdout: {}",
+            from_subdirectory.stdout
         );
     }
 

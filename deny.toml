@@ -1,0 +1,17 @@
+[graph]
+all-features = false
+
+[advisories]
+# Defaults: vulnerabilities are denied; unmaintained, unsound and yanked crates are reported.
+
+[licenses]
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "Unlicense", "0BSD", "CC0-1.0", "BSL-1.0"]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
