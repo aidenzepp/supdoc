@@ -511,7 +511,10 @@ mod helps {
                     path,
                     reason: "tree-sitter returned no tree",
                 };
-                (error.code().to_owned(), Some(error.help()))
+                (
+                    error.code().to_owned(),
+                    Some(error.help(supdoc::read::error::ReadRole::ScannedSource, "file")),
+                )
             },
         },
         UnitCase {

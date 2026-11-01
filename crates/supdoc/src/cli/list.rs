@@ -2,7 +2,7 @@
 //!
 //! Read-only, and exits 0 whatever state the links are in: `check` is the gate. A `TARGET` that
 //! names nothing (a missing file, an unknown namespace, a symbol that doesn't resolve) is refused,
-//! so a typo never reads as "no docs depend on this". The run is `load_config → read_lock → scan →
+//! so a typo never reads as "no docs depend on this". The run is `load_config → parse TARGET → read_lock → scan →
 //! reconcile → filter by TARGET and --state → cap at --limit`, with effects only at the two ends.
 
 use std::io::{self, Write};
@@ -28,7 +28,7 @@ use crate::read::cartridge::{Languages, SourceFile, SymbolTable};
 use crate::read::error::ResolveError;
 use crate::scan::model::Scope;
 
-use super::args::{Limit, ListArgs};
+use super::args::{Limit, ListArgs, TargetArg};
 use super::check::LinkJson;
 use super::project::{absolute, ensure_exists, load_config, path_outside, read_lock};
 use super::{CliError, Context, Outcome};
@@ -53,6 +53,11 @@ use super::{CliError, Context, Outcome};
 /// `cli-list-output` when the report cannot be written (74).
 pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let config = load_config(context, output)?;
+    let target = args
+        .target
+        .as_ref()
+        .map(|typed| parse_target(typed, &config, &context.cwd))
+        .transpose()?;
     let lock = read_lock(&config, &context.cwd)?;
     let scan = crate::scan::assemble::run(&config, &Languages::builtin(), &Scope::All).map_err(
         |error| {
@@ -67,11 +72,6 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
     let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
     let model = reconcile_in(&scan, &lock, &Scope::All, &paths);
 
-    let target = args
-        .target
-        .as_deref()
-        .map(|typed| parse_target(typed, &config, &context.cwd))
-        .transpose()?;
     let wanted = target.as_ref().map(|target| Wanted::new(target, &config));
     let linked: Vec<LinkReport> = model
         .links
@@ -132,18 +132,13 @@ pub fn schema() -> schemars::Schema {
 ///
 /// Returns `cli-path-outside-project` for a plain path outside the project and
 /// `cli-target-invalid` for text that is not a target. Both exit 2.
-fn parse_target(typed: &str, config: &Config, cwd: &AbsolutePath) -> Result<LinkRef, CliError> {
-    let (path, symbol) = match typed.split_once('#') {
-        Some((path, symbol)) => (path, Some(symbol)),
-        None => (typed, None),
-    };
-    let namespaced = path.split_once(':').is_some_and(|(name, rest)| {
-        !rest.is_empty() && name.parse::<crate::namespace::NamespaceName>().is_ok()
-    });
+fn parse_target(arg: &TargetArg, config: &Config, cwd: &AbsolutePath) -> Result<LinkRef, CliError> {
+    let typed = arg.typed();
     let rewritten;
-    let text = if namespaced {
+    let text = if arg.is_namespaced() {
         typed
     } else {
+        let path = arg.file();
         let absolute = absolute(cwd, Path::new(path));
         let relative = absolute
             .strip_prefix(config.root())
@@ -153,7 +148,7 @@ fn parse_target(typed: &str, config: &Config, cwd: &AbsolutePath) -> Result<Link
             .filter(|inside| !inside.is_empty())
             .ok_or_else(|| target_invalid(typed, "it must name a file inside the project"))?;
         let inside = inside.replace(std::path::MAIN_SEPARATOR, "/");
-        rewritten = match symbol {
+        rewritten = match arg.symbol() {
             Some(symbol) => format!("{inside}#{symbol}"),
             None => inside,
         };
@@ -422,7 +417,7 @@ impl Wanted {
     fn refusal(
         &self,
         target: &LinkRef,
-        typed: &str,
+        typed: &TargetArg,
         config: &Config,
         cwd: &AbsolutePath,
     ) -> Option<CliError> {
@@ -431,7 +426,7 @@ impl Wanted {
         {
             return Some(unknown_namespace(config, name));
         }
-        let typed_file = Path::new(typed.split_once('#').map_or(typed, |(file, _)| file));
+        let typed_file = Path::new(typed.file());
         let file = match &self.place {
             Place::File(file) => file,
             Place::Unlocated(_) => return Some(path_outside(typed_file, config.root())),

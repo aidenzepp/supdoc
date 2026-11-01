@@ -21,7 +21,7 @@ use crate::output::text::{render_finding, visible};
 use crate::output::{Output, OutputError, Report, TextContext};
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile, Symbol};
-use crate::read::error::{ReadError, ResolveError};
+use crate::read::error::{ReadError, ReadRole, ResolveError};
 
 use super::args::ResolveArgs;
 use super::project::{absolute, command_line, ensure_exists, load_config, path_outside_config};
@@ -227,14 +227,7 @@ fn read_failed(error: &ReadError, root: &AbsolutePath, typed: &Path) -> CliError
         | ReadError::UnsupportedLanguage { .. } => CliError::REFUSED_EXIT_CODE,
     };
     let shown = relative_to(root, error.path());
-    let help = match error {
-        // `exclude` only removes a file from the scan, and resolve reads FILE regardless.
-        ReadError::NotUtf8 { .. } => format!(
-            "Save `{}` as UTF-8, or resolve a file that is",
-            typed.display()
-        ),
-        _ => error.help(),
-    };
+    let help = error.help(ReadRole::ResolveArgument, &typed.display().to_string());
     CliError::new(error.code(), error.message_naming(&shown), help, exit_code)
 }
 

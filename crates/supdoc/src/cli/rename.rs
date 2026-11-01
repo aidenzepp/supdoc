@@ -33,7 +33,7 @@ use crate::output::text::{render_finding, visible};
 use crate::output::{Output, OutputError, Report, TextContext, preview_note};
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile};
-use crate::read::error::ReadError;
+use crate::read::error::{ReadError, ReadRole};
 use crate::read::links::links;
 use crate::scan::model::Scope;
 use crate::scan::walk::{UnreadCause, UnreadDir, walk};
@@ -777,23 +777,12 @@ fn unread_source(source: &SourcePath, rerun: &str, error: &ReadError) -> CliErro
             "{}; its links can't be renamed, so nothing was written",
             error.message_naming(source)
         ),
-        then_rerun(&unread_source_help(error), rerun),
+        then_rerun(
+            &error.help(ReadRole::RenamedSource, &source.to_string()),
+            rerun,
+        ),
         CliError::REFUSED_EXIT_CODE,
     )
-}
-
-/// What to do about a source the rename couldn't read, before running it again. Never the read
-/// error's `exclude` route: a source excluded and then renamed past keeps OLD in its links while
-/// its lock entries move to NEW, the very state the refusal exists to prevent.
-fn unread_source_help(error: &ReadError) -> String {
-    match error {
-        ReadError::NotUtf8 { .. } => "Save the file as UTF-8".to_owned(),
-        ReadError::Missing { .. }
-        | ReadError::Io { .. }
-        | ReadError::TooLarge { .. }
-        | ReadError::UnsupportedLanguage { .. }
-        | ReadError::Internal { .. } => error.help(),
-    }
 }
 
 /// The error for a walked file whose name isn't a valid source path. The walk reports such a file
