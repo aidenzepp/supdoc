@@ -9,6 +9,9 @@ pub mod format;
 /// How paths are shown in each format (07 G7).
 pub mod paths;
 
+/// The closing note of a preview.
+pub mod preview;
+
 /// The summary line and its counts.
 pub mod summary;
 
@@ -39,6 +42,7 @@ mod tests;
 pub use format::{OutputFormat, TextContext, Verbosity};
 pub use json::{Envelope, FindingJson, SCHEMA_VERSION};
 pub use paths::PathStyle;
+pub use preview::preview_note;
 pub use report::Report;
 pub use sink::{Output, OutputError, OutputSettings};
 pub use summary::Summary;
