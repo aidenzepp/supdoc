@@ -992,7 +992,7 @@ mod tests {
     use clap::Parser as _;
 
     use super::*;
-    use crate::check::reconcile::reconcile;
+    use crate::check::reconcile::reconcile_at_root;
     use crate::cli::args::{Cli, Command, NamespaceCommand};
     use crate::output::{OutputSettings, PathStyle, Verbosity};
     use crate::scan::model::TargetState;
@@ -1191,7 +1191,7 @@ web = \"services/web\"
             let lock = Lockfile::read(&lock_path(&self.root()))
                 .expect("the lockfile should parse")
                 .unwrap_or_default();
-            reconcile(&scan, &lock, &Scope::All)
+            reconcile_at_root(&scan, &lock, &Scope::All)
                 .links
                 .into_iter()
                 .map(|link| {

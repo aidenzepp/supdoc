@@ -53,21 +53,21 @@ pub fn run(
     let table = file.language().symbols(&file);
 
     let text = IndexedText::new(file.text());
-    let (symbols, query, truncated) = if let Some(query) = &args.symbol {
+    let (symbols, query, total) = if let Some(query) = &args.symbol {
         let symbol = table
             .resolve(file.path(), query)
             .map_err(|error| resolve_failed(&error, config.root(), &args.file))?;
-        (vec![SymbolJson::new(&text, symbol)], Some(query), false)
+        (vec![SymbolJson::new(&text, symbol)], Some(query), 1)
     } else {
         let total = table.iter().count();
-        let shown = if args.limit == 0 { total } else { args.limit };
-        let symbols = table
-            .iter()
-            .take(shown)
+        let symbols = args
+            .limit
+            .take(table.iter())
             .map(|symbol| SymbolJson::new(&text, symbol))
             .collect();
-        (symbols, None, total > shown)
+        (symbols, None, total)
     };
+    let truncated = args.symbol.is_none() && args.limit.truncated(total);
     let listed = symbols.len();
     let findings = if file.has_syntax_errors() {
         vec![syntax_errors(&file, config.root(), &command)]
@@ -87,9 +87,7 @@ pub fn run(
         .map_err(|error| output_failed(&error))?;
     if truncated {
         output
-            .note(&format!(
-                "Showing {listed} symbols; there are more. Raise --limit, or use --limit 0 for all."
-            ))
+            .note(&args.limit.truncation_note(listed, total, "symbols"))
             .map_err(|error| output_failed(&error))?;
     } else if listed == 0 {
         output
@@ -717,9 +715,28 @@ mod tests {
 
         let text = project.resolve(&["resolve", "src/lib.rs", "--limit", "2"]);
         assert!(
-            text.stderr.contains("Showing 2 symbols"),
+            text.stderr.contains("Showing 2 of "),
             "stderr: {}",
             text.stderr
+        );
+    }
+
+    #[test]
+    fn resolve_limit_0_lists_every_symbol() {
+        let project = Project::new();
+        project.write(
+            "src/lib.rs",
+            "pub fn a() {}\npub fn b() {}\npub fn c() {}\n",
+        );
+
+        let run = project.resolve(&["--json", "resolve", "src/lib.rs", "--limit", "0"]);
+
+        let json = run.json();
+        assert_eq!(at(&json, "/truncated"), false, "json: {json}");
+        assert_eq!(
+            at(&json, "/data/symbols").as_array().map(Vec::len),
+            Some(3),
+            "json: {json}"
         );
     }
 

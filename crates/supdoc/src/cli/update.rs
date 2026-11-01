@@ -17,7 +17,7 @@ use serde::Serialize;
 
 use crate::check::model::{LinkReport, Report as CheckModel};
 use crate::check::plan::{LockChange, SettingsChange, UpdatePlan, plan_update};
-use crate::check::reconcile::reconcile;
+use crate::check::reconcile::reconcile_in;
 use crate::finding::Finding;
 use crate::hash::LineEndings;
 use crate::link::LinkKey;
@@ -82,7 +82,9 @@ pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<
                 )
             })?;
 
-    let model = reconcile(&scan, &lock, &scope);
+    // `supdoc fix PATH` takes `PATH` relative to the current directory, so hints name it from there.
+    let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
+    let model = reconcile_in(&scan, &lock, &scope, &paths);
     let plan = plan_update(&model, &scan, &lock, &args.state, settings);
     let applied = args.confirm.mode() == WriteMode::Apply;
     if applied && let Some(next) = &plan.next {
@@ -90,8 +92,6 @@ pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<
             .map_err(|error| lock_failure(&error, config.root(), &context.cwd))?;
     }
 
-    // `supdoc fix PATH` takes `PATH` relative to the current directory, so hints name it from there.
-    let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
     let apply_note = preview_note(
         args.confirm.dry_run,
         &command_line(
@@ -1428,7 +1428,9 @@ mod tests {
             let scan = crate::scan::assemble::run(&config, &Languages::builtin(), &Scope::All)
                 .expect("the fixture project should scan");
             let lock = self.lock().unwrap_or_default();
-            let model = reconcile(&scan, &lock, &Scope::All);
+            let root = self.root();
+            let paths = PathStyle::new(root.clone(), root, None);
+            let model = reconcile_in(&scan, &lock, &Scope::All, &paths);
             Summary::tally(model.links.iter().map(|link| link.state))
         }
     }
