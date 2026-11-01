@@ -117,12 +117,9 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
 
 /// The JSON Schema of `supdoc list`'s `--json` output: the whole envelope, with `data` typed as
 /// [`ListReport`].
-///
-/// # Errors
-///
-/// Never fails; the `Result` matches the commands that are not built yet.
-pub fn schema() -> Result<schemars::Schema, CliError> {
-    Ok(schemars::schema_for!(Envelope<'static, ListReport>))
+#[must_use]
+pub fn schema() -> schemars::Schema {
+    schemars::schema_for!(Envelope<'static, ListReport>)
 }
 
 /// The `TARGET` as typed, made into a [`LinkRef`] whose plain path is relative to the project root.
@@ -1092,7 +1089,7 @@ mod tests {
 
     /// Every way `json` breaks the schema `schema()` publishes for `supdoc list`.
     fn schema_violations(json: &serde_json::Value) -> Vec<String> {
-        let schema = schema().expect("list is built, so it has a schema");
+        let schema = schema();
         let schema = serde_json::to_value(schema).expect("the list schema should serialize");
         let validator = jsonschema::validator_for(&schema)
             .expect("the generated schema should be a valid JSON Schema");

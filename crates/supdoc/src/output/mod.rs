@@ -3,9 +3,6 @@
 //! [`Output`] is the one place supdoc writes to stdout and stderr. Reports are plain values that
 //! implement [`Report`], so every format of every report can be tested without files or a terminal.
 
-/// JSON Schema for every report, and the `supdoc schema` export (07 G10).
-pub mod schema;
-
 /// How output is shown: format, verbosity, and the context text rendering needs.
 pub mod format;
 

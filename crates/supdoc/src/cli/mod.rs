@@ -1,8 +1,7 @@
 //! The command-line interface: arguments, parsing and command dispatch (06).
 //!
 //! [`run`] holds the one dispatch `match`. Each command lives in `cli/<command>.rs` and exposes a
-//! `run` function, so building a command means editing only its own file. Until a command is
-//! built, its `run` returns the `cli-not-built` error.
+//! `run` function, so building a command means editing only its own file.
 
 /// Command-line argument definitions.
 pub mod args;
@@ -107,7 +106,7 @@ pub struct ErrorSite {
 /// module's own `code()`, `help()` and `exit_code()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliError {
-    /// Stable code, never reworded: `config-extends-missing`, `cli-not-built`.
+    /// Stable code, never reworded: `config-extends-missing`.
     code: &'static str,
     /// What happened, in one line.
     message: String,
@@ -145,22 +144,6 @@ impl CliError {
             ..self
         }
     }
-
-    /// The error a command returns until it is built.
-    #[must_use]
-    pub fn not_built(command: &str) -> Self {
-        Self::new(
-            Self::NOT_BUILT,
-            format!("`supdoc {command}` is not built yet"),
-            format!(
-                "this build has the arguments of `supdoc {command}` but not its behavior; install a release that includes the command with `cargo install supdoc`"
-            ),
-            Self::BUG_EXIT_CODE,
-        )
-    }
-
-    /// The code of [`CliError::not_built`].
-    pub const NOT_BUILT: &'static str = "cli-not-built";
 
     /// The exit code for a supdoc bug (06 X7).
     pub const BUG_EXIT_CODE: u8 = 70;
@@ -223,7 +206,7 @@ impl std::error::Error for CliError {}
 ///
 /// # Errors
 ///
-/// Returns the command's own [`CliError`], or `cli-not-built` for a command that is not built.
+/// Returns the command's own [`CliError`].
 pub fn run(command: &Command, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     match command {
         Command::Check(args) => check::run(args, context, output),
@@ -245,13 +228,11 @@ pub fn run(command: &Command, context: &Context, output: &mut Output) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use clap::{CommandFactory, Parser as _};
+    use clap::CommandFactory;
 
-    use super::*;
     use crate::cli::args::Cli;
-    use crate::output::{OutputSettings, PathStyle, Verbosity};
 
-    /// One invocation per leaf subcommand, with the dispatch path it must take.
+    /// One invocation per leaf subcommand, that the arguments must cover.
     const INVOCATIONS: [(&str, &[&str]); 12] = [
         ("check", &["supdoc", "check"]),
         ("update", &["supdoc", "update"]),
@@ -269,69 +250,6 @@ mod tests {
         ("completions", &["supdoc", "completions", "zsh"]),
         ("skill install", &["supdoc", "skill", "install"]),
     ];
-
-    /// Runs `argv` with a fresh, empty directory as the current directory, so a built command
-    /// that writes files never touches a shared location.
-    fn dispatch(argv: &[&str]) -> Result<Outcome, CliError> {
-        let cli = Cli::try_parse_from(argv).unwrap_or_else(|error| {
-            panic!("`{}` should parse: {error}", argv.join(" "));
-        });
-        let dir = tempfile::tempdir().expect("a fresh temp directory should be created");
-        let cwd = AbsolutePath::new(dir.path()).expect("a temp directory should be absolute");
-        let settings = OutputSettings {
-            format: cli.global.format(),
-            verbosity: Verbosity::from_flags(cli.global.quiet, cli.global.verbose),
-            color: false,
-            unicode: false,
-            width: 80,
-            paths: PathStyle::new(cwd.clone(), cwd.clone(), None),
-        };
-        let mut output = Output::stdio(settings, anstream::ColorChoice::Never);
-        let context = Context {
-            global: cli.global,
-            cwd,
-            home: None,
-            claude_config_dir: None,
-        };
-        run(&cli.command, &context, &mut output)
-    }
-
-    #[test]
-    fn every_subcommand_dispatches_to_its_own_run() {
-        for (name, argv) in INVOCATIONS {
-            let result = dispatch(argv);
-
-            // A command that is built has its own tests. One that is not built must say so by
-            // name, which proves the match routed it to the right file.
-            if let Err(error) = result.as_ref().map_err(CliError::code)
-                && error == CliError::NOT_BUILT
-            {
-                let message = result.as_ref().err().map(CliError::message);
-                assert_eq!(
-                    message,
-                    Some(format!("`supdoc {name}` is not built yet").as_str()),
-                    "`supdoc {name}` was routed to another command",
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn unbuilt_commands_return_the_not_built_error_with_exit_code_70() {
-        for (name, argv) in INVOCATIONS {
-            let Err(error) = dispatch(argv) else {
-                continue;
-            };
-            if error.code() == CliError::NOT_BUILT {
-                assert_eq!(error.exit_code(), 70, "exit code of unbuilt `{name}`");
-                assert!(
-                    error.help().contains(name),
-                    "help of unbuilt `{name}` should name the command: {}",
-                    error.help()
-                );
-            }
-        }
-    }
 
     #[test]
     fn every_leaf_subcommand_has_an_invocation_above() {

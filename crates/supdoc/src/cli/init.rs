@@ -113,12 +113,9 @@ pub fn run(args: &InitArgs, context: &Context, output: &mut Output) -> Result<Ou
 
 /// The JSON Schema of `supdoc init`'s `--json` output: the whole envelope, with `data` typed as
 /// the starter report.
-///
-/// # Errors
-///
-/// Never fails; the `Result` matches the commands that are not built yet.
-pub fn schema() -> Result<schemars::Schema, CliError> {
-    Ok(schemars::schema_for!(Envelope<'static, StarterReport>))
+#[must_use]
+pub fn schema() -> schemars::Schema {
+    schemars::schema_for!(Envelope<'static, StarterReport>)
 }
 
 /// Where the starter config goes: `-c PATH` resolved against the current directory, otherwise
@@ -698,8 +695,7 @@ mod tests {
         let _outcome = run(&args, &context, &mut output).expect("the dry run should succeed");
         let json: serde_json::Value = serde_json::from_str(&stdout.text())
             .unwrap_or_else(|error| panic!("stdout should be JSON ({error}): {}", stdout.text()));
-        let schema = serde_json::to_value(schema().expect("init is built, so it has a schema"))
-            .expect("the init schema should serialize");
+        let schema = serde_json::to_value(schema()).expect("the init schema should serialize");
         let validator = jsonschema::validator_for(&schema)
             .expect("the generated schema should be a valid JSON Schema");
 

@@ -451,13 +451,6 @@ mod helps {
     /// Codes no binary run can print reliably, built through the library instead.
     const UNIT_CASES: &[UnitCase] = &[
         UnitCase {
-            kind: "cli-not-built",
-            build: || {
-                let error = supdoc::cli::CliError::not_built("check");
-                (error.code().to_owned(), Some(error.help().to_owned()))
-            },
-        },
-        UnitCase {
             kind: "read-internal",
             build: || {
                 let path =

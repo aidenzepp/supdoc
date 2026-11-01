@@ -55,12 +55,12 @@ const ERROR: &str = "error";
 /// Runs `supdoc schema`, printing the schema document through `output`.
 ///
 /// With a `COMMAND` the document is that command's schema. Without one it is one 2020-12 document
-/// holding the schema of every command this build has built, and of the error, under `$defs`,
+/// holding the schema of every command, and of the error, under `$defs`,
 /// with a top-level `oneOf` over them.
 ///
 /// # Errors
 ///
-/// Returns `cli-not-built` for a named command that is not built yet, and `cli-schema-write` when
+/// Returns `cli-schema-serialize` if a schema cannot become JSON, and `cli-schema-write` when
 /// standard output cannot be written for a reason other than a closed pipe.
 pub fn run(
     args: &SchemaArgs,
@@ -82,10 +82,9 @@ pub fn run(
 ///
 /// # Errors
 ///
-/// Returns `cli-not-built` while the command is not built, and `cli-schema-serialize` if the
-/// schema cannot become JSON.
+/// Returns `cli-schema-serialize` if the schema cannot become JSON.
 fn schema_value(target: SchemaTarget) -> Result<Value, CliError> {
-    let mut schema = to_value(schema_of(target)?, &name(target))?;
+    let mut schema = to_value(schema_of(target), &name(target))?;
     pin_command(&mut schema, &command_words(target));
     Ok(schema)
 }
@@ -133,11 +132,7 @@ fn pin_command(schema: &mut Value, command: &str) {
 }
 
 /// The schema `target`'s command publishes.
-///
-/// # Errors
-///
-/// Returns `cli-not-built` while the command is not built.
-fn schema_of(target: SchemaTarget) -> Result<schemars::Schema, CliError> {
+fn schema_of(target: SchemaTarget) -> schemars::Schema {
     match target {
         SchemaTarget::Check => check::schema(),
         SchemaTarget::Update => update::schema(),
@@ -159,12 +154,11 @@ fn name(target: SchemaTarget) -> String {
         .map_or_else(String::new, |value| value.get_name().to_owned())
 }
 
-/// The one document `supdoc schema` prints without a COMMAND: every built command's schema and
+/// The one document `supdoc schema` prints without a COMMAND: every command's schema and
 /// the error's under `$defs`, and a top-level `oneOf` over them.
 ///
 /// Each entry is its own schema resource, with an `$id` and its own `$defs`, so the `#/$defs/...`
-/// references inside it keep resolving. A command that is not built has no JSON output to
-/// describe yet, so it is left out rather than failing the rest.
+/// references inside it keep resolving.
 ///
 /// # Errors
 ///
@@ -172,11 +166,7 @@ fn name(target: SchemaTarget) -> String {
 fn combined_schema() -> Result<Value, CliError> {
     let mut entries = Vec::new();
     for target in SchemaTarget::value_variants() {
-        match schema_value(*target) {
-            Ok(schema) => entries.push((name(*target), schema)),
-            Err(error) if error.code() == CliError::NOT_BUILT => {}
-            Err(error) => return Err(error),
-        }
+        entries.push((name(*target), schema_value(*target)?));
     }
     entries.push((ERROR.to_owned(), error_value()?));
 
@@ -322,32 +312,15 @@ mod tests {
                 .unwrap_or_else(|| panic!("{} names no command", path.display()));
             assert!(
                 schema_value(*target).is_ok(),
-                "{} ships a schema for a command that is not built",
+                "{} should hold the schema of a command that publishes one",
                 path.display()
             );
         }
     }
 
     #[test]
-    fn a_named_command_that_is_not_built_says_so() {
-        for target in SchemaTarget::value_variants() {
-            let Err(error) = schema_value(*target) else {
-                continue;
-            };
-
-            assert_eq!(error.code(), CliError::NOT_BUILT, "`{}`", name(*target));
-            let spoken = format!("supdoc {}", name(*target).replace('-', " "));
-            assert!(
-                error.message().contains(&spoken),
-                "the not-built error should name `{spoken}`: {}",
-                error.message()
-            );
-        }
-    }
-
-    #[test]
     fn the_bare_document_is_a_2020_12_schema_with_defs_error_and_one_of() {
-        let document = combined_schema().expect("unbuilt commands are skipped, not fatal");
+        let document = combined_schema().expect("every schema should become JSON");
 
         assert_eq!(document.pointer("/$schema"), Some(&Value::from(DIALECT)));
         let _validator = jsonschema::validator_for(&document)
@@ -380,7 +353,7 @@ mod tests {
 
     #[test]
     fn the_bare_document_accepts_the_error_and_rejects_other_json() {
-        let document = combined_schema().expect("the document should build");
+        let document = combined_schema().expect("every schema should become JSON");
         let validator = jsonschema::validator_for(&document).expect("a valid schema");
 
         let fatal = serde_json::json!({

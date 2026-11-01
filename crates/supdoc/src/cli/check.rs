@@ -66,12 +66,9 @@ pub fn run(args: &CheckArgs, context: &Context, output: &mut Output) -> Result<O
 
 /// The JSON Schema of `supdoc check`'s `--json` output: the whole envelope, with `data` typed as
 /// [`CheckReport`].
-///
-/// # Errors
-///
-/// Never fails; the `Result` matches the commands that are not built yet.
-pub fn schema() -> Result<schemars::Schema, CliError> {
-    Ok(schemars::schema_for!(Envelope<'static, CheckReport>))
+#[must_use]
+pub fn schema() -> schemars::Schema {
+    schemars::schema_for!(Envelope<'static, CheckReport>)
 }
 
 /// The error for a report that could not be written.
@@ -911,7 +908,7 @@ mod tests {
 
     /// Every way `json` breaks the schema `schema()` publishes for `supdoc check`.
     fn schema_violations(json: &serde_json::Value) -> Vec<String> {
-        let schema = schema().expect("check is built, so it has a schema");
+        let schema = schema();
         let schema = serde_json::to_value(schema).expect("the check schema should serialize");
         let validator = jsonschema::validator_for(&schema)
             .expect("the generated schema should be a valid JSON Schema");
