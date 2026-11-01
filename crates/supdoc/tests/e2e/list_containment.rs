@@ -1,8 +1,6 @@
 //! `supdoc list TARGET#symbol` reads no file outside the project root and never blocks on a file
 //! that isn't a regular file (#60).
 
-#![cfg(unix)]
-
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::process::{Command, Stdio};
@@ -123,9 +121,10 @@ fn list_target_symbol_never_reads_outside_the_root_or_blocks_on_a_fifo() {
 
     // FIFO: never opened, so the run finishes.
     let fifo = run_bounded(&project, &["list", "src/pipe.rs#x"]);
-    assert!(
-        fifo.code.is_some(),
-        "`list src/pipe.rs#x` was killed by a signal: {}",
+    assert_eq!(
+        fifo.code,
+        Some(0),
+        "`list src/pipe.rs#x` should list nothing and exit 0, never open the pipe: {}",
         fifo.stderr
     );
 }
