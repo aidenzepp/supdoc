@@ -27,7 +27,7 @@ use super::{CliError, Context, Outcome};
 /// Returns the config's own error (78, or 74 when unreadable) and `cli-config-output` when the
 /// report cannot be written (74).
 pub fn run(inspect: Inspect, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
-    let config = load_config(context, output, command(inspect))?;
+    let config = load_config(context, output)?;
     let written = match inspect {
         Inspect::ConfigShow => output
             .report(&ConfigShowReport::new(&config), true)
@@ -72,14 +72,6 @@ pub fn schema(inspect: Inspect) -> schemars::Schema {
         Inspect::NamespaceList { .. } => {
             schemars::schema_for!(Envelope<'static, NamespaceListReport>)
         }
-    }
-}
-
-/// The command `inspect` names, as a user types it after `supdoc`.
-const fn command(inspect: Inspect) -> &'static str {
-    match inspect {
-        Inspect::ConfigShow => "config show",
-        Inspect::NamespaceList { .. } => "namespace list",
     }
 }
 

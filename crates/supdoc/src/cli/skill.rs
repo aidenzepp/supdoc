@@ -162,12 +162,11 @@ fn destinations(
 fn project_root(context: &Context, output: &mut Output) -> Result<AbsolutePath, CliError> {
     if let Some(file) = &context.global.config {
         let file = absolute(&context.cwd, file);
-        check_config_exists(&file)
-            .map_err(|error| config_failure(&error, context, output, "skill install"))?;
+        check_config_exists(&file).map_err(|error| config_failure(&error, context, output))?;
         return Ok(file.parent().unwrap_or(file));
     }
-    let found = discover_config(&context.cwd)
-        .map_err(|error| config_failure(&error, context, output, "skill install"))?;
+    let found =
+        discover_config(&context.cwd).map_err(|error| config_failure(&error, context, output))?;
     Ok(found
         .and_then(|file| file.parent())
         .unwrap_or_else(|| context.cwd.clone()))
@@ -395,7 +394,7 @@ fn exists(shown: &str) -> Finding {
         Severity::Warning,
         format!("{shown} already exists with different contents"),
     )
-    .with_help("Re-run with `--yes` to replace it")
+    .with_help("Repeat the command with `--yes` added to replace it, for example `supdoc skill install --yes`")
 }
 
 /// The refusal for a project copy that `link` would send out of `root`: to `real`, or somewhere
@@ -452,7 +451,7 @@ fn no_home() -> CliError {
     CliError::new(
         "cli-skill-no-home",
         "`--global` installs into your home directory, but HOME is not set",
-        "Set HOME to your home directory, or drop `--global` to install into the project",
+        "Set HOME, for example `export HOME=/home/you`, or drop `--global` to install into the project",
         CliError::USAGE_EXIT_CODE,
     )
 }

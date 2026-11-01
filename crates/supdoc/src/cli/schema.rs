@@ -247,8 +247,18 @@ mod tests {
         );
     }
 
+    /// The environment variable that makes the drift tests rewrite the shipped files.
+    const REGENERATE_VAR: &str = "SUPDOC_REGENERATE_SCHEMAS";
+
     /// Asserts `shipped` is exactly what `supdoc schema` prints for `file`'s schema.
+    ///
+    /// With `SUPDOC_REGENERATE_SCHEMAS` set, rewrites `file` instead.
     fn assert_file_current(file: &std::path::Path, schema: &Value, regenerate: &str) {
+        if std::env::var_os(REGENERATE_VAR).is_some() {
+            std::fs::write(file, pretty(schema))
+                .unwrap_or_else(|error| panic!("{} should be writable: {error}", file.display()));
+            return;
+        }
         let shipped = std::fs::read_to_string(file).unwrap_or_else(|error| {
             panic!("{} should exist: {error}", file.display());
         });
@@ -265,16 +275,16 @@ mod tests {
         let Some(dir) = schema_dir_if_present() else {
             return;
         };
-        let mut checked = 0;
         for target in SchemaTarget::value_variants() {
-            let Ok(schema) = schema_value(*target) else {
-                continue;
-            };
+            let schema = schema_value(*target).expect("every command's schema should serialize");
             let file = dir.join(format!("{}.json", name(*target)));
-            assert_file_current(&file, &schema, &format!("supdoc schema {}", name(*target)));
-            checked += 1;
+            let command = name(*target);
+            assert_file_current(
+                &file,
+                &schema,
+                &format!("supdoc schema {command} > schema/{command}.json"),
+            );
         }
-        assert!(checked > 0, "at least one command should be built");
     }
 
     #[test]
@@ -287,7 +297,7 @@ mod tests {
         assert_file_current(
             &file,
             &schema,
-            "supdoc schema > schema/error.json (error entry)",
+            &format!("{REGENERATE_VAR}=1 cargo test -p supdoc cli::schema"),
         );
     }
 
@@ -310,11 +320,7 @@ mod tests {
                 .iter()
                 .find(|target| name(**target) == stem)
                 .unwrap_or_else(|| panic!("{} names no command", path.display()));
-            assert!(
-                schema_value(*target).is_ok(),
-                "{} should hold the schema of a command that publishes one",
-                path.display()
-            );
+            let _schema = schema_value(*target).expect("every command's schema should serialize");
         }
     }
 
@@ -334,10 +340,9 @@ mod tests {
             "$defs should hold the error schema"
         );
         for target in SchemaTarget::value_variants() {
-            assert_eq!(
+            assert!(
                 defs.contains_key(&name(*target)),
-                schema_value(*target).is_ok(),
-                "`{}` should appear in $defs exactly when it is built",
+                "`{}` should appear in $defs",
                 name(*target)
             );
         }
@@ -400,9 +405,7 @@ mod tests {
     #[test]
     fn every_published_schema_is_a_valid_json_schema_with_a_versioned_envelope() {
         for target in SchemaTarget::value_variants() {
-            let Ok(schema) = schema_value(*target) else {
-                continue;
-            };
+            let schema = schema_value(*target).expect("every command's schema should serialize");
             let _validator = jsonschema::validator_for(&schema).unwrap_or_else(|error| {
                 panic!("`{}` publishes an invalid schema: {error}", name(*target))
             });
