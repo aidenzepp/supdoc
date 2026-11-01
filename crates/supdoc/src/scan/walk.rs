@@ -782,8 +782,9 @@ fn explicit_path_warnings(
 }
 
 /// The warning for one explicitly named path, or `None` when it was walked or is skipped for a
-/// reason that isn't a user setting (missing, a symlink, a version-control or nested-project
-/// directory).
+/// reason that isn't a user setting (missing, a version-control or nested-project directory).
+/// A path that is a symlink, or lies under a symlinked directory, is never walked, so it always
+/// gets a warning.
 fn explicit_path_warning(
     config: &Config,
     languages: &Languages,
@@ -794,7 +795,13 @@ fn explicit_path_warning(
     let root = config.root();
     let path = AbsolutePath::new(&root.as_path().join(listed.as_str()))?;
     let kind = fs::symlink_metadata(path.as_path()).ok()?.file_type();
-    if (!kind.is_file() && !kind.is_dir()) || is_inside_skipped_dir(root, listed) {
+    if is_inside_skipped_dir(root, listed) {
+        return None;
+    }
+    if kind.is_symlink() {
+        return Some(symlinked(root, listed, &path, Symlink::Itself));
+    }
+    if !kind.is_file() && !kind.is_dir() {
         return None;
     }
 
@@ -814,14 +821,13 @@ fn explicit_path_warning(
     if is_source_file && !config.scans(&path) {
         return Some(excluded(listed, None));
     }
+    // The walk never enters a symlinked directory, so nothing under one is walked and no rule
+    // names it.
+    if has_symlinked_parent(root, listed) {
+        return Some(symlinked(root, listed, &path, Symlink::Parent));
+    }
     if is_source_file && !walked {
-        // The walk never enters a symlinked directory, so a path under one is not walked and no
-        // rule names it.
-        return Some(if has_symlinked_parent(root, listed) {
-            symlinked_parent(root, listed, &path)
-        } else {
-            ignored(listed, "an ignore file")
-        });
+        return Some(ignored(listed, "an ignore file"));
     }
     None
 }
@@ -842,17 +848,34 @@ fn has_symlinked_parent(root: &AbsolutePath, listed: &SourcePath) -> bool {
     false
 }
 
-/// The finding for an explicit path reached through a symlinked directory, which the walk does
-/// not enter. It suggests the real path only when that lies inside the project.
-fn symlinked_parent(root: &AbsolutePath, listed: &SourcePath, path: &AbsolutePath) -> Finding {
+/// Where the symlink sits that keeps the walk from an explicitly named path.
+#[derive(Clone, Copy)]
+enum Symlink {
+    /// The named path is itself a symlink, which the walk doesn't follow.
+    Itself,
+    /// A directory above the named path is a symlink, which the walk doesn't enter.
+    Parent,
+}
+
+/// The finding for an explicit path that is a symlink or is reached through a symlinked
+/// directory, neither of which the walk follows. It suggests the real path only when that lies
+/// inside the project.
+fn symlinked(
+    root: &AbsolutePath,
+    listed: &SourcePath,
+    path: &AbsolutePath,
+    symlink: Symlink,
+) -> Finding {
     let listed = listed.as_str();
-    let finding = Finding::new(
-        "scan-explicit-path-symlinked",
-        Severity::Warning,
-        format!(
+    let message = match symlink {
+        Symlink::Itself => format!(
+            "{listed} was named on the command line but is a symlink, which supdoc doesn't follow",
+        ),
+        Symlink::Parent => format!(
             "{listed} was named on the command line but is reached through a symlinked directory, which supdoc doesn't enter",
         ),
-    );
+    };
+    let finding = Finding::new("scan-explicit-path-symlinked", Severity::Warning, message);
     let real = fs::canonicalize(path.as_path()).ok().and_then(|real| {
         let real_root = fs::canonicalize(root.as_path()).ok()?;
         let relative = real.strip_prefix(real_root).ok()?;
@@ -860,7 +883,7 @@ fn symlinked_parent(root: &AbsolutePath, listed: &SourcePath, path: &AbsolutePat
     });
     match real {
         Some(real) => finding.with_help(format!("Pass the real path `{real}` instead")),
-        None => finding.with_help("Pass the path of the real directory inside the project instead"),
+        None => finding.with_help("Pass the real path inside the project instead"),
     }
 }
 
@@ -1064,6 +1087,81 @@ mod tests {
         assert_eq!(
             finding.help.as_deref(),
             Some("Pass the real path `real/a.rs` instead")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_named_symlinked_directory_warns_with_its_real_path() {
+        let project = Project::new();
+        project.write("real/a.md", "");
+        std::os::unix::fs::symlink("real", project.dir.path().join("alias"))
+            .expect("the fixture symlink should be creatable");
+
+        let walk = project.walk(&paths(&["alias"]));
+
+        assert_eq!(codes(&walk), ["scan-explicit-path-symlinked"]);
+        let finding = walk.findings.first().expect("one warning was expected");
+        assert_eq!(
+            finding.message,
+            "alias was named on the command line but is a symlink, which supdoc doesn't follow"
+        );
+        assert_eq!(
+            finding.help.as_deref(),
+            Some("Pass the real path `real` instead")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_named_directory_under_a_symlinked_directory_warns_with_its_real_path() {
+        let project = Project::new();
+        project.write("real/sub/a.md", "");
+        std::os::unix::fs::symlink("real", project.dir.path().join("alias"))
+            .expect("the fixture symlink should be creatable");
+
+        let walk = project.walk(&paths(&["alias/sub"]));
+
+        assert_eq!(codes(&walk), ["scan-explicit-path-symlinked"]);
+        let finding = walk.findings.first().expect("one warning was expected");
+        assert_eq!(
+            finding.help.as_deref(),
+            Some("Pass the real path `real/sub` instead")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_named_symlinked_file_warns_with_its_real_path() {
+        let project = Project::new();
+        project.write("real/a.md", "");
+        std::os::unix::fs::symlink("real/a.md", project.dir.path().join("link.md"))
+            .expect("the fixture symlink should be creatable");
+
+        let walk = project.walk(&paths(&["link.md"]));
+
+        assert_eq!(codes(&walk), ["scan-explicit-path-symlinked"]);
+        let finding = walk.findings.first().expect("one warning was expected");
+        assert_eq!(
+            finding.help.as_deref(),
+            Some("Pass the real path `real/a.md` instead")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_named_symlink_out_of_the_root_suggests_no_real_path() {
+        let outside = outside_dir();
+        let project = Project::new();
+        symlink_in(&project, "build", &outside.path().join("build"));
+
+        let walk = project.walk(&paths(&["build"]));
+
+        assert_eq!(codes(&walk), ["scan-explicit-path-symlinked"]);
+        let finding = walk.findings.first().expect("one warning was expected");
+        assert_eq!(
+            finding.help.as_deref(),
+            Some("Pass the real path inside the project instead")
         );
     }
 

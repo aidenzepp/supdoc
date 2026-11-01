@@ -12,7 +12,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::check::model::LinkReport;
-use crate::check::reconcile::reconcile;
+use crate::check::reconcile::reconcile_in;
 use crate::config::Config;
 use crate::finding::Finding;
 use crate::link::{LinkKey, LinkRef, SymbolPath, Target};
@@ -22,7 +22,7 @@ use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
 use crate::output::summary::render_summary;
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, OutputError, Report, Summary, TextContext};
+use crate::output::{Output, OutputError, PathStyle, Report, Summary, TextContext};
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile, SymbolTable};
 use crate::read::error::ResolveError;
@@ -64,7 +64,8 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
             )
         },
     )?;
-    let model = reconcile(&scan, &lock, &Scope::All);
+    let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
+    let model = reconcile_in(&scan, &lock, &Scope::All, &paths);
 
     let target = args
         .target
@@ -523,7 +524,7 @@ mod tests {
     use super::*;
     use crate::cli::args::{Cli, Command};
     use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
-    use crate::output::{OutputSettings, PathStyle, Verbosity};
+    use crate::output::{OutputSettings, Verbosity};
     use crate::scan::model::TargetState;
 
     /// The code the guides point at.
