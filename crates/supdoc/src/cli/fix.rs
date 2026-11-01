@@ -15,7 +15,7 @@ use crate::check::fix::{
     FixPlan, FixResult, PlannedFix, apply_fixes, move_lock_entries, plan_fixes,
 };
 use crate::check::model::Report as CheckModel;
-use crate::check::reconcile::reconcile;
+use crate::check::reconcile::reconcile_in;
 use crate::config::Config;
 use crate::finding::{Finding, Fix};
 use crate::link::{LinkKey, SourcePath};
@@ -84,6 +84,8 @@ struct Planned {
     lock: Lockfile,
     /// The fixes to preview or apply.
     plan: FixPlan,
+    /// How help commands name files: relative to the current directory.
+    paths: PathStyle,
     /// Broken links in scope, fixable or not, for the note when nothing can be fixed.
     broken: usize,
 }
@@ -110,8 +112,10 @@ impl Planned {
                 scope.contains(&key.source) && matches!(link.target, TargetState::Broken { .. })
             })
             .count();
+        let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
         Ok(Self {
             plan: plan_fixes(&scan),
+            paths,
             config,
             lock,
             broken,
@@ -230,7 +234,7 @@ impl Planned {
                 .map(|planned| planned.fix.file.clone())
                 .collect();
             let scope = Scope::Paths(fixed.into_iter().collect());
-            reconcile(&scan(&self.config, &scope)?, &lock, &scope)
+            reconcile_in(&scan(&self.config, &scope)?, &lock, &scope, &self.paths)
         };
         let fixes: Vec<FixRecord> = done
             .iter()
