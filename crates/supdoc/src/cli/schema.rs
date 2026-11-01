@@ -15,7 +15,7 @@ use serde_json::{Map, Value};
 use crate::output::json::FatalJson;
 use crate::output::{Output, OutputError, Report, TextContext};
 
-use super::args::{Inspect, Limit, SchemaArgs, SchemaTarget};
+use super::args::{SchemaArgs, SchemaTarget};
 use super::{
     CliError, Context, Outcome, check, config, fix, init, list, rename, resolve, skill, update,
 };
@@ -108,8 +108,11 @@ fn to_value(schema: schemars::Schema, what: &str) -> Result<Value, CliError> {
         CliError::new(
             "cli-schema-serialize",
             format!("could not turn the schema of `{what}` into JSON: {error}"),
-            "this is a supdoc bug; report it with the command you ran and the output of \
-             `supdoc --version`",
+            concat!(
+                "this is a supdoc bug; report it at ",
+                env!("CARGO_PKG_REPOSITORY"),
+                "/issues with the command you ran and the output of `supdoc --version`"
+            ),
             CliError::BUG_EXIT_CODE,
         )
     })
@@ -139,10 +142,8 @@ fn schema_of(target: SchemaTarget) -> schemars::Schema {
         SchemaTarget::Fix => fix::schema(),
         SchemaTarget::List => list::schema(),
         SchemaTarget::Resolve => resolve::schema(),
-        SchemaTarget::ConfigShow => config::schema(Inspect::ConfigShow),
-        SchemaTarget::NamespaceList => config::schema(Inspect::NamespaceList {
-            limit: Limit::UNLIMITED,
-        }),
+        SchemaTarget::ConfigShow => config::config_show_schema(),
+        SchemaTarget::NamespaceList => config::namespace_list_schema(),
         SchemaTarget::NamespaceRename => rename::schema(),
         SchemaTarget::Init => init::schema(),
         SchemaTarget::SkillInstall => skill::schema(),

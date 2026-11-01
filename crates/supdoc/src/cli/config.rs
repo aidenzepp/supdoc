@@ -26,7 +26,11 @@ use super::{CliError, Context, Outcome};
 ///
 /// Returns the config's own error (78, or 74 when unreadable) and `cli-config-output` when the
 /// report cannot be written (74).
-pub fn run(inspect: Inspect, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
+pub fn run(
+    inspect: Inspect<'_>,
+    context: &Context,
+    output: &mut Output,
+) -> Result<Outcome, CliError> {
     let config = load_config(context, output)?;
     let written = match inspect {
         Inspect::ConfigShow => output
@@ -41,11 +45,11 @@ pub fn run(inspect: Inspect, context: &Context, output: &mut Output) -> Result<O
                     Ok(())
                 }
             }),
-        Inspect::NamespaceList { limit } => {
-            let report = NamespaceListReport::new(&config, limit);
+        Inspect::NamespaceList(args) => {
+            let report = NamespaceListReport::new(&config, args.limit);
             output.report(&report, true).and_then(|()| {
                 if report.truncated {
-                    output.note(&limit.truncation_note(
+                    output.note(&args.limit.truncation_note(
                         report.namespaces.len(),
                         report.total,
                         "namespaces",
@@ -62,24 +66,25 @@ pub fn run(inspect: Inspect, context: &Context, output: &mut Output) -> Result<O
     Ok(Outcome::Clean)
 }
 
-/// The JSON Schema of the `--json` output of `supdoc config show` or `supdoc namespace list`, as
-/// `inspect` says: the whole envelope, with `data` typed as the command's report.
-/// The shape is the same for every `--limit`.
+/// The JSON Schema of the `--json` output of `supdoc config show`: the whole envelope, with `data`
+/// typed as the command's report.
 #[must_use]
-pub fn schema(inspect: Inspect) -> schemars::Schema {
-    match inspect {
-        Inspect::ConfigShow => schemars::schema_for!(Envelope<'static, ConfigShowReport>),
-        Inspect::NamespaceList { .. } => {
-            schemars::schema_for!(Envelope<'static, NamespaceListReport>)
-        }
-    }
+pub fn config_show_schema() -> schemars::Schema {
+    schemars::schema_for!(Envelope<'static, ConfigShowReport>)
+}
+
+/// The JSON Schema of the `--json` output of `supdoc namespace list`: the whole envelope, with
+/// `data` typed as the command's report. The shape is the same for every `--limit`.
+#[must_use]
+pub fn namespace_list_schema() -> schemars::Schema {
+    schemars::schema_for!(Envelope<'static, NamespaceListReport>)
 }
 
 /// The error for a report that could not be written.
-fn output_failed(inspect: Inspect, error: &OutputError) -> CliError {
+fn output_failed(inspect: Inspect<'_>, error: &OutputError) -> CliError {
     let (code, name) = match inspect {
         Inspect::ConfigShow => ("cli-config-output", "config show"),
-        Inspect::NamespaceList { .. } => ("cli-namespace-output", "namespace list"),
+        Inspect::NamespaceList(_) => ("cli-namespace-output", "namespace list"),
     };
     CliError::new(
         code,
@@ -191,7 +196,7 @@ pub(crate) struct NamespaceListReport {
 }
 
 impl NamespaceListReport {
-    /// The report for `config`, showing at most `limit` namespaces .
+    /// The report for `config`, showing at most `limit` namespaces.
     fn new(config: &Config, limit: Limit) -> Self {
         let all = namespace_rows(config);
         let total = all.len();
@@ -502,9 +507,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("`{}` should parse: {error}", command_line.join(" ")));
         let inspect = match &cli.command {
             Command::Config(ConfigCommand::Show) => Inspect::ConfigShow,
-            Command::Namespace(NamespaceCommand::List(args)) => {
-                Inspect::NamespaceList { limit: args.limit }
-            }
+            Command::Namespace(NamespaceCommand::List(args)) => Inspect::NamespaceList(args),
             _ => panic!(
                 "`{}` should be config show or namespace list",
                 command_line.join(" ")
@@ -681,9 +684,8 @@ mod tests {
         assert_eq!(run.stdout, "", "a fatal error leaves stdout empty");
     }
 
-    /// Every way `json` breaks the schema `schema(inspect)` publishes.
-    fn schema_violations(inspect: Inspect, json: &serde_json::Value) -> Vec<String> {
-        let schema = schema(inspect);
+    /// Every way `json` breaks `schema`, the schema a command publishes.
+    fn schema_violations(schema: schemars::Schema, json: &serde_json::Value) -> Vec<String> {
         let schema = serde_json::to_value(schema).expect("the schema should serialize");
         let validator = jsonschema::validator_for(&schema)
             .expect("the generated schema should be a valid JSON Schema");
@@ -701,7 +703,7 @@ mod tests {
         );
         let json = run_in_child(&project, &["--json", "config", "show"]).json();
 
-        let errors = schema_violations(Inspect::ConfigShow, &json);
+        let errors = schema_violations(config_show_schema(), &json);
 
         assert!(errors.is_empty(), "schema violations: {errors:?} in {json}");
         assert_eq!(at(&json, "/command"), "config show");
@@ -847,12 +849,7 @@ mod tests {
         );
         let json = project.run(&["--json", "namespace", "list"]).json();
 
-        let errors = schema_violations(
-            Inspect::NamespaceList {
-                limit: Limit::UNLIMITED,
-            },
-            &json,
-        );
+        let errors = schema_violations(namespace_list_schema(), &json);
 
         assert!(errors.is_empty(), "schema violations: {errors:?} in {json}");
         assert_eq!(at(&json, "/command"), "namespace list");

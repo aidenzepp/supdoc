@@ -2,7 +2,9 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
@@ -19,6 +21,16 @@ pub(crate) struct Run {
 }
 
 impl Run {
+    /// The run of `supdoc args` that produced `output`.
+    fn from_output(args: &[&str], output: Output) -> Self {
+        Self {
+            args: args.join(" "),
+            stdout: String::from_utf8(output.stdout).expect("stdout should be UTF-8"),
+            stderr: String::from_utf8(output.stderr).expect("stderr should be UTF-8"),
+            code: output.status.code(),
+        }
+    }
+
     /// Fails unless the run exited with `code`, showing both streams.
     pub(crate) fn assert_exit(&self, code: i32) -> &Self {
         assert_eq!(
@@ -98,19 +110,62 @@ impl Project {
     /// Runs `supdoc` with `args` from the project directory `dir`, with only the environment
     /// variables `vars`.
     pub(crate) fn supdoc_in_with(&self, dir: &str, args: &[&str], vars: &[(&str, &Path)]) -> Run {
-        let output = Command::new(env!("CARGO_BIN_EXE_supdoc"))
+        let output = self
+            .command(dir, args, vars)
+            .output()
+            .expect("the supdoc binary should start");
+        Run::from_output(args, output)
+    }
+
+    /// Runs `supdoc` with `args` from the project directory `dir` with no inherited
+    /// environment, failing the test if it runs past `limit`.
+    pub(crate) fn supdoc_bounded(&self, dir: &str, args: &[&str], limit: Duration) -> Run {
+        let mut child = self
+            .command(dir, args, &[])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the supdoc binary should start");
+        let started = Instant::now();
+        loop {
+            if child
+                .try_wait()
+                .expect("the run should be waitable")
+                .is_some()
+            {
+                break;
+            }
+            if started.elapsed() > limit {
+                drop(child.kill());
+                drop(child.wait());
+                panic!("`supdoc {}` hung for over {limit:?}", args.join(" "));
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        let output = child
+            .wait_with_output()
+            .expect("the finished run's output should be readable");
+        Run::from_output(args, output)
+    }
+
+    /// The `supdoc args` command, run from the project directory `dir` with only `vars` set.
+    fn command(&self, dir: &str, args: &[&str], vars: &[(&str, &Path)]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_supdoc"));
+        let _command = command
             .args(args)
             .current_dir(self.path(dir))
             .env_clear()
-            .envs(vars.iter().copied())
-            .output()
-            .expect("the supdoc binary should start");
-        Run {
-            args: args.join(" "),
-            stdout: String::from_utf8(output.stdout).expect("stdout should be UTF-8"),
-            stderr: String::from_utf8(output.stderr).expect("stderr should be UTF-8"),
-            code: output.status.code(),
+            .envs(vars.iter().copied());
+        command
+    }
+
+    /// Writes `text` to `relative`, creating its directories.
+    pub(crate) fn write(&self, relative: &str, text: &str) {
+        let path = self.path(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("the fixture directory should be creatable");
         }
+        std::fs::write(path, text).expect("the fixture file should be writable");
     }
 
     /// Records every link in `supdoc.lock` from the project root, as a user's first `update --yes`.

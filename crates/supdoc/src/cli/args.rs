@@ -374,15 +374,12 @@ pub struct RenameArgs {
 }
 
 /// What `config show` and `namespace list` read, handed to the one module that implements both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Inspect {
+#[derive(Debug, Clone, Copy)]
+pub enum Inspect<'a> {
     /// `supdoc config show`.
     ConfigShow,
-    /// `supdoc namespace list`, showing at most `limit` namespaces (0 means no limit).
-    NamespaceList {
-        /// `--limit`.
-        limit: Limit,
-    },
+    /// `supdoc namespace list` with its parsed arguments.
+    NamespaceList(&'a NamespaceListArgs),
 }
 
 /// Arguments of `supdoc schema`.
