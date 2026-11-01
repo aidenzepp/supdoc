@@ -401,7 +401,7 @@ fn render_settings_row(
     change: SettingsChangeJson,
     out: &mut dyn Write,
 ) -> io::Result<()> {
-    let arrow = if context.unicode { "→" } else { "->" };
+    let arrow = context.arrow();
     let LineEndingsChange { from, to } = change.line_endings;
     writeln!(out, "settings  line-endings  {from} {arrow} {to}")
 }
@@ -413,7 +413,7 @@ fn render_settings_row(
 ///
 /// Fails if writing to `out` fails.
 fn render_rows(context: &TextContext, rows: &[ChangeRow], out: &mut dyn Write) -> io::Result<()> {
-    let arrow = if context.unicode { "→" } else { "->" };
+    let arrow = context.arrow();
     // Printed by file then position (S8); `changes` in JSON and the lockfile keep `LinkKey` order.
     let mut ordered: Vec<&ChangeRow> = rows.iter().collect();
     ordered.sort_by_key(|row| {
@@ -429,10 +429,7 @@ fn render_rows(context: &TextContext, rows: &[ChangeRow], out: &mut dyn Write) -
             if let Some(first) = row.locations.first() {
                 written_at = format!("{written_at}:{}", first.line);
             }
-            let mut target = row.key.target.to_string();
-            if let Some(symbol) = &row.key.symbol {
-                target = format!("{target}#{symbol}");
-            }
+            let target = row.key.target_text();
             let mut result = match row.action {
                 Action::Accept => format!("{} {arrow} {}", row.state, LinkState::Passed),
                 Action::Record | Action::Remove => row.state.to_string(),

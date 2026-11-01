@@ -266,7 +266,7 @@ impl Report for ListReport {
 ///
 /// Fails if writing to `out` fails.
 fn render_link(context: &TextContext, link: &LinkJson, out: &mut dyn Write) -> io::Result<()> {
-    let arrow = if context.unicode { "→" } else { "->" };
+    let arrow = context.arrow();
     let mut place = visible(&context.paths.text(&link.key.source));
     if let Some(first) = link.locations.first() {
         place = format!("{place}:{}", first.line);
@@ -275,10 +275,7 @@ fn render_link(context: &TextContext, link: &LinkJson, out: &mut dyn Write) -> i
             place = format!("{place} (+{more} more)");
         }
     }
-    let mut target = link.key.target.to_string();
-    if let Some(symbol) = &link.key.symbol {
-        target = format!("{target}#{symbol}");
-    }
+    let target = link.key.target_text();
     let state = link.state.to_string();
     writeln!(out, "{state:<8}  {place}  {arrow}  {}", visible(&target))
 }
