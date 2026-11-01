@@ -12,32 +12,58 @@ use sha2::{Digest, Sha256};
 use crate::hash::{Hash, HashSettings, LineEndings};
 use crate::read::cartridge::{SourceFile, Symbol};
 
+/// A symbol whose range does not fit the file it was asked to be hashed in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolOutsideFile {
+    /// The symbol's byte range.
+    pub range: Range<usize>,
+    /// The file's length in bytes.
+    pub len: usize,
+}
+
 /// The hash of `symbol`'s bytes in `file`, `file.text()[symbol.range]`, under `settings`.
 ///
-/// Infallible because a symbol's range comes from `file`'s own tree. A range that doesn't fit
-/// `file` (a symbol from some other file) hashes as no bytes rather than panicking.
+/// Meant for a symbol taken from `file`'s own symbol table, whose range comes from `file`'s own
+/// tree. A range that doesn't fit `file` (a symbol from some other file) hashes as no bytes;
+/// [`try_hash_symbol`] refuses it instead.
 #[must_use]
 pub fn hash_symbol(file: &SourceFile, symbol: &Symbol, settings: HashSettings) -> Hash {
-    digest_range(file.text().as_bytes(), symbol.range.clone(), settings)
+    try_hash_symbol(file, symbol, settings).unwrap_or_else(|_| Hash::digest(b""))
+}
+
+/// The hash of `symbol`'s bytes in `file` under `settings`, failing closed.
+///
+/// # Errors
+///
+/// Returns [`SymbolOutsideFile`] when `symbol`'s range does not fit `file`, so a symbol from
+/// another file can never record a hash of no bytes.
+pub fn try_hash_symbol(
+    file: &SourceFile,
+    symbol: &Symbol,
+    settings: HashSettings,
+) -> Result<Hash, SymbolOutsideFile> {
+    let text = file.text().as_bytes();
+    digest_range(text, symbol.range.clone(), settings).ok_or_else(|| SymbolOutsideFile {
+        range: symbol.range.clone(),
+        len: text.len(),
+    })
 }
 
 /// The hash of every byte of `file`, under `settings`.
 #[must_use]
 pub fn hash_file(file: &SourceFile, settings: HashSettings) -> Hash {
     let text = file.text().as_bytes();
-    digest_range(text, 0..text.len(), settings)
+    digest_range(text, 0..text.len(), settings).unwrap_or_else(|| Hash::digest(b""))
 }
 
-/// SHA-256 of `text[range]` under `settings`, or of no bytes when `range` doesn't fit `text`.
+/// SHA-256 of `text[range]` under `settings`, or `None` when `range` doesn't fit `text`.
 ///
 /// Under [`LineEndings::Normalize`], a CR is dropped when the byte after it *in `text`* is an LF,
 /// so a CR at the range's end whose LF lies just outside it is still dropped (B.4). The bytes
 /// between dropped CRs are fed to the hasher in runs, so nothing is copied.
-fn digest_range(text: &[u8], range: Range<usize>, settings: HashSettings) -> Hash {
-    let Some(bytes) = text.get(range.clone()) else {
-        return Hash::digest(b"");
-    };
-    match settings.line_endings {
+fn digest_range(text: &[u8], range: Range<usize>, settings: HashSettings) -> Option<Hash> {
+    let bytes = text.get(range.clone())?;
+    Some(match settings.line_endings {
         LineEndings::Exact => Hash::digest(bytes),
         LineEndings::Normalize => {
             let after = text.get(range.end);
@@ -53,7 +79,7 @@ fn digest_range(text: &[u8], range: Range<usize>, settings: HashSettings) -> Has
             hasher.update(bytes.get(run_start..).unwrap_or_default());
             Hash::from_bytes(hasher.finalize().into())
         }
-    }
+    })
 }
 
 #[cfg(test)]
@@ -149,7 +175,7 @@ mod tests {
     }
 
     #[test]
-    fn range_outside_the_file_hashes_as_no_bytes() {
+    fn range_outside_the_file_is_refused() {
         let file = parse("fn add() {}\n");
         let foreign = Symbol {
             path: "elsewhere"
@@ -159,7 +185,14 @@ mod tests {
             range: 100..200,
         };
 
-        assert_eq!(hash_symbol(&file, &foreign, NORMALIZE), Hash::digest(b""));
+        assert_eq!(
+            try_hash_symbol(&file, &foreign, NORMALIZE),
+            Err(SymbolOutsideFile {
+                range: 100..200,
+                len: 12
+            }),
+            "a symbol from another file must not hash as no bytes",
+        );
     }
 
     /// A symbol over an explicit byte range of `file`, as a grammar would report it.

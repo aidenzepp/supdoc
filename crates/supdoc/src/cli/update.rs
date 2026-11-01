@@ -32,7 +32,8 @@ use crate::state::LinkState;
 use super::args::{UpdateArgs, WriteMode};
 use super::check::LinkLocationJson;
 use super::project::{
-    load_config, lock_failure, lock_path, read_lock_for_update, scope, settings_mismatch,
+    LockForUpdate, load_config, lock_failure, lock_path, read_lock_for_update, scope,
+    settings_mismatch,
 };
 use super::{CliError, Context, Outcome};
 
@@ -64,8 +65,12 @@ const MIGRATION_STATES: [LinkState; 3] = [LinkState::Failed, LinkState::New, Lin
 pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let config = load_config(context, output, &command_text(args))?;
     let scope = scope(&args.paths, &context.cwd, config.root())?;
-    let (lock, settings_change) = read_lock_for_update(&config, &context.cwd)?;
-    if let Some(change) = settings_change
+    let LockForUpdate {
+        lock,
+        settings,
+        change,
+    } = read_lock_for_update(&config, &context.cwd)?;
+    if let Some(change) = change
         && !migrates_every_entry(&scope, &args.state)
     {
         return Err(settings_mismatch(&config, change));
@@ -81,7 +86,7 @@ pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<
         })?;
 
     let model = reconcile(&scan, &lock, &scope);
-    let plan = plan_update(&model, &scan, &lock, &args.state, config.hash_settings());
+    let plan = plan_update(&model, &scan, &lock, &args.state, settings);
     let applied = args.confirm.mode() == WriteMode::Apply;
     if applied && let Some(next) = &plan.next {
         next.write(&lock_path(config.root()))

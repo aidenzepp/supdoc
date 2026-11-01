@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use crate::check::plan::SettingsChange;
 use crate::config::{Config, ConfigError};
 use crate::finding::{Location, Snippet};
+use crate::hash::HashSettings;
 use crate::link::SourcePath;
 use crate::lock::error::{LockError, SettingsMismatch, shell_quote};
 use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
@@ -186,14 +187,29 @@ pub(crate) fn lock_path(root: &AbsolutePath) -> AbsolutePath {
 /// Returns the lockfile's own error (74 when it can't be read, 78 when its text is invalid), or
 /// `lock-settings-mismatch` (78) when the recorded settings differ from the configured ones.
 pub(crate) fn read_lock(config: &Config, cwd: &AbsolutePath) -> Result<Lockfile, CliError> {
-    match read_lock_for_update(config, cwd)? {
-        (lock, None) => Ok(lock),
-        (_, Some(change)) => Err(settings_mismatch(config, change)),
+    let read = read_lock_for_update(config, cwd)?;
+    match read.change {
+        None => Ok(read.lock),
+        Some(change) => Err(settings_mismatch(config, change)),
     }
 }
 
-/// The lockfile in `config`'s root, and how the hash settings it records differ from the ones
-/// `config` resolves to, if they do (02 L10).
+/// A lockfile read for `update`, with the hash settings the run must hash under and how they
+/// differ from the ones the lockfile records.
+///
+/// The settings travel with the lock so the scan and the plan cannot each pick their own.
+#[derive(Debug)]
+pub(crate) struct LockForUpdate {
+    /// The lockfile as read, or an empty one under `settings` when there is none.
+    pub(crate) lock: Lockfile,
+    /// The settings every hash in this run uses: the ones `config` resolves to.
+    pub(crate) settings: HashSettings,
+    /// How the recorded settings differ from `settings`, if they do.
+    pub(crate) change: Option<SettingsChange>,
+}
+
+/// The lockfile in `config`'s root with the settings to hash under, and how the ones it records
+/// differ from them, if they do (02 L10).
 ///
 /// A missing lockfile is an empty one under `config`'s settings, so a fresh project never
 /// differs. A help names the lockfile relative to `cwd`, the directory supdoc runs in.
@@ -204,17 +220,25 @@ pub(crate) fn read_lock(config: &Config, cwd: &AbsolutePath) -> Result<Lockfile,
 pub(crate) fn read_lock_for_update(
     config: &Config,
     cwd: &AbsolutePath,
-) -> Result<(Lockfile, Option<SettingsChange>), CliError> {
+) -> Result<LockForUpdate, CliError> {
     let configured = config.hash_settings();
     let read = Lockfile::read(&lock_path(config.root()))
         .map_err(|error| lock_failure(&error, config.root(), cwd))?;
     let Some(lock) = read else {
         let mut empty = Lockfile::default();
         empty.set_hash_settings(configured);
-        return Ok((empty, None));
+        return Ok(LockForUpdate {
+            lock: empty,
+            settings: configured,
+            change: None,
+        });
     };
     let change = SettingsChange::between(lock.hash_settings(), configured);
-    Ok((lock, change))
+    Ok(LockForUpdate {
+        lock,
+        settings: configured,
+        change,
+    })
 }
 
 /// The `lock-settings-mismatch` error (78) for a command that can't re-record the lockfile under
