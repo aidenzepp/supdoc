@@ -49,15 +49,6 @@ const COMMAND: &str = "namespace rename";
 /// The note that closes a preview, after the counts.
 const PREVIEW_NOTE: &str = "Nothing written. Run the same command with --yes to apply.";
 
-/// The whole command as typed, for the config fallback help that says to run it again.
-fn command_text(args: &RenameArgs) -> String {
-    let mut command = format!("{COMMAND} {} {}", args.old, args.new);
-    if args.confirm.mode() == WriteMode::Apply {
-        command.push_str(" --yes");
-    }
-    command
-}
-
 /// Runs `supdoc namespace rename OLD NEW`: previews every edit, or with `--yes` makes them.
 ///
 /// # Errors
@@ -71,7 +62,7 @@ fn command_text(args: &RenameArgs) -> String {
 /// writing (all 1), `cli-rename-write` when a file can't be written, and `cli-rename-output` when
 /// the report can't be written (both 74).
 pub fn run(args: &RenameArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
-    let plan = Plan::build(&args.old, &args.new, &command_text(args), context, output)?;
+    let plan = Plan::build(&args.old, &args.new, context, output)?;
     let applied = match args.confirm.mode() {
         WriteMode::Preview => false,
         WriteMode::Apply => {
@@ -129,11 +120,10 @@ impl Plan {
     fn build(
         old: &NamespaceName,
         new: &NamespaceName,
-        command: &str,
         context: &Context,
         output: &mut Output,
     ) -> Result<Self, CliError> {
-        let config = load_config(context, output, command)?;
+        let config = load_config(context, output)?;
         let lock = read_lock(&config, &context.cwd)?;
         let nearest = defining_file(&config, old, new)?;
         let config_edit = ConfigEdit::read(nearest, config.root(), &context.cwd, old, new)?;
@@ -413,9 +403,7 @@ fn read_config(file: &AbsolutePath, cwd: &AbsolutePath) -> Result<String, CliErr
         CliError::new(
             error.code(),
             error.message_from(cwd),
-            error.help_from(cwd).unwrap_or_else(|| {
-                format!("Check that the file can be read, then run `supdoc {COMMAND}` again")
-            }),
+            error.help_from(cwd),
             error.exit_code(),
         )
     })
@@ -1204,14 +1192,8 @@ web = \"services/web\"
                 panic!("`{}` should be a namespace rename", args.join(" "));
             };
             let context = context(&cli, self.root());
-            Plan::build(
-                &rename.old,
-                &rename.new,
-                &command_text(rename),
-                &context,
-                &mut output,
-            )
-            .expect("the rename should plan")
+            Plan::build(&rename.old, &rename.new, &context, &mut output)
+                .expect("the rename should plan")
         }
     }
 

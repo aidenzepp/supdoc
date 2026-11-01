@@ -31,16 +31,12 @@ use super::{CliError, Context, ErrorSite};
 /// # Errors
 ///
 /// Returns the config's own error, with its code, help and exit code.
-pub(crate) fn load_config(
-    context: &Context,
-    output: &mut Output,
-    command: &str,
-) -> Result<Config, CliError> {
+pub(crate) fn load_config(context: &Context, output: &mut Output) -> Result<Config, CliError> {
     let loaded = match &context.global.config {
         Some(file) => Config::load_file(&absolute(&context.cwd, file)),
         None => Config::load(&context.cwd),
     };
-    let config = loaded.map_err(|error| config_failure(&error, context, output, command))?;
+    let config = loaded.map_err(|error| config_failure(&error, context, output))?;
     output.set_root(config.root().clone());
     Ok(config)
 }
@@ -87,18 +83,11 @@ pub(crate) fn config_failure(
     error: &ConfigError,
     context: &Context,
     output: &mut Output,
-    command: &str,
 ) -> CliError {
-    let help = error.help_from(&context.cwd).unwrap_or_else(|| {
-        format!(
-            "Correct the config as the message says, then run `{}` again",
-            invocation(context, command)
-        )
-    });
     let failure = CliError::new(
         error.code(),
         error.message_from(&context.cwd),
-        help,
+        error.help_from(&context.cwd),
         error.exit_code(),
     );
     match error_site(error, &context.cwd, output) {
@@ -444,7 +433,7 @@ mod tests {
             home: None,
             claude_config_dir: None,
         };
-        load_config(&context, &mut output, "list")
+        load_config(&context, &mut output)
     }
 
     /// A project with an empty config and a `docs` directory to run from.
@@ -552,9 +541,8 @@ mod tests {
     }
 
     #[test]
-    fn config_error_help_names_the_command_passed_in() {
+    fn a_wrong_type_help_names_the_key_and_its_form() {
         let dir = tempfile::tempdir().expect("a fresh temp directory should be created");
-        // A wrong type has no specific hint, so the help falls back to rerunning the command.
         fs::write(dir.path().join("supdoc.config.toml"), "include = 3\n")
             .expect("the fixture config should be written");
         let cwd = AbsolutePath::new(dir.path()).expect("a temp directory should be absolute");
@@ -575,7 +563,7 @@ mod tests {
             claude_config_dir: None,
         };
 
-        let error = load_config(&context, &mut output, "list")
+        let error = load_config(&context, &mut output)
             .expect_err("a config with a wrong type should not load");
 
         assert_eq!(
@@ -583,8 +571,8 @@ mod tests {
             ("config-parse", CliError::CONFIG_EXIT_CODE)
         );
         assert!(
-            error.help().contains("run `supdoc list` again"),
-            "the fallback help should name the command that was run: {}",
+            error.help().contains("`include = [\"docs\"]`"),
+            "a wrong type should get a help that names the key and its form: {}",
             error.help()
         );
     }
@@ -615,7 +603,7 @@ mod tests {
             claude_config_dir: None,
         };
 
-        let error = load_config(&context, &mut output, "list")
+        let error = load_config(&context, &mut output)
             .expect_err("a config with a syntax error should not load");
 
         let site = error.site().expect("a parse error should carry its site");

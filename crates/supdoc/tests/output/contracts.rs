@@ -516,12 +516,14 @@ mod helps {
         }
     }
 
-    /// Whether `help` quotes at least one non-empty backtick span: a command or a concrete value.
+    /// Whether `help` quotes at least one backtick span that is a command or a concrete value: a
+    /// bare flag such as `--config` names neither.
     fn quotes_a_command_or_value(help: &str) -> bool {
-        help.split('`')
-            .skip(1)
-            .step_by(2)
-            .any(|span| !span.trim().is_empty())
+        help.split('`').skip(1).step_by(2).any(|span| {
+            let span = span.trim();
+            let bare_flag = span.starts_with('-') && !span.contains(char::is_whitespace);
+            !span.is_empty() && !bare_flag
+        })
     }
 
     /// Whether `help` sends the reader elsewhere instead of saying what to do (07 G3).

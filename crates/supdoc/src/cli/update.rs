@@ -63,7 +63,7 @@ const MIGRATION_STATES: [LinkState; 3] = [LinkState::Failed, LinkState::New, Lin
 /// `--state`, `scan-root-unreadable` (74), and `cli-update-output` when the report cannot be
 /// written (74).
 pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
-    let config = load_config(context, output, &command_text(args))?;
+    let config = load_config(context, output)?;
     let scope = scope(&args.paths, &context.cwd, config.root())?;
     let LockForUpdate {
         lock,
@@ -456,20 +456,6 @@ fn render_rows(context: &TextContext, rows: &[ChangeRow], out: &mut dyn Write) -
         )?;
     }
     Ok(())
-}
-
-/// The command that repeats this run, as `supdoc update [PATH]... [--yes]` takes it, for helps
-/// that say to run it again.
-fn command_text(args: &UpdateArgs) -> String {
-    let mut command = String::from("update");
-    for path in &args.paths {
-        command.push(' ');
-        command.push_str(&shell_quote(&path.display().to_string()));
-    }
-    if args.confirm.mode() == WriteMode::Apply {
-        command.push_str(" --yes");
-    }
-    command
 }
 
 /// The cause of a broken link, as a top-level finding, or `None` for a link in any other state

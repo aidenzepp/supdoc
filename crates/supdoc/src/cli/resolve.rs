@@ -47,7 +47,7 @@ pub fn run(
     output: &mut Output,
 ) -> Result<Outcome, CliError> {
     let command = command_text(args);
-    let config = load_config(context, output, &command)?;
+    let config = load_config(context, output)?;
     let path = locate(&config, &context.cwd, &args.file)?;
     let file = SourceFile::read(path, &Languages::builtin())
         .map_err(|error| read_failed(&error, config.root(), &args.file))?;
