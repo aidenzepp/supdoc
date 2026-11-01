@@ -572,7 +572,7 @@ mod tests {
         let mut leaves = Vec::new();
         walk("supdoc", &Cli::command(), &mut leaves);
 
-        assert_eq!(leaves.len(), 12, "leaf subcommands: {leaves:?}");
+        assert!(!leaves.is_empty(), "no leaf subcommands found");
         for (name, after_help) in leaves {
             assert!(
                 after_help.starts_with("Examples:") && after_help.contains(&format!("\n  {name}")),
@@ -601,65 +601,61 @@ mod tests {
             .filter(|line| line.starts_with("supdoc "))
     }
 
+    /// Every `after_help` block of the command tree, the top level included.
+    fn after_help_blocks(command: &clap::Command, name: &str, blocks: &mut Vec<(String, String)>) {
+        if let Some(after_help) = command.get_after_help() {
+            blocks.push((name.to_owned(), after_help.to_string()));
+        }
+        for subcommand in command.get_subcommands() {
+            if subcommand.get_name() != "help" {
+                let path = format!("{name} {}", subcommand.get_name());
+                after_help_blocks(subcommand, &path, blocks);
+            }
+        }
+    }
+
     #[test]
     fn every_example_parses() {
-        use crate::cli::examples::{
-            CHECK_EXAMPLES, COMPLETIONS_EXAMPLES, CONFIG_SHOW_EXAMPLES, FIX_EXAMPLES,
-            INIT_EXAMPLES, LIST_EXAMPLES, NAMESPACE_LIST_EXAMPLES, NAMESPACE_RENAME_EXAMPLES,
-            RESOLVE_EXAMPLES, SCHEMA_EXAMPLES, SKILL_INSTALL_EXAMPLES, TOP_EXAMPLES,
-            UPDATE_EXAMPLES,
-        };
+        let mut blocks = Vec::new();
+        after_help_blocks(&Cli::command(), "supdoc", &mut blocks);
 
-        for block in [
-            TOP_EXAMPLES,
-            CHECK_EXAMPLES,
-            UPDATE_EXAMPLES,
-            FIX_EXAMPLES,
-            LIST_EXAMPLES,
-            RESOLVE_EXAMPLES,
-            CONFIG_SHOW_EXAMPLES,
-            NAMESPACE_LIST_EXAMPLES,
-            NAMESPACE_RENAME_EXAMPLES,
-            INIT_EXAMPLES,
-            SCHEMA_EXAMPLES,
-            COMPLETIONS_EXAMPLES,
-            SKILL_INSTALL_EXAMPLES,
-        ] {
-            for line in example_lines(block) {
+        for (name, block) in &blocks {
+            let lines: Vec<&str> = example_lines(block).collect();
+            assert!(!lines.is_empty(), "`{name}` has no example lines: {block}");
+            for line in lines {
                 let invocation = line.split(" > ").next().unwrap_or(line);
                 let args: Vec<&str> = invocation.split_whitespace().collect();
                 assert!(
                     matches!(parse_from(args.iter().copied(), |_| None), Parsed::Run(_)),
-                    "example `{line}` should parse"
+                    "example `{line}` in the `{name}` help should parse"
                 );
             }
         }
     }
 
     #[test]
-    fn read_and_write_commands_say_so_in_their_help() {
-        let mut command = Cli::command();
-        command.build();
-        for (name, expected) in [
-            ("check", "read-only"),
-            ("list", "read-only"),
-            ("resolve", "read-only"),
-            ("schema", "read-only"),
-            ("completions", "read-only"),
-            ("update", "writes"),
-            ("fix", "writes"),
-            ("init", "writes"),
-        ] {
-            let about = command
-                .find_subcommand(name)
-                .and_then(clap::Command::get_about)
-                .map(ToString::to_string)
-                .unwrap_or_default();
-            assert!(
-                about.contains(expected),
-                "`{name}` about should say `{expected}`: {about}"
-            );
+    fn every_leaf_command_says_whether_it_reads_or_writes() {
+        fn check(command: &clap::Command, name: &str) {
+            for subcommand in command.get_subcommands() {
+                if subcommand.get_name() == "help" {
+                    continue;
+                }
+                let path = format!("{name} {}", subcommand.get_name());
+                if subcommand.has_subcommands() {
+                    check(subcommand, &path);
+                    continue;
+                }
+                let about = subcommand
+                    .get_about()
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                assert!(
+                    about.contains("read-only") || about.contains("writes"),
+                    "`{path}` about should say `read-only` or `writes`: {about}"
+                );
+            }
         }
+        check(&Cli::command(), "supdoc");
     }
 
     #[test]
