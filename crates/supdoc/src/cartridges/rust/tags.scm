@@ -1,4 +1,4 @@
-; Rust symbols (03 R4, R5). Written in tree-sitter's tags.scm conventions plus the
+; Rust symbols. Written in tree-sitter's tags.scm conventions plus the
 ; @supdoc.scope extensions. Unlike the grammar's bundled tags.scm, this covers fields, enum
 ; variants, consts, statics, associated types and generic or trait impls.
 

@@ -23,7 +23,7 @@ use crate::finding::{Finding, Severity};
 use crate::lock::error::shell_quote;
 use crate::lock::io::write_atomically;
 use crate::output::json::Envelope;
-use crate::output::paths::relative_to;
+use crate::output::paths::{relative_or_absolute, relative_to};
 use crate::output::text::{render_finding, visible};
 use crate::output::{Output, Report, TextContext, preview_note};
 use crate::path::AbsolutePath;
@@ -131,7 +131,7 @@ pub fn run(
         .into_iter()
         .map(|path| SkillChange {
             action: inspect(&path),
-            shown: label(&path, &base),
+            shown: relative_or_absolute(&base, &path),
             path,
         })
         .collect();
@@ -265,14 +265,6 @@ fn check_config_exists(file: &AbsolutePath) -> Result<(), ConfigError> {
 /// `relative` joined onto `base`.
 fn beneath(base: &AbsolutePath, relative: &str) -> AbsolutePath {
     base.join_path(Path::new(relative))
-}
-
-/// `path` as a person reads it: relative to `base` when it is beneath it, absolute otherwise.
-fn label(path: &AbsolutePath, base: &AbsolutePath) -> String {
-    path.strip_prefix(base).map_or_else(
-        || path.display().to_string(),
-        |relative| relative.display().to_string(),
-    )
 }
 
 /// Refuses `target` when a directory between `root` and it leads outside `root` once symlinks
@@ -479,7 +471,7 @@ fn outside_root(
         || shell_quote(&link.display().to_string()),
         |link| shell_quote(&relative_to(cwd, &link)),
     );
-    let shown = label(target, root);
+    let shown = relative_or_absolute(root, target);
     let message = match real {
         Some(real) => {
             let landing = target

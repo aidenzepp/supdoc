@@ -1,5 +1,4 @@
-//! Python: a query-driven cartridge plus one override, `self.x` attributes of `__init__` (03 R1,
-//! Overrides).
+//! Python: a query-driven cartridge plus one override, `self.x` attributes of `__init__`.
 //!
 //! Symbols come from `tags.scm` and link regions (comments and docstrings) from `injections.scm`,
 //! both beside this file. Queries can't match at an arbitrary depth, so the attributes a class
@@ -9,7 +8,7 @@ use std::sync::LazyLock;
 
 use tree_sitter::Node;
 
-use crate::link::SymbolPath;
+use crate::link::SymbolSegment;
 use crate::read::cartridge::{
     Cartridge, CompiledQueries, LanguageId, MarkdownRegion, SourceFile, Symbol, SymbolTable,
 };
@@ -115,11 +114,7 @@ fn init_attributes(file: &SourceFile, tagged: &SymbolTable) -> Vec<Symbol> {
             .flat_map(|body| init_methods(body, file.text()))
         {
             for (name, assignment) in assigned_attributes(init, file.text()) {
-                let mut segments = class.path.segments().to_vec();
-                segments.push(name);
-                let Ok(path) = SymbolPath::from_segments(segments) else {
-                    continue;
-                };
+                let path = class.path.child(name);
                 let taken = |symbol: &Symbol| symbol.path == path;
                 if !tagged.iter().any(taken) && !attributes.iter().any(taken) {
                     attributes.push(Symbol {
@@ -153,7 +148,10 @@ fn init_methods<'tree>(body: Node<'tree>, text: &str) -> Vec<Node<'tree>> {
 }
 
 /// The `(x, assignment)` pairs for every `self.x = …` in `function`, in source order.
-fn assigned_attributes<'tree>(function: Node<'tree>, text: &str) -> Vec<(String, Node<'tree>)> {
+fn assigned_attributes<'tree>(
+    function: Node<'tree>,
+    text: &str,
+) -> Vec<(SymbolSegment, Node<'tree>)> {
     let mut found = Vec::new();
     let mut pending: Vec<Node<'tree>> = function.child_by_field_name("body").into_iter().collect();
     while let Some(node) = pending.pop() {
@@ -177,15 +175,16 @@ fn assigned_attributes<'tree>(function: Node<'tree>, text: &str) -> Vec<(String,
 }
 
 /// `x` if `target` is exactly `self.x`.
-fn self_attribute(target: Node<'_>, text: &str) -> Option<String> {
+fn self_attribute(target: Node<'_>, text: &str) -> Option<SymbolSegment> {
     if target.kind() != "attribute" {
         return None;
     }
     let object = target.child_by_field_name("object")?;
     let attribute = target.child_by_field_name("attribute")?;
     (object.kind() == "identifier" && text.get(object.byte_range()) == Some(RECEIVER))
-        .then(|| text.get(attribute.byte_range()).map(str::to_owned))
+        .then(|| text.get(attribute.byte_range()))
         .flatten()
+        .and_then(|name| SymbolSegment::new(name.to_owned()).ok())
 }
 
 #[cfg(test)]
@@ -372,7 +371,7 @@ def outer():
             .collect();
         assert_eq!(
             actual, expected,
-            "a grammar upgrade moved a symbol's node boundaries (02 L8)"
+            "a grammar upgrade moved a symbol's node boundaries"
         );
         assert_eq!(
             hash_file(&file, HashSettings::default()).to_string(),

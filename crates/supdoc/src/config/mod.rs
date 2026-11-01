@@ -20,7 +20,7 @@ use crate::path::AbsolutePath;
 
 use pattern::{AnchoredPatterns, PatternList};
 
-pub use error::ConfigError;
+pub use error::{ConfigError, NamespaceEscape};
 pub use pattern::PatternDefinition;
 
 /// The file name supdoc looks for in each directory.

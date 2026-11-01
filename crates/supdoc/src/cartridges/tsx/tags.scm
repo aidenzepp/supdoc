@@ -1,4 +1,4 @@
-; TSX symbols (03 R4, R5a). Written in tree-sitter's tags.scm conventions. Unlike the grammar's
+; TSX symbols. Written in tree-sitter's tags.scm conventions. Unlike the grammar's
 ; bundled tags.scm, this covers classes, fields, enums and their members, type aliases and
 ; module-level variables, and leaves out references. Names nest by containment: `Counter.increment`.
 ; Overloads and get/set pairs share one name, so resolving them reports every candidate (R5a).

@@ -304,7 +304,51 @@ pub enum TargetError {
 #[serde(try_from = "String")]
 pub struct SymbolPath(Vec<String>);
 
+/// One segment of a [`SymbolPath`]: non-empty and free of `.`.
+///
+/// Holding one proves the segment is valid, so [`SymbolPath::root`] and [`SymbolPath::child`]
+/// cannot fail.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SymbolSegment(String);
+
+impl SymbolSegment {
+    /// Checks `name` as a symbol path segment.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `name` is empty or contains `.`.
+    pub fn new(name: String) -> Result<Self, SymbolPathError> {
+        SymbolPath::from_segments(vec![name]).map(|path| Self(path.0.into_iter().collect()))
+    }
+
+    /// This segment with `-number` appended, which keeps it valid.
+    #[must_use]
+    pub fn numbered(&self, number: usize) -> Self {
+        Self(format!("{}-{number}", self.0))
+    }
+
+    /// The segment's text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 impl SymbolPath {
+    /// A one-segment path.
+    #[must_use]
+    pub fn root(segment: SymbolSegment) -> Self {
+        Self(vec![segment.0])
+    }
+
+    /// This path extended by one more segment.
+    #[must_use]
+    pub fn child(&self, segment: SymbolSegment) -> Self {
+        let mut segments = self.0.clone();
+        segments.push(segment.0);
+        Self(segments)
+    }
+
     /// Builds a path from its segments, outermost first.
     ///
     /// # Errors
@@ -739,6 +783,27 @@ mod tests {
         assert_eq!(parsed.segments(), ["Config", "Display", "fmt"]);
         assert_eq!(parsed.last(), "fmt");
         assert_eq!(parsed.to_string(), "Config.Display.fmt");
+    }
+
+    #[test]
+    fn symbol_path_built_from_valid_segments_matches_parsing() {
+        let segment = |name: &str| {
+            SymbolSegment::new(name.to_owned()).expect("the fixture segment should be valid")
+        };
+
+        let built = SymbolPath::root(segment("Config")).child(segment("validate").numbered(1));
+
+        assert_eq!(built, symbol("Config.validate-1"));
+    }
+
+    #[test]
+    fn symbol_segment_rejects_empty_and_dotted_names() {
+        for name in ["", "a.b"] {
+            assert!(
+                SymbolSegment::new(name.to_owned()).is_err(),
+                "segment `{name}` should be rejected"
+            );
+        }
     }
 
     #[test]

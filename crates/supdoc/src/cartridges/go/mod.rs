@@ -1,4 +1,4 @@
-//! Go: pure data over the query contract (03 R3–R5), with methods named by their receiver.
+//! Go: pure data over the query contract, with methods named by their receiver.
 //!
 //! Symbols come from `tags.scm` and link regions from `injections.scm`, both beside this file.
 //! The golden symbol list in the tests is the public contract: users type these paths into docs.
@@ -201,7 +201,7 @@ func (r *Ring[T]) Push(item T) {
                 .expect("the symbol should lie in its own file")
                 .to_string(),
                 hash,
-                "a grammar upgrade moved `{path}`'s node boundaries (02 L8)"
+                "a grammar upgrade moved `{path}`'s node boundaries"
             );
         }
         assert_eq!(

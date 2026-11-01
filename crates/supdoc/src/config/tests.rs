@@ -688,8 +688,9 @@ fn every_error_has_a_code_and_message_names_a_file() {
             file: file.clone(),
             name: name("shared"),
             directory: file.clone(),
+            span: 0..1,
             root: file.clone(),
-            through_symlink: false,
+            escape: NamespaceEscape::AsWritten,
         },
     ];
     let mut codes = Vec::new();
@@ -714,8 +715,9 @@ fn namespace_outside_root_help_makes_no_claim_about_what_supdoc_reads() {
         file: file.clone(),
         name: "shared".parse().expect("the fixture name should be valid"),
         directory: file.clone(),
+        span: 0..1,
         root: file,
-        through_symlink: false,
+        escape: NamespaceEscape::AsWritten,
     };
     let help = error.help().expect("the error should carry a help");
 
@@ -1313,6 +1315,68 @@ fn namespace_outside_the_root_is_a_config_error() {
     );
     assert_eq!(error.exit_code(), 78);
     assert!(error.to_string().contains("`up`"), "{error}");
+}
+
+#[test]
+fn namespace_outside_the_root_points_at_its_value() {
+    let text = "include = [\"docs\"]\n[namespaces]\nup = \"../secrets\"\n";
+    let dir = tree(&[("project/supdoc.config.toml", text)]);
+    let error = load_error(&dir, "project/supdoc.config.toml");
+
+    let ConfigError::NamespaceOutsideRoot { span, .. } = &error else {
+        panic!("expected config-namespace-outside-root, got {error:?}");
+    };
+    assert_eq!(text.get(span.clone()), Some("\"../secrets\""));
+}
+
+#[cfg(unix)]
+#[test]
+fn namespace_through_a_symlink_loop_is_not_called_outside() {
+    let dir = tree(&[("project/supdoc.config.toml", "[namespaces]\nloop = \"a\"")]);
+    let project = dir.path().join("project");
+    std::os::unix::fs::symlink(project.join("b"), project.join("a"))
+        .expect("the symlink should be creatable");
+    std::os::unix::fs::symlink(project.join("a"), project.join("b"))
+        .expect("the symlink should be creatable");
+    let error = load_error(&dir, "project/supdoc.config.toml");
+
+    let cwd = at(&dir, "project");
+
+    assert_eq!(error.code(), "config-namespace-outside-root", "{error:?}");
+    assert_eq!(error.exit_code(), 78);
+    assert_eq!(
+        error.message_from(&cwd),
+        "supdoc.config.toml sets namespace `loop` to a, which supdoc can't follow to a real \
+         location (a symlink along it may loop)"
+    );
+    assert_eq!(
+        error.help_from(&cwd),
+        "Point the namespace at a real directory inside the project root, and check that no \
+         symlink along it leads back to itself"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn namespace_written_outside_the_root_is_outside_even_through_a_symlink_loop() {
+    let dir = tree(&[(
+        "project/supdoc.config.toml",
+        "[namespaces]\ncore = \"../elsewhere\"",
+    )]);
+    std::os::unix::fs::symlink(dir.path().join("elsewhere"), dir.path().join("elsewhere"))
+        .expect("the symlink should be creatable");
+    let error = load_error(&dir, "project/supdoc.config.toml");
+
+    let ConfigError::NamespaceOutsideRoot { escape, .. } = &error else {
+        panic!("expected config-namespace-outside-root, got {error:?}");
+    };
+    assert_eq!(*escape, NamespaceEscape::AsWritten, "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("which is outside the project root"),
+        "{error}"
+    );
 }
 
 #[test]

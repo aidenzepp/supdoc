@@ -102,7 +102,8 @@ fn config_span(error: &ConfigError) -> Option<(&AbsolutePath, Range<usize>)> {
         ConfigError::Parse { path, error } => error.span().map(|span| (path, span)),
         ConfigError::ExtendsMissing { file, span, .. }
         | ConfigError::ExtendsDirectory { file, span, .. }
-        | ConfigError::ExtendsNotConfig { file, span, .. } => Some((file, span.clone())),
+        | ConfigError::ExtendsNotConfig { file, span, .. }
+        | ConfigError::NamespaceOutsideRoot { file, span, .. } => Some((file, span.clone())),
         ConfigError::ExtendsLoop { chain, span } => chain
             .len()
             .checked_sub(2)
@@ -110,8 +111,7 @@ fn config_span(error: &ConfigError) -> Option<(&AbsolutePath, Range<usize>)> {
             .map(|file| (file, span.clone())),
         ConfigError::NotFound { .. }
         | ConfigError::Read { .. }
-        | ConfigError::SymlinkNotConfig { .. }
-        | ConfigError::NamespaceOutsideRoot { .. } => None,
+        | ConfigError::SymlinkNotConfig { .. } => None,
     }
 }
 

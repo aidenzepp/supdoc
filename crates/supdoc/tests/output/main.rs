@@ -1,6 +1,6 @@
 //! Runs the built `supdoc` binary in a fresh project and checks what a user sees: a golden
-//! transcript per command (07 G13), and the binary-level stream, color, pipe and write
-//! contracts (06 X3–X14, 07 G2/G8/G12).
+//! transcript per command, and the binary-level stream, color, pipe and write
+//! contracts.
 //!
 //! Unix only: the suite uses Unix permissions, symlinks and `sh`. Windows is untested, and CI runs
 //! only on Linux.

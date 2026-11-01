@@ -94,7 +94,7 @@ fn current_dir() -> Result<AbsolutePath, CliError> {
 
 /// Writes help, a version or a usage error to its stream and returns its exit code.
 ///
-/// A closed pipe is not a failure of supdoc, so it exits 0 (06 X13).
+/// A closed pipe is not a failure of supdoc, so it exits 0.
 fn print(printout: &Printout) -> u8 {
     let written = match printout.stream {
         Stream::Stdout => write_all(io::stdout(), &printout.text),
@@ -119,7 +119,7 @@ fn write_all(mut sink: impl Write, text: &str) -> io::Result<()> {
 
 /// Prints `error` as a fatal error in the requested format and returns its exit code.
 ///
-/// A closed pipe is not a failure of supdoc, so it exits 0 (06 X13).
+/// A closed pipe is not a failure of supdoc, so it exits 0.
 fn report(output: &mut Output, error: &CliError) -> u8 {
     let written = output.fatal(&fatal_finding(error), error.exit_code());
     if output.is_closed() {
@@ -152,7 +152,7 @@ fn choice(color: ColorChoice) -> anstream::ColorChoice {
     }
 }
 
-/// Whether text output carries color (06 X13).
+/// Whether text output carries color.
 ///
 /// `--color always` and `never` decide alone. `auto` colors only when stdout, the stream the data
 /// goes to, is a terminal, `NO_COLOR` is unset or empty, and `TERM` isn't `dumb`.

@@ -1,4 +1,4 @@
-//! Reading a Markdown link destination into a link target and an optional symbol (03 R10, R11).
+//! Reading a Markdown link destination into a link target and an optional symbol.
 //!
 //! The rules run in a fixed order, and each one either settles the destination or hands it on:
 //!
