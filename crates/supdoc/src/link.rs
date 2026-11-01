@@ -177,12 +177,22 @@ pub enum LinkPathError {
         /// The rejected path.
         path: String,
     },
-    /// A target path climbs out of the project root (or its namespace's directory) with `..`.
+    /// A plain target path climbs out of the project root with `..`.
     #[error(
         "target `{path}` climbs out of the project root with `..`, and supdoc reads only files inside it"
     )]
     TargetClimbs {
         /// The rejected path.
+        path: String,
+    },
+    /// A namespaced target path uses `..`, so it could leave its namespace's directory.
+    #[error(
+        "target `{namespace}:{path}` uses `..`, and supdoc reads a namespaced target only inside the `{namespace}` namespace's directory"
+    )]
+    NamespacedTargetClimbs {
+        /// The namespace the target names, `auth`.
+        namespace: String,
+        /// The rejected path inside the namespace's directory.
         path: String,
     },
     /// A target path contains `:`, which the lockfile reserves for namespace prefixes.
@@ -244,10 +254,17 @@ impl FromStr for Target {
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
         match raw.split_once(':') {
             None => Ok(Self::Path(raw.parse()?)),
-            Some((namespace, path)) => Ok(Self::Namespaced {
-                namespace: namespace.parse()?,
-                path: path.parse()?,
-            }),
+            Some((namespace, path)) => {
+                let namespace: NamespaceName = namespace.parse()?;
+                let path = path.parse().map_err(|error| match error {
+                    LinkPathError::TargetClimbs { path } => LinkPathError::NamespacedTargetClimbs {
+                        namespace: namespace.to_string(),
+                        path,
+                    },
+                    other => other,
+                })?;
+                Ok(Self::Namespaced { namespace, path })
+            }
         }
     }
 }
@@ -556,19 +573,35 @@ mod tests {
 
     #[test]
     fn target_with_parent_segment_is_rejected_plain_or_namespaced() {
-        for (raw, path) in [
-            ("../shared/x.rs", "../shared/x.rs"),
-            ("src/../../x.rs", "src/../../x.rs"),
-            ("docs:../outside/x.rs", "../outside/x.rs"),
-        ] {
+        for raw in ["../shared/x.rs", "src/../../x.rs"] {
             assert_eq!(
                 raw.parse::<Target>(),
                 Err(TargetError::Path(LinkPathError::TargetClimbs {
-                    path: path.to_owned()
+                    path: raw.to_owned()
                 })),
                 "target `{raw}` should not parse",
             );
         }
+        assert_eq!(
+            "docs:../outside/x.rs".parse::<Target>(),
+            Err(TargetError::Path(LinkPathError::NamespacedTargetClimbs {
+                namespace: "docs".to_owned(),
+                path: "../outside/x.rs".to_owned(),
+            })),
+            "a namespaced target with `..` should not parse",
+        );
+    }
+
+    #[test]
+    fn namespaced_climbing_target_message_keeps_the_namespace() {
+        let error = "auth:../web/x.rs"
+            .parse::<Target>()
+            .expect_err("a namespaced target with `..` should not parse");
+        let message = error.to_string();
+        assert!(
+            message.contains("`auth:../web/x.rs`") && !message.contains("project root"),
+            "the message should name the whole target and not blame the project root: {message}",
+        );
     }
 
     #[test]
