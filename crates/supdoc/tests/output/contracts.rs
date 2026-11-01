@@ -535,6 +535,9 @@ mod helps {
         })
     }
 
+    /// The crate's own issues page, the one URL a help may name: exit-70 helps send the reader there.
+    const ISSUES_URL: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/issues");
+
     /// Whether `help` sends the reader elsewhere instead of saying what to do (07 G3).
     fn points_elsewhere(help: &str) -> bool {
         const POINTERS: &[&str] = &[
@@ -545,18 +548,18 @@ mod helps {
             "refer to",
             "consult",
             "readme",
-            "http",
         ];
-        let lowered = help.to_lowercase();
-        help.split_whitespace().count() < 3
-            || POINTERS.iter().any(|pointer| lowered.contains(pointer))
+        let lowered = help.to_lowercase().replace(ISSUES_URL, "");
+        lowered.contains("http") || POINTERS.iter().any(|pointer| lowered.contains(pointer))
     }
 
     /// What is wrong with `help` under 07 G3, if anything: it must quote a runnable command or a
     /// concrete value (`supdoc update docs/guide.md --yes`, `did you mean log_in?`) and must not send
     /// the reader elsewhere.
     fn help_problem(help: &str) -> Option<&'static str> {
-        if points_elsewhere(help) {
+        if help.split_whitespace().count() < 3 {
+            Some("help is too short to name a next step")
+        } else if points_elsewhere(help) {
             Some("should say what to do, not send the reader elsewhere")
         } else if !quotes_a_command_or_value(help) {
             Some("should quote a runnable command or concrete value in backticks")
@@ -1252,6 +1255,11 @@ mod helps {
             if let Some(problem) = help.as_deref().and_then(help_problem) {
                 problems.push(format!(
                     "the help of `{kind}` (built directly) {problem} (07 G3): {help:?}"
+                ));
+            }
+            if kind == "read-internal" && !help.as_deref().is_some_and(|h| h.contains(ISSUES_URL)) {
+                problems.push(format!(
+                    "the help of `{kind}` is an exit-70 help and should name {ISSUES_URL}: {help:?}"
                 ));
             }
             let _new = covered.insert(unit.kind.to_owned());

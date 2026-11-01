@@ -108,8 +108,11 @@ fn to_value(schema: schemars::Schema, what: &str) -> Result<Value, CliError> {
         CliError::new(
             "cli-schema-serialize",
             format!("could not turn the schema of `{what}` into JSON: {error}"),
-            "this is a supdoc bug; report it with the command you ran and the output of \
-             `supdoc --version`",
+            concat!(
+                "this is a supdoc bug; report it at ",
+                env!("CARGO_PKG_REPOSITORY"),
+                "/issues with the command you ran and the output of `supdoc --version`"
+            ),
             CliError::BUG_EXIT_CODE,
         )
     })
