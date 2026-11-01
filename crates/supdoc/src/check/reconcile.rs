@@ -319,8 +319,9 @@ fn syntax_error_finding(target: &Target) -> Finding {
     Finding::new(
         "read-syntax-errors",
         Severity::Warning,
-        format!("{target} has syntax errors; its links may report stale until it parses cleanly"),
+        format!("{target} has syntax errors; its links may report failed until it parses cleanly"),
     )
+    .with_help("Fix the syntax errors, then run `supdoc check` again")
 }
 
 #[cfg(test)]
