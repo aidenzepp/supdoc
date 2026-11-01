@@ -32,7 +32,8 @@ use crate::state::LinkState;
 use super::args::{UpdateArgs, WriteMode};
 use super::check::LinkLocationJson;
 use super::project::{
-    load_config, lock_failure, lock_path, read_lock_for_update, scope, settings_mismatch,
+    LockForUpdate, load_config, lock_failure, lock_path, read_lock_for_update, scope,
+    settings_mismatch,
 };
 use super::{CliError, Context, Outcome};
 
@@ -62,28 +63,33 @@ const MIGRATION_STATES: [LinkState; 3] = [LinkState::Failed, LinkState::New, Lin
 /// `--state`, `scan-root-unreadable` (74), and `cli-update-output` when the report cannot be
 /// written (74).
 pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
-    let config = load_config(context, output, &command_text(args))?;
+    let config = load_config(context, output)?;
     let scope = scope(&args.paths, &context.cwd, config.root())?;
-    let (lock, settings_change) = read_lock_for_update(&config, &context.cwd)?;
-    if let Some(change) = settings_change
+    let LockForUpdate {
+        lock,
+        settings,
+        change,
+    } = read_lock_for_update(&config, &context.cwd)?;
+    if let Some(change) = change
         && !migrates_every_entry(&scope, &args.state)
     {
         return Err(settings_mismatch(&config, change));
     }
     let scan =
-        crate::scan::assemble::run(&config, &Languages::builtin(), &scope).map_err(|error| {
-            CliError::new(
-                error.code(),
-                error.to_string(),
-                error.help(),
-                error.exit_code(),
-            )
-        })?;
+        crate::scan::assemble::run_with_settings(&config, &Languages::builtin(), &scope, settings)
+            .map_err(|error| {
+                CliError::new(
+                    error.code(),
+                    error.to_string(),
+                    error.help(),
+                    error.exit_code(),
+                )
+            })?;
 
     // `supdoc fix PATH` takes `PATH` relative to the current directory, so hints name it from there.
     let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
     let model = reconcile_in(&scan, &lock, &scope, &paths);
-    let plan = plan_update(&model, &scan, &lock, &args.state, config.hash_settings());
+    let plan = plan_update(&model, &scan, &lock, &args.state, settings);
     let applied = args.confirm.mode() == WriteMode::Apply;
     if applied && let Some(next) = &plan.next {
         next.write(&lock_path(config.root()))
@@ -450,20 +456,6 @@ fn render_rows(context: &TextContext, rows: &[ChangeRow], out: &mut dyn Write) -
         )?;
     }
     Ok(())
-}
-
-/// The command that repeats this run, as `supdoc update [PATH]... [--yes]` takes it, for helps
-/// that say to run it again.
-fn command_text(args: &UpdateArgs) -> String {
-    let mut command = String::from("update");
-    for path in &args.paths {
-        command.push(' ');
-        command.push_str(&shell_quote(&path.display().to_string()));
-    }
-    if args.confirm.mode() == WriteMode::Apply {
-        command.push_str(" --yes");
-    }
-    command
 }
 
 /// The cause of a broken link, as a top-level finding, or `None` for a link in any other state

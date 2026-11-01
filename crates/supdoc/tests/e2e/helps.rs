@@ -22,9 +22,9 @@ fn write(project: &Project, relative: &str, text: &str) {
     fs::write(path, text).expect("the file should be writable");
 }
 
-/// The text of `run`'s output from the first `marker` to the next blank line.
+/// The text of `run`'s stdout (where the report prints findings) from the first `marker` to the next blank line.
 fn block(run: &Run, marker: &str) -> String {
-    let output = format!("{}{}", run.stdout, run.stderr);
+    let output = &run.stdout;
     let start = output
         .find(marker)
         .unwrap_or_else(|| panic!("the output should have `{marker}`:\n{output}"));
@@ -193,26 +193,17 @@ fn update_points_at_fix_only_for_a_link_fix_can_repair() {
 }
 
 #[test]
-fn config_failure_help_repeats_the_command_that_failed() {
+fn config_failure_help_names_a_value_to_write() {
     let project = project();
-    write(&project, "supdoc.config.toml", "include = \n");
+    write(&project, "supdoc.config.toml", "include = 3\n");
 
-    let resolve = project.supdoc(&["resolve", "src/lib.rs"]);
-    let update = project.supdoc(&["update", "--yes"]);
+    let run = project.supdoc(&["update", "--yes"]);
 
-    let _ = resolve.assert_exit(78);
+    let _ = run.assert_exit(78);
     assert!(
-        resolve
-            .stderr
-            .contains("run `supdoc resolve src/lib.rs` again"),
-        "resolve needs its FILE:\n{}",
-        resolve.stderr
-    );
-    let _ = update.assert_exit(78);
-    assert!(
-        update.stderr.contains("run `supdoc update --yes` again"),
-        "update should keep --yes:\n{}",
-        update.stderr
+        run.stderr.contains("`include = [\"docs\"]`"),
+        "a wrong type should say what to write:\n{}",
+        run.stderr
     );
 }
 
@@ -300,17 +291,16 @@ fn link_entry_without_hash_does_not_get_the_features_help() {
 }
 
 #[test]
-fn rename_config_failure_help_repeats_the_whole_command() {
+fn rename_config_failure_help_names_a_value_to_write() {
     let project = project();
-    write(&project, "supdoc.config.toml", "include = \n");
+    write(&project, "supdoc.config.toml", "include = 3\n");
 
     let run = project.supdoc(&["namespace", "rename", "old", "new", "--yes"]);
 
     let _ = run.assert_exit(78);
     assert!(
-        run.stderr
-            .contains("run `supdoc namespace rename old new --yes` again"),
-        "rename needs OLD, NEW and --yes:\n{}",
+        run.stderr.contains("`include = [\"docs\"]`"),
+        "a wrong type should say what to write:\n{}",
         run.stderr
     );
 }

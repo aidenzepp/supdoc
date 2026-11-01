@@ -52,7 +52,7 @@ use super::{CliError, Context, Outcome};
 /// `resolve-not-found` or `resolve-ambiguous` (1); `scan-root-unreadable` (74), and
 /// `cli-list-output` when the report cannot be written (74).
 pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
-    let config = load_config(context, output, "list")?;
+    let config = load_config(context, output)?;
     let lock = read_lock(&config, &context.cwd)?;
     let scan = crate::scan::assemble::run(&config, &Languages::builtin(), &Scope::All).map_err(
         |error| {
@@ -495,7 +495,7 @@ fn unknown_namespace(config: &Config, name: &NamespaceName) -> CliError {
         .keys()
         .map(NamespaceName::as_str)
         .collect();
-    let help = match crate::scan::targets::close_match(name.as_str(), defined.iter().copied()) {
+    let help = match crate::suggest::close_match(name.as_str(), defined.iter().copied()) {
         Some(nearest) => format!(
             "did you mean `{nearest}`? Defined namespaces: `{}`",
             defined.join("`, `")

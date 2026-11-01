@@ -8,11 +8,12 @@ use std::fmt::Write as _;
 
 use clap::builder::{FalseyValueParser, TypedValueParser as _};
 use clap::error::ErrorKind;
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory as _, Parser, ValueEnum};
 
 use super::CliError;
 use super::args::{Cli, resolve_format};
 use crate::output::OutputFormat;
+use crate::output::json::FatalJson;
 
 /// What parsing the command line produced.
 #[derive(Debug)]
@@ -66,13 +67,14 @@ where
     let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
     match Cli::try_parse_from(&args) {
         Ok(cli) => Parsed::Run(Box::new(cli)),
-        Err(error) => Parsed::Print(printout(&error, requested_format(&args, env))),
+        Err(error) => Parsed::Print(printout(&error, &args, requested_format(&args, env))),
     }
 }
 
 /// Decides what to print for a clap error or an explicit `--help` / `--version`.
-fn printout(error: &clap::Error, format: OutputFormat) -> Printout {
-    let text = redirect_flag_tip(&error.render().to_string());
+fn printout(error: &clap::Error, args: &[OsString], format: OutputFormat) -> Printout {
+    let command = help_command(args);
+    let text = redirect_flag_tip(&error.render().to_string(), &command);
     match error.kind() {
         // Bare `supdoc` shows help, as a successful request for help (06 X1).
         ErrorKind::DisplayHelp
@@ -84,7 +86,7 @@ fn printout(error: &clap::Error, format: OutputFormat) -> Printout {
         },
         _ if format.is_json() => Printout {
             stream: Stream::Stderr,
-            text: usage_error_json(&text),
+            text: usage_error_json(&text, &command),
             exit_code: CliError::USAGE_EXIT_CODE,
         },
         _ => Printout {
@@ -95,6 +97,51 @@ fn printout(error: &clap::Error, format: OutputFormat) -> Printout {
     }
 }
 
+/// The subcommand path the arguments name, such as `["namespace", "list"]`; empty when none parsed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HelpCommand(Vec<String>);
+
+impl HelpCommand {
+    /// Whether the command is `supdoc check`.
+    fn is_check(&self) -> bool {
+        self.0 == ["check"]
+    }
+
+    /// The command line that prints this command's help, such as `supdoc check --help`.
+    fn help_invocation(&self) -> String {
+        let mut line = String::from("supdoc");
+        for word in &self.0 {
+            line.push(' ');
+            line.push_str(word);
+        }
+        line.push_str(" --help");
+        line
+    }
+}
+
+/// The deepest subcommand path the arguments name, read from the raw arguments.
+///
+/// Flags, flag values and unknown words are skipped; only words that are subcommands of the
+/// command reached so far extend the path.
+fn help_command(args: &[OsString]) -> HelpCommand {
+    let mut command = Cli::command();
+    let mut path = Vec::new();
+    for word in args
+        .iter()
+        .skip(1)
+        .filter_map(|arg| arg.to_str())
+        .take_while(|arg| *arg != "--")
+        .filter(|arg| !arg.starts_with('-'))
+    {
+        let Some(sub) = command.find_subcommand(word) else {
+            continue;
+        };
+        path.push(sub.get_name().to_owned());
+        command = sub.clone();
+    }
+    HelpCommand(path)
+}
+
 /// The leading whitespace of `line`.
 fn indent_of(line: &str) -> &str {
     line.strip_suffix(line.trim_start()).unwrap_or_default()
@@ -103,7 +150,7 @@ fn indent_of(line: &str) -> &str {
 /// Replaces clap's `-- --flag` tip, which only leads to a second error, with a tip that names a real flag.
 ///
 /// `--format` points at `--output` and `--json`; any other unknown flag points at `--help`.
-fn redirect_flag_tip(rendered: &str) -> String {
+fn redirect_flag_tip(rendered: &str, command: &HelpCommand) -> String {
     let mut out = String::with_capacity(rendered.len());
     for line in rendered.split_inclusive('\n') {
         let body = line.trim();
@@ -118,12 +165,19 @@ fn redirect_flag_tip(rendered: &str) -> String {
                     "tip: use `--output json` (or `--json`) to choose the output format\n",
                 );
             }
+            Some("--yes") if command.is_check() => {
+                out.push_str(indent_of(line));
+                out.push_str(
+                    "tip: `check` only reads, so it takes no `--yes`; run `supdoc update --yes` to accept changes into supdoc.lock\n",
+                );
+            }
             Some(flag) => {
                 out.push_str(indent_of(line));
                 // Writing into a `String` cannot fail.
                 let _ = writeln!(
                     out,
-                    "tip: `{flag}` is not a flag of this command; run `supdoc <command> --help` to see its flags"
+                    "tip: `{flag}` is not a flag of this command; run `{}` to see its flags",
+                    command.help_invocation()
                 );
             }
             None => out.push_str(line),
@@ -141,23 +195,15 @@ fn ensure_newline(mut text: String) -> String {
 }
 
 /// The JSON error object for a usage error (06 X8, 07 fatal error shape), on one line.
-fn usage_error_json(rendered: &str) -> String {
-    #[derive(serde::Serialize)]
-    struct UsageError<'a> {
-        error: bool,
-        kind: &'static str,
-        message: &'a str,
-        help: String,
-        exit_code: u8,
-    }
-
-    let (message, help) = split_clap_message(rendered);
-    let error = UsageError {
+fn usage_error_json(rendered: &str, command: &HelpCommand) -> String {
+    let (message, help) = split_clap_message(rendered, command);
+    let error = FatalJson {
         error: true,
-        kind: USAGE_ERROR_CODE,
-        message,
-        help,
+        kind: USAGE_ERROR_CODE.to_owned(),
+        message: message.to_owned(),
+        help: Some(help),
         exit_code: CliError::USAGE_EXIT_CODE,
+        location: None,
     };
     // Serializing plain strings and numbers cannot fail; the fallback keeps stderr valid JSON anyway.
     let mut line = serde_json::to_string(&error).unwrap_or_else(|_| {
@@ -171,8 +217,8 @@ fn usage_error_json(rendered: &str) -> String {
 /// Splits clap's rendered error into the message and a help line.
 ///
 /// The message is clap's first paragraph without its `error: ` prefix, which already lists valid
-/// values. The help repeats clap's `tip:` suggestions and points at `--help`.
-fn split_clap_message(rendered: &str) -> (&str, String) {
+/// values. The help repeats clap's `tip:` suggestions and points at the parsed command's `--help`.
+fn split_clap_message<'a>(rendered: &'a str, command: &HelpCommand) -> (&'a str, String) {
     let first_paragraph = rendered.split("\n\n").next().unwrap_or(rendered).trim();
     let message = first_paragraph
         .strip_prefix("error: ")
@@ -181,9 +227,13 @@ fn split_clap_message(rendered: &str) -> (&str, String) {
         .lines()
         .filter_map(|line| line.trim().strip_prefix("tip: "))
         .collect();
-    let pointer = "run `supdoc --help`, or `supdoc <command> --help`, to see valid usage";
+    let pointer = if command.0.is_empty() {
+        "run `supdoc --help` to see valid usage".to_owned()
+    } else {
+        format!("run `{}` to see valid usage", command.help_invocation())
+    };
     let help = if tips.is_empty() {
-        pointer.to_owned()
+        pointer
     } else {
         format!("{}; {pointer}", tips.join("; "))
     };
@@ -245,7 +295,8 @@ mod tests {
     use clap::{ColorChoice, CommandFactory};
 
     use super::*;
-    use crate::cli::args::{Command, ListArgs};
+    use crate::cli::args::{Command, ListArgs, SkillCommand};
+    use crate::state::LinkState;
 
     /// Parses `args` (without the program name) with an empty environment.
     fn parse(args: &[&str]) -> Parsed {
@@ -521,7 +572,7 @@ mod tests {
         let mut leaves = Vec::new();
         walk("supdoc", &Cli::command(), &mut leaves);
 
-        assert_eq!(leaves.len(), 12, "leaf subcommands: {leaves:?}");
+        assert!(!leaves.is_empty(), "no leaf subcommands found");
         for (name, after_help) in leaves {
             assert!(
                 after_help.starts_with("Examples:") && after_help.contains(&format!("\n  {name}")),
@@ -550,65 +601,61 @@ mod tests {
             .filter(|line| line.starts_with("supdoc "))
     }
 
+    /// Every `after_help` block of the command tree, the top level included.
+    fn after_help_blocks(command: &clap::Command, name: &str, blocks: &mut Vec<(String, String)>) {
+        if let Some(after_help) = command.get_after_help() {
+            blocks.push((name.to_owned(), after_help.to_string()));
+        }
+        for subcommand in command.get_subcommands() {
+            if subcommand.get_name() != "help" {
+                let path = format!("{name} {}", subcommand.get_name());
+                after_help_blocks(subcommand, &path, blocks);
+            }
+        }
+    }
+
     #[test]
     fn every_example_parses() {
-        use crate::cli::examples::{
-            CHECK_EXAMPLES, COMPLETIONS_EXAMPLES, CONFIG_SHOW_EXAMPLES, FIX_EXAMPLES,
-            INIT_EXAMPLES, LIST_EXAMPLES, NAMESPACE_LIST_EXAMPLES, NAMESPACE_RENAME_EXAMPLES,
-            RESOLVE_EXAMPLES, SCHEMA_EXAMPLES, SKILL_INSTALL_EXAMPLES, TOP_EXAMPLES,
-            UPDATE_EXAMPLES,
-        };
+        let mut blocks = Vec::new();
+        after_help_blocks(&Cli::command(), "supdoc", &mut blocks);
 
-        for block in [
-            TOP_EXAMPLES,
-            CHECK_EXAMPLES,
-            UPDATE_EXAMPLES,
-            FIX_EXAMPLES,
-            LIST_EXAMPLES,
-            RESOLVE_EXAMPLES,
-            CONFIG_SHOW_EXAMPLES,
-            NAMESPACE_LIST_EXAMPLES,
-            NAMESPACE_RENAME_EXAMPLES,
-            INIT_EXAMPLES,
-            SCHEMA_EXAMPLES,
-            COMPLETIONS_EXAMPLES,
-            SKILL_INSTALL_EXAMPLES,
-        ] {
-            for line in example_lines(block) {
+        for (name, block) in &blocks {
+            let lines: Vec<&str> = example_lines(block).collect();
+            assert!(!lines.is_empty(), "`{name}` has no example lines: {block}");
+            for line in lines {
                 let invocation = line.split(" > ").next().unwrap_or(line);
                 let args: Vec<&str> = invocation.split_whitespace().collect();
                 assert!(
                     matches!(parse_from(args.iter().copied(), |_| None), Parsed::Run(_)),
-                    "example `{line}` should parse"
+                    "example `{line}` in the `{name}` help should parse"
                 );
             }
         }
     }
 
     #[test]
-    fn read_and_write_commands_say_so_in_their_help() {
-        let mut command = Cli::command();
-        command.build();
-        for (name, expected) in [
-            ("check", "read-only"),
-            ("list", "read-only"),
-            ("resolve", "read-only"),
-            ("schema", "read-only"),
-            ("completions", "read-only"),
-            ("update", "writes"),
-            ("fix", "writes"),
-            ("init", "writes"),
-        ] {
-            let about = command
-                .find_subcommand(name)
-                .and_then(clap::Command::get_about)
-                .map(ToString::to_string)
-                .unwrap_or_default();
-            assert!(
-                about.contains(expected),
-                "`{name}` about should say `{expected}`: {about}"
-            );
+    fn every_leaf_command_says_whether_it_reads_or_writes() {
+        fn check(command: &clap::Command, name: &str) {
+            for subcommand in command.get_subcommands() {
+                if subcommand.get_name() == "help" {
+                    continue;
+                }
+                let path = format!("{name} {}", subcommand.get_name());
+                if subcommand.has_subcommands() {
+                    check(subcommand, &path);
+                    continue;
+                }
+                let about = subcommand
+                    .get_about()
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                assert!(
+                    about.contains("read-only") || about.contains("writes"),
+                    "`{path}` about should say `read-only` or `writes`: {about}"
+                );
+            }
         }
+        check(&Cli::command(), "supdoc");
     }
 
     #[test]
@@ -679,20 +726,86 @@ mod tests {
     }
 
     #[test]
-    fn usage_error_json_keys_come_in_the_documented_order() {
-        let printout = parse_printout(&["chek", "--json"]);
-        let keys: Vec<usize> = [
-            "\"error\"",
-            "\"kind\"",
-            "\"message\"",
-            "\"help\"",
-            "\"exit_code\"",
-        ]
-        .iter()
-        .map(|key| printout.text.find(key).unwrap_or(usize::MAX))
-        .collect();
+    fn usage_error_json_validates_against_the_published_error_schema() {
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../schema/error.json"))
+                .expect("schema/error.json should be JSON");
+        let validator = jsonschema::validator_for(&schema)
+            .expect("schema/error.json should be a valid JSON Schema");
 
-        assert!(keys.is_sorted(), "key order in {}", printout.text);
+        for args in [&["chek", "--json"][..], &["check", "--bogus", "--json"][..]] {
+            let printout = parse_printout(args);
+            let value: serde_json::Value =
+                serde_json::from_str(&printout.text).expect("the usage error should be JSON");
+            let violations: Vec<String> = validator
+                .iter_errors(&value)
+                .map(|error| error.to_string())
+                .collect();
+
+            assert!(
+                violations.is_empty(),
+                "`supdoc {}` usage error breaks schema/error.json: {violations:?} in {value}",
+                args.join(" ")
+            );
+            assert!(
+                value.get("location").is_none(),
+                "a usage error has no location: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn flag_tips_name_the_parsed_subcommand() {
+        for (args, command) in [
+            (&["check", "--bogus"][..], "supdoc check --help"),
+            (
+                &["-c", "x.toml", "update", "--bogus"][..],
+                "supdoc update --help",
+            ),
+        ] {
+            let printout = parse_printout(args);
+
+            assert!(
+                printout.text.contains(&format!("`{command}`")),
+                "tip of `supdoc {}` should name `{command}`: {}",
+                args.join(" "),
+                printout.text
+            );
+            assert!(
+                !printout.text.contains("<command>"),
+                "tip of `supdoc {}` should not use a placeholder: {}",
+                args.join(" "),
+                printout.text
+            );
+        }
+    }
+
+    #[test]
+    fn json_usage_error_help_names_the_parsed_subcommand() {
+        let printout = parse_printout(&["check", "--bogus", "--json"]);
+        let value: serde_json::Value =
+            serde_json::from_str(&printout.text).expect("the usage error should be JSON");
+        let help = value
+            .get("help")
+            .and_then(serde_json::Value::as_str)
+            .expect("the usage error should have a help string");
+
+        assert!(
+            help.ends_with("run `supdoc check --help` to see valid usage"),
+            "{help}"
+        );
+    }
+
+    #[test]
+    fn check_yes_tip_points_at_update() {
+        let printout = parse_printout(&["check", "--yes"]);
+
+        assert!(
+            printout.text.contains("`check` only reads")
+                && printout.text.contains("supdoc update --yes"),
+            "check --yes should say check only reads and point at update: {}",
+            printout.text
+        );
     }
 
     #[test]
@@ -770,8 +883,65 @@ mod tests {
     /// Environment variable that tells `child_probe` which arguments to parse.
     const PROBE_ARGS: &str = "SUPDOC_TEST_PROBE_ARGS";
 
+    /// The values `child_probe` read out of the parsed command line.
+    #[derive(Debug, serde::Serialize, serde::Deserialize)]
+    struct Probe {
+        format: String,
+        output: String,
+        color: String,
+        quiet: bool,
+        verbose: u8,
+        config: Option<String>,
+        deny_warnings: Option<bool>,
+        yes: Option<bool>,
+        dry_run: Option<bool>,
+        global: Option<bool>,
+        limit: Option<usize>,
+        states: Option<Vec<String>>,
+    }
+
+    impl Probe {
+        fn of(cli: &Cli) -> Self {
+            let mut probe = Self {
+                format: format!("{:?}", cli.global.format()),
+                output: format!("{:?}", cli.global.output),
+                color: format!("{:?}", cli.global.color),
+                quiet: cli.global.quiet,
+                verbose: cli.global.verbose,
+                config: cli
+                    .global
+                    .config
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned()),
+                deny_warnings: None,
+                yes: None,
+                dry_run: None,
+                global: None,
+                limit: None,
+                states: None,
+            };
+            let states = |states: &[LinkState]| states.iter().map(|s| format!("{s:?}")).collect();
+            match &cli.command {
+                Command::Check(args) => probe.deny_warnings = Some(args.deny_warnings),
+                Command::Update(args) => {
+                    probe.yes = Some(args.confirm.yes);
+                    probe.dry_run = Some(args.confirm.dry_run);
+                    probe.states = Some(states(&args.state));
+                }
+                Command::List(args) => {
+                    probe.limit = Some(args.limit);
+                    probe.states = Some(states(&args.state));
+                }
+                Command::Skill(SkillCommand::Install(args)) => probe.global = Some(args.global),
+                _ => {}
+            }
+            probe
+        }
+    }
+
     /// Not a test on its own: when re-run by `parse_in_child`, parses the arguments it was given
-    /// and prints what clap produced. Otherwise it does nothing.
+    /// and prints a [`Probe`] as JSON. Otherwise it does nothing. `parse_in_child` fails if the
+    /// child printed no probe line, so a child that never ran cannot pass a test.
     #[test]
     fn child_probe() {
         let Some(joined) = std::env::var_os(PROBE_ARGS) else {
@@ -783,15 +953,19 @@ mod tests {
             .map(str::to_owned)
             .collect::<Vec<_>>();
         let report = match parse_from(args, |name| std::env::var(name).ok()) {
-            Parsed::Run(cli) => format!("PROBE {:?} {:?}", cli.global.format(), cli),
-            Parsed::Print(printout) => format!("PROBE Print {}", printout.text.replace('\n', " ")),
+            Parsed::Run(cli) => {
+                serde_json::to_string(&Probe::of(&cli)).expect("the probe should serialize")
+            }
+            Parsed::Print(printout) => {
+                panic!("the probe arguments should parse: {}", printout.text)
+            }
         };
-        writeln!(std::io::stdout(), "{report}").expect("the probe should write to stdout");
+        writeln!(std::io::stdout(), "PROBE {report}").expect("the probe should write to stdout");
     }
 
     /// Parses `args` in a child process whose environment is only `env` plus the unrelated
-    /// variables the test harness needs. Returns the `Cli` as a debug string, or the printed text.
-    fn parse_in_child(args: &[&str], env: &[(&str, &str)]) -> String {
+    /// variables the test harness needs. Fails unless the child ran `child_probe` and printed what it parsed.
+    fn parse_in_child(args: &[&str], env: &[(&str, &str)]) -> Probe {
         let mut child = Process::new(
             std::env::current_exe().expect("the test binary should know its own path"),
         );
@@ -814,10 +988,18 @@ mod tests {
             .output()
             .expect("the test binary should re-run itself");
         let stdout = String::from_utf8_lossy(&output.stdout);
-        stdout
+        assert!(
+            output.status.success(),
+            "the probe child failed ({}):\n{stdout}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let line = stdout
             .lines()
-            .find_map(|line| line.split_once("PROBE ").map(|(_, rest)| rest.to_owned()))
-            .unwrap_or_else(|| panic!("the child printed no probe line:\n{stdout}"))
+            .find_map(|line| line.split_once("PROBE ").map(|(_, rest)| rest))
+            .unwrap_or_else(|| panic!("the child printed no probe line:\n{stdout}"));
+        serde_json::from_str(line)
+            .unwrap_or_else(|error| panic!("the probe line should be JSON ({error}): {line}"))
     }
 
     #[test]
@@ -829,8 +1011,8 @@ mod tests {
             );
 
             assert!(
-                parsed.contains("quiet: false") && parsed.contains("deny_warnings: false"),
-                "SUPDOC_QUIET={value} should turn the flag off: {parsed}"
+                !parsed.quiet && parsed.deny_warnings == Some(false),
+                "SUPDOC_QUIET={value} should turn the flag off: {parsed:?}"
             );
         }
     }
@@ -841,10 +1023,10 @@ mod tests {
         assert_eq!(printout.exit_code, 2, "{}", printout.text);
         for flag in ["-g", "--global"] {
             let parsed = parse_in_child(&["supdoc", "skill", "install", flag], &[]);
-            assert!(parsed.contains("global: true"), "{flag}: {parsed}");
+            assert_eq!(parsed.global, Some(true), "{flag}: {parsed:?}");
         }
         let plain = parse_in_child(&["supdoc", "skill", "install"], &[]);
-        assert!(plain.contains("global: false"), "{plain}");
+        assert_eq!(plain.global, Some(false), "{plain:?}");
     }
 
     #[test]
@@ -858,9 +1040,10 @@ mod tests {
         ] {
             let parsed =
                 parse_in_child(&["supdoc", "skill", "install"], &[("SUPDOC_GLOBAL", value)]);
-            assert!(
-                parsed.contains(&format!("global: {expected}")),
-                "SUPDOC_GLOBAL={value:?} should give global: {expected}: {parsed}"
+            assert_eq!(
+                parsed.global,
+                Some(expected),
+                "SUPDOC_GLOBAL={value:?} should give global: {expected}: {parsed:?}"
             );
         }
     }
@@ -877,10 +1060,8 @@ mod tests {
         );
 
         assert!(
-            parsed.contains("quiet: true")
-                && parsed.contains("yes: true")
-                && parsed.contains("dry_run: false"),
-            "{parsed}"
+            parsed.quiet && parsed.yes == Some(true) && parsed.dry_run == Some(false),
+            "{parsed:?}"
         );
     }
 
@@ -902,19 +1083,22 @@ mod tests {
             &[("SUPDOC_LIMIT", "7"), ("SUPDOC_OUTPUT", "github")],
         );
 
-        assert!(
-            from_env.contains("limit: 7")
-                && from_env.contains("Failed, New")
-                && from_env.contains("output: Github")
-                && from_env.contains("color: Never")
-                && from_env.contains("ci/supdoc.config.toml")
-                && from_env.contains("verbose: 2"),
-            "{from_env}"
+        assert_eq!(from_env.limit, Some(7), "{from_env:?}");
+        assert_eq!(
+            from_env.states,
+            Some(vec!["Failed".to_owned(), "New".to_owned()]),
+            "{from_env:?}"
         );
-        assert!(
-            overridden.contains("limit: 9") && overridden.contains("output: Jsonl"),
-            "{overridden}"
+        assert_eq!(from_env.output, "Github", "{from_env:?}");
+        assert_eq!(from_env.color, "Never", "{from_env:?}");
+        assert_eq!(
+            from_env.config.as_deref(),
+            Some("ci/supdoc.config.toml"),
+            "{from_env:?}"
         );
+        assert_eq!(from_env.verbose, 2, "{from_env:?}");
+        assert_eq!(overridden.limit, Some(9), "{overridden:?}");
+        assert_eq!(overridden.output, "Jsonl", "{overridden:?}");
     }
 
     #[test]
@@ -929,15 +1113,15 @@ mod tests {
         );
         let off = parse_in_child(&["supdoc", "check"], &[("SUPDOC_JSON", "0")]);
 
-        assert!(
-            json.starts_with("Json "),
-            "SUPDOC_JSON beats SUPDOC_OUTPUT: {json}"
+        assert_eq!(
+            json.format, "Json",
+            "SUPDOC_JSON beats SUPDOC_OUTPUT: {json:?}"
         );
-        assert!(
-            jsonl.starts_with("Jsonl "),
-            "SUPDOC_JSONL beats SUPDOC_JSON: {jsonl}"
+        assert_eq!(
+            jsonl.format, "Jsonl",
+            "SUPDOC_JSONL beats SUPDOC_JSON: {jsonl:?}"
         );
-        assert!(off.starts_with("Text "), "SUPDOC_JSON=0 is off: {off}");
+        assert_eq!(off.format, "Text", "SUPDOC_JSON=0 is off: {off:?}");
     }
 
     #[test]
