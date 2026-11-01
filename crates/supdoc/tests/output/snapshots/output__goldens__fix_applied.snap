@@ -11,4 +11,4 @@ docs/api.md:3:5
   = now new
 
 --- stderr
-Fixed 1 link in 1 file.
+Fixed 1 link in 1 file. Run `supdoc update docs/api.md --yes` to record them.

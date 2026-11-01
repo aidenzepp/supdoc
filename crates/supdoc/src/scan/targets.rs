@@ -15,6 +15,7 @@ use std::path::Path;
 
 use crate::config::{CONFIG_FILE_NAME, Config};
 use crate::finding::{Finding, Fix, Location, Severity, Snippet};
+use crate::hash::HashSettings;
 use crate::link::{LinkKey, Target};
 use crate::output::paths::relative_to;
 use crate::path::AbsolutePath;
@@ -22,6 +23,7 @@ use crate::read::cartridge::{Languages, SourceFile, SymbolTable};
 use crate::read::error::{ReadError, ResolveError};
 use crate::read::hash::{hash_file, hash_symbol};
 use crate::scan::model::{ScannedLink, TargetState};
+use crate::suggest::close_match;
 
 /// Finding code for a target path whose case differs from the real path (04 S12).
 const CODE_CASE_MISMATCH: &str = "scan-case-mismatch";
@@ -162,6 +164,7 @@ pub(crate) fn resolve(
     config: &Config,
     languages: &Languages,
     parsed: &mut Parsed,
+    settings: HashSettings,
     occurrences: Vec<Occurrence>,
 ) -> BTreeMap<LinkKey, ScannedLink> {
     let mut by_target: BTreeMap<Target, BTreeMap<LinkKey, Vec<Occurrence>>> = BTreeMap::new();
@@ -176,7 +179,9 @@ pub(crate) fn resolve(
 
     let mut links = BTreeMap::new();
     for (target, keyed) in by_target {
-        for (key, state, occurrences) in target_states(config, languages, parsed, &target, keyed) {
+        for (key, state, occurrences) in
+            target_states(config, languages, parsed, settings, &target, keyed)
+        {
             let snippet = occurrences
                 .first()
                 .and_then(|occurrence| occurrence.snippet.clone());
@@ -199,6 +204,7 @@ fn target_states(
     config: &Config,
     languages: &Languages,
     parsed: &mut Parsed,
+    settings: HashSettings,
     target: &Target,
     keyed: BTreeMap<LinkKey, Vec<Occurrence>>,
 ) -> Vec<(LinkKey, TargetState, Vec<Occurrence>)> {
@@ -230,7 +236,6 @@ fn target_states(
         Err(error) => return broken_by(&|first| read_failed(&error, config.root(), first)),
     };
 
-    let settings = config.hash_settings();
     let mut table: Option<SymbolTable> = None;
     keyed
         .into_iter()
@@ -245,9 +250,21 @@ fn target_states(
                 Some(symbol) => {
                     let table = table.get_or_insert_with(|| file.language().symbols(file));
                     match table.resolve(file.path(), symbol) {
-                        Ok(found) => TargetState::Present {
-                            hash: hash_symbol(file, found, settings),
-                            syntax_errors,
+                        Ok(found) => match hash_symbol(file, found, settings) {
+                            Ok(hash) => TargetState::Present {
+                                hash,
+                                syntax_errors,
+                            },
+                            Err(_outside) => TargetState::Broken {
+                                finding: read_failed(
+                                    &ReadError::Internal {
+                                        path: file.path().clone(),
+                                        reason: "a symbol's byte range lies outside the file",
+                                    },
+                                    config.root(),
+                                    first,
+                                ),
+                            },
                         },
                         Err(error) => TargetState::Broken {
                             finding: resolve_failed(&error, config.root(), table, first),
@@ -511,33 +528,6 @@ fn resolve_failed(
     }
 }
 
-/// Whether `candidate` is a likely misspelling of `wanted`: within `max(len, 3) / 3` single-character
-/// edits, counting a swap of neighbors as one edit.
-pub(crate) fn is_close(wanted: &str, candidate: &str) -> bool {
-    strsim::osa_distance(wanted, candidate) <= wanted.chars().count().max(3) / 3
-}
-
-/// The one candidate that is a likely misspelling of `wanted`, if exactly one is.
-///
-/// Close means within `max(len, 3) / 3` single-character edits of `wanted`, counting a swap of
-/// neighbors as one edit, so `atuh` is close to `auth`. Repeated candidates count once.
-pub(crate) fn close_match<'c>(
-    wanted: &str,
-    candidates: impl IntoIterator<Item = &'c str>,
-) -> Option<&'c str> {
-    let mut close: Vec<&str> = candidates
-        .into_iter()
-        .filter(|candidate| *candidate != wanted)
-        .filter(|candidate| is_close(wanted, candidate))
-        .collect();
-    close.sort_unstable();
-    close.dedup();
-    match close.as_slice() {
-        [only] => Some(only),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -624,6 +614,7 @@ mod tests {
             &config,
             &Languages::builtin(),
             &mut Parsed::default(),
+            config.hash_settings(),
             vec![occurrence],
         );
         match links.get(&key).map(|link| &link.target) {

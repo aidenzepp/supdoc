@@ -37,7 +37,7 @@ use super::{CliError, Context, Outcome};
 /// error (78 when invalid, 74 when unreadable), `scan-root-unreadable` (74), and
 /// `cli-check-output` when the report cannot be written (74).
 pub fn run(args: &CheckArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
-    let config = load_config(context, output, "check")?;
+    let config = load_config(context, output)?;
     let scope = scope(&args.paths, &context.cwd, config.root())?;
     let lock = read_lock(&config, &context.cwd)?;
     let scan =
@@ -56,8 +56,7 @@ pub fn run(args: &CheckArgs, context: &Context, output: &mut Output) -> Result<O
         reconcile::Outcome::Clean => Outcome::Clean,
         reconcile::Outcome::Failing => Outcome::Failing,
     };
-    let verbosity = Verbosity::from_flags(context.global.quiet, context.global.verbose);
-    let report = CheckReport::new(model, verbosity);
+    let report = CheckReport::new(model, output.verbosity());
     output
         .report(&report, outcome == Outcome::Clean)
         .map_err(|error| output_failed(&error))?;
@@ -892,6 +891,21 @@ mod tests {
                 .contains("passed  docs/guide.md -> src/lib.rs#add"),
             "stdout: {}",
             verbose_text.stdout
+        );
+    }
+
+    #[test]
+    fn repeating_verbose_changes_nothing() {
+        let project = Project::new();
+        project.record_all();
+
+        let once = project.check(&["-v", "check"]);
+        let twice = project.check(&["-vv", "check"]);
+
+        assert_eq!(
+            (once.stdout, once.stderr),
+            (twice.stdout, twice.stderr),
+            "`-vv` should print what `-v` prints"
         );
     }
 

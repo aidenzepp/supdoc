@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use crate::check::plan::SettingsChange;
 use crate::config::{Config, ConfigError};
 use crate::finding::{Location, Snippet};
+use crate::hash::HashSettings;
 use crate::link::SourcePath;
 use crate::lock::error::{LockError, SettingsMismatch, shell_quote};
 use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
@@ -30,16 +31,12 @@ use super::{CliError, Context, ErrorSite};
 /// # Errors
 ///
 /// Returns the config's own error, with its code, help and exit code.
-pub(crate) fn load_config(
-    context: &Context,
-    output: &mut Output,
-    command: &str,
-) -> Result<Config, CliError> {
+pub(crate) fn load_config(context: &Context, output: &mut Output) -> Result<Config, CliError> {
     let loaded = match &context.global.config {
         Some(file) => Config::load_file(&absolute(&context.cwd, file)),
         None => Config::load(&context.cwd),
     };
-    let config = loaded.map_err(|error| config_failure(&error, context, output, command))?;
+    let config = loaded.map_err(|error| config_failure(&error, context, output))?;
     output.set_root(config.root().clone());
     Ok(config)
 }
@@ -56,6 +53,27 @@ pub(crate) fn invocation(context: &Context, command: &str) -> String {
     }
 }
 
+/// The shell command that runs `supdoc name OPERAND... FLAG...` from the current directory: every
+/// operand is quoted for the shell, and `-c PATH` leads when the run was pointed at a config, so
+/// the command acts on the same project and the same paths.
+pub(crate) fn command_line<S: AsRef<str>>(
+    context: &Context,
+    name: &str,
+    operands: &[S],
+    flags: &[&str],
+) -> String {
+    let mut command = name.to_owned();
+    for operand in operands {
+        command.push(' ');
+        command.push_str(&shell_quote(operand.as_ref()));
+    }
+    for flag in flags {
+        command.push(' ');
+        command.push_str(flag);
+    }
+    invocation(context, &command)
+}
+
 /// The fatal error for a config that did not load, pointing at the offending text when the config
 /// error knows where it is.
 ///
@@ -65,18 +83,11 @@ pub(crate) fn config_failure(
     error: &ConfigError,
     context: &Context,
     output: &mut Output,
-    command: &str,
 ) -> CliError {
-    let help = error.help_from(&context.cwd).unwrap_or_else(|| {
-        format!(
-            "Correct the config as the message says, then run `{}` again",
-            invocation(context, command)
-        )
-    });
     let failure = CliError::new(
         error.code(),
         error.message_from(&context.cwd),
-        help,
+        error.help_from(&context.cwd),
         error.exit_code(),
     );
     match error_site(error, &context.cwd, output) {
@@ -186,14 +197,29 @@ pub(crate) fn lock_path(root: &AbsolutePath) -> AbsolutePath {
 /// Returns the lockfile's own error (74 when it can't be read, 78 when its text is invalid), or
 /// `lock-settings-mismatch` (78) when the recorded settings differ from the configured ones.
 pub(crate) fn read_lock(config: &Config, cwd: &AbsolutePath) -> Result<Lockfile, CliError> {
-    match read_lock_for_update(config, cwd)? {
-        (lock, None) => Ok(lock),
-        (_, Some(change)) => Err(settings_mismatch(config, change)),
+    let read = read_lock_for_update(config, cwd)?;
+    match read.change {
+        None => Ok(read.lock),
+        Some(change) => Err(settings_mismatch(config, change)),
     }
 }
 
-/// The lockfile in `config`'s root, and how the hash settings it records differ from the ones
-/// `config` resolves to, if they do (02 L10).
+/// A lockfile read for `update`, with the hash settings the run must hash under and how they
+/// differ from the ones the lockfile records.
+///
+/// The settings travel with the lock so the scan and the plan cannot each pick their own.
+#[derive(Debug)]
+pub(crate) struct LockForUpdate {
+    /// The lockfile as read, or an empty one under `settings` when there is none.
+    pub(crate) lock: Lockfile,
+    /// The settings every hash in this run uses: the ones `config` resolves to.
+    pub(crate) settings: HashSettings,
+    /// How the recorded settings differ from `settings`, if they do.
+    pub(crate) change: Option<SettingsChange>,
+}
+
+/// The lockfile in `config`'s root with the settings to hash under, and how the ones it records
+/// differ from them, if they do (02 L10).
 ///
 /// A missing lockfile is an empty one under `config`'s settings, so a fresh project never
 /// differs. A help names the lockfile relative to `cwd`, the directory supdoc runs in.
@@ -204,17 +230,25 @@ pub(crate) fn read_lock(config: &Config, cwd: &AbsolutePath) -> Result<Lockfile,
 pub(crate) fn read_lock_for_update(
     config: &Config,
     cwd: &AbsolutePath,
-) -> Result<(Lockfile, Option<SettingsChange>), CliError> {
+) -> Result<LockForUpdate, CliError> {
     let configured = config.hash_settings();
     let read = Lockfile::read(&lock_path(config.root()))
         .map_err(|error| lock_failure(&error, config.root(), cwd))?;
     let Some(lock) = read else {
         let mut empty = Lockfile::default();
         empty.set_hash_settings(configured);
-        return Ok((empty, None));
+        return Ok(LockForUpdate {
+            lock: empty,
+            settings: configured,
+            change: None,
+        });
     };
     let change = SettingsChange::between(lock.hash_settings(), configured);
-    Ok((lock, change))
+    Ok(LockForUpdate {
+        lock,
+        settings: configured,
+        change,
+    })
 }
 
 /// The `lock-settings-mismatch` error (78) for a command that can't re-record the lockfile under
@@ -399,7 +433,7 @@ mod tests {
             home: None,
             claude_config_dir: None,
         };
-        load_config(&context, &mut output, "list")
+        load_config(&context, &mut output)
     }
 
     /// A project with an empty config and a `docs` directory to run from.
@@ -507,9 +541,8 @@ mod tests {
     }
 
     #[test]
-    fn config_error_help_names_the_command_passed_in() {
+    fn a_wrong_type_help_names_the_key_and_its_form() {
         let dir = tempfile::tempdir().expect("a fresh temp directory should be created");
-        // A wrong type has no specific hint, so the help falls back to rerunning the command.
         fs::write(dir.path().join("supdoc.config.toml"), "include = 3\n")
             .expect("the fixture config should be written");
         let cwd = AbsolutePath::new(dir.path()).expect("a temp directory should be absolute");
@@ -530,7 +563,7 @@ mod tests {
             claude_config_dir: None,
         };
 
-        let error = load_config(&context, &mut output, "list")
+        let error = load_config(&context, &mut output)
             .expect_err("a config with a wrong type should not load");
 
         assert_eq!(
@@ -538,8 +571,8 @@ mod tests {
             ("config-parse", CliError::CONFIG_EXIT_CODE)
         );
         assert!(
-            error.help().contains("run `supdoc list` again"),
-            "the fallback help should name the command that was run: {}",
+            error.help().contains("`include = [\"docs\"]`"),
+            "a wrong type should get a help that names the key and its form: {}",
             error.help()
         );
     }
@@ -570,7 +603,7 @@ mod tests {
             claude_config_dir: None,
         };
 
-        let error = load_config(&context, &mut output, "list")
+        let error = load_config(&context, &mut output)
             .expect_err("a config with a syntax error should not load");
 
         let site = error.site().expect("a parse error should carry its site");

@@ -1,7 +1,8 @@
 //! Example invocations shown after each command's flags in `--help` (06 X9).
 //!
 //! Every example is a real invocation with realistic arguments. A test parses each one, so an
-//! example can never drift away from the flags it demonstrates.
+//! example can never drift away from the flags it demonstrates. Group blocks are built from the
+//! leaf blocks' bodies, so the two can never differ.
 
 /// Shown after the top-level help: the three tasks people reach for first.
 pub const TOP_EXAMPLES: &str = "\
@@ -88,32 +89,68 @@ Examples:
   # A Markdown file's headings, machine-readable
   supdoc resolve docs/guide.md --json";
 
-/// Shown after `supdoc config show --help`.
-pub const CONFIG_SHOW_EXAMPLES: &str = "\
-Examples:
+/// Body of the `config show` examples, shared by the leaf and the `config` group blocks.
+macro_rules! config_show_body {
+    () => {
+        "
   # The resolved config and the file each value came from
   supdoc config show
 
   # Machine-readable
-  supdoc config show --json";
+  supdoc config show --json"
+    };
+}
 
-/// Shown after `supdoc namespace list --help`.
-pub const NAMESPACE_LIST_EXAMPLES: &str = "\
-Examples:
+/// Body of the `namespace list` examples, shared by the leaf and the `namespace` group blocks.
+macro_rules! namespace_list_body {
+    () => {
+        "
   # Namespaces and the directories they map to
   supdoc namespace list
 
   # Machine-readable
-  supdoc namespace list --json";
+  supdoc namespace list --json"
+    };
+}
 
-/// Shown after `supdoc namespace rename --help`.
-pub const NAMESPACE_RENAME_EXAMPLES: &str = "\
-Examples:
+/// Body of the `namespace rename` examples, shared by the leaf and the `namespace` group blocks.
+macro_rules! namespace_rename_body {
+    () => {
+        "
   # Preview renaming `auth` to `identity` everywhere
   supdoc namespace rename auth identity
 
   # Apply it
-  supdoc namespace rename auth identity --yes";
+  supdoc namespace rename auth identity --yes
+
+  # Machine-readable preview
+  supdoc namespace rename auth identity --json"
+    };
+}
+
+/// Body of the `skill install` examples, shared by the leaf and the `skill` group blocks.
+macro_rules! skill_install_body {
+    () => {
+        "
+  # Preview the install into the current project
+  supdoc skill install
+
+  # Install into your home directory
+  supdoc skill install --global --yes
+
+  # Machine-readable preview
+  supdoc skill install --json"
+    };
+}
+
+/// Shown after `supdoc config show --help`.
+pub const CONFIG_SHOW_EXAMPLES: &str = concat!("Examples:", config_show_body!());
+
+/// Shown after `supdoc namespace list --help`.
+pub const NAMESPACE_LIST_EXAMPLES: &str = concat!("Examples:", namespace_list_body!());
+
+/// Shown after `supdoc namespace rename --help`.
+pub const NAMESPACE_RENAME_EXAMPLES: &str = concat!("Examples:", namespace_rename_body!());
 
 /// Shown after `supdoc init --help`.
 pub const INIT_EXAMPLES: &str = "\
@@ -122,7 +159,10 @@ Examples:
   supdoc init
 
   # Show what would be written
-  supdoc init --dry-run";
+  supdoc init --dry-run
+
+  # Machine-readable preview
+  supdoc init --dry-run --json";
 
 /// Shown after `supdoc schema --help`.
 pub const SCHEMA_EXAMPLES: &str = "\
@@ -137,43 +177,24 @@ Examples:
 pub const COMPLETIONS_EXAMPLES: &str = "\
 Examples:
   # Install zsh completions
-  supdoc completions zsh > ~/.zfunc/_supdoc";
+  supdoc completions zsh > ~/.zfunc/_supdoc
+
+  # Machine-readable
+  supdoc completions zsh --json";
 
 /// Shown after `supdoc skill install --help`.
-pub const SKILL_INSTALL_EXAMPLES: &str = "\
-Examples:
-  # Preview the install into the current project
-  supdoc skill install
-
-  # Install into your home directory
-  supdoc skill install --global --yes";
+pub const SKILL_INSTALL_EXAMPLES: &str = concat!("Examples:", skill_install_body!());
 
 /// Shown after `supdoc config --help`.
-pub const CONFIG_EXAMPLES: &str = "\
-Examples:
-  # The resolved config and the file each value came from
-  supdoc config show
-
-  # Machine-readable
-  supdoc config show --json";
+pub const CONFIG_EXAMPLES: &str = concat!("Examples:", config_show_body!());
 
 /// Shown after `supdoc namespace --help`.
-pub const NAMESPACE_EXAMPLES: &str = "\
-Examples:
-  # Namespaces and the directories they map to
-  supdoc namespace list
-
-  # Machine-readable
-  supdoc namespace list --json
-
-  # Preview renaming `auth` to `identity` everywhere
-  supdoc namespace rename auth identity";
+pub const NAMESPACE_EXAMPLES: &str = concat!(
+    "Examples:",
+    namespace_list_body!(),
+    "\n",
+    namespace_rename_body!()
+);
 
 /// Shown after `supdoc skill --help`.
-pub const SKILL_EXAMPLES: &str = "\
-Examples:
-  # Preview the install into the current project
-  supdoc skill install
-
-  # Install into your home directory
-  supdoc skill install --global --yes";
+pub const SKILL_EXAMPLES: &str = concat!("Examples:", skill_install_body!());
