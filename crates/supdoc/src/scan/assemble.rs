@@ -391,7 +391,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::check::reconcile::{Outcome, check_outcome, reconcile};
+    use crate::check::reconcile::{Outcome, check_outcome, reconcile_at_root};
     use crate::hash::Hash;
     use crate::link::Target;
     use crate::lock::model::Lockfile;
@@ -722,7 +722,7 @@ mod tests {
 
     /// Whether `check` passes on `project`, given `lock`, without and with `--deny-warnings`.
     fn outcomes(project: &Project, lock: &Lockfile) -> [Outcome; 2] {
-        let report = reconcile(&project.scan(), lock, &Scope::All);
+        let report = reconcile_at_root(&project.scan(), lock, &Scope::All);
         [check_outcome(&report, false), check_outcome(&report, true)]
     }
 
@@ -771,7 +771,7 @@ mod tests {
             .into_iter()
             .collect();
 
-        let report = reconcile(&project.scan(), &lock, &Scope::All);
+        let report = reconcile_at_root(&project.scan(), &lock, &Scope::All);
 
         let states: Vec<(LinkKey, LinkState)> = report
             .links
