@@ -431,6 +431,10 @@ mod helps {
             why: "a file must change between planning and writing one rename",
         },
         Unreachable {
+            kind: "cli-rename-invalid-source-path",
+            why: "the walk reports a file with an invalid name as a finding, so rename never meets one",
+        },
+        Unreachable {
             kind: "cli-schema-serialize",
             why: "a built-in JSON Schema must fail to serialize, which is a supdoc bug",
         },
@@ -959,6 +963,11 @@ mod helps {
                 p.write("docs/private/a.md", "# A\n");
                 chmod(p, "docs/private", 0o000);
             },
+            &["check"],
+        ),
+        case(
+            "scan-invalid-source-path",
+            |p| p.write("docs/a\\b.md", "# A\n"),
             &["check"],
         ),
         case("scan-root-unreadable", |p| chmod(p, ".", 0o300), &["check"]),
