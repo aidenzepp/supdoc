@@ -14,6 +14,8 @@
 #[cfg(test)]
 mod contracts;
 #[cfg(test)]
+mod env_and_fix;
+#[cfg(test)]
 mod goldens;
 #[cfg(test)]
 mod support;
