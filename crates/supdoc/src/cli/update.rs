@@ -85,6 +85,19 @@ pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<
             .map_err(|error| lock_failure(&error, config.root(), &context.cwd))?;
     }
 
+    // A `--state` that narrows or widens the run is repeated, so `--yes` applies what was previewed.
+    let state_flag = format!(
+        "--state {}",
+        args.state
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let mut flags = vec!["--yes"];
+    if args.state != MIGRATION_STATES {
+        flags.push(&state_flag);
+    }
     let apply_note = preview_note(
         args.confirm.dry_run,
         &command_line(
@@ -95,7 +108,7 @@ pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<
                 .iter()
                 .map(|path| path.display().to_string())
                 .collect::<Vec<_>>(),
-            &["--yes"],
+            &flags,
         ),
     );
     let report = UpdateReport::new(&model, &plan, &args.state, applied, &paths, context);
@@ -821,6 +834,18 @@ mod tests {
         assert_eq!(
             run.stderr,
             "Nothing written. Run `supdoc update --yes` to apply.\n"
+        );
+    }
+
+    #[test]
+    fn update_preview_note_repeats_a_given_state() {
+        let project = project_with_failed_new_and_obsolete();
+
+        let run = project.update(&["update", "--state", "new"]);
+
+        assert_eq!(
+            run.stderr,
+            "Nothing written. Run `supdoc update --yes --state new` to apply.\n"
         );
     }
 
