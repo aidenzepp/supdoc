@@ -38,11 +38,17 @@ fn assert_none_is_a_usage_error(project: &Project, invocations: &[Vec<&str>]) {
     let mut failures = Vec::new();
     for argv in invocations {
         let run = project.supdoc(argv);
-        if run.code == Some(i32::from(CliError::USAGE_EXIT_CODE)) {
+        let rejected = [
+            i32::from(CliError::USAGE_EXIT_CODE),
+            i32::from(CliError::BUG_EXIT_CODE),
+            101,
+        ];
+        if run.code.is_none_or(|code| rejected.contains(&code)) {
             failures.push(format!(
-                "`supdoc {}` was a usage error, so this test can't tell whether it is built; add \
-                 its required arguments to `required_arguments`: {}",
-                run.args, run.stderr
+                "`supdoc {}` ended with {:?} (usage error, bug, panic or signal), so this test \
+                 can't tell whether it is built; fix the command or add its required arguments \
+                 to `required_arguments`: {}",
+                run.args, run.code, run.stderr
             ));
         }
     }

@@ -136,6 +136,50 @@ impl LineIndex {
     }
 }
 
+/// A text with its [`LineIndex`], so every location and snippet taken from it costs a lookup
+/// instead of a scan of the whole text.
+#[derive(Debug, Clone)]
+pub struct IndexedText<'text> {
+    /// The text the index was built from.
+    text: &'text str,
+    /// Where each line of `text` starts.
+    index: LineIndex,
+}
+
+impl<'text> IndexedText<'text> {
+    /// Indexes `text` once.
+    #[must_use]
+    pub fn new(text: &'text str) -> Self {
+        Self {
+            text,
+            index: LineIndex::new(text),
+        }
+    }
+
+    /// The 1-based line and character column of byte `offset`.
+    ///
+    /// `None` if `offset` is past the end of the text or not on a character boundary.
+    #[must_use]
+    pub fn position(&self, offset: usize) -> Option<(u32, u32)> {
+        let line_start = self.index.line_start(offset);
+        let column = self.text.get(line_start..offset)?.chars().count() + 1;
+        let line = self.index.line_of(offset);
+        Some((u32::try_from(line).ok()?, u32::try_from(column).ok()?))
+    }
+
+    /// Locates `range` in the text, as [`Location::in_text`] does.
+    #[must_use]
+    pub fn locate(&self, file: SourcePath, range: Range<usize>) -> Option<Location> {
+        Location::in_indexed(file, self.text, &self.index, range)
+    }
+
+    /// Captures the lines `range` covers, as [`Snippet::capture`] does.
+    #[must_use]
+    pub fn snippet(&self, range: Range<usize>) -> Option<Snippet> {
+        Snippet::capture_indexed(self.text, &self.index, range)
+    }
+}
+
 impl Location {
     /// Locates `range` in `text`, the contents of `file`, computing its line and column.
     ///

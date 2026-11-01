@@ -166,7 +166,7 @@ fn lockfile_target_climbing_out_of_the_root_is_a_parse_error() {
 
     let run = project.supdoc_in("services/web", &["check"]);
 
-    assert_ne!(run.code, Some(0), "{}", run.stderr);
+    let _ = run.assert_exit(78);
     assert!(run.stderr.contains("lock-parse"), "{}", run.stderr);
     assert!(
         run.stderr
@@ -218,7 +218,7 @@ fn a_lockfile_symlinked_out_of_the_root_is_refused_alike_whether_or_not_its_targ
         let _ = with_target.assert_exit(78);
         assert_no_secret_key(with_target);
         assert!(
-            format!("{}{}", with_target.stdout, with_target.stderr).contains("lock-outside-root"),
+            with_target.stderr.contains("lock-outside-root"),
             "`supdoc {}` should refuse the lockfile\nstdout:\n{}\nstderr:\n{}",
             with_target.args,
             with_target.stdout,
@@ -252,7 +252,7 @@ fn a_found_config_symlinked_to_an_outside_dotenv_file_is_refused_without_printin
         let _ = run.assert_exit(78);
         assert_no_secret_key(&run);
         assert!(
-            format!("{}{}", run.stdout, run.stderr).contains("config-symlink-not-config"),
+            run.stderr.contains("config-symlink-not-config"),
             "`supdoc {}` should refuse the config\nstdout:\n{}\nstderr:\n{}",
             run.args,
             run.stdout,
@@ -288,7 +288,7 @@ fn a_found_config_symlinked_out_of_the_root_is_refused_alike_whatever_its_target
         let _ = file_run.assert_exit(78);
         assert_no_secret(file_run);
         assert!(
-            format!("{}{}", file_run.stdout, file_run.stderr).contains("config-symlink-not-config"),
+            file_run.stderr.contains("config-symlink-not-config"),
             "`supdoc {}` should refuse the config\nstdout:\n{}\nstderr:\n{}",
             file_run.args,
             file_run.stdout,
@@ -361,7 +361,7 @@ fn assert_extends_link_refused_alike(project: &Project, extends: &str) {
         let _ = file_run.assert_exit(78);
         assert_no_secret(file_run);
         assert!(
-            format!("{}{}", file_run.stdout, file_run.stderr).contains("config-extends-not-config"),
+            file_run.stderr.contains("config-extends-not-config"),
             "`supdoc {}` with `extends = \"{extends}\"` should refuse it\nstdout:\n{}\nstderr:\n{}",
             file_run.args,
             file_run.stdout,

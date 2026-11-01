@@ -21,7 +21,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::config::{CONFIG_FILE_NAME, Config, ConfigError};
-use crate::finding::{Finding, Location};
+use crate::finding::{Finding, IndexedText, Location};
 use crate::link::destination::parse_destination;
 use crate::link::{LinkKey, SourcePath, Target};
 use crate::lock::error::LockError;
@@ -36,8 +36,8 @@ use crate::read::cartridge::{Languages, SourceFile};
 use crate::read::error::ReadError;
 use crate::read::links::links;
 use crate::scan::model::Scope;
-use crate::scan::targets::close_match;
 use crate::scan::walk::{UnreadCause, UnreadDir, walk};
+use crate::suggest::close_match;
 
 use super::args::{RenameArgs, WriteMode};
 use super::project::{load_config, lock_path, read_lock};
@@ -48,15 +48,6 @@ const COMMAND: &str = "namespace rename";
 
 /// The note that closes a preview, after the counts.
 const PREVIEW_NOTE: &str = "Nothing written. Run the same command with --yes to apply.";
-
-/// The whole command as typed, for the config fallback help that says to run it again.
-fn command_text(args: &RenameArgs) -> String {
-    let mut command = format!("{COMMAND} {} {}", args.old, args.new);
-    if args.confirm.mode() == WriteMode::Apply {
-        command.push_str(" --yes");
-    }
-    command
-}
 
 /// Runs `supdoc namespace rename OLD NEW`: previews every edit, or with `--yes` makes them.
 ///
@@ -71,7 +62,7 @@ fn command_text(args: &RenameArgs) -> String {
 /// writing (all 1), `cli-rename-write` when a file can't be written, and `cli-rename-output` when
 /// the report can't be written (both 74).
 pub fn run(args: &RenameArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
-    let plan = Plan::build(&args.old, &args.new, &command_text(args), context, output)?;
+    let plan = Plan::build(&args.old, &args.new, context, output)?;
     let applied = match args.confirm.mode() {
         WriteMode::Preview => false,
         WriteMode::Apply => {
@@ -129,11 +120,10 @@ impl Plan {
     fn build(
         old: &NamespaceName,
         new: &NamespaceName,
-        command: &str,
         context: &Context,
         output: &mut Output,
     ) -> Result<Self, CliError> {
-        let config = load_config(context, output, command)?;
+        let config = load_config(context, output)?;
         let lock = read_lock(&config, &context.cwd)?;
         let nearest = defining_file(&config, old, new)?;
         let config_edit = ConfigEdit::read(nearest, config.root(), &context.cwd, old, new)?;
@@ -415,9 +405,7 @@ fn read_config(file: &AbsolutePath, cwd: &AbsolutePath) -> Result<String, CliErr
         CliError::new(
             error.code(),
             error.message_from(cwd),
-            error.help_from(cwd).unwrap_or_else(|| {
-                format!("Check that the file can be read, then run `supdoc {COMMAND}` again")
-            }),
+            error.help_from(cwd),
             error.exit_code(),
         )
     })
@@ -476,7 +464,7 @@ impl ConfigEdit {
         let location = relative
             .as_deref()
             .and_then(|path| SourcePath::from_relative(path).ok())
-            .and_then(|source| Location::in_text(source, &text, key.clone()));
+            .and_then(|source| IndexedText::new(&text).locate(source, key.clone()));
         Ok(Self {
             file: file.clone(),
             shown,
@@ -559,10 +547,11 @@ impl SourceEdit {
         if ranges.is_empty() {
             return None;
         }
+        let indexed = IndexedText::new(text);
         let links = ranges
             .into_iter()
             .map(|destination| LinkEdit {
-                location: Location::in_text(source.clone(), text, destination.clone()),
+                location: indexed.locate(source.clone(), destination.clone()),
                 destination,
             })
             .collect();
@@ -1213,14 +1202,8 @@ web = \"services/web\"
                 panic!("`{}` should be a namespace rename", args.join(" "));
             };
             let context = context(&cli, self.root());
-            Plan::build(
-                &rename.old,
-                &rename.new,
-                &command_text(rename),
-                &context,
-                &mut output,
-            )
-            .expect("the rename should plan")
+            Plan::build(&rename.old, &rename.new, &context, &mut output)
+                .expect("the rename should plan")
         }
     }
 
@@ -1886,7 +1869,10 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
                 extension: "xyz".to_owned(),
                 supported: vec!["md"],
             },
-            ReadError::Internal { path: path.clone() },
+            ReadError::Internal {
+                path: path.clone(),
+                reason: "tree-sitter returned no tree",
+            },
         ];
         let causes = [UnreadCause::Io(io::ErrorKind::PermissionDenied)];
         let dirs = causes.map(|cause| UnreadDir {
