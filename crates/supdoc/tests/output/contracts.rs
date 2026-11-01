@@ -1276,6 +1276,38 @@ mod helps {
         (args.join(" "), helps, stderr)
     }
 
+    /// Pushes onto `problems` what is wrong with the helps `case` printed: a missing help on its own
+    /// code, a changed pinned help, or a help that names no command or value.
+    fn help_problems(
+        case: &HelpCase,
+        args: &str,
+        helps: &[(String, Option<String>)],
+        problems: &mut Vec<String>,
+    ) {
+        for (kind, help) in helps {
+            let helpless = HELPLESS.iter().any(|entry| entry.kind == kind);
+            if kind == case.kind && help.as_deref().is_none_or(str::is_empty) && !helpless {
+                problems.push(format!(
+                    "`{kind}` (from `supdoc {args}`) printed no help; give it a `.with_help` or \
+                     list it in HELPLESS with a reason"
+                ));
+            }
+            if let Some((_, pinned)) = PINNED_HELPS.iter().find(|(pin, _)| pin == kind)
+                && help.as_deref().is_some_and(|help| help != *pinned)
+            {
+                problems.push(format!(
+                    "the help of `{kind}` (from `supdoc {args}`) changed; expected {pinned:?}, \
+                     got {help:?}"
+                ));
+            }
+            if let Some(problem) = help.as_deref().and_then(help_problem) {
+                problems.push(format!(
+                    "the help of `{kind}` (from `supdoc {args}`) {problem} (07 G3): {help:?}"
+                ));
+            }
+        }
+    }
+
     #[test]
     fn every_help_names_a_command_or_value() {
         let mut problems = Vec::new();
@@ -1305,28 +1337,7 @@ mod helps {
                     stderr.trim()
                 ));
             }
-            for (kind, help) in &helps {
-                let helpless = HELPLESS.iter().any(|entry| entry.kind == kind);
-                if kind == case.kind && help.as_deref().is_none_or(str::is_empty) && !helpless {
-                    problems.push(format!(
-                        "`{kind}` (from `supdoc {args}`) printed no help; give it a `.with_help` \
-                         or list it in HELPLESS with a reason"
-                    ));
-                }
-                if let Some((_, pinned)) = PINNED_HELPS.iter().find(|(pin, _)| pin == kind)
-                    && help.as_deref().is_some_and(|help| help != *pinned)
-                {
-                    problems.push(format!(
-                        "the help of `{kind}` (from `supdoc {args}`) changed; expected {pinned:?}, \
-                         got {help:?}"
-                    ));
-                }
-                if let Some(problem) = help.as_deref().and_then(help_problem) {
-                    problems.push(format!(
-                        "the help of `{kind}` (from `supdoc {args}`) {problem} (07 G3): {help:?}"
-                    ));
-                }
-            }
+            help_problems(case, &args, &helps, &mut problems);
         }
 
         for unit in UNIT_CASES {
