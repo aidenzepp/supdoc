@@ -514,6 +514,12 @@ fn resolve_failed(
     }
 }
 
+/// Whether `candidate` is a likely misspelling of `wanted`: within `max(len, 3) / 3` single-character
+/// edits, counting a swap of neighbors as one edit.
+pub(crate) fn is_close(wanted: &str, candidate: &str) -> bool {
+    strsim::osa_distance(wanted, candidate) <= wanted.chars().count().max(3) / 3
+}
+
 /// The one candidate that is a likely misspelling of `wanted`, if exactly one is.
 ///
 /// Close means within `max(len, 3) / 3` single-character edits of `wanted`, counting a swap of
@@ -522,11 +528,10 @@ pub(crate) fn close_match<'c>(
     wanted: &str,
     candidates: impl IntoIterator<Item = &'c str>,
 ) -> Option<&'c str> {
-    let limit = wanted.chars().count().max(3) / 3;
     let mut close: Vec<&str> = candidates
         .into_iter()
         .filter(|candidate| *candidate != wanted)
-        .filter(|candidate| strsim::osa_distance(wanted, candidate) <= limit)
+        .filter(|candidate| is_close(wanted, candidate))
         .collect();
     close.sort_unstable();
     close.dedup();

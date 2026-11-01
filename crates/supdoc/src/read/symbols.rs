@@ -20,6 +20,7 @@ use crate::link::SymbolPath;
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{SourceFile, Symbol, SymbolTable};
 use crate::read::error::ResolveError;
+use crate::scan::targets::is_close;
 
 /// How many near-misses a `NotFound` suggests.
 const NEAREST: usize = 3;
@@ -326,6 +327,7 @@ impl SymbolTable {
                 file: file.clone(),
                 query: query.clone(),
                 nearest: self.nearest(query),
+                file_has_symbols: self.iter().next().is_some(),
             }),
             several => Err(ResolveError::Ambiguous {
                 file: file.clone(),
@@ -335,7 +337,8 @@ impl SymbolTable {
         }
     }
 
-    /// Up to three paths (full paths or aliases) closest to `query` by edit distance, closest
+    /// Up to three paths (full paths or aliases) that are close misspellings of `query` (the
+    /// fixer's cutoff) or end in the same name, such as a trait method under another path, closest
     /// first. Ties keep file order.
     #[must_use]
     pub fn nearest(&self, query: &SymbolPath) -> Vec<SymbolPath> {
@@ -345,6 +348,10 @@ impl SymbolTable {
             .iter()
             .flat_map(|symbol| std::iter::once(&symbol.path).chain(&symbol.aliases))
             .filter(|path| seen.insert(*path))
+            .filter(|path| {
+                let shown = path.to_string();
+                is_close(&wanted, &shown) || shares_last_segment(&wanted, &shown)
+            })
             .map(|path| (strsim::levenshtein(&wanted, &path.to_string()), path))
             .collect();
         scored.sort_by_key(|(distance, _)| *distance);
@@ -354,6 +361,12 @@ impl SymbolTable {
             .map(|(_, path)| path.clone())
             .collect()
     }
+}
+
+/// Whether `candidate` ends in the last dot-separated name of `wanted`.
+fn shares_last_segment(wanted: &str, candidate: &str) -> bool {
+    let last = |path: &str| path.rsplit('.').next().map(str::to_owned);
+    last(wanted) == last(candidate)
 }
 
 #[cfg(test)]
@@ -480,13 +493,17 @@ mod tests {
             Err(ResolveError::NotFound {
                 file: absolute("/repo/src/lib.rs"),
                 query: path("Config.validat"),
-                nearest: vec![
-                    path("Config.validate"),
-                    path("Config.valid"),
-                    path("Config.port")
-                ],
+                nearest: vec![path("Config.validate"), path("Config.valid")],
+                file_has_symbols: true,
             }),
         );
+    }
+
+    #[test]
+    fn nearest_omits_symbols_beyond_the_closeness_cutoff() {
+        let table = table(&["add", "Config"]);
+
+        assert_eq!(table.nearest(&path("zzzzzzzz")), Vec::new());
     }
 
     #[test]

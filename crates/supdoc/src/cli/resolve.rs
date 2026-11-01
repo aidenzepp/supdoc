@@ -788,7 +788,7 @@ mod tests {
         assert_eq!(
             shown(&not_found),
             "no symbol `Config.validat` in src/lib.rs\n\
-             did you mean `Config.validate`, `Config.port`, `Config`? \
+             did you mean `Config.validate`? \
              `supdoc resolve ../src/lib.rs` lists every symbol",
             "the message names the file from the root; the help repeats FILE as typed so it runs"
         );
