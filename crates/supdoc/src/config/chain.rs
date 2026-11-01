@@ -186,7 +186,8 @@ fn read_text(file: &AbsolutePath, is_start: bool) -> Result<String, ConfigError>
 /// # Errors
 ///
 /// `ExtendsNotConfig` for any other name, or for a value [`plain`] refuses that doesn't lead to a
-/// config file; `ExtendsDirectory` for a value ending in `.` or `..`; and for a plain value,
+/// config file; `ExtendsDirectory` for a value ending in `.` or `..`, or naming a [`plain`]
+/// directory (never suggesting the file that wrote it); and for a plain value,
 /// `ExtendsMissing` or `ExtendsDirectory` when it isn't a file, `Read` for other failures.
 fn resolve_extends(
     root: &AbsolutePath,
@@ -199,7 +200,8 @@ fn resolve_extends(
         file: from.clone(),
         extends: value.clone(),
         span: extends.span(),
-        suggestion: config_inside(root, value, &resolved),
+        suggestion: config_inside(root, value, &resolved)
+            .filter(|_| config_in(&resolved).as_ref() != Some(from)),
     };
     let not_config = || ConfigError::ExtendsNotConfig {
         file: from.clone(),
@@ -209,6 +211,9 @@ fn resolve_extends(
     match value.as_path().components().next_back() {
         None | Some(Component::CurDir | Component::ParentDir) => return Err(directory()),
         Some(Component::Normal(name)) if name == CONFIG_FILE_NAME => {}
+        Some(_) if plain(root, &resolved) && resolved.as_path().is_dir() => {
+            return Err(directory());
+        }
         Some(_) => return Err(not_config()),
     }
     if !plain(root, &resolved) {

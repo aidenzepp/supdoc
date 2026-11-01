@@ -285,6 +285,14 @@ fn parse_help(message: &str) -> Option<String> {
              at least 2 characters long"
                 .to_owned(),
         )
+    } else if message.starts_with("invalid type: string")
+        && message.ends_with("expected a sequence")
+    {
+        let value = message.split('"').nth(1).unwrap_or_default();
+        Some(format!(
+            "Write a list, such as `[\"{value}\"]`: `include` and `exclude` take a list of \
+             patterns even when there is only one"
+        ))
     } else if message.contains("is an absolute path") {
         Some("Write the path relative to this config file, such as `services/auth`".to_owned())
     } else if message.ends_with("leaves this config's directory") {
