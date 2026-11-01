@@ -22,9 +22,9 @@ fn write(project: &Project, relative: &str, text: &str) {
     fs::write(path, text).expect("the file should be writable");
 }
 
-/// The text of `run`'s output from the first `marker` to the next blank line.
+/// The text of `run`'s stdout (where the report prints findings) from the first `marker` to the next blank line.
 fn block(run: &Run, marker: &str) -> String {
-    let output = format!("{}{}", run.stdout, run.stderr);
+    let output = &run.stdout;
     let start = output
         .find(marker)
         .unwrap_or_else(|| panic!("the output should have `{marker}`:\n{output}"));
@@ -90,6 +90,9 @@ fn missing_path_help_lists_the_nearest_directory_that_exists() {
 
 #[test]
 fn unreadable_lock_help_names_the_lock_from_the_current_directory() {
+    if !crate::permissions_restrict_this_user("unreadable_lock_help") {
+        return;
+    }
     let project = project();
     project.record();
     let lock = project.path("supdoc.lock");

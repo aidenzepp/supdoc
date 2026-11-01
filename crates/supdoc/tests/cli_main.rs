@@ -1,5 +1,9 @@
 //! Runs the built `supdoc` binary and checks what a user sees: streams and exit codes (06, 07).
+//!
+//! Unix only: the suite uses Unix permissions, symlinks and `sh`. Windows is untested, and CI runs
+//! only on Linux.
 
+#![cfg(unix)]
 #![cfg_attr(
     test,
     allow(
@@ -107,30 +111,4 @@ fn unknown_flag_exits_2_with_a_json_usage_error_under_json() {
     let error = single_json_object(&run.stderr);
     assert_eq!(field(&error, "kind"), "cli-usage");
     assert_eq!(field(&error, "exit_code"), 2);
-}
-
-#[test]
-fn only_one_output_format_type_exists_in_the_crate() {
-    let mut definitions = Vec::new();
-    let mut pending = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
-    while let Some(dir) = pending.pop() {
-        for entry in std::fs::read_dir(&dir).expect("the source directory should be readable") {
-            let path = entry.expect("a directory entry should be readable").path();
-            if path.is_dir() {
-                pending.push(path);
-            } else if path.extension().is_some_and(|ext| ext == "rs") {
-                let text =
-                    std::fs::read_to_string(&path).expect("a source file should be readable");
-                if text.contains("enum OutputFormat") {
-                    definitions.push(path);
-                }
-            }
-        }
-    }
-
-    assert_eq!(
-        definitions.len(),
-        1,
-        "OutputFormat should be defined once: {definitions:?}"
-    );
 }

@@ -23,6 +23,7 @@ use crate::read::cartridge::{Languages, SourceFile, SymbolTable};
 use crate::read::error::{ReadError, ResolveError};
 use crate::read::hash::{hash_file, hash_symbol};
 use crate::scan::model::{ScannedLink, TargetState};
+use crate::suggest::close_match;
 
 /// Finding code for a target path whose case differs from the real path (04 S12).
 const CODE_CASE_MISMATCH: &str = "scan-case-mismatch";
@@ -524,33 +525,6 @@ fn resolve_failed(
     match close.zip(range) {
         Some((close, range)) => finding.with_fix(fix_at(first, range, close)),
         None => finding,
-    }
-}
-
-/// Whether `candidate` is a likely misspelling of `wanted`: within `max(len, 3) / 3` single-character
-/// edits, counting a swap of neighbors as one edit.
-pub(crate) fn is_close(wanted: &str, candidate: &str) -> bool {
-    strsim::osa_distance(wanted, candidate) <= wanted.chars().count().max(3) / 3
-}
-
-/// The one candidate that is a likely misspelling of `wanted`, if exactly one is.
-///
-/// Close means within `max(len, 3) / 3` single-character edits of `wanted`, counting a swap of
-/// neighbors as one edit, so `atuh` is close to `auth`. Repeated candidates count once.
-pub(crate) fn close_match<'c>(
-    wanted: &str,
-    candidates: impl IntoIterator<Item = &'c str>,
-) -> Option<&'c str> {
-    let mut close: Vec<&str> = candidates
-        .into_iter()
-        .filter(|candidate| *candidate != wanted)
-        .filter(|candidate| is_close(wanted, candidate))
-        .collect();
-    close.sort_unstable();
-    close.dedup();
-    match close.as_slice() {
-        [only] => Some(only),
-        _ => None,
     }
 }
 

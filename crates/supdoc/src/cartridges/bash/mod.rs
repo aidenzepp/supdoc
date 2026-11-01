@@ -40,6 +40,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::cartridges::rust::region_texts;
     use crate::hash::HashSettings;
     use crate::path::AbsolutePath;
     use crate::read::cartridge::{SourceFile, Symbol, SymbolTable};
@@ -234,8 +235,8 @@ cleanup() { rm -rf "$TMP"; }
         );
 
         assert_eq!(
-            file.language().markdown_regions(&file).len(),
-            3,
+            region_texts(&file),
+            [" [a](a.md)\n", "/bin/sh\n", " [c](c.md)\n"],
             "the two comments and the shebang, not the string or heredoc",
         );
     }

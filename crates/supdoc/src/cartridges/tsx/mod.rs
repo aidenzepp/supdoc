@@ -40,6 +40,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::cartridges::rust::region_texts;
     use crate::hash::HashSettings;
     use crate::link::SymbolPath;
     use crate::path::AbsolutePath;
@@ -312,14 +313,17 @@ namespace util {
         let file =
             parse("/** [a](a.md) */\n// [b](b.md)\nconst view = <div>{/* [c](c.md) */}</div>;\n");
 
-        assert_eq!(file.language().markdown_regions(&file).len(), 3);
+        assert_eq!(
+            region_texts(&file),
+            ["/** [a](a.md) */", " [b](b.md)\n", "/* [c](c.md) */"]
+        );
     }
 
     #[test]
     fn tsx_strings_and_jsx_text_are_not_link_regions() {
         let file = parse("const s = \"[a](a.md)\";\nconst v = <p>[b](b.md)</p>;\n");
 
-        assert_eq!(file.language().markdown_regions(&file).len(), 0);
+        assert_eq!(region_texts(&file), Vec::<&str>::new());
     }
 
     #[test]

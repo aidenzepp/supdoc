@@ -10,9 +10,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use ignore::gitignore::{Gitignore, GitignoreBuilder, Glob};
 use ignore::{DirEntry, Match, WalkBuilder};
 
-use crate::config::{CONFIG_FILE_NAME, Config, config_entry};
+use crate::config::{CONFIG_FILE_NAME, Config, PatternDefinition, config_entry};
 use crate::finding::{Finding, Severity};
-use crate::link::SourcePath;
+use crate::link::{LinkPathError, SourcePath};
+use crate::lock::error::shell_quote;
 use crate::output::paths::relative_to;
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Cartridge, Languages};
@@ -88,15 +89,18 @@ impl UnreadDir {
     /// The message names the directory relative to the project `root`, as the read messages name
     /// files, so no finding carries a machine-specific absolute path.
     fn finding(&self, root: &AbsolutePath) -> Finding {
+        let shown = relative_to(root, &self.path);
         Finding::new(
             "scan-unreadable-dir",
             Severity::Warning,
-            format!("skipped {}: {}", relative_to(root, &self.path), self.cause),
+            format!("skipped {shown}: {}", self.cause),
         )
-        .with_help(
-            "Links in that directory weren't checked. Fix its permissions, or add it to `exclude` \
-             in `supdoc.config.toml`",
-        )
+        .with_help(format!(
+            "Links in that directory weren't checked. Run `chmod u+rx {dir}`, or add `exclude = \
+             [{pattern:?}]` to {CONFIG_FILE_NAME}",
+            dir = shell_quote(&shown),
+            pattern = shown,
+        ))
     }
 }
 
@@ -711,26 +715,27 @@ fn as_source(
     }
     let cartridge = languages.for_path(path.as_path())?;
     let relative_path = path.strip_prefix(config.root())?;
-    let Ok(relative) = SourcePath::from_relative(relative_path) else {
-        return Some(Err(invalid_source_path(relative_path)));
+    let relative = match SourcePath::from_relative(relative_path) {
+        Ok(relative) => relative,
+        Err(error) => return Some(Err(invalid_source_path(relative_path, &error))),
     };
     scope.contains(&relative).then_some(Ok((path, cartridge)))
 }
 
 /// The warning for a file the walk would read but whose name isn't a valid source path.
-fn invalid_source_path(relative: &Path) -> Finding {
+fn invalid_source_path(relative: &Path, error: &LinkPathError) -> Finding {
     Finding::new(
         "scan-invalid-source-path",
         Severity::Warning,
         format!(
-            "skipped {}: its name can't be written as a source path",
+            "skipped {}: its name can't be written as a source path ({error})",
             relative.display()
         ),
     )
-    .with_help(
-        "Links in that file weren't checked. Rename the file, or add it to `exclude` in \
-         `supdoc.config.toml`",
-    )
+    .with_help(format!(
+        "Links in that file weren't checked. Rename the file so its path is valid UTF-8 and \
+         joins names with `/`, or add it to `exclude` in {CONFIG_FILE_NAME}"
+    ))
 }
 
 /// The directory the walker couldn't read.
@@ -816,10 +821,18 @@ fn explicit_path_warning(
     }
     let excluded_by = config.excluded_by(&path);
     if let Some(pattern) = excluded_by.filter(|_| is_source_file || kind.is_dir()) {
-        return Some(excluded(listed, Some(pattern)));
+        return Some(excluded(
+            listed,
+            Some(pattern),
+            &defined_in(root, config.exclude_definition()),
+        ));
     }
     if is_source_file && !config.scans(&path) {
-        return Some(excluded(listed, None));
+        return Some(excluded(
+            listed,
+            None,
+            &defined_in(root, config.include_definition()),
+        ));
     }
     // The walk never enters a symlinked directory, so nothing under one is walked and no rule
     // names it.
@@ -887,30 +900,39 @@ fn symlinked(
     }
 }
 
+/// The config file that set a pattern key, relative to the project `root`, or the default config
+/// name when no file sets it.
+fn defined_in(root: &AbsolutePath, definition: Option<PatternDefinition<'_>>) -> String {
+    definition.map_or_else(
+        || CONFIG_FILE_NAME.to_owned(),
+        |definition| relative_to(root, definition.file()),
+    )
+}
+
 /// The finding for an explicit path that the config excludes, naming the `exclude` pattern when
-/// one matched and otherwise blaming `include`.
-fn excluded(listed: &SourcePath, pattern: Option<&str>) -> Finding {
+/// one matched and otherwise blaming `include`, each in the config `file` that set it.
+fn excluded(listed: &SourcePath, pattern: Option<&str>, file: &str) -> Finding {
     let listed = listed.as_str();
     match pattern {
         Some(pattern) => Finding::new(
             "scan-explicit-path-excluded",
             Severity::Warning,
             format!(
-                "{listed} was named on the command line but is excluded by `{pattern}` in `exclude` in {CONFIG_FILE_NAME}",
+                "{listed} was named on the command line but is excluded by `{pattern}` in `exclude` in {file}",
             ),
         )
         .with_help(format!(
-            "Remove `{pattern}` from `exclude` to check it, or stop passing it"
+            "Remove `{pattern}` from `exclude` in {file} to check it, or stop passing it"
         )),
         None => Finding::new(
             "scan-explicit-path-excluded",
             Severity::Warning,
             format!(
-                "{listed} was named on the command line but is not matched by `include` in {CONFIG_FILE_NAME}",
+                "{listed} was named on the command line but is not matched by `include` in {file}",
             ),
         )
         .with_help(format!(
-            "Add `{listed}` to `include` to check it, or stop passing it"
+            "Add `{listed}` to `include` in {file} to check it, or stop passing it"
         )),
     }
 }
@@ -1386,6 +1408,11 @@ mod tests {
         assert_eq!(codes(&walk), ["scan-invalid-source-path"]);
         let finding = walk.findings.first().expect("one warning was expected");
         assert_eq!(finding.severity, Severity::Warning);
+        assert!(
+            finding.message.contains("uses `\\`"),
+            "got: {}",
+            finding.message
+        );
         assert!(
             finding.message.contains("docs/a\\b.md"),
             "message was: {}",
