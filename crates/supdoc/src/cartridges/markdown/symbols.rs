@@ -1,7 +1,7 @@
-//! Markdown headings as symbols (03 R12).
+//! Markdown headings as symbols.
 //!
 //! Each heading is one symbol whose range is its whole section: the heading, its body and every
-//! subsection, up to the next heading of the same or a higher level (03 R7).
+//! subsection, up to the next heading of the same or a higher level.
 //!
 //! A heading answers to two names that never clash, because GitHub anchors never contain `.`:
 //!

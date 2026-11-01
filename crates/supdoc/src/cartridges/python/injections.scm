@@ -1,4 +1,4 @@
-; Where links are read in Python (03 R9, R14): every `#` comment and every docstring, read as
+; Where links are read in Python: every `#` comment and every docstring, read as
 ; inline Markdown. Other string literals are never regions, so `s = "[a](b.py#c)"` is not a link.
 ; A docstring is the first statement of a module, class or function; comments may precede it.
 

@@ -1,4 +1,4 @@
-; JavaScript symbols (03 R4, R5). Written in tree-sitter's tags.scm conventions. Unlike the
+; JavaScript symbols. Written in tree-sitter's tags.scm conventions. Unlike the
 ; grammar's bundled tags.scm, this covers class fields and top-level bindings, and it leaves out
 ; call and `new` references, which aren't definitions.
 
