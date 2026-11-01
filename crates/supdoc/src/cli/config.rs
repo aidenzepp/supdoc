@@ -16,7 +16,7 @@ use crate::output::text::visible;
 use crate::output::{Output, OutputError, Report, TextContext, Verbosity};
 use crate::path::AbsolutePath;
 
-use super::args::Inspect;
+use super::args::{Inspect, Limit};
 use super::project::{load_config, lock_path};
 use super::{CliError, Context, Outcome};
 
@@ -45,9 +45,10 @@ pub fn run(inspect: Inspect, context: &Context, output: &mut Output) -> Result<O
             let report = NamespaceListReport::new(&config, limit);
             output.report(&report, true).and_then(|()| {
                 if report.truncated {
-                    output.note(&format!(
-                        "Showing {} namespaces; there are more. Raise --limit, or use --limit 0 for all.",
-                        report.namespaces.len()
+                    output.note(&limit.truncation_note(
+                        report.namespaces.len(),
+                        report.total,
+                        "namespaces",
                     ))
                 } else if report.namespaces.is_empty() {
                     output.note("No namespaces configured.")
@@ -192,17 +193,20 @@ pub(crate) struct NamespaceListReport {
     /// Whether `--limit` left namespaces out.
     #[serde(skip)]
     truncated: bool,
+    /// How many namespaces exist, shown or not.
+    #[serde(skip)]
+    total: usize,
 }
 
 impl NamespaceListReport {
-    /// The report for `config`, showing at most `limit` namespaces (0 means no limit).
-    fn new(config: &Config, limit: usize) -> Self {
-        let mut namespaces = namespace_rows(config);
-        let truncated = limit != 0 && namespaces.len() > limit;
-        namespaces.truncate(if limit == 0 { namespaces.len() } else { limit });
+    /// The report for `config`, showing at most `limit` namespaces .
+    fn new(config: &Config, limit: Limit) -> Self {
+        let all = namespace_rows(config);
+        let total = all.len();
         Self {
-            namespaces,
-            truncated,
+            namespaces: limit.take(all).collect(),
+            truncated: limit.truncated(total),
+            total,
         }
     }
 }
@@ -732,9 +736,28 @@ mod tests {
 
         let text = project.run(&["namespace", "list", "--limit", "2"]);
         assert!(
-            text.stderr.contains("Showing 2 namespaces"),
+            text.stderr.contains("Showing 2 of 3 namespaces."),
             "stderr: {}",
             text.stderr
+        );
+    }
+
+    #[test]
+    fn namespace_list_limit_0_shows_every_namespace() {
+        let project = Project::new();
+        project.write(
+            "supdoc.config.toml",
+            "[namespaces]\nweb = \"apps/web\"\nauth = \"services/auth\"\ncore = \"core\"\n",
+        );
+
+        let run = project.run(&["--json", "namespace", "list", "--limit", "0"]);
+
+        let json = run.json();
+        assert_eq!(at(&json, "/truncated"), false, "json: {json}");
+        assert_eq!(
+            at(&json, "/data/namespaces").as_array().map(Vec::len),
+            Some(3),
+            "json: {json}"
         );
     }
 
@@ -832,7 +855,12 @@ mod tests {
         );
         let json = project.run(&["--json", "namespace", "list"]).json();
 
-        let errors = schema_violations(Inspect::NamespaceList { limit: 0 }, &json);
+        let errors = schema_violations(
+            Inspect::NamespaceList {
+                limit: Limit::UNLIMITED,
+            },
+            &json,
+        );
 
         assert!(errors.is_empty(), "schema violations: {errors:?} in {json}");
         assert_eq!(at(&json, "/command"), "namespace list");

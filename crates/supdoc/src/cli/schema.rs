@@ -15,7 +15,7 @@ use serde_json::{Map, Value};
 use crate::output::json::FatalJson;
 use crate::output::{Output, OutputError, Report, TextContext};
 
-use super::args::{Inspect, SchemaArgs, SchemaTarget};
+use super::args::{Inspect, Limit, SchemaArgs, SchemaTarget};
 use super::{
     CliError, Context, Outcome, check, config, fix, init, list, rename, resolve, skill, update,
 };
@@ -140,7 +140,9 @@ fn schema_of(target: SchemaTarget) -> schemars::Schema {
         SchemaTarget::List => list::schema(),
         SchemaTarget::Resolve => resolve::schema(),
         SchemaTarget::ConfigShow => config::schema(Inspect::ConfigShow),
-        SchemaTarget::NamespaceList => config::schema(Inspect::NamespaceList { limit: 0 }),
+        SchemaTarget::NamespaceList => config::schema(Inspect::NamespaceList {
+            limit: Limit::UNLIMITED,
+        }),
         SchemaTarget::NamespaceRename => rename::schema(),
         SchemaTarget::Init => init::schema(),
         SchemaTarget::SkillInstall => skill::schema(),

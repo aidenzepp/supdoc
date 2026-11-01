@@ -245,7 +245,7 @@ mod tests {
     use clap::{ColorChoice, CommandFactory};
 
     use super::*;
-    use crate::cli::args::{Command, ListArgs};
+    use crate::cli::args::{Command, Limit, ListArgs};
 
     /// Parses `args` (without the program name) with an empty environment.
     fn parse(args: &[&str]) -> Parsed {
@@ -406,8 +406,11 @@ mod tests {
             panic!("expected list");
         };
 
-        assert_eq!((defaults.limit, defaults.target.is_none()), (100, true));
-        assert_eq!(given.limit, 0);
+        assert_eq!(
+            (defaults.limit, defaults.target.is_none()),
+            (Limit::at_most(100), true)
+        );
+        assert_eq!(given.limit, Limit::UNLIMITED);
         assert_eq!(given.target.as_deref(), Some("auth:src/session.rs#login"));
         assert_eq!(given.state.len(), 2);
     }
@@ -903,7 +906,7 @@ mod tests {
         );
 
         assert!(
-            from_env.contains("limit: 7")
+            from_env.contains("limit: Limit(Some(7))")
                 && from_env.contains("Failed, New")
                 && from_env.contains("output: Github")
                 && from_env.contains("color: Never")
@@ -912,7 +915,7 @@ mod tests {
             "{from_env}"
         );
         assert!(
-            overridden.contains("limit: 9") && overridden.contains("output: Jsonl"),
+            overridden.contains("limit: Limit(Some(9))") && overridden.contains("output: Jsonl"),
             "{overridden}"
         );
     }
@@ -949,7 +952,7 @@ mod tests {
         assert!(!cli.global.quiet && cli.global.verbose == 0 && cli.global.config.is_none());
         assert!(matches!(
             cli.command,
-            Command::List(ListArgs { limit: 100, .. })
+            Command::List(ListArgs { limit, .. }) if limit == Limit::at_most(100)
         ));
     }
 
