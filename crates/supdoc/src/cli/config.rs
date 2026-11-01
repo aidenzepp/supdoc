@@ -347,10 +347,9 @@ fn namespace_rows(config: &Config) -> Vec<NamespaceJson> {
     config
         .namespaces()
         .iter()
-        .map(|(name, folder)| {
-            // A loaded config records the defining file of every namespace; the root only
-            // stands in for a record that cannot be missing.
-            let defined_in = config.namespace_defined_in(name).unwrap_or(root);
+        .map(|(name, namespace)| {
+            let folder = namespace.dir();
+            let defined_in = namespace.defined_in();
             NamespaceJson {
                 name: name.to_string(),
                 path: relative_to(root, folder),
