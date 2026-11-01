@@ -279,13 +279,16 @@ struct Wanted {
 enum Place {
     /// The file's absolute path, so `auth:login.rs` and `services/auth/login.rs` are one place.
     File(AbsolutePath),
-    /// A target in a namespace the config doesn't define: compared as written.
+    /// A target in a namespace the config doesn't define, or one that lies outside the project
+    /// root once symlinks are followed: compared as written, and never read.
     Unlocated(Target),
 }
 
 impl Place {
     /// Where `target` points. A plain path is joined onto `plain_base`, and a namespaced one onto
     /// its namespace's directory.
+    ///
+    /// Effect: follows symlinks along the joined path to check it stays inside the project root.
     fn of(target: &Target, plain_base: &AbsolutePath, config: &Config) -> Self {
         let base = match target {
             Target::Path(_) => plain_base,
@@ -297,6 +300,9 @@ impl Place {
         // Joining a relative path onto an absolute one is always absolute.
         let file = AbsolutePath::new(&base.as_path().join(target.path().as_str()))
             .unwrap_or_else(|| base.clone());
+        if !config.contains(base.as_path()) || !config.contains(file.as_path()) {
+            return Self::Unlocated(target.clone());
+        }
         Self::File(file)
     }
 }
