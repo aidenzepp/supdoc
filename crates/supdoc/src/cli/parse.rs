@@ -4,6 +4,7 @@
 //! code that touches the process and tests can inspect every outcome (06 `main`, X8).
 
 use std::ffi::{OsStr, OsString};
+use std::fmt::Write as _;
 
 use clap::builder::{FalseyValueParser, TypedValueParser as _};
 use clap::error::ErrorKind;
@@ -71,7 +72,7 @@ where
 
 /// Decides what to print for a clap error or an explicit `--help` / `--version`.
 fn printout(error: &clap::Error, format: OutputFormat) -> Printout {
-    let text = error.render().to_string();
+    let text = redirect_flag_tip(&error.render().to_string());
     match error.kind() {
         // Bare `supdoc` shows help, as a successful request for help (06 X1).
         ErrorKind::DisplayHelp
@@ -92,6 +93,40 @@ fn printout(error: &clap::Error, format: OutputFormat) -> Printout {
             exit_code: CliError::USAGE_EXIT_CODE,
         },
     }
+}
+
+/// Replaces clap's `-- --flag` tip, which only leads to a second error, with a tip that names a real flag.
+///
+/// `--format` points at `--output` and `--json`; any other unknown flag points at `--help`.
+fn redirect_flag_tip(rendered: &str) -> String {
+    let mut out = String::with_capacity(rendered.len());
+    for line in rendered.split_inclusive('\n') {
+        let body = line.trim();
+        let flag = body
+            .strip_prefix("tip: to pass '")
+            .and_then(|rest| rest.split_once("' as a value, use '-- "))
+            .map(|(flag, _)| flag);
+        match flag {
+            Some("--format") => {
+                let indent = &line[..line.len() - line.trim_start().len()];
+                out.push_str(indent);
+                out.push_str(
+                    "tip: use `--output json` (or `--json`) to choose the output format\n",
+                );
+            }
+            Some(flag) => {
+                let indent = &line[..line.len() - line.trim_start().len()];
+                out.push_str(indent);
+                // Writing into a `String` cannot fail.
+                let _ = writeln!(
+                    out,
+                    "tip: `{flag}` is not a flag of this command; run `supdoc <command> --help` to see its flags"
+                );
+            }
+            None => out.push_str(line),
+        }
+    }
+    out
 }
 
 /// Appends a newline unless the text already ends in one.
@@ -571,6 +606,22 @@ mod tests {
                 "`{name}` about should say `{expected}`: {about}"
             );
         }
+    }
+
+    #[test]
+    fn unknown_format_flag_tip_names_the_real_flag_not_a_double_dash_escape() {
+        let printout = parse_printout(&["check", "--format", "json", "--json"]);
+
+        assert!(
+            printout.text.contains("`--output json`"),
+            "tip should name `--output json`: {}",
+            printout.text
+        );
+        assert!(
+            !printout.text.contains("-- --format"),
+            "tip should not suggest `-- --format`: {}",
+            printout.text
+        );
     }
 
     #[test]

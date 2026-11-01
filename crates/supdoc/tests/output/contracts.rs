@@ -431,6 +431,10 @@ mod helps {
             why: "a file must change between planning and writing one rename",
         },
         Unreachable {
+            kind: "cli-rename-invalid-source-path",
+            why: "the walk reports a file with an invalid name as a finding, so rename never meets one",
+        },
+        Unreachable {
             kind: "cli-schema-serialize",
             why: "a built-in JSON Schema must fail to serialize, which is a supdoc bug",
         },
@@ -961,6 +965,11 @@ mod helps {
             },
             &["check"],
         ),
+        case(
+            "scan-invalid-source-path",
+            |p| p.write("docs/a\\b.md", "# A\n"),
+            &["check"],
+        ),
         case("scan-root-unreadable", |p| chmod(p, ".", 0o300), &["check"]),
         case(
             "scan-ignore-file-symlink",
@@ -973,6 +982,11 @@ mod helps {
         case("cli-usage", |_| {}, &["check", "--no-such-flag"]),
         case("cli-path-missing", |_| {}, &["check", "docs/nope.md"]),
         case("cli-path-missing", |_| {}, &["resolve", "nope.rs"]),
+        case(
+            "cli-resolve-fragment",
+            |_| {},
+            &["resolve", "src/lib.rs#add"],
+        ),
         case(
             "cli-path-unreadable",
             |p| {

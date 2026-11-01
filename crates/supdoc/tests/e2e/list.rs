@@ -107,12 +107,12 @@ fn list_with_an_unlinked_target_prints_nothing_and_says_so_on_stderr() {
     let project = Project::fixture("basic");
     project.record();
 
-    let run = project.supdoc(&["list", "nonexistent.rs"]);
+    let run = project.supdoc(&["list", "docs/api.md"]);
 
     let _ = run.assert_exit(0);
     assert_eq!(run.stdout, "", "no links means no data on stdout");
     assert!(
-        run.stderr.contains("No links to nonexistent.rs"),
+        run.stderr.contains("No links to docs/api.md"),
         "stderr should say nothing matched: {}",
         run.stderr
     );

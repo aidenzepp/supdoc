@@ -66,7 +66,7 @@ impl TryFrom<String> for SourcePath {
     type Error = LinkPathError;
 
     fn try_from(path: String) -> Result<Self, Self::Error> {
-        check_link_path(&path, ParentSegments::Rejected)?;
+        check_link_path(&path, |path| LinkPathError::ParentSegment { path })?;
         Ok(Self(path))
     }
 }
@@ -80,8 +80,8 @@ impl FromStr for SourcePath {
 }
 
 /// The path part of a [`Target`]: relative to the project root (or to a namespace's directory),
-/// `/`-separated, not empty, with no `.` or empty segments. Unlike a [`SourcePath`], it may use
-/// `..` to point outside the root (02 L5).
+/// `/`-separated, not empty, with no `.`, `..` or empty segments. supdoc reads no target outside
+/// the project root, so a target that climbs with `..` can't be represented.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TargetPath(String);
 
@@ -97,7 +97,7 @@ impl TryFrom<String> for TargetPath {
     type Error = LinkPathError;
 
     fn try_from(path: String) -> Result<Self, Self::Error> {
-        check_link_path(&path, ParentSegments::Allowed)?;
+        check_link_path(&path, |path| LinkPathError::TargetClimbs { path })?;
         if path.contains(':') {
             return Err(LinkPathError::Colon { path });
         }
@@ -113,21 +113,13 @@ impl FromStr for TargetPath {
     }
 }
 
-/// Whether a link path may contain `..` segments.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ParentSegments {
-    /// `..` is allowed: targets may point outside the project root.
-    Allowed,
-    /// `..` is rejected: sources are always inside the project root.
-    Rejected,
-}
-
-/// Checks the shared rules for a project-relative, `/`-separated link path.
+/// Checks the shared rules for a project-relative, `/`-separated link path. A `..` segment is
+/// refused with `climbs`, so sources and targets each name their own reason.
 ///
 /// # Errors
 ///
 /// Returns the first rule `path` breaks.
-fn check_link_path(path: &str, parents: ParentSegments) -> Result<(), LinkPathError> {
+fn check_link_path(path: &str, climbs: fn(String) -> LinkPathError) -> Result<(), LinkPathError> {
     let error = |make: fn(String) -> LinkPathError| Err(make(path.to_owned()));
     if path.is_empty() {
         return Err(LinkPathError::Empty);
@@ -142,9 +134,7 @@ fn check_link_path(path: &str, parents: ParentSegments) -> Result<(), LinkPathEr
         match segment {
             "" => return error(|path| LinkPathError::EmptySegment { path }),
             "." => return error(|path| LinkPathError::DotSegment { path }),
-            ".." if parents == ParentSegments::Rejected => {
-                return error(|path| LinkPathError::ParentSegment { path });
-            }
+            ".." => return error(climbs),
             _ => {}
         }
     }
@@ -187,6 +177,14 @@ pub enum LinkPathError {
         /// The rejected path.
         path: String,
     },
+    /// A target path climbs out of the project root (or its namespace's directory) with `..`.
+    #[error(
+        "target `{path}` climbs out of the project root with `..`, and supdoc reads only files inside it"
+    )]
+    TargetClimbs {
+        /// The rejected path.
+        path: String,
+    },
     /// A target path contains `:`, which the lockfile reserves for namespace prefixes.
     #[error(
         "`{path}` contains `:`; rename the file or directory, because `:` is reserved for namespace prefixes"
@@ -209,7 +207,7 @@ pub enum LinkPathError {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize)]
 #[serde(try_from = "String")]
 pub enum Target {
-    /// `src/lib.rs`, `../shared/x.rs`: relative to the project root.
+    /// `src/lib.rs`, `docs/guide.md`: relative to the project root.
     Path(TargetPath),
     /// `auth:src/lib.rs`: relative to the namespace's directory.
     Namespaced {
@@ -557,8 +555,20 @@ mod tests {
     }
 
     #[test]
-    fn target_with_parent_segment_is_accepted() {
-        assert_eq!(target("../shared/x.rs").path().as_str(), "../shared/x.rs");
+    fn target_with_parent_segment_is_rejected_plain_or_namespaced() {
+        for (raw, path) in [
+            ("../shared/x.rs", "../shared/x.rs"),
+            ("src/../../x.rs", "src/../../x.rs"),
+            ("docs:../outside/x.rs", "../outside/x.rs"),
+        ] {
+            assert_eq!(
+                raw.parse::<Target>(),
+                Err(TargetError::Path(LinkPathError::TargetClimbs {
+                    path: path.to_owned()
+                })),
+                "target `{raw}` should not parse",
+            );
+        }
     }
 
     #[test]
