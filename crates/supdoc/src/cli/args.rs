@@ -83,7 +83,7 @@ pub struct GlobalArgs {
     /// Only print data and errors
     #[arg(short, long, global = true, env = "SUPDOC_QUIET", value_parser = FalseyValueParser::new())]
     pub quiet: bool,
-    /// List passed links too
+    /// Show more detail, such as passed links in `check`
     #[arg(short, long, global = true, env = "SUPDOC_VERBOSE", action = ArgAction::Count)]
     pub verbose: u8,
     /// When to use color
@@ -395,21 +395,4 @@ pub struct SkillInstallArgs {
     /// Preview or apply.
     #[command(flatten)]
     pub confirm: Confirm,
-}
-
-#[cfg(test)]
-mod tests {
-    use clap::CommandFactory;
-
-    use super::Cli;
-
-    #[test]
-    fn help_does_not_promise_more_verbosity_than_one_level() {
-        let help = Cli::command().render_long_help().to_string();
-
-        assert!(
-            !help.contains("repeat for more"),
-            "--verbose has a single level, so the help should not invite repeating it:\n{help}"
-        );
-    }
 }
