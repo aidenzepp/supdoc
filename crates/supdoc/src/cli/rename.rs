@@ -36,8 +36,8 @@ use crate::read::cartridge::{Languages, SourceFile};
 use crate::read::error::ReadError;
 use crate::read::links::links;
 use crate::scan::model::Scope;
-use crate::scan::targets::close_match;
 use crate::scan::walk::{UnreadCause, UnreadDir, walk};
+use crate::suggest::close_match;
 
 use super::args::{RenameArgs, WriteMode};
 use super::project::{load_config, lock_path, read_lock};
