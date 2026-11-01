@@ -20,7 +20,7 @@ use crate::link::SymbolPath;
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{SourceFile, Symbol, SymbolTable};
 use crate::read::error::ResolveError;
-use crate::scan::targets::is_close;
+use crate::suggest::{distance, is_close};
 
 /// How many near-misses a `NotFound` suggests.
 const NEAREST: usize = 3;
@@ -352,7 +352,7 @@ impl SymbolTable {
                 let shown = path.to_string();
                 is_close(&wanted, &shown) || shares_last_segment(&wanted, &shown)
             })
-            .map(|path| (strsim::levenshtein(&wanted, &path.to_string()), path))
+            .map(|path| (distance(&wanted, &path.to_string()), path))
             .collect();
         scored.sort_by_key(|(distance, _)| *distance);
         scored

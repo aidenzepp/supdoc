@@ -296,7 +296,8 @@ fn link_finding(
 ) -> Finding {
     let (code, help, fix) = match error {
         LinkError::UnknownNamespace { prefix, known, .. } => {
-            let close = targets::close_match(prefix, known.iter().map(NamespaceName::as_str));
+            let close =
+                crate::suggest::close_match(prefix, known.iter().map(NamespaceName::as_str));
             let fix = close.zip(written.and_then(|written| written.prefix_range(prefix)));
             let fix = fix.map(|(close, range)| Fix {
                 file: location.file.clone(),
