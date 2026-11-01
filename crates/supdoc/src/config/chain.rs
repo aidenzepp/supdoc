@@ -376,5 +376,6 @@ pub(super) fn confine_namespaces(config: &Config) -> Result<(), ConfigError> {
         name: name.clone(),
         directory: directory.clone(),
         root: config.root().clone(),
+        through_symlink: directory.strip_prefix(config.root()).is_some(),
     })
 }
