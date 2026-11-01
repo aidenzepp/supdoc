@@ -40,10 +40,11 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::cartridges::rust::region_texts;
     use crate::hash::HashSettings;
     use crate::link::SymbolPath;
     use crate::path::AbsolutePath;
-    use crate::read::cartridge::{Cartridge, SourceFile, Symbol, SymbolTable};
+    use crate::read::cartridge::{SourceFile, Symbol, SymbolTable};
     use crate::read::hash::{hash_file, hash_symbol};
 
     /// Every kind of declaration the cartridge names, once.
@@ -283,17 +284,20 @@ namespace util {
     }
 
     #[test]
-    fn ts_block_comment_link_is_extracted() {
+    fn ts_line_and_block_comments_are_link_regions() {
         let file = parse("// [a](a.md)\n/** [b](b.md) */\n/* [c](c.md) */\nfunction f() {}\n");
 
-        assert_eq!(file.language().markdown_regions(&file).len(), 3);
+        assert_eq!(
+            region_texts(&file),
+            [" [a](a.md)\n", "/** [b](b.md) */", "/* [c](c.md) */"]
+        );
     }
 
     #[test]
     fn ts_string_literal_is_not_a_link_region() {
         let file = parse("const s = \"[a](b.ts#c)\";\n");
 
-        assert_eq!(file.language().markdown_regions(&file).len(), 0);
+        assert_eq!(region_texts(&file), Vec::<&str>::new());
     }
 
     #[test]
@@ -304,9 +308,17 @@ namespace util {
     }
 
     #[test]
-    fn ts_extensions_cover_module_variants() {
-        let ts = cartridge().expect("the built-in TypeScript queries should compile");
+    fn ts_module_variants_use_the_typescript_cartridge() {
+        let languages = crate::read::cartridge::Languages::builtin();
 
-        assert_eq!(ts.extensions(), ["ts", "mts", "cts"]);
+        for name in ["a.ts", "a.mts", "a.cts"] {
+            assert_eq!(
+                languages
+                    .for_path(Path::new(name))
+                    .map(|cartridge| cartridge.id().as_str()),
+                Some("typescript"),
+                "{name}",
+            );
+        }
     }
 }

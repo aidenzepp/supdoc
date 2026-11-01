@@ -132,9 +132,12 @@ mod tests {
     fn body_of_a_markdown_file_yields_link_regions() {
         let file = registered_file("guide.md");
 
+        let found = links(&file);
+        let destinations: Vec<_> = found.iter().map(|link| link.destination.as_str()).collect();
+
         assert_eq!(
-            links(&file).len(),
-            1,
+            destinations,
+            ["../src/lib.rs#add"],
             "the one link in the body should be read through the registered cartridge"
         );
     }
