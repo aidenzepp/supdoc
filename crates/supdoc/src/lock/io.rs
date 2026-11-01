@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::error::LockError;
 use super::model::{LOCK_FILE_NAME, Lockfile};
-use crate::path::AbsolutePath;
+use crate::path::{AbsolutePath, is_regular_file};
 
 impl Lockfile {
     /// Reads and parses the lockfile at `path`. `Ok(None)` if the file doesn't exist; the
@@ -22,8 +22,9 @@ impl Lockfile {
     /// # Errors
     ///
     /// `OutsideRoot` for a symlink that doesn't lead to a `supdoc.lock` inside the root, whether
-    /// or not its target exists. Otherwise fails if the file exists but cannot be read, or its text is
-    /// not a valid lockfile.
+    /// or not its target exists. `NotRegularFile` for a directory, FIFO or other non-file, refused
+    /// before it is opened so a FIFO can't block the read. Otherwise fails if the file exists but
+    /// cannot be read, or its text is not a valid lockfile.
     pub fn read(path: &AbsolutePath) -> Result<Option<Self>, LockError> {
         let read_failed = |error| LockError::Read {
             path: path.clone(),
@@ -34,6 +35,12 @@ impl Lockfile {
             Located::Inside(file) => file,
             Located::Outside => return Err(LockError::OutsideRoot { path: path.clone() }),
         };
+        match is_regular_file(&file) {
+            Ok(true) => {}
+            Ok(false) => return Err(LockError::NotRegularFile { path: path.clone() }),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(read_failed(error)),
+        }
         let text = match fs::read_to_string(&file) {
             Ok(text) => text,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -331,6 +338,58 @@ mod tests {
             fs::read_to_string(&planted_file).expect("the planted file should be readable"),
             "planted",
             "the pre-existing file must not be overwritten"
+        );
+    }
+
+    #[test]
+    fn directory_at_the_lockfile_path_is_refused_as_not_a_regular_file() {
+        let dir = tempfile::tempdir().expect("a temp directory should be creatable");
+        let path = lock_path(&dir);
+        fs::create_dir(path.as_path()).expect("the directory should be creatable");
+
+        let error = Lockfile::read(&path).expect_err("a directory should be refused");
+
+        assert!(
+            matches!(error, LockError::NotRegularFile { .. }),
+            "got: {error}"
+        );
+        assert_eq!(error.code(), "lock-read");
+        assert_eq!(error.exit_code(), 74);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_at_the_lockfile_path_is_refused_without_opening_it() {
+        let dir = tempfile::tempdir().expect("a temp directory should be creatable");
+        let path = lock_path(&dir);
+        let made = std::process::Command::new("mkfifo")
+            .arg(path.as_path())
+            .status()
+            .expect("mkfifo should run");
+        assert!(made.success(), "mkfifo should create the FIFO");
+
+        let error = Lockfile::read(&path).expect_err("a FIFO should be refused, not opened");
+
+        assert!(
+            matches!(error, LockError::NotRegularFile { .. }),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn non_utf8_lockfile_is_a_read_error_whose_help_has_no_chmod() {
+        let dir = tempfile::tempdir().expect("a temp directory should be creatable");
+        let path = lock_path(&dir);
+        fs::write(path.as_path(), b"version = 1\n# caf\xe9\n")
+            .expect("the fixture should be writable");
+
+        let error = Lockfile::read(&path).expect_err("Latin-1 text should be refused");
+        let help = error.help_from(&path.parent().expect("the lockfile should have a parent"));
+
+        assert_eq!(error.code(), "lock-read");
+        assert!(
+            help.contains("not UTF-8") && !help.contains("chmod"),
+            "got: {help}"
         );
     }
 

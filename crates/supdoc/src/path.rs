@@ -104,6 +104,19 @@ impl AsRef<Path> for AbsolutePath {
     }
 }
 
+/// Whether `path` is a regular file once symlinks are followed, so a directory, FIFO, socket or
+/// device is refused before it is opened. Opening a FIFO blocks until a writer appears, so a
+/// reader that skips this check can hang forever.
+///
+/// Effect: reads the metadata of `path` and of every symlink on the way to it.
+///
+/// # Errors
+///
+/// Fails if that metadata can't be read, including `NotFound` when nothing is there.
+pub(crate) fn is_regular_file(path: &Path) -> std::io::Result<bool> {
+    std::fs::metadata(path).map(|metadata| metadata.is_file())
+}
+
 /// Appends `path` to `base` one component at a time, dropping `.` and resolving `..` lexically.
 ///
 /// `base` must already be normalized. A `..` that would climb above the root is dropped, because

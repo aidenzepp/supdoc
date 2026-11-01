@@ -254,14 +254,18 @@ fn rewritten_key(key: &LinkKey, code: &str, replacement: &str) -> Option<LinkKey
 ///
 /// A file is rewritten whole or not at all: if any of its edits no longer finds the bytes it was
 /// planned against, nothing in that file is touched. Other files are unaffected.
+///
+/// `rerun` is the command a skipped file's help says to run again. A write failure's help says the
+/// other fixes were applied only when some were.
 #[must_use]
-pub fn apply_fixes(plan: &FixPlan, root: &AbsolutePath) -> FixResult {
+pub fn apply_fixes(plan: &FixPlan, root: &AbsolutePath, rerun: &str) -> FixResult {
     let mut by_file: BTreeMap<&SourcePath, Vec<&PlannedFix>> = BTreeMap::new();
     for planned in &plan.fixes {
         by_file.entry(&planned.fix.file).or_default().push(planned);
     }
 
     let mut result = FixResult::default();
+    let mut unwritten = Vec::new();
     for (file, planned) in by_file {
         let path = root.as_path().join(file.as_str());
         match rewrite_file(&path, &planned) {
@@ -271,9 +275,17 @@ pub fn apply_fixes(plan: &FixPlan, root: &AbsolutePath) -> FixResult {
                     fix: planned.fix.clone(),
                     moved: planned.moved.clone(),
                 })),
-            Err(Skip::Changed) => result.skipped.push(file_changed(file, planned.len())),
-            Err(Skip::Io(error)) => result.skipped.push(write_failed(file, &error)),
+            Err(Skip::Changed) => result
+                .skipped
+                .push(file_changed(file, planned.len(), rerun)),
+            Err(Skip::Io(error)) => unwritten.push((file, error)),
         }
+    }
+    let others_applied = !result.applied.is_empty();
+    for (file, error) in unwritten {
+        result
+            .skipped
+            .push(write_failed(file, &error, rerun, others_applied));
     }
     result
 }
@@ -329,7 +341,7 @@ fn rewrite_file(path: &Path, planned: &[&PlannedFix]) -> Result<(), Skip> {
 }
 
 /// The `fix-file-changed` finding for `file`, which had `count` fixes.
-fn file_changed(file: &SourcePath, count: usize) -> Finding {
+fn file_changed(file: &SourcePath, count: usize, rerun: &str) -> Finding {
     let fixes = if count == 1 {
         "its 1 fix was not applied".to_owned()
     } else {
@@ -340,20 +352,31 @@ fn file_changed(file: &SourcePath, count: usize) -> Finding {
         Severity::Warning,
         format!("{file} changed since it was scanned; {fixes}"),
     )
-    .with_help("Run `supdoc fix --yes` again. Nothing in that file was modified")
+    .with_help(format!(
+        "Run `{rerun}` again. Nothing in that file was modified"
+    ))
 }
 
 /// The `fix-write-failed` finding for `file`.
-fn write_failed(file: &SourcePath, error: &io::Error) -> Finding {
+fn write_failed(
+    file: &SourcePath,
+    error: &io::Error,
+    rerun: &str,
+    others_applied: bool,
+) -> Finding {
+    let others = if others_applied {
+        ". The other fixes were applied"
+    } else {
+        ""
+    };
     Finding::new(
         CODE_WRITE_FAILED,
         Severity::Error,
         format!("cannot write {file}: {error}"),
     )
-    .with_help(
-        "The file was left as it was. Make it writable and run `supdoc fix --yes` again. \
-         The other fixes were applied",
-    )
+    .with_help(format!(
+        "The file was left as it was. Make it writable and run `{rerun}` again{others}"
+    ))
 }
 
 /// Moves the lock entry of every rewritten link to its new key (05 C6), so a fixed link keeps its
@@ -659,7 +682,7 @@ mod tests {
         let project = Project::with(&[("docs/a.md", DOC)]);
         let plan = plan_fixes(&scan_of([broken("docs/a.md", DOC, "ad", "add")]));
 
-        let result = apply_fixes(&plan, &project.root());
+        let result = apply_fixes(&plan, &project.root(), "supdoc fix --yes");
 
         assert_eq!(result.applied.len(), 1);
         assert_eq!(result.skipped, vec![]);
@@ -677,7 +700,7 @@ mod tests {
             broken("docs/a.md", DOC, "su", "s"),
         ]));
 
-        let result = apply_fixes(&plan, &project.root());
+        let result = apply_fixes(&plan, &project.root(), "supdoc fix --yes");
 
         assert_eq!(result.applied.len(), 2);
         assert_eq!(
@@ -699,7 +722,7 @@ mod tests {
         fs::write(project.dir.path().join("docs/a.md"), &edited)
             .expect("the fixture file should be writable");
 
-        let result = apply_fixes(&plan, &project.root());
+        let result = apply_fixes(&plan, &project.root(), "supdoc fix --yes");
 
         assert_eq!(
             project.read("docs/a.md"),
@@ -726,7 +749,7 @@ mod tests {
         let project = Project::with(&[("docs/b.md", DOC)]);
         let plan = plan_fixes(&scan_of([broken("docs/a.md", DOC, "ad", "add")]));
 
-        let result = apply_fixes(&plan, &project.root());
+        let result = apply_fixes(&plan, &project.root(), "supdoc fix --yes");
 
         assert_eq!(result.applied, vec![]);
         let [skipped] = result.skipped.as_slice() else {
@@ -744,7 +767,7 @@ mod tests {
         let project = Project::with(&[("docs/a.md", DOC)]);
         let plan = plan_fixes(&scan_of([broken("docs/a.md", DOC, "ad", "add")]));
 
-        let _result = apply_fixes(&plan, &project.root());
+        let _result = apply_fixes(&plan, &project.root(), "supdoc fix --yes");
 
         let names: Vec<_> = fs::read_dir(project.dir.path().join("docs"))
             .expect("the docs directory should be readable")
@@ -763,7 +786,7 @@ mod tests {
             .expect("the fixture permissions should be settable");
         let plan = plan_fixes(&scan_of([broken("docs/a.md", DOC, "ad", "add")]));
 
-        let _result = apply_fixes(&plan, &project.root());
+        let _result = apply_fixes(&plan, &project.root(), "supdoc fix --yes");
 
         let mode = fs::metadata(&path)
             .expect("the file should exist")
@@ -780,7 +803,7 @@ mod tests {
             .expect("the fixture symlink should be creatable");
         let plan = plan_fixes(&scan_of([broken("docs-link.md", DOC, "ad", "add")]));
 
-        let result = apply_fixes(&plan, &project.root());
+        let result = apply_fixes(&plan, &project.root(), "supdoc fix --yes");
 
         assert_eq!(result.applied, vec![]);
         let [skipped] = result.skipped.as_slice() else {
