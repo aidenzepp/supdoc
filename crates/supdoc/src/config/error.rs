@@ -108,11 +108,12 @@ pub enum ConfigError {
         name: NamespaceName,
         /// The directory it names, as written from `file`.
         directory: AbsolutePath,
+        /// Byte range of the namespace's value inside `file`.
+        span: Range<usize>,
         /// The project root.
         root: AbsolutePath,
-        /// Whether `directory` as written lies inside the root and only a symlink along it leads
-        /// out. Where the symlink leads is never printed.
-        through_symlink: bool,
+        /// How `directory` ends up outside the root. Where a symlink leads is never printed.
+        escape: NamespaceEscape,
     },
 
     /// A chain of `extends` comes back to a file it already visited.
@@ -122,6 +123,18 @@ pub enum ConfigError {
         /// Byte range of the closing `extends` value, inside the file before the last in `chain`.
         span: Range<usize>,
     },
+}
+
+/// How a namespace's directory ends up outside the project root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamespaceEscape {
+    /// The directory as written lies outside the root.
+    AsWritten,
+    /// The directory as written lies inside the root, and a symlink along it leads out.
+    ThroughSymlink,
+    /// Where the directory lies can't be worked out, such as through a symlink loop, so it is
+    /// treated as outside.
+    Unresolvable,
 }
 
 impl ConfigError {
@@ -183,7 +196,8 @@ impl ConfigError {
                 name,
                 directory,
                 root,
-                through_symlink: true,
+                escape: NamespaceEscape::ThroughSymlink,
+                ..
             } => format!(
                 "{} sets namespace `{name}` to {}, which leads outside the project root {} \
                  through a symlink",
@@ -195,8 +209,21 @@ impl ConfigError {
                 file,
                 name,
                 directory,
+                escape: NamespaceEscape::Unresolvable,
+                ..
+            } => format!(
+                "{} sets namespace `{name}` to {}, which supdoc can't follow to a real location \
+                 (a symlink along it may loop)",
+                show(file),
+                show(directory)
+            ),
+            Self::NamespaceOutsideRoot {
+                file,
+                name,
+                directory,
                 root,
-                through_symlink: false,
+                escape: NamespaceEscape::AsWritten,
+                ..
             } => format!(
                 "{} sets namespace `{name}` to {}, which is outside the project root {}",
                 show(file),
@@ -265,7 +292,7 @@ impl ConfigError {
                 ))
             }
             Self::NamespaceOutsideRoot {
-                through_symlink: true,
+                escape: NamespaceEscape::ThroughSymlink,
                 ..
             } => Some(
                 "Point the namespace at a real directory inside the project root, not a symlink \
@@ -273,7 +300,15 @@ impl ConfigError {
                     .to_owned(),
             ),
             Self::NamespaceOutsideRoot {
-                through_symlink: false,
+                escape: NamespaceEscape::Unresolvable,
+                ..
+            } => Some(
+                "Point the namespace at a real directory inside the project root, and check that no \
+                 symlink along it leads back to itself"
+                    .to_owned(),
+            ),
+            Self::NamespaceOutsideRoot {
+                escape: NamespaceEscape::AsWritten,
                 ..
             } => Some(
                 "Point the namespace at a directory inside the project root, or move the project's \
