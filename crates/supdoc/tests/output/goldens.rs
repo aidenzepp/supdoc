@@ -199,3 +199,12 @@ fn skill_install_global_preview_text_matches_golden() {
             .transcript()
     );
 }
+
+#[test]
+fn check_color_always_on_a_capable_terminal_matches_golden() {
+    // Every other golden clears the environment, so none pins the Unicode glyphs or the ANSI
+    // styling that only appear with color on and `TERM` set.
+    let project = Project::dirty();
+    let run = project.run_with(&["check", "--color", "always"], &[("TERM", "xterm")]);
+    insta::assert_snapshot!("check_color_unicode", run.transcript());
+}
