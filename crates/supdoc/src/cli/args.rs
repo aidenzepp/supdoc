@@ -296,10 +296,18 @@ pub enum ConfigCommand {
 pub enum NamespaceCommand {
     /// List namespaces and the directories they map to (read-only)
     #[command(after_help = NAMESPACE_LIST_EXAMPLES)]
-    List,
+    List(NamespaceListArgs),
     /// Rename a namespace in config, supdoc.lock and every link using it (writes; previews unless --yes)
     #[command(after_help = NAMESPACE_RENAME_EXAMPLES)]
     Rename(RenameArgs),
+}
+
+/// Arguments of `supdoc namespace list`.
+#[derive(Debug, Args)]
+pub struct NamespaceListArgs {
+    /// Show at most this many namespaces; 0 means no limit
+    #[arg(long, env = "SUPDOC_LIMIT", default_value_t = DEFAULT_LIMIT, value_name = "N")]
+    pub limit: usize,
 }
 
 /// Arguments of `supdoc namespace rename`.
@@ -321,8 +329,11 @@ pub struct RenameArgs {
 pub enum Inspect {
     /// `supdoc config show`.
     ConfigShow,
-    /// `supdoc namespace list`.
-    NamespaceList,
+    /// `supdoc namespace list`, showing at most `limit` namespaces (0 means no limit).
+    NamespaceList {
+        /// `--limit`.
+        limit: usize,
+    },
 }
 
 /// Arguments of `supdoc schema`.

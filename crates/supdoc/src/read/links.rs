@@ -383,13 +383,16 @@ fn starts_block(
     if line_start <= region_start {
         return true;
     }
-    let before = &text[region_start..line_start - 1];
+    // Line starts come from the text itself, so they are always character boundaries. A range
+    // that isn't one counts as a block start, which only ever loosens what counts as a link.
+    let Some(before) = text.get(region_start..line_start - 1) else {
+        return true;
+    };
     let previous_start = before
         .rfind('\n')
         .map_or(region_start, |at| region_start + at + 1);
-    text[previous_start..line_start - 1]
-        .chars()
-        .all(char::is_whitespace)
+    text.get(previous_start..line_start - 1)
+        .is_none_or(|previous| previous.chars().all(char::is_whitespace))
         || last_definition_line == Some(previous_start)
 }
 

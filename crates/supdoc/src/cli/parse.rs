@@ -95,6 +95,11 @@ fn printout(error: &clap::Error, format: OutputFormat) -> Printout {
     }
 }
 
+/// The leading whitespace of `line`.
+fn indent_of(line: &str) -> &str {
+    line.strip_suffix(line.trim_start()).unwrap_or_default()
+}
+
 /// Replaces clap's `-- --flag` tip, which only leads to a second error, with a tip that names a real flag.
 ///
 /// `--format` points at `--output` and `--json`; any other unknown flag points at `--help`.
@@ -108,15 +113,13 @@ fn redirect_flag_tip(rendered: &str) -> String {
             .map(|(flag, _)| flag);
         match flag {
             Some("--format") => {
-                let indent = &line[..line.len() - line.trim_start().len()];
-                out.push_str(indent);
+                out.push_str(indent_of(line));
                 out.push_str(
                     "tip: use `--output json` (or `--json`) to choose the output format\n",
                 );
             }
             Some(flag) => {
-                let indent = &line[..line.len() - line.trim_start().len()];
-                out.push_str(indent);
+                out.push_str(indent_of(line));
                 // Writing into a `String` cannot fail.
                 let _ = writeln!(
                     out,

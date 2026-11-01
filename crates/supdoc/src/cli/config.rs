@@ -41,10 +41,15 @@ pub fn run(inspect: Inspect, context: &Context, output: &mut Output) -> Result<O
                     Ok(())
                 }
             }),
-        Inspect::NamespaceList => {
-            let report = NamespaceListReport::new(&config);
+        Inspect::NamespaceList { limit } => {
+            let report = NamespaceListReport::new(&config, limit);
             output.report(&report, true).and_then(|()| {
-                if report.namespaces.is_empty() {
+                if report.truncated {
+                    output.note(&format!(
+                        "Showing {} namespaces; there are more. Raise --limit, or use --limit 0 for all.",
+                        report.namespaces.len()
+                    ))
+                } else if report.namespaces.is_empty() {
                     output.note("No namespaces configured.")
                 } else {
                     Ok(())
@@ -58,11 +63,14 @@ pub fn run(inspect: Inspect, context: &Context, output: &mut Output) -> Result<O
 
 /// The JSON Schema of the `--json` output of `supdoc config show` or `supdoc namespace list`, as
 /// `inspect` says: the whole envelope, with `data` typed as the command's report.
+/// The shape is the same for every `--limit`.
 #[must_use]
 pub fn schema(inspect: Inspect) -> schemars::Schema {
     match inspect {
         Inspect::ConfigShow => schemars::schema_for!(Envelope<'static, ConfigShowReport>),
-        Inspect::NamespaceList => schemars::schema_for!(Envelope<'static, NamespaceListReport>),
+        Inspect::NamespaceList { .. } => {
+            schemars::schema_for!(Envelope<'static, NamespaceListReport>)
+        }
     }
 }
 
@@ -70,7 +78,7 @@ pub fn schema(inspect: Inspect) -> schemars::Schema {
 const fn command(inspect: Inspect) -> &'static str {
     match inspect {
         Inspect::ConfigShow => "config show",
-        Inspect::NamespaceList => "namespace list",
+        Inspect::NamespaceList { .. } => "namespace list",
     }
 }
 
@@ -78,7 +86,7 @@ const fn command(inspect: Inspect) -> &'static str {
 fn output_failed(inspect: Inspect, error: &OutputError) -> CliError {
     let (code, name) = match inspect {
         Inspect::ConfigShow => ("cli-config-output", "config show"),
-        Inspect::NamespaceList => ("cli-namespace-output", "namespace list"),
+        Inspect::NamespaceList { .. } => ("cli-namespace-output", "namespace list"),
     };
     CliError::new(
         code,
@@ -179,15 +187,22 @@ impl Report for ConfigShowReport {
 /// What `namespace list` prints: every effective namespace, sorted by name.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct NamespaceListReport {
-    /// Every namespace, by name.
+    /// Every namespace up to `--limit`, by name.
     namespaces: Vec<NamespaceJson>,
+    /// Whether `--limit` left namespaces out.
+    #[serde(skip)]
+    truncated: bool,
 }
 
 impl NamespaceListReport {
-    /// The report for `config`.
-    fn new(config: &Config) -> Self {
+    /// The report for `config`, showing at most `limit` namespaces (0 means no limit).
+    fn new(config: &Config, limit: usize) -> Self {
+        let mut namespaces = namespace_rows(config);
+        let truncated = limit != 0 && namespaces.len() > limit;
+        namespaces.truncate(if limit == 0 { namespaces.len() } else { limit });
         Self {
-            namespaces: namespace_rows(config),
+            namespaces,
+            truncated,
         }
     }
 }
@@ -195,6 +210,10 @@ impl NamespaceListReport {
 impl Report for NamespaceListReport {
     fn command(&self) -> &'static str {
         "namespace list"
+    }
+
+    fn truncated(&self) -> bool {
+        self.truncated
     }
 
     fn render_text(&self, context: &TextContext, out: &mut dyn Write) -> io::Result<()> {
@@ -487,7 +506,9 @@ mod tests {
             .unwrap_or_else(|error| panic!("`{}` should parse: {error}", command_line.join(" ")));
         let inspect = match &cli.command {
             Command::Config(ConfigCommand::Show) => Inspect::ConfigShow,
-            Command::Namespace(NamespaceCommand::List) => Inspect::NamespaceList,
+            Command::Namespace(NamespaceCommand::List(args)) => {
+                Inspect::NamespaceList { limit: args.limit }
+            }
             _ => panic!(
                 "`{}` should be config show or namespace list",
                 command_line.join(" ")
@@ -691,6 +712,33 @@ mod tests {
     }
 
     #[test]
+    fn namespace_list_caps_at_limit_and_signals_truncation() {
+        let project = Project::new();
+        project.write(
+            "supdoc.config.toml",
+            "[namespaces]\nweb = \"apps/web\"\nauth = \"services/auth\"\ncore = \"core\"\n",
+        );
+
+        let run = project.run(&["--json", "namespace", "list", "--limit", "2"]);
+
+        assert_eq!(run.exit_code(), 0, "stderr: {}", run.stderr);
+        let json = run.json();
+        assert_eq!(at(&json, "/truncated"), true, "json: {json}");
+        assert_eq!(
+            at(&json, "/data/namespaces").as_array().map(Vec::len),
+            Some(2),
+            "json: {json}"
+        );
+
+        let text = project.run(&["namespace", "list", "--limit", "2"]);
+        assert!(
+            text.stderr.contains("Showing 2 namespaces"),
+            "stderr: {}",
+            text.stderr
+        );
+    }
+
+    #[test]
     fn namespace_list_shows_name_and_folder_sorted() {
         let project = Project::new();
         project.write(
@@ -784,7 +832,7 @@ mod tests {
         );
         let json = project.run(&["--json", "namespace", "list"]).json();
 
-        let errors = schema_violations(Inspect::NamespaceList, &json);
+        let errors = schema_violations(Inspect::NamespaceList { limit: 0 }, &json);
 
         assert!(errors.is_empty(), "schema violations: {errors:?} in {json}");
         assert_eq!(at(&json, "/command"), "namespace list");

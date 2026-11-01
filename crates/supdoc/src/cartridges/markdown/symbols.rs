@@ -376,7 +376,9 @@ mod tests {
                 &query.parse().expect("the query should be a valid symbol"),
             )
             .expect("the query should resolve to one heading");
-        &file.text()[symbol.range.clone()]
+        file.text()
+            .get(symbol.range.clone())
+            .expect("a heading range should lie on character boundaries")
     }
 
     const NEWS: &str = "# News\n\nIntro.\n\n## What's new\n\nA lot.\n\n### Details\n\nMore.\n\n## Roadmap\n\nSoon.\n";

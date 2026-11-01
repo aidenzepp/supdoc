@@ -216,9 +216,11 @@ pub fn run(command: &Command, context: &Context, output: &mut Output) -> Result<
         Command::Resolve(args) => resolve::run(args, context, output),
         Command::Init(args) => init::run(args, context, output),
         Command::Config(ConfigCommand::Show) => config::run(Inspect::ConfigShow, context, output),
-        Command::Namespace(NamespaceCommand::List) => {
-            config::run(Inspect::NamespaceList, context, output)
-        }
+        Command::Namespace(NamespaceCommand::List(args)) => config::run(
+            Inspect::NamespaceList { limit: args.limit },
+            context,
+            output,
+        ),
         Command::Namespace(NamespaceCommand::Rename(args)) => rename::run(args, context, output),
         Command::Schema(args) => schema::run(args, context, output),
         Command::Completions(args) => completions::run(args, context, output),

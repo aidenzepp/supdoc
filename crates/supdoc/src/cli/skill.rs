@@ -207,8 +207,7 @@ fn check_config_exists(file: &AbsolutePath) -> Result<(), ConfigError> {
 
 /// `relative` joined onto `base`.
 fn beneath(base: &AbsolutePath, relative: &str) -> AbsolutePath {
-    AbsolutePath::new(&base.as_path().join(relative))
-        .unwrap_or_else(|| unreachable!("a path joined onto an absolute directory is absolute"))
+    base.join_path(Path::new(relative))
 }
 
 /// `path` as a person reads it: relative to `base` when it is beneath it, absolute otherwise.

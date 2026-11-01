@@ -41,9 +41,11 @@ fn assert_crlf_matches_lf(id: &str, lf: &str) {
     let crlf_symbols: Vec<_> = language.symbols(&crlf_file).iter().cloned().collect();
 
     assert!(
-        lf_symbols
-            .iter()
-            .any(|symbol| lf[symbol.range.clone()].contains('\n')),
+        lf_symbols.iter().any(|symbol| {
+            lf.get(symbol.range.clone())
+                .expect("a symbol range should lie on character boundaries")
+                .contains('\n')
+        }),
         "the {id} fixture should yield a multi-line symbol, got {lf_symbols:?}",
     );
     assert_eq!(

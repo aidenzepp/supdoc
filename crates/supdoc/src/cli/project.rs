@@ -131,8 +131,7 @@ fn error_site(error: &ConfigError, cwd: &AbsolutePath, output: &mut Output) -> O
 
 /// `path` as typed, made absolute against the current directory.
 pub(crate) fn absolute(cwd: &AbsolutePath, path: &Path) -> AbsolutePath {
-    // Joining onto an absolute directory always gives an absolute path.
-    AbsolutePath::new(&cwd.as_path().join(path)).unwrap_or_else(|| cwd.clone())
+    cwd.join_path(path)
 }
 
 /// The part of the project `[PATHS]` names: everything when none are given, or when one of them
@@ -172,9 +171,7 @@ pub(crate) fn scope(
 
 /// Where the project's `supdoc.lock` is, whether or not it exists yet.
 pub(crate) fn lock_path(root: &AbsolutePath) -> AbsolutePath {
-    AbsolutePath::new(&root.as_path().join(LOCK_FILE_NAME)).unwrap_or_else(|| {
-        unreachable!("the lockfile name joined onto an absolute root is absolute")
-    })
+    root.join_path(Path::new(LOCK_FILE_NAME))
 }
 
 /// The lockfile in `config`'s root, or an empty one when there is none yet (06 "What each command
