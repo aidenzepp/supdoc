@@ -446,8 +446,6 @@ mod tests {
         let context = Context {
             global: cli.global,
             cwd,
-            home: None,
-            claude_config_dir: None,
         };
         load_config(&context, &mut output)
     }
@@ -575,8 +573,6 @@ mod tests {
         let context = Context {
             global: cli.global,
             cwd,
-            home: None,
-            claude_config_dir: None,
         };
 
         let error = load_config(&context, &mut output)
@@ -615,8 +611,6 @@ mod tests {
         let context = Context {
             global: cli.global,
             cwd,
-            home: None,
-            claude_config_dir: None,
         };
 
         let error = load_config(&context, &mut output)
