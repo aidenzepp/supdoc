@@ -25,7 +25,10 @@ impl SourceFile {
         text: String,
         language: &'static dyn Cartridge,
     ) -> Result<Self, ReadError> {
-        let internal = ReadError::Internal { path: path.clone() };
+        let internal = ReadError::Internal {
+            path: path.clone(),
+            reason: "tree-sitter returned no tree",
+        };
         Self::from_text(path, text, language).ok_or(internal)
     }
 
