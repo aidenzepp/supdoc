@@ -406,12 +406,37 @@ pub struct LinkKey {
 impl fmt::Display for LinkKey {
     /// `docs/guide.md → src/lib.rs#Config.validate`
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} → {}", self.source.as_str(), self.target)?;
-        if let Some(symbol) = &self.symbol {
-            write!(f, "#{symbol}")?;
-        }
-        Ok(())
+        write!(f, "{} → ", self.source.as_str())?;
+        write_target(f, &self.target, self.symbol.as_ref())
     }
+}
+
+impl LinkKey {
+    /// The target part alone, as `path`, `path#symbol` or `ns:path#symbol`.
+    #[must_use]
+    pub fn target_text(&self) -> String {
+        let mut text = String::new();
+        // A `String` never fails to take a write, so the result carries no information.
+        let _ = write_target(&mut text, &self.target, self.symbol.as_ref());
+        text
+    }
+}
+
+/// Writes `target`, then `#symbol` when there is one: the one rendering of a link's target.
+///
+/// # Errors
+///
+/// Fails if writing to `out` fails.
+fn write_target(
+    out: &mut impl fmt::Write,
+    target: &Target,
+    symbol: Option<&SymbolPath>,
+) -> fmt::Result {
+    write!(out, "{target}")?;
+    if let Some(symbol) = symbol {
+        write!(out, "#{symbol}")?;
+    }
+    Ok(())
 }
 
 /// What a link points at, without its source: `path`, `path#symbol` or `ns:path#symbol`.
@@ -444,11 +469,7 @@ impl FromStr for LinkRef {
 
 impl fmt::Display for LinkRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.target)?;
-        if let Some(symbol) = &self.symbol {
-            write!(f, "#{symbol}")?;
-        }
-        Ok(())
+        write_target(f, &self.target, self.symbol.as_ref())
     }
 }
 

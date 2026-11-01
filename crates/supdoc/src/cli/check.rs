@@ -17,7 +17,7 @@ use crate::link::{LinkKey, SourcePath};
 use crate::output::json::{Envelope, FindingJson};
 use crate::output::summary::render_summary;
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, OutputError, PathStyle, Report, Summary, TextContext, Verbosity};
+use crate::output::{Output, PathStyle, Report, Summary, TextContext, Verbosity};
 use crate::read::cartridge::Languages;
 use crate::state::LinkState;
 
@@ -40,15 +40,8 @@ pub fn run(args: &CheckArgs, context: &Context, output: &mut Output) -> Result<O
     let config = load_config(context, output)?;
     let scope = scope(&args.paths, &config, context)?;
     let lock = read_lock(&config, &context.cwd)?;
-    let scan =
-        crate::scan::assemble::run(&config, &Languages::builtin(), &scope).map_err(|error| {
-            CliError::new(
-                error.code(),
-                error.to_string(),
-                error.help(),
-                error.exit_code(),
-            )
-        })?;
+    let scan = crate::scan::assemble::run(&config, &Languages::builtin(), &scope)
+        .map_err(CliError::from)?;
 
     let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
     let model = reconcile_in(&scan, &lock, &scope, &paths);
@@ -59,7 +52,7 @@ pub fn run(args: &CheckArgs, context: &Context, output: &mut Output) -> Result<O
     let report = CheckReport::new(model, output.verbosity());
     output
         .report(&report, outcome == Outcome::Clean)
-        .map_err(|error| output_failed(&error))?;
+        .map_err(|error| CliError::output_failed("cli-check-output", "the check report", &error))?;
     Ok(outcome)
 }
 
@@ -68,17 +61,6 @@ pub fn run(args: &CheckArgs, context: &Context, output: &mut Output) -> Result<O
 #[must_use]
 pub fn schema() -> schemars::Schema {
     schemars::schema_for!(Envelope<'static, CheckReport>)
-}
-
-/// The error for a report that could not be written.
-fn output_failed(error: &OutputError) -> CliError {
-    CliError::new(
-        "cli-check-output",
-        format!("cannot write the check report: {error}"),
-        "Check that standard output and standard error are open and writable, or redirect both \
-         to a file with `> supdoc.out 2>&1`",
-        CliError::IO_EXIT_CODE,
-    )
 }
 
 /// What `check` prints: the counts, the links to show, and the findings not tied to one link
@@ -202,16 +184,12 @@ impl CheckReport {
 ///
 /// Fails if writing to `out` fails.
 fn render_passed(context: &TextContext, key: &LinkKey, out: &mut dyn Write) -> io::Result<()> {
-    let arrow = if context.unicode { "→" } else { "->" };
-    let mut target = key.target.to_string();
-    if let Some(symbol) = &key.symbol {
-        target = format!("{target}#{symbol}");
-    }
     writeln!(
         out,
-        "passed  {} {arrow} {}\n",
+        "passed  {} {} {}\n",
         visible(&context.paths.text(&key.source)),
-        visible(&target),
+        context.arrow(),
+        visible(&key.target_text()),
     )
 }
 

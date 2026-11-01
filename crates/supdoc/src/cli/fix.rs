@@ -24,7 +24,7 @@ use crate::lock::model::Lockfile;
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, OutputError, PathStyle, Report, TextContext, preview_note};
+use crate::output::{Output, PathStyle, Report, TextContext, preview_note};
 use crate::path::AbsolutePath;
 use crate::read::cartridge::Languages;
 use crate::scan::model::{Scan, Scope, TargetState};
@@ -167,7 +167,7 @@ impl Planned {
                 let moved = planned.moved.clone().filter(|(old, new)| {
                     self.lock.get(old).is_some() && self.lock.get(new).is_none()
                 });
-                FixRecord::new(planned, moved, None)
+                FixRecord::new(planned, moved, None, None)
             })
             .collect();
         let report = FixReport {
@@ -177,7 +177,7 @@ impl Planned {
         };
         output
             .report(&report, true)
-            .map_err(|error| output_failed(&error))?;
+            .map_err(|error| CliError::output_failed("cli-fix-output", "the fix report", &error))?;
         let note = if report.fixes.is_empty() {
             nothing_to_fix(self.broken)
         } else {
@@ -185,7 +185,9 @@ impl Planned {
             let file_count = count(report.files(), "file", "files");
             format!("{fix_count} in {file_count}. {apply_note}")
         };
-        output.note(&note).map_err(|error| output_failed(&error))?;
+        output
+            .note(&note)
+            .map_err(|error| CliError::output_failed("cli-fix-output", "the fix report", &error))?;
         Ok(Outcome::Clean)
     }
 
@@ -241,7 +243,13 @@ impl Planned {
             .zip(new_ranges(&done))
             .map(|(planned, range)| {
                 let moved = planned.moved.clone().filter(|pair| moved.contains(pair));
-                FixRecord::new(planned, moved, state_at(&states, &planned.fix.file, range))
+                let state = state_at(&states, &planned.fix.file, range);
+                // `supdoc update` takes the path from the current directory, like the report.
+                let update = (state == Some(LinkState::Failed)).then(|| {
+                    let path = self.paths.text(&planned.fix.file);
+                    command_line(context, "update", &[path.as_str()], &["--yes"])
+                });
+                FixRecord::new(planned, moved, state, update)
             })
             .collect();
 
@@ -260,7 +268,7 @@ impl Planned {
         let ok = write_failed == 0 && !file_changed && lock_failure.is_none();
         output
             .report(&report, ok)
-            .map_err(|error| output_failed(&error))?;
+            .map_err(|error| CliError::output_failed("cli-fix-output", "the fix report", &error))?;
         let note = if !report.fixes.is_empty() {
             let link_count = count(report.fixes.len(), "link", "links");
             let file_count = count(report.files(), "file", "files");
@@ -274,7 +282,9 @@ impl Planned {
             None
         };
         if let Some(note) = note {
-            output.note(&note).map_err(|error| output_failed(&error))?;
+            output.note(&note).map_err(|error| {
+                CliError::output_failed("cli-fix-output", "the fix report", &error)
+            })?;
         }
 
         if let Some(error) = lock_failure {
@@ -308,14 +318,7 @@ impl Planned {
 ///
 /// Returns the scan's own error, such as an unreadable root (74).
 fn scan(config: &Config, scope: &Scope) -> Result<Scan, CliError> {
-    crate::scan::assemble::run(config, &Languages::builtin(), scope).map_err(|error| {
-        CliError::new(
-            error.code(),
-            error.to_string(),
-            error.help(),
-            error.exit_code(),
-        )
-    })
+    crate::scan::assemble::run(config, &Languages::builtin(), scope).map_err(CliError::from)
 }
 
 /// Where each fix's replacement sits in its file once every fix before it in that file is
@@ -456,17 +459,6 @@ fn lock_unwritten(
     )
 }
 
-/// The error for a report that could not be written.
-fn output_failed(error: &OutputError) -> CliError {
-    CliError::new(
-        "cli-fix-output",
-        format!("cannot write the fix report: {error}"),
-        "Check that standard output and standard error are open and writable, or redirect both \
-         to a file with `> supdoc.out 2>&1`",
-        CliError::IO_EXIT_CODE,
-    )
-}
-
 /// `supdoc fix`: the planned or applied edits, and the files left alone.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct FixReport {
@@ -545,6 +537,9 @@ pub(crate) struct FixRecord {
     /// The link with the fix applied, for text.
     #[serde(skip)]
     new_link: String,
+    /// The command that records the fixed link, for text, when its state after the fix is `failed`.
+    #[serde(skip)]
+    update_command: Option<String>,
 }
 
 impl FixRecord {
@@ -554,6 +549,7 @@ impl FixRecord {
         planned: &PlannedFix,
         moved: Option<(LinkKey, LinkKey)>,
         state: Option<LinkState>,
+        update_command: Option<String>,
     ) -> Self {
         let Fix {
             file,
@@ -605,6 +601,7 @@ impl FixRecord {
             source: file.clone(),
             old_link,
             new_link,
+            update_command,
         }
     }
 
@@ -620,11 +617,10 @@ impl FixRecord {
         writeln!(out, "  + {}", visible(&self.new_link))?;
         if let Some(state) = self.state {
             writeln!(out, "  = now {state}")?;
-            if state == LinkState::Failed {
-                writeln!(
-                    out,
-                    "  = help: reread it, then run supdoc update {path} --yes"
-                )?;
+            if state == LinkState::Failed
+                && let Some(command) = &self.update_command
+            {
+                writeln!(out, "  = help: reread it, then run {}", visible(command))?;
             }
         }
         writeln!(out)
@@ -835,9 +831,14 @@ mod tests {
         /// Records the hash `GUIDE`'s link will have once fixed under its broken key, as if the
         /// symbol was renamed after `update --yes`.
         fn record_before_rename(&self) {
-            self.write("docs/guide.md", FIXED_GUIDE);
+            self.record_before_rename_at("docs/guide.md");
+        }
+
+        /// [`Self::record_before_rename`] for the guide at `relative`, which must be the only one.
+        fn record_before_rename_at(&self, relative: &str) {
+            self.write(relative, FIXED_GUIDE);
             let hashes = self.hashes();
-            self.write("docs/guide.md", GUIDE);
+            self.write(relative, GUIDE);
             let old = self.only_key();
             let hash = hashes
                 .iter()
@@ -925,6 +926,28 @@ mod tests {
         );
         let updated = project.run(&["update", "docs/guide.md", "my docs/guide.md", "--yes"]);
         assert_eq!(updated.exit_code(), 0, "stderr: {}", updated.stderr);
+    }
+
+    #[test]
+    fn fix_yes_help_for_a_failed_link_keeps_the_config_and_quotes_a_spaced_path() {
+        let project = Project::empty();
+        project.write("src/lib.rs", LIB);
+        project.record_before_rename_at("my docs/guide.md");
+        project.write(
+            "src/lib.rs",
+            "pub fn add(a: i32, b: i32) -> i32 {\n    a - b\n}\n",
+        );
+
+        let run = project.run(&["-c", "supdoc.config.toml", "fix", "--yes"]);
+
+        assert!(
+            run.stdout.contains(
+                "= help: reread it, then run \
+                 supdoc -c supdoc.config.toml update 'my docs/guide.md' --yes\n"
+            ),
+            "the help should keep -c and quote the path: {}",
+            run.stdout
+        );
     }
 
     #[test]

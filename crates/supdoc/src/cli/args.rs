@@ -241,7 +241,7 @@ pub struct FixArgs {
 pub struct ListArgs {
     /// Only links to this target: `path`, `path#symbol` or `ns:path#symbol`
     #[arg(value_name = "TARGET", value_hint = ValueHint::AnyPath)]
-    pub target: Option<String>,
+    pub target: Option<TargetArg>,
     /// Only links in these states
     #[arg(
         long,
@@ -254,6 +254,68 @@ pub struct ListArgs {
     /// Show at most this many links; 0 means no limit
     #[arg(long, env = "SUPDOC_LIMIT", default_value_t = DEFAULT_LIMIT, value_name = "N")]
     pub limit: Limit,
+}
+
+/// A `list` TARGET as typed, split once into its file part and optional symbol.
+///
+/// Whether the file part is a `ns:path` is decided here, once, so nothing downstream re-splits
+/// the text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetArg {
+    /// The text exactly as typed.
+    typed: String,
+    /// The text before the first `#`.
+    file: String,
+    /// The text after the first `#`, when there is one.
+    symbol: Option<String>,
+    /// Whether `file` is `ns:path`, with a valid namespace name and a non-empty path.
+    namespaced: bool,
+}
+
+impl TargetArg {
+    /// The target exactly as typed, for messages.
+    #[must_use]
+    pub fn typed(&self) -> &str {
+        &self.typed
+    }
+
+    /// The file part as typed: the text before the first `#`.
+    #[must_use]
+    pub fn file(&self) -> &str {
+        &self.file
+    }
+
+    /// The symbol part as typed: the text after the first `#`.
+    #[must_use]
+    pub fn symbol(&self) -> Option<&str> {
+        self.symbol.as_deref()
+    }
+
+    /// Whether the file part is `ns:path`.
+    #[must_use]
+    pub const fn is_namespaced(&self) -> bool {
+        self.namespaced
+    }
+}
+
+impl std::str::FromStr for TargetArg {
+    type Err = std::convert::Infallible;
+
+    fn from_str(typed: &str) -> Result<Self, Self::Err> {
+        let (file, symbol) = match typed.split_once('#') {
+            Some((file, symbol)) => (file, Some(symbol.to_owned())),
+            None => (typed, None),
+        };
+        let namespaced = file
+            .split_once(':')
+            .is_some_and(|(name, rest)| !rest.is_empty() && name.parse::<NamespaceName>().is_ok());
+        Ok(Self {
+            typed: typed.to_owned(),
+            file: file.to_owned(),
+            symbol,
+            namespaced,
+        })
+    }
 }
 
 /// How many results `list`, `resolve` and `namespace list` show unless told otherwise (06 X11).

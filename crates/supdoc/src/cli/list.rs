@@ -2,7 +2,7 @@
 //!
 //! Read-only, and exits 0 whatever state the links are in: `check` is the gate. A `TARGET` that
 //! names nothing (a missing file, an unknown namespace, a symbol that doesn't resolve) is refused,
-//! so a typo never reads as "no docs depend on this". The run is `load_config → read_lock → scan →
+//! so a typo never reads as "no docs depend on this". The run is `load_config → parse TARGET → read_lock → scan →
 //! reconcile → filter by TARGET and --state → cap at --limit`, with effects only at the two ends.
 
 use std::io::{self, Write};
@@ -22,15 +22,17 @@ use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
 use crate::output::summary::render_summary;
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, OutputError, PathStyle, Report, Summary, TextContext};
+use crate::output::{Output, PathStyle, Report, Summary, TextContext};
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile, SymbolTable};
 use crate::read::error::ResolveError;
 use crate::scan::model::Scope;
 
-use super::args::{Limit, ListArgs};
+use super::args::{Limit, ListArgs, TargetArg};
 use super::check::LinkJson;
-use super::project::{absolute, ensure_exists, load_config, path_outside, read_lock};
+use super::project::{
+    absolute, command_line, ensure_exists, load_config, path_outside_config, read_lock,
+};
 use super::{CliError, Context, Outcome};
 
 /// Runs `supdoc list`: prints each link in the chosen states, optionally only those pointing at
@@ -53,25 +55,17 @@ use super::{CliError, Context, Outcome};
 /// `cli-list-output` when the report cannot be written (74).
 pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let config = load_config(context, output)?;
+    let target = args
+        .target
+        .as_ref()
+        .map(|typed| parse_target(typed, &config, &context.cwd))
+        .transpose()?;
     let lock = read_lock(&config, &context.cwd)?;
-    let scan = crate::scan::assemble::run(&config, &Languages::builtin(), &Scope::All).map_err(
-        |error| {
-            CliError::new(
-                error.code(),
-                error.to_string(),
-                error.help(),
-                error.exit_code(),
-            )
-        },
-    )?;
+    let scan = crate::scan::assemble::run(&config, &Languages::builtin(), &Scope::All)
+        .map_err(CliError::from)?;
     let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
     let model = reconcile_in(&scan, &lock, &Scope::All, &paths);
 
-    let target = args
-        .target
-        .as_deref()
-        .map(|typed| parse_target(typed, &config, &context.cwd))
-        .transpose()?;
     let wanted = target.as_ref().map(|target| Wanted::new(target, &config));
     let linked: Vec<LinkReport> = model
         .links
@@ -84,7 +78,7 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
         .collect();
     if linked.is_empty()
         && let (Some(target), Some(wanted), Some(typed)) = (&target, &wanted, &args.target)
-        && let Some(error) = wanted.refusal(target, typed, &config, &context.cwd)
+        && let Some(error) = wanted.refusal(target, typed, &config, context)
     {
         return Err(error);
     }
@@ -97,7 +91,7 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
     let report = ListReport::new(&matched, args.limit, model.findings);
     output
         .report(&report, true)
-        .map_err(|error| output_failed(&error))?;
+        .map_err(|error| CliError::output_failed("cli-list-output", "the link list", &error))?;
     if report.truncated {
         output
             .note(
@@ -105,13 +99,15 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
                     .limit
                     .truncation_note(report.links.len(), total, "links"),
             )
-            .map_err(|error| output_failed(&error))?;
+            .map_err(|error| CliError::output_failed("cli-list-output", "the link list", &error))?;
     } else if total == 0 {
         let note = match &target {
             Some(target) => format!("No links to {target}."),
             None => "No links found.".to_owned(),
         };
-        output.note(&note).map_err(|error| output_failed(&error))?;
+        output
+            .note(&note)
+            .map_err(|error| CliError::output_failed("cli-list-output", "the link list", &error))?;
     }
     Ok(Outcome::Clean)
 }
@@ -132,28 +128,23 @@ pub fn schema() -> schemars::Schema {
 ///
 /// Returns `cli-path-outside-project` for a plain path outside the project and
 /// `cli-target-invalid` for text that is not a target. Both exit 2.
-fn parse_target(typed: &str, config: &Config, cwd: &AbsolutePath) -> Result<LinkRef, CliError> {
-    let (path, symbol) = match typed.split_once('#') {
-        Some((path, symbol)) => (path, Some(symbol)),
-        None => (typed, None),
-    };
-    let namespaced = path.split_once(':').is_some_and(|(name, rest)| {
-        !rest.is_empty() && name.parse::<crate::namespace::NamespaceName>().is_ok()
-    });
+fn parse_target(arg: &TargetArg, config: &Config, cwd: &AbsolutePath) -> Result<LinkRef, CliError> {
+    let typed = arg.typed();
     let rewritten;
-    let text = if namespaced {
+    let text = if arg.is_namespaced() {
         typed
     } else {
+        let path = arg.file();
         let absolute = absolute(cwd, Path::new(path));
         let relative = absolute
             .strip_prefix(config.root())
-            .ok_or_else(|| path_outside(Path::new(path), config.root()))?;
+            .ok_or_else(|| path_outside_config(Path::new(path), config))?;
         let inside = relative
             .to_str()
             .filter(|inside| !inside.is_empty())
             .ok_or_else(|| target_invalid(typed, "it must name a file inside the project"))?;
         let inside = inside.replace(std::path::MAIN_SEPARATOR, "/");
-        rewritten = match symbol {
+        rewritten = match arg.symbol() {
             Some(symbol) => format!("{inside}#{symbol}"),
             None => inside,
         };
@@ -170,17 +161,6 @@ fn target_invalid(typed: &str, reason: &str) -> CliError {
         format!("`{typed}` is not a link target: {reason}"),
         "Write TARGET as `path`, `path#symbol` or `ns:path#symbol`",
         CliError::USAGE_EXIT_CODE,
-    )
-}
-
-/// The error for a report that could not be written.
-fn output_failed(error: &OutputError) -> CliError {
-    CliError::new(
-        "cli-list-output",
-        format!("cannot write the link list: {error}"),
-        "Check that standard output and standard error are open and writable, or redirect both \
-         to a file with `> supdoc.out 2>&1`",
-        CliError::IO_EXIT_CODE,
     )
 }
 
@@ -266,7 +246,7 @@ impl Report for ListReport {
 ///
 /// Fails if writing to `out` fails.
 fn render_link(context: &TextContext, link: &LinkJson, out: &mut dyn Write) -> io::Result<()> {
-    let arrow = if context.unicode { "→" } else { "->" };
+    let arrow = context.arrow();
     let mut place = visible(&context.paths.text(&link.key.source));
     if let Some(first) = link.locations.first() {
         place = format!("{place}:{}", first.line);
@@ -275,10 +255,7 @@ fn render_link(context: &TextContext, link: &LinkJson, out: &mut dyn Write) -> i
             place = format!("{place} (+{more} more)");
         }
     }
-    let mut target = link.key.target.to_string();
-    if let Some(symbol) = &link.key.symbol {
-        target = format!("{target}#{symbol}");
-    }
+    let target = link.key.target_text();
     let state = link.state.to_string();
     writeln!(out, "{state:<8}  {place}  {arrow}  {}", visible(&target))
 }
@@ -425,19 +402,20 @@ impl Wanted {
     fn refusal(
         &self,
         target: &LinkRef,
-        typed: &str,
+        typed: &TargetArg,
         config: &Config,
-        cwd: &AbsolutePath,
+        context: &Context,
     ) -> Option<CliError> {
+        let cwd = &context.cwd;
         if let Some(name) = target.target.namespace()
             && config.namespace(name).is_none()
         {
             return Some(unknown_namespace(config, name));
         }
-        let typed_file = Path::new(typed.split_once('#').map_or(typed, |(file, _)| file));
+        let typed_file = Path::new(typed.file());
         let file = match &self.place {
             Place::File(file) => file,
-            Place::Unlocated(_) => return Some(path_outside(typed_file, config.root())),
+            Place::Unlocated(_) => return Some(path_outside_config(typed_file, config)),
         };
         if let Err(error) = ensure_exists(file, typed_file, cwd) {
             let namespaced = target
@@ -455,7 +433,12 @@ impl Wanted {
             SymbolFilter::Unresolved { error, .. } => Some(CliError::new(
                 error.code(),
                 error.message_naming(&relative_to(config.root(), error.file())),
-                error.help_naming(&typed_file.display()),
+                error.help_running(&command_line(
+                    context,
+                    "resolve",
+                    &[typed_file.display().to_string()],
+                    &[],
+                )),
                 CliError::REFUSED_EXIT_CODE,
             )),
             SymbolFilter::Any | SymbolFilter::Text(_) | SymbolFilter::Resolved { .. } => None,
@@ -888,6 +871,32 @@ mod tests {
         assert_eq!(
             (error.code(), error.exit_code()),
             ("cli-path-outside-project", 2)
+        );
+    }
+
+    #[test]
+    fn list_target_outside_the_directory_without_a_config_says_no_config_was_found() {
+        let project = Project::new();
+        let config = project.dir.path().join(crate::config::CONFIG_FILE_NAME);
+        assert!(!config.exists(), "the fixture should have no config");
+
+        let run = project.list(&["list", "/elsewhere/src/lib.rs"]);
+
+        let error = run
+            .result
+            .expect_err("a target outside the directory should be refused");
+        assert_eq!(error.code(), "cli-path-outside-project");
+        assert!(
+            error
+                .message()
+                .ends_with("and no supdoc.config.toml was found above it"),
+            "the message should say no config was found: {}",
+            error.message()
+        );
+        assert!(
+            error.help().contains("supdoc -c <dir>/supdoc.config.toml"),
+            "the help should offer -c: {}",
+            error.help()
         );
     }
 

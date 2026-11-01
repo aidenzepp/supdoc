@@ -15,11 +15,11 @@ use crate::config::CONFIG_FILE_NAME;
 use crate::lock::error::shell_quote;
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
-use crate::output::{Output, OutputError, Report, TextContext};
+use crate::output::{Output, Report, TextContext};
 use crate::path::AbsolutePath;
 
 use super::args::InitArgs;
-use super::{CliError, Context, Outcome};
+use super::{CliError, Context, Outcome, cause};
 
 /// The file `supdoc init` writes. It loads as a valid config (see the tests). Every key is
 /// commented out, so none of them is live: a live `include` or `exclude` would replace the
@@ -92,21 +92,25 @@ pub fn run(args: &InitArgs, context: &Context, output: &mut Output) -> Result<Ou
         refuse_if_present(&target, context)?;
         output
             .artifact(&report(false), STARTER, true)
-            .map_err(|error| output_failed(&label, &error))?;
+            .map_err(|error| {
+                CliError::output_failed("cli-init-write", &format!("the report on {label}"), &error)
+            })?;
         output
             .note(&format!(
                 "Nothing written. Run `{}` to write {label}.",
                 command(context)
             ))
-            .map_err(|error| output_failed(&label, &error))?;
+            .map_err(|error| {
+                CliError::output_failed("cli-init-write", &format!("the report on {label}"), &error)
+            })?;
     } else {
         write_new(&target, context)?;
-        output
-            .artifact(&report(true), "", true)
-            .map_err(|error| output_failed(&label, &error))?;
-        output
-            .note(&format!("Wrote {label}"))
-            .map_err(|error| output_failed(&label, &error))?;
+        output.artifact(&report(true), "", true).map_err(|error| {
+            CliError::output_failed("cli-init-write", &format!("the report on {label}"), &error)
+        })?;
+        output.note(&format!("Wrote {label}")).map_err(|error| {
+            CliError::output_failed("cli-init-write", &format!("the report on {label}"), &error)
+        })?;
     }
     Ok(Outcome::Clean)
 }
@@ -249,21 +253,11 @@ fn write_failed(target: &AbsolutePath, error: &io::Error, context: &Context) -> 
     CliError::new(
         "cli-init-write",
         format!(
-            "cannot write {}: {error}",
-            relative_to(&context.cwd, target)
+            "cannot write {}: {}",
+            relative_to(&context.cwd, target),
+            cause(error)
         ),
         format!("{fix}, then run `{}` again", command(context)),
-        CliError::IO_EXIT_CODE,
-    )
-}
-
-/// The error for output that could not be written, naming the config as the notes do.
-fn output_failed(label: &str, error: &OutputError) -> CliError {
-    CliError::new(
-        "cli-init-write",
-        format!("cannot report on {label}: {error}"),
-        "check that standard output and standard error are open and writable, or redirect both \
-         to a file with `> supdoc.out 2>&1`",
         CliError::IO_EXIT_CODE,
     )
 }
@@ -485,7 +479,7 @@ mod tests {
             [exists.message(), missing.message()],
             [
                 "sub/x.toml already exists",
-                "cannot write nope/x.toml: No such file or directory (os error 2)",
+                "cannot write nope/x.toml: no such file or directory",
             ],
             "the messages should name the file as typed, not by its absolute path"
         );
@@ -513,7 +507,7 @@ mod tests {
             [exists.message(), missing.message()],
             [
                 "../supdoc.config.toml already exists",
-                "cannot write ../nope/x.toml: No such file or directory (os error 2)",
+                "cannot write ../nope/x.toml: no such file or directory",
             ],
             "from a subdirectory the messages should name the file as typed, not absolutely"
         );

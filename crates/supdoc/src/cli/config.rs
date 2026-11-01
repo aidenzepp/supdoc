@@ -13,7 +13,7 @@ use crate::hash::LineEndings;
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
 use crate::output::text::visible;
-use crate::output::{Output, OutputError, Report, TextContext, Verbosity};
+use crate::output::{Output, Report, TextContext, Verbosity};
 use crate::path::AbsolutePath;
 
 use super::args::{Inspect, Limit};
@@ -62,7 +62,11 @@ pub fn run(
             })
         }
     };
-    written.map_err(|error| output_failed(inspect, &error))?;
+    let (code, subject) = match inspect {
+        Inspect::ConfigShow => ("cli-config-output", "the config show report"),
+        Inspect::NamespaceList(_) => ("cli-namespace-output", "the namespace list report"),
+    };
+    written.map_err(|error| CliError::output_failed(code, subject, &error))?;
     Ok(Outcome::Clean)
 }
 
@@ -78,21 +82,6 @@ pub fn config_show_schema() -> schemars::Schema {
 #[must_use]
 pub fn namespace_list_schema() -> schemars::Schema {
     schemars::schema_for!(Envelope<'static, NamespaceListReport>)
-}
-
-/// The error for a report that could not be written.
-fn output_failed(inspect: Inspect<'_>, error: &OutputError) -> CliError {
-    let (code, name) = match inspect {
-        Inspect::ConfigShow => ("cli-config-output", "config show"),
-        Inspect::NamespaceList(_) => ("cli-namespace-output", "namespace list"),
-    };
-    CliError::new(
-        code,
-        format!("cannot write the {name} report: {error}"),
-        "Check that standard output and standard error are open and writable, or redirect both \
-         to a file with `> supdoc.out 2>&1`",
-        CliError::IO_EXIT_CODE,
-    )
 }
 
 /// What `config show` prints: the resolved config and the file each part came from.
@@ -149,7 +138,7 @@ impl Report for ConfigShowReport {
     }
 
     fn render_text(&self, context: &TextContext, out: &mut dyn Write) -> io::Result<()> {
-        let arrow = arrow(context);
+        let arrow = context.arrow();
         match self.chain.split_first() {
             None => writeln!(out, "config     (none; defaults)")?,
             Some((child, parents)) => {
@@ -230,7 +219,7 @@ impl Report for NamespaceListReport {
     }
 
     fn render_text(&self, context: &TextContext, out: &mut dyn Write) -> io::Result<()> {
-        let arrow = arrow(context);
+        let arrow = context.arrow();
         let width = self
             .namespaces
             .iter()
@@ -404,11 +393,6 @@ fn render_patterns(
 /// ` (missing)` for a namespace whose directory is gone, and nothing otherwise.
 const fn missing_mark(namespace: &NamespaceJson) -> &'static str {
     if namespace.exists { "" } else { " (missing)" }
-}
-
-/// The arrow between a namespace and its directory.
-const fn arrow(context: &TextContext) -> &'static str {
-    if context.unicode { "→" } else { "->" }
 }
 
 #[cfg(test)]
