@@ -304,7 +304,7 @@ fn syntax_errors(file: &SourceFile, root: &AbsolutePath, again: &str) -> Finding
 /// file with syntax errors.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct ResolveReport {
-    /// The file, relative to the project root. `..` climbs out of it for a file outside.
+    /// The file, relative to the project root.
     file: String,
     /// The `SYMBOL` that was resolved. Left out when listing.
     #[serde(skip_serializing_if = "Option::is_none")]
