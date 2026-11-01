@@ -28,7 +28,7 @@ use crate::read::cartridge::{Languages, SourceFile, SymbolTable};
 use crate::read::error::ResolveError;
 use crate::scan::model::Scope;
 
-use super::args::ListArgs;
+use super::args::{Limit, ListArgs};
 use super::check::LinkJson;
 use super::project::{absolute, ensure_exists, load_config, path_outside, read_lock};
 use super::{CliError, Context, Outcome};
@@ -94,17 +94,17 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
         .collect();
 
     let total = matched.len();
-    let shown = if args.limit == 0 { total } else { args.limit };
-    let report = ListReport::new(&matched, shown, model.findings);
+    let report = ListReport::new(&matched, args.limit, model.findings);
     output
         .report(&report, true)
         .map_err(|error| output_failed(&error))?;
     if report.truncated {
         output
-            .note(&format!(
-                "Showing {} of {total} links. Use --limit 0 to show all.",
-                report.links.len()
-            ))
+            .note(
+                &args
+                    .limit
+                    .truncation_note(report.links.len(), total, "links"),
+            )
             .map_err(|error| output_failed(&error))?;
     } else if total == 0 {
         let note = match &target {
@@ -206,11 +206,11 @@ pub(crate) struct ListReport {
 }
 
 impl ListReport {
-    /// The report for `matched`, showing the first `shown` links.
-    fn new(matched: &[LinkReport], shown: usize, loose: Vec<Finding>) -> Self {
+    /// The report for `matched`, showing at most `limit` links.
+    fn new(matched: &[LinkReport], limit: Limit, loose: Vec<Finding>) -> Self {
         let summary = Summary::tally(matched.iter().map(|link| link.state));
-        let truncated = matched.len() > shown;
-        let listed: Vec<&LinkReport> = matched.iter().take(shown).collect();
+        let truncated = limit.truncated(matched.len());
+        let listed: Vec<&LinkReport> = limit.take(matched).collect();
         Self {
             summary,
             links: listed.iter().map(|link| LinkJson::from(*link)).collect(),
