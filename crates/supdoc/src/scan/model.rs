@@ -53,6 +53,9 @@ pub struct Scan {
     /// Sources that were walked but couldn't be read. Their lock entries are never judged
     /// obsolete (05 C5).
     pub unread_sources: BTreeSet<SourcePath>,
+    /// Sources holding a link too malformed to have a key. Such a link may be an edit of a locked
+    /// one, so none of the source's lock entries are judged obsolete while it remains.
+    pub keyless_error_sources: BTreeSet<SourcePath>,
     /// Directories the walk couldn't read, relative to the root. Every source beneath one is
     /// unread too, so its lock entries are never judged obsolete either (05 C5).
     pub unread_dirs: BTreeSet<SourcePath>,

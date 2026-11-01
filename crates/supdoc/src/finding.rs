@@ -103,6 +103,39 @@ pub struct Location {
     pub column: u32,
 }
 
+/// The byte offset where each line of a text starts, computed once so that many lookups cost one
+/// scan of the text instead of one scan each.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineIndex {
+    /// Start offsets of every line, ascending; the first is always 0.
+    starts: Vec<usize>,
+}
+
+impl LineIndex {
+    /// Indexes the lines of `text`.
+    #[must_use]
+    pub fn new(text: &str) -> Self {
+        let newlines = text.match_indices('\n').map(|(at, _)| at + 1);
+        Self {
+            starts: std::iter::once(0).chain(newlines).collect(),
+        }
+    }
+
+    /// The 1-based line containing byte `offset`.
+    #[must_use]
+    pub fn line_of(&self, offset: usize) -> usize {
+        self.starts.partition_point(|&start| start <= offset)
+    }
+
+    /// The byte offset where the line containing `offset` starts.
+    fn line_start(&self, offset: usize) -> usize {
+        self.starts
+            .get(self.line_of(offset) - 1)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
 impl Location {
     /// Locates `range` in `text`, the contents of `file`, computing its line and column.
     ///
@@ -110,12 +143,22 @@ impl Location {
     /// boundaries.
     #[must_use]
     pub fn in_text(file: SourcePath, text: &str, range: Range<usize>) -> Option<Self> {
+        Self::in_indexed(file, text, &LineIndex::new(text), range)
+    }
+
+    /// Like [`in_text`](Self::in_text), for many ranges of one `text` whose `index` was built once.
+    #[must_use]
+    pub fn in_indexed(
+        file: SourcePath,
+        text: &str,
+        index: &LineIndex,
+        range: Range<usize>,
+    ) -> Option<Self> {
         // Rejects a reversed range, one past the end, or one splitting a character.
         let _covered: &str = text.get(range.clone())?;
-        let before = text.get(..range.start)?;
-        let line_start = before.rfind('\n').map_or(0, |newline| newline + 1);
-        let line = u32::try_from(before.matches('\n').count() + 1).ok()?;
-        let column = u32::try_from(before.get(line_start..)?.chars().count() + 1).ok()?;
+        let line_start = index.line_start(range.start);
+        let line = u32::try_from(index.line_of(range.start)).ok()?;
+        let column = u32::try_from(text.get(line_start..range.start)?.chars().count() + 1).ok()?;
         Some(Self {
             file,
             range,
@@ -154,16 +197,21 @@ impl Snippet {
     /// boundaries.
     #[must_use]
     pub fn capture(text: &str, range: Range<usize>) -> Option<Self> {
+        Self::capture_indexed(text, &LineIndex::new(text), range)
+    }
+
+    /// Like [`capture`](Self::capture), for many ranges of one `text` whose `index` was built once.
+    #[must_use]
+    pub fn capture_indexed(text: &str, index: &LineIndex, range: Range<usize>) -> Option<Self> {
         // Rejects a reversed range, one past the end, or one splitting a character.
         let _covered: &str = text.get(range.clone())?;
-        let before = text.get(..range.start)?;
-        let start = before.rfind('\n').map_or(0, |newline| newline + 1);
+        let start = index.line_start(range.start);
         let after = text.get(range.end..)?;
         let end = after
             .find('\n')
             .map_or(text.len(), |newline| range.end + newline);
         Some(Self {
-            first_line: u32::try_from(before.matches('\n').count() + 1).ok()?,
+            first_line: u32::try_from(index.line_of(range.start)).ok()?,
             text: text.get(start..end)?.to_owned(),
             highlight: (range.start - start)..(range.end - start),
         })
@@ -197,6 +245,24 @@ mod tests {
 
         assert_eq!((location.line, location.column), (2, 5));
         assert_eq!(location.range, start..text.len());
+    }
+
+    #[test]
+    fn a_range_far_into_a_many_line_text_is_located_by_the_line_index() {
+        let text = "ab\n".repeat(5000) + "é [a](b.rs#c)\nlast";
+        let start = text.find('[').expect("the fixture should contain a link");
+        let range = start..start + 9;
+        let index = LineIndex::new(&text);
+        let location = Location::in_indexed(source("a.md"), &text, &index, range.clone())
+            .expect("a range inside the text should be locatable");
+        let snippet =
+            Snippet::capture_indexed(&text, &index, range).expect("the range should be capturable");
+
+        assert_eq!((location.line, location.column), (5001, 3));
+        assert_eq!(
+            (snippet.first_line, snippet.text.as_str()),
+            (5001, "é [a](b.rs#c)")
+        );
     }
 
     #[test]

@@ -66,6 +66,13 @@ fn toml_message(line: Option<usize>, error: &toml::de::Error) -> String {
     }
 }
 
+/// Whether a TOML message is about the lockfile header's `version`, not a `[[link]]` entry.
+///
+/// An empty file and a file with no `version` both report the field as missing.
+fn is_header_problem(message: &str) -> bool {
+    message == "missing field `version`" || message.starts_with("unsupported lockfile format")
+}
+
 /// `text` as one shell word: unchanged when it holds only characters the shell never treats
 /// specially, otherwise in single quotes, so a help can name a path with spaces and still run.
 pub(crate) fn shell_quote(text: &str) -> String {
@@ -112,9 +119,13 @@ impl ParseLockError {
                  as every lockfile supdoc writes has, then run `supdoc check`. Or delete \
                  `supdoc.lock` and run `supdoc update --yes` to record the links again"
             }
+            Self::Toml { error, .. } if is_header_problem(error.message()) => {
+                "Write `version = 1` at the top of supdoc.lock, then run `supdoc check`. Or \
+                 delete `supdoc.lock` and run `supdoc update --yes` to record the links again"
+            }
             Self::Toml { .. } => {
                 "Fix that line or delete the entry, then run `supdoc check`. \
-                 A deleted entry is re-added the next time links are locked"
+                 A deleted entry is re-added the next time you run `supdoc update`"
             }
             Self::ConflictingDuplicate { .. } => {
                 "A merge probably kept both sides. Delete one entry and run `supdoc check`. \
@@ -358,6 +369,25 @@ mod tests {
             errors.iter().all(|error| !error.help().is_empty()),
             "every parse error should say what to do next"
         );
+    }
+
+    #[test]
+    fn header_errors_say_how_to_fix_the_header_not_to_delete_an_entry() {
+        for text in [
+            "",
+            "[features.hash]\nline-endings = \"normalize\"\n",
+            "version = 0\n",
+        ] {
+            let error = crate::lock::model::Lockfile::parse(text)
+                .expect_err("the fixture lockfile header should be rejected");
+
+            let help = error.help();
+
+            assert!(
+                help.contains("version = 1") && !help.contains("delete the entry"),
+                "help for {text:?} should name the header fix, got: {help}"
+            );
+        }
     }
 
     fn mismatch(configured_in: Option<&str>) -> SettingsMismatch {
