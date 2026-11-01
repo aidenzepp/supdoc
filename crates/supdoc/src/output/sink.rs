@@ -112,6 +112,12 @@ impl Output {
         self.settings.unicode
     }
 
+    /// How much to say, as `main` decided it from the flags.
+    #[must_use]
+    pub const fn verbosity(&self) -> Verbosity {
+        self.settings.verbosity
+    }
+
     /// Whether a reader closed the pipe. The caller should exit 0.
     #[must_use]
     pub fn is_closed(&self) -> bool {
