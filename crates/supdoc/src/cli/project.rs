@@ -30,16 +30,12 @@ use super::{CliError, Context, ErrorSite};
 /// # Errors
 ///
 /// Returns the config's own error, with its code, help and exit code.
-pub(crate) fn load_config(
-    context: &Context,
-    output: &mut Output,
-    command: &str,
-) -> Result<Config, CliError> {
+pub(crate) fn load_config(context: &Context, output: &mut Output) -> Result<Config, CliError> {
     let loaded = match &context.global.config {
         Some(file) => Config::load_file(&absolute(&context.cwd, file)),
         None => Config::load(&context.cwd),
     };
-    let config = loaded.map_err(|error| config_failure(&error, context, output, command))?;
+    let config = loaded.map_err(|error| config_failure(&error, context, output))?;
     output.set_root(config.root().clone());
     Ok(config)
 }
@@ -65,7 +61,6 @@ pub(crate) fn config_failure(
     error: &ConfigError,
     context: &Context,
     output: &mut Output,
-    command: &str,
 ) -> CliError {
     let failure = CliError::new(
         error.code(),
@@ -393,7 +388,7 @@ mod tests {
             home: None,
             claude_config_dir: None,
         };
-        load_config(&context, &mut output, "list")
+        load_config(&context, &mut output)
     }
 
     /// A project with an empty config and a `docs` directory to run from.
@@ -523,7 +518,7 @@ mod tests {
             claude_config_dir: None,
         };
 
-        let error = load_config(&context, &mut output, "list")
+        let error = load_config(&context, &mut output)
             .expect_err("a config with a wrong type should not load");
 
         assert_eq!(
@@ -563,7 +558,7 @@ mod tests {
             claude_config_dir: None,
         };
 
-        let error = load_config(&context, &mut output, "list")
+        let error = load_config(&context, &mut output)
             .expect_err("a config with a syntax error should not load");
 
         let site = error.site().expect("a parse error should carry its site");

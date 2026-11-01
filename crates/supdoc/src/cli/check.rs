@@ -37,7 +37,7 @@ use super::{CliError, Context, Outcome};
 /// error (78 when invalid, 74 when unreadable), `scan-root-unreadable` (74), and
 /// `cli-check-output` when the report cannot be written (74).
 pub fn run(args: &CheckArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
-    let config = load_config(context, output, "check")?;
+    let config = load_config(context, output)?;
     let scope = scope(&args.paths, &context.cwd, config.root())?;
     let lock = read_lock(&config, &context.cwd)?;
     let scan =

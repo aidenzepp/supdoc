@@ -52,7 +52,7 @@ use super::{CliError, Context, Outcome};
 /// `resolve-not-found` or `resolve-ambiguous` (1); `scan-root-unreadable` (74), and
 /// `cli-list-output` when the report cannot be written (74).
 pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
-    let config = load_config(context, output, "list")?;
+    let config = load_config(context, output)?;
     let lock = read_lock(&config, &context.cwd)?;
     let scan = crate::scan::assemble::run(&config, &Languages::builtin(), &Scope::All).map_err(
         |error| {

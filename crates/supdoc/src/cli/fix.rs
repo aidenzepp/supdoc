@@ -94,7 +94,7 @@ impl Planned {
         context: &Context,
         output: &mut Output,
     ) -> Result<Self, CliError> {
-        let config = load_config(context, output, "fix")?;
+        let config = load_config(context, output)?;
         let scope = scope(paths, &context.cwd, config.root())?;
         let lock = read_lock(&config, &context.cwd)?;
         let scan = scan(&config, &scope)?;
