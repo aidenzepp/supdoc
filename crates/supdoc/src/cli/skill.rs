@@ -28,7 +28,7 @@ use crate::output::{Output, OutputError, Report, TextContext};
 use crate::path::AbsolutePath;
 
 use super::args::{SkillInstallArgs, WriteMode};
-use super::project::{absolute, config_failure};
+use super::project::{absolute, command_line, config_failure};
 use super::{CliError, Context, Outcome};
 
 /// The skill, embedded so the installed copy always matches this binary.
@@ -83,7 +83,7 @@ pub fn run(
     let destinations = destinations(args.global, &base, context)?;
     if !args.global {
         for path in &destinations {
-            contain(&base, path, &context.cwd)?;
+            contain(&base, path, context)?;
         }
     }
     let changes: Vec<SkillChange> = destinations
@@ -105,7 +105,7 @@ pub fn run(
     if !args.global {
         output.set_root(base);
     }
-    let report = SkillInstallReport::new(applied, changes);
+    let report = SkillInstallReport::new(applied, args.global, changes, context);
     output
         .report(&report, true)
         .map_err(|error| output_failed(&error))?;
@@ -230,8 +230,8 @@ fn label(path: &AbsolutePath, base: &AbsolutePath) -> String {
 /// # Errors
 ///
 /// Returns `cli-skill-outside-root` naming the first directory that leads out, in the help
-/// relative to `cwd` so its commands run as written.
-fn contain(root: &AbsolutePath, target: &AbsolutePath, cwd: &AbsolutePath) -> Result<(), CliError> {
+/// relative to the current directory so its commands run as written.
+fn contain(root: &AbsolutePath, target: &AbsolutePath, context: &Context) -> Result<(), CliError> {
     // Every project destination is beneath the root, so there is always a directory chain.
     let Some(directories) = target.strip_prefix(root).and_then(Path::parent) else {
         return Ok(());
@@ -242,7 +242,7 @@ fn contain(root: &AbsolutePath, target: &AbsolutePath, cwd: &AbsolutePath) -> Re
         dir.push(component);
         match real_location(&dir) {
             Some(real) if real.starts_with(&real_root) => {}
-            real => return Err(outside_root(root, target, &dir, real.as_deref(), cwd)),
+            real => return Err(outside_root(root, target, &dir, real.as_deref(), context)),
         }
     }
     Ok(())
@@ -277,14 +277,14 @@ pub(crate) struct SkillInstallReport {
 
 impl SkillInstallReport {
     /// The report for `changes`, warning about each file a preview would replace.
-    fn new(applied: bool, changes: Vec<SkillChange>) -> Self {
+    fn new(applied: bool, global: bool, changes: Vec<SkillChange>, context: &Context) -> Self {
         let findings = if applied {
             Vec::new()
         } else {
             changes
                 .iter()
                 .filter(|change| change.action == SkillAction::Replace)
-                .map(|change| exists(&change.shown))
+                .map(|change| exists(&change.shown, global, context))
                 .collect()
         };
         Self {
@@ -388,13 +388,19 @@ fn install_file(target: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// The warning for a different `SKILL.md` a preview would replace (06 error table, Q25).
-fn exists(shown: &str) -> Finding {
+fn exists(shown: &str, global: bool, context: &Context) -> Finding {
+    let flags: &[&str] = if global {
+        &["--global", "--yes"]
+    } else {
+        &["--yes"]
+    };
+    let rerun = command_line::<&str>(context, "skill install", &[], flags);
     Finding::new(
         "cli-skill-exists",
         Severity::Warning,
         format!("{shown} already exists with different contents"),
     )
-    .with_help("Repeat the command with `--yes` added to replace it, for example `supdoc skill install --yes`")
+    .with_help(format!("Run `{rerun}` to replace it"))
 }
 
 /// The refusal for a project copy that `link` would send out of `root`: to `real`, or somewhere
@@ -407,8 +413,9 @@ fn outside_root(
     target: &AbsolutePath,
     link: &Path,
     real: Option<&Path>,
-    cwd: &AbsolutePath,
+    context: &Context,
 ) -> CliError {
+    let cwd = &context.cwd;
     let shown_link = link.strip_prefix(root.as_path()).unwrap_or(link).display();
     let typed_link = AbsolutePath::new(link).map_or_else(
         || shell_quote(&link.display().to_string()),
@@ -433,12 +440,14 @@ fn outside_root(
              worked out, so it may be outside the project root"
         ),
     };
+    let global_install =
+        command_line::<&str>(context, "skill install", &[], &["--global", "--yes"]);
     CliError::new(
         "cli-skill-outside-root",
         message,
         format!(
             "Nothing was written. Point {typed_link} at a directory inside the project, or \
-             install into your home directory with `supdoc skill install --global --yes`. To \
+             install into your home directory with `{global_install}`. To \
              use a real directory instead, run `rm {typed_link}` (this removes only the link, \
              not the directory it points to), then `mkdir {typed_link}`"
         ),
@@ -862,6 +871,35 @@ mod tests {
         assert_eq!(
             message,
             format!("{AGENTS_SKILL} already exists with different contents")
+        );
+    }
+
+    #[test]
+    fn skill_install_exists_help_keeps_the_config_and_its_command_replaces_the_skill() {
+        let world = World::new();
+        plant(&world.project_file(CONFIG_FILE_NAME), "");
+        plant(&world.project_file(AGENTS_SKILL), "my own skill\n");
+        let nested = world.project_file("docs");
+        fs::create_dir_all(&nested).expect("the nested directory should be created");
+
+        let run = world.install_in(&nested, None, &["-c", "../supdoc.config.toml", "--json"]);
+
+        let json = run.json();
+        let help = at(&json, "/findings/0/help")
+            .as_str()
+            .expect("the finding help should be text")
+            .to_owned();
+        let printed = "supdoc -c ../supdoc.config.toml skill install --yes";
+        assert!(
+            help.contains(&format!("`{printed}`")),
+            "the help should name the install with its config and --yes: {help}"
+        );
+        let again = world.install_in(&nested, None, &["-c", "../supdoc.config.toml", "--yes"]);
+        assert_eq!(again.exit_code(), 0, "stderr: {}", again.stderr);
+        assert_eq!(
+            contents(&world.project_file(AGENTS_SKILL)).as_deref(),
+            Some(SKILL),
+            "the printed command should replace the skill"
         );
     }
 
