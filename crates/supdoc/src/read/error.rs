@@ -162,6 +162,18 @@ impl ReadError {
     }
 }
 
+/// Whether `query` is a GitHub line anchor: `L<n>` or `L<n>-L<m>`.
+fn is_line_anchor(query: &str) -> bool {
+    let digits = |part: &str| {
+        part.strip_prefix('L')
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|byte| byte.is_ascii_digit()))
+    };
+    query.split_once('-').map_or_else(
+        || digits(query),
+        |(start, end)| digits(start) && digits(end),
+    )
+}
+
 impl Display for ReadError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.message_naming(&self.path().display()))
@@ -181,6 +193,8 @@ pub enum ResolveError {
         query: SymbolPath,
         /// Up to three paths closest to `query` by edit distance, closest first.
         nearest: Vec<SymbolPath>,
+        /// Whether the file has any symbols at all.
+        file_has_symbols: bool,
     },
 
     /// Several symbols answer to that path; supdoc never picks one (03 R5a).
@@ -239,9 +253,21 @@ impl ResolveError {
     /// The help text, with `list` as the sentence that says how to list the file's symbols.
     fn help_listing(&self, list: &str) -> String {
         match self {
-            Self::NotFound { nearest, .. } => {
-                if nearest.is_empty() {
-                    format!("the file has no symbols with a similar name. {list}")
+            Self::NotFound {
+                query,
+                nearest,
+                file_has_symbols,
+                ..
+            } => {
+                if is_line_anchor(&query.to_string()) {
+                    format!(
+                        "line anchors like `#{query}` aren't supported. link a symbol name, or \
+                         the whole file without a `#`. {list}"
+                    )
+                } else if !file_has_symbols {
+                    "the file has no symbols. link to the whole file, without a `#`".to_owned()
+                } else if nearest.is_empty() {
+                    format!("no symbol has a similar name. {list}")
                 } else {
                     format!("did you mean {}? {list}", quoted(nearest))
                 }
@@ -298,6 +324,7 @@ mod tests {
             file: absolute("/repo/src/lib.rs"),
             query: symbol("Config.fmt"),
             nearest: vec![symbol("Config.Display.fmt"), symbol("Config.port")],
+            file_has_symbols: true,
         };
 
         assert_eq!(error.code(), "resolve-not-found");
@@ -309,6 +336,36 @@ mod tests {
             error.help(),
             "did you mean `Config.Display.fmt`, `Config.port`? \
              `supdoc resolve /repo/src/lib.rs` lists every symbol",
+        );
+    }
+
+    #[test]
+    fn not_found_explains_line_anchors_and_symbol_free_files() {
+        let not_found = |query: &str, file_has_symbols| ResolveError::NotFound {
+            file: absolute("/repo/src/lib.rs"),
+            query: symbol(query),
+            nearest: Vec::new(),
+            file_has_symbols,
+        };
+
+        assert!(
+            not_found("L10", true)
+                .help()
+                .starts_with("line anchors like `#L10` aren't supported")
+        );
+        assert!(
+            not_found("L10-L12", true)
+                .help()
+                .contains("aren't supported")
+        );
+        assert_eq!(
+            not_found("foo", false).help(),
+            "the file has no symbols. link to the whole file, without a `#`"
+        );
+        assert!(
+            not_found("foo", true)
+                .help()
+                .starts_with("no symbol has a similar name.")
         );
     }
 

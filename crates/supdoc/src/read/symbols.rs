@@ -20,6 +20,7 @@ use crate::link::SymbolPath;
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{SourceFile, Symbol, SymbolTable};
 use crate::read::error::ResolveError;
+use crate::scan::targets::is_close;
 
 /// How many near-misses a `NotFound` suggests.
 const NEAREST: usize = 3;
@@ -326,6 +327,7 @@ impl SymbolTable {
                 file: file.clone(),
                 query: query.clone(),
                 nearest: self.nearest(query),
+                file_has_symbols: self.iter().next().is_some(),
             }),
             several => Err(ResolveError::Ambiguous {
                 file: file.clone(),
@@ -335,8 +337,8 @@ impl SymbolTable {
         }
     }
 
-    /// Up to three paths (full paths or aliases) closest to `query` by edit distance, closest
-    /// first. Ties keep file order.
+    /// Up to three paths (full paths or aliases) that are close misspellings of `query` (the
+    /// cutoff the fixer uses), closest first. Ties keep file order.
     #[must_use]
     pub fn nearest(&self, query: &SymbolPath) -> Vec<SymbolPath> {
         let wanted = query.to_string();
@@ -345,6 +347,7 @@ impl SymbolTable {
             .iter()
             .flat_map(|symbol| std::iter::once(&symbol.path).chain(&symbol.aliases))
             .filter(|path| seen.insert(*path))
+            .filter(|path| is_close(&wanted, &path.to_string()))
             .map(|path| (strsim::levenshtein(&wanted, &path.to_string()), path))
             .collect();
         scored.sort_by_key(|(distance, _)| *distance);
@@ -480,13 +483,17 @@ mod tests {
             Err(ResolveError::NotFound {
                 file: absolute("/repo/src/lib.rs"),
                 query: path("Config.validat"),
-                nearest: vec![
-                    path("Config.validate"),
-                    path("Config.valid"),
-                    path("Config.port")
-                ],
+                nearest: vec![path("Config.validate"), path("Config.valid")],
+                file_has_symbols: true,
             }),
         );
+    }
+
+    #[test]
+    fn nearest_omits_symbols_beyond_the_closeness_cutoff() {
+        let table = table(&["add", "Config"]);
+
+        assert_eq!(table.nearest(&path("zzzzzzzz")), Vec::new());
     }
 
     #[test]
