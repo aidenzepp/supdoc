@@ -1,6 +1,6 @@
 //! How a path is shown in each format (07 G7).
 
-use std::path::{Component, Path};
+use std::path::Component;
 
 use crate::link::SourcePath;
 use crate::path::AbsolutePath;
@@ -65,11 +65,7 @@ impl PathStyle {
     #[must_use]
     pub fn github(&self, source: &SourcePath) -> String {
         let base = self.github_workspace.as_ref().unwrap_or(&self.root);
-        let absolute = self.absolute(source);
-        match absolute.strip_prefix(base) {
-            Some(inside) => shown(inside),
-            None => shown(absolute.as_path()),
-        }
+        relative_or_absolute(base, &self.absolute(source))
     }
 
     /// A source file as JSON shows it: relative to the project root, like `supdoc.lock`.
@@ -113,13 +109,25 @@ pub(crate) fn relative_to(base: &AbsolutePath, target: &AbsolutePath) -> String 
     }
 }
 
-/// A path as text. Paths are shown as the operating system writes them.
-fn shown(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
+/// `target` relative to `base` when it lies beneath it, with `/` between segments, and absolute
+/// otherwise, as the operating system writes it.
+///
+/// The one rule for a path that must name its file without climbing out of `base`: GitHub
+/// annotations against the workspace, and messages naming a file against the project root, where
+/// a config the project extends often lies outside it.
+#[must_use]
+pub(crate) fn relative_or_absolute(base: &AbsolutePath, target: &AbsolutePath) -> String {
+    if target.strip_prefix(base).is_some() {
+        relative_to(base, target)
+    } else {
+        target.as_path().to_string_lossy().into_owned()
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     fn absolute(raw: &str) -> AbsolutePath {
@@ -143,5 +151,19 @@ mod tests {
             "../elsewhere/a.md"
         );
         assert_eq!(relative_to(&root, &root), ".");
+    }
+
+    #[test]
+    fn relative_or_absolute_descends_beneath_and_stays_absolute_outside() {
+        let root = absolute("/repo");
+
+        assert_eq!(
+            relative_or_absolute(&root, &absolute("/repo/src/lib.rs")),
+            "src/lib.rs"
+        );
+        assert_eq!(
+            relative_or_absolute(&root, &absolute("/elsewhere/a.md")),
+            "/elsewhere/a.md"
+        );
     }
 }
