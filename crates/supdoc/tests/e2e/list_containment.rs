@@ -1,15 +1,12 @@
 //! `supdoc list TARGET#symbol` reads no file outside the project root and never blocks on a file
 //! that isn't a regular file (#60).
 
-#![cfg(unix)]
-
 use std::fs;
 use std::os::unix::fs::symlink;
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
-use crate::support::Project;
+use crate::support::{Project, Run};
 
 /// How long one run may take before it counts as hung.
 const HANG_LIMIT: Duration = Duration::from_secs(30);
@@ -50,50 +47,9 @@ fn project_with_outside_and_fifo_targets() -> Project {
     project
 }
 
-/// What a bounded run printed and how it exited.
-struct Finished {
-    /// The exit code, `None` if a signal ended it.
-    code: Option<i32>,
-    /// Everything on stdout.
-    stdout: String,
-    /// Everything on stderr.
-    stderr: String,
-}
-
 /// Runs `supdoc args` from `services/web`, failing the test if it runs past [`HANG_LIMIT`].
-fn run_bounded(project: &Project, args: &[&str]) -> Finished {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_supdoc"))
-        .args(args)
-        .current_dir(project.path("services/web"))
-        .env_clear()
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("the supdoc binary should start");
-    let started = Instant::now();
-    loop {
-        if child
-            .try_wait()
-            .expect("the run should be waitable")
-            .is_some()
-        {
-            break;
-        }
-        if started.elapsed() > HANG_LIMIT {
-            drop(child.kill());
-            drop(child.wait());
-            panic!("`supdoc {}` hung for over {HANG_LIMIT:?}", args.join(" "));
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    let output = child
-        .wait_with_output()
-        .expect("the finished run's output should be readable");
-    Finished {
-        code: output.status.code(),
-        stdout: String::from_utf8(output.stdout).expect("stdout should be UTF-8"),
-        stderr: String::from_utf8(output.stderr).expect("stderr should be UTF-8"),
-    }
+fn run_bounded(project: &Project, args: &[&str]) -> Run {
+    project.supdoc_bounded("services/web", args, HANG_LIMIT)
 }
 
 #[test]

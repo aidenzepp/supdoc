@@ -1,7 +1,7 @@
 //! Links into each language's symbols are recorded, pass, and fail when the symbol changes (docref's
 //! TypeScript, Markdown, sub-declaration, JavaScript, Python, Go and Bash tests).
 
-use crate::support::{Project, links};
+use crate::support::{Project, array_at, at, links};
 
 #[test]
 fn typescript_rust_and_markdown_heading_links_are_recorded_and_pass() {
@@ -141,14 +141,21 @@ fn changing_a_python_method_body_fails_its_link() {
         "return bool(self.host)",
     );
 
-    let check = project.supdoc(&["check"]);
+    let report = project.supdoc(&["--json", "check"]).assert_exit(1).json();
 
-    let _ = check.assert_exit(1);
-    assert!(
-        check.stdout.contains("src/app.py#Config.validate"),
-        "the method's link should fail: {}",
-        check.stdout
-    );
+    // The method's link fails, and so does its enclosing `Config` struct link.
+    assert_eq!(at(&report, "/data/summary/failed"), 2, "{report}");
+    assert_eq!(at(&report, "/data/summary/broken"), 0, "{report}");
+    let failed: Vec<&str> = array_at(&report, "/data/links")
+        .iter()
+        .filter(|link| at(link, "/state") == "failed")
+        .map(|link| {
+            at(link, "/symbol")
+                .as_str()
+                .expect("a link's symbol should be a string")
+        })
+        .collect();
+    assert_eq!(failed, ["Config", "Config.validate"], "{report}");
 }
 
 #[test]
@@ -179,14 +186,11 @@ fn changing_a_go_function_body_fails_its_link() {
     project.record();
     project.replace("src/main.go", "return data", "return data + data");
 
-    let check = project.supdoc(&["check"]);
+    let report = project.supdoc(&["--json", "check"]).assert_exit(1).json();
 
-    let _ = check.assert_exit(1);
-    assert!(
-        check.stdout.contains("src/main.go#process"),
-        "the function's link should fail: {}",
-        check.stdout
-    );
+    assert_eq!(at(&report, "/data/summary/failed"), 1, "{report}");
+    assert_eq!(at(&report, "/data/summary/broken"), 0, "{report}");
+    assert_eq!(at(&report, "/data/links/0/symbol"), "process", "{report}");
 }
 
 #[test]
@@ -214,12 +218,9 @@ fn changing_a_bash_function_body_fails_its_link() {
     project.record();
     project.replace("src/deploy.sh", "mkdir -p", "mkdir -pv");
 
-    let check = project.supdoc(&["check"]);
+    let report = project.supdoc(&["--json", "check"]).assert_exit(1).json();
 
-    let _ = check.assert_exit(1);
-    assert!(
-        check.stdout.contains("src/deploy.sh#setup_env"),
-        "the function's link should fail: {}",
-        check.stdout
-    );
+    assert_eq!(at(&report, "/data/summary/failed"), 1, "{report}");
+    assert_eq!(at(&report, "/data/summary/broken"), 0, "{report}");
+    assert_eq!(at(&report, "/data/links/0/symbol"), "setup_env", "{report}");
 }

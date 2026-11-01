@@ -30,7 +30,7 @@ use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
 use crate::namespace::NamespaceName;
 use crate::output::json::{Envelope, LocationJson};
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, OutputError, Report, TextContext};
+use crate::output::{Output, OutputError, Report, TextContext, preview_note};
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile};
 use crate::read::error::ReadError;
@@ -40,14 +40,11 @@ use crate::scan::walk::{UnreadCause, UnreadDir, walk};
 use crate::suggest::close_match;
 
 use super::args::{RenameArgs, WriteMode};
-use super::project::{load_config, lock_path, read_lock};
+use super::project::{command_line, load_config, lock_path, read_lock};
 use super::{CliError, Context, Outcome};
 
 /// The command as users type it, for help text and the JSON `command`.
 const COMMAND: &str = "namespace rename";
-
-/// The note that closes a preview, after the counts.
-const PREVIEW_NOTE: &str = "Nothing written. Run the same command with --yes to apply.";
 
 /// Runs `supdoc namespace rename OLD NEW`: previews every edit, or with `--yes` makes them.
 ///
@@ -73,7 +70,16 @@ pub fn run(args: &RenameArgs, context: &Context, output: &mut Output) -> Result<
     output
         .report(&plan.report(applied), true)
         .map_err(|error| output_failed(&error))?;
-    for note in plan.notes(applied) {
+    let apply_note = preview_note(
+        args.confirm.dry_run,
+        &command_line(
+            context,
+            "namespace rename",
+            &[args.old.to_string(), args.new.to_string()],
+            &["--yes"],
+        ),
+    );
+    for note in plan.notes(applied, &apply_note) {
         output.note(&note).map_err(|error| output_failed(&error))?;
     }
     Ok(Outcome::Clean)
@@ -177,7 +183,8 @@ impl Plan {
         let mut written: Vec<String> = Vec::new();
         for source in &self.sources {
             let renamed =
-                replace_ranges(&source.text, source.prefixes(&self.old), self.new.as_str());
+                replace_ranges(&source.text, source.prefixes(&self.old), self.new.as_str())
+                    .ok_or_else(|| self.file_changed(source.source.as_str()))?;
             replace_file(source.file.as_path(), renamed.as_bytes()).map_err(|error| {
                 self.write_failed(source.source.as_str(), &error.to_string(), &written)
             })?;
@@ -200,7 +207,8 @@ impl Plan {
             &self.config.text,
             std::iter::once(self.config.key.clone()),
             self.new.as_str(),
-        );
+        )
+        .ok_or_else(|| self.file_changed(&self.config.shown))?;
         replace_file(self.config.file.as_path(), renamed.as_bytes())
             .map_err(|error| self.write_failed(&self.config.shown, &error.to_string(), &written))
     }
@@ -283,7 +291,7 @@ impl Plan {
 
     /// The notes that close the run: the parent config left as it is, then the counts and what
     /// to do next, or that the rename is done.
-    fn notes(&self, applied: bool) -> Vec<String> {
+    fn notes(&self, applied: bool, apply_note: &str) -> Vec<String> {
         let mut notes = Vec::new();
         if let Some(parent) = &self.parent {
             notes.push(format!(
@@ -299,7 +307,7 @@ impl Plan {
         } else {
             let links: usize = self.sources.iter().map(|source| source.links.len()).sum();
             notes.push(format!(
-                "1 config entry, {} in {}, {}. {PREVIEW_NOTE}",
+                "1 config entry, {} in {}, {}. {apply_note}",
                 count(links, "link", "links"),
                 count(self.sources.len(), "file", "files"),
                 count(self.lock.moved.len(), "lock entry", "lock entries"),
@@ -358,7 +366,7 @@ fn defining_file<'c>(
     new: &NamespaceName,
 ) -> Result<&'c AbsolutePath, CliError> {
     let Some(defined_in) = config.namespace_defined_in(old) else {
-        return Err(unknown_namespace(config, old));
+        return Err(unknown_namespace(config, old, new));
     };
     if old == new || config.namespace(new).is_some() {
         return Err(target_exists(config, old, new));
@@ -487,7 +495,10 @@ impl ConfigEdit {
 
     /// The key's line with the key renamed to `new`.
     fn renamed_line(&self, new: &str) -> String {
-        let renamed = replace_ranges(&self.text, std::iter::once(self.key.clone()), new);
+        let Some(renamed) = replace_ranges(&self.text, std::iter::once(self.key.clone()), new)
+        else {
+            return Self::line(&self.text, self.key.clone());
+        };
         let start = self.key.start;
         Self::line(&renamed, start..start + new.len())
     }
@@ -614,21 +625,21 @@ impl LockEdit {
 }
 
 /// `text` with every range in `ranges`, which are in order and don't overlap, replaced by
-/// `replacement`.
+/// `replacement`, or `None` if a range doesn't lie inside `text` on character boundaries.
 fn replace_ranges(
     text: &str,
     ranges: impl IntoIterator<Item = Range<usize>>,
     replacement: &str,
-) -> String {
+) -> Option<String> {
     let mut renamed = String::with_capacity(text.len());
     let mut at = 0;
     for range in ranges {
-        renamed.push_str(text.get(at..range.start).unwrap_or_default());
+        renamed.push_str(text.get(at..range.start)?);
         renamed.push_str(replacement);
         at = range.end;
     }
-    renamed.push_str(text.get(at..).unwrap_or_default());
-    renamed
+    renamed.push_str(text.get(at..)?);
+    Some(renamed)
 }
 
 /// Whether `file` is still a regular file holding exactly `text`.
@@ -649,8 +660,8 @@ fn replace_file(target: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// The error for an OLD that no config defines, naming the likely intended one and every
-/// configured namespace (NR2, Q18).
-fn unknown_namespace(config: &Config, old: &NamespaceName) -> CliError {
+/// configured namespace (NR2, Q18). When NEW is already defined it says the rename looks done.
+fn unknown_namespace(config: &Config, old: &NamespaceName, new: &NamespaceName) -> CliError {
     let names: Vec<&str> = config
         .namespaces()
         .keys()
@@ -669,9 +680,14 @@ fn unknown_namespace(config: &Config, old: &NamespaceName) -> CliError {
         Some(close) => format!("did you mean `{close}`? Configured namespaces: {listed}"),
         None => format!("Configured namespaces: {listed}"),
     };
+    let message = if config.namespace(new).is_some() {
+        format!("no namespace is named `{old}`, but `{new}` is defined: the rename looks done")
+    } else {
+        format!("no namespace is named `{old}`")
+    };
     CliError::new(
         "cli-rename-unknown-namespace",
-        format!("no namespace is named `{old}`"),
+        message,
         help,
         CliError::REFUSED_EXIT_CODE,
     )
@@ -962,10 +978,10 @@ mod tests {
     use crate::scan::model::TargetState;
     use crate::state::LinkState;
 
-    /// A config naming two namespaces, with comments that a rename must keep.
     /// A parent config whose namespace lies inside `app/`, so `app/` may inherit it.
     const INHERITED_CONFIG: &str = "[namespaces]\nauth = \"app/services/auth\"\n";
 
+    /// A config naming two namespaces, with comments that a rename must keep.
     const CONFIG: &str = "\
 # Shared code lives beside the docs.
 [namespaces]
@@ -1397,8 +1413,24 @@ web = \"services/web\"
         );
         assert_eq!(
             text.stderr,
-            "1 config entry, 1 link in 1 file, 1 lock entry. Nothing written. Run the same \
-             command with --yes to apply.\n"
+            "1 config entry, 1 link in 1 file, 1 lock entry. Nothing written. Run \
+             `supdoc namespace rename auth identity --yes` to apply.\n"
+        );
+    }
+
+    #[test]
+    fn namespace_rename_of_a_missing_old_with_a_defined_new_says_it_looks_done() {
+        let project = Project::new();
+
+        let run = project.rename(&["namespace", "rename", "gone", "web", "--yes"]);
+
+        assert_eq!(run.exit_code(), 1);
+        let error = run.error();
+        assert_eq!(error.code(), "cli-rename-unknown-namespace");
+        assert!(
+            error.message().contains("`web` is defined"),
+            "{}",
+            error.message()
         );
     }
 
@@ -1631,7 +1663,6 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
     fn namespace_rename_refuses_everything_when_a_source_is_unreadable() {
         let project = Project::new();
         project.record_all();
-        project.write("docs/broken.md", "See [login](auth:login.rs#login).\n");
         std::fs::write(
             project.root().as_path().join("docs/broken.md"),
             b"See [login](auth:login.rs#login).\n\xff\xfe",
