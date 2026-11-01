@@ -138,7 +138,7 @@ impl Report for ConfigShowReport {
     }
 
     fn render_text(&self, context: &TextContext, out: &mut dyn Write) -> io::Result<()> {
-        let arrow = arrow(context);
+        let arrow = context.arrow();
         match self.chain.split_first() {
             None => writeln!(out, "config     (none; defaults)")?,
             Some((child, parents)) => {
@@ -207,7 +207,7 @@ impl Report for NamespaceListReport {
     }
 
     fn render_text(&self, context: &TextContext, out: &mut dyn Write) -> io::Result<()> {
-        let arrow = arrow(context);
+        let arrow = context.arrow();
         let width = self
             .namespaces
             .iter()
@@ -377,11 +377,6 @@ fn render_patterns(
 /// ` (missing)` for a namespace whose directory is gone, and nothing otherwise.
 const fn missing_mark(namespace: &NamespaceJson) -> &'static str {
     if namespace.exists { "" } else { " (missing)" }
-}
-
-/// The arrow between a namespace and its directory.
-const fn arrow(context: &TextContext) -> &'static str {
-    if context.unicode { "→" } else { "->" }
 }
 
 /// `path` as text output shows it: relative to the current directory.

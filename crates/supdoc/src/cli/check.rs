@@ -184,16 +184,12 @@ impl CheckReport {
 ///
 /// Fails if writing to `out` fails.
 fn render_passed(context: &TextContext, key: &LinkKey, out: &mut dyn Write) -> io::Result<()> {
-    let arrow = if context.unicode { "→" } else { "->" };
-    let mut target = key.target.to_string();
-    if let Some(symbol) = &key.symbol {
-        target = format!("{target}#{symbol}");
-    }
     writeln!(
         out,
-        "passed  {} {arrow} {}\n",
+        "passed  {} {} {}\n",
         visible(&context.paths.text(&key.source)),
-        visible(&target),
+        context.arrow(),
+        visible(&key.target_text()),
     )
 }
 
