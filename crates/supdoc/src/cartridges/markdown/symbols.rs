@@ -292,64 +292,18 @@ impl Siblings {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
-    use std::sync::OnceLock;
 
     use super::*;
+    use crate::cartridges::markdown::cartridge::cartridge;
     use crate::hash::HashSettings;
     use crate::path::AbsolutePath;
-    use crate::read::cartridge::{Cartridge, CompiledQueries, LanguageId, MarkdownRegion};
     use crate::read::hash::hash_symbol;
-
-    /// A Markdown cartridge with no queries, enough to parse the block grammar.
-    #[derive(Debug)]
-    struct TestMarkdown {
-        /// The grammar, created on first use.
-        grammar: OnceLock<tree_sitter::Language>,
-        /// Empty queries, compiled on first use.
-        queries: OnceLock<CompiledQueries>,
-    }
-
-    impl Cartridge for TestMarkdown {
-        fn id(&self) -> LanguageId {
-            LanguageId::new("markdown")
-        }
-
-        fn extensions(&self) -> &'static [&'static str] {
-            &["md"]
-        }
-
-        fn grammar(&self) -> &tree_sitter::Language {
-            self.grammar.get_or_init(|| tree_sitter_md::LANGUAGE.into())
-        }
-
-        fn queries(&self) -> &CompiledQueries {
-            self.queries.get_or_init(|| {
-                let empty = || {
-                    tree_sitter::Query::new(self.grammar(), "")
-                        .expect("an empty query should compile against any grammar")
-                };
-                CompiledQueries::new(empty(), empty())
-            })
-        }
-
-        fn symbols(&self, file: &SourceFile) -> SymbolTable {
-            heading_symbols(file)
-        }
-
-        fn markdown_regions(&self, _file: &SourceFile) -> Vec<MarkdownRegion> {
-            Vec::new()
-        }
-    }
-
-    static MARKDOWN: TestMarkdown = TestMarkdown {
-        grammar: OnceLock::new(),
-        queries: OnceLock::new(),
-    };
 
     fn parse(text: &str) -> SourceFile {
         let path = AbsolutePath::new(Path::new("/repo/docs/guide.md"))
             .expect("the fixture path should be absolute");
-        SourceFile::from_text(path, text.to_owned(), &MARKDOWN)
+        let markdown = cartridge().expect("the built-in Markdown cartridge should load");
+        SourceFile::from_text(path, text.to_owned(), markdown)
             .expect("the Markdown grammar should parse any text")
     }
 
@@ -452,6 +406,7 @@ mod tests {
                 )
                 .expect("the query should resolve");
             hash_symbol(file, symbol, HashSettings::default())
+                .expect("the symbol should lie in its own file")
         };
 
         assert_ne!(

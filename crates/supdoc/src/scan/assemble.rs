@@ -10,6 +10,7 @@ use std::fs;
 
 use crate::config::{CONFIG_FILE_NAME, Config};
 use crate::finding::{Finding, Fix, LineIndex, Location, Severity, Snippet};
+use crate::hash::HashSettings;
 use crate::link::destination::{LinkError, parse_destination};
 use crate::link::{LinkKey, RawLink, SourcePath};
 use crate::namespace::NamespaceName;
@@ -76,7 +77,22 @@ impl ScanError {
 ///
 /// [`ScanError::RootUnreadable`] when the project root can't be listed.
 pub fn run(config: &Config, languages: &Languages, scope: &Scope) -> Result<Scan, ScanError> {
-    assemble(config, languages, scope).map(|(scan, _parsed)| scan)
+    run_with_settings(config, languages, scope, config.hash_settings())
+}
+
+/// [`run`], hashing every target under `settings` rather than the config's own, for a command
+/// that read them from the lockfile it is about to re-record.
+///
+/// # Errors
+///
+/// As [`run`].
+pub fn run_with_settings(
+    config: &Config,
+    languages: &Languages,
+    scope: &Scope,
+    settings: HashSettings,
+) -> Result<Scan, ScanError> {
+    assemble(config, languages, scope, settings).map(|(scan, _parsed)| scan)
 }
 
 /// [`run`], also handing back the files it parsed, so tests can see that none was parsed twice.
@@ -88,6 +104,7 @@ fn assemble(
     config: &Config,
     languages: &Languages,
     scope: &Scope,
+    settings: HashSettings,
 ) -> Result<(Scan, Parsed), ScanError> {
     let root = config.root();
     if let Err(error) = fs::read_dir(root.as_path()) {
@@ -127,7 +144,7 @@ fn assemble(
         .filter_map(|relative| SourcePath::from_relative(relative).ok())
         .collect();
 
-    let mut links = targets::resolve(config, languages, &mut parsed, found.occurrences);
+    let mut links = targets::resolve(config, languages, &mut parsed, settings, found.occurrences);
     add_broken(&mut links, found.broken);
     let keyless_error_sources = found
         .unkeyed
@@ -458,8 +475,13 @@ mod tests {
         }
 
         fn assemble(&self) -> (Scan, Parsed) {
-            assemble(&self.config(), &Languages::builtin(), &Scope::All)
-                .expect("a readable project root should scan")
+            assemble(
+                &self.config(),
+                &Languages::builtin(),
+                &Scope::All,
+                self.config().hash_settings(),
+            )
+            .expect("a readable project root should scan")
         }
 
         fn scan(&self) -> Scan {

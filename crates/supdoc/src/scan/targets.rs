@@ -15,6 +15,7 @@ use std::path::Path;
 
 use crate::config::{CONFIG_FILE_NAME, Config};
 use crate::finding::{Finding, Fix, Location, Severity, Snippet};
+use crate::hash::HashSettings;
 use crate::link::{LinkKey, Target};
 use crate::output::paths::relative_to;
 use crate::path::AbsolutePath;
@@ -163,6 +164,7 @@ pub(crate) fn resolve(
     config: &Config,
     languages: &Languages,
     parsed: &mut Parsed,
+    settings: HashSettings,
     occurrences: Vec<Occurrence>,
 ) -> BTreeMap<LinkKey, ScannedLink> {
     let mut by_target: BTreeMap<Target, BTreeMap<LinkKey, Vec<Occurrence>>> = BTreeMap::new();
@@ -177,7 +179,9 @@ pub(crate) fn resolve(
 
     let mut links = BTreeMap::new();
     for (target, keyed) in by_target {
-        for (key, state, occurrences) in target_states(config, languages, parsed, &target, keyed) {
+        for (key, state, occurrences) in
+            target_states(config, languages, parsed, settings, &target, keyed)
+        {
             let snippet = occurrences
                 .first()
                 .and_then(|occurrence| occurrence.snippet.clone());
@@ -200,6 +204,7 @@ fn target_states(
     config: &Config,
     languages: &Languages,
     parsed: &mut Parsed,
+    settings: HashSettings,
     target: &Target,
     keyed: BTreeMap<LinkKey, Vec<Occurrence>>,
 ) -> Vec<(LinkKey, TargetState, Vec<Occurrence>)> {
@@ -231,7 +236,6 @@ fn target_states(
         Err(error) => return broken_by(&|first| read_failed(&error, config.root(), first)),
     };
 
-    let settings = config.hash_settings();
     let mut table: Option<SymbolTable> = None;
     keyed
         .into_iter()
@@ -246,9 +250,21 @@ fn target_states(
                 Some(symbol) => {
                     let table = table.get_or_insert_with(|| file.language().symbols(file));
                     match table.resolve(file.path(), symbol) {
-                        Ok(found) => TargetState::Present {
-                            hash: hash_symbol(file, found, settings),
-                            syntax_errors,
+                        Ok(found) => match hash_symbol(file, found, settings) {
+                            Ok(hash) => TargetState::Present {
+                                hash,
+                                syntax_errors,
+                            },
+                            Err(_outside) => TargetState::Broken {
+                                finding: read_failed(
+                                    &ReadError::Internal {
+                                        path: file.path().clone(),
+                                        reason: "a symbol's byte range lies outside the file",
+                                    },
+                                    config.root(),
+                                    first,
+                                ),
+                            },
                         },
                         Err(error) => TargetState::Broken {
                             finding: resolve_failed(&error, config.root(), table, first),
@@ -598,6 +614,7 @@ mod tests {
             &config,
             &Languages::builtin(),
             &mut Parsed::default(),
+            config.hash_settings(),
             vec![occurrence],
         );
         match links.get(&key).map(|link| &link.target) {

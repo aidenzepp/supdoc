@@ -40,6 +40,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::cartridges::rust::region_texts;
     use crate::hash::HashSettings;
     use crate::path::AbsolutePath;
     use crate::read::cartridge::{SourceFile, Symbol, SymbolTable};
@@ -147,6 +148,7 @@ cleanup() { rm -rf "$TMP"; }
                     resolved(&file, &table, path),
                     HashSettings::default()
                 )
+                .expect("the symbol should lie in its own file")
                 .to_string(),
                 hash,
                 "a grammar upgrade moved `{path}`'s node boundaries (02 L8)"
@@ -193,6 +195,7 @@ cleanup() { rm -rf "$TMP"; }
 
         let hash = |file: &SourceFile, table: &SymbolTable, path| {
             hash_symbol(file, resolved(file, table, path), HashSettings::default())
+                .expect("the symbol should lie in its own file")
         };
 
         assert_eq!(
@@ -232,8 +235,8 @@ cleanup() { rm -rf "$TMP"; }
         );
 
         assert_eq!(
-            file.language().markdown_regions(&file).len(),
-            3,
+            region_texts(&file),
+            [" [a](a.md)\n", "/bin/sh\n", " [c](c.md)\n"],
             "the two comments and the shebang, not the string or heredoc",
         );
     }
