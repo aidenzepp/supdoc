@@ -837,6 +837,28 @@ mod tests {
     }
 
     #[test]
+    fn list_link_failed_help_names_the_source_from_the_current_directory() {
+        let project = Project::new();
+        project.write("supdoc.config.toml", "");
+        project.write("docs/a.md", "See [add](../src/lib.rs#add).\n");
+        project.record_all();
+        project.write("src/lib.rs", &LIB.replace("a + b", "b + a"));
+
+        let run = project.list_from("docs", &["--json", "list"]);
+
+        let json = run.json();
+        let help = json
+            .pointer("/data/links/0/finding/help")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("the changed link should carry help: {json}"));
+        assert!(
+            help.contains("supdoc update a.md --yes")
+                && project.root().as_path().join("docs/a.md").exists(),
+            "from docs/ the help should name `a.md`, which exists there: {help}"
+        );
+    }
+
+    #[test]
     fn list_target_accepts_dot_slash_and_an_absolute_path_inside_the_root() {
         let project = Project::new();
         project.write("docs/a.md", "[add](../src/lib.rs#add).\n");
