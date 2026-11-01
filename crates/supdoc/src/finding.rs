@@ -320,28 +320,64 @@ mod tests {
         start..start + needle.len()
     }
 
+    /// Asserts `range` of `text` captures a window of at most `bound` bytes holding the
+    /// highlight (cut to `highlight_len`), starting on line `first_line`.
+    fn assert_window(text: &str, range: Range<usize>, highlight_len: usize, first_line: u32) {
+        let bound = 2 * SNIPPET_CONTEXT + SNIPPET_MAX_HIGHLIGHT + 8;
+        let index = LineIndex::new(text);
+        let snippet = Snippet::capture_indexed(text, &index, range.clone())
+            .expect("the range should be capturable");
+
+        assert!(
+            snippet.text.len() <= bound,
+            "snippet is {} bytes",
+            snippet.text.len()
+        );
+        assert_eq!(snippet.first_line, first_line);
+        assert_eq!(
+            snippet.text.get(snippet.highlight.clone()).map(str::len),
+            Some(highlight_len),
+            "the highlight should be on character boundaries"
+        );
+        assert_eq!(
+            snippet.text.get(snippet.highlight.clone()),
+            text.get(range.start..range.start + highlight_len)
+        );
+    }
+
     #[test]
     fn snippet_of_a_long_line_is_a_window() {
-        let line = "é".repeat(500_000);
-        let text = format!("{line}[a](b.rs#c){line}\nnext");
-        let index = LineIndex::new(&text);
-        let start = line.len();
-        let range = start..start + "[a](b.rs#c)".len();
-        let bound = 2 * SNIPPET_CONTEXT + SNIPPET_MAX_HIGHLIGHT + 4;
+        let anchor = "[a](b.rs#c)";
+        // An odd offset into two-byte characters makes every window edge land mid-character.
+        let filler = "é".repeat(500_000);
+        let text = format!("x{filler}{anchor}{filler}\nnext");
+        let start = 1 + filler.len();
+        assert_window(&text, start..start + anchor.len(), anchor.len(), 1);
 
-        for _ in 0..1000 {
-            let snippet = Snippet::capture_indexed(&text, &index, range.clone())
-                .expect("the range should be capturable");
-            assert!(
-                snippet.text.len() <= bound,
-                "snippet is {} bytes",
-                snippet.text.len()
-            );
-            assert_eq!(
-                snippet.text.get(snippet.highlight.clone()),
-                Some("[a](b.rs#c)")
-            );
-            assert_eq!(snippet.first_line, 1);
+        // A highlight over the cap is cut short, on a boundary.
+        let wide = "é".repeat(5_000);
+        let text = format!("{filler}{wide}{filler}");
+        assert_window(
+            &text,
+            filler.len()..filler.len() + wide.len(),
+            SNIPPET_MAX_HIGHLIGHT,
+            1,
+        );
+
+        // A link within the context of each edge of its line keeps the whole edge.
+        let near = format!("{}{anchor}{}\n", "a".repeat(100), "b".repeat(100));
+        let text = format!("first\n{near}last");
+        let start = "first\n".len() + 100;
+        let index = LineIndex::new(&text);
+        let snippet = Snippet::capture_indexed(&text, &index, start..start + anchor.len())
+            .expect("the range should be capturable");
+        assert_eq!(snippet.text, near.trim_end());
+        assert_eq!(snippet.first_line, 2);
+
+        // Many findings on one huge line each copy only a window.
+        let huge = format!("x{filler}");
+        for offset in (0..1000).map(|i| 1 + i * 998) {
+            assert_window(&huge, offset..offset + 2, 2, 1);
         }
     }
 

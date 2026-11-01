@@ -108,7 +108,9 @@ impl Planned {
             })
             .count();
         Ok(Self {
-            plan: plan_fixes(&scan),
+            plan: plan_fixes(&scan, &|file| {
+                std::fs::read_to_string(config.root().as_path().join(file.as_str())).ok()
+            }),
             config,
             lock,
             broken,
@@ -553,15 +555,8 @@ impl FixRecord {
             .map_or((0, 0, range.clone()), |location| {
                 (location.line, location.column, location.range.clone())
             });
-        let scanned = |wanted: &std::ops::Range<usize>| -> Option<String> {
-            let snippet = finding.snippet.as_ref()?;
-            let origin = link_range.start.checked_sub(snippet.highlight.start)?;
-            let from = wanted.start.checked_sub(origin)?;
-            let to = wanted.end.checked_sub(origin)?;
-            snippet.text.get(from..to).map(str::to_owned)
-        };
-        let before = scanned(range).unwrap_or_default();
-        let old_link = scanned(&link_range).unwrap_or_else(|| before.clone());
+        let before = planned.before.clone();
+        let old_link = planned.link_text.clone();
         let new_link = range
             .start
             .checked_sub(link_range.start)
@@ -1414,16 +1409,18 @@ mod tests {
             "the fixture should offer three fixes: {fixable:?}"
         );
 
-        let planned: BTreeSet<(String, String)> = plan_fixes(&scan)
-            .fixes
-            .iter()
-            .map(|planned| {
-                (
-                    planned.finding.code.to_owned(),
-                    planned.fix.replacement.clone(),
-                )
-            })
-            .collect();
+        let planned: BTreeSet<(String, String)> = plan_fixes(&scan, &|file| {
+            fs::read_to_string(project.path(file.as_str())).ok()
+        })
+        .fixes
+        .iter()
+        .map(|planned| {
+            (
+                planned.finding.code.to_owned(),
+                planned.fix.replacement.clone(),
+            )
+        })
+        .collect();
 
         assert_eq!(planned, fixable);
     }

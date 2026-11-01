@@ -481,7 +481,9 @@ mod helps {
         let scan =
             supdoc::scan::assemble::run(&config, &languages, &supdoc::scan::model::Scope::All)
                 .expect("the fixture project should scan");
-        let plan = supdoc::check::fix::plan_fixes(&scan);
+        let plan = supdoc::check::fix::plan_fixes(&scan, &|file| {
+            std::fs::read_to_string(real.join(file.as_str())).ok()
+        });
         project.write(
             "docs/api.md",
             "# API\n\nEdited after the scan.\n\nSee [ad](../src/lib.rs#ad).\n",
