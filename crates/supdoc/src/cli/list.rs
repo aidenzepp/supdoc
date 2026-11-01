@@ -1,6 +1,8 @@
 //! `supdoc list`: shows every link and its state, or only the links to one target (06 X11).
 //!
-//! Read-only, and always exit 0: `check` is the gate. The run is `load_config → read_lock → scan →
+//! Read-only, and exits 0 whatever state the links are in: `check` is the gate. A `TARGET` that
+//! names nothing (a missing file, an unknown namespace, a symbol that doesn't resolve) is refused,
+//! so a typo never reads as "no docs depend on this". The run is `load_config → read_lock → scan →
 //! reconcile → filter by TARGET and --state → cap at --limit`, with effects only at the two ends.
 
 use std::io::{self, Write};
@@ -14,17 +16,21 @@ use crate::check::reconcile::reconcile;
 use crate::config::Config;
 use crate::finding::Finding;
 use crate::link::{LinkKey, LinkRef, SymbolPath, Target};
+use crate::lock::error::shell_quote;
+use crate::namespace::NamespaceName;
 use crate::output::json::Envelope;
+use crate::output::paths::relative_to;
 use crate::output::summary::render_summary;
 use crate::output::text::{render_finding, visible};
 use crate::output::{Output, OutputError, Report, Summary, TextContext};
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile, SymbolTable};
+use crate::read::error::ResolveError;
 use crate::scan::model::Scope;
 
 use super::args::ListArgs;
 use super::check::LinkJson;
-use super::project::{absolute, load_config, path_outside, read_lock};
+use super::project::{absolute, ensure_exists, load_config, path_outside, read_lock};
 use super::{CliError, Context, Outcome};
 
 /// Runs `supdoc list`: prints each link in the chosen states, optionally only those pointing at
@@ -32,15 +38,19 @@ use super::{CliError, Context, Outcome};
 ///
 /// A missing `supdoc.lock` is an empty one, so every link is `new`. `TARGET` is read relative to
 /// the current directory, so `./src/lib.rs`, `../src/lib.rs` and an absolute path inside the
-/// project all work, and `ns:path` names the same file as the plain path to it. It is not an
-/// error for `TARGET` to name a file that doesn't exist or has no links.
+/// project all work, and `ns:path` names the same file as the plain path to it. A real `TARGET`
+/// with no links says so and exits 0. When no link points at `TARGET`, it is checked: a missing
+/// file, an unknown namespace or a symbol that doesn't resolve is an error. Links recorded for a
+/// file that is gone still list.
 ///
 /// # Errors
 ///
 /// Returns the config's own error (78, or 74 when unreadable), the lockfile's own error (78 when
 /// invalid, 74 when unreadable), `cli-path-outside-project` (2) for a plain `TARGET` outside the
-/// project, `cli-target-invalid` (2) for a `TARGET` that isn't a target, `scan-root-unreadable`
-/// (74), and `cli-list-output` when the report cannot be written (74).
+/// project, `cli-target-invalid` (2) for a `TARGET` that isn't a target; when no link points at
+/// `TARGET`, `link-unknown-namespace` or `cli-path-missing` (2), `cli-path-unreadable` (74), or
+/// `resolve-not-found` or `resolve-ambiguous` (1); `scan-root-unreadable` (74), and
+/// `cli-list-output` when the report cannot be written (74).
 pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let config = load_config(context, output, "list")?;
     let lock = read_lock(&config, &context.cwd)?;
@@ -62,15 +72,24 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
         .map(|typed| parse_target(typed, &config, &context.cwd))
         .transpose()?;
     let wanted = target.as_ref().map(|target| Wanted::new(target, &config));
-    let matched: Vec<LinkReport> = model
+    let linked: Vec<LinkReport> = model
         .links
         .into_iter()
-        .filter(|link| args.state.is_empty() || args.state.contains(&link.state))
         .filter(|link| {
             wanted
                 .as_ref()
                 .is_none_or(|wanted| wanted.matches(&link.key, &config))
         })
+        .collect();
+    if linked.is_empty()
+        && let (Some(target), Some(wanted), Some(typed)) = (&target, &wanted, &args.target)
+        && let Some(error) = wanted.refusal(target, typed, &config, &context.cwd)
+    {
+        return Err(error);
+    }
+    let matched: Vec<LinkReport> = linked
+        .into_iter()
+        .filter(|link| args.state.is_empty() || args.state.contains(&link.state))
         .collect();
 
     let total = matched.len();
@@ -311,9 +330,16 @@ impl Place {
 enum SymbolFilter {
     /// The whole file was named: links to the file and to any symbol in it.
     Any,
-    /// The symbol could not be resolved in the file, so links match by the text they were written
-    /// with.
+    /// The file could not be located or read, so links match by the text they were written with.
     Text(SymbolPath),
+    /// The file has no single symbol by that path, so links match by the text they were written
+    /// with.
+    Unresolved {
+        /// What `TARGET` was written with.
+        typed: SymbolPath,
+        /// Why it names no single symbol in the file.
+        error: ResolveError,
+    },
     /// Links match when they were written with the same text, or resolve to the same symbol.
     Resolved {
         /// What `TARGET` was written with.
@@ -347,12 +373,14 @@ impl Wanted {
             return SymbolFilter::Text(typed.clone());
         };
         let table = file.language().symbols(&file);
-        let Some(symbol) = table
-            .resolve(file.path(), typed)
-            .ok()
-            .map(|found| found.path.clone())
-        else {
-            return SymbolFilter::Text(typed.clone());
+        let symbol = match table.resolve(file.path(), typed) {
+            Ok(found) => found.path.clone(),
+            Err(error) => {
+                return SymbolFilter::Unresolved {
+                    typed: typed.clone(),
+                    error,
+                };
+            }
         };
         SymbolFilter::Resolved {
             typed: typed.clone(),
@@ -371,7 +399,9 @@ impl Wanted {
         match (&self.symbol, &key.symbol) {
             (SymbolFilter::Any, _) => true,
             (_, None) => false,
-            (SymbolFilter::Text(typed), Some(written)) => typed == written,
+            (SymbolFilter::Text(typed) | SymbolFilter::Unresolved { typed, .. }, Some(written)) => {
+                typed == written
+            }
             (
                 SymbolFilter::Resolved {
                     typed,
@@ -388,6 +418,102 @@ impl Wanted {
             }
         }
     }
+
+    /// Why `target`, typed as `typed`, names nothing: its namespace isn't defined, its file is
+    /// outside the project or missing, or its symbol doesn't resolve. `None` when it names a real
+    /// file (and symbol), or when the file can't be read to check the symbol.
+    ///
+    /// Effect: looks up the file's metadata.
+    fn refusal(
+        &self,
+        target: &LinkRef,
+        typed: &str,
+        config: &Config,
+        cwd: &AbsolutePath,
+    ) -> Option<CliError> {
+        if let Some(name) = target.target.namespace()
+            && config.namespace(name).is_none()
+        {
+            return Some(unknown_namespace(config, name));
+        }
+        let typed_file = Path::new(typed.split_once('#').map_or(typed, |(file, _)| file));
+        let file = match &self.place {
+            Place::File(file) => file,
+            Place::Unlocated(_) => return Some(path_outside(typed_file, config.root())),
+        };
+        if let Err(error) = ensure_exists(file, typed_file, cwd) {
+            let namespaced = target
+                .target
+                .namespace()
+                .and_then(|name| Some((name, config.namespace(name)?)));
+            return Some(match namespaced {
+                Some((name, directory)) if error.code() == "cli-path-missing" => {
+                    namespaced_missing(typed_file, name, directory, cwd)
+                }
+                _ => error,
+            });
+        }
+        match &self.symbol {
+            SymbolFilter::Unresolved { error, .. } => Some(CliError::new(
+                error.code(),
+                error.message_naming(&relative_to(config.root(), error.file())),
+                error.help_naming(&typed_file.display()),
+                CliError::REFUSED_EXIT_CODE,
+            )),
+            SymbolFilter::Any | SymbolFilter::Text(_) | SymbolFilter::Resolved { .. } => None,
+        }
+    }
+}
+
+/// The error for a namespaced `TARGET` whose file doesn't exist. Its path is relative to the
+/// namespace's `directory`, not the current directory, so the help lists that directory as seen
+/// from `cwd`.
+fn namespaced_missing(
+    typed: &Path,
+    name: &NamespaceName,
+    directory: &AbsolutePath,
+    cwd: &AbsolutePath,
+) -> CliError {
+    let shown = match relative_to(cwd, directory) {
+        empty if empty.is_empty() => ".".to_owned(),
+        shown => shown,
+    };
+    CliError::new(
+        "cli-path-missing",
+        format!("{} does not exist", typed.display()),
+        format!(
+            "The path after `{name}:` is relative to the `{name}` namespace's directory. \
+             `ls {}` lists what is there",
+            shell_quote(&shown)
+        ),
+        CliError::USAGE_EXIT_CODE,
+    )
+}
+
+/// The error for a namespace the config doesn't define, naming the closest defined one.
+fn unknown_namespace(config: &Config, name: &NamespaceName) -> CliError {
+    let defined: Vec<&str> = config
+        .namespaces()
+        .keys()
+        .map(NamespaceName::as_str)
+        .collect();
+    let help = match crate::scan::targets::close_match(name.as_str(), defined.iter().copied()) {
+        Some(nearest) => format!(
+            "did you mean `{nearest}`? Defined namespaces: `{}`",
+            defined.join("`, `")
+        ),
+        None if defined.is_empty() => format!(
+            "Define `{name}` under `[namespaces]` in {}",
+            crate::config::CONFIG_FILE_NAME
+        ),
+        None => format!("Defined namespaces: `{}`", defined.join("`, `")),
+    };
+    CliError::new(
+        "link-unknown-namespace",
+        format!("unknown namespace `{name}`"),
+        help,
+        CliError::USAGE_EXIT_CODE,
+    )
 }
 
 #[cfg(test)]
@@ -699,9 +825,9 @@ mod tests {
             from_docs.stdout
         );
         assert_eq!(
-            wrong_base.listed(),
-            Vec::<String>::new(),
-            "`src/lib.rs` from `docs/` is `docs/src/lib.rs`, which nothing links to"
+            wrong_base.result.as_ref().err().map(CliError::code),
+            Some("cli-path-missing"),
+            "`src/lib.rs` from `docs/` is `docs/src/lib.rs`, which doesn't exist"
         );
         let text = project.list_from("docs", &["list", "../src/lib.rs"]);
         assert!(
@@ -829,6 +955,96 @@ mod tests {
         assert_eq!(run.exit_code(), 0);
         assert_eq!(run.stdout, "");
         assert_eq!(run.stderr, "No links to src/other.rs.\n");
+    }
+
+    #[test]
+    fn list_of_a_missing_file_is_refused_not_no_links() {
+        let project = Project::new();
+        project.write("docs/a.md", "[add](../src/lib.rs#add).\n");
+        project.write("src/lib.rs", LIB);
+
+        let error = project
+            .list(&["list", "src/nope.rs"])
+            .result
+            .expect_err("a missing file should be refused");
+
+        assert_eq!((error.code(), error.exit_code()), ("cli-path-missing", 2));
+    }
+
+    #[test]
+    fn list_of_a_misspelled_symbol_is_refused_with_the_nearest_symbol() {
+        let project = Project::new();
+        project.write("docs/a.md", "[add](../src/lib.rs#add).\n");
+        project.write("src/lib.rs", LIB);
+
+        let error = project
+            .list(&["list", "src/lib.rs#ad"])
+            .result
+            .expect_err("a symbol that doesn't resolve should be refused");
+
+        assert_eq!((error.code(), error.exit_code()), ("resolve-not-found", 1));
+        assert!(
+            error.help().contains("`add`") && error.help().contains("supdoc resolve src/lib.rs"),
+            "help: {}",
+            error.help()
+        );
+    }
+
+    #[test]
+    fn list_of_an_unknown_namespace_is_refused_naming_the_defined_ones() {
+        let project = Project::new();
+        project.write(
+            "supdoc.config.toml",
+            "[namespaces]\nauth = \"services/auth\"\n",
+        );
+        project.write("services/auth/login.rs", "pub fn login() {}\n");
+        project.write("docs/a.md", "[login](auth:login.rs#login).\n");
+
+        let error = project
+            .list(&["list", "auht:login.rs"])
+            .result
+            .expect_err("an unknown namespace should be refused");
+
+        assert_eq!(
+            (error.code(), error.exit_code()),
+            ("link-unknown-namespace", 2)
+        );
+        assert!(error.help().contains("`auth`"), "help: {}", error.help());
+    }
+
+    #[test]
+    fn list_of_a_missing_namespaced_file_points_at_the_namespace_directory() {
+        let project = Project::new();
+        project.write(
+            "supdoc.config.toml",
+            "[namespaces]\nauth = \"services/auth\"\n",
+        );
+        project.write("services/auth/login.rs", "pub fn login() {}\n");
+        project.write("docs/a.md", "[login](auth:login.rs#login).\n");
+
+        let error = project
+            .list(&["list", "auth:nope.rs"])
+            .result
+            .expect_err("a missing namespaced file should be refused");
+
+        assert_eq!((error.code(), error.exit_code()), ("cli-path-missing", 2));
+        assert!(
+            error.help().contains("`ls services/auth`")
+                && !error.help().contains("current directory"),
+            "help: {}",
+            error.help()
+        );
+    }
+
+    #[test]
+    fn list_still_shows_links_to_a_file_that_is_gone() {
+        let project = Project::new();
+        project.write("docs/a.md", "[add](../src/gone.rs#add).\n");
+
+        let run = project.list(&["--json", "list", "src/gone.rs#add"]);
+
+        assert_eq!(run.exit_code(), 0, "stderr: {}", run.stderr);
+        assert_eq!(run.listed().len(), 1, "stdout: {}", run.stdout);
     }
 
     #[test]

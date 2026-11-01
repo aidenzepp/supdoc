@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::support::{Project, array_at};
+use crate::support::Project;
 
 /// How long one run may take before it counts as hung.
 const HANG_LIMIT: Duration = Duration::from_secs(30);
@@ -100,16 +100,15 @@ fn run_bounded(project: &Project, args: &[&str]) -> Finished {
 fn list_target_symbol_never_reads_outside_the_root_or_blocks_on_a_fifo() {
     let project = project_with_outside_and_fifo_targets();
 
-    // Symlink out: `#new` reaches `Config.new` only through the outside file's symbols, so the
-    // link must not match.
-    let outside = run_bounded(&project, &["--json", "list", "src/evil.rs#new"]);
-    assert_eq!(outside.code, Some(0), "{}", outside.stderr);
-    let report: serde_json::Value =
-        serde_json::from_str(&outside.stdout).expect("stdout should be JSON");
-    assert_eq!(
-        array_at(&report, "/data/links").len(),
-        0,
-        "`list src/evil.rs#new` resolved a symbol in a file outside the root: {report}"
+    // Symlink out: `#new` reaches `Config.new` only through the outside file's symbols. The target
+    // is refused as outside the project, the same way whatever the outside file holds.
+    let outside = run_bounded(&project, &["list", "src/evil.rs#new"]);
+    assert_eq!(outside.code, Some(2), "{}", outside.stderr);
+    assert_eq!(outside.stdout, "", "a refused run prints no report");
+    assert!(
+        outside.stderr.contains("cli-path-outside-project") && !outside.stderr.contains("Config"),
+        "`list src/evil.rs#new` should be refused as outside the project: {}",
+        outside.stderr
     );
 
     // `ns:../`: refused at parse, before anything is opened.
