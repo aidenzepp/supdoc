@@ -223,19 +223,26 @@ pub struct Fix {
     pub replacement: String,
 }
 
-/// The whole lines a finding's range covers, captured when the finding is created (07 G11).
+/// A bounded window of the lines a finding's range covers, captured when the finding is created (07 G11).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snippet {
     /// 1-based line number of the first line of `text`.
     pub first_line: u32,
-    /// The whole lines the finding's range covers, nothing more, without the final newline.
+    /// The covered lines, cut to a window around the range, without the final newline.
     pub text: String,
     /// The highlighted range, relative to `text`.
     pub highlight: Range<usize>,
 }
 
+/// Bytes of the covered lines kept on each side of the highlighted range.
+const SNIPPET_CONTEXT: usize = 200;
+
+/// Most bytes of the highlighted range a snippet keeps; a longer range is cut short.
+const SNIPPET_MAX_HIGHLIGHT: usize = 1024;
+
 impl Snippet {
-    /// Captures the lines of `text` that `range` covers.
+    /// Captures the lines of `text` that `range` covers, cut to a window of [`SNIPPET_CONTEXT`]
+    /// bytes around a range of at most [`SNIPPET_MAX_HIGHLIGHT`] bytes.
     ///
     /// `None` if `range` is reversed, runs past the end of `text`, or doesn't fall on character
     /// boundaries.
@@ -249,17 +256,50 @@ impl Snippet {
     pub fn capture_indexed(text: &str, index: &LineIndex, range: Range<usize>) -> Option<Self> {
         // Rejects a reversed range, one past the end, or one splitting a character.
         let _covered: &str = text.get(range.clone())?;
-        let start = index.line_start(range.start);
+        let line_start = index.line_start(range.start);
         let after = text.get(range.end..)?;
-        let end = after
+        let line_end = after
             .find('\n')
             .map_or(text.len(), |newline| range.end + newline);
+        let highlight_end = floor_boundary(
+            text,
+            range
+                .end
+                .min(range.start.saturating_add(SNIPPET_MAX_HIGHLIGHT)),
+        )
+        .max(range.start);
+        let start = ceil_boundary(
+            text,
+            line_start.max(range.start.saturating_sub(SNIPPET_CONTEXT)),
+        );
+        let end = floor_boundary(
+            text,
+            line_end.min(highlight_end.saturating_add(SNIPPET_CONTEXT)),
+        );
         Some(Self {
             first_line: u32::try_from(index.line_of(range.start)).ok()?,
             text: text.get(start..end)?.to_owned(),
-            highlight: (range.start - start)..(range.end - start),
+            highlight: (range.start - start)..(highlight_end - start),
         })
     }
+}
+
+/// The largest char boundary of `text` at or before `offset`.
+fn floor_boundary(text: &str, mut offset: usize) -> usize {
+    offset = offset.min(text.len());
+    while !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
+/// The smallest char boundary of `text` at or after `offset`.
+fn ceil_boundary(text: &str, mut offset: usize) -> usize {
+    offset = offset.min(text.len());
+    while !text.is_char_boundary(offset) {
+        offset += 1;
+    }
+    offset
 }
 
 #[cfg(test)]
@@ -278,6 +318,31 @@ mod tests {
             .find(needle)
             .expect("the needle should be in the fixture");
         start..start + needle.len()
+    }
+
+    #[test]
+    fn snippet_of_a_long_line_is_a_window() {
+        let line = "é".repeat(500_000);
+        let text = format!("{line}[a](b.rs#c){line}\nnext");
+        let index = LineIndex::new(&text);
+        let start = line.len();
+        let range = start..start + "[a](b.rs#c)".len();
+        let bound = 2 * SNIPPET_CONTEXT + SNIPPET_MAX_HIGHLIGHT + 4;
+
+        for _ in 0..1000 {
+            let snippet = Snippet::capture_indexed(&text, &index, range.clone())
+                .expect("the range should be capturable");
+            assert!(
+                snippet.text.len() <= bound,
+                "snippet is {} bytes",
+                snippet.text.len()
+            );
+            assert_eq!(
+                snippet.text.get(snippet.highlight.clone()),
+                Some("[a](b.rs#c)")
+            );
+            assert_eq!(snippet.first_line, 1);
+        }
     }
 
     #[test]
