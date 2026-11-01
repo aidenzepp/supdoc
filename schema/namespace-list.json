@@ -157,7 +157,7 @@
       "description": "What `namespace list` prints: every effective namespace, sorted by name.",
       "properties": {
         "namespaces": {
-          "description": "Every namespace, by name.",
+          "description": "Every namespace up to `--limit`, by name.",
           "items": {
             "$ref": "#/$defs/NamespaceJson"
           },

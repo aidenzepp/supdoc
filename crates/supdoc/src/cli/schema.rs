@@ -140,7 +140,7 @@ fn schema_of(target: SchemaTarget) -> schemars::Schema {
         SchemaTarget::List => list::schema(),
         SchemaTarget::Resolve => resolve::schema(),
         SchemaTarget::ConfigShow => config::schema(Inspect::ConfigShow),
-        SchemaTarget::NamespaceList => config::schema(Inspect::NamespaceList),
+        SchemaTarget::NamespaceList => config::schema(Inspect::NamespaceList { limit: 0 }),
         SchemaTarget::NamespaceRename => rename::schema(),
         SchemaTarget::Init => init::schema(),
         SchemaTarget::SkillInstall => skill::schema(),
