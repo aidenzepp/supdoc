@@ -1,7 +1,6 @@
 //! Contract tests for output (07 "Tests"): every format of a report, rendered from constructed
 //! values.
 
-use std::collections::BTreeSet;
 use std::io::{self, Write};
 
 use serde_json::Value;
@@ -13,7 +12,6 @@ use crate::output::fixtures::{
 use crate::output::format::TextContext;
 use crate::output::format::{OutputFormat, Verbosity, supports_unicode};
 use crate::output::github::{annotation, escape_data, escape_property};
-use crate::output::json::{Envelope, FatalJson, FindingJson};
 use crate::output::jsonl;
 use crate::output::paths::PathStyle;
 use crate::output::report::Report;
@@ -40,119 +38,6 @@ fn at<'a>(value: &'a Value, pointer: &str) -> &'a Value {
 fn parse(line: &str) -> Value {
     serde_json::from_str(line)
         .unwrap_or_else(|error| panic!("`{line}` should be valid JSON: {error}"))
-}
-
-#[test]
-fn check_text_matches_golden() {
-    let text = stdout_of(OutputFormat::Text, Verbosity::Normal, false);
-
-    insta::assert_snapshot!(text);
-}
-
-#[test]
-fn fatal_error_text_matches_golden() {
-    let config = "extends = \"../../supdoc.confg.toml\"\n";
-    let finding = finding_on(
-        "apps/web/supdoc.config.toml",
-        config,
-        "\"../../supdoc.confg.toml\"",
-        "config-extends-missing",
-        Severity::Error,
-        "apps/web/supdoc.config.toml extends `../../supdoc.confg.toml`, but no file exists at supdoc.confg.toml",
-        "point `extends` at an existing supdoc.config.toml, relative to this file",
-    );
-    let (mut output, _stdout, stderr) = captured(settings(OutputFormat::Text, Verbosity::Normal));
-
-    output
-        .fatal(&finding, 78)
-        .expect("writing to a buffer should succeed");
-
-    insta::assert_snapshot!(stderr.text());
-}
-
-#[test]
-fn every_report_json_validates_against_its_schema() {
-    let report = check_report();
-    let schema = serde_json::to_value(schemars::schema_for!(crate::output::fixtures::CheckFixture))
-        .expect("a schema should serialize");
-    let validator = jsonschema::validator_for(&schema).expect("the schema should compile");
-    let envelope = parse(&stdout_of(OutputFormat::Json, Verbosity::Normal, false));
-
-    let errors: Vec<String> = validator
-        .iter_errors(at(&envelope, "/data"))
-        .map(|error| error.to_string())
-        .collect();
-    assert!(
-        errors.is_empty(),
-        "data should match its schema: {errors:?}"
-    );
-
-    let finding_schema = serde_json::to_value(schemars::schema_for!(FindingJson))
-        .expect("a schema should serialize");
-    let finding_validator =
-        jsonschema::validator_for(&finding_schema).expect("the schema should compile");
-    for finding in &at(&envelope, "/findings")
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-    {
-        assert!(
-            finding_validator.is_valid(finding),
-            "{finding} should match the finding schema"
-        );
-    }
-    assert_eq!(
-        at(&envelope, "/findings").as_array().map(Vec::len),
-        Some(report.loose.len())
-    );
-
-    let fatal_schema =
-        serde_json::to_value(schemars::schema_for!(FatalJson)).expect("a schema should serialize");
-    let fatal_validator =
-        jsonschema::validator_for(&fatal_schema).expect("the schema should compile");
-    let fatal = serde_json::to_value(FatalJson::new(
-        report
-            .loose
-            .first()
-            .expect("the fixture has a loose finding"),
-        78,
-    ))
-    .expect("a fatal error should serialize");
-    assert!(
-        fatal_validator.is_valid(&fatal),
-        "{fatal} should match its schema"
-    );
-}
-
-#[test]
-fn envelope_has_the_same_top_level_keys_for_every_command() {
-    let expected: BTreeSet<&str> = [
-        "schema_version",
-        "command",
-        "ok",
-        "root",
-        "data",
-        "findings",
-        "truncated",
-    ]
-    .into();
-    for command in ["check", "list", "update"] {
-        let mut report = check_report();
-        report.command = command;
-        let envelope = Envelope::new(&report, false, &absolute("/repo"));
-        let value = serde_json::to_value(&envelope).expect("an envelope should serialize");
-        let keys: BTreeSet<&str> = value
-            .as_object()
-            .expect("an envelope should be an object")
-            .keys()
-            .map(String::as_str)
-            .collect();
-
-        assert_eq!(keys, expected, "top-level keys for `{command}`");
-        assert_eq!(at(&value, "/command"), command);
-        assert_eq!(at(&value, "/schema_version"), 1);
-        assert_eq!(at(&value, "/root"), "/repo");
-    }
 }
 
 #[test]

@@ -1566,6 +1566,73 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
     }
 
     #[test]
+    fn namespace_rename_refuses_when_the_lockfile_changed_after_scan() {
+        let project = Project::new();
+        project.record_all();
+        let plan = project.plan("auth", "identity");
+        let mut lock = project.lock();
+        lock.retain(|_key, _hash| false);
+        lock.write(&lock_path(&project.root()))
+            .expect("the edited lockfile should be written");
+        let before = project.files();
+
+        let error = plan
+            .apply()
+            .expect_err("a lockfile changed since it was read should refuse the rename");
+
+        assert_eq!(
+            (error.code(), error.exit_code()),
+            ("cli-rename-file-changed", 1)
+        );
+        assert!(
+            error.message().contains("supdoc.lock"),
+            "{}",
+            error.message()
+        );
+        assert!(
+            error
+                .help()
+                .contains("`supdoc namespace rename auth identity --yes`"),
+            "the help should quote the command to run again: {}",
+            error.help()
+        );
+        assert_eq!(
+            project.files(),
+            before,
+            "nothing is written, the edit is kept"
+        );
+    }
+
+    #[test]
+    fn namespace_rename_refuses_when_the_config_changed_after_scan() {
+        let project = Project::new();
+        project.record_all();
+        let plan = project.plan("auth", "identity");
+        let config_text = project.read(CONFIG_FILE_NAME);
+        project.write(CONFIG_FILE_NAME, &format!("# edited\n{config_text}"));
+        let before = project.files();
+
+        let error = plan
+            .apply()
+            .expect_err("a config changed since it was read should refuse the rename");
+
+        assert_eq!(
+            (error.code(), error.exit_code()),
+            ("cli-rename-file-changed", 1)
+        );
+        assert!(
+            error.message().contains(CONFIG_FILE_NAME),
+            "{}",
+            error.message()
+        );
+        assert_eq!(
+            project.files(),
+            before,
+            "nothing is written, the edit is kept"
+        );
+    }
+
+    #[test]
     fn namespace_rename_refuses_everything_when_a_source_is_unreadable() {
         let project = Project::new();
         project.record_all();
