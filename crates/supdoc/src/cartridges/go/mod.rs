@@ -40,6 +40,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::cartridges::rust::region_texts;
     use crate::hash::HashSettings;
     use crate::link::SymbolPath;
     use crate::path::AbsolutePath;
@@ -306,13 +307,13 @@ func (r *Ring[T]) Push(item T) {
     fn go_comments_are_link_regions() {
         let file = parse("// [a](a.md)\n/* [b](b.md) */\nfunc f() {}\n");
 
-        assert_eq!(file.language().markdown_regions(&file).len(), 2);
+        assert_eq!(region_texts(&file), [" [a](a.md)\n", "/* [b](b.md) */"]);
     }
 
     #[test]
     fn go_string_literal_is_not_a_link_region() {
         let file = parse("package p\nvar s = \"[a](b.go#c)\"\n");
 
-        assert_eq!(file.language().markdown_regions(&file).len(), 0);
+        assert_eq!(region_texts(&file), Vec::<&str>::new());
     }
 }
