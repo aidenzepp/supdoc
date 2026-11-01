@@ -185,24 +185,41 @@ fn refuse_if_present(target: &AbsolutePath, context: &Context) -> Result<(), Cli
 
 /// Creates `target` with the starter contents, failing rather than replacing anything.
 ///
-/// The file is created exclusively, so a config that appears between a check and the write is
-/// still never overwritten.
+/// The starter is written to a temporary sibling and linked into place, which fails if `target`
+/// exists, so a config that appears between a check and the write is never overwritten and a
+/// failed write never leaves a partial config behind.
 ///
 /// # Errors
 ///
 /// Returns `cli-init-exists` when `target` exists, and `cli-init-write` when it cannot be written.
 fn write_new(target: &AbsolutePath, context: &Context) -> Result<(), CliError> {
-    let mut file = OpenOptions::new()
+    let temporary = temporary_sibling(target);
+    let written = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(target.as_path())
-        .map_err(|error| match error.kind() {
-            io::ErrorKind::AlreadyExists => exists(target, context),
-            _ => write_failed(target, &error, context),
-        })?;
-    file.write_all(STARTER.as_bytes())
-        .and_then(|()| file.flush())
-        .map_err(|error| write_failed(target, &error, context))
+        .open(&temporary)
+        .and_then(|mut file| {
+            file.write_all(STARTER.as_bytes())?;
+            file.flush()
+        });
+    let linked = written.and_then(|()| std::fs::hard_link(&temporary, target.as_path()));
+    // Best effort: the temporary is ours, and the outcome is already decided.
+    drop(std::fs::remove_file(&temporary));
+    linked.map_err(|error| match error.kind() {
+        io::ErrorKind::AlreadyExists => exists(target, context),
+        _ => write_failed(target, &error, context),
+    })
+}
+
+/// A hidden file beside `target` that this run alone writes before linking it into place.
+fn temporary_sibling(target: &AbsolutePath) -> std::path::PathBuf {
+    let name = target
+        .as_path()
+        .file_name()
+        .map_or_else(|| CONFIG_FILE_NAME.into(), |name| name.to_string_lossy());
+    target
+        .as_path()
+        .with_file_name(format!(".{name}.{}.tmp", std::process::id()))
 }
 
 /// The refusal for an existing config (06 error table), naming it as the notes do.
@@ -220,13 +237,25 @@ fn exists(target: &AbsolutePath, context: &Context) -> CliError {
 
 /// The error for a config that could not be written, naming it as the notes do.
 fn write_failed(target: &AbsolutePath, error: &io::Error, context: &Context) -> CliError {
+    let directory = target
+        .as_path()
+        .parent()
+        .unwrap_or_else(|| target.as_path());
+    let directory = shell_quote(&directory.to_string_lossy());
+    let fix = match error.kind() {
+        io::ErrorKind::NotFound => format!("create the directory with `mkdir -p {directory}`"),
+        io::ErrorKind::NotADirectory => {
+            format!("a file is in the way of the directory {directory}; move or delete that file")
+        }
+        io::ErrorKind::PermissionDenied => {
+            format!("make the directory {directory} writable by you")
+        }
+        _ => format!("check that you can write to the directory {directory}"),
+    };
     CliError::new(
         "cli-init-write",
         format!("cannot write {}: {error}", label(target, &context.cwd)),
-        format!(
-            "check that the directory exists and that you can write to it, then run `{}` again",
-            command(context)
-        ),
+        format!("{fix}, then run `{}` again", command(context)),
         CliError::IO_EXIT_CODE,
     )
 }
@@ -523,11 +552,46 @@ mod tests {
             Some(&STARTER.into()),
             "contents in {json}"
         );
-        assert!(
-            json.pointer("/data/path")
-                .is_some_and(serde_json::Value::is_string),
+        assert_eq!(
+            json.pointer("/data/path"),
+            Some(
+                &dir.path()
+                    .join("supdoc.config.toml")
+                    .to_string_lossy()
+                    .into()
+            ),
             "path in {json}"
         );
+    }
+
+    #[test]
+    fn write_failure_helps_by_kind_and_leaves_no_temporary_file() {
+        let dir = tempfile::tempdir().expect("a temp directory should be created");
+        std::fs::write(dir.path().join("file"), "").expect("the blocking file should be written");
+        let (missing_args, missing_context) = context_in(&dir, &["-c", "nope/x.toml"]);
+        let (blocked_args, blocked_context) = context_in(&dir, &["-c", "file/x.toml"]);
+
+        let (missing, _, _) = run_captured(&missing_args, &missing_context);
+        let (blocked, _, _) = run_captured(&blocked_args, &blocked_context);
+
+        let missing = missing.expect_err("a missing directory cannot hold a config");
+        let blocked = blocked.expect_err("a file cannot hold a config");
+        let root = dir.path().to_string_lossy();
+        assert!(
+            missing.help().contains(&format!("mkdir -p {root}/nope")),
+            "help was: {}",
+            missing.help()
+        );
+        assert!(
+            blocked.help().contains(&format!("{root}/file"))
+                && blocked.help().contains("in the way"),
+            "help was: {}",
+            blocked.help()
+        );
+        let leftovers = std::fs::read_dir(dir.path())
+            .expect("the directory should be readable")
+            .count();
+        assert_eq!(leftovers, 1, "only the blocking file remains");
     }
 
     #[test]
@@ -624,7 +688,7 @@ mod tests {
         let (dry_args, dry_context) = context_in(&dir, &["--dry-run", "-c", "gone/x.toml"]);
         let (real_args, real_context) = context_in(&dir, &["-c", "gone/x.toml"]);
 
-        let (dry, _, dry_stdout) = run_captured(&dry_args, &dry_context);
+        let (dry, _, dry_stderr) = run_captured(&dry_args, &dry_context);
         let (real, _, _) = run_captured(&real_args, &real_context);
         let dry = dry.expect_err("the preview should fail on a missing directory");
         let real = real.expect_err("the real run should fail on a missing directory");
@@ -634,7 +698,7 @@ mod tests {
             (real.code(), real.exit_code(), real.to_string()),
             "the preview and the real run fail the same way"
         );
-        assert_eq!(dry_stdout, "", "no note claims success");
+        assert_eq!(dry_stderr, "", "no note claims success");
     }
 
     #[test]
