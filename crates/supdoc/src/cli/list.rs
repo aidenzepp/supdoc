@@ -16,6 +16,7 @@ use crate::check::reconcile::reconcile;
 use crate::config::Config;
 use crate::finding::Finding;
 use crate::link::{LinkKey, LinkRef, SymbolPath, Target};
+use crate::lock::error::shell_quote;
 use crate::namespace::NamespaceName;
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
@@ -441,7 +442,16 @@ impl Wanted {
             Place::Unlocated(_) => return Some(path_outside(typed_file, config.root())),
         };
         if let Err(error) = ensure_exists(file, typed_file, cwd) {
-            return Some(error);
+            let namespaced = target
+                .target
+                .namespace()
+                .and_then(|name| Some((name, config.namespace(name)?)));
+            return Some(match namespaced {
+                Some((name, directory)) if error.code() == "cli-path-missing" => {
+                    namespaced_missing(typed_file, name, directory, cwd)
+                }
+                _ => error,
+            });
         }
         match &self.symbol {
             SymbolFilter::Unresolved { error, .. } => Some(CliError::new(
@@ -453,6 +463,31 @@ impl Wanted {
             SymbolFilter::Any | SymbolFilter::Text(_) | SymbolFilter::Resolved { .. } => None,
         }
     }
+}
+
+/// The error for a namespaced `TARGET` whose file doesn't exist. Its path is relative to the
+/// namespace's `directory`, not the current directory, so the help lists that directory as seen
+/// from `cwd`.
+fn namespaced_missing(
+    typed: &Path,
+    name: &NamespaceName,
+    directory: &AbsolutePath,
+    cwd: &AbsolutePath,
+) -> CliError {
+    let shown = match relative_to(cwd, directory) {
+        empty if empty.is_empty() => ".".to_owned(),
+        shown => shown,
+    };
+    CliError::new(
+        "cli-path-missing",
+        format!("{} does not exist", typed.display()),
+        format!(
+            "The path after `{name}:` is relative to the `{name}` namespace's directory. \
+             `ls {}` lists what is there",
+            shell_quote(&shown)
+        ),
+        CliError::USAGE_EXIT_CODE,
+    )
 }
 
 /// The error for a namespace the config doesn't define, naming the closest defined one.
@@ -975,6 +1010,30 @@ mod tests {
             ("link-unknown-namespace", 2)
         );
         assert!(error.help().contains("`auth`"), "help: {}", error.help());
+    }
+
+    #[test]
+    fn list_of_a_missing_namespaced_file_points_at_the_namespace_directory() {
+        let project = Project::new();
+        project.write(
+            "supdoc.config.toml",
+            "[namespaces]\nauth = \"services/auth\"\n",
+        );
+        project.write("services/auth/login.rs", "pub fn login() {}\n");
+        project.write("docs/a.md", "[login](auth:login.rs#login).\n");
+
+        let error = project
+            .list(&["list", "auth:nope.rs"])
+            .result
+            .expect_err("a missing namespaced file should be refused");
+
+        assert_eq!((error.code(), error.exit_code()), ("cli-path-missing", 2));
+        assert!(
+            error.help().contains("`ls services/auth`")
+                && !error.help().contains("current directory"),
+            "help: {}",
+            error.help()
+        );
     }
 
     #[test]
