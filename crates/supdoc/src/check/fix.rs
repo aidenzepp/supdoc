@@ -48,17 +48,6 @@ pub struct PlannedFix {
     /// The old and new key when this edit rewrites a link wholly, so its lock entry can follow
     /// (05 C6).
     pub moved: Option<(LinkKey, LinkKey)>,
-    /// The bytes the file held around the edit when it was scanned.
-    expected: Expected,
-}
-
-/// Bytes the file must still hold at `start`, or the edit is not applied.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Expected {
-    /// Byte offset in the file where `text` begins.
-    start: usize,
-    /// The scanned lines around the edit.
-    text: String,
 }
 
 /// What [`apply_fixes`] did.
@@ -81,8 +70,8 @@ pub struct AppliedFix {
 
 /// Picks every fix the scan offers that can be verified before it is applied.
 ///
-/// A fix is planned only if its finding has a location and a snippet that contain it, because
-/// those are the only record of what the file held at scan time. Of two overlapping fixes in one
+/// A fix is planned only if its finding has a location that contains it and `read` returns the
+/// source, because the bytes it will replace are read from the source, never from a display snippet. Of two overlapping fixes in one
 /// file the earlier one wins; the other link simply stays broken and shows up again on the next
 /// scan.
 #[must_use]
@@ -96,28 +85,28 @@ pub fn plan_fixes(scan: &Scan) -> FixPlan {
         });
     let loose = scan.findings.iter().map(|finding| (None, finding));
 
-    let mut candidates: Vec<(Option<&LinkKey>, &Finding, Expected)> = Vec::new();
+    let mut candidates: Vec<(Option<&LinkKey>, &Finding)> = Vec::new();
     for (key, finding) in linked.chain(loose) {
         let Some(fix) = &finding.fix else { continue };
-        let Some(expected) = expected_for(finding, fix) else {
+        if !vouches_for(finding, fix) {
             continue;
-        };
+        }
         let duplicate = candidates
             .iter()
-            .any(|(_, other, _)| other.fix.as_ref() == Some(fix));
+            .any(|(_, other)| other.fix.as_deref() == Some(fix));
         if !duplicate {
-            candidates.push((key, finding, expected));
+            candidates.push((key, finding));
         }
     }
-    candidates.sort_by(|(_, a, _), (_, b, _)| order(a.fix.as_ref(), b.fix.as_ref()));
+    candidates.sort_by(|(_, a), (_, b)| order(a.fix.as_deref(), b.fix.as_deref()));
 
-    let mut kept: Vec<(Option<&LinkKey>, &Finding, Expected)> = Vec::new();
+    let mut kept: Vec<(Option<&LinkKey>, &Finding)> = Vec::new();
     for candidate in candidates {
-        let overlaps = kept.iter().any(|(_, other, _)| {
+        let overlaps = kept.iter().any(|(_, other)| {
             other
                 .fix
                 .as_ref()
-                .zip(candidate.1.fix.as_ref())
+                .zip(candidate.1.fix.as_deref())
                 .is_some_and(|(earlier, later)| {
                     earlier.file == later.file && later.range.start < earlier.range.end
                 })
@@ -129,14 +118,13 @@ pub fn plan_fixes(scan: &Scan) -> FixPlan {
 
     let fixes = kept
         .iter()
-        .filter_map(|(key, finding, expected)| {
-            let fix = finding.fix.clone()?;
+        .filter_map(|(key, finding)| {
+            let fix = finding.fix.as_deref()?.clone();
             let moved = key.and_then(|key| moved_by(scan, key, finding, &fix, &kept));
             Some(PlannedFix {
                 fix,
                 finding: (*finding).clone(),
                 moved,
-                expected: expected.clone(),
             })
         })
         .collect();
@@ -149,27 +137,15 @@ fn order(a: Option<&Fix>, b: Option<&Fix>) -> std::cmp::Ordering {
     key(a).cmp(&key(b))
 }
 
-/// The scanned bytes that must still be on disk for `fix`, or `None` if the finding cannot vouch
-/// for them: no location or snippet, a different file, or an edit outside the snippet.
-fn expected_for(finding: &Finding, fix: &Fix) -> Option<Expected> {
-    let location = finding.location.as_ref()?;
-    let snippet = finding.snippet.as_ref()?;
-    if location.file != fix.file {
-        return None;
-    }
-    let start = location.range.start.checked_sub(snippet.highlight.start)?;
-    let end = start.checked_add(snippet.text.len())?;
-    let inside =
-        fix.range.start >= start && fix.range.start <= fix.range.end && fix.range.end <= end;
-    let on_boundaries = snippet
-        .text
-        .is_char_boundary(fix.range.start - start.min(fix.range.start))
-        && snippet
-            .text
-            .is_char_boundary(fix.range.end.saturating_sub(start));
-    (inside && on_boundaries).then(|| Expected {
-        start,
-        text: snippet.text.clone(),
+/// Whether the finding can vouch for `fix`: it has a location in the same file that contains the
+/// edit, and the edit remembers the bytes it replaces.
+fn vouches_for(finding: &Finding, fix: &Fix) -> bool {
+    finding.location.as_ref().is_some_and(|location| {
+        location.file == fix.file
+            && fix.range.start >= location.range.start
+            && fix.range.start <= fix.range.end
+            && fix.range.end <= location.range.end
+            && fix.scanned.len() == fix.range.len()
     })
 }
 
@@ -181,7 +157,7 @@ fn moved_by(
     key: &LinkKey,
     finding: &Finding,
     fix: &Fix,
-    kept: &[(Option<&LinkKey>, &Finding, Expected)],
+    kept: &[(Option<&LinkKey>, &Finding)],
 ) -> Option<(LinkKey, LinkKey)> {
     let new = rewritten_key(key, finding.code, &fix.replacement)?;
     if new == *key || scan.links.contains_key(&new) {
@@ -190,8 +166,8 @@ fn moved_by(
     let link = scan.links.get(key)?;
     let rewritten = |range: &Range<usize>, file: &SourcePath| {
         kept.iter()
-            .filter(|(other, _, _)| *other == Some(key))
-            .filter_map(|(_, other, _)| other.fix.as_ref())
+            .filter(|(other, _)| *other == Some(key))
+            .filter_map(|(_, other)| other.fix.as_deref())
             .any(|fix| {
                 fix.file == *file && fix.range.start >= range.start && fix.range.end <= range.end
             })
@@ -318,11 +294,9 @@ fn rewrite_file(path: &Path, planned: &[&PlannedFix]) -> Result<(), Skip> {
     }
     let mut bytes = fs::read(path)?;
     let unchanged = planned.iter().all(|planned| {
-        let Expected { start, text } = &planned.expected;
-        start
-            .checked_add(text.len())
-            .and_then(|end| bytes.get(*start..end))
-            .is_some_and(|found| found == text.as_bytes())
+        bytes
+            .get(planned.fix.range.clone())
+            .is_some_and(|found| found == planned.fix.scanned.as_bytes())
     });
     if !unchanged {
         return Err(Skip::Changed);
@@ -438,6 +412,7 @@ mod tests {
             .with_snippet(Snippet::capture(text, range.clone()).expect("the range should capture"))
             .with_fix(Fix {
                 file: file.clone(),
+                scanned: old.into(),
                 range,
                 replacement: new.to_owned(),
             });
@@ -507,19 +482,6 @@ mod tests {
         }
 
         assert_eq!(plan_fixes(&scan_of([(key, link)])).fixes, vec![]);
-    }
-
-    #[test]
-    fn plan_skips_a_fix_it_cannot_verify() {
-        let (key, mut link) = broken("docs/a.md", DOC, "ad", "add");
-        if let TargetState::Broken { finding } = &mut link.target {
-            finding.snippet = None;
-        }
-
-        assert!(
-            plan_fixes(&scan_of([(key, link)])).fixes.is_empty(),
-            "without a snippet there is no record of what the file held"
-        );
     }
 
     #[test]
@@ -610,6 +572,7 @@ mod tests {
             .with_snippet(Snippet::capture(&text, range.clone()).expect("the range should capture"))
             .with_fix(Fix {
                 file,
+                scanned: written.into(),
                 range,
                 replacement: fixed.to_owned(),
             });
@@ -674,6 +637,70 @@ mod tests {
             "api/lib.rs",
             "docs/Api/LIB.rs",
             "docs/api/lib.rs",
+        );
+    }
+
+    #[test]
+    fn a_link_with_two_kilobytes_of_text_still_gets_its_fix_applied() {
+        let label = "x".repeat(2048);
+        let text = format!("# Guide\nCall [{label}](src/lib.rs#ad) now.\n");
+        let project = Project::with(&[("docs/a.md", text.as_str())]);
+        let (key, mut link) = broken("docs/a.md", &text, "ad", "add");
+        let link_range =
+            text.find('[').expect("the fixture should hold a link")..text.len() - " now.\n".len();
+        let snippet =
+            Snippet::capture(&text, link_range.clone()).expect("the link range should capture");
+        assert!(
+            snippet.text.len() < text.len(),
+            "the snippet should be a bounded window, not the whole line"
+        );
+        let finding = match &mut link.target {
+            TargetState::Broken { finding } => Some(finding),
+            TargetState::Present { .. } => None,
+        }
+        .expect("the fixture link should be broken");
+        finding.location = Some(
+            Location::in_text(
+                "docs/a.md"
+                    .parse()
+                    .expect("the fixture source should be valid"),
+                &text,
+                link_range,
+            )
+            .expect("the link range should locate"),
+        );
+        finding.snippet = Some(snippet);
+
+        let plan = plan_fixes(&scan_of([(key, link)]));
+        let result = apply_fixes(&plan, &project.root(), "supdoc fix --yes");
+
+        assert_eq!(plan.fixes.len(), 1, "the long link's fix should be planned");
+        assert_eq!(result.skipped, vec![]);
+        assert_eq!(
+            project.read("docs/a.md"),
+            text.replacen("#ad)", "#add)", 1),
+            "the fix should rewrite the symbol of the long link"
+        );
+    }
+
+    #[test]
+    fn a_doc_edited_after_the_scan_is_skipped_as_changed() {
+        let project = Project::with(&[("docs/a.md", DOC)]);
+        let plan = plan_fixes(&scan_of([broken("docs/a.md", DOC, "ad", "add")]));
+        let edited = DOC
+            .replacen("Call", "Now call", 1)
+            .replacen("#ad)", "#xy)", 1);
+        fs::write(project.dir.path().join("docs/a.md"), &edited)
+            .expect("the edited doc should be written");
+
+        let result = apply_fixes(&plan, &project.root(), "supdoc fix --yes");
+
+        assert_eq!(result.applied, vec![]);
+        assert_eq!(result.skipped.len(), 1, "{:?}", result.skipped);
+        assert_eq!(
+            project.read("docs/a.md"),
+            edited,
+            "a file that no longer matches the scan must not be rewritten"
         );
     }
 
@@ -827,6 +854,7 @@ mod tests {
                     .expect("the fixture source should be valid"),
                 range: 0..1,
                 replacement: String::new(),
+                scanned: Box::default(),
             },
             moved: Some((key("docs/a.md", "ad"), key("docs/a.md", "add"))),
         }];
@@ -857,6 +885,7 @@ mod tests {
                     .expect("the fixture source should be valid"),
                 range: 0..1,
                 replacement: String::new(),
+                scanned: Box::default(),
             },
             moved: Some((key("docs/a.md", "ad"), key("docs/a.md", "add"))),
         }];

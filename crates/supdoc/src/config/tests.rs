@@ -332,7 +332,38 @@ fn pattern_with_parent_segment_is_rejected() {
 
     assert_eq!(error.code(), "config-parse");
     assert!(error.to_string().contains("../shared"), "{error}");
-    assert!(error.help().is_some());
+    assert_eq!(
+        error.help().as_deref(),
+        Some(
+            "Patterns match only files under this config's directory. Remove `..`, or move the \
+             pattern into the config of a directory that holds `../shared`"
+        )
+    );
+}
+
+#[test]
+fn pattern_set_too_large_to_compile_names_the_cause_and_count() {
+    let patterns: Vec<String> = (0..7000)
+        .map(|index| format!("\"**/generated/module{index}/**/*.rs\""))
+        .collect();
+    let text = format!("exclude = [{}]\n", patterns.join(","));
+    let dir = tree(&[("supdoc.config.toml", &text)]);
+    let error = load_error(&dir, "supdoc.config.toml");
+    let message = error.to_string();
+
+    assert_eq!(error.code(), "config-parse");
+    assert!(
+        message.contains("7000 patterns are too many or too complex to match together"),
+        "{message}"
+    );
+    assert!(!message.contains("invalid glob"), "{message}");
+    assert_eq!(
+        error.help().as_deref(),
+        Some(
+            "Use fewer, broader patterns than these 7000: a pattern also matches everything \
+             beneath it, so `generated` covers every file under that directory"
+        )
+    );
 }
 
 #[test]
@@ -352,7 +383,13 @@ fn single_letter_namespace_is_parse_error_with_line() {
 
     assert_eq!(error.code(), "config-parse");
     assert_eq!(parse_span_text(&error, text), "c");
-    assert!(error.help().is_some());
+    assert_eq!(
+        error.help().as_deref(),
+        Some(
+            "Rename the namespace to an ASCII letter followed by letters, digits, `-` or `_`, \
+             at least 2 characters long"
+        )
+    );
 }
 
 #[test]
@@ -362,7 +399,26 @@ fn absolute_namespace_path_is_parse_error() {
 
     assert_eq!(error.code(), "config-parse");
     assert!(error.to_string().contains("/srv/auth"), "{error}");
-    assert!(error.help().is_some());
+    assert_eq!(
+        error.help().as_deref(),
+        Some("Write the path relative to this config file, such as `services/auth`")
+    );
+}
+
+#[test]
+fn value_of_the_wrong_type_gets_the_form_the_key_takes() {
+    let dir = tree(&[("supdoc.config.toml", "extends = 3\n")]);
+    let error = load_error(&dir, "supdoc.config.toml");
+
+    assert_eq!(error.code(), "config-parse");
+    assert_eq!(
+        error.help().as_deref(),
+        Some(
+            "`extends` and each namespace take a path in quotes: write \
+             `extends = \"../supdoc.config.toml\"`"
+        ),
+        "{error}"
+    );
 }
 
 #[test]
@@ -372,6 +428,7 @@ fn malformed_toml_is_parse_error_without_help() {
 
     assert_eq!(error.code(), "config-parse");
     assert_eq!(error.exit_code(), 78);
+    assert_eq!(error.help(), None, "{error}");
 }
 
 #[test]
@@ -455,10 +512,12 @@ fn include_given_a_string_says_to_write_a_list() {
     let dir = tree(&[("supdoc.config.toml", "include = \"docs\"\n")]);
     let error = load_error(&dir, "supdoc.config.toml");
 
-    let help = error.help().unwrap_or_default();
-    assert!(
-        help.contains("[\"docs\"]"),
-        "help should show the list form: {help}"
+    assert_eq!(
+        error.help().as_deref(),
+        Some(
+            "Write a list, such as `[\"docs\"]`: `include` and `exclude` take a list of \
+             patterns even when there is only one"
+        )
     );
 }
 
@@ -630,6 +689,7 @@ fn every_error_has_a_code_and_message_names_a_file() {
             name: name("shared"),
             directory: file.clone(),
             root: file.clone(),
+            through_symlink: false,
         },
     ];
     let mut codes = Vec::new();
@@ -655,6 +715,7 @@ fn namespace_outside_root_help_makes_no_claim_about_what_supdoc_reads() {
         name: "shared".parse().expect("the fixture name should be valid"),
         directory: file.clone(),
         root: file,
+        through_symlink: false,
     };
     let help = error.help().expect("the error should carry a help");
 
@@ -758,6 +819,26 @@ fn extends_naming_another_file_is_refused_without_printing_it() {
         !shown.contains("hunter2"),
         "the secret must not be shown: {shown}"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn extends_naming_a_fifo_is_refused_without_opening_it() {
+    let dir = tree(&[(
+        "supdoc.config.toml",
+        "extends = \"base/supdoc.config.toml\"\n",
+    )]);
+    fs::create_dir(dir.path().join("base")).expect("the fixture directory should be creatable");
+    let made = std::process::Command::new("mkfifo")
+        .arg(dir.path().join("base/supdoc.config.toml"))
+        .status()
+        .expect("mkfifo should run");
+    assert!(made.success(), "mkfifo should create the FIFO");
+
+    let error = load_error(&dir, "supdoc.config.toml");
+
+    assert_eq!(error.code(), "config-extends-not-config", "got {error:?}");
+    assert_eq!(error.exit_code(), 78);
 }
 
 #[test]
@@ -1254,6 +1335,12 @@ fn inherited_namespace_outside_the_child_root_is_a_config_error() {
         "config-namespace-outside-root",
         "got {error:?}"
     );
+    assert!(
+        error
+            .to_string()
+            .contains("which is outside the project root"),
+        "a path written outside the root is not blamed on a symlink: {error}"
+    );
 }
 
 #[cfg(unix)]
@@ -1272,11 +1359,32 @@ fn namespace_symlinked_outside_the_root_is_a_config_error() {
     )
     .expect("the symlink should be creatable");
     let error = load_error(&dir, "project/supdoc.config.toml");
+    let message = error.to_string();
 
     assert_eq!(
         error.code(),
         "config-namespace-outside-root",
         "got {error:?}"
+    );
+    assert!(
+        message.ends_with(&format!(
+            "sets namespace `lib` to {}, which leads outside the project root {} through a \
+             symlink",
+            at(&dir, "project/vendor").display(),
+            at(&dir, "project").display()
+        )),
+        "{message}"
+    );
+    assert!(
+        !message.contains(&dir.path().join("outside").display().to_string()),
+        "the message must not print where the symlink leads: {message}"
+    );
+    assert_eq!(
+        error.help().as_deref(),
+        Some(
+            "Point the namespace at a real directory inside the project root, not a symlink \
+             that leads out of it"
+        )
     );
 }
 

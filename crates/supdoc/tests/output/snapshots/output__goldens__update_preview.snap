@@ -17,4 +17,4 @@ error[resolve-not-found]: no symbol `ad` in src/lib.rs
   = help: did you mean `add`? run `supdoc resolve src/lib.rs` from the project root to list its symbols. Update can't record a broken link; repair it with `supdoc fix docs/api.md --yes`
 
 --- stderr
-Nothing written. Run the same command with --yes to apply.
+Nothing written. Run `supdoc update --yes` to apply.
