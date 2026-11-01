@@ -566,7 +566,7 @@ mod helps {
     }
 
     /// Every code in supdoc's production source: each `"area-name"` string literal outside
-    /// `tests.rs`, `fixtures.rs`, comments and the `mod tests` that ends a file.
+    /// `tests.rs`, `fixtures.rs`, comments and the `#[cfg(test)] mod tests {` that ends a file.
     fn source_codes() -> BTreeSet<String> {
         let mut codes = BTreeSet::new();
         let mut pending = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
@@ -585,9 +585,19 @@ mod helps {
                 {
                     let text =
                         std::fs::read_to_string(&path).expect("a source file should be UTF-8");
-                    let production = text
-                        .lines()
-                        .take_while(|line| !line.trim_start().starts_with("mod tests"))
+                    let lines: Vec<&str> = text.lines().collect();
+                    let production = lines
+                        .iter()
+                        .enumerate()
+                        .take_while(|(index, line)| {
+                            let opens_test_module = line.trim_start().starts_with("mod tests {")
+                                && index
+                                    .checked_sub(1)
+                                    .and_then(|previous| lines.get(previous))
+                                    .is_some_and(|previous| previous.trim() == "#[cfg(test)]");
+                            !opens_test_module
+                        })
+                        .map(|(_, line)| *line)
                         .filter(|line| !line.trim_start().starts_with("//"));
                     for line in production {
                         let literals = line.split('"').skip(1).step_by(2);
