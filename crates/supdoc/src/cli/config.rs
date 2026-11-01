@@ -520,8 +520,6 @@ mod tests {
         let context = Context {
             global: cli.global,
             cwd,
-            home: None,
-            claude_config_dir: None,
         };
         let result = super::run(inspect, &context, &mut output);
         Run {

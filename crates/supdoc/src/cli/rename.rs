@@ -1235,8 +1235,6 @@ web = \"services/web\"
         Context {
             global: cli.global.clone(),
             cwd,
-            home: None,
-            claude_config_dir: None,
         }
     }
 
