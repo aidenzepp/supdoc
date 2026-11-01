@@ -27,7 +27,11 @@
 //!   accepts one.
 //! - Not ported, because supdoc has no such command: `namespace remove` (2 tests), `namespace add`
 //!   (1 test) and `watch` (2 tests, "Later" in 06).
+//!
+//! Unix only: the suite uses Unix permissions, symlinks and `sh`. Windows is untested, and CI runs
+//! only on Linux.
 
+#![cfg(unix)]
 #![cfg_attr(
     test,
     allow(
@@ -39,6 +43,31 @@
 
 #[cfg(test)]
 mod support;
+
+/// Whether mode `000` keeps this user out of a directory. It doesn't for root, where the
+/// permission tests can't happen: each of them prints a skip reason and returns early.
+#[cfg(test)]
+fn permissions_restrict_this_user(test: &str) -> bool {
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("the probe directory should be creatable");
+    let file = dir.path().join("probe");
+    std::fs::write(&file, "").expect("the probe file should be writable");
+    let locked = std::fs::Permissions::from_mode(0o000);
+    std::fs::set_permissions(dir.path(), locked).expect("the probe directory should be lockable");
+    let restricted = std::fs::symlink_metadata(&file).is_err();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+        .expect("the probe directory should be unlockable");
+    if !restricted {
+        // Written to the process's stderr directly, which `cargo test` shows even for a passing test.
+        let _ignored = writeln!(
+            std::io::stderr(),
+            "SKIPPED {test}: mode 000 does not restrict this user (running as root?)"
+        );
+    }
+    restricted
+}
 
 #[cfg(test)]
 mod commands;

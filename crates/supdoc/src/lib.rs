@@ -11,6 +11,9 @@
     )
 )]
 
+/// The shared "did you mean" rule: one cutoff, one distance metric, a length prefilter.
+pub(crate) mod suggest;
+
 /// Absolute and project-relative paths, normalized lexically.
 pub mod path;
 

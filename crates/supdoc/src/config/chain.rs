@@ -13,7 +13,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, PathBuf};
 
-use crate::path::{AbsolutePath, RelativePath};
+use crate::path::{AbsolutePath, RelativePath, is_regular_file};
 
 use super::pattern::{AnchoredPatterns, PatternList};
 use super::raw::RawConfig;
@@ -75,33 +75,20 @@ pub(super) fn discover(start: &AbsolutePath) -> Result<Option<AbsolutePath>, Con
     Ok(None)
 }
 
-/// Whether `path`, once every symlink along it is followed, is a file named
-/// `supdoc.config.toml`.
+/// Whether `path`, once every symlink along it is followed, is a regular file named
+/// `supdoc.config.toml`, the one rule discovery and both `extends` branches share.
 ///
-/// Every failure to follow it counts as no, so a dangling link, a loop and a link to a directory
-/// all get the same answer as a link to a file with another name.
+/// Every failure to follow it counts as no, so a dangling link, a loop, a directory and a FIFO
+/// all get the same answer as a link to a file with another name. A FIFO is refused before it is
+/// opened, so reading it can't block.
 ///
 /// Effect: reads symlinks along `path` and the metadata of where it leads.
 fn leads_to_config(path: &AbsolutePath) -> bool {
     fs::canonicalize(path.as_path()).is_ok_and(|real| {
         real.file_name()
             .is_some_and(|name| name == CONFIG_FILE_NAME)
-            && fs::metadata(&real).is_ok_and(|metadata| metadata.is_file())
+            && is_regular_file(&real).unwrap_or(false)
     })
-}
-
-/// Whether `file`, once every symlink is followed, is a file named `supdoc.config.toml`.
-///
-/// Effect: reads symlinks along `file`.
-///
-/// # Errors
-///
-/// Fails when `file`'s real location can't be worked out.
-fn really_config(file: &AbsolutePath) -> std::io::Result<bool> {
-    let real = fs::canonicalize(file.as_path())?;
-    Ok(real
-        .file_name()
-        .is_some_and(|name| name == CONFIG_FILE_NAME))
 }
 
 /// Reads `file` and every config it extends, child first.
@@ -187,8 +174,10 @@ fn read_text(file: &AbsolutePath, is_start: bool) -> Result<String, ConfigError>
 ///
 /// `ExtendsNotConfig` for any other name, or for a value [`plain`] refuses that doesn't lead to a
 /// config file; `ExtendsDirectory` for a value ending in `.` or `..`, or naming a [`plain`]
-/// directory (never suggesting the file that wrote it); and for a plain value,
-/// `ExtendsMissing` or `ExtendsDirectory` when it isn't a file, `Read` for other failures.
+/// directory (never suggesting the file that wrote it); and for a plain value, `ExtendsMissing`
+/// when nothing is there, `ExtendsDirectory` for a directory, `ExtendsNotConfig` for any other
+/// entry that isn't a regular file (a FIFO is refused before it is opened), `Read` for other
+/// failures.
 fn resolve_extends(
     root: &AbsolutePath,
     from: &AbsolutePath,
@@ -225,14 +214,8 @@ fn resolve_extends(
     }
     match fs::metadata(resolved.as_path()) {
         Ok(metadata) if metadata.is_dir() => Err(directory()),
-        Ok(_) => match really_config(&resolved) {
-            Ok(true) => Ok(resolved),
-            Ok(false) => Err(not_config()),
-            Err(error) => Err(ConfigError::Read {
-                path: resolved,
-                error,
-            }),
-        },
+        Ok(_) if leads_to_config(&resolved) => Ok(resolved),
+        Ok(_) => Err(not_config()),
         Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
             Err(ConfigError::ExtendsMissing {
                 file: from.clone(),

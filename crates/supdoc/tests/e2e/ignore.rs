@@ -19,7 +19,15 @@ fn a_named_path_beside_a_gitignore_symlinked_out_of_the_root_is_not_quoted() {
     .expect("the symlink should be creatable");
 
     let run = project.supdoc_in("services/web", &["check", "docs/guide.md"]);
+    let list = project.supdoc_in("services/web", &["--json", "list"]);
 
+    let _ = run.assert_exit(1);
+    let _ = list.assert_exit(0);
+    assert!(
+        listed_sources(&list).contains(&"docs/guide.md".to_owned()),
+        "the guide is not hidden by the symlinked rules\n{}",
+        list.stdout
+    );
     for stream in [&run.stdout, &run.stderr] {
         assert!(
             !stream.contains("gui*.md"),
@@ -346,7 +354,13 @@ fn a_worktrees_shared_exclude_file_applies_and_is_never_quoted() {
     let check = project.supdoc_in("services/web", &["check"]);
     let named = project.supdoc_in("services/web", &["check", "docs/scratch.md"]);
 
+    let _ = check.assert_exit(1);
     assert!(!check.stdout.contains("scratch.md"), "{}", check.stdout);
+    assert!(
+        check.stdout.contains("docs/guide.md"),
+        "the guide is still checked\n{}",
+        check.stdout
+    );
     assert!(
         named.stdout.contains("ignored by an ignore file"),
         "{}",
@@ -375,9 +389,10 @@ fn a_parent_repositorys_exclude_file_applies_to_a_root_in_a_subdirectory() {
 
     let run = project.supdoc_in("services/web", &["check"]);
 
+    let _ = run.assert_exit(1);
     assert!(
-        !run.stdout.contains("scratch.md"),
-        "the parent's exclude rule hides scratch.md\n{}",
+        run.stdout.contains("docs/guide.md") && !run.stdout.contains("scratch.md"),
+        "the parent's exclude rule hides scratch.md and nothing else\n{}",
         run.stdout
     );
 }
