@@ -198,6 +198,7 @@ function outer() {
                     resolved(&file, &table, path),
                     HashSettings::default()
                 )
+                .expect("the symbol should lie in its own file")
                 .to_string(),
                 hash,
                 "a grammar upgrade moved `{path}`'s node boundaries (02 L8)"
@@ -248,6 +249,7 @@ function outer() {
 
         let hash = |file: &SourceFile, table: &SymbolTable, path| {
             hash_symbol(file, resolved(file, table, path), HashSettings::default())
+                .expect("the symbol should lie in its own file")
         };
 
         assert_eq!(

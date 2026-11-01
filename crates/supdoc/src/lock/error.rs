@@ -1,6 +1,7 @@
 //! Lockfile errors: what failed, a stable code, and what to do next (02 Errors).
 
 use std::fmt::{self, Display, Formatter};
+use std::io::ErrorKind;
 
 use crate::hash::LineEndings;
 use crate::link::LinkKey;
@@ -68,9 +69,13 @@ fn toml_message(line: Option<usize>, error: &toml::de::Error) -> String {
 
 /// Whether a TOML message is about the lockfile header's `version`, not a `[[link]]` entry.
 ///
-/// An empty file and a file with no `version` both report the field as missing.
+/// An empty file and a file with no `version` both report the field as missing. `version` is the
+/// lockfile's only `u32` field, so a wrongly typed one (`"1"`, `1.0`, `-1`) is the only error
+/// that expects a `u32`.
 fn is_header_problem(message: &str) -> bool {
-    message == "missing field `version`" || message.starts_with("unsupported lockfile format")
+    message == "missing field `version`"
+        || message.starts_with("unsupported lockfile format")
+        || message.ends_with("expected u32")
 }
 
 /// `text` as one shell word: unchanged when it holds only characters the shell never treats
@@ -152,6 +157,14 @@ pub enum LockError {
         error: std::io::Error,
     },
 
+    /// Something other than a regular file, such as a directory or FIFO, is at the lockfile's
+    /// path (or at the in-root file its symlink leads to), so supdoc refuses it without opening
+    /// it. Reported under `lock-read`.
+    NotRegularFile {
+        /// The lockfile, as supdoc looked for it.
+        path: AbsolutePath,
+    },
+
     /// The lockfile is a symlink that doesn't lead to a `supdoc.lock` inside the project root,
     /// so supdoc refuses it without reading it. The message is the same whether or not anything
     /// is there.
@@ -182,7 +195,7 @@ impl LockError {
     #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
-            Self::Read { .. } => "lock-read",
+            Self::Read { .. } | Self::NotRegularFile { .. } => "lock-read",
             Self::OutsideRoot { .. } => "lock-outside-root",
             Self::Parse { error, .. } => error.code(),
             Self::Write { .. } => "lock-write",
@@ -194,6 +207,7 @@ impl LockError {
     pub fn path(&self) -> &AbsolutePath {
         match self {
             Self::Read { path, .. }
+            | Self::NotRegularFile { path }
             | Self::OutsideRoot { path }
             | Self::Parse { path, .. }
             | Self::Write { path, .. } => path,
@@ -211,6 +225,7 @@ impl LockError {
     fn message_naming(&self, shown: &dyn Display) -> String {
         match self {
             Self::Read { error, .. } => format!("cannot read {shown}: {error}"),
+            Self::NotRegularFile { .. } => format!("cannot read {shown}: it is not a regular file"),
             Self::OutsideRoot { .. } => format!(
                 "{shown} is a symlink that doesn't lead to a supdoc.lock inside the project root"
             ),
@@ -220,13 +235,16 @@ impl LockError {
     }
 
     /// What to do about it, naming the lockfile relative to `cwd`, the directory supdoc runs
-    /// in, so a command in the help runs as written.
+    /// in, so a command in the help runs as written. Read and write failures branch on the
+    /// I/O error's kind, so a full disk is never answered with a `chmod`.
     #[must_use]
     pub fn help_from(&self, cwd: &AbsolutePath) -> String {
         let shown = || shell_quote(&relative_to(cwd, self.path()));
         match self {
-            Self::Read { .. } => format!(
-                "Give the current user read access, for example with `chmod u+r {}`",
+            Self::Read { error, .. } => read_help(error.kind(), &shown()),
+            Self::NotRegularFile { .. } => format!(
+                "supdoc.lock must be a regular file. Move this one aside with `mv {0} {0}.old`, \
+                 then run `supdoc update --yes` to record the links again",
                 shown()
             ),
             Self::OutsideRoot { .. } => format!(
@@ -235,9 +253,16 @@ impl LockError {
                 shown()
             ),
             Self::Parse { error, .. } => error.help().to_owned(),
-            Self::Write { .. } => "The existing lockfile was not changed. Make the directory \
-                 that holds `supdoc.lock` writable, then run the same command again"
-                .to_owned(),
+            Self::Write { error, path } => {
+                let directory = path.parent().map_or_else(
+                    || ".".to_owned(),
+                    |directory| shell_quote(&relative_to(cwd, &directory)),
+                );
+                format!(
+                    "The existing lockfile was not changed. {}",
+                    write_help(error.kind(), &directory)
+                )
+            }
         }
     }
 
@@ -247,8 +272,52 @@ impl LockError {
     pub const fn exit_code(&self) -> u8 {
         match self {
             Self::Parse { .. } | Self::OutsideRoot { .. } => EXIT_CONFIG,
-            Self::Read { .. } | Self::Write { .. } => EXIT_IO,
+            Self::Read { .. } | Self::NotRegularFile { .. } | Self::Write { .. } => EXIT_IO,
         }
+    }
+}
+
+/// The next step after reading the lockfile `shown` (already shell-quoted) failed with `kind`.
+fn read_help(kind: ErrorKind, shown: &str) -> String {
+    match kind {
+        ErrorKind::PermissionDenied => {
+            format!("Give the current user read access, for example with `chmod u+r {shown}`")
+        }
+        ErrorKind::InvalidData => format!(
+            "The file is not UTF-8 text, so supdoc didn't write it. Restore it with `git checkout \
+             -- {shown}`, or delete it and run `supdoc update --yes` to record the links again"
+        ),
+        _ => format!(
+            "Fix the cause above, then run the same command again. `ls -l {shown}` shows the \
+             file's type and permissions"
+        ),
+    }
+}
+
+/// The next step after writing a lockfile in `directory` (already shell-quoted) failed with
+/// `kind`.
+fn write_help(kind: ErrorKind, directory: &str) -> String {
+    match kind {
+        ErrorKind::PermissionDenied => format!(
+            "Make its directory writable, for example with `chmod u+w {directory}`, then run the \
+             same command again"
+        ),
+        ErrorKind::StorageFull | ErrorKind::QuotaExceeded => format!(
+            "The disk holding `{directory}` is full or over quota. Free some space, then run the \
+             same command again"
+        ),
+        ErrorKind::ReadOnlyFilesystem => format!(
+            "`{directory}` is on a read-only filesystem. Run supdoc in a writable checkout, then \
+             run the same command again"
+        ),
+        ErrorKind::AlreadyExists => format!(
+            "Every temporary name supdoc tried was taken. Remove leftover `supdoc.lock.*.tmp` \
+             files from `{directory}`, then run the same command again"
+        ),
+        _ => format!(
+            "Fix the cause above, then run the same command again. `ls -ld {directory}` shows \
+             the directory's permissions"
+        ),
     }
 }
 
@@ -377,6 +446,9 @@ mod tests {
             "",
             "[features.hash]\nline-endings = \"normalize\"\n",
             "version = 0\n",
+            "version = \"1\"\n",
+            "version = 1.0\n",
+            "version = -1\n",
         ] {
             let error = crate::lock::model::Lockfile::parse(text)
                 .expect_err("the fixture lockfile header should be rejected");
@@ -491,6 +563,120 @@ mod tests {
             helps[1].contains("`rm ../supdoc.lock`"),
             "the symlink help should run from docs/: {}",
             helps[1]
+        );
+    }
+
+    fn read_error(kind: std::io::ErrorKind) -> LockError {
+        LockError::Read {
+            path: absolute("/repo/supdoc.lock"),
+            error: std::io::Error::from(kind),
+        }
+    }
+
+    fn write_error(kind: std::io::ErrorKind) -> LockError {
+        LockError::Write {
+            path: absolute("/repo/supdoc.lock"),
+            error: std::io::Error::from(kind),
+        }
+    }
+
+    #[test]
+    fn unreadable_lockfile_help_gives_chmod_on_the_file() {
+        let help = read_error(ErrorKind::PermissionDenied).help_from(&absolute("/repo/docs"));
+
+        assert!(help.contains("`chmod u+r ../supdoc.lock`"), "got: {help}");
+    }
+
+    #[test]
+    fn non_utf8_lockfile_help_says_so_without_chmod() {
+        let help = read_error(ErrorKind::InvalidData).help_from(&absolute("/repo"));
+
+        assert!(
+            help.contains("not UTF-8") && !help.contains("chmod"),
+            "got: {help}"
+        );
+    }
+
+    #[test]
+    fn other_read_failure_help_offers_no_chmod() {
+        let help = read_error(ErrorKind::Other).help_from(&absolute("/repo"));
+
+        assert!(
+            help.contains("`ls -l supdoc.lock`") && !help.contains("chmod"),
+            "got: {help}"
+        );
+    }
+
+    #[test]
+    fn non_regular_lockfile_is_lock_read_with_exit_74_and_a_move_aside_help() {
+        let error = LockError::NotRegularFile {
+            path: absolute("/repo/supdoc.lock"),
+        };
+
+        let help = error.help_from(&absolute("/repo"));
+
+        assert_eq!(error.code(), "lock-read");
+        assert_eq!(error.exit_code(), 74);
+        assert_eq!(
+            error.message_from(&absolute("/repo")),
+            "cannot read supdoc.lock: it is not a regular file"
+        );
+        assert!(
+            help.contains("`mv supdoc.lock supdoc.lock.old`") && !help.contains("chmod"),
+            "got: {help}"
+        );
+    }
+
+    #[test]
+    fn unwritable_directory_help_gives_chmod_on_the_quoted_directory() {
+        let help = write_error(ErrorKind::PermissionDenied).help_from(&absolute("/repo/docs"));
+
+        assert!(
+            help.starts_with("The existing lockfile was not changed.")
+                && help.contains("`chmod u+w ..`"),
+            "got: {help}"
+        );
+    }
+
+    #[test]
+    fn unwritable_directory_with_a_space_is_quoted_in_the_chmod() {
+        let error = LockError::Write {
+            path: absolute("/my repo/supdoc.lock"),
+            error: std::io::Error::from(ErrorKind::PermissionDenied),
+        };
+
+        let help = error.help_from(&absolute("/"));
+
+        assert!(help.contains("`chmod u+w 'my repo'`"), "got: {help}");
+    }
+
+    #[test]
+    fn full_disk_help_says_the_disk_is_full_without_chmod() {
+        let help = write_error(ErrorKind::StorageFull).help_from(&absolute("/repo"));
+
+        assert!(
+            help.contains("is full") && !help.contains("chmod"),
+            "got: {help}"
+        );
+    }
+
+    #[test]
+    fn read_only_filesystem_help_says_so_without_chmod() {
+        let help = write_error(ErrorKind::ReadOnlyFilesystem).help_from(&absolute("/repo"));
+
+        assert!(
+            help.contains("read-only filesystem") && !help.contains("chmod"),
+            "got: {help}"
+        );
+    }
+
+    #[test]
+    fn exhausted_temporary_names_help_names_the_leftover_files() {
+        let help = write_error(ErrorKind::AlreadyExists).help_from(&absolute("/repo"));
+
+        assert!(
+            help.contains("`supdoc.lock.*.tmp`") && !help.contains("chmod"),
+            "got: {help}"
         );
     }
 

@@ -150,7 +150,9 @@ mod tests {
         let symbol = table
             .resolve(file.path(), &query)
             .unwrap_or_else(|error| panic!("`{raw}` should resolve: {error}"));
-        hash_symbol(&file, symbol, HashSettings::default()).to_string()
+        hash_symbol(&file, symbol, HashSettings::default())
+            .expect("the symbol should lie in its own file")
+            .to_string()
     }
 
     /// Pinned from `printf` of the section's bytes piped to `shasum -a 256`, not from supdoc: a
