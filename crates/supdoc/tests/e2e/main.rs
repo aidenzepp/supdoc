@@ -55,6 +55,8 @@ mod lifecycle;
 #[cfg(test)]
 mod list;
 #[cfg(test)]
+mod list_containment;
+#[cfg(test)]
 mod namespaces;
 #[cfg(test)]
 mod paths;
