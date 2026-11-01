@@ -473,8 +473,17 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::cartridges::markdown::regions::tests::markdown_file;
+    use crate::cartridges::markdown::cartridge::cartridge;
     use crate::path::AbsolutePath;
+
+    /// `text` parsed as `/repo/docs/guide.md` with the built-in Markdown cartridge.
+    fn markdown_file(text: &str) -> SourceFile {
+        let path = AbsolutePath::new(Path::new("/repo/docs/guide.md"))
+            .expect("the fixture path should be absolute");
+        let markdown = cartridge().expect("the built-in Markdown cartridge should load");
+        SourceFile::parse(path, text.to_owned(), markdown)
+            .expect("tree-sitter should return a tree")
+    }
 
     fn rust_file(text: &str) -> SourceFile {
         let rust =
