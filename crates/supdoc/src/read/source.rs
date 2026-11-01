@@ -64,11 +64,15 @@ impl SourceFile {
 
 /// Reads the whole file, refusing one over [`MAX_FILE_BYTES`] before reading its contents.
 ///
+/// Only a regular file is opened, after following symlinks: opening a FIFO or a device can block
+/// forever, so any other kind is refused before the open.
+///
 /// The read itself is capped too, so a file that grows after the size check is still refused.
 ///
 /// # Errors
 ///
-/// [`ReadError::Missing`], [`ReadError::Io`] or [`ReadError::TooLarge`].
+/// [`ReadError::Missing`], [`ReadError::Io`] (also for a file that is not a regular file) or
+/// [`ReadError::TooLarge`].
 fn read_capped(path: &AbsolutePath) -> Result<Vec<u8>, ReadError> {
     let io_error = |error: io::Error| {
         if error.kind() == io::ErrorKind::NotFound {
@@ -86,6 +90,12 @@ fn read_capped(path: &AbsolutePath) -> Result<Vec<u8>, ReadError> {
         limit: MAX_FILE_BYTES,
     };
 
+    if !fs::metadata(path.as_path()).map_err(io_error)?.is_file() {
+        return Err(io_error(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "it is not a regular file",
+        )));
+    }
     let file = File::open(path.as_path()).map_err(io_error)?;
     let size = file.metadata().map_err(io_error)?.len();
     if size > MAX_FILE_BYTES {
