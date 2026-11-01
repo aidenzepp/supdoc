@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 use crate::config::{CONFIG_FILE_NAME, Config};
-use crate::finding::{Finding, Fix, Location, Severity, Snippet};
+use crate::finding::{Finding, Fix, LineIndex, Location, Severity, Snippet};
 use crate::link::destination::{LinkError, parse_destination};
 use crate::link::{LinkKey, RawLink, SourcePath};
 use crate::namespace::NamespaceName;
@@ -185,15 +185,17 @@ fn source_links(
     found: &mut SourceLinks,
 ) {
     let text = file.text();
+    let lines = LineIndex::new(text);
     for raw in links(file) {
         let Some(parsed) = parse_destination(&raw, source, config.namespaces(), languages) else {
             continue;
         };
         // A link's range comes from this file's own tree, so it always lies inside the text.
-        let Some(location) = Location::in_text(source.clone(), text, raw.range.clone()) else {
+        let Some(location) = Location::in_indexed(source.clone(), text, &lines, raw.range.clone())
+        else {
             continue;
         };
-        let snippet = Snippet::capture(text, raw.range.clone());
+        let snippet = Snippet::capture_indexed(text, &lines, raw.range.clone());
         let written = Written::locate(text, &raw.range, &raw.destination);
         match parsed {
             Ok(link) => found.occurrences.push(Occurrence {
