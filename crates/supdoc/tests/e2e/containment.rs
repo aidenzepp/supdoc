@@ -90,7 +90,6 @@ fn links_climbing_out_of_the_root_are_not_read_or_recorded() {
     assert_eq!(outside, 4, "{}", check.stdout);
 }
 
-#[cfg(unix)]
 #[test]
 fn symlink_out_of_the_root_is_not_read_or_recorded() {
     let project = web_project();
@@ -118,7 +117,6 @@ fn symlink_out_of_the_root_is_not_read_or_recorded() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn symlink_named_like_python_to_a_dotenv_file_is_not_parsed_as_python() {
     let project = web_project();
@@ -197,7 +195,6 @@ fn assert_no_secret_key(run: &crate::support::Run) {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn a_lockfile_symlinked_out_of_the_root_is_refused_alike_whether_or_not_its_target_exists() {
     let project = web_project();
@@ -237,7 +234,6 @@ fn a_lockfile_symlinked_out_of_the_root_is_refused_alike_whether_or_not_its_targ
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn a_found_config_symlinked_to_an_outside_dotenv_file_is_refused_without_printing_it() {
     let project = web_project();
@@ -261,7 +257,6 @@ fn a_found_config_symlinked_to_an_outside_dotenv_file_is_refused_without_printin
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn a_found_config_symlinked_out_of_the_root_is_refused_alike_whatever_its_target_is() {
     let project = web_project();
@@ -306,7 +301,6 @@ fn a_found_config_symlinked_out_of_the_root_is_refused_alike_whatever_its_target
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn a_found_config_symlinked_to_another_config_file_still_loads() {
     let project = web_project();
@@ -330,7 +324,6 @@ fn a_found_config_symlinked_to_another_config_file_still_loads() {
 /// Writes `extends` into the web project's config, points `services/web/x/supdoc.config.toml` at
 /// an outside file, an outside directory and nothing in turn, and fails unless every format
 /// refuses all three alike as `config-extends-not-config`.
-#[cfg(unix)]
 fn assert_extends_link_refused_alike(project: &Project, extends: &str) {
     fs::create_dir(project.path("outside-dir")).expect("the outside directory should be creatable");
     fs::write(
@@ -379,13 +372,11 @@ fn assert_extends_link_refused_alike(project: &Project, extends: &str) {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn an_extends_symlinked_out_of_the_root_is_refused_alike_whatever_its_target_is() {
     assert_extends_link_refused_alike(&web_project(), "x/supdoc.config.toml");
 }
 
-#[cfg(unix)]
 #[test]
 fn an_extends_through_an_outside_alias_of_the_root_is_refused_alike_whatever_its_target_is() {
     let project = web_project();
@@ -399,7 +390,6 @@ fn an_extends_through_an_outside_alias_of_the_root_is_refused_alike_whatever_its
     assert_extends_link_refused_alike(&project, "../alias-to-web/x/supdoc.config.toml");
 }
 
-#[cfg(unix)]
 #[test]
 fn an_extends_symlinked_to_another_config_file_still_loads() {
     let project = web_project();
@@ -460,7 +450,6 @@ fn assert_lockfile_refused_quietly(project: &Project, leak: &str) {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn a_lockfile_symlinked_to_an_in_root_dotenv_file_is_refused_without_printing_it() {
     let project = web_project();
@@ -472,7 +461,6 @@ fn a_lockfile_symlinked_to_an_in_root_dotenv_file_is_refused_without_printing_it
     assert_lockfile_refused_quietly(&project, "API_KEY");
 }
 
-#[cfg(unix)]
 #[test]
 fn a_lockfile_symlinked_to_an_in_root_file_with_a_lock_key_is_refused_without_printing_its_value() {
     let project = web_project();
@@ -487,7 +475,6 @@ fn a_lockfile_symlinked_to_an_in_root_file_with_a_lock_key_is_refused_without_pr
     assert_lockfile_refused_quietly(&project, "s3cr3t-token");
 }
 
-#[cfg(unix)]
 #[test]
 fn a_lockfile_symlinked_to_an_in_root_supdoc_lock_still_loads() {
     let project = web_project();
@@ -515,7 +502,6 @@ fn a_lockfile_symlinked_to_an_in_root_supdoc_lock_still_loads() {
 
 /// The web project's `check --json` with `docs/x/supdoc.config.toml` symlinked to `target`
 /// (relative to the fixture root) and a broken link beside it.
-#[cfg(unix)]
 fn check_with_nested_config_symlinked_to(target: &str) -> crate::support::Run {
     let project = web_project();
     fs::create_dir(project.path("services/web/docs/x")).expect("the directory should be creatable");
@@ -532,7 +518,6 @@ fn check_with_nested_config_symlinked_to(target: &str) -> crate::support::Run {
     project.supdoc_in("services/web", &["--json", "check"])
 }
 
-#[cfg(unix)]
 #[test]
 fn a_nested_config_symlinked_out_of_the_root_scans_alike_whether_or_not_its_target_exists() {
     let present = check_with_nested_config_symlinked_to("settings.py");
@@ -559,7 +544,6 @@ fn a_nested_config_symlinked_out_of_the_root_scans_alike_whether_or_not_its_targ
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn skill_install_refuses_an_agents_directory_symlinked_out_of_the_root() {
     let project = web_project();
@@ -646,7 +630,6 @@ fn skill_install_refuses_a_config_that_does_not_exist() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn skill_install_refuses_a_config_symlink_that_dangles() {
     let project = web_project();

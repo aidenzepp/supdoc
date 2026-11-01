@@ -1,8 +1,6 @@
 //! `supdoc list TARGET#symbol` reads no file outside the project root and never blocks on a file
 //! that isn't a regular file (#60).
 
-#![cfg(unix)]
-
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::process::{Command, Stdio};
