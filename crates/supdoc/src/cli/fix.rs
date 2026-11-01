@@ -325,6 +325,7 @@ fn new_ranges(done: &[&PlannedFix]) -> Vec<Option<std::ops::Range<usize>>> {
             file: this,
             range,
             replacement,
+            scanned: _,
         } = &planned.fix;
         if file != Some(this) {
             file = Some(this);
@@ -554,6 +555,7 @@ impl FixRecord {
             file,
             range,
             replacement,
+            scanned: _,
         } = &planned.fix;
         let finding = &planned.finding;
         // A planned fix lies inside its finding's location and snippet, so these slices exist.
@@ -563,6 +565,8 @@ impl FixRecord {
             .map_or((0, 0, range.clone()), |location| {
                 (location.line, location.column, location.range.clone())
             });
+        let before = planned.fix.scanned.to_string();
+        // The snippet is a bounded window; the whole link is shown only when the window holds it.
         let scanned = |wanted: &std::ops::Range<usize>| -> Option<String> {
             let snippet = finding.snippet.as_ref()?;
             let origin = link_range.start.checked_sub(snippet.highlight.start)?;
@@ -570,7 +574,6 @@ impl FixRecord {
             let to = wanted.end.checked_sub(origin)?;
             snippet.text.get(from..to).map(str::to_owned)
         };
-        let before = scanned(range).unwrap_or_default();
         let old_link = scanned(&link_range).unwrap_or_else(|| before.clone());
         let new_link = range
             .start
@@ -1414,7 +1417,7 @@ mod tests {
             })
             .chain(&scan.findings)
             .filter_map(|finding| {
-                let fix = finding.fix.as_ref()?;
+                let fix = finding.fix.as_deref()?;
                 Some((finding.code.to_owned(), fix.replacement.clone()))
             })
             .collect();
