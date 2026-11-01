@@ -4,6 +4,7 @@
 //! code that touches the process and tests can inspect every outcome (06 `main`, X8).
 
 use std::ffi::{OsStr, OsString};
+use std::fmt::Write as _;
 
 use clap::builder::{FalseyValueParser, TypedValueParser as _};
 use clap::error::ErrorKind;
@@ -116,9 +117,11 @@ fn redirect_flag_tip(rendered: &str) -> String {
             Some(flag) => {
                 let indent = &line[..line.len() - line.trim_start().len()];
                 out.push_str(indent);
-                out.push_str(&format!(
-                    "tip: `{flag}` is not a flag of this command; run `supdoc <command> --help` to see its flags\n"
-                ));
+                // Writing into a `String` cannot fail.
+                let _ = writeln!(
+                    out,
+                    "tip: `{flag}` is not a flag of this command; run `supdoc <command> --help` to see its flags"
+                );
             }
             None => out.push_str(line),
         }
