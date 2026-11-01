@@ -6,7 +6,7 @@ use std::process::Stdio;
 
 use crate::support::{Project, Run, strip_ansi};
 
-/// Every read command, in the arguments a user would type (06 X3).
+/// Every read command, in the arguments a user would type.
 const READS: &[&[&str]] = &[
     &["check"],
     &["check", "docs/guide.md"],
@@ -23,7 +23,7 @@ const READS: &[&[&str]] = &[
     &["completions", "bash"],
 ];
 
-/// Every write command run without `--yes`, or with `--dry-run`, which beats `--yes` (06 X4).
+/// Every write command run without `--yes`, or with `--dry-run`, which beats `--yes`.
 const PREVIEWS: &[&[&str]] = &[
     &["update"],
     &["update", "--dry-run", "--yes"],
@@ -363,7 +363,7 @@ fn completions_and_schema_work_with_a_broken_config() {
     }
 }
 
-/// 07 G3: every help names a fix. Unix only, since some codes are reached through file
+/// Every help names a fix. Unix only, since some codes are reached through file
 /// permissions, `sh` and a file-size limit.
 #[cfg(unix)]
 mod helps {
@@ -583,7 +583,7 @@ mod helps {
     /// The crate's own issues page, the one URL a help may name: exit-70 helps send the reader there.
     const ISSUES_URL: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/issues");
 
-    /// Whether `help` sends the reader elsewhere instead of saying what to do (07 G3).
+    /// Whether `help` sends the reader elsewhere instead of saying what to do.
     fn points_elsewhere(help: &str) -> bool {
         const POINTERS: &[&str] = &[
             "see the docs",
@@ -598,7 +598,7 @@ mod helps {
         lowered.contains("http") || POINTERS.iter().any(|pointer| lowered.contains(pointer))
     }
 
-    /// What is wrong with `help` under 07 G3, if anything: it must quote a runnable command or a
+    /// What is wrong with `help`, if anything: it must quote a runnable command or a
     /// concrete value (`supdoc update docs/guide.md --yes`, `did you mean log_in?`) and must not send
     /// the reader elsewhere.
     fn help_problem(help: &str) -> Option<&'static str> {
@@ -1305,7 +1305,7 @@ mod helps {
             }
             if let Some(problem) = help.as_deref().and_then(help_problem) {
                 problems.push(format!(
-                    "the help of `{kind}` (from `supdoc {args}`) {problem} (07 G3): {help:?}"
+                    "the help of `{kind}` (from `supdoc {args}`) {problem}: {help:?}"
                 ));
             }
         }
@@ -1353,7 +1353,7 @@ mod helps {
             }
             if let Some(problem) = help.as_deref().and_then(help_problem) {
                 problems.push(format!(
-                    "the help of `{kind}` (built directly) {problem} (07 G3): {help:?}"
+                    "the help of `{kind}` (built directly) {problem}: {help:?}"
                 ));
             }
             if kind == "read-internal" && !help.as_deref().is_some_and(|h| h.contains(ISSUES_URL)) {

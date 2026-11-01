@@ -1,4 +1,4 @@
-; TypeScript symbols (03 R4). Written in tree-sitter's tags.scm conventions. Unlike the grammar's
+; TypeScript symbols. Written in tree-sitter's tags.scm conventions. Unlike the grammar's
 ; bundled tags.scm, this covers fields, enum members, namespaces, type aliases and top-level
 ; `const` bindings. Nesting by containment gives `Class.method` and `Namespace.member`.
 

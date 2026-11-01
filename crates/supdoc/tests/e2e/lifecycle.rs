@@ -14,7 +14,7 @@ fn init_writes_only_the_config_and_the_first_update_records_links_that_then_pass
     );
     assert!(
         !project.path("supdoc.lock").exists(),
-        "init should leave the lockfile to the first update (05 C10)"
+        "init should leave the lockfile to the first update"
     );
 
     project.record();
@@ -127,7 +127,7 @@ fn reformatting_inside_a_symbol_fails_its_link_and_leaves_the_others_passing() {
     assert_eq!(
         at(&report, "/data/summary/failed"),
         1,
-        "a hash covers the symbol's exact bytes, whitespace included (03 R6): {report}"
+        "a hash covers the symbol's exact bytes, whitespace included: {report}"
     );
     assert_eq!(at(&report, "/data/links/0/symbol"), "add", "{report}");
     assert_eq!(at(&report, "/data/summary/passed"), 4, "{report}");

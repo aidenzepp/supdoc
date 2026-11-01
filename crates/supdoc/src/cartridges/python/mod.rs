@@ -1,5 +1,4 @@
-//! Python: a query-driven cartridge plus one override, `self.x` attributes of `__init__` (03 R1,
-//! Overrides).
+//! Python: a query-driven cartridge plus one override, `self.x` attributes of `__init__`.
 //!
 //! Symbols come from `tags.scm` and link regions (comments and docstrings) from `injections.scm`,
 //! both beside this file. Queries can't match at an arbitrary depth, so the attributes a class
@@ -372,7 +371,7 @@ def outer():
             .collect();
         assert_eq!(
             actual, expected,
-            "a grammar upgrade moved a symbol's node boundaries (02 L8)"
+            "a grammar upgrade moved a symbol's node boundaries"
         );
         assert_eq!(
             hash_file(&file, HashSettings::default()).to_string(),
