@@ -55,6 +55,20 @@ fn supdoc_yes_lets_update_write_the_lock_and_supdoc_dry_run_stops_it() {
         dry.transcript()
     );
 
+    assert_eq!(
+        dry.code,
+        Some(0),
+        "SUPDOC_DRY_RUN=1 `update` is a preview and should exit 0: {}",
+        dry.transcript()
+    );
+    assert!(
+        dry.stderr.contains(
+            "Drop --dry-run (or unset SUPDOC_DRY_RUN) and add --yes to apply, as in `supdoc update --yes`."
+        ),
+        "the preview should say to unset SUPDOC_DRY_RUN and add --yes: {}",
+        dry.transcript()
+    );
+
     let before = project.files();
     let yes = project.run_with(&["update"], &[("SUPDOC_YES", "1")]);
     assert_eq!(
