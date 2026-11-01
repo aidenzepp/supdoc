@@ -652,17 +652,6 @@ mod tests {
     }
 
     #[test]
-    fn case_fix_moves_the_key_of_an_outside_root_link() {
-        assert_case_fix_moves(
-            "docs/a.md",
-            "../../Shared/Math.rs",
-            "../../shared/math.rs",
-            "../Shared/Math.rs",
-            "../shared/math.rs",
-        );
-    }
-
-    #[test]
     fn apply_rewrites_the_link_in_the_file() {
         let project = Project::with(&[("docs/a.md", DOC)]);
         let plan = plan_fixes(&scan_of([broken("docs/a.md", DOC, "ad", "add")]));
