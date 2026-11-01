@@ -12,7 +12,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::check::model::LinkReport;
-use crate::check::reconcile::reconcile;
+use crate::check::reconcile::reconcile_in;
 use crate::config::Config;
 use crate::finding::Finding;
 use crate::link::{LinkKey, LinkRef, SymbolPath, Target};
@@ -22,7 +22,7 @@ use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
 use crate::output::summary::render_summary;
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, OutputError, Report, Summary, TextContext};
+use crate::output::{Output, OutputError, PathStyle, Report, Summary, TextContext};
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile, SymbolTable};
 use crate::read::error::ResolveError;
@@ -52,7 +52,7 @@ use super::{CliError, Context, Outcome};
 /// `resolve-not-found` or `resolve-ambiguous` (1); `scan-root-unreadable` (74), and
 /// `cli-list-output` when the report cannot be written (74).
 pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
-    let config = load_config(context, output, "list")?;
+    let config = load_config(context, output)?;
     let lock = read_lock(&config, &context.cwd)?;
     let scan = crate::scan::assemble::run(&config, &Languages::builtin(), &Scope::All).map_err(
         |error| {
@@ -64,7 +64,8 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
             )
         },
     )?;
-    let model = reconcile(&scan, &lock, &Scope::All);
+    let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
+    let model = reconcile_in(&scan, &lock, &Scope::All, &paths);
 
     let target = args
         .target
@@ -494,7 +495,7 @@ fn unknown_namespace(config: &Config, name: &NamespaceName) -> CliError {
         .keys()
         .map(NamespaceName::as_str)
         .collect();
-    let help = match crate::scan::targets::close_match(name.as_str(), defined.iter().copied()) {
+    let help = match crate::suggest::close_match(name.as_str(), defined.iter().copied()) {
         Some(nearest) => format!(
             "did you mean `{nearest}`? Defined namespaces: `{}`",
             defined.join("`, `")
@@ -523,7 +524,7 @@ mod tests {
     use super::*;
     use crate::cli::args::{Cli, Command};
     use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
-    use crate::output::{OutputSettings, PathStyle, Verbosity};
+    use crate::output::{OutputSettings, Verbosity};
     use crate::scan::model::TargetState;
 
     /// The code the guides point at.

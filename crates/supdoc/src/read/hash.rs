@@ -12,32 +12,51 @@ use sha2::{Digest, Sha256};
 use crate::hash::{Hash, HashSettings, LineEndings};
 use crate::read::cartridge::{SourceFile, Symbol};
 
-/// The hash of `symbol`'s bytes in `file`, `file.text()[symbol.range]`, under `settings`.
+/// A symbol whose range does not fit the file it was asked to be hashed in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolOutsideFile {
+    /// The symbol's byte range.
+    pub range: Range<usize>,
+    /// The file's length in bytes.
+    pub len: usize,
+}
+
+/// The hash of `symbol`'s bytes in `file`, `file.text()[symbol.range]`, under `settings`, failing
+/// closed.
 ///
-/// Infallible because a symbol's range comes from `file`'s own tree. A range that doesn't fit
-/// `file` (a symbol from some other file) hashes as no bytes rather than panicking.
-#[must_use]
-pub fn hash_symbol(file: &SourceFile, symbol: &Symbol, settings: HashSettings) -> Hash {
-    digest_range(file.text().as_bytes(), symbol.range.clone(), settings)
+/// `symbol` must come from `file`'s own symbol table, whose ranges come from `file`'s own tree.
+///
+/// # Errors
+///
+/// Returns [`SymbolOutsideFile`] when `symbol`'s range does not fit `file` (a symbol from another
+/// file), so such a symbol can never record a hash of no bytes.
+pub fn hash_symbol(
+    file: &SourceFile,
+    symbol: &Symbol,
+    settings: HashSettings,
+) -> Result<Hash, SymbolOutsideFile> {
+    let text = file.text().as_bytes();
+    digest_range(text, symbol.range.clone(), settings).ok_or_else(|| SymbolOutsideFile {
+        range: symbol.range.clone(),
+        len: text.len(),
+    })
 }
 
 /// The hash of every byte of `file`, under `settings`.
 #[must_use]
 pub fn hash_file(file: &SourceFile, settings: HashSettings) -> Hash {
     let text = file.text().as_bytes();
-    digest_range(text, 0..text.len(), settings)
+    digest_range(text, 0..text.len(), settings).unwrap_or_else(|| Hash::digest(b""))
 }
 
-/// SHA-256 of `text[range]` under `settings`, or of no bytes when `range` doesn't fit `text`.
+/// SHA-256 of `text[range]` under `settings`, or `None` when `range` doesn't fit `text`.
 ///
 /// Under [`LineEndings::Normalize`], a CR is dropped when the byte after it *in `text`* is an LF,
 /// so a CR at the range's end whose LF lies just outside it is still dropped (B.4). The bytes
 /// between dropped CRs are fed to the hasher in runs, so nothing is copied.
-fn digest_range(text: &[u8], range: Range<usize>, settings: HashSettings) -> Hash {
-    let Some(bytes) = text.get(range.clone()) else {
-        return Hash::digest(b"");
-    };
-    match settings.line_endings {
+fn digest_range(text: &[u8], range: Range<usize>, settings: HashSettings) -> Option<Hash> {
+    let bytes = text.get(range.clone())?;
+    Some(match settings.line_endings {
         LineEndings::Exact => Hash::digest(bytes),
         LineEndings::Normalize => {
             let after = text.get(range.end);
@@ -53,7 +72,7 @@ fn digest_range(text: &[u8], range: Range<usize>, settings: HashSettings) -> Has
             hasher.update(bytes.get(run_start..).unwrap_or_default());
             Hash::from_bytes(hasher.finalize().into())
         }
-    }
+    })
 }
 
 #[cfg(test)]
@@ -99,7 +118,7 @@ mod tests {
         let symbol = table
             .resolve(file.path(), &query)
             .unwrap_or_else(|error| panic!("`{path}` should resolve in {text:?}: {error}"));
-        hash_symbol(&file, symbol, settings)
+        hash_symbol(&file, symbol, settings).expect("the symbol should lie in its own file")
     }
 
     #[test]
@@ -149,7 +168,7 @@ mod tests {
     }
 
     #[test]
-    fn range_outside_the_file_hashes_as_no_bytes() {
+    fn range_outside_the_file_is_refused() {
         let file = parse("fn add() {}\n");
         let foreign = Symbol {
             path: "elsewhere"
@@ -159,7 +178,14 @@ mod tests {
             range: 100..200,
         };
 
-        assert_eq!(hash_symbol(&file, &foreign, NORMALIZE), Hash::digest(b""));
+        assert_eq!(
+            hash_symbol(&file, &foreign, NORMALIZE),
+            Err(SymbolOutsideFile {
+                range: 100..200,
+                len: 12
+            }),
+            "a symbol from another file must not hash as no bytes",
+        );
     }
 
     /// A symbol over an explicit byte range of `file`, as a grammar would report it.
@@ -235,17 +261,20 @@ mod tests {
         let file = parse("ab\r\ncd");
 
         assert_eq!(
-            hash_symbol(&file, &range_symbol(0..3), NORMALIZE),
+            hash_symbol(&file, &range_symbol(0..3), NORMALIZE)
+                .expect("the symbol should lie in its own file"),
             Hash::digest(b"ab"),
             "the look-ahead reads the file, not the range",
         );
         assert_eq!(
-            hash_symbol(&file, &range_symbol(3..6), NORMALIZE),
+            hash_symbol(&file, &range_symbol(3..6), NORMALIZE)
+                .expect("the symbol should lie in its own file"),
             Hash::digest(b"\ncd"),
             "an LF whose CR lies before the range is kept",
         );
         assert_eq!(
-            hash_symbol(&file, &range_symbol(0..3), EXACT),
+            hash_symbol(&file, &range_symbol(0..3), EXACT)
+                .expect("the symbol should lie in its own file"),
             Hash::digest(b"ab\r"),
         );
     }
@@ -264,6 +293,24 @@ mod tests {
         assert_eq!(
             symbol_hash_with(text, "add", NORMALIZE),
             Hash::digest(b"fn add(a: u8) -> u8 {\n    a\n}"),
+        );
+    }
+
+    /// Pinned from `printf` of the file's bytes piped to `shasum -a 256`, not from supdoc.
+    const HASH_WITH_B: &str = "a75d72742a6c0fb87ad0e9a2abd32c4f7bc13863cfb597f3d7b7652c78675779";
+    /// The same bytes with `b.md` spelled `c.md`.
+    const HASH_WITH_C: &str = "a415e4296c9a189b7b6ae079968e260507e2290831ed281d5a90406615201863";
+
+    #[test]
+    fn editing_a_comment_link_changes_whole_file_hash_of_its_file() {
+        let before = parse("fn a() {}\n\n// see [b](../docs/b.md)\n");
+        let after = parse("fn a() {}\n\n// see [b](../docs/c.md)\n");
+
+        assert_eq!(hash_file(&before, NORMALIZE).to_string(), HASH_WITH_B);
+        assert_eq!(
+            hash_file(&after, NORMALIZE).to_string(),
+            HASH_WITH_C,
+            "a whole-file hash covers comments, so editing a link in one changes it (03 R6)",
         );
     }
 }
