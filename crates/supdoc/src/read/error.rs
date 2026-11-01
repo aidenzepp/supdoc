@@ -7,6 +7,7 @@
 use std::fmt::{self, Display, Formatter};
 
 use crate::link::SymbolPath;
+use crate::lock::error::shell_quote;
 use crate::path::AbsolutePath;
 
 /// Why a file couldn't be read and parsed.
@@ -238,7 +239,10 @@ impl ResolveError {
     /// What to do next, naming the file as `shown` instead of by its absolute path.
     #[must_use]
     pub fn help_naming(&self, shown: &dyn Display) -> String {
-        self.help_listing(&format!("`supdoc resolve {shown}` lists every symbol"))
+        self.help_listing(&format!(
+            "`supdoc resolve {}` lists every symbol",
+            shell_quote(&shown.to_string())
+        ))
     }
 
     /// What to do next, for a `shown` path relative to the project root. A scan cannot know the
@@ -246,7 +250,8 @@ impl ResolveError {
     #[must_use]
     pub fn help_from_root(&self, shown: &dyn Display) -> String {
         self.help_listing(&format!(
-            "run `supdoc resolve {shown}` from the project root to list its symbols"
+            "run `supdoc resolve {}` from the project root to list its symbols",
+            shell_quote(&shown.to_string())
         ))
     }
 

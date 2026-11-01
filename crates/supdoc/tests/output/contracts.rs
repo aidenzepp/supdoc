@@ -483,7 +483,7 @@ mod helps {
             "docs/api.md",
             "# API\n\nEdited after the scan.\n\nSee [ad](../src/lib.rs#ad).\n",
         );
-        let result = supdoc::check::fix::apply_fixes(&plan, &root);
+        let result = supdoc::check::fix::apply_fixes(&plan, &root, "supdoc fix --yes");
         let finding = result
             .skipped
             .first()
