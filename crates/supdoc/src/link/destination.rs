@@ -13,15 +13,15 @@
 //!
 //! Paths and fragments are percent-decoded; the prefix and the `scheme://` test are not.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::str::FromStr;
 
+use crate::config::Namespace;
 use crate::link::{
     LinkPathError, RawLink, SourcePath, SymbolPath, SymbolPathError, Target, TargetPath,
 };
 use crate::namespace::NamespaceName;
-use crate::path::AbsolutePath;
 use crate::read::cartridge::Languages;
 
 /// Schemes that name no path and never take `//`.
@@ -92,6 +92,36 @@ pub enum LinkError {
     },
 }
 
+/// The namespace names a destination may use as a prefix. Parsing reads only the names, never a
+/// namespace's directory.
+pub trait NamespaceNames {
+    /// Whether `name` is configured.
+    fn defines(&self, name: &NamespaceName) -> bool;
+
+    /// Every configured name, in order.
+    fn names(&self) -> Vec<NamespaceName>;
+}
+
+impl NamespaceNames for BTreeMap<NamespaceName, Namespace> {
+    fn defines(&self, name: &NamespaceName) -> bool {
+        self.contains_key(name)
+    }
+
+    fn names(&self) -> Vec<NamespaceName> {
+        self.keys().cloned().collect()
+    }
+}
+
+impl NamespaceNames for BTreeSet<NamespaceName> {
+    fn defines(&self, name: &NamespaceName) -> bool {
+        self.contains(name)
+    }
+
+    fn names(&self) -> Vec<NamespaceName> {
+        self.iter().cloned().collect()
+    }
+}
+
 /// Reads `raw`'s destination as written in `source`.
 ///
 /// Returns `None` when the destination is not a supdoc link: a URL, `mailto:`-style scheme,
@@ -103,7 +133,7 @@ pub enum LinkError {
 pub fn parse_destination(
     raw: &RawLink,
     source: &SourcePath,
-    namespaces: &BTreeMap<NamespaceName, AbsolutePath>,
+    namespaces: &impl NamespaceNames,
     languages: &Languages,
 ) -> Option<Result<ParsedLink, LinkError>> {
     let destination = raw.destination.trim();
@@ -246,21 +276,18 @@ fn split_prefix(text: &str) -> Option<(&str, &str)> {
 }
 
 /// The configured namespace spelled `prefix`, if any.
-fn namespaces_entry(
-    namespaces: &BTreeMap<NamespaceName, AbsolutePath>,
-    prefix: &str,
-) -> Option<NamespaceName> {
+fn namespaces_entry(namespaces: &impl NamespaceNames, prefix: &str) -> Option<NamespaceName> {
     let name = NamespaceName::from_str(prefix).ok()?;
-    namespaces.contains_key(&name).then_some(name)
+    namespaces.defines(&name).then_some(name)
 }
 
 /// The error for `prefix`, listing the configured namespaces nearest first.
 fn unknown_namespace(
     prefix: &str,
     destination: &str,
-    namespaces: &BTreeMap<NamespaceName, AbsolutePath>,
+    namespaces: &impl NamespaceNames,
 ) -> LinkError {
-    let mut known: Vec<NamespaceName> = namespaces.keys().cloned().collect();
+    let mut known = namespaces.names();
     // The sort is stable, so equally near names stay in alphabetical order.
     known.sort_by_key(|name| strsim::levenshtein(prefix, name.as_str()));
     LinkError::UnknownNamespace {
@@ -398,16 +425,11 @@ mod tests {
 
     /// Parses `destination` written in `source`, with namespaces `auth` and `billing`.
     fn parse_in(source: &str, destination: &str) -> Option<Result<ParsedLink, LinkError>> {
-        let namespaces = ["auth", "billing"]
+        let namespaces: BTreeSet<NamespaceName> = ["auth", "billing"]
             .into_iter()
             .map(|name| {
-                let dir = AbsolutePath::new(Path::new("/elsewhere"))
-                    .expect("the fixture directory is absolute");
-                (
-                    name.parse::<NamespaceName>()
-                        .expect("the fixture namespace name should be valid"),
-                    dir,
-                )
+                name.parse()
+                    .expect("the fixture namespace name should be valid")
             })
             .collect();
         let raw = RawLink {

@@ -1017,7 +1017,7 @@ mod tests {
         let parsed = crate::link::destination::parse_destination(
             &raw,
             &source,
-            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeSet::<crate::namespace::NamespaceName>::new(),
             &crate::read::cartridge::Languages::builtin(),
         );
 
