@@ -120,10 +120,15 @@ pub fn walk(config: &Config, languages: &Languages, scope: &Scope) -> Walk {
     let rules = Arc::new(IgnoreRules::new(root));
     let mut sources = Vec::new();
     let mut unread_dirs = Vec::new();
+    let mut invalid_names = Vec::new();
 
     for entry in walker(config, scope, &rules) {
         match entry {
-            Ok(entry) => sources.extend(as_source(config, languages, scope, &entry)),
+            Ok(entry) => match as_source(config, languages, scope, &entry) {
+                Some(Ok(source)) => sources.push(source),
+                Some(Err(finding)) => invalid_names.push(finding),
+                None => {}
+            },
             Err(error) => unread_dirs.extend(unreadable_dir(&error)),
         }
     }
@@ -131,6 +136,7 @@ pub fn walk(config: &Config, languages: &Languages, scope: &Scope) -> Walk {
     unread_dirs.sort();
 
     let mut findings: Vec<Finding> = unread_dirs.iter().map(|dir| dir.finding(root)).collect();
+    findings.extend(invalid_names);
     // Taken before the explicit paths are judged, which may read directories the walk never
     // entered: only an ignore file the walk met is worth a warning.
     findings.extend(
@@ -687,13 +693,14 @@ fn may_hold_sources(root: &AbsolutePath, scope: &Scope, dir: &Path) -> bool {
         })
 }
 
-/// `entry` as a source, or `None` when a rule skips it.
+/// `entry` as a source, `None` when a rule skips it, or a `scan-invalid-source-path` warning when
+/// its name can't be a source path, so the skipped file is never silent.
 fn as_source(
     config: &Config,
     languages: &Languages,
     scope: &Scope,
     entry: &DirEntry,
-) -> Option<(AbsolutePath, &'static dyn Cartridge)> {
+) -> Option<Result<(AbsolutePath, &'static dyn Cartridge), Finding>> {
     // A symlink reports its own type, not its target's, so links are skipped here (04 S3).
     if !entry.file_type()?.is_file() {
         return None;
@@ -703,8 +710,27 @@ fn as_source(
         return None;
     }
     let cartridge = languages.for_path(path.as_path())?;
-    let relative = SourcePath::from_relative(path.strip_prefix(config.root())?).ok()?;
-    scope.contains(&relative).then_some((path, cartridge))
+    let relative_path = path.strip_prefix(config.root())?;
+    let Ok(relative) = SourcePath::from_relative(relative_path) else {
+        return Some(Err(invalid_source_path(&relative_path)));
+    };
+    scope.contains(&relative).then_some(Ok((path, cartridge)))
+}
+
+/// The warning for a file the walk would read but whose name isn't a valid source path.
+fn invalid_source_path(relative: &Path) -> Finding {
+    Finding::new(
+        "scan-invalid-source-path",
+        Severity::Warning,
+        format!(
+            "skipped {}: its name can't be written as a source path",
+            relative.display()
+        ),
+    )
+    .with_help(
+        "Links in that file weren't checked. Rename the file, or add it to `exclude` in \
+         `supdoc.config.toml`",
+    )
 }
 
 /// The directory the walker couldn't read.
@@ -1183,6 +1209,26 @@ mod tests {
             walk.findings.is_empty(),
             "unexpected findings: {:?}",
             walk.findings
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_whose_name_is_not_a_source_path_is_a_finding_not_a_silent_skip() {
+        let project = Project::new();
+        project.write(CONFIG_FILE_NAME, "");
+        project.write("docs/a\\b.md", "");
+
+        let walk = project.walk(&Scope::All);
+
+        assert!(walk.sources.is_empty());
+        assert_eq!(codes(&walk), ["scan-invalid-source-path"]);
+        let finding = walk.findings.first().expect("one warning was expected");
+        assert_eq!(finding.severity, Severity::Warning);
+        assert!(
+            finding.message.contains("docs/a\\b.md"),
+            "message was: {}",
+            finding.message
         );
     }
 

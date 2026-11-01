@@ -155,7 +155,7 @@ impl Plan {
                 .strip_prefix(config.root())
                 .and_then(|relative| SourcePath::from_relative(relative).ok())
             else {
-                continue;
+                return Err(invalid_source(path, old, new));
             };
             match SourceFile::read(path.clone(), &languages) {
                 Ok(file) => {
@@ -767,6 +767,21 @@ fn unread_source_help(error: &ReadError) -> String {
         | ReadError::UnsupportedLanguage { .. }
         | ReadError::Internal { .. } => error.help(),
     }
+}
+
+/// The error for a walked file whose name isn't a valid source path. The walk reports such a file
+/// as a finding instead of returning it, so this guards the invariant rather than skipping.
+fn invalid_source(path: &AbsolutePath, old: &NamespaceName, new: &NamespaceName) -> CliError {
+    CliError::new(
+        "cli-rename-invalid-source-path",
+        format!(
+            "{} has a name that isn't a valid source path; its links can't be renamed, so \
+             nothing was written",
+            path.display()
+        ),
+        then_rerun("Rename the file", old, new),
+        CliError::REFUSED_EXIT_CODE,
+    )
 }
 
 /// The error for a directory the walk couldn't read. The sources beneath it are as unknown as an
