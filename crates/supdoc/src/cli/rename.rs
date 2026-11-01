@@ -30,7 +30,7 @@ use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
 use crate::namespace::NamespaceName;
 use crate::output::json::{Envelope, LocationJson};
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, OutputError, Report, TextContext, preview_note};
+use crate::output::{Output, Report, TextContext, preview_note};
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile};
 use crate::read::error::{ReadError, ReadRole};
@@ -41,7 +41,7 @@ use crate::suggest::close_match;
 
 use super::args::{RenameArgs, WriteMode};
 use super::project::{command_line, config_failure, invocation, load_config, lock_path, read_lock};
-use super::{CliError, Context, Outcome};
+use super::{CliError, Context, Outcome, cause};
 
 /// The command as users type it, for help text and the JSON `command`.
 const COMMAND: &str = "namespace rename";
@@ -69,7 +69,9 @@ pub fn run(args: &RenameArgs, context: &Context, output: &mut Output) -> Result<
     };
     output
         .report(&plan.report(applied), true)
-        .map_err(|error| output_failed(&error))?;
+        .map_err(|error| {
+            CliError::output_failed("cli-rename-output", "the rename report", &error)
+        })?;
     let apply_note = preview_note(
         args.confirm.dry_run,
         &command_line(
@@ -80,7 +82,9 @@ pub fn run(args: &RenameArgs, context: &Context, output: &mut Output) -> Result<
         ),
     );
     for note in plan.notes(applied, &apply_note) {
-        output.note(&note).map_err(|error| output_failed(&error))?;
+        output.note(&note).map_err(|error| {
+            CliError::output_failed("cli-rename-output", "the rename report", &error)
+        })?;
     }
     Ok(Outcome::Clean)
 }
@@ -206,7 +210,7 @@ impl Plan {
                 replace_ranges(&source.text, source.prefixes(&self.old), self.new.as_str())
                     .ok_or_else(|| self.file_changed(source.source.as_str()))?;
             replace_file(source.file.as_path(), renamed.as_bytes()).map_err(|error| {
-                self.write_failed(source.source.as_str(), &error.to_string(), &written)
+                self.write_failed(source.source.as_str(), &cause(&error), &written)
             })?;
             written.push(source.source.to_string());
         }
@@ -216,7 +220,7 @@ impl Plan {
                 .write(&lock_path(&self.root))
                 .map_err(|error| {
                     let reason = match &error {
-                        LockError::Write { error, .. } => error.to_string(),
+                        LockError::Write { error, .. } => cause(error),
                         other => other.message_from(&self.root),
                     };
                     self.write_failed(LOCK_FILE_NAME, &reason, &written)
@@ -230,7 +234,7 @@ impl Plan {
         )
         .ok_or_else(|| self.file_changed(&self.config.shown))?;
         replace_file(self.config.file.as_path(), renamed.as_bytes())
-            .map_err(|error| self.write_failed(&self.config.shown, &error.to_string(), &written))
+            .map_err(|error| self.write_failed(&self.config.shown, &cause(&error), &written))
     }
 
     /// Refuses the rename when any file it will write is no longer exactly as read (NR8).
@@ -838,17 +842,6 @@ fn then_rerun(help: &str, rerun: &str) -> String {
         "."
     };
     format!("{help}{end} Then run `{rerun}` again")
-}
-
-/// The error for a report that could not be written.
-fn output_failed(error: &OutputError) -> CliError {
-    CliError::new(
-        "cli-rename-output",
-        format!("cannot write the rename report: {error}"),
-        "Check that standard output and standard error are open and writable, or redirect both \
-         to a file with `> supdoc.out 2>&1`",
-        CliError::IO_EXIT_CODE,
-    )
 }
 
 /// `1 link`, `2 links`.
@@ -1845,7 +1838,7 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
             (error.code(), error.message()),
             (
                 "cli-rename-write",
-                "cannot write supdoc.lock: Permission denied (os error 13)"
+                "cannot write supdoc.lock: permission denied"
             ),
             "the lockfile is named once, relative to the root"
         );

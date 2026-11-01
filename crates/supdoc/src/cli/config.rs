@@ -13,7 +13,7 @@ use crate::hash::LineEndings;
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
 use crate::output::text::visible;
-use crate::output::{Output, OutputError, Report, TextContext, Verbosity};
+use crate::output::{Output, Report, TextContext, Verbosity};
 use crate::path::AbsolutePath;
 
 use super::args::{Inspect, Limit};
@@ -62,7 +62,11 @@ pub fn run(
             })
         }
     };
-    written.map_err(|error| output_failed(inspect, &error))?;
+    let (code, subject) = match inspect {
+        Inspect::ConfigShow => ("cli-config-output", "the config show report"),
+        Inspect::NamespaceList(_) => ("cli-namespace-output", "the namespace list report"),
+    };
+    written.map_err(|error| CliError::output_failed(code, subject, &error))?;
     Ok(Outcome::Clean)
 }
 
@@ -78,21 +82,6 @@ pub fn config_show_schema() -> schemars::Schema {
 #[must_use]
 pub fn namespace_list_schema() -> schemars::Schema {
     schemars::schema_for!(Envelope<'static, NamespaceListReport>)
-}
-
-/// The error for a report that could not be written.
-fn output_failed(inspect: Inspect<'_>, error: &OutputError) -> CliError {
-    let (code, name) = match inspect {
-        Inspect::ConfigShow => ("cli-config-output", "config show"),
-        Inspect::NamespaceList(_) => ("cli-namespace-output", "namespace list"),
-    };
-    CliError::new(
-        code,
-        format!("cannot write the {name} report: {error}"),
-        "Check that standard output and standard error are open and writable, or redirect both \
-         to a file with `> supdoc.out 2>&1`",
-        CliError::IO_EXIT_CODE,
-    )
 }
 
 /// What `config show` prints: the resolved config and the file each part came from.
