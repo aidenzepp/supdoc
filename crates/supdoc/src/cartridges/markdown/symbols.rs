@@ -452,6 +452,7 @@ mod tests {
                 )
                 .expect("the query should resolve");
             hash_symbol(file, symbol, HashSettings::default())
+                .expect("the symbol should lie in its own file")
         };
 
         assert_ne!(

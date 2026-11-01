@@ -76,14 +76,15 @@ pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<
         return Err(settings_mismatch(&config, change));
     }
     let scan =
-        crate::scan::assemble::run(&config, &Languages::builtin(), &scope).map_err(|error| {
-            CliError::new(
-                error.code(),
-                error.to_string(),
-                error.help(),
-                error.exit_code(),
-            )
-        })?;
+        crate::scan::assemble::run_with_settings(&config, &Languages::builtin(), &scope, settings)
+            .map_err(|error| {
+                CliError::new(
+                    error.code(),
+                    error.to_string(),
+                    error.help(),
+                    error.exit_code(),
+                )
+            })?;
 
     let model = reconcile(&scan, &lock, &scope);
     let plan = plan_update(&model, &scan, &lock, &args.state, settings);

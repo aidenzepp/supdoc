@@ -435,6 +435,10 @@ mod helps {
             why: "the walk reports a file with an invalid name as a finding, so rename never meets one",
         },
         Unreachable {
+            kind: "scan-symbol-outside-file",
+            why: "a symbol resolved in a file must have a range outside that same file",
+        },
+        Unreachable {
             kind: "cli-schema-serialize",
             why: "a built-in JSON Schema must fail to serialize, which is a supdoc bug",
         },

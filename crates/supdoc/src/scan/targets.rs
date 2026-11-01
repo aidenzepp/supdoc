@@ -15,16 +15,20 @@ use std::path::Path;
 
 use crate::config::{CONFIG_FILE_NAME, Config};
 use crate::finding::{Finding, Fix, Location, Severity, Snippet};
+use crate::hash::HashSettings;
 use crate::link::{LinkKey, Target};
 use crate::output::paths::relative_to;
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile, SymbolTable};
 use crate::read::error::{ReadError, ResolveError};
-use crate::read::hash::{hash_file, hash_symbol};
+use crate::read::hash::{SymbolOutsideFile, hash_file, hash_symbol};
 use crate::scan::model::{ScannedLink, TargetState};
 
 /// Finding code for a target path whose case differs from the real path (04 S12).
 const CODE_CASE_MISMATCH: &str = "scan-case-mismatch";
+
+/// The code for a resolved symbol whose range lies outside its own file.
+const CODE_SYMBOL_OUTSIDE_FILE: &str = "scan-symbol-outside-file";
 
 /// Finding code for a namespace the config doesn't define (03 R10).
 pub(crate) const CODE_UNKNOWN_NAMESPACE: &str = "link-unknown-namespace";
@@ -162,6 +166,7 @@ pub(crate) fn resolve(
     config: &Config,
     languages: &Languages,
     parsed: &mut Parsed,
+    settings: HashSettings,
     occurrences: Vec<Occurrence>,
 ) -> BTreeMap<LinkKey, ScannedLink> {
     let mut by_target: BTreeMap<Target, BTreeMap<LinkKey, Vec<Occurrence>>> = BTreeMap::new();
@@ -176,7 +181,9 @@ pub(crate) fn resolve(
 
     let mut links = BTreeMap::new();
     for (target, keyed) in by_target {
-        for (key, state, occurrences) in target_states(config, languages, parsed, &target, keyed) {
+        for (key, state, occurrences) in
+            target_states(config, languages, parsed, settings, &target, keyed)
+        {
             let snippet = occurrences
                 .first()
                 .and_then(|occurrence| occurrence.snippet.clone());
@@ -199,6 +206,7 @@ fn target_states(
     config: &Config,
     languages: &Languages,
     parsed: &mut Parsed,
+    settings: HashSettings,
     target: &Target,
     keyed: BTreeMap<LinkKey, Vec<Occurrence>>,
 ) -> Vec<(LinkKey, TargetState, Vec<Occurrence>)> {
@@ -230,7 +238,6 @@ fn target_states(
         Err(error) => return broken_by(&|first| read_failed(&error, config.root(), first)),
     };
 
-    let settings = config.hash_settings();
     let mut table: Option<SymbolTable> = None;
     keyed
         .into_iter()
@@ -245,9 +252,14 @@ fn target_states(
                 Some(symbol) => {
                     let table = table.get_or_insert_with(|| file.language().symbols(file));
                     match table.resolve(file.path(), symbol) {
-                        Ok(found) => TargetState::Present {
-                            hash: hash_symbol(file, found, settings),
-                            syntax_errors,
+                        Ok(found) => match hash_symbol(file, found, settings) {
+                            Ok(hash) => TargetState::Present {
+                                hash,
+                                syntax_errors,
+                            },
+                            Err(error) => TargetState::Broken {
+                                finding: symbol_outside_file(&error, first),
+                            },
                         },
                         Err(error) => TargetState::Broken {
                             finding: resolve_failed(&error, config.root(), table, first),
@@ -477,6 +489,20 @@ fn read_failed(error: &ReadError, root: &AbsolutePath, first: &Occurrence) -> Fi
     )
 }
 
+/// `scan-symbol-outside-file`: a resolved symbol's range doesn't fit the file it was resolved in,
+/// which is a supdoc bug; the link is broken rather than recorded with a hash of no bytes.
+fn symbol_outside_file(error: &SymbolOutsideFile, first: &Occurrence) -> Finding {
+    broken(
+        CODE_SYMBOL_OUTSIDE_FILE,
+        format!(
+            "the symbol's bytes {}..{} lie outside its {}-byte file",
+            error.range.start, error.range.end, error.len
+        ),
+        "this is a bug in supdoc; report it with the file and link that triggered it".to_owned(),
+        first,
+    )
+}
+
 /// The finding for a symbol that doesn't resolve. A `resolve-not-found` gets a fix when exactly
 /// one symbol in the file is a close match (03: the fixer never guesses).
 ///
@@ -624,6 +650,7 @@ mod tests {
             &config,
             &Languages::builtin(),
             &mut Parsed::default(),
+            config.hash_settings(),
             vec![occurrence],
         );
         match links.get(&key).map(|link| &link.target) {

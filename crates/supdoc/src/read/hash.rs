@@ -21,23 +21,16 @@ pub struct SymbolOutsideFile {
     pub len: usize,
 }
 
-/// The hash of `symbol`'s bytes in `file`, `file.text()[symbol.range]`, under `settings`.
+/// The hash of `symbol`'s bytes in `file`, `file.text()[symbol.range]`, under `settings`, failing
+/// closed.
 ///
-/// Meant for a symbol taken from `file`'s own symbol table, whose range comes from `file`'s own
-/// tree. A range that doesn't fit `file` (a symbol from some other file) hashes as no bytes;
-/// [`try_hash_symbol`] refuses it instead.
-#[must_use]
-pub fn hash_symbol(file: &SourceFile, symbol: &Symbol, settings: HashSettings) -> Hash {
-    try_hash_symbol(file, symbol, settings).unwrap_or_else(|_| Hash::digest(b""))
-}
-
-/// The hash of `symbol`'s bytes in `file` under `settings`, failing closed.
+/// `symbol` must come from `file`'s own symbol table, whose ranges come from `file`'s own tree.
 ///
 /// # Errors
 ///
-/// Returns [`SymbolOutsideFile`] when `symbol`'s range does not fit `file`, so a symbol from
-/// another file can never record a hash of no bytes.
-pub fn try_hash_symbol(
+/// Returns [`SymbolOutsideFile`] when `symbol`'s range does not fit `file` (a symbol from another
+/// file), so such a symbol can never record a hash of no bytes.
+pub fn hash_symbol(
     file: &SourceFile,
     symbol: &Symbol,
     settings: HashSettings,
@@ -125,7 +118,7 @@ mod tests {
         let symbol = table
             .resolve(file.path(), &query)
             .unwrap_or_else(|error| panic!("`{path}` should resolve in {text:?}: {error}"));
-        hash_symbol(&file, symbol, settings)
+        hash_symbol(&file, symbol, settings).expect("the symbol should lie in its own file")
     }
 
     #[test]
@@ -186,7 +179,7 @@ mod tests {
         };
 
         assert_eq!(
-            try_hash_symbol(&file, &foreign, NORMALIZE),
+            hash_symbol(&file, &foreign, NORMALIZE),
             Err(SymbolOutsideFile {
                 range: 100..200,
                 len: 12
@@ -268,17 +261,20 @@ mod tests {
         let file = parse("ab\r\ncd");
 
         assert_eq!(
-            hash_symbol(&file, &range_symbol(0..3), NORMALIZE),
+            hash_symbol(&file, &range_symbol(0..3), NORMALIZE)
+                .expect("the symbol should lie in its own file"),
             Hash::digest(b"ab"),
             "the look-ahead reads the file, not the range",
         );
         assert_eq!(
-            hash_symbol(&file, &range_symbol(3..6), NORMALIZE),
+            hash_symbol(&file, &range_symbol(3..6), NORMALIZE)
+                .expect("the symbol should lie in its own file"),
             Hash::digest(b"\ncd"),
             "an LF whose CR lies before the range is kept",
         );
         assert_eq!(
-            hash_symbol(&file, &range_symbol(0..3), EXACT),
+            hash_symbol(&file, &range_symbol(0..3), EXACT)
+                .expect("the symbol should lie in its own file"),
             Hash::digest(b"ab\r"),
         );
     }
