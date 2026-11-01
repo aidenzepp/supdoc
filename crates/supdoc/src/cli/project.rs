@@ -20,7 +20,7 @@ use crate::output::Output;
 use crate::path::AbsolutePath;
 use crate::scan::model::Scope;
 
-use super::{CliError, Context, ErrorSite};
+use super::{CliError, Context, ErrorSite, cause};
 
 /// The config `--config` names, or the one found by searching upward from the current directory.
 ///
@@ -316,13 +316,6 @@ fn path_unreadable(typed: &Path, error: &std::io::Error) -> CliError {
         ),
         CliError::IO_EXIT_CODE,
     )
-}
-
-/// `error`'s reason in lowercase, without the `(os error N)` suffix.
-fn cause(error: &std::io::Error) -> String {
-    let text = error.to_string();
-    let text = text.split(" (os error").next().unwrap_or(&text);
-    text.to_lowercase()
 }
 
 /// The error for a `[PATH]` that doesn't exist (06 error table).

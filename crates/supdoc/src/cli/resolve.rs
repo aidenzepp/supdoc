@@ -18,7 +18,7 @@ use crate::namespace::NamespaceName;
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, OutputError, Report, TextContext};
+use crate::output::{Output, Report, TextContext};
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile, Symbol};
 use crate::read::error::{ReadError, ResolveError};
@@ -82,20 +82,24 @@ pub fn run(
         truncated,
         findings,
     };
-    output
-        .report(&report, true)
-        .map_err(|error| output_failed(&error))?;
+    output.report(&report, true).map_err(|error| {
+        CliError::output_failed("cli-resolve-output", "the resolve report", &error)
+    })?;
     if truncated {
         output
             .note(&args.limit.truncation_note(listed, total, "symbols"))
-            .map_err(|error| output_failed(&error))?;
+            .map_err(|error| {
+                CliError::output_failed("cli-resolve-output", "the resolve report", &error)
+            })?;
     } else if listed == 0 {
         output
             .note(&format!(
                 "{} has no symbols; link to the whole file instead.",
                 report.shown_as
             ))
-            .map_err(|error| output_failed(&error))?;
+            .map_err(|error| {
+                CliError::output_failed("cli-resolve-output", "the resolve report", &error)
+            })?;
     }
     Ok(Outcome::Clean)
 }
@@ -250,17 +254,6 @@ fn resolve_failed(error: &ResolveError, root: &AbsolutePath, typed: &Path) -> Cl
         error.message_naming(&shown),
         error.help_naming(&typed.display()),
         CliError::REFUSED_EXIT_CODE,
-    )
-}
-
-/// The error for a report that could not be written.
-fn output_failed(error: &OutputError) -> CliError {
-    CliError::new(
-        "cli-resolve-output",
-        format!("cannot write the resolve report: {error}"),
-        "Check that standard output and standard error are open and writable, or redirect both \
-         to a file with `> supdoc.out 2>&1`",
-        CliError::IO_EXIT_CODE,
     )
 }
 

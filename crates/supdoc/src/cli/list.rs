@@ -22,7 +22,7 @@ use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
 use crate::output::summary::render_summary;
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, OutputError, PathStyle, Report, Summary, TextContext};
+use crate::output::{Output, PathStyle, Report, Summary, TextContext};
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile, SymbolTable};
 use crate::read::error::ResolveError;
@@ -54,16 +54,8 @@ use super::{CliError, Context, Outcome};
 pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let config = load_config(context, output)?;
     let lock = read_lock(&config, &context.cwd)?;
-    let scan = crate::scan::assemble::run(&config, &Languages::builtin(), &Scope::All).map_err(
-        |error| {
-            CliError::new(
-                error.code(),
-                error.to_string(),
-                error.help(),
-                error.exit_code(),
-            )
-        },
-    )?;
+    let scan = crate::scan::assemble::run(&config, &Languages::builtin(), &Scope::All)
+        .map_err(CliError::from)?;
     let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
     let model = reconcile_in(&scan, &lock, &Scope::All, &paths);
 
@@ -97,7 +89,7 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
     let report = ListReport::new(&matched, args.limit, model.findings);
     output
         .report(&report, true)
-        .map_err(|error| output_failed(&error))?;
+        .map_err(|error| CliError::output_failed("cli-list-output", "the link list", &error))?;
     if report.truncated {
         output
             .note(
@@ -105,13 +97,15 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
                     .limit
                     .truncation_note(report.links.len(), total, "links"),
             )
-            .map_err(|error| output_failed(&error))?;
+            .map_err(|error| CliError::output_failed("cli-list-output", "the link list", &error))?;
     } else if total == 0 {
         let note = match &target {
             Some(target) => format!("No links to {target}."),
             None => "No links found.".to_owned(),
         };
-        output.note(&note).map_err(|error| output_failed(&error))?;
+        output
+            .note(&note)
+            .map_err(|error| CliError::output_failed("cli-list-output", "the link list", &error))?;
     }
     Ok(Outcome::Clean)
 }
@@ -170,17 +164,6 @@ fn target_invalid(typed: &str, reason: &str) -> CliError {
         format!("`{typed}` is not a link target: {reason}"),
         "Write TARGET as `path`, `path#symbol` or `ns:path#symbol`",
         CliError::USAGE_EXIT_CODE,
-    )
-}
-
-/// The error for a report that could not be written.
-fn output_failed(error: &OutputError) -> CliError {
-    CliError::new(
-        "cli-list-output",
-        format!("cannot write the link list: {error}"),
-        "Check that standard output and standard error are open and writable, or redirect both \
-         to a file with `> supdoc.out 2>&1`",
-        CliError::IO_EXIT_CODE,
     )
 }
 
