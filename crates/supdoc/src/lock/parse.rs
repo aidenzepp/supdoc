@@ -593,14 +593,21 @@ hash = \"41aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d2\"
 
     #[test]
     fn target_with_parent_segment_is_rejected() {
-        for target in ["../shared/x.rs", "src/../../x.rs", "auth:../x.rs"] {
+        for (target, says) in [
+            ("../shared/x.rs", "climbs out of the project root"),
+            ("src/../../x.rs", "climbs out of the project root"),
+            (
+                "auth:../x.rs",
+                "only inside the `auth` namespace's directory",
+            ),
+        ] {
             let text = file(&[entry("docs/a.md", target, None, HASH_A)]);
 
             let error = parse_error(&text);
             assert_eq!(error.code(), "lock-parse", "`{target}` should be rejected");
             assert!(
-                error.to_string().contains("outside") || error.to_string().contains("climbs"),
-                "the error should say the target leaves the root: {error}",
+                error.to_string().contains(says),
+                "the error for `{target}` should say \"{says}\": {error}",
             );
         }
     }

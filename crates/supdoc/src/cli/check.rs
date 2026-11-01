@@ -38,7 +38,7 @@ use super::{CliError, Context, Outcome};
 /// `cli-check-output` when the report cannot be written (74).
 pub fn run(args: &CheckArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let config = load_config(context, output)?;
-    let scope = scope(&args.paths, &context.cwd, config.root())?;
+    let scope = scope(&args.paths, &config, context)?;
     let lock = read_lock(&config, &context.cwd)?;
     let scan =
         crate::scan::assemble::run(&config, &Languages::builtin(), &scope).map_err(|error| {

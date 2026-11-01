@@ -503,13 +503,21 @@ mod tests {
 
     #[test]
     fn namespaced_path_climbing_out_of_its_directory_is_outside_root() {
-        assert_eq!(
-            parse_in("a/b/c.md", "auth:../x.rs"),
-            Some(Err(LinkError::OutsideRoot {
-                destination: "auth:../x.rs".to_owned(),
-                namespace: Some("auth".parse().expect("the fixture name should be valid")),
-            })),
-        );
+        for destination in [
+            "auth:../x.rs",
+            "auth:..%2Fx.rs",
+            "auth:%2E%2E/x.rs",
+            "auth:src/..%2F..%2Fx.rs#f",
+        ] {
+            assert_eq!(
+                parse_in("a/b/c.md", destination),
+                Some(Err(LinkError::OutsideRoot {
+                    destination: destination.to_owned(),
+                    namespace: Some("auth".parse().expect("the fixture name should be valid")),
+                })),
+                "{destination} should be decoded before it is normalized",
+            );
+        }
     }
 
     #[test]
@@ -596,6 +604,9 @@ mod tests {
             ("docs/guide.md", "/../outside.rs"),
             ("docs/guide.md", "/../../home/settings.rs#DEBUG"),
             ("docs/deep/guide.md", "/docs/../../outside.rs"),
+            ("guide.md", "%2E%2E/outside.rs"),
+            ("guide.md", "..%2F..%2Foutside.rs"),
+            ("docs/guide.md", "/%2e%2e/outside.rs#f"),
         ] {
             assert_eq!(
                 parse_in(source, destination),

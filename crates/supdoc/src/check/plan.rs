@@ -135,7 +135,7 @@ fn hash_to_record(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::check::reconcile::reconcile;
+    use crate::check::reconcile::reconcile_at_root;
     use crate::finding::{Finding, Severity};
     use crate::hash::LineEndings;
     use crate::scan::model::{ScannedLink, Scope};
@@ -182,7 +182,7 @@ mod tests {
     }
 
     fn plan(scan: &Scan, lock: &Lockfile, states: &[LinkState]) -> UpdatePlan {
-        let report = reconcile(scan, lock, &Scope::All);
+        let report = reconcile_at_root(scan, lock, &Scope::All);
         plan_update(&report, scan, lock, states, lock.hash_settings())
     }
 
@@ -296,7 +296,7 @@ mod tests {
         let exact = HashSettings {
             line_endings: LineEndings::Exact,
         };
-        let report = reconcile(&scan, &lock, &Scope::All);
+        let report = reconcile_at_root(&scan, &lock, &Scope::All);
 
         let plan = plan_update(&report, &scan, &lock, &DEFAULT_STATES, exact);
 
