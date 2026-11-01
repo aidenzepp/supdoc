@@ -368,6 +368,7 @@ fn completions_and_schema_work_with_a_broken_config() {
 #[cfg(unix)]
 mod helps {
     use std::collections::BTreeSet;
+    use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::Path;
     use std::process::{Command, Stdio};
@@ -398,6 +399,9 @@ mod helps {
         args: &'static [&'static str],
         /// How the binary is run.
         via: Via,
+        /// Whether `setup` removes permissions, so the case can't happen for a user they don't
+        /// restrict (root).
+        needs_permissions: bool,
     }
 
     /// A [`HelpCase`] run in the project root with an empty environment.
@@ -411,6 +415,22 @@ mod helps {
             setup,
             args,
             via: Via::Plain,
+            needs_permissions: false,
+        }
+    }
+
+    /// A [`HelpCase`] whose `setup` removes permissions: skipped for a user they don't restrict.
+    const fn restricted_case(
+        kind: &'static str,
+        setup: fn(&Project),
+        args: &'static [&'static str],
+    ) -> HelpCase {
+        HelpCase {
+            kind,
+            setup,
+            args,
+            via: Via::Plain,
+            needs_permissions: true,
         }
     }
 
@@ -422,6 +442,7 @@ mod helps {
             setup: |_| {},
             args,
             via: Via::FullStdout,
+            needs_permissions: false,
         }
     }
 
@@ -535,6 +556,9 @@ mod helps {
         })
     }
 
+    /// The crate's own issues page, the one URL a help may name: exit-70 helps send the reader there.
+    const ISSUES_URL: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/issues");
+
     /// Whether `help` sends the reader elsewhere instead of saying what to do (07 G3).
     fn points_elsewhere(help: &str) -> bool {
         const POINTERS: &[&str] = &[
@@ -545,18 +569,18 @@ mod helps {
             "refer to",
             "consult",
             "readme",
-            "http",
         ];
-        let lowered = help.to_lowercase();
-        help.split_whitespace().count() < 3
-            || POINTERS.iter().any(|pointer| lowered.contains(pointer))
+        let lowered = help.to_lowercase().replace(ISSUES_URL, "");
+        lowered.contains("http") || POINTERS.iter().any(|pointer| lowered.contains(pointer))
     }
 
     /// What is wrong with `help` under 07 G3, if anything: it must quote a runnable command or a
     /// concrete value (`supdoc update docs/guide.md --yes`, `did you mean log_in?`) and must not send
     /// the reader elsewhere.
     fn help_problem(help: &str) -> Option<&'static str> {
-        if points_elsewhere(help) {
+        if help.split_whitespace().count() < 3 {
+            Some("help is too short to name a next step")
+        } else if points_elsewhere(help) {
             Some("should say what to do, not send the reader elsewhere")
         } else if !quotes_a_command_or_value(help) {
             Some("should quote a runnable command or concrete value in backticks")
@@ -636,6 +660,19 @@ mod helps {
             std::fs::Permissions::from_mode(mode),
         )
         .expect("the fixture permissions should be settable");
+    }
+
+    /// Whether mode `000` keeps this user out of a directory, which it doesn't for root.
+    fn permissions_restrict_this_user() -> bool {
+        let dir = tempfile::tempdir().expect("the probe directory should be creatable");
+        let file = dir.path().join("probe");
+        std::fs::write(&file, "").expect("the probe file should be writable");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o000))
+            .expect("the probe directory should be lockable");
+        let restricted = std::fs::symlink_metadata(&file).is_err();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("the probe directory should be unlockable");
+        restricted
     }
 
     /// Gives the owner full access to everything under `dir` again, so the project can be removed.
@@ -809,8 +846,8 @@ mod helps {
             |p| p.write("docs/guide.md", "[x](../src/gone.rs#add)\n"),
             &["check"],
         ),
-        case("read-io", |p| chmod(p, "src/lib.rs", 0o000), &["check"]),
-        case("read-io", |p| chmod(p, "docs/old.md", 0o000), &["check"]),
+        restricted_case("read-io", |p| chmod(p, "src/lib.rs", 0o000), &["check"]),
+        restricted_case("read-io", |p| chmod(p, "docs/old.md", 0o000), &["check"]),
         case(
             "config-parse",
             |p| p.write("supdoc.config.toml", "include = 3\n"),
@@ -841,7 +878,7 @@ mod helps {
             |_| {},
             &["check", "--config", "nope.toml"],
         ),
-        case(
+        restricted_case(
             "config-read",
             |p| chmod(p, "supdoc.config.toml", 0o000),
             &["check"],
@@ -935,7 +972,7 @@ mod helps {
             },
             &["check"],
         ),
-        case("lock-read", |p| chmod(p, "supdoc.lock", 0o000), &["check"]),
+        restricted_case("lock-read", |p| chmod(p, "supdoc.lock", 0o000), &["check"]),
         case(
             "lock-read",
             |p| {
@@ -955,7 +992,7 @@ mod helps {
             },
             &["check"],
         ),
-        case(
+        restricted_case(
             "lock-write",
             |p| {
                 p.write("docs/new.md", "# N\n\nSee [add](../src/lib.rs#add).\n");
@@ -991,7 +1028,7 @@ mod helps {
             },
             &["check", "alias/lib.rs"],
         ),
-        case(
+        restricted_case(
             "scan-unreadable-dir",
             |p| {
                 p.write("docs/private/a.md", "# A\n");
@@ -1004,7 +1041,7 @@ mod helps {
             |p| p.write("docs/a\\b.md", "# A\n"),
             &["check"],
         ),
-        case("scan-root-unreadable", |p| chmod(p, ".", 0o300), &["check"]),
+        restricted_case("scan-root-unreadable", |p| chmod(p, ".", 0o300), &["check"]),
         case(
             "scan-ignore-file-symlink",
             |p| {
@@ -1021,7 +1058,7 @@ mod helps {
             |_| {},
             &["resolve", "src/lib.rs#add"],
         ),
-        case(
+        restricted_case(
             "cli-path-unreadable",
             |p| {
                 p.write("docs/private/a.md", "# A\n");
@@ -1033,7 +1070,7 @@ mod helps {
         case("cli-path-invalid", |_| {}, &["resolve", "src"]),
         case("cli-target-invalid", |_| {}, &["list", "src/lib.rs#a..b"]),
         case("cli-init-exists", |_| {}, &["init"]),
-        case(
+        restricted_case(
             "cli-init-write",
             |p| {
                 std::fs::remove_file(p.path().join("supdoc.config.toml"))
@@ -1076,12 +1113,12 @@ mod helps {
             },
             &["namespace", "rename", "shared", "common"],
         ),
-        case(
+        restricted_case(
             "cli-rename-unreadable-source",
             |p| chmod(p, "docs/guide.md", 0o000),
             &["namespace", "rename", "core", "base"],
         ),
-        case(
+        restricted_case(
             "cli-rename-write",
             |p| chmod(p, "docs", 0o555),
             &["namespace", "rename", "core", "base", "--yes"],
@@ -1096,7 +1133,7 @@ mod helps {
             |_| {},
             &["skill", "install", "--global"],
         ),
-        case(
+        restricted_case(
             "cli-skill-write",
             |p| chmod(p, ".", 0o555),
             &["skill", "install", "--yes"],
@@ -1114,14 +1151,16 @@ mod helps {
             setup: |_| {},
             args: &["skill", "install", "--global"],
             via: Via::RelativeClaudeDir,
+            needs_permissions: false,
         },
         HelpCase {
             kind: "cli-no-cwd",
             setup: |_| {},
             args: &["check"],
             via: Via::RemovedCwd,
+            needs_permissions: false,
         },
-        case(
+        restricted_case(
             "fix-write-failed",
             |p| {
                 fixable(p);
@@ -1129,7 +1168,7 @@ mod helps {
             },
             &["fix", "--yes"],
         ),
-        case(
+        restricted_case(
             "fix-lock-write-failed",
             |p| {
                 p.write(
@@ -1221,7 +1260,20 @@ mod helps {
         let mut problems = Vec::new();
         let mut covered = BTreeSet::new();
 
+        let restricted = permissions_restrict_this_user();
         for case in HELP_CASES {
+            if case.needs_permissions && !restricted {
+                // Written to the process's stderr directly, which `cargo test` shows even for a
+                // passing test.
+                let _ignored = writeln!(
+                    std::io::stderr(),
+                    "SKIPPED a `{}` help case: mode 000 does not restrict this user (running as \
+                     root?)",
+                    case.kind
+                );
+                let _new = covered.insert(case.kind.to_owned());
+                continue;
+            }
             let (args, helps, stderr) = run_help_case(case);
             if helps.iter().any(|(kind, _)| kind == case.kind) {
                 let _new = covered.insert(case.kind.to_owned());
@@ -1252,6 +1304,11 @@ mod helps {
             if let Some(problem) = help.as_deref().and_then(help_problem) {
                 problems.push(format!(
                     "the help of `{kind}` (built directly) {problem} (07 G3): {help:?}"
+                ));
+            }
+            if kind == "read-internal" && !help.as_deref().is_some_and(|h| h.contains(ISSUES_URL)) {
+                problems.push(format!(
+                    "the help of `{kind}` is an exit-70 help and should name {ISSUES_URL}: {help:?}"
                 ));
             }
             let _new = covered.insert(unit.kind.to_owned());
