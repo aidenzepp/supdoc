@@ -151,7 +151,7 @@ fn github_lines_escape_percent_newline_colon_comma() {
 
     assert_eq!(
         line,
-        "::error file=docs/a%2Cb%3A c.md,line=1,col=5,title=supdoc link-failed::50%25 changed%0Asecond line. Run `supdoc update --yes`"
+        "::error file=docs/a%2Cb%3A c.md,line=1,col=5,title=supdoc link-failed::50%25 changed\\nsecond line. Run `supdoc update --yes`"
     );
     assert_eq!(line.lines().count(), 1, "an annotation is exactly one line");
 }
@@ -622,11 +622,48 @@ fn a_message_cannot_forge_a_workflow_command_under_github_format() {
     assert_eq!(
         commands,
         vec![
-            "::error title=supdoc link-failed::oops%0A::error::x%0D::warning::y",
-            "::error title=supdoc link-failed::oops%0A::error::x%0D::warning::y",
+            "::error title=supdoc link-failed::oops\\n::error::x\\r::warning::y",
+            "::error title=supdoc link-failed::oops\\n::error::x\\r::warning::y",
         ]
     );
-    assert!(emitted.contains("done%0A::error::forged"), "{emitted}");
+    assert!(emitted.contains("done\\n::error::forged"), "{emitted}");
+}
+
+#[test]
+fn bidi_and_invisible_characters_are_escaped_in_every_github_field() {
+    for (character, escaped) in [
+        ('\u{202E}', "\\u{202e}"),
+        ('\u{2066}', "\\u{2066}"),
+        ('\u{200B}', "\\u{200b}"),
+        ('\u{2028}', "\\u{2028}"),
+    ] {
+        let finding = finding_on(
+            &format!("docs/a{character}.md"),
+            "see [x](a.rs#b)\n",
+            "[x](a.rs#b)",
+            "link-failed",
+            Severity::Error,
+            &format!("bad{character}message"),
+            &format!("help{character}text"),
+        );
+        let line = annotation(&paths(), &finding);
+        assert!(!line.contains(character), "{escaped}: {line:?}");
+        for field in ["bad", "elp", "docs/a"] {
+            assert!(
+                line.contains(&format!("{field}{escaped}")),
+                "{escaped} in {field}: {line}"
+            );
+        }
+
+        let (mut output, _stdout, stderr) =
+            captured(settings(OutputFormat::Github, Verbosity::Normal));
+        output
+            .note(&format!("note{character}text"))
+            .expect("writing to a buffer should succeed");
+        let emitted = stderr.text();
+        assert!(!emitted.contains(character), "{escaped}: {emitted:?}");
+        assert!(emitted.contains(&format!("note{escaped}")), "{emitted}");
+    }
 }
 
 fn rendered_text(finding: &Finding) -> String {
