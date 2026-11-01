@@ -370,12 +370,14 @@ fn confined(
     written: (AbsolutePath, Range<usize>),
 ) -> Result<Namespace, ConfigError> {
     let (defined_in, span) = written;
-    let escape = match super::confine::real_location(dir.as_path()) {
+    let real = super::confine::real_location(dir.as_path());
+    let escape = match real {
         Some(real) if real.starts_with(real_root) => return Ok(Namespace { dir, defined_in }),
+        // Written outside the root: that is the problem, whatever lies beyond it.
+        _ if dir.strip_prefix(root).is_none() => NamespaceEscape::AsWritten,
         None => NamespaceEscape::Unresolvable,
         // Written inside the root, so only a symlink along it can lead out.
-        Some(_) if dir.strip_prefix(root).is_some() => NamespaceEscape::ThroughSymlink,
-        Some(_) => NamespaceEscape::AsWritten,
+        Some(_) => NamespaceEscape::ThroughSymlink,
     };
     Err(ConfigError::NamespaceOutsideRoot {
         file: defined_in,
