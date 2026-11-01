@@ -1,5 +1,5 @@
 //! One golden transcript per command, colors off, so a change to what a person reads shows up
-//! as a reviewed snapshot diff (07 G13).
+//! as a reviewed snapshot diff.
 //!
 //! `schema` and `completions` print generated documents (JSON Schema, a shell script), which
 //! their own tests and `schema/*.json` already pin, so they have no golden here.

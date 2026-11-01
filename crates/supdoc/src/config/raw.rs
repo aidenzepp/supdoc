@@ -21,9 +21,10 @@ pub(crate) struct RawConfig {
     pub(crate) include: Option<PatternList>,
     /// `None` inherits from the parent; `Some(empty)` deliberately excludes nothing.
     pub(crate) exclude: Option<PatternList>,
-    /// Short names for directories, relative to the file that wrote them.
+    /// Short names for directories, relative to the file that wrote them. Spanned so an error
+    /// about a directory can point at its value.
     #[serde(default)]
-    pub(crate) namespaces: BTreeMap<NamespaceName, RelativePath>,
+    pub(crate) namespaces: BTreeMap<NamespaceName, toml::Spanned<RelativePath>>,
     /// `None` inherits every toggle from the parent.
     pub(crate) features: Option<RawFeatures>,
 }

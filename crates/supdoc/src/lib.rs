@@ -1,6 +1,6 @@
 //! supdoc tracks links from documentation to code and reports when the linked code changes.
 //!
-//! Every module is declared here.
+//! The crate root: the top-level modules of the library.
 
 #![cfg_attr(
     test,
