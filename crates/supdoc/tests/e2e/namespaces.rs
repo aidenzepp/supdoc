@@ -1,7 +1,7 @@
 //! Namespaced links, config `include`/`exclude` and `extends`, and the namespace commands (docref's
 //! namespace and config tests).
 
-use crate::support::{Project, array_at, links};
+use crate::support::{Project, array_at, at, links};
 
 #[test]
 fn namespaced_and_plain_links_are_recorded_in_their_written_form_and_pass() {
@@ -27,14 +27,11 @@ fn changing_a_namespaced_target_fails_its_link() {
         "input.len() > 3",
     );
 
-    let check = project.supdoc(&["check"]);
+    let report = project.supdoc(&["--json", "check"]).assert_exit(1).json();
 
-    let _ = check.assert_exit(1);
-    assert!(
-        check.stdout.contains("auth:src/lib.rs#validate"),
-        "the namespaced link should fail: {}",
-        check.stdout
-    );
+    assert_eq!(at(&report, "/data/summary/failed"), 1, "{report}");
+    assert_eq!(at(&report, "/data/summary/broken"), 0, "{report}");
+    assert_eq!(at(&report, "/data/links/0/symbol"), "validate", "{report}");
 }
 
 #[test]
@@ -125,7 +122,6 @@ fn namespace_rename_rewrites_config_lockfile_and_links_and_check_still_passes() 
     let _ = project.supdoc(&["check"]).assert_exit(0);
 }
 
-#[cfg(unix)]
 #[test]
 fn namespace_rename_prints_the_walk_findings_without_changing_its_other_lines() {
     let project = Project::fixture("namespaced");

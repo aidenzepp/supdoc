@@ -73,3 +73,46 @@ fn supdoc_yes_lets_update_write_the_lock_and_supdoc_dry_run_stops_it() {
         "the SUPDOC_YES=1 run should have changed the project files"
     );
 }
+
+#[test]
+fn check_json_fix_offsets_produce_the_same_file_as_fix_yes() {
+    let project = misspelled_in_multibyte_doc();
+    let output = project
+        .command(&["--json", "check"], &[])
+        .output()
+        .expect("the supdoc binary should start");
+    let document: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--json should print one JSON document");
+    let fix = document
+        .pointer("/data/links/0/finding/fix")
+        .expect("the misspelled link should carry a fix object");
+    let file = fix["file"].as_str().expect("fix.file should be a string");
+    let start = usize::try_from(fix["start"].as_u64().expect("fix.start should be a number"))
+        .expect("fix.start should fit usize");
+    let end = usize::try_from(fix["end"].as_u64().expect("fix.end should be a number"))
+        .expect("fix.end should fit usize");
+    let replacement = fix["replacement"]
+        .as_str()
+        .expect("fix.replacement should be a string");
+
+    let original = std::fs::read(project.path().join(file)).expect("the doc should be readable");
+    let mut applied = original
+        .get(..start)
+        .expect("fix.start should lie inside the file")
+        .to_vec();
+    applied.extend_from_slice(replacement.as_bytes());
+    applied.extend_from_slice(
+        original
+            .get(end..)
+            .expect("fix.end should lie inside the file"),
+    );
+
+    let run = project.run(&["fix", "--yes"]);
+    let fixed = std::fs::read(project.path().join(file)).expect("the doc should be readable");
+    assert_eq!(
+        String::from_utf8_lossy(&applied),
+        String::from_utf8_lossy(&fixed),
+        "applying the JSON fix offsets should give the file `fix --yes` writes: {}",
+        run.transcript()
+    );
+}
