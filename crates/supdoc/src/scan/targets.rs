@@ -21,14 +21,11 @@ use crate::output::paths::relative_to;
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile, SymbolTable};
 use crate::read::error::{ReadError, ResolveError};
-use crate::read::hash::{SymbolOutsideFile, hash_file, hash_symbol};
+use crate::read::hash::{hash_file, hash_symbol};
 use crate::scan::model::{ScannedLink, TargetState};
 
 /// Finding code for a target path whose case differs from the real path (04 S12).
 const CODE_CASE_MISMATCH: &str = "scan-case-mismatch";
-
-/// The code for a resolved symbol whose range lies outside its own file.
-const CODE_SYMBOL_OUTSIDE_FILE: &str = "scan-symbol-outside-file";
 
 /// Finding code for a namespace the config doesn't define (03 R10).
 pub(crate) const CODE_UNKNOWN_NAMESPACE: &str = "link-unknown-namespace";
@@ -257,8 +254,14 @@ fn target_states(
                                 hash,
                                 syntax_errors,
                             },
-                            Err(error) => TargetState::Broken {
-                                finding: symbol_outside_file(&error, first),
+                            Err(_outside) => TargetState::Broken {
+                                finding: read_failed(
+                                    &ReadError::Internal {
+                                        path: file.path().clone(),
+                                    },
+                                    config.root(),
+                                    first,
+                                ),
                             },
                         },
                         Err(error) => TargetState::Broken {
@@ -485,20 +488,6 @@ fn read_failed(error: &ReadError, root: &AbsolutePath, first: &Occurrence) -> Fi
         error.code(),
         error.message_naming(&shown),
         error.target_help(&shown),
-        first,
-    )
-}
-
-/// `scan-symbol-outside-file`: a resolved symbol's range doesn't fit the file it was resolved in,
-/// which is a supdoc bug; the link is broken rather than recorded with a hash of no bytes.
-fn symbol_outside_file(error: &SymbolOutsideFile, first: &Occurrence) -> Finding {
-    broken(
-        CODE_SYMBOL_OUTSIDE_FILE,
-        format!(
-            "the symbol's bytes {}..{} lie outside its {}-byte file",
-            error.range.start, error.range.end, error.len
-        ),
-        "this is a bug in supdoc; report it with the file and link that triggered it".to_owned(),
         first,
     )
 }
