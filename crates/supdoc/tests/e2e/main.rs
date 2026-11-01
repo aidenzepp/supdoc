@@ -47,6 +47,8 @@ mod containment;
 #[cfg(test)]
 mod helps;
 #[cfg(test)]
+mod ignore;
+#[cfg(test)]
 mod json;
 #[cfg(test)]
 mod languages;

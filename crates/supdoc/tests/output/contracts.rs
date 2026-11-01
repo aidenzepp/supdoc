@@ -456,7 +456,10 @@ mod helps {
                 let path =
                     supdoc::path::AbsolutePath::new(std::path::Path::new("/project/src/lib.rs"))
                         .expect("the fixture path should be absolute");
-                let error = supdoc::read::error::ReadError::Internal { path };
+                let error = supdoc::read::error::ReadError::Internal {
+                    path,
+                    reason: "tree-sitter returned no tree",
+                };
                 (error.code().to_owned(), Some(error.help()))
             },
         },
@@ -483,7 +486,7 @@ mod helps {
             "docs/api.md",
             "# API\n\nEdited after the scan.\n\nSee [ad](../src/lib.rs#ad).\n",
         );
-        let result = supdoc::check::fix::apply_fixes(&plan, &root);
+        let result = supdoc::check::fix::apply_fixes(&plan, &root, "supdoc fix --yes");
         let finding = result
             .skipped
             .first()
@@ -914,6 +917,15 @@ mod helps {
             &["check"],
         ),
         case("lock-read", |p| chmod(p, "supdoc.lock", 0o000), &["check"]),
+        case(
+            "lock-read",
+            |p| {
+                let lock = p.path().join("supdoc.lock");
+                std::fs::remove_file(&lock).expect("the lockfile should be removable");
+                std::fs::create_dir(&lock).expect("the directory should be creatable");
+            },
+            &["check"],
+        ),
         case(
             "lock-outside-root",
             |p| {
