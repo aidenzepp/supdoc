@@ -108,9 +108,19 @@ fn inline_parser() -> Option<Parser> {
 /// Parses only `region`'s ranges of `text`, together, with the inline grammar. The tree keeps
 /// `text`'s offsets.
 ///
-/// `None` if tree-sitter rejects the ranges or returns no tree. [`MarkdownRegion`] holds only
-/// ranges tree-sitter accepts, and supdoc sets no timeout or cancellation, so neither happens.
+/// `None` if the region has no `[` byte, since every link and every reference definition starts
+/// with one and the parse would find nothing. Also `None` if tree-sitter rejects the ranges or
+/// returns no tree. [`MarkdownRegion`] holds only ranges tree-sitter accepts, and supdoc sets no
+/// timeout or cancellation, so neither happens.
 fn parse_region(parser: &mut Parser, text: &str, region: &MarkdownRegion) -> Option<Tree> {
+    let has_bracket = region.ranges().iter().any(|range| {
+        text.as_bytes()
+            .get(range.start_byte..range.end_byte)
+            .is_some_and(|bytes| bytes.contains(&b'['))
+    });
+    if !has_bracket {
+        return None;
+    }
     parser.set_included_ranges(region.ranges()).ok()?;
     parser.parse(text, None)
 }
@@ -512,6 +522,21 @@ mod tests {
 
     fn span(text: &str, destination: &str, slice: &str) -> (String, String, String) {
         (text.to_owned(), destination.to_owned(), slice.to_owned())
+    }
+
+    #[test]
+    fn a_region_without_a_bracket_is_not_parsed() {
+        let file =
+            rust_file("/// Plain prose.\nfn a() {}\n\n/// See [the doc](docs/a.md).\nfn b() {}\n");
+        let mut parser = inline_parser().expect("the inline grammar should load");
+        let parsed: Vec<bool> = file
+            .language()
+            .markdown_regions(&file)
+            .iter()
+            .map(|region| parse_region(&mut parser, file.text(), region).is_some())
+            .collect();
+        assert_eq!(parsed, [false, true]);
+        assert_eq!(destinations(&file), ["docs/a.md"]);
     }
 
     #[test]

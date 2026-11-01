@@ -149,11 +149,39 @@ fn locate(config: &Config, cwd: &AbsolutePath, typed: &Path) -> Result<AbsoluteP
     if !config.contains(found.as_path()) {
         return Err(path_outside(typed, config.root()));
     }
+    if found.as_path().symlink_metadata().is_err()
+        && let Some(error) = fragment_form(config, cwd, typed)
+    {
+        return Err(error);
+    }
     ensure_exists(&found, typed, cwd)?;
     if found.as_path().is_dir() {
         return Err(directory(typed));
     }
     Ok(found)
+}
+
+/// The refusal for a `FILE` written `path#symbol`, as links and findings write a target, when the
+/// part before the first `#` is a file that exists, with the exact command that takes it.
+///
+/// `None` when `typed` has no `#` or the part before it isn't a file, so the ordinary
+/// missing-file error stays. No new syntax is accepted: `resolve` still takes `FILE [SYMBOL]`.
+fn fragment_form(config: &Config, cwd: &AbsolutePath, typed: &Path) -> Option<CliError> {
+    let text = typed.to_str()?;
+    let (file, symbol) = text.split_once('#')?;
+    if file.is_empty() || symbol.is_empty() || locate(config, cwd, Path::new(file)).is_err() {
+        return None;
+    }
+    Some(CliError::new(
+        "cli-resolve-fragment",
+        format!("{text} is a link target, but resolve takes the file and symbol separately"),
+        format!(
+            "Write it as `supdoc resolve {} {}`",
+            shell_quote(file),
+            shell_quote(symbol)
+        ),
+        CliError::USAGE_EXIT_CODE,
+    ))
 }
 
 /// The error for a `FILE` that is a directory: `resolve` reads one file.
@@ -634,6 +662,22 @@ mod tests {
 
         assert_eq!(run.exit_code(), 2);
         assert_eq!(run.error().code(), "cli-path-missing");
+    }
+
+    #[test]
+    fn resolve_file_hash_symbol_refuses_with_the_separate_form() {
+        let project = Project::new();
+
+        let run = project.resolve(&["resolve", "src/lib.rs#load"]);
+
+        assert_eq!(run.exit_code(), 2);
+        let error = run.error();
+        assert_eq!(error.code(), "cli-resolve-fragment");
+        assert!(
+            error.help().contains("`supdoc resolve src/lib.rs load`"),
+            "help: {}",
+            error.help()
+        );
     }
 
     #[test]

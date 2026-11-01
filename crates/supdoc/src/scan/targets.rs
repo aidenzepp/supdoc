@@ -294,9 +294,6 @@ fn locate(config: &Config, target: &Target) -> Located {
         },
     };
     let segments: Vec<&str> = path.as_str().split('/').collect();
-    if segments.contains(&"..") {
-        return Located::OutsideRoot;
-    }
     // Joining a relative path onto an absolute one is always absolute, so the base never stands
     // in for the file.
     let file =
