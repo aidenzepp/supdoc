@@ -456,7 +456,10 @@ mod helps {
                 let path =
                     supdoc::path::AbsolutePath::new(std::path::Path::new("/project/src/lib.rs"))
                         .expect("the fixture path should be absolute");
-                let error = supdoc::read::error::ReadError::Internal { path };
+                let error = supdoc::read::error::ReadError::Internal {
+                    path,
+                    reason: "tree-sitter returned no tree",
+                };
                 (error.code().to_owned(), Some(error.help()))
             },
         },

@@ -258,6 +258,7 @@ fn target_states(
                                 finding: read_failed(
                                     &ReadError::Internal {
                                         path: file.path().clone(),
+                                        reason: "a symbol's byte range lies outside the file",
                                     },
                                     config.root(),
                                     first,

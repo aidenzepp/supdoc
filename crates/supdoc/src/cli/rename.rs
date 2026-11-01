@@ -1861,7 +1861,10 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
                 extension: "xyz".to_owned(),
                 supported: vec!["md"],
             },
-            ReadError::Internal { path: path.clone() },
+            ReadError::Internal {
+                path: path.clone(),
+                reason: "tree-sitter returned no tree",
+            },
         ];
         let causes = [UnreadCause::Io(io::ErrorKind::PermissionDenied)];
         let dirs = causes.map(|cause| UnreadDir {
