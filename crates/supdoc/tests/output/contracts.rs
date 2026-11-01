@@ -457,7 +457,10 @@ mod helps {
                     supdoc::path::AbsolutePath::new(std::path::Path::new("/project/src/lib.rs"))
                         .expect("the fixture path should be absolute");
                 let error = supdoc::read::error::ReadError::Internal { path };
-                (error.code().to_owned(), Some(error.help()))
+                (
+                    error.code().to_owned(),
+                    Some(error.help(supdoc::read::error::ReadRole::ScannedSource, "file")),
+                )
             },
         },
         UnitCase {

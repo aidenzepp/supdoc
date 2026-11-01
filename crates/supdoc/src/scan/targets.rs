@@ -19,7 +19,7 @@ use crate::link::{LinkKey, Target};
 use crate::output::paths::relative_to;
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile, SymbolTable};
-use crate::read::error::{ReadError, ResolveError};
+use crate::read::error::{ReadError, ReadRole, ResolveError};
 use crate::read::hash::{hash_file, hash_symbol};
 use crate::scan::model::{ScannedLink, TargetState};
 
@@ -472,7 +472,7 @@ fn read_failed(error: &ReadError, root: &AbsolutePath, first: &Occurrence) -> Fi
     broken(
         error.code(),
         error.message_naming(&shown),
-        error.target_help(&shown),
+        error.help(ReadRole::Target, &shown),
         first,
     )
 }
