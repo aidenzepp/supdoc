@@ -24,12 +24,12 @@ use crate::lock::io::write_atomically;
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, OutputError, Report, TextContext, preview_note};
+use crate::output::{Output, Report, TextContext, preview_note};
 use crate::path::AbsolutePath;
 
 use super::args::{SkillInstallArgs, WriteMode};
 use super::project::{absolute, command_line, config_failure};
-use super::{CliError, Context, Outcome};
+use super::{CliError, Context, Outcome, cause};
 
 /// The skill, embedded so the installed copy always matches this binary.
 const SKILL: &str = include_str!("../../SKILL.md");
@@ -116,12 +116,14 @@ pub fn run(
         ),
     );
     let report = SkillInstallReport::new(applied, args.global, changes, context);
-    output
-        .report(&report, true)
-        .map_err(|error| output_failed(&error))?;
+    output.report(&report, true).map_err(|error| {
+        CliError::output_failed("cli-skill-output", "the skill install report", &error)
+    })?;
     output
         .note(report.closing_note(&apply_note))
-        .map_err(|error| output_failed(&error))?;
+        .map_err(|error| {
+            CliError::output_failed("cli-skill-output", "the skill install report", &error)
+        })?;
     Ok(Outcome::Clean)
 }
 
@@ -494,19 +496,8 @@ fn write_failed(
     };
     CliError::new(
         "cli-skill-write",
-        format!("cannot write {}: {error}", change.shown),
+        format!("cannot write {}: {}", change.shown, cause(error)),
         format!("Check that you can create and write files in `{shown_directory}`"),
-        CliError::IO_EXIT_CODE,
-    )
-}
-
-/// The error for a report that could not be written.
-fn output_failed(error: &OutputError) -> CliError {
-    CliError::new(
-        "cli-skill-output",
-        format!("cannot write the skill install report: {error}"),
-        "Check that standard output and standard error are open and writable, or redirect both \
-         to a file with `> supdoc.out 2>&1`",
         CliError::IO_EXIT_CODE,
     )
 }

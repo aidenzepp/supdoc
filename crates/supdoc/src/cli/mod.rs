@@ -51,8 +51,9 @@ pub mod schema;
 use std::fmt;
 
 use crate::finding::{Location, Snippet};
-use crate::output::Output;
+use crate::output::{Output, OutputError};
 use crate::path::AbsolutePath;
+use crate::scan::assemble::ScanError;
 
 use args::{Command, ConfigCommand, GlobalArgs, Inspect, NamespaceCommand, SkillCommand};
 
@@ -145,6 +146,23 @@ impl CliError {
         }
     }
 
+    /// The error for a report that could not be written, for `subject` such as `the check report`.
+    ///
+    /// Every command's report failure shares this help and the I/O exit code.
+    #[must_use]
+    pub(crate) fn output_failed(code: &'static str, subject: &str, error: &OutputError) -> Self {
+        Self::new(
+            code,
+            format!(
+                "cannot write {subject}: {}",
+                without_os_code(&error.to_string())
+            ),
+            "Check that standard output and standard error are open and writable, or redirect \
+             both to a file with `> supdoc.out 2>&1`",
+            Self::IO_EXIT_CODE,
+        )
+    }
+
     /// The exit code for a supdoc bug (06 X7).
     pub const BUG_EXIT_CODE: u8 = 70;
 
@@ -189,6 +207,27 @@ impl CliError {
     pub fn site(&self) -> Option<&ErrorSite> {
         self.site.as_deref()
     }
+}
+
+impl From<ScanError> for CliError {
+    fn from(error: ScanError) -> Self {
+        Self::new(
+            error.code(),
+            error.to_string(),
+            error.help(),
+            error.exit_code(),
+        )
+    }
+}
+
+/// `error`'s reason in lowercase, without the operating system's error-code suffix.
+pub(crate) fn cause(error: &std::io::Error) -> String {
+    without_os_code(&error.to_string()).to_lowercase()
+}
+
+/// `text` without a trailing ` (os ...)` code such as the one `io::Error` appends.
+fn without_os_code(text: &str) -> &str {
+    text.split(" (os ").next().unwrap_or(text)
 }
 
 impl fmt::Display for CliError {

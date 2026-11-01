@@ -17,7 +17,7 @@ use crate::lock::error::shell_quote;
 use crate::namespace::NamespaceName;
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile};
-use crate::read::error::ReadError;
+use crate::read::error::{ReadError, ReadRole};
 use crate::read::links::links;
 use crate::scan::model::{Scan, ScannedLink, Scope, TargetState};
 use crate::scan::targets::{self, CODE_UNKNOWN_NAMESPACE, Occurrence, Parsed, Written};
@@ -394,7 +394,7 @@ fn unreadable_source(source: &SourcePath, error: &ReadError) -> Finding {
     .with_location(start)
     .with_help(format!(
         "Links in {source} weren't checked. {}",
-        error.help()
+        error.help(ReadRole::ScannedSource, &source.to_string())
     ))
 }
 

@@ -23,7 +23,7 @@ use crate::hash::LineEndings;
 use crate::link::LinkKey;
 use crate::output::json::Envelope;
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, OutputError, PathStyle, Report, Summary, TextContext, preview_note};
+use crate::output::{Output, PathStyle, Report, Summary, TextContext, preview_note};
 use crate::read::cartridge::Languages;
 use crate::scan::model::Scope;
 use crate::state::LinkState;
@@ -73,14 +73,7 @@ pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<
     }
     let scan =
         crate::scan::assemble::run_with_settings(&config, &Languages::builtin(), &scope, settings)
-            .map_err(|error| {
-                CliError::new(
-                    error.code(),
-                    error.to_string(),
-                    error.help(),
-                    error.exit_code(),
-                )
-            })?;
+            .map_err(CliError::from)?;
 
     // `supdoc fix PATH` takes `PATH` relative to the current directory, so hints name it from there.
     let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
@@ -119,12 +112,14 @@ pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<
         ),
     );
     let report = UpdateReport::new(&model, &plan, &args.state, applied, &paths, context);
-    output
-        .report(&report, true)
-        .map_err(|error| output_failed(&error))?;
+    output.report(&report, true).map_err(|error| {
+        CliError::output_failed("cli-update-output", "the update report", &error)
+    })?;
     output
         .note(&report.closing_note(output.unicode(), &apply_note))
-        .map_err(|error| output_failed(&error))?;
+        .map_err(|error| {
+            CliError::output_failed("cli-update-output", "the update report", &error)
+        })?;
     Ok(Outcome::Clean)
 }
 
@@ -139,17 +134,6 @@ fn migrates_every_entry(scope: &Scope, states: &[LinkState]) -> bool {
 #[must_use]
 pub fn schema() -> schemars::Schema {
     schemars::schema_for!(Envelope<'static, UpdateReport>)
-}
-
-/// The error for a report that could not be written.
-fn output_failed(error: &OutputError) -> CliError {
-    CliError::new(
-        "cli-update-output",
-        format!("cannot write the update report: {error}"),
-        "Check that standard output and standard error are open and writable, or redirect both \
-         to a file with `> supdoc.out 2>&1`",
-        CliError::IO_EXIT_CODE,
-    )
 }
 
 /// `supdoc update`: the planned or applied lockfile changes.
@@ -414,7 +398,7 @@ fn render_settings_row(
     change: SettingsChangeJson,
     out: &mut dyn Write,
 ) -> io::Result<()> {
-    let arrow = if context.unicode { "→" } else { "->" };
+    let arrow = context.arrow();
     let LineEndingsChange { from, to } = change.line_endings;
     writeln!(out, "settings  line-endings  {from} {arrow} {to}")
 }
@@ -426,7 +410,7 @@ fn render_settings_row(
 ///
 /// Fails if writing to `out` fails.
 fn render_rows(context: &TextContext, rows: &[ChangeRow], out: &mut dyn Write) -> io::Result<()> {
-    let arrow = if context.unicode { "→" } else { "->" };
+    let arrow = context.arrow();
     // Printed by file then position (S8); `changes` in JSON and the lockfile keep `LinkKey` order.
     let mut ordered: Vec<&ChangeRow> = rows.iter().collect();
     ordered.sort_by_key(|row| {
@@ -442,10 +426,7 @@ fn render_rows(context: &TextContext, rows: &[ChangeRow], out: &mut dyn Write) -
             if let Some(first) = row.locations.first() {
                 written_at = format!("{written_at}:{}", first.line);
             }
-            let mut target = row.key.target.to_string();
-            if let Some(symbol) = &row.key.symbol {
-                target = format!("{target}#{symbol}");
-            }
+            let target = row.key.target_text();
             let mut result = match row.action {
                 Action::Accept => format!("{} {arrow} {}", row.state, LinkState::Passed),
                 Action::Record | Action::Remove => row.state.to_string(),

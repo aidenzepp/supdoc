@@ -295,7 +295,7 @@ mod tests {
     use clap::{ColorChoice, CommandFactory};
 
     use super::*;
-    use crate::cli::args::{Command, Limit, ListArgs, SkillCommand};
+    use crate::cli::args::{Command, Limit, ListArgs, SkillCommand, TargetArg};
     use crate::state::LinkState;
 
     /// Parses `args` (without the program name) with an empty environment.
@@ -462,7 +462,10 @@ mod tests {
             (Limit::at_most(100), true)
         );
         assert_eq!(given.limit, Limit::UNLIMITED);
-        assert_eq!(given.target.as_deref(), Some("auth:src/session.rs#login"));
+        assert_eq!(
+            given.target.as_ref().map(TargetArg::typed),
+            Some("auth:src/session.rs#login")
+        );
         assert_eq!(given.state.len(), 2);
     }
 

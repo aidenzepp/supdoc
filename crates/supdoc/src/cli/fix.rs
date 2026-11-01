@@ -24,7 +24,7 @@ use crate::lock::model::Lockfile;
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, OutputError, PathStyle, Report, TextContext, preview_note};
+use crate::output::{Output, PathStyle, Report, TextContext, preview_note};
 use crate::path::AbsolutePath;
 use crate::read::cartridge::Languages;
 use crate::scan::model::{Scan, Scope, TargetState};
@@ -177,7 +177,7 @@ impl Planned {
         };
         output
             .report(&report, true)
-            .map_err(|error| output_failed(&error))?;
+            .map_err(|error| CliError::output_failed("cli-fix-output", "the fix report", &error))?;
         let note = if report.fixes.is_empty() {
             nothing_to_fix(self.broken)
         } else {
@@ -185,7 +185,9 @@ impl Planned {
             let file_count = count(report.files(), "file", "files");
             format!("{fix_count} in {file_count}. {apply_note}")
         };
-        output.note(&note).map_err(|error| output_failed(&error))?;
+        output
+            .note(&note)
+            .map_err(|error| CliError::output_failed("cli-fix-output", "the fix report", &error))?;
         Ok(Outcome::Clean)
     }
 
@@ -266,7 +268,7 @@ impl Planned {
         let ok = write_failed == 0 && !file_changed && lock_failure.is_none();
         output
             .report(&report, ok)
-            .map_err(|error| output_failed(&error))?;
+            .map_err(|error| CliError::output_failed("cli-fix-output", "the fix report", &error))?;
         let note = if !report.fixes.is_empty() {
             let link_count = count(report.fixes.len(), "link", "links");
             let file_count = count(report.files(), "file", "files");
@@ -280,7 +282,9 @@ impl Planned {
             None
         };
         if let Some(note) = note {
-            output.note(&note).map_err(|error| output_failed(&error))?;
+            output.note(&note).map_err(|error| {
+                CliError::output_failed("cli-fix-output", "the fix report", &error)
+            })?;
         }
 
         if let Some(error) = lock_failure {
@@ -314,14 +318,7 @@ impl Planned {
 ///
 /// Returns the scan's own error, such as an unreadable root (74).
 fn scan(config: &Config, scope: &Scope) -> Result<Scan, CliError> {
-    crate::scan::assemble::run(config, &Languages::builtin(), scope).map_err(|error| {
-        CliError::new(
-            error.code(),
-            error.to_string(),
-            error.help(),
-            error.exit_code(),
-        )
-    })
+    crate::scan::assemble::run(config, &Languages::builtin(), scope).map_err(CliError::from)
 }
 
 /// Where each fix's replacement sits in its file once every fix before it in that file is
@@ -458,17 +455,6 @@ fn lock_unwritten(
              to carry the history over, or run `{update}` on them to lock the fixed \
              links afresh without it"
         ),
-        CliError::IO_EXIT_CODE,
-    )
-}
-
-/// The error for a report that could not be written.
-fn output_failed(error: &OutputError) -> CliError {
-    CliError::new(
-        "cli-fix-output",
-        format!("cannot write the fix report: {error}"),
-        "Check that standard output and standard error are open and writable, or redirect both \
-         to a file with `> supdoc.out 2>&1`",
         CliError::IO_EXIT_CODE,
     )
 }
