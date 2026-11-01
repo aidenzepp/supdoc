@@ -12,7 +12,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::config::Config;
-use crate::finding::{Finding, Severity};
+use crate::finding::{Finding, IndexedText, Severity};
 use crate::link::SymbolPath;
 use crate::lock::error::shell_quote;
 use crate::namespace::NamespaceName;
@@ -47,24 +47,25 @@ pub fn run(
     output: &mut Output,
 ) -> Result<Outcome, CliError> {
     let command = command_text(args);
-    let config = load_config(context, output, &command)?;
+    let config = load_config(context, output)?;
     let path = locate(&config, &context.cwd, &args.file)?;
     let file = SourceFile::read(path, &Languages::builtin())
         .map_err(|error| read_failed(&error, config.root(), &args.file))?;
     let table = file.language().symbols(&file);
 
+    let text = IndexedText::new(file.text());
     let (symbols, query, truncated) = if let Some(query) = &args.symbol {
         let symbol = table
             .resolve(file.path(), query)
             .map_err(|error| resolve_failed(&error, config.root(), &args.file))?;
-        (vec![SymbolJson::new(&file, symbol)], Some(query), false)
+        (vec![SymbolJson::new(&text, symbol)], Some(query), false)
     } else {
         let total = table.iter().count();
         let shown = if args.limit == 0 { total } else { args.limit };
         let symbols = table
             .iter()
             .take(shown)
-            .map(|symbol| SymbolJson::new(&file, symbol))
+            .map(|symbol| SymbolJson::new(&text, symbol))
             .collect();
         (symbols, None, total > shown)
     };
@@ -303,7 +304,7 @@ fn syntax_errors(file: &SourceFile, root: &AbsolutePath, again: &str) -> Finding
 /// file with syntax errors.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct ResolveReport {
-    /// The file, relative to the project root. `..` climbs out of it for a file outside.
+    /// The file, relative to the project root.
     file: String,
     /// The `SYMBOL` that was resolved. Left out when listing.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -339,20 +340,14 @@ pub(crate) struct SymbolJson {
 }
 
 impl SymbolJson {
-    /// `symbol` as found in `file`.
-    fn new(file: &SourceFile, symbol: &Symbol) -> Self {
-        let before = file.text().get(..symbol.range.start).unwrap_or_default();
-        let line_start = before.rfind('\n').map_or(0, |newline| newline + 1);
-        let line = before.matches('\n').count() + 1;
-        let column = before
-            .get(line_start..)
-            .map_or(0, |text| text.chars().count())
-            + 1;
+    /// `symbol` as found in the indexed text of its file.
+    fn new(text: &IndexedText<'_>, symbol: &Symbol) -> Self {
+        let (line, column) = text.position(symbol.range.start).unwrap_or((1, 1));
         Self {
             path: symbol.path.to_string(),
             aliases: symbol.aliases.iter().map(SymbolPath::to_string).collect(),
-            line: u32::try_from(line).unwrap_or(u32::MAX),
-            column: u32::try_from(column).unwrap_or(u32::MAX),
+            line,
+            column,
             start: symbol.range.start,
             end: symbol.range.end,
         }
