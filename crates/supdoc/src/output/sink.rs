@@ -213,7 +213,7 @@ impl Output {
             return Ok(());
         }
         let note = if self.settings.format == OutputFormat::Github {
-            github::escape_data(note)
+            github::escape_data(&text::visible(note))
         } else {
             text::visible(note)
         };
