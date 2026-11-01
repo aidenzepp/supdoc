@@ -37,6 +37,21 @@ impl AbsolutePath {
         Self(joined)
     }
 
+    /// Appends `path` and normalizes the result. An absolute `path` replaces `self`, as
+    /// [`Path::join`] does.
+    ///
+    /// Infallible: the result is absolute either way, so no caller needs a fallback.
+    #[must_use]
+    pub fn join_path(&self, path: &Path) -> Self {
+        let mut joined = if path.is_absolute() {
+            PathBuf::new()
+        } else {
+            self.0.clone()
+        };
+        push_normalized(&mut joined, path);
+        Self(joined)
+    }
+
     /// The directory containing this path, or `None` at the filesystem root.
     #[must_use]
     pub fn parent(&self) -> Option<Self> {
@@ -188,6 +203,22 @@ mod tests {
 
     fn relative(raw: &str) -> RelativePath {
         RelativePath::try_from(raw.to_owned()).expect("the fixture path should be relative")
+    }
+
+    #[test]
+    fn join_path_appends_a_relative_path_and_normalizes_it() {
+        assert_eq!(
+            absolute("/repo/docs").join_path(Path::new("../src/./lib.rs")),
+            absolute("/repo/src/lib.rs")
+        );
+    }
+
+    #[test]
+    fn join_path_with_an_absolute_path_replaces_the_base() {
+        assert_eq!(
+            absolute("/repo").join_path(Path::new("/elsewhere/../etc/x.toml")),
+            absolute("/etc/x.toml")
+        );
     }
 
     #[test]

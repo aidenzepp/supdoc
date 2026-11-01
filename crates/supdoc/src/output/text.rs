@@ -93,10 +93,16 @@ fn with_source_column(
     let Some(at) = rest.find(&header).map(|at| at + header.len()) else {
         return rendered.to_owned();
     };
-    let digits = rest[at..]
+    let Some((head, tail)) = rest.split_at_checked(at) else {
+        return rendered.to_owned();
+    };
+    let digits = tail
         .find(|character: char| !character.is_ascii_digit())
-        .unwrap_or(rest.len() - at);
-    format!("{title}\n{}{column}{}", &rest[..at], &rest[at + digits..])
+        .unwrap_or(tail.len());
+    let Some((_, after)) = tail.split_at_checked(digits) else {
+        return rendered.to_owned();
+    };
+    format!("{title}\n{head}{column}{after}")
 }
 
 /// `text` with each `→` spelled `->` when `context` draws in ASCII (07 G12). Finding messages

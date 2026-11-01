@@ -138,8 +138,7 @@ fn locate(config: &Config, cwd: &AbsolutePath, typed: &Path) -> Result<AbsoluteP
             let directory = config
                 .namespace(&name)
                 .ok_or_else(|| unknown_namespace(config, &name))?;
-            // A namespace directory is absolute, so the join is too.
-            AbsolutePath::new(&directory.as_path().join(rest)).unwrap_or_else(|| directory.clone())
+            directory.join_path(Path::new(rest))
         }
         None => absolute(cwd, typed),
     };

@@ -126,8 +126,7 @@ fn target(context: &Context) -> AbsolutePath {
         .config
         .as_deref()
         .unwrap_or_else(|| Path::new(CONFIG_FILE_NAME));
-    AbsolutePath::new(&context.cwd.as_path().join(requested))
-        .unwrap_or_else(|| unreachable!("a path joined onto an absolute directory is absolute"))
+    context.cwd.join_path(requested)
 }
 
 /// The `supdoc init` command that writes what a dry run previewed: with `-c PATH` when the

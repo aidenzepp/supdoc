@@ -26,6 +26,10 @@ indexing_slicing = "deny"
 # That module writes through stdout/stderr handles, which these lints don't flag.
 print_stdout = "deny"
 print_stderr = "deny"
+# String slicing and unreachable!() panic outside the reach of indexing_slicing and panic.
+# Denying both keeps every production panic path visible to the existing no-panic policy.
+string_slice = "deny"
+unreachable = "deny"
 
 # Every dependency is declared here once (08 build DAG, T0) so later tasks never edit this file.
 [workspace.dependencies]

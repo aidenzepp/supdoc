@@ -28,7 +28,9 @@ fn block(run: &Run, marker: &str) -> String {
     let start = output
         .find(marker)
         .unwrap_or_else(|| panic!("the output should have `{marker}`:\n{output}"));
-    let rest = &output[start..];
+    let rest = output
+        .get(start..)
+        .expect("`find` returns a character boundary");
     rest.split("\n\n").next().unwrap_or(rest).to_owned()
 }
 

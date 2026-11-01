@@ -191,10 +191,8 @@ fn combined_schema() -> Result<Value, CliError> {
 
 /// `value` as indented JSON ending in a newline, the form of the files under `schema/`.
 fn pretty(value: &Value) -> String {
-    let mut text = serde_json::to_string_pretty(value)
-        .unwrap_or_else(|_| unreachable!("a JSON value always serializes"));
-    text.push('\n');
-    text
+    // `Value`'s alternate `Display` is serde_json's pretty printer, and it cannot fail.
+    format!("{value:#}\n")
 }
 
 /// The error for a schema that could not be written.

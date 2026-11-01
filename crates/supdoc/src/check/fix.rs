@@ -401,7 +401,10 @@ mod tests {
             .expect("the fixture text should hold the link")
             + 1;
         let range = at..at + old.len();
-        let link_start = text[..at].rfind('[').expect("the fixture link should open");
+        let link_start = text
+            .get(..at)
+            .and_then(|before| before.rfind('['))
+            .expect("the fixture link should open");
         let link_range = link_start..at + old.len() + 1;
         let file: SourcePath = source.parse().expect("the fixture source should be valid");
         let location = |range| {
