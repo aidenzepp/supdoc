@@ -108,9 +108,7 @@ impl Planned {
             })
             .count();
         Ok(Self {
-            plan: plan_fixes(&scan, &|file| {
-                std::fs::read_to_string(config.root().as_path().join(file.as_str())).ok()
-            }),
+            plan: plan_fixes(&scan),
             config,
             lock,
             broken,
@@ -317,6 +315,7 @@ fn new_ranges(done: &[&PlannedFix]) -> Vec<Option<std::ops::Range<usize>>> {
             file: this,
             range,
             replacement,
+            scanned: _,
         } = &planned.fix;
         if file != Some(this) {
             file = Some(this);
@@ -546,6 +545,7 @@ impl FixRecord {
             file,
             range,
             replacement,
+            scanned: _,
         } = &planned.fix;
         let finding = &planned.finding;
         // A planned fix lies inside its finding's location and snippet, so these slices exist.
@@ -555,8 +555,16 @@ impl FixRecord {
             .map_or((0, 0, range.clone()), |location| {
                 (location.line, location.column, location.range.clone())
             });
-        let before = planned.before.clone();
-        let old_link = planned.link_text.clone();
+        let before = planned.fix.scanned.to_string();
+        // The snippet is a bounded window; the whole link is shown only when the window holds it.
+        let scanned = |wanted: &std::ops::Range<usize>| -> Option<String> {
+            let snippet = finding.snippet.as_ref()?;
+            let origin = link_range.start.checked_sub(snippet.highlight.start)?;
+            let from = wanted.start.checked_sub(origin)?;
+            let to = wanted.end.checked_sub(origin)?;
+            snippet.text.get(from..to).map(str::to_owned)
+        };
+        let old_link = scanned(&link_range).unwrap_or_else(|| before.clone());
         let new_link = range
             .start
             .checked_sub(link_range.start)
@@ -1399,7 +1407,7 @@ mod tests {
             })
             .chain(&scan.findings)
             .filter_map(|finding| {
-                let fix = finding.fix.as_ref()?;
+                let fix = finding.fix.as_deref()?;
                 Some((finding.code.to_owned(), fix.replacement.clone()))
             })
             .collect();
@@ -1409,18 +1417,16 @@ mod tests {
             "the fixture should offer three fixes: {fixable:?}"
         );
 
-        let planned: BTreeSet<(String, String)> = plan_fixes(&scan, &|file| {
-            fs::read_to_string(project.path(file.as_str())).ok()
-        })
-        .fixes
-        .iter()
-        .map(|planned| {
-            (
-                planned.finding.code.to_owned(),
-                planned.fix.replacement.clone(),
-            )
-        })
-        .collect();
+        let planned: BTreeSet<(String, String)> = plan_fixes(&scan)
+            .fixes
+            .iter()
+            .map(|planned| {
+                (
+                    planned.finding.code.to_owned(),
+                    planned.fix.replacement.clone(),
+                )
+            })
+            .collect();
 
         assert_eq!(planned, fixable);
     }

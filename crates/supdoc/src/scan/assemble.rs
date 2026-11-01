@@ -298,10 +298,13 @@ fn link_finding(
         LinkError::UnknownNamespace { prefix, known, .. } => {
             let close = targets::close_match(prefix, known.iter().map(NamespaceName::as_str));
             let fix = close.zip(written.and_then(|written| written.prefix_range(prefix)));
-            let fix = fix.map(|(close, range)| Fix {
-                file: location.file.clone(),
-                range,
-                replacement: close.to_owned(),
+            let fix = fix.and_then(|(close, range)| {
+                Some(Fix {
+                    file: location.file.clone(),
+                    scanned: written?.text_at(&range)?,
+                    range,
+                    replacement: close.to_owned(),
+                })
             });
             let help = namespace_help(prefix, close, config);
             (CODE_UNKNOWN_NAMESPACE, help, fix)

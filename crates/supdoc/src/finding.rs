@@ -20,7 +20,7 @@ pub struct Finding {
     /// What to do next.
     pub help: Option<String>,
     /// An exact edit, present only when there's exactly one correct fix. The fixer never guesses.
-    pub fix: Option<Fix>,
+    pub fix: Option<Box<Fix>>,
     /// The source lines this finding covers, captured when it is created so rendering never reads
     /// files (07 G11).
     pub snippet: Option<Snippet>,
@@ -63,7 +63,7 @@ impl Finding {
     #[must_use]
     pub fn with_fix(self, fix: Fix) -> Self {
         Self {
-            fix: Some(fix),
+            fix: Some(Box::new(fix)),
             ..self
         }
     }
@@ -221,6 +221,9 @@ pub struct Fix {
     pub range: Range<usize>,
     /// The new text.
     pub replacement: String,
+    /// The bytes `range` held in the scanned text. `supdoc fix` applies the edit only if the file
+    /// still holds them. Never serialized: this type has no serde derive.
+    pub scanned: Box<str>,
 }
 
 /// A bounded window of the lines a finding's range covers, captured when the finding is created (07 G11).
@@ -348,19 +351,25 @@ mod tests {
     #[test]
     fn snippet_of_a_long_line_is_a_window() {
         let anchor = "[a](b.rs#c)";
-        // An odd offset into two-byte characters makes every window edge land mid-character.
-        let filler = "é".repeat(500_000);
-        let text = format!("x{filler}{anchor}{filler}\nnext");
-        let start = 1 + filler.len();
-        assert_window(&text, start..start + anchor.len(), anchor.len(), 1);
+        // Three-byte characters: the context distance (200) and the highlight cap (1024) are not
+        // multiples of 3, so every window edge lands inside a character and must be moved to a
+        // boundary. An edge left where it fell makes the capture fail.
+        let filler = "€".repeat(500_000);
+        let text = format!("{filler}{anchor}{filler}\nnext");
+        assert_window(
+            &text,
+            filler.len()..filler.len() + anchor.len(),
+            anchor.len(),
+            1,
+        );
 
         // A highlight over the cap is cut short, on a boundary.
-        let wide = "é".repeat(5_000);
+        let wide = "€".repeat(5_000);
         let text = format!("{filler}{wide}{filler}");
         assert_window(
             &text,
             filler.len()..filler.len() + wide.len(),
-            SNIPPET_MAX_HIGHLIGHT,
+            SNIPPET_MAX_HIGHLIGHT - SNIPPET_MAX_HIGHLIGHT % 3,
             1,
         );
 
@@ -375,9 +384,8 @@ mod tests {
         assert_eq!(snippet.first_line, 2);
 
         // Many findings on one huge line each copy only a window.
-        let huge = format!("x{filler}");
-        for offset in (0..1000).map(|i| 1 + i * 998) {
-            assert_window(&huge, offset..offset + 2, 2, 1);
+        for offset in (0..1000).map(|i| i * 999) {
+            assert_window(&filler, offset..offset + 3, 3, 1);
         }
     }
 
@@ -466,6 +474,7 @@ mod tests {
             file: source("docs/guide.md"),
             range: range_of("sub"),
             replacement: "minus".to_owned(),
+            scanned: "sub".into(),
         };
         let snippet =
             Snippet::capture(GUIDE, range_of("add")).expect("the range should be capturable");
@@ -484,7 +493,7 @@ mod tests {
                 location: Some(location),
                 message: "no symbol `sub`".to_owned(),
                 help: Some("did you mean `minus`?".to_owned()),
-                fix: Some(fix),
+                fix: Some(Box::new(fix)),
                 snippet: Some(snippet),
             },
         );
