@@ -29,6 +29,7 @@ use crate::lock::io::write_atomically;
 use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
 use crate::namespace::NamespaceName;
 use crate::output::json::{Envelope, LocationJson};
+use crate::output::paths::relative_or_absolute;
 use crate::output::text::{render_finding, visible};
 use crate::output::{Output, OutputError, Report, TextContext, preview_note};
 use crate::path::AbsolutePath;
@@ -317,7 +318,7 @@ impl Plan {
             notes.push(format!(
                 "{} also defines `{}` and was left as it is, so `{}` still names its directory \
                  there.",
-                parent.display(),
+                relative_or_absolute(&self.root, parent),
                 self.old,
                 self.old
             ));
@@ -479,7 +480,7 @@ impl ConfigEdit {
         output: &mut Output,
     ) -> Result<Self, CliError> {
         let text = read_config(file, context, output)?;
-        let shown = shown_from_root(file, root);
+        let shown = relative_or_absolute(root, file);
         let relative = file.strip_prefix(root).map(Path::to_path_buf);
         let Some(key) = namespace_key(&text, old) else {
             return Err(CliError::new(
@@ -726,7 +727,7 @@ fn target_exists(
         _ if old == new => format!("`{new}` is already the namespace's name"),
         Some(file) => format!(
             "a namespace named `{new}` already exists, defined in {}",
-            shown_from_root(file, config.root())
+            relative_or_absolute(config.root(), file)
         ),
         None => format!("a namespace named `{new}` already exists"),
     };
@@ -739,15 +740,6 @@ fn target_exists(
             invocation(context, "namespace list")
         ),
         CliError::REFUSED_EXIT_CODE,
-    )
-}
-
-/// `file` as rename's messages name it: relative to the project `root`, or absolute when it is
-/// outside the root, as a config the project extends often is.
-fn shown_from_root(file: &AbsolutePath, root: &AbsolutePath) -> String {
-    file.strip_prefix(root).map_or_else(
-        || file.display().to_string(),
-        |relative| relative.display().to_string(),
     )
 }
 
@@ -919,7 +911,7 @@ pub(crate) enum RenameKind {
 
 impl RenameKind {
     /// The word text output starts the line with.
-    const fn label(self) -> &'static str {
+    const fn word(self) -> &'static str {
         match self {
             Self::Config => "config",
             Self::Link => "link",
@@ -957,7 +949,7 @@ impl Report for RenameReport {
             writeln!(
                 out,
                 "{}  {}  {}  {arrow}  {}",
-                change.kind.label(),
+                change.kind.word(),
                 visible(&place),
                 visible(&change.before),
                 visible(&change.after),

@@ -153,18 +153,30 @@ impl Report for ConfigShowReport {
         match self.chain.split_first() {
             None => writeln!(out, "config     (none; defaults)")?,
             Some((child, parents)) => {
-                writeln!(out, "config     {}", shown(context, child))?;
+                writeln!(
+                    out,
+                    "config     {}",
+                    visible(&context.paths.text_absolute(child))
+                )?;
                 for parent in parents {
-                    writeln!(out, "extends    {}", shown(context, parent))?;
+                    writeln!(
+                        out,
+                        "extends    {}",
+                        visible(&context.paths.text_absolute(parent))
+                    )?;
                 }
             }
         }
-        writeln!(out, "lockfile   {}", shown(context, &self.lock))?;
+        writeln!(
+            out,
+            "lockfile   {}",
+            visible(&context.paths.text_absolute(&self.lock))
+        )?;
         render_patterns(context, "include", &self.include, out)?;
         render_patterns(context, "exclude", &self.exclude, out)?;
         let line_endings = &self.features.hash.line_endings;
         let origin = match &line_endings.defined_in {
-            Some(file) => format!("(from {})", shown(context, file)),
+            Some(file) => format!("(from {})", visible(&context.paths.text_absolute(file))),
             None => "(default)".to_owned(),
         };
         writeln!(out, "line-endings  {}  {origin}", line_endings.value)?;
@@ -173,8 +185,8 @@ impl Report for ConfigShowReport {
                 out,
                 "namespace  {} {arrow} {}  ({}){}",
                 visible(&namespace.name),
-                shown(context, &namespace.folder),
-                shown(context, &namespace.defined_in),
+                visible(&context.paths.text_absolute(&namespace.folder)),
+                visible(&context.paths.text_absolute(&namespace.defined_in)),
                 missing_mark(namespace),
             )?;
         }
@@ -230,11 +242,15 @@ impl Report for NamespaceListReport {
             write!(
                 out,
                 "{name:<width$}  {arrow}  {}{}",
-                shown(context, &namespace.folder),
+                visible(&context.paths.text_absolute(&namespace.folder)),
                 missing_mark(namespace),
             )?;
             if context.verbosity >= Verbosity::Verbose {
-                write!(out, "  (from {})", shown(context, &namespace.defined_in))?;
+                write!(
+                    out,
+                    "  (from {})",
+                    visible(&context.paths.text_absolute(&namespace.defined_in))
+                )?;
             }
             writeln!(out)?;
         }
@@ -379,7 +395,7 @@ fn render_patterns(
         visible(&patterns.patterns.join(", "))
     };
     let origin = match &patterns.file {
-        Some(file) => format!("(from {})", shown(context, file)),
+        Some(file) => format!("(from {})", visible(&context.paths.text_absolute(file))),
         None => "(default)".to_owned(),
     };
     writeln!(out, "{key:<10} {list}  {origin}")
@@ -393,11 +409,6 @@ const fn missing_mark(namespace: &NamespaceJson) -> &'static str {
 /// The arrow between a namespace and its directory.
 const fn arrow(context: &TextContext) -> &'static str {
     if context.unicode { "→" } else { "->" }
-}
-
-/// `path` as text output shows it: relative to the current directory.
-fn shown(context: &TextContext, path: &AbsolutePath) -> String {
-    visible(&context.paths.text_absolute(path))
 }
 
 #[cfg(test)]
