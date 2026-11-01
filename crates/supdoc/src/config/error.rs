@@ -1,6 +1,7 @@
 //! Config errors: a stable code, a one-line message and a separate hint for each.
 
 use std::fmt;
+use std::io::ErrorKind;
 use std::ops::Range;
 
 use crate::lock::error::shell_quote;
@@ -201,31 +202,32 @@ impl ConfigError {
     }
 
     /// What to do next, naming any file relative to `cwd`, the directory supdoc runs in, so a
-    /// command in the help runs as written.
-    ///
-    /// `None` when the message is already the fix.
+    /// command in the help runs as written. Every error has one.
     #[must_use]
-    pub fn help_from(&self, cwd: &AbsolutePath) -> Option<String> {
+    pub fn help_from(&self, cwd: &AbsolutePath) -> String {
         self.hint(&|file| relative_to(cwd, file))
+            .unwrap_or_else(|| GLOB_OR_SYNTAX_HELP.to_owned())
     }
 
     /// What to do next, naming any file as `show` writes it.
     fn hint(&self, show: &dyn Fn(&AbsolutePath) -> String) -> Option<String> {
         match self {
-            Self::NotFound { .. } => Some(
-                "Check the `--config` path, or leave out `--config` to search upward from the \
-                 current directory"
-                    .to_owned(),
-            ),
-            Self::Read { .. } => Some(
-                "Give the current user read access, or pass `--config` with a readable file"
-                    .to_owned(),
-            ),
+            Self::NotFound { path } => {
+                let config = shell_quote(&show(path));
+                Some(format!(
+                    "Create it with `supdoc -c {config} init`, or leave out `--config` to search \
+                     upward from the current directory"
+                ))
+            }
+            Self::Read { path, error } => Some(read_help(&shell_quote(&show(path)), error.kind())),
             Self::Parse { error, .. } => parse_help(error.message()),
-            Self::ExtendsMissing { .. } => Some(
-                "Point `extends` at an existing supdoc.config.toml, relative to this file"
-                    .to_owned(),
-            ),
+            Self::ExtendsMissing { resolved, .. } => {
+                let resolved = shell_quote(&show(resolved));
+                Some(format!(
+                    "Create it with `supdoc -c {resolved} init`, or point `extends` at an \
+                     existing supdoc.config.toml, relative to this file"
+                ))
+            }
             Self::ExtendsDirectory { suggestion, .. } => Some(match suggestion {
                 Some(file) => format!("Use `extends = \"{file}\"`"),
                 None => "Point `extends` at a supdoc.config.toml file, not a directory".to_owned(),
@@ -269,6 +271,24 @@ impl ConfigError {
     }
 }
 
+/// The help for a parse error with no hint of its own: a bad glob or a TOML syntax error.
+const GLOB_OR_SYNTAX_HELP: &str = "Fix the text at the line shown. A list is written \
+     `include = [\"docs\"]` and a glob like `docs/**/*.md`";
+
+/// The help for a config file that could not be read, chosen from why. `file` is already quoted
+/// for a shell. The file may be reached through `extends`, so `--config` is not offered.
+fn read_help(file: &str, kind: ErrorKind) -> String {
+    match kind {
+        ErrorKind::PermissionDenied => {
+            format!("Give the current user read access, for example `chmod u+r {file}`")
+        }
+        ErrorKind::InvalidData => {
+            format!("Save {file} as UTF-8 text: supdoc cannot read any other encoding")
+        }
+        _ => format!("Check that {file} is a file this user can read, for example `cat {file}`"),
+    }
+}
+
 /// The hint for a parse error, chosen from the message the value types wrote.
 ///
 /// The types raise their errors through serde, which keeps only the text, so this reads the text
@@ -293,6 +313,12 @@ fn parse_help(message: &str) -> Option<String> {
             "Write a list, such as `[\"{value}\"]`: `include` and `exclude` take a list of \
              patterns even when there is only one"
         ))
+    } else if let Some(form) = message
+        .strip_prefix("invalid type:")
+        .and_then(|_| message.rsplit(", expected ").next())
+        .map(type_form)
+    {
+        Some(form)
     } else if message.contains("is an absolute path") {
         Some("Write the path relative to this config file, such as `services/auth`".to_owned())
     } else if message.ends_with("leaves this config's directory") {
@@ -303,6 +329,25 @@ fn parse_help(message: &str) -> Option<String> {
         )
     } else {
         None
+    }
+}
+
+/// The help for a value of the wrong type, from the type the message says was expected.
+fn type_form(expected: &str) -> String {
+    match expected {
+        "a sequence" => "`include` and `exclude` take a list of patterns: write \
+                         `include = [\"docs\"]`"
+            .to_owned(),
+        "a string" => "`extends` and each namespace take a path in quotes: write \
+                       `extends = \"../supdoc.config.toml\"`"
+            .to_owned(),
+        "a map" | "a table" => "`namespaces` and `features` are tables: write `[namespaces]` on \
+                                its own line, then `docs = \"docs\"` beneath it"
+            .to_owned(),
+        _ => format!(
+            "Rewrite the value as {expected}: `include = [\"docs\"]` is a list, \
+             `extends = \"base/supdoc.config.toml\"` is a path"
+        ),
     }
 }
 
