@@ -129,6 +129,16 @@ fn assemble(
 
     let mut links = targets::resolve(config, languages, &mut parsed, found.occurrences);
     add_broken(&mut links, found.broken);
+    let keyless_error_sources = found
+        .unkeyed
+        .iter()
+        .filter_map(|finding| {
+            finding
+                .location
+                .as_ref()
+                .map(|location| location.file.clone())
+        })
+        .collect();
     findings.extend(found.unkeyed);
     findings.sort_by(|left, right| {
         position(left)
@@ -140,6 +150,7 @@ fn assemble(
         links,
         findings,
         unread_sources,
+        keyless_error_sources,
         unread_dirs,
     };
     Ok((scan, parsed))

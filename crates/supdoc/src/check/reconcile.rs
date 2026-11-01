@@ -58,11 +58,7 @@ fn reconcile_with(
         .filter(|(key, _)| scope.contains(&key.source))
         .collect();
 
-    let keyless_error_sources = scan
-        .findings
-        .iter()
-        .filter(|finding| finding.code.starts_with("link-") && finding.severity == Severity::Error)
-        .filter_map(|finding| finding.location.as_ref().map(|location| &location.file));
+    let keyless_error_sources = scan.keyless_error_sources.iter();
     let broken_link_sources = scan
         .links
         .iter()
@@ -604,8 +600,13 @@ mod tests {
             let edited = key("docs/edited.md", Some("add"));
             let removed = key("docs/gone.md", Some("add"));
             let mut scan = Scan::default();
-            scan.findings
-                .push(malformed_link_in("docs/edited.md", code));
+            let finding = malformed_link_in("docs/edited.md", code);
+            let _new = scan.keyless_error_sources.insert(
+                "docs/edited.md"
+                    .parse()
+                    .expect("the fixture source should be valid"),
+            );
+            scan.findings.push(finding);
 
             let report = reconcile(
                 &scan,
@@ -629,6 +630,21 @@ mod tests {
                 "{code}: the link error still fails the check",
             );
         }
+    }
+
+    #[test]
+    fn keyless_error_source_is_unjudged_whatever_its_finding_code_is() {
+        let edited = key("docs/edited.md", Some("add"));
+        let mut scan = Scan::default();
+        let _new = scan.keyless_error_sources.insert(edited.source.clone());
+
+        let report = reconcile(&scan, &lock_of(&[(&edited, b"v1")]), &Scope::All);
+
+        assert_eq!(
+            state_of(&report, &edited),
+            None,
+            "membership in `keyless_error_sources`, not a code prefix, must keep the entry",
+        );
     }
 
     #[test]
