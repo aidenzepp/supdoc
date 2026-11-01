@@ -50,6 +50,26 @@ fn check_github_matches_golden() {
 }
 
 #[test]
+fn check_github_with_workspace_matches_golden() {
+    // A workspace below the project root makes `docs/` files workspace-relative (`api.md`) and
+    // leaves `supdoc.lock`, outside it, absolute.
+    let project = Project::dirty();
+    let workspace = project
+        .path()
+        .join("docs")
+        .canonicalize()
+        .expect("the fixture's docs directory should exist");
+    let workspace = workspace
+        .to_str()
+        .expect("the fixture path should be UTF-8");
+    let run = project.run_with(
+        &["check", "--output", "github"],
+        &[("GITHUB_WORKSPACE", workspace)],
+    );
+    insta::assert_snapshot!("check_github_workspace", run.transcript());
+}
+
+#[test]
 fn update_preview_text_matches_golden() {
     golden("update_preview", &Project::dirty(), &["update"]);
 }

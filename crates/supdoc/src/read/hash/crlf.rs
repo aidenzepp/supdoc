@@ -59,8 +59,10 @@ fn assert_crlf_matches_lf(id: &str, lf: &str) {
             "{id}: symbol paths differ"
         );
         assert_eq!(
-            hash_symbol(&lf_file, lf_symbol, NORMALIZE),
-            hash_symbol(&crlf_file, crlf_symbol, NORMALIZE),
+            hash_symbol(&lf_file, lf_symbol, NORMALIZE)
+                .expect("the symbol should lie in its own file"),
+            hash_symbol(&crlf_file, crlf_symbol, NORMALIZE)
+                .expect("the symbol should lie in its own file"),
             "{id}: `{}` hashes differently under CRLF (LF range {:?}, CRLF range {:?})",
             lf_symbol.path,
             lf_symbol.range,

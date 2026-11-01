@@ -256,8 +256,7 @@ fn switching_line_endings_to_exact_refuses_until_update_migrates_the_lock() {
     let refused = project.supdoc(&["check"]);
     let _ = refused.assert_exit(78);
     assert!(
-        refused.stdout.contains("lock-settings-mismatch")
-            || refused.stderr.contains("lock-settings-mismatch"),
+        refused.stderr.contains("lock-settings-mismatch") && refused.stdout.is_empty(),
         "check should refuse with lock-settings-mismatch:\nstdout:\n{}\nstderr:\n{}",
         refused.stdout,
         refused.stderr
@@ -297,7 +296,7 @@ fn update_with_only_broken_links_left_says_nothing_to_update_with_and_without_ye
         let run = project.supdoc(args);
         let _ = run.assert_exit(0);
         assert!(
-            run.stderr.contains("resolve-not-found") || run.stdout.contains("resolve-not-found"),
+            run.stdout.contains("resolve-not-found"),
             "`supdoc {}` should still report the broken link:\nstdout:\n{}\nstderr:\n{}",
             run.args,
             run.stdout,

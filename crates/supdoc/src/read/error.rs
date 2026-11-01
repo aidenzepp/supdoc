@@ -7,6 +7,7 @@
 use std::fmt::{self, Display, Formatter};
 
 use crate::link::SymbolPath;
+use crate::lock::error::shell_quote;
 use crate::path::AbsolutePath;
 
 /// Why a file couldn't be read and parsed.
@@ -54,10 +55,13 @@ pub enum ReadError {
         supported: Vec<&'static str>,
     },
 
-    /// tree-sitter produced no tree. supdoc sets no timeout or cancellation, so this is a bug.
+    /// A condition supdoc guarantees cannot happen did (tree-sitter producing no tree, a symbol
+    /// whose range lies outside its file), so this is a bug.
     Internal {
-        /// The file being parsed.
+        /// The file being read.
         path: AbsolutePath,
+        /// What went wrong, as a short phrase that reads before "for <file>".
+        reason: &'static str,
     },
 }
 
@@ -84,7 +88,7 @@ impl ReadError {
             | Self::NotUtf8 { path, .. }
             | Self::TooLarge { path, .. }
             | Self::UnsupportedLanguage { path, .. }
-            | Self::Internal { path } => path,
+            | Self::Internal { path, .. } => path,
         }
     }
 
@@ -103,8 +107,8 @@ impl ReadError {
             Self::UnsupportedLanguage { extension, .. } => {
                 format!("no language for `.{extension}` files ({shown})")
             }
-            Self::Internal { .. } => {
-                format!("tree-sitter returned no tree for {shown} (supdoc bug)")
+            Self::Internal { reason, .. } => {
+                format!("{reason} for {shown} (supdoc bug)")
             }
         }
     }
@@ -238,7 +242,10 @@ impl ResolveError {
     /// What to do next, naming the file as `shown` instead of by its absolute path.
     #[must_use]
     pub fn help_naming(&self, shown: &dyn Display) -> String {
-        self.help_listing(&format!("`supdoc resolve {shown}` lists every symbol"))
+        self.help_listing(&format!(
+            "`supdoc resolve {}` lists every symbol",
+            shell_quote(&shown.to_string())
+        ))
     }
 
     /// What to do next, for a `shown` path relative to the project root. A scan cannot know the
@@ -246,7 +253,8 @@ impl ResolveError {
     #[must_use]
     pub fn help_from_root(&self, shown: &dyn Display) -> String {
         self.help_listing(&format!(
-            "run `supdoc resolve {shown}` from the project root to list its symbols"
+            "run `supdoc resolve {}` from the project root to list its symbols",
+            shell_quote(&shown.to_string())
         ))
     }
 

@@ -39,67 +39,19 @@ pub fn markdown_regions(file: &SourceFile) -> Vec<MarkdownRegion> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use std::path::Path;
-    use std::sync::OnceLock;
 
     use super::*;
+    use crate::cartridges::markdown::cartridge::cartridge;
     use crate::path::AbsolutePath;
-    use crate::read::cartridge::{Cartridge, CompiledQueries, LanguageId, SymbolTable};
-
-    /// The Markdown block grammar with this module's regions, standing in for the Markdown
-    /// cartridge until it is registered.
-    #[derive(Debug)]
-    pub(crate) struct Markdown {
-        /// The grammar, created on first use.
-        grammar: OnceLock<tree_sitter::Language>,
-        /// Empty queries, compiled on first use.
-        queries: OnceLock<CompiledQueries>,
-    }
-
-    impl Cartridge for Markdown {
-        fn id(&self) -> LanguageId {
-            LanguageId::new("markdown")
-        }
-
-        fn extensions(&self) -> &'static [&'static str] {
-            &["md"]
-        }
-
-        fn grammar(&self) -> &tree_sitter::Language {
-            self.grammar.get_or_init(|| tree_sitter_md::LANGUAGE.into())
-        }
-
-        fn queries(&self) -> &CompiledQueries {
-            self.queries.get_or_init(|| {
-                let empty = || {
-                    tree_sitter::Query::new(self.grammar(), "")
-                        .expect("an empty query should compile against any grammar")
-                };
-                CompiledQueries::new(empty(), empty())
-            })
-        }
-
-        fn symbols(&self, _file: &SourceFile) -> SymbolTable {
-            SymbolTable::default()
-        }
-
-        fn markdown_regions(&self, file: &SourceFile) -> Vec<MarkdownRegion> {
-            markdown_regions(file)
-        }
-    }
-
-    /// The stand-in Markdown cartridge.
-    pub(crate) static MARKDOWN: Markdown = Markdown {
-        grammar: OnceLock::new(),
-        queries: OnceLock::new(),
-    };
 
     /// `text` parsed as `/repo/docs/guide.md`.
-    pub(crate) fn markdown_file(text: &str) -> SourceFile {
+    fn markdown_file(text: &str) -> SourceFile {
         let path = AbsolutePath::new(Path::new("/repo/docs/guide.md"))
             .expect("the fixture path should be absolute");
-        SourceFile::parse(path, text.to_owned(), &MARKDOWN)
+        let markdown = cartridge().expect("the built-in Markdown cartridge should load");
+        SourceFile::parse(path, text.to_owned(), markdown)
             .expect("tree-sitter should return a tree")
     }
 
