@@ -141,14 +141,23 @@ fn jsonl_output_has_nothing_but_json_lines_on_stdout() {
         let run = project.run(&with_format(args, &["--jsonl"]));
 
         assert_eq!(run.code, Some(0), "`supdoc {}`: {}", run.args, run.stderr);
+        let mut last = None;
         for line in run.stdout.lines() {
             let record: Result<serde_json::Value, _> = serde_json::from_str(line);
             assert!(
-                record.is_ok_and(|record| record.is_object()),
+                record.as_ref().is_ok_and(serde_json::Value::is_object),
                 "`supdoc {}` printed a line that isn't a JSON object: {line}",
                 run.args
             );
+            last = record.ok();
         }
+        assert_eq!(
+            last.as_ref().and_then(|record| record.get("type")),
+            Some(&serde_json::json!("summary")),
+            "`supdoc {}` should end its JSONL stream with the summary line:\n{}",
+            run.args,
+            run.stdout
+        );
         assert_eq!(run.stderr, "", "`supdoc {}` stderr", run.args);
     }
 }
