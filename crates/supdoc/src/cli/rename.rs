@@ -21,7 +21,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::config::{CONFIG_FILE_NAME, Config, ConfigError};
-use crate::finding::{Finding, Location};
+use crate::finding::{Finding, IndexedText, Location};
 use crate::link::destination::parse_destination;
 use crate::link::{LinkKey, SourcePath, Target};
 use crate::lock::error::LockError;
@@ -474,7 +474,7 @@ impl ConfigEdit {
         let location = relative
             .as_deref()
             .and_then(|path| SourcePath::from_relative(path).ok())
-            .and_then(|source| Location::in_text(source, &text, key.clone()));
+            .and_then(|source| IndexedText::new(&text).locate(source, key.clone()));
         Ok(Self {
             file: file.clone(),
             shown,
@@ -554,10 +554,11 @@ impl SourceEdit {
         if ranges.is_empty() {
             return None;
         }
+        let indexed = IndexedText::new(text);
         let links = ranges
             .into_iter()
             .map(|destination| LinkEdit {
-                location: Location::in_text(source.clone(), text, destination.clone()),
+                location: indexed.locate(source.clone(), destination.clone()),
                 destination,
             })
             .collect();
