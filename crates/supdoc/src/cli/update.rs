@@ -21,7 +21,6 @@ use crate::check::reconcile::reconcile_in;
 use crate::finding::Finding;
 use crate::hash::LineEndings;
 use crate::link::LinkKey;
-use crate::lock::error::shell_quote;
 use crate::output::json::Envelope;
 use crate::output::text::{render_finding, visible};
 use crate::output::{Output, OutputError, PathStyle, Report, Summary, TextContext, preview_note};
@@ -61,7 +60,7 @@ const MIGRATION_STATES: [LinkState; 3] = [LinkState::Failed, LinkState::New, Lin
 /// written (74).
 pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let config = load_config(context, output)?;
-    let scope = scope(&args.paths, &context.cwd, config.root())?;
+    let scope = scope(&args.paths, &config, context)?;
     let LockForUpdate {
         lock,
         settings,
@@ -106,7 +105,7 @@ pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<
             &["--yes"],
         ),
     );
-    let report = UpdateReport::new(&model, &plan, &args.state, applied, &paths);
+    let report = UpdateReport::new(&model, &plan, &args.state, applied, &paths, context);
     output
         .report(&report, true)
         .map_err(|error| output_failed(&error))?;
@@ -165,13 +164,15 @@ pub(crate) struct UpdateReport {
 
 impl UpdateReport {
     /// The report of `plan`, made from `model`, the reconciled links it was planned from. `paths`
-    /// names each broken link's source in its `supdoc fix` hint, relative to the current directory.
+    /// names each broken link's source in its `supdoc fix` hint, relative to the current directory,
+    /// and `context` keeps the hint's `-c` so it loads the same config.
     fn new(
         model: &CheckModel,
         plan: &UpdatePlan,
         states: &[LinkState],
         applied: bool,
         paths: &PathStyle,
+        context: &Context,
     ) -> Self {
         let links: BTreeMap<&LinkKey, &LinkReport> =
             model.links.iter().map(|link| (&link.key, link)).collect();
@@ -194,7 +195,7 @@ impl UpdateReport {
                     model
                         .links
                         .iter()
-                        .filter_map(|link| broken_finding(link, paths)),
+                        .filter_map(|link| broken_finding(link, paths, context)),
                 )
                 .collect(),
             rows,
@@ -474,7 +475,7 @@ fn render_rows(context: &TextContext, rows: &[ChangeRow], out: &mut dyn Write) -
 /// Its help adds that update can't record the link. It points at `supdoc fix` only when the
 /// finding carries a fix, so the command repairs that cause, and names the link's source as
 /// `paths` shows text: relative to the current directory, so the command runs where this one did.
-fn broken_finding(link: &LinkReport, paths: &PathStyle) -> Option<Finding> {
+fn broken_finding(link: &LinkReport, paths: &PathStyle, context: &Context) -> Option<Finding> {
     if link.state != LinkState::Broken {
         return None;
     }
@@ -486,8 +487,8 @@ fn broken_finding(link: &LinkReport, paths: &PathStyle) -> Option<Finding> {
     }
     let pointer = if finding.fix.is_some() {
         format!(
-            "update can't record a broken link; repair it with `supdoc fix {} --yes`",
-            shell_quote(&paths.text(&link.key.source))
+            "update can't record a broken link; repair it with `{}`",
+            command_line(context, "fix", &[paths.text(&link.key.source)], &["--yes"])
         )
     } else {
         "update can't record a broken link until it is repaired".to_owned()
@@ -999,6 +1000,28 @@ mod tests {
             "text shows the finding too: {}",
             text.stdout
         );
+    }
+
+    #[test]
+    fn update_fix_hint_keeps_the_config_when_run_from_another_directory() {
+        let project = Project::new();
+        project.write("supdoc.config.toml", "");
+        project.write("docs/broken.md", "See [gone](../src/lib.rs#ad) here.\n");
+
+        let json = project.update_in(
+            "docs",
+            &["-c", "../supdoc.config.toml", "--json", "update"],
+            false,
+        );
+
+        let help = at(&json.json(), "/findings/0/help").to_string();
+        let printed = "supdoc -c ../supdoc.config.toml fix broken.md --yes";
+        assert!(
+            help.contains(&format!("`{printed}`")),
+            "the hint should keep -c: {help}"
+        );
+        let words: Vec<&str> = printed.split(' ').collect();
+        let _parsed = Cli::try_parse_from(&words).expect("the printed fix command should parse");
     }
 
     #[test]

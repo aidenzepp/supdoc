@@ -102,7 +102,7 @@ impl Planned {
         output: &mut Output,
     ) -> Result<Self, CliError> {
         let config = load_config(context, output)?;
-        let scope = scope(paths, &context.cwd, config.root())?;
+        let scope = scope(paths, &config, context)?;
         let lock = read_lock(&config, &context.cwd)?;
         let scan = scan(&config, &scope)?;
         let broken = scan
