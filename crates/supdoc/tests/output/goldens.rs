@@ -50,6 +50,26 @@ fn check_github_matches_golden() {
 }
 
 #[test]
+fn check_github_with_workspace_matches_golden() {
+    // A workspace below the project root makes `docs/` files workspace-relative (`api.md`) and
+    // leaves `supdoc.lock`, outside it, absolute.
+    let project = Project::dirty();
+    let workspace = project
+        .path()
+        .join("docs")
+        .canonicalize()
+        .expect("the fixture's docs directory should exist");
+    let workspace = workspace
+        .to_str()
+        .expect("the fixture path should be UTF-8");
+    let run = project.run_with(
+        &["check", "--output", "github"],
+        &[("GITHUB_WORKSPACE", workspace)],
+    );
+    insta::assert_snapshot!("check_github_workspace", run.transcript());
+}
+
+#[test]
 fn update_preview_text_matches_golden() {
     golden("update_preview", &Project::dirty(), &["update"]);
 }
@@ -198,4 +218,13 @@ fn skill_install_global_preview_text_matches_golden() {
             .with_home(home_dir.path())
             .transcript()
     );
+}
+
+#[test]
+fn check_color_always_on_a_capable_terminal_matches_golden() {
+    // Every other golden clears the environment, so none pins the Unicode glyphs or the ANSI
+    // styling that only appear with color on and `TERM` set.
+    let project = Project::dirty();
+    let run = project.run_with(&["check", "--color", "always"], &[("TERM", "xterm")]);
+    insta::assert_snapshot!("check_color_unicode", run.transcript());
 }

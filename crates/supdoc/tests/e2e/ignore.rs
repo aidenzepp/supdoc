@@ -19,7 +19,15 @@ fn a_named_path_beside_a_gitignore_symlinked_out_of_the_root_is_not_quoted() {
     .expect("the symlink should be creatable");
 
     let run = project.supdoc_in("services/web", &["check", "docs/guide.md"]);
+    let list = project.supdoc_in("services/web", &["--json", "list"]);
 
+    let _ = run.assert_exit(1);
+    let _ = list.assert_exit(0);
+    assert!(
+        listed_sources(&list).contains(&"docs/guide.md".to_owned()),
+        "the guide is not hidden by the symlinked rules\n{}",
+        list.stdout
+    );
     for stream in [&run.stdout, &run.stderr] {
         assert!(
             !stream.contains("gui*.md"),
@@ -346,7 +354,13 @@ fn a_worktrees_shared_exclude_file_applies_and_is_never_quoted() {
     let check = project.supdoc_in("services/web", &["check"]);
     let named = project.supdoc_in("services/web", &["check", "docs/scratch.md"]);
 
+    let _ = check.assert_exit(1);
     assert!(!check.stdout.contains("scratch.md"), "{}", check.stdout);
+    assert!(
+        check.stdout.contains("docs/guide.md"),
+        "the guide is still checked\n{}",
+        check.stdout
+    );
     assert!(
         named.stdout.contains("ignored by an ignore file"),
         "{}",
@@ -375,9 +389,10 @@ fn a_parent_repositorys_exclude_file_applies_to_a_root_in_a_subdirectory() {
 
     let run = project.supdoc_in("services/web", &["check"]);
 
+    let _ = run.assert_exit(1);
     assert!(
-        !run.stdout.contains("scratch.md"),
-        "the parent's exclude rule hides scratch.md\n{}",
+        run.stdout.contains("docs/guide.md") && !run.stdout.contains("scratch.md"),
+        "the parent's exclude rule hides scratch.md and nothing else\n{}",
         run.stdout
     );
 }
@@ -952,4 +967,70 @@ fn an_outer_rule_ignoring_the_root_or_a_directory_on_the_way_to_it_hides_nothing
             named.stdout
         );
     }
+}
+
+/// The sources of every link a `--json list` run from `services/web` reports, with `home` as the
+/// only environment.
+fn sources_listed_with_home(project: &Project, home: &std::path::Path) -> Vec<String> {
+    let run = project.supdoc_in_with("services/web", &["--json", "list"], &[("HOME", home)]);
+    let _ = run.assert_exit(0);
+    listed_sources(&run)
+}
+
+#[test]
+fn rules_match_case_sensitively_even_when_the_repository_sets_core_ignorecase() {
+    let project = web_project();
+    let home = tempfile::tempdir().expect("a home directory should be creatable");
+    make_git_dir(&project, "services/web/.git");
+    // Git would hide `docs/guide.md` with `GUI*.md` under `core.ignorecase`; supdoc does not.
+    write(
+        &project,
+        "services/web/.git/config",
+        "[core]\n\tignorecase = true\n",
+    );
+    write(&project, "services/web/.gitignore", "docs/GUI*.md\n");
+
+    let sources = sources_listed_with_home(&project, home.path());
+
+    assert!(
+        sources.contains(&"docs/guide.md".to_owned()),
+        "a differently cased rule hides nothing, whatever `core.ignorecase` says\n{sources:?}"
+    );
+}
+
+#[test]
+fn core_excludes_file_counts_from_the_user_config_and_not_from_the_repository_config() {
+    let project = web_project();
+    let home = tempfile::tempdir().expect("a home directory should be creatable");
+    write(&project, "rules-user", "docs/gui*.md\n");
+    write(&project, "rules-repo", "docs/gui*.md\n");
+    make_git_dir(&project, "services/web/.git");
+    write(
+        &project,
+        "services/web/.git/config",
+        &format!(
+            "[core]\n\texcludesFile = {}\n",
+            project.path("rules-repo").display()
+        ),
+    );
+
+    let from_repo_config = sources_listed_with_home(&project, home.path());
+    fs::write(
+        home.path().join(".gitconfig"),
+        format!(
+            "[core]\n\texcludesFile = {}\n",
+            project.path("rules-user").display()
+        ),
+    )
+    .expect("the user git config should be writable");
+    let from_user_config = sources_listed_with_home(&project, home.path());
+
+    assert!(
+        from_repo_config.contains(&"docs/guide.md".to_owned()),
+        "a repository's own `core.excludesFile` is not read\n{from_repo_config:?}"
+    );
+    assert!(
+        !from_user_config.contains(&"docs/guide.md".to_owned()),
+        "the user config's `core.excludesFile` hides the guide, as in git\n{from_user_config:?}"
+    );
 }

@@ -8,6 +8,7 @@ use crate::link::SourcePath;
 use crate::lock::model::LOCK_FILE_NAME;
 use crate::output::format::Verbosity;
 use crate::output::paths::PathStyle;
+use crate::output::text::visible;
 
 /// The code of a finding about a lockfile entry whose link is gone.
 const OBSOLETE_CODE: &str = "link-obsolete";
@@ -31,7 +32,9 @@ pub fn render_annotations(
     Ok(())
 }
 
-/// One workflow command for `finding`.
+/// One workflow command for `finding`. The message, help and file are first spelled out with
+/// [`visible`], like text output, so bidi and control characters from untrusted files can't
+/// reorder or hide what the PR shows; then the workflow-command escapes apply.
 #[must_use]
 pub fn annotation(paths: &PathStyle, finding: &Finding) -> String {
     let command = match finding.severity {
@@ -43,7 +46,7 @@ pub fn annotation(paths: &PathStyle, finding: &Finding) -> String {
     if let Some(location) = &finding.location {
         properties.push(format!(
             "file={}",
-            escape_property(&paths.github(&location.file))
+            escape_property(&visible(&paths.github(&location.file)))
         ));
         properties.push(format!("line={}", location.line));
         properties.push(format!("col={}", location.column));
@@ -52,7 +55,7 @@ pub fn annotation(paths: &PathStyle, finding: &Finding) -> String {
         if let Ok(lockfile) = SourcePath::from_relative(Path::new(LOCK_FILE_NAME)) {
             properties.push(format!(
                 "file={}",
-                escape_property(&paths.github(&lockfile))
+                escape_property(&visible(&paths.github(&lockfile)))
             ));
         }
     }
@@ -63,7 +66,7 @@ pub fn annotation(paths: &PathStyle, finding: &Finding) -> String {
     format!(
         "::{command} {}::{}",
         properties.join(","),
-        escape_data(&message(finding))
+        escape_data(&visible(&message(finding)))
     )
 }
 

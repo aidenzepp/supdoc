@@ -549,6 +549,15 @@ mod tests {
     }
 
     #[test]
+    fn comment_link_resolves_relative_to_the_code_file() {
+        assert_eq!(
+            parse_in("src/server.rs", "../docs/b.md"),
+            Some(Ok(link("docs/b.md", None))),
+            "`../docs/b.md` written in `src/server.rs` is `docs/b.md` from the project root",
+        );
+    }
+
+    #[test]
     fn root_relative_and_relative_spellings_of_one_file_share_a_key() {
         let from_root = parse_in("docs/guide.md", "/docs/../src/lib.rs#add");
         assert_eq!(from_root, Some(Ok(link("src/lib.rs", Some("add")))));
