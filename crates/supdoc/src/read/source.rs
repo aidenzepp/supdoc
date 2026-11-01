@@ -274,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_extension_is_unsupported_without_touching_the_filesystem() {
+    fn missing_png_is_unsupported_not_missing() {
         let dir = temp_dir();
         let path = absolute_in(&dir, "logo.png");
 

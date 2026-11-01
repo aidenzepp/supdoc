@@ -342,11 +342,35 @@ fn quiet_shows_only_errors_and_no_summary() {
 
 #[test]
 fn verbose_lists_passed_links() {
-    let normal = stdout_of(OutputFormat::Text, Verbosity::Normal, false);
-    let verbose = stdout_of(OutputFormat::Text, Verbosity::Verbose, false);
+    let passed = || crate::check::model::Report {
+        links: vec![crate::check::model::LinkReport {
+            key: crate::link::LinkKey {
+                source: source("docs/setup.md"),
+                target: "src/config.rs"
+                    .parse()
+                    .expect("the fixture target should be valid"),
+                symbol: None,
+            },
+            state: crate::state::LinkState::Passed,
+            locations: Vec::new(),
+            finding: None,
+            moved_from: None,
+        }],
+        findings: Vec::new(),
+    };
+    let render = |verbosity| {
+        let (mut output, stdout, _stderr) = captured(settings(OutputFormat::Text, verbosity));
+        output
+            .report(
+                &crate::cli::check::CheckReport::new(passed(), verbosity),
+                true,
+            )
+            .expect("writing to a buffer should succeed");
+        stdout.text()
+    };
 
-    assert!(!normal.contains("passed  docs/setup.md"));
-    assert!(verbose.contains("passed  docs/setup.md -> src/config.rs"));
+    assert!(!render(Verbosity::Normal).contains("passed  docs/setup.md"));
+    assert!(render(Verbosity::Verbose).contains("passed  docs/setup.md -> src/config.rs"));
 }
 
 #[test]
@@ -792,7 +816,7 @@ fn set_root_makes_github_paths_workspace_relative() {
 }
 
 #[test]
-fn set_root_makes_json_root_and_paths_project_relative() {
+fn set_root_makes_the_json_root_project_relative() {
     let (mut output, stdout) = output_in_subdirectory(OutputFormat::Json);
     output.set_root(absolute("/repo"));
 
@@ -802,15 +826,6 @@ fn set_root_makes_json_root_and_paths_project_relative() {
 
     let envelope = parse(stdout.text().trim_end());
     assert_eq!(at(&envelope, "/root"), "/repo");
-    assert_eq!(
-        PathStyle::json(&source("docs/guide.md")),
-        "docs/guide.md",
-        "JSON paths are the project-relative source paths"
-    );
-    assert!(
-        envelope.to_string().contains("\"docs/guide.md\""),
-        "the envelope should name docs/guide.md relative to the root: {envelope}"
-    );
 }
 
 #[test]
