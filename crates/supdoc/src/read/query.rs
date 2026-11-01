@@ -126,33 +126,51 @@ pub fn injected_markdown(file: &SourceFile) -> Vec<MarkdownRegion> {
 
     let mut regions = Vec::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(query, file.tree().root_node(), text.as_bytes());
-    while let Some(found) = matches.next() {
-        let set = query
-            .property_settings(found.pattern_index)
-            .iter()
-            .any(|property| {
-                &*property.key == "injection.language"
-                    && property.value.as_deref() == Some(MARKDOWN_INLINE)
-            });
-        let captured = found.captures().iter().any(|capture| {
-            Some(capture.index) == language
-                && text.get(capture.node.byte_range()) == Some(MARKDOWN_INLINE)
-        });
-        if !set && !captured {
+    // Only the bytes that can open a comment (or, in Python, a docstring) are searched, so the
+    // query visits those spots and their ancestors instead of every node of the tree.
+    let python = file.language().id().as_str() == "python";
+    let mut searched_to = 0;
+    for (offset, byte) in text.bytes().enumerate() {
+        if offset < searched_to || !opens_injection(byte, python) {
             continue;
         }
-        regions.extend(
-            found
+        searched_to = offset + 1;
+        let _window = cursor.set_byte_range(offset..offset + 1);
+        let mut matches = cursor.matches(query, file.tree().root_node(), text.as_bytes());
+        while let Some(found) = matches.next() {
+            let set = query
+                .property_settings(found.pattern_index)
+                .iter()
+                .any(|property| {
+                    &*property.key == "injection.language"
+                        && property.value.as_deref() == Some(MARKDOWN_INLINE)
+                });
+            let captured = found.captures().iter().any(|capture| {
+                Some(capture.index) == language
+                    && text.get(capture.node.byte_range()) == Some(MARKDOWN_INLINE)
+            });
+            if !set && !captured {
+                continue;
+            }
+            for capture in found
                 .captures()
                 .iter()
                 .filter(|capture| Some(capture.index) == content)
-                .map(|capture| capture.node.range()),
-        );
+            {
+                searched_to = searched_to.max(capture.node.end_byte());
+                regions.push(capture.node.range());
+            }
+        }
     }
     regions.sort_by_key(|range| (range.start_byte, range.end_byte));
     regions.dedup();
     join_line_comments(regions, text)
+}
+
+/// Whether `byte` can start a comment in any built-in grammar (`//`, `/*`, `#`), or, in Python, a
+/// docstring (a quote). A comment or docstring always contains one of them.
+const fn opens_injection(byte: u8, python: bool) -> bool {
+    matches!(byte, b'/' | b'#') || (python && matches!(byte, b'"' | b'\''))
 }
 
 /// `ranges`, in file order, as regions: each run of adjacent line comments of the same kind
@@ -354,6 +372,31 @@ mod tests {
         let file = rust_file("fn f() { let s = \"[a](b.rs#c)\"; }\n");
 
         assert_eq!(region_texts(&file), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn python_docstrings_after_leading_comments_and_comments_are_regions() {
+        let python = crate::cartridges::python::cartridge()
+            .expect("the built-in Python queries should compile");
+        let path = AbsolutePath::new(Path::new("/repo/m.py"))
+            .expect("the fixture path should be absolute");
+        let text = "# top\n\"\"\"Module [a](a.md).\"\"\"\nx = \"# not\"\n\nclass C:\n    # c\n    \"\"\"Class doc.\"\"\"\n    def f(self):\n        \"\"\"Fn doc.\"\"\"\n        y = 'str'\n        return y  # tail\n";
+        let file = SourceFile::parse(path, text.to_owned(), python)
+            .expect("tree-sitter should return a tree");
+
+        let texts = region_texts(&file);
+
+        assert_eq!(
+            texts,
+            [
+                " top\n",
+                "\"\"\"Module [a](a.md).\"\"\"",
+                " c\n",
+                "\"\"\"Class doc.\"\"\"",
+                "\"\"\"Fn doc.\"\"\"",
+                " tail\n",
+            ],
+        );
     }
 
     #[test]
