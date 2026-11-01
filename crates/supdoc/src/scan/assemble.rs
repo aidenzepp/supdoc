@@ -13,6 +13,7 @@ use crate::finding::{Finding, Fix, LineIndex, Location, Severity, Snippet};
 use crate::hash::HashSettings;
 use crate::link::destination::{LinkError, parse_destination};
 use crate::link::{LinkKey, RawLink, SourcePath};
+use crate::lock::error::shell_quote;
 use crate::namespace::NamespaceName;
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile};
@@ -51,10 +52,11 @@ impl ScanError {
     #[must_use]
     pub fn help(&self) -> String {
         match self {
-            Self::RootUnreadable { .. } => "Give the current user read access to the project \
-                                            root, for example with `chmod u+r` on it, or run \
-                                            from a directory you can read"
-                .to_owned(),
+            Self::RootUnreadable { root, .. } => format!(
+                "Give the current user read and search access to the project root, for example \
+                 with `chmod u+rx {}`",
+                shell_quote(&root.display().to_string())
+            ),
         }
     }
 
@@ -254,10 +256,10 @@ fn unknown_namespace_key(
         return None;
     };
     let namespace: NamespaceName = prefix.parse().ok()?;
-    let mut namespaces = config.namespaces().clone();
-    // Parsing never reads a namespace's directory, so the root stands in for the missing one.
-    let _absent = namespaces.insert(namespace, config.root().clone());
-    let link = parse_destination(raw, source, &namespaces, languages)?.ok()?;
+    // Parsing reads only namespace names, so adding the missing name is all it takes.
+    let mut names: BTreeSet<NamespaceName> = config.namespaces().keys().cloned().collect();
+    let _absent = names.insert(namespace);
+    let link = parse_destination(raw, source, &names, languages)?.ok()?;
     Some(LinkKey {
         source: source.clone(),
         target: link.target,
@@ -299,10 +301,13 @@ fn link_finding(
             let close =
                 crate::suggest::close_match(prefix, known.iter().map(NamespaceName::as_str));
             let fix = close.zip(written.and_then(|written| written.prefix_range(prefix)));
-            let fix = fix.map(|(close, range)| Fix {
-                file: location.file.clone(),
-                range,
-                replacement: close.to_owned(),
+            let fix = fix.and_then(|(close, range)| {
+                Some(Fix {
+                    file: location.file.clone(),
+                    scanned: written?.text_at(&range)?,
+                    range,
+                    replacement: close.to_owned(),
+                })
             });
             let help = namespace_help(prefix, close, config);
             (CODE_UNKNOWN_NAMESPACE, help, fix)
@@ -409,7 +414,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::check::reconcile::{Outcome, check_outcome, reconcile};
+    use crate::check::reconcile::{Outcome, check_outcome, reconcile_at_root};
     use crate::hash::Hash;
     use crate::link::Target;
     use crate::lock::model::Lockfile;
@@ -745,7 +750,7 @@ mod tests {
 
     /// Whether `check` passes on `project`, given `lock`, without and with `--deny-warnings`.
     fn outcomes(project: &Project, lock: &Lockfile) -> [Outcome; 2] {
-        let report = reconcile(&project.scan(), lock, &Scope::All);
+        let report = reconcile_at_root(&project.scan(), lock, &Scope::All);
         [check_outcome(&report, false), check_outcome(&report, true)]
     }
 
@@ -794,7 +799,7 @@ mod tests {
             .into_iter()
             .collect();
 
-        let report = reconcile(&project.scan(), &lock, &Scope::All);
+        let report = reconcile_at_root(&project.scan(), &lock, &Scope::All);
 
         let states: Vec<(LinkKey, LinkState)> = report
             .links
@@ -888,6 +893,19 @@ mod tests {
             .expect("the root should be unlockable, so the temp dir can be removed");
         let error = result.expect_err("an unreadable root should stop the scan");
         assert_eq!(error.code(), "scan-root-unreadable");
+    }
+
+    #[test]
+    fn unreadable_root_help_gives_chmod_with_the_root_and_no_other_directory_advice() {
+        let error = ScanError::RootUnreadable {
+            root: AbsolutePath::new(Path::new("/work/my repo")).expect("the path is absolute"),
+            error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        };
+
+        let help = error.help();
+
+        assert!(help.contains("`chmod u+rx '/work/my repo'`"), "got: {help}");
+        assert!(!help.contains("another directory"), "got: {help}");
     }
 
     #[test]

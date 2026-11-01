@@ -177,11 +177,13 @@ impl ReadError {
                     "supdoc reads {listed}. A whole-file link to this type can't be tracked yet"
                 )
             }
-            (Self::Internal { .. }, _) => {
-                "Report a bug, including the output of `supdoc --version` and the file's \
-                 language and size"
-                    .to_owned()
-            }
+            (Self::Internal { .. }, _) => concat!(
+                "Report a bug at ",
+                env!("CARGO_PKG_REPOSITORY"),
+                "/issues, including the output of `supdoc --version` and the file's \
+                     language and size"
+            )
+            .to_owned(),
         }
     }
 }

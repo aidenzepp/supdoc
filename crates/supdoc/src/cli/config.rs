@@ -16,7 +16,7 @@ use crate::output::text::visible;
 use crate::output::{Output, OutputError, Report, TextContext, Verbosity};
 use crate::path::AbsolutePath;
 
-use super::args::Inspect;
+use super::args::{Inspect, Limit};
 use super::project::{load_config, lock_path};
 use super::{CliError, Context, Outcome};
 
@@ -26,7 +26,11 @@ use super::{CliError, Context, Outcome};
 ///
 /// Returns the config's own error (78, or 74 when unreadable) and `cli-config-output` when the
 /// report cannot be written (74).
-pub fn run(inspect: Inspect, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
+pub fn run(
+    inspect: Inspect<'_>,
+    context: &Context,
+    output: &mut Output,
+) -> Result<Outcome, CliError> {
     let config = load_config(context, output)?;
     let written = match inspect {
         Inspect::ConfigShow => output
@@ -41,13 +45,14 @@ pub fn run(inspect: Inspect, context: &Context, output: &mut Output) -> Result<O
                     Ok(())
                 }
             }),
-        Inspect::NamespaceList { limit } => {
-            let report = NamespaceListReport::new(&config, limit);
+        Inspect::NamespaceList(args) => {
+            let report = NamespaceListReport::new(&config, args.limit);
             output.report(&report, true).and_then(|()| {
                 if report.truncated {
-                    output.note(&format!(
-                        "Showing {} namespaces; there are more. Raise --limit, or use --limit 0 for all.",
-                        report.namespaces.len()
+                    output.note(&args.limit.truncation_note(
+                        report.namespaces.len(),
+                        report.total,
+                        "namespaces",
                     ))
                 } else if report.namespaces.is_empty() {
                     output.note("No namespaces configured.")
@@ -61,24 +66,25 @@ pub fn run(inspect: Inspect, context: &Context, output: &mut Output) -> Result<O
     Ok(Outcome::Clean)
 }
 
-/// The JSON Schema of the `--json` output of `supdoc config show` or `supdoc namespace list`, as
-/// `inspect` says: the whole envelope, with `data` typed as the command's report.
-/// The shape is the same for every `--limit`.
+/// The JSON Schema of the `--json` output of `supdoc config show`: the whole envelope, with `data`
+/// typed as the command's report.
 #[must_use]
-pub fn schema(inspect: Inspect) -> schemars::Schema {
-    match inspect {
-        Inspect::ConfigShow => schemars::schema_for!(Envelope<'static, ConfigShowReport>),
-        Inspect::NamespaceList { .. } => {
-            schemars::schema_for!(Envelope<'static, NamespaceListReport>)
-        }
-    }
+pub fn config_show_schema() -> schemars::Schema {
+    schemars::schema_for!(Envelope<'static, ConfigShowReport>)
+}
+
+/// The JSON Schema of the `--json` output of `supdoc namespace list`: the whole envelope, with
+/// `data` typed as the command's report. The shape is the same for every `--limit`.
+#[must_use]
+pub fn namespace_list_schema() -> schemars::Schema {
+    schemars::schema_for!(Envelope<'static, NamespaceListReport>)
 }
 
 /// The error for a report that could not be written.
-fn output_failed(inspect: Inspect, error: &OutputError) -> CliError {
+fn output_failed(inspect: Inspect<'_>, error: &OutputError) -> CliError {
     let (code, name) = match inspect {
         Inspect::ConfigShow => ("cli-config-output", "config show"),
-        Inspect::NamespaceList { .. } => ("cli-namespace-output", "namespace list"),
+        Inspect::NamespaceList(_) => ("cli-namespace-output", "namespace list"),
     };
     CliError::new(
         code,
@@ -184,17 +190,20 @@ pub(crate) struct NamespaceListReport {
     /// Whether `--limit` left namespaces out.
     #[serde(skip)]
     truncated: bool,
+    /// How many namespaces exist, shown or not.
+    #[serde(skip)]
+    total: usize,
 }
 
 impl NamespaceListReport {
-    /// The report for `config`, showing at most `limit` namespaces (0 means no limit).
-    fn new(config: &Config, limit: usize) -> Self {
-        let mut namespaces = namespace_rows(config);
-        let truncated = limit != 0 && namespaces.len() > limit;
-        namespaces.truncate(if limit == 0 { namespaces.len() } else { limit });
+    /// The report for `config`, showing at most `limit` namespaces.
+    fn new(config: &Config, limit: Limit) -> Self {
+        let all = namespace_rows(config);
+        let total = all.len();
         Self {
-            namespaces,
-            truncated,
+            namespaces: limit.take(all).collect(),
+            truncated: limit.truncated(total),
+            total,
         }
     }
 }
@@ -338,10 +347,9 @@ fn namespace_rows(config: &Config) -> Vec<NamespaceJson> {
     config
         .namespaces()
         .iter()
-        .map(|(name, folder)| {
-            // A loaded config records the defining file of every namespace; the root only
-            // stands in for a record that cannot be missing.
-            let defined_in = config.namespace_defined_in(name).unwrap_or(root);
+        .map(|(name, namespace)| {
+            let folder = namespace.dir();
+            let defined_in = namespace.defined_in();
             NamespaceJson {
                 name: name.to_string(),
                 path: relative_to(root, folder),
@@ -498,9 +506,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("`{}` should parse: {error}", command_line.join(" ")));
         let inspect = match &cli.command {
             Command::Config(ConfigCommand::Show) => Inspect::ConfigShow,
-            Command::Namespace(NamespaceCommand::List(args)) => {
-                Inspect::NamespaceList { limit: args.limit }
-            }
+            Command::Namespace(NamespaceCommand::List(args)) => Inspect::NamespaceList(args),
             _ => panic!(
                 "`{}` should be config show or namespace list",
                 command_line.join(" ")
@@ -677,9 +683,8 @@ mod tests {
         assert_eq!(run.stdout, "", "a fatal error leaves stdout empty");
     }
 
-    /// Every way `json` breaks the schema `schema(inspect)` publishes.
-    fn schema_violations(inspect: Inspect, json: &serde_json::Value) -> Vec<String> {
-        let schema = schema(inspect);
+    /// Every way `json` breaks `schema`, the schema a command publishes.
+    fn schema_violations(schema: schemars::Schema, json: &serde_json::Value) -> Vec<String> {
         let schema = serde_json::to_value(schema).expect("the schema should serialize");
         let validator = jsonschema::validator_for(&schema)
             .expect("the generated schema should be a valid JSON Schema");
@@ -697,7 +702,7 @@ mod tests {
         );
         let json = run_in_child(&project, &["--json", "config", "show"]).json();
 
-        let errors = schema_violations(Inspect::ConfigShow, &json);
+        let errors = schema_violations(config_show_schema(), &json);
 
         assert!(errors.is_empty(), "schema violations: {errors:?} in {json}");
         assert_eq!(at(&json, "/command"), "config show");
@@ -724,9 +729,28 @@ mod tests {
 
         let text = project.run(&["namespace", "list", "--limit", "2"]);
         assert!(
-            text.stderr.contains("Showing 2 namespaces"),
+            text.stderr.contains("Showing 2 of 3 namespaces."),
             "stderr: {}",
             text.stderr
+        );
+    }
+
+    #[test]
+    fn namespace_list_limit_0_shows_every_namespace() {
+        let project = Project::new();
+        project.write(
+            "supdoc.config.toml",
+            "[namespaces]\nweb = \"apps/web\"\nauth = \"services/auth\"\ncore = \"core\"\n",
+        );
+
+        let run = project.run(&["--json", "namespace", "list", "--limit", "0"]);
+
+        let json = run.json();
+        assert_eq!(at(&json, "/truncated"), false, "json: {json}");
+        assert_eq!(
+            at(&json, "/data/namespaces").as_array().map(Vec::len),
+            Some(3),
+            "json: {json}"
         );
     }
 
@@ -824,7 +848,7 @@ mod tests {
         );
         let json = project.run(&["--json", "namespace", "list"]).json();
 
-        let errors = schema_violations(Inspect::NamespaceList { limit: 0 }, &json);
+        let errors = schema_violations(namespace_list_schema(), &json);
 
         assert!(errors.is_empty(), "schema violations: {errors:?} in {json}");
         assert_eq!(at(&json, "/command"), "namespace list");

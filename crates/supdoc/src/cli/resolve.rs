@@ -14,7 +14,6 @@ use serde::Serialize;
 use crate::config::Config;
 use crate::finding::{Finding, IndexedText, Severity};
 use crate::link::SymbolPath;
-use crate::lock::error::shell_quote;
 use crate::namespace::NamespaceName;
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
@@ -25,7 +24,7 @@ use crate::read::cartridge::{Languages, SourceFile, Symbol};
 use crate::read::error::{ReadError, ReadRole, ResolveError};
 
 use super::args::ResolveArgs;
-use super::project::{absolute, ensure_exists, invocation, load_config, path_outside};
+use super::project::{absolute, command_line, ensure_exists, load_config, path_outside_config};
 use super::{CliError, Context, Outcome};
 
 /// Runs `supdoc resolve`: prints every symbol in `FILE`, or the one `SYMBOL` names.
@@ -46,36 +45,32 @@ pub fn run(
     context: &Context,
     output: &mut Output,
 ) -> Result<Outcome, CliError> {
-    let command = command_text(args);
+    let command = command_text(args, context);
     let config = load_config(context, output)?;
-    let path = locate(&config, &context.cwd, &args.file)?;
+    let path = locate(&config, context, &args.file)?;
     let file = SourceFile::read(path, &Languages::builtin())
         .map_err(|error| read_failed(&error, config.root(), &args.file))?;
     let table = file.language().symbols(&file);
 
     let text = IndexedText::new(file.text());
-    let (symbols, query, truncated) = if let Some(query) = &args.symbol {
+    let (symbols, query, total) = if let Some(query) = &args.symbol {
         let symbol = table
             .resolve(file.path(), query)
             .map_err(|error| resolve_failed(&error, config.root(), &args.file))?;
-        (vec![SymbolJson::new(&text, symbol)], Some(query), false)
+        (vec![SymbolJson::new(&text, symbol)], Some(query), 1)
     } else {
         let total = table.iter().count();
-        let shown = if args.limit == 0 { total } else { args.limit };
-        let symbols = table
-            .iter()
-            .take(shown)
+        let symbols = args
+            .limit
+            .take(table.iter())
             .map(|symbol| SymbolJson::new(&text, symbol))
             .collect();
-        (symbols, None, total > shown)
+        (symbols, None, total)
     };
+    let truncated = args.symbol.is_none() && args.limit.truncated(total);
     let listed = symbols.len();
     let findings = if file.has_syntax_errors() {
-        vec![syntax_errors(
-            &file,
-            config.root(),
-            &invocation(context, &command),
-        )]
+        vec![syntax_errors(&file, config.root(), &command)]
     } else {
         Vec::new()
     };
@@ -92,9 +87,7 @@ pub fn run(
         .map_err(|error| output_failed(&error))?;
     if truncated {
         output
-            .note(&format!(
-                "Showing {listed} symbols; there are more. Raise --limit, or use --limit 0 for all."
-            ))
+            .note(&args.limit.truncation_note(listed, total, "symbols"))
             .map_err(|error| output_failed(&error))?;
     } else if listed == 0 {
         output
@@ -128,7 +121,8 @@ pub fn schema() -> schemars::Schema {
 /// `cli-path-outside-project` for a file outside the project root, `cli-path-missing` for a file
 /// that doesn't exist, and `cli-path-invalid` for a directory (all exit 2), and
 /// `cli-path-unreadable` (74) for one that can't be looked up for any other reason.
-fn locate(config: &Config, cwd: &AbsolutePath, typed: &Path) -> Result<AbsolutePath, CliError> {
+fn locate(config: &Config, context: &Context, typed: &Path) -> Result<AbsolutePath, CliError> {
+    let cwd = &context.cwd;
     let namespaced = typed.to_str().and_then(|text| {
         let (name, rest) = text.split_once(':')?;
         let name = NamespaceName::from_str(name).ok()?;
@@ -144,10 +138,10 @@ fn locate(config: &Config, cwd: &AbsolutePath, typed: &Path) -> Result<AbsoluteP
         None => absolute(cwd, typed),
     };
     if !config.contains(found.as_path()) {
-        return Err(path_outside(typed, config.root()));
+        return Err(path_outside_config(typed, config));
     }
     if found.as_path().symlink_metadata().is_err()
-        && let Some(error) = fragment_form(config, cwd, typed)
+        && let Some(error) = fragment_form(config, context, typed)
     {
         return Err(error);
     }
@@ -163,19 +157,18 @@ fn locate(config: &Config, cwd: &AbsolutePath, typed: &Path) -> Result<AbsoluteP
 ///
 /// `None` when `typed` has no `#` or the part before it isn't a file, so the ordinary
 /// missing-file error stays. No new syntax is accepted: `resolve` still takes `FILE [SYMBOL]`.
-fn fragment_form(config: &Config, cwd: &AbsolutePath, typed: &Path) -> Option<CliError> {
+fn fragment_form(config: &Config, context: &Context, typed: &Path) -> Option<CliError> {
     let text = typed.to_str()?;
     let (file, symbol) = text.split_once('#')?;
-    if file.is_empty() || symbol.is_empty() || locate(config, cwd, Path::new(file)).is_err() {
+    if file.is_empty() || symbol.is_empty() || locate(config, context, Path::new(file)).is_err() {
         return None;
     }
     Some(CliError::new(
         "cli-resolve-fragment",
         format!("{text} is a link target, but resolve takes the file and symbol separately"),
         format!(
-            "Write it as `supdoc resolve {} {}`",
-            shell_quote(file),
-            shell_quote(symbol)
+            "Write it as `{}`",
+            command_line(context, "resolve", &[file, symbol], &[])
         ),
         CliError::USAGE_EXIT_CODE,
     ))
@@ -266,13 +259,10 @@ fn output_failed(error: &OutputError) -> CliError {
 
 /// The command that repeats this run, as `supdoc resolve FILE [SYMBOL]` takes it, for helps that
 /// say to run it again.
-fn command_text(args: &ResolveArgs) -> String {
-    let mut command = format!("resolve {}", shell_quote(&args.file.display().to_string()));
-    if let Some(symbol) = &args.symbol {
-        command.push(' ');
-        command.push_str(&shell_quote(&symbol.to_string()));
-    }
-    command
+fn command_text(args: &ResolveArgs, context: &Context) -> String {
+    let mut operands = vec![args.file.display().to_string()];
+    operands.extend(args.symbol.iter().map(ToString::to_string));
+    command_line(context, "resolve", &operands, &[])
 }
 
 /// The warning that `file` has syntax errors, so its symbols may be incomplete (03 R8).
@@ -649,6 +639,32 @@ mod tests {
     }
 
     #[test]
+    fn resolve_fragment_help_keeps_the_config_and_its_command_runs_from_another_directory() {
+        let project = Project::new();
+        project.write("docs/keep", "");
+
+        let run = project.resolve_from(
+            "docs",
+            &[
+                "-c",
+                "../supdoc.config.toml",
+                "resolve",
+                "../src/lib.rs#load",
+            ],
+        );
+
+        let help = run.error().help();
+        let printed = "supdoc -c ../supdoc.config.toml resolve ../src/lib.rs load";
+        assert!(
+            help.contains(&format!("`{printed}`")),
+            "the help should keep -c: {help}"
+        );
+        let words: Vec<&str> = printed.split(' ').skip(1).collect();
+        let again = project.resolve_from("docs", &words);
+        assert_eq!(again.exit_code(), 0, "the printed command should run");
+    }
+
+    #[test]
     fn resolve_file_hash_symbol_refuses_with_the_separate_form() {
         let project = Project::new();
 
@@ -692,9 +708,28 @@ mod tests {
 
         let text = project.resolve(&["resolve", "src/lib.rs", "--limit", "2"]);
         assert!(
-            text.stderr.contains("Showing 2 symbols"),
+            text.stderr.contains("Showing 2 of "),
             "stderr: {}",
             text.stderr
+        );
+    }
+
+    #[test]
+    fn resolve_limit_0_lists_every_symbol() {
+        let project = Project::new();
+        project.write(
+            "src/lib.rs",
+            "pub fn a() {}\npub fn b() {}\npub fn c() {}\n",
+        );
+
+        let run = project.resolve(&["--json", "resolve", "src/lib.rs", "--limit", "0"]);
+
+        let json = run.json();
+        assert_eq!(at(&json, "/truncated"), false, "json: {json}");
+        assert_eq!(
+            at(&json, "/data/symbols").as_array().map(Vec::len),
+            Some(3),
+            "json: {json}"
         );
     }
 

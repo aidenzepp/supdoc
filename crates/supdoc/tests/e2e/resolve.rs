@@ -4,6 +4,16 @@ use std::collections::BTreeSet;
 
 use crate::support::{Project, Run, array_at, at, links};
 
+/// The JSON error object `run` printed on stderr, or a failure showing that stderr.
+fn error_json(run: &Run) -> serde_json::Value {
+    serde_json::from_str(&run.stderr).unwrap_or_else(|error| {
+        panic!(
+            "`supdoc {}` should print one JSON error on stderr ({error}):\n{}",
+            run.args, run.stderr
+        )
+    })
+}
+
 /// The symbol paths `supdoc --json resolve <file>` lists, run from `project`'s root.
 fn listed_symbols(project: &Project, file: &str) -> BTreeSet<String> {
     let report = project
@@ -190,10 +200,7 @@ fn resolve_non_utf8_file_exits_1_with_read_not_utf8() {
 
     let _ = run.assert_exit(1);
     assert_eq!(
-        at(
-            &serde_json::from_str(&run.stderr).unwrap_or_default(),
-            "/kind"
-        ),
+        at(&error_json(&run), "/kind"),
         "read-not-utf8",
         "a file that is not UTF-8 should be refused (R6); stderr: {}",
         run.stderr
@@ -212,10 +219,7 @@ fn resolve_file_over_16_mib_exits_1_with_read_too_large() {
 
     let _ = run.assert_exit(1);
     assert_eq!(
-        at(
-            &serde_json::from_str(&run.stderr).unwrap_or_default(),
-            "/kind"
-        ),
+        at(&error_json(&run), "/kind"),
         "read-too-large",
         "a file over 16 MiB should be refused (R6); stderr: {}",
         run.stderr
@@ -282,7 +286,6 @@ fn assert_refused_as_outside(run: &Run, leak: &str) {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn resolve_through_a_symlink_out_of_the_root_lists_no_outside_symbol() {
     let project = project_beside_outside_files("");
@@ -294,7 +297,6 @@ fn resolve_through_a_symlink_out_of_the_root_lists_no_outside_symbol() {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn resolve_through_a_markdown_symlink_out_of_the_root_lists_no_outside_heading() {
     let project = project_beside_outside_files("");
@@ -306,7 +308,6 @@ fn resolve_through_a_markdown_symlink_out_of_the_root_lists_no_outside_heading()
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn resolve_of_a_missing_symbol_through_a_symlink_out_of_the_root_suggests_no_outside_symbol() {
     let project = project_beside_outside_files("");
@@ -336,7 +337,6 @@ fn resolve_of_a_namespaced_path_climbing_out_of_the_root_is_refused() {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn resolve_through_a_symlink_to_a_file_inside_the_root_still_lists_its_symbols() {
     let project = Project::fixture("basic");

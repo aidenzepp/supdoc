@@ -156,15 +156,16 @@ pub(crate) fn absolute(cwd: &AbsolutePath, path: &Path) -> AbsolutePath {
 /// reason, such as a parent directory it has no permission to search.
 pub(crate) fn scope(
     paths: &[PathBuf],
-    cwd: &AbsolutePath,
-    root: &AbsolutePath,
+    config: &Config,
+    context: &Context,
 ) -> Result<Scope, CliError> {
+    let (cwd, root) = (&context.cwd, config.root());
     let mut sources = Vec::with_capacity(paths.len());
     for typed in paths {
         let path = absolute(cwd, typed);
         ensure_exists(&path, typed, cwd)?;
         let Some(inside) = path.strip_prefix(root) else {
-            return Err(path_outside(typed, root));
+            return Err(path_outside_config(typed, config));
         };
         if inside.as_os_str().is_empty() {
             return Ok(Scope::All);
@@ -364,6 +365,28 @@ pub(crate) fn path_outside(typed: &Path, root: &AbsolutePath) -> CliError {
         format!(
             "Pass a path inside `{}`, or run supdoc from the project that contains it",
             root.display()
+        ),
+        CliError::USAGE_EXIT_CODE,
+    )
+}
+
+/// The error for a `[PATH]` outside the project `config` names. When no config was found, the
+/// "project" is only the current directory, so the error says that and offers `-c`.
+pub(crate) fn path_outside_config(typed: &Path, config: &Config) -> CliError {
+    if !config.files().is_empty() {
+        return path_outside(typed, config.root());
+    }
+    CliError::new(
+        "cli-path-outside-project",
+        format!(
+            "{} is outside the current directory, and no {} was found above it",
+            typed.display(),
+            crate::config::CONFIG_FILE_NAME
+        ),
+        format!(
+            "Run supdoc from the project that contains it, or name its config with `supdoc -c \
+             <dir>/{} …`",
+            crate::config::CONFIG_FILE_NAME
         ),
         CliError::USAGE_EXIT_CODE,
     )

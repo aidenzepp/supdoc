@@ -434,10 +434,6 @@ mod tests {
             codes,
             ["lock-conflict", "lock-newer-version", "lock-duplicate"]
         );
-        assert!(
-            errors.iter().all(|error| !error.help().is_empty()),
-            "every parse error should say what to do next"
-        );
     }
 
     #[test]

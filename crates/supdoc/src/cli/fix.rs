@@ -15,7 +15,7 @@ use crate::check::fix::{
     FixPlan, FixResult, PlannedFix, apply_fixes, move_lock_entries, plan_fixes,
 };
 use crate::check::model::Report as CheckModel;
-use crate::check::reconcile::reconcile;
+use crate::check::reconcile::reconcile_in;
 use crate::config::Config;
 use crate::finding::{Finding, Fix};
 use crate::link::{LinkKey, SourcePath};
@@ -24,7 +24,7 @@ use crate::lock::model::Lockfile;
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, OutputError, PathStyle, Report, TextContext};
+use crate::output::{Output, OutputError, PathStyle, Report, TextContext, preview_note};
 use crate::path::AbsolutePath;
 use crate::read::cartridge::Languages;
 use crate::scan::model::{Scan, Scope, TargetState};
@@ -43,9 +43,6 @@ const CODE_LOCK_WRITE_FAILED: &str = "fix-lock-write-failed";
 /// The code of the finding for a source file that changed between the scan and the write.
 const CODE_FILE_CHANGED: &str = "fix-file-changed";
 
-/// The note that closes a preview, after the count of fixes.
-const PREVIEW_NOTE: &str = "Nothing written. Run the same command with --yes to apply.";
-
 /// Runs `supdoc fix`: previews every certain fix, or with `--yes` applies them and reports the
 /// state each fixed link has now.
 ///
@@ -62,7 +59,13 @@ const PREVIEW_NOTE: &str = "Nothing written. Run the same command with --yes to 
 /// report cannot be written (74).
 pub fn run(args: &FixArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let planned = Planned::scan(&args.paths, context, output)?;
-    planned.finish(args.confirm.mode(), context, &args.paths, output)
+    planned.finish(
+        args.confirm.mode(),
+        args.confirm.dry_run,
+        context,
+        &args.paths,
+        output,
+    )
 }
 
 /// The JSON Schema of `supdoc fix`'s `--json` output: the whole envelope, with `data` typed as
@@ -81,6 +84,8 @@ struct Planned {
     lock: Lockfile,
     /// The fixes to preview or apply.
     plan: FixPlan,
+    /// How help commands name files: relative to the current directory.
+    paths: PathStyle,
     /// Broken links in scope, fixable or not, for the note when nothing can be fixed.
     broken: usize,
 }
@@ -97,7 +102,7 @@ impl Planned {
         output: &mut Output,
     ) -> Result<Self, CliError> {
         let config = load_config(context, output)?;
-        let scope = scope(paths, &context.cwd, config.root())?;
+        let scope = scope(paths, &config, context)?;
         let lock = read_lock(&config, &context.cwd)?;
         let scan = scan(&config, &scope)?;
         let broken = scan
@@ -107,8 +112,10 @@ impl Planned {
                 scope.contains(&key.source) && matches!(link.target, TargetState::Broken { .. })
             })
             .count();
+        let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
         Ok(Self {
             plan: plan_fixes(&scan),
+            paths,
             config,
             lock,
             broken,
@@ -125,6 +132,7 @@ impl Planned {
     fn finish(
         self,
         mode: WriteMode,
+        args_dry_run: bool,
         context: &Context,
         paths: &[std::path::PathBuf],
         output: &mut Output,
@@ -134,7 +142,13 @@ impl Planned {
             .map(|path| path.display().to_string())
             .collect();
         match mode {
-            WriteMode::Preview => self.preview(output),
+            WriteMode::Preview => self.preview(
+                &preview_note(
+                    args_dry_run,
+                    &command_line(context, "fix", &paths, &["--yes"]),
+                ),
+                output,
+            ),
             WriteMode::Apply => self.apply(context, &paths, output),
         }
     }
@@ -144,7 +158,7 @@ impl Planned {
     /// # Errors
     ///
     /// Returns `cli-fix-output` when the report cannot be written.
-    fn preview(self, output: &mut Output) -> Result<Outcome, CliError> {
+    fn preview(self, apply_note: &str, output: &mut Output) -> Result<Outcome, CliError> {
         let fixes: Vec<FixRecord> = self
             .plan
             .fixes
@@ -169,7 +183,7 @@ impl Planned {
         } else {
             let fix_count = count(report.fixes.len(), "fix", "fixes");
             let file_count = count(report.files(), "file", "files");
-            format!("{fix_count} in {file_count}. {PREVIEW_NOTE}")
+            format!("{fix_count} in {file_count}. {apply_note}")
         };
         output.note(&note).map_err(|error| output_failed(&error))?;
         Ok(Outcome::Clean)
@@ -220,7 +234,7 @@ impl Planned {
                 .map(|planned| planned.fix.file.clone())
                 .collect();
             let scope = Scope::Paths(fixed.into_iter().collect());
-            reconcile(&scan(&self.config, &scope)?, &lock, &scope)
+            reconcile_in(&scan(&self.config, &scope)?, &lock, &scope, &self.paths)
         };
         let fixes: Vec<FixRecord> = done
             .iter()
@@ -315,6 +329,7 @@ fn new_ranges(done: &[&PlannedFix]) -> Vec<Option<std::ops::Range<usize>>> {
             file: this,
             range,
             replacement,
+            scanned: _,
         } = &planned.fix;
         if file != Some(this) {
             file = Some(this);
@@ -544,6 +559,7 @@ impl FixRecord {
             file,
             range,
             replacement,
+            scanned: _,
         } = &planned.fix;
         let finding = &planned.finding;
         // A planned fix lies inside its finding's location and snippet, so these slices exist.
@@ -553,6 +569,8 @@ impl FixRecord {
             .map_or((0, 0, range.clone()), |location| {
                 (location.line, location.column, location.range.clone())
             });
+        let before = planned.fix.scanned.to_string();
+        // The snippet is a bounded window; the whole link is shown only when the window holds it.
         let scanned = |wanted: &std::ops::Range<usize>| -> Option<String> {
             let snippet = finding.snippet.as_ref()?;
             let origin = link_range.start.checked_sub(snippet.highlight.start)?;
@@ -560,7 +578,6 @@ impl FixRecord {
             let to = wanted.end.checked_sub(origin)?;
             snippet.text.get(from..to).map(str::to_owned)
         };
-        let before = scanned(range).unwrap_or_default();
         let old_link = scanned(&link_range).unwrap_or_else(|| before.clone());
         let new_link = range
             .start
@@ -1119,7 +1136,7 @@ mod tests {
         );
         assert_eq!(
             run.stderr,
-            "1 fix in 1 file. Nothing written. Run the same command with --yes to apply.\n",
+            "1 fix in 1 file. Nothing written. Run `supdoc fix --yes` to apply.\n",
         );
     }
 
@@ -1152,7 +1169,7 @@ mod tests {
         let edited = format!("Edited after the scan.\n{GUIDE}");
         project.write("docs/guide.md", &edited);
 
-        let result = planned.finish(mode, &session.context, &paths, &mut session.output);
+        let result = planned.finish(mode, false, &session.context, &paths, &mut session.output);
         let run = session.finished(result);
 
         assert_eq!(run.exit_code(), 1, "stderr: {}", run.stderr);
@@ -1224,7 +1241,7 @@ mod tests {
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o555))
             .expect("the fixture directory should become read-only");
 
-        let result = planned.finish(mode, &session.context, &paths, &mut session.output);
+        let result = planned.finish(mode, false, &session.context, &paths, &mut session.output);
 
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755))
             .expect("the fixture directory should become writable again");
@@ -1404,7 +1421,7 @@ mod tests {
             })
             .chain(&scan.findings)
             .filter_map(|finding| {
-                let fix = finding.fix.as_ref()?;
+                let fix = finding.fix.as_deref()?;
                 Some((finding.code.to_owned(), fix.replacement.clone()))
             })
             .collect();
