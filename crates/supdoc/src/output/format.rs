@@ -31,10 +31,8 @@ pub enum Verbosity {
     Quiet,
     /// The default: errors, warnings, notes and the summary.
     Normal,
-    /// `-v`: also lists passed links.
+    /// `-v` (repeats are accepted and mean the same): also lists passed links.
     Verbose,
-    /// `-vv`: also run details on stderr.
-    Trace,
 }
 
 impl Verbosity {
@@ -44,8 +42,7 @@ impl Verbosity {
         match (quiet, verbose) {
             (true, _) => Self::Quiet,
             (false, 0) => Self::Normal,
-            (false, 1) => Self::Verbose,
-            (false, _) => Self::Trace,
+            (false, _) => Self::Verbose,
         }
     }
 
@@ -67,13 +64,7 @@ impl Verbosity {
     /// Whether passed links are listed.
     #[must_use]
     pub const fn lists_passed(self) -> bool {
-        matches!(self, Self::Verbose | Self::Trace)
-    }
-
-    /// Whether run details are printed to stderr.
-    #[must_use]
-    pub const fn shows_run_details(self) -> bool {
-        matches!(self, Self::Trace)
+        matches!(self, Self::Verbose)
     }
 }
 

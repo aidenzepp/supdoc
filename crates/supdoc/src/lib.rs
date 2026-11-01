@@ -1,6 +1,6 @@
 //! supdoc tracks links from documentation to code and reports when the linked code changes.
 //!
-//! Every module is declared here up front, so later work adds files without editing this one.
+//! Every module is declared here.
 
 #![cfg_attr(
     test,
