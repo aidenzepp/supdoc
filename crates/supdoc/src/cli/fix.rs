@@ -24,7 +24,7 @@ use crate::lock::model::Lockfile;
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, OutputError, PathStyle, Report, TextContext};
+use crate::output::{Output, OutputError, PathStyle, Report, TextContext, preview_note};
 use crate::path::AbsolutePath;
 use crate::read::cartridge::Languages;
 use crate::scan::model::{Scan, Scope, TargetState};
@@ -43,9 +43,6 @@ const CODE_LOCK_WRITE_FAILED: &str = "fix-lock-write-failed";
 /// The code of the finding for a source file that changed between the scan and the write.
 const CODE_FILE_CHANGED: &str = "fix-file-changed";
 
-/// The note that closes a preview, after the count of fixes.
-const PREVIEW_NOTE: &str = "Nothing written. Run the same command with --yes to apply.";
-
 /// Runs `supdoc fix`: previews every certain fix, or with `--yes` applies them and reports the
 /// state each fixed link has now.
 ///
@@ -62,7 +59,13 @@ const PREVIEW_NOTE: &str = "Nothing written. Run the same command with --yes to 
 /// report cannot be written (74).
 pub fn run(args: &FixArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let planned = Planned::scan(&args.paths, context, output)?;
-    planned.finish(args.confirm.mode(), context, &args.paths, output)
+    planned.finish(
+        args.confirm.mode(),
+        args.confirm.dry_run,
+        context,
+        &args.paths,
+        output,
+    )
 }
 
 /// The JSON Schema of `supdoc fix`'s `--json` output: the whole envelope, with `data` typed as
@@ -125,6 +128,7 @@ impl Planned {
     fn finish(
         self,
         mode: WriteMode,
+        args_dry_run: bool,
         context: &Context,
         paths: &[std::path::PathBuf],
         output: &mut Output,
@@ -134,7 +138,13 @@ impl Planned {
             .map(|path| path.display().to_string())
             .collect();
         match mode {
-            WriteMode::Preview => self.preview(output),
+            WriteMode::Preview => self.preview(
+                &preview_note(
+                    args_dry_run,
+                    &command_line(context, "fix", &paths, &["--yes"]),
+                ),
+                output,
+            ),
             WriteMode::Apply => self.apply(context, &paths, output),
         }
     }
@@ -144,7 +154,7 @@ impl Planned {
     /// # Errors
     ///
     /// Returns `cli-fix-output` when the report cannot be written.
-    fn preview(self, output: &mut Output) -> Result<Outcome, CliError> {
+    fn preview(self, apply_note: &str, output: &mut Output) -> Result<Outcome, CliError> {
         let fixes: Vec<FixRecord> = self
             .plan
             .fixes
@@ -169,7 +179,7 @@ impl Planned {
         } else {
             let fix_count = count(report.fixes.len(), "fix", "fixes");
             let file_count = count(report.files(), "file", "files");
-            format!("{fix_count} in {file_count}. {PREVIEW_NOTE}")
+            format!("{fix_count} in {file_count}. {apply_note}")
         };
         output.note(&note).map_err(|error| output_failed(&error))?;
         Ok(Outcome::Clean)
@@ -1119,7 +1129,7 @@ mod tests {
         );
         assert_eq!(
             run.stderr,
-            "1 fix in 1 file. Nothing written. Run the same command with --yes to apply.\n",
+            "1 fix in 1 file. Nothing written. Run `supdoc fix --yes` to apply.\n",
         );
     }
 
@@ -1152,7 +1162,7 @@ mod tests {
         let edited = format!("Edited after the scan.\n{GUIDE}");
         project.write("docs/guide.md", &edited);
 
-        let result = planned.finish(mode, &session.context, &paths, &mut session.output);
+        let result = planned.finish(mode, false, &session.context, &paths, &mut session.output);
         let run = session.finished(result);
 
         assert_eq!(run.exit_code(), 1, "stderr: {}", run.stderr);
@@ -1224,7 +1234,7 @@ mod tests {
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o555))
             .expect("the fixture directory should become read-only");
 
-        let result = planned.finish(mode, &session.context, &paths, &mut session.output);
+        let result = planned.finish(mode, false, &session.context, &paths, &mut session.output);
 
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755))
             .expect("the fixture directory should become writable again");

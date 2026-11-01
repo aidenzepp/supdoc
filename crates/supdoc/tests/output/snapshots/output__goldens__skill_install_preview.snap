@@ -8,4 +8,4 @@ exit: 0
 create     .agents/skills/supdoc/SKILL.md
 create     .claude/skills/supdoc/SKILL.md
 --- stderr
-Nothing written. Run the same command with --yes to apply.
+Nothing written. Run `supdoc skill install --yes` to apply.
