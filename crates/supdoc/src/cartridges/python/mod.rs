@@ -361,6 +361,7 @@ def outer():
                         resolved(&file, &table, path),
                         HashSettings::default(),
                     )
+                    .expect("the symbol should lie in its own file")
                     .to_string(),
                 )
             })
@@ -413,6 +414,7 @@ def outer():
 
         let hash = |file: &SourceFile, table: &SymbolTable, path| {
             hash_symbol(file, resolved(file, table, path), HashSettings::default())
+                .expect("the symbol should lie in its own file")
         };
 
         assert_eq!(
@@ -505,6 +507,7 @@ def outer():
         let hash = |file: &SourceFile| {
             let table = symbols(file);
             hash_symbol(file, resolved(file, &table, "f"), HashSettings::default())
+                .expect("the symbol should lie in its own file")
         };
 
         assert_ne!(hash(&before), hash(&after));

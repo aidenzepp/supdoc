@@ -132,9 +132,12 @@ mod tests {
     fn body_of_a_markdown_file_yields_link_regions() {
         let file = registered_file("guide.md");
 
+        let found = links(&file);
+        let destinations: Vec<_> = found.iter().map(|link| link.destination.as_str()).collect();
+
         assert_eq!(
-            links(&file).len(),
-            1,
+            destinations,
+            ["../src/lib.rs#add"],
             "the one link in the body should be read through the registered cartridge"
         );
     }
@@ -147,7 +150,9 @@ mod tests {
         let symbol = table
             .resolve(file.path(), &query)
             .unwrap_or_else(|error| panic!("`{raw}` should resolve: {error}"));
-        hash_symbol(&file, symbol, HashSettings::default()).to_string()
+        hash_symbol(&file, symbol, HashSettings::default())
+            .expect("the symbol should lie in its own file")
+            .to_string()
     }
 
     /// Pinned from `printf` of the section's bytes piped to `shasum -a 256`, not from supdoc: a

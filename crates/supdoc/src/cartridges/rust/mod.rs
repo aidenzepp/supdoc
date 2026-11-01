@@ -35,6 +35,21 @@ pub fn cartridge() -> Result<&'static QueryCartridge, &'static QueryFileError> {
     RUST.as_ref()
 }
 
+/// Each region's text, comment markers left out, in file order. Shared by every cartridge's
+/// region tests, which assert what is a region and not only how many there are.
+#[cfg(test)]
+pub(crate) fn region_texts(file: &crate::read::cartridge::SourceFile) -> Vec<String> {
+    file.language()
+        .markdown_regions(file)
+        .iter()
+        .map(|region| {
+            region
+                .text_within(0..file.text().len(), file.text())
+                .into_owned()
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -223,6 +238,7 @@ pub mod util {
                         resolved(&file, &table, path),
                         HashSettings::default(),
                     )
+                    .expect("the symbol should lie in its own file")
                     .to_string(),
                 )
             })
@@ -281,6 +297,7 @@ pub mod util {
 
         let hash = |file: &SourceFile, table: &SymbolTable, path| {
             hash_symbol(file, resolved(file, table, path), HashSettings::default())
+                .expect("the symbol should lie in its own file")
         };
 
         assert_eq!(
@@ -320,7 +337,10 @@ pub mod util {
     fn rust_line_and_block_comments_are_link_regions() {
         let file = parse("/// [a](a.md)\n// [b](b.md)\n/* [c](c.md) */\nfn f() {}\n");
 
-        assert_eq!(file.language().markdown_regions(&file).len(), 3);
+        assert_eq!(
+            region_texts(&file),
+            [" [a](a.md)\n", " [b](b.md)\n", "/* [c](c.md) */"]
+        );
     }
 
     #[test]
@@ -457,7 +477,8 @@ pub mod util {
                 &file,
                 resolved(&file, &table, "add"),
                 HashSettings::default()
-            ),
+            )
+            .expect("the symbol should lie in its own file"),
             Hash::digest(b"fn add() { 1 }"),
         );
     }
