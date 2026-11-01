@@ -621,7 +621,7 @@ mod tests {
             assert_eq!(
                 text,
                 "no symbol `ad` in src/lib.rs\n\
-                 did you mean `add`, `sub`? run `supdoc resolve src/lib.rs` from the project root to list its symbols",
+                 did you mean `add`? run `supdoc resolve src/lib.rs` from the project root to list its symbols",
                 "root {root:?}: the message and help should name the file from the project root"
             );
             assert!(
