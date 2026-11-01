@@ -266,4 +266,22 @@ mod tests {
             Hash::digest(b"fn add(a: u8) -> u8 {\n    a\n}"),
         );
     }
+
+    /// Pinned from `printf` of the file's bytes piped to `shasum -a 256`, not from supdoc.
+    const HASH_WITH_B: &str = "a75d72742a6c0fb87ad0e9a2abd32c4f7bc13863cfb597f3d7b7652c78675779";
+    /// The same bytes with `b.md` spelled `c.md`.
+    const HASH_WITH_C: &str = "a415e4296c9a189b7b6ae079968e260507e2290831ed281d5a90406615201863";
+
+    #[test]
+    fn editing_a_comment_link_changes_whole_file_hash_of_its_file() {
+        let before = parse("fn a() {}\n\n// see [b](../docs/b.md)\n");
+        let after = parse("fn a() {}\n\n// see [b](../docs/c.md)\n");
+
+        assert_eq!(hash_file(&before, NORMALIZE).to_string(), HASH_WITH_B);
+        assert_eq!(
+            hash_file(&after, NORMALIZE).to_string(),
+            HASH_WITH_C,
+            "a whole-file hash covers comments, so editing a link in one changes it (03 R6)",
+        );
+    }
 }
