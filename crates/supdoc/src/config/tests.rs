@@ -422,6 +422,47 @@ fn extends_directory_suggests_config_inside_it() {
 }
 
 #[test]
+fn extends_naming_an_in_root_directory_gets_the_directory_error() {
+    let dir = tree(&[
+        ("docs/inner/supdoc.config.toml", ""),
+        ("supdoc.config.toml", "extends = \"docs/inner\"\n"),
+    ]);
+    let error = load_error(&dir, "supdoc.config.toml");
+
+    assert_eq!(error.code(), "config-extends-directory", "got {error:?}");
+    assert_eq!(
+        error.help().as_deref(),
+        Some("Use `extends = \"docs/inner/supdoc.config.toml\"`"),
+    );
+
+    let dir = tree(&[("supdoc.config.toml", "extends = \".\"\n")]);
+    let error = load_error(&dir, "supdoc.config.toml");
+    assert_eq!(error.code(), "config-extends-directory", "got {error:?}");
+    assert!(
+        matches!(
+            &error,
+            ConfigError::ExtendsDirectory {
+                suggestion: None,
+                ..
+            }
+        ),
+        "must not suggest the file itself: {error:?}",
+    );
+}
+
+#[test]
+fn include_given_a_string_says_to_write_a_list() {
+    let dir = tree(&[("supdoc.config.toml", "include = \"docs\"\n")]);
+    let error = load_error(&dir, "supdoc.config.toml");
+
+    let help = error.help().unwrap_or_default();
+    assert!(
+        help.contains("[\"docs\"]"),
+        "help should show the list form: {help}"
+    );
+}
+
+#[test]
 fn extends_directory_without_config_has_no_suggestion() {
     let dir = tree(&[("apps/web/supdoc.config.toml", "extends = \"../..\"\n")]);
     let error = load_error(&dir, "apps/web/supdoc.config.toml");
