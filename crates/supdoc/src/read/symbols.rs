@@ -338,7 +338,8 @@ impl SymbolTable {
     }
 
     /// Up to three paths (full paths or aliases) that are close misspellings of `query` (the
-    /// cutoff the fixer uses), closest first. Ties keep file order.
+    /// fixer's cutoff) or end in the same name, such as a trait method under another path, closest
+    /// first. Ties keep file order.
     #[must_use]
     pub fn nearest(&self, query: &SymbolPath) -> Vec<SymbolPath> {
         let wanted = query.to_string();
@@ -347,7 +348,10 @@ impl SymbolTable {
             .iter()
             .flat_map(|symbol| std::iter::once(&symbol.path).chain(&symbol.aliases))
             .filter(|path| seen.insert(*path))
-            .filter(|path| is_close(&wanted, &path.to_string()))
+            .filter(|path| {
+                let shown = path.to_string();
+                is_close(&wanted, &shown) || shares_last_segment(&wanted, &shown)
+            })
             .map(|path| (strsim::levenshtein(&wanted, &path.to_string()), path))
             .collect();
         scored.sort_by_key(|(distance, _)| *distance);
@@ -357,6 +361,12 @@ impl SymbolTable {
             .map(|(_, path)| path.clone())
             .collect()
     }
+}
+
+/// Whether `candidate` ends in the last dot-separated name of `wanted`.
+fn shares_last_segment(wanted: &str, candidate: &str) -> bool {
+    let last = |path: &str| path.rsplit('.').next().map(str::to_owned);
+    last(wanted) == last(candidate)
 }
 
 #[cfg(test)]
