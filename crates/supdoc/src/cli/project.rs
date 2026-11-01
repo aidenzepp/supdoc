@@ -67,16 +67,10 @@ pub(crate) fn config_failure(
     output: &mut Output,
     command: &str,
 ) -> CliError {
-    let help = error.help_from(&context.cwd).unwrap_or_else(|| {
-        format!(
-            "Correct the config as the message says, then run `{}` again",
-            invocation(context, command)
-        )
-    });
     let failure = CliError::new(
         error.code(),
         error.message_from(&context.cwd),
-        help,
+        error.help_from(&context.cwd),
         error.exit_code(),
     );
     match error_site(error, &context.cwd, output) {
@@ -507,9 +501,8 @@ mod tests {
     }
 
     #[test]
-    fn config_error_help_names_the_command_passed_in() {
+    fn a_wrong_type_help_names_the_key_and_its_form() {
         let dir = tempfile::tempdir().expect("a fresh temp directory should be created");
-        // A wrong type has no specific hint, so the help falls back to rerunning the command.
         fs::write(dir.path().join("supdoc.config.toml"), "include = 3\n")
             .expect("the fixture config should be written");
         let cwd = AbsolutePath::new(dir.path()).expect("a temp directory should be absolute");
@@ -538,8 +531,8 @@ mod tests {
             ("config-parse", CliError::CONFIG_EXIT_CODE)
         );
         assert!(
-            error.help().contains("run `supdoc list` again"),
-            "the fallback help should name the command that was run: {}",
+            error.help().contains("`include = [\"docs\"]`"),
+            "a wrong type should get a help that names the key and its form: {}",
             error.help()
         );
     }
