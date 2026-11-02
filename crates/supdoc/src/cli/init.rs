@@ -269,48 +269,11 @@ mod tests {
     use clap::Parser as _;
 
     use crate::cli::args::{Cli, Command};
+    use crate::cli::testing::{Capture, ClosedPipe};
     use crate::config::Config;
     use crate::output::{OutputFormat, OutputSettings, PathStyle, Verbosity};
 
     use super::*;
-
-    /// A writer that keeps what it is given, shared with the test that reads it back.
-    #[derive(Clone, Default)]
-    struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl Capture {
-        fn text(&self) -> String {
-            let bytes = self.0.lock().expect("the capture lock should be free");
-            String::from_utf8(bytes.clone()).expect("captured output should be UTF-8")
-        }
-    }
-
-    impl Write for Capture {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .expect("the capture lock should be free")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// A writer whose reader has hung up.
-    struct ClosedPipe;
-
-    impl Write for ClosedPipe {
-        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-            Err(io::ErrorKind::BrokenPipe.into())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
 
     /// Plain text settings rooted in `cwd`.
     fn text_settings(cwd: &AbsolutePath) -> OutputSettings {

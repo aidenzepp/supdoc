@@ -248,20 +248,17 @@ impl From<&Location> for LinkLocationJson {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-    use std::fs;
-    use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex};
 
-    use clap::Parser as _;
+    use std::fs;
+    use std::path::Path;
 
     use super::*;
-    use crate::cli::args::{Cli, Command};
-    use crate::config::Config;
-    use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
-    use crate::output::OutputSettings;
+    use crate::cli::args::Command;
+    use crate::cli::testing::{Project, Run, Session, at};
+
+    use crate::lock::model::LOCK_FILE_NAME;
+
     use crate::path::AbsolutePath;
-    use crate::scan::model::{Scope, TargetState};
 
     /// A file that documents `add` in `src/lib.rs`.
     const GUIDE: &str = "# Guide\n\nThe [add](../src/lib.rs#add) function sums.\n";
@@ -269,176 +266,39 @@ mod tests {
     /// The code `GUIDE` points at.
     const LIB: &str = "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n";
 
-    /// A buffer `Output` writes into and the test reads back.
-    #[derive(Clone, Default)]
-    struct Capture(Arc<Mutex<Vec<u8>>>);
-
-    impl Capture {
-        fn text(&self) -> String {
-            let bytes = self.0.lock().expect("the capture lock should be free");
-            String::from_utf8(bytes.clone()).expect("captured output should be UTF-8")
-        }
-    }
-
-    impl io::Write for Capture {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .expect("the capture lock should be free")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// The value at `pointer` (RFC 6901) in `json`, or a failure naming what is missing.
-    fn at(json: &serde_json::Value, pointer: &str) -> serde_json::Value {
-        json.pointer(pointer)
-            .unwrap_or_else(|| panic!("`{pointer}` should be in the JSON output: {json}"))
-            .clone()
-    }
-
-    /// What one `supdoc check` run returned and printed.
-    struct Run {
-        result: Result<Outcome, CliError>,
-        stdout: String,
-        stderr: String,
-    }
-
-    impl Run {
-        /// The exit code the process would end with.
-        fn exit_code(&self) -> u8 {
-            match &self.result {
-                Ok(outcome) => outcome.exit_code(),
-                Err(error) => error.exit_code(),
-            }
-        }
-
-        /// stdout parsed as the one JSON document `--json` prints.
-        fn json(&self) -> serde_json::Value {
-            serde_json::from_str(&self.stdout)
-                .unwrap_or_else(|error| panic!("stdout should be JSON ({error}): {}", self.stdout))
-        }
-    }
-
-    /// A project in a fresh temporary directory, with the guide and the code it documents.
-    struct Project {
-        dir: tempfile::TempDir,
+    /// A project with the guide and the code it documents.
+    fn project() -> Project {
+        let project = Project::empty();
+        project.write("docs/guide.md", GUIDE);
+        project.write("src/lib.rs", LIB);
+        project
     }
 
     impl Project {
-        fn new() -> Self {
-            let project = Self {
-                dir: tempfile::tempdir().expect("a fresh temp directory should be created"),
-            };
-            project.write("docs/guide.md", GUIDE);
-            project.write("src/lib.rs", LIB);
-            project
-        }
-
-        fn root(&self) -> AbsolutePath {
-            AbsolutePath::new(self.dir.path()).expect("a temp directory should be absolute")
-        }
-
-        fn write(&self, relative: &str, text: &str) {
-            let path = self.dir.path().join(relative);
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).expect("the fixture directory should be created");
-            }
-            fs::write(&path, text).expect("the fixture file should be written");
-        }
-
-        /// Records every present link's current hash in `supdoc.lock`, as `update --yes` would.
-        fn record_all(&self) {
-            let root = self.root();
-            let config = Config::load(&root).expect("the fixture config should load");
-            let scan = crate::scan::assemble::run(&config, &Languages::builtin(), &Scope::All)
-                .expect("the fixture project should scan");
-            let mut lock = Lockfile::default();
-            for (key, link) in scan.links {
-                if let TargetState::Present { hash, .. } = link.target {
-                    let _previous = lock.insert(key, hash);
-                }
-            }
-            assert!(!lock.is_empty(), "the fixture should have a link to record");
-            let path = AbsolutePath::new(&self.dir.path().join(LOCK_FILE_NAME))
-                .expect("the lockfile path should be absolute");
-            lock.write(&path)
-                .expect("the fixture lockfile should be written");
-        }
-
-        /// Every file under the root and its bytes.
-        fn files(&self) -> BTreeMap<PathBuf, Vec<u8>> {
-            fn collect(dir: &Path, found: &mut BTreeMap<PathBuf, Vec<u8>>) {
-                for entry in fs::read_dir(dir).expect("a fixture directory should be readable") {
-                    let path = entry.expect("a directory entry should be readable").path();
-                    if path.is_dir() {
-                        collect(&path, found);
-                    } else {
-                        let bytes = fs::read(&path).expect("a fixture file should be readable");
-                        let _previous = found.insert(path, bytes);
-                    }
-                }
-            }
-            let mut found = BTreeMap::new();
-            collect(self.dir.path(), &mut found);
-            found
-        }
-
         /// Runs `supdoc <args>` from the project root. `args` must start with `check`.
         fn check(&self, args: &[&str]) -> Run {
-            Self::check_in(self.root(), args)
+            check_in(self.root(), args)
         }
 
         /// Runs `supdoc <args>` from the project directory `relative`, which must exist.
         fn check_from(&self, relative: &str, args: &[&str]) -> Run {
-            let cwd = AbsolutePath::new(&self.dir.path().join(relative))
-                .expect("a directory under the root should be absolute");
-            Self::check_in(cwd, args)
+            check_in(self.root_of(relative), args)
         }
+    }
 
-        /// Runs `supdoc <args>` from `cwd`, with output paths provisionally rooted there as
-        /// `main` roots them before any config loads.
-        fn check_in(cwd: AbsolutePath, args: &[&str]) -> Run {
-            let command_line: Vec<&str> = std::iter::once("supdoc")
-                .chain(args.iter().copied())
-                .collect();
-            let cli = Cli::try_parse_from(&command_line).unwrap_or_else(|error| {
-                panic!("`{}` should parse: {error}", command_line.join(" "))
-            });
-            let Command::Check(check_args) = &cli.command else {
-                panic!("`{}` should be a check command", command_line.join(" "));
-            };
-            let settings = OutputSettings {
-                format: cli.global.format(),
-                verbosity: Verbosity::from_flags(cli.global.quiet, cli.global.verbose),
-                color: false,
-                unicode: false,
-                width: 80,
-                paths: PathStyle::new(cwd.clone(), cwd.clone(), None),
-            };
-            let (stdout, stderr) = (Capture::default(), Capture::default());
-            let mut output =
-                Output::new(settings, Box::new(stdout.clone()), Box::new(stderr.clone()));
-            let context = Context {
-                global: cli.global.clone(),
-                cwd,
-            };
-            let result = run(check_args, &context, &mut output);
-            Run {
-                result,
-                stdout: stdout.text(),
-                stderr: stderr.text(),
-            }
-        }
+    /// Runs `supdoc <args>` from `cwd`. `args` must start with `check`.
+    fn check_in(cwd: AbsolutePath, args: &[&str]) -> Run {
+        let mut session = Session::new(cwd, args);
+        let Command::Check(check_args) = &session.cli.command else {
+            panic!("`supdoc {}` should be a check command", args.join(" "));
+        };
+        let result = run(check_args, &session.context, &mut session.output);
+        session.finished(result)
     }
 
     #[test]
     fn recorded_unchanged_link_passes_with_exit_0() {
-        let project = Project::new();
+        let project = project();
         project.record_all();
 
         let run = project.check(&["check"]);
@@ -449,7 +309,7 @@ mod tests {
 
     #[test]
     fn unrecorded_link_is_new_and_fails_with_exit_1() {
-        let project = Project::new();
+        let project = project();
 
         let run = project.check(&["check"]);
 
@@ -468,7 +328,7 @@ mod tests {
 
     #[test]
     fn failed_help_names_the_update_path_from_where_check_ran_quoted() {
-        let project = Project::new();
+        let project = project();
         project.write("supdoc.config.toml", "");
         project.write("my docs/guide.md", GUIDE);
         project.record_all();
@@ -498,7 +358,7 @@ mod tests {
 
     #[test]
     fn changed_target_is_failed_and_fails_the_check() {
-        let project = Project::new();
+        let project = project();
         project.record_all();
         project.write(
             "src/lib.rs",
@@ -522,7 +382,7 @@ mod tests {
 
     #[test]
     fn findings_print_in_document_order_not_link_key_order() {
-        let project = Project::new();
+        let project = project();
         project.write("src/a.rs", "pub fn add() {}\n");
         project.write("src/b.rs", "pub fn sub() {}\n");
         project.write(
@@ -555,7 +415,7 @@ mod tests {
 
     #[test]
     fn a_located_loose_finding_prints_before_a_later_link_finding_in_the_same_file() {
-        let project = Project::new();
+        let project = project();
         project.write("src/a.rs", "pub fn add() {}\n");
         project.write(
             "docs/g.md",
@@ -578,7 +438,7 @@ mod tests {
 
     #[test]
     fn missing_target_is_broken_and_fails_the_check() {
-        let project = Project::new();
+        let project = project();
         project.record_all();
         project.write(
             "src/lib.rs",
@@ -598,7 +458,7 @@ mod tests {
 
     #[test]
     fn obsolete_entry_only_warns_unless_warnings_are_denied() {
-        let project = Project::new();
+        let project = project();
         project.record_all();
         project.write("docs/guide.md", "# Guide\n\nNo links any more.\n");
 
@@ -627,7 +487,7 @@ mod tests {
             }
         }
 
-        let project = Project::new();
+        let project = project();
         project.write("docs/sub/c.md", "See [add](../../src/lib.rs#add).\n");
         project.record_all();
         project.write("docs/guide.md", "# Guide\n\nNo links any more.\n");
@@ -660,7 +520,7 @@ mod tests {
     #[test]
     fn check_never_writes_any_file() {
         for recorded in [false, true] {
-            let project = Project::new();
+            let project = project();
             if recorded {
                 project.record_all();
                 // Make one link failed and add an obsolete entry's worth of drift.
@@ -688,14 +548,14 @@ mod tests {
 
     #[test]
     fn exit_codes_match_table() {
-        let clean = Project::new();
+        let clean = project();
         clean.record_all();
-        let failing = Project::new();
-        let bad_config = Project::new();
+        let failing = project();
+        let bad_config = project();
         bad_config.write("supdoc.config.toml", "include = 3\n");
-        let conflicted_lock = Project::new();
+        let conflicted_lock = project();
         conflicted_lock.write(LOCK_FILE_NAME, "<<<<<<< HEAD\n=======\n>>>>>>> theirs\n");
-        let unreadable_lock = Project::new();
+        let unreadable_lock = project();
         fs::create_dir(unreadable_lock.dir.path().join(LOCK_FILE_NAME))
             .expect("a directory in place of the lockfile should be created");
 
@@ -720,7 +580,7 @@ mod tests {
 
     #[test]
     fn missing_path_is_a_usage_error_naming_the_path() {
-        let project = Project::new();
+        let project = project();
 
         let run = project.check(&["check", "docs/nope.md"]);
 
@@ -735,7 +595,7 @@ mod tests {
 
     #[test]
     fn path_outside_the_project_is_a_usage_error() {
-        let project = Project::new();
+        let project = project();
         let outside = project
             .dir
             .path()
@@ -755,7 +615,7 @@ mod tests {
 
     #[test]
     fn paths_narrow_the_check_and_leave_other_entries_unjudged() {
-        let project = Project::new();
+        let project = project();
         project.write("docs/other.md", "See [add](../src/lib.rs#add).\n");
         project.record_all();
         project.write("docs/other.md", "No links here.\n");
@@ -773,7 +633,7 @@ mod tests {
 
     #[test]
     fn json_nests_link_findings_and_keeps_loose_findings_top_level() {
-        let project = Project::new();
+        let project = project();
         project.write("supdoc.config.toml", "exclude = [\"private\"]\n");
         project.write("private/notes.md", "[add](../src/lib.rs#add)\n");
 
@@ -826,7 +686,7 @@ mod tests {
 
     #[test]
     fn run_from_a_subdirectory_reports_paths_against_the_project_root() {
-        let project = Project::new();
+        let project = project();
         project.write("supdoc.config.toml", "");
 
         let json = project.check_from("docs", &["--json", "check"]).json();
@@ -851,7 +711,7 @@ mod tests {
 
     #[test]
     fn passed_links_are_listed_only_when_verbose() {
-        let project = Project::new();
+        let project = project();
         project.record_all();
 
         let normal = project.check(&["--json", "check"]);
@@ -872,7 +732,7 @@ mod tests {
 
     #[test]
     fn repeating_verbose_changes_nothing() {
-        let project = Project::new();
+        let project = project();
         project.record_all();
 
         let once = project.check(&["-v", "check"]);
@@ -887,7 +747,7 @@ mod tests {
 
     #[test]
     fn quiet_clean_run_prints_nothing() {
-        let project = Project::new();
+        let project = project();
         project.record_all();
 
         let run = project.check(&["-q", "check"]);
@@ -910,7 +770,7 @@ mod tests {
 
     #[test]
     fn check_json_validates_against_its_schema() {
-        let project = Project::new();
+        let project = project();
         let json = project.check(&["--json", "check"]).json();
 
         let errors = schema_violations(&json);
@@ -920,7 +780,7 @@ mod tests {
 
     #[test]
     fn check_schema_rejects_an_envelope_without_its_schema_version() {
-        let project = Project::new();
+        let project = project();
         let mut json = project.check(&["--json", "check"]).json();
         let _version = json
             .as_object_mut()
