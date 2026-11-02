@@ -51,13 +51,24 @@ impl IgnoreFile {
 pub struct Walk {
     /// Sorted by path (04 S8). Every entry is under the root, passes [`Config::scans`], is inside
     /// the [`Scope`], and has a cartridge (04 S6).
-    pub sources: Vec<(AbsolutePath, &'static dyn Cartridge)>,
+    pub sources: Vec<WalkedSource>,
     /// Unreadable directories, symlinked ignore files that weren't read, and explicitly named
     /// paths that are excluded or ignored, sorted.
     pub findings: Vec<Finding>,
     /// The directories the walk couldn't read, sorted by path. Nothing beneath one was walked, so
     /// its sources and their links are unknown (05 C5).
     pub unread_dirs: Vec<UnreadDir>,
+}
+
+/// A file the walk found to read links from.
+#[derive(Debug)]
+pub struct WalkedSource {
+    /// Its path relative to the root, as links name it.
+    pub source: SourcePath,
+    /// Its path on disk.
+    pub path: AbsolutePath,
+    /// The cartridge that reads it.
+    pub cartridge: &'static dyn Cartridge,
 }
 
 /// A directory the walk couldn't read, so nothing beneath it was walked.
@@ -141,7 +152,7 @@ pub fn walk(config: &Config, languages: &Languages, scope: &Scope) -> Walk {
             Err(error) => unread_dirs.extend(unreadable_dir(&error)),
         }
     }
-    sources.sort_by(|(left, _), (right, _)| left.cmp(right));
+    sources.sort_by(|left, right| left.path.cmp(&right.path));
     unread_dirs.sort();
 
     let mut findings: Vec<Finding> = unread_dirs.iter().map(|dir| dir.finding(root)).collect();
@@ -1080,7 +1091,7 @@ fn as_source(
     languages: &Languages,
     scope: &Scope,
     entry: &DirEntry,
-) -> Option<Result<(AbsolutePath, &'static dyn Cartridge), Finding>> {
+) -> Option<Result<WalkedSource, Finding>> {
     // A symlink reports its own type, not its target's, so links are skipped here (04 S3).
     if !entry.file_type()?.is_file() {
         return None;
@@ -1095,7 +1106,11 @@ fn as_source(
         Ok(relative) => relative,
         Err(error) => return Some(Err(invalid_source_path(relative_path, &error))),
     };
-    scope.contains(&relative).then_some(Ok((path, cartridge)))
+    scope.contains(&relative).then_some(Ok(WalkedSource {
+        source: relative,
+        path,
+        cartridge,
+    }))
 }
 
 /// The warning for a file the walk would read but whose name isn't a valid source path.
@@ -1144,7 +1159,7 @@ fn explicit_path_warnings(
     languages: &Languages,
     scope: &Scope,
     rules: &IgnoreRules,
-    sources: &[(AbsolutePath, &'static dyn Cartridge)],
+    sources: &[WalkedSource],
     unread_dirs: &[UnreadDir],
 ) -> Vec<Finding> {
     let Scope::Paths(listed) = scope else {
@@ -1170,7 +1185,7 @@ fn explicit_path_warning(
     config: &Config,
     languages: &Languages,
     rules: &IgnoreRules,
-    sources: &[(AbsolutePath, &'static dyn Cartridge)],
+    sources: &[WalkedSource],
     listed: &SourcePath,
 ) -> Option<Finding> {
     let root = config.root();
@@ -1189,7 +1204,7 @@ fn explicit_path_warning(
     let ignored_by = ignore_rule(rules, root, &path, kind.is_dir());
     let is_source_file = kind.is_file() && languages.for_path(path.as_path()).is_some();
     let walked = sources
-        .binary_search_by(|(source, _)| source.cmp(&path))
+        .binary_search_by(|walked| walked.path.cmp(&path))
         .is_ok();
 
     if let Some(rule) = ignored_by {
@@ -1529,7 +1544,7 @@ mod tests {
             self.walk(scope)
                 .sources
                 .iter()
-                .map(|(path, _)| self.relative(path))
+                .map(|walked| self.relative(&walked.path))
                 .collect()
         }
 
@@ -1839,7 +1854,7 @@ mod tests {
         let languages: Vec<_> = walk
             .sources
             .iter()
-            .map(|(_, cartridge)| cartridge.id().as_str())
+            .map(|walked| walked.cartridge.id().as_str())
             .collect();
         assert_eq!(languages, ["rust"]);
     }
@@ -2004,7 +2019,7 @@ mod tests {
         assert_eq!(
             walk.sources
                 .iter()
-                .map(|(path, _)| project.relative(path))
+                .map(|walked| project.relative(&walked.path))
                 .collect::<Vec<_>>(),
             ["open/b.rs"],
         );
@@ -2462,7 +2477,7 @@ mod tests {
         let names = walked
             .sources
             .iter()
-            .filter_map(|(path, _)| path.as_path().file_name())
+            .filter_map(|walked| walked.path.as_path().file_name())
             .map(|name| name.to_string_lossy().into_owned())
             .collect();
         (names, codes(&walked))
@@ -2531,7 +2546,7 @@ mod tests {
         let walked: Vec<_> = all
             .sources
             .iter()
-            .filter_map(|(path, _)| path.as_path().file_name())
+            .filter_map(|walked| walked.path.as_path().file_name())
             .collect();
         assert_eq!(
             walked,
@@ -2666,7 +2681,7 @@ mod tests {
         assert_eq!(
             walk.sources
                 .iter()
-                .map(|(path, _)| project.relative(path))
+                .map(|walked| project.relative(&walked.path))
                 .collect::<Vec<_>>(),
             ["gen/out.rs"],
             "the rules of an unreadable file don't apply, as in git"
@@ -2999,7 +3014,7 @@ mod tests {
         assert_eq!(
             walk.sources
                 .iter()
-                .map(|(path, _)| project.relative(path))
+                .map(|walked| project.relative(&walked.path))
                 .collect::<Vec<_>>(),
             ["open.rs"],
         );
