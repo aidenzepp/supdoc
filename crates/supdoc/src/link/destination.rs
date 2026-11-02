@@ -110,6 +110,10 @@ pub enum LinkError {
         destination: String,
         /// Every configured namespace, nearest spelling to `prefix` first.
         known: Vec<NamespaceName>,
+        /// The link the destination would be if `prefix` were configured, or `None` when the
+        /// rest of it is not a link too (an invalid path or symbol, a directory, a file no
+        /// cartridge reads, or a prefix that is not a namespace name).
+        parsed: Option<Box<ParsedLink>>,
     },
     /// The path part is not a valid link path (empty, `a//b`, `\`, not UTF-8, ...).
     #[error("invalid path in `{destination}`: {error}")]
@@ -243,7 +247,14 @@ pub fn parse_destination(
         Some((prefix, path)) => match namespaces_entry(namespaces, prefix) {
             Some(namespace) => (Some(namespace), path),
             None => {
-                return Destination::Invalid(unknown_namespace(prefix, destination, namespaces));
+                return Destination::Invalid(unknown_namespace(
+                    prefix,
+                    destination,
+                    raw,
+                    source,
+                    namespaces,
+                    languages,
+                ));
             }
         },
         None => (None, before_fragment),
@@ -399,15 +410,28 @@ fn namespaces_entry(namespaces: &impl NamespaceNames, prefix: &str) -> Option<Na
 fn unknown_namespace(
     prefix: &str,
     destination: &str,
+    raw: &RawLink,
+    source: &SourcePath,
     namespaces: &impl NamespaceNames,
+    languages: &Languages,
 ) -> LinkError {
     let mut known = namespaces.names();
+    // Parsing reads only namespace names, so adding the missing one is all it takes.
+    let parsed = NamespaceName::from_str(prefix).ok().and_then(|name| {
+        let mut with_prefix: BTreeSet<NamespaceName> = known.iter().cloned().collect();
+        let _absent = with_prefix.insert(name);
+        match parse_destination(raw, source, &with_prefix, languages) {
+            Destination::Link(link) => Some(Box::new(link)),
+            Destination::Invalid(_) | Destination::NotSupdoc { .. } => None,
+        }
+    });
     // The sort is stable, so equally near names stay in alphabetical order.
     known.sort_by_key(|name| strsim::levenshtein(prefix, name.as_str()));
     LinkError::UnknownNamespace {
         prefix: prefix.to_owned(),
         destination: destination.to_owned(),
         known,
+        parsed,
     }
 }
 
@@ -664,6 +688,7 @@ mod tests {
                 prefix: "bilng".to_owned(),
                 destination: "bilng:src/x.rs#f".to_owned(),
                 known: names(&["billing", "auth"]),
+                parsed: Some(Box::new(link("bilng:src/x.rs", Some("f")))),
             }),
         );
     }
