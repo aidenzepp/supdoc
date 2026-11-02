@@ -6,8 +6,33 @@ use super::model::{LinkReport, Report};
 use crate::hash::{Hash, HashSettings};
 use crate::link::LinkKey;
 use crate::lock::model::Lockfile;
-use crate::scan::model::{Scan, TargetState};
+use crate::scan::model::{Scan, Scope, TargetState};
 use crate::state::LinkState;
+
+/// The states an update must select to move the lockfile to new hash settings (B.5).
+pub const MIGRATION_STATES: [LinkState; 3] =
+    [LinkState::Failed, LinkState::New, LinkState::Obsolete];
+
+/// A move of the whole lockfile to new hash settings.
+///
+/// Only a full update can build one: no `[PATHS]` and every state in [`MIGRATION_STATES`] selected
+/// (B.5). Entries the plan leaves alone keep their old hashes under the new settings (B-Q4), which
+/// is only safe when the plan re-records every entry it can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Migration {
+    /// The settings the scan hashed with.
+    settings: HashSettings,
+}
+
+impl Migration {
+    /// The migration to `settings` for an update over `scope` selecting `states`, or `None` when
+    /// that update is not a full one.
+    #[must_use]
+    pub fn for_update(settings: HashSettings, scope: &Scope, states: &[LinkState]) -> Option<Self> {
+        (matches!(scope, Scope::All) && MIGRATION_STATES.iter().all(|state| states.contains(state)))
+            .then_some(Self { settings })
+    }
+}
 
 /// What `update` would do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,28 +76,28 @@ pub enum LockChange {
 }
 
 /// Plans what `update` would do for the links in `states` (05 C9), re-recording the lockfile
-/// under `settings`, the hash settings `scan` hashed with.
+/// under `migration`'s settings when there is one; otherwise the lock keeps its own settings.
 ///
 /// `broken` links are never recorded: there is no code to hash (05 C7). A link that moved keys
 /// brings its old entry's hash along. That hash is replaced by the current one only when `failed`
 /// is selected, so moving a link never accepts drift by itself. Moving needs `new` to be selected.
 ///
-/// When `settings` differ from the lock's, every link whose hash they change looks `failed`, and
-/// is accepted like any other. Entries the plan leaves alone keep their old hashes under the new
-/// settings (B-Q4), so the caller plans a settings change only for a full update: no `[PATHS]`
-/// and every state from `failed`, `new` and `obsolete` selected (B.5).
+/// When the migration's settings differ from the lock's, every link whose hash they change looks
+/// `failed`, and is accepted like any other.
 #[must_use]
 pub fn plan_update(
     report: &Report,
     scan: &Scan,
     lock: &Lockfile,
     states: &[LinkState],
-    settings: HashSettings,
+    migration: Option<Migration>,
 ) -> UpdatePlan {
     let selected = |state: LinkState| states.contains(&state);
-    let settings_change = SettingsChange::between(lock.hash_settings(), settings);
     let mut next = lock.clone();
-    next.set_hash_settings(settings);
+    let settings_change = migration.and_then(|migration| {
+        next.set_hash_settings(migration.settings);
+        SettingsChange::between(lock.hash_settings(), migration.settings)
+    });
     let mut changes = Vec::new();
 
     for link in &report.links {
@@ -183,7 +208,7 @@ mod tests {
 
     fn plan(scan: &Scan, lock: &Lockfile, states: &[LinkState]) -> UpdatePlan {
         let report = reconcile_at_root(scan, lock, &Scope::All);
-        plan_update(&report, scan, lock, states, lock.hash_settings())
+        plan_update(&report, scan, lock, states, None)
     }
 
     const DEFAULT_STATES: [LinkState; 3] = [LinkState::Failed, LinkState::New, LinkState::Obsolete];
@@ -298,7 +323,13 @@ mod tests {
         };
         let report = reconcile_at_root(&scan, &lock, &Scope::All);
 
-        let plan = plan_update(&report, &scan, &lock, &DEFAULT_STATES, exact);
+        let plan = plan_update(
+            &report,
+            &scan,
+            &lock,
+            &DEFAULT_STATES,
+            Migration::for_update(exact, &Scope::All, &DEFAULT_STATES),
+        );
 
         assert_eq!(plan.changes, [], "the one link still passes");
         assert_eq!(
