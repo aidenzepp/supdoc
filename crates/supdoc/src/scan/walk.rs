@@ -745,7 +745,7 @@ fn own_ignore_files(dir: &Path) -> OwnIgnoreFiles {
 /// git searches further up.
 ///
 /// Effect: reads file metadata in `dir` and its `.git` directory.
-fn holds_git(dir: &Path) -> bool {
+pub(crate) fn holds_git(dir: &Path) -> bool {
     let dot_git = dir.join(".git");
     match fs::metadata(&dot_git) {
         Err(_) => false,
