@@ -40,8 +40,12 @@ pub fn run(args: &CheckArgs, context: &Context, output: &mut Output) -> Result<O
     let config = load_config(context, output)?;
     let scope = scope(&args.paths, &config, context)?;
     let lock = read_lock(&config, &context.cwd)?;
-    let scan = crate::scan::assemble::run(&config, &Languages::builtin(), &scope)
-        .map_err(CliError::from)?;
+    let scan = crate::scan::assemble::run(
+        &config,
+        Languages::builtin().map_err(CliError::from)?,
+        &scope,
+    )
+    .map_err(CliError::from)?;
 
     let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
     let model = reconcile_in(&scan, &lock, &scope, &paths);

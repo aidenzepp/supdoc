@@ -16,7 +16,9 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::check::model::{LinkReport, Report as CheckModel};
-use crate::check::plan::{LockChange, SettingsChange, UpdatePlan, plan_update};
+use crate::check::plan::{
+    LockChange, MIGRATION_STATES, Migration, SettingsChange, UpdatePlan, plan_update,
+};
 use crate::check::reconcile::reconcile_in;
 use crate::finding::Finding;
 use crate::hash::LineEndings;
@@ -25,7 +27,6 @@ use crate::output::json::Envelope;
 use crate::output::text::{render_finding, visible};
 use crate::output::{Output, PathStyle, Report, Summary, TextContext, preview_note};
 use crate::read::cartridge::Languages;
-use crate::scan::model::Scope;
 use crate::state::LinkState;
 
 use super::args::{UpdateArgs, WriteMode};
@@ -38,10 +39,6 @@ use super::{CliError, Context, Outcome};
 
 /// The closing note when the plan is empty (06a Q6).
 const NOTHING_NOTE: &str = "Nothing to update.";
-
-/// The states a settings migration must select, so no entry keeps a hash from the old settings
-/// that the run could have re-recorded (B.5).
-const MIGRATION_STATES: [LinkState; 3] = [LinkState::Failed, LinkState::New, LinkState::Obsolete];
 
 /// Runs `supdoc update`: prints every lockfile change the selected states call for, and writes
 /// them under `--yes` (05 C2, C9).
@@ -67,18 +64,23 @@ pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<
         change,
     } = read_lock_for_update(&config, &context.cwd)?;
     if let Some(change) = change
-        && !migrates_every_entry(&scope, &args.state)
+        && Migration::for_update(settings, &scope, &args.state).is_none()
     {
         return Err(settings_mismatch(&config, change));
     }
-    let scan =
-        crate::scan::assemble::run_with_settings(&config, &Languages::builtin(), &scope, settings)
-            .map_err(CliError::from)?;
+    let scan = crate::scan::assemble::run_with_settings(
+        &config,
+        Languages::builtin().map_err(CliError::from)?,
+        &scope,
+        settings,
+    )
+    .map_err(CliError::from)?;
 
     // `supdoc fix PATH` takes `PATH` relative to the current directory, so hints name it from there.
     let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
     let model = reconcile_in(&scan, &lock, &scope, &paths);
-    let plan = plan_update(&model, &scan, &lock, &args.state, settings);
+    let migration = Migration::for_update(settings, &scope, &args.state);
+    let plan = plan_update(&model, &scan, &lock, &args.state, migration);
     let applied = args.confirm.mode() == WriteMode::Apply;
     if applied && let Some(next) = &plan.next {
         next.write(&lock_path(config.root()))
@@ -121,12 +123,6 @@ pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<
             CliError::output_failed("cli-update-output", "the update report", &error)
         })?;
     Ok(Outcome::Clean)
-}
-
-/// Whether an update over `scope` with `states` re-records every entry it can, so it may move the
-/// lockfile to new hash settings: no `[PATHS]` and every state from [`MIGRATION_STATES`] (B.5).
-fn migrates_every_entry(scope: &Scope, states: &[LinkState]) -> bool {
-    matches!(scope, Scope::All) && MIGRATION_STATES.iter().all(|state| states.contains(state))
 }
 
 /// The JSON Schema of `supdoc update`'s `--json` output: the whole envelope, with `data` typed as
@@ -583,8 +579,12 @@ mod tests {
         /// settings, independently of `update`.
         fn record_hashed(&self) {
             let config = Config::load(&self.root()).expect("the fixture config should load");
-            let scan = crate::scan::assemble::run(&config, &Languages::builtin(), &Scope::All)
-                .expect("the fixture project should scan");
+            let scan = crate::scan::assemble::run(
+                &config,
+                Languages::builtin().expect("the built-in cartridges should load"),
+                &Scope::All,
+            )
+            .expect("the fixture project should scan");
             let mut lock = Lockfile::default();
             lock.set_hash_settings(config.hash_settings());
             for (key, link) in scan.links {
@@ -1332,8 +1332,12 @@ mod tests {
         /// The state counts `supdoc check` would report for the whole project now.
         fn check_all(&self) -> Summary {
             let config = Config::load(&self.root()).expect("the fixture config should load");
-            let scan = crate::scan::assemble::run(&config, &Languages::builtin(), &Scope::All)
-                .expect("the fixture project should scan");
+            let scan = crate::scan::assemble::run(
+                &config,
+                Languages::builtin().expect("the built-in cartridges should load"),
+                &Scope::All,
+            )
+            .expect("the fixture project should scan");
             let lock = self.lock().unwrap_or_default();
             let root = self.root();
             let paths = PathStyle::new(root.clone(), root, None);

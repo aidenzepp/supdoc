@@ -58,6 +58,7 @@ use crate::exit::ExitStatus;
 use crate::finding::{Location, Snippet};
 use crate::output::{Output, OutputError};
 use crate::path::AbsolutePath;
+use crate::read::error::CartridgeLoadError;
 use crate::scan::assemble::ScanError;
 
 use args::{Command, ConfigCommand, GlobalArgs, Inspect, NamespaceCommand, SkillCommand};
@@ -209,6 +210,17 @@ impl From<ScanError> for CliError {
             error.to_string(),
             error.help(),
             error.status(),
+        )
+    }
+}
+
+impl From<&CartridgeLoadError> for CliError {
+    fn from(error: &CartridgeLoadError) -> Self {
+        Self::new(
+            error.code(),
+            error.to_string(),
+            error.help(),
+            ExitStatus::Bug,
         )
     }
 }

@@ -49,7 +49,7 @@ pub fn run(
     let command = command_text(args, context);
     let config = load_config(context, output)?;
     let path = locate(&config, context, &args.file)?;
-    let file = SourceFile::read(path, &Languages::builtin())
+    let file = SourceFile::read(path, Languages::builtin().map_err(CliError::from)?)
         .map_err(|error| read_failed(&error, config.root(), &args.file))?;
     let table = file.language().symbols(&file);
 

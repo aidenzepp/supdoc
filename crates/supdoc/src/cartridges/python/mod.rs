@@ -552,8 +552,23 @@ def outer():
     }
 
     #[test]
+    fn python_property_and_setter_are_one_symbol_spanning_both() {
+        let src = "class A:\n    @property\n    def x(self): return 1\n    @x.setter\n    def x(self, v): pass\n";
+        let file = parse(src);
+        let table = symbols(&file);
+
+        let symbol = resolved(&file, &table, "A.x");
+
+        assert!(
+            text_of(&file, symbol).contains("return 1") && text_of(&file, symbol).contains("pass"),
+            "{symbol:?}",
+        );
+    }
+
+    #[test]
     fn python_files_use_the_python_cartridge() {
-        let languages = crate::read::cartridge::Languages::builtin();
+        let languages = crate::read::cartridge::Languages::builtin()
+            .expect("the built-in cartridges should load");
 
         for name in ["tools/build.py", "stubs/app.pyi"] {
             assert_eq!(

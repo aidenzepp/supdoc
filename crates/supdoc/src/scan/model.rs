@@ -75,12 +75,21 @@ impl Scan {
 /// One link, wherever it appears in its source, and the current state of its target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScannedLink {
-    /// Every place this link appears in its source. Never empty.
-    pub locations: Vec<Location>,
+    /// The first place this link appears in its source.
+    pub first: Location,
+    /// Every later place this link appears, in order.
+    pub more: Vec<Location>,
     /// The source lines of the first location, captured at scan time (07 G11), when they could be.
     pub snippet: Option<Snippet>,
     /// What the target looks like right now.
     pub target: TargetState,
+}
+
+impl ScannedLink {
+    /// Every place this link appears in its source, first one first. Never empty.
+    pub fn locations(&self) -> impl Iterator<Item = &Location> {
+        std::iter::once(&self.first).chain(&self.more)
+    }
 }
 
 /// What a link's target looks like right now.

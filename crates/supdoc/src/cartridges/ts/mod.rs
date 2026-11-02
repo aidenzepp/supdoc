@@ -311,7 +311,8 @@ namespace util {
 
     #[test]
     fn ts_module_variants_use_the_typescript_cartridge() {
-        let languages = crate::read::cartridge::Languages::builtin();
+        let languages = crate::read::cartridge::Languages::builtin()
+            .expect("the built-in cartridges should load");
 
         for name in ["a.ts", "a.mts", "a.cts"] {
             assert_eq!(
