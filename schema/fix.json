@@ -166,7 +166,7 @@
       "description": "`supdoc fix`: the planned or applied edits, and the files left alone.",
       "properties": {
         "applied": {
-          "description": "`false` for a preview, `true` once the fixes were written (K9).",
+          "description": "`false` for a preview, `true` once the fixes were written.",
           "type": "boolean"
         },
         "fixes": {
@@ -184,7 +184,7 @@
       "type": "object"
     },
     "LinkKey": {
-      "description": "Identity of one lock entry (02 L2). Field order is the sort order (02 L1).",
+      "description": "Identity of one lock entry. Field order is the sort order.",
       "properties": {
         "source": {
           "$ref": "#/$defs/SourcePath",
@@ -213,7 +213,7 @@
       "type": "object"
     },
     "LinkState": {
-      "description": "Where one link stands, in snapshot-testing terms (05 C1).\n\nThe same values name states everywhere: in reports, in `--state` filters on `update` and\n`list`, and in JSON output.",
+      "description": "Where one link stands, in snapshot-testing terms.\n\nThe same values name states everywhere: in reports, in `--state` filters on `update` and\n`list`, and in JSON output.",
       "oneOf": [
         {
           "const": "passed",
@@ -284,7 +284,7 @@
       "type": "object"
     },
     "MovedJson": {
-      "description": "The lock entry a fix carries from a link's old key to its new one (05 C6).",
+      "description": "The lock entry a fix carries from a link's old key to its new one.",
       "properties": {
         "from": {
           "$ref": "#/$defs/LinkKey",

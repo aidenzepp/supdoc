@@ -1,4 +1,4 @@
-//! The process exit status: the one place the exit values 0, 1, 2, 70, 74 and 78 are defined (06 X7).
+//! The process exit status: the one place the exit values 0, 1, 2, 70, 74 and 78 are defined.
 
 /// How a supdoc run ends, as the process exit status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

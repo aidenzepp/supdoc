@@ -1,9 +1,9 @@
-//! `supdoc fix`: rewrites broken links whose repair is certain (05 C8).
+//! `supdoc fix`: rewrites broken links whose repair is certain.
 //!
 //! The run is `config → lockfile → scan → plan_fixes`, then either the preview, or `apply_fixes →
 //! move lock entries → write the lockfile if an entry moved → scan the fixed files again →
 //! reconcile`, so each fixed link reports the state it has now. A preview runs every step a real
-//! run does up to the first write (K8).
+//! run does up to the first write.
 
 use std::collections::BTreeSet;
 use std::io::{self, Write};
@@ -101,7 +101,7 @@ struct Planned {
     /// The command that runs this fix again without `--yes`, keeping this run's `[PATH]` and `-c`.
     fix_command: String,
     /// One `read-timeout` per file that outlasted `parse-timeout`. Its links were never checked
-    /// for fixes, so the run fails rather than saying there is nothing to fix (D1).
+    /// for fixes, so the run fails rather than saying there is nothing to fix.
     timeouts: Vec<Finding>,
 }
 
@@ -532,7 +532,7 @@ fn timeout_note(files: usize, rerun: &str) -> String {
 }
 
 /// Every `read-timeout` in `scan`: a source whose links weren't read, then each link into a
-/// target that wasn't. Every command that meets one exits 1 (D1).
+/// target that wasn't. Every command that meets one exits 1.
 pub(crate) fn timed_out(scan: &Scan) -> impl Iterator<Item = &Finding> {
     let targets = scan.links.values().filter_map(|link| match &link.target {
         TargetState::Broken { finding } => Some(finding),
@@ -544,7 +544,7 @@ pub(crate) fn timed_out(scan: &Scan) -> impl Iterator<Item = &Finding> {
         .filter(|finding| finding.code == CODE_TIMEOUT)
 }
 
-/// The note for a run with nothing to fix, naming the broken links left as they are (Q8).
+/// The note for a run with nothing to fix, naming the broken links left as they are.
 /// `check` is the command that lists them.
 fn nothing_to_fix(broken: usize, check: &str) -> String {
     match broken {
@@ -615,7 +615,7 @@ fn lock_unwritten(
 /// `supdoc fix`: the planned or applied edits, and the files left alone.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct FixReport {
-    /// `false` for a preview, `true` once the fixes were written (K9).
+    /// `false` for a preview, `true` once the fixes were written.
     applied: bool,
     /// One per planned fix in a preview; one per written fix after `--yes`. Sorted by file, then
     /// position.
@@ -756,7 +756,7 @@ impl FixRecord {
     }
 }
 
-/// The lock entry a fix carries from a link's old key to its new one (05 C6).
+/// The lock entry a fix carries from a link's old key to its new one.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct MovedJson {
     /// The key before the fix.
@@ -1351,7 +1351,7 @@ mod tests {
         assert_eq!(
             run.exit_code(),
             74,
-            "a write failure outranks a changed file (F5); stderr: {}",
+            "a write failure outranks a changed file; stderr: {}",
             run.stderr
         );
         let json = run.json();

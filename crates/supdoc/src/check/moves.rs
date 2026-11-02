@@ -1,4 +1,4 @@
-//! Moved-link detection: carrying a lock entry's history to the key it moved to (05 C6).
+//! Moved-link detection: carrying a lock entry's history to the key it moved to.
 //!
 //! The rule is one sentence: **carry the old hash only when there is exactly one candidate.** A
 //! new link and a removed lock entry are candidates for each other when they point at the same

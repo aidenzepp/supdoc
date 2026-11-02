@@ -1,4 +1,4 @@
-//! The check report: every link in scope with its state, plus findings not tied to one link (05).
+//! The check report: every link in scope with its state, plus findings not tied to one link.
 
 use crate::finding::{Finding, Location};
 use crate::link::LinkKey;
@@ -25,6 +25,6 @@ pub(crate) struct LinkReport {
     pub(crate) locations: Vec<Location>,
     /// The finding that explains this state (none for `passed`).
     pub(crate) finding: Option<Finding>,
-    /// Set when a hash was carried from an old key (05 C6).
+    /// Set when a hash was carried from an old key.
     pub(crate) moved_from: Option<LinkKey>,
 }

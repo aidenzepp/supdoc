@@ -61,7 +61,7 @@ pub(crate) fn exit_code() -> u8 {
     }
 }
 
-/// The current directory, read once for the whole run (01).
+/// The current directory, read once for the whole run.
 ///
 /// # Errors
 ///
@@ -83,7 +83,7 @@ fn current_dir() -> Result<AbsolutePath, CliError> {
 /// Writes help, a version or a usage error to its stream and returns its exit code.
 ///
 /// A closed pipe does not change the exit code: the run's own code stands, so `--help` exits 0
-/// and a usage error still exits 2 (D18).
+/// and a usage error still exits 2.
 fn print(printout: &Printout) -> u8 {
     let written = match printout.stream {
         Stream::Stdout => write_all(io::stdout(), &printout.text),
@@ -113,7 +113,7 @@ fn write_all(mut sink: impl Write, text: &str) -> io::Result<()> {
 
 /// Prints `error` as a fatal error in the requested format and returns its exit code.
 ///
-/// A closed pipe does not change the exit code: the error's own code stands (06 X13).
+/// A closed pipe does not change the exit code: the error's own code stands.
 fn report(output: &mut Output, error: &CliError) -> u8 {
     let written = output.fatal(&fatal_finding(error), error.exit_code());
     if written.is_ok() {

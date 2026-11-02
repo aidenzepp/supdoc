@@ -1,4 +1,4 @@
-//! Rendering a lockfile as its canonical v1 text (02 L1).
+//! Rendering a lockfile as its canonical v1 text.
 
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 

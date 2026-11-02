@@ -1,4 +1,4 @@
-//! `supdoc init`: writes a starter config and nothing else (05 C10).
+//! `supdoc init`: writes a starter config and nothing else.
 //!
 //! The starter goes to `-c PATH` when given, otherwise to `supdoc.config.toml` in the current
 //! directory. The lockfile is created by the first `update --yes`. An existing file is never
@@ -253,7 +253,7 @@ fn temporary_sibling(target: &AbsolutePath) -> std::path::PathBuf {
         .with_file_name(format!(".{name}.{}.tmp", std::process::id()))
 }
 
-/// The refusal for an existing config (06 error table), naming it as the notes do.
+/// The refusal for an existing config, naming it as the notes do.
 fn exists(target: &AbsolutePath, context: &Context) -> CliError {
     CliError::new(
         "cli-init-exists",

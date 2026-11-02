@@ -1,5 +1,5 @@
 //! `supdoc config show` and `supdoc namespace list`: what the loaded config says, and which file
-//! said it (06a §5.6, §5.7).
+//! said it.
 //!
 //! Both are read-only. Each runs `load_config → report`, and the two share the namespace row.
 

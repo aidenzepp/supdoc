@@ -1,4 +1,4 @@
-//! Reading and atomically writing `supdoc.lock` (02 L9).
+//! Reading and atomically writing `supdoc.lock`.
 
 use std::fs;
 use std::io::{self, Read as _, Write as _};

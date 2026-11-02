@@ -1,8 +1,8 @@
 //! The scan's entry point, [`run`]: walk the project, read every source once, extract its links,
-//! then resolve each target once (04).
+//! then resolve each target once.
 //!
 //! Only a project root that can't be read or walked stops the run. Every other problem, with one
-//! file or one link, becomes a finding and the scan goes on (S7).
+//! file or one link, becomes a finding and the scan goes on.
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -26,7 +26,7 @@ use crate::scan::model::{Scan, ScannedLink, Scope, TargetState};
 use crate::scan::targets::{self, CODE_UNKNOWN_NAMESPACE, Occurrence, Parsed, Written};
 use crate::scan::walk::{CODE_IGNORE_TOO_LARGE, GlobalExcludes, UnreadDir, walk};
 
-/// Why a scan couldn't run at all (04 S7). Every smaller problem is a finding instead.
+/// Why a scan couldn't run at all. Every smaller problem is a finding instead.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ScanError {
     /// The project root itself can't be listed, so no result would mean anything.
@@ -84,7 +84,7 @@ impl ScanError {
         }
     }
 
-    /// The process exit status for this error (06 X7): 74 when the project can't be read, 78 for
+    /// The process exit status for this error: 74 when the project can't be read, 78 for
     /// an ignore file over its configured ceiling.
     #[must_use]
     pub(crate) const fn status(&self) -> ExitStatus {
@@ -96,9 +96,9 @@ impl ScanError {
 }
 
 /// Scans the part of the project `scope` names: every link in its sources, what each target looks
-/// like right now, and every problem met on the way, in a deterministic order (S8). The walk
+/// like right now, and every problem met on the way, in a deterministic order. The walk
 /// honors the global `excludes` file `main` found. Each file is
-/// parsed at most once as a source and once as a target (S9). The lockfile is never read.
+/// parsed at most once as a source and once as a target. The lockfile is never read.
 ///
 /// Effect: reads the filesystem. Everything after the walk and the file reads is pure.
 ///
@@ -294,7 +294,7 @@ pub(crate) fn read_sources(
     })
 }
 
-/// Where a finding sits, for sorting by file then position (S8). Findings about no one place sort
+/// Where a finding sits, for sorting by file then position. Findings about no one place sort
 /// first.
 fn position(finding: &Finding) -> Option<(&SourcePath, usize, usize)> {
     finding
@@ -308,7 +308,7 @@ fn position(finding: &Finding) -> Option<(&SourcePath, usize, usize)> {
 struct SourceLinks {
     /// Links that parsed, still to be resolved.
     occurrences: Vec<Occurrence>,
-    /// Links meant for supdoc but wrong (03 R10) that still have a key: broken as written.
+    /// Links meant for supdoc but wrong that still have a key: broken as written.
     broken: Vec<(LinkKey, Location, Finding)>,
     /// Links meant for supdoc but too malformed to have a key: only their finding is left.
     unkeyed: Vec<Finding>,
@@ -316,7 +316,7 @@ struct SourceLinks {
     untracked: UntrackedLinks,
 }
 
-/// Adds `raws`, the links read from `file`, to `found`, in file order (03 R10).
+/// Adds `raws`, the links read from `file`, to `found`, in file order.
 fn source_links(
     config: &Config,
     languages: &Languages,
@@ -375,7 +375,7 @@ fn source_links(
 }
 
 /// The key `source`'s link would have if its unknown namespace were configured, so a locked link
-/// whose namespace was renamed or removed in config is broken rather than obsolete (05 C1, C3).
+/// whose namespace was renamed or removed in config is broken rather than obsolete.
 ///
 /// `None` for every other link error, and when the rest of the destination is wrong too: an
 /// invalid path or symbol can't be written as a key.
@@ -536,7 +536,7 @@ fn link_finding(
 }
 
 /// The warning for a walked source that couldn't be read. Its links weren't checked, and its lock
-/// entries are kept (05 C5).
+/// entries are kept.
 ///
 /// It points at the start of the file, since no text was read to point into.
 fn unreadable_source(source: &SourcePath, error: &ReadError) -> Finding {
@@ -929,7 +929,7 @@ mod tests {
         assert_eq!(finding.fix, None);
     }
 
-    // Link errors fail `check` (03 R10, 05 C3)
+    // Link errors fail `check`
 
     /// Whether `check` passes on `project`, given `lock`, without and with `--deny-warnings`.
     fn outcomes(project: &Project, lock: &Lockfile) -> [Outcome; 2] {
@@ -1142,7 +1142,7 @@ mod tests {
         assert_eq!(project.scan(), project.scan());
     }
 
-    // Targets are read directly, never through the walk (S3, S5)
+    // Targets are read directly, never through the walk
 
     #[cfg(unix)]
     #[test]
@@ -1306,7 +1306,7 @@ mod tests {
         assert_present(&scan, &key);
     }
 
-    // Fixes must be verifiable by `supdoc fix` (05 C8)
+    // Fixes must be verifiable by `supdoc fix`
 
     #[test]
     fn every_fix_lies_inside_its_findings_location_and_snippet() {

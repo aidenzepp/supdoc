@@ -1,8 +1,8 @@
-//! The state of a link compared with the lockfile (05 C1).
+//! The state of a link compared with the lockfile.
 
 use std::fmt;
 
-/// Where one link stands, in snapshot-testing terms (05 C1).
+/// Where one link stands, in snapshot-testing terms.
 ///
 /// The same values name states everywhere: in reports, in `--state` filters on `update` and
 /// `list`, and in JSON output.

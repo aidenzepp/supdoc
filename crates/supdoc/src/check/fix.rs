@@ -1,4 +1,4 @@
-//! Planning and applying `supdoc fix` (05 C8), and carrying lock entries to rewritten links (C6).
+//! Planning and applying `supdoc fix`, and carrying lock entries to rewritten links.
 //!
 //! [`plan_fixes`] is pure: it picks the scan's unambiguous [`Fix`]es and remembers what each one
 //! expects to find on disk. [`apply_fixes`] is the effect: it verifies each file against that
@@ -32,7 +32,7 @@ const CODE_FILE_CHANGED: &str = "fix-file-changed";
 /// Finding code: a file could not be rewritten.
 const CODE_WRITE_FAILED: &str = "fix-write-failed";
 
-/// The edits `supdoc fix` would make. The preview is this value rendered (05 C2).
+/// The edits `supdoc fix` would make. The preview is this value rendered.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct FixPlan {
     /// Sorted by file, then position. Edits to one file never overlap.
@@ -71,7 +71,7 @@ pub(crate) struct PlannedFix {
     pub(crate) old_link: String,
     /// The link with the edit applied.
     pub(crate) new_link: String,
-    /// The lock entry move when this edit rewrites a link wholly, so its entry can follow (05 C6).
+    /// The lock entry move when this edit rewrites a link wholly, so its entry can follow.
     pub(crate) moved: Option<Move>,
 }
 
@@ -502,7 +502,7 @@ fn write_failed(
     .with_help(help)
 }
 
-/// Moves the lock entry of every rewritten link to its new key (05 C6), so a fixed link keeps its
+/// Moves the lock entry of every rewritten link to its new key, so a fixed link keeps its
 /// history: unchanged code reports `passed`, changed code reports `failed`.
 ///
 /// An entry is never overwritten: if the new key already has one, both stay as they are. Returns

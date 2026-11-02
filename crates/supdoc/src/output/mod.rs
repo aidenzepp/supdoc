@@ -1,4 +1,4 @@
-//! Rendering reports as text, JSON, JSONL and GitHub annotations (07).
+//! Rendering reports as text, JSON, JSONL and GitHub annotations.
 //!
 //! [`Output`] is the one place supdoc writes to stdout and stderr. Reports are plain values that
 //! implement [`Report`], so every format of every report can be tested without files or a terminal.
@@ -6,7 +6,7 @@
 /// How output is shown: format, verbosity, and the context text rendering needs.
 pub(crate) mod format;
 
-/// How paths are shown in each format (07 G7).
+/// How paths are shown in each format.
 pub(crate) mod paths;
 
 /// The closing note of a preview.

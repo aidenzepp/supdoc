@@ -1,7 +1,9 @@
-//! Grouping links by target and reading each target once (04, From links to targets, steps 3-6).
+//! Grouping links by target and reading each target once.
 //!
 //! Every distinct target is located on disk, checked to lie inside the project root once symlinks
-//! are followed, checked for case (S12) and for being a directory (S13), then read through [`Parsed`] so a target is parsed once. A source is dropped once its links are read, so one that is also a target is parsed a second time (S9).
+//! are followed, checked for case and for being a directory, then read through [`Parsed`] so a
+//! target is parsed once. A source is dropped once its links are read, so one that is also a
+//! target is parsed a second time.
 //! Each link into it then hashes the whole file or the one symbol it names. Anything that goes
 //! wrong becomes that link's [`TargetState::Broken`] finding, with a [`Fix`] only when exactly one
 //! edit is right.
@@ -26,10 +28,10 @@ use crate::read::hash::{hash_file, hash_symbol};
 use crate::scan::model::{ScannedLink, TargetState};
 use crate::suggest::close_match;
 
-/// Finding code for a target path whose case differs from the real path (04 S12).
+/// Finding code for a target path whose case differs from the real path.
 const CODE_CASE_MISMATCH: &str = "scan-case-mismatch";
 
-/// Finding code for a namespace the config doesn't define (03 R10).
+/// Finding code for a namespace the config doesn't define.
 pub(crate) const CODE_UNKNOWN_NAMESPACE: &str = "link-unknown-namespace";
 
 /// Finding code for a link whose target lies outside the project root.
@@ -39,7 +41,7 @@ pub(crate) const CODE_OUTSIDE_ROOT: &str = "link-outside-root";
 pub(crate) const OUTSIDE_ROOT_HELP: &str = "Link to a file inside the project root, or move \
      `supdoc.config.toml` up to a directory that holds both";
 
-/// Files parsed during one run, keyed by path (04 S9). Owned by one scan, never global.
+/// Files parsed during one run, keyed by path. Owned by one scan, never global.
 #[derive(Debug, Default)]
 pub(crate) struct Parsed {
     /// Every file read so far.
@@ -95,7 +97,7 @@ pub(crate) struct Occurrence {
     pub(crate) key: LinkKey,
     /// Where the whole link is.
     pub(crate) location: Location,
-    /// The lines the link covers, captured while the source text is at hand (07 G11).
+    /// The lines the link covers, captured while the source text is at hand.
     pub(crate) snippet: Option<Snippet>,
     /// The destination as written, when it can be found inside the link itself.
     pub(crate) written: Option<Written>,
@@ -176,8 +178,8 @@ impl Written {
     }
 }
 
-/// Resolves every link: groups them by key (S11) and by target, reads each target once, and
-/// records what each target looks like now. Links to a directory are dropped (S13); the second
+/// Resolves every link: groups them by key and by target, reads each target once, and
+/// records what each target looks like now. Links to a directory are dropped; the second
 /// value counts them, one per place written, for `check -v`.
 ///
 /// Effect: reads target files and the directory listings along their paths.
@@ -237,7 +239,7 @@ pub(crate) fn resolve(
     (links, directory_links)
 }
 
-/// The state of each link into `target`; a directory yields none, as it is never tracked (S13).
+/// The state of each link into `target`; a directory yields none, as it is never tracked.
 fn target_states(
     config: &Config,
     languages: &Languages,
@@ -339,9 +341,9 @@ fn target_states(
 enum Located {
     /// A path to read. It may still be missing: reading it says so.
     File(AbsolutePath),
-    /// A directory, which is navigation and never tracked (S13).
+    /// A directory, which is navigation and never tracked.
     Directory,
-    /// The path names a real file, but with different case (S12). Holds the real target path,
+    /// The path names a real file, but with different case. Holds the real target path,
     /// written like the target's own path.
     CaseMismatch(String),
     /// The target lies outside the project root once symlinks are followed, or climbs out with
@@ -349,7 +351,7 @@ enum Located {
     OutsideRoot,
 }
 
-/// Finds `target` on disk: against the root, or against its namespace's directory (01).
+/// Finds `target` on disk: against the root, or against its namespace's directory.
 ///
 /// The target must lie inside the project root once every symlink along it is followed, so an
 /// in-root symlink to a file outside, even a dangling one, is [`Located::OutsideRoot`].
@@ -545,7 +547,7 @@ fn read_failed(error: &ReadError, root: &AbsolutePath, first: &Occurrence) -> Fi
 }
 
 /// The finding for a symbol that doesn't resolve. A `resolve-not-found` gets a fix when exactly
-/// one symbol in the file is a close match (03: the fixer never guesses).
+/// one symbol in the file is a close match; the fixer never guesses.
 ///
 /// The message and help name the file relative to the project `root`, so no finding carries a
 /// machine-specific absolute path. A file outside the root climbs out of it with `..`.

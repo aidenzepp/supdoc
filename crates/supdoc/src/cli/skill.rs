@@ -1,5 +1,4 @@
 //! `supdoc skill install`: writes the embedded `SKILL.md` where agent runtimes look for skills
-//! (06 X16).
 //!
 //! It always writes two copies, one for the shared agents directory and one for Claude Code, and
 //! nothing else. The project scope puts them under the project root, the config's directory or
@@ -7,7 +6,7 @@
 //! Code's config directory. Each copy is a real file written atomically. A copy that already
 //! holds the embedded text is left alone; a different one is replaced only under `--yes`. A
 //! project install writes nothing outside the project: it refuses a symlinked directory on the
-//! way to either copy that leads out of the root (04 S15), and follows one that stays inside.
+//! way to either copy that leads out of the root, and follows one that stays inside.
 
 use std::ffi::OsString;
 use std::fs;
@@ -267,7 +266,7 @@ fn beneath(base: &AbsolutePath, relative: &str) -> AbsolutePath {
 }
 
 /// Refuses `target` when a directory between `root` and it leads outside `root` once symlinks
-/// are followed, so a project install never writes outside the project (04 S15). A symlink that
+/// are followed, so a project install never writes outside the project. A symlink that
 /// leads elsewhere inside `root` is followed. A dangling one counts where it points, and one whose
 /// real location can't be worked out counts as outside, as [`Config::contains`] decides for reads.
 ///
@@ -440,7 +439,7 @@ fn install_file(target: &Path, bytes: &[u8]) -> io::Result<()> {
     write_atomically(target, bytes, permissions.as_ref())
 }
 
-/// The warning for a different `SKILL.md` a preview would replace (06 error table, Q25).
+/// The warning for a different `SKILL.md` a preview would replace.
 fn exists(shown: &str, global: bool, context: &Context) -> Finding {
     let flags: &[&str] = if global {
         &["--global", "--yes"]

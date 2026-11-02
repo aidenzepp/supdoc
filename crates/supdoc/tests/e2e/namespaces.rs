@@ -87,12 +87,8 @@ fn config_show_marks_a_missing_namespace_folder_as_not_existing() {
             .and_then(|namespace| namespace.pointer("/exists").cloned())
             .unwrap_or_else(|| panic!("`config show` should list namespace {name}: {report}"))
     };
-    assert_eq!(
-        exists("auth"),
-        true,
-        "services/auth is in the fixture (CS4)"
-    );
-    assert_eq!(exists("ghost"), false, "services/ghost is not (CS4)");
+    assert_eq!(exists("auth"), true, "services/auth is in the fixture");
+    assert_eq!(exists("ghost"), false, "services/ghost is not");
 }
 
 #[test]

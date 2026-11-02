@@ -1,5 +1,5 @@
 //! Findings: one problem each, linter style, with where it is, how bad it is, what to do next, and
-//! an exact edit when there's exactly one correct fix (04, 07).
+//! an exact edit when there's exactly one correct fix.
 
 use std::ops::Range;
 
@@ -25,7 +25,7 @@ pub(crate) struct Finding {
     /// An exact edit, present only when there's exactly one correct fix. The fixer never guesses.
     pub(crate) fix: Option<Box<Fix>>,
     /// The source lines this finding covers, captured when it is created so rendering never reads
-    /// files (07 G11).
+    /// files.
     pub(crate) snippet: Option<Snippet>,
 }
 
@@ -81,7 +81,7 @@ impl Finding {
     }
 }
 
-/// How bad a finding is (07 G5).
+/// How bad a finding is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Severity {
@@ -89,7 +89,7 @@ pub(crate) enum Severity {
     Error,
     /// Reported; fails `check` only under `--deny-warnings`.
     Warning,
-    /// Information only, such as a moved link carrying its history (05 C6).
+    /// Information only, such as a moved link carrying its history.
     Note,
 }
 
@@ -209,7 +209,7 @@ impl Location {
     }
 }
 
-/// Replace `range` in `file` with `replacement`. Applied by `supdoc fix --yes` (05).
+/// Replace `range` in `file` with `replacement`. Applied by `supdoc fix --yes`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Fix {
     /// The source file to edit.
@@ -223,7 +223,7 @@ pub(crate) struct Fix {
     pub(crate) scanned: Box<str>,
 }
 
-/// A bounded window of the lines a finding's range covers, captured when the finding is created (07 G11).
+/// A bounded window of the lines a finding's range covers, captured when the finding is created.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Snippet {
     /// 1-based line number of the first line of `text`.

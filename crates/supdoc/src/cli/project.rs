@@ -2,7 +2,7 @@
 //! the scope to `[PATHS]`, and read the lockfile.
 //!
 //! [`load_config`] sets the output root itself, so no command can load a config and then report
-//! paths against the wrong directory (X4).
+//! paths against the wrong directory.
 
 use std::io::ErrorKind;
 use std::ops::Range;
@@ -153,7 +153,7 @@ pub(crate) fn absolute(cwd: &AbsolutePath, path: &Path) -> AbsolutePath {
 }
 
 /// The part of the project `[PATHS]` names: everything when none are given, or when one of them
-/// is the project root itself (04 S10).
+/// is the project root itself.
 ///
 /// Every path is checked before any of them can widen the scope to the whole project, so a bad
 /// path is refused wherever it appears among the arguments.
@@ -198,8 +198,8 @@ pub(crate) fn lock_path(root: &AbsolutePath) -> AbsolutePath {
     root.join_path(Path::new(LOCK_FILE_NAME))
 }
 
-/// The lockfile in `config`'s root, or an empty one when there is none yet (06 "What each command
-/// touches"), refusing one recorded under different hash settings than `config` resolves to (B.5).
+/// The lockfile in `config`'s root, or an empty one when there is none yet,
+/// refusing one recorded under different hash settings than `config` resolves to.
 ///
 /// Every command but `update` reads the lock through here, so a `passed` verdict always means the
 /// target's bytes, read under the lock's recorded settings, hash to the recorded value. A help
@@ -232,7 +232,7 @@ pub(crate) struct LockForUpdate {
 }
 
 /// The lockfile in `config`'s root with the settings to hash under, and how the ones it records
-/// differ from them, if they do (02 L10).
+/// differ from them, if they do.
 ///
 /// A missing lockfile is an empty one under `config`'s settings, so a fresh project never
 /// differs. A help names the lockfile relative to `cwd`, the directory supdoc runs in.
@@ -334,7 +334,7 @@ fn path_unreadable(typed: &Path, error: &std::io::Error) -> CliError {
 /// The code of every error for a path that doesn't exist.
 pub(crate) const CODE_PATH_MISSING: &str = "cli-path-missing";
 
-/// The error for a `[PATH]` that doesn't exist (06 error table).
+/// The error for a `[PATH]` that doesn't exist.
 ///
 /// The help lists the nearest directory of `typed` that exists under `cwd`, so the command it
 /// names runs where this one did.

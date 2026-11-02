@@ -1,4 +1,4 @@
-//! The ignore engine: which `.ignore`, `.gitignore` and exclude-file rules decide a path (04 S2, S15).
+//! The ignore engine: which `.ignore`, `.gitignore` and exclude-file rules decide a path.
 
 use std::collections::HashMap;
 use std::fs;
@@ -19,7 +19,7 @@ use crate::scan::git::{ExcludeFile, git_exclude};
 use crate::scan::walk::GlobalExcludes;
 
 /// An ignore file a directory can hold that a checkout can plant. One that is a symlink is not
-/// read, wherever it points, as git doesn't read one in its work tree (04 S15): inside the project
+/// read, wherever it points, as git doesn't read one in its work tree: inside the project
 /// root, and in the directories above it, which lie inside the work tree too. Git's exclude files,
 /// reached through `.git`, are not among them: git refuses to check out any `.git` path, so they
 /// are followed as git follows them, symlinks included.
@@ -42,7 +42,7 @@ impl IgnoreFile {
 }
 
 /// The ignore rules the walk applies and the explicit-path warnings quote from, so the rule a
-/// warning names is the rule that decided (04 S15).
+/// warning names is the rule that decided.
 ///
 /// They follow git and the walker's defaults: for each kind of file, `.ignore`, then `.gitignore`,
 /// then the git exclude file, the deepest directory with a rule that matches decides, from the
@@ -172,7 +172,7 @@ impl Origin {
     /// How a warning names `file`, an ignore file of this origin: by kind, and by path relative
     /// to `root` only when it lies inside the root, by whole components once `..` is resolved.
     /// The global excludes file is the user's own and is named by its path. Never by its
-    /// contents (04 S15).
+    /// contents.
     fn name(self, root: &AbsolutePath, file: Option<&Path>) -> String {
         let within = file
             .and_then(AbsolutePath::new)
@@ -465,7 +465,7 @@ pub(super) enum ReadFailure {
 
 impl Level {
     /// The rules of `dir`, the root or a directory beneath it. A `.ignore` or `.gitignore` there
-    /// that is a symlink is not read, wherever it points (04 S15): only an `lstat` looks at it.
+    /// that is a symlink is not read, wherever it points: only an `lstat` looks at it.
     /// `is_nested_top` marks a directory beneath the root that is the top of its own git work
     /// tree ([`holds_git`]).
     ///
@@ -564,7 +564,7 @@ pub(super) struct OwnIgnoreFiles {
 }
 
 /// The rules of `dir`'s `.ignore` and `.gitignore`, which of the two are symlinks, and which
-/// exist but couldn't be read. A symlink is not read, wherever it points (04 S15): only an `lstat`
+/// exist but couldn't be read. A symlink is not read, wherever it points: only an `lstat`
 /// looks at it.
 ///
 /// Effect: reads file metadata in `dir` and its ignore files.

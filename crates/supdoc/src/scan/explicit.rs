@@ -1,4 +1,4 @@
-//! Judging the paths a scan names explicitly (04 S10).
+//! Judging the paths a scan names explicitly.
 
 use std::fs;
 use std::path::Path;
@@ -17,7 +17,7 @@ use crate::scan::model::Scope;
 use crate::scan::walk::{UnreadDir, WalkedSource, is_nested_project, is_vcs_dir};
 
 /// Warnings for each explicitly named path that the walk skipped because of the config or an
-/// ignore file (04 S10). A path beneath one of `unread_dirs` gets none: that directory's own
+/// ignore file. A path beneath one of `unread_dirs` gets none: that directory's own
 /// warning already explains it.
 pub(super) fn explicit_path_warnings(
     config: &Config,
@@ -292,7 +292,7 @@ pub(super) fn ignored(listed: &SourcePath, by: &IgnoredBy) -> Finding {
 }
 
 /// The version-control directory or nested project that `listed` or one of its parent directories
-/// is, which the walk skips whatever the user names (04 S2, S4). A symlink is never judged here:
+/// is, which the walk skips whatever the user names. A symlink is never judged here:
 /// the walk doesn't follow it, so it gets the symlink warning.
 pub(super) fn skipped_dir(root: &AbsolutePath, listed: &SourcePath) -> Option<SkippedDir> {
     let mut current = root.as_path().to_path_buf();
@@ -321,7 +321,7 @@ pub(super) fn skipped_dir(root: &AbsolutePath, listed: &SourcePath) -> Option<Sk
 /// symlinked directory, so nothing beneath one is judged. A rule is quoted with its file only when
 /// that file lies inside the root and is no symlink; any other is blamed on "an ignore file", and
 /// its file named by kind and, unless above the root, by path, so no line from outside the root
-/// is ever printed (04 S15).
+/// is ever printed.
 ///
 /// Effect: reads ignore files and file metadata beneath the root.
 pub(super) fn ignore_rule(

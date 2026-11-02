@@ -1,4 +1,4 @@
-//! Text rendering of findings in the style of rustc and Cargo (07 G1).
+//! Text rendering of findings in the style of rustc and Cargo.
 
 use std::io::{self, Write};
 use std::ops::Range;
@@ -13,7 +13,7 @@ use crate::output::format::TextContext;
 /// line with the link underlined, and a `help:` line.
 ///
 /// Writes nothing when the verbosity hides the finding's severity. The source excerpt comes from
-/// the finding's captured snippet; this function never reads files (07 G11).
+/// the finding's captured snippet; this function never reads files.
 ///
 /// # Errors
 ///
@@ -106,14 +106,14 @@ fn with_source_column(
 }
 
 impl TextContext {
-    /// The arrow between two things in a row: `→`, or `->` when drawing in ASCII (07 G12).
+    /// The arrow between two things in a row: `→`, or `->` when drawing in ASCII.
     #[must_use]
     pub(crate) const fn arrow(&self) -> &'static str {
         if self.unicode { "→" } else { "->" }
     }
 }
 
-/// `text` with each `→` spelled `->` when `context` draws in ASCII (07 G12). Finding messages
+/// `text` with each `→` spelled `->` when `context` draws in ASCII. Finding messages
 /// embed link keys, whose `Display` is Unicode, so the swap happens here at the output layer.
 fn glyphs(context: &TextContext, text: String) -> String {
     if context.unicode {

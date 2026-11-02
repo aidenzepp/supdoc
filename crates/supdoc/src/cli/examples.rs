@@ -1,4 +1,4 @@
-//! Example invocations shown after each command's flags in `--help` (06 X9).
+//! Example invocations shown after each command's flags in `--help`.
 //!
 //! Every example is a real invocation with realistic arguments. A test parses each one, so an
 //! example can never drift away from the flags it demonstrates. Group blocks are built from the

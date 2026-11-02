@@ -1,4 +1,4 @@
-//! JSONL: one self-describing object per line, ending with a summary (07 G9).
+//! JSONL: one self-describing object per line, ending with a summary.
 
 use serde_json::{Map, Value};
 

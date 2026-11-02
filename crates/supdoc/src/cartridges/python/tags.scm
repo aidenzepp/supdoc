@@ -1,6 +1,6 @@
 ; Python symbols. Written in tree-sitter's tags.scm conventions. Unlike the grammar's
 ; bundled tags.scm, this also names module constants and class attributes. `self.x` attributes
-; assigned in `__init__` are added by the cartridge's own code (03, Python override).
+; assigned in `__init__` are added by the cartridge's own code.
 ; A decorator sits outside the definition's node, so `@property` is beside the method.
 
 ; Definitions: nesting names them, so a method is `Config.validate`.

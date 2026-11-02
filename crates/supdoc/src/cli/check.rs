@@ -1,6 +1,6 @@
-//! `supdoc check`: compares every link in scope with `supdoc.lock` and reports which fail (05).
+//! `supdoc check`: compares every link in scope with `supdoc.lock` and reports which fail.
 //!
-//! Read-only: `check` never writes a file (05 C2). The run is `config::load → Lockfile::read →
+//! Read-only: `check` never writes a file. The run is `config::load → Lockfile::read →
 //! scan → reconcile → check_outcome → render`, with effects only at the two ends.
 //!
 //! This module also owns the wire form of one link, [`LinkJson`], which `list` shares.
@@ -28,7 +28,7 @@ use super::project::{load_config, read_lock, scope};
 use super::{CliError, Context, Outcome};
 
 /// Runs `supdoc check`: prints every link that needs attention, the findings not tied to one
-/// link, and the summary line, then says whether the check passed (05 C3).
+/// link, and the summary line, then says whether the check passed.
 ///
 /// A missing `supdoc.lock` is an empty one, so every link is `new`.
 ///
@@ -81,10 +81,9 @@ pub(crate) fn schema() -> schemars::Schema {
 }
 
 /// What `check` prints: the counts, the links to show, and the findings not tied to one link
-/// (07 G8).
 ///
 /// JSON puts `summary` and `links` under `data`; the envelope carries the loose findings. Passed
-/// links are always counted but listed only under `--verbose` (07 G6).
+/// links are always counted but listed only under `--verbose`.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct CheckReport {
     /// How many links are in each state, passed ones included.
@@ -182,7 +181,7 @@ enum Entry<'a> {
 }
 
 impl Entry<'_> {
-    /// Where the entry sits, for ordering by file then position (S8). Entries about no one place
+    /// Where the entry sits, for ordering by file then position. Entries about no one place
     /// sort first.
     fn position(&self) -> Option<(&SourcePath, usize, usize)> {
         let location = match self {
@@ -198,7 +197,7 @@ impl Entry<'_> {
 }
 
 impl CheckReport {
-    /// The links shown and the loose findings as one list ordered by file then position (S8),
+    /// The links shown and the loose findings as one list ordered by file then position,
     /// whichever link or target each comes from. The `links` array and the lockfile keep `LinkKey`
     /// order; only what is printed follows the document.
     fn in_document_order(&self) -> Vec<Entry<'_>> {
@@ -245,7 +244,7 @@ fn render_untracked(untracked: &[(Untracked, usize)], out: &mut dyn Write) -> io
     }
 }
 
-/// One link as `check --json` and `list --json` show it (07 "JSON output").
+/// One link as `check --json` and `list --json` show it.
 ///
 /// `source`, `target` and `symbol` sit beside the state. The explaining finding is nested
 /// without a location, since `locations` already says where the link is.

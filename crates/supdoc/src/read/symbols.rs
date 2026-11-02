@@ -1,5 +1,5 @@
-//! Naming symbols from `tags.scm` captures ([`tag_symbols`], 03 R4) and resolving a symbol path
-//! against a file's [`SymbolTable`] (03 Symbols and resolution).
+//! Naming symbols from `tags.scm` captures ([`tag_symbols`]) and resolving a symbol path
+//! against a file's [`SymbolTable`].
 //!
 //! # The naming rule
 //!
@@ -10,7 +10,7 @@
 //!
 //! When a scope segment also captures its type arguments (`@supdoc.scope.arguments`,
 //! `@supdoc.scope.qualifier.arguments`), the symbol additionally answers to the path with those
-//! arguments written out, so `impl Foo<u8>` and `impl Foo<u16>` stay distinguishable (03 R5).
+//! arguments written out, so `impl Foo<u8>` and `impl Foo<u16>` stay distinguishable.
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -26,7 +26,7 @@ use crate::suggest::{distance, is_close};
 /// How many near-misses a `NotFound` suggests.
 const NEAREST: usize = 3;
 
-/// The symbols `file` exposes, named by its cartridge's `tags.scm` (03 R4).
+/// The symbols `file` exposes, named by its cartridge's `tags.scm`.
 ///
 /// Symbols come back in file order: by start offset, outer before inner.
 ///
@@ -335,7 +335,7 @@ impl SymbolTable {
     ///
     /// A path that equals a symbol's full path or one of its aliases names that symbol. A
     /// one-segment path that matches no full path names every symbol whose last segment it is
-    /// (docref's `#add` shorthand), so it resolves only when that is unique (03 R5a).
+    /// (docref's `#add` shorthand), so it resolves only when that is unique.
     ///
     /// # Errors
     ///

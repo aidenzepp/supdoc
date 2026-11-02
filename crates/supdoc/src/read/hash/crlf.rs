@@ -1,4 +1,4 @@
-//! Witness (B.6, FEAT-7): under `normalize`, a CRLF file hashes every symbol like its LF twin, in
+//! Witness: under `normalize`, a CRLF file hashes every symbol like its LF twin, in
 //! every built-in cartridge. One test per cartridge, each over a multi-line fixture with comments.
 
 use std::path::Path;

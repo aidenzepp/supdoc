@@ -1,5 +1,4 @@
 //! `supdoc resolve`: lists the symbols a file exposes, or confirms that one symbol resolves in it
-//! (06 X11, 03).
 //!
 //! Read-only. The run is `load_config → locate FILE → SourceFile::read → SymbolTable → list or
 //! resolve`, with effects only at the two ends.
@@ -119,7 +118,7 @@ pub(crate) fn schema() -> schemars::Schema {
 /// inside the namespace's directory.
 ///
 /// A file whose real location, every symlink followed, is outside the project root is refused
-/// before anything else looks at it, so nothing from it is read or printed (R1).
+/// before anything else looks at it, so nothing from it is read or printed.
 ///
 /// Effect: reads file metadata and symlinks along the path.
 ///
@@ -216,7 +215,7 @@ fn unknown_namespace(config: &Config, name: &NamespaceName) -> CliError {
 
 /// The error for a file that couldn't be read, with the read error's own code and help.
 ///
-/// The message names the file relative to the project `root`, as JSON shows paths (K5). A
+/// The message names the file relative to the project `root`, as JSON shows paths. A
 /// non-UTF-8 file's help repeats `typed`, the `FILE` as written.
 fn read_failed(error: &ReadError, root: &AbsolutePath, typed: &Path) -> CliError {
     let exit_code = match error {
@@ -237,7 +236,7 @@ fn read_failed(error: &ReadError, root: &AbsolutePath, typed: &Path) -> CliError
 /// The error for a `SYMBOL` that names no single symbol, with the resolve error's own code and
 /// help.
 ///
-/// The message names the file relative to the project `root`, as JSON shows paths (K5). The help's
+/// The message names the file relative to the project `root`, as JSON shows paths. The help's
 /// `supdoc resolve` command repeats `typed`, the `FILE` as written, so it runs where this one did.
 fn resolve_failed(
     error: &ResolveError,
@@ -267,9 +266,9 @@ fn command_text(args: &ResolveArgs, context: &Context) -> String {
     command_line(context, "resolve", &operands, &[])
 }
 
-/// The warning that `file` has syntax errors, so its symbols may be incomplete (03 R8).
+/// The warning that `file` has syntax errors, so its symbols may be incomplete.
 ///
-/// It names the file relative to the project `root`, as JSON shows paths (K5). Its help says to
+/// It names the file relative to the project `root`, as JSON shows paths. Its help says to
 /// run `again`, the command that repeats this run.
 fn syntax_errors(file: &SourceFile, root: &AbsolutePath, again: &str) -> Finding {
     Finding::new(

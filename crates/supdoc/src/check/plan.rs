@@ -1,4 +1,4 @@
-//! Planning `update`: exactly what would change in the lockfile, computed without writing (05 C2).
+//! Planning `update`: exactly what would change in the lockfile, computed without writing.
 //!
 //! The preview is this value rendered, and `--yes` writes [`UpdatePlan::next`].
 
@@ -9,15 +9,15 @@ use crate::lock::model::Lockfile;
 use crate::scan::model::{Scan, Scope, TargetState};
 use crate::state::LinkState;
 
-/// The states an update must select to move the lockfile to new hash settings (B.5).
+/// The states an update must select to move the lockfile to new hash settings.
 pub(crate) const MIGRATION_STATES: [LinkState; 3] =
     [LinkState::Failed, LinkState::New, LinkState::Obsolete];
 
 /// A move of the whole lockfile to new hash settings.
 ///
-/// Only a full update can build one: no `[PATHS]` and every state in [`MIGRATION_STATES`] selected
-/// (B.5). Entries the plan leaves alone keep their old hashes under the new settings (B-Q4), which
-/// is only safe when the plan re-records every entry it can.
+/// Only a full update can build one: no `[PATHS]` and every state in [`MIGRATION_STATES`] selected.
+/// Entries the plan leaves alone keep their old hashes under the new settings, which is only
+/// safe when the plan re-records every entry it can.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Migration {
     /// The settings the scan hashed with.
@@ -44,7 +44,7 @@ pub(crate) struct UpdatePlan {
     /// Every lock entry that would change, in report order.
     pub(crate) changes: Vec<LockChange>,
     /// The hash settings the lockfile is re-recorded under, when they differ from the ones it
-    /// records (B.5). A change of settings alone is a change: `next` is then `Some`.
+    /// records. A change of settings alone is a change: `next` is then `Some`.
     pub(crate) settings: Option<SettingsChange>,
     /// The lockfile after the changes, or `None` when there is nothing to do, so the file isn't
     /// rewritten and its modification time and git status stay quiet.
@@ -71,7 +71,7 @@ impl SettingsChange {
 /// One change to the lockfile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LockChange {
-    /// Add an entry for a link that had none: a `new` link, or a link that moved keys (05 C6).
+    /// Add an entry for a link that had none: a `new` link, or a link that moved keys.
     Record(LinkKey),
     /// Replace an entry's hash with the code's current hash: a `failed` link.
     Accept(LinkKey),
@@ -79,15 +79,15 @@ pub(crate) enum LockChange {
     Remove(LinkKey),
 }
 
-/// Plans what `update` would do for the links in `states` (05 C9), re-recording the lockfile
+/// Plans what `update` would do for the links in `states`, re-recording the lockfile
 /// under `migration`'s settings when there is one; otherwise the lock keeps its own settings.
 ///
-/// `broken` links are never recorded: there is no code to hash (05 C7). A link that moved keys
+/// `broken` links are never recorded: there is no code to hash. A link that moved keys
 /// brings its old entry's hash along. That hash is replaced by the current one only when `failed`
 /// is selected, so moving a link never accepts drift by itself. Selecting `new` moves a link under
 /// its carried hash. Selecting `failed` alone moves only a moved link that fails, accepting the
 /// current hash at its new key. Either way the old entry is removed, even when its source lies
-/// outside the scope (05 C6).
+/// outside the scope.
 ///
 /// When the migration's settings differ from the lock's, every link whose hash they change looks
 /// `failed`, and is accepted like any other.

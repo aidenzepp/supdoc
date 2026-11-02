@@ -1,4 +1,4 @@
-//! Finding links in a file's Markdown regions: [`links`] (03 R9, R14, Links from any source file).
+//! Finding links in a file's Markdown regions: [`links`].
 //!
 //! Link syntax is the same for every language, so this is a function, not a cartridge method.
 //! Cartridges only decide *where* links can be ([`Cartridge::markdown_regions`]); this module
@@ -42,8 +42,9 @@ use tree_sitter::{Node, Parser, Tree};
 use crate::link::RawLink;
 use crate::read::cartridge::{MarkdownRegion, SourceFile};
 use crate::read::error::ReadError;
+use crate::read::registry::inline_parser;
 
-/// Every link in `file`'s Markdown regions, in file order (03 R9, R14).
+/// Every link in `file`'s Markdown regions, in file order.
 ///
 /// Destinations are returned as written, after reference resolution and without the `<…>` that
 /// may wrap them, with the file bytes they are written at. Reading them is `parse_destination`'s
@@ -54,10 +55,7 @@ use crate::read::error::ReadError;
 /// [`ReadError::Timeout`] when the file's deadline stops the regions query or an inline parse.
 /// No links are returned then, not even those read before it.
 pub(crate) fn links(file: &SourceFile) -> Result<Vec<RawLink>, ReadError> {
-    let Some(mut parser) = inline_parser() else {
-        // `Languages::builtin` fails the run when this grammar doesn't load, so no file gets here.
-        return Ok(Vec::new());
-    };
+    let mut parser = inline_parser();
     let text = file.text();
     let mut document = document_definitions(file);
 
@@ -99,15 +97,6 @@ pub(crate) fn links(file: &SourceFile) -> Result<Vec<RawLink>, ReadError> {
     }
     links.sort_by_key(|link| (link.range.start, link.range.end));
     Ok(links)
-}
-
-/// A parser for tree-sitter-md's inline grammar, or `None` if the grammar can't be loaded.
-fn inline_parser() -> Option<Parser> {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&tree_sitter_md::INLINE_LANGUAGE.into())
-        .ok()?;
-    Some(parser)
 }
 
 /// Parses only `region`'s ranges of `file`'s text, together, with the inline grammar, under the
@@ -559,7 +548,7 @@ mod tests {
     fn a_region_without_a_bracket_is_not_parsed() {
         let file =
             rust_file("/// Plain prose.\nfn a() {}\n\n/// See [the doc](docs/a.md).\nfn b() {}\n");
-        let mut parser = inline_parser().expect("the inline grammar should load");
+        let mut parser = inline_parser();
         let parsed: Vec<bool> = file
             .language()
             .markdown_regions(&file)
@@ -569,14 +558,6 @@ mod tests {
             .collect();
         assert_eq!(parsed, [false, true]);
         assert_eq!(destinations(&file), ["docs/a.md"]);
-    }
-
-    #[test]
-    fn inline_grammar_loads() {
-        assert!(
-            inline_parser().is_some(),
-            "tree-sitter-md's inline grammar should load into this tree-sitter version",
-        );
     }
 
     #[test]

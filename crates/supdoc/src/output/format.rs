@@ -3,7 +3,7 @@
 use crate::finding::Severity;
 use crate::output::paths::PathStyle;
 
-/// The format data is written in (06 X5).
+/// The format data is written in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, clap::ValueEnum)]
 pub(crate) enum OutputFormat {
     /// Human-readable, with source excerpts.
@@ -24,7 +24,7 @@ impl OutputFormat {
     }
 }
 
-/// How much to say (07 G6).
+/// How much to say.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Verbosity {
     /// `-q`: errors only, with no summary line.
@@ -68,8 +68,7 @@ impl Verbosity {
     }
 }
 
-/// Everything text rendering needs, passed in explicitly so rendering touches no global state
-/// (07 "Rust design").
+/// Everything text rendering needs, passed in explicitly so rendering touches no global state.
 #[derive(Debug, Clone)]
 pub(crate) struct TextContext {
     /// Whether to emit ANSI color.
@@ -85,7 +84,7 @@ pub(crate) struct TextContext {
 }
 
 /// Whether text output may draw with Unicode box characters: when color is on, and the terminal
-/// isn't `TERM=dumb` (07 G12).
+/// isn't `TERM=dumb`.
 #[must_use]
 pub(crate) fn supports_unicode(color: bool, term: Option<&str>) -> bool {
     color && term != Some("dumb")

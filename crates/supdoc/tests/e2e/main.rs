@@ -3,7 +3,8 @@
 //!
 //! The modules cover: `commands`, `helps` and `json` (command surface and output), `lifecycle`
 //! (init, update, check), `containment`, `resolve`, `paths`, `ignore`, `namespaces` and `languages`
-//! (what links resolve to), and `list` and `list_containment` (the `list` command).
+//! (what links resolve to), `list` and `list_containment` (the `list` command), and `limits`
+//! (the size, timeout and similar limits).
 //!
 //! The suite began as a port of docref's integration tests (`docref/tests/integration.rs`), adjusted
 //! to supdoc's decisions:

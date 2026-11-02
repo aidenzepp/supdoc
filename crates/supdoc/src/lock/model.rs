@@ -1,4 +1,4 @@
-//! The in-memory lockfile: one recorded hash per link (02).
+//! The in-memory lockfile: one recorded hash per link.
 //!
 //! Parsing, rendering and file I/O live beside this module; this is the map they build and read.
 
@@ -10,7 +10,7 @@ use crate::link::LinkKey;
 /// The lockfile's name, in the project root.
 pub(crate) const LOCK_FILE_NAME: &str = "supdoc.lock";
 
-/// The on-disk format version this supdoc reads and writes (02 L7).
+/// The on-disk format version this supdoc reads and writes.
 ///
 /// Until the first release, v1 is still being defined: format and hashing changes redefine v1
 /// rather than bump it. From the first published release on, any change bumps it, including a
@@ -23,7 +23,7 @@ pub(crate) const FORMAT_VERSION: u32 = 1;
 /// Keyed by [`LinkKey`], so entries are unique and sorted in canonical order by construction.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Lockfile {
-    /// The `[features.hash]` settings every recorded hash was computed under (02 L10).
+    /// The `[features.hash]` settings every recorded hash was computed under.
     hash: HashSettings,
     /// The entries, in canonical order.
     links: BTreeMap<LinkKey, Hash>,

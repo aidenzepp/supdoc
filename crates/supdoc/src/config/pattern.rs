@@ -9,7 +9,7 @@ use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 
 use crate::path::AbsolutePath;
 
-/// Compiled globs, relative to the directory of the config that wrote them (01 D3).
+/// Compiled globs, relative to the directory of the config that wrote them.
 ///
 /// Every pattern also matches everything beneath what it matches, and `*` never crosses `/`.
 #[derive(Debug, Clone, serde::Deserialize)]

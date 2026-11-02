@@ -1,4 +1,4 @@
-//! GitHub Actions workflow commands, shown on the PR diff (07 "GitHub output").
+//! GitHub Actions workflow commands, shown on the PR diff.
 
 use std::io::{self, Write};
 use std::path::Path;

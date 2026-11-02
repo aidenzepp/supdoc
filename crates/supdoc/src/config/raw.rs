@@ -44,7 +44,7 @@ pub(crate) struct RawLimits {
     pub(crate) max_ignore_size: Option<SizeLimit>,
 }
 
-/// The `[features]` table: one sub-table per area (01 D10).
+/// The `[features]` table: one sub-table per area.
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawFeatures {

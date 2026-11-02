@@ -1,4 +1,4 @@
-//! `supdoc completions`: prints a shell completion script (06 X14).
+//! `supdoc completions`: prints a shell completion script.
 //!
 //! Completions never load the config, so they work in a broken project.
 
@@ -35,7 +35,7 @@ impl Report for ScriptReport {
 /// Runs `supdoc completions`, printing the script through `output`.
 ///
 /// A closed pipe is not a failure of supdoc: `output` drops what it cannot deliver and the
-/// command ends cleanly (06 X13).
+/// command ends cleanly.
 ///
 /// # Errors
 ///

@@ -1,4 +1,4 @@
-//! `supdoc list`: shows every link and its state, or only the links to one target (06 X11).
+//! `supdoc list`: shows every link and its state, or only the links to one target.
 //!
 //! Read-only, and exits 0 whatever state the links are in: `check` is the gate. A `TARGET` that
 //! names nothing (a missing file, an unknown namespace, a symbol that doesn't resolve) is refused,
@@ -126,7 +126,7 @@ pub(crate) fn run(
             .note(&note)
             .map_err(|error| CliError::output_failed("the link list", &error))?;
     }
-    // A file that outlasted `parse-timeout` left its links unchecked, so the run fails (D1).
+    // A file that outlasted `parse-timeout` left its links unchecked, so the run fails.
     Ok(if timed_out {
         Outcome::Failing
     } else {
@@ -187,7 +187,7 @@ fn target_invalid(typed: &str, reason: &str) -> CliError {
 }
 
 /// What `list` prints: the counts of every match, the links to show, and the scan's findings not
-/// tied to one link (07 G8).
+/// tied to one link.
 ///
 /// JSON puts `summary` and `links` under `data`; the envelope carries the loose findings.
 #[derive(Debug, Serialize, JsonSchema)]

@@ -238,11 +238,11 @@
       "type": "object"
     },
     "LineEndings": {
-      "description": "How line endings are treated before hashing (01 D10, 03 R6).",
+      "description": "How line endings are treated before hashing.",
       "oneOf": [
         {
           "const": "normalize",
-          "description": "Each CR immediately followed by LF is dropped before hashing (B.4).",
+          "description": "Each CR immediately followed by LF is dropped before hashing.",
           "type": "string"
         },
         {

@@ -158,6 +158,12 @@ impl Project {
         }
     }
 
+    /// The empty directory standing in for the home and config directories. A missing
+    /// `gitconfig` file in it is the system git config.
+    pub(crate) fn no_git_config(&self) -> &Path {
+        self.no_git_config.path()
+    }
+
     /// The `supdoc args` command, run in the project root with only `env` set.
     ///
     /// Git's environment is isolated first: `HOME` and `XDG_CONFIG_HOME` are an empty directory

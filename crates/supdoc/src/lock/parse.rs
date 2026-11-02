@@ -1,4 +1,4 @@
-//! Parsing lockfile text, leniently (02 L6, L7).
+//! Parsing lockfile text, leniently.
 
 use std::collections::BTreeMap;
 
@@ -29,7 +29,7 @@ struct RawLockfile {
     /// Checked to be the current version; not needed afterwards.
     #[serde(rename = "version", deserialize_with = "current_version")]
     _version: u32,
-    /// The settings the hashes were computed under. Required (02 L10).
+    /// The settings the hashes were computed under. Required.
     features: RawFeatures,
     /// The entries, each with the position it was written at.
     #[serde(default)]
@@ -128,7 +128,7 @@ fn features_are_missing(text: &str, error: &toml::de::Error) -> bool {
 
 impl Lockfile {
     /// Reads lockfile text. Entries may be in any order and identical duplicates collapse into
-    /// one; [`render`](Self::render) then writes them canonically (02 L6).
+    /// one; [`render`](Self::render) then writes them canonically.
     ///
     /// # Errors
     ///
