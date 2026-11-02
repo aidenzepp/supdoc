@@ -9,9 +9,10 @@
 //!   (`news.whats-new`). Headings elsewhere in the file don't change it, so it survives reordering.
 //! - the **GitHub anchor** (`whats-new`), kept as an alias so a link copied from GitHub resolves.
 //!
-//! Slugs follow GitHub: lowercase, keep letters, numbers, `_`, `-` and combining marks, drop other
-//! punctuation, turn each space into `-`. Anchors repeated in a file get `-1`, `-2`, … in document
-//! order, as GitHub numbers them. Sibling headings that share a slug get the same suffixes in
+//! Slugs follow GitHub: lowercase, keep letters, numbers, marks (general category M), connector
+//! punctuation (Pc, which includes `_`) and `-`, drop other punctuation, turn each space into `-`.
+//! Anchors repeated in a file get `-1`, `-2`, … in document order, as GitHub numbers them; headings
+//! inside block quotes and lists count for that numbering, though they are not sections. Sibling headings that share a slug get the same suffixes in
 //! their dotted path, scoped to the parent, so every dotted path is unique.
 //!
 //! A heading whose slug is empty (`## !!!`) can't be named: it isn't a symbol, and it is left out
@@ -21,6 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use tree_sitter::{Node, Parser};
+use unicode_general_category::{GeneralCategory, get_general_category};
 
 use crate::link::{SymbolPath, SymbolSegment};
 use crate::read::cartridge::{SourceFile, Symbol, SymbolTable};
@@ -30,7 +32,7 @@ use crate::read::cartridge::{SourceFile, Symbol, SymbolTable};
 pub fn heading_symbols(file: &SourceFile) -> SymbolTable {
     let root = file.tree().root_node();
     let mut headings = Vec::new();
-    collect_headings(root, &mut headings);
+    collect_headings(root, true, &mut headings);
 
     let mut reader = HeadingReader {
         text: file.text(),
@@ -40,6 +42,12 @@ pub fn heading_symbols(file: &SourceFile) -> SymbolTable {
     let mut open = vec![Open::root()];
     let mut symbols = Vec::new();
     for (index, heading) in headings.iter().enumerate() {
+        if !heading.section {
+            if let Ok(slug) = SymbolSegment::new(slugify(&reader.display(heading.node))) {
+                let _anchor = anchors.claim(&slug);
+            }
+            continue;
+        }
         while open
             .last()
             .is_some_and(|parent| parent.level >= heading.level)
@@ -59,7 +67,7 @@ pub fn heading_symbols(file: &SourceFile) -> SymbolTable {
         let end = headings
             .iter()
             .skip(index + 1)
-            .find(|next| next.level <= heading.level)
+            .find(|next| next.section && next.level <= heading.level)
             .map_or(root.end_byte(), |next| next.node.start_byte());
         let range = heading.node.start_byte()..end;
         symbols.push(symbol(path.clone(), anchors.claim(&slug), range));
@@ -78,23 +86,31 @@ struct Heading<'tree> {
     level: u8,
     /// The `atx_heading` or `setext_heading` node.
     node: Node<'tree>,
+    /// Whether it sits at the document's top level and so owns a section. Headings inside block
+    /// quotes or lists take part in anchor numbering only.
+    section: bool,
 }
 
-/// Appends every heading under `node`, in document order. Only headings at the document's top
-/// level count: those inside block quotes or lists have no section of their own.
+/// Appends every heading under `node`, in document order. Headings inside block quotes or lists
+/// are included, marked as having no section, because GitHub numbers their anchors too.
 ///
 /// The grammar nests headings in `section` nodes, but not reliably for setext headings, so only
 /// the headings themselves are read from it.
-fn collect_headings<'tree>(node: Node<'tree>, out: &mut Vec<Heading<'tree>>) {
+fn collect_headings<'tree>(node: Node<'tree>, section: bool, out: &mut Vec<Heading<'tree>>) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         match child.kind() {
-            "section" => collect_headings(child, out),
+            "section" => collect_headings(child, section, out),
             "atx_heading" | "setext_heading" => {
                 if let Some(level) = level_of(child) {
-                    out.push(Heading { level, node: child });
+                    out.push(Heading {
+                        level,
+                        node: child,
+                        section,
+                    });
                 }
             }
+            "block_quote" | "list" | "list_item" => collect_headings(child, false, out),
             _ => {}
         }
     }
@@ -256,10 +272,21 @@ fn slugify(text: &str) -> String {
         .chars()
         .filter_map(|c| match c {
             ' ' => Some('-'),
-            c if c.is_alphanumeric() || matches!(c, '_' | '-' | '\u{0300}'..='\u{036F}') => Some(c),
+            c if c == '-' || c.is_alphanumeric() || is_mark_or_connector(c) => Some(c),
             _ => None,
         })
         .collect()
+}
+
+/// Whether `c` is in general category M (marks) or Pc (connector punctuation), which GitHub keeps.
+fn is_mark_or_connector(c: char) -> bool {
+    matches!(
+        get_general_category(c),
+        GeneralCategory::NonspacingMark
+            | GeneralCategory::SpacingMark
+            | GeneralCategory::EnclosingMark
+            | GeneralCategory::ConnectorPunctuation
+    )
 }
 
 /// Slugs already used in one scope, and how to number the next repeat. File-wide, it numbers
@@ -434,6 +461,35 @@ mod tests {
                 "hello-world.snake_case-name (snake_case-name)",
             ],
         );
+    }
+
+    #[test]
+    fn markdown_quoted_and_listed_headings_count_in_anchor_numbering() {
+        assert_eq!(
+            names("## Note\n\n> ## Note\n\n## Note\n"),
+            ["note", "note-1 (note-2)"],
+            "the quoted heading takes #note-1 on GitHub, so the last one is #note-2"
+        );
+        assert_eq!(
+            names("## Note\n\n- ## Note\n\n## Note\n"),
+            ["note", "note-1 (note-2)"],
+        );
+    }
+
+    #[test]
+    fn markdown_slugs_keep_marks_outside_the_latin_block() {
+        for (heading, slug) in [
+            ("हिन्दी", "हिन्दी"),
+            ("ไทย ที่", "ไทย-ที่"),
+            ("⚠️ Warning", "\u{fe0f}-warning"),
+            ("a\u{20DD}b", "a\u{20DD}b"),
+        ] {
+            assert_eq!(
+                names(&format!("# {heading}\n")),
+                [slug],
+                "the slug of {heading:?} should keep every mark"
+            );
+        }
     }
 
     #[test]

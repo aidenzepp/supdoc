@@ -1105,7 +1105,11 @@ mod tests {
                 .expect("the temporary directory should be absolute");
             let config =
                 Config::load_file(&config_path).expect("the fixture config should be valid");
-            walk(&config, &Languages::builtin(), scope)
+            walk(
+                &config,
+                Languages::builtin().expect("the built-in cartridges should load"),
+                scope,
+            )
         }
 
         /// The walked sources, relative to the root.
@@ -2038,7 +2042,11 @@ mod tests {
     /// The names of the files `config`'s project walks, sorted, and its findings' codes.
     #[cfg(unix)]
     fn walked_names(config: &Config) -> (Vec<String>, Vec<&'static str>) {
-        let walked = walk(config, &Languages::builtin(), &Scope::All);
+        let walked = walk(
+            config,
+            Languages::builtin().expect("the built-in cartridges should load"),
+            &Scope::All,
+        );
         let names = walked
             .sources
             .iter()
@@ -2097,8 +2105,16 @@ mod tests {
             .expect("the temporary directory should be absolute");
         let config = Config::load_file(&config_path).expect("the fixture config should be valid");
 
-        let all = walk(&config, &Languages::builtin(), &Scope::All);
-        let one = walk(&config, &Languages::builtin(), &paths(&["out.rs"]));
+        let all = walk(
+            &config,
+            Languages::builtin().expect("the built-in cartridges should load"),
+            &Scope::All,
+        );
+        let one = walk(
+            &config,
+            Languages::builtin().expect("the built-in cartridges should load"),
+            &paths(&["out.rs"]),
+        );
 
         let walked: Vec<_> = all
             .sources

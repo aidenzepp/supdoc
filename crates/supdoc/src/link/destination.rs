@@ -154,6 +154,36 @@ pub enum LinkError {
     },
 }
 
+/// The destination with the mechanical repairs applied: runs of `/` collapsed, `\` written as `/`,
+/// and a `:~:` text fragment dropped. `None` when none of them changes anything.
+///
+/// The result is only a candidate; the caller decides whether it parses.
+#[must_use]
+pub fn repaired_destination(destination: &str) -> Option<String> {
+    let destination = destination.trim();
+    let (path, fragment) = match destination.split_once('#') {
+        Some((path, fragment)) => (path, Some(fragment)),
+        None => (destination, None),
+    };
+    let mut repaired = String::with_capacity(destination.len());
+    for character in path.chars() {
+        let character = if character == '\\' { '/' } else { character };
+        if !(character == '/' && repaired.ends_with('/')) {
+            repaired.push(character);
+        }
+    }
+    if let Some(fragment) = fragment {
+        let kept = fragment
+            .split_once(TEXT_FRAGMENT_MARKER)
+            .map_or(fragment, |(kept, _dropped)| kept);
+        if !kept.is_empty() {
+            repaired.push('#');
+            repaired.push_str(kept);
+        }
+    }
+    (repaired != destination).then_some(repaired)
+}
+
 /// The namespace names a destination may use as a prefix. Parsing reads only the names, never a
 /// namespace's directory.
 pub trait NamespaceNames {
@@ -448,6 +478,24 @@ mod tests {
     use std::sync::OnceLock;
 
     use super::*;
+
+    #[test]
+    fn repair_collapses_slashes_swaps_backslashes_and_drops_text_fragments() {
+        let cases = [
+            ("../src//lib.rs#add", Some("../src/lib.rs#add")),
+            ("..\\src\\lib.rs#add", Some("../src/lib.rs#add")),
+            ("../src/lib.rs#add:~:text=x", Some("../src/lib.rs#add")),
+            ("../src/lib.rs#:~:text=x", Some("../src/lib.rs")),
+            ("../src/lib.rs#add", None),
+        ];
+        for (written, expected) in cases {
+            assert_eq!(
+                repaired_destination(written).as_deref(),
+                expected,
+                "repair of `{written}`"
+            );
+        }
+    }
     use crate::read::cartridge::{
         Cartridge, CompiledQueries, LanguageId, MarkdownRegion, SourceFile, SymbolTable,
     };

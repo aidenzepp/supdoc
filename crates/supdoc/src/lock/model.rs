@@ -38,8 +38,9 @@ impl Lockfile {
 
     /// Records that the hashes are (or will be) computed under `settings`.
     ///
-    /// Changes no entry: the caller re-records any hash the new settings would change.
-    pub const fn set_hash_settings(&mut self, settings: HashSettings) {
+    /// Changes no entry: the caller re-records any hash the new settings would change. Only the
+    /// lock parser and `check::plan`'s migration may call it.
+    pub(crate) const fn set_hash_settings(&mut self, settings: HashSettings) {
         self.hash = settings;
     }
 

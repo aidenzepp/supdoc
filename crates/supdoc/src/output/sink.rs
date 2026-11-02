@@ -54,8 +54,8 @@ pub enum OutputError {
 /// Every byte supdoc prints goes through here.
 ///
 /// A closed pipe, as in `supdoc list | head`, is not an error: the first write that meets one
-/// marks the output closed, and everything after it is dropped quietly (06 X13). Callers can ask
-/// [`Output::is_closed`] and exit 0.
+/// marks that stream closed, and later writes to it are dropped quietly (06 X13). The other
+/// stream keeps working, and the run keeps its own exit code.
 pub struct Output {
     /// How to write.
     settings: OutputSettings,
@@ -63,15 +63,18 @@ pub struct Output {
     stdout: Box<dyn Write>,
     /// Where notes about the run, diagnostics and fatal errors go.
     stderr: Box<dyn Write>,
-    /// Whether a reader hung up.
-    closed: bool,
+    /// Whether the reader of stdout hung up.
+    stdout_closed: bool,
+    /// Whether the reader of stderr hung up.
+    stderr_closed: bool,
 }
 
 impl std::fmt::Debug for Output {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Output")
             .field("settings", &self.settings)
-            .field("closed", &self.closed)
+            .field("stdout_closed", &self.stdout_closed)
+            .field("stderr_closed", &self.stderr_closed)
             .finish_non_exhaustive()
     }
 }
@@ -84,7 +87,8 @@ impl Output {
             settings,
             stdout,
             stderr,
-            closed: false,
+            stdout_closed: false,
+            stderr_closed: false,
         }
     }
 
@@ -118,10 +122,10 @@ impl Output {
         self.settings.verbosity
     }
 
-    /// Whether a reader closed the pipe. The caller should exit 0.
+    /// Whether the reader of stdout closed the pipe. The run's exit code does not change.
     #[must_use]
-    pub fn is_closed(&self) -> bool {
-        self.closed
+    pub const fn is_closed(&self) -> bool {
+        self.stdout_closed
     }
 
     /// Writes `report` to stdout in the chosen format. `ok` must be true exactly when the process
@@ -253,23 +257,23 @@ impl Output {
         self.write(Stream::Stderr, &bytes)
     }
 
-    /// Writes `bytes` to `stream`, turning a closed pipe into a closed output.
+    /// Writes `bytes` to `stream`, turning a closed pipe into a closed stream.
     ///
     /// # Errors
     ///
     /// Fails if the write fails for any reason but a closed pipe.
     fn write(&mut self, stream: Stream, bytes: &[u8]) -> Result<(), OutputError> {
-        if self.closed {
+        let (target, closed) = match stream {
+            Stream::Stdout => (&mut self.stdout, &mut self.stdout_closed),
+            Stream::Stderr => (&mut self.stderr, &mut self.stderr_closed),
+        };
+        if *closed {
             return Ok(());
         }
-        let target = match stream {
-            Stream::Stdout => &mut self.stdout,
-            Stream::Stderr => &mut self.stderr,
-        };
         match target.write_all(bytes).and_then(|()| target.flush()) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
-                self.closed = true;
+                *closed = true;
                 Ok(())
             }
             Err(error) => Err(error.into()),

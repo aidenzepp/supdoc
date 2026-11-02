@@ -19,6 +19,30 @@ impl NamespaceName {
     }
 }
 
+/// What to do about the unknown namespace `name`, given every `known` namespace: the likely
+/// intended one when exactly one is close, then every known namespace, or how to define the first.
+///
+/// Every command that meets an unknown namespace words its help with this one builder.
+#[must_use]
+pub(crate) fn unknown_namespace_help(name: &str, known: &[&str]) -> String {
+    let define = format!(
+        "Define `{name}` under `[namespaces]` in {}",
+        crate::config::CONFIG_FILE_NAME
+    );
+    if known.is_empty() {
+        return format!("No namespaces are configured. {define}");
+    }
+    let listed = known
+        .iter()
+        .map(|known| format!("`{known}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match crate::suggest::close_match(name, known.iter().copied()) {
+        Some(close) => format!("did you mean `{close}`? Configured namespaces: {listed}"),
+        None => format!("Configured namespaces: {listed}. {define}"),
+    }
+}
+
 impl TryFrom<String> for NamespaceName {
     type Error = NamespaceNameError;
 
@@ -104,6 +128,31 @@ pub enum NamespaceNameError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_namespace_help_without_any_configured_says_how_to_define_one() {
+        assert_eq!(
+            unknown_namespace_help("auth", &[]),
+            "No namespaces are configured. Define `auth` under `[namespaces]` in supdoc.config.toml"
+        );
+    }
+
+    #[test]
+    fn unknown_namespace_help_with_a_close_match_names_it_and_lists_all() {
+        assert_eq!(
+            unknown_namespace_help("atuh", &["auth", "web"]),
+            "did you mean `auth`? Configured namespaces: `auth`, `web`"
+        );
+    }
+
+    #[test]
+    fn unknown_namespace_help_without_a_close_match_lists_all_and_says_how_to_define() {
+        assert_eq!(
+            unknown_namespace_help("billing", &["auth", "web"]),
+            "Configured namespaces: `auth`, `web`. Define `billing` under `[namespaces]` in \
+             supdoc.config.toml"
+        );
+    }
 
     fn parse(name: &str) -> Result<NamespaceName, NamespaceNameError> {
         name.parse()
