@@ -480,11 +480,7 @@ impl ConfigEdit {
         let real = match resolve_project_file(file) {
             Ok(ProjectFile::Inside(real)) => real,
             Ok(ProjectFile::Outside(real)) => {
-                return Err(config_outside_root(
-                    &shown,
-                    real.as_ref().unwrap_or(file),
-                    rerun,
-                ));
+                return Err(config_outside_root(&shown, real.as_ref(), rerun));
             }
             // Gone since it was loaded, or its metadata can't be read: the read says why.
             Ok(ProjectFile::Absent) | Err(_) => file.clone(),
@@ -492,12 +488,7 @@ impl ConfigEdit {
         let text = read_config(&real, context, output)?;
         let relative = file.strip_prefix(root).map(Path::to_path_buf);
         let Some(key) = namespace_key(&text, old) else {
-            return Err(CliError::new(
-                "cli-rename-file-changed",
-                format!("{shown} no longer defines `{old}`; nothing was written"),
-                format!("Run `{rerun}` again"),
-                CliError::REFUSED_EXIT_CODE,
-            ));
+            return Err(file_changed(&shown, rerun));
         };
         let location = relative
             .as_deref()
@@ -708,7 +699,17 @@ pub fn file_changed(file: &str, apply_command: &str) -> CliError {
 
 /// The `cli-rename-config-outside-root` error (1) for the config `shown`, a symlink whose real
 /// file `real` lies outside the project root, where a rename never writes; `rerun` repeats it.
-fn config_outside_root(shown: &str, real: &AbsolutePath, rerun: &str) -> CliError {
+fn config_outside_root(shown: &str, real: Option<&AbsolutePath>, rerun: &str) -> CliError {
+    let Some(real) = real else {
+        return CliError::new(
+            "cli-rename-config-outside-root",
+            format!("{shown} is a symlink that doesn't resolve to a file; nothing was written"),
+            format!(
+                "Point the symlink at a file inside the project root, then run `{rerun}` again"
+            ),
+            CliError::REFUSED_EXIT_CODE,
+        );
+    };
     CliError::new(
         "cli-rename-config-outside-root",
         format!(
