@@ -148,7 +148,7 @@ fn reconcile_with(
         });
     }
 
-    let used_up: BTreeSet<&LinkKey> = moves.carried.iter().map(|carried| &carried.from).collect();
+    let used_up: BTreeSet<LinkKey> = moves.carried().map(|carried| carried.from).collect();
     for key in removed.into_iter().filter(|key| !used_up.contains(key)) {
         report.links.push(LinkReport {
             key: key.clone(),
