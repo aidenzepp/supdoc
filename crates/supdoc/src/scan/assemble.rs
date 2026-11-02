@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 use crate::config::{CONFIG_FILE_NAME, Config};
+use crate::exit::ExitStatus;
 use crate::finding::{Finding, Fix, LineIndex, Location, Severity, Snippet};
 use crate::hash::HashSettings;
 use crate::link::destination::{LinkError, parse_destination};
@@ -22,9 +23,6 @@ use crate::read::links::links;
 use crate::scan::model::{Scan, ScannedLink, Scope, TargetState};
 use crate::scan::targets::{self, CODE_UNKNOWN_NAMESPACE, Occurrence, Parsed, Written};
 use crate::scan::walk::walk;
-
-/// Exit status for a scan that couldn't read the project (06 X7).
-const EXIT_IO: u8 = 74;
 
 /// Why a scan couldn't run at all (04 S7). Every smaller problem is a finding instead.
 #[derive(Debug, thiserror::Error)]
@@ -62,16 +60,16 @@ impl ScanError {
 
     /// The process exit status for this error (06 X7): 74, since the project can't be read.
     #[must_use]
-    pub const fn exit_code(&self) -> u8 {
+    pub const fn status(&self) -> ExitStatus {
         match self {
-            Self::RootUnreadable { .. } => EXIT_IO,
+            Self::RootUnreadable { .. } => ExitStatus::Io,
         }
     }
 }
 
 /// Scans the part of the project `scope` names: every link in its sources, what each target looks
 /// like right now, and every problem met on the way, in a deterministic order (S8). Each file is
-/// parsed at most once (S9). The lockfile is never read.
+/// parsed at most once as a source and once as a target (S9). The lockfile is never read.
 ///
 /// Effect: reads the filesystem. Everything after the walk and the file reads is pure.
 ///
@@ -130,7 +128,10 @@ fn assemble(
             continue;
         };
         match parsed.read(path, languages) {
-            Ok(file) => source_links(config, languages, &source, file, &mut found),
+            Ok(file) => {
+                source_links(config, languages, &source, file, &mut found);
+                parsed.forget(path);
+            }
             Err(error) => {
                 findings.push(unreadable_source(&source, &error));
                 let _new = unread_sources.insert(source);
@@ -917,7 +918,7 @@ mod tests {
     }
 
     #[test]
-    fn file_that_is_source_and_target_is_parsed_once() {
+    fn target_is_parsed_once_and_a_source_that_is_also_a_target_is_parsed_again() {
         let project = Project::new();
         project.write(
             "docs/guide.md",
@@ -931,7 +932,10 @@ mod tests {
         let (scan, parsed) = project.assemble();
 
         assert_eq!(scan.links.len(), 2, "both files link to each other");
-        assert_eq!(parsed.parses, 2, "each file is both a source and a target");
+        assert_eq!(
+            parsed.parses, 4,
+            "each file is parsed once as a source, dropped, then once as a target"
+        );
     }
 
     #[test]

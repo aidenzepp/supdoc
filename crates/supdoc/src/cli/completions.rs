@@ -9,6 +9,7 @@ use clap_complete::Shell;
 use schemars::JsonSchema;
 use serde::Serialize;
 
+use crate::exit::ExitStatus;
 use crate::output::{Output, OutputError, Report, TextContext};
 
 use super::args::{Cli, CompletionsArgs};
@@ -63,7 +64,7 @@ fn write_failed(shell: Shell, error: &OutputError) -> CliError {
             "check that standard output is open and writable, or redirect it to a file with \
              `supdoc completions {shell} > supdoc.{shell}`"
         ),
-        CliError::IO_EXIT_CODE,
+        ExitStatus::Io,
     )
 }
 

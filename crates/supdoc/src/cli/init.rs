@@ -12,6 +12,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::config::CONFIG_FILE_NAME;
+use crate::exit::ExitStatus;
 use crate::lock::error::shell_quote;
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
@@ -229,7 +230,7 @@ fn exists(target: &AbsolutePath, context: &Context) -> CliError {
             "The existing file wasn't changed. Edit it directly, or delete it and run `{}`.",
             command(context)
         ),
-        CliError::REFUSED_EXIT_CODE,
+        ExitStatus::Failed,
     )
 }
 
@@ -258,7 +259,7 @@ fn write_failed(target: &AbsolutePath, error: &io::Error, context: &Context) -> 
             cause(error)
         ),
         format!("{fix}, then run `{}` again", command(context)),
-        CliError::IO_EXIT_CODE,
+        ExitStatus::Io,
     )
 }
 

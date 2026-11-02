@@ -14,6 +14,7 @@ use serde::Serialize;
 use crate::check::model::LinkReport;
 use crate::check::reconcile::reconcile_in;
 use crate::config::Config;
+use crate::exit::ExitStatus;
 use crate::finding::Finding;
 use crate::link::{LinkKey, LinkRef, SymbolPath, Target};
 use crate::lock::error::shell_quote;
@@ -164,7 +165,7 @@ fn target_invalid(typed: &str, reason: &str) -> CliError {
         "cli-target-invalid",
         format!("`{typed}` is not a link target: {reason}"),
         "Write TARGET as `path`, `path#symbol` or `ns:path#symbol`",
-        CliError::USAGE_EXIT_CODE,
+        ExitStatus::Usage,
     )
 }
 
@@ -295,9 +296,7 @@ impl Place {
                 None => return Self::Unlocated(target.clone()),
             },
         };
-        // Joining a relative path onto an absolute one is always absolute.
-        let file = AbsolutePath::new(&base.as_path().join(target.path().as_str()))
-            .unwrap_or_else(|| base.clone());
+        let file = base.join_path(Path::new(target.path().as_str()));
         if !config.contains(base.as_path()) || !config.contains(file.as_path()) {
             return Self::Unlocated(target.clone());
         }
@@ -446,7 +445,7 @@ impl Wanted {
                     &[typed_file.display().to_string()],
                     &[],
                 )),
-                CliError::REFUSED_EXIT_CODE,
+                ExitStatus::Failed,
             )),
             SymbolFilter::Any | SymbolFilter::Text(_) | SymbolFilter::Resolved { .. } => None,
         }
@@ -474,7 +473,7 @@ fn namespaced_missing(
              `ls {}` lists what is there",
             shell_quote(&shown)
         ),
-        CliError::USAGE_EXIT_CODE,
+        ExitStatus::Usage,
     )
 }
 
@@ -500,7 +499,7 @@ fn unknown_namespace(config: &Config, name: &NamespaceName) -> CliError {
         "link-unknown-namespace",
         format!("unknown namespace `{name}`"),
         help,
-        CliError::USAGE_EXIT_CODE,
+        ExitStatus::Usage,
     )
 }
 

@@ -54,6 +54,7 @@ pub(crate) mod testing;
 
 use std::fmt;
 
+use crate::exit::ExitStatus;
 use crate::finding::{Location, Snippet};
 use crate::output::{Output, OutputError};
 use crate::path::AbsolutePath;
@@ -85,9 +86,10 @@ impl Outcome {
     #[must_use]
     pub const fn exit_code(self) -> u8 {
         match self {
-            Self::Clean => 0,
-            Self::Failing => 1,
+            Self::Clean => ExitStatus::Clean,
+            Self::Failing => ExitStatus::Failed,
         }
+        .code()
     }
 }
 
@@ -114,8 +116,8 @@ pub struct CliError {
     message: String,
     /// What to do next.
     help: String,
-    /// The process exit code.
-    exit_code: u8,
+    /// The process exit status.
+    status: ExitStatus,
     /// Where in a file it happened, when it is about one place.
     site: Option<Box<ErrorSite>>,
 }
@@ -127,13 +129,13 @@ impl CliError {
         code: &'static str,
         message: impl Into<String>,
         help: impl Into<String>,
-        exit_code: u8,
+        status: ExitStatus,
     ) -> Self {
         Self {
             code,
             message: message.into(),
             help: help.into(),
-            exit_code,
+            status,
             site: None,
         }
     }
@@ -160,24 +162,9 @@ impl CliError {
             ),
             "Check that standard output and standard error are open and writable, or redirect \
              both to a file with `> supdoc.out 2>&1`",
-            Self::IO_EXIT_CODE,
+            ExitStatus::Io,
         )
     }
-
-    /// The exit code for a supdoc bug (06 X7).
-    pub const BUG_EXIT_CODE: u8 = 70;
-
-    /// The exit code for a usage error, such as a missing `[PATH]` (06 X7).
-    pub const USAGE_EXIT_CODE: u8 = 2;
-
-    /// The exit code for a refused change, such as an existing config (06 X7).
-    pub const REFUSED_EXIT_CODE: u8 = 1;
-
-    /// The exit code for an I/O failure (06 X7).
-    pub const IO_EXIT_CODE: u8 = 74;
-
-    /// The exit code for a config or lockfile problem (06 X7).
-    pub const CONFIG_EXIT_CODE: u8 = 78;
 
     /// The stable code.
     #[must_use]
@@ -197,10 +184,16 @@ impl CliError {
         &self.help
     }
 
+    /// The process exit status.
+    #[must_use]
+    pub const fn status(&self) -> ExitStatus {
+        self.status
+    }
+
     /// The process exit code.
     #[must_use]
     pub const fn exit_code(&self) -> u8 {
-        self.exit_code
+        self.status.code()
     }
 
     /// Where in a file it happened, if it is about one place.
@@ -216,7 +209,7 @@ impl From<ScanError> for CliError {
             error.code(),
             error.to_string(),
             error.help(),
-            error.exit_code(),
+            error.status(),
         )
     }
 }
