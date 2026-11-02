@@ -25,7 +25,9 @@ use crate::scan::model::Scope;
 
 use super::{CliError, Context, ErrorSite, cause};
 
-/// The config `--config` names, or the one found by searching upward from the current directory.
+/// The config `--config` names, or the one found by searching upward from the current directory,
+/// with the `[limits]` flags and variables put in effect over its own, so every reader the
+/// command runs takes its ceiling from [`Config::limits_in_effect`].
 ///
 /// On success, `output` reports paths against the config's root from then on. `command` names the
 /// command in the fallback help, as in ``run `supdoc list` again``: it is the whole command to
@@ -39,7 +41,9 @@ pub(crate) fn load_config(context: &Context, output: &mut Output) -> Result<Conf
         Some(file) => Config::load_file(&absolute(&context.cwd, file)),
         None => Config::load(&context.cwd),
     };
-    let config = loaded.map_err(|error| config_failure(&error, context, output))?;
+    let config = loaded
+        .map_err(|error| config_failure(&error, context, output))?
+        .with_command_line(&context.global.limits.0);
     output.set_root(config.root().clone());
     Ok(config)
 }

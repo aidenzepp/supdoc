@@ -14,7 +14,7 @@ use std::io::ErrorKind;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
-use crate::limits::ConfigLimits;
+use crate::limits::{CommandLineLimits, ConfigLimits, Limits};
 use crate::namespace::NamespaceName;
 use crate::path::{AbsolutePath, RelativePath, holds_git, is_regular_file};
 
@@ -368,6 +368,7 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Result<Config, Co
         exclude,
         namespaces,
         line_endings,
+        in_effect: Limits::resolve(&CommandLineLimits::default(), &limits),
         limits,
     })
 }

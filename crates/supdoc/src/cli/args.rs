@@ -117,7 +117,7 @@ const LIMIT_FLAGS: [(&str, &str, &str, &str); 4] = [
         "parse-timeout",
         "SUPDOC_PARSE_TIMEOUT",
         "DURATION",
-        "Stop reading a file after this long, such as 10s or 500ms; 0 for no limit",
+        "Stop each read of a file after this long, such as 10s or 500ms; 0 for no limit",
     ),
     (
         "max-lock-size",

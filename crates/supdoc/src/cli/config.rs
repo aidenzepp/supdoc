@@ -17,7 +17,7 @@ use crate::output::text::visible;
 use crate::output::{Output, Report, TextContext, Verbosity};
 use crate::path::AbsolutePath;
 
-use super::args::{Inspect, Limit, LimitFlags};
+use super::args::{Inspect, Limit};
 use super::project::{load_config, lock_path};
 use super::{CliError, Context, Outcome};
 
@@ -35,10 +35,7 @@ pub fn run(
     let config = load_config(context, output)?;
     let written = match inspect {
         Inspect::ConfigShow => output
-            .report(
-                &ConfigShowReport::new(&config, &context.global.limits),
-                true,
-            )
+            .report(&ConfigShowReport::new(&config), true)
             .and_then(|()| {
                 if config.files().is_empty() {
                     output.note(&format!(
@@ -115,10 +112,10 @@ pub(crate) struct ConfigShowReport {
 
 impl ConfigShowReport {
     /// The report for `config`.
-    fn new(config: &Config, flags: &LimitFlags) -> Self {
+    fn new(config: &Config) -> Self {
         let root = config.root();
         Self {
-            limits: LimitsJson::new(root, &Limits::resolve(&flags.0, config.limits())),
+            limits: LimitsJson::new(root, config.limits_in_effect()),
             files: config
                 .files()
                 .iter()
@@ -329,7 +326,7 @@ impl FeaturesJson {
 /// The `[limits]` ceilings in effect, each with where it came from.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct LimitsJson {
-    /// How long one file may take to read.
+    /// How long one read of a file may take.
     parse_timeout: LimitJson,
     /// How large `supdoc.lock` may be.
     max_lock_size: LimitJson,

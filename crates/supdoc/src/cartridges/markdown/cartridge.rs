@@ -10,6 +10,7 @@ use crate::cartridges::markdown::symbols::heading_symbols;
 use crate::read::cartridge::{
     Cartridge, CompiledQueries, LanguageId, MarkdownRegion, SourceFile, SymbolTable,
 };
+use crate::read::error::ReadError;
 use crate::read::query::QueryFileError;
 
 /// The Markdown language: block grammar, headings as symbols, body text as link regions.
@@ -63,12 +64,12 @@ impl Cartridge for Markdown {
         &self.queries
     }
 
-    fn symbols(&self, file: &SourceFile) -> SymbolTable {
+    fn symbols(&self, file: &SourceFile) -> Result<SymbolTable, ReadError> {
         heading_symbols(file)
     }
 
-    fn markdown_regions(&self, file: &SourceFile) -> Vec<MarkdownRegion> {
-        markdown_regions(file)
+    fn markdown_regions(&self, file: &SourceFile) -> Result<Vec<MarkdownRegion>, ReadError> {
+        Ok(markdown_regions(file))
     }
 }
 
@@ -100,7 +101,10 @@ mod tests {
 
     fn section_of(file: &SourceFile, raw: &str) -> String {
         let query: SymbolPath = raw.parse().expect("the fixture symbol should be valid");
-        let table = file.language().symbols(file);
+        let table = file
+            .language()
+            .symbols(file)
+            .expect("the fixture should read");
         let symbol = table
             .resolve(file.path(), &query)
             .unwrap_or_else(|error| panic!("`{raw}` should resolve: {error}"));
@@ -133,7 +137,7 @@ mod tests {
     fn body_of_a_markdown_file_yields_link_regions() {
         let file = registered_file("guide.md");
 
-        let found = links(&file);
+        let found = links(&file).expect("the fixture should read");
         let destinations: Vec<_> = found.iter().map(|link| link.destination.as_str()).collect();
 
         assert_eq!(
@@ -147,7 +151,10 @@ mod tests {
     fn section_hash(raw: &str) -> String {
         let file = registered_file("guide.md");
         let query: SymbolPath = raw.parse().expect("the fixture symbol should be valid");
-        let table = file.language().symbols(&file);
+        let table = file
+            .language()
+            .symbols(&file)
+            .expect("the fixture should read");
         let symbol = table
             .resolve(file.path(), &query)
             .unwrap_or_else(|error| panic!("`{raw}` should resolve: {error}"));

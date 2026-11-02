@@ -31,6 +31,7 @@ use crate::state::LinkState;
 
 use super::args::{UpdateArgs, WriteMode};
 use super::check::LinkLocationJson;
+use super::fix::timed_out;
 use super::project::{
     LockForUpdate, command_line, load_config, lock_failure, lock_path, read_lock_for_update, scope,
     settings_mismatch,
@@ -114,7 +115,9 @@ pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<
         ),
     );
     let report = UpdateReport::new(&model, &plan, &args.state, applied, &paths, context);
-    output.report(&report, true).map_err(|error| {
+    // A file that outlasted `parse-timeout` left its links unread, so the run fails (D1).
+    let timed_out = timed_out(&scan).next().is_some();
+    output.report(&report, !timed_out).map_err(|error| {
         CliError::output_failed("cli-update-output", "the update report", &error)
     })?;
     output
@@ -122,7 +125,11 @@ pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<
         .map_err(|error| {
             CliError::output_failed("cli-update-output", "the update report", &error)
         })?;
-    Ok(Outcome::Clean)
+    Ok(if timed_out {
+        Outcome::Failing
+    } else {
+        Outcome::Clean
+    })
 }
 
 /// The JSON Schema of `supdoc update`'s `--json` output: the whole envelope, with `data` typed as

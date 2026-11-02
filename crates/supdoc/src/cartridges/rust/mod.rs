@@ -41,6 +41,7 @@ pub fn cartridge() -> Result<&'static QueryCartridge, &'static QueryFileError> {
 pub(crate) fn region_texts(file: &crate::read::cartridge::SourceFile) -> Vec<String> {
     file.language()
         .markdown_regions(file)
+        .expect("the fixture should read")
         .iter()
         .map(|region| {
             region
@@ -130,7 +131,9 @@ pub mod util {
     }
 
     fn symbols(file: &SourceFile) -> SymbolTable {
-        file.language().symbols(file)
+        file.language()
+            .symbols(file)
+            .expect("the fixture should read")
     }
 
     fn paths(table: &SymbolTable) -> Vec<String> {

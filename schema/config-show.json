@@ -226,7 +226,7 @@
         },
         "parse_timeout": {
           "$ref": "#/$defs/LimitJson",
-          "description": "How long one file may take to read."
+          "description": "How long one read of a file may take."
         }
       },
       "required": [

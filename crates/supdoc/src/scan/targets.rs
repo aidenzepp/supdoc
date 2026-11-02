@@ -16,6 +16,7 @@ use std::path::Path;
 use crate::config::Config;
 use crate::finding::{Finding, Fix, Location, Severity, Snippet};
 use crate::hash::HashSettings;
+use crate::limits::TimeLimit;
 use crate::link::{LinkKey, Target};
 use crate::namespace::NamespaceName;
 use crate::output::paths::relative_to;
@@ -61,11 +62,12 @@ impl Parsed {
         &mut self,
         path: &AbsolutePath,
         languages: &Languages,
+        limit: TimeLimit,
     ) -> Result<&SourceFile, ReadError> {
         match self.files.entry(path.clone()) {
             Entry::Occupied(parsed) => Ok(parsed.into_mut()),
             Entry::Vacant(slot) => {
-                let file = SourceFile::read(path.clone(), languages)?;
+                let file = SourceFile::read(path.clone(), languages, limit)?;
                 #[cfg(test)]
                 {
                     self.parses += 1;
@@ -176,7 +178,8 @@ impl Written {
 }
 
 /// Resolves every link: groups them by key (S11) and by target, reads each target once, and
-/// records what each target looks like now. Links to a directory are dropped (S13).
+/// records what each target looks like now. Links to a directory are dropped (S13); the second
+/// value counts them, one per place written, for `check -v`.
 ///
 /// Effect: reads target files and the directory listings along their paths.
 pub(crate) fn resolve(
@@ -185,7 +188,7 @@ pub(crate) fn resolve(
     parsed: &mut Parsed,
     settings: HashSettings,
     occurrences: Vec<Occurrence>,
-) -> BTreeMap<LinkKey, ScannedLink> {
+) -> (BTreeMap<LinkKey, ScannedLink>, usize) {
     let mut by_target: BTreeMap<Target, BTreeMap<LinkKey, Vec<Occurrence>>> = BTreeMap::new();
     for occurrence in occurrences {
         by_target
@@ -210,7 +213,12 @@ pub(crate) fn resolve(
     parsed.retain_only(&to_read);
 
     let mut links = BTreeMap::new();
+    let mut directory_links = 0;
     for (at, target, keyed) in located {
+        if matches!(at, Located::Directory) {
+            directory_links += keyed.values().map(Vec::len).sum::<usize>();
+            continue;
+        }
         for (key, state, occurrences) in
             target_states(config, languages, parsed, settings, at, &target, keyed)
         {
@@ -227,10 +235,10 @@ pub(crate) fn resolve(
             let _replaced = links.insert(key, link);
         }
     }
-    links
+    (links, directory_links)
 }
 
-/// The state of each link into `target`, or nothing when the target isn't tracked.
+/// The state of each link into `target`; a directory yields none, as it is never tracked (S13).
 fn target_states(
     config: &Config,
     languages: &Languages,
@@ -265,12 +273,29 @@ fn target_states(
         }
         Located::File(path) => path,
     };
-    let file = match parsed.read(&path, languages) {
+    let limit = config.limits_in_effect().parse_timeout.value;
+    let file = match parsed.read(&path, languages, limit) {
         Ok(file) => file,
-        Err(error) => return broken_by(&|first| read_failed(&error, config.root(), first)),
+        Err(error) => {
+            return broken_by(&|first| read_failed(&error, config.root(), first));
+        }
+    };
+    // Symbols are read once, before any link, so a deadline that stops the query breaks every
+    // link into the file alike and no link resolves against a partial table.
+    let needs_symbols = keyed.keys().any(|key| key.symbol.is_some());
+    let table = if needs_symbols {
+        match file.language().symbols(file) {
+            Ok(table) => Some(table),
+            Err(error) => {
+                let states = broken_by(&|first| read_failed(&error, config.root(), first));
+                parsed.forget(&path);
+                return states;
+            }
+        }
+    } else {
+        None
     };
 
-    let mut table: Option<SymbolTable> = None;
     let states: Vec<_> = keyed
         .into_iter()
         .filter_map(|(key, occurrences)| {
@@ -282,7 +307,7 @@ fn target_states(
                     syntax_errors,
                 },
                 Some(symbol) => {
-                    let table = table.get_or_insert_with(|| file.language().symbols(file));
+                    let table = table.as_ref()?;
                     match table.resolve(file.path(), symbol) {
                         Ok(found) => match hash_symbol(file, found, settings) {
                             Ok(hash) => TargetState::Present {
@@ -586,6 +611,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::hash::{HashSettings, LineEndings};
+    use crate::limits::Limits;
     use crate::link::SourcePath;
 
     fn absolute(raw: &str) -> AbsolutePath {
@@ -661,7 +687,7 @@ mod tests {
         .expect("the fixture config should load");
         let occurrence = occurrence("a.rs");
         let key = occurrence.key.clone();
-        let links = resolve(
+        let (links, _directory_links) = resolve(
             &config,
             Languages::builtin().expect("the built-in cartridges should load"),
             &mut Parsed::default(),
@@ -684,6 +710,7 @@ mod tests {
             let file = SourceFile::read(
                 AbsolutePath::new(&path).expect("a temp dir path should be absolute"),
                 languages,
+                Limits::PARSE_TIMEOUT,
             )
             .expect("the fixture should read");
             hash_file(&file, HashSettings { line_endings })
