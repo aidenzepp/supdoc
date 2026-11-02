@@ -115,7 +115,8 @@ impl UnreadDir {
 ///
 /// A directory that can't be read becomes a finding and the walk continues, including when it is
 /// the root itself: the caller decides whether an unreadable root is fatal. A `.ignore` or
-/// `.gitignore` inside the root that is a symlink is not read, and becomes a finding too.
+/// `.gitignore` inside the root that is a symlink is not read, and becomes a finding too, as does
+/// an ignore file that exists but can't be read, inside the root or above it.
 ///
 /// Effect: reads directory listings, ignore files and file metadata.
 #[must_use]
@@ -148,6 +149,12 @@ pub fn walk(config: &Config, languages: &Languages, scope: &Scope) -> Walk {
             .symlinked_files()
             .iter()
             .map(|file| symlinked_ignore_file(root, file)),
+    );
+    findings.extend(
+        rules
+            .unreadable_files()
+            .iter()
+            .map(|file| unreadable_ignore_file(root, file)),
     );
     findings.extend(explicit_path_warnings(
         config,
@@ -238,6 +245,8 @@ struct IgnoreRules {
     above: Option<Arc<Level>>,
     /// The global excludes file, such as `~/.config/git/ignore`.
     global: Gitignore,
+    /// Whether the root lies in a git work tree, where `git check-ignore` can name a rule.
+    in_work_tree: bool,
     /// The rules of the root and of each directory beneath it read so far, by path.
     inside: Mutex<HashMap<PathBuf, Arc<Level>>>,
 }
@@ -257,6 +266,9 @@ struct Level {
     /// Its ignore files that are symlinks, which were not read. Left empty above the root, where
     /// they are passed over without a report.
     symlinked: Vec<IgnoreFile>,
+    /// Its ignore files, the exclude file among them, that exist but couldn't be read, so their
+    /// rules don't apply.
+    unreadable: Vec<UnreadableFile>,
     /// Whether it is the top of a git work tree nested beneath the root, past which the
     /// `.gitignore` and exclude rules of the directories above don't apply. Never the root or a
     /// directory above it, where the chain already ends at the top.
@@ -280,29 +292,78 @@ enum Place {
     Above,
 }
 
-/// The rule that decided whether a path is ignored, and whether its line may be quoted.
+/// The rule that decided whether a path is ignored, and where its file lies.
 #[derive(Debug, Clone, Copy)]
 struct Rule<'a> {
     /// The rule.
     glob: &'a Glob,
-    /// Whether it comes from an ignore file inside the root that isn't a symlink.
-    quotable: bool,
+    /// Where its file lies, which decides whether its line may be quoted.
+    origin: Origin,
+}
+
+/// Where an ignore file lies, which decides how a warning may name it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// A `.ignore`, `.gitignore` or git exclude file inside the root that isn't reached through a
+    /// symlink: its path and lines may be quoted.
+    Inside,
+    /// A git exclude file reached through a symlink, which may lie anywhere: its path is named,
+    /// never its lines.
+    Exclude,
+    /// An ignore file in a directory above the root: neither its path nor its lines are printed.
+    Above,
+    /// The global excludes file: its path is named, never its lines.
+    Global,
+}
+
+impl Origin {
+    /// How a warning names `file`, an ignore file of this origin: by kind, and by path relative
+    /// to `root` unless it lies above the root. Never by its contents (04 S15).
+    fn name(self, root: &AbsolutePath, file: Option<&Path>) -> String {
+        let shown = file.map(|file| match AbsolutePath::new(file) {
+            Some(file) if self != Self::Global => relative_to(root, &file),
+            _ => file.display().to_string(),
+        });
+        match (self, shown) {
+            (Self::Inside, Some(shown)) => format!("`{shown}`"),
+            (Self::Inside, None) => "its ignore file".to_owned(),
+            (Self::Exclude, Some(shown)) => format!("the git exclude file `{shown}`"),
+            (Self::Exclude, None) => "the git exclude file".to_owned(),
+            (Self::Above, _) => "an ignore file above the project root".to_owned(),
+            (Self::Global, Some(shown)) => format!("the global excludes file `{shown}`"),
+            (Self::Global, None) => "the global excludes file".to_owned(),
+        }
+    }
+}
+
+/// How an explicit-path warning names the rule that skipped the path and the file holding it.
+struct IgnoredBy {
+    /// The rule for the message: its line and file when it may be quoted, and "an ignore file"
+    /// otherwise, so no line from outside the root is ever printed.
+    rule: String,
+    /// The file holding the rule for the help, by kind and path ([`Origin::name`]).
+    file: String,
+    /// Whether the root lies in a git work tree, so `git check-ignore` can name the rule.
+    in_work_tree: bool,
 }
 
 impl Rule<'_> {
-    /// How a warning names this rule: the line and its file, relative to `root`, when it may be
-    /// quoted, and "an ignore file" otherwise, so no line from outside the root is ever printed.
-    fn describe(self, root: &Path) -> String {
-        if !self.quotable {
-            return "an ignore file".to_owned();
-        }
-        let rule = self.glob.original();
-        match self.glob.from() {
-            Some(file) => format!(
-                "`{rule}` in {}",
-                file.strip_prefix(root).unwrap_or(file).display()
+    /// How a warning names this rule and its file, relative to `root`.
+    fn describe(self, root: &AbsolutePath, in_work_tree: bool) -> IgnoredBy {
+        let from = self.glob.from();
+        let rule = match (self.origin, from) {
+            (Origin::Inside, Some(file)) => format!(
+                "`{}` in {}",
+                self.glob.original(),
+                file.strip_prefix(root.as_path()).unwrap_or(file).display()
             ),
-            None => format!("`{rule}`"),
+            (Origin::Inside, None) => format!("`{}`", self.glob.original()),
+            _ => "an ignore file".to_owned(),
+        };
+        IgnoredBy {
+            rule,
+            file: self.origin.name(root, from),
+            in_work_tree,
         }
     }
 }
@@ -342,6 +403,7 @@ impl IgnoreRules {
             canonical_root,
             above,
             global,
+            in_work_tree: top.is_some(),
             inside: Mutex::new(HashMap::new()),
         }
     }
@@ -402,18 +464,30 @@ impl IgnoreRules {
         let mut current = level;
         let mut passed_top = false;
         while let Some(level) = current {
-            let (seen, quote_files, quote_exclude) = match level.place {
-                Place::Inside { quote_exclude } => (path, true, quote_exclude),
-                Place::Above => (resolved.as_deref().unwrap_or(path), false, false),
+            let (seen, files, exclude_file) = match level.place {
+                Place::Inside { quote_exclude } => (
+                    path,
+                    Origin::Inside,
+                    if quote_exclude {
+                        Origin::Inside
+                    } else {
+                        Origin::Exclude
+                    },
+                ),
+                Place::Above => (
+                    resolved.as_deref().unwrap_or(path),
+                    Origin::Above,
+                    Origin::Above,
+                ),
             };
             if ignore.is_none() {
-                ignore = rule(&level.ignore, seen, is_dir, quote_files);
+                ignore = rule(&level.ignore, seen, is_dir, files);
             }
             if gitignore.is_none() && !passed_top {
-                gitignore = rule(&level.gitignore, seen, is_dir, quote_files);
+                gitignore = rule(&level.gitignore, seen, is_dir, files);
             }
             if exclude.is_none() && !passed_top {
-                exclude = rule(&level.exclude, seen, is_dir, quote_exclude);
+                exclude = rule(&level.exclude, seen, is_dir, exclude_file);
             }
             passed_top = passed_top || level.is_nested_top;
             current = level.parent.as_deref();
@@ -422,7 +496,7 @@ impl IgnoreRules {
             &self.global,
             resolved.as_deref().unwrap_or(path),
             is_dir,
-            false,
+            Origin::Global,
         );
         ignore.or(gitignore).or(exclude).or(global)
     }
@@ -440,6 +514,23 @@ impl IgnoreRules {
             .collect()
     }
 
+    /// Every ignore file the walk met that exists but couldn't be read: those above the root, all
+    /// read up front, and those of the directories inside it read so far.
+    fn unreadable_files(&self) -> Vec<UnreadableFile> {
+        let mut files = Vec::new();
+        let mut above = self.above.as_deref();
+        while let Some(level) = above {
+            files.extend(level.unreadable.iter().cloned());
+            above = level.parent.as_deref();
+        }
+        files.extend(
+            self.read_so_far()
+                .values()
+                .flat_map(|level| level.unreadable.iter().cloned()),
+        );
+        files
+    }
+
     /// The directories read so far. A panic while one was being added leaves the map whole, so a
     /// poisoned lock is still safe to use.
     fn read_so_far(&self) -> MutexGuard<'_, HashMap<PathBuf, Arc<Level>>> {
@@ -447,11 +538,20 @@ impl IgnoreRules {
     }
 }
 
-/// How `matcher` judges `path`, with the rule marked `quotable` or not.
-fn rule<'a>(matcher: &'a Gitignore, path: &Path, is_dir: bool, quotable: bool) -> Match<Rule<'a>> {
+/// How `matcher`, whose file lies at `origin`, judges `path`.
+fn rule<'a>(matcher: &'a Gitignore, path: &Path, is_dir: bool, origin: Origin) -> Match<Rule<'a>> {
     matcher
         .matched(path, is_dir)
-        .map(|glob| Rule { glob, quotable })
+        .map(|glob| Rule { glob, origin })
+}
+
+/// An ignore file that exists but couldn't be read, so its rules don't apply.
+#[derive(Debug, Clone)]
+struct UnreadableFile {
+    /// The file.
+    path: AbsolutePath,
+    /// Where it lies, which decides how a warning names it.
+    origin: Origin,
 }
 
 impl Level {
@@ -462,15 +562,24 @@ impl Level {
     ///
     /// Effect: reads file metadata in `dir`, its ignore files and its git exclude file.
     fn inside(dir: AbsolutePath, parent: Option<Arc<Self>>, is_nested_top: bool) -> Self {
-        let (ignore, gitignore, symlinked) = own_ignore_files(dir.as_path());
-        let (exclude, quote_exclude) = git_exclude(dir.as_path());
+        let own = own_ignore_files(dir.as_path());
+        let exclude = git_exclude(dir.as_path());
+        let exclude_origin = if exclude.quotable {
+            Origin::Inside
+        } else {
+            Origin::Exclude
+        };
+        let unreadable = unreadable_in(&dir, &own, &exclude, Origin::Inside, exclude_origin);
         Self {
             dir,
-            ignore,
-            gitignore,
-            exclude,
-            place: Place::Inside { quote_exclude },
-            symlinked,
+            ignore: own.ignore,
+            gitignore: own.gitignore,
+            exclude: exclude.rules,
+            place: Place::Inside {
+                quote_exclude: exclude.quotable,
+            },
+            symlinked: own.symlinked,
+            unreadable,
             is_nested_top,
             parent,
         }
@@ -482,27 +591,89 @@ impl Level {
     ///
     /// Effect: reads file metadata in `dir`, its ignore files and its git exclude file.
     fn above(dir: AbsolutePath, parent: Option<Arc<Self>>) -> Self {
-        let (ignore, gitignore, _unread_symlinks) = own_ignore_files(dir.as_path());
-        let exclude = git_exclude(dir.as_path()).0;
+        let own = own_ignore_files(dir.as_path());
+        let exclude = git_exclude(dir.as_path());
+        let unreadable = unreadable_in(&dir, &own, &exclude, Origin::Above, Origin::Above);
         Self {
             dir,
-            ignore,
-            gitignore,
-            exclude,
+            ignore: own.ignore,
+            gitignore: own.gitignore,
+            exclude: exclude.rules,
             place: Place::Above,
             symlinked: Vec::new(),
+            unreadable,
             is_nested_top: false,
             parent,
         }
     }
 }
 
-/// The rules of `dir`'s `.ignore` and `.gitignore`, and which of the two are symlinks. A symlink is
-/// not read, wherever it points (04 S15): only an `lstat` looks at it.
+/// The ignore files of `dir` that exist but couldn't be read: its own, at `files`, and its exclude
+/// file, at `exclude_origin`.
+fn unreadable_in(
+    dir: &AbsolutePath,
+    own: &OwnIgnoreFiles,
+    exclude: &ExcludeFile,
+    files: Origin,
+    exclude_origin: Origin,
+) -> Vec<UnreadableFile> {
+    let own = own.unreadable.iter().map(|file| UnreadableFile {
+        path: dir.join_path(Path::new(file.path())),
+        origin: files,
+    });
+    let exclude = exclude
+        .unreadable
+        .iter()
+        .filter_map(|path| AbsolutePath::new(path))
+        .map(|path| UnreadableFile {
+            path,
+            origin: exclude_origin,
+        });
+    own.chain(exclude).collect()
+}
+
+/// The rules of a directory's `.ignore` and `.gitignore`, and which of them weren't read.
+struct OwnIgnoreFiles {
+    /// The rules of its `.ignore`.
+    ignore: Gitignore,
+    /// The rules of its `.gitignore`.
+    gitignore: Gitignore,
+    /// Those that are symlinks, which were not read.
+    symlinked: Vec<IgnoreFile>,
+    /// Those that exist but couldn't be read.
+    unreadable: Vec<IgnoreFile>,
+}
+
+/// The rules of a directory's git exclude file, whether they may be quoted, and the file when it
+/// exists but couldn't be read.
+struct ExcludeFile {
+    /// Its rules, none when there is no exclude file.
+    rules: Gitignore,
+    /// Whether its rules may be quoted ([`git_exclude`]).
+    quotable: bool,
+    /// The file, when it exists but couldn't be read.
+    unreadable: Option<PathBuf>,
+}
+
+impl ExcludeFile {
+    /// No exclude file applies.
+    fn none() -> Self {
+        Self {
+            rules: Gitignore::empty(),
+            quotable: false,
+            unreadable: None,
+        }
+    }
+}
+
+/// The rules of `dir`'s `.ignore` and `.gitignore`, which of the two are symlinks, and which
+/// exist but couldn't be read. A symlink is not read, wherever it points (04 S15): only an `lstat`
+/// looks at it.
 ///
 /// Effect: reads file metadata in `dir` and its ignore files.
-fn own_ignore_files(dir: &Path) -> (Gitignore, Gitignore, Vec<IgnoreFile>) {
+fn own_ignore_files(dir: &Path) -> OwnIgnoreFiles {
     let mut symlinked = Vec::new();
+    let mut unreadable = Vec::new();
     let mut own = |file: IgnoreFile| {
         let path = dir.join(file.path());
         match fs::symlink_metadata(&path) {
@@ -511,12 +682,23 @@ fn own_ignore_files(dir: &Path) -> (Gitignore, Gitignore, Vec<IgnoreFile>) {
                 symlinked.push(file);
                 Gitignore::empty()
             }
-            Ok(_) => rules_in(dir, &path),
+            Ok(_) => {
+                let (rules, is_unreadable) = rules_in(dir, &path);
+                if is_unreadable {
+                    unreadable.push(file);
+                }
+                rules
+            }
         }
     };
     let ignore = own(IgnoreFile::Ignore);
     let gitignore = own(IgnoreFile::Gitignore);
-    (ignore, gitignore, symlinked)
+    OwnIgnoreFiles {
+        ignore,
+        gitignore,
+        symlinked,
+        unreadable,
+    }
 }
 
 /// Whether `dir` is the top of a git work tree, as git decides it: `dir/.git`, followed through
@@ -548,14 +730,29 @@ fn is_git_dir(git_dir: &Path) -> bool {
         && fs::metadata(git_dir.join("refs")).is_ok_and(|metadata| metadata.is_dir())
 }
 
-/// The rules of `file`, which apply beneath `dir`. A missing or unreadable file has none, and a
-/// line that isn't a valid pattern is left out, as the walker treats them.
+/// The rules of `file`, which apply beneath `dir`, and whether it exists but couldn't be read. A
+/// missing or unreadable file has no rules, and a line that isn't a valid pattern is left out, as
+/// git and the walker treat them.
 ///
 /// Effect: reads `file`, following symlinks.
-fn rules_in(dir: &Path, file: &Path) -> Gitignore {
+fn rules_in(dir: &Path, file: &Path) -> (Gitignore, bool) {
     let mut builder = GitignoreBuilder::new(dir);
-    let _unread_or_invalid = builder.add(file);
-    builder.build().unwrap_or_else(|_| Gitignore::empty())
+    let is_unreadable = builder.add(file).is_some_and(|error| is_unreadable(&error));
+    let rules = builder.build().unwrap_or_else(|_| Gitignore::empty());
+    (rules, is_unreadable)
+}
+
+/// Whether `error`, from reading an ignore file, says the file couldn't be read, rather than that
+/// a line isn't a valid pattern or the file is missing.
+fn is_unreadable(error: &ignore::Error) -> bool {
+    match error {
+        ignore::Error::Io(error) => error.kind() != io::ErrorKind::NotFound,
+        ignore::Error::Partial(errors) => errors.iter().any(is_unreadable),
+        ignore::Error::WithPath { err, .. }
+        | ignore::Error::WithDepth { err, .. }
+        | ignore::Error::WithLineNumber { err, .. } => is_unreadable(err),
+        _ => false,
+    }
 }
 
 /// The rules of `dir`'s git exclude file, and whether they may be quoted.
@@ -570,26 +767,31 @@ fn rules_in(dir: &Path, file: &Path) -> Gitignore {
 /// directory, directory and file, no symlink among them, so the file lies inside `dir`.
 ///
 /// Effect: reads file metadata in `dir`, a `.git` file and its `commondir`, and the exclude file.
-fn git_exclude(dir: &Path) -> (Gitignore, bool) {
+fn git_exclude(dir: &Path) -> ExcludeFile {
     let dot_git = dir.join(".git");
     let Ok(metadata) = fs::metadata(&dot_git) else {
-        return (Gitignore::empty(), false);
+        return ExcludeFile::none();
     };
     let git_dir = if metadata.is_file() {
         let Some(common) = common_dir(dir, &dot_git) else {
-            return (Gitignore::empty(), false);
+            return ExcludeFile::none();
         };
         common
     } else if is_git_dir(&dot_git) {
         dot_git.clone()
     } else {
-        return (Gitignore::empty(), false);
+        return ExcludeFile::none();
     };
     let exclude = git_dir.join("info").join("exclude");
     let quotable = is_real_dir(&dot_git)
         && is_real_dir(&dot_git.join("info"))
         && fs::symlink_metadata(&exclude).is_ok_and(|metadata| metadata.is_file());
-    (rules_in(dir, &exclude), quotable)
+    let (rules, is_unreadable) = rules_in(dir, &exclude);
+    ExcludeFile {
+        rules,
+        quotable,
+        unreadable: is_unreadable.then_some(exclude),
+    }
 }
 
 /// The shared git directory of the worktree whose `.git` file in `dir` is `dot_git`: its
@@ -644,6 +846,29 @@ fn symlinked_ignore_file(root: &AbsolutePath, file: &AbsolutePath) -> Finding {
          the files its rules would hide are checked. Replace the symlink with a regular file \
          holding those rules, or add the paths to `exclude` in `{CONFIG_FILE_NAME}`"
     ))
+}
+
+/// The warning for `file`, an ignore file that exists but couldn't be read, so its rules don't
+/// apply and the files they would hide are checked. Inside the root it offers the `chmod` that
+/// fixes it; above the root it names no path, and elsewhere it names the path but never a line.
+fn unreadable_ignore_file(root: &AbsolutePath, file: &UnreadableFile) -> Finding {
+    let named = file.origin.name(root, Some(file.path.as_path()));
+    let finding = Finding::new(
+        "scan-ignore-file-unreadable",
+        Severity::Warning,
+        format!("{named} can't be read, so its rules don't apply"),
+    );
+    match file.origin {
+        Origin::Inside => finding.with_help(format!(
+            "The files its rules would hide were checked. Run `chmod u+r {}` so they're skipped, \
+             or add them to `exclude` in `{CONFIG_FILE_NAME}`",
+            shell_quote(&relative_to(root, &file.path)),
+        )),
+        Origin::Exclude | Origin::Above | Origin::Global => finding.with_help(format!(
+            "The files its rules would hide were checked. Make it readable, or add those files \
+             to `exclude` in `{CONFIG_FILE_NAME}`"
+        )),
+    }
 }
 
 /// Whether the walk keeps `entry`. Only directories are refused here; files are judged by
@@ -844,8 +1069,15 @@ fn explicit_path_warning(
     if has_symlinked_parent(root, listed) {
         return Some(symlinked(root, listed, &path, Symlink::Parent));
     }
+    // The walk skipped it, but asking each rule again found none that does: say so, rather than
+    // blame a rule that may not exist.
     if is_source_file && !walked {
-        return Some(ignored(listed, "an ignore file"));
+        return Some(unscanned(
+            listed,
+            &Unscanned::Unreached {
+                in_work_tree: rules.in_work_tree,
+            },
+        ));
     }
     (kind.is_file() && !is_source_file).then(|| unscanned(listed, &Unscanned::UnreadType))
 }
@@ -856,6 +1088,12 @@ enum Unscanned {
     Dir(SkippedDir),
     /// No cartridge reads files of this type.
     UnreadType,
+    /// The walk didn't reach it, and no rule found explains why. In a git work tree,
+    /// `git check-ignore` may name a rule supdoc missed.
+    Unreached {
+        /// Whether the root lies in a git work tree.
+        in_work_tree: bool,
+    },
 }
 
 /// A directory the walk never enters, whatever the user names.
@@ -881,6 +1119,18 @@ fn unscanned(listed: &SourcePath, why: &Unscanned) -> Finding {
         Unscanned::UnreadType => (
             "has a type no language supdoc reads".to_owned(),
             "Pass a `.md` or `.rs` file instead, or stop passing this one".to_owned(),
+        ),
+        Unscanned::Unreached { in_work_tree } => (
+            "the walk didn't reach it, and supdoc found no rule that skips it".to_owned(),
+            if *in_work_tree {
+                format!(
+                    "Run `git check-ignore -v -- {}` to look for a rule that skips it, or stop \
+                     passing it",
+                    shell_quote(listed),
+                )
+            } else {
+                format!("Check that `{listed}` and its directories can be read, or stop passing it")
+            },
         ),
     };
     Finding::new(
@@ -984,20 +1234,31 @@ fn excluded(listed: &SourcePath, pattern: Option<&str>, file: &str) -> Finding {
     }
 }
 
-/// The finding for an explicit path that an ignore file skips, naming that `rule`.
-fn ignored(listed: &SourcePath, rule: &str) -> Finding {
+/// The finding for an explicit path that an ignore file skips, naming the rule and its file as
+/// far as `by` may, and in a git work tree offering `git check-ignore` to show the rule.
+fn ignored(listed: &SourcePath, by: &IgnoredBy) -> Finding {
+    let listed = listed.as_str();
+    let show_rule = if by.in_work_tree {
+        format!(
+            ". `git check-ignore -v -- {}` shows the rule",
+            shell_quote(listed)
+        )
+    } else {
+        String::new()
+    };
+    let help = format!(
+        "Remove that rule from {file} to check `{listed}`, or stop passing it{show_rule}",
+        file = by.file,
+    );
     Finding::new(
         "scan-explicit-path-ignored",
         Severity::Warning,
         format!(
             "{listed} was named on the command line but is ignored by {rule}",
-            listed = listed.as_str(),
+            rule = by.rule,
         ),
     )
-    .with_help(format!(
-        "Remove that rule from its ignore file to check `{listed}`, or stop passing it",
-        listed = listed.as_str(),
-    ))
+    .with_help(help)
 }
 
 /// The version-control directory or nested project that `listed` or one of its parent directories
@@ -1028,8 +1289,9 @@ fn skipped_dir(root: &AbsolutePath, listed: &SourcePath) -> Option<SkippedDir> {
 /// It asks what the walk asked, with the same [`IgnoreRules`] and in the order the walk would:
 /// each directory on the way down from the root, then `path` itself. The walk never enters a
 /// symlinked directory, so nothing beneath one is judged. A rule is quoted with its file only when
-/// that file lies inside the root and is no symlink; any other is blamed on "an ignore file", so
-/// no line from outside the root is ever printed (04 S15).
+/// that file lies inside the root and is no symlink; any other is blamed on "an ignore file", and
+/// its file named by kind and, unless above the root, by path, so no line from outside the root
+/// is ever printed (04 S15).
 ///
 /// Effect: reads ignore files and file metadata beneath the root.
 fn ignore_rule(
@@ -1037,7 +1299,7 @@ fn ignore_rule(
     root: &AbsolutePath,
     path: &AbsolutePath,
     is_dir: bool,
-) -> Option<String> {
+) -> Option<IgnoredBy> {
     let mut current = root.as_path().to_path_buf();
     let mut components = path.strip_prefix(root)?.components().peekable();
     while let Some(component) = components.next() {
@@ -1048,7 +1310,7 @@ fn ignore_rule(
             return None;
         }
         if let Match::Ignore(rule) = rules.matched(dir.as_deref(), &current, !is_last || is_dir) {
-            return Some(rule.describe(root.as_path()));
+            return Some(rule.describe(root, rules.in_work_tree));
         }
     }
     None
@@ -2201,6 +2463,129 @@ mod tests {
             messages(&walk).ends_with("is ignored by `o*.rs` in docs/.gitignore"),
             "the deepest `.gitignore` decided:\n{}",
             messages(&walk)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_gitignore_in_the_root_warns_naming_it_with_chmod() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let project = Project::new();
+        project.write(".gitignore", "gen/\n");
+        project.write("gen/out.rs", "");
+        let file = project.dir.path().join(".gitignore");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o000))
+            .expect("the fixture ignore file permissions should be settable");
+        if fs::read(&file).is_ok() {
+            return; // Mode 000 doesn't keep this user (root) out.
+        }
+
+        let walk = project.walk(&Scope::All);
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644))
+            .expect("the fixture ignore file permissions should be restorable");
+
+        assert_eq!(codes(&walk), ["scan-ignore-file-unreadable"]);
+        let finding = walk
+            .findings
+            .first()
+            .expect("the unreadable ignore file should be reported");
+        assert_eq!(finding.severity, Severity::Warning);
+        assert_eq!(
+            finding.message,
+            "`.gitignore` can't be read, so its rules don't apply"
+        );
+        let help = finding.help.as_deref().unwrap_or_default();
+        assert!(help.contains("`chmod u+r .gitignore`"), "{help}");
+        assert_eq!(
+            walk.sources
+                .iter()
+                .map(|(path, _)| project.relative(path))
+                .collect::<Vec<_>>(),
+            ["gen/out.rs"],
+            "the rules of an unreadable file don't apply, as in git"
+        );
+    }
+
+    #[test]
+    fn an_ignore_file_with_only_invalid_lines_is_not_unreadable() {
+        let project = Project::new();
+        project.write(".gitignore", "a/**b/[\n");
+
+        let walk = project.walk(&Scope::All);
+
+        assert!(walk.findings.is_empty(), "{:?}", walk.findings);
+    }
+
+    #[test]
+    fn explicit_path_ignored_help_names_the_file_and_offers_git_check_ignore() {
+        let project = Project::new();
+        write_exclude(&project, "");
+        project.write("docs/.gitignore", "o*.rs\n");
+        project.write("docs/out.rs", "");
+
+        let walk = project.walk(&paths(&["docs/out.rs"]));
+
+        let help = walk
+            .findings
+            .first()
+            .and_then(|finding| finding.help.as_deref())
+            .unwrap_or_default();
+        assert_eq!(
+            help,
+            "Remove that rule from `docs/.gitignore` to check `docs/out.rs`, or stop passing it. \
+             `git check-ignore -v -- docs/out.rs` shows the rule"
+        );
+    }
+
+    #[test]
+    fn explicit_path_ignored_help_offers_no_git_command_outside_a_work_tree() {
+        let project = Project::new();
+        project.write(".ignore", "out.rs\n");
+        project.write("out.rs", "");
+
+        let walk = project.walk(&paths(&["out.rs"]));
+
+        let help = walk
+            .findings
+            .first()
+            .and_then(|finding| finding.help.as_deref())
+            .unwrap_or_default();
+        assert_eq!(
+            help,
+            "Remove that rule from `.ignore` to check `out.rs`, or stop passing it"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_path_ignored_help_names_a_git_exclude_file_reached_through_a_symlink() {
+        let outside = outside_dir();
+        let project = Project::new();
+        project.write("out.rs", "");
+        make_git_dir(&project.dir.path().join(".git"));
+        fs::create_dir(project.dir.path().join(".git/info"))
+            .expect("the fixture git directory should be creatable");
+        symlink_in(
+            &project,
+            ".git/info/exclude",
+            &outside.path().join("ignore"),
+        );
+
+        let walk = project.walk(&paths(&["out.rs"]));
+
+        let help = walk
+            .findings
+            .first()
+            .and_then(|finding| finding.help.as_deref())
+            .unwrap_or_default();
+        assert!(
+            help.starts_with("Remove that rule from the git exclude file `.git/info/exclude` "),
+            "{help}"
+        );
+        assert!(
+            !help.contains(RULE),
+            "a line from outside was printed: {help}"
         );
     }
 
