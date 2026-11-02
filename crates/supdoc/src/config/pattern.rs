@@ -107,6 +107,12 @@ fn compile(pattern: &str) -> Result<[Glob; 2], PatternError> {
             pattern: pattern.to_owned(),
         });
     }
+    if pattern.split('/').any(|segment| segment == ".") {
+        return Err(PatternError::DotSegment {
+            pattern: pattern.to_owned(),
+            corrected: without_dot_segments(pattern),
+        });
+    }
     let trimmed = pattern.trim_end_matches('/');
     if trimmed.is_empty() {
         return Err(PatternError::Empty);
@@ -115,6 +121,20 @@ fn compile(pattern: &str) -> Result<[Glob; 2], PatternError> {
         glob(pattern, trimmed)?,
         glob(pattern, &format!("{trimmed}/**"))?,
     ])
+}
+
+/// `pattern` with its `.` segments dropped, or `**` when nothing else is left.
+fn without_dot_segments(pattern: &str) -> String {
+    let kept: Vec<&str> = pattern
+        .split('/')
+        .filter(|segment| *segment != ".")
+        .collect();
+    let corrected = kept.join("/");
+    if corrected.trim_matches('/').is_empty() {
+        "**".to_owned()
+    } else {
+        corrected
+    }
 }
 
 /// Compiles `source` with `*` unable to cross `/`, reporting errors against `pattern` as written.
@@ -146,6 +166,14 @@ pub(crate) enum PatternError {
     LeavesDirectory {
         /// The rejected pattern, as written.
         pattern: String,
+    },
+    /// The pattern has a `.` segment, which no path under the config's directory contains.
+    #[error("pattern `{pattern}` has a `.` segment; write `{corrected}`")]
+    DotSegment {
+        /// The rejected pattern, as written.
+        pattern: String,
+        /// The pattern without its `.` segments.
+        corrected: String,
     },
     /// The pattern is the empty string.
     #[error("pattern is empty; write a path or glob such as `docs`")]
