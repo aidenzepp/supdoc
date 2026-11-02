@@ -50,7 +50,7 @@ use crate::read::cartridge::{MarkdownRegion, SourceFile};
 #[must_use]
 pub fn links(file: &SourceFile) -> Vec<RawLink> {
     let Some(mut parser) = inline_parser() else {
-        // The inline grammar is compiled in; a test proves it loads, so this is unreachable.
+        // `Languages::builtin` fails the run when this grammar doesn't load, so no file gets here.
         return Vec::new();
     };
     let text = file.text();
@@ -515,6 +515,7 @@ mod tests {
     fn builtin_file(path: &str, text: &str) -> SourceFile {
         let path = AbsolutePath::new(Path::new(path)).expect("the fixture path should be absolute");
         let language = crate::read::cartridge::Languages::builtin()
+            .expect("the built-in cartridges should load")
             .for_path(path.as_path())
             .expect("the built-in registry should cover the fixture extension");
         SourceFile::parse(path, text.to_owned(), language)

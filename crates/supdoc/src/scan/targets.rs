@@ -13,10 +13,11 @@ use std::fs;
 use std::ops::Range;
 use std::path::Path;
 
-use crate::config::{CONFIG_FILE_NAME, Config};
+use crate::config::Config;
 use crate::finding::{Finding, Fix, Location, Severity, Snippet};
 use crate::hash::HashSettings;
 use crate::link::{LinkKey, Target};
+use crate::namespace::NamespaceName;
 use crate::output::paths::relative_to;
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile, SymbolTable};
@@ -255,7 +256,9 @@ fn target_states(
 
     let path = match at {
         Located::Directory => return Vec::new(),
-        Located::UnknownNamespace => return broken_by(&|first| unknown_namespace(target, first)),
+        Located::UnknownNamespace => {
+            return broken_by(&|first| unknown_namespace(config, target, first));
+        }
         Located::OutsideRoot => return broken_by(&|first| outside_root(target, first)),
         Located::CaseMismatch(real) => {
             return broken_by(&|first| case_mismatch(target, &real, first));
@@ -508,14 +511,19 @@ fn outside_root(target: &Target, first: &Occurrence) -> Finding {
 }
 
 /// A `link-unknown-namespace` finding for a namespace the config doesn't define.
-fn unknown_namespace(target: &Target, first: &Occurrence) -> Finding {
+fn unknown_namespace(config: &Config, target: &Target, first: &Occurrence) -> Finding {
     let namespace = target
         .namespace()
         .map_or_else(String::new, ToString::to_string);
+    let known: Vec<&str> = config
+        .namespaces()
+        .keys()
+        .map(NamespaceName::as_str)
+        .collect();
     broken(
         CODE_UNKNOWN_NAMESPACE,
         format!("unknown namespace `{namespace}` in `{target}`"),
-        format!("Define `{namespace}` under `[namespaces]` in {CONFIG_FILE_NAME}"),
+        crate::namespace::unknown_namespace_help(&namespace, &known),
         first,
     )
 }
@@ -655,7 +663,7 @@ mod tests {
         let key = occurrence.key.clone();
         let links = resolve(
             &config,
-            &Languages::builtin(),
+            Languages::builtin().expect("the built-in cartridges should load"),
             &mut Parsed::default(),
             config.hash_settings(),
             vec![occurrence],
@@ -672,10 +680,10 @@ mod tests {
             let dir = tempfile::TempDir::new().expect("a temp dir should be creatable");
             let path = dir.path().join("a.rs");
             std::fs::write(&path, "fn a() {\r\n}\r\n").expect("the fixture should be writable");
-            let languages = Languages::builtin();
+            let languages = Languages::builtin().expect("the built-in cartridges should load");
             let file = SourceFile::read(
                 AbsolutePath::new(&path).expect("a temp dir path should be absolute"),
-                &languages,
+                languages,
             )
             .expect("the fixture should read");
             hash_file(&file, HashSettings { line_endings })
