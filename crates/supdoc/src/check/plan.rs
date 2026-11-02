@@ -55,7 +55,10 @@ pub enum LockChange {
 ///
 /// `broken` links are never recorded: there is no code to hash (05 C7). A link that moved keys
 /// brings its old entry's hash along. That hash is replaced by the current one only when `failed`
-/// is selected, so moving a link never accepts drift by itself. Moving needs `new` to be selected.
+/// is selected, so moving a link never accepts drift by itself. Selecting `new` moves a link under
+/// its carried hash. Selecting `failed` alone moves only a moved link that fails, accepting the
+/// current hash at its new key. Either way the old entry is removed, even when its source lies
+/// outside the scope (05 C6).
 ///
 /// When `settings` differ from the lock's, every link whose hash they change looks `failed`, and
 /// is accepted like any other. Entries the plan leaves alone keep their old hashes under the new
@@ -366,5 +369,29 @@ mod tests {
             accepting.next.and_then(|next| next.get(&moved)),
             Some(Hash::digest(b"v2")),
         );
+    }
+
+    #[test]
+    fn update_plan_with_only_failed_selected_accepts_a_moved_failed_link_and_drops_its_old_entry() {
+        let old = key("docs/guide.md", "add");
+        let moved = key("docs/guide/intro.md", "add");
+        let scan = scan_of(vec![(moved.clone(), present(b"v2"))]);
+        let lock = lock_of(&[(&old, b"v1")]);
+
+        let plan = plan(&scan, &lock, &[LinkState::Failed]);
+
+        assert_eq!(
+            plan.changes,
+            [
+                LockChange::Accept(moved.clone()),
+                LockChange::Remove(old.clone())
+            ],
+            "`failed` alone accepts the moved link at its new key",
+        );
+        let next = plan
+            .next
+            .expect("accepting a moved link changes the lockfile");
+        assert_eq!(next.get(&moved), Some(Hash::digest(b"v2")));
+        assert_eq!(next.get(&old), None);
     }
 }
