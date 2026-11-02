@@ -328,7 +328,6 @@ impl FeaturesJson {
 
 /// The `[limits]` ceilings in effect, each with where it came from.
 #[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "kebab-case")]
 pub(crate) struct LimitsJson {
     /// How long one file may take to read.
     parse_timeout: LimitJson,

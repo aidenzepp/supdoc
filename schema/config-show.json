@@ -212,28 +212,28 @@
     "LimitsJson": {
       "description": "The `[limits]` ceilings in effect, each with where it came from.",
       "properties": {
-        "max-config-size": {
+        "max_config_size": {
           "$ref": "#/$defs/LimitJson",
           "description": "How large each config file may be. Set only by flag or environment variable."
         },
-        "max-ignore-size": {
+        "max_ignore_size": {
           "$ref": "#/$defs/LimitJson",
           "description": "How large each ignore file may be."
         },
-        "max-lock-size": {
+        "max_lock_size": {
           "$ref": "#/$defs/LimitJson",
           "description": "How large `supdoc.lock` may be."
         },
-        "parse-timeout": {
+        "parse_timeout": {
           "$ref": "#/$defs/LimitJson",
           "description": "How long one file may take to read."
         }
       },
       "required": [
-        "parse-timeout",
-        "max-lock-size",
-        "max-config-size",
-        "max-ignore-size"
+        "parse_timeout",
+        "max_lock_size",
+        "max_config_size",
+        "max_ignore_size"
       ],
       "type": "object"
     },
