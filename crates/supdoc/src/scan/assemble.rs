@@ -12,7 +12,9 @@ use crate::config::Config;
 use crate::exit::ExitStatus;
 use crate::finding::{Finding, Fix, LineIndex, Location, Severity, Snippet};
 use crate::hash::HashSettings;
-use crate::link::destination::{LinkError, parse_destination, repaired_destination};
+use crate::link::destination::{
+    Destination, LinkError, Untracked, parse_destination, repaired_destination,
+};
 use crate::link::{LinkKey, RawLink, SourcePath};
 use crate::lock::error::shell_quote;
 use crate::namespace::NamespaceName;
@@ -92,10 +94,43 @@ pub fn run_with_settings(
     scope: &Scope,
     settings: HashSettings,
 ) -> Result<Scan, ScanError> {
-    assemble(config, languages, scope, settings).map(|(scan, _parsed)| scan)
+    assemble(config, languages, scope, settings).map(|(scan, _parsed, _untracked)| scan)
 }
 
-/// [`run`], also handing back the files it parsed, so tests can see that none was parsed twice.
+/// [`run`], also counting the links it left untracked, by reason, for `check -v`.
+///
+/// # Errors
+///
+/// As [`run`].
+pub fn run_with_untracked(
+    config: &Config,
+    languages: &Languages,
+    scope: &Scope,
+) -> Result<(Scan, UntrackedLinks), ScanError> {
+    assemble(config, languages, scope, config.hash_settings())
+        .map(|(scan, _parsed, untracked)| (scan, untracked))
+}
+
+/// How many links a scan left untracked for each reason, one per place written.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct UntrackedLinks(BTreeMap<Untracked, usize>);
+
+impl UntrackedLinks {
+    /// Counts `count` more links left untracked for `reason`.
+    fn add(&mut self, reason: Untracked, count: usize) {
+        if count > 0 {
+            *self.0.entry(reason).or_default() += count;
+        }
+    }
+
+    /// Each reason at least one link was left untracked for, with how many, in reason order.
+    pub fn counts(&self) -> impl Iterator<Item = (Untracked, usize)> + '_ {
+        self.0.iter().map(|(reason, count)| (*reason, *count))
+    }
+}
+
+/// [`run`], also handing back the files it parsed, so tests can see that none was parsed twice,
+/// and the links it left untracked.
 ///
 /// # Errors
 ///
@@ -105,7 +140,7 @@ fn assemble(
     languages: &Languages,
     scope: &Scope,
     settings: HashSettings,
-) -> Result<(Scan, Parsed), ScanError> {
+) -> Result<(Scan, Parsed, UntrackedLinks), ScanError> {
     let root = config.root();
     if let Err(error) = fs::read_dir(root.as_path()) {
         return Err(ScanError::RootUnreadable {
@@ -147,7 +182,10 @@ fn assemble(
         .filter_map(|relative| SourcePath::from_relative(relative).ok())
         .collect();
 
-    let mut links = targets::resolve(config, languages, &mut parsed, settings, found.occurrences);
+    let (mut links, directory_links) =
+        targets::resolve(config, languages, &mut parsed, settings, found.occurrences);
+    let mut untracked = found.untracked;
+    untracked.add(Untracked::Directory, directory_links);
     add_broken(&mut links, found.broken);
     let keyless_error_sources = found
         .unkeyed
@@ -173,7 +211,7 @@ fn assemble(
         keyless_error_sources,
         unread_dirs,
     };
-    Ok((scan, parsed))
+    Ok((scan, parsed, untracked))
 }
 
 /// Where a finding sits, for sorting by file then position (S8). Findings about no one place sort
@@ -194,6 +232,8 @@ struct SourceLinks {
     broken: Vec<(LinkKey, Location, Finding)>,
     /// Links meant for supdoc but too malformed to have a key: only their finding is left.
     unkeyed: Vec<Finding>,
+    /// Links that are not supdoc links, counted by reason.
+    untracked: UntrackedLinks,
 }
 
 /// Adds every supdoc link in `file` to `found`, in file order (03 R10).
@@ -207,8 +247,13 @@ fn source_links(
     let text = file.text();
     let lines = LineIndex::new(text);
     for raw in links(file) {
-        let Some(parsed) = parse_destination(&raw, source, config.namespaces(), languages) else {
-            continue;
+        let parsed = match parse_destination(&raw, source, config.namespaces(), languages) {
+            Destination::Link(link) => Ok(link),
+            Destination::Invalid(error) => Err(error),
+            Destination::NotSupdoc { reason } => {
+                found.untracked.add(reason, 1);
+                continue;
+            }
         };
         // A link's range comes from this file's own tree, so it always lies inside the text.
         let Some(location) = Location::in_indexed(source.clone(), text, &lines, raw.range.clone())
@@ -267,7 +312,9 @@ fn unknown_namespace_key(
     // Parsing reads only namespace names, so adding the missing name is all it takes.
     let mut names: BTreeSet<NamespaceName> = config.namespaces().keys().cloned().collect();
     let _absent = names.insert(namespace);
-    let link = parse_destination(raw, source, &names, languages)?.ok()?;
+    let Destination::Link(link) = parse_destination(raw, source, &names, languages) else {
+        return None;
+    };
     Some(LinkKey {
         source: source.clone(),
         target: link.target,
@@ -311,7 +358,11 @@ fn unique_repair(
         destination: repaired.clone(),
         ..raw.clone()
     };
-    let _parsed = parse_destination(&candidate, source, config.namespaces(), languages)?.ok()?;
+    let Destination::Link(_parsed) =
+        parse_destination(&candidate, source, config.namespaces(), languages)
+    else {
+        return None;
+    };
     let written = written?;
     let range = raw.destination_range.clone();
     (written.text_at(&range)?.as_ref() == raw.destination.trim())
@@ -370,6 +421,12 @@ fn link_finding(
                 None => ("link-invalid-path", rule.to_owned(), None),
             }
         }
+        LinkError::Directory { .. } => (
+            "link-invalid-path",
+            "Add the file's name to the path, so the link names the file that holds the symbol"
+                .to_owned(),
+            None,
+        ),
         LinkError::InvalidSymbol { .. } => (
             "link-invalid-symbol",
             "Write the symbol as names joined by `.`, like `Config.validate`".to_owned(),
@@ -520,7 +577,19 @@ mod tests {
                 &Scope::All,
                 self.config().hash_settings(),
             )
+            .map(|(scan, parsed, _untracked)| (scan, parsed))
             .expect("a readable project root should scan")
+        }
+
+        /// The scan, with the links it left untracked as `(reason, count)` pairs.
+        fn scan_untracked(&self) -> (Scan, Vec<(Untracked, usize)>) {
+            let (scan, untracked) = run_with_untracked(
+                &self.config(),
+                Languages::builtin().expect("the built-in cartridges should load"),
+                &Scope::All,
+            )
+            .expect("a readable project root should scan");
+            (scan, untracked.counts().collect())
         }
 
         fn scan(&self) -> Scan {
@@ -873,18 +942,26 @@ mod tests {
     }
 
     #[test]
-    fn directory_link_is_not_tracked() {
+    fn directory_link_is_not_tracked_but_counted() {
         let project = Project::new();
         project.write("src/lib.rs", LIB);
+        project.write("src/dir.rs/mod.rs", LIB);
         project.write(
             "docs/guide.md",
-            "See [src](../src/) and [src](../src#add).\n",
+            "See [src](../src/), [home](/), [lib](../src#add), [d](../src/dir.rs) and \
+             [api](api.html#section).\n",
         );
 
-        let scan = project.scan();
+        let (scan, untracked) = project.scan_untracked();
 
         assert_eq!(scan.links.len(), 0, "links to a directory are navigation");
         assert_eq!(scan.findings, Vec::new());
+        assert_eq!(
+            untracked,
+            [(Untracked::Directory, 3), (Untracked::UntrackedType, 2)],
+            "`../src/`, `/` and the `dir.rs` directory are directories; `../src#add` and \
+             `api.html#section` name no file a language reads",
+        );
     }
 
     #[test]

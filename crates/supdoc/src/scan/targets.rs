@@ -176,7 +176,8 @@ impl Written {
 }
 
 /// Resolves every link: groups them by key (S11) and by target, reads each target once, and
-/// records what each target looks like now. Links to a directory are dropped (S13).
+/// records what each target looks like now. Links to a directory are dropped (S13); the second
+/// value counts them, one per place written, for `check -v`.
 ///
 /// Effect: reads target files and the directory listings along their paths.
 pub(crate) fn resolve(
@@ -185,7 +186,7 @@ pub(crate) fn resolve(
     parsed: &mut Parsed,
     settings: HashSettings,
     occurrences: Vec<Occurrence>,
-) -> BTreeMap<LinkKey, ScannedLink> {
+) -> (BTreeMap<LinkKey, ScannedLink>, usize) {
     let mut by_target: BTreeMap<Target, BTreeMap<LinkKey, Vec<Occurrence>>> = BTreeMap::new();
     for occurrence in occurrences {
         by_target
@@ -210,7 +211,12 @@ pub(crate) fn resolve(
     parsed.retain_only(&to_read);
 
     let mut links = BTreeMap::new();
+    let mut directory_links = 0;
     for (at, target, keyed) in located {
+        if matches!(at, Located::Directory) {
+            directory_links += keyed.values().map(Vec::len).sum::<usize>();
+            continue;
+        }
         for (key, state, occurrences) in
             target_states(config, languages, parsed, settings, at, &target, keyed)
         {
@@ -227,10 +233,10 @@ pub(crate) fn resolve(
             let _replaced = links.insert(key, link);
         }
     }
-    links
+    (links, directory_links)
 }
 
-/// The state of each link into `target`, or nothing when the target isn't tracked.
+/// The state of each link into `target`; a directory yields none, as it is never tracked (S13).
 fn target_states(
     config: &Config,
     languages: &Languages,
@@ -267,7 +273,9 @@ fn target_states(
     };
     let file = match parsed.read(&path, languages) {
         Ok(file) => file,
-        Err(error) => return broken_by(&|first| read_failed(&error, config.root(), first)),
+        Err(error) => {
+            return broken_by(&|first| read_failed(&error, config.root(), first));
+        }
     };
 
     let mut table: Option<SymbolTable> = None;
@@ -661,7 +669,7 @@ mod tests {
         .expect("the fixture config should load");
         let occurrence = occurrence("a.rs");
         let key = occurrence.key.clone();
-        let links = resolve(
+        let (links, _directory_links) = resolve(
             &config,
             Languages::builtin().expect("the built-in cartridges should load"),
             &mut Parsed::default(),

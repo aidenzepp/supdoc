@@ -564,7 +564,9 @@ impl SourceEdit {
         let prefix = format!("{old}:");
         let mut ranges: Vec<Range<usize>> = links(file)
             .into_iter()
-            .filter(|raw| parse_destination(raw, &source, config.namespaces(), languages).is_some())
+            .filter(|raw| {
+                parse_destination(raw, &source, config.namespaces(), languages).is_supdoc()
+            })
             .map(|raw| raw.destination_range)
             .filter(|range| {
                 text.get(range.clone())
