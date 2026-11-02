@@ -177,3 +177,38 @@ fn namespace_rename_rewrites_untracked_links_by_their_written_prefix() {
     );
     let _ = project.supdoc(&["check"]).assert_exit(0);
 }
+
+#[test]
+fn namespace_rename_refuses_an_oversized_ignore_file_before_writing_anything() {
+    let project = Project::fixture("namespaced");
+    project.write("docs/hidden.md", "[v](auth:src/lib.rs#validate)\n");
+    project.write(
+        ".gitignore",
+        &format!("docs/hidden.md\n{}\n", "#".repeat(300_000)),
+    );
+    let files = [
+        "supdoc.config.toml",
+        "docs/guide.md",
+        "docs/hidden.md",
+        ".gitignore",
+    ];
+    let before: Vec<String> = files.iter().map(|file| project.read(file)).collect();
+    let lock_before = std::fs::read(project.path("supdoc.lock")).ok();
+
+    let run = project.supdoc(&["namespace", "rename", "auth", "authn", "--yes"]);
+
+    let _ = run.assert_exit(78);
+    assert!(
+        format!("{}{}", run.stdout, run.stderr).contains("ignore-too-large"),
+        "the refusal should name `ignore-too-large`\nstdout:\n{}\nstderr:\n{}",
+        run.stdout,
+        run.stderr
+    );
+    let after: Vec<String> = files.iter().map(|file| project.read(file)).collect();
+    assert_eq!(after, before, "no file should change");
+    assert_eq!(
+        std::fs::read(project.path("supdoc.lock")).ok(),
+        lock_before,
+        "the lock should not change"
+    );
+}

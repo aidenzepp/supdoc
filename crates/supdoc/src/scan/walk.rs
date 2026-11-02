@@ -3,15 +3,16 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
-use std::io::{self, BufRead as _};
+use std::io::{self, BufRead as _, Read as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder, Glob};
 use ignore::{DirEntry, Match, WalkBuilder};
 
-use crate::config::{CONFIG_FILE_NAME, Config, PatternDefinition, config_entry};
+use crate::config::{CONFIG_FILE_NAME, Config, PatternDefinition, config_entry, size_text};
 use crate::finding::{Finding, Severity};
+use crate::limits::SizeLimit;
 use crate::link::{LinkPathError, SourcePath};
 use crate::lock::error::shell_quote;
 use crate::output::paths::relative_to;
@@ -122,7 +123,10 @@ impl UnreadDir {
 #[must_use]
 pub fn walk(config: &Config, languages: &Languages, scope: &Scope) -> Walk {
     let root = config.root();
-    let rules = Arc::new(IgnoreRules::new(root));
+    let rules = Arc::new(IgnoreRules::new(
+        root,
+        config.limits_in_effect().max_ignore_size.value,
+    ));
     let mut sources = Vec::new();
     let mut unread_dirs = Vec::new();
     let mut invalid_names = Vec::new();
@@ -249,6 +253,8 @@ struct IgnoreRules {
     in_work_tree: bool,
     /// The rules of the root and of each directory beneath it read so far, by path.
     inside: Mutex<HashMap<PathBuf, Arc<Level>>>,
+    /// How large each ignore file may be. A larger one is not read and becomes an error.
+    limit: SizeLimit,
 }
 
 /// One directory's ignore rules, linked to those of the directory above it.
@@ -388,7 +394,7 @@ impl IgnoreRules {
     ///
     /// Effect: resolves `root`'s symlinks, reads file metadata in it and the directories above
     /// it, and reads ignore files, git files and git config.
-    fn new(root: &AbsolutePath) -> Self {
+    fn new(root: &AbsolutePath, limit: SizeLimit) -> Self {
         let canonical_root = fs::canonicalize(root.as_path()).ok();
         let top = canonical_root
             .as_deref()
@@ -399,7 +405,7 @@ impl IgnoreRules {
             .and_then(|(canonical, top)| {
                 let parents: Vec<&Path> = canonical.ancestors().take(top + 1).skip(1).collect();
                 parents.into_iter().rev().fold(None, |parent, dir| {
-                    Some(Arc::new(Level::above(root.join_path(dir), parent)))
+                    Some(Arc::new(Level::above(root.join_path(dir), parent, limit)))
                 })
             });
         // The global excludes anchor at the top of the git work tree, or at the root with none, so
@@ -418,6 +424,7 @@ impl IgnoreRules {
             global,
             in_work_tree: top.is_some(),
             inside: Mutex::new(HashMap::new()),
+            limit,
         }
     }
 
@@ -453,6 +460,7 @@ impl IgnoreRules {
             self.root.join_path(dir),
             parent,
             is_nested_top,
+            self.limit,
         ));
         Some(Arc::clone(
             self.read_so_far().entry(dir.to_path_buf()).or_insert(level),
@@ -587,6 +595,13 @@ enum ReadFailure {
     /// Reading stopped partway, as at a line that isn't UTF-8 or with a directory in its place, so
     /// the rules after that point don't apply.
     Partial,
+    /// It is larger than `max-ignore-size`, so it wasn't read and none of its rules apply.
+    TooLarge {
+        /// Its size in bytes.
+        size: u64,
+        /// The ceiling in bytes.
+        limit: u64,
+    },
 }
 
 impl Level {
@@ -596,9 +611,14 @@ impl Level {
     /// tree ([`holds_git`]).
     ///
     /// Effect: reads file metadata in `dir`, its ignore files and its git exclude file.
-    fn inside(dir: AbsolutePath, parent: Option<Arc<Self>>, is_nested_top: bool) -> Self {
-        let own = own_ignore_files(dir.as_path());
-        let exclude = git_exclude(dir.as_path());
+    fn inside(
+        dir: AbsolutePath,
+        parent: Option<Arc<Self>>,
+        is_nested_top: bool,
+        limit: SizeLimit,
+    ) -> Self {
+        let own = own_ignore_files(dir.as_path(), limit);
+        let exclude = git_exclude(dir.as_path(), limit);
         let exclude_origin = if exclude.quotable {
             Origin::Inside
         } else {
@@ -625,9 +645,9 @@ impl Level {
     /// read either, and unlike inside the root it is not reported: git warns of it already.
     ///
     /// Effect: reads file metadata in `dir`, its ignore files and its git exclude file.
-    fn above(dir: AbsolutePath, parent: Option<Arc<Self>>) -> Self {
-        let own = own_ignore_files(dir.as_path());
-        let exclude = git_exclude(dir.as_path());
+    fn above(dir: AbsolutePath, parent: Option<Arc<Self>>, limit: SizeLimit) -> Self {
+        let own = own_ignore_files(dir.as_path(), limit);
+        let exclude = git_exclude(dir.as_path(), limit);
         let unreadable = unreadable_in(&dir, &own, &exclude, Origin::Above, Origin::Above);
         Self {
             dir,
@@ -711,7 +731,7 @@ impl ExcludeFile {
 /// looks at it.
 ///
 /// Effect: reads file metadata in `dir` and its ignore files.
-fn own_ignore_files(dir: &Path) -> OwnIgnoreFiles {
+fn own_ignore_files(dir: &Path, limit: SizeLimit) -> OwnIgnoreFiles {
     let mut symlinked = Vec::new();
     let mut unreadable = Vec::new();
     let mut own = |file: IgnoreFile| {
@@ -723,7 +743,7 @@ fn own_ignore_files(dir: &Path) -> OwnIgnoreFiles {
                 Gitignore::empty()
             }
             Ok(_) => {
-                let (rules, failure) = rules_in(dir, &path);
+                let (rules, failure) = rules_in(dir, &path, limit);
                 unreadable.extend(failure.map(|failure| (file, failure)));
                 rules
             }
@@ -742,31 +762,81 @@ fn own_ignore_files(dir: &Path) -> OwnIgnoreFiles {
 /// The rules of `file`, which apply beneath `dir`, and how reading it failed, if it exists but
 /// couldn't be read in full. A missing file has no rules, one that can't be opened none, one whose
 /// reading stops partway the rules before that point, and a line that isn't a valid pattern is
-/// left out, as git and the walker treat them.
+/// left out, as git and the walker treat them. A leading UTF-8 byte order mark is dropped, as git
+/// drops it.
+///
+/// A file larger than `limit` has no rules and fails as [`ReadFailure::TooLarge`], which fails the
+/// run rather than widening the scan unnoticed. The size is checked on the open handle and the read
+/// stops one byte past the limit on that same handle, so a file that grows after the check is
+/// still refused.
 ///
 /// Effect: reads `file`, following symlinks.
-fn rules_in(dir: &Path, file: &Path) -> (Gitignore, Option<ReadFailure>) {
+fn rules_in(dir: &Path, file: &Path, limit: SizeLimit) -> (Gitignore, Option<ReadFailure>) {
+    let (bytes, mut failure) = match read_capped(file, limit) {
+        Ok(read) => read,
+        Err(failure) => return (Gitignore::empty(), failure),
+    };
     let mut builder = GitignoreBuilder::new(dir);
-    let failure = builder.add(file).and_then(|error| read_failure(&error));
+    for (index, line) in bytes.lines().enumerate() {
+        let Ok(line) = line else {
+            failure = Some(ReadFailure::Partial);
+            break;
+        };
+        let line = if index == 0 {
+            line.trim_start_matches('\u{feff}')
+        } else {
+            &line
+        };
+        let _invalid_pattern = builder.add_line(Some(file.to_path_buf()), line);
+    }
     let rules = builder.build().unwrap_or_else(|_| Gitignore::empty());
     (rules, failure)
 }
 
-/// How `error`, from reading an ignore file, says reading failed: denied permission, or any other
-/// failure partway. `None` when the file is missing or only a line isn't a valid pattern.
-fn read_failure(error: &ignore::Error) -> Option<ReadFailure> {
-    match error {
-        ignore::Error::Io(error) => match error.kind() {
-            io::ErrorKind::NotFound => None,
-            io::ErrorKind::PermissionDenied => Some(ReadFailure::Denied),
-            _ => Some(ReadFailure::Partial),
-        },
-        ignore::Error::Partial(errors) => errors.iter().filter_map(read_failure).min(),
-        ignore::Error::WithPath { err, .. }
-        | ignore::Error::WithDepth { err, .. }
-        | ignore::Error::WithLineNumber { err, .. } => read_failure(err),
-        _ => None,
+/// The bytes of `file`, at most `limit` of them, and [`ReadFailure::Partial`] when reading stopped
+/// partway, with the bytes read before that point.
+///
+/// # Errors
+///
+/// `None` when `file` is missing, [`ReadFailure::Denied`] when it can't be opened for lack of
+/// permission, [`ReadFailure::TooLarge`] when it holds more than `limit` bytes, and
+/// [`ReadFailure::Partial`] when it can't be opened for any other reason.
+fn read_capped(
+    file: &Path,
+    limit: SizeLimit,
+) -> Result<(Vec<u8>, Option<ReadFailure>), Option<ReadFailure>> {
+    let handle = fs::File::open(file).map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => None,
+        io::ErrorKind::PermissionDenied => Some(ReadFailure::Denied),
+        _ => Some(ReadFailure::Partial),
+    })?;
+    let too_large = |size, limit| Some(ReadFailure::TooLarge { size, limit });
+    let mut bytes = Vec::new();
+    let read = match limit.get() {
+        Some(limit) => {
+            let size = handle.metadata().map_or(0, |metadata| metadata.len());
+            if size > limit {
+                return Err(too_large(size, limit));
+            }
+            let read = handle.take(limit.saturating_add(1)).read_to_end(&mut bytes);
+            let held = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            if held > limit {
+                return Err(too_large(held, limit));
+            }
+            read
+        }
+        None => (&handle).read_to_end(&mut bytes),
+    };
+    if read.is_err() {
+        // A read that stops partway may stop inside a line: drop that cut-off line, as the
+        // ignore crate's line reader does, so it never becomes a shorter, wider rule.
+        let whole = bytes
+            .iter()
+            .rposition(|&byte| byte == b'\n')
+            .map_or(0, |end| end + 1);
+        bytes.truncate(whole);
     }
+    Ok((bytes, read.err().map(|_| ReadFailure::Partial)))
 }
 
 /// The rules of `dir`'s git exclude file, and whether they may be quoted.
@@ -781,7 +851,7 @@ fn read_failure(error: &ignore::Error) -> Option<ReadFailure> {
 /// directory, directory and file, no symlink among them, so the file lies inside `dir`.
 ///
 /// Effect: reads file metadata in `dir`, a `.git` file and its `commondir`, and the exclude file.
-fn git_exclude(dir: &Path) -> ExcludeFile {
+fn git_exclude(dir: &Path, limit: SizeLimit) -> ExcludeFile {
     let dot_git = dir.join(".git");
     let Ok(metadata) = fs::metadata(&dot_git) else {
         return ExcludeFile::none();
@@ -800,7 +870,7 @@ fn git_exclude(dir: &Path) -> ExcludeFile {
     let quotable = is_real_dir(&dot_git)
         && is_real_dir(&dot_git.join("info"))
         && fs::symlink_metadata(&exclude).is_ok_and(|metadata| metadata.is_file());
-    let (rules, failure) = rules_in(dir, &exclude);
+    let (rules, failure) = rules_in(dir, &exclude, limit);
     ExcludeFile {
         rules,
         quotable,
@@ -868,9 +938,12 @@ fn symlinked_ignore_file(root: &AbsolutePath, file: &AbsolutePath) -> Finding {
 /// denied gets the `chmod` that fixes it.
 fn unreadable_ignore_file(root: &AbsolutePath, file: &UnreadableFile) -> Finding {
     let named = file.origin.name(root, Some(file.path.as_path()));
+    if let ReadFailure::TooLarge { size, limit } = file.failure {
+        return too_large_ignore_file(&named, size, limit, is_nested(root, file));
+    }
     let message = match file.failure {
         ReadFailure::Denied => format!("{named} can't be read, so its rules don't apply"),
-        ReadFailure::Partial => {
+        ReadFailure::Partial | ReadFailure::TooLarge { .. } => {
             format!("{named} could not be fully read, so some of its rules may not apply")
         }
     };
@@ -886,11 +959,62 @@ fn unreadable_ignore_file(root: &AbsolutePath, file: &UnreadableFile) -> Finding
                 "The files its rules would hide were checked. Make it readable, or add those \
                  files to `exclude` in `{CONFIG_FILE_NAME}`"
             )),
-        (ReadFailure::Partial, _) => finding.with_help(format!(
+        (ReadFailure::Partial | ReadFailure::TooLarge { .. }, _) => finding.with_help(format!(
             "The files its later rules would hide may have been checked. Make it a regular UTF-8 \
              text file, or add those files to `exclude` in `{CONFIG_FILE_NAME}`"
         )),
     }
+}
+
+/// The code for an ignore file over `max-ignore-size`, which the scan turns into a fatal error.
+pub(crate) const CODE_IGNORE_TOO_LARGE: &str = "ignore-too-large";
+
+/// The error for `named`, an ignore file of `size` bytes over the `limit` (`max-ignore-size`). It
+/// was not read, so the files its rules would hide would be checked: the scan stops instead of
+/// quietly widening. The help names the key, variable and flag that raise the limit, with the next
+/// power of two above the measured size. Only a `nested` file, one beneath the root, can be left
+/// out by excluding its directory; any other is the root's own, git's or above the root.
+fn too_large_ignore_file(named: &str, size: u64, limit: u64, nested: bool) -> Finding {
+    let raised = size_text(size.saturating_add(1).next_power_of_two());
+    let raise = format!(
+        "raise the limit with `[limits] max-ignore-size = \"{raised}\"` in {CONFIG_FILE_NAME}, \
+         `SUPDOC_MAX_IGNORE_SIZE={raised}` or `--max-ignore-size {raised}`"
+    );
+    let next = if nested {
+        format!("{raise}, or add its directory to `exclude`")
+    } else {
+        format!("{raise}, or shorten the file")
+    };
+    Finding::new(
+        CODE_IGNORE_TOO_LARGE,
+        Severity::Error,
+        format!(
+            "{named} is {} (limit {}), so it was not read",
+            size_text(size),
+            size_text(limit)
+        ),
+    )
+    .with_help(format!(
+        "Real ignore files are a few KiB, and each pattern costs memory. If this file is real, \
+         {next}. `0` means no limit"
+    ))
+}
+
+/// Whether `file` is a `.ignore` or `.gitignore` in a directory beneath the root, which an
+/// `exclude` of that directory leaves out. The root's own, a git exclude file and any file above
+/// the root are not.
+fn is_nested(root: &AbsolutePath, file: &UnreadableFile) -> bool {
+    let is_own_file = file
+        .path
+        .as_path()
+        .file_name()
+        .is_some_and(|name| name == ".ignore" || name == ".gitignore");
+    file.origin == Origin::Inside
+        && is_own_file
+        && file
+            .path
+            .parent()
+            .is_some_and(|dir| dir != *root && dir.as_path().starts_with(root.as_path()))
 }
 
 /// Whether the walk keeps `entry`. Only directories are refused here; files are judged by

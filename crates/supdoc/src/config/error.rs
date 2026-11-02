@@ -34,6 +34,16 @@ pub enum ConfigError {
         error: std::io::Error,
     },
 
+    /// A config file in the chain is larger than `max-config-size`, so it was not read.
+    TooLarge {
+        /// The file.
+        path: AbsolutePath,
+        /// Its size in bytes, or as many as were read before the read stopped.
+        size: u64,
+        /// The ceiling in bytes.
+        limit: u64,
+    },
+
     /// Malformed TOML, unknown key, bad glob, bad namespace name or absolute path.
     Parse {
         /// The file that failed to parse.
@@ -139,6 +149,7 @@ impl ConfigError {
         match self {
             Self::NotFound { .. } => "config-not-found",
             Self::Read { .. } => "config-read",
+            Self::TooLarge { .. } => "config-too-large",
             Self::Parse { .. } => "config-parse",
             Self::ExtendsMissing { .. } => "config-extends-missing",
             Self::ExtendsDirectory { .. } => "config-extends-directory",
@@ -162,6 +173,12 @@ impl ConfigError {
         match self {
             Self::NotFound { path } => format!("no config file at {}", show(path)),
             Self::Read { path, error } => format!("cannot read {}: {error}", show(path)),
+            Self::TooLarge { path, size, limit } => format!(
+                "{} is {} (limit {}), so it was not read",
+                show(path),
+                size_text(*size),
+                size_text(*limit)
+            ),
             Self::Parse { path, error } => format!("{}: {}", show(path), error.message()),
             Self::ExtendsMissing {
                 file,
@@ -260,6 +277,15 @@ impl ConfigError {
                 ))
             }
             Self::Read { path, error } => Some(read_help(&shell_quote(&show(path)), error.kind())),
+            Self::TooLarge { size, .. } => {
+                let raised = size_text(size.saturating_add(1).next_power_of_two());
+                Some(format!(
+                    "Real configs are a few KiB. If this one is real, raise the limit with \
+                     `SUPDOC_MAX_CONFIG_SIZE={raised}` or `--max-config-size {raised}`. `0` means no \
+                     limit. The limit can't be set inside a config file, because it guards reading \
+                     that file"
+                ))
+            }
             Self::Parse { error, .. } => parse_help(error.message()),
             Self::ExtendsMissing { resolved, .. } => {
                 let resolved = shell_quote(&show(resolved));
@@ -319,6 +345,7 @@ impl ConfigError {
         match self {
             Self::Read { .. } => ExitStatus::Io,
             Self::NotFound { .. }
+            | Self::TooLarge { .. }
             | Self::Parse { .. }
             | Self::ExtendsMissing { .. }
             | Self::ExtendsDirectory { .. }
@@ -327,6 +354,24 @@ impl ConfigError {
             | Self::SymlinkNotConfig { .. }
             | Self::NamespaceOutsideRoot { .. } => ExitStatus::Config,
         }
+    }
+}
+
+/// `bytes` in the largest unit, `B`, `KiB` or `MiB`, that divides it; a size with a remainder is
+/// shown in `KiB` or `MiB` to one decimal place, rounded down, as `292.9KiB`.
+pub(crate) fn size_text(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    let (unit, scale) = match bytes {
+        b if b >= MIB => ("MiB", MIB),
+        b if b >= KIB => ("KiB", KIB),
+        _ => return format!("{bytes}B"),
+    };
+    if bytes.is_multiple_of(scale) {
+        format!("{}{unit}", bytes / scale)
+    } else {
+        let tenths = bytes.saturating_mul(10) / scale;
+        format!("{}.{}{unit}", tenths / 10, tenths % 10)
     }
 }
 
@@ -353,7 +398,16 @@ fn read_help(file: &str, kind: ErrorKind) -> String {
 /// The types raise their errors through serde, which keeps only the text, so this reads the text
 /// back. The unit tests pin each message so a reworded one fails here, not silently.
 fn parse_help(message: &str) -> Option<String> {
-    if message.starts_with("unknown field") {
+    if message.starts_with("unknown field `max-config-size`") {
+        Some(
+            "Remove `max-config-size` from this file: it guards reading config files, so no \
+             config file can set it. Set it with `SUPDOC_MAX_CONFIG_SIZE=1MiB` or \
+             `--max-config-size 1MiB` instead"
+                .to_owned(),
+        )
+    } else if let Some(help) = limit_help(message) {
+        Some(help)
+    } else if message.starts_with("unknown field") {
         let key = message.split('`').nth(1).unwrap_or_default();
         Some(format!(
             "Remove `{key}`, or rename it to one of the keys the message lists"
@@ -404,6 +458,30 @@ fn parse_help(message: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// The help for a `[limits]` value that isn't `0` or a number with a unit, from the message
+/// [`crate::limits::LimitError`] wrote or the one serde wrote for a value of another type, such as
+/// a float. `None` for any other message.
+fn limit_help(message: &str) -> Option<String> {
+    const DURATION: &str = "a duration such as `parse-timeout = \"10s\"` (also `ms` or `m`)";
+    const SIZE: &str = "a size such as `max-lock-size = \"16MiB\"` (also `B` or `KiB`)";
+    let form = if message.contains("` is not a duration; give a unit") {
+        DURATION.to_owned()
+    } else if message.contains("` is not a size; give a unit") {
+        SIZE.to_owned()
+    } else if message.starts_with("invalid type:")
+        && message.ends_with(
+            "expected a value with a unit, such as \"10s\" or \"256KiB\", or 0 for no limit",
+        )
+    {
+        format!("{DURATION}, or {SIZE}")
+    } else {
+        return None;
+    };
+    Some(format!(
+        "Write the limit as a whole number with its unit in quotes: {form}. `0` means no limit"
+    ))
 }
 
 /// The help for a value of the wrong type, from the type the message says was expected.

@@ -24,7 +24,7 @@ use crate::read::error::{ReadError, ReadRole};
 use crate::read::links::links;
 use crate::scan::model::{Scan, ScannedLink, Scope, TargetState};
 use crate::scan::targets::{self, CODE_UNKNOWN_NAMESPACE, Occurrence, Parsed, Written};
-use crate::scan::walk::walk;
+use crate::scan::walk::{CODE_IGNORE_TOO_LARGE, walk};
 
 /// Why a scan couldn't run at all (04 S7). Every smaller problem is a finding instead.
 #[derive(Debug, thiserror::Error)]
@@ -37,14 +37,37 @@ pub enum ScanError {
         /// What the operating system reported.
         error: std::io::Error,
     },
+    /// An ignore file is larger than `max-ignore-size`, so it wasn't read. Skipping it would widen
+    /// the scan, so the scan doesn't run.
+    #[error("{message}")]
+    IgnoreTooLarge {
+        /// What the walk reported, naming the file, its size and the limit.
+        message: String,
+        /// What the walk said to do next.
+        help: String,
+    },
 }
 
 impl ScanError {
+    /// The refusal for the first `ignore-too-large` among a walk's `findings`, if there is one.
+    /// Every command that walks the project refuses with it before it reads a source or writes.
+    #[must_use]
+    pub(crate) fn ignore_too_large(findings: &[Finding]) -> Option<Self> {
+        let too_large = findings
+            .iter()
+            .find(|finding| finding.code == CODE_IGNORE_TOO_LARGE)?;
+        Some(Self::IgnoreTooLarge {
+            message: too_large.message.clone(),
+            help: too_large.help.clone().unwrap_or_default(),
+        })
+    }
+
     /// The stable code for this error: `scan-root-unreadable`.
     #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
             Self::RootUnreadable { .. } => "scan-root-unreadable",
+            Self::IgnoreTooLarge { .. } => CODE_IGNORE_TOO_LARGE,
         }
     }
 
@@ -57,14 +80,17 @@ impl ScanError {
                  with `chmod u+rx {}`",
                 shell_quote(&root.display().to_string())
             ),
+            Self::IgnoreTooLarge { help, .. } => help.clone(),
         }
     }
 
-    /// The process exit status for this error (06 X7): 74, since the project can't be read.
+    /// The process exit status for this error (06 X7): 74 when the project can't be read, 78 for
+    /// an ignore file over its configured ceiling.
     #[must_use]
     pub const fn status(&self) -> ExitStatus {
         match self {
             Self::RootUnreadable { .. } => ExitStatus::Io,
+            Self::IgnoreTooLarge { .. } => ExitStatus::Config,
         }
     }
 }
@@ -77,7 +103,8 @@ impl ScanError {
 ///
 /// # Errors
 ///
-/// [`ScanError::RootUnreadable`] when the project root can't be listed.
+/// [`ScanError::RootUnreadable`] when the project root can't be listed, and
+/// [`ScanError::IgnoreTooLarge`] when an ignore file the walk met is over `max-ignore-size`.
 pub fn run(config: &Config, languages: &Languages, scope: &Scope) -> Result<Scan, ScanError> {
     run_with_settings(config, languages, scope, config.hash_settings())
 }
@@ -150,6 +177,9 @@ fn assemble(
     }
 
     let walked = walk(config, languages, scope);
+    if let Some(error) = ScanError::ignore_too_large(&walked.findings) {
+        return Err(error);
+    }
     let mut findings = walked.findings;
     let mut parsed = Parsed::default();
     let mut unread_sources = BTreeSet::new();

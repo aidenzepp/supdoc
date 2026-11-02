@@ -4,13 +4,12 @@
 //! [`load_config`] sets the output root itself, so no command can load a config and then report
 //! paths against the wrong directory (X4).
 
-use std::fs;
 use std::io::ErrorKind;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use crate::check::plan::SettingsChange;
-use crate::config::{Config, ConfigError};
+use crate::config::{Config, ConfigError, config_size_limit, read_config_text};
 use crate::exit::ExitStatus;
 use crate::finding::{Location, Snippet};
 use crate::hash::HashSettings;
@@ -37,13 +36,12 @@ use super::{CliError, Context, ErrorSite, cause};
 ///
 /// Returns the config's own error, with its code, help and exit code.
 pub(crate) fn load_config(context: &Context, output: &mut Output) -> Result<Config, CliError> {
+    let given = &context.global.limits.0;
     let loaded = match &context.global.config {
-        Some(file) => Config::load_file(&absolute(&context.cwd, file)),
-        None => Config::load(&context.cwd),
+        Some(file) => Config::load_file_under(&absolute(&context.cwd, file), given),
+        None => Config::load_under(&context.cwd, given),
     };
-    let config = loaded
-        .map_err(|error| config_failure(&error, context, output))?
-        .with_command_line(&context.global.limits.0);
+    let config = loaded.map_err(|error| config_failure(&error, context, output))?;
     output.set_root(config.root().clone());
     Ok(config)
 }
@@ -97,7 +95,7 @@ pub(crate) fn config_failure(
         error.help_from(&context.cwd),
         error.status(),
     );
-    match error_site(error, &context.cwd, output) {
+    match error_site(error, context, output) {
         Some(site) => failure.at(site),
         None => failure,
     }
@@ -118,6 +116,7 @@ fn config_span(error: &ConfigError) -> Option<(&AbsolutePath, Range<usize>)> {
             .map(|file| (file, span.clone())),
         ConfigError::NotFound { .. }
         | ConfigError::Read { .. }
+        | ConfigError::TooLarge { .. }
         | ConfigError::SymlinkNotConfig { .. } => None,
     }
 }
@@ -127,9 +126,12 @@ fn config_span(error: &ConfigError) -> Option<(&AbsolutePath, Range<usize>)> {
 /// Source paths are relative to a root and cannot climb, so a file inside the current directory
 /// is shown relative to it, and a file outside it becomes its own directory's only file: the
 /// output root moves there, which keeps the text path correct relative to the current directory.
-fn error_site(error: &ConfigError, cwd: &AbsolutePath, output: &mut Output) -> Option<ErrorSite> {
+///
+/// The file is read again through the same `max-config-size` cap as the load.
+fn error_site(error: &ConfigError, context: &Context, output: &mut Output) -> Option<ErrorSite> {
+    let cwd = &context.cwd;
     let (file, span) = config_span(error)?;
-    let text = fs::read_to_string(file.as_path()).ok()?;
+    let text = read_config_text(file, config_size_limit(&context.global.limits.0)).ok()?;
     let (root, relative) = match file.strip_prefix(cwd) {
         Some(inside) => (cwd.clone(), inside.to_path_buf()),
         None => (
