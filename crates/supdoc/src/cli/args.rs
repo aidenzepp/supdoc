@@ -5,6 +5,7 @@
 
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::str::FromStr as _;
 
 use clap::builder::FalseyValueParser;
 use clap::{ArgAction, Args, ColorChoice, Parser, Subcommand, ValueEnum, ValueHint};
@@ -15,6 +16,7 @@ use super::examples::{
     NAMESPACE_RENAME_EXAMPLES, RESOLVE_EXAMPLES, SCHEMA_EXAMPLES, SKILL_EXAMPLES,
     SKILL_INSTALL_EXAMPLES, TOP_EXAMPLES, UPDATE_EXAMPLES,
 };
+use crate::limits::{CommandLineLimits, Given, Limits, SizeLimit, TimeLimit};
 use crate::link::SymbolPath;
 use crate::namespace::NamespaceName;
 use crate::output::OutputFormat;
@@ -97,6 +99,108 @@ pub struct GlobalArgs {
         value_name = "WHEN"
     )]
     pub color: ColorChoice,
+    /// The `[limits]` ceilings given by flag or environment variable.
+    #[command(flatten)]
+    pub limits: LimitFlags,
+}
+
+/// The `--parse-timeout`, `--max-lock-size`, `--max-config-size` and `--max-ignore-size` flags.
+///
+/// Written by hand rather than derived, so each value keeps whether its flag or its `SUPDOC_*`
+/// variable gave it, which `config show` reports.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LimitFlags(pub CommandLineLimits);
+
+/// The clap id, flag, variable, value name, help and default of each limit flag.
+const LIMIT_FLAGS: [(&str, &str, &str, &str); 4] = [
+    (
+        "parse-timeout",
+        "SUPDOC_PARSE_TIMEOUT",
+        "DURATION",
+        "Stop reading a file after this long, such as 10s or 500ms; 0 for no limit",
+    ),
+    (
+        "max-lock-size",
+        "SUPDOC_MAX_LOCK_SIZE",
+        "SIZE",
+        "Refuse a supdoc.lock larger than this, such as 16MiB; 0 for no limit",
+    ),
+    (
+        "max-config-size",
+        "SUPDOC_MAX_CONFIG_SIZE",
+        "SIZE",
+        "Refuse a config file larger than this, such as 256KiB; 0 for no limit",
+    ),
+    (
+        "max-ignore-size",
+        "SUPDOC_MAX_IGNORE_SIZE",
+        "SIZE",
+        "Refuse an ignore file larger than this, such as 256KiB; 0 for no limit",
+    ),
+];
+
+impl LimitFlags {
+    /// The default each flag's help shows, in [`LIMIT_FLAGS`] order.
+    fn defaults() -> [String; 4] {
+        [
+            Limits::PARSE_TIMEOUT.to_string(),
+            Limits::MAX_LOCK_SIZE.to_string(),
+            Limits::MAX_CONFIG_SIZE.to_string(),
+            Limits::MAX_IGNORE_SIZE.to_string(),
+        ]
+    }
+}
+
+/// The value of the limit flag `id`, and whether its environment variable gave it.
+fn given<T: Copy + Send + Sync + 'static>(
+    matches: &clap::ArgMatches,
+    id: &str,
+) -> Option<Given<T>> {
+    let value = *matches.get_one::<T>(id)?;
+    let from_env = matches.value_source(id) == Some(clap::parser::ValueSource::EnvVariable);
+    Some(Given { value, from_env })
+}
+
+impl clap::FromArgMatches for LimitFlags {
+    fn from_arg_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
+        Ok(Self(CommandLineLimits {
+            parse_timeout: given(matches, "parse-timeout"),
+            max_lock_size: given(matches, "max-lock-size"),
+            max_config_size: given(matches, "max-config-size"),
+            max_ignore_size: given(matches, "max-ignore-size"),
+        }))
+    }
+
+    fn update_from_arg_matches(&mut self, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
+        *self = Self::from_arg_matches(matches)?;
+        Ok(())
+    }
+}
+
+impl Args for LimitFlags {
+    fn augment_args(command: clap::Command) -> clap::Command {
+        LIMIT_FLAGS.into_iter().zip(Self::defaults()).fold(
+            command,
+            |command, ((id, env, value_name, help), default)| {
+                let arg = clap::Arg::new(id)
+                    .long(id)
+                    .global(true)
+                    .env(env)
+                    .value_name(value_name)
+                    .help(format!("{help} [default: {default}]"))
+                    .help_heading("Limits");
+                command.arg(if value_name == "DURATION" {
+                    arg.value_parser(TimeLimit::from_str)
+                } else {
+                    arg.value_parser(SizeLimit::from_str)
+                })
+            },
+        )
+    }
+
+    fn augment_args_for_update(command: clap::Command) -> clap::Command {
+        Self::augment_args(command)
+    }
 }
 
 impl GlobalArgs {

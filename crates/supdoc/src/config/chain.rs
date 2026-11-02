@@ -14,6 +14,7 @@ use std::io::ErrorKind;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
+use crate::limits::ConfigLimits;
 use crate::namespace::NamespaceName;
 use crate::path::{AbsolutePath, RelativePath, is_regular_file};
 
@@ -38,9 +39,9 @@ pub(super) fn directory_of(file: &AbsolutePath) -> AbsolutePath {
     file.parent().unwrap_or_else(|| file.clone())
 }
 
-/// `dir/supdoc.config.toml`, or `None` if that is somehow not absolute (it always is).
-fn config_in(dir: &AbsolutePath) -> Option<AbsolutePath> {
-    AbsolutePath::new(&dir.as_path().join(CONFIG_FILE_NAME))
+/// `dir/supdoc.config.toml`.
+fn config_in(dir: &AbsolutePath) -> AbsolutePath {
+    dir.join_path(Path::new(CONFIG_FILE_NAME))
 }
 
 /// Walks up from `start` to the nearest directory holding a config file (01 D1).
@@ -63,9 +64,8 @@ fn config_in(dir: &AbsolutePath) -> Option<AbsolutePath> {
 pub(super) fn discover(start: &AbsolutePath) -> Result<Option<AbsolutePath>, ConfigError> {
     let mut dir = Some(start.clone());
     while let Some(current) = dir {
-        if let (Some(candidate), Some(entry)) =
-            (config_in(&current), config_entry(current.as_path()))
-        {
+        let candidate = config_in(&current);
+        if let Some(entry) = config_entry(current.as_path()) {
             return if !entry.file_type().is_symlink() || leads_to_config(&candidate) {
                 Ok(Some(candidate))
             } else {
@@ -191,8 +191,7 @@ fn resolve_extends(
         file: from.clone(),
         extends: value.clone(),
         span: extends.span(),
-        suggestion: config_inside(root, value, &resolved)
-            .filter(|_| config_in(&resolved).as_ref() != Some(from)),
+        suggestion: config_inside(root, value, &resolved).filter(|_| config_in(&resolved) != *from),
     };
     let not_config = || ConfigError::ExtendsNotConfig {
         file: from.clone(),
@@ -276,7 +275,7 @@ fn config_inside(
     extends: &RelativePath,
     directory: &AbsolutePath,
 ) -> Option<RelativePath> {
-    let candidate = config_in(directory)?;
+    let candidate = config_in(directory);
     let is_plain_file = plain(root, &candidate)
         && fs::symlink_metadata(candidate.as_path()).is_ok_and(|metadata| metadata.is_file());
     if !is_plain_file {
@@ -303,6 +302,7 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Result<Config, Co
     let mut exclude = None;
     let mut written = BTreeMap::new();
     let mut line_endings = None;
+    let mut limits = ConfigLimits::default();
     for Layer { file, raw } in layers {
         let base = directory_of(&file);
         for (name, relative) in raw.namespaces {
@@ -329,6 +329,15 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Result<Config, Co
                 .and_then(|hash| hash.line_endings)
                 .map(|value| (value, file.clone()));
         }
+        if let Some(raw_limits) = raw.limits {
+            nearest(&mut limits.parse_timeout, raw_limits.parse_timeout, &file);
+            nearest(&mut limits.max_lock_size, raw_limits.max_lock_size, &file);
+            nearest(
+                &mut limits.max_ignore_size,
+                raw_limits.max_ignore_size,
+                &file,
+            );
+        }
         files.push(file);
     }
     let real_root = super::real_root(&root);
@@ -349,7 +358,15 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Result<Config, Co
         exclude,
         namespaces,
         line_endings,
+        limits,
     })
+}
+
+/// Fills `slot` with `value` and the `file` that wrote it, unless a nearer file already did.
+fn nearest<T>(slot: &mut Option<(T, AbsolutePath)>, value: Option<T>, file: &AbsolutePath) {
+    if slot.is_none() {
+        *slot = value.map(|value| (value, file.clone()));
+    }
 }
 
 /// The namespace `name`, once its directory is found inside the root after symlinks are followed.
