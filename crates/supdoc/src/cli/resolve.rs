@@ -377,65 +377,26 @@ impl Report for ResolveReport {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::sync::{Arc, Mutex};
-
-    use clap::Parser as _;
 
     use super::*;
-    use crate::cli::args::{Cli, Command};
-    use crate::output::{OutputSettings, PathStyle, Verbosity};
+    use crate::cli::args::Command;
+    use crate::cli::testing::{Project, Run, Session, at};
 
     /// Rust code with a struct, a method and a free function.
     const LIB: &str = "pub struct Config {\n    port: u16,\n}\n\nimpl Config {\n    pub fn validate(&self) -> bool {\n        self.port > 0\n    }\n}\n\npub fn load() {}\n";
 
-    /// A buffer `Output` writes into and the test reads back.
-    #[derive(Clone, Default)]
-    struct Capture(Arc<Mutex<Vec<u8>>>);
-
-    impl Capture {
-        fn text(&self) -> String {
-            let bytes = self.0.lock().expect("the capture lock should be free");
-            String::from_utf8(bytes.clone()).expect("captured output should be UTF-8")
-        }
-    }
-
-    impl io::Write for Capture {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .expect("the capture lock should be free")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// The value at `pointer` (RFC 6901) in `json`, or a failure naming what is missing.
-    fn at(json: &serde_json::Value, pointer: &str) -> serde_json::Value {
-        json.pointer(pointer)
-            .unwrap_or_else(|| panic!("`{pointer}` should be in the JSON output: {json}"))
-            .clone()
-    }
-
-    /// What one `supdoc resolve` run returned and printed.
-    struct Run {
-        result: Result<Outcome, CliError>,
-        stdout: String,
-        stderr: String,
+    /// A project with one namespace and `LIB` at `src/lib.rs`.
+    fn project() -> Project {
+        let project = Project::empty();
+        project.write(
+            "supdoc.config.toml",
+            "[namespaces]\nauth = \"services/auth\"\n",
+        );
+        project.write("src/lib.rs", LIB);
+        project
     }
 
     impl Run {
-        /// The exit code the process would end with.
-        fn exit_code(&self) -> u8 {
-            match &self.result {
-                Ok(outcome) => outcome.exit_code(),
-                Err(error) => error.exit_code(),
-            }
-        }
-
         /// The error the run ended with, or a failure saying it succeeded.
         fn error(&self) -> &CliError {
             self.result
@@ -443,96 +404,40 @@ mod tests {
                 .err()
                 .unwrap_or_else(|| panic!("the run should fail, but printed: {}", self.stdout))
         }
-
-        /// stdout parsed as the one JSON document `--json` prints.
-        fn json(&self) -> serde_json::Value {
-            serde_json::from_str(&self.stdout)
-                .unwrap_or_else(|error| panic!("stdout should be JSON ({error}): {}", self.stdout))
-        }
     }
 
-    /// A project in a fresh temporary directory.
-    struct Project {
-        dir: tempfile::TempDir,
+    /// The temp directory's own name, which any absolute path into the project contains.
+    fn temp_name(project: &Project) -> String {
+        project
+            .dir
+            .path()
+            .file_name()
+            .expect("a temp directory should have a name")
+            .to_string_lossy()
+            .into_owned()
     }
 
     impl Project {
-        fn new() -> Self {
-            let project = Self {
-                dir: tempfile::tempdir().expect("a fresh temp directory should be created"),
-            };
-            project.write(
-                "supdoc.config.toml",
-                "[namespaces]\nauth = \"services/auth\"\n",
-            );
-            project.write("src/lib.rs", LIB);
-            project
-        }
-
-        fn write(&self, relative: &str, text: &str) {
-            let path = self.dir.path().join(relative);
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).expect("the fixture directory should be created");
-            }
-            fs::write(&path, text).expect("the fixture file should be written");
-        }
-
         /// Runs `supdoc <args>` from the project root. `args` must start with `resolve` or a
         /// global flag.
         fn resolve(&self, args: &[&str]) -> Run {
             self.resolve_from("", args)
         }
 
-        /// The temp directory's own name, which any absolute path into the project contains.
-        fn temp_name(&self) -> String {
-            self.dir
-                .path()
-                .file_name()
-                .expect("a temp directory should have a name")
-                .to_string_lossy()
-                .into_owned()
-        }
-
         /// Runs `supdoc <args>` from the directory `relative` under the root.
         fn resolve_from(&self, relative: &str, args: &[&str]) -> Run {
-            let cwd = AbsolutePath::new(&self.dir.path().join(relative))
-                .expect("a directory under the root should be absolute");
-            let command_line: Vec<&str> = std::iter::once("supdoc")
-                .chain(args.iter().copied())
-                .collect();
-            let cli = Cli::try_parse_from(&command_line).unwrap_or_else(|error| {
-                panic!("`{}` should parse: {error}", command_line.join(" "))
-            });
-            let Command::Resolve(resolve_args) = &cli.command else {
-                panic!("`{}` should be a resolve command", command_line.join(" "));
+            let mut session = Session::new(self.root_of(relative), args);
+            let Command::Resolve(resolve_args) = &session.cli.command else {
+                panic!("`supdoc {}` should be a resolve command", args.join(" "));
             };
-            let settings = OutputSettings {
-                format: cli.global.format(),
-                verbosity: Verbosity::from_flags(cli.global.quiet, cli.global.verbose),
-                color: false,
-                unicode: false,
-                width: 80,
-                paths: PathStyle::new(cwd.clone(), cwd.clone(), None),
-            };
-            let (stdout, stderr) = (Capture::default(), Capture::default());
-            let mut output =
-                Output::new(settings, Box::new(stdout.clone()), Box::new(stderr.clone()));
-            let context = Context {
-                global: cli.global.clone(),
-                cwd,
-            };
-            let result = run(resolve_args, &context, &mut output);
-            Run {
-                result,
-                stdout: stdout.text(),
-                stderr: stderr.text(),
-            }
+            let result = run(resolve_args, &session.context, &mut session.output);
+            session.finished(result)
         }
     }
 
     #[test]
     fn resolve_lists_rust_symbols_in_file_order() {
-        let project = Project::new();
+        let project = project();
 
         let run = project.resolve(&["resolve", "src/lib.rs"]);
 
@@ -545,7 +450,7 @@ mod tests {
 
     #[test]
     fn resolve_lists_markdown_headings_with_anchor_aliases() {
-        let project = Project::new();
+        let project = project();
         project.write("docs/guide.md", "# News\n\n## What's new\n\ntext\n");
 
         let run = project.resolve(&["resolve", "docs/guide.md"]);
@@ -561,7 +466,7 @@ mod tests {
 
     #[test]
     fn resolve_confirms_one_symbol_and_prints_it() {
-        let project = Project::new();
+        let project = project();
 
         let run = project.resolve(&["resolve", "src/lib.rs", "Config.validate"]);
 
@@ -571,7 +476,7 @@ mod tests {
 
     #[test]
     fn resolve_unknown_symbol_exits_1_with_nearest_in_help() {
-        let project = Project::new();
+        let project = project();
 
         let run = project.resolve(&["resolve", "src/lib.rs", "Config.validat"]);
 
@@ -588,7 +493,7 @@ mod tests {
 
     #[test]
     fn resolve_ambiguous_symbol_exits_1_listing_full_paths() {
-        let project = Project::new();
+        let project = project();
         project.write(
             "src/two.rs",
             "pub struct Foo;\npub struct Bar;\nimpl Foo {\n    pub fn new() {}\n}\nimpl Bar {\n    pub fn new() {}\n}\n",
@@ -608,7 +513,7 @@ mod tests {
 
     #[test]
     fn resolve_namespaced_file_reads_through_the_namespace() {
-        let project = Project::new();
+        let project = project();
         project.write("services/auth/login.rs", "pub fn login() {}\n");
 
         let run = project.resolve(&["resolve", "auth:login.rs", "login"]);
@@ -619,7 +524,7 @@ mod tests {
 
     #[test]
     fn resolve_unknown_namespace_is_usage_error_exit_2() {
-        let project = Project::new();
+        let project = project();
 
         let run = project.resolve(&["resolve", "autt:login.rs"]);
 
@@ -631,7 +536,7 @@ mod tests {
 
     #[test]
     fn resolve_missing_file_is_usage_error_exit_2() {
-        let project = Project::new();
+        let project = project();
 
         let run = project.resolve(&["resolve", "src/nope.rs"]);
 
@@ -641,7 +546,7 @@ mod tests {
 
     #[test]
     fn resolve_fragment_help_keeps_the_config_and_its_command_runs_from_another_directory() {
-        let project = Project::new();
+        let project = project();
         project.write("docs/keep", "");
 
         let run = project.resolve_from(
@@ -667,7 +572,7 @@ mod tests {
 
     #[test]
     fn resolve_unknown_symbol_help_keeps_the_config_from_a_subdirectory() {
-        let project = Project::new();
+        let project = project();
         project.write("docs/keep", "");
 
         let run = project.resolve_from(
@@ -692,7 +597,7 @@ mod tests {
 
     #[test]
     fn resolve_file_hash_symbol_refuses_with_the_separate_form() {
-        let project = Project::new();
+        let project = project();
 
         let run = project.resolve(&["resolve", "src/lib.rs#load"]);
 
@@ -708,7 +613,7 @@ mod tests {
 
     #[test]
     fn resolve_unsupported_extension_exits_1() {
-        let project = Project::new();
+        let project = project();
         project.write("logo.png", "not an image");
 
         let run = project.resolve(&["resolve", "logo.png"]);
@@ -719,7 +624,7 @@ mod tests {
 
     #[test]
     fn resolve_caps_at_limit_and_signals_truncation() {
-        let project = Project::new();
+        let project = project();
 
         let run = project.resolve(&["--json", "resolve", "src/lib.rs", "--limit", "2"]);
 
@@ -742,7 +647,7 @@ mod tests {
 
     #[test]
     fn resolve_limit_0_lists_every_symbol() {
-        let project = Project::new();
+        let project = project();
         project.write(
             "src/lib.rs",
             "pub fn a() {}\npub fn b() {}\npub fn c() {}\n",
@@ -761,7 +666,7 @@ mod tests {
 
     #[test]
     fn resolve_file_with_syntax_error_lists_and_warns() {
-        let project = Project::new();
+        let project = project();
         project.write("src/broken.rs", "pub fn fine() {}\n\npub fn broken( {\n");
 
         let run = project.resolve(&["--json", "resolve", "src/broken.rs"]);
@@ -784,7 +689,7 @@ mod tests {
 
     #[test]
     fn resolve_file_without_symbols_says_to_link_the_whole_file() {
-        let project = Project::new();
+        let project = project();
         project.write("src/empty.rs", "// nothing here\n");
 
         let run = project.resolve(&["resolve", "src/empty.rs"]);
@@ -799,7 +704,7 @@ mod tests {
 
     #[test]
     fn resolve_json_validates_against_its_schema() {
-        let project = Project::new();
+        let project = project();
         let json = project.resolve(&["--json", "resolve", "src/lib.rs"]).json();
 
         let schema = serde_json::to_value(schema()).expect("the resolve schema should serialize");
@@ -817,7 +722,7 @@ mod tests {
 
     #[test]
     fn resolve_errors_from_a_subdirectory_name_the_file_from_the_root() {
-        let project = Project::new();
+        let project = project();
         project.write("docs/guide.md", "# Guide\n");
         fs::write(project.dir.path().join("src/latin1.rs"), b"// caf\xe9\n")
             .expect("the non-UTF-8 fixture should be written");
@@ -846,7 +751,7 @@ mod tests {
         );
         for run in [&not_found, &not_utf8, &no_language] {
             assert!(
-                !shown(run).contains(&project.temp_name()),
+                !shown(run).contains(&temp_name(&project)),
                 "no temp-dir prefix should leak into: {}",
                 shown(run)
             );
@@ -855,7 +760,7 @@ mod tests {
 
     #[test]
     fn resolve_syntax_warning_names_the_file_from_the_root_in_json() {
-        let project = Project::new();
+        let project = project();
         project.write("docs/guide.md", "# Guide\n");
         project.write("src/broken.rs", "pub fn fine() {}\n\npub fn broken( {\n");
 
@@ -872,7 +777,7 @@ mod tests {
 
     #[test]
     fn resolve_directory_is_usage_error_exit_2() {
-        let project = Project::new();
+        let project = project();
 
         let run = project.resolve(&["resolve", "src"]);
 

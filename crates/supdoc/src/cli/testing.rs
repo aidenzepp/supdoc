@@ -65,6 +65,18 @@ pub(crate) fn at(json: &serde_json::Value, pointer: &str) -> serde_json::Value {
         .clone()
 }
 
+/// Reports that a repository-only test was skipped, since a packaged crate lacks the repository.
+#[expect(
+    clippy::print_stderr,
+    reason = "a skipped test must say why; the test harness shows captured stderr on request"
+)]
+pub(crate) fn skip(missing: &Path) {
+    eprintln!(
+        "skipped: {} is absent outside the repository",
+        missing.display()
+    );
+}
+
 /// What one `supdoc` run returned and printed.
 pub(crate) struct Run {
     /// The command's result.

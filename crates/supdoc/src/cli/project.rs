@@ -559,24 +559,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("a fresh temp directory should be created");
         fs::write(dir.path().join("supdoc.config.toml"), "include = 3\n")
             .expect("the fixture config should be written");
-        let cwd = AbsolutePath::new(dir.path()).expect("a temp directory should be absolute");
-        let cli = Cli::try_parse_from(["supdoc", "list"]).expect("`supdoc list` should parse");
-        let settings = OutputSettings {
-            format: cli.global.format(),
-            verbosity: Verbosity::from_flags(cli.global.quiet, cli.global.verbose),
-            color: false,
-            unicode: false,
-            width: 80,
-            paths: PathStyle::new(cwd.clone(), cwd.clone(), None),
-        };
-        let mut output = Output::stdio(settings, anstream::ColorChoice::Never);
-        let context = Context {
-            global: cli.global,
-            cwd,
-        };
 
-        let error = load_config(&context, &mut output)
-            .expect_err("a config with a wrong type should not load");
+        let error = load_in(dir.path()).expect_err("a config with a wrong type should not load");
 
         assert_eq!(
             (error.code(), error.exit_code()),
@@ -597,24 +581,8 @@ mod tests {
             "include = [\"docs\"]\nexclude = oops\n",
         )
         .expect("the fixture config should be written");
-        let cwd = AbsolutePath::new(dir.path()).expect("a temp directory should be absolute");
-        let cli = Cli::try_parse_from(["supdoc", "list"]).expect("`supdoc list` should parse");
-        let settings = OutputSettings {
-            format: cli.global.format(),
-            verbosity: Verbosity::from_flags(cli.global.quiet, cli.global.verbose),
-            color: false,
-            unicode: false,
-            width: 80,
-            paths: PathStyle::new(cwd.clone(), cwd.clone(), None),
-        };
-        let mut output = Output::stdio(settings, anstream::ColorChoice::Never);
-        let context = Context {
-            global: cli.global,
-            cwd,
-        };
 
-        let error = load_config(&context, &mut output)
-            .expect_err("a config with a syntax error should not load");
+        let error = load_in(dir.path()).expect_err("a config with a syntax error should not load");
 
         let site = error.site().expect("a parse error should carry its site");
         assert_eq!(

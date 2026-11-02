@@ -557,64 +557,13 @@ fn write_failed(
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
     use std::time::{Duration, UNIX_EPOCH};
 
-    use clap::Parser as _;
-
-    use crate::cli::args::{Cli, Command, SkillCommand};
+    use crate::cli::args::{Command, SkillCommand};
+    use crate::cli::testing::{Run, Session, at, skip};
     use crate::config::CONFIG_FILE_NAME;
-    use crate::output::{OutputSettings, PathStyle, Verbosity};
 
     use super::*;
-
-    /// A writer that keeps what it is given, shared with the test that reads it back.
-    #[derive(Clone, Default)]
-    struct Capture(Arc<Mutex<Vec<u8>>>);
-
-    impl Capture {
-        fn text(&self) -> String {
-            let bytes = self.0.lock().expect("the capture lock should be free");
-            String::from_utf8(bytes.clone()).expect("captured output should be UTF-8")
-        }
-    }
-
-    impl Write for Capture {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .expect("the capture lock should be free")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// What one run produced.
-    struct Run {
-        result: Result<Outcome, CliError>,
-        stdout: String,
-        stderr: String,
-    }
-
-    impl Run {
-        /// The exit code the process would end with.
-        fn exit_code(&self) -> u8 {
-            match &self.result {
-                Ok(outcome) => outcome.exit_code(),
-                Err(error) => error.exit_code(),
-            }
-        }
-
-        /// stdout parsed as the one JSON document `--json` prints.
-        fn json(&self) -> serde_json::Value {
-            serde_json::from_str(&self.stdout)
-                .unwrap_or_else(|error| panic!("stdout should be JSON ({error}): {}", self.stdout))
-        }
-    }
 
     /// A fresh project directory and a fresh home directory, both empty.
     struct World {
@@ -641,28 +590,12 @@ mod tests {
         /// Runs `supdoc skill install <flags>` in `cwd`, with this world's home and the given
         /// Claude Code config directory.
         fn install_in(&self, cwd: &Path, claude_dir: Option<&Path>, flags: &[&str]) -> Run {
-            let mut words = vec!["supdoc", "skill", "install"];
+            let mut words = vec!["skill", "install"];
             words.extend_from_slice(flags);
-            let cli = Cli::try_parse_from(&words)
-                .unwrap_or_else(|error| panic!("`{}` should parse: {error}", words.join(" ")));
-            let Command::Skill(SkillCommand::Install(args)) = &cli.command else {
-                panic!("`{}` should be skill install", words.join(" "));
-            };
             let cwd = AbsolutePath::new(cwd).expect("the working directory should be absolute");
-            let settings = OutputSettings {
-                format: cli.global.format(),
-                verbosity: Verbosity::from_flags(cli.global.quiet, cli.global.verbose),
-                color: false,
-                unicode: false,
-                width: 80,
-                paths: PathStyle::new(cwd.clone(), cwd.clone(), None),
-            };
-            let (stdout, stderr) = (Capture::default(), Capture::default());
-            let mut output =
-                Output::new(settings, Box::new(stdout.clone()), Box::new(stderr.clone()));
-            let context = Context {
-                global: cli.global.clone(),
-                cwd,
+            let mut session = Session::new(cwd, &words);
+            let Command::Skill(SkillCommand::Install(args)) = &session.cli.command else {
+                panic!("`supdoc {}` should be skill install", words.join(" "));
             };
             let dirs = SkillDirs {
                 home: AbsolutePath::new(self.home.path()),
@@ -670,12 +603,8 @@ mod tests {
                     .and_then(AbsolutePath::new)
                     .map_or(ClaudeConfigDir::Unset, ClaudeConfigDir::Absolute),
             };
-            let result = run(args, &dirs, &context, &mut output);
-            Run {
-                result,
-                stdout: stdout.text(),
-                stderr: stderr.text(),
-            }
+            let result = run(args, &dirs, &session.context, &mut session.output);
+            session.finished(result)
         }
 
         /// Runs `supdoc skill install <flags>` from the project directory.
@@ -712,12 +641,6 @@ mod tests {
                 )
             })
             .collect()
-    }
-
-    /// The value at `pointer` in `json`, which the test expects to be there.
-    fn at<'a>(json: &'a serde_json::Value, pointer: &str) -> &'a serde_json::Value {
-        json.pointer(pointer)
-            .unwrap_or_else(|| panic!("{pointer} should be in {json}"))
     }
 
     /// The action of the first change in a `--json` document.
@@ -839,32 +762,15 @@ mod tests {
     #[test]
     fn skill_install_global_without_home_is_a_usage_error() {
         let world = World::new();
-        let cli = Cli::try_parse_from(["supdoc", "skill", "install", "--global", "--yes"])
-            .expect("the command line should parse");
-        let Command::Skill(SkillCommand::Install(args)) = &cli.command else {
+        let cwd = AbsolutePath::new(world.project.path()).expect("absolute");
+        let mut session = Session::new(cwd, &["skill", "install", "--global", "--yes"]);
+        let Command::Skill(SkillCommand::Install(args)) = &session.cli.command else {
             panic!("should be skill install");
         };
-        let cwd = AbsolutePath::new(world.project.path()).expect("absolute");
-        let context = Context {
-            global: cli.global.clone(),
-            cwd: cwd.clone(),
-        };
         let dirs = SkillDirs::from_vars(|_| None);
-        let settings = OutputSettings {
-            format: cli.global.format(),
-            verbosity: Verbosity::Normal,
-            color: false,
-            unicode: false,
-            width: 80,
-            paths: PathStyle::new(cwd.clone(), cwd, None),
-        };
-        let mut output = Output::new(
-            settings,
-            Box::new(Capture::default()),
-            Box::new(Capture::default()),
-        );
 
-        let error = run(args, &dirs, &context, &mut output).expect_err("--global needs HOME");
+        let error = run(args, &dirs, &session.context, &mut session.output)
+            .expect_err("--global needs HOME");
 
         assert_eq!(error.code(), "cli-skill-no-home");
         assert_eq!(error.exit_code(), CliError::USAGE_EXIT_CODE);
@@ -944,7 +850,8 @@ mod tests {
         let json = run.json();
         assert_eq!(at(&json, "/data/applied"), false);
         assert_eq!(first_action(&json), "replace");
-        let codes: Vec<&str> = at(&json, "/findings")
+        let findings = at(&json, "/findings");
+        let codes: Vec<&str> = findings
             .as_array()
             .expect("findings should be an array")
             .iter()
@@ -964,7 +871,8 @@ mod tests {
         let run = world.install_in(&nested, None, &["--json"]);
 
         let json = run.json();
-        let message = at(&json, "/findings/0/message")
+        let message = at(&json, "/findings/0/message");
+        let message = message
             .as_str()
             .expect("the finding message should be text");
         assert_eq!(
@@ -1419,18 +1327,6 @@ mod tests {
             .collect();
 
         assert!(errors.is_empty(), "schema violations: {errors:?} in {json}");
-    }
-
-    /// Reports that a repository-only test was skipped, since a packaged crate lacks the repository.
-    #[expect(
-        clippy::print_stderr,
-        reason = "a skipped test must say why; the test harness shows captured stderr on request"
-    )]
-    fn skip(missing: &std::path::Path) {
-        eprintln!(
-            "skipped: {} is absent outside the repository",
-            missing.display()
-        );
     }
 
     #[test]
