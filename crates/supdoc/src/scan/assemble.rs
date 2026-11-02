@@ -24,7 +24,7 @@ use crate::read::error::{ReadError, ReadRole};
 use crate::read::links::links;
 use crate::scan::model::{Scan, ScannedLink, Scope, TargetState};
 use crate::scan::targets::{self, CODE_UNKNOWN_NAMESPACE, Occurrence, Parsed, Written};
-use crate::scan::walk::{CODE_IGNORE_TOO_LARGE, walk};
+use crate::scan::walk::{CODE_IGNORE_TOO_LARGE, UnreadDir, walk};
 
 /// Why a scan couldn't run at all (04 S7). Every smaller problem is a finding instead.
 #[derive(Debug, thiserror::Error)]
@@ -176,35 +176,25 @@ fn assemble(
         });
     }
 
-    let walked = walk(config, languages, scope);
-    if let Some(error) = ScanError::ignore_too_large(&walked.findings) {
-        return Err(error);
-    }
-    let mut findings = walked.findings;
+    let mut findings = Vec::new();
     let mut parsed = Parsed::default();
     let mut unread_sources = BTreeSet::new();
     let mut found = SourceLinks::default();
-    for walked_source in &walked.sources {
-        let (source, path) = (walked_source.source.clone(), &walked_source.path);
-        let limit = config.limits_in_effect().parse_timeout.value;
-        let read = parsed
-            .read(path, languages, limit)
-            .and_then(|file| Ok((links(file)?, file)));
-        match read {
-            Ok((raws, file)) => {
-                source_links(config, languages, &source, file, raws, &mut found);
-                parsed.forget(path);
-            }
-            Err(error) => {
-                parsed.forget(path);
-                findings.push(unreadable_source(&source, &error));
-                let _new = unread_sources.insert(source);
-            }
-        }
-    }
+    let front = read_sources(
+        config,
+        languages,
+        scope,
+        &mut parsed,
+        |source, file, raws| source_links(config, languages, source, file, raws, &mut found),
+        |source, error| {
+            findings.push(unreadable_source(source, &error));
+            let _new = unread_sources.insert(source.clone());
+        },
+    )?;
+    findings.extend(front.findings);
 
     // The root itself was read and walked above, so every unread directory lies beneath it.
-    let unread_dirs = walked
+    let unread_dirs = front
         .unread_dirs
         .iter()
         .filter_map(|dir| dir.path.strip_prefix(root))
@@ -241,6 +231,55 @@ fn assemble(
         unread_dirs,
     };
     Ok((scan, parsed, untracked))
+}
+
+/// What [`read_sources`] met besides the sources themselves.
+#[derive(Debug)]
+pub(crate) struct FrontHalf {
+    /// The walk's findings.
+    pub(crate) findings: Vec<Finding>,
+    /// The directories the walk couldn't read.
+    pub(crate) unread_dirs: Vec<UnreadDir>,
+}
+
+/// The front half of a scan, shared with `namespace rename`: walks the project, refuses an
+/// oversized ignore file, then reads each source once under the config's read deadline and hands
+/// its parsed file and raw links to `on_links`, or its failure to `on_unread`. Each file is
+/// dropped once its callback returns.
+///
+/// Effect: reads the filesystem.
+///
+/// # Errors
+///
+/// [`ScanError::IgnoreTooLarge`] when an ignore file the walk met is over `max-ignore-size`.
+pub(crate) fn read_sources(
+    config: &Config,
+    languages: &Languages,
+    scope: &Scope,
+    parsed: &mut Parsed,
+    mut on_links: impl FnMut(&SourcePath, &SourceFile, Vec<RawLink>),
+    mut on_unread: impl FnMut(&SourcePath, ReadError),
+) -> Result<FrontHalf, ScanError> {
+    let walked = walk(config, languages, scope);
+    if let Some(error) = ScanError::ignore_too_large(&walked.findings) {
+        return Err(error);
+    }
+    let limit = config.limits_in_effect().parse_timeout.value;
+    for walked_source in &walked.sources {
+        let (source, path) = (&walked_source.source, &walked_source.path);
+        let read = parsed
+            .read(path, languages, limit)
+            .and_then(|file| Ok((links(file)?, file)));
+        match read {
+            Ok((raws, file)) => on_links(source, file, raws),
+            Err(error) => on_unread(source, error),
+        }
+        parsed.forget(path);
+    }
+    Ok(FrontHalf {
+        findings: walked.findings,
+        unread_dirs: walked.unread_dirs,
+    })
 }
 
 /// Where a finding sits, for sorting by file then position (S8). Findings about no one place sort
