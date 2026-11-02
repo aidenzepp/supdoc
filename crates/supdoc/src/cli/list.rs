@@ -2,7 +2,7 @@
 //!
 //! Read-only, and exits 0 whatever state the links are in: `check` is the gate. A `TARGET` that
 //! names nothing (a missing file, an unknown namespace, a symbol that doesn't resolve) is refused,
-//! so a typo never reads as "no docs depend on this". The run is `load_config → read_lock → scan →
+//! so a typo never reads as "no docs depend on this". The run is `load_config → parse TARGET → read_lock → scan →
 //! reconcile → filter by TARGET and --state → cap at --limit`, with effects only at the two ends.
 
 use std::io::{self, Write};
@@ -12,7 +12,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::check::model::LinkReport;
-use crate::check::reconcile::reconcile;
+use crate::check::reconcile::reconcile_in;
 use crate::config::Config;
 use crate::finding::Finding;
 use crate::link::{LinkKey, LinkRef, SymbolPath, Target};
@@ -22,15 +22,17 @@ use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
 use crate::output::summary::render_summary;
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, OutputError, Report, Summary, TextContext};
+use crate::output::{Output, PathStyle, Report, Summary, TextContext};
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile, SymbolTable};
 use crate::read::error::ResolveError;
 use crate::scan::model::Scope;
 
-use super::args::ListArgs;
+use super::args::{Limit, ListArgs, TargetArg};
 use super::check::LinkJson;
-use super::project::{absolute, ensure_exists, load_config, path_outside, read_lock};
+use super::project::{
+    absolute, command_line, ensure_exists, load_config, path_outside_config, read_lock,
+};
 use super::{CliError, Context, Outcome};
 
 /// Runs `supdoc list`: prints each link in the chosen states, optionally only those pointing at
@@ -52,25 +54,18 @@ use super::{CliError, Context, Outcome};
 /// `resolve-not-found` or `resolve-ambiguous` (1); `scan-root-unreadable` (74), and
 /// `cli-list-output` when the report cannot be written (74).
 pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
-    let config = load_config(context, output, "list")?;
-    let lock = read_lock(&config, &context.cwd)?;
-    let scan = crate::scan::assemble::run(&config, &Languages::builtin(), &Scope::All).map_err(
-        |error| {
-            CliError::new(
-                error.code(),
-                error.to_string(),
-                error.help(),
-                error.exit_code(),
-            )
-        },
-    )?;
-    let model = reconcile(&scan, &lock, &Scope::All);
-
+    let config = load_config(context, output)?;
     let target = args
         .target
-        .as_deref()
+        .as_ref()
         .map(|typed| parse_target(typed, &config, &context.cwd))
         .transpose()?;
+    let lock = read_lock(&config, &context.cwd)?;
+    let scan = crate::scan::assemble::run(&config, &Languages::builtin(), &Scope::All)
+        .map_err(CliError::from)?;
+    let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
+    let model = reconcile_in(&scan, &lock, &Scope::All, &paths);
+
     let wanted = target.as_ref().map(|target| Wanted::new(target, &config));
     let linked: Vec<LinkReport> = model
         .links
@@ -83,7 +78,7 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
         .collect();
     if linked.is_empty()
         && let (Some(target), Some(wanted), Some(typed)) = (&target, &wanted, &args.target)
-        && let Some(error) = wanted.refusal(target, typed, &config, &context.cwd)
+        && let Some(error) = wanted.refusal(target, typed, &config, context)
     {
         return Err(error);
     }
@@ -93,24 +88,26 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
         .collect();
 
     let total = matched.len();
-    let shown = if args.limit == 0 { total } else { args.limit };
-    let report = ListReport::new(&matched, shown, model.findings);
+    let report = ListReport::new(&matched, args.limit, model.findings);
     output
         .report(&report, true)
-        .map_err(|error| output_failed(&error))?;
+        .map_err(|error| CliError::output_failed("cli-list-output", "the link list", &error))?;
     if report.truncated {
         output
-            .note(&format!(
-                "Showing {} of {total} links. Use --limit 0 to show all.",
-                report.links.len()
-            ))
-            .map_err(|error| output_failed(&error))?;
+            .note(
+                &args
+                    .limit
+                    .truncation_note(report.links.len(), total, "links"),
+            )
+            .map_err(|error| CliError::output_failed("cli-list-output", "the link list", &error))?;
     } else if total == 0 {
         let note = match &target {
             Some(target) => format!("No links to {target}."),
             None => "No links found.".to_owned(),
         };
-        output.note(&note).map_err(|error| output_failed(&error))?;
+        output
+            .note(&note)
+            .map_err(|error| CliError::output_failed("cli-list-output", "the link list", &error))?;
     }
     Ok(Outcome::Clean)
 }
@@ -131,28 +128,23 @@ pub fn schema() -> schemars::Schema {
 ///
 /// Returns `cli-path-outside-project` for a plain path outside the project and
 /// `cli-target-invalid` for text that is not a target. Both exit 2.
-fn parse_target(typed: &str, config: &Config, cwd: &AbsolutePath) -> Result<LinkRef, CliError> {
-    let (path, symbol) = match typed.split_once('#') {
-        Some((path, symbol)) => (path, Some(symbol)),
-        None => (typed, None),
-    };
-    let namespaced = path.split_once(':').is_some_and(|(name, rest)| {
-        !rest.is_empty() && name.parse::<crate::namespace::NamespaceName>().is_ok()
-    });
+fn parse_target(arg: &TargetArg, config: &Config, cwd: &AbsolutePath) -> Result<LinkRef, CliError> {
+    let typed = arg.typed();
     let rewritten;
-    let text = if namespaced {
+    let text = if arg.is_namespaced() {
         typed
     } else {
+        let path = arg.file();
         let absolute = absolute(cwd, Path::new(path));
         let relative = absolute
             .strip_prefix(config.root())
-            .ok_or_else(|| path_outside(Path::new(path), config.root()))?;
+            .ok_or_else(|| path_outside_config(Path::new(path), config))?;
         let inside = relative
             .to_str()
             .filter(|inside| !inside.is_empty())
             .ok_or_else(|| target_invalid(typed, "it must name a file inside the project"))?;
         let inside = inside.replace(std::path::MAIN_SEPARATOR, "/");
-        rewritten = match symbol {
+        rewritten = match arg.symbol() {
             Some(symbol) => format!("{inside}#{symbol}"),
             None => inside,
         };
@@ -169,17 +161,6 @@ fn target_invalid(typed: &str, reason: &str) -> CliError {
         format!("`{typed}` is not a link target: {reason}"),
         "Write TARGET as `path`, `path#symbol` or `ns:path#symbol`",
         CliError::USAGE_EXIT_CODE,
-    )
-}
-
-/// The error for a report that could not be written.
-fn output_failed(error: &OutputError) -> CliError {
-    CliError::new(
-        "cli-list-output",
-        format!("cannot write the link list: {error}"),
-        "Check that standard output and standard error are open and writable, or redirect both \
-         to a file with `> supdoc.out 2>&1`",
-        CliError::IO_EXIT_CODE,
     )
 }
 
@@ -205,11 +186,11 @@ pub(crate) struct ListReport {
 }
 
 impl ListReport {
-    /// The report for `matched`, showing the first `shown` links.
-    fn new(matched: &[LinkReport], shown: usize, loose: Vec<Finding>) -> Self {
+    /// The report for `matched`, showing at most `limit` links.
+    fn new(matched: &[LinkReport], limit: Limit, loose: Vec<Finding>) -> Self {
         let summary = Summary::tally(matched.iter().map(|link| link.state));
-        let truncated = matched.len() > shown;
-        let listed: Vec<&LinkReport> = matched.iter().take(shown).collect();
+        let truncated = limit.truncated(matched.len());
+        let listed: Vec<&LinkReport> = limit.take(matched).collect();
         Self {
             summary,
             links: listed.iter().map(|link| LinkJson::from(*link)).collect(),
@@ -265,7 +246,7 @@ impl Report for ListReport {
 ///
 /// Fails if writing to `out` fails.
 fn render_link(context: &TextContext, link: &LinkJson, out: &mut dyn Write) -> io::Result<()> {
-    let arrow = if context.unicode { "→" } else { "->" };
+    let arrow = context.arrow();
     let mut place = visible(&context.paths.text(&link.key.source));
     if let Some(first) = link.locations.first() {
         place = format!("{place}:{}", first.line);
@@ -274,10 +255,7 @@ fn render_link(context: &TextContext, link: &LinkJson, out: &mut dyn Write) -> i
             place = format!("{place} (+{more} more)");
         }
     }
-    let mut target = link.key.target.to_string();
-    if let Some(symbol) = &link.key.symbol {
-        target = format!("{target}#{symbol}");
-    }
+    let target = link.key.target_text();
     let state = link.state.to_string();
     writeln!(out, "{state:<8}  {place}  {arrow}  {}", visible(&target))
 }
@@ -424,19 +402,20 @@ impl Wanted {
     fn refusal(
         &self,
         target: &LinkRef,
-        typed: &str,
+        typed: &TargetArg,
         config: &Config,
-        cwd: &AbsolutePath,
+        context: &Context,
     ) -> Option<CliError> {
+        let cwd = &context.cwd;
         if let Some(name) = target.target.namespace()
             && config.namespace(name).is_none()
         {
             return Some(unknown_namespace(config, name));
         }
-        let typed_file = Path::new(typed.split_once('#').map_or(typed, |(file, _)| file));
+        let typed_file = Path::new(typed.file());
         let file = match &self.place {
             Place::File(file) => file,
-            Place::Unlocated(_) => return Some(path_outside(typed_file, config.root())),
+            Place::Unlocated(_) => return Some(path_outside_config(typed_file, config)),
         };
         if let Err(error) = ensure_exists(file, typed_file, cwd) {
             let namespaced = target
@@ -454,7 +433,12 @@ impl Wanted {
             SymbolFilter::Unresolved { error, .. } => Some(CliError::new(
                 error.code(),
                 error.message_naming(&relative_to(config.root(), error.file())),
-                error.help_naming(&typed_file.display()),
+                error.help_running(&command_line(
+                    context,
+                    "resolve",
+                    &[typed_file.display().to_string()],
+                    &[],
+                )),
                 CliError::REFUSED_EXIT_CODE,
             )),
             SymbolFilter::Any | SymbolFilter::Text(_) | SymbolFilter::Resolved { .. } => None,
@@ -494,7 +478,7 @@ fn unknown_namespace(config: &Config, name: &NamespaceName) -> CliError {
         .keys()
         .map(NamespaceName::as_str)
         .collect();
-    let help = match crate::scan::targets::close_match(name.as_str(), defined.iter().copied()) {
+    let help = match crate::suggest::close_match(name.as_str(), defined.iter().copied()) {
         Some(nearest) => format!(
             "did you mean `{nearest}`? Defined namespaces: `{}`",
             defined.join("`, `")
@@ -515,66 +499,23 @@ fn unknown_namespace(config: &Config, name: &NamespaceName) -> CliError {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::sync::{Arc, Mutex};
-
-    use clap::Parser as _;
 
     use super::*;
-    use crate::cli::args::{Cli, Command};
-    use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
-    use crate::output::{OutputSettings, PathStyle, Verbosity};
-    use crate::scan::model::TargetState;
+    use crate::cli::args::Command;
+    use crate::cli::testing::{Project, Run, Session};
 
     /// The code the guides point at.
     const LIB: &str = "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\n\
                        pub fn sub(a: i32, b: i32) -> i32 {\n    a - b\n}\n";
 
-    /// A buffer `Output` writes into and the test reads back.
-    #[derive(Clone, Default)]
-    struct Capture(Arc<Mutex<Vec<u8>>>);
-
-    impl Capture {
-        fn text(&self) -> String {
-            let bytes = self.0.lock().expect("the capture lock should be free");
-            String::from_utf8(bytes.clone()).expect("captured output should be UTF-8")
-        }
-    }
-
-    impl io::Write for Capture {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .expect("the capture lock should be free")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// What one `supdoc list` run returned and printed.
-    struct Run {
-        result: Result<Outcome, CliError>,
-        stdout: String,
-        stderr: String,
+    /// A project with the code the guides point at.
+    fn project() -> Project {
+        let project = Project::empty();
+        project.write("src/lib.rs", LIB);
+        project
     }
 
     impl Run {
-        fn exit_code(&self) -> u8 {
-            match &self.result {
-                Ok(outcome) => outcome.exit_code(),
-                Err(error) => error.exit_code(),
-            }
-        }
-
-        fn json(&self) -> serde_json::Value {
-            serde_json::from_str(&self.stdout)
-                .unwrap_or_else(|error| panic!("stdout should be JSON ({error}): {}", self.stdout))
-        }
-
         /// Each listed link as `source target#symbol state` text, in output order.
         fn listed(&self) -> Vec<String> {
             let json = self.json();
@@ -608,52 +549,10 @@ mod tests {
         }
     }
 
-    /// A project in a fresh temporary directory.
-    struct Project {
-        dir: tempfile::TempDir,
-    }
-
     impl Project {
-        fn new() -> Self {
-            let project = Self {
-                dir: tempfile::tempdir().expect("a fresh temp directory should be created"),
-            };
-            project.write("src/lib.rs", LIB);
-            project
-        }
-
-        fn root(&self) -> AbsolutePath {
-            AbsolutePath::new(self.dir.path()).expect("a temp directory should be absolute")
-        }
-
         /// The absolute path of `relative` under the root.
         fn absolute(&self, relative: &str) -> String {
             self.dir.path().join(relative).display().to_string()
-        }
-
-        fn write(&self, relative: &str, text: &str) {
-            let path = self.dir.path().join(relative);
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).expect("the fixture directory should be created");
-            }
-            fs::write(&path, text).expect("the fixture file should be written");
-        }
-
-        /// Records every present link's current hash in `supdoc.lock`.
-        fn record_all(&self) {
-            let config = Config::load(&self.root()).expect("the fixture config should load");
-            let scan = crate::scan::assemble::run(&config, &Languages::builtin(), &Scope::All)
-                .expect("the fixture project should scan");
-            let mut lock = Lockfile::default();
-            for (key, link) in scan.links {
-                if let TargetState::Present { hash, .. } = link.target {
-                    let _previous = lock.insert(key, hash);
-                }
-            }
-            let path = AbsolutePath::new(&self.dir.path().join(LOCK_FILE_NAME))
-                .expect("the lockfile path should be absolute");
-            lock.write(&path)
-                .expect("the fixture lockfile should be written");
         }
 
         /// Runs `supdoc <args>` from the project root. `args` must start with `list`.
@@ -663,47 +562,19 @@ mod tests {
 
         /// Runs `supdoc <args>` from the directory `relative` under the root.
         fn list_from(&self, relative: &str, args: &[&str]) -> Run {
-            let cwd = AbsolutePath::new(&self.dir.path().join(relative))
-                .expect("a directory under the root should be absolute");
-            let command_line: Vec<&str> = std::iter::once("supdoc")
-                .chain(args.iter().copied())
-                .collect();
-            let cli = Cli::try_parse_from(&command_line).unwrap_or_else(|error| {
-                panic!("`{}` should parse: {error}", command_line.join(" "))
-            });
-            let Command::List(list_args) = &cli.command else {
-                panic!("`{}` should be a list command", command_line.join(" "));
+            let mut session = Session::new(self.root_of(relative), args);
+            let Command::List(list_args) = &session.cli.command else {
+                panic!("`supdoc {}` should be a list command", args.join(" "));
             };
-            let settings = OutputSettings {
-                format: cli.global.format(),
-                verbosity: Verbosity::from_flags(cli.global.quiet, cli.global.verbose),
-                color: false,
-                unicode: false,
-                width: 80,
-                paths: PathStyle::new(cwd.clone(), cwd.clone(), None),
-            };
-            let (stdout, stderr) = (Capture::default(), Capture::default());
-            let mut output =
-                Output::new(settings, Box::new(stdout.clone()), Box::new(stderr.clone()));
-            let context = Context {
-                global: cli.global.clone(),
-                cwd,
-                home: None,
-                claude_config_dir: None,
-            };
-            let result = run(list_args, &context, &mut output);
-            Run {
-                result,
-                stdout: stdout.text(),
-                stderr: stderr.text(),
-            }
+            let result = run(list_args, &session.context, &mut session.output);
+            session.finished(result)
         }
     }
 
     /// A project with one passed link (`docs/a.md` to `add`) and one new link (`docs/b.md` to
     /// `sub`).
     fn passed_and_new() -> Project {
-        let project = Project::new();
+        let project = project();
         project.write("docs/a.md", "See [add](../src/lib.rs#add).\n");
         project.record_all();
         project.write("docs/b.md", "See [sub](../src/lib.rs#sub).\n");
@@ -731,7 +602,7 @@ mod tests {
 
     #[test]
     fn list_file_target_matches_whole_file_and_symbol_links() {
-        let project = Project::new();
+        let project = project();
         project.write("src/other.rs", "pub fn other() {}\n");
         project.write(
             "docs/a.md",
@@ -750,7 +621,7 @@ mod tests {
 
     #[test]
     fn list_symbol_target_excludes_other_symbols() {
-        let project = Project::new();
+        let project = project();
         project.write(
             "docs/a.md",
             "[whole](../src/lib.rs), [add](../src/lib.rs#add), [sub](../src/lib.rs#sub).\n",
@@ -768,7 +639,7 @@ mod tests {
 
     #[test]
     fn list_symbol_target_matches_a_link_that_no_longer_resolves_by_its_text() {
-        let project = Project::new();
+        let project = project();
         project.write("docs/a.md", "[gone](../src/lib.rs#gone).\n");
 
         let run = project.list(&["--json", "list", "src/lib.rs#gone"]);
@@ -783,7 +654,7 @@ mod tests {
 
     #[test]
     fn list_namespaced_and_plain_path_targets_match_the_same_links() {
-        let project = Project::new();
+        let project = project();
         project.write(
             "supdoc.config.toml",
             "[namespaces]\nauth = \"services/auth\"\n",
@@ -808,7 +679,7 @@ mod tests {
 
     #[test]
     fn list_target_is_relative_to_cwd_from_a_subdirectory() {
-        let project = Project::new();
+        let project = project();
         project.write("supdoc.config.toml", "");
         project.write("docs/a.md", "[add](../src/lib.rs#add).\n");
 
@@ -836,8 +707,30 @@ mod tests {
     }
 
     #[test]
+    fn list_link_failed_help_names_the_source_from_the_current_directory() {
+        let project = project();
+        project.write("supdoc.config.toml", "");
+        project.write("docs/a.md", "See [add](../src/lib.rs#add).\n");
+        project.record_all();
+        project.write("src/lib.rs", &LIB.replace("a + b", "b + a"));
+
+        let run = project.list_from("docs", &["--json", "list"]);
+
+        let json = run.json();
+        let help = json
+            .pointer("/data/links/0/finding/help")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("the changed link should carry help: {json}"));
+        assert!(
+            help.contains("supdoc update a.md --yes")
+                && project.root().as_path().join("docs/a.md").exists(),
+            "from docs/ the help should name `a.md`, which exists there: {help}"
+        );
+    }
+
+    #[test]
     fn list_target_accepts_dot_slash_and_an_absolute_path_inside_the_root() {
-        let project = Project::new();
+        let project = project();
         project.write("docs/a.md", "[add](../src/lib.rs#add).\n");
         let absolute = format!("{}#add", project.absolute("src/lib.rs"));
 
@@ -855,7 +748,7 @@ mod tests {
 
     #[test]
     fn list_target_outside_the_root_is_the_path_error() {
-        let project = Project::new();
+        let project = project();
 
         let run = project.list(&["--json", "list", "/elsewhere/src/lib.rs"]);
 
@@ -865,6 +758,32 @@ mod tests {
         assert_eq!(
             (error.code(), error.exit_code()),
             ("cli-path-outside-project", 2)
+        );
+    }
+
+    #[test]
+    fn list_target_outside_the_directory_without_a_config_says_no_config_was_found() {
+        let project = project();
+        let config = project.dir.path().join(crate::config::CONFIG_FILE_NAME);
+        assert!(!config.exists(), "the fixture should have no config");
+
+        let run = project.list(&["list", "/elsewhere/src/lib.rs"]);
+
+        let error = run
+            .result
+            .expect_err("a target outside the directory should be refused");
+        assert_eq!(error.code(), "cli-path-outside-project");
+        assert!(
+            error
+                .message()
+                .ends_with("and no supdoc.config.toml was found above it"),
+            "the message should say no config was found: {}",
+            error.message()
+        );
+        assert!(
+            error.help().contains("supdoc -c <dir>/supdoc.config.toml"),
+            "the help should offer -c: {}",
+            error.help()
         );
     }
 
@@ -890,7 +809,7 @@ mod tests {
 
     /// A project where 101 documents link to `src/lib.rs`.
     fn many_links() -> Project {
-        let project = Project::new();
+        let project = project();
         for number in 0..101 {
             project.write(&format!("docs/n{number:03}.md"), "[lib](../src/lib.rs).\n");
         }
@@ -943,7 +862,7 @@ mod tests {
 
     #[test]
     fn list_no_match_exits_0_with_stderr_note_and_empty_stdout() {
-        let project = Project::new();
+        let project = project();
         project.write("docs/a.md", "[add](../src/lib.rs#add).\n");
         project.write("src/other.rs", "pub fn other() {}\n");
 
@@ -956,7 +875,7 @@ mod tests {
 
     #[test]
     fn list_of_a_missing_file_is_refused_not_no_links() {
-        let project = Project::new();
+        let project = project();
         project.write("docs/a.md", "[add](../src/lib.rs#add).\n");
         project.write("src/lib.rs", LIB);
 
@@ -970,7 +889,7 @@ mod tests {
 
     #[test]
     fn list_of_a_misspelled_symbol_is_refused_with_the_nearest_symbol() {
-        let project = Project::new();
+        let project = project();
         project.write("docs/a.md", "[add](../src/lib.rs#add).\n");
         project.write("src/lib.rs", LIB);
 
@@ -989,7 +908,7 @@ mod tests {
 
     #[test]
     fn list_of_an_unknown_namespace_is_refused_naming_the_defined_ones() {
-        let project = Project::new();
+        let project = project();
         project.write(
             "supdoc.config.toml",
             "[namespaces]\nauth = \"services/auth\"\n",
@@ -1011,7 +930,7 @@ mod tests {
 
     #[test]
     fn list_of_a_missing_namespaced_file_points_at_the_namespace_directory() {
-        let project = Project::new();
+        let project = project();
         project.write(
             "supdoc.config.toml",
             "[namespaces]\nauth = \"services/auth\"\n",
@@ -1035,7 +954,7 @@ mod tests {
 
     #[test]
     fn list_still_shows_links_to_a_file_that_is_gone() {
-        let project = Project::new();
+        let project = project();
         project.write("docs/a.md", "[add](../src/gone.rs#add).\n");
 
         let run = project.list(&["--json", "list", "src/gone.rs#add"]);
@@ -1062,7 +981,7 @@ mod tests {
 
     #[test]
     fn text_shows_state_first_place_and_summary() {
-        let project = Project::new();
+        let project = project();
         project.write(
             "docs/a.md",
             "[add](../src/lib.rs#add)\n\nAgain [add](../src/lib.rs#add).\n",

@@ -1,24 +1,28 @@
-//! End-to-end parity with docref: runs the built `supdoc` binary against copies of the fixtures in
+//! End-to-end tests: run the built `supdoc` binary against copies of the fixtures in
 //! `tests/fixtures/` and checks what lands in `supdoc.lock`, the exit codes and the reports.
 //!
-//! These are docref's 11 fixtures and 60 integration tests (`docref/tests/integration.rs`), adjusted to
-//! supdoc's decisions (planning 01–06 and the approved command specs):
+//! The modules cover: `commands`, `helps` and `json` (command surface and output), `lifecycle`
+//! (init, update, check), `containment`, `resolve`, `paths`, `ignore`, `namespaces` and `languages`
+//! (what links resolve to), and `list` and `list_containment` (the `list` command).
+//!
+//! The suite began as a port of docref's integration tests (`docref/tests/integration.rs`), adjusted
+//! to supdoc's decisions:
 //!
 //! - `docref init` recorded the lockfile. supdoc's `init` writes only a starter config, and the first
-//!   `supdoc update --yes` records the lockfile (05 C10), so tests record with `update --yes`.
+//!   `supdoc update --yes` records the lockfile, so tests record with `update --yes`.
 //! - `.docref.toml` and `.docref.lock` are `supdoc.config.toml` and `supdoc.lock`. Patterns are globs
-//!   without trailing slashes (01).
-//! - A hash covers a symbol's exact bytes (03 R6), so reformatting inside a symbol fails its link,
+//!   without trailing slashes.
+//! - A hash covers a symbol's exact bytes, so reformatting inside a symbol fails its link,
 //!   where docref normalized whitespace away. A comment above an item is outside it and still passes.
-//! - docref's STALE is supdoc's `failed`. Both `failed` and `broken` exit 1 (05 C4); docref used 2 for
+//! - docref's STALE is supdoc's `failed`. Both `failed` and `broken` exit 1; docref used 2 for
 //!   broken.
-//! - `update` narrows by the files links are written in, not by target (05 C9): docref's
+//! - `update` narrows by the files links are written in, not by target: docref's
 //!   `update src/lib.rs#A` and `update --from docs/guide.md` both become `update docs/guide.md --yes`.
-//!   Writes preview unless `--yes` (06 X4).
-//! - `status` and `refs` are `list` and `list TARGET` (06a §5.4). `--format json` is `--json`, and passed
+//!   Writes preview unless `--yes`.
+//! - `status` and `refs` are `list` and `list TARGET`. `--format json` is `--json`, and passed
 //!   links show in `check --json` only with `-v`.
 //! - A Markdown dotted path starts at the top heading (`overview.foo.example`), and a duplicate heading
-//!   answers to its numbered GitHub anchor (`example-1`) instead of being ambiguous (03 R12). The
+//!   answers to its numbered GitHub anchor (`example-1`) instead of being ambiguous. The
 //!   ambiguity test moved to a Rust method name two types share; the `scoped` fixture gained `Server`
 //!   for it.
 //! - docref's `wholefile_update_bare_path` (`update src/lib.rs` accepts the whole-file link while `add`
@@ -26,8 +30,12 @@
 //!   with no narrowing by target, the two links sit in different docs and `update docs/guide.md --yes`
 //!   accepts one.
 //! - Not ported, because supdoc has no such command: `namespace remove` (2 tests), `namespace add`
-//!   (1 test) and `watch` (2 tests, "Later" in 06).
+//!   (1 test) and `watch` (2 tests, still planned).
+//!
+//! Unix only: the suite uses Unix permissions, symlinks and `sh`. Windows is untested, and CI runs
+//! only on Linux.
 
+#![cfg(unix)]
 #![cfg_attr(
     test,
     allow(
@@ -39,6 +47,31 @@
 
 #[cfg(test)]
 mod support;
+
+/// Whether mode `000` keeps this user out of a directory. It doesn't for root, where the
+/// permission tests can't happen: each of them prints a skip reason and returns early.
+#[cfg(test)]
+fn permissions_restrict_this_user(test: &str) -> bool {
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("the probe directory should be creatable");
+    let file = dir.path().join("probe");
+    std::fs::write(&file, "").expect("the probe file should be writable");
+    let locked = std::fs::Permissions::from_mode(0o000);
+    std::fs::set_permissions(dir.path(), locked).expect("the probe directory should be lockable");
+    let restricted = std::fs::symlink_metadata(&file).is_err();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+        .expect("the probe directory should be unlockable");
+    if !restricted {
+        // Written to the process's stderr directly, which `cargo test` shows even for a passing test.
+        let _ignored = writeln!(
+            std::io::stderr(),
+            "SKIPPED {test}: mode 000 does not restrict this user (running as root?)"
+        );
+    }
+    restricted
+}
 
 #[cfg(test)]
 mod commands;

@@ -48,11 +48,16 @@ pub mod skill;
 /// `supdoc schema`.
 pub mod schema;
 
+/// Test doubles the unit tests of this module share.
+#[cfg(test)]
+pub(crate) mod testing;
+
 use std::fmt;
 
 use crate::finding::{Location, Snippet};
-use crate::output::Output;
+use crate::output::{Output, OutputError};
 use crate::path::AbsolutePath;
+use crate::scan::assemble::ScanError;
 
 use args::{Command, ConfigCommand, GlobalArgs, Inspect, NamespaceCommand, SkillCommand};
 
@@ -63,10 +68,6 @@ pub struct Context {
     pub global: GlobalArgs,
     /// The current directory, read once by `main` (01).
     pub cwd: AbsolutePath,
-    /// The user's home directory (`HOME`), read once by `main`.
-    pub home: Option<AbsolutePath>,
-    /// Claude Code's config directory (`CLAUDE_CONFIG_DIR`), read once by `main`.
-    pub claude_config_dir: Option<AbsolutePath>,
 }
 
 /// How a command that ran to completion ended (06 X7).
@@ -145,6 +146,23 @@ impl CliError {
         }
     }
 
+    /// The error for a report that could not be written, for `subject` such as `the check report`.
+    ///
+    /// Every command's report failure shares this help and the I/O exit code.
+    #[must_use]
+    pub(crate) fn output_failed(code: &'static str, subject: &str, error: &OutputError) -> Self {
+        Self::new(
+            code,
+            format!(
+                "cannot write {subject}: {}",
+                without_os_code(&error.to_string())
+            ),
+            "Check that standard output and standard error are open and writable, or redirect \
+             both to a file with `> supdoc.out 2>&1`",
+            Self::IO_EXIT_CODE,
+        )
+    }
+
     /// The exit code for a supdoc bug (06 X7).
     pub const BUG_EXIT_CODE: u8 = 70;
 
@@ -191,6 +209,27 @@ impl CliError {
     }
 }
 
+impl From<ScanError> for CliError {
+    fn from(error: ScanError) -> Self {
+        Self::new(
+            error.code(),
+            error.to_string(),
+            error.help(),
+            error.exit_code(),
+        )
+    }
+}
+
+/// `error`'s reason in lowercase, without the operating system's error-code suffix.
+pub(crate) fn cause(error: &std::io::Error) -> String {
+    without_os_code(&error.to_string()).to_lowercase()
+}
+
+/// `text` without a trailing ` (os ...)` code such as the one `io::Error` appends.
+fn without_os_code(text: &str) -> &str {
+    text.split(" (os ").next().unwrap_or(text)
+}
+
 impl fmt::Display for CliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.message)
@@ -207,7 +246,12 @@ impl std::error::Error for CliError {}
 /// # Errors
 ///
 /// Returns the command's own [`CliError`].
-pub fn run(command: &Command, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
+pub fn run(
+    command: &Command,
+    skill_dirs: &skill::SkillDirs,
+    context: &Context,
+    output: &mut Output,
+) -> Result<Outcome, CliError> {
     match command {
         Command::Check(args) => check::run(args, context, output),
         Command::Update(args) => update::run(args, context, output),
@@ -216,65 +260,14 @@ pub fn run(command: &Command, context: &Context, output: &mut Output) -> Result<
         Command::Resolve(args) => resolve::run(args, context, output),
         Command::Init(args) => init::run(args, context, output),
         Command::Config(ConfigCommand::Show) => config::run(Inspect::ConfigShow, context, output),
-        Command::Namespace(NamespaceCommand::List(args)) => config::run(
-            Inspect::NamespaceList { limit: args.limit },
-            context,
-            output,
-        ),
+        Command::Namespace(NamespaceCommand::List(args)) => {
+            config::run(Inspect::NamespaceList(args), context, output)
+        }
         Command::Namespace(NamespaceCommand::Rename(args)) => rename::run(args, context, output),
         Command::Schema(args) => schema::run(args, context, output),
         Command::Completions(args) => completions::run(args, context, output),
-        Command::Skill(SkillCommand::Install(args)) => skill::run(args, context, output),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use clap::CommandFactory;
-
-    use crate::cli::args::Cli;
-
-    /// One invocation per leaf subcommand, that the arguments must cover.
-    const INVOCATIONS: [(&str, &[&str]); 12] = [
-        ("check", &["supdoc", "check"]),
-        ("update", &["supdoc", "update"]),
-        ("fix", &["supdoc", "fix"]),
-        ("list", &["supdoc", "list"]),
-        ("resolve", &["supdoc", "resolve", "src/lib.rs"]),
-        ("init", &["supdoc", "init"]),
-        ("config show", &["supdoc", "config", "show"]),
-        ("namespace list", &["supdoc", "namespace", "list"]),
-        (
-            "namespace rename",
-            &["supdoc", "namespace", "rename", "auth", "identity"],
-        ),
-        ("schema", &["supdoc", "schema"]),
-        ("completions", &["supdoc", "completions", "zsh"]),
-        ("skill install", &["supdoc", "skill", "install"]),
-    ];
-
-    #[test]
-    fn every_leaf_subcommand_has_an_invocation_above() {
-        fn collect_leaves(command: &clap::Command, prefix: &str, found: &mut Vec<String>) {
-            for subcommand in command.get_subcommands() {
-                if subcommand.get_name() == "help" {
-                    continue;
-                }
-                let path = format!("{prefix}{}", subcommand.get_name());
-                if subcommand.has_subcommands() {
-                    collect_leaves(subcommand, &format!("{path} "), found);
-                } else {
-                    found.push(path);
-                }
-            }
+        Command::Skill(SkillCommand::Install(args)) => {
+            skill::run(args, skill_dirs, context, output)
         }
-
-        let mut leaves = Vec::new();
-        collect_leaves(&Cli::command(), "", &mut leaves);
-        leaves.sort();
-        let mut invoked: Vec<&str> = INVOCATIONS.iter().map(|(name, _)| *name).collect();
-        invoked.sort_unstable();
-
-        assert_eq!(leaves, invoked, "leaf subcommands vs tested invocations");
     }
 }

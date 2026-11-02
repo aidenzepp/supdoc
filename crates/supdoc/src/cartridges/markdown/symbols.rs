@@ -1,7 +1,7 @@
-//! Markdown headings as symbols (03 R12).
+//! Markdown headings as symbols.
 //!
 //! Each heading is one symbol whose range is its whole section: the heading, its body and every
-//! subsection, up to the next heading of the same or a higher level (03 R7).
+//! subsection, up to the next heading of the same or a higher level.
 //!
 //! A heading answers to two names that never clash, because GitHub anchors never contain `.`:
 //!
@@ -22,7 +22,7 @@ use std::ops::Range;
 
 use tree_sitter::{Node, Parser};
 
-use crate::link::SymbolPath;
+use crate::link::{SymbolPath, SymbolSegment};
 use crate::read::cartridge::{SourceFile, Symbol, SymbolTable};
 
 /// The symbols of a Markdown `file`: one per nameable heading, in document order.
@@ -46,27 +46,26 @@ pub fn heading_symbols(file: &SourceFile) -> SymbolTable {
         {
             let _closed = open.pop();
         }
-        let slug = slugify(&reader.display(heading.node));
-        if slug.is_empty() {
+        let Ok(slug) = SymbolSegment::new(slugify(&reader.display(heading.node))) else {
             continue;
-        }
+        };
         let Some(parent) = open.last_mut() else {
             continue;
         };
-        let mut segments = parent.segments.clone();
-        segments.push(parent.children.claim(&slug));
+        let path = match &parent.path {
+            Some(parent_path) => parent_path.child(parent.children.claim(&slug)),
+            None => SymbolPath::root(parent.children.claim(&slug)),
+        };
         let end = headings
             .iter()
             .skip(index + 1)
             .find(|next| next.level <= heading.level)
             .map_or(root.end_byte(), |next| next.node.start_byte());
         let range = heading.node.start_byte()..end;
-        if let Some(symbol) = symbol(&segments, &anchors.claim(&slug), range) {
-            symbols.push(symbol);
-        }
+        symbols.push(symbol(path.clone(), anchors.claim(&slug), range));
         open.push(Open {
             level: heading.level,
-            segments,
+            path: Some(path),
             children: Siblings::default(),
         });
     }
@@ -121,8 +120,8 @@ fn level_of(heading: Node<'_>) -> Option<u8> {
 struct Open {
     /// The heading's level; the root is 0.
     level: u8,
-    /// Its dotted path. Empty for the root.
-    segments: Vec<String>,
+    /// Its dotted path. `None` for the root.
+    path: Option<SymbolPath>,
     /// The slugs its direct children have claimed.
     children: Siblings,
 }
@@ -132,7 +131,7 @@ impl Open {
     fn root() -> Self {
         Self {
             level: 0,
-            segments: Vec::new(),
+            path: None,
             children: Siblings::default(),
         }
     }
@@ -192,21 +191,19 @@ fn first_inline(node: Node<'_>) -> Option<Node<'_>> {
         .find(|child| child.kind() == "inline")
 }
 
-/// The symbol for a section, named by `segments` and answering to `anchor` too. `None` only if
-/// a segment isn't a valid symbol segment, which a slug never is.
-fn symbol(segments: &[String], anchor: &str, range: Range<usize>) -> Option<Symbol> {
-    let path = SymbolPath::from_segments(segments.to_vec()).ok()?;
-    let anchor = SymbolPath::from_segments(vec![anchor.to_owned()]).ok()?;
+/// The symbol for a section, named by `path` and answering to `anchor` too.
+fn symbol(path: SymbolPath, anchor: SymbolSegment, range: Range<usize>) -> Symbol {
+    let anchor = SymbolPath::root(anchor);
     let aliases = if anchor == path {
         Vec::new()
     } else {
         vec![anchor]
     };
-    Some(Symbol {
+    Symbol {
         path,
         aliases,
         range,
-    })
+    }
 }
 
 /// The text `node` shows once rendered: markup delimiters dropped, links and images reduced to
@@ -270,19 +267,19 @@ fn slugify(text: &str) -> String {
 #[derive(Debug, Default)]
 struct Siblings {
     /// Every name handed out, suffixed or not.
-    used: HashSet<String>,
+    used: HashSet<SymbolSegment>,
     /// The last suffix tried for each slug.
-    suffixes: HashMap<String, usize>,
+    suffixes: HashMap<SymbolSegment, usize>,
 }
 
 impl Siblings {
     /// `slug` if unused, else `slug-1`, `slug-2`, … whichever is free first.
-    fn claim(&mut self, slug: &str) -> String {
-        let mut name = slug.to_owned();
+    fn claim(&mut self, slug: &SymbolSegment) -> SymbolSegment {
+        let mut name = slug.clone();
         while self.used.contains(&name) {
-            let next = self.suffixes.entry(slug.to_owned()).or_insert(0);
+            let next = self.suffixes.entry(slug.clone()).or_insert(0);
             *next += 1;
-            name = format!("{slug}-{next}");
+            name = slug.numbered(*next);
         }
         let _newly_used = self.used.insert(name.clone());
         name
@@ -292,64 +289,18 @@ impl Siblings {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
-    use std::sync::OnceLock;
 
     use super::*;
+    use crate::cartridges::markdown::cartridge::cartridge;
     use crate::hash::HashSettings;
     use crate::path::AbsolutePath;
-    use crate::read::cartridge::{Cartridge, CompiledQueries, LanguageId, MarkdownRegion};
     use crate::read::hash::hash_symbol;
-
-    /// A Markdown cartridge with no queries, enough to parse the block grammar.
-    #[derive(Debug)]
-    struct TestMarkdown {
-        /// The grammar, created on first use.
-        grammar: OnceLock<tree_sitter::Language>,
-        /// Empty queries, compiled on first use.
-        queries: OnceLock<CompiledQueries>,
-    }
-
-    impl Cartridge for TestMarkdown {
-        fn id(&self) -> LanguageId {
-            LanguageId::new("markdown")
-        }
-
-        fn extensions(&self) -> &'static [&'static str] {
-            &["md"]
-        }
-
-        fn grammar(&self) -> &tree_sitter::Language {
-            self.grammar.get_or_init(|| tree_sitter_md::LANGUAGE.into())
-        }
-
-        fn queries(&self) -> &CompiledQueries {
-            self.queries.get_or_init(|| {
-                let empty = || {
-                    tree_sitter::Query::new(self.grammar(), "")
-                        .expect("an empty query should compile against any grammar")
-                };
-                CompiledQueries::new(empty(), empty())
-            })
-        }
-
-        fn symbols(&self, file: &SourceFile) -> SymbolTable {
-            heading_symbols(file)
-        }
-
-        fn markdown_regions(&self, _file: &SourceFile) -> Vec<MarkdownRegion> {
-            Vec::new()
-        }
-    }
-
-    static MARKDOWN: TestMarkdown = TestMarkdown {
-        grammar: OnceLock::new(),
-        queries: OnceLock::new(),
-    };
 
     fn parse(text: &str) -> SourceFile {
         let path = AbsolutePath::new(Path::new("/repo/docs/guide.md"))
             .expect("the fixture path should be absolute");
-        SourceFile::from_text(path, text.to_owned(), &MARKDOWN)
+        let markdown = cartridge().expect("the built-in Markdown cartridge should load");
+        SourceFile::from_text(path, text.to_owned(), markdown)
             .expect("the Markdown grammar should parse any text")
     }
 
@@ -452,6 +403,7 @@ mod tests {
                 )
                 .expect("the query should resolve");
             hash_symbol(file, symbol, HashSettings::default())
+                .expect("the symbol should lie in its own file")
         };
 
         assert_ne!(

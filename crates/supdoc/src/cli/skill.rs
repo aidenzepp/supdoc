@@ -9,6 +9,7 @@
 //! project install writes nothing outside the project: it refuses a symlinked directory on the
 //! way to either copy that leads out of the root (04 S15), and follows one that stays inside.
 
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
@@ -22,14 +23,14 @@ use crate::finding::{Finding, Severity};
 use crate::lock::error::shell_quote;
 use crate::lock::io::write_atomically;
 use crate::output::json::Envelope;
-use crate::output::paths::relative_to;
+use crate::output::paths::{relative_or_absolute, relative_to};
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, OutputError, Report, TextContext};
+use crate::output::{Output, Report, TextContext, preview_note};
 use crate::path::AbsolutePath;
 
 use super::args::{SkillInstallArgs, WriteMode};
-use super::project::{absolute, config_failure};
-use super::{CliError, Context, Outcome};
+use super::project::{absolute, command_line, config_failure};
+use super::{CliError, Context, Outcome, cause};
 
 /// The skill, embedded so the installed copy always matches this binary.
 const SKILL: &str = include_str!("../../SKILL.md");
@@ -46,14 +47,52 @@ const DEFAULT_CLAUDE_DIR: &str = ".claude";
 /// Where the skill goes beneath Claude Code's config directory.
 const CLAUDE_DIR_SKILL: &str = "skills/supdoc/SKILL.md";
 
-/// The closing note of a preview that would change something (06a K7).
-const PREVIEW_NOTE: &str = "Nothing written. Run the same command with --yes to apply.";
-
 /// The closing note when every copy already holds the embedded skill.
 const UP_TO_DATE_NOTE: &str = "The supdoc skill is already installed and up to date.";
 
 /// The closing note after writing at least one copy.
 const INSTALLED_NOTE: &str = "Installed the supdoc skill.";
+
+/// The environment variable that moves Claude Code's config directory.
+const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
+
+/// What `CLAUDE_CONFIG_DIR` said, keeping a relative value instead of dropping it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaudeConfigDir {
+    /// Unset or empty: Claude Code's directory is `~/.claude`.
+    Unset,
+    /// An absolute directory.
+    Absolute(AbsolutePath),
+    /// A relative value, which `--global` refuses.
+    Relative(OsString),
+}
+
+/// The directories `skill install --global` writes under, read once by `main`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillDirs {
+    /// The user's home directory (`HOME`), when set to an absolute path.
+    pub home: Option<AbsolutePath>,
+    /// Claude Code's config directory (`CLAUDE_CONFIG_DIR`).
+    pub claude_config_dir: ClaudeConfigDir,
+}
+
+impl SkillDirs {
+    /// Reads `HOME` and `CLAUDE_CONFIG_DIR` through `var`.
+    ///
+    /// An unset or empty value is absent, and a relative `HOME` counts as unset.
+    pub fn from_vars(var: impl Fn(&str) -> Option<OsString>) -> Self {
+        let set = |name: &str| var(name).filter(|value| !value.is_empty());
+        let claude_config_dir = match set(CLAUDE_CONFIG_DIR) {
+            None => ClaudeConfigDir::Unset,
+            Some(value) => AbsolutePath::new(Path::new(&value))
+                .map_or(ClaudeConfigDir::Relative(value), ClaudeConfigDir::Absolute),
+        };
+        Self {
+            home: set("HOME").and_then(|value| AbsolutePath::new(Path::new(&value))),
+            claude_config_dir,
+        }
+    }
+}
 
 /// Runs `supdoc skill install`: previews, or under `--yes` writes, both copies of `SKILL.md`.
 ///
@@ -68,9 +107,11 @@ const INSTALLED_NOTE: &str = "Installed the supdoc skill.";
 /// written or previewed, `cli-skill-no-home` when `--global` is given and `HOME` is not set,
 /// `cli-skill-outside-root` when a project copy would be written through a symlink out of the
 /// project, before anything is written or previewed, `cli-skill-write` when a copy cannot be
-/// written, and `cli-skill-output` when the report cannot be written.
+/// written, `cli-skill-relative-claude-dir` when `--global` is given and `CLAUDE_CONFIG_DIR` is
+/// relative, and `cli-skill-output` when the report cannot be written.
 pub fn run(
     args: &SkillInstallArgs,
+    dirs: &SkillDirs,
     context: &Context,
     output: &mut Output,
 ) -> Result<Outcome, CliError> {
@@ -80,17 +121,17 @@ pub fn run(
     } else {
         project_root(context, output)?
     };
-    let destinations = destinations(args.global, &base, context)?;
+    let destinations = destinations(args.global, &base, dirs)?;
     if !args.global {
         for path in &destinations {
-            contain(&base, path, &context.cwd)?;
+            contain(&base, path, context)?;
         }
     }
     let changes: Vec<SkillChange> = destinations
         .into_iter()
         .map(|path| SkillChange {
             action: inspect(&path),
-            shown: label(&path, &base),
+            shown: relative_or_absolute(&base, &path),
             path,
         })
         .collect();
@@ -105,13 +146,28 @@ pub fn run(
     if !args.global {
         output.set_root(base);
     }
-    let report = SkillInstallReport::new(applied, changes);
+    let apply_note = preview_note(
+        args.confirm.dry_run,
+        &command_line(
+            context,
+            "skill install",
+            &[] as &[&str],
+            if args.global {
+                &["--global", "--yes"]
+            } else {
+                &["--yes"]
+            },
+        ),
+    );
+    let report = SkillInstallReport::new(applied, args.global, changes, context);
+    output.report(&report, true).map_err(|error| {
+        CliError::output_failed("cli-skill-output", "the skill install report", &error)
+    })?;
     output
-        .report(&report, true)
-        .map_err(|error| output_failed(&error))?;
-    output
-        .note(report.closing_note())
-        .map_err(|error| output_failed(&error))?;
+        .note(report.closing_note(&apply_note))
+        .map_err(|error| {
+            CliError::output_failed("cli-skill-output", "the skill install report", &error)
+        })?;
     Ok(Outcome::Clean)
 }
 
@@ -126,11 +182,12 @@ pub fn schema() -> schemars::Schema {
 ///
 /// # Errors
 ///
-/// Returns `cli-skill-no-home` when `global` is set and `HOME` is not.
+/// Returns `cli-skill-no-home` when `global` is set and `HOME` is not, and
+/// `cli-skill-relative-claude-dir` when `global` is set and `CLAUDE_CONFIG_DIR` is relative.
 fn destinations(
     global: bool,
     root: &AbsolutePath,
-    context: &Context,
+    dirs: &SkillDirs,
 ) -> Result<[AbsolutePath; 2], CliError> {
     if !global {
         return Ok([
@@ -138,11 +195,12 @@ fn destinations(
             beneath(root, PROJECT_CLAUDE_SKILL),
         ]);
     }
-    let home = context.home.as_ref().ok_or_else(no_home)?;
-    let claude_dir = context
-        .claude_config_dir
-        .clone()
-        .unwrap_or_else(|| beneath(home, DEFAULT_CLAUDE_DIR));
+    let home = dirs.home.as_ref().ok_or_else(no_home)?;
+    let claude_dir = match &dirs.claude_config_dir {
+        ClaudeConfigDir::Unset => beneath(home, DEFAULT_CLAUDE_DIR),
+        ClaudeConfigDir::Absolute(dir) => dir.clone(),
+        ClaudeConfigDir::Relative(value) => return Err(relative_claude_dir(value)),
+    };
     Ok([
         beneath(home, AGENTS_SKILL),
         beneath(&claude_dir, CLAUDE_DIR_SKILL),
@@ -162,12 +220,11 @@ fn destinations(
 fn project_root(context: &Context, output: &mut Output) -> Result<AbsolutePath, CliError> {
     if let Some(file) = &context.global.config {
         let file = absolute(&context.cwd, file);
-        check_config_exists(&file)
-            .map_err(|error| config_failure(&error, context, output, "skill install"))?;
+        check_config_exists(&file).map_err(|error| config_failure(&error, context, output))?;
         return Ok(file.parent().unwrap_or(file));
     }
-    let found = discover_config(&context.cwd)
-        .map_err(|error| config_failure(&error, context, output, "skill install"))?;
+    let found =
+        discover_config(&context.cwd).map_err(|error| config_failure(&error, context, output))?;
     Ok(found
         .and_then(|file| file.parent())
         .unwrap_or_else(|| context.cwd.clone()))
@@ -210,14 +267,6 @@ fn beneath(base: &AbsolutePath, relative: &str) -> AbsolutePath {
     base.join_path(Path::new(relative))
 }
 
-/// `path` as a person reads it: relative to `base` when it is beneath it, absolute otherwise.
-fn label(path: &AbsolutePath, base: &AbsolutePath) -> String {
-    path.strip_prefix(base).map_or_else(
-        || path.display().to_string(),
-        |relative| relative.display().to_string(),
-    )
-}
-
 /// Refuses `target` when a directory between `root` and it leads outside `root` once symlinks
 /// are followed, so a project install never writes outside the project (04 S15). A symlink that
 /// leads elsewhere inside `root` is followed. A dangling one counts where it points, and one whose
@@ -231,8 +280,8 @@ fn label(path: &AbsolutePath, base: &AbsolutePath) -> String {
 /// # Errors
 ///
 /// Returns `cli-skill-outside-root` naming the first directory that leads out, in the help
-/// relative to `cwd` so its commands run as written.
-fn contain(root: &AbsolutePath, target: &AbsolutePath, cwd: &AbsolutePath) -> Result<(), CliError> {
+/// relative to the current directory so its commands run as written.
+fn contain(root: &AbsolutePath, target: &AbsolutePath, context: &Context) -> Result<(), CliError> {
     // Every project destination is beneath the root, so there is always a directory chain.
     let Some(directories) = target.strip_prefix(root).and_then(Path::parent) else {
         return Ok(());
@@ -243,7 +292,7 @@ fn contain(root: &AbsolutePath, target: &AbsolutePath, cwd: &AbsolutePath) -> Re
         dir.push(component);
         match real_location(&dir) {
             Some(real) if real.starts_with(&real_root) => {}
-            real => return Err(outside_root(root, target, &dir, real.as_deref(), cwd)),
+            real => return Err(outside_root(root, target, &dir, real.as_deref(), context)),
         }
     }
     Ok(())
@@ -278,14 +327,14 @@ pub(crate) struct SkillInstallReport {
 
 impl SkillInstallReport {
     /// The report for `changes`, warning about each file a preview would replace.
-    fn new(applied: bool, changes: Vec<SkillChange>) -> Self {
+    fn new(applied: bool, global: bool, changes: Vec<SkillChange>, context: &Context) -> Self {
         let findings = if applied {
             Vec::new()
         } else {
             changes
                 .iter()
                 .filter(|change| change.action == SkillAction::Replace)
-                .map(|change| exists(&change.shown))
+                .map(|change| exists(&change.shown, global, context))
                 .collect()
         };
         Self {
@@ -296,13 +345,13 @@ impl SkillInstallReport {
     }
 
     /// The note that ends the run.
-    fn closing_note(&self) -> &'static str {
+    fn closing_note<'a>(&self, apply_note: &'a str) -> &'a str {
         if !self.changes.iter().any(|change| change.action.writes()) {
             UP_TO_DATE_NOTE
         } else if self.applied {
             INSTALLED_NOTE
         } else {
-            PREVIEW_NOTE
+            apply_note
         }
     }
 }
@@ -389,13 +438,19 @@ fn install_file(target: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// The warning for a different `SKILL.md` a preview would replace (06 error table, Q25).
-fn exists(shown: &str) -> Finding {
+fn exists(shown: &str, global: bool, context: &Context) -> Finding {
+    let flags: &[&str] = if global {
+        &["--global", "--yes"]
+    } else {
+        &["--yes"]
+    };
+    let rerun = command_line::<&str>(context, "skill install", &[], flags);
     Finding::new(
         "cli-skill-exists",
         Severity::Warning,
         format!("{shown} already exists with different contents"),
     )
-    .with_help("Re-run with `--yes` to replace it")
+    .with_help(format!("Run `{rerun}` to replace it"))
 }
 
 /// The refusal for a project copy that `link` would send out of `root`: to `real`, or somewhere
@@ -408,14 +463,15 @@ fn outside_root(
     target: &AbsolutePath,
     link: &Path,
     real: Option<&Path>,
-    cwd: &AbsolutePath,
+    context: &Context,
 ) -> CliError {
+    let cwd = &context.cwd;
     let shown_link = link.strip_prefix(root.as_path()).unwrap_or(link).display();
     let typed_link = AbsolutePath::new(link).map_or_else(
         || shell_quote(&link.display().to_string()),
         |link| shell_quote(&relative_to(cwd, &link)),
     );
-    let shown = label(target, root);
+    let shown = relative_or_absolute(root, target);
     let message = match real {
         Some(real) => {
             let landing = target
@@ -434,12 +490,14 @@ fn outside_root(
              worked out, so it may be outside the project root"
         ),
     };
+    let global_install =
+        command_line::<&str>(context, "skill install", &[], &["--global", "--yes"]);
     CliError::new(
         "cli-skill-outside-root",
         message,
         format!(
             "Nothing was written. Point {typed_link} at a directory inside the project, or \
-             install into your home directory with `supdoc skill install --global --yes`. To \
+             install into your home directory with `{global_install}`. To \
              use a real directory instead, run `rm {typed_link}` (this removes only the link, \
              not the directory it points to), then `mkdir {typed_link}`"
         ),
@@ -452,7 +510,21 @@ fn no_home() -> CliError {
     CliError::new(
         "cli-skill-no-home",
         "`--global` installs into your home directory, but HOME is not set",
-        "Set HOME to your home directory, or drop `--global` to install into the project",
+        "Set HOME, for example `export HOME=/home/you`, or drop `--global` to install into the project",
+        CliError::USAGE_EXIT_CODE,
+    )
+}
+
+/// The error for a relative `CLAUDE_CONFIG_DIR`, which would otherwise send the Claude Code copy
+/// somewhere the person did not mean.
+fn relative_claude_dir(value: &OsString) -> CliError {
+    CliError::new(
+        "cli-skill-relative-claude-dir",
+        format!(
+            "{CLAUDE_CONFIG_DIR} is `{}`, which is not an absolute path",
+            value.to_string_lossy()
+        ),
+        format!("Set `{CLAUDE_CONFIG_DIR}` to an absolute path, or unset it to use `~/.claude`"),
         CliError::USAGE_EXIT_CODE,
     )
 }
@@ -476,19 +548,8 @@ fn write_failed(
     };
     CliError::new(
         "cli-skill-write",
-        format!("cannot write {}: {error}", change.shown),
+        format!("cannot write {}: {}", change.shown, cause(error)),
         format!("Check that you can create and write files in `{shown_directory}`"),
-        CliError::IO_EXIT_CODE,
-    )
-}
-
-/// The error for a report that could not be written.
-fn output_failed(error: &OutputError) -> CliError {
-    CliError::new(
-        "cli-skill-output",
-        format!("cannot write the skill install report: {error}"),
-        "Check that standard output and standard error are open and writable, or redirect both \
-         to a file with `> supdoc.out 2>&1`",
         CliError::IO_EXIT_CODE,
     )
 }
@@ -496,64 +557,13 @@ fn output_failed(error: &OutputError) -> CliError {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
     use std::time::{Duration, UNIX_EPOCH};
 
-    use clap::Parser as _;
-
-    use crate::cli::args::{Cli, Command, SkillCommand};
+    use crate::cli::args::{Command, SkillCommand};
+    use crate::cli::testing::{Run, Session, at, skip};
     use crate::config::CONFIG_FILE_NAME;
-    use crate::output::{OutputSettings, PathStyle, Verbosity};
 
     use super::*;
-
-    /// A writer that keeps what it is given, shared with the test that reads it back.
-    #[derive(Clone, Default)]
-    struct Capture(Arc<Mutex<Vec<u8>>>);
-
-    impl Capture {
-        fn text(&self) -> String {
-            let bytes = self.0.lock().expect("the capture lock should be free");
-            String::from_utf8(bytes.clone()).expect("captured output should be UTF-8")
-        }
-    }
-
-    impl Write for Capture {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .expect("the capture lock should be free")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// What one run produced.
-    struct Run {
-        result: Result<Outcome, CliError>,
-        stdout: String,
-        stderr: String,
-    }
-
-    impl Run {
-        /// The exit code the process would end with.
-        fn exit_code(&self) -> u8 {
-            match &self.result {
-                Ok(outcome) => outcome.exit_code(),
-                Err(error) => error.exit_code(),
-            }
-        }
-
-        /// stdout parsed as the one JSON document `--json` prints.
-        fn json(&self) -> serde_json::Value {
-            serde_json::from_str(&self.stdout)
-                .unwrap_or_else(|error| panic!("stdout should be JSON ({error}): {}", self.stdout))
-        }
-    }
 
     /// A fresh project directory and a fresh home directory, both empty.
     struct World {
@@ -580,37 +590,21 @@ mod tests {
         /// Runs `supdoc skill install <flags>` in `cwd`, with this world's home and the given
         /// Claude Code config directory.
         fn install_in(&self, cwd: &Path, claude_dir: Option<&Path>, flags: &[&str]) -> Run {
-            let mut words = vec!["supdoc", "skill", "install"];
+            let mut words = vec!["skill", "install"];
             words.extend_from_slice(flags);
-            let cli = Cli::try_parse_from(&words)
-                .unwrap_or_else(|error| panic!("`{}` should parse: {error}", words.join(" ")));
-            let Command::Skill(SkillCommand::Install(args)) = &cli.command else {
-                panic!("`{}` should be skill install", words.join(" "));
-            };
             let cwd = AbsolutePath::new(cwd).expect("the working directory should be absolute");
-            let settings = OutputSettings {
-                format: cli.global.format(),
-                verbosity: Verbosity::from_flags(cli.global.quiet, cli.global.verbose),
-                color: false,
-                unicode: false,
-                width: 80,
-                paths: PathStyle::new(cwd.clone(), cwd.clone(), None),
+            let mut session = Session::new(cwd, &words);
+            let Command::Skill(SkillCommand::Install(args)) = &session.cli.command else {
+                panic!("`supdoc {}` should be skill install", words.join(" "));
             };
-            let (stdout, stderr) = (Capture::default(), Capture::default());
-            let mut output =
-                Output::new(settings, Box::new(stdout.clone()), Box::new(stderr.clone()));
-            let context = Context {
-                global: cli.global.clone(),
-                cwd,
+            let dirs = SkillDirs {
                 home: AbsolutePath::new(self.home.path()),
-                claude_config_dir: claude_dir.and_then(AbsolutePath::new),
+                claude_config_dir: claude_dir
+                    .and_then(AbsolutePath::new)
+                    .map_or(ClaudeConfigDir::Unset, ClaudeConfigDir::Absolute),
             };
-            let result = run(args, &context, &mut output);
-            Run {
-                result,
-                stdout: stdout.text(),
-                stderr: stderr.text(),
-            }
+            let result = run(args, &dirs, &session.context, &mut session.output);
+            session.finished(result)
         }
 
         /// Runs `supdoc skill install <flags>` from the project directory.
@@ -649,12 +643,6 @@ mod tests {
             .collect()
     }
 
-    /// The value at `pointer` in `json`, which the test expects to be there.
-    fn at<'a>(json: &'a serde_json::Value, pointer: &str) -> &'a serde_json::Value {
-        json.pointer(pointer)
-            .unwrap_or_else(|| panic!("{pointer} should be in {json}"))
-    }
-
     /// The action of the first change in a `--json` document.
     fn first_action(json: &serde_json::Value) -> String {
         changes(json)
@@ -679,7 +667,12 @@ mod tests {
             run.stdout,
             "create     .agents/skills/supdoc/SKILL.md\ncreate     .claude/skills/supdoc/SKILL.md\n",
         );
-        assert!(run.stderr.contains(PREVIEW_NOTE), "stderr: {}", run.stderr);
+        assert!(
+            run.stderr
+                .contains("Run `supdoc skill install --yes` to apply."),
+            "stderr: {}",
+            run.stderr
+        );
         assert!(
             !world.project_file(".agents").exists() && !world.project_file(".claude").exists(),
             "a preview should create no directory"
@@ -769,36 +762,56 @@ mod tests {
     #[test]
     fn skill_install_global_without_home_is_a_usage_error() {
         let world = World::new();
-        let cli = Cli::try_parse_from(["supdoc", "skill", "install", "--global", "--yes"])
-            .expect("the command line should parse");
-        let Command::Skill(SkillCommand::Install(args)) = &cli.command else {
+        let cwd = AbsolutePath::new(world.project.path()).expect("absolute");
+        let mut session = Session::new(cwd, &["skill", "install", "--global", "--yes"]);
+        let Command::Skill(SkillCommand::Install(args)) = &session.cli.command else {
             panic!("should be skill install");
         };
-        let cwd = AbsolutePath::new(world.project.path()).expect("absolute");
-        let context = Context {
-            global: cli.global.clone(),
-            cwd: cwd.clone(),
-            home: None,
-            claude_config_dir: None,
-        };
-        let settings = OutputSettings {
-            format: cli.global.format(),
-            verbosity: Verbosity::Normal,
-            color: false,
-            unicode: false,
-            width: 80,
-            paths: PathStyle::new(cwd.clone(), cwd, None),
-        };
-        let mut output = Output::new(
-            settings,
-            Box::new(Capture::default()),
-            Box::new(Capture::default()),
-        );
+        let dirs = SkillDirs::from_vars(|_| None);
 
-        let error = run(args, &context, &mut output).expect_err("--global needs HOME");
+        let error = run(args, &dirs, &session.context, &mut session.output)
+            .expect_err("--global needs HOME");
 
         assert_eq!(error.code(), "cli-skill-no-home");
         assert_eq!(error.exit_code(), CliError::USAGE_EXIT_CODE);
+    }
+
+    #[test]
+    fn a_relative_claude_config_dir_is_kept_and_refused_for_global() {
+        let dirs = SkillDirs::from_vars(|name| match name {
+            "HOME" => Some(OsString::from("/home/me")),
+            _ => Some(OsString::from("rel/claude")),
+        });
+        let root = AbsolutePath::new(Path::new("/work")).expect("absolute");
+
+        assert_eq!(
+            dirs.claude_config_dir,
+            ClaudeConfigDir::Relative(OsString::from("rel/claude"))
+        );
+        let error = destinations(true, &root, &dirs).expect_err("relative should be refused");
+        assert_eq!(error.code(), "cli-skill-relative-claude-dir");
+        assert_eq!(error.exit_code(), CliError::USAGE_EXIT_CODE);
+        assert!(
+            error.to_string().contains("rel/claude"),
+            "the message should name the value: {error}"
+        );
+        assert!(
+            destinations(false, &root, &dirs).is_ok(),
+            "a project install should ignore CLAUDE_CONFIG_DIR"
+        );
+    }
+
+    #[test]
+    fn unset_and_empty_claude_config_dirs_are_unset() {
+        for value in [None, Some("")] {
+            let dirs = SkillDirs::from_vars(|name| {
+                (name == CLAUDE_CONFIG_DIR)
+                    .then_some(value)
+                    .flatten()
+                    .map(OsString::from)
+            });
+            assert_eq!(dirs.claude_config_dir, ClaudeConfigDir::Unset);
+        }
     }
 
     #[test]
@@ -837,7 +850,8 @@ mod tests {
         let json = run.json();
         assert_eq!(at(&json, "/data/applied"), false);
         assert_eq!(first_action(&json), "replace");
-        let codes: Vec<&str> = at(&json, "/findings")
+        let findings = at(&json, "/findings");
+        let codes: Vec<&str> = findings
             .as_array()
             .expect("findings should be an array")
             .iter()
@@ -857,12 +871,42 @@ mod tests {
         let run = world.install_in(&nested, None, &["--json"]);
 
         let json = run.json();
-        let message = at(&json, "/findings/0/message")
+        let message = at(&json, "/findings/0/message");
+        let message = message
             .as_str()
             .expect("the finding message should be text");
         assert_eq!(
             message,
             format!("{AGENTS_SKILL} already exists with different contents")
+        );
+    }
+
+    #[test]
+    fn skill_install_exists_help_keeps_the_config_and_its_command_replaces_the_skill() {
+        let world = World::new();
+        plant(&world.project_file(CONFIG_FILE_NAME), "");
+        plant(&world.project_file(AGENTS_SKILL), "my own skill\n");
+        let nested = world.project_file("docs");
+        fs::create_dir_all(&nested).expect("the nested directory should be created");
+
+        let run = world.install_in(&nested, None, &["-c", "../supdoc.config.toml", "--json"]);
+
+        let json = run.json();
+        let help = at(&json, "/findings/0/help")
+            .as_str()
+            .expect("the finding help should be text")
+            .to_owned();
+        let printed = "supdoc -c ../supdoc.config.toml skill install --yes";
+        assert!(
+            help.contains(&format!("`{printed}`")),
+            "the help should name the install with its config and --yes: {help}"
+        );
+        let again = world.install_in(&nested, None, &["-c", "../supdoc.config.toml", "--yes"]);
+        assert_eq!(again.exit_code(), 0, "stderr: {}", again.stderr);
+        assert_eq!(
+            contents(&world.project_file(AGENTS_SKILL)).as_deref(),
+            Some(SKILL),
+            "the printed command should replace the skill"
         );
     }
 
@@ -927,7 +971,12 @@ mod tests {
             "stderr: {}",
             run.stderr
         );
-        assert!(!run.stderr.contains(PREVIEW_NOTE), "stderr: {}", run.stderr);
+        assert!(
+            !run.stderr
+                .contains("Run `supdoc skill install --yes` to apply."),
+            "stderr: {}",
+            run.stderr
+        );
     }
 
     #[test]
@@ -1278,18 +1327,6 @@ mod tests {
             .collect();
 
         assert!(errors.is_empty(), "schema violations: {errors:?} in {json}");
-    }
-
-    /// Reports that a repository-only test was skipped, since a packaged crate lacks the repository.
-    #[expect(
-        clippy::print_stderr,
-        reason = "a skipped test must say why; the test harness shows captured stderr on request"
-    )]
-    fn skip(missing: &std::path::Path) {
-        eprintln!(
-            "skipped: {} is absent outside the repository",
-            missing.display()
-        );
     }
 
     #[test]

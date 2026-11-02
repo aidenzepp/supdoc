@@ -1,6 +1,7 @@
 //! Config errors: a stable code, a one-line message and a separate hint for each.
 
 use std::fmt;
+use std::io::ErrorKind;
 use std::ops::Range;
 
 use crate::lock::error::shell_quote;
@@ -98,7 +99,8 @@ pub enum ConfigError {
         path: AbsolutePath,
     },
 
-    /// A namespace names a directory outside the project root.
+    /// A namespace names a directory outside the project root, either as written or once a
+    /// symlink along it is followed.
     NamespaceOutsideRoot {
         /// The config that defined the namespace.
         file: AbsolutePath,
@@ -106,8 +108,12 @@ pub enum ConfigError {
         name: NamespaceName,
         /// The directory it names, as written from `file`.
         directory: AbsolutePath,
+        /// Byte range of the namespace's value inside `file`.
+        span: Range<usize>,
         /// The project root.
         root: AbsolutePath,
+        /// How `directory` ends up outside the root. Where a symlink leads is never printed.
+        escape: NamespaceEscape,
     },
 
     /// A chain of `extends` comes back to a file it already visited.
@@ -117,6 +123,18 @@ pub enum ConfigError {
         /// Byte range of the closing `extends` value, inside the file before the last in `chain`.
         span: Range<usize>,
     },
+}
+
+/// How a namespace's directory ends up outside the project root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamespaceEscape {
+    /// The directory as written lies outside the root.
+    AsWritten,
+    /// The directory as written lies inside the root, and a symlink along it leads out.
+    ThroughSymlink,
+    /// Where the directory lies can't be worked out, such as through a symlink loop, so it is
+    /// treated as outside.
+    Unresolvable,
 }
 
 impl ConfigError {
@@ -138,7 +156,7 @@ impl ConfigError {
 
     /// The message, naming each file relative to `cwd`, the directory supdoc runs in, as the
     /// error's location does. No config loaded, so there is no project root to name them from.
-    /// A namespace's directory, which lies outside the root, and the root itself stay absolute.
+    /// A namespace's directory that lies outside the root, and the root itself, stay absolute.
     #[must_use]
     pub fn message_from(&self, cwd: &AbsolutePath) -> String {
         self.describe(&|file| relative_to(cwd, file))
@@ -178,6 +196,34 @@ impl ConfigError {
                 name,
                 directory,
                 root,
+                escape: NamespaceEscape::ThroughSymlink,
+                ..
+            } => format!(
+                "{} sets namespace `{name}` to {}, which leads outside the project root {} \
+                 through a symlink",
+                show(file),
+                show(directory),
+                root.display()
+            ),
+            Self::NamespaceOutsideRoot {
+                file,
+                name,
+                directory,
+                escape: NamespaceEscape::Unresolvable,
+                ..
+            } => format!(
+                "{} sets namespace `{name}` to {}, which supdoc can't follow to a real location \
+                 (a symlink along it may loop)",
+                show(file),
+                show(directory)
+            ),
+            Self::NamespaceOutsideRoot {
+                file,
+                name,
+                directory,
+                root,
+                escape: NamespaceEscape::AsWritten,
+                ..
             } => format!(
                 "{} sets namespace `{name}` to {}, which is outside the project root {}",
                 show(file),
@@ -201,31 +247,32 @@ impl ConfigError {
     }
 
     /// What to do next, naming any file relative to `cwd`, the directory supdoc runs in, so a
-    /// command in the help runs as written.
-    ///
-    /// `None` when the message is already the fix.
+    /// command in the help runs as written. Every error has one.
     #[must_use]
-    pub fn help_from(&self, cwd: &AbsolutePath) -> Option<String> {
+    pub fn help_from(&self, cwd: &AbsolutePath) -> String {
         self.hint(&|file| relative_to(cwd, file))
+            .unwrap_or_else(|| GLOB_OR_SYNTAX_HELP.to_owned())
     }
 
     /// What to do next, naming any file as `show` writes it.
     fn hint(&self, show: &dyn Fn(&AbsolutePath) -> String) -> Option<String> {
         match self {
-            Self::NotFound { .. } => Some(
-                "Check the `--config` path, or leave out `--config` to search upward from the \
-                 current directory"
-                    .to_owned(),
-            ),
-            Self::Read { .. } => Some(
-                "Give the current user read access, or pass `--config` with a readable file"
-                    .to_owned(),
-            ),
+            Self::NotFound { path } => {
+                let config = shell_quote(&show(path));
+                Some(format!(
+                    "Create it with `supdoc -c {config} init`, or leave out `--config` to search \
+                     upward from the current directory"
+                ))
+            }
+            Self::Read { path, error } => Some(read_help(&shell_quote(&show(path)), error.kind())),
             Self::Parse { error, .. } => parse_help(error.message()),
-            Self::ExtendsMissing { .. } => Some(
-                "Point `extends` at an existing supdoc.config.toml, relative to this file"
-                    .to_owned(),
-            ),
+            Self::ExtendsMissing { resolved, .. } => {
+                let resolved = shell_quote(&show(resolved));
+                Some(format!(
+                    "Create it with `supdoc -c {resolved} init`, or point `extends` at an \
+                     existing supdoc.config.toml, relative to this file"
+                ))
+            }
             Self::ExtendsDirectory { suggestion, .. } => Some(match suggestion {
                 Some(file) => format!("Use `extends = \"{file}\"`"),
                 None => "Point `extends` at a supdoc.config.toml file, not a directory".to_owned(),
@@ -244,7 +291,26 @@ impl ConfigError {
                      `--config` with the file you mean"
                 ))
             }
-            Self::NamespaceOutsideRoot { .. } => Some(
+            Self::NamespaceOutsideRoot {
+                escape: NamespaceEscape::ThroughSymlink,
+                ..
+            } => Some(
+                "Point the namespace at a real directory inside the project root, not a symlink \
+                 that leads out of it"
+                    .to_owned(),
+            ),
+            Self::NamespaceOutsideRoot {
+                escape: NamespaceEscape::Unresolvable,
+                ..
+            } => Some(
+                "Point the namespace at a real directory inside the project root, and check that no \
+                 symlink along it leads back to itself"
+                    .to_owned(),
+            ),
+            Self::NamespaceOutsideRoot {
+                escape: NamespaceEscape::AsWritten,
+                ..
+            } => Some(
                 "Point the namespace at a directory inside the project root, or move the project's \
                  `supdoc.config.toml` up to a directory that holds both"
                     .to_owned(),
@@ -266,6 +332,24 @@ impl ConfigError {
             | Self::SymlinkNotConfig { .. }
             | Self::NamespaceOutsideRoot { .. } => EXIT_CONFIG,
         }
+    }
+}
+
+/// The help for a parse error with no hint of its own: a bad glob or a TOML syntax error.
+const GLOB_OR_SYNTAX_HELP: &str = "Fix the text at the line shown. A list is written \
+     `include = [\"docs\"]` and a glob like `docs/**/*.md`";
+
+/// The help for a config file that could not be read, chosen from why. `file` is already quoted
+/// for a shell. The file may be reached through `extends`, so `--config` is not offered.
+fn read_help(file: &str, kind: ErrorKind) -> String {
+    match kind {
+        ErrorKind::PermissionDenied => {
+            format!("Give the current user read access, for example `chmod u+r {file}`")
+        }
+        ErrorKind::InvalidData => {
+            format!("Save {file} as UTF-8 text: supdoc cannot read any other encoding")
+        }
+        _ => format!("Check that {file} is a file this user can read, for example `cat {file}`"),
     }
 }
 
@@ -293,16 +377,50 @@ fn parse_help(message: &str) -> Option<String> {
             "Write a list, such as `[\"{value}\"]`: `include` and `exclude` take a list of \
              patterns even when there is only one"
         ))
+    } else if let Some(form) = message
+        .strip_prefix("invalid type:")
+        .and_then(|_| message.rsplit(", expected ").next())
+        .map(type_form)
+    {
+        Some(form)
     } else if message.contains("is an absolute path") {
         Some("Write the path relative to this config file, such as `services/auth`".to_owned())
-    } else if message.ends_with("leaves this config's directory") {
-        Some(
-            "Links, namespaces and extends stay inside the project root. For a monorepo, put \
-             `supdoc.config.toml` at the repo root"
-                .to_owned(),
-        )
+    } else if message.starts_with("pattern `")
+        && message.ends_with("leaves this config's directory")
+    {
+        let pattern = message.split('`').nth(1).unwrap_or_default();
+        Some(format!(
+            "Patterns match only files under this config's directory. Remove `..`, or move the \
+             pattern into the config of a directory that holds `{pattern}`"
+        ))
+    } else if let Some((count, _)) =
+        message.split_once(" patterns are too many or too complex to match together")
+    {
+        Some(format!(
+            "Use fewer, broader patterns than these {count}: a pattern also matches everything \
+             beneath it, so `generated` covers every file under that directory"
+        ))
     } else {
         None
+    }
+}
+
+/// The help for a value of the wrong type, from the type the message says was expected.
+fn type_form(expected: &str) -> String {
+    match expected {
+        "a sequence" => "`include` and `exclude` take a list of patterns: write \
+                         `include = [\"docs\"]`"
+            .to_owned(),
+        "a string" => "`extends` and each namespace take a path in quotes: write \
+                       `extends = \"../supdoc.config.toml\"`"
+            .to_owned(),
+        "a map" | "a table" => "`namespaces` and `features` are tables: write `[namespaces]` on \
+                                its own line, then `docs = \"docs\"` beneath it"
+            .to_owned(),
+        _ => format!(
+            "Rewrite the value as {expected}: `include = [\"docs\"]` is a list, \
+             `extends = \"base/supdoc.config.toml\"` is a path"
+        ),
     }
 }
 

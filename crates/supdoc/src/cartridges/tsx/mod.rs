@@ -1,4 +1,4 @@
-//! TSX: pure data that names TypeScript-with-JSX symbols and finds links in comments (03 R3–R5).
+//! TSX: pure data that names TypeScript-with-JSX symbols and finds links in comments.
 //!
 //! Symbols come from `tags.scm` and link regions from `injections.scm`, both beside this file.
 //! The golden symbol list in the tests is the public contract: users type these paths into docs.
@@ -40,6 +40,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::cartridges::rust::region_texts;
     use crate::hash::HashSettings;
     use crate::link::SymbolPath;
     use crate::path::AbsolutePath;
@@ -211,6 +212,7 @@ namespace util {
                         resolved(&file, &table, path),
                         HashSettings::default(),
                     )
+                    .expect("the symbol should lie in its own file")
                     .to_string(),
                 )
             })
@@ -221,7 +223,7 @@ namespace util {
             .collect();
         assert_eq!(
             actual, expected,
-            "a grammar upgrade moved a symbol's node boundaries (02 L8)"
+            "a grammar upgrade moved a symbol's node boundaries"
         );
         assert_eq!(
             hash_file(&file, HashSettings::default()).to_string(),
@@ -270,6 +272,7 @@ namespace util {
 
         let hash = |file: &SourceFile, table: &SymbolTable, path| {
             hash_symbol(file, resolved(file, table, path), HashSettings::default())
+                .expect("the symbol should lie in its own file")
         };
 
         assert_eq!(
@@ -310,14 +313,17 @@ namespace util {
         let file =
             parse("/** [a](a.md) */\n// [b](b.md)\nconst view = <div>{/* [c](c.md) */}</div>;\n");
 
-        assert_eq!(file.language().markdown_regions(&file).len(), 3);
+        assert_eq!(
+            region_texts(&file),
+            ["/** [a](a.md) */", " [b](b.md)\n", "/* [c](c.md) */"]
+        );
     }
 
     #[test]
     fn tsx_strings_and_jsx_text_are_not_link_regions() {
         let file = parse("const s = \"[a](a.md)\";\nconst v = <p>[b](b.md)</p>;\n");
 
-        assert_eq!(file.language().markdown_regions(&file).len(), 0);
+        assert_eq!(region_texts(&file), Vec::<&str>::new());
     }
 
     #[test]

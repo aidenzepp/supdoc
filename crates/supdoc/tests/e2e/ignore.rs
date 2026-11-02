@@ -19,7 +19,15 @@ fn a_named_path_beside_a_gitignore_symlinked_out_of_the_root_is_not_quoted() {
     .expect("the symlink should be creatable");
 
     let run = project.supdoc_in("services/web", &["check", "docs/guide.md"]);
+    let list = project.supdoc_in("services/web", &["--json", "list"]);
 
+    let _ = run.assert_exit(1);
+    let _ = list.assert_exit(0);
+    assert!(
+        listed_sources(&list).contains(&"docs/guide.md".to_owned()),
+        "the guide is not hidden by the symlinked rules\n{}",
+        list.stdout
+    );
     for stream in [&run.stdout, &run.stderr] {
         assert!(
             !stream.contains("gui*.md"),
@@ -130,7 +138,7 @@ fn a_package_whose_gitignore_links_to_the_monorepos_scans_with_one_warning() {
     fs::write(project.path(".gitignore"), "scr*.md\n").expect("the gitignore should be writable");
     std::os::unix::fs::symlink("../../.gitignore", project.path("services/web/.gitignore"))
         .expect("the symlink should be creatable");
-    write(&project, "services/web/docs/scratch.md", SCRATCH);
+    project.write("services/web/docs/scratch.md", SCRATCH);
 
     let run = project.supdoc_in("services/web", &["--json", "update", "--yes"]);
     let list = project.supdoc_in("services/web", &["--json", "list"]);
@@ -155,7 +163,7 @@ fn a_package_whose_gitignore_links_to_the_monorepos_scans_with_one_warning() {
 #[test]
 fn a_gitignore_symlinked_within_the_root_is_not_honoured() {
     let project = web_project();
-    write(&project, "services/web/rules", "gui*.md\n");
+    project.write("services/web/rules", "gui*.md\n");
     std::os::unix::fs::symlink("../rules", project.path("services/web/docs/.gitignore"))
         .expect("the symlink should be creatable");
 
@@ -176,23 +184,10 @@ fn a_gitignore_symlinked_within_the_root_is_not_honoured() {
     );
 }
 
-/// Writes `text` to `relative` in `project`, creating its directories.
-fn write(project: &Project, relative: &str, text: &str) {
-    let path = project.path(relative);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).expect("the fixture directory should be creatable");
-    }
-    fs::write(path, text).expect("the fixture file should be writable");
-}
-
 /// Makes `relative` in `project` a git directory git accepts as a repository, without running
 /// git: a `HEAD` naming a branch, and empty `objects` and `refs` directories.
 fn make_git_dir(project: &Project, relative: &str) {
-    write(
-        project,
-        &format!("{relative}/HEAD"),
-        "ref: refs/heads/main\n",
-    );
+    project.write(&format!("{relative}/HEAD"), "ref: refs/heads/main\n");
     for dir in ["objects", "refs"] {
         fs::create_dir_all(project.path(&format!("{relative}/{dir}")))
             .expect("the fixture git directory should be creatable");
@@ -205,7 +200,7 @@ const SCRATCH: &str = "The [`handler`](../src/lib.rs#handler) function.\n";
 #[test]
 fn a_gitignore_whitelist_overrides_a_git_exclude_rule_and_keeps_the_lock_entry() {
     let project = web_project();
-    write(&project, "services/web/docs/keep.md", SCRATCH);
+    project.write("services/web/docs/keep.md", SCRATCH);
     let _ = project
         .supdoc_in("services/web", &["update", "--yes"])
         .assert_exit(0);
@@ -213,8 +208,8 @@ fn a_gitignore_whitelist_overrides_a_git_exclude_rule_and_keeps_the_lock_entry()
     assert!(project.read("services/web/supdoc.lock").contains(kept));
     // As in git, the `.gitignore` whitelist outranks the exclude file's rule.
     make_git_dir(&project, "services/web/.git");
-    write(&project, "services/web/.git/info/exclude", "docs/*.md\n");
-    write(&project, "services/web/.gitignore", "!docs/keep.md\n");
+    project.write("services/web/.git/info/exclude", "docs/*.md\n");
+    project.write("services/web/.gitignore", "!docs/keep.md\n");
 
     let _ = project
         .supdoc_in("services/web", &["update", "--yes"])
@@ -235,13 +230,9 @@ fn a_git_exclude_whitelist_overrides_the_global_excludes_file() {
         .expect("the git config directory should be creatable");
     fs::write(home.path().join(".config/git/ignore"), "docs/*.md\n")
         .expect("the global excludes file should be writable");
-    write(&project, "services/web/docs/keep.md", SCRATCH);
+    project.write("services/web/docs/keep.md", SCRATCH);
     make_git_dir(&project, "services/web/.git");
-    write(
-        &project,
-        "services/web/.git/info/exclude",
-        "!docs/keep.md\n",
-    );
+    project.write("services/web/.git/info/exclude", "!docs/keep.md\n");
 
     let run = project.supdoc_in_with(
         "services/web",
@@ -272,7 +263,7 @@ fn lock_with_global_pattern(project: &Project, dir: &str, pattern: &str) -> Stri
         format!("{pattern}\n"),
     )
     .expect("the global excludes file should be writable");
-    write(project, "services/web/docs/keep.md", SCRATCH);
+    project.write("services/web/docs/keep.md", SCRATCH);
 
     let run = project.supdoc_in_with(dir, &["update", "--yes"], &[("HOME", home.path())]);
 
@@ -313,9 +304,8 @@ fn a_separate_git_dir_brings_its_info_exclude_file_unquoted() {
     let project = web_project();
     // A submodule or `--separate-git-dir` checkout: a `.git` file naming the git directory, which
     // has no `commondir`, so it is the shared directory itself.
-    write(&project, "outside.git/info/exclude", "gui*.md\n");
-    write(
-        &project,
+    project.write("outside.git/info/exclude", "gui*.md\n");
+    project.write(
         "services/web/.git",
         &format!("gitdir: {}\n", project.path("outside.git").display()),
     );
@@ -331,22 +321,27 @@ fn a_worktrees_shared_exclude_file_applies_and_is_never_quoted() {
         .assert_exit(0);
     // `git worktree add` leaves a `.git` file naming the worktree's git directory, whose
     // `commondir` leads to the main repository's, outside the root.
-    write(
-        &project,
+    project.write(
         "services/web/.git",
         &format!(
             "gitdir: {}\n",
             project.path("main.git/worktrees/web").display()
         ),
     );
-    write(&project, "main.git/worktrees/web/commondir", "../..\n");
-    write(&project, "main.git/info/exclude", "scr*.md\n");
-    write(&project, "services/web/docs/scratch.md", SCRATCH);
+    project.write("main.git/worktrees/web/commondir", "../..\n");
+    project.write("main.git/info/exclude", "scr*.md\n");
+    project.write("services/web/docs/scratch.md", SCRATCH);
 
     let check = project.supdoc_in("services/web", &["check"]);
     let named = project.supdoc_in("services/web", &["check", "docs/scratch.md"]);
 
+    let _ = check.assert_exit(1);
     assert!(!check.stdout.contains("scratch.md"), "{}", check.stdout);
+    assert!(
+        check.stdout.contains("docs/guide.md"),
+        "the guide is still checked\n{}",
+        check.stdout
+    );
     assert!(
         named.stdout.contains("ignored by an ignore file"),
         "{}",
@@ -370,14 +365,15 @@ fn a_parent_repositorys_exclude_file_applies_to_a_root_in_a_subdirectory() {
         .supdoc_in("services/web", &["update", "--yes"])
         .assert_exit(0);
     make_git_dir(&project, ".git");
-    write(&project, ".git/info/exclude", "scratch.md\n");
-    write(&project, "services/web/docs/scratch.md", SCRATCH);
+    project.write(".git/info/exclude", "scratch.md\n");
+    project.write("services/web/docs/scratch.md", SCRATCH);
 
     let run = project.supdoc_in("services/web", &["check"]);
 
+    let _ = run.assert_exit(1);
     assert!(
-        !run.stdout.contains("scratch.md"),
-        "the parent's exclude rule hides scratch.md\n{}",
+        run.stdout.contains("docs/guide.md") && !run.stdout.contains("scratch.md"),
+        "the parent's exclude rule hides scratch.md and nothing else\n{}",
         run.stdout
     );
 }
@@ -386,7 +382,7 @@ fn a_parent_repositorys_exclude_file_applies_to_a_root_in_a_subdirectory() {
 /// hiding the guide: `check` and `update --yes` succeed without the guide, the named guide is
 /// blamed on "an ignore file", and no line of that file is printed.
 fn assert_followed_and_never_quoted(project: &Project) {
-    write(project, "services/web/docs/keep.md", SCRATCH);
+    project.write("services/web/docs/keep.md", SCRATCH);
     let update = project.supdoc_in("services/web", &["update", "--yes"]);
     let check = project.supdoc_in("services/web", &["check"]);
     let named = project.supdoc_in("services/web", &["check", "docs/guide.md"]);
@@ -426,7 +422,7 @@ fn assert_followed_and_never_quoted(project: &Project) {
 #[cfg(unix)]
 fn git_dir_symlinked_out(project: &Project, link: &str) {
     make_git_dir(project, "outside.git");
-    write(project, "outside.git/info/exclude", "gui*.md\n");
+    project.write("outside.git/info/exclude", "gui*.md\n");
     std::os::unix::fs::symlink(project.path("outside.git"), project.path(link))
         .expect("the symlink should be creatable");
 }
@@ -454,7 +450,7 @@ fn a_root_whose_git_dir_is_symlinked_out_applies_its_exclude_file_unquoted() {
 #[test]
 fn a_root_whose_git_info_is_symlinked_out_applies_its_exclude_file_unquoted() {
     let project = web_project();
-    write(&project, "outside.git/info/exclude", "gui*.md\n");
+    project.write("outside.git/info/exclude", "gui*.md\n");
     make_git_dir(&project, "services/web/.git");
     std::os::unix::fs::symlink(
         project.path("outside.git/info"),
@@ -498,7 +494,7 @@ fn a_dotfile_gitignore_above_the_root_symlinked_elsewhere_is_not_read() {
 fn a_shared_ignore_file_above_the_root_symlinked_within_the_checkout_is_not_read() {
     let project = monorepo_with_git();
     // A monorepo whose root `.ignore` links to a shared file outside the subproject's root.
-    write(&project, "tools/ignore", "gui*.md\n");
+    project.write("tools/ignore", "gui*.md\n");
     std::os::unix::fs::symlink(project.path("tools/ignore"), project.path(".ignore"))
         .expect("the symlink should be creatable");
 
@@ -530,7 +526,7 @@ fn a_named_path_hidden_by_a_regular_ignore_file_above_the_root_is_blamed_unquote
     for file in [".gitignore", ".ignore"] {
         let project = monorepo_with_git();
         // A regular file the work tree holds above the root: it applies, but lies outside.
-        write(&project, file, "gui*.md\n");
+        project.write(file, "gui*.md\n");
 
         let run = project.supdoc_in("services/web", &["--json", "check", "docs/guide.md"]);
 
@@ -568,18 +564,14 @@ const NESTED_DOC: &str = "The [`handler`](../../src/lib.rs#handler) function.\n"
 fn web_with_nested_repo() -> Project {
     let project = web_project();
     make_git_dir(&project, "services/web/.git");
-    write(&project, "services/web/.gitignore", "*.gen.md\n");
+    project.write("services/web/.gitignore", "*.gen.md\n");
     make_git_dir(&project, "services/web/docs/nested/.git");
-    write(
-        &project,
-        "services/web/docs/nested/.git/info/exclude",
-        "ne.md\n",
-    );
+    project.write("services/web/docs/nested/.git/info/exclude", "ne.md\n");
     for doc in ["nested/a.gen.md", "nested/ne.md", "nested/k.md"] {
-        write(&project, &format!("services/web/docs/{doc}"), NESTED_DOC);
+        project.write(&format!("services/web/docs/{doc}"), NESTED_DOC);
     }
     for doc in ["top.gen.md", "top.md"] {
-        write(&project, &format!("services/web/docs/{doc}"), SCRATCH);
+        project.write(&format!("services/web/docs/{doc}"), SCRATCH);
     }
     project
 }
@@ -614,19 +606,18 @@ fn a_submodule_applies_its_own_exclude_file_and_not_the_superprojects_gitignore(
     let project = monorepo_with_git();
     // The superproject is the whole fixture; `docs/mod` is a submodule whose `.git` file names
     // its git directory under the superproject's `.git/modules` (audit probe N5).
-    write(&project, ".gitignore", "*.sp.md\n");
+    project.write(".gitignore", "*.sp.md\n");
     make_git_dir(&project, ".git/modules/mod");
-    write(&project, ".git/modules/mod/info/exclude", "sm.md\n");
-    write(
-        &project,
+    project.write(".git/modules/mod/info/exclude", "sm.md\n");
+    project.write(
         "services/web/docs/mod/.git",
         "gitdir: ../../../../.git/modules/mod\n",
     );
     for doc in ["mod/a.sp.md", "mod/sm.md", "mod/k.md"] {
-        write(&project, &format!("services/web/docs/{doc}"), NESTED_DOC);
+        project.write(&format!("services/web/docs/{doc}"), NESTED_DOC);
     }
     for doc in ["top.sp.md", "top.md"] {
-        write(&project, &format!("services/web/docs/{doc}"), SCRATCH);
+        project.write(&format!("services/web/docs/{doc}"), SCRATCH);
     }
 
     assert_eq!(
@@ -645,8 +636,8 @@ fn a_submodule_applies_its_own_exclude_file_and_not_the_superprojects_gitignore(
 #[test]
 fn an_outer_ignore_file_still_hides_files_inside_a_nested_repository() {
     let project = web_with_nested_repo();
-    write(&project, "services/web/.ignore", "ig*.md\n");
-    write(&project, "services/web/docs/nested/ig.md", NESTED_DOC);
+    project.write("services/web/.ignore", "ig*.md\n");
+    project.write("services/web/docs/nested/ig.md", NESTED_DOC);
 
     assert!(
         !web_sources(&project).contains(&"docs/nested/ig.md".to_owned()),
@@ -657,7 +648,7 @@ fn an_outer_ignore_file_still_hides_files_inside_a_nested_repository() {
 #[test]
 fn an_outer_rule_naming_a_nested_repository_still_skips_it() {
     let project = web_with_nested_repo();
-    write(&project, "services/web/.gitignore", "/docs/nested/\n");
+    project.write("services/web/.gitignore", "/docs/nested/\n");
 
     let sources = web_sources(&project);
 
@@ -740,7 +731,7 @@ fn a_gitignore_above_the_work_tree_top_does_not_apply_but_one_at_the_top_does() 
     fs::write(project.path(".gitignore"), "gui*.md\n").expect("the gitignore should be writable");
     fs::write(project.path("services/.gitignore"), "scr*.md\n")
         .expect("the gitignore should be writable");
-    write(&project, "services/web/docs/scratch.md", SCRATCH);
+    project.write("services/web/docs/scratch.md", SCRATCH);
 
     let run = project.supdoc_in("services/web", &["update", "--yes"]);
 
@@ -810,7 +801,7 @@ fn a_gitignore_above_a_git_entry_git_cannot_use_applies_up_to_the_real_top() {
         let project = monorepo_with_unusable_web_git(unusable);
         fs::write(project.path(".gitignore"), "gui*.md\n")
             .expect("the gitignore should be writable");
-        write(&project, "services/web/docs/keep.md", SCRATCH);
+        project.write("services/web/docs/keep.md", SCRATCH);
 
         let run = project.supdoc_in("services/web", &["update", "--yes"]);
 
@@ -845,7 +836,7 @@ fn an_anchored_global_pattern_counts_from_the_real_top_past_a_git_entry_git_cann
 fn a_git_directory_holding_only_an_exclude_file_hides_nothing() {
     let project = monorepo_with_git();
     // Git rejects a `.git` without `HEAD`, `objects` and `refs`, so never reads its exclude file.
-    write(&project, "services/web/.git/info/exclude", "gui*.md\n");
+    project.write("services/web/.git/info/exclude", "gui*.md\n");
 
     assert_guide_recorded(
         &project,
@@ -952,4 +943,65 @@ fn an_outer_rule_ignoring_the_root_or_a_directory_on_the_way_to_it_hides_nothing
             named.stdout
         );
     }
+}
+
+/// The sources of every link a `--json list` run from `services/web` reports, with `home` as the
+/// only environment.
+fn sources_listed_with_home(project: &Project, home: &std::path::Path) -> Vec<String> {
+    let run = project.supdoc_in_with("services/web", &["--json", "list"], &[("HOME", home)]);
+    let _ = run.assert_exit(0);
+    listed_sources(&run)
+}
+
+#[test]
+fn rules_match_case_sensitively_even_when_the_repository_sets_core_ignorecase() {
+    let project = web_project();
+    let home = tempfile::tempdir().expect("a home directory should be creatable");
+    make_git_dir(&project, "services/web/.git");
+    // Git would hide `docs/guide.md` with `GUI*.md` under `core.ignorecase`; supdoc does not.
+    project.write("services/web/.git/config", "[core]\n\tignorecase = true\n");
+    project.write("services/web/.gitignore", "docs/GUI*.md\n");
+
+    let sources = sources_listed_with_home(&project, home.path());
+
+    assert!(
+        sources.contains(&"docs/guide.md".to_owned()),
+        "a differently cased rule hides nothing, whatever `core.ignorecase` says\n{sources:?}"
+    );
+}
+
+#[test]
+fn core_excludes_file_counts_from_the_user_config_and_not_from_the_repository_config() {
+    let project = web_project();
+    let home = tempfile::tempdir().expect("a home directory should be creatable");
+    project.write("rules-user", "docs/gui*.md\n");
+    project.write("rules-repo", "docs/gui*.md\n");
+    make_git_dir(&project, "services/web/.git");
+    project.write(
+        "services/web/.git/config",
+        &format!(
+            "[core]\n\texcludesFile = {}\n",
+            project.path("rules-repo").display()
+        ),
+    );
+
+    let from_repo_config = sources_listed_with_home(&project, home.path());
+    fs::write(
+        home.path().join(".gitconfig"),
+        format!(
+            "[core]\n\texcludesFile = {}\n",
+            project.path("rules-user").display()
+        ),
+    )
+    .expect("the user git config should be writable");
+    let from_user_config = sources_listed_with_home(&project, home.path());
+
+    assert!(
+        from_repo_config.contains(&"docs/guide.md".to_owned()),
+        "a repository's own `core.excludesFile` is not read\n{from_repo_config:?}"
+    );
+    assert!(
+        !from_user_config.contains(&"docs/guide.md".to_owned()),
+        "the user config's `core.excludesFile` hides the guide, as in git\n{from_user_config:?}"
+    );
 }

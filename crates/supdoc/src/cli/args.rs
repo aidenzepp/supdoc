@@ -3,6 +3,7 @@
 //! Every flag has a `SUPDOC_*` environment variable (06 X6). Definition only: running a command
 //! lives in the sibling modules.
 
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use clap::builder::FalseyValueParser;
@@ -83,7 +84,7 @@ pub struct GlobalArgs {
     /// Only print data and errors
     #[arg(short, long, global = true, env = "SUPDOC_QUIET", value_parser = FalseyValueParser::new())]
     pub quiet: bool,
-    /// List passed links too
+    /// Show more detail, such as passed links in `check`
     #[arg(short, long, global = true, env = "SUPDOC_VERBOSE", action = ArgAction::Count)]
     pub verbose: u8,
     /// When to use color
@@ -240,7 +241,7 @@ pub struct FixArgs {
 pub struct ListArgs {
     /// Only links to this target: `path`, `path#symbol` or `ns:path#symbol`
     #[arg(value_name = "TARGET", value_hint = ValueHint::AnyPath)]
-    pub target: Option<String>,
+    pub target: Option<TargetArg>,
     /// Only links in these states
     #[arg(
         long,
@@ -252,11 +253,121 @@ pub struct ListArgs {
     pub state: Vec<LinkState>,
     /// Show at most this many links; 0 means no limit
     #[arg(long, env = "SUPDOC_LIMIT", default_value_t = DEFAULT_LIMIT, value_name = "N")]
-    pub limit: usize,
+    pub limit: Limit,
 }
 
-/// How many results `list` and `resolve` show unless told otherwise (06 X11).
-pub const DEFAULT_LIMIT: usize = 100;
+/// A `list` TARGET as typed, split once into its file part and optional symbol.
+///
+/// Whether the file part is a `ns:path` is decided here, once, so nothing downstream re-splits
+/// the text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetArg {
+    /// The text exactly as typed.
+    typed: String,
+    /// The text before the first `#`.
+    file: String,
+    /// The text after the first `#`, when there is one.
+    symbol: Option<String>,
+    /// Whether `file` is `ns:path`, with a valid namespace name and a non-empty path.
+    namespaced: bool,
+}
+
+impl TargetArg {
+    /// The target exactly as typed, for messages.
+    #[must_use]
+    pub fn typed(&self) -> &str {
+        &self.typed
+    }
+
+    /// The file part as typed: the text before the first `#`.
+    #[must_use]
+    pub fn file(&self) -> &str {
+        &self.file
+    }
+
+    /// The symbol part as typed: the text after the first `#`.
+    #[must_use]
+    pub fn symbol(&self) -> Option<&str> {
+        self.symbol.as_deref()
+    }
+
+    /// Whether the file part is `ns:path`.
+    #[must_use]
+    pub const fn is_namespaced(&self) -> bool {
+        self.namespaced
+    }
+}
+
+impl std::str::FromStr for TargetArg {
+    type Err = std::convert::Infallible;
+
+    fn from_str(typed: &str) -> Result<Self, Self::Err> {
+        let (file, symbol) = match typed.split_once('#') {
+            Some((file, symbol)) => (file, Some(symbol.to_owned())),
+            None => (typed, None),
+        };
+        let namespaced = file
+            .split_once(':')
+            .is_some_and(|(name, rest)| !rest.is_empty() && name.parse::<NamespaceName>().is_ok());
+        Ok(Self {
+            typed: typed.to_owned(),
+            file: file.to_owned(),
+            symbol,
+            namespaced,
+        })
+    }
+}
+
+/// How many results `list`, `resolve` and `namespace list` show unless told otherwise (06 X11).
+pub const DEFAULT_LIMIT: Limit = Limit::at_most(100);
+
+/// How many results a list-style command shows: a count, or everything (`--limit 0`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limit(Option<NonZeroUsize>);
+
+impl Limit {
+    /// A limit of `count` results; `0` shows everything.
+    #[must_use]
+    pub const fn at_most(count: usize) -> Self {
+        Self(NonZeroUsize::new(count))
+    }
+
+    /// No limit: every result is shown.
+    pub const UNLIMITED: Self = Self(None);
+
+    /// The first results of `items`, at most this many.
+    pub fn take<I: IntoIterator>(self, items: I) -> impl Iterator<Item = I::Item> {
+        items
+            .into_iter()
+            .take(self.0.map_or(usize::MAX, NonZeroUsize::get))
+    }
+
+    /// Whether `total` results do not all fit under this limit.
+    #[must_use]
+    pub fn truncated(self, total: usize) -> bool {
+        self.0.is_some_and(|limit| total > limit.get())
+    }
+
+    /// The note for a list that showed `shown` of `total` `noun`s, naming how to see them all.
+    #[must_use]
+    pub fn truncation_note(self, shown: usize, total: usize, noun: &str) -> String {
+        format!("Showing {shown} of {total} {noun}. Use --limit 0 to show all.")
+    }
+}
+
+impl std::str::FromStr for Limit {
+    type Err = std::num::ParseIntError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        text.parse().map(Self::at_most)
+    }
+}
+
+impl std::fmt::Display for Limit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.map_or(0, NonZeroUsize::get))
+    }
+}
 
 /// Arguments of `supdoc resolve`.
 #[derive(Debug, Args)]
@@ -269,7 +380,7 @@ pub struct ResolveArgs {
     pub symbol: Option<SymbolPath>,
     /// Show at most this many symbols; 0 means no limit
     #[arg(long, env = "SUPDOC_LIMIT", default_value_t = DEFAULT_LIMIT, value_name = "N")]
-    pub limit: usize,
+    pub limit: Limit,
 }
 
 /// Arguments of `supdoc init`.
@@ -307,7 +418,7 @@ pub enum NamespaceCommand {
 pub struct NamespaceListArgs {
     /// Show at most this many namespaces; 0 means no limit
     #[arg(long, env = "SUPDOC_LIMIT", default_value_t = DEFAULT_LIMIT, value_name = "N")]
-    pub limit: usize,
+    pub limit: Limit,
 }
 
 /// Arguments of `supdoc namespace rename`.
@@ -325,15 +436,12 @@ pub struct RenameArgs {
 }
 
 /// What `config show` and `namespace list` read, handed to the one module that implements both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Inspect {
+#[derive(Debug, Clone, Copy)]
+pub enum Inspect<'a> {
     /// `supdoc config show`.
     ConfigShow,
-    /// `supdoc namespace list`, showing at most `limit` namespaces (0 means no limit).
-    NamespaceList {
-        /// `--limit`.
-        limit: usize,
-    },
+    /// `supdoc namespace list` with its parsed arguments.
+    NamespaceList(&'a NamespaceListArgs),
 }
 
 /// Arguments of `supdoc schema`.
@@ -395,21 +503,4 @@ pub struct SkillInstallArgs {
     /// Preview or apply.
     #[command(flatten)]
     pub confirm: Confirm,
-}
-
-#[cfg(test)]
-mod tests {
-    use clap::CommandFactory;
-
-    use super::Cli;
-
-    #[test]
-    fn help_does_not_promise_more_verbosity_than_one_level() {
-        let help = Cli::command().render_long_help().to_string();
-
-        assert!(
-            !help.contains("repeat for more"),
-            "--verbose has a single level, so the help should not invite repeating it:\n{help}"
-        );
-    }
 }

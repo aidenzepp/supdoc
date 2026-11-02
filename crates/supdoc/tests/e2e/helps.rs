@@ -10,21 +10,13 @@ use crate::support::{Project, Run};
 /// The project at `fixture "basic"` with an empty config, so a run from `docs/` still finds its root.
 fn project() -> Project {
     let project = Project::fixture("basic");
-    write(&project, "supdoc.config.toml", "");
+    project.write("supdoc.config.toml", "");
     project
 }
 
-/// Writes `text` to `relative` inside `project`, creating its directories.
-fn write(project: &Project, relative: &str, text: &str) {
-    let path = project.path(relative);
-    fs::create_dir_all(path.parent().expect("a project path should have a parent"))
-        .expect("the directory should be creatable");
-    fs::write(path, text).expect("the file should be writable");
-}
-
-/// The text of `run`'s output from the first `marker` to the next blank line.
+/// The text of `run`'s stdout (where the report prints findings) from the first `marker` to the next blank line.
 fn block(run: &Run, marker: &str) -> String {
-    let output = format!("{}{}", run.stdout, run.stderr);
+    let output = &run.stdout;
     let start = output
         .find(marker)
         .unwrap_or_else(|| panic!("the output should have `{marker}`:\n{output}"));
@@ -52,7 +44,7 @@ fn init_help_keeps_the_config_flag_when_the_directory_is_missing() {
 #[test]
 fn init_help_keeps_the_config_flag_when_the_file_exists() {
     let project = project();
-    write(&project, "sub/x.toml", "");
+    project.write("sub/x.toml", "");
 
     let run = project.supdoc(&["-c", "sub/x.toml", "init"]);
 
@@ -67,7 +59,7 @@ fn init_help_keeps_the_config_flag_when_the_file_exists() {
 #[test]
 fn missing_path_help_lists_the_nearest_directory_that_exists() {
     let project = project();
-    write(&project, "my dir/keep.md", "");
+    project.write("my dir/keep.md", "");
 
     let nothing = project.supdoc(&["check", "nope/x.md"]);
     let deeper = project.supdoc(&["check", "docs/nope/x.md"]);
@@ -90,6 +82,9 @@ fn missing_path_help_lists_the_nearest_directory_that_exists() {
 
 #[test]
 fn unreadable_lock_help_names_the_lock_from_the_current_directory() {
+    if !crate::permissions_restrict_this_user("unreadable_lock_help") {
+        return;
+    }
     let project = project();
     project.record();
     let lock = project.path("supdoc.lock");
@@ -119,7 +114,7 @@ fn unreadable_lock_help_names_the_lock_from_the_current_directory() {
 #[test]
 fn lock_symlink_help_names_the_symlink_from_the_current_directory() {
     let project = project();
-    write(&project, "base.lock", "");
+    project.write("base.lock", "");
     symlink("base.lock", project.path("supdoc.lock")).expect("the symlink should be creatable");
 
     let run = project.supdoc_in("docs", &["check"]);
@@ -143,7 +138,7 @@ fn lock_symlink_help_names_the_symlink_from_the_current_directory() {
 fn config_symlink_help_names_the_config_and_keeps_it_for_init() {
     let project = project();
     fs::remove_file(project.path("supdoc.config.toml")).expect("the config should be removable");
-    write(&project, "base.toml", "");
+    project.write("base.toml", "");
     symlink("base.toml", project.path("supdoc.config.toml"))
         .expect("the symlink should be creatable");
 
@@ -167,12 +162,8 @@ fn config_symlink_help_names_the_config_and_keeps_it_for_init() {
 #[test]
 fn update_points_at_fix_only_for_a_link_fix_can_repair() {
     let project = project();
-    write(
-        &project,
-        "docs/typo.md",
-        "See [t](../src/lib.rs#ad) here.\n",
-    );
-    write(&project, "docs/gone.md", "See [g](../src/gone.rs) here.\n");
+    project.write("docs/typo.md", "See [t](../src/lib.rs#ad) here.\n");
+    project.write("docs/gone.md", "See [g](../src/gone.rs) here.\n");
 
     let run = project.supdoc(&["update"]);
 
@@ -193,37 +184,24 @@ fn update_points_at_fix_only_for_a_link_fix_can_repair() {
 }
 
 #[test]
-fn config_failure_help_repeats_the_command_that_failed() {
+fn config_failure_help_names_a_value_to_write() {
     let project = project();
-    write(&project, "supdoc.config.toml", "include = \n");
+    project.write("supdoc.config.toml", "include = 3\n");
 
-    let resolve = project.supdoc(&["resolve", "src/lib.rs"]);
-    let update = project.supdoc(&["update", "--yes"]);
+    let run = project.supdoc(&["update", "--yes"]);
 
-    let _ = resolve.assert_exit(78);
+    let _ = run.assert_exit(78);
     assert!(
-        resolve
-            .stderr
-            .contains("run `supdoc resolve src/lib.rs` again"),
-        "resolve needs its FILE:\n{}",
-        resolve.stderr
-    );
-    let _ = update.assert_exit(78);
-    assert!(
-        update.stderr.contains("run `supdoc update --yes` again"),
-        "update should keep --yes:\n{}",
-        update.stderr
+        run.stderr.contains("`include = [\"docs\"]`"),
+        "a wrong type should say what to write:\n{}",
+        run.stderr
     );
 }
 
 #[test]
 fn syntax_error_help_repeats_the_resolve_with_its_file() {
     let project = project();
-    write(
-        &project,
-        "src/bad.rs",
-        "pub fn fine() {}\npub fn broken( {\n",
-    );
+    project.write("src/bad.rs", "pub fn fine() {}\npub fn broken( {\n");
 
     let run = project.supdoc(&["resolve", "src/bad.rs"]);
 
@@ -239,7 +217,7 @@ fn non_utf8_target_help_does_not_offer_exclude() {
     let project = project();
     fs::write(project.path("src/bad.rs"), [0xff, 0xfe, b'\n'])
         .expect("the target should be writable");
-    write(&project, "docs/b.md", "[b](../src/bad.rs)\n");
+    project.write("docs/b.md", "[b](../src/bad.rs)\n");
 
     let run = project.supdoc(&["check"]);
 
@@ -264,7 +242,7 @@ fn lock_without_hash_features_help_names_the_table_and_the_recovery() {
         .lines()
         .filter(|line| !line.starts_with("[features") && !line.starts_with("line-endings"))
         .collect();
-    write(&project, "supdoc.lock", &kept.join("\n"));
+    project.write("supdoc.lock", &kept.join("\n"));
 
     let run = project.supdoc(&["check"]);
 
@@ -287,7 +265,7 @@ fn link_entry_without_hash_does_not_get_the_features_help() {
         .lines()
         .filter(|line| !line.starts_with("hash ="))
         .collect();
-    write(&project, "supdoc.lock", &kept.join("\n"));
+    project.write("supdoc.lock", &kept.join("\n"));
 
     let run = project.supdoc(&["check"]);
 
@@ -300,17 +278,16 @@ fn link_entry_without_hash_does_not_get_the_features_help() {
 }
 
 #[test]
-fn rename_config_failure_help_repeats_the_whole_command() {
+fn rename_config_failure_help_names_a_value_to_write() {
     let project = project();
-    write(&project, "supdoc.config.toml", "include = \n");
+    project.write("supdoc.config.toml", "include = 3\n");
 
     let run = project.supdoc(&["namespace", "rename", "old", "new", "--yes"]);
 
     let _ = run.assert_exit(78);
     assert!(
-        run.stderr
-            .contains("run `supdoc namespace rename old new --yes` again"),
-        "rename needs OLD, NEW and --yes:\n{}",
+        run.stderr.contains("`include = [\"docs\"]`"),
+        "a wrong type should say what to write:\n{}",
         run.stderr
     );
 }

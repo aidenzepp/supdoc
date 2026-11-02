@@ -6,7 +6,7 @@ use std::process::Stdio;
 
 use crate::support::{Project, Run, strip_ansi};
 
-/// Every read command, in the arguments a user would type (06 X3).
+/// Every read command, in the arguments a user would type.
 const READS: &[&[&str]] = &[
     &["check"],
     &["check", "docs/guide.md"],
@@ -23,7 +23,7 @@ const READS: &[&[&str]] = &[
     &["completions", "bash"],
 ];
 
-/// Every write command run without `--yes`, or with `--dry-run`, which beats `--yes` (06 X4).
+/// Every write command run without `--yes`, or with `--dry-run`, which beats `--yes`.
 const PREVIEWS: &[&[&str]] = &[
     &["update"],
     &["update", "--dry-run", "--yes"],
@@ -141,14 +141,23 @@ fn jsonl_output_has_nothing_but_json_lines_on_stdout() {
         let run = project.run(&with_format(args, &["--jsonl"]));
 
         assert_eq!(run.code, Some(0), "`supdoc {}`: {}", run.args, run.stderr);
+        let mut last = None;
         for line in run.stdout.lines() {
             let record: Result<serde_json::Value, _> = serde_json::from_str(line);
             assert!(
-                record.is_ok_and(|record| record.is_object()),
+                record.as_ref().is_ok_and(serde_json::Value::is_object),
                 "`supdoc {}` printed a line that isn't a JSON object: {line}",
                 run.args
             );
+            last = record.ok();
         }
+        assert_eq!(
+            last.as_ref().and_then(|record| record.get("type")),
+            Some(&serde_json::json!("summary")),
+            "`supdoc {}` should end its JSONL stream with the summary line:\n{}",
+            run.args,
+            run.stdout
+        );
         assert_eq!(run.stderr, "", "`supdoc {}` stderr", run.args);
     }
 }
@@ -354,11 +363,12 @@ fn completions_and_schema_work_with_a_broken_config() {
     }
 }
 
-/// 07 G3: every help names a fix. Unix only, since some codes are reached through file
+/// Every help names a fix. Unix only, since some codes are reached through file
 /// permissions, `sh` and a file-size limit.
 #[cfg(unix)]
 mod helps {
     use std::collections::BTreeSet;
+    use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::Path;
     use std::process::{Command, Stdio};
@@ -389,6 +399,9 @@ mod helps {
         args: &'static [&'static str],
         /// How the binary is run.
         via: Via,
+        /// Whether `setup` removes permissions, so the case can't happen for a user they don't
+        /// restrict (root).
+        needs_permissions: bool,
     }
 
     /// A [`HelpCase`] run in the project root with an empty environment.
@@ -402,6 +415,22 @@ mod helps {
             setup,
             args,
             via: Via::Plain,
+            needs_permissions: false,
+        }
+    }
+
+    /// A [`HelpCase`] whose `setup` removes permissions: skipped for a user they don't restrict.
+    const fn restricted_case(
+        kind: &'static str,
+        setup: fn(&Project),
+        args: &'static [&'static str],
+    ) -> HelpCase {
+        HelpCase {
+            kind,
+            setup,
+            args,
+            via: Via::Plain,
+            needs_permissions: true,
         }
     }
 
@@ -413,6 +442,7 @@ mod helps {
             setup: |_| {},
             args,
             via: Via::FullStdout,
+            needs_permissions: false,
         }
     }
 
@@ -440,6 +470,27 @@ mod helps {
         },
     ];
 
+    /// A code that prints no help on purpose, and why.
+    struct Helpless {
+        /// The code.
+        kind: &'static str,
+        /// Why the message has no next step to give.
+        why: &'static str,
+    }
+
+    /// Codes a [`HelpCase`] prints without a help; every other printed case code must carry one.
+    const HELPLESS: &[Helpless] = &[Helpless {
+        kind: "check-moved",
+        why: "a note that a link followed a moved file; it asks nothing of the reader",
+    }];
+
+    /// Codes whose rendered help is pinned word for word, so any rewording is a deliberate update.
+    const PINNED_HELPS: &[(&str, &str)] = &[(
+        "link-outside-root",
+        "Link to a file inside the project root, or move `supdoc.config.toml` up to a directory \
+         that holds both",
+    )];
+
     /// A code whose message a test can build through the library, with the code and help it got.
     struct UnitCase {
         /// The code the constructor should give.
@@ -456,8 +507,14 @@ mod helps {
                 let path =
                     supdoc::path::AbsolutePath::new(std::path::Path::new("/project/src/lib.rs"))
                         .expect("the fixture path should be absolute");
-                let error = supdoc::read::error::ReadError::Internal { path };
-                (error.code().to_owned(), Some(error.help()))
+                let error = supdoc::read::error::ReadError::Internal {
+                    path,
+                    reason: "tree-sitter returned no tree",
+                };
+                (
+                    error.code().to_owned(),
+                    Some(error.help(supdoc::read::error::ReadRole::ScannedSource, "file")),
+                )
             },
         },
         UnitCase {
@@ -483,7 +540,7 @@ mod helps {
             "docs/api.md",
             "# API\n\nEdited after the scan.\n\nSee [ad](../src/lib.rs#ad).\n",
         );
-        let result = supdoc::check::fix::apply_fixes(&plan, &root);
+        let result = supdoc::check::fix::apply_fixes(&plan, &root, "supdoc fix --yes");
         let finding = result
             .skipped
             .first()
@@ -513,15 +570,20 @@ mod helps {
         }
     }
 
-    /// Whether `help` quotes at least one non-empty backtick span: a command or a concrete value.
+    /// Whether `help` quotes at least one backtick span that is a command or a concrete value: a
+    /// bare flag such as `--config` names neither.
     fn quotes_a_command_or_value(help: &str) -> bool {
-        help.split('`')
-            .skip(1)
-            .step_by(2)
-            .any(|span| !span.trim().is_empty())
+        help.split('`').skip(1).step_by(2).any(|span| {
+            let span = span.trim();
+            let bare_flag = span.starts_with('-') && !span.contains(char::is_whitespace);
+            !span.is_empty() && !bare_flag
+        })
     }
 
-    /// Whether `help` sends the reader elsewhere instead of saying what to do (07 G3).
+    /// The crate's own issues page, the one URL a help may name: exit-70 helps send the reader there.
+    const ISSUES_URL: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/issues");
+
+    /// Whether `help` sends the reader elsewhere instead of saying what to do.
     fn points_elsewhere(help: &str) -> bool {
         const POINTERS: &[&str] = &[
             "see the docs",
@@ -531,18 +593,18 @@ mod helps {
             "refer to",
             "consult",
             "readme",
-            "http",
         ];
-        let lowered = help.to_lowercase();
-        help.split_whitespace().count() < 3
-            || POINTERS.iter().any(|pointer| lowered.contains(pointer))
+        let lowered = help.to_lowercase().replace(ISSUES_URL, "");
+        lowered.contains("http") || POINTERS.iter().any(|pointer| lowered.contains(pointer))
     }
 
-    /// What is wrong with `help` under 07 G3, if anything: it must quote a runnable command or a
+    /// What is wrong with `help`, if anything: it must quote a runnable command or a
     /// concrete value (`supdoc update docs/guide.md --yes`, `did you mean log_in?`) and must not send
     /// the reader elsewhere.
     fn help_problem(help: &str) -> Option<&'static str> {
-        if points_elsewhere(help) {
+        if help.split_whitespace().count() < 3 {
+            Some("help is too short to name a next step")
+        } else if points_elsewhere(help) {
             Some("should say what to do, not send the reader elsewhere")
         } else if !quotes_a_command_or_value(help) {
             Some("should quote a runnable command or concrete value in backticks")
@@ -552,7 +614,7 @@ mod helps {
     }
 
     /// Every code in supdoc's production source: each `"area-name"` string literal outside
-    /// `tests.rs`, `fixtures.rs`, comments and the `mod tests` that ends a file.
+    /// `tests.rs`, `fixtures.rs`, comments and the `#[cfg(test)] mod tests {` that ends a file.
     fn source_codes() -> BTreeSet<String> {
         let mut codes = BTreeSet::new();
         let mut pending = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
@@ -571,9 +633,19 @@ mod helps {
                 {
                     let text =
                         std::fs::read_to_string(&path).expect("a source file should be UTF-8");
-                    let production = text
-                        .lines()
-                        .take_while(|line| !line.trim_start().starts_with("mod tests"))
+                    let lines: Vec<&str> = text.lines().collect();
+                    let production = lines
+                        .iter()
+                        .enumerate()
+                        .take_while(|(index, line)| {
+                            let opens_test_module = line.trim_start().starts_with("mod tests {")
+                                && index
+                                    .checked_sub(1)
+                                    .and_then(|previous| lines.get(previous))
+                                    .is_some_and(|previous| previous.trim() == "#[cfg(test)]");
+                            !opens_test_module
+                        })
+                        .map(|(_, line)| *line)
                         .filter(|line| !line.trim_start().starts_with("//"));
                     for line in production {
                         let literals = line.split('"').skip(1).step_by(2);
@@ -612,6 +684,19 @@ mod helps {
             std::fs::Permissions::from_mode(mode),
         )
         .expect("the fixture permissions should be settable");
+    }
+
+    /// Whether mode `000` keeps this user out of a directory, which it doesn't for root.
+    fn permissions_restrict_this_user() -> bool {
+        let dir = tempfile::tempdir().expect("the probe directory should be creatable");
+        let file = dir.path().join("probe");
+        std::fs::write(&file, "").expect("the probe file should be writable");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o000))
+            .expect("the probe directory should be lockable");
+        let restricted = std::fs::symlink_metadata(&file).is_err();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("the probe directory should be unlockable");
+        restricted
     }
 
     /// Gives the owner full access to everything under `dir` again, so the project can be removed.
@@ -785,8 +870,8 @@ mod helps {
             |p| p.write("docs/guide.md", "[x](../src/gone.rs#add)\n"),
             &["check"],
         ),
-        case("read-io", |p| chmod(p, "src/lib.rs", 0o000), &["check"]),
-        case("read-io", |p| chmod(p, "docs/old.md", 0o000), &["check"]),
+        restricted_case("read-io", |p| chmod(p, "src/lib.rs", 0o000), &["check"]),
+        restricted_case("read-io", |p| chmod(p, "docs/old.md", 0o000), &["check"]),
         case(
             "config-parse",
             |p| p.write("supdoc.config.toml", "include = 3\n"),
@@ -817,7 +902,7 @@ mod helps {
             |_| {},
             &["check", "--config", "nope.toml"],
         ),
-        case(
+        restricted_case(
             "config-read",
             |p| chmod(p, "supdoc.config.toml", 0o000),
             &["check"],
@@ -911,7 +996,16 @@ mod helps {
             },
             &["check"],
         ),
-        case("lock-read", |p| chmod(p, "supdoc.lock", 0o000), &["check"]),
+        restricted_case("lock-read", |p| chmod(p, "supdoc.lock", 0o000), &["check"]),
+        case(
+            "lock-read",
+            |p| {
+                let lock = p.path().join("supdoc.lock");
+                std::fs::remove_file(&lock).expect("the lockfile should be removable");
+                std::fs::create_dir(&lock).expect("the directory should be creatable");
+            },
+            &["check"],
+        ),
         case(
             "lock-outside-root",
             |p| {
@@ -922,7 +1016,7 @@ mod helps {
             },
             &["check"],
         ),
-        case(
+        restricted_case(
             "lock-write",
             |p| {
                 p.write("docs/new.md", "# N\n\nSee [add](../src/lib.rs#add).\n");
@@ -958,7 +1052,7 @@ mod helps {
             },
             &["check", "alias/lib.rs"],
         ),
-        case(
+        restricted_case(
             "scan-unreadable-dir",
             |p| {
                 p.write("docs/private/a.md", "# A\n");
@@ -971,7 +1065,7 @@ mod helps {
             |p| p.write("docs/a\\b.md", "# A\n"),
             &["check"],
         ),
-        case("scan-root-unreadable", |p| chmod(p, ".", 0o300), &["check"]),
+        restricted_case("scan-root-unreadable", |p| chmod(p, ".", 0o300), &["check"]),
         case(
             "scan-ignore-file-symlink",
             |p| {
@@ -988,7 +1082,7 @@ mod helps {
             |_| {},
             &["resolve", "src/lib.rs#add"],
         ),
-        case(
+        restricted_case(
             "cli-path-unreadable",
             |p| {
                 p.write("docs/private/a.md", "# A\n");
@@ -1000,7 +1094,7 @@ mod helps {
         case("cli-path-invalid", |_| {}, &["resolve", "src"]),
         case("cli-target-invalid", |_| {}, &["list", "src/lib.rs#a..b"]),
         case("cli-init-exists", |_| {}, &["init"]),
-        case(
+        restricted_case(
             "cli-init-write",
             |p| {
                 std::fs::remove_file(p.path().join("supdoc.config.toml"))
@@ -1043,12 +1137,12 @@ mod helps {
             },
             &["namespace", "rename", "shared", "common"],
         ),
-        case(
+        restricted_case(
             "cli-rename-unreadable-source",
             |p| chmod(p, "docs/guide.md", 0o000),
             &["namespace", "rename", "core", "base"],
         ),
-        case(
+        restricted_case(
             "cli-rename-write",
             |p| chmod(p, "docs", 0o555),
             &["namespace", "rename", "core", "base", "--yes"],
@@ -1063,7 +1157,7 @@ mod helps {
             |_| {},
             &["skill", "install", "--global"],
         ),
-        case(
+        restricted_case(
             "cli-skill-write",
             |p| chmod(p, ".", 0o555),
             &["skill", "install", "--yes"],
@@ -1081,14 +1175,16 @@ mod helps {
             setup: |_| {},
             args: &["skill", "install", "--global"],
             via: Via::RelativeClaudeDir,
+            needs_permissions: false,
         },
         HelpCase {
             kind: "cli-no-cwd",
             setup: |_| {},
             args: &["check"],
             via: Via::RemovedCwd,
+            needs_permissions: false,
         },
-        case(
+        restricted_case(
             "fix-write-failed",
             |p| {
                 fixable(p);
@@ -1096,7 +1192,7 @@ mod helps {
             },
             &["fix", "--yes"],
         ),
-        case(
+        restricted_case(
             "fix-lock-write-failed",
             |p| {
                 p.write(
@@ -1183,12 +1279,57 @@ mod helps {
         (args.join(" "), helps, stderr)
     }
 
+    /// Pushes onto `problems` what is wrong with the helps `case` printed: a missing help on its own
+    /// code, a changed pinned help, or a help that names no command or value.
+    fn help_problems(
+        case: &HelpCase,
+        args: &str,
+        helps: &[(String, Option<String>)],
+        problems: &mut Vec<String>,
+    ) {
+        for (kind, help) in helps {
+            let helpless = HELPLESS.iter().any(|entry| entry.kind == kind);
+            if kind == case.kind && help.as_deref().is_none_or(str::is_empty) && !helpless {
+                problems.push(format!(
+                    "`{kind}` (from `supdoc {args}`) printed no help; give it a `.with_help` or \
+                     list it in HELPLESS with a reason"
+                ));
+            }
+            if let Some((_, pinned)) = PINNED_HELPS.iter().find(|(pin, _)| pin == kind)
+                && help.as_deref().is_some_and(|help| help != *pinned)
+            {
+                problems.push(format!(
+                    "the help of `{kind}` (from `supdoc {args}`) changed; expected {pinned:?}, \
+                     got {help:?}"
+                ));
+            }
+            if let Some(problem) = help.as_deref().and_then(help_problem) {
+                problems.push(format!(
+                    "the help of `{kind}` (from `supdoc {args}`) {problem}: {help:?}"
+                ));
+            }
+        }
+    }
+
     #[test]
     fn every_help_names_a_command_or_value() {
         let mut problems = Vec::new();
         let mut covered = BTreeSet::new();
 
+        let restricted = permissions_restrict_this_user();
         for case in HELP_CASES {
+            if case.needs_permissions && !restricted {
+                // Written to the process's stderr directly, which `cargo test` shows even for a
+                // passing test.
+                let _ignored = writeln!(
+                    std::io::stderr(),
+                    "SKIPPED a `{}` help case: mode 000 does not restrict this user (running as \
+                     root?)",
+                    case.kind
+                );
+                let _new = covered.insert(case.kind.to_owned());
+                continue;
+            }
             let (args, helps, stderr) = run_help_case(case);
             if helps.iter().any(|(kind, _)| kind == case.kind) {
                 let _new = covered.insert(case.kind.to_owned());
@@ -1199,13 +1340,7 @@ mod helps {
                     stderr.trim()
                 ));
             }
-            for (kind, help) in &helps {
-                if let Some(problem) = help.as_deref().and_then(help_problem) {
-                    problems.push(format!(
-                        "the help of `{kind}` (from `supdoc {args}`) {problem} (07 G3): {help:?}"
-                    ));
-                }
-            }
+            help_problems(case, &args, &helps, &mut problems);
         }
 
         for unit in UNIT_CASES {
@@ -1218,10 +1353,24 @@ mod helps {
             }
             if let Some(problem) = help.as_deref().and_then(help_problem) {
                 problems.push(format!(
-                    "the help of `{kind}` (built directly) {problem} (07 G3): {help:?}"
+                    "the help of `{kind}` (built directly) {problem}: {help:?}"
+                ));
+            }
+            if kind == "read-internal" && !help.as_deref().is_some_and(|h| h.contains(ISSUES_URL)) {
+                problems.push(format!(
+                    "the help of `{kind}` is an exit-70 help and should name {ISSUES_URL}: {help:?}"
                 ));
             }
             let _new = covered.insert(unit.kind.to_owned());
+        }
+
+        for helpless in HELPLESS {
+            assert!(
+                covered.contains(helpless.kind),
+                "`{}` is listed as helpless ({}) but no case prints it",
+                helpless.kind,
+                helpless.why
+            );
         }
 
         for unreachable in UNREACHABLE {

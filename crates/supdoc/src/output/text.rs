@@ -105,6 +105,14 @@ fn with_source_column(
     format!("{title}\n{head}{column}{after}")
 }
 
+impl TextContext {
+    /// The arrow between two things in a row: `→`, or `->` when drawing in ASCII (07 G12).
+    #[must_use]
+    pub const fn arrow(&self) -> &'static str {
+        if self.unicode { "→" } else { "->" }
+    }
+}
+
 /// `text` with each `→` spelled `->` when `context` draws in ASCII (07 G12). Finding messages
 /// embed link keys, whose `Display` is Unicode, so the swap happens here at the output layer.
 fn glyphs(context: &TextContext, text: String) -> String {

@@ -1,4 +1,4 @@
-//! Go: pure data over the query contract (03 R3–R5), with methods named by their receiver.
+//! Go: pure data over the query contract, with methods named by their receiver.
 //!
 //! Symbols come from `tags.scm` and link regions from `injections.scm`, both beside this file.
 //! The golden symbol list in the tests is the public contract: users type these paths into docs.
@@ -40,6 +40,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::cartridges::rust::region_texts;
     use crate::hash::HashSettings;
     use crate::link::SymbolPath;
     use crate::path::AbsolutePath;
@@ -197,9 +198,10 @@ func (r *Ring[T]) Push(item T) {
                     resolved(&file, &table, path),
                     HashSettings::default()
                 )
+                .expect("the symbol should lie in its own file")
                 .to_string(),
                 hash,
-                "a grammar upgrade moved `{path}`'s node boundaries (02 L8)"
+                "a grammar upgrade moved `{path}`'s node boundaries"
             );
         }
         assert_eq!(
@@ -238,6 +240,7 @@ func (r *Ring[T]) Push(item T) {
 
         let hash = |file: &SourceFile, table: &SymbolTable, path| {
             hash_symbol(file, resolved(file, table, path), HashSettings::default())
+                .expect("the symbol should lie in its own file")
         };
 
         assert_eq!(
@@ -304,13 +307,13 @@ func (r *Ring[T]) Push(item T) {
     fn go_comments_are_link_regions() {
         let file = parse("// [a](a.md)\n/* [b](b.md) */\nfunc f() {}\n");
 
-        assert_eq!(file.language().markdown_regions(&file).len(), 2);
+        assert_eq!(region_texts(&file), [" [a](a.md)\n", "/* [b](b.md) */"]);
     }
 
     #[test]
     fn go_string_literal_is_not_a_link_region() {
         let file = parse("package p\nvar s = \"[a](b.go#c)\"\n");
 
-        assert_eq!(file.language().markdown_regions(&file).len(), 0);
+        assert_eq!(region_texts(&file), Vec::<&str>::new());
     }
 }

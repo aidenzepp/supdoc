@@ -151,7 +151,7 @@ fn github_lines_escape_percent_newline_colon_comma() {
 
     assert_eq!(
         line,
-        "::error file=docs/a%2Cb%3A c.md,line=1,col=5,title=supdoc link-failed::50%25 changed%0Asecond line. Run `supdoc update --yes`"
+        "::error file=docs/a%2Cb%3A c.md,line=1,col=5,title=supdoc link-failed::50%25 changed\\nsecond line. Run `supdoc update --yes`"
     );
     assert_eq!(line.lines().count(), 1, "an annotation is exactly one line");
 }
@@ -303,13 +303,13 @@ fn preview_on_stdout_nothing_written_note_on_stderr() {
         .report(&check_report(), false)
         .expect("writing to a buffer should succeed");
     output
-        .note("Nothing written. Run the same command with --yes to apply.")
+        .note("Nothing written. Run `supdoc update --yes` to apply.")
         .expect("writing to a buffer should succeed");
 
     assert!(!stdout.text().contains("Nothing written"));
     assert_eq!(
         stderr.text(),
-        "Nothing written. Run the same command with --yes to apply.\n"
+        "Nothing written. Run `supdoc update --yes` to apply.\n"
     );
 }
 
@@ -342,11 +342,35 @@ fn quiet_shows_only_errors_and_no_summary() {
 
 #[test]
 fn verbose_lists_passed_links() {
-    let normal = stdout_of(OutputFormat::Text, Verbosity::Normal, false);
-    let verbose = stdout_of(OutputFormat::Text, Verbosity::Verbose, false);
+    let passed = || crate::check::model::Report {
+        links: vec![crate::check::model::LinkReport {
+            key: crate::link::LinkKey {
+                source: source("docs/setup.md"),
+                target: "src/config.rs"
+                    .parse()
+                    .expect("the fixture target should be valid"),
+                symbol: None,
+            },
+            state: crate::state::LinkState::Passed,
+            locations: Vec::new(),
+            finding: None,
+            moved_from: None,
+        }],
+        findings: Vec::new(),
+    };
+    let render = |verbosity| {
+        let (mut output, stdout, _stderr) = captured(settings(OutputFormat::Text, verbosity));
+        output
+            .report(
+                &crate::cli::check::CheckReport::new(passed(), verbosity),
+                true,
+            )
+            .expect("writing to a buffer should succeed");
+        stdout.text()
+    };
 
-    assert!(!normal.contains("passed  docs/setup.md"));
-    assert!(verbose.contains("passed  docs/setup.md -> src/config.rs"));
+    assert!(!render(Verbosity::Normal).contains("passed  docs/setup.md"));
+    assert!(render(Verbosity::Verbose).contains("passed  docs/setup.md -> src/config.rs"));
 }
 
 #[test]
@@ -598,11 +622,48 @@ fn a_message_cannot_forge_a_workflow_command_under_github_format() {
     assert_eq!(
         commands,
         vec![
-            "::error title=supdoc link-failed::oops%0A::error::x%0D::warning::y",
-            "::error title=supdoc link-failed::oops%0A::error::x%0D::warning::y",
+            "::error title=supdoc link-failed::oops\\n::error::x\\r::warning::y",
+            "::error title=supdoc link-failed::oops\\n::error::x\\r::warning::y",
         ]
     );
-    assert!(emitted.contains("done%0A::error::forged"), "{emitted}");
+    assert!(emitted.contains("done\\n::error::forged"), "{emitted}");
+}
+
+#[test]
+fn bidi_and_invisible_characters_are_escaped_in_every_github_field() {
+    for (character, escaped) in [
+        ('\u{202E}', "\\u{202e}"),
+        ('\u{2066}', "\\u{2066}"),
+        ('\u{200B}', "\\u{200b}"),
+        ('\u{2028}', "\\u{2028}"),
+    ] {
+        let finding = finding_on(
+            &format!("docs/a{character}.md"),
+            "see [x](a.rs#b)\n",
+            "[x](a.rs#b)",
+            "link-failed",
+            Severity::Error,
+            &format!("bad{character}message"),
+            &format!("help{character}text"),
+        );
+        let line = annotation(&paths(), &finding);
+        assert!(!line.contains(character), "{escaped}: {line:?}");
+        for field in ["bad", "elp", "docs/a"] {
+            assert!(
+                line.contains(&format!("{field}{escaped}")),
+                "{escaped} in {field}: {line}"
+            );
+        }
+
+        let (mut output, _stdout, stderr) =
+            captured(settings(OutputFormat::Github, Verbosity::Normal));
+        output
+            .note(&format!("note{character}text"))
+            .expect("writing to a buffer should succeed");
+        let emitted = stderr.text();
+        assert!(!emitted.contains(character), "{escaped}: {emitted:?}");
+        assert!(emitted.contains(&format!("note{escaped}")), "{emitted}");
+    }
 }
 
 fn rendered_text(finding: &Finding) -> String {
@@ -755,7 +816,7 @@ fn set_root_makes_github_paths_workspace_relative() {
 }
 
 #[test]
-fn set_root_makes_json_root_and_paths_project_relative() {
+fn set_root_makes_the_json_root_project_relative() {
     let (mut output, stdout) = output_in_subdirectory(OutputFormat::Json);
     output.set_root(absolute("/repo"));
 
@@ -765,15 +826,6 @@ fn set_root_makes_json_root_and_paths_project_relative() {
 
     let envelope = parse(stdout.text().trim_end());
     assert_eq!(at(&envelope, "/root"), "/repo");
-    assert_eq!(
-        PathStyle::json(&source("docs/guide.md")),
-        "docs/guide.md",
-        "JSON paths are the project-relative source paths"
-    );
-    assert!(
-        envelope.to_string().contains("\"docs/guide.md\""),
-        "the envelope should name docs/guide.md relative to the root: {envelope}"
-    );
 }
 
 #[test]

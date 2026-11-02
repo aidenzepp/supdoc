@@ -177,12 +177,22 @@ pub enum LinkPathError {
         /// The rejected path.
         path: String,
     },
-    /// A target path climbs out of the project root (or its namespace's directory) with `..`.
+    /// A plain target path climbs out of the project root with `..`.
     #[error(
         "target `{path}` climbs out of the project root with `..`, and supdoc reads only files inside it"
     )]
     TargetClimbs {
         /// The rejected path.
+        path: String,
+    },
+    /// A namespaced target path uses `..`, so it could leave its namespace's directory.
+    #[error(
+        "target `{namespace}:{path}` uses `..`, and supdoc reads a namespaced target only inside the `{namespace}` namespace's directory"
+    )]
+    NamespacedTargetClimbs {
+        /// The namespace the target names, `auth`.
+        namespace: String,
+        /// The rejected path inside the namespace's directory.
         path: String,
     },
     /// A target path contains `:`, which the lockfile reserves for namespace prefixes.
@@ -244,10 +254,17 @@ impl FromStr for Target {
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
         match raw.split_once(':') {
             None => Ok(Self::Path(raw.parse()?)),
-            Some((namespace, path)) => Ok(Self::Namespaced {
-                namespace: namespace.parse()?,
-                path: path.parse()?,
-            }),
+            Some((namespace, path)) => {
+                let namespace: NamespaceName = namespace.parse()?;
+                let path = path.parse().map_err(|error| match error {
+                    LinkPathError::TargetClimbs { path } => LinkPathError::NamespacedTargetClimbs {
+                        namespace: namespace.to_string(),
+                        path,
+                    },
+                    other => other,
+                })?;
+                Ok(Self::Namespaced { namespace, path })
+            }
         }
     }
 }
@@ -287,7 +304,51 @@ pub enum TargetError {
 #[serde(try_from = "String")]
 pub struct SymbolPath(Vec<String>);
 
+/// One segment of a [`SymbolPath`]: non-empty and free of `.`.
+///
+/// Holding one proves the segment is valid, so [`SymbolPath::root`] and [`SymbolPath::child`]
+/// cannot fail.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SymbolSegment(String);
+
+impl SymbolSegment {
+    /// Checks `name` as a symbol path segment.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `name` is empty or contains `.`.
+    pub fn new(name: String) -> Result<Self, SymbolPathError> {
+        SymbolPath::from_segments(vec![name]).map(|path| Self(path.0.into_iter().collect()))
+    }
+
+    /// This segment with `-number` appended, which keeps it valid.
+    #[must_use]
+    pub fn numbered(&self, number: usize) -> Self {
+        Self(format!("{}-{number}", self.0))
+    }
+
+    /// The segment's text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 impl SymbolPath {
+    /// A one-segment path.
+    #[must_use]
+    pub fn root(segment: SymbolSegment) -> Self {
+        Self(vec![segment.0])
+    }
+
+    /// This path extended by one more segment.
+    #[must_use]
+    pub fn child(&self, segment: SymbolSegment) -> Self {
+        let mut segments = self.0.clone();
+        segments.push(segment.0);
+        Self(segments)
+    }
+
     /// Builds a path from its segments, outermost first.
     ///
     /// # Errors
@@ -389,12 +450,37 @@ pub struct LinkKey {
 impl fmt::Display for LinkKey {
     /// `docs/guide.md → src/lib.rs#Config.validate`
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} → {}", self.source.as_str(), self.target)?;
-        if let Some(symbol) = &self.symbol {
-            write!(f, "#{symbol}")?;
-        }
-        Ok(())
+        write!(f, "{} → ", self.source.as_str())?;
+        write_target(f, &self.target, self.symbol.as_ref())
     }
+}
+
+impl LinkKey {
+    /// The target part alone, as `path`, `path#symbol` or `ns:path#symbol`.
+    #[must_use]
+    pub fn target_text(&self) -> String {
+        let mut text = String::new();
+        // A `String` never fails to take a write, so the result carries no information.
+        let _ = write_target(&mut text, &self.target, self.symbol.as_ref());
+        text
+    }
+}
+
+/// Writes `target`, then `#symbol` when there is one: the one rendering of a link's target.
+///
+/// # Errors
+///
+/// Fails if writing to `out` fails.
+fn write_target(
+    out: &mut impl fmt::Write,
+    target: &Target,
+    symbol: Option<&SymbolPath>,
+) -> fmt::Result {
+    write!(out, "{target}")?;
+    if let Some(symbol) = symbol {
+        write!(out, "#{symbol}")?;
+    }
+    Ok(())
 }
 
 /// What a link points at, without its source: `path`, `path#symbol` or `ns:path#symbol`.
@@ -427,11 +513,7 @@ impl FromStr for LinkRef {
 
 impl fmt::Display for LinkRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.target)?;
-        if let Some(symbol) = &self.symbol {
-            write!(f, "#{symbol}")?;
-        }
-        Ok(())
+        write_target(f, &self.target, self.symbol.as_ref())
     }
 }
 
@@ -556,19 +638,35 @@ mod tests {
 
     #[test]
     fn target_with_parent_segment_is_rejected_plain_or_namespaced() {
-        for (raw, path) in [
-            ("../shared/x.rs", "../shared/x.rs"),
-            ("src/../../x.rs", "src/../../x.rs"),
-            ("docs:../outside/x.rs", "../outside/x.rs"),
-        ] {
+        for raw in ["../shared/x.rs", "src/../../x.rs"] {
             assert_eq!(
                 raw.parse::<Target>(),
                 Err(TargetError::Path(LinkPathError::TargetClimbs {
-                    path: path.to_owned()
+                    path: raw.to_owned()
                 })),
                 "target `{raw}` should not parse",
             );
         }
+        assert_eq!(
+            "docs:../outside/x.rs".parse::<Target>(),
+            Err(TargetError::Path(LinkPathError::NamespacedTargetClimbs {
+                namespace: "docs".to_owned(),
+                path: "../outside/x.rs".to_owned(),
+            })),
+            "a namespaced target with `..` should not parse",
+        );
+    }
+
+    #[test]
+    fn namespaced_climbing_target_message_keeps_the_namespace() {
+        let error = "auth:../web/x.rs"
+            .parse::<Target>()
+            .expect_err("a namespaced target with `..` should not parse");
+        let message = error.to_string();
+        assert!(
+            message.contains("`auth:../web/x.rs`") && !message.contains("project root"),
+            "the message should name the whole target and not blame the project root: {message}",
+        );
     }
 
     #[test]
@@ -685,6 +783,27 @@ mod tests {
         assert_eq!(parsed.segments(), ["Config", "Display", "fmt"]);
         assert_eq!(parsed.last(), "fmt");
         assert_eq!(parsed.to_string(), "Config.Display.fmt");
+    }
+
+    #[test]
+    fn symbol_path_built_from_valid_segments_matches_parsing() {
+        let segment = |name: &str| {
+            SymbolSegment::new(name.to_owned()).expect("the fixture segment should be valid")
+        };
+
+        let built = SymbolPath::root(segment("Config")).child(segment("validate").numbered(1));
+
+        assert_eq!(built, symbol("Config.validate-1"));
+    }
+
+    #[test]
+    fn symbol_segment_rejects_empty_and_dotted_names() {
+        for name in ["", "a.b"] {
+            assert!(
+                SymbolSegment::new(name.to_owned()).is_err(),
+                "segment `{name}` should be rejected"
+            );
+        }
     }
 
     #[test]

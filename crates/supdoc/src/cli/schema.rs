@@ -15,7 +15,7 @@ use serde_json::{Map, Value};
 use crate::output::json::FatalJson;
 use crate::output::{Output, OutputError, Report, TextContext};
 
-use super::args::{Inspect, SchemaArgs, SchemaTarget};
+use super::args::{SchemaArgs, SchemaTarget};
 use super::{
     CliError, Context, Outcome, check, config, fix, init, list, rename, resolve, skill, update,
 };
@@ -108,8 +108,11 @@ fn to_value(schema: schemars::Schema, what: &str) -> Result<Value, CliError> {
         CliError::new(
             "cli-schema-serialize",
             format!("could not turn the schema of `{what}` into JSON: {error}"),
-            "this is a supdoc bug; report it with the command you ran and the output of \
-             `supdoc --version`",
+            concat!(
+                "this is a supdoc bug; report it at ",
+                env!("CARGO_PKG_REPOSITORY"),
+                "/issues with the command you ran and the output of `supdoc --version`"
+            ),
             CliError::BUG_EXIT_CODE,
         )
     })
@@ -139,8 +142,8 @@ fn schema_of(target: SchemaTarget) -> schemars::Schema {
         SchemaTarget::Fix => fix::schema(),
         SchemaTarget::List => list::schema(),
         SchemaTarget::Resolve => resolve::schema(),
-        SchemaTarget::ConfigShow => config::schema(Inspect::ConfigShow),
-        SchemaTarget::NamespaceList => config::schema(Inspect::NamespaceList { limit: 0 }),
+        SchemaTarget::ConfigShow => config::config_show_schema(),
+        SchemaTarget::NamespaceList => config::namespace_list_schema(),
         SchemaTarget::NamespaceRename => rename::schema(),
         SchemaTarget::Init => init::schema(),
         SchemaTarget::SkillInstall => skill::schema(),
@@ -211,6 +214,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::cli::testing::skip;
 
     /// The `schema/` directory at the repository root, where releases ship the schemas.
     fn schema_dir() -> PathBuf {
@@ -233,20 +237,18 @@ mod tests {
         }
     }
 
-    /// Reports that a repository-only test was skipped, since a packaged crate lacks the repository.
-    #[expect(
-        clippy::print_stderr,
-        reason = "a skipped test must say why; the test harness shows captured stderr on request"
-    )]
-    fn skip(missing: &std::path::Path) {
-        eprintln!(
-            "skipped: {} is absent outside the repository",
-            missing.display()
-        );
-    }
+    /// The environment variable that makes the drift tests rewrite the shipped files.
+    const REGENERATE_VAR: &str = "SUPDOC_REGENERATE_SCHEMAS";
 
     /// Asserts `shipped` is exactly what `supdoc schema` prints for `file`'s schema.
+    ///
+    /// With `SUPDOC_REGENERATE_SCHEMAS` set, rewrites `file` instead.
     fn assert_file_current(file: &std::path::Path, schema: &Value, regenerate: &str) {
+        if std::env::var_os(REGENERATE_VAR).is_some() {
+            std::fs::write(file, pretty(schema))
+                .unwrap_or_else(|error| panic!("{} should be writable: {error}", file.display()));
+            return;
+        }
         let shipped = std::fs::read_to_string(file).unwrap_or_else(|error| {
             panic!("{} should exist: {error}", file.display());
         });
@@ -263,16 +265,16 @@ mod tests {
         let Some(dir) = schema_dir_if_present() else {
             return;
         };
-        let mut checked = 0;
         for target in SchemaTarget::value_variants() {
-            let Ok(schema) = schema_value(*target) else {
-                continue;
-            };
+            let schema = schema_value(*target).expect("every command's schema should serialize");
             let file = dir.join(format!("{}.json", name(*target)));
-            assert_file_current(&file, &schema, &format!("supdoc schema {}", name(*target)));
-            checked += 1;
+            let command = name(*target);
+            assert_file_current(
+                &file,
+                &schema,
+                &format!("supdoc schema {command} > schema/{command}.json"),
+            );
         }
-        assert!(checked > 0, "at least one command should be built");
     }
 
     #[test]
@@ -285,7 +287,7 @@ mod tests {
         assert_file_current(
             &file,
             &schema,
-            "supdoc schema > schema/error.json (error entry)",
+            &format!("{REGENERATE_VAR}=1 cargo test -p supdoc cli::schema"),
         );
     }
 
@@ -308,11 +310,7 @@ mod tests {
                 .iter()
                 .find(|target| name(**target) == stem)
                 .unwrap_or_else(|| panic!("{} names no command", path.display()));
-            assert!(
-                schema_value(*target).is_ok(),
-                "{} should hold the schema of a command that publishes one",
-                path.display()
-            );
+            let _schema = schema_value(*target).expect("every command's schema should serialize");
         }
     }
 
@@ -332,10 +330,9 @@ mod tests {
             "$defs should hold the error schema"
         );
         for target in SchemaTarget::value_variants() {
-            assert_eq!(
+            assert!(
                 defs.contains_key(&name(*target)),
-                schema_value(*target).is_ok(),
-                "`{}` should appear in $defs exactly when it is built",
+                "`{}` should appear in $defs",
                 name(*target)
             );
         }
@@ -398,9 +395,7 @@ mod tests {
     #[test]
     fn every_published_schema_is_a_valid_json_schema_with_a_versioned_envelope() {
         for target in SchemaTarget::value_variants() {
-            let Ok(schema) = schema_value(*target) else {
-                continue;
-            };
+            let schema = schema_value(*target).expect("every command's schema should serialize");
             let _validator = jsonschema::validator_for(&schema).unwrap_or_else(|error| {
                 panic!("`{}` publishes an invalid schema: {error}", name(*target))
             });

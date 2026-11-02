@@ -13,10 +13,10 @@ use crate::hash::LineEndings;
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
 use crate::output::text::visible;
-use crate::output::{Output, OutputError, Report, TextContext, Verbosity};
+use crate::output::{Output, Report, TextContext, Verbosity};
 use crate::path::AbsolutePath;
 
-use super::args::Inspect;
+use super::args::{Inspect, Limit};
 use super::project::{load_config, lock_path};
 use super::{CliError, Context, Outcome};
 
@@ -26,8 +26,12 @@ use super::{CliError, Context, Outcome};
 ///
 /// Returns the config's own error (78, or 74 when unreadable) and `cli-config-output` when the
 /// report cannot be written (74).
-pub fn run(inspect: Inspect, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
-    let config = load_config(context, output, command(inspect))?;
+pub fn run(
+    inspect: Inspect<'_>,
+    context: &Context,
+    output: &mut Output,
+) -> Result<Outcome, CliError> {
+    let config = load_config(context, output)?;
     let written = match inspect {
         Inspect::ConfigShow => output
             .report(&ConfigShowReport::new(&config), true)
@@ -41,13 +45,14 @@ pub fn run(inspect: Inspect, context: &Context, output: &mut Output) -> Result<O
                     Ok(())
                 }
             }),
-        Inspect::NamespaceList { limit } => {
-            let report = NamespaceListReport::new(&config, limit);
+        Inspect::NamespaceList(args) => {
+            let report = NamespaceListReport::new(&config, args.limit);
             output.report(&report, true).and_then(|()| {
                 if report.truncated {
-                    output.note(&format!(
-                        "Showing {} namespaces; there are more. Raise --limit, or use --limit 0 for all.",
-                        report.namespaces.len()
+                    output.note(&args.limit.truncation_note(
+                        report.namespaces.len(),
+                        report.total,
+                        "namespaces",
                     ))
                 } else if report.namespaces.is_empty() {
                     output.note("No namespaces configured.")
@@ -57,44 +62,26 @@ pub fn run(inspect: Inspect, context: &Context, output: &mut Output) -> Result<O
             })
         }
     };
-    written.map_err(|error| output_failed(inspect, &error))?;
+    let (code, subject) = match inspect {
+        Inspect::ConfigShow => ("cli-config-output", "the config show report"),
+        Inspect::NamespaceList(_) => ("cli-namespace-output", "the namespace list report"),
+    };
+    written.map_err(|error| CliError::output_failed(code, subject, &error))?;
     Ok(Outcome::Clean)
 }
 
-/// The JSON Schema of the `--json` output of `supdoc config show` or `supdoc namespace list`, as
-/// `inspect` says: the whole envelope, with `data` typed as the command's report.
-/// The shape is the same for every `--limit`.
+/// The JSON Schema of the `--json` output of `supdoc config show`: the whole envelope, with `data`
+/// typed as the command's report.
 #[must_use]
-pub fn schema(inspect: Inspect) -> schemars::Schema {
-    match inspect {
-        Inspect::ConfigShow => schemars::schema_for!(Envelope<'static, ConfigShowReport>),
-        Inspect::NamespaceList { .. } => {
-            schemars::schema_for!(Envelope<'static, NamespaceListReport>)
-        }
-    }
+pub fn config_show_schema() -> schemars::Schema {
+    schemars::schema_for!(Envelope<'static, ConfigShowReport>)
 }
 
-/// The command `inspect` names, as a user types it after `supdoc`.
-const fn command(inspect: Inspect) -> &'static str {
-    match inspect {
-        Inspect::ConfigShow => "config show",
-        Inspect::NamespaceList { .. } => "namespace list",
-    }
-}
-
-/// The error for a report that could not be written.
-fn output_failed(inspect: Inspect, error: &OutputError) -> CliError {
-    let (code, name) = match inspect {
-        Inspect::ConfigShow => ("cli-config-output", "config show"),
-        Inspect::NamespaceList { .. } => ("cli-namespace-output", "namespace list"),
-    };
-    CliError::new(
-        code,
-        format!("cannot write the {name} report: {error}"),
-        "Check that standard output and standard error are open and writable, or redirect both \
-         to a file with `> supdoc.out 2>&1`",
-        CliError::IO_EXIT_CODE,
-    )
+/// The JSON Schema of the `--json` output of `supdoc namespace list`: the whole envelope, with
+/// `data` typed as the command's report. The shape is the same for every `--limit`.
+#[must_use]
+pub fn namespace_list_schema() -> schemars::Schema {
+    schemars::schema_for!(Envelope<'static, NamespaceListReport>)
 }
 
 /// What `config show` prints: the resolved config and the file each part came from.
@@ -151,22 +138,34 @@ impl Report for ConfigShowReport {
     }
 
     fn render_text(&self, context: &TextContext, out: &mut dyn Write) -> io::Result<()> {
-        let arrow = arrow(context);
+        let arrow = context.arrow();
         match self.chain.split_first() {
             None => writeln!(out, "config     (none; defaults)")?,
             Some((child, parents)) => {
-                writeln!(out, "config     {}", shown(context, child))?;
+                writeln!(
+                    out,
+                    "config     {}",
+                    visible(&context.paths.text_absolute(child))
+                )?;
                 for parent in parents {
-                    writeln!(out, "extends    {}", shown(context, parent))?;
+                    writeln!(
+                        out,
+                        "extends    {}",
+                        visible(&context.paths.text_absolute(parent))
+                    )?;
                 }
             }
         }
-        writeln!(out, "lockfile   {}", shown(context, &self.lock))?;
+        writeln!(
+            out,
+            "lockfile   {}",
+            visible(&context.paths.text_absolute(&self.lock))
+        )?;
         render_patterns(context, "include", &self.include, out)?;
         render_patterns(context, "exclude", &self.exclude, out)?;
         let line_endings = &self.features.hash.line_endings;
         let origin = match &line_endings.defined_in {
-            Some(file) => format!("(from {})", shown(context, file)),
+            Some(file) => format!("(from {})", visible(&context.paths.text_absolute(file))),
             None => "(default)".to_owned(),
         };
         writeln!(out, "line-endings  {}  {origin}", line_endings.value)?;
@@ -175,8 +174,8 @@ impl Report for ConfigShowReport {
                 out,
                 "namespace  {} {arrow} {}  ({}){}",
                 visible(&namespace.name),
-                shown(context, &namespace.folder),
-                shown(context, &namespace.defined_in),
+                visible(&context.paths.text_absolute(&namespace.folder)),
+                visible(&context.paths.text_absolute(&namespace.defined_in)),
                 missing_mark(namespace),
             )?;
         }
@@ -192,17 +191,20 @@ pub(crate) struct NamespaceListReport {
     /// Whether `--limit` left namespaces out.
     #[serde(skip)]
     truncated: bool,
+    /// How many namespaces exist, shown or not.
+    #[serde(skip)]
+    total: usize,
 }
 
 impl NamespaceListReport {
-    /// The report for `config`, showing at most `limit` namespaces (0 means no limit).
-    fn new(config: &Config, limit: usize) -> Self {
-        let mut namespaces = namespace_rows(config);
-        let truncated = limit != 0 && namespaces.len() > limit;
-        namespaces.truncate(if limit == 0 { namespaces.len() } else { limit });
+    /// The report for `config`, showing at most `limit` namespaces.
+    fn new(config: &Config, limit: Limit) -> Self {
+        let all = namespace_rows(config);
+        let total = all.len();
         Self {
-            namespaces,
-            truncated,
+            namespaces: limit.take(all).collect(),
+            truncated: limit.truncated(total),
+            total,
         }
     }
 }
@@ -217,7 +219,7 @@ impl Report for NamespaceListReport {
     }
 
     fn render_text(&self, context: &TextContext, out: &mut dyn Write) -> io::Result<()> {
-        let arrow = arrow(context);
+        let arrow = context.arrow();
         let width = self
             .namespaces
             .iter()
@@ -229,11 +231,15 @@ impl Report for NamespaceListReport {
             write!(
                 out,
                 "{name:<width$}  {arrow}  {}{}",
-                shown(context, &namespace.folder),
+                visible(&context.paths.text_absolute(&namespace.folder)),
                 missing_mark(namespace),
             )?;
             if context.verbosity >= Verbosity::Verbose {
-                write!(out, "  (from {})", shown(context, &namespace.defined_in))?;
+                write!(
+                    out,
+                    "  (from {})",
+                    visible(&context.paths.text_absolute(&namespace.defined_in))
+                )?;
             }
             writeln!(out)?;
         }
@@ -346,10 +352,9 @@ fn namespace_rows(config: &Config) -> Vec<NamespaceJson> {
     config
         .namespaces()
         .iter()
-        .map(|(name, folder)| {
-            // A loaded config records the defining file of every namespace; the root only
-            // stands in for a record that cannot be missing.
-            let defined_in = config.namespace_defined_in(name).unwrap_or(root);
+        .map(|(name, namespace)| {
+            let folder = namespace.dir();
+            let defined_in = namespace.defined_in();
             NamespaceJson {
                 name: name.to_string(),
                 path: relative_to(root, folder),
@@ -379,7 +384,7 @@ fn render_patterns(
         visible(&patterns.patterns.join(", "))
     };
     let origin = match &patterns.file {
-        Some(file) => format!("(from {})", shown(context, file)),
+        Some(file) => format!("(from {})", visible(&context.paths.text_absolute(file))),
         None => "(default)".to_owned(),
     };
     writeln!(out, "{key:<10} {list}  {origin}")
@@ -390,157 +395,38 @@ const fn missing_mark(namespace: &NamespaceJson) -> &'static str {
     if namespace.exists { "" } else { " (missing)" }
 }
 
-/// The arrow between a namespace and its directory.
-const fn arrow(context: &TextContext) -> &'static str {
-    if context.unicode { "→" } else { "->" }
-}
-
-/// `path` as text output shows it: relative to the current directory.
-fn shown(context: &TextContext, path: &AbsolutePath) -> String {
-    visible(&context.paths.text_absolute(path))
-}
-
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::sync::{Arc, Mutex};
-
-    use clap::Parser as _;
 
     use super::*;
-    use crate::cli::args::{Cli, Command, ConfigCommand, NamespaceCommand};
-    use crate::output::{OutputSettings, PathStyle};
-
-    /// A buffer `Output` writes into and the test reads back.
-    #[derive(Clone, Default)]
-    struct Capture(Arc<Mutex<Vec<u8>>>);
-
-    impl Capture {
-        fn text(&self) -> String {
-            let bytes = self.0.lock().expect("the capture lock should be free");
-            String::from_utf8(bytes.clone()).expect("captured output should be UTF-8")
-        }
-    }
-
-    impl io::Write for Capture {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .expect("the capture lock should be free")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// What one run returned and printed.
-    struct Run {
-        result: Result<Outcome, CliError>,
-        stdout: String,
-        stderr: String,
-    }
-
-    impl Run {
-        /// The exit code the process would end with.
-        fn exit_code(&self) -> u8 {
-            match &self.result {
-                Ok(outcome) => outcome.exit_code(),
-                Err(error) => error.exit_code(),
-            }
-        }
-
-        /// stdout parsed as the one JSON document `--json` prints.
-        fn json(&self) -> serde_json::Value {
-            serde_json::from_str(&self.stdout)
-                .unwrap_or_else(|error| panic!("stdout should be JSON ({error}): {}", self.stdout))
-        }
-    }
-
-    /// The value at `pointer` (RFC 6901) in `json`, or a failure naming what is missing.
-    fn at(json: &serde_json::Value, pointer: &str) -> serde_json::Value {
-        json.pointer(pointer)
-            .unwrap_or_else(|| panic!("`{pointer}` should be in the JSON output: {json}"))
-            .clone()
-    }
-
-    /// A project in a fresh temporary directory.
-    struct Project {
-        dir: tempfile::TempDir,
-    }
+    use crate::cli::args::{Command, ConfigCommand, NamespaceCommand};
+    use crate::cli::testing::{Project, Run, Session, at};
 
     impl Project {
-        fn new() -> Self {
-            Self {
-                dir: tempfile::tempdir().expect("a fresh temp directory should be created"),
-            }
-        }
-
-        fn root(&self) -> AbsolutePath {
-            AbsolutePath::new(self.dir.path()).expect("a temp directory should be absolute")
-        }
-
-        fn write(&self, relative: &str, text: &str) {
-            let path = self.dir.path().join(relative);
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).expect("the fixture directory should be created");
-            }
-            fs::write(&path, text).expect("the fixture file should be written");
-        }
-
         /// Runs `supdoc <args>` from the project root.
         fn run(&self, args: &[&str]) -> Run {
             run_in(self.root(), args)
         }
     }
 
-    /// Runs `supdoc <args>` from `cwd`, with output paths provisionally rooted there as `main`
-    /// roots them before any config loads. `args` must name `config show` or `namespace list`.
+    /// Runs `supdoc <args>` from `cwd`. `args` must name `config show` or `namespace list`.
     fn run_in(cwd: AbsolutePath, args: &[&str]) -> Run {
-        let command_line: Vec<&str> = std::iter::once("supdoc")
-            .chain(args.iter().copied())
-            .collect();
-        let cli = Cli::try_parse_from(&command_line)
-            .unwrap_or_else(|error| panic!("`{}` should parse: {error}", command_line.join(" ")));
-        let inspect = match &cli.command {
+        let mut session = Session::new(cwd, args);
+        let inspect = match &session.cli.command {
             Command::Config(ConfigCommand::Show) => Inspect::ConfigShow,
-            Command::Namespace(NamespaceCommand::List(args)) => {
-                Inspect::NamespaceList { limit: args.limit }
-            }
+            Command::Namespace(NamespaceCommand::List(args)) => Inspect::NamespaceList(args),
             _ => panic!(
-                "`{}` should be config show or namespace list",
-                command_line.join(" ")
+                "`supdoc {}` should be config show or namespace list",
+                args.join(" ")
             ),
         };
-        let settings = OutputSettings {
-            format: cli.global.format(),
-            verbosity: Verbosity::from_flags(cli.global.quiet, cli.global.verbose),
-            color: false,
-            unicode: false,
-            width: 80,
-            paths: PathStyle::new(cwd.clone(), cwd.clone(), None),
-        };
-        let (stdout, stderr) = (Capture::default(), Capture::default());
-        let mut output = Output::new(settings, Box::new(stdout.clone()), Box::new(stderr.clone()));
-        let context = Context {
-            global: cli.global,
-            cwd,
-            home: None,
-            claude_config_dir: None,
-        };
-        let result = super::run(inspect, &context, &mut output);
-        Run {
-            result,
-            stdout: stdout.text(),
-            stderr: stderr.text(),
-        }
+        let result = super::run(inspect, &session.context, &mut session.output);
+        session.finished(result)
     }
 
     /// A parent config in the project root and a child under `child/` that extends it.
     fn chain_project(parent: &str, child_extra: &str) -> Project {
-        let project = Project::new();
+        let project = Project::empty();
         project.write("supdoc.config.toml", parent);
         project.write(
             "child/supdoc.config.toml",
@@ -594,7 +480,7 @@ mod tests {
 
     #[test]
     fn config_show_without_config_reports_defaults_and_notes_it() {
-        let project = Project::new();
+        let project = Project::empty();
 
         let json = project.run(&["--json", "config", "show"]).json();
         let text = project.run(&["config", "show"]);
@@ -670,7 +556,7 @@ mod tests {
 
     #[test]
     fn config_show_broken_config_exits_78() {
-        let project = Project::new();
+        let project = Project::empty();
         project.write("supdoc.config.toml", "include = 3\n");
 
         let run = project.run(&["config", "show"]);
@@ -685,9 +571,8 @@ mod tests {
         assert_eq!(run.stdout, "", "a fatal error leaves stdout empty");
     }
 
-    /// Every way `json` breaks the schema `schema(inspect)` publishes.
-    fn schema_violations(inspect: Inspect, json: &serde_json::Value) -> Vec<String> {
-        let schema = schema(inspect);
+    /// Every way `json` breaks `schema`, the schema a command publishes.
+    fn schema_violations(schema: schemars::Schema, json: &serde_json::Value) -> Vec<String> {
         let schema = serde_json::to_value(schema).expect("the schema should serialize");
         let validator = jsonschema::validator_for(&schema)
             .expect("the generated schema should be a valid JSON Schema");
@@ -705,7 +590,7 @@ mod tests {
         );
         let json = run_in_child(&project, &["--json", "config", "show"]).json();
 
-        let errors = schema_violations(Inspect::ConfigShow, &json);
+        let errors = schema_violations(config_show_schema(), &json);
 
         assert!(errors.is_empty(), "schema violations: {errors:?} in {json}");
         assert_eq!(at(&json, "/command"), "config show");
@@ -713,7 +598,7 @@ mod tests {
 
     #[test]
     fn namespace_list_caps_at_limit_and_signals_truncation() {
-        let project = Project::new();
+        let project = Project::empty();
         project.write(
             "supdoc.config.toml",
             "[namespaces]\nweb = \"apps/web\"\nauth = \"services/auth\"\ncore = \"core\"\n",
@@ -732,15 +617,34 @@ mod tests {
 
         let text = project.run(&["namespace", "list", "--limit", "2"]);
         assert!(
-            text.stderr.contains("Showing 2 namespaces"),
+            text.stderr.contains("Showing 2 of 3 namespaces."),
             "stderr: {}",
             text.stderr
         );
     }
 
     #[test]
+    fn namespace_list_limit_0_shows_every_namespace() {
+        let project = Project::empty();
+        project.write(
+            "supdoc.config.toml",
+            "[namespaces]\nweb = \"apps/web\"\nauth = \"services/auth\"\ncore = \"core\"\n",
+        );
+
+        let run = project.run(&["--json", "namespace", "list", "--limit", "0"]);
+
+        let json = run.json();
+        assert_eq!(at(&json, "/truncated"), false, "json: {json}");
+        assert_eq!(
+            at(&json, "/data/namespaces").as_array().map(Vec::len),
+            Some(3),
+            "json: {json}"
+        );
+    }
+
+    #[test]
     fn namespace_list_shows_name_and_folder_sorted() {
-        let project = Project::new();
+        let project = Project::empty();
         project.write(
             "supdoc.config.toml",
             "[namespaces]\nweb = \"apps/web\"\nauth = \"services/auth\"\n",
@@ -787,7 +691,7 @@ mod tests {
 
     #[test]
     fn namespace_list_empty_prints_nothing_and_notes_on_stderr() {
-        let project = Project::new();
+        let project = Project::empty();
         project.write("supdoc.config.toml", "");
 
         let run = project.run(&["namespace", "list"]);
@@ -799,7 +703,7 @@ mod tests {
 
     #[test]
     fn namespace_list_marks_missing_folder() {
-        let project = Project::new();
+        let project = Project::empty();
         project.write(
             "supdoc.config.toml",
             "[namespaces]\nghost = \"nowhere\"\nreal = \"here\"\n",
@@ -825,14 +729,14 @@ mod tests {
 
     #[test]
     fn namespace_list_json_validates_against_its_schema() {
-        let project = Project::new();
+        let project = Project::empty();
         project.write(
             "supdoc.config.toml",
             "[namespaces]\nauth = \"services/auth\"\n",
         );
         let json = project.run(&["--json", "namespace", "list"]).json();
 
-        let errors = schema_violations(Inspect::NamespaceList { limit: 0 }, &json);
+        let errors = schema_violations(namespace_list_schema(), &json);
 
         assert!(errors.is_empty(), "schema violations: {errors:?} in {json}");
         assert_eq!(at(&json, "/command"), "namespace list");

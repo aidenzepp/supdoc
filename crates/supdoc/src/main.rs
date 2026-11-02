@@ -1,4 +1,8 @@
-//! The `supdoc` command: the only code that reads the process environment and sets its exit code.
+//! The `supdoc` command: the code that reads the process environment and sets its exit code.
+//!
+//! `main` reads the environment variables the commands need and hands them down. Clap reads the
+//! `SUPDOC_*` flags from the same lookup, and `walk` still reads the global git excludes
+//! (`HOME`, `XDG_CONFIG_HOME`, `GIT_CONFIG_GLOBAL`) itself until C5-71 moves that read here.
 
 #![cfg_attr(
     test,
@@ -9,14 +13,15 @@
     )
 )]
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::io::{self, IsTerminal, Write};
 use std::path::{MAIN_SEPARATOR_STR, Path};
 use std::process::ExitCode;
 
 use clap::ColorChoice;
-use supdoc::cli::args::{Cli, Command, GlobalArgs, SkillCommand};
-use supdoc::cli::parse::{Parsed, Printout, Stream, parse_process};
+use supdoc::cli::args::{Cli, GlobalArgs};
+use supdoc::cli::parse::{Parsed, Printout, Stream, parse_from};
+use supdoc::cli::skill::SkillDirs;
 use supdoc::cli::{CliError, Context, run};
 use supdoc::finding::{Finding, Severity};
 use supdoc::output::format::supports_unicode;
@@ -25,9 +30,6 @@ use supdoc::path::AbsolutePath;
 
 /// The exit code for an I/O error (06 X7).
 const IO_EXIT_CODE: u8 = 74;
-
-/// The environment variable that moves Claude Code's config directory.
-const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
 
 /// Terminal width when `COLUMNS` says nothing usable.
 const DEFAULT_WIDTH: usize = 80;
@@ -40,7 +42,10 @@ fn main() -> ExitCode {
 ///
 /// Builds the one [`Output`] of the run, and every command prints through it.
 fn exit_code() -> u8 {
-    let cli = match parse_process() {
+    let var = |name: &str| std::env::var_os(name);
+    let cli = match parse_from(std::env::args_os(), |name| {
+        var(name).and_then(|value| value.into_string().ok())
+    }) {
         Parsed::Run(cli) => *cli,
         Parsed::Print(printout) => return print(&printout),
     };
@@ -57,17 +62,8 @@ fn exit_code() -> u8 {
     let result = if let Some(error) = failure {
         Err(error)
     } else {
-        let var = |name: &str| std::env::var_os(name);
-        reject_relative_claude_dir(&command, var(CLAUDE_CONFIG_DIR).as_deref()).and_then(|()| {
-            let (home, claude_config_dir) = home_dirs(var);
-            let context = Context {
-                global,
-                cwd,
-                home,
-                claude_config_dir,
-            };
-            run(&command, &context, &mut output)
-        })
+        let context = Context { global, cwd };
+        run(&command, &SkillDirs::from_vars(var), &context, &mut output)
     };
 
     match result {
@@ -96,53 +92,9 @@ fn current_dir() -> Result<AbsolutePath, CliError> {
         })
 }
 
-/// `HOME` and `CLAUDE_CONFIG_DIR`, read once for the whole run.
-///
-/// An unset, empty or relative value is `None`.
-fn home_dirs(
-    var: impl Fn(&str) -> Option<OsString>,
-) -> (Option<AbsolutePath>, Option<AbsolutePath>) {
-    let dir = |name: &str| {
-        var(name)
-            .filter(|value| !value.is_empty())
-            .and_then(|value| AbsolutePath::new(Path::new(&value)))
-    };
-    (dir("HOME"), dir(CLAUDE_CONFIG_DIR))
-}
-
-/// Refuses a relative `CLAUDE_CONFIG_DIR` for `skill install --global`.
-///
-/// [`home_dirs`] drops a relative value, which would silently send the Claude Code copy to
-/// `~/.claude`, so the command is refused before it runs.
-///
-/// # Errors
-///
-/// Returns `cli-skill-relative-claude-dir` when `command` is `skill install --global` and
-/// `value` is a non-empty relative path.
-fn reject_relative_claude_dir(command: &Command, value: Option<&OsStr>) -> Result<(), CliError> {
-    let global_install =
-        matches!(command, Command::Skill(SkillCommand::Install(args)) if args.global);
-    match value {
-        Some(dir) if global_install && !dir.is_empty() && !Path::new(dir).is_absolute() => {
-            Err(CliError::new(
-                "cli-skill-relative-claude-dir",
-                format!(
-                    "{CLAUDE_CONFIG_DIR} is `{}`, which is not an absolute path",
-                    dir.to_string_lossy()
-                ),
-                format!(
-                    "Set `{CLAUDE_CONFIG_DIR}` to an absolute path, or unset it to use `~/.claude`"
-                ),
-                CliError::USAGE_EXIT_CODE,
-            ))
-        }
-        _ => Ok(()),
-    }
-}
-
 /// Writes help, a version or a usage error to its stream and returns its exit code.
 ///
-/// A closed pipe is not a failure of supdoc, so it exits 0 (06 X13).
+/// A closed pipe is not a failure of supdoc, so it exits 0.
 fn print(printout: &Printout) -> u8 {
     let written = match printout.stream {
         Stream::Stdout => write_all(io::stdout(), &printout.text),
@@ -167,7 +119,7 @@ fn write_all(mut sink: impl Write, text: &str) -> io::Result<()> {
 
 /// Prints `error` as a fatal error in the requested format and returns its exit code.
 ///
-/// A closed pipe is not a failure of supdoc, so it exits 0 (06 X13).
+/// A closed pipe is not a failure of supdoc, so it exits 0.
 fn report(output: &mut Output, error: &CliError) -> u8 {
     let written = output.fatal(&fatal_finding(error), error.exit_code());
     if output.is_closed() {
@@ -200,7 +152,7 @@ fn choice(color: ColorChoice) -> anstream::ColorChoice {
     }
 }
 
-/// Whether text output carries color (06 X13).
+/// Whether text output carries color.
 ///
 /// `--color always` and `never` decide alone. `auto` colors only when stdout, the stream the data
 /// goes to, is a terminal, `NO_COLOR` is unset or empty, and `TERM` isn't `dumb`.
@@ -246,7 +198,7 @@ fn settings(global: &GlobalArgs, cwd: AbsolutePath) -> OutputSettings {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
+    use std::ffi::OsString;
     use std::sync::{Arc, Mutex};
 
     use supdoc::cli::ErrorSite;
@@ -373,31 +325,6 @@ mod tests {
         );
     }
 
-    fn lookup(vars: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
-        move |name| {
-            vars.iter()
-                .find(|(key, _)| *key == name)
-                .map(|(_, value)| OsString::from(value))
-        }
-    }
-
-    #[test]
-    fn context_carries_home_and_claude_config_dir() {
-        let (home, claude) = home_dirs(lookup(&[
-            ("HOME", "/home/me"),
-            ("CLAUDE_CONFIG_DIR", "/home/me/.claude-alt"),
-        ]));
-
-        assert_eq!(
-            home.as_ref().map(AsRef::<Path>::as_ref),
-            Some(Path::new("/home/me"))
-        );
-        assert_eq!(
-            claude.as_ref().map(AsRef::<Path>::as_ref),
-            Some(Path::new("/home/me/.claude-alt"))
-        );
-    }
-
     #[test]
     fn auto_color_follows_the_stdout_terminal() {
         let auto = |terminal| color_on(ColorChoice::Auto, terminal, None, Some("xterm"));
@@ -435,59 +362,5 @@ mod tests {
             Some("dumb")
         ));
         assert!(!color_on(ColorChoice::Never, true, None, Some("xterm")));
-    }
-
-    #[test]
-    fn unset_or_empty_claude_config_dir_is_none() {
-        let (home, unset) = home_dirs(lookup(&[("HOME", "/home/me")]));
-        let (_, empty) = home_dirs(lookup(&[("HOME", "/home/me"), ("CLAUDE_CONFIG_DIR", "")]));
-
-        assert!(home.is_some(), "HOME should be read");
-        assert!(unset.is_none(), "unset CLAUDE_CONFIG_DIR should be None");
-        assert!(empty.is_none(), "empty CLAUDE_CONFIG_DIR should be None");
-    }
-
-    fn parsed(args: &[&str]) -> Command {
-        Cli::try_parse_from(args)
-            .expect("the command line should parse")
-            .command
-    }
-
-    #[test]
-    fn a_relative_claude_config_dir_is_a_usage_error_for_skill_install_global() {
-        let command = parsed(&["supdoc", "skill", "install", "--global"]);
-        let error = reject_relative_claude_dir(&command, Some(OsStr::new("rel/claude")))
-            .expect_err("a relative CLAUDE_CONFIG_DIR should be refused");
-
-        assert_eq!(error.code(), "cli-skill-relative-claude-dir");
-        assert_eq!(error.exit_code(), CliError::USAGE_EXIT_CODE);
-        assert!(
-            error.to_string().contains("rel/claude"),
-            "the message should name the value: {error}"
-        );
-    }
-
-    #[test]
-    fn unset_empty_and_absolute_claude_config_dirs_are_accepted() {
-        let command = parsed(&["supdoc", "skill", "install", "--global"]);
-        for value in [None, Some(OsStr::new("")), Some(OsStr::new("/abs/claude"))] {
-            assert!(
-                reject_relative_claude_dir(&command, value).is_ok(),
-                "{value:?} should be accepted"
-            );
-        }
-    }
-
-    #[test]
-    fn a_relative_claude_config_dir_is_ignored_outside_skill_install_global() {
-        for args in [
-            &["supdoc", "skill", "install"][..],
-            &["supdoc", "check"][..],
-        ] {
-            assert!(
-                reject_relative_claude_dir(&parsed(args), Some(OsStr::new("rel/claude"))).is_ok(),
-                "{args:?} should not read CLAUDE_CONFIG_DIR"
-            );
-        }
     }
 }

@@ -7,6 +7,7 @@
 use std::fmt::{self, Display, Formatter};
 
 use crate::link::SymbolPath;
+use crate::lock::error::shell_quote;
 use crate::path::AbsolutePath;
 
 /// Why a file couldn't be read and parsed.
@@ -54,11 +55,27 @@ pub enum ReadError {
         supported: Vec<&'static str>,
     },
 
-    /// tree-sitter produced no tree. supdoc sets no timeout or cancellation, so this is a bug.
+    /// A condition supdoc guarantees cannot happen did (tree-sitter producing no tree, a symbol
+    /// whose range lies outside its file), so this is a bug.
     Internal {
-        /// The file being parsed.
+        /// The file being read.
         path: AbsolutePath,
+        /// What went wrong, as a short phrase that reads before "for <file>".
+        reason: &'static str,
     },
+}
+
+/// What a file was being read as, which decides what advice fits its [`ReadError`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadRole {
+    /// A walked source file being scanned for links; `exclude` removes it from the scan.
+    ScannedSource,
+    /// A walked source file being renamed past, which must never be offered `exclude`.
+    RenamedSource,
+    /// A file a link points at; `exclude` does not matter to a link.
+    Target,
+    /// The `FILE` argument of `supdoc resolve`, read whatever `exclude` says.
+    ResolveArgument,
 }
 
 impl ReadError {
@@ -84,7 +101,7 @@ impl ReadError {
             | Self::NotUtf8 { path, .. }
             | Self::TooLarge { path, .. }
             | Self::UnsupportedLanguage { path, .. }
-            | Self::Internal { path } => path,
+            | Self::Internal { path, .. } => path,
         }
     }
 
@@ -103,47 +120,54 @@ impl ReadError {
             Self::UnsupportedLanguage { extension, .. } => {
                 format!("no language for `.{extension}` files ({shown})")
             }
-            Self::Internal { .. } => {
-                format!("tree-sitter returned no tree for {shown} (supdoc bug)")
+            Self::Internal { reason, .. } => {
+                format!("{reason} for {shown} (supdoc bug)")
             }
         }
     }
 
-    /// What to do next when the file is a link's target rather than a file being scanned, with
-    /// the file named as `shown`.
+    /// What to do next, for a file read in `role`, with the file named as `shown`.
     ///
-    /// The same as [`ReadError::help`] except for a file that is missing or not UTF-8. `exclude`
-    /// removes a file from the scan, which a link to it does not care about, so it is not offered.
+    /// Only a file that is missing, not UTF-8 or too large reads differently by role; the
+    /// other errors give the same advice whoever asked.
     #[must_use]
-    pub fn target_help(&self, shown: &str) -> String {
-        match self {
-            Self::Missing { .. } => {
+    pub fn help(&self, role: ReadRole, shown: &str) -> String {
+        match (self, role) {
+            (Self::Missing { .. }, ReadRole::Target) => {
                 format!("If `{shown}` moved, update the link to its new path")
             }
-            Self::NotUtf8 { .. } => {
-                format!("Save `{shown}` as UTF-8, or point the link at a file that is")
+            (Self::Missing { .. }, _) => {
+                "If the file moved, update the link to its new path".to_owned()
             }
-            _ => self.help(),
-        }
-    }
-
-    /// What to do next.
-    #[must_use]
-    pub fn help(&self) -> String {
-        match self {
-            Self::Missing { .. } => "If the file moved, update the link to its new path".to_owned(),
-            Self::Io { .. } => {
-                "Check that the current user can read the file, for example with `chmod u+r` on it"
-                    .to_owned()
-            }
-            Self::NotUtf8 { .. } => {
+            (Self::NotUtf8 { .. }, ReadRole::ScannedSource) => {
                 "Save the file as UTF-8, or add it to `exclude` in `supdoc.config.toml`".to_owned()
             }
-            Self::TooLarge { limit, .. } => format!(
+            (Self::NotUtf8 { .. }, ReadRole::RenamedSource) => "Save the file as UTF-8".to_owned(),
+            (Self::NotUtf8 { .. }, ReadRole::Target) => {
+                format!("Save `{shown}` as UTF-8, or point the link at a file that is")
+            }
+            (Self::NotUtf8 { .. }, ReadRole::ResolveArgument) => {
+                format!("Save `{shown}` as UTF-8, or resolve a file that is")
+            }
+            (Self::TooLarge { limit, .. }, ReadRole::ScannedSource) => format!(
+                "Shrink the file under `{limit}` bytes, or add it to `exclude` in \
+                 `supdoc.config.toml`"
+            ),
+            (Self::TooLarge { limit, .. }, ReadRole::RenamedSource) => {
+                format!("Shrink the file under `{limit}` bytes")
+            }
+            (Self::TooLarge { limit, .. }, ReadRole::ResolveArgument) => {
+                format!("Resolve a file under `{limit}` bytes")
+            }
+            (Self::TooLarge { limit, .. }, ReadRole::Target) => format!(
                 "Link to a symbol in a file under `{limit}` bytes. Generated files usually \
                  shouldn't be linked"
             ),
-            Self::UnsupportedLanguage { supported, .. } => {
+            (Self::Io { .. }, _) => {
+                "Check that the current user can read the file, for example with `chmod u+r` on it"
+                    .to_owned()
+            }
+            (Self::UnsupportedLanguage { supported, .. }, _) => {
                 let listed = supported
                     .iter()
                     .map(|extension| format!("`.{extension}`"))
@@ -153,11 +177,13 @@ impl ReadError {
                     "supdoc reads {listed}. A whole-file link to this type can't be tracked yet"
                 )
             }
-            Self::Internal { .. } => {
-                "Report a bug, including the output of `supdoc --version` and the file's \
-                 language and size"
-                    .to_owned()
-            }
+            (Self::Internal { .. }, _) => concat!(
+                "Report a bug at ",
+                env!("CARGO_PKG_REPOSITORY"),
+                "/issues, including the output of `supdoc --version` and the file's \
+                     language and size"
+            )
+            .to_owned(),
         }
     }
 }
@@ -221,7 +247,10 @@ impl ResolveError {
     /// What to do next, naming the file by its absolute path.
     #[must_use]
     pub fn help(&self) -> String {
-        self.help_naming(&self.file().display())
+        self.help_running(&format!(
+            "supdoc resolve {}",
+            shell_quote(&self.file().display().to_string())
+        ))
     }
 
     /// The message, naming the file as `shown` instead of by its absolute path.
@@ -235,10 +264,11 @@ impl ResolveError {
         }
     }
 
-    /// What to do next, naming the file as `shown` instead of by its absolute path.
+    /// What to do next, with `command` as the whole shell command that lists the file's symbols,
+    /// so a run that was given `-c` or a relative path repeats both.
     #[must_use]
-    pub fn help_naming(&self, shown: &dyn Display) -> String {
-        self.help_listing(&format!("`supdoc resolve {shown}` lists every symbol"))
+    pub fn help_running(&self, command: &str) -> String {
+        self.help_listing(&format!("`{command}` lists every symbol"))
     }
 
     /// What to do next, for a `shown` path relative to the project root. A scan cannot know the
@@ -246,7 +276,8 @@ impl ResolveError {
     #[must_use]
     pub fn help_from_root(&self, shown: &dyn Display) -> String {
         self.help_listing(&format!(
-            "run `supdoc resolve {shown}` from the project root to list its symbols"
+            "run `supdoc resolve {}` from the project root to list its symbols",
+            shell_quote(&shown.to_string())
         ))
     }
 
@@ -402,8 +433,34 @@ mod tests {
             "no language for `.png` files (/repo/logo.png)"
         );
         assert_eq!(
-            error.help(),
+            error.help(ReadRole::Target, "logo.png"),
             "supdoc reads `.md`, `.rs`. A whole-file link to this type can't be tracked yet",
+        );
+    }
+
+    #[test]
+    fn too_large_source_help_gives_source_advice_not_link_advice() {
+        let error = ReadError::TooLarge {
+            path: absolute("/repo/big.md"),
+            size: 18_000_000,
+            limit: 16_777_216,
+        };
+
+        let scanned = error.help(ReadRole::ScannedSource, "big.md");
+        assert!(
+            scanned.contains("exclude") && !scanned.contains("Link to a symbol"),
+            "a too-large source should be told to shrink or exclude it, got: {scanned}"
+        );
+        let renamed = error.help(ReadRole::RenamedSource, "big.md");
+        assert!(
+            !renamed.contains("exclude") && !renamed.contains("Link to a symbol"),
+            "a too-large renamed source must not be offered exclude, got: {renamed}"
+        );
+        assert!(
+            error
+                .help(ReadRole::Target, "big.md")
+                .contains("Link to a symbol"),
+            "a too-large target keeps the link advice"
         );
     }
 }

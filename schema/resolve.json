@@ -129,7 +129,7 @@
       "description": "What `resolve` prints: the symbols of one file, or the one symbol asked for.\n\nJSON puts `file`, `query` and `symbols` under `data`; the envelope carries the warning for a\nfile with syntax errors.",
       "properties": {
         "file": {
-          "description": "The file, relative to the project root. `..` climbs out of it for a file outside.",
+          "description": "The file, relative to the project root.",
           "type": "string"
         },
         "query": {

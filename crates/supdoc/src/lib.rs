@@ -1,6 +1,6 @@
 //! supdoc tracks links from documentation to code and reports when the linked code changes.
 //!
-//! Every module is declared here.
+//! The crate root: the top-level modules of the library.
 
 #![cfg_attr(
     test,
@@ -10,6 +10,9 @@
         reason = "tests report failures rather than document callable contracts"
     )
 )]
+
+/// The shared "did you mean" rule: one cutoff, one distance metric, a length prefilter.
+pub(crate) mod suggest;
 
 /// Absolute and project-relative paths, normalized lexically.
 pub mod path;

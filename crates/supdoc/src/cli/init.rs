@@ -15,11 +15,11 @@ use crate::config::CONFIG_FILE_NAME;
 use crate::lock::error::shell_quote;
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
-use crate::output::{Output, OutputError, Report, TextContext};
+use crate::output::{Output, Report, TextContext};
 use crate::path::AbsolutePath;
 
 use super::args::InitArgs;
-use super::{CliError, Context, Outcome};
+use super::{CliError, Context, Outcome, cause};
 
 /// The file `supdoc init` writes. It loads as a valid config (see the tests). Every key is
 /// commented out, so none of them is live: a live `include` or `exclude` would replace the
@@ -80,7 +80,7 @@ impl Report for StarterReport {
 /// file cannot be created or the output cannot be written.
 pub fn run(args: &InitArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let target = target(context);
-    let label = label(&target, &context.cwd);
+    let label = relative_to(&context.cwd, &target);
     let report = |applied| StarterReport {
         applied,
         path: target.clone(),
@@ -92,21 +92,25 @@ pub fn run(args: &InitArgs, context: &Context, output: &mut Output) -> Result<Ou
         refuse_if_present(&target, context)?;
         output
             .artifact(&report(false), STARTER, true)
-            .map_err(|error| output_failed(&label, &error))?;
+            .map_err(|error| {
+                CliError::output_failed("cli-init-write", &format!("the report on {label}"), &error)
+            })?;
         output
             .note(&format!(
                 "Nothing written. Run `{}` to write {label}.",
                 command(context)
             ))
-            .map_err(|error| output_failed(&label, &error))?;
+            .map_err(|error| {
+                CliError::output_failed("cli-init-write", &format!("the report on {label}"), &error)
+            })?;
     } else {
         write_new(&target, context)?;
-        output
-            .artifact(&report(true), "", true)
-            .map_err(|error| output_failed(&label, &error))?;
-        output
-            .note(&format!("Wrote {label}"))
-            .map_err(|error| output_failed(&label, &error))?;
+        output.artifact(&report(true), "", true).map_err(|error| {
+            CliError::output_failed("cli-init-write", &format!("the report on {label}"), &error)
+        })?;
+        output.note(&format!("Wrote {label}")).map_err(|error| {
+            CliError::output_failed("cli-init-write", &format!("the report on {label}"), &error)
+        })?;
     }
     Ok(Outcome::Clean)
 }
@@ -164,12 +168,6 @@ fn require_parent_directory(target: &AbsolutePath, context: &Context) -> Result<
     }
 }
 
-/// `target` as a person reads it in a note or a message: relative to `cwd`, climbing out of it
-/// when `-c` names a file above it, as the config errors name files.
-fn label(target: &AbsolutePath, cwd: &AbsolutePath) -> String {
-    relative_to(cwd, target)
-}
-
 /// Fails with `cli-init-exists` when something is already at `target`.
 ///
 /// # Errors
@@ -185,31 +183,48 @@ fn refuse_if_present(target: &AbsolutePath, context: &Context) -> Result<(), Cli
 
 /// Creates `target` with the starter contents, failing rather than replacing anything.
 ///
-/// The file is created exclusively, so a config that appears between a check and the write is
-/// still never overwritten.
+/// The starter is written to a temporary sibling and linked into place, which fails if `target`
+/// exists, so a config that appears between a check and the write is never overwritten and a
+/// failed write never leaves a partial config behind.
 ///
 /// # Errors
 ///
 /// Returns `cli-init-exists` when `target` exists, and `cli-init-write` when it cannot be written.
 fn write_new(target: &AbsolutePath, context: &Context) -> Result<(), CliError> {
-    let mut file = OpenOptions::new()
+    let temporary = temporary_sibling(target);
+    let written = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(target.as_path())
-        .map_err(|error| match error.kind() {
-            io::ErrorKind::AlreadyExists => exists(target, context),
-            _ => write_failed(target, &error, context),
-        })?;
-    file.write_all(STARTER.as_bytes())
-        .and_then(|()| file.flush())
-        .map_err(|error| write_failed(target, &error, context))
+        .open(&temporary)
+        .and_then(|mut file| {
+            file.write_all(STARTER.as_bytes())?;
+            file.flush()
+        });
+    let linked = written.and_then(|()| std::fs::hard_link(&temporary, target.as_path()));
+    // Best effort: the temporary is ours, and the outcome is already decided.
+    drop(std::fs::remove_file(&temporary));
+    linked.map_err(|error| match error.kind() {
+        io::ErrorKind::AlreadyExists => exists(target, context),
+        _ => write_failed(target, &error, context),
+    })
+}
+
+/// A hidden file beside `target` that this run alone writes before linking it into place.
+fn temporary_sibling(target: &AbsolutePath) -> std::path::PathBuf {
+    let name = target
+        .as_path()
+        .file_name()
+        .map_or_else(|| CONFIG_FILE_NAME.into(), |name| name.to_string_lossy());
+    target
+        .as_path()
+        .with_file_name(format!(".{name}.{}.tmp", std::process::id()))
 }
 
 /// The refusal for an existing config (06 error table), naming it as the notes do.
 fn exists(target: &AbsolutePath, context: &Context) -> CliError {
     CliError::new(
         "cli-init-exists",
-        format!("{} already exists", label(target, &context.cwd)),
+        format!("{} already exists", relative_to(&context.cwd, target)),
         format!(
             "The existing file wasn't changed. Edit it directly, or delete it and run `{}`.",
             command(context)
@@ -220,24 +235,29 @@ fn exists(target: &AbsolutePath, context: &Context) -> CliError {
 
 /// The error for a config that could not be written, naming it as the notes do.
 fn write_failed(target: &AbsolutePath, error: &io::Error, context: &Context) -> CliError {
+    let directory = target
+        .as_path()
+        .parent()
+        .unwrap_or_else(|| target.as_path());
+    let directory = shell_quote(&directory.to_string_lossy());
+    let fix = match error.kind() {
+        io::ErrorKind::NotFound => format!("create the directory with `mkdir -p {directory}`"),
+        io::ErrorKind::NotADirectory => {
+            format!("a file is in the way of the directory {directory}; move or delete that file")
+        }
+        io::ErrorKind::PermissionDenied => {
+            format!("make the directory {directory} writable by you")
+        }
+        _ => format!("check that you can write to the directory {directory}"),
+    };
     CliError::new(
         "cli-init-write",
-        format!("cannot write {}: {error}", label(target, &context.cwd)),
         format!(
-            "check that the directory exists and that you can write to it, then run `{}` again",
-            command(context)
+            "cannot write {}: {}",
+            relative_to(&context.cwd, target),
+            cause(error)
         ),
-        CliError::IO_EXIT_CODE,
-    )
-}
-
-/// The error for output that could not be written, naming the config as the notes do.
-fn output_failed(label: &str, error: &OutputError) -> CliError {
-    CliError::new(
-        "cli-init-write",
-        format!("cannot report on {label}: {error}"),
-        "check that standard output and standard error are open and writable, or redirect both \
-         to a file with `> supdoc.out 2>&1`",
+        format!("{fix}, then run `{}` again", command(context)),
         CliError::IO_EXIT_CODE,
     )
 }
@@ -249,48 +269,11 @@ mod tests {
     use clap::Parser as _;
 
     use crate::cli::args::{Cli, Command};
+    use crate::cli::testing::{Capture, ClosedPipe};
     use crate::config::Config;
     use crate::output::{OutputFormat, OutputSettings, PathStyle, Verbosity};
 
     use super::*;
-
-    /// A writer that keeps what it is given, shared with the test that reads it back.
-    #[derive(Clone, Default)]
-    struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl Capture {
-        fn text(&self) -> String {
-            let bytes = self.0.lock().expect("the capture lock should be free");
-            String::from_utf8(bytes.clone()).expect("captured output should be UTF-8")
-        }
-    }
-
-    impl Write for Capture {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .expect("the capture lock should be free")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// A writer whose reader has hung up.
-    struct ClosedPipe;
-
-    impl Write for ClosedPipe {
-        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-            Err(io::ErrorKind::BrokenPipe.into())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
 
     /// Plain text settings rooted in `cwd`.
     fn text_settings(cwd: &AbsolutePath) -> OutputSettings {
@@ -338,8 +321,6 @@ mod tests {
             Context {
                 global: cli.global,
                 cwd,
-                home: None,
-                claude_config_dir: None,
             },
         )
     }
@@ -459,7 +440,7 @@ mod tests {
             [exists.message(), missing.message()],
             [
                 "sub/x.toml already exists",
-                "cannot write nope/x.toml: No such file or directory (os error 2)",
+                "cannot write nope/x.toml: no such file or directory",
             ],
             "the messages should name the file as typed, not by its absolute path"
         );
@@ -487,7 +468,7 @@ mod tests {
             [exists.message(), missing.message()],
             [
                 "../supdoc.config.toml already exists",
-                "cannot write ../nope/x.toml: No such file or directory (os error 2)",
+                "cannot write ../nope/x.toml: no such file or directory",
             ],
             "from a subdirectory the messages should name the file as typed, not absolutely"
         );
@@ -523,11 +504,46 @@ mod tests {
             Some(&STARTER.into()),
             "contents in {json}"
         );
-        assert!(
-            json.pointer("/data/path")
-                .is_some_and(serde_json::Value::is_string),
+        assert_eq!(
+            json.pointer("/data/path"),
+            Some(
+                &dir.path()
+                    .join("supdoc.config.toml")
+                    .to_string_lossy()
+                    .into()
+            ),
             "path in {json}"
         );
+    }
+
+    #[test]
+    fn write_failure_helps_by_kind_and_leaves_no_temporary_file() {
+        let dir = tempfile::tempdir().expect("a temp directory should be created");
+        std::fs::write(dir.path().join("file"), "").expect("the blocking file should be written");
+        let (missing_args, missing_context) = context_in(&dir, &["-c", "nope/x.toml"]);
+        let (blocked_args, blocked_context) = context_in(&dir, &["-c", "file/x.toml"]);
+
+        let (missing, _, _) = run_captured(&missing_args, &missing_context);
+        let (blocked, _, _) = run_captured(&blocked_args, &blocked_context);
+
+        let missing = missing.expect_err("a missing directory cannot hold a config");
+        let blocked = blocked.expect_err("a file cannot hold a config");
+        let root = dir.path().to_string_lossy();
+        assert!(
+            missing.help().contains(&format!("mkdir -p {root}/nope")),
+            "help was: {}",
+            missing.help()
+        );
+        assert!(
+            blocked.help().contains(&format!("{root}/file"))
+                && blocked.help().contains("in the way"),
+            "help was: {}",
+            blocked.help()
+        );
+        let leftovers = std::fs::read_dir(dir.path())
+            .expect("the directory should be readable")
+            .count();
+        assert_eq!(leftovers, 1, "only the blocking file remains");
     }
 
     #[test]
@@ -624,7 +640,7 @@ mod tests {
         let (dry_args, dry_context) = context_in(&dir, &["--dry-run", "-c", "gone/x.toml"]);
         let (real_args, real_context) = context_in(&dir, &["-c", "gone/x.toml"]);
 
-        let (dry, _, dry_stdout) = run_captured(&dry_args, &dry_context);
+        let (dry, _, dry_stderr) = run_captured(&dry_args, &dry_context);
         let (real, _, _) = run_captured(&real_args, &real_context);
         let dry = dry.expect_err("the preview should fail on a missing directory");
         let real = real.expect_err("the real run should fail on a missing directory");
@@ -634,7 +650,7 @@ mod tests {
             (real.code(), real.exit_code(), real.to_string()),
             "the preview and the real run fail the same way"
         );
-        assert_eq!(dry_stdout, "", "no note claims success");
+        assert_eq!(dry_stderr, "", "no note claims success");
     }
 
     #[test]

@@ -20,7 +20,7 @@ use crate::path::AbsolutePath;
 
 use pattern::{AnchoredPatterns, PatternList};
 
-pub use error::ConfigError;
+pub use error::{ConfigError, NamespaceEscape};
 pub use pattern::PatternDefinition;
 
 /// The file name supdoc looks for in each directory.
@@ -52,6 +52,31 @@ pub(crate) fn discover_config(start: &AbsolutePath) -> Result<Option<AbsolutePat
     chain::discover(start)
 }
 
+/// A namespace's directory and the config file that defined it.
+///
+/// Constructed only while the chain is merged, after its directory is found inside the root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Namespace {
+    /// The directory, resolved from the config that wrote it. It may not exist (01 D7).
+    dir: AbsolutePath,
+    /// The nearest config file in the chain that defines this namespace.
+    defined_in: AbsolutePath,
+}
+
+impl Namespace {
+    /// The directory the namespace names.
+    #[must_use]
+    pub fn dir(&self) -> &AbsolutePath {
+        &self.dir
+    }
+
+    /// The config file that defined the namespace.
+    #[must_use]
+    pub fn defined_in(&self) -> &AbsolutePath {
+        &self.defined_in
+    }
+}
+
 /// A fully resolved config. Constructed only by [`Config::load`] and [`Config::load_file`].
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -65,10 +90,8 @@ pub struct Config {
     include: AnchoredPatterns,
     /// Files removed from `include`, if any key set it.
     exclude: Option<AnchoredPatterns>,
-    /// Namespace directories, each resolved from the config that wrote it.
-    namespaces: BTreeMap<NamespaceName, AbsolutePath>,
-    /// The config file that defined each namespace in `namespaces`, under the same names.
-    namespace_files: BTreeMap<NamespaceName, AbsolutePath>,
+    /// Every namespace, each confined to the root when the chain was merged.
+    namespaces: BTreeMap<NamespaceName, Namespace>,
     /// The nearest `[features.hash] line-endings` and the file that set it, if any file did.
     line_endings: Option<(LineEndings, AbsolutePath)>,
 }
@@ -100,9 +123,7 @@ impl Config {
     /// [`Config::load`] does.
     pub fn load_file(file: &AbsolutePath) -> Result<Self, ConfigError> {
         let layers = chain::read_chain(file)?;
-        let config = chain::merge(chain::directory_of(file), layers);
-        chain::confine_namespaces(&config)?;
-        Ok(config)
+        chain::merge(chain::directory_of(file), layers)
     }
 
     /// The config used when no file is found: scan everything beneath `root`.
@@ -114,7 +135,6 @@ impl Config {
             include: AnchoredPatterns::built_in(root.clone(), PatternList::everything()),
             exclude: None,
             namespaces: BTreeMap::new(),
-            namespace_files: BTreeMap::new(),
             line_endings: None,
         }
     }
@@ -165,12 +185,12 @@ impl Config {
     /// The directory may not exist: that is checked when a link through it is read (01 D7).
     #[must_use]
     pub fn namespace(&self, name: &NamespaceName) -> Option<&AbsolutePath> {
-        self.namespaces.get(name)
+        self.namespaces.get(name).map(Namespace::dir)
     }
 
     /// Every namespace, by name.
     #[must_use]
-    pub fn namespaces(&self) -> &BTreeMap<NamespaceName, AbsolutePath> {
+    pub fn namespaces(&self) -> &BTreeMap<NamespaceName, Namespace> {
         &self.namespaces
     }
 
@@ -192,7 +212,7 @@ impl Config {
     /// it. When several files in the chain define it, this is the nearest one.
     #[must_use]
     pub fn namespace_defined_in(&self, name: &NamespaceName) -> Option<&AbsolutePath> {
-        self.namespace_files.get(name)
+        self.namespaces.get(name).map(Namespace::defined_in)
     }
 
     /// The resolved hash settings: each key from the nearest config that sets it, else the

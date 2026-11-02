@@ -81,8 +81,10 @@ impl TryFrom<Vec<String>> for PatternList {
                 let _added = builder.add(glob);
             }
         }
-        let set = builder.build().map_err(|error| PatternError::Invalid {
-            pattern: error.glob().unwrap_or_default().to_owned(),
+        // Each glob already compiled alone, so a failure here is the set as a whole: too many
+        // patterns, or too complex, for the matcher's size limit.
+        let set = builder.build().map_err(|error| PatternError::TooComplex {
+            count: raw.len(),
             reason: error.kind().to_string(),
         })?;
         Ok(Self(Matcher::Globs { set, written: raw }))
@@ -148,6 +150,14 @@ pub(crate) enum PatternError {
     /// The pattern is the empty string.
     #[error("pattern is empty; write a path or glob such as `docs`")]
     Empty,
+    /// The patterns each compile, but not together: the set is too large or too complex.
+    #[error("{count} patterns are too many or too complex to match together ({reason})")]
+    TooComplex {
+        /// How many patterns the list holds.
+        count: usize,
+        /// What the glob compiler reported.
+        reason: String,
+    },
     /// The glob syntax is wrong.
     #[error("invalid glob `{pattern}`: {reason}")]
     Invalid {

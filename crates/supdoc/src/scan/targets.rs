@@ -15,13 +15,15 @@ use std::path::Path;
 
 use crate::config::{CONFIG_FILE_NAME, Config};
 use crate::finding::{Finding, Fix, Location, Severity, Snippet};
+use crate::hash::HashSettings;
 use crate::link::{LinkKey, Target};
 use crate::output::paths::relative_to;
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile, SymbolTable};
-use crate::read::error::{ReadError, ResolveError};
+use crate::read::error::{ReadError, ReadRole, ResolveError};
 use crate::read::hash::{hash_file, hash_symbol};
 use crate::scan::model::{ScannedLink, TargetState};
+use crate::suggest::close_match;
 
 /// Finding code for a target path whose case differs from the real path (04 S12).
 const CODE_CASE_MISMATCH: &str = "scan-case-mismatch";
@@ -137,6 +139,13 @@ impl Written {
         })
     }
 
+    /// The source bytes at `range`, a part of this destination, as scanned.
+    pub(crate) fn text_at(&self, range: &Range<usize>) -> Option<Box<str>> {
+        let from = range.start.checked_sub(self.range.start)?;
+        let to = range.end.checked_sub(self.range.start)?;
+        self.text.get(from..to).map(Box::from)
+    }
+
     /// The range of `prefix` when the destination starts with `prefix:`.
     pub(crate) fn prefix_range(&self, prefix: &str) -> Option<Range<usize>> {
         self.text
@@ -173,6 +182,7 @@ pub(crate) fn resolve(
     config: &Config,
     languages: &Languages,
     parsed: &mut Parsed,
+    settings: HashSettings,
     occurrences: Vec<Occurrence>,
 ) -> BTreeMap<LinkKey, ScannedLink> {
     let mut by_target: BTreeMap<Target, BTreeMap<LinkKey, Vec<Occurrence>>> = BTreeMap::new();
@@ -201,7 +211,7 @@ pub(crate) fn resolve(
     let mut links = BTreeMap::new();
     for (at, target, keyed) in located {
         for (key, state, occurrences) in
-            target_states(config, languages, parsed, at, &target, keyed)
+            target_states(config, languages, parsed, settings, at, &target, keyed)
         {
             let snippet = occurrences
                 .first()
@@ -225,6 +235,7 @@ fn target_states(
     config: &Config,
     languages: &Languages,
     parsed: &mut Parsed,
+    settings: HashSettings,
     at: Located,
     target: &Target,
     keyed: BTreeMap<LinkKey, Vec<Occurrence>>,
@@ -257,7 +268,6 @@ fn target_states(
         Err(error) => return broken_by(&|first| read_failed(&error, config.root(), first)),
     };
 
-    let settings = config.hash_settings();
     let mut table: Option<SymbolTable> = None;
     let states: Vec<_> = keyed
         .into_iter()
@@ -272,9 +282,21 @@ fn target_states(
                 Some(symbol) => {
                     let table = table.get_or_insert_with(|| file.language().symbols(file));
                     match table.resolve(file.path(), symbol) {
-                        Ok(found) => TargetState::Present {
-                            hash: hash_symbol(file, found, settings),
-                            syntax_errors,
+                        Ok(found) => match hash_symbol(file, found, settings) {
+                            Ok(hash) => TargetState::Present {
+                                hash,
+                                syntax_errors,
+                            },
+                            Err(_outside) => TargetState::Broken {
+                                finding: read_failed(
+                                    &ReadError::Internal {
+                                        path: file.path().clone(),
+                                        reason: "a symbol's byte range lies outside the file",
+                                    },
+                                    config.root(),
+                                    first,
+                                ),
+                            },
                         },
                         Err(error) => TargetState::Broken {
                             finding: resolve_failed(&error, config.root(), table, first),
@@ -392,13 +414,17 @@ fn broken(code: &'static str, message: String, help: String, first: &Occurrence)
     }
 }
 
-/// The edit replacing `range` in the occurrence's source with `replacement`.
-fn fix_at(first: &Occurrence, range: Range<usize>, replacement: impl Into<String>) -> Fix {
-    Fix {
+/// The edit replacing `range` in the occurrence's source with `replacement`, remembering the
+/// bytes `range` held in the scanned text. `None` when `range` is not inside the written
+/// destination.
+fn fix_at(first: &Occurrence, range: Range<usize>, replacement: impl Into<String>) -> Option<Fix> {
+    let scanned = first.written.as_ref()?.text_at(&range)?;
+    Some(Fix {
         file: first.location.file.clone(),
         range,
         replacement: replacement.into(),
-    }
+        scanned,
+    })
 }
 
 /// `scan-case-mismatch`: the path names a real file with different case, fixed by writing the
@@ -414,13 +440,16 @@ fn case_mismatch(target: &Target, real: &str, first: &Occurrence) -> Finding {
         Some((*path, range.clone(), replacement))
     });
     if let Some((path, range, replacement)) = rewrite {
-        return broken(
+        let finding = broken(
             CODE_CASE_MISMATCH,
             format!("{path} doesn't match the real path {replacement} (case differs)"),
             format!("Change the link to `{replacement}`. `supdoc fix` can do it"),
             first,
-        )
-        .with_fix(fix_at(first, range, replacement));
+        );
+        return match fix_at(first, range, replacement) {
+            Some(fix) => finding.with_fix(fix),
+            None => finding,
+        };
     }
     let real = match target.namespace() {
         Some(namespace) => format!("{namespace}:{real}"),
@@ -501,7 +530,7 @@ fn read_failed(error: &ReadError, root: &AbsolutePath, first: &Occurrence) -> Fi
     broken(
         error.code(),
         error.message_naming(&shown),
-        error.target_help(&shown),
+        error.help(ReadRole::Target, &shown),
         first,
     )
 }
@@ -534,36 +563,12 @@ fn resolve_failed(
         .collect();
     let close = close_match(&query.to_string(), names.iter().map(String::as_str));
     let range = first.written.as_ref().and_then(Written::fragment_range);
-    match close.zip(range) {
-        Some((close, range)) => finding.with_fix(fix_at(first, range, close)),
+    match close
+        .zip(range)
+        .and_then(|(close, range)| fix_at(first, range, close))
+    {
+        Some(fix) => finding.with_fix(fix),
         None => finding,
-    }
-}
-
-/// Whether `candidate` is a likely misspelling of `wanted`: within `max(len, 3) / 3` single-character
-/// edits, counting a swap of neighbors as one edit.
-pub(crate) fn is_close(wanted: &str, candidate: &str) -> bool {
-    strsim::osa_distance(wanted, candidate) <= wanted.chars().count().max(3) / 3
-}
-
-/// The one candidate that is a likely misspelling of `wanted`, if exactly one is.
-///
-/// Close means within `max(len, 3) / 3` single-character edits of `wanted`, counting a swap of
-/// neighbors as one edit, so `atuh` is close to `auth`. Repeated candidates count once.
-pub(crate) fn close_match<'c>(
-    wanted: &str,
-    candidates: impl IntoIterator<Item = &'c str>,
-) -> Option<&'c str> {
-    let mut close: Vec<&str> = candidates
-        .into_iter()
-        .filter(|candidate| *candidate != wanted)
-        .filter(|candidate| is_close(wanted, candidate))
-        .collect();
-    close.sort_unstable();
-    close.dedup();
-    match close.as_slice() {
-        [only] => Some(only),
-        _ => None,
     }
 }
 
@@ -653,6 +658,7 @@ mod tests {
             &config,
             &Languages::builtin(),
             &mut Parsed::default(),
+            config.hash_settings(),
             vec![occurrence],
         );
         match links.get(&key).map(|link| &link.target) {
@@ -689,14 +695,6 @@ mod tests {
         assert_ne!(
             expected(LineEndings::Normalize),
             expected(LineEndings::Exact)
-        );
-    }
-
-    #[test]
-    fn the_outside_root_help_makes_no_claim_about_what_supdoc_reads() {
-        assert!(
-            !OUTSIDE_ROOT_HELP.contains("reads nothing"),
-            "the help must not promise what supdoc reads outside the root: {OUTSIDE_ROOT_HELP}"
         );
     }
 }

@@ -1,4 +1,4 @@
-//! TypeScript: pure data on the query contract (03 R3, R4).
+//! TypeScript: pure data on the query contract.
 //!
 //! Symbols come from `tags.scm` and link regions from `injections.scm`, both beside this file.
 //! The golden symbol list in the tests is the public contract: users type these paths into docs.
@@ -40,10 +40,11 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::cartridges::rust::region_texts;
     use crate::hash::HashSettings;
     use crate::link::SymbolPath;
     use crate::path::AbsolutePath;
-    use crate::read::cartridge::{Cartridge, SourceFile, Symbol, SymbolTable};
+    use crate::read::cartridge::{SourceFile, Symbol, SymbolTable};
     use crate::read::hash::{hash_file, hash_symbol};
 
     /// Every kind of declaration the cartridge names, once.
@@ -207,6 +208,7 @@ namespace util {
                         resolved(&file, &table, path),
                         HashSettings::default(),
                     )
+                    .expect("the symbol should lie in its own file")
                     .to_string(),
                 )
             })
@@ -217,7 +219,7 @@ namespace util {
             .collect();
         assert_eq!(
             actual, expected,
-            "a grammar upgrade moved a symbol's node boundaries (02 L8)"
+            "a grammar upgrade moved a symbol's node boundaries"
         );
         assert_eq!(
             hash_file(&file, HashSettings::default()).to_string(),
@@ -265,6 +267,7 @@ namespace util {
 
         let hash = |file: &SourceFile, table: &SymbolTable, path| {
             hash_symbol(file, resolved(file, table, path), HashSettings::default())
+                .expect("the symbol should lie in its own file")
         };
 
         assert_eq!(
@@ -283,17 +286,20 @@ namespace util {
     }
 
     #[test]
-    fn ts_block_comment_link_is_extracted() {
+    fn ts_line_and_block_comments_are_link_regions() {
         let file = parse("// [a](a.md)\n/** [b](b.md) */\n/* [c](c.md) */\nfunction f() {}\n");
 
-        assert_eq!(file.language().markdown_regions(&file).len(), 3);
+        assert_eq!(
+            region_texts(&file),
+            [" [a](a.md)\n", "/** [b](b.md) */", "/* [c](c.md) */"]
+        );
     }
 
     #[test]
     fn ts_string_literal_is_not_a_link_region() {
         let file = parse("const s = \"[a](b.ts#c)\";\n");
 
-        assert_eq!(file.language().markdown_regions(&file).len(), 0);
+        assert_eq!(region_texts(&file), Vec::<&str>::new());
     }
 
     #[test]
@@ -304,9 +310,17 @@ namespace util {
     }
 
     #[test]
-    fn ts_extensions_cover_module_variants() {
-        let ts = cartridge().expect("the built-in TypeScript queries should compile");
+    fn ts_module_variants_use_the_typescript_cartridge() {
+        let languages = crate::read::cartridge::Languages::builtin();
 
-        assert_eq!(ts.extensions(), ["ts", "mts", "cts"]);
+        for name in ["a.ts", "a.mts", "a.cts"] {
+            assert_eq!(
+                languages
+                    .for_path(Path::new(name))
+                    .map(|cartridge| cartridge.id().as_str()),
+                Some("typescript"),
+                "{name}",
+            );
+        }
     }
 }

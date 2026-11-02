@@ -1,4 +1,4 @@
-//! Reading a Markdown link destination into a link target and an optional symbol (03 R10, R11).
+//! Reading a Markdown link destination into a link target and an optional symbol.
 //!
 //! The rules run in a fixed order, and each one either settles the destination or hands it on:
 //!
@@ -13,15 +13,15 @@
 //!
 //! Paths and fragments are percent-decoded; the prefix and the `scheme://` test are not.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::str::FromStr;
 
+use crate::config::Namespace;
 use crate::link::{
     LinkPathError, RawLink, SourcePath, SymbolPath, SymbolPathError, Target, TargetPath,
 };
 use crate::namespace::NamespaceName;
-use crate::path::AbsolutePath;
 use crate::read::cartridge::Languages;
 
 /// Schemes that name no path and never take `//`.
@@ -92,6 +92,36 @@ pub enum LinkError {
     },
 }
 
+/// The namespace names a destination may use as a prefix. Parsing reads only the names, never a
+/// namespace's directory.
+pub trait NamespaceNames {
+    /// Whether `name` is configured.
+    fn defines(&self, name: &NamespaceName) -> bool;
+
+    /// Every configured name, in order.
+    fn names(&self) -> Vec<NamespaceName>;
+}
+
+impl NamespaceNames for BTreeMap<NamespaceName, Namespace> {
+    fn defines(&self, name: &NamespaceName) -> bool {
+        self.contains_key(name)
+    }
+
+    fn names(&self) -> Vec<NamespaceName> {
+        self.keys().cloned().collect()
+    }
+}
+
+impl NamespaceNames for BTreeSet<NamespaceName> {
+    fn defines(&self, name: &NamespaceName) -> bool {
+        self.contains(name)
+    }
+
+    fn names(&self) -> Vec<NamespaceName> {
+        self.iter().cloned().collect()
+    }
+}
+
 /// Reads `raw`'s destination as written in `source`.
 ///
 /// Returns `None` when the destination is not a supdoc link: a URL, `mailto:`-style scheme,
@@ -103,7 +133,7 @@ pub enum LinkError {
 pub fn parse_destination(
     raw: &RawLink,
     source: &SourcePath,
-    namespaces: &BTreeMap<NamespaceName, AbsolutePath>,
+    namespaces: &impl NamespaceNames,
     languages: &Languages,
 ) -> Option<Result<ParsedLink, LinkError>> {
     let destination = raw.destination.trim();
@@ -246,21 +276,18 @@ fn split_prefix(text: &str) -> Option<(&str, &str)> {
 }
 
 /// The configured namespace spelled `prefix`, if any.
-fn namespaces_entry(
-    namespaces: &BTreeMap<NamespaceName, AbsolutePath>,
-    prefix: &str,
-) -> Option<NamespaceName> {
+fn namespaces_entry(namespaces: &impl NamespaceNames, prefix: &str) -> Option<NamespaceName> {
     let name = NamespaceName::from_str(prefix).ok()?;
-    namespaces.contains_key(&name).then_some(name)
+    namespaces.defines(&name).then_some(name)
 }
 
 /// The error for `prefix`, listing the configured namespaces nearest first.
 fn unknown_namespace(
     prefix: &str,
     destination: &str,
-    namespaces: &BTreeMap<NamespaceName, AbsolutePath>,
+    namespaces: &impl NamespaceNames,
 ) -> LinkError {
-    let mut known: Vec<NamespaceName> = namespaces.keys().cloned().collect();
+    let mut known = namespaces.names();
     // The sort is stable, so equally near names stay in alphabetical order.
     known.sort_by_key(|name| strsim::levenshtein(prefix, name.as_str()));
     LinkError::UnknownNamespace {
@@ -398,16 +425,11 @@ mod tests {
 
     /// Parses `destination` written in `source`, with namespaces `auth` and `billing`.
     fn parse_in(source: &str, destination: &str) -> Option<Result<ParsedLink, LinkError>> {
-        let namespaces = ["auth", "billing"]
+        let namespaces: BTreeSet<NamespaceName> = ["auth", "billing"]
             .into_iter()
             .map(|name| {
-                let dir = AbsolutePath::new(Path::new("/elsewhere"))
-                    .expect("the fixture directory is absolute");
-                (
-                    name.parse::<NamespaceName>()
-                        .expect("the fixture namespace name should be valid"),
-                    dir,
-                )
+                name.parse()
+                    .expect("the fixture namespace name should be valid")
             })
             .collect();
         let raw = RawLink {
@@ -481,13 +503,21 @@ mod tests {
 
     #[test]
     fn namespaced_path_climbing_out_of_its_directory_is_outside_root() {
-        assert_eq!(
-            parse_in("a/b/c.md", "auth:../x.rs"),
-            Some(Err(LinkError::OutsideRoot {
-                destination: "auth:../x.rs".to_owned(),
-                namespace: Some("auth".parse().expect("the fixture name should be valid")),
-            })),
-        );
+        for destination in [
+            "auth:../x.rs",
+            "auth:..%2Fx.rs",
+            "auth:%2E%2E/x.rs",
+            "auth:src/..%2F..%2Fx.rs#f",
+        ] {
+            assert_eq!(
+                parse_in("a/b/c.md", destination),
+                Some(Err(LinkError::OutsideRoot {
+                    destination: destination.to_owned(),
+                    namespace: Some("auth".parse().expect("the fixture name should be valid")),
+                })),
+                "{destination} should be decoded before it is normalized",
+            );
+        }
     }
 
     #[test]
@@ -541,6 +571,15 @@ mod tests {
     }
 
     #[test]
+    fn comment_link_resolves_relative_to_the_code_file() {
+        assert_eq!(
+            parse_in("src/server.rs", "../docs/b.md"),
+            Some(Ok(link("docs/b.md", None))),
+            "`../docs/b.md` written in `src/server.rs` is `docs/b.md` from the project root",
+        );
+    }
+
+    #[test]
     fn root_relative_and_relative_spellings_of_one_file_share_a_key() {
         let from_root = parse_in("docs/guide.md", "/docs/../src/lib.rs#add");
         assert_eq!(from_root, Some(Ok(link("src/lib.rs", Some("add")))));
@@ -565,6 +604,9 @@ mod tests {
             ("docs/guide.md", "/../outside.rs"),
             ("docs/guide.md", "/../../home/settings.rs#DEBUG"),
             ("docs/deep/guide.md", "/docs/../../outside.rs"),
+            ("guide.md", "%2E%2E/outside.rs"),
+            ("guide.md", "..%2F..%2Foutside.rs"),
+            ("docs/guide.md", "/%2e%2e/outside.rs#f"),
         ] {
             assert_eq!(
                 parse_in(source, destination),

@@ -21,7 +21,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::config::{CONFIG_FILE_NAME, Config, ConfigError};
-use crate::finding::{Finding, Location};
+use crate::finding::{Finding, IndexedText, Location};
 use crate::link::destination::parse_destination;
 use crate::link::{LinkKey, SourcePath, Target};
 use crate::lock::error::LockError;
@@ -29,34 +29,23 @@ use crate::lock::io::write_atomically;
 use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
 use crate::namespace::NamespaceName;
 use crate::output::json::{Envelope, LocationJson};
+use crate::output::paths::relative_or_absolute;
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, OutputError, Report, TextContext};
+use crate::output::{Output, Report, TextContext, preview_note};
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile};
-use crate::read::error::ReadError;
+use crate::read::error::{ReadError, ReadRole};
 use crate::read::links::links;
 use crate::scan::model::Scope;
-use crate::scan::targets::close_match;
 use crate::scan::walk::{UnreadCause, UnreadDir, walk};
+use crate::suggest::close_match;
 
 use super::args::{RenameArgs, WriteMode};
-use super::project::{load_config, lock_path, read_lock};
-use super::{CliError, Context, Outcome};
+use super::project::{command_line, config_failure, invocation, load_config, lock_path, read_lock};
+use super::{CliError, Context, Outcome, cause};
 
 /// The command as users type it, for help text and the JSON `command`.
 const COMMAND: &str = "namespace rename";
-
-/// The note that closes a preview, after the counts.
-const PREVIEW_NOTE: &str = "Nothing written. Run the same command with --yes to apply.";
-
-/// The whole command as typed, for the config fallback help that says to run it again.
-fn command_text(args: &RenameArgs) -> String {
-    let mut command = format!("{COMMAND} {} {}", args.old, args.new);
-    if args.confirm.mode() == WriteMode::Apply {
-        command.push_str(" --yes");
-    }
-    command
-}
 
 /// Runs `supdoc namespace rename OLD NEW`: previews every edit, or with `--yes` makes them.
 ///
@@ -71,7 +60,7 @@ fn command_text(args: &RenameArgs) -> String {
 /// writing (all 1), `cli-rename-write` when a file can't be written, and `cli-rename-output` when
 /// the report can't be written (both 74).
 pub fn run(args: &RenameArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
-    let plan = Plan::build(&args.old, &args.new, &command_text(args), context, output)?;
+    let plan = Plan::build(args, context, output)?;
     let applied = match args.confirm.mode() {
         WriteMode::Preview => false,
         WriteMode::Apply => {
@@ -81,11 +70,44 @@ pub fn run(args: &RenameArgs, context: &Context, output: &mut Output) -> Result<
     };
     output
         .report(&plan.report(applied), true)
-        .map_err(|error| output_failed(&error))?;
-    for note in plan.notes(applied) {
-        output.note(&note).map_err(|error| output_failed(&error))?;
+        .map_err(|error| {
+            CliError::output_failed("cli-rename-output", "the rename report", &error)
+        })?;
+    let apply_note = preview_note(
+        args.confirm.dry_run,
+        &command_line(
+            context,
+            "namespace rename",
+            &[args.old.to_string(), args.new.to_string()],
+            &["--yes"],
+        ),
+    );
+    for note in plan.notes(applied, &apply_note) {
+        output.note(&note).map_err(|error| {
+            CliError::output_failed("cli-rename-output", "the rename report", &error)
+        })?;
     }
     Ok(Outcome::Clean)
+}
+
+/// The command that repeats this run, `--yes` included when it applies, for helps that say to run
+/// it again.
+fn command_text(args: &RenameArgs, context: &Context) -> String {
+    let flags: &[&str] = match args.confirm.mode() {
+        WriteMode::Apply => &["--yes"],
+        WriteMode::Preview => &[],
+    };
+    rename_command(args, context, flags)
+}
+
+/// `supdoc namespace rename OLD NEW` with `flags`, as the shell takes it from here.
+fn rename_command(args: &RenameArgs, context: &Context, flags: &[&str]) -> String {
+    command_line(
+        context,
+        COMMAND,
+        &[args.old.as_str(), args.new.as_str()],
+        flags,
+    )
 }
 
 /// The JSON Schema of `supdoc namespace rename`'s `--json` output: the whole envelope, with `data`
@@ -102,6 +124,8 @@ struct Plan {
     old: NamespaceName,
     /// Its new name.
     new: NamespaceName,
+    /// The command that applies this rename, for helps after a write was refused or failed.
+    apply_command: String,
     /// The project root, where `supdoc.lock` sits.
     root: AbsolutePath,
     /// The key to rename in the nearest config.
@@ -126,23 +150,19 @@ impl Plan {
     /// `cli-rename-target-exists`, `cli-rename-inherited`, `cli-rename-unreadable-source` when a
     /// source or a directory can't be read, or `cli-rename-file-changed` when the config no longer
     /// defines OLD once it is read again.
-    fn build(
-        old: &NamespaceName,
-        new: &NamespaceName,
-        command: &str,
-        context: &Context,
-        output: &mut Output,
-    ) -> Result<Self, CliError> {
-        let config = load_config(context, output, command)?;
+    fn build(args: &RenameArgs, context: &Context, output: &mut Output) -> Result<Self, CliError> {
+        let (old, new) = (&args.old, &args.new);
+        let rerun = command_text(args, context);
+        let config = load_config(context, output)?;
         let lock = read_lock(&config, &context.cwd)?;
-        let nearest = defining_file(&config, old, new)?;
-        let config_edit = ConfigEdit::read(nearest, config.root(), &context.cwd, old, new)?;
-        let parent = parent_definition(&config, old, &context.cwd)?;
+        let nearest = defining_file(&config, old, new, context)?;
+        let config_edit = ConfigEdit::read(nearest, config.root(), old, &rerun, context, output)?;
+        let parent = parent_definition(&config, old, context, output)?;
 
         let languages = Languages::builtin();
         let walked = walk(&config, &languages, &Scope::All);
         if let Some(dir) = walked.unread_dirs.first() {
-            return Err(unread_dir(dir, config.root(), old, new));
+            return Err(unread_dir(dir, config.root(), &rerun));
         }
         let findings = walked.findings;
         let mut sources = Vec::new();
@@ -152,13 +172,13 @@ impl Plan {
                 .strip_prefix(config.root())
                 .and_then(|relative| SourcePath::from_relative(relative).ok())
             else {
-                return Err(invalid_source(path, old, new));
+                return Err(invalid_source(path, &rerun));
             };
             match SourceFile::read(path.clone(), &languages) {
                 Ok(file) => {
                     sources.extend(SourceEdit::find(&config, &languages, source, &file, old));
                 }
-                Err(error) => return Err(unread_source(&source, old, new, &error)),
+                Err(error) => return Err(unread_source(&source, &rerun, &error)),
             }
         }
 
@@ -166,6 +186,7 @@ impl Plan {
             lock: LockEdit::new(lock, old, new),
             old: old.clone(),
             new: new.clone(),
+            apply_command: rename_command(args, context, &["--yes"]),
             root: config.root().clone(),
             config: config_edit,
             parent,
@@ -187,9 +208,10 @@ impl Plan {
         let mut written: Vec<String> = Vec::new();
         for source in &self.sources {
             let renamed =
-                replace_ranges(&source.text, source.prefixes(&self.old), self.new.as_str());
+                replace_ranges(&source.text, source.prefixes(&self.old), self.new.as_str())
+                    .ok_or_else(|| self.file_changed(source.source.as_str()))?;
             replace_file(source.file.as_path(), renamed.as_bytes()).map_err(|error| {
-                self.write_failed(source.source.as_str(), &error.to_string(), &written)
+                self.write_failed(source.source.as_str(), &cause(&error), &written)
             })?;
             written.push(source.source.to_string());
         }
@@ -199,7 +221,7 @@ impl Plan {
                 .write(&lock_path(&self.root))
                 .map_err(|error| {
                     let reason = match &error {
-                        LockError::Write { error, .. } => error.to_string(),
+                        LockError::Write { error, .. } => cause(error),
                         other => other.message_from(&self.root),
                     };
                     self.write_failed(LOCK_FILE_NAME, &reason, &written)
@@ -210,9 +232,10 @@ impl Plan {
             &self.config.text,
             std::iter::once(self.config.key.clone()),
             self.new.as_str(),
-        );
+        )
+        .ok_or_else(|| self.file_changed(&self.config.shown))?;
         replace_file(self.config.file.as_path(), renamed.as_bytes())
-            .map_err(|error| self.write_failed(&self.config.shown, &error.to_string(), &written))
+            .map_err(|error| self.write_failed(&self.config.shown, &cause(&error), &written))
     }
 
     /// Refuses the rename when any file it will write is no longer exactly as read (NR8).
@@ -293,13 +316,13 @@ impl Plan {
 
     /// The notes that close the run: the parent config left as it is, then the counts and what
     /// to do next, or that the rename is done.
-    fn notes(&self, applied: bool) -> Vec<String> {
+    fn notes(&self, applied: bool, apply_note: &str) -> Vec<String> {
         let mut notes = Vec::new();
         if let Some(parent) = &self.parent {
             notes.push(format!(
                 "{} also defines `{}` and was left as it is, so `{}` still names its directory \
                  there.",
-                parent.display(),
+                relative_or_absolute(&self.root, parent),
                 self.old,
                 self.old
             ));
@@ -309,7 +332,7 @@ impl Plan {
         } else {
             let links: usize = self.sources.iter().map(|source| source.links.len()).sum();
             notes.push(format!(
-                "1 config entry, {} in {}, {}. {PREVIEW_NOTE}",
+                "1 config entry, {} in {}, {}. {apply_note}",
                 count(links, "link", "links"),
                 count(self.sources.len(), "file", "files"),
                 count(self.lock.moved.len(), "lock entry", "lock entries"),
@@ -326,8 +349,8 @@ impl Plan {
                 "{file} changed or can't be read since the rename was planned; nothing was written"
             ),
             format!(
-                "Run `supdoc namespace rename {} {} --yes` again to plan from the files as they are now",
-                self.old, self.new
+                "Run `{}` again to plan from the files as they are now",
+                self.apply_command
             ),
             CliError::REFUSED_EXIT_CODE,
         )
@@ -335,7 +358,7 @@ impl Plan {
 
     /// The error for a file that couldn't be written, after the files in `written`.
     fn write_failed(&self, file: &str, error: &str, written: &[String]) -> CliError {
-        let again = format!("supdoc namespace rename {} {} --yes", self.old, self.new);
+        let again = &self.apply_command;
         let help = if written.is_empty() {
             format!("Nothing was written. Make {file} writable, then run `{again}` again")
         } else {
@@ -366,12 +389,13 @@ fn defining_file<'c>(
     config: &'c Config,
     old: &NamespaceName,
     new: &NamespaceName,
+    context: &Context,
 ) -> Result<&'c AbsolutePath, CliError> {
     let Some(defined_in) = config.namespace_defined_in(old) else {
-        return Err(unknown_namespace(config, old));
+        return Err(unknown_namespace(config, old, new));
     };
     if old == new || config.namespace(new).is_some() {
-        return Err(target_exists(config, old, new));
+        return Err(target_exists(config, old, new, context));
     }
     match config.files().first() {
         Some(nearest) if nearest == defined_in => Ok(nearest),
@@ -387,10 +411,11 @@ fn defining_file<'c>(
 fn parent_definition(
     config: &Config,
     name: &NamespaceName,
-    cwd: &AbsolutePath,
+    context: &Context,
+    output: &mut Output,
 ) -> Result<Option<AbsolutePath>, CliError> {
     for file in config.files().iter().skip(1) {
-        let text = read_config(file, cwd)?;
+        let text = read_config(file, context, output)?;
         if namespace_key(&text, name).is_some() {
             return Ok(Some(file.clone()));
         }
@@ -402,22 +427,19 @@ fn parent_definition(
 ///
 /// # Errors
 ///
-/// Returns the config's own read error (74), naming the file relative to `cwd`, as every config
-/// error does.
-fn read_config(file: &AbsolutePath, cwd: &AbsolutePath) -> Result<String, CliError> {
+/// Returns the config's own read error (74), naming the file relative to the current directory, as
+/// every config error does.
+fn read_config(
+    file: &AbsolutePath,
+    context: &Context,
+    output: &mut Output,
+) -> Result<String, CliError> {
     fs::read_to_string(file.as_path()).map_err(|error| {
         let error = ConfigError::Read {
             path: file.clone(),
             error,
         };
-        CliError::new(
-            error.code(),
-            error.message_from(cwd),
-            error.help_from(cwd).unwrap_or_else(|| {
-                format!("Check that the file can be read, then run `supdoc {COMMAND}` again")
-            }),
-            error.exit_code(),
-        )
+        config_failure(&error, context, output)
     })
 }
 
@@ -456,25 +478,26 @@ impl ConfigEdit {
     fn read(
         file: &AbsolutePath,
         root: &AbsolutePath,
-        cwd: &AbsolutePath,
         old: &NamespaceName,
-        new: &NamespaceName,
+        rerun: &str,
+        context: &Context,
+        output: &mut Output,
     ) -> Result<Self, CliError> {
-        let text = read_config(file, cwd)?;
-        let shown = shown_from_root(file, root);
+        let text = read_config(file, context, output)?;
+        let shown = relative_or_absolute(root, file);
         let relative = file.strip_prefix(root).map(Path::to_path_buf);
         let Some(key) = namespace_key(&text, old) else {
             return Err(CliError::new(
                 "cli-rename-file-changed",
                 format!("{shown} no longer defines `{old}`; nothing was written"),
-                format!("Run `supdoc namespace rename {old} {new}` again"),
+                format!("Run `{rerun}` again"),
                 CliError::REFUSED_EXIT_CODE,
             ));
         };
         let location = relative
             .as_deref()
             .and_then(|path| SourcePath::from_relative(path).ok())
-            .and_then(|source| Location::in_text(source, &text, key.clone()));
+            .and_then(|source| IndexedText::new(&text).locate(source, key.clone()));
         Ok(Self {
             file: file.clone(),
             shown,
@@ -499,7 +522,10 @@ impl ConfigEdit {
 
     /// The key's line with the key renamed to `new`.
     fn renamed_line(&self, new: &str) -> String {
-        let renamed = replace_ranges(&self.text, std::iter::once(self.key.clone()), new);
+        let Some(renamed) = replace_ranges(&self.text, std::iter::once(self.key.clone()), new)
+        else {
+            return Self::line(&self.text, self.key.clone());
+        };
         let start = self.key.start;
         Self::line(&renamed, start..start + new.len())
     }
@@ -554,10 +580,11 @@ impl SourceEdit {
         if ranges.is_empty() {
             return None;
         }
+        let indexed = IndexedText::new(text);
         let links = ranges
             .into_iter()
             .map(|destination| LinkEdit {
-                location: Location::in_text(source.clone(), text, destination.clone()),
+                location: indexed.locate(source.clone(), destination.clone()),
                 destination,
             })
             .collect();
@@ -625,21 +652,21 @@ impl LockEdit {
 }
 
 /// `text` with every range in `ranges`, which are in order and don't overlap, replaced by
-/// `replacement`.
+/// `replacement`, or `None` if a range doesn't lie inside `text` on character boundaries.
 fn replace_ranges(
     text: &str,
     ranges: impl IntoIterator<Item = Range<usize>>,
     replacement: &str,
-) -> String {
+) -> Option<String> {
     let mut renamed = String::with_capacity(text.len());
     let mut at = 0;
     for range in ranges {
-        renamed.push_str(text.get(at..range.start).unwrap_or_default());
+        renamed.push_str(text.get(at..range.start)?);
         renamed.push_str(replacement);
         at = range.end;
     }
-    renamed.push_str(text.get(at..).unwrap_or_default());
-    renamed
+    renamed.push_str(text.get(at..)?);
+    Some(renamed)
 }
 
 /// Whether `file` is still a regular file holding exactly `text`.
@@ -660,8 +687,8 @@ fn replace_file(target: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// The error for an OLD that no config defines, naming the likely intended one and every
-/// configured namespace (NR2, Q18).
-fn unknown_namespace(config: &Config, old: &NamespaceName) -> CliError {
+/// configured namespace (NR2, Q18). When NEW is already defined it says the rename looks done.
+fn unknown_namespace(config: &Config, old: &NamespaceName, new: &NamespaceName) -> CliError {
     let names: Vec<&str> = config
         .namespaces()
         .keys()
@@ -680,39 +707,43 @@ fn unknown_namespace(config: &Config, old: &NamespaceName) -> CliError {
         Some(close) => format!("did you mean `{close}`? Configured namespaces: {listed}"),
         None => format!("Configured namespaces: {listed}"),
     };
+    let message = if config.namespace(new).is_some() {
+        format!("no namespace is named `{old}`, but `{new}` is defined: the rename looks done")
+    } else {
+        format!("no namespace is named `{old}`")
+    };
     CliError::new(
         "cli-rename-unknown-namespace",
-        format!("no namespace is named `{old}`"),
+        message,
         help,
         CliError::REFUSED_EXIT_CODE,
     )
 }
 
 /// The error for a NEW that is already a namespace, or is OLD itself (NR3).
-fn target_exists(config: &Config, old: &NamespaceName, new: &NamespaceName) -> CliError {
+fn target_exists(
+    config: &Config,
+    old: &NamespaceName,
+    new: &NamespaceName,
+    context: &Context,
+) -> CliError {
     let message = match config.namespace_defined_in(new) {
         _ if old == new => format!("`{new}` is already the namespace's name"),
         Some(file) => format!(
             "a namespace named `{new}` already exists, defined in {}",
-            shown_from_root(file, config.root())
+            relative_or_absolute(config.root(), file)
         ),
         None => format!("a namespace named `{new}` already exists"),
     };
     CliError::new(
         "cli-rename-target-exists",
         message,
-        "Run `supdoc namespace list` to see the names in use, and choose a NEW name none of \
-         them has. Nothing was changed",
+        format!(
+            "Run `{}` to see the names in use, and choose a NEW name none of them has. Nothing \
+             was changed",
+            invocation(context, "namespace list")
+        ),
         CliError::REFUSED_EXIT_CODE,
-    )
-}
-
-/// `file` as rename's messages name it: relative to the project `root`, or absolute when it is
-/// outside the root, as a config the project extends often is.
-fn shown_from_root(file: &AbsolutePath, root: &AbsolutePath) -> String {
-    file.strip_prefix(root).map_or_else(
-        || file.display().to_string(),
-        |relative| relative.display().to_string(),
     )
 }
 
@@ -735,40 +766,24 @@ fn inherited(old: &NamespaceName, defined_in: &AbsolutePath) -> CliError {
 
 /// The error for a walked source that couldn't be read. Its links can't be checked for OLD, so
 /// the whole rename is refused rather than moving lock entries past a file left unrenamed.
-fn unread_source(
-    source: &SourcePath,
-    old: &NamespaceName,
-    new: &NamespaceName,
-    error: &ReadError,
-) -> CliError {
+fn unread_source(source: &SourcePath, rerun: &str, error: &ReadError) -> CliError {
     CliError::new(
         "cli-rename-unreadable-source",
         format!(
             "{}; its links can't be renamed, so nothing was written",
             error.message_naming(source)
         ),
-        then_rerun(&unread_source_help(error), old, new),
+        then_rerun(
+            &error.help(ReadRole::RenamedSource, &source.to_string()),
+            rerun,
+        ),
         CliError::REFUSED_EXIT_CODE,
     )
 }
 
-/// What to do about a source the rename couldn't read, before running it again. Never the read
-/// error's `exclude` route: a source excluded and then renamed past keeps OLD in its links while
-/// its lock entries move to NEW, the very state the refusal exists to prevent.
-fn unread_source_help(error: &ReadError) -> String {
-    match error {
-        ReadError::NotUtf8 { .. } => "Save the file as UTF-8".to_owned(),
-        ReadError::Missing { .. }
-        | ReadError::Io { .. }
-        | ReadError::TooLarge { .. }
-        | ReadError::UnsupportedLanguage { .. }
-        | ReadError::Internal { .. } => error.help(),
-    }
-}
-
 /// The error for a walked file whose name isn't a valid source path. The walk reports such a file
 /// as a finding instead of returning it, so this guards the invariant rather than skipping.
-fn invalid_source(path: &AbsolutePath, old: &NamespaceName, new: &NamespaceName) -> CliError {
+fn invalid_source(path: &AbsolutePath, rerun: &str) -> CliError {
     CliError::new(
         "cli-rename-invalid-source-path",
         format!(
@@ -776,7 +791,7 @@ fn invalid_source(path: &AbsolutePath, old: &NamespaceName, new: &NamespaceName)
              nothing was written",
             path.display()
         ),
-        then_rerun("Rename the file", old, new),
+        then_rerun("Rename the file", rerun),
         CliError::REFUSED_EXIT_CODE,
     )
 }
@@ -784,12 +799,7 @@ fn invalid_source(path: &AbsolutePath, old: &NamespaceName, new: &NamespaceName)
 /// The error for a directory the walk couldn't read. The sources beneath it are as unknown as an
 /// unread source's links, so the rename is refused for the same reason (05 C5). As for an unread
 /// source, the help never offers `exclude`.
-fn unread_dir(
-    dir: &UnreadDir,
-    root: &AbsolutePath,
-    old: &NamespaceName,
-    new: &NamespaceName,
-) -> CliError {
+fn unread_dir(dir: &UnreadDir, root: &AbsolutePath, rerun: &str) -> CliError {
     let shown = dir
         .path
         .strip_prefix(root)
@@ -802,7 +812,7 @@ fn unread_dir(
              nothing was written",
             dir.cause
         ),
-        then_rerun(&unread_dir_help(dir.cause), old, new),
+        then_rerun(&unread_dir_help(dir.cause), rerun),
         CliError::REFUSED_EXIT_CODE,
     )
 }
@@ -817,24 +827,13 @@ fn unread_dir_help(cause: UnreadCause) -> String {
 }
 
 /// `help`, followed by the sentence that says to run the rename again once it is followed.
-fn then_rerun(help: &str, old: &NamespaceName, new: &NamespaceName) -> String {
+fn then_rerun(help: &str, rerun: &str) -> String {
     let end = if help.ends_with(['.', '?', '!']) {
         ""
     } else {
         "."
     };
-    format!("{help}{end} Then run `supdoc namespace rename {old} {new}` again")
-}
-
-/// The error for a report that could not be written.
-fn output_failed(error: &OutputError) -> CliError {
-    CliError::new(
-        "cli-rename-output",
-        format!("cannot write the rename report: {error}"),
-        "Check that standard output and standard error are open and writable, or redirect both \
-         to a file with `> supdoc.out 2>&1`",
-        CliError::IO_EXIT_CODE,
-    )
+    format!("{help}{end} Then run `{rerun}` again")
 }
 
 /// `1 link`, `2 links`.
@@ -894,7 +893,7 @@ pub(crate) enum RenameKind {
 
 impl RenameKind {
     /// The word text output starts the line with.
-    const fn label(self) -> &'static str {
+    const fn word(self) -> &'static str {
         match self {
             Self::Config => "config",
             Self::Link => "link",
@@ -932,7 +931,7 @@ impl Report for RenameReport {
             writeln!(
                 out,
                 "{}  {}  {}  {arrow}  {}",
-                change.kind.label(),
+                change.kind.word(),
                 visible(&place),
                 visible(&change.before),
                 visible(&change.after),
@@ -962,21 +961,17 @@ impl Report for RenameReport {
 mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
-
-    use clap::Parser as _;
 
     use super::*;
-    use crate::check::reconcile::reconcile;
-    use crate::cli::args::{Cli, Command, NamespaceCommand};
-    use crate::output::{OutputSettings, PathStyle, Verbosity};
-    use crate::scan::model::TargetState;
+    use crate::check::reconcile::reconcile_at_root;
+    use crate::cli::args::{Command, NamespaceCommand};
+    use crate::cli::testing::{Project, Run, Session, at};
     use crate::state::LinkState;
 
-    /// A config naming two namespaces, with comments that a rename must keep.
     /// A parent config whose namespace lies inside `app/`, so `app/` may inherit it.
     const INHERITED_CONFIG: &str = "[namespaces]\nauth = \"app/services/auth\"\n";
 
+    /// A config naming two namespaces, with comments that a rename must keep.
     const CONFIG: &str = "\
 # Shared code lives beside the docs.
 [namespaces]
@@ -988,38 +983,6 @@ web = \"services/web\"
     /// A guide with one link into each namespace.
     const GUIDE: &str = "# Guide\n\nSee [login](auth:login.rs#login) and [app](web:app.rs#app).\n";
 
-    /// A buffer `Output` writes into and the test reads back.
-    #[derive(Clone, Default)]
-    struct Capture(Arc<Mutex<Vec<u8>>>);
-
-    impl Capture {
-        fn text(&self) -> String {
-            let bytes = self.0.lock().expect("the capture lock should be free");
-            String::from_utf8(bytes.clone()).expect("captured output should be UTF-8")
-        }
-    }
-
-    impl io::Write for Capture {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .expect("the capture lock should be free")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// The value at `pointer` (RFC 6901) in `json`, or a failure naming what is missing.
-    fn at(json: &serde_json::Value, pointer: &str) -> serde_json::Value {
-        json.pointer(pointer)
-            .unwrap_or_else(|| panic!("`{pointer}` should be in the JSON output: {json}"))
-            .clone()
-    }
-
     #[test]
     fn config_read_error_names_the_config_from_the_current_directory() {
         let dir = tempfile::tempdir().expect("a fresh temp directory should be created");
@@ -1029,7 +992,9 @@ web = \"services/web\"
         let file = AbsolutePath::new(&dir.path().join("base.toml"))
             .expect("a temp file path should be absolute");
 
-        let error = read_config(&file, &docs).expect_err("a missing config should not be read");
+        let mut session = Session::new(docs, &["namespace", "rename", "auth", "identity"]);
+        let error = read_config(&file, &session.context, &mut session.output)
+            .expect_err("a missing config should not be read");
 
         assert_eq!(error.code(), "config-read");
         assert!(
@@ -1044,114 +1009,43 @@ web = \"services/web\"
         );
     }
 
-    /// What one `supdoc namespace rename` run returned and printed.
-    struct Run {
-        result: Result<Outcome, CliError>,
-        stdout: String,
-        stderr: String,
-    }
-
     impl Run {
-        fn exit_code(&self) -> u8 {
-            match &self.result {
-                Ok(outcome) => outcome.exit_code(),
-                Err(error) => error.exit_code(),
-            }
-        }
-
-        fn error(&self) -> &CliError {
+        fn rename_error(&self) -> &CliError {
             self.result
                 .as_ref()
                 .err()
                 .unwrap_or_else(|| panic!("the rename should fail; stdout: {}", self.stdout))
         }
-
-        fn json(&self) -> serde_json::Value {
-            serde_json::from_str(&self.stdout)
-                .unwrap_or_else(|error| panic!("stdout should be JSON ({error}): {}", self.stdout))
-        }
     }
 
     /// A project in a fresh temporary directory: the config, both namespaces' code and the guide.
-    struct Project {
-        dir: tempfile::TempDir,
+    fn project() -> Project {
+        let project = Project::empty();
+        project.write(CONFIG_FILE_NAME, CONFIG);
+        project.write(
+            "services/auth/login.rs",
+            "pub fn login() {}\n\npub fn logout() {}\n",
+        );
+        project.write("services/web/app.rs", "pub fn app() {}\n");
+        project.write("docs/guide.md", GUIDE);
+        project
     }
 
     impl Project {
-        fn new() -> Self {
-            let project = Self {
-                dir: tempfile::tempdir().expect("a fresh temp directory should be created"),
-            };
-            project.write(CONFIG_FILE_NAME, CONFIG);
-            project.write(
-                "services/auth/login.rs",
-                "pub fn login() {}\n\npub fn logout() {}\n",
-            );
-            project.write("services/web/app.rs", "pub fn app() {}\n");
-            project.write("docs/guide.md", GUIDE);
-            project
-        }
-
-        fn root(&self) -> AbsolutePath {
-            AbsolutePath::new(self.dir.path()).expect("a temp directory should be absolute")
-        }
-
-        fn write(&self, relative: &str, text: &str) {
-            let path = self.dir.path().join(relative);
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).expect("the fixture directory should be created");
-            }
-            fs::write(&path, text).expect("the fixture file should be written");
-        }
-
         fn read(&self, relative: &str) -> String {
             fs::read_to_string(self.dir.path().join(relative))
                 .unwrap_or_else(|error| panic!("{relative} should be readable: {error}"))
         }
 
-        fn lock(&self) -> Lockfile {
+        fn lockfile(&self) -> Lockfile {
             Lockfile::read(&lock_path(&self.root()))
                 .expect("the lockfile should parse")
                 .expect("the lockfile should exist")
         }
 
-        /// Every file under the root and its bytes.
-        fn files(&self) -> BTreeMap<PathBuf, Vec<u8>> {
-            fn collect(dir: &Path, found: &mut BTreeMap<PathBuf, Vec<u8>>) {
-                for entry in fs::read_dir(dir).expect("a fixture directory should be readable") {
-                    let path = entry.expect("a directory entry should be readable").path();
-                    if path.is_dir() {
-                        collect(&path, found);
-                    } else {
-                        let bytes = fs::read(&path).expect("a fixture file should be readable");
-                        let _previous = found.insert(path, bytes);
-                    }
-                }
-            }
-            let mut found = BTreeMap::new();
-            collect(self.dir.path(), &mut found);
-            found
-        }
-
         /// The project's config, loaded as `supdoc` loads it from the root.
         fn config(&self) -> Config {
             Config::load(&self.root()).expect("the fixture config should load")
-        }
-
-        /// Records every present link's current hash in `supdoc.lock`, as `update --yes` would.
-        fn record_all(&self) {
-            let scan =
-                crate::scan::assemble::run(&self.config(), &Languages::builtin(), &Scope::All)
-                    .expect("the fixture project should scan");
-            let mut lock = Lockfile::default();
-            for (key, link) in scan.links {
-                if let TargetState::Present { hash, .. } = link.target {
-                    let _previous = lock.insert(key, hash);
-                }
-            }
-            assert!(!lock.is_empty(), "the fixture should have a link to record");
-            lock.write(&lock_path(&self.root()))
-                .expect("the fixture lockfile should be written");
         }
 
         /// Each link's source, target, symbol and state, as `supdoc check` would judge them.
@@ -1162,7 +1056,7 @@ web = \"services/web\"
             let lock = Lockfile::read(&lock_path(&self.root()))
                 .expect("the lockfile should parse")
                 .unwrap_or_default();
-            reconcile(&scan, &lock, &Scope::All)
+            reconcile_at_root(&scan, &lock, &Scope::All)
                 .links
                 .into_iter()
                 .map(|link| {
@@ -1175,19 +1069,12 @@ web = \"services/web\"
 
         /// Runs `supdoc <args>` from `relative` under the root. `args` must name the rename.
         fn rename_from(&self, relative: &str, args: &[&str]) -> Run {
-            let cwd = AbsolutePath::new(&self.dir.path().join(relative))
-                .expect("a directory under the root should be absolute");
-            let (cli, mut output, stdout, stderr) = setup(&cwd, args);
-            let Command::Namespace(NamespaceCommand::Rename(rename)) = &cli.command else {
+            let mut session = Session::new(self.root_of(relative), args);
+            let Command::Namespace(NamespaceCommand::Rename(rename)) = &session.cli.command else {
                 panic!("`{}` should be a namespace rename", args.join(" "));
             };
-            let context = context(&cli, cwd);
-            let result = run(rename, &context, &mut output);
-            Run {
-                result,
-                stdout: stdout.text(),
-                stderr: stderr.text(),
-            }
+            let result = run(rename, &session.context, &mut session.output);
+            session.finished(result)
         }
 
         /// Runs `supdoc <args>` from the project root.
@@ -1198,62 +1085,25 @@ web = \"services/web\"
         /// The plan `supdoc namespace rename OLD NEW` makes from the root, without running it.
         fn plan(&self, old: &str, new: &str) -> Plan {
             let args = ["namespace", "rename", old, new];
-            let (cli, mut output, _stdout, _stderr) = setup(&self.root(), &args);
-            let Command::Namespace(NamespaceCommand::Rename(rename)) = &cli.command else {
+            let mut session = Session::new(self.root(), &args);
+            let Command::Namespace(NamespaceCommand::Rename(rename)) = &session.cli.command else {
                 panic!("`{}` should be a namespace rename", args.join(" "));
             };
-            let context = context(&cli, self.root());
-            Plan::build(
-                &rename.old,
-                &rename.new,
-                &command_text(rename),
-                &context,
-                &mut output,
-            )
-            .expect("the rename should plan")
-        }
-    }
-
-    /// Parses `args` and builds an `Output` that writes into two captures, with paths rooted at
-    /// `cwd` as `main` roots them before any config loads.
-    fn setup(cwd: &AbsolutePath, args: &[&str]) -> (Cli, Output, Capture, Capture) {
-        let command_line: Vec<&str> = std::iter::once("supdoc")
-            .chain(args.iter().copied())
-            .collect();
-        let cli = Cli::try_parse_from(&command_line)
-            .unwrap_or_else(|error| panic!("`{}` should parse: {error}", command_line.join(" ")));
-        let settings = OutputSettings {
-            format: cli.global.format(),
-            verbosity: Verbosity::from_flags(cli.global.quiet, cli.global.verbose),
-            color: false,
-            unicode: false,
-            width: 80,
-            paths: PathStyle::new(cwd.clone(), cwd.clone(), None),
-        };
-        let (stdout, stderr) = (Capture::default(), Capture::default());
-        let output = Output::new(settings, Box::new(stdout.clone()), Box::new(stderr.clone()));
-        (cli, output, stdout, stderr)
-    }
-
-    fn context(cli: &Cli, cwd: AbsolutePath) -> Context {
-        Context {
-            global: cli.global.clone(),
-            cwd,
-            home: None,
-            claude_config_dir: None,
+            Plan::build(rename, &session.context, &mut session.output)
+                .expect("the rename should plan")
         }
     }
 
     #[test]
     fn namespace_rename_yes_updates_config_lock_and_links() {
-        let project = Project::new();
+        let project = project();
         project.record_all();
         let entries = |lock: &Lockfile| -> BTreeMap<String, String> {
             lock.iter()
                 .map(|(key, hash)| (key.to_string(), hash.to_string()))
                 .collect()
         };
-        let expected: BTreeMap<String, String> = entries(&project.lock())
+        let expected: BTreeMap<String, String> = entries(&project.lockfile())
             .into_iter()
             .map(|(key, hash)| (key.replace("→ auth:", "→ identity:"), hash))
             .collect();
@@ -1272,7 +1122,7 @@ web = \"services/web\"
             "the auth link moves and the web link stays"
         );
         assert_eq!(
-            entries(&project.lock()),
+            entries(&project.lockfile()),
             expected,
             "lock entries move to identity with their hashes"
         );
@@ -1285,7 +1135,7 @@ web = \"services/web\"
 
     #[test]
     fn namespace_rename_preserves_config_comments() {
-        let project = Project::new();
+        let project = project();
         let config = "\
 # Top comment.
 include = [\"docs\"]   # only docs
@@ -1311,7 +1161,7 @@ web = \"services/web\"
 
     #[test]
     fn namespace_rename_rewrites_a_reference_definition_once_for_many_usages() {
-        let project = Project::new();
+        let project = project();
         let doc = "See [sign in][login] or [log in][login].\n\n[login]: auth:login.rs#login\n";
         project.write("docs/guide.md", doc);
 
@@ -1338,7 +1188,7 @@ web = \"services/web\"
 
     #[test]
     fn namespace_rename_rewrites_a_link_in_a_joined_line_comment() {
-        let project = Project::new();
+        let project = project();
         let code = "/// Signs in through the [login\n/// handler](auth:login.rs#login).\npub fn sign_in() {}\n";
         project.write("src/lib.rs", code);
 
@@ -1354,7 +1204,7 @@ web = \"services/web\"
 
     #[test]
     fn namespace_rename_then_check_reports_the_same_states() {
-        let project = Project::new();
+        let project = project();
         project.write(
             "docs/more.md",
             "[logout](auth:login.rs#logout) and [all](auth:login.rs)\n",
@@ -1387,7 +1237,7 @@ web = \"services/web\"
 
     #[test]
     fn namespace_rename_preview_writes_nothing() {
-        let project = Project::new();
+        let project = project();
         project.record_all();
         let before = project.files();
 
@@ -1414,20 +1264,36 @@ web = \"services/web\"
         );
         assert_eq!(
             text.stderr,
-            "1 config entry, 1 link in 1 file, 1 lock entry. Nothing written. Run the same \
-             command with --yes to apply.\n"
+            "1 config entry, 1 link in 1 file, 1 lock entry. Nothing written. Run \
+             `supdoc namespace rename auth identity --yes` to apply.\n"
+        );
+    }
+
+    #[test]
+    fn namespace_rename_of_a_missing_old_with_a_defined_new_says_it_looks_done() {
+        let project = project();
+
+        let run = project.rename(&["namespace", "rename", "gone", "web", "--yes"]);
+
+        assert_eq!(run.exit_code(), 1);
+        let error = run.rename_error();
+        assert_eq!(error.code(), "cli-rename-unknown-namespace");
+        assert!(
+            error.message().contains("`web` is defined"),
+            "{}",
+            error.message()
         );
     }
 
     #[test]
     fn namespace_rename_unknown_old_exits_1_listing_names() {
-        let project = Project::new();
+        let project = project();
         let before = project.files();
 
         let run = project.rename(&["namespace", "rename", "atuh", "identity", "--yes"]);
 
         assert_eq!(run.exit_code(), 1);
-        let error = run.error();
+        let error = run.rename_error();
         assert_eq!(error.code(), "cli-rename-unknown-namespace");
         assert!(error.message().contains("`atuh`"), "{}", error.message());
         assert_eq!(
@@ -1439,7 +1305,7 @@ web = \"services/web\"
 
     #[test]
     fn namespace_rename_existing_new_exits_1() {
-        let project = Project::new();
+        let project = project();
         let before = project.files();
 
         let taken = project.rename(&["namespace", "rename", "auth", "web", "--yes"]);
@@ -1447,24 +1313,28 @@ web = \"services/web\"
 
         for (name, run) in [("taken", &taken), ("same", &same)] {
             assert_eq!(run.exit_code(), 1, "{name}");
-            assert_eq!(run.error().code(), "cli-rename-target-exists", "{name}");
+            assert_eq!(
+                run.rename_error().code(),
+                "cli-rename-target-exists",
+                "{name}"
+            );
         }
         assert!(
-            taken.error().message().contains("`web`"),
+            taken.rename_error().message().contains("`web`"),
             "{}",
-            taken.error().message()
+            taken.rename_error().message()
         );
         assert_eq!(project.files(), before);
     }
 
     #[test]
     fn namespace_rename_existing_new_names_the_defining_config_from_the_root() {
-        let project = Project::new();
+        let project = project();
 
         let run = project.rename_from("docs", &["namespace", "rename", "auth", "web", "--yes"]);
 
         assert_eq!(
-            run.error().message(),
+            run.rename_error().message(),
             "a namespace named `web` already exists, defined in supdoc.config.toml",
             "the project's own config is named relative to the root, not absolutely"
         );
@@ -1472,7 +1342,7 @@ web = \"services/web\"
 
     #[test]
     fn namespace_rename_inherited_namespace_is_refused_naming_its_file() {
-        let project = Project::new();
+        let project = project();
         // A namespace is inherited only when it names a directory inside the child's root.
         project.write(CONFIG_FILE_NAME, INHERITED_CONFIG);
         project.write(
@@ -1485,7 +1355,7 @@ web = \"services/web\"
         let run = project.rename_from("app", &["namespace", "rename", "auth", "identity", "--yes"]);
 
         assert_eq!(run.exit_code(), 1);
-        let error = run.error();
+        let error = run.rename_error();
         assert_eq!(error.code(), "cli-rename-inherited");
         let parent = project.root().as_path().join(CONFIG_FILE_NAME);
         assert!(
@@ -1498,7 +1368,7 @@ web = \"services/web\"
 
     #[test]
     fn namespace_rename_of_a_name_also_in_a_parent_renames_only_the_local_one() {
-        let project = Project::new();
+        let project = project();
         project.write(CONFIG_FILE_NAME, INHERITED_CONFIG);
         let child =
             "extends = \"../supdoc.config.toml\"\n\n[namespaces]\nauth = \"services/auth\"\n";
@@ -1526,7 +1396,7 @@ web = \"services/web\"
 
     #[test]
     fn namespace_rename_leaves_code_spans_and_other_prefixes_alone() {
-        let project = Project::new();
+        let project = project();
         let doc = "\
 Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
 
@@ -1550,7 +1420,7 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
 
     #[test]
     fn namespace_rename_refuses_when_a_source_changed_after_scan() {
-        let project = Project::new();
+        let project = project();
         project.record_all();
         let plan = project.plan("auth", "identity");
         let edited = format!("{GUIDE}One more line.\n");
@@ -1579,10 +1449,10 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
 
     #[test]
     fn namespace_rename_refuses_when_the_lockfile_changed_after_scan() {
-        let project = Project::new();
+        let project = project();
         project.record_all();
         let plan = project.plan("auth", "identity");
-        let mut lock = project.lock();
+        let mut lock = project.lockfile();
         lock.retain(|_key, _hash| false);
         lock.write(&lock_path(&project.root()))
             .expect("the edited lockfile should be written");
@@ -1617,7 +1487,7 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
 
     #[test]
     fn namespace_rename_refuses_when_the_config_changed_after_scan() {
-        let project = Project::new();
+        let project = project();
         project.record_all();
         let plan = project.plan("auth", "identity");
         let config_text = project.read(CONFIG_FILE_NAME);
@@ -1645,10 +1515,77 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
     }
 
     #[test]
-    fn namespace_rename_refuses_everything_when_a_source_is_unreadable() {
-        let project = Project::new();
+    fn rename_help_command_keeps_config_and_yes_and_reruns_from_another_directory() {
+        let project = project();
         project.record_all();
-        project.write("docs/broken.md", "See [login](auth:login.rs#login).\n");
+        std::fs::write(
+            project.root().as_path().join("docs/broken.md"),
+            b"See [login](auth:login.rs#login).\n\xff\xfe",
+        )
+        .expect("the broken doc should be writable");
+        let typed = [
+            "-c",
+            "../supdoc.config.toml",
+            "namespace",
+            "rename",
+            "auth",
+            "identity",
+            "--yes",
+        ];
+
+        let run = project.rename_from("docs", &typed);
+
+        let error = run
+            .result
+            .expect_err("an unreadable source should refuse the rename");
+        let help = error.help();
+        let printed = "supdoc -c ../supdoc.config.toml namespace rename auth identity --yes";
+        assert!(
+            help.contains(&format!("`{printed}`")),
+            "the help should name the run with its config and --yes: {help}"
+        );
+        let words: Vec<&str> = printed.split(' ').skip(1).collect();
+        let again = project.rename_from("docs", &words);
+        assert_eq!(
+            again
+                .result
+                .expect_err("the printed command should rerun the refusal")
+                .code(),
+            "cli-rename-unreadable-source",
+            "the printed command should load the same config and reach the same refusal"
+        );
+    }
+
+    #[test]
+    fn rename_target_exists_help_lists_namespaces_with_the_config() {
+        let project = project();
+
+        let run = project.rename_from(
+            "docs",
+            &[
+                "-c",
+                "../supdoc.config.toml",
+                "namespace",
+                "rename",
+                "auth",
+                "web",
+            ],
+        );
+
+        let error = run
+            .result
+            .expect_err("renaming onto an existing namespace should refuse");
+        let help = error.help();
+        assert!(
+            help.contains("`supdoc -c ../supdoc.config.toml namespace list`"),
+            "the help should keep -c: {help}"
+        );
+    }
+
+    #[test]
+    fn namespace_rename_refuses_everything_when_a_source_is_unreadable() {
+        let project = project();
+        project.record_all();
         std::fs::write(
             project.root().as_path().join("docs/broken.md"),
             b"See [login](auth:login.rs#login).\n\xff\xfe",
@@ -1679,7 +1616,7 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
         );
         assert_eq!(
             error.help(),
-            "Save the file as UTF-8. Then run `supdoc namespace rename auth identity` again",
+            "Save the file as UTF-8. Then run `supdoc namespace rename auth identity --yes` again",
             "the help should offer only fixing the file, then the rerun hint as its own sentence"
         );
         assert_eq!(
@@ -1738,7 +1675,7 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
     #[cfg(unix)]
     #[test]
     fn lock_write_failure_names_the_lockfile_once_and_relative() {
-        let project = Project::new();
+        let project = project();
         project.record_all();
         let plan = project.plan("auth", "identity");
         let _read_only = ReadOnly::new(project.dir.path().to_path_buf());
@@ -1751,7 +1688,7 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
             (error.code(), error.message()),
             (
                 "cli-rename-write",
-                "cannot write supdoc.lock: Permission denied (os error 13)"
+                "cannot write supdoc.lock: permission denied"
             ),
             "the lockfile is named once, relative to the root"
         );
@@ -1760,7 +1697,7 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
     #[cfg(unix)]
     #[test]
     fn namespace_rename_refuses_everything_when_a_directory_is_unreadable() {
-        let project = Project::new();
+        let project = project();
         project.write("docs/sub/c.md", "See [login](auth:login.rs#login).\n");
         project.record_all();
         let before = project.files();
@@ -1786,7 +1723,7 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
         assert_eq!(
             error.help(),
             "Check that the current user can list the directory, for example with `chmod u+rx` \
-             on it. Then run `supdoc namespace rename auth identity` again",
+             on it. Then run `supdoc namespace rename auth identity --yes` again",
             "the help should offer only fixing the directory, then the rerun hint as its own \
              sentence"
         );
@@ -1809,7 +1746,7 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
     #[cfg(unix)]
     #[test]
     fn namespace_rename_renames_links_a_symlinked_ignore_file_would_hide_and_warns() {
-        let project = Project::new();
+        let project = project();
         let outside = tempfile::tempdir().expect("an outside directory should be created");
         symlink_out(&project, &outside, "docs/.gitignore");
 
@@ -1834,8 +1771,7 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
     /// links still say OLD, so no refusal may suggest `exclude`.
     #[test]
     fn no_unread_refusal_help_suggests_excluding_the_path() {
-        let old: NamespaceName = "auth".parse().expect("`auth` is a valid namespace");
-        let new: NamespaceName = "identity".parse().expect("`identity` is a valid namespace");
+        const RERUN: &str = "supdoc namespace rename auth identity";
         let root = AbsolutePath::new(Path::new("/project")).expect("the root should be absolute");
         let path = AbsolutePath::new(Path::new("/project/docs/a.md"))
             .expect("the source path should be absolute");
@@ -1861,7 +1797,10 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
                 extension: "xyz".to_owned(),
                 supported: vec!["md"],
             },
-            ReadError::Internal { path: path.clone() },
+            ReadError::Internal {
+                path: path.clone(),
+                reason: "tree-sitter returned no tree",
+            },
         ];
         let causes = [UnreadCause::Io(io::ErrorKind::PermissionDenied)];
         let dirs = causes.map(|cause| UnreadDir {
@@ -1872,10 +1811,10 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
 
         let refusals = read_errors
             .iter()
-            .map(|error| (error.code(), unread_source(&source, &old, &new, error)))
+            .map(|error| (error.code(), unread_source(&source, RERUN, error)))
             .chain(
                 dirs.iter()
-                    .map(|dir| ("unread-dir", unread_dir(dir, &root, &old, &new))),
+                    .map(|dir| ("unread-dir", unread_dir(dir, &root, RERUN))),
             );
 
         for (cause, refusal) in refusals {
@@ -1889,7 +1828,7 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
 
     #[test]
     fn namespace_rename_without_a_lockfile_creates_none() {
-        let project = Project::new();
+        let project = project();
 
         let run = project.rename(&["namespace", "rename", "auth", "identity", "--yes"]);
 
@@ -1902,7 +1841,7 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
 
     #[test]
     fn namespace_rename_json_validates_against_its_schema() {
-        let project = Project::new();
+        let project = project();
         project.record_all();
         let json = project
             .rename(&["--json", "namespace", "rename", "auth", "identity"])
