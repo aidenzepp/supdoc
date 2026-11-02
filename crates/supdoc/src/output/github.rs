@@ -3,15 +3,12 @@
 use std::io::{self, Write};
 use std::path::Path;
 
-use crate::finding::{Finding, Severity};
+use crate::finding::{Finding, OBSOLETE_CODE, Severity};
 use crate::link::SourcePath;
 use crate::lock::model::LOCK_FILE_NAME;
 use crate::output::format::Verbosity;
 use crate::output::paths::PathStyle;
 use crate::output::text::visible;
-
-/// The code of a finding about a lockfile entry whose link is gone.
-const OBSOLETE_CODE: &str = "link-obsolete";
 
 /// Writes one `::error`, `::warning` or `::notice` line per finding the verbosity shows.
 ///

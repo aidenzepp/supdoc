@@ -3,16 +3,11 @@
 use std::fmt::{self, Display, Formatter};
 use std::io::ErrorKind;
 
+use crate::exit::ExitStatus;
 use crate::hash::LineEndings;
 use crate::link::LinkKey;
 use crate::output::paths::relative_to;
 use crate::path::AbsolutePath;
-
-/// Exit status for a lockfile the user fixes by editing it (06 X7).
-const EXIT_CONFIG: u8 = 78;
-
-/// Exit status for a lockfile that can't be read or written (06 X7).
-const EXIT_IO: u8 = 74;
 
 /// Why lockfile text could not be turned into a [`Lockfile`](super::model::Lockfile).
 ///
@@ -269,10 +264,10 @@ impl LockError {
     /// The process exit status for this error (06 X7): 78 when the text is invalid or the file
     /// is refused, else 74.
     #[must_use]
-    pub const fn exit_code(&self) -> u8 {
+    pub const fn status(&self) -> ExitStatus {
         match self {
-            Self::Parse { .. } | Self::OutsideRoot { .. } => EXIT_CONFIG,
-            Self::Read { .. } | Self::NotRegularFile { .. } | Self::Write { .. } => EXIT_IO,
+            Self::Parse { .. } | Self::OutsideRoot { .. } => ExitStatus::Config,
+            Self::Read { .. } | Self::NotRegularFile { .. } | Self::Write { .. } => ExitStatus::Io,
         }
     }
 }
@@ -399,8 +394,8 @@ impl SettingsMismatch {
 
     /// The process exit status (06 X7): 78, a config or lockfile problem.
     #[must_use]
-    pub const fn exit_code(&self) -> u8 {
-        EXIT_CONFIG
+    pub const fn status(&self) -> ExitStatus {
+        ExitStatus::Config
     }
 }
 
@@ -474,7 +469,7 @@ mod tests {
         let error = mismatch(None);
 
         assert_eq!(error.code(), "lock-settings-mismatch");
-        assert_eq!(error.exit_code(), 78);
+        assert_eq!(error.status(), ExitStatus::Config);
     }
 
     #[test]
@@ -612,7 +607,7 @@ mod tests {
         let help = error.help_from(&absolute("/repo"));
 
         assert_eq!(error.code(), "lock-read");
-        assert_eq!(error.exit_code(), 74);
+        assert_eq!(error.status(), ExitStatus::Io);
         assert_eq!(
             error.message_from(&absolute("/repo")),
             "cannot read supdoc.lock: it is not a regular file"
