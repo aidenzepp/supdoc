@@ -14,7 +14,7 @@ use crate::limits::{Limits, Setting, Source};
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
 use crate::output::text::visible;
-use crate::output::{Output, Report, TextContext, Verbosity};
+use crate::output::{Output, RecordArray, Report, TextContext, Verbosity};
 use crate::path::AbsolutePath;
 
 use super::args::{Inspect, Limit};
@@ -137,6 +137,10 @@ impl ConfigShowReport {
 }
 
 impl Report for ConfigShowReport {
+    fn record_arrays(&self) -> &'static [RecordArray] {
+        const { &[RecordArray::new("namespaces", "namespace")] }
+    }
+
     fn command(&self) -> &'static str {
         "config show"
     }
@@ -225,6 +229,10 @@ impl NamespaceListReport {
 }
 
 impl Report for NamespaceListReport {
+    fn record_arrays(&self) -> &'static [RecordArray] {
+        const { &[RecordArray::new("namespaces", "namespace")] }
+    }
+
     fn command(&self) -> &'static str {
         "namespace list"
     }

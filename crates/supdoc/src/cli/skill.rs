@@ -26,7 +26,7 @@ use crate::lock::io::write_atomically;
 use crate::output::json::Envelope;
 use crate::output::paths::{relative_or_absolute, relative_to};
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, Report, TextContext, preview_note};
+use crate::output::{Output, RecordArray, Report, TextContext, preview_note};
 use crate::path::AbsolutePath;
 
 use super::args::{SkillInstallArgs, WriteMode};
@@ -358,6 +358,10 @@ impl SkillInstallReport {
 }
 
 impl Report for SkillInstallReport {
+    fn record_arrays(&self) -> &'static [RecordArray] {
+        const { &[RecordArray::new("changes", "change")] }
+    }
+
     fn command(&self) -> &'static str {
         "skill install"
     }

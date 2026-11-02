@@ -19,7 +19,7 @@ use crate::namespace::NamespaceName;
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, Report, TextContext};
+use crate::output::{Output, RecordArray, Report, TextContext};
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile, Symbol};
 use crate::read::error::{ReadError, ReadRole, ResolveError};
@@ -343,6 +343,10 @@ impl SymbolJson {
 }
 
 impl Report for ResolveReport {
+    fn record_arrays(&self) -> &'static [RecordArray] {
+        const { &[RecordArray::new("symbols", "symbol")] }
+    }
+
     fn command(&self) -> &'static str {
         "resolve"
     }
