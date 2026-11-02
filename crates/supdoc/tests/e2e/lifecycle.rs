@@ -319,7 +319,7 @@ fn update_with_only_broken_links_left_says_nothing_to_update_with_and_without_ye
 }
 
 #[test]
-fn update_jsonl_summary_carries_the_line_endings_change_only_when_the_settings_change() {
+fn update_jsonl_summary_carries_the_settings_change_only_when_the_settings_change() {
     let project = Project::fixture("basic");
     std::fs::write(
         project.path("supdoc.config.toml"),
@@ -344,16 +344,28 @@ fn update_jsonl_summary_carries_the_line_endings_change_only_when_the_settings_c
     let _ = migrating.assert_exit(0);
     let migrated = summary_of(&migrating);
     assert_eq!(at(&migrated, "/type"), "summary", "{migrated}");
-    assert_eq!(at(&migrated, "/line_endings_from"), "exact", "{migrated}");
-    assert_eq!(at(&migrated, "/line_endings_to"), "normalize", "{migrated}");
+    assert_eq!(
+        at(&migrated, "/settings_change/line_endings/from"),
+        "exact",
+        "{migrated}"
+    );
+    assert_eq!(
+        at(&migrated, "/settings_change/line_endings/to"),
+        "normalize",
+        "{migrated}"
+    );
+    assert!(
+        migrated.get("line_endings_from").is_none() && migrated.get("line_endings_to").is_none(),
+        "the summary mirrors --json: no flat line-endings keys: {migrated}"
+    );
 
     let settled = project.supdoc(&["--jsonl", "update", "--yes"]);
     let _ = settled.assert_exit(0);
     let unchanged = summary_of(&settled);
     assert_eq!(at(&unchanged, "/type"), "summary", "{unchanged}");
     assert!(
-        unchanged.get("line_endings_from").is_none() && unchanged.get("line_endings_to").is_none(),
-        "a run that changes no settings should carry no line-endings fields: {unchanged}"
+        unchanged.get("settings_change").is_none(),
+        "a run that changes no settings should carry no settings_change: {unchanged}"
     );
 }
 

@@ -46,8 +46,8 @@ pub fn lines<R: Report>(report: &R, ok: bool) -> Vec<Value> {
     lines
 }
 
-/// The closing line: every top-level field of the report that is not a record array, the command, whether it succeeded, the
-/// link counts, and the schema version.
+/// The closing line: every top-level field of the report that is not a record array, the command,
+/// whether it succeeded, and the schema version.
 ///
 /// The summary's own keys win over a report field of the same name.
 fn summary_line<R: Report>(report: &R, ok: bool) -> Value {
@@ -55,16 +55,12 @@ fn summary_line<R: Report>(report: &R, ok: bool) -> Value {
     let _type = fields.insert("type".to_owned(), Value::String("summary".to_owned()));
     let _command = fields.insert("command".to_owned(), Value::from(report.command()));
     let _ok = fields.insert("ok".to_owned(), Value::Bool(ok));
-    if let Some(Ok(Value::Object(counts))) = report.summary().map(serde_json::to_value) {
-        fields.extend(counts);
-    }
     let _version = fields.insert("schema_version".to_owned(), Value::from(SCHEMA_VERSION));
     Value::Object(fields)
 }
 
-/// Every top-level field of the serialized report except its record arrays, objects and other
-/// arrays included, plus the line-endings change of `settings_change` as `line_endings_from` and
-/// `line_endings_to` when it is present.
+/// Every top-level field of the serialized report except its record arrays, so the summary
+/// mirrors `--json`'s data, objects and other arrays included.
 fn summary_fields<R: Report + ?Sized>(report: &R) -> Map<String, Value> {
     let Ok(Value::Object(mut fields)) = serde_json::to_value(report) else {
         return Map::new();
@@ -72,17 +68,7 @@ fn summary_fields<R: Report + ?Sized>(report: &R) -> Map<String, Value> {
     for record in report.record_arrays() {
         let _records = fields.remove(record.key);
     }
-    let line_endings = fields
-        .get("settings_change")
-        .and_then(|change| change.get("line_endings"));
-    let from = line_endings.and_then(|change| change.get("from")).cloned();
-    let to = line_endings.and_then(|change| change.get("to")).cloned();
-    let mut scalars = fields;
-    if let (Some(from @ Value::String(_)), Some(to @ Value::String(_))) = (from, to) {
-        let _from = scalars.insert("line_endings_from".to_owned(), from);
-        let _to = scalars.insert("line_endings_to".to_owned(), to);
-    }
-    scalars
+    fields
 }
 
 /// `value` with a `type` field. A non-object value is kept under `value`.

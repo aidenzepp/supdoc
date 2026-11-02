@@ -64,7 +64,7 @@ Commands that write (`update`, `fix`, `namespace rename`, `skill install`) only 
 
 - `--json` prints one JSON document: `schema_version`, `command`, `ok`, `root`, `data`, `findings`,
   `truncated`. Errors are JSON too, on stderr.
-- `--jsonl` prints one object per line, ending with a summary.
+- `--jsonl` prints one object per line, ending with a summary line that carries the same fields as `--json`'s `data`, minus the record arrays.
 - `supdoc schema check` describes the shape of `supdoc check --json`.
 - Paths in JSON are relative to the project root, the directory holding `supdoc.config.toml`.
 

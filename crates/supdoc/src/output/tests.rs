@@ -67,8 +67,8 @@ fn jsonl_lines_each_parse_and_end_with_summary() {
     let summary = lines.last().expect("there should be a summary line");
     assert_eq!(at(summary, "/command"), "check");
     assert_eq!(at(summary, "/ok"), false);
-    assert_eq!(at(summary, "/passed"), 38);
-    assert_eq!(at(summary, "/failed"), 1);
+    assert_eq!(at(summary, "/summary/passed"), 38);
+    assert_eq!(at(summary, "/summary/failed"), 1);
     assert_eq!(at(summary, "/schema_version"), 1);
 }
 
