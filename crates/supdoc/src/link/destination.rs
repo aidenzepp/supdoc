@@ -7,12 +7,14 @@
 //! 3. A leading `/` is the project root; anything else is relative to the source file's directory.
 //!    Every path is then normalized lexically (`.`, `..`), so one file has one spelling.
 //!    A path that still climbs (`../x`, `/../x`, `ns:../x`) leaves the project root or the
-//!    namespace's directory, and is a [`LinkError::OutsideRoot`] decided without the filesystem.
+//!    namespace's directory. Rules 4 and 5 decide whether that matters.
 //! 4. A path that names a directory (it is empty once normalized, as `/`, `./` or a `../` that
-//!    reaches the root, or it ends in `/` or `..`) is navigation, not a supdoc link. With a `#fragment` it
-//!    is a [`LinkError::Directory`]: a symbol lives in a file, not a directory.
+//!    reaches the root, or it ends in `/` or `..`) is navigation, not a supdoc link, even when it
+//!    climbs. With a `#fragment` it is a [`LinkError::OutsideRoot`] if it climbs, otherwise a
+//!    [`LinkError::Directory`]: a symbol lives in a file, not a directory.
 //! 5. With or without a `#fragment`, only a file some cartridge reads is a link (`logo.png` and
-//!    `api.html#section` are not).
+//!    `api.html#section` are not, even when they climb). A climbing path to such a file is a
+//!    [`LinkError::OutsideRoot`], decided without the filesystem.
 //! 6. With a fragment, `#heading` alone (the same file) is not tracked; otherwise it is a symbol.
 //!
 //! A destination that is not a supdoc link says why, as a [`Destination::NotSupdoc`] reason.
@@ -254,7 +256,7 @@ pub(crate) fn parse_destination(
 
     let fragment = fragment.filter(|fragment| !fragment.is_empty());
     if path.is_empty() && namespace.is_none() {
-        // `#setup` (or an empty destination): a heading in this very file, never tracked (R11).
+        // `#setup` (or an empty destination): a heading in this very file, never tracked.
         return not_supdoc(Untracked::SameFile);
     }
 
@@ -362,7 +364,7 @@ fn parse_symbol(destination: &str, fragment: &str) -> Result<SymbolPath, LinkErr
 }
 
 /// Whether `text` (a destination without its fragment) names no path at all: a URL, an ignored
-/// scheme, or a language path such as `crate::Foo` or `Self::iter` (R10).
+/// scheme, or a language path such as `crate::Foo` or `Self::iter`.
 fn is_not_a_path(text: &str) -> bool {
     if text.starts_with("::") {
         return true;

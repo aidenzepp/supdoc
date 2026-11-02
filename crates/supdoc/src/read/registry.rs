@@ -1,4 +1,4 @@
-//! The built-in language registry: [`Languages::builtin`] (03 R1, The registry).
+//! The built-in language registry: [`Languages::builtin`].
 
 use std::sync::LazyLock;
 
@@ -14,6 +14,16 @@ static BUILTIN: LazyLock<Result<Languages, CartridgeLoadError>> =
 /// Whether the Markdown inline grammar loads into a parser, checked once. Reading links needs it.
 static INLINE_GRAMMAR: LazyLock<Result<(), LanguageError>> =
     LazyLock::new(|| Parser::new().set_language(&tree_sitter_md::INLINE_LANGUAGE.into()));
+
+/// A parser for tree-sitter-md's inline grammar.
+///
+/// [`Languages::builtin`] fails the run when the grammar does not load, so every parser made
+/// after it has the grammar.
+pub(crate) fn inline_parser() -> Parser {
+    let mut parser = Parser::new();
+    let _loaded = parser.set_language(&tree_sitter_md::INLINE_LANGUAGE.into());
+    parser
+}
 
 impl Languages {
     /// Every cartridge compiled into supdoc, built once per process.

@@ -1,4 +1,4 @@
-//! Runs the built `supdoc` binary and checks what a user sees: streams and exit codes (06, 07).
+//! Runs the built `supdoc` binary and checks what a user sees: streams and exit codes.
 //!
 //! Unix only: the suite uses Unix permissions, symlinks and `sh`. Windows is untested, and CI runs
 //! only on Linux.

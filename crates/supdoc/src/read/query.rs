@@ -1,5 +1,5 @@
 //! [`QueryCartridge`]: a language that is pure data, a grammar plus its `tags.scm` and
-//! `injections.scm` (03 R3, The query contract).
+//! `injections.scm`.
 //!
 //! Both files use tree-sitter's own capture names, so they stay ordinary tree-sitter queries:
 //!
@@ -11,7 +11,7 @@
 //! | `@supdoc.scope` | A container that adds segments to definitions inside it but isn't addressable (a Rust `impl`) |
 //! | `@supdoc.scope.name` | That segment. Inside a definition pattern, a parent segment containment can't express (a Go receiver) |
 //! | `@supdoc.scope.qualifier` | A second segment after the name (the trait in `impl Trait for Type`) |
-//! | `@supdoc.scope.arguments`, `@supdoc.scope.qualifier.arguments` | Type arguments of the name or qualifier, for the full-type alias (03 R5) |
+//! | `@supdoc.scope.arguments`, `@supdoc.scope.qualifier.arguments` | Type arguments of the name or qualifier, for the full-type alias |
 //!
 //! See [`tag_symbols`] for how a path is built from them.
 //!
@@ -28,7 +28,7 @@ use crate::read::cartridge::{
 use crate::read::error::ReadError;
 use crate::read::symbols::tag_symbols;
 
-/// The `injection.language` that marks a region where links are read (03 R9).
+/// The `injection.language` that marks a region where links are read.
 pub(crate) const MARKDOWN_INLINE: &str = "markdown_inline";
 
 /// Markers that open a line comment, longest first so `///` isn't read as `//`.
@@ -115,7 +115,7 @@ impl Cartridge for QueryCartridge {
     }
 }
 
-/// The regions `file`'s `injections.scm` marks as `markdown_inline`, in file order (03 R9, R14).
+/// The regions `file`'s `injections.scm` marks as `markdown_inline`, in file order.
 ///
 /// The language comes from a `#set! injection.language` on the pattern or from an
 /// `@injection.language` capture, tree-sitter's two ways of naming it.

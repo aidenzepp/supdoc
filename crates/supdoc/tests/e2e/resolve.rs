@@ -202,7 +202,7 @@ fn resolve_non_utf8_file_exits_1_with_read_not_utf8() {
     assert_eq!(
         at(&error_json(&run), "/kind"),
         "read-not-utf8",
-        "a file that is not UTF-8 should be refused (R6); stderr: {}",
+        "a file that is not UTF-8 should be refused; stderr: {}",
         run.stderr
     );
 }
@@ -221,7 +221,7 @@ fn resolve_file_over_16_mib_exits_1_with_read_too_large() {
     assert_eq!(
         at(&error_json(&run), "/kind"),
         "read-too-large",
-        "a file over 16 MiB should be refused (R6); stderr: {}",
+        "a file over 16 MiB should be refused; stderr: {}",
         run.stderr
     );
 }

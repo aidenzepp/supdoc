@@ -1,4 +1,4 @@
-//! Reconciliation: the pure join of a scan and the lockfile that gives every link its state (05).
+//! Reconciliation: the pure join of a scan and the lockfile that gives every link its state.
 
 use std::collections::BTreeSet;
 use std::{fs, io};
@@ -26,13 +26,13 @@ pub(crate) enum Outcome {
 /// Gives every [`LinkKey`] in `scope` the state the 05 table says.
 ///
 /// Links outside `scope` are not judged, and neither are lock entries written in sources that
-/// couldn't be read this run (05 C5). A source with a broken link is treated the same way,
+/// couldn't be read this run. A source with a broken link is treated the same way,
 /// whether the link is too malformed to have a key (a link error) or has a key whose target can't
 /// be resolved (such as an unknown namespace): that link may be an edit of a locked one, so none
 /// of the source's entries are judged obsolete while it remains broken. Other sources are
 /// unaffected.
 ///
-/// A link in `scope` can still have moved from a source outside it (05 C6). A scoped walk never
+/// A link in `scope` can still have moved from a source outside it. A scoped walk never
 /// reads those sources, so an out-of-scope lock entry is a move candidate only when it points
 /// where a new in-scope link points and its source file no longer exists. That file is the one
 /// thing read here, once per such entry.
@@ -171,8 +171,8 @@ fn reconcile_with(
     report
 }
 
-/// Whether `check` passes (05 C3): `failed`, `broken` and `new` links fail it, and so does every
-/// error finding, such as a link too malformed to have a key (03 R10). `obsolete` links only
+/// Whether `check` passes: `failed`, `broken` and `new` links fail it, and so does every
+/// error finding, such as a link too malformed to have a key. `obsolete` links only
 /// warn, and `deny_warnings` makes them, and every warning finding, fail it too.
 #[must_use]
 pub(crate) fn check_outcome(report: &Report, deny_warnings: bool) -> Outcome {
@@ -364,7 +364,7 @@ fn move_ambiguous_note(
     )
 }
 
-/// The warning that a target file has syntax errors (03 R8, 05 C12).
+/// The warning that a target file has syntax errors.
 fn syntax_error_finding(target: &Target) -> Finding {
     Finding::new(
         "read-syntax-errors",

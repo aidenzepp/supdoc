@@ -340,7 +340,7 @@ impl ConfigError {
         }
     }
 
-    /// The process exit status for this error (06 X7): 74 when a file can't be read, else 78.
+    /// The process exit status for this error: 74 when a file can't be read, else 78.
     #[must_use]
     pub(crate) fn status(&self) -> ExitStatus {
         match self {

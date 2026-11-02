@@ -1,7 +1,7 @@
 //! Turning the command line into a [`Cli`], or into the text to print and the exit code to use.
 //!
 //! Parsing never prints and never exits: [`parse_from`] returns what to show, so `main` is the only
-//! code that touches the process and tests can inspect every outcome (06 `main`, X8).
+//! code that touches the process and tests can inspect every outcome.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
@@ -31,7 +31,7 @@ pub(crate) struct Printout {
     pub(crate) stream: Stream,
     /// The text, ending in a newline.
     pub(crate) text: String,
-    /// The process exit code: 0 for help and version, 2 for a usage error (06 X7).
+    /// The process exit code: 0 for help and version, 2 for a usage error.
     pub(crate) exit_code: u8,
 }
 
@@ -70,7 +70,7 @@ fn printout(error: &clap::Error, args: &[OsString], format: OutputFormat) -> Pri
     let command = help_command(args);
     let text = redirect_flag_tip(&error.render().to_string(), &command);
     match error.kind() {
-        // Bare `supdoc` shows help, as a successful request for help (06 X1).
+        // Bare `supdoc` shows help, as a successful request for help.
         ErrorKind::DisplayHelp
         | ErrorKind::DisplayVersion
         | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => Printout {
@@ -188,7 +188,7 @@ fn ensure_newline(mut text: String) -> String {
     text
 }
 
-/// The JSON error object for a usage error (06 X8, 07 fatal error shape), on one line.
+/// The JSON error object for a usage error, on one line.
 fn usage_error_json(rendered: &str, command: &HelpCommand) -> String {
     let (message, help) = split_clap_message(rendered, command);
     let error = FatalJson {

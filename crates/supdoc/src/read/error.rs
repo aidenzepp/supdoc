@@ -1,5 +1,5 @@
 //! Errors from reading one file ([`ReadError`]) and from resolving a symbol in it
-//! ([`ResolveError`]) (03 R13, Errors).
+//! ([`ResolveError`]).
 //!
 //! Each error has a stable `code()` and a `help()` that says what to do next. Both are about one
 //! file, so callers turn them into findings rather than stopping the run.
@@ -36,7 +36,7 @@ pub(crate) enum ReadError {
         error: std::io::Error,
     },
 
-    /// The file isn't UTF-8 (03 R13).
+    /// The file isn't UTF-8.
     NotUtf8 {
         /// The file being read.
         path: AbsolutePath,
@@ -44,7 +44,7 @@ pub(crate) enum ReadError {
         offset: usize,
     },
 
-    /// The file is over the size limit (03 R13).
+    /// The file is over the size limit.
     TooLarge {
         /// The file being read.
         path: AbsolutePath,
@@ -89,7 +89,7 @@ pub(crate) enum ReadError {
     },
 }
 
-/// The code of [`ReadError::Timeout`]. Every command that meets it exits 1 (D1).
+/// The code of [`ReadError::Timeout`]. Every command that meets it exits 1.
 pub(crate) const CODE_TIMEOUT: &str = "read-timeout";
 
 /// How to raise the per-file read ceiling: its key, variable and flag, and the value that lifts it.
@@ -354,7 +354,7 @@ pub(crate) enum ResolveError {
         file_has_symbols: bool,
     },
 
-    /// Several symbols answer to that path; supdoc never picks one (03 R5a).
+    /// Several symbols answer to that path; supdoc never picks one.
     Ambiguous {
         /// The file searched.
         file: AbsolutePath,
@@ -544,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_lists_every_full_path() {
+    fn ambiguous_lists_the_full_path_of_each_candidate() {
         let error = ResolveError::Ambiguous {
             file: absolute("/repo/src/lib.rs"),
             query: symbol("new"),

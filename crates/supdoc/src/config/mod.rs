@@ -59,7 +59,7 @@ pub(crate) fn discover_config(start: &AbsolutePath) -> Result<Option<AbsolutePat
 /// Constructed only while the chain is merged, after its directory is found inside the root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Namespace {
-    /// The directory, resolved from the config that wrote it. It may not exist (01 D7).
+    /// The directory, resolved from the config that wrote it. It may not exist.
     dir: AbsolutePath,
     /// The nearest config file in the chain that defines this namespace.
     defined_in: AbsolutePath,
@@ -224,7 +224,7 @@ impl Config {
 
     /// The directory a namespace names, or `None` if the config doesn't define it.
     ///
-    /// The directory may not exist: that is checked when a link through it is read (01 D7).
+    /// The directory may not exist: that is checked when a link through it is read.
     #[must_use]
     pub(crate) fn namespace(&self, name: &NamespaceName) -> Option<&AbsolutePath> {
         self.namespaces.get(name).map(Namespace::dir)

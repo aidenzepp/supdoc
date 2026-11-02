@@ -1,7 +1,7 @@
-//! The scan result: every link in the project and what its target looks like right now (04).
+//! The scan result: every link in the project and what its target looks like right now.
 //!
 //! A scan holds facts about now. It never says "failed"; only comparing it with the lockfile
-//! (05) can say that.
+//! can say that.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -14,7 +14,7 @@ use crate::link::{LinkKey, SourcePath};
 pub(crate) enum Scope {
     /// Every source under the root.
     All,
-    /// Only these files and directories (04 S10), relative to the project root. Converting what
+    /// Only these files and directories, relative to the project root. Converting what
     /// the user typed into root-relative paths is the caller's job, not the scan's.
     Paths(Vec<SourcePath>),
 }
@@ -44,27 +44,27 @@ fn lies_under(source: &SourcePath, path: &SourcePath) -> bool {
 /// Every link found in one run, plus problems not tied to a single link.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Scan {
-    /// One per [`LinkKey`] (04 S11), sorted.
+    /// One per [`LinkKey`], sorted.
     pub(crate) links: BTreeMap<LinkKey, ScannedLink>,
     /// Problems not tied to one link (unreadable directories, excluded explicit paths, and links
-    /// too malformed to have a key, like an invalid symbol), sorted (04 S8). A link's own problem
+    /// too malformed to have a key, like an invalid symbol), sorted. A link's own problem
     /// lives in its [`TargetState::Broken`]. Never fatal.
     pub(crate) findings: Vec<Finding>,
     /// Sources that were walked but couldn't be read. Their lock entries are never judged
-    /// obsolete (05 C5).
+    /// obsolete.
     pub(crate) unread_sources: BTreeSet<SourcePath>,
     /// Sources holding a link too malformed to have a key. Such a link may be an edit of a locked
     /// one, so none of the source's lock entries are judged obsolete while it remains.
     pub(crate) keyless_error_sources: BTreeSet<SourcePath>,
     /// Directories the walk couldn't read, relative to the root. Every source beneath one is
-    /// unread too, so its lock entries are never judged obsolete either (05 C5).
+    /// unread too, so its lock entries are never judged obsolete either.
     pub(crate) unread_dirs: BTreeSet<SourcePath>,
 }
 
 impl Scan {
     /// Whether `source` couldn't be read: it failed to read itself, or it lies beneath a
     /// directory the walk couldn't read. Its links are unknown, so none of its lock entries can
-    /// be judged (05 C5).
+    /// be judged.
     #[must_use]
     pub(crate) fn is_unread(&self, source: &SourcePath) -> bool {
         self.unread_sources.contains(source)
@@ -79,7 +79,7 @@ pub(crate) struct ScannedLink {
     pub(crate) first: Location,
     /// Every later place this link appears, in order.
     pub(crate) more: Vec<Location>,
-    /// The source lines of the first location, captured at scan time (07 G11), when they could be.
+    /// The source lines of the first location, captured at scan time, when they could be.
     pub(crate) snippet: Option<Snippet>,
     /// What the target looks like right now.
     pub(crate) target: TargetState,
@@ -99,7 +99,7 @@ pub(crate) enum TargetState {
     Present {
         /// The hash of the symbol's bytes, or of the whole file.
         hash: Hash,
-        /// Whether the target file has syntax errors, which can make its hash unstable (03 R8).
+        /// Whether the target file has syntax errors, which can make its hash unstable.
         syntax_errors: bool,
     },
     /// The file, the symbol or the namespace can't be found. The finding explains.

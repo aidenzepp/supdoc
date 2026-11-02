@@ -1,4 +1,4 @@
-//! `Output`: the one value that writes to stdout and stderr (06 "main and the output module").
+//! `Output`: the one value that writes to stdout and stderr.
 
 use std::io::{self, Write};
 
@@ -21,7 +21,7 @@ pub(crate) struct OutputSettings {
     pub(crate) verbosity: Verbosity,
     /// Whether text output carries ANSI color.
     pub(crate) color: bool,
-    /// Whether text output draws with Unicode instead of ASCII (07 G12).
+    /// Whether text output draws with Unicode instead of ASCII.
     pub(crate) unicode: bool,
     /// The terminal width in columns.
     pub(crate) width: usize,
@@ -56,7 +56,7 @@ pub(crate) enum OutputError {
 /// Every byte supdoc prints goes through here.
 ///
 /// A closed pipe, as in `supdoc list | head`, is not an error: the first write that meets one
-/// marks that stream closed, and later writes to it are dropped quietly (06 X13). The other
+/// marks that stream closed, and later writes to it are dropped quietly. The other
 /// stream keeps working, and the run keeps its own exit code.
 pub(crate) struct Output {
     /// How to write.
@@ -116,7 +116,7 @@ impl Output {
         self.settings.paths.set_root(root);
     }
 
-    /// Whether text output draws with Unicode instead of ASCII (07 G12).
+    /// Whether text output draws with Unicode instead of ASCII.
     #[must_use]
     pub(crate) const fn unicode(&self) -> bool {
         self.settings.unicode

@@ -1,6 +1,6 @@
-//! Command-line argument definitions, written with clap's derive API (06).
+//! Command-line argument definitions, written with clap's derive API.
 //!
-//! Every flag has a `SUPDOC_*` environment variable (06 X6). Definition only: running a command
+//! Every flag has a `SUPDOC_*` environment variable. Definition only: running a command
 //! lives in the sibling modules.
 
 use std::num::NonZeroUsize;
@@ -206,7 +206,7 @@ impl Args for LimitFlags {
 impl GlobalArgs {
     /// The format that applies once `--json` and `--jsonl` are taken into account.
     ///
-    /// `--jsonl` beats `--json`, which beats `--output` (06 X5). This is precedence rather than a
+    /// `--jsonl` beats `--json`, which beats `--output`. This is precedence rather than a
     /// clap conflict, because a conflict could fire from `SUPDOC_OUTPUT` alone.
     #[must_use]
     pub(crate) fn format(&self) -> OutputFormat {
@@ -214,7 +214,7 @@ impl GlobalArgs {
     }
 }
 
-/// Applies the precedence `--jsonl` > `--json` > `--output` (06 X5).
+/// Applies the precedence `--jsonl` > `--json` > `--output`.
 #[must_use]
 pub(super) const fn resolve_format(output: OutputFormat, json: bool, jsonl: bool) -> OutputFormat {
     if jsonl {
@@ -226,7 +226,7 @@ pub(super) const fn resolve_format(output: OutputFormat, json: bool, jsonl: bool
     }
 }
 
-/// The commands (06 X2). Actions are top-level verbs, groups are `noun verb`.
+/// The commands. Actions are top-level verbs, groups are `noun verb`.
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
     /// Check links against supdoc.lock (read-only)
@@ -264,7 +264,7 @@ pub(crate) enum Command {
     Skill(SkillCommand),
 }
 
-/// Whether a write command applies its changes (06 X4).
+/// Whether a write command applies its changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WriteMode {
     /// Show what would change and write nothing.
@@ -273,7 +273,7 @@ pub(crate) enum WriteMode {
     Apply,
 }
 
-/// Flags shared by every command that writes (06 X4).
+/// Flags shared by every command that writes.
 #[derive(Debug, Clone, Args)]
 #[command(next_help_heading = "Writing")]
 pub(crate) struct Confirm {
@@ -422,7 +422,7 @@ impl std::str::FromStr for TargetArg {
     }
 }
 
-/// How many results `list`, `resolve` and `namespace list` show unless told otherwise (06 X11).
+/// How many results `list`, `resolve` and `namespace list` show unless told otherwise.
 pub(crate) const DEFAULT_LIMIT: Limit = Limit::at_most(100);
 
 /// How many results a list-style command shows: a count, or everything (`--limit 0`).
@@ -557,7 +557,7 @@ pub(crate) struct SchemaArgs {
     pub(crate) command: Option<SchemaTarget>,
 }
 
-/// The commands that have JSON output, and so a schema (06 X10).
+/// The commands that have JSON output, and so a schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum SchemaTarget {
     /// `supdoc check`

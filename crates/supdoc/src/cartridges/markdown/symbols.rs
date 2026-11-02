@@ -22,6 +22,8 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use tree_sitter::{Node, Parser};
+
+use crate::read::registry::inline_parser;
 use unicode_general_category::{GeneralCategory, get_general_category};
 
 use crate::link::{SymbolPath, SymbolSegment};
@@ -158,22 +160,12 @@ impl Open {
     }
 }
 
-/// A parser for headings' inline content, or `None` if the grammar can't be loaded (a supdoc
-/// bug). Headings are then slugged from their raw text.
-fn inline_parser() -> Option<Parser> {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&tree_sitter_md::INLINE_LANGUAGE.into())
-        .ok()?;
-    Some(parser)
-}
-
 /// Reads what a heading displays.
 struct HeadingReader<'file> {
     /// The file whose headings are read, for its text and its deadline.
     file: &'file SourceFile,
     /// Reads a heading's inline markup.
-    inline: Option<Parser>,
+    inline: Parser,
 }
 
 impl HeadingReader<'_> {
@@ -195,14 +187,11 @@ impl HeadingReader<'_> {
         let Some(raw) = content.and_then(|node| self.file.text().get(node.byte_range())) else {
             return Ok(String::new());
         };
-        let tree = match self.inline.as_mut() {
-            Some(parser) => self
-                .file
-                .deadline()
-                .parse(parser, raw)
-                .map_err(|stopped| self.file.timed_out("a heading's inline parse", stopped))?,
-            None => None,
-        };
+        let tree = self
+            .file
+            .deadline()
+            .parse(&mut self.inline, raw)
+            .map_err(|stopped| self.file.timed_out("a heading's inline parse", stopped))?;
         Ok(tree.map_or_else(
             || raw.to_owned(),
             |tree| {

@@ -1,4 +1,4 @@
-//! The `Report` trait: what every piece of output data implements (07 "Rust design").
+//! The `Report` trait: what every piece of output data implements.
 
 use std::io::{self, Write};
 
@@ -40,7 +40,7 @@ pub(crate) trait Report: serde::Serialize + schemars::JsonSchema {
 
     /// Findings that aren't about one link. They go in the envelope's top-level `findings`.
     ///
-    /// A link's own finding is nested in the link's serialized form instead (07 G8).
+    /// A link's own finding is nested in the link's serialized form instead.
     fn findings(&self) -> &[Finding] {
         &[]
     }

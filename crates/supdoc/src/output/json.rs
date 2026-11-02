@@ -1,4 +1,4 @@
-//! The JSON envelope and the JSON form of findings (07 G8, G10).
+//! The JSON envelope and the JSON form of findings.
 
 use serde::Serialize;
 
@@ -6,9 +6,8 @@ use crate::finding::{Finding, Fix, Location, Severity};
 use crate::output::report::Report;
 use crate::path::AbsolutePath;
 
-/// The version of the JSON shape. Adding optional fields keeps it; removing or renaming bumps it
-/// (07 G10). New values of an existing enum (states, actions, kinds, JSONL record types) also keep
-/// it, so consumers must tolerate values they do not know.
+/// The version of the JSON shape. Adding optional fields keeps it; removing or renaming bumps it. New values of an existing enum (states, actions, kinds,
+/// JSONL record types) also keep it, so consumers must tolerate values they do not know.
 pub(crate) const SCHEMA_VERSION: u32 = 2;
 
 /// The one object every command writes under `--json`, with the same top-level keys each time.
@@ -166,7 +165,7 @@ impl From<&Fix> for FixJson {
     }
 }
 
-/// A fatal error as JSON shows it, written to stderr (06 X8).
+/// A fatal error as JSON shows it, written to stderr.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub(crate) struct FatalJson {
     /// Always `true`, so a reader can tell this object from a report.

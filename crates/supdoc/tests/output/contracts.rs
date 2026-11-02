@@ -1,5 +1,5 @@
 //! The contracts only the running binary can show: what touches the disk, what reaches each
-//! stream, color and glyphs, a closed pipe, and `ok` against the exit code (06, 07).
+//! stream, color and glyphs, a closed pipe, and `ok` against the exit code.
 
 use std::io::{BufRead, BufReader};
 use std::process::Stdio;
@@ -1350,8 +1350,9 @@ mod helps {
     ];
 
     /// `supdoc args`, run by `sh` in the project root after `prelude`, with an empty environment but
-    /// for `PATH`.
+    /// for `PATH` and the isolated git config that [`Project::command`] sets.
     fn shell(project: &Project, prelude: &str, args: &[&str]) -> Command {
+        let empty = project.no_git_config();
         let mut command = Command::new("sh");
         let _command = command
             .arg("-c")
@@ -1361,6 +1362,9 @@ mod helps {
             .current_dir(project.path())
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
+            .env("HOME", empty)
+            .env("XDG_CONFIG_HOME", empty)
+            .env("GIT_CONFIG_SYSTEM", empty.join("gitconfig"))
             .stdin(Stdio::null());
         command
     }
@@ -1502,6 +1506,14 @@ mod helps {
                 problems.push(format!(
                     "the unit case for `{}` built `{kind}` instead",
                     unit.kind
+                ));
+            }
+            if help.as_deref().is_none_or(str::is_empty)
+                && !HELPLESS.iter().any(|entry| entry.kind == kind)
+            {
+                problems.push(format!(
+                    "`{kind}` (built directly) has no help; give it a `.with_help` or list it \
+                     in HELPLESS with a reason"
                 ));
             }
             if let Some(problem) = help.as_deref().and_then(help_problem) {

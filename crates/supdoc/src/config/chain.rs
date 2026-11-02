@@ -44,7 +44,7 @@ fn config_in(dir: &AbsolutePath) -> AbsolutePath {
     dir.join_path(Path::new(CONFIG_FILE_NAME))
 }
 
-/// Walks up from `start` to the nearest directory holding a config file (01 D1), stopping at the
+/// Walks up from `start` to the nearest directory holding a config file, stopping at the
 /// top of the git work tree `start` lies in.
 ///
 /// The top is the first directory holding a `.git` as git decides it ([`holds_git`]), the same
@@ -423,7 +423,7 @@ fn nearest<T>(slot: &mut Option<(T, AbsolutePath)>, value: Option<T>, file: &Abs
 
 /// The namespace `name`, once its directory is found inside the root after symlinks are followed.
 ///
-/// A missing directory is still allowed (01 D7): where it would be is what counts.
+/// A missing directory is still allowed: where it would be is what counts.
 ///
 /// Effect: reads file metadata and symlinks along `dir`.
 ///

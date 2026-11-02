@@ -2,7 +2,7 @@
 //! the lockfile records for it.
 //!
 //! Every path here is project-relative and `/`-separated whatever the operating system, because
-//! these values are written into `supdoc.lock`, which is committed and shared (02 L5).
+//! these values are written into `supdoc.lock`, which is committed and shared.
 
 use std::fmt;
 use std::ops::Range;
@@ -11,12 +11,12 @@ use std::str::FromStr;
 
 use crate::namespace::{NamespaceName, NamespaceNameError};
 
-/// Parsing a Markdown link destination into a link target (03 R10).
+/// Parsing a Markdown link destination into a link target.
 pub(crate) mod destination;
 
 /// A file that contains links (a doc **or a code file**), relative to the project root.
 ///
-/// `/`-separated, not empty, with no `.`, `..` or empty segments (02 L5).
+/// `/`-separated, not empty, with no `.`, `..` or empty segments.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize)]
 #[serde(try_from = "String")]
 pub(crate) struct SourcePath(String);
@@ -211,7 +211,7 @@ pub(crate) enum LinkPathError {
     },
 }
 
-/// Where a link points, exactly as written in the doc (02 L4).
+/// Where a link points, exactly as written in the doc.
 ///
 /// Ordering puts plain paths before namespaced ones, then sorts by namespace and path.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize)]
@@ -426,7 +426,7 @@ impl SymbolPathError {
     pub(crate) const DOT_IN_SEGMENT: &'static str = "a segment contains `.`";
 }
 
-/// Identity of one lock entry (02 L2). Field order is the sort order (02 L1).
+/// Identity of one lock entry. Field order is the sort order.
 #[derive(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, schemars::JsonSchema,
 )]
@@ -522,7 +522,7 @@ pub(crate) enum LinkRefError {
     Symbol(#[from] SymbolPathError),
 }
 
-/// A link exactly as found in a source file, before its destination is understood (03).
+/// A link exactly as found in a source file, before its destination is understood.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RawLink {
     /// The link text, for diagnostics.

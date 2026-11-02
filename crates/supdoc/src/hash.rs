@@ -1,4 +1,4 @@
-//! Content hashes of linked code: SHA-256 digests (03 R6, 02).
+//! Content hashes of linked code: SHA-256 digests.
 
 use std::fmt;
 use std::str::FromStr;
@@ -106,7 +106,7 @@ impl serde::Serialize for Hash {
     }
 }
 
-/// How line endings are treated before hashing (01 D10, 03 R6).
+/// How line endings are treated before hashing.
 #[derive(
     Debug,
     Clone,
@@ -120,7 +120,7 @@ impl serde::Serialize for Hash {
 )]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum LineEndings {
-    /// Each CR immediately followed by LF is dropped before hashing (B.4).
+    /// Each CR immediately followed by LF is dropped before hashing.
     #[default]
     Normalize,
     /// Every byte is hashed as is.
@@ -137,7 +137,7 @@ impl fmt::Display for LineEndings {
     }
 }
 
-/// Every setting that changes a hash. Recorded in `supdoc.lock` (02 L10).
+/// Every setting that changes a hash. Recorded in `supdoc.lock`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct HashSettings {
     /// How line endings are treated before hashing.

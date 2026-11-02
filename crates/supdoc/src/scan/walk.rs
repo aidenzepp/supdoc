@@ -1,4 +1,4 @@
-//! Walking the project tree to find the files a scan reads links from (04 S1-S6, S10).
+//! Walking the project tree to find the files a scan reads links from.
 
 use std::fmt;
 use std::io;
@@ -19,20 +19,20 @@ pub(crate) use crate::scan::ignore::CODE_IGNORE_TOO_LARGE;
 use crate::scan::ignore::{IgnoreRules, symlinked_ignore_file, unreadable_ignore_file};
 use crate::scan::model::Scope;
 
-/// Directories of version-control systems, never walked (04 S2).
+/// Directories of version-control systems, never walked.
 const VCS_DIRS: [&str; 4] = [".git", ".hg", ".svn", ".jj"];
 
 /// The files a scan reads links from, and the problems met while finding them.
 #[derive(Debug)]
 pub(crate) struct Walk {
-    /// Sorted by path (04 S8). Every entry is under the root, passes [`Config::scans`], is inside
-    /// the [`Scope`], and has a cartridge (04 S6).
+    /// Sorted by path. Every entry is under the root, passes [`Config::scans`], is inside
+    /// the [`Scope`], and has a cartridge.
     pub(crate) sources: Vec<WalkedSource>,
     /// Unreadable directories, symlinked ignore files that weren't read, and explicitly named
     /// paths that are excluded or ignored, sorted.
     pub(crate) findings: Vec<Finding>,
     /// The directories the walk couldn't read, sorted by path. Nothing beneath one was walked, so
-    /// its sources and their links are unknown (05 C5).
+    /// its sources and their links are unknown.
     pub(crate) unread_dirs: Vec<UnreadDir>,
 }
 
@@ -124,7 +124,7 @@ impl GlobalExcludes {
 
 /// Walks the project beneath `config.root()` and returns its sources.
 ///
-/// The rules apply in order to each entry (04, The walk): ignore files ([`IgnoreRules`]: each
+/// The rules apply in order to each entry: ignore files ([`IgnoreRules`]: each
 /// directory's `.ignore`, `.gitignore` and `.git/info/exclude`, those of the directories above the
 /// root up to the top of its git work tree, and the global `excludes` file, even outside a git
 /// repository), version-control directories, nested projects, symlinks, then `Config::scans` and
@@ -243,14 +243,14 @@ fn is_excluded_dir(config: &Config, dir: &Path) -> bool {
     AbsolutePath::new(dir).is_some_and(|dir| config.excluded_by(&dir).is_some())
 }
 
-/// Whether `dir` is named like a version-control directory (04 S2).
+/// Whether `dir` is named like a version-control directory.
 pub(super) fn is_vcs_dir(dir: &Path) -> bool {
     dir.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| VCS_DIRS.contains(&name))
 }
 
-/// Whether `dir` has its own config, which makes it a separate project (04 S4).
+/// Whether `dir` has its own config, which makes it a separate project.
 ///
 /// The same presence rule as the config search: an entry named `supdoc.config.toml` counts only
 /// when a no-follow check shows a regular file or a symlink, a dangling one included. A
@@ -259,7 +259,7 @@ pub(super) fn is_nested_project(dir: &Path) -> bool {
     config_entry(dir).is_some()
 }
 
-/// Whether anything under `dir` can be inside `scope`, so narrowing the walk (04 S10) never
+/// Whether anything under `dir` can be inside `scope`, so narrowing the walk never
 /// skips a listed path.
 fn may_hold_sources(root: &AbsolutePath, scope: &Scope, dir: &Path) -> bool {
     let Scope::Paths(listed) = scope else {
@@ -288,7 +288,7 @@ fn as_source(
     scope: &Scope,
     entry: &DirEntry,
 ) -> Option<Result<WalkedSource, Finding>> {
-    // A symlink reports its own type, not its target's, so links are skipped here (04 S3).
+    // A symlink reports its own type, not its target's, so links are skipped here.
     if !entry.file_type()?.is_file() {
         return None;
     }

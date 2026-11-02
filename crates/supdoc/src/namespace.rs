@@ -4,7 +4,7 @@ use std::fmt;
 use std::str::FromStr;
 
 /// A namespace name: an ASCII letter, then ASCII letters, digits, `-` or `_`, at least 2
-/// characters long (01 D6).
+/// characters long.
 ///
 /// The two-character minimum keeps a name from reading like a Windows drive (`C:src`).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize)]

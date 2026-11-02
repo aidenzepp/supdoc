@@ -1,4 +1,4 @@
-//! The summary line: how many links are in each state (07 "Summary line").
+//! The summary line: how many links are in each state.
 
 use std::io::{self, Write};
 
@@ -59,7 +59,7 @@ impl Summary {
     /// `Links  1 failed · 1 broken · 38 passed · 1 obsolete`: worst first, zero counts left out.
     ///
     /// A run with no links at all says `0 passed`, so the line is never empty. Without `unicode`
-    /// the counts are separated by `, ` instead of `·`, so the line is plain ASCII (07 G12).
+    /// the counts are separated by `, ` instead of `·`, so the line is plain ASCII.
     #[must_use]
     pub(crate) fn line(&self, color: bool, unicode: bool) -> String {
         const WORST_FIRST: [LinkState; 5] = [

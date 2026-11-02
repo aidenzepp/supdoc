@@ -29,7 +29,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "A fatal error as JSON shows it, written to stderr (06 X8).",
+  "description": "A fatal error as JSON shows it, written to stderr.",
   "properties": {
     "error": {
       "description": "Always `true`, so a reader can tell this object from a report.",

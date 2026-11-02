@@ -1,14 +1,13 @@
 //! `supdoc namespace rename`: renames a namespace in the config, in `supdoc.lock` and in every
-//! link that uses it (06, 06a §5.8).
+//! link that uses it.
 //!
 //! The run is `config → lockfile → plan → preview or (verify → write) → report`. [`Plan::build`]
 //! reads every file and decides every edit, and writes nothing. [`Plan::apply`] first checks that
-//! each file it will touch still holds what was read, refusing the whole rename if one doesn't
-//! (NR8), then writes sources, `supdoc.lock` and the config in that order, each atomically,
-//! stopping at the first failure (NR9). The config is last, so it names OLD until every link has
+//! each file it will touch still holds what was read, refusing the whole rename if one doesn't, then writes sources, `supdoc.lock` and the config in that order,
+//! each atomically, stopping at the first failure. The config is last, so it names OLD until every link has
 //! moved, and running the command again finishes an interrupted rename.
 //!
-//! Links are found the way the scan finds them, never by searching text (NR6): only the `OLD`
+//! Links are found the way the scan finds them, never by searching text: only the `OLD`
 //! prefix inside each link's written destination changes, and a reference definition that
 //! several links share is edited once.
 
@@ -135,7 +134,7 @@ struct Plan {
     max_lock_size: SizeLimit,
     /// The key to rename in the nearest config.
     config: ConfigEdit,
-    /// A config further up the `extends` chain that also defines OLD, left as it is (NR5).
+    /// A config further up the `extends` chain that also defines OLD, left as it is.
     parent: Option<AbsolutePath>,
     /// Each source with a link through OLD, in path order.
     sources: Vec<SourceEdit>,
@@ -247,7 +246,7 @@ impl Plan {
             .map_err(|error| self.write_failed(&self.config.shown, &cause(&error), &written))
     }
 
-    /// Refuses the rename when any file it will write is no longer exactly as read (NR8).
+    /// Refuses the rename when any file it will write is no longer exactly as read.
     ///
     /// # Errors
     ///
@@ -382,9 +381,9 @@ impl Plan {
 ///
 /// # Errors
 ///
-/// Returns `cli-rename-unknown-namespace` when OLD isn't defined (NR2), `cli-rename-target-exists`
-/// when NEW is, or equals OLD (NR3), and `cli-rename-inherited` when only a config further up
-/// the `extends` chain defines OLD (NR4).
+/// Returns `cli-rename-unknown-namespace` when OLD isn't defined, `cli-rename-target-exists`
+/// when NEW is, or equals OLD, and `cli-rename-inherited` when only a config further up
+/// the `extends` chain defines OLD.
 fn defining_file<'c>(
     config: &'c Config,
     old: &NamespaceName,
@@ -465,7 +464,7 @@ struct ConfigEdit {
 
 impl ConfigEdit {
     /// Reads `file` and finds the key OLD in it with `toml_edit`, so comments and order stay as
-    /// they are (NR10).
+    /// they are.
     ///
     /// # Errors
     ///
@@ -555,7 +554,7 @@ struct LinkEdit {
 
 impl SourceEdit {
     /// The links in `file` whose destination is written with the prefix `old:`, tracked or not
-    /// (a bare `old:`, a link to a file no language reads, a fragment link to one), or `None` when there are none (NR6). Several uses of one reference definition
+    /// (a bare `old:`, a link to a file no language reads, a fragment link to one), or `None` when there are none. Several uses of one reference definition
     /// share its range and are renamed once.
     fn find(
         source: SourcePath,
@@ -606,7 +605,7 @@ impl SourceEdit {
     }
 }
 
-/// The lockfile as read, and every entry whose target is in OLD with the key it moves to (NR7).
+/// The lockfile as read, and every entry whose target is in OLD with the key it moves to.
 #[derive(Debug)]
 struct LockEdit {
     /// The lockfile as read; empty when there is none.
@@ -731,7 +730,7 @@ fn config_outside_root(shown: &str, real: Option<&AbsolutePath>, rerun: &str) ->
 }
 
 /// The error for an OLD that no config defines, naming the likely intended one and every
-/// configured namespace (NR2, Q18). When NEW is already defined it says the rename looks done.
+/// configured namespace. When NEW is already defined it says the rename looks done.
 fn unknown_namespace(config: &Config, old: &NamespaceName, new: &NamespaceName) -> CliError {
     let names: Vec<&str> = config
         .namespaces()
@@ -752,7 +751,7 @@ fn unknown_namespace(config: &Config, old: &NamespaceName, new: &NamespaceName) 
     )
 }
 
-/// The error for a NEW that is already a namespace, or is OLD itself (NR3).
+/// The error for a NEW that is already a namespace, or is OLD itself.
 fn target_exists(
     config: &Config,
     old: &NamespaceName,
@@ -779,7 +778,7 @@ fn target_exists(
     )
 }
 
-/// The error for an OLD that only a config further up the `extends` chain defines (NR4, Q19).
+/// The error for an OLD that only a config further up the `extends` chain defines.
 fn inherited(old: &NamespaceName, defined_in: &AbsolutePath) -> CliError {
     CliError::new(
         "cli-rename-inherited",
@@ -814,7 +813,7 @@ fn unread_source(source: &SourcePath, rerun: &str, error: &ReadError) -> CliErro
 }
 
 /// The error for a directory the walk couldn't read. The sources beneath it are as unknown as an
-/// unread source's links, so the rename is refused for the same reason (05 C5). As for an unread
+/// unread source's links, so the rename is refused for the same reason. As for an unread
 /// source, the help never offers `exclude`.
 fn unread_dir(dir: &UnreadDir, root: &AbsolutePath, rerun: &str) -> CliError {
     let shown = dir

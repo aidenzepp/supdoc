@@ -61,7 +61,7 @@ pub(crate) fn exit_code() -> u8 {
     }
 }
 
-/// The current directory, read once for the whole run (01).
+/// The current directory, read once for the whole run.
 ///
 /// # Errors
 ///
@@ -107,7 +107,7 @@ fn write_all(mut sink: impl Write, text: &str) -> io::Result<()> {
 
 /// Prints `error` as a fatal error in the requested format and returns its exit code.
 ///
-/// A closed pipe does not change the exit code: the error's own code stands (06 X13).
+/// A closed pipe does not change the exit code: the error's own code stands.
 fn report(output: &mut Output, error: &CliError) -> u8 {
     let written = output.fatal(&fatal_finding(error), error.exit_code());
     if written.is_ok() {

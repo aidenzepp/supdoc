@@ -1,4 +1,4 @@
-//! Finding a directory's git exclude file, however `.git` is laid out (04 S15).
+//! Finding a directory's git exclude file, however `.git` is laid out.
 
 use std::fs;
 use std::io::{self, BufRead as _};
@@ -38,7 +38,7 @@ impl ExcludeFile {
 /// where a `.git` symlink points, when git accepts it as one ([`is_git_dir`]), or for a `.git` file
 /// the shared directory ([`common_dir`]) of the git directory it names. Each is followed wherever
 /// it leads, as git follows it: none can come from a checkout's content, since git refuses to
-/// check out any `.git` path (04 S15).
+/// check out any `.git` path.
 ///
 /// Its rules may be quoted only when `.git`, `.git/info` and the exclude file are a real
 /// directory, directory and file, no symlink among them, so the file lies inside `dir`.

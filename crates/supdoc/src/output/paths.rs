@@ -1,4 +1,4 @@
-//! How a path is shown in each format (07 G7).
+//! How a path is shown in each format.
 
 use std::path::{Component, Path};
 

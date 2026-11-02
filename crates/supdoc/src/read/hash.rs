@@ -1,7 +1,7 @@
-//! The v1 hash scheme: SHA-256 of the bytes of a symbol's node, or of the whole file (03 R6, R7).
+//! The v1 hash scheme: SHA-256 of the bytes of a symbol's node, or of the whole file.
 //!
 //! Nothing is stripped: whitespace and comments inside the range count. The one exception is line
-//! endings: under the default `[features.hash] line-endings = "normalize"` (01 D10), each CR
+//! endings: under the default `[features.hash] line-endings = "normalize"`, each CR
 //! directly before an LF is dropped before hashing, so CRLF and LF checkouts agree. `"exact"`
 //! hashes every byte. Ranges themselves are never changed; only the bytes fed to SHA-256 are.
 
@@ -52,7 +52,7 @@ pub(crate) fn hash_file(file: &SourceFile, settings: HashSettings) -> Hash {
 /// SHA-256 of `text[range]` under `settings`, or `None` when `range` doesn't fit `text`.
 ///
 /// Under [`LineEndings::Normalize`], a CR is dropped when the byte after it *in `text`* is an LF,
-/// so a CR at the range's end whose LF lies just outside it is still dropped (B.4). The bytes
+/// so a CR at the range's end whose LF lies just outside it is still dropped. The bytes
 /// between dropped CRs are fed to the hasher in runs, so nothing is copied.
 fn digest_range(text: &[u8], range: Range<usize>, settings: HashSettings) -> Option<Hash> {
     let bytes = text.get(range.clone())?;
@@ -141,7 +141,7 @@ mod tests {
 
         assert_ne!(
             before, after,
-            "R6 keeps whitespace inside the symbol's range"
+            "the symbol hash keeps whitespace inside the symbol's range"
         );
     }
 
@@ -150,7 +150,10 @@ mod tests {
         let before = symbol_hash("fn add() {\n    // one\n}\n", "add");
         let after = symbol_hash("fn add() {\n    // two\n}\n", "add");
 
-        assert_ne!(before, after, "R6 keeps comments inside the symbol's range");
+        assert_ne!(
+            before, after,
+            "the symbol hash keeps comments inside the symbol's range"
+        );
     }
 
     #[test]
@@ -244,7 +247,7 @@ mod tests {
         assert_ne!(
             hash_file(&parse(text), NORMALIZE),
             Hash::digest(b"fn a() {}\n// b\n"),
-            "a lone CR must not hash like an LF (B-Q2)",
+            "a lone CR must not hash like an LF",
         );
     }
 
@@ -313,7 +316,7 @@ mod tests {
         assert_eq!(
             hash_file(&after, NORMALIZE).to_string(),
             HASH_WITH_C,
-            "a whole-file hash covers comments, so editing a link in one changes it (03 R6)",
+            "a whole-file hash covers comments, so editing a link in one changes it",
         );
     }
 }

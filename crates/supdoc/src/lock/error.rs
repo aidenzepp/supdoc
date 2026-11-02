@@ -1,4 +1,4 @@
-//! Lockfile errors: what failed, a stable code, and what to do next (02 Errors).
+//! Lockfile errors: what failed, a stable code, and what to do next.
 
 use std::fmt::{self, Display, Formatter};
 use std::io::ErrorKind;
@@ -297,7 +297,7 @@ impl LockError {
         }
     }
 
-    /// The process exit status for this error (06 X7): 78 when the text is invalid or the file
+    /// The process exit status for this error: 78 when the text is invalid or the file
     /// is refused, else 74.
     #[must_use]
     pub(crate) const fn status(&self) -> ExitStatus {
@@ -362,7 +362,7 @@ impl Display for LockError {
 
 impl std::error::Error for LockError {}
 
-/// `supdoc.lock` was written with different hash settings than the config resolves to (02 L10).
+/// `supdoc.lock` was written with different hash settings than the config resolves to.
 ///
 /// Comparing hashes across settings would report links as changed when only the rule changed, so
 /// every command except a full `supdoc update` stops here, before the scan and before any write.
@@ -430,7 +430,7 @@ impl SettingsMismatch {
         )
     }
 
-    /// The process exit status (06 X7): 78, a config or lockfile problem.
+    /// The process exit status: 78, a config or lockfile problem.
     #[must_use]
     pub(crate) const fn status() -> ExitStatus {
         ExitStatus::Config

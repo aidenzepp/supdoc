@@ -1,5 +1,5 @@
 //! The [`Cartridge`] trait that plugs a language into supdoc, the values it exchanges with the
-//! rest of supdoc, and the [`Languages`] lookup that finds a cartridge for a file (03).
+//! rest of supdoc, and the [`Languages`] lookup that finds a cartridge for a file.
 //!
 //! Constructors that need the reading machinery (`SourceFile::parse`, `SymbolTable::resolve`,
 //! `Languages::builtin`) live in the sibling modules; this module fixes the shapes they share.
@@ -19,7 +19,7 @@ use crate::link::SymbolPath;
 use crate::path::AbsolutePath;
 use crate::read::error::ReadError;
 
-/// One language. The rest of supdoc only ever talks to this trait (03 R3).
+/// One language. The rest of supdoc only ever talks to this trait.
 ///
 /// Most languages are data: a grammar plus tree-sitter's own `tags.scm` and `injections.scm`
 /// query files. Languages that need real code (Python's `__init__` attributes, Markdown's
@@ -34,7 +34,7 @@ pub(crate) trait Cartridge: Send + Sync + fmt::Debug {
     /// The tree-sitter grammar.
     fn grammar(&self) -> &tree_sitter::Language;
 
-    /// The symbols `file` exposes (03 R4). Query-driven cartridges run `tags.scm`.
+    /// The symbols `file` exposes. Query-driven cartridges run `tags.scm`.
     ///
     /// # Errors
     ///
@@ -42,7 +42,7 @@ pub(crate) trait Cartridge: Send + Sync + fmt::Debug {
     /// returned.
     fn symbols(&self, file: &SourceFile) -> Result<SymbolTable, ReadError>;
 
-    /// The regions of `file` written in Markdown, where links are read, in file order (03 R9, R14).
+    /// The regions of `file` written in Markdown, where links are read, in file order.
     /// Query-driven cartridges return the `injections.scm` captures whose `injection.language` is
     /// `markdown_inline`, with each run of adjacent line comments joined into one region.
     ///
@@ -302,7 +302,7 @@ impl Deadline {
 pub(crate) struct Symbol {
     /// Full dotted path: `Config.validate`, `RingBuffer.new`, `news.whats-new`.
     path: SymbolPath,
-    /// Extra names that also resolve here (Markdown's GitHub anchor, 03 R12).
+    /// Extra names that also resolve here (Markdown's GitHub anchor).
     aliases: Vec<SymbolPath>,
     /// Byte range in the file; valid for the `SourceFile` the symbol came from.
     range: Range<usize>,
@@ -329,7 +329,7 @@ impl Symbol {
         &self.path
     }
 
-    /// Extra names that also resolve here (Markdown's GitHub anchor, 03 R12).
+    /// Extra names that also resolve here (Markdown's GitHub anchor).
     #[must_use]
     pub(crate) fn aliases(&self) -> &[SymbolPath] {
         &self.aliases
@@ -368,7 +368,7 @@ impl SymbolTable {
     }
 }
 
-/// One place in a file where links are read, parsed as one piece of inline Markdown (03 R9, R14).
+/// One place in a file where links are read, parsed as one piece of inline Markdown.
 ///
 /// Usually one byte range: a paragraph, a block comment, a docstring. A run of adjacent line
 /// comments is one region of several ranges, one per comment body without its marker, so a link

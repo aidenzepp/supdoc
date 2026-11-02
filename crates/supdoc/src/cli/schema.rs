@@ -1,9 +1,9 @@
-//! `supdoc schema`: prints the JSON Schema of a command's `--json` output (06 X10, 07 G10).
+//! `supdoc schema`: prints the JSON Schema of a command's `--json` output.
 //!
 //! The schema is the one the command itself publishes through its `schema()` function, so the
 //! JSON a command writes and the schema printed here come from the same types. Each envelope
 //! schema pins its `command`, so one command's output validates against its own schema only. The
-//! schema never loads the config (06 X14).
+//! schema never loads the config.
 
 use std::io::{self, Write};
 

@@ -1,13 +1,13 @@
-//! `supdoc update`: records the code each selected link points at in `supdoc.lock` (05).
+//! `supdoc update`: records the code each selected link points at in `supdoc.lock`.
 //!
 //! The run is `config::load → Lockfile::read → scan → reconcile → plan_update`, then a preview,
 //! or under `--yes` one atomic write of the planned lockfile. A preview runs every step a real run
-//! does, up to that write (05 C2, 06a K8).
+//! does, up to that write.
 //!
 //! When the lockfile records other hash settings than the config resolves to, a full update (no
 //! `[PATHS]`, every state from `failed`, `new` and `obsolete`) is the migration: the scan hashes
 //! under the config's settings, links whose hash that changes are accepted as `failed`, and the
-//! lockfile is re-recorded under the new settings. A narrower update refuses (B.5).
+//! lockfile is re-recorded under the new settings. A narrower update refuses.
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
@@ -38,15 +38,15 @@ use super::project::{
 };
 use super::{CliError, Context, Outcome};
 
-/// The closing note when the plan is empty (06a Q6).
+/// The closing note when the plan is empty.
 const NOTHING_NOTE: &str = "Nothing to update.";
 
 /// Runs `supdoc update`: prints every lockfile change the selected states call for, and writes
-/// them under `--yes` (05 C2, C9).
+/// them under `--yes`.
 ///
-/// Broken links are never recorded (05 C7). Each one's cause is reported as a finding pointing at
-/// `supdoc fix`, and the run still exits 0 (06a U5, Q7). A missing `supdoc.lock` is an empty one,
-/// and `--yes` creates it when there is something to record (05 C10).
+/// Broken links are never recorded. Each one's cause is reported as a finding pointing at
+/// `supdoc fix`, and the run still exits 0. A missing `supdoc.lock` is an empty one,
+/// and `--yes` creates it when there is something to record.
 ///
 /// # Errors
 ///
@@ -120,7 +120,7 @@ pub(crate) fn run(
         ),
     );
     let report = UpdateReport::new(&model, &plan, &args.state, applied, &paths, context);
-    // A file that outlasted `parse-timeout` left its links unread, so the run fails (D1).
+    // A file that outlasted `parse-timeout` left its links unread, so the run fails.
     let timed_out = timed_out(&scan).next().is_some();
     output
         .report(&report, !timed_out)
@@ -205,8 +205,8 @@ impl UpdateReport {
         }
     }
 
-    /// What the run says on stderr when it is done (06a K7, Q6). A settings change alone is a
-    /// change (B.5). The note follows the plan, not the findings: broken links are printed above
+    /// What the run says on stderr when it is done. A settings change alone is a
+    /// change. The note follows the plan, not the findings: broken links are printed above
     /// it but leave the plan empty.
     fn closing_note(&self, unicode: bool, apply_note: &str) -> String {
         if self.rows.is_empty() && self.settings_change.is_none() {
@@ -220,7 +220,7 @@ impl UpdateReport {
 
     /// `supdoc.lock: 1 accepted · 1 recorded · 1 removed`, leaving out actions that didn't occur,
     /// and led by `line-endings set to normalize` when the settings changed. Without `unicode` the
-    /// parts are separated by `, ` so the note is plain ASCII (07 G12).
+    /// parts are separated by `, ` so the note is plain ASCII.
     fn applied_note(&self, unicode: bool) -> String {
         let settings = self
             .settings_change
@@ -270,7 +270,7 @@ impl Report for UpdateReport {
 }
 
 /// How the lockfile's hash settings change, as JSON shows it:
-/// `{"line_endings": {"from": "exact", "to": "normalize"}}` (B-Q6).
+/// `{"line_endings": {"from": "exact", "to": "normalize"}}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 pub(crate) struct SettingsChangeJson {
     /// `[features.hash] line-endings`.
@@ -341,7 +341,7 @@ pub(crate) struct ChangeJson {
     key: LinkKey,
     /// Every place the link appears in its source. Empty for `remove`.
     locations: Vec<LinkLocationJson>,
-    /// The entry a moved link carries its history from (05 C6).
+    /// The entry a moved link carries its history from.
     #[serde(skip_serializing_if = "Option::is_none")]
     moved_from: Option<LinkKey>,
 }
@@ -398,7 +398,7 @@ impl ChangeRow {
 }
 
 /// Writes the settings line that leads a migration's rows, as `settings  line-endings  exact ->
-/// normalize` (B.5).
+/// normalize`.
 ///
 /// # Errors
 ///
@@ -414,14 +414,14 @@ fn render_settings_row(
 }
 
 /// Writes one aligned line per change, as `accept  docs/guide.md:3  →  src/lib.rs#add  failed →
-/// passed` (07 "Previews").
+/// passed`.
 ///
 /// # Errors
 ///
 /// Fails if writing to `out` fails.
 fn render_rows(context: &TextContext, rows: &[ChangeRow], out: &mut dyn Write) -> io::Result<()> {
     let arrow = context.arrow();
-    // Printed by file then position (S8); `changes` in JSON and the lockfile keep `LinkKey` order.
+    // Printed by file then position; `changes` in JSON and the lockfile keep `LinkKey` order.
     let mut ordered: Vec<&ChangeRow> = rows.iter().collect();
     ordered.sort_by_key(|row| {
         (
@@ -474,7 +474,7 @@ fn render_rows(context: &TextContext, rows: &[ChangeRow], out: &mut dyn Write) -
 }
 
 /// The cause of a broken link, as a top-level finding, or `None` for a link in any other state
-/// (05 C7, 06a U5).
+///.
 ///
 /// Its help adds that update can't record the link. It points at `supdoc fix` only when the
 /// finding carries a fix, so the command repairs that cause, and names the link's source as

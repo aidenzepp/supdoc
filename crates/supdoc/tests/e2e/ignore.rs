@@ -569,7 +569,7 @@ fn a_named_path_hidden_by_a_regular_ignore_file_above_the_root_is_blamed_unquote
 const NESTED_DOC: &str = "The [`handler`](../../src/lib.rs#handler) function.\n";
 
 /// The web project as the top of its own repository, whose `.gitignore` hides `*.gen.md`, with an
-/// untracked repository `docs/nested` inside it whose exclude file hides `ne.md` (audit probe N4).
+/// untracked repository `docs/nested` inside it whose exclude file hides `ne.md`.
 /// `docs/nested` holds `a.gen.md`, `ne.md` and `k.md`; `docs` holds `top.gen.md` and `top.md`.
 fn web_with_nested_repo() -> Project {
     let project = web_project();
@@ -615,7 +615,7 @@ fn a_nested_repository_applies_its_own_rules_and_not_the_outer_gitignore() {
 fn a_submodule_applies_its_own_exclude_file_and_not_the_superprojects_gitignore() {
     let project = monorepo_with_git();
     // The superproject is the whole fixture; `docs/mod` is a submodule whose `.git` file names
-    // its git directory under the superproject's `.git/modules` (audit probe N5).
+    // its git directory under the superproject's `.git/modules`.
     project.write(".gitignore", "*.sp.md\n");
     make_git_dir(&project, ".git/modules/mod");
     project.write(".git/modules/mod/info/exclude", "sm.md\n");

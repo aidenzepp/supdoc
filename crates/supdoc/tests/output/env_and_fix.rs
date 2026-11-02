@@ -1,5 +1,5 @@
-//! Binary contracts with no other owner: the `fix` object in `check --json` (r-tests T4) and
-//! the `SUPDOC_YES` / `SUPDOC_DRY_RUN` variables deciding whether `update` writes (r-tests T8).
+//! Binary contracts with no other owner: the `fix` object in `check --json` and
+//! the `SUPDOC_YES` / `SUPDOC_DRY_RUN` variables deciding whether `update` writes.
 
 use super::support::Project;
 

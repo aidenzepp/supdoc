@@ -2,7 +2,7 @@
 ; node kind. Written in tree-sitter's tags.scm conventions. Unlike the grammar's bundled
 ; tags.scm, this covers fields, enum members, namespaces, type aliases and top-level
 ; bindings. Nesting by containment gives `Class.method` and `Namespace.member`.
-; Overloads and get/set pairs share one name, so resolving them reports every candidate.
+; Overloads and get/set pairs share one name and fold into one symbol spanning all of them.
 ; Members of an object literal come from `js/object_members.scm`, appended by `ts/mod.rs`.
 
 ; Declarations

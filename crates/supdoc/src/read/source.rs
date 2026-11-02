@@ -1,4 +1,4 @@
-//! Reading a file into a [`SourceFile`]: the size and UTF-8 checks, then one parse (03 Parsing).
+//! Reading a file into a [`SourceFile`]: the size and UTF-8 checks, then one parse.
 
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -13,7 +13,7 @@ use crate::read::cartridge::Cartridge;
 use crate::read::cartridge::{Deadline, Languages, SourceFile};
 use crate::read::error::ReadError;
 
-/// The largest file supdoc reads: 16 MiB (03 R13).
+/// The largest file supdoc reads: 16 MiB.
 pub(crate) const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 impl SourceFile {
@@ -21,7 +21,7 @@ impl SourceFile {
     /// ([`Limits::PARSE_TIMEOUT`]). Pure apart from reading the clock: the text is already in
     /// memory.
     ///
-    /// A file with syntax errors still parses; check [`SourceFile::has_syntax_errors`] (03 R8).
+    /// A file with syntax errors still parses; check [`SourceFile::has_syntax_errors`].
     ///
     /// # Errors
     ///
@@ -68,7 +68,7 @@ impl SourceFile {
     }
 
     /// Whether the tree has any `ERROR` or missing node. The file is still symbolized and hashed,
-    /// but its hashes may change once it parses cleanly (03 R8).
+    /// but its hashes may change once it parses cleanly.
     #[must_use]
     pub(crate) fn has_syntax_errors(&self) -> bool {
         self.tree().root_node().has_error()

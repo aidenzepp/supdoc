@@ -1,4 +1,4 @@
-//! Contract tests for output (07 "Tests"): every format of a report, rendered from constructed
+//! Contract tests for output: every format of a report, rendered from constructed
 //! values.
 
 use std::io::{self, Write};

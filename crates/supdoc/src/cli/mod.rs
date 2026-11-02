@@ -1,4 +1,4 @@
-//! The command-line interface: arguments, parsing and command dispatch (06).
+//! The command-line interface: arguments, parsing and command dispatch.
 //!
 //! [`run`] holds the one dispatch `match`. Each command lives in `cli/<command>.rs` and exposes a
 //! `run` function, so building a command means editing only its own file.
@@ -69,13 +69,13 @@ use args::{Command, ConfigCommand, GlobalArgs, Inspect, NamespaceCommand, SkillC
 pub(crate) struct Context {
     /// The flags every command accepts.
     pub(crate) global: GlobalArgs,
-    /// The current directory, read once by `main` (01).
+    /// The current directory, read once by `main`.
     pub(crate) cwd: AbsolutePath,
     /// The git global excludes file every walk honors, found once by `main`.
     pub(crate) global_excludes: GlobalExcludes,
 }
 
-/// How a command that ran to completion ended (06 X7).
+/// How a command that ran to completion ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Outcome {
     /// Nothing is wrong. Exit code 0.
@@ -97,7 +97,7 @@ impl Outcome {
 }
 
 /// The place in a file that a [`CliError`] is about, with its source line captured so rendering
-/// never reads files (07 G11).
+/// never reads files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ErrorSite {
     /// The file, line and column.
@@ -107,7 +107,7 @@ pub(crate) struct ErrorSite {
 }
 
 /// A command that could not finish: a stable code, what happened, what to do next, and the exit
-/// code to use (06 X7, 07 fatal error shape).
+/// code to use.
 ///
 /// Commands convert the errors of the modules they call with [`CliError::new`], using that
 /// module's own `code()`, `help()` and `exit_code()`.
@@ -243,7 +243,7 @@ impl std::error::Error for CliError {}
 /// Runs `command`, printing everything through `output`.
 ///
 /// This `match` is complete: it never changes when a command is built. A command that finds
-/// `output` closed returns its normal [`Outcome`]; `main` turns that into a clean exit (06 X13).
+/// `output` closed returns its normal [`Outcome`]; `main` turns that into a clean exit.
 ///
 /// # Errors
 ///
