@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::link::LinkKey;
+use crate::link::{LinkKey, SymbolPath, Target};
 
 /// What detection decided about the new links it was given.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -21,39 +21,47 @@ pub(super) struct Moves {
 /// Pairs each of `new` (links with no lock entry) with the one entry of `obsolete` (lock entries
 /// with no link) it clearly moved from, if there is exactly one such entry and no other new link
 /// also matches it.
+///
+/// The removed entries are grouped by what they point at, so each new link costs one lookup, and
+/// the number of new links pointing at a group is how many claim each of its entries.
 pub(super) fn detect_moves(new: &[&LinkKey], obsolete: &[&LinkKey]) -> Moves {
-    let candidates: Vec<(&LinkKey, Vec<&LinkKey>)> = new
-        .iter()
-        .map(|&fresh| {
-            let matching = obsolete
-                .iter()
-                .copied()
-                .filter(|old| old.target == fresh.target && old.symbol == fresh.symbol)
-                .collect();
-            (fresh, matching)
-        })
-        .collect();
-
-    let mut claims: BTreeMap<&LinkKey, usize> = BTreeMap::new();
-    for old in candidates.iter().flat_map(|(_, matching)| matching) {
-        *claims.entry(old).or_default() += 1;
+    let mut by_reference: BTreeMap<Reference<'_>, Vec<&LinkKey>> = BTreeMap::new();
+    for &old in obsolete {
+        by_reference.entry(reference(old)).or_default().push(old);
+    }
+    let mut claims: BTreeMap<Reference<'_>, usize> = BTreeMap::new();
+    for &fresh in new {
+        if by_reference.contains_key(&reference(fresh)) {
+            *claims.entry(reference(fresh)).or_default() += 1;
+        }
     }
 
     let mut moves = Moves::default();
-    for (fresh, matching) in candidates {
+    for &fresh in new {
+        let pointed_at = reference(fresh);
+        let Some(matching) = by_reference.get(&pointed_at) else {
+            continue;
+        };
         match matching.as_slice() {
-            [] => {}
-            [only] if claims.get(only) == Some(&1) => {
+            [only] if claims.get(&pointed_at) == Some(&1) => {
                 let _previous = moves.carried.insert(fresh.clone(), (*only).clone());
             }
             _ => {
                 let _previous = moves
                     .ambiguous
-                    .insert(fresh.clone(), matching.into_iter().cloned().collect());
+                    .insert(fresh.clone(), matching.iter().copied().cloned().collect());
             }
         }
     }
     moves
+}
+
+/// What a link points at: its target and symbol, without its source.
+type Reference<'a> = (&'a Target, Option<&'a SymbolPath>);
+
+/// The [`Reference`] of `key`.
+fn reference(key: &LinkKey) -> Reference<'_> {
+    (&key.target, key.symbol.as_ref())
 }
 
 #[cfg(test)]
