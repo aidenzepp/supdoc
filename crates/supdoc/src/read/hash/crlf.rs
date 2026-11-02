@@ -14,6 +14,7 @@ const NORMALIZE: HashSettings = HashSettings {
 
 fn cartridge(id: &str) -> &'static dyn Cartridge {
     Languages::builtin()
+        .expect("the built-in cartridges should load")
         .iter()
         .find(|cartridge| cartridge.id().as_str() == id)
         .unwrap_or_else(|| panic!("the built-in registry should hold a `{id}` cartridge"))
