@@ -121,7 +121,9 @@ impl UnreadDir {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GlobalExcludes {
     /// The file, whether or not it exists. `None` when there is no home directory to find it in.
-    file: Option<AbsolutePath>,
+    /// Kept as git names it, not lexically normalized, so the operating system resolves a `..`
+    /// after a symlink as git does.
+    file: Option<PathBuf>,
 }
 
 impl GlobalExcludes {
@@ -134,14 +136,14 @@ impl GlobalExcludes {
     /// The file git reads as the global excludes, found as the walker's own lookup finds it:
     /// `core.excludesFile` from `GIT_CONFIG_GLOBAL`, `~/.gitconfig`, the XDG git config or the
     /// system git config, else `$XDG_CONFIG_HOME/git/ignore`, else `~/.config/git/ignore`. A
-    /// relative path counts from `cwd`. Whether it exists is left to the walk, where a missing file
-    /// has no rules.
+    /// relative path counts from `cwd`, joined without removing `..`, as git opens it. Whether it
+    /// exists is left to the walk, where a missing file has no rules.
     ///
     /// Effect: reads environment variables and the user's and system git config.
     #[must_use]
     pub fn find(cwd: &AbsolutePath) -> Self {
         Self {
-            file: ignore::gitignore::gitconfig_excludes_path().map(|file| cwd.join_path(&file)),
+            file: ignore::gitignore::gitconfig_excludes_path().map(|file| cwd.as_path().join(file)),
         }
     }
 }
@@ -468,12 +470,16 @@ impl IgnoreRules {
         let (global, global_unreadable) = excludes.file.as_ref().map_or_else(
             || (Gitignore::empty(), None),
             |file| {
-                let (rules, failure) = rules_in(anchor, file.as_path(), limit);
-                let unreadable = failure.map(|failure| UnreadableFile {
-                    path: file.clone(),
-                    origin: Origin::Global,
-                    failure,
-                });
+                let (rules, failure) = rules_in(anchor, file, limit);
+                // Normalized only to name it in a warning; the read above used the path as is.
+                let unreadable =
+                    failure
+                        .zip(AbsolutePath::new(file))
+                        .map(|(failure, path)| UnreadableFile {
+                            path,
+                            origin: Origin::Global,
+                            failure,
+                        });
                 (rules, unreadable)
             },
         );

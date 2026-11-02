@@ -76,6 +76,8 @@ pub(crate) fn array_at<'a>(
 pub(crate) struct Project {
     /// Keeps the directory alive until the project is dropped.
     _dir: TempDir,
+    /// An empty directory outside the project that stands in for every git config location.
+    no_git_config: TempDir,
     /// The copied fixture's root.
     root: PathBuf,
 }
@@ -89,7 +91,13 @@ impl Project {
         let dir = TempDir::new().expect("a temporary directory should be creatable");
         let root = dir.path().to_path_buf();
         copy_tree(&source, &root);
-        Self { _dir: dir, root }
+        let no_git_config =
+            TempDir::new().expect("an empty git config directory should be creatable");
+        Self {
+            _dir: dir,
+            root,
+            no_git_config,
+        }
     }
 
     /// The absolute path of `relative` inside the project.
@@ -149,12 +157,20 @@ impl Project {
     }
 
     /// The `supdoc args` command, run from the project directory `dir` with only `vars` set.
+    ///
+    /// Git's environment is isolated first: `HOME` and `XDG_CONFIG_HOME` are an empty directory
+    /// and `GIT_CONFIG_SYSTEM` a missing file in it, with `GIT_CONFIG_GLOBAL` cleared with the rest,
+    /// so no run reads the real user's or the machine's git config. `vars` may set any of them.
     fn command(&self, dir: &str, args: &[&str], vars: &[(&str, &Path)]) -> Command {
+        let empty = self.no_git_config.path();
         let mut command = Command::new(env!("CARGO_BIN_EXE_supdoc"));
         let _command = command
             .args(args)
             .current_dir(self.path(dir))
             .env_clear()
+            .env("HOME", empty)
+            .env("XDG_CONFIG_HOME", empty)
+            .env("GIT_CONFIG_SYSTEM", empty.join("gitconfig"))
             .envs(vars.iter().copied());
         command
     }

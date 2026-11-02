@@ -237,7 +237,10 @@ fn a_git_exclude_whitelist_overrides_the_global_excludes_file() {
     let run = project.supdoc_in_with(
         "services/web",
         &["--json", "list"],
-        &[("HOME", home.path())],
+        &[
+            ("HOME", home.path()),
+            ("XDG_CONFIG_HOME", &home.path().join(".config")),
+        ],
     );
 
     let sources: Vec<_> = array_at(&run.json(), "/data/links")
@@ -265,7 +268,14 @@ fn lock_with_global_pattern(project: &Project, dir: &str, pattern: &str) -> Stri
     .expect("the global excludes file should be writable");
     project.write("services/web/docs/keep.md", SCRATCH);
 
-    let run = project.supdoc_in_with(dir, &["update", "--yes"], &[("HOME", home.path())]);
+    let run = project.supdoc_in_with(
+        dir,
+        &["update", "--yes"],
+        &[
+            ("HOME", home.path()),
+            ("XDG_CONFIG_HOME", &home.path().join(".config")),
+        ],
+    );
 
     let _ = run.assert_exit(0);
     lock_of_web(project)
