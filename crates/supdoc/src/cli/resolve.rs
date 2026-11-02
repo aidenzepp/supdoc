@@ -226,7 +226,8 @@ fn read_failed(error: &ReadError, root: &AbsolutePath, typed: &Path) -> CliError
         ReadError::Missing { .. } => ExitStatus::Usage,
         ReadError::Io { .. } => ExitStatus::Io,
         ReadError::Internal { .. } => ExitStatus::Bug,
-        ReadError::NotUtf8 { .. }
+        ReadError::NotAFile { .. }
+        | ReadError::NotUtf8 { .. }
         | ReadError::TooLarge { .. }
         | ReadError::Timeout { .. }
         | ReadError::UnsupportedLanguage { .. } => ExitStatus::Failed,
@@ -473,6 +474,25 @@ mod tests {
 
         assert_eq!(run.exit_code(), 0, "stderr: {}", run.stderr);
         assert_eq!(run.stdout, "src/lib.rs#Config.validate\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_socket_exits_1_as_not_a_file() {
+        let project = project();
+        let _listener = std::os::unix::net::UnixListener::bind(project.dir.path().join("x.rs"))
+            .expect("the socket should bind in the project");
+
+        let run = project.resolve(&["resolve", "x.rs"]);
+
+        assert_eq!(run.exit_code(), 1, "stderr: {}", run.stderr);
+        let error = run.error();
+        assert_eq!(error.code(), "read-not-a-file");
+        assert!(
+            !error.help().contains("chmod"),
+            "a socket needs a regular file, not a permission change: {}",
+            error.help()
+        );
     }
 
     #[test]

@@ -902,6 +902,17 @@ mod helps {
             |p| p.write("docs/guide.md", "[x](../src/gone.rs#add)\n"),
             &["check"],
         ),
+        case(
+            "read-not-a-file",
+            |p| {
+                let made = std::process::Command::new("mkfifo")
+                    .arg(p.path().join("src/p.rs"))
+                    .status()
+                    .expect("mkfifo should run");
+                assert!(made.success(), "mkfifo should create the FIFO");
+            },
+            &["resolve", "src/p.rs"],
+        ),
         restricted_case("read-io", |p| chmod(p, "src/lib.rs", 0o000), &["check"]),
         restricted_case("read-io", |p| chmod(p, "docs/old.md", 0o000), &["check"]),
         case(
@@ -1037,6 +1048,11 @@ mod helps {
                 std::fs::create_dir(&lock).expect("the directory should be creatable");
             },
             &["check"],
+        ),
+        case(
+            "lock-too-large",
+            |_| {},
+            &["--max-lock-size", "16B", "check"],
         ),
         case(
             "lock-outside-root",
@@ -1381,6 +1397,24 @@ mod helps {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn lock_over_max_lock_size_is_refused_with_exit_78() {
+        let project = Project::clean();
+
+        let output = project
+            .command(&["--max-lock-size", "16B", "check"], &[])
+            .stdin(Stdio::null())
+            .output()
+            .expect("the supdoc binary should start");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(78), "stderr: {stderr}");
+        assert!(
+            stderr.contains("error[lock-too-large]"),
+            "the run should report lock-too-large, got: {stderr}"
+        );
     }
 
     #[test]
