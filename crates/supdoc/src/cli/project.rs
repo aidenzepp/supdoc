@@ -28,9 +28,7 @@ use super::{CliError, Context, ErrorSite, cause};
 /// with the `[limits]` flags and variables put in effect over its own, so every reader the
 /// command runs takes its ceiling from [`Config::limits_in_effect`].
 ///
-/// On success, `output` reports paths against the config's root from then on. `command` names the
-/// command in the fallback help, as in ``run `supdoc list` again``: it is the whole command to
-/// run, arguments included, and the fallback adds `-c PATH` when the config came from there.
+/// On success, `output` reports paths against the config's root from then on.
 ///
 /// # Errors
 ///
@@ -333,13 +331,16 @@ fn path_unreadable(typed: &Path, error: &std::io::Error) -> CliError {
     )
 }
 
+/// The code of every error for a path that doesn't exist.
+pub(crate) const CODE_PATH_MISSING: &str = "cli-path-missing";
+
 /// The error for a `[PATH]` that doesn't exist.
 ///
 /// The help lists the nearest directory of `typed` that exists under `cwd`, so the command it
 /// names runs where this one did.
 pub(crate) fn path_missing(typed: &Path, cwd: &AbsolutePath) -> CliError {
     CliError::new(
-        "cli-path-missing",
+        CODE_PATH_MISSING,
         format!("{} does not exist", typed.display()),
         format!(
             "Check the path, which is relative to the current directory. `ls {}` lists what is \
@@ -364,7 +365,7 @@ pub(crate) fn namespaced_missing(
         shown => shown,
     };
     CliError::new(
-        "cli-path-missing",
+        CODE_PATH_MISSING,
         format!("{} does not exist", typed.display()),
         format!(
             "The path after `{name}:` is relative to the `{name}` namespace's directory. \

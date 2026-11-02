@@ -96,6 +96,10 @@ struct Planned {
     paths: PathStyle,
     /// Broken links in scope, fixable or not, for the note when nothing can be fixed.
     broken: usize,
+    /// The command that lists the broken links, as typed here: it keeps this run's `[PATH]` and `-c`.
+    check_command: String,
+    /// The command that runs this fix again without `--yes`, keeping this run's `[PATH]` and `-c`.
+    fix_command: String,
     /// One `read-timeout` per file that outlasted `parse-timeout`. Its links were never checked
     /// for fixes, so the run fails rather than saying there is nothing to fix.
     timeouts: Vec<Finding>,
@@ -129,6 +133,12 @@ impl Planned {
             .filter(|finding| files.insert(finding.message.clone()))
             .cloned()
             .collect();
+        let typed: Vec<String> = paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect();
+        let check_command = command_line(context, "check", &typed, &[]);
+        let fix_command = command_line(context, "fix", &typed, &[]);
         let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
         Ok(Self {
             plan: plan_fixes(&scan),
@@ -137,6 +147,8 @@ impl Planned {
             excludes: context.global_excludes.clone(),
             lock,
             broken,
+            check_command,
+            fix_command,
             timeouts,
         })
     }
@@ -215,10 +227,13 @@ impl Planned {
             Some(format!("{fix_count} in {file_count}. {apply_note}"))
         };
         let note = match (timed_out, planned) {
-            (true, Some(planned)) => format!("{} {planned}", timeout_note(report.findings.len())),
-            (true, None) => timeout_note(report.findings.len()),
+            (true, Some(planned)) => format!(
+                "{} {planned}",
+                timeout_note(report.findings.len(), &self.fix_command)
+            ),
+            (true, None) => timeout_note(report.findings.len(), &self.fix_command),
             (false, Some(planned)) => planned,
-            (false, None) => nothing_to_fix(self.broken),
+            (false, None) => nothing_to_fix(self.broken, &self.check_command),
         };
         output
             .note(&note)
@@ -287,9 +302,9 @@ impl Planned {
                 "Fixed {link_count} in {file_count}. Run `{update}` to record them."
             ))
         } else if timed_out {
-            Some(timeout_note(timeout_count))
+            Some(timeout_note(timeout_count, &rerun))
         } else if self.plan.fixes().is_empty() {
-            Some(nothing_to_fix(self.broken))
+            Some(nothing_to_fix(self.broken, &self.check_command))
         } else {
             None
         };
@@ -507,12 +522,12 @@ fn count(n: usize, one: &str, many: &str) -> String {
 }
 
 /// The note for a run in which `files` files outlasted `parse-timeout`, so their links got no
-/// fixes.
-fn timeout_note(files: usize) -> String {
+/// fixes. `rerun` is the command that runs the fix again.
+fn timeout_note(files: usize, rerun: &str) -> String {
     let files = count(files, "file", "files");
     format!(
         "Reading {files} took longer than `parse-timeout` allows per read, so links there got no \
-         fixes; raise the limit and run supdoc fix again."
+         fixes; raise the limit and run `{rerun}` again."
     )
 }
 
@@ -530,13 +545,13 @@ pub(crate) fn timed_out(scan: &Scan) -> impl Iterator<Item = &Finding> {
 }
 
 /// The note for a run with nothing to fix, naming the broken links left as they are.
-fn nothing_to_fix(broken: usize) -> String {
+/// `check` is the command that lists them.
+fn nothing_to_fix(broken: usize, check: &str) -> String {
     match broken {
         0 => "Nothing to fix.".to_owned(),
-        1 => "Nothing to fix. 1 broken link has no certain fix; run supdoc check to see it."
-            .to_owned(),
+        1 => format!("Nothing to fix. 1 broken link has no certain fix; run `{check}` to see it."),
         n => format!(
-            "Nothing to fix. {n} broken links have no certain fix; run supdoc check to see them."
+            "Nothing to fix. {n} broken links have no certain fix; run `{check}` to see them."
         ),
     }
 }
@@ -1238,7 +1253,7 @@ mod tests {
         assert_eq!(run.stdout, "");
         assert_eq!(
             run.stderr,
-            "Nothing to fix. 1 broken link has no certain fix; run supdoc check to see it.\n",
+            "Nothing to fix. 1 broken link has no certain fix; run `supdoc check` to see it.\n",
         );
     }
 

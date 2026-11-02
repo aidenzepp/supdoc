@@ -82,15 +82,21 @@ fn current_dir() -> Result<AbsolutePath, CliError> {
 
 /// Writes help, a version or a usage error to its stream and returns its exit code.
 ///
-/// A closed pipe is not a failure of supdoc, so it exits 0.
+/// A closed pipe does not change the exit code: the run's own code stands, so `--help` exits 0
+/// and a usage error still exits 2.
 fn print(printout: &Printout) -> u8 {
     let written = match printout.stream {
         Stream::Stdout => write_all(io::stdout(), &printout.text),
         Stream::Stderr => write_all(io::stderr(), &printout.text),
     };
+    exit_after_print(&written, printout.exit_code)
+}
+
+/// The exit code of a run whose help or usage text was written with result `written`.
+fn exit_after_print(written: &io::Result<()>, exit_code: u8) -> u8 {
     match written {
-        Ok(()) => printout.exit_code,
-        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => ExitStatus::Clean.code(),
+        Ok(()) => exit_code,
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => exit_code,
         Err(_) => ExitStatus::Io.code(),
     }
 }
@@ -194,6 +200,20 @@ mod tests {
     use crate::output::OutputFormat;
 
     use super::*;
+
+    #[test]
+    fn closed_stdout_keeps_the_exit_code_of_help_and_of_a_usage_error() {
+        let closed = Err(io::Error::from(io::ErrorKind::BrokenPipe));
+
+        assert_eq!(
+            (
+                exit_after_print(&closed, ExitStatus::Clean.code()),
+                exit_after_print(&closed, ExitStatus::Usage.code()),
+            ),
+            (0, 2),
+            "a closed pipe keeps help at exit 0 and a usage error at exit 2"
+        );
+    }
 
     /// A writer whose bytes the test can read back after `Output` takes ownership of it.
     #[derive(Clone, Default)]

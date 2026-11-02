@@ -203,8 +203,11 @@ fn pretty(value: &Value) -> String {
 fn write_failed(error: &OutputError) -> CliError {
     CliError::new(
         "cli-schema-write",
-        format!("could not write the schema: {error}"),
-        "check that standard output is open and writable, or redirect it to a file with \
+        format!(
+            "could not write the schema: {}",
+            super::without_os_code(&error.to_string())
+        ),
+        "Check that standard output is open and writable, or redirect it to a file with \
          `supdoc schema > supdoc.schema.json`",
         ExitStatus::Io,
     )

@@ -61,7 +61,7 @@ fn config_in(dir: &AbsolutePath) -> AbsolutePath {
 /// A symlink must lead to a file really named `supdoc.config.toml`, the rule `extends` follows
 /// too. It is checked before anything is read, so a hostile checkout can't make supdoc print
 /// another file's lines by linking the config to it. `--config` skips this: the caller chose that
-/// file (A-Q6).
+/// file.
 ///
 /// # Errors
 ///

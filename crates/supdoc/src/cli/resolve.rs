@@ -25,7 +25,8 @@ use crate::read::error::{ReadError, ReadRole, ResolveError};
 
 use super::args::{Limit, ResolveArgs};
 use super::project::{
-    absolute, command_line, ensure_exists, load_config, namespaced_missing, path_outside_config,
+    CODE_PATH_MISSING, absolute, command_line, ensure_exists, load_config, namespaced_missing,
+    path_outside_config,
 };
 use super::{CliError, Context, Outcome};
 
@@ -154,7 +155,7 @@ fn locate(config: &Config, context: &Context, typed: &Path) -> Result<AbsolutePa
         return Err(error);
     }
     ensure_exists(&found, typed, cwd).map_err(|error| match missing_in {
-        Some((name, directory)) if error.code() == "cli-path-missing" => {
+        Some((name, directory)) if error.code() == CODE_PATH_MISSING => {
             namespaced_missing(typed, &name, directory, cwd)
         }
         _ => error,

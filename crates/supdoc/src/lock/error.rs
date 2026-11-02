@@ -297,8 +297,9 @@ impl LockError {
         }
     }
 
-    /// The process exit status for this error: 78 when the text is invalid or the file
-    /// is refused, else 74.
+    /// The process exit status for this error: 78 when the text is invalid
+    /// (`Parse`) or the file is refused (`OutsideRoot`, `TooLarge`), else 74, including for a
+    /// lock that is not a regular file.
     #[must_use]
     pub(crate) const fn status(&self) -> ExitStatus {
         match self {
@@ -442,7 +443,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_error_has_a_code_and_help() {
+    fn every_parse_error_has_its_code() {
         let key: LinkKey = LinkKey {
             source: "a.md".parse().expect("the fixture source should be valid"),
             target: "b.rs".parse().expect("the fixture target should be valid"),

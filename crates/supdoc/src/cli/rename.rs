@@ -399,7 +399,7 @@ fn defining_file<'c>(
     }
     match config.files().first() {
         Some(nearest) if nearest == defined_in => Ok(nearest),
-        _ => Err(inherited(old, defined_in)),
+        _ => Err(inherited(old, defined_in, config.root())),
     }
 }
 
@@ -731,6 +731,28 @@ fn config_outside_root(shown: &str, real: Option<&AbsolutePath>, rerun: &str) ->
     )
 }
 
+/// What to do about an OLD no config defines: the likely intended namespace, then every configured
+/// one. Unlike the shared unknown-namespace help it never says to define OLD, because renaming
+/// needs OLD to exist already.
+fn unknown_old_help(old: &str, known: &[&str]) -> String {
+    if known.is_empty() {
+        return format!(
+            "No namespaces are configured, so there is nothing to rename. A namespace is defined \
+             under `[namespaces]` in {}",
+            crate::config::CONFIG_FILE_NAME
+        );
+    }
+    let listed = known
+        .iter()
+        .map(|known| format!("`{known}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match crate::suggest::close_match(old, known.iter().copied()) {
+        Some(close) => format!("did you mean `{close}`? Configured namespaces: {listed}"),
+        None => format!("Configured namespaces: {listed}"),
+    }
+}
+
 /// The error for an OLD that no config defines, naming the likely intended one and every
 /// configured namespace. When NEW is already defined it says the rename looks done.
 fn unknown_namespace(config: &Config, old: &NamespaceName, new: &NamespaceName) -> CliError {
@@ -739,7 +761,7 @@ fn unknown_namespace(config: &Config, old: &NamespaceName, new: &NamespaceName) 
         .keys()
         .map(NamespaceName::as_str)
         .collect();
-    let help = crate::namespace::unknown_namespace_help(old.as_str(), &names);
+    let help = unknown_old_help(old.as_str(), &names);
     let message = if config.namespace(new).is_some() {
         format!("no namespace is named `{old}`, but `{new}` is defined: the rename looks done")
     } else {
@@ -781,17 +803,14 @@ fn target_exists(
 }
 
 /// The error for an OLD that only a config further up the `extends` chain defines.
-fn inherited(old: &NamespaceName, defined_in: &AbsolutePath) -> CliError {
+fn inherited(old: &NamespaceName, defined_in: &AbsolutePath, root: &AbsolutePath) -> CliError {
+    let shown = relative_or_absolute(root, defined_in);
     CliError::new(
         "cli-rename-inherited",
+        format!("`{old}` is defined in {shown}, a config this project extends"),
         format!(
-            "`{old}` is defined in {}, a config this project extends",
-            defined_in.display()
-        ),
-        format!(
-            "Rename it from the project that owns `{}`; renaming it here would change projects \
-             that weren't scanned. Nothing was changed",
-            defined_in.display()
+            "Rename it from the project that owns `{shown}`; renaming it here would change \
+             projects that weren't scanned. Nothing was changed"
         ),
         ExitStatus::Failed,
     )
@@ -818,11 +837,7 @@ fn unread_source(source: &SourcePath, rerun: &str, error: &ReadError) -> CliErro
 /// unread source's links, so the rename is refused for the same reason. As for an unread
 /// source, the help never offers `exclude`.
 fn unread_dir(dir: &UnreadDir, root: &AbsolutePath, rerun: &str) -> CliError {
-    let shown = dir
-        .path
-        .strip_prefix(root)
-        .and_then(|relative| SourcePath::from_relative(relative).ok())
-        .map_or_else(|| dir.path.display().to_string(), |dir| dir.to_string());
+    let shown = relative_or_absolute(root, &dir.path);
     CliError::new(
         "cli-rename-unreadable-source",
         format!(
@@ -1330,6 +1345,19 @@ web = \"services/web\"
             "did you mean `auth`? Configured namespaces: `auth`, `web`"
         );
         assert_eq!(project.files(), before);
+    }
+
+    #[test]
+    fn namespace_rename_unknown_old_without_a_close_match_never_says_to_define_it() {
+        let project = project();
+
+        let run = project.rename(&["namespace", "rename", "billing", "identity", "--yes"]);
+
+        assert_eq!(run.exit_code(), 1);
+        assert_eq!(
+            run.rename_error().help(),
+            "Configured namespaces: `auth`, `web`"
+        );
     }
 
     #[test]
