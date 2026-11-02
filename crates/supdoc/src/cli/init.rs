@@ -301,6 +301,7 @@ mod tests {
     use crate::cli::testing::{Capture, ClosedPipe};
     use crate::config::Config;
     use crate::output::{OutputFormat, OutputSettings, PathStyle, Verbosity};
+    use crate::scan::walk::GlobalExcludes;
 
     use super::*;
 
@@ -350,6 +351,7 @@ mod tests {
             Context {
                 global: cli.global,
                 cwd,
+                global_excludes: GlobalExcludes::none(),
             },
         )
     }

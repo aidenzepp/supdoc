@@ -60,6 +60,7 @@ use crate::output::{Output, OutputError};
 use crate::path::AbsolutePath;
 use crate::read::error::CartridgeLoadError;
 use crate::scan::assemble::ScanError;
+use crate::scan::walk::GlobalExcludes;
 
 use args::{Command, ConfigCommand, GlobalArgs, Inspect, NamespaceCommand, SkillCommand};
 
@@ -70,6 +71,8 @@ pub struct Context {
     pub global: GlobalArgs,
     /// The current directory, read once by `main` (01).
     pub cwd: AbsolutePath,
+    /// The git global excludes file every walk honors, found once by `main`.
+    pub global_excludes: GlobalExcludes,
 }
 
 /// How a command that ran to completion ended (06 X7).

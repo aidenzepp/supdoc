@@ -237,7 +237,10 @@ fn a_git_exclude_whitelist_overrides_the_global_excludes_file() {
     let run = project.supdoc_in_with(
         "services/web",
         &["--json", "list"],
-        &[("HOME", home.path())],
+        &[
+            ("HOME", home.path()),
+            ("XDG_CONFIG_HOME", &home.path().join(".config")),
+        ],
     );
 
     let sources: Vec<_> = array_at(&run.json(), "/data/links")
@@ -265,7 +268,14 @@ fn lock_with_global_pattern(project: &Project, dir: &str, pattern: &str) -> Stri
     .expect("the global excludes file should be writable");
     project.write("services/web/docs/keep.md", SCRATCH);
 
-    let run = project.supdoc_in_with(dir, &["update", "--yes"], &[("HOME", home.path())]);
+    let run = project.supdoc_in_with(
+        dir,
+        &["update", "--yes"],
+        &[
+            ("HOME", home.path()),
+            ("XDG_CONFIG_HOME", &home.path().join(".config")),
+        ],
+    );
 
     let _ = run.assert_exit(0);
     lock_of_web(project)
@@ -1003,5 +1013,33 @@ fn core_excludes_file_counts_from_the_user_config_and_not_from_the_repository_co
     assert!(
         !from_user_config.contains(&"docs/guide.md".to_owned()),
         "the user config's `core.excludesFile` hides the guide, as in git\n{from_user_config:?}"
+    );
+}
+
+#[test]
+fn a_global_excludes_rule_from_the_xdg_config_home_hides_a_file() {
+    let project = Project::fixture("basic");
+    let home = project.path("home");
+    let xdg = home.join("xdg");
+    fs::create_dir_all(xdg.join("git")).expect("the fixture git directory should be creatable");
+    fs::write(xdg.join("git/ignore"), "/docs/guide.md\n")
+        .expect("the global excludes file should be writable");
+    let system = home.join("no-system-gitconfig");
+
+    let run = project.supdoc_in_with(
+        ".",
+        &["--json", "list"],
+        &[
+            ("HOME", &home),
+            ("XDG_CONFIG_HOME", &xdg),
+            ("GIT_CONFIG_SYSTEM", &system),
+        ],
+    );
+
+    let _ = run.assert_exit(0);
+    let sources = listed_sources(&run);
+    assert!(
+        !sources.contains(&"docs/guide.md".to_owned()) && !sources.is_empty(),
+        "the global rule hides the guide and nothing else\n{sources:?}"
     );
 }

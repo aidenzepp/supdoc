@@ -367,3 +367,114 @@ fn max_config_size_in_a_config_file_points_at_the_variable_and_the_flag() {
         "the help should name the variable and the flag:\n{output}"
     );
 }
+
+/// Runs `supdoc args` from the root of `project` with `HOME` and `XDG_CONFIG_HOME` in a fixture
+/// directory beneath it, whose `git/ignore` is the global excludes file `prepare` writes, so no
+/// git config or home of the real user is read.
+fn with_global_excludes(
+    project: &Project,
+    args: &[&str],
+    prepare: impl FnOnce(&Path),
+) -> crate::support::Run {
+    let home = project.path("home");
+    let xdg = home.join("xdg");
+    std::fs::create_dir_all(xdg.join("git"))
+        .expect("the fixture git directory should be creatable");
+    prepare(&xdg.join("git/ignore"));
+    let system = home.join("no-system-gitconfig");
+    project.supdoc_in_with(
+        ".",
+        args,
+        &[
+            ("HOME", &home),
+            ("XDG_CONFIG_HOME", &xdg),
+            ("GIT_CONFIG_SYSTEM", &system),
+        ],
+    )
+}
+
+/// Writes an oversized global excludes file at `file`.
+fn oversized_global(file: &Path) {
+    std::fs::write(file, oversized("gen/")).expect("the global excludes file should be writable");
+}
+
+#[test]
+fn an_oversized_global_excludes_file_fails_check_with_78() {
+    let project = Project::fixture("basic");
+
+    let run = with_global_excludes(&project, &["check"], oversized_global);
+
+    let _ = run.assert_exit(78);
+    let output = all_output(&run);
+    assert!(
+        output.contains("ignore-too-large")
+            && output.contains("the global excludes file")
+            && output.contains("or shorten the file"),
+        "a global excludes file over the cap should be refused by name:\n{output}"
+    );
+}
+
+#[test]
+fn an_oversized_global_excludes_file_stops_rename_before_it_writes() {
+    let project = Project::fixture("namespaced");
+    project.record();
+    let files = ["supdoc.config.toml", "supdoc.lock", "docs/guide.md"];
+    let before = files.map(|file| project.read(file));
+
+    let run = with_global_excludes(
+        &project,
+        &["namespace", "rename", "auth", "authn", "--yes"],
+        oversized_global,
+    );
+
+    let _ = run.assert_exit(78);
+    assert!(
+        all_output(&run).contains("ignore-too-large"),
+        "rename should refuse the oversized global excludes file:\n{}",
+        all_output(&run)
+    );
+    let after = files.map(|file| project.read(file));
+    assert_eq!(before, after, "a refused rename should write nothing");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_global_excludes_file_warns_by_name_and_the_run_goes_on() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let project = Project::fixture("basic");
+    let mut file = std::path::PathBuf::new();
+
+    let run = with_global_excludes(&project, &["--json", "list"], |global| {
+        std::fs::write(global, "docs/\n").expect("the global excludes file should be writable");
+        std::fs::set_permissions(global, std::fs::Permissions::from_mode(0o000))
+            .expect("the global excludes file should be lockable");
+        file = global.to_path_buf();
+    });
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644))
+        .expect("the global excludes file should be unlockable");
+
+    let _ = run.assert_exit(0);
+    let output = all_output(&run);
+    assert!(
+        output.contains("scan-ignore-file-unreadable")
+            && output.contains("the global excludes file")
+            && !output.contains("chmod"),
+        "an unreadable global excludes file should warn by name, without a chmod into the user's \
+         home:\n{output}"
+    );
+}
+
+#[test]
+fn a_missing_global_excludes_file_is_silent() {
+    let project = Project::fixture("basic");
+
+    let run = with_global_excludes(&project, &["--json", "list"], |_| {});
+
+    let _ = run.assert_exit(0);
+    assert!(
+        !all_output(&run).contains("global excludes"),
+        "no global excludes file is nothing to report:\n{}",
+        all_output(&run)
+    );
+}

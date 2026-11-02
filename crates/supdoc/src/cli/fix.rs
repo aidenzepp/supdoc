@@ -32,6 +32,7 @@ use crate::path::AbsolutePath;
 use crate::read::cartridge::Languages;
 use crate::read::error::CODE_TIMEOUT;
 use crate::scan::model::{Scan, Scope, TargetState};
+use crate::scan::walk::GlobalExcludes;
 use crate::state::LinkState;
 
 use super::args::{FixArgs, WriteMode};
@@ -81,6 +82,8 @@ pub fn schema() -> schemars::Schema {
 struct Planned {
     /// The loaded config, whose root every source path is relative to.
     config: Config,
+    /// The global excludes file the walk honors, for the re-scan.
+    excludes: GlobalExcludes,
     /// The lockfile as read, empty when there is none.
     lock: Lockfile,
     /// The fixes to preview or apply.
@@ -108,7 +111,7 @@ impl Planned {
         let config = load_config(context, output)?;
         let scope = scope(paths, &config, context)?;
         let lock = read_lock(&config, &context.cwd)?;
-        let scan = scan(&config, &scope)?;
+        let scan = scan(&config, &scope, &context.global_excludes)?;
         let broken = scan
             .links
             .iter()
@@ -127,6 +130,7 @@ impl Planned {
             plan: plan_fixes(&scan),
             paths,
             config,
+            excludes: context.global_excludes.clone(),
             lock,
             broken,
             timeouts,
@@ -357,7 +361,7 @@ impl Planned {
             .collect();
         let scope = Scope::Paths(fixed.into_iter().collect());
         Ok(reconcile_in(
-            &scan(&self.config, &scope)?,
+            &scan(&self.config, &scope, &self.excludes)?,
             lock,
             &scope,
             &self.paths,
@@ -413,14 +417,19 @@ fn count_skipped(skipped: &[Skipped], kind: SkippedKind) -> usize {
         .count()
 }
 
-/// Scans `scope` with the built-in languages.
+/// Scans `scope` with the built-in languages, under the global `excludes` file.
 ///
 /// # Errors
 ///
 /// Returns the scan's own error, such as an unreadable root (74).
-fn scan(config: &Config, scope: &Scope) -> Result<Scan, CliError> {
-    crate::scan::assemble::run(config, Languages::builtin().map_err(CliError::from)?, scope)
-        .map_err(CliError::from)
+fn scan(config: &Config, scope: &Scope, excludes: &GlobalExcludes) -> Result<Scan, CliError> {
+    crate::scan::assemble::run(
+        config,
+        Languages::builtin().map_err(CliError::from)?,
+        scope,
+        excludes,
+    )
+    .map_err(CliError::from)
 }
 
 /// Where each fix's replacement sits in its file once every fix before it in that file is
@@ -816,6 +825,7 @@ mod tests {
                 &config,
                 Languages::builtin().expect("the built-in cartridges should load"),
                 &Scope::All,
+                &GlobalExcludes::none(),
             )
             .expect("the fixture project should scan")
         }

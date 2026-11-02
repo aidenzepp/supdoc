@@ -28,6 +28,7 @@ use supdoc::finding::{Finding, Severity};
 use supdoc::output::format::supports_unicode;
 use supdoc::output::{Output, OutputSettings, PathStyle, Verbosity};
 use supdoc::path::AbsolutePath;
+use supdoc::scan::walk::GlobalExcludes;
 
 /// Terminal width when `COLUMNS` says nothing usable.
 const DEFAULT_WIDTH: usize = 80;
@@ -60,7 +61,12 @@ fn exit_code() -> u8 {
     let result = if let Some(error) = failure {
         Err(error)
     } else {
-        let context = Context { global, cwd };
+        let global_excludes = GlobalExcludes::find(&cwd);
+        let context = Context {
+            global,
+            cwd,
+            global_excludes,
+        };
         run(&command, &SkillDirs::from_vars(var), &context, &mut output)
     };
 

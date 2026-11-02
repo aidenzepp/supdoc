@@ -24,7 +24,7 @@ use crate::read::error::{ReadError, ReadRole};
 use crate::read::links::links;
 use crate::scan::model::{Scan, ScannedLink, Scope, TargetState};
 use crate::scan::targets::{self, CODE_UNKNOWN_NAMESPACE, Occurrence, Parsed, Written};
-use crate::scan::walk::{CODE_IGNORE_TOO_LARGE, UnreadDir, walk};
+use crate::scan::walk::{CODE_IGNORE_TOO_LARGE, GlobalExcludes, UnreadDir, walk};
 
 /// Why a scan couldn't run at all (04 S7). Every smaller problem is a finding instead.
 #[derive(Debug, thiserror::Error)]
@@ -96,7 +96,8 @@ impl ScanError {
 }
 
 /// Scans the part of the project `scope` names: every link in its sources, what each target looks
-/// like right now, and every problem met on the way, in a deterministic order (S8). Each file is
+/// like right now, and every problem met on the way, in a deterministic order (S8). The walk
+/// honors the global `excludes` file `main` found. Each file is
 /// parsed at most once as a source and once as a target (S9). The lockfile is never read.
 ///
 /// Effect: reads the filesystem. Everything after the walk and the file reads is pure.
@@ -105,8 +106,13 @@ impl ScanError {
 ///
 /// [`ScanError::RootUnreadable`] when the project root can't be listed, and
 /// [`ScanError::IgnoreTooLarge`] when an ignore file the walk met is over `max-ignore-size`.
-pub fn run(config: &Config, languages: &Languages, scope: &Scope) -> Result<Scan, ScanError> {
-    run_with_settings(config, languages, scope, config.hash_settings())
+pub fn run(
+    config: &Config,
+    languages: &Languages,
+    scope: &Scope,
+    excludes: &GlobalExcludes,
+) -> Result<Scan, ScanError> {
+    run_with_settings(config, languages, scope, excludes, config.hash_settings())
 }
 
 /// [`run`], hashing every target under `settings` rather than the config's own, for a command
@@ -119,9 +125,10 @@ pub fn run_with_settings(
     config: &Config,
     languages: &Languages,
     scope: &Scope,
+    excludes: &GlobalExcludes,
     settings: HashSettings,
 ) -> Result<Scan, ScanError> {
-    assemble(config, languages, scope, settings).map(|(scan, _parsed, _untracked)| scan)
+    assemble(config, languages, scope, excludes, settings).map(|(scan, _parsed, _untracked)| scan)
 }
 
 /// [`run`], also counting the links it left untracked, by reason, for `check -v`.
@@ -133,8 +140,9 @@ pub fn run_with_untracked(
     config: &Config,
     languages: &Languages,
     scope: &Scope,
+    excludes: &GlobalExcludes,
 ) -> Result<(Scan, UntrackedLinks), ScanError> {
-    assemble(config, languages, scope, config.hash_settings())
+    assemble(config, languages, scope, excludes, config.hash_settings())
         .map(|(scan, _parsed, untracked)| (scan, untracked))
 }
 
@@ -166,6 +174,7 @@ fn assemble(
     config: &Config,
     languages: &Languages,
     scope: &Scope,
+    excludes: &GlobalExcludes,
     settings: HashSettings,
 ) -> Result<(Scan, Parsed, UntrackedLinks), ScanError> {
     let root = config.root();
@@ -184,6 +193,7 @@ fn assemble(
         config,
         languages,
         scope,
+        excludes,
         &mut parsed,
         |source, file, raws| source_links(config, languages, source, file, raws, &mut found),
         |source, error| {
@@ -242,7 +252,8 @@ pub(crate) struct FrontHalf {
     pub(crate) unread_dirs: Vec<UnreadDir>,
 }
 
-/// The front half of a scan, shared with `namespace rename`: walks the project, refuses an
+/// The front half of a scan, shared with `namespace rename`: walks the project under the global
+/// `excludes` file, refuses an
 /// oversized ignore file, then reads each source once under the config's read deadline and hands
 /// its parsed file and raw links to `on_links`, or its failure to `on_unread`. Each file is
 /// dropped once its callback returns.
@@ -256,11 +267,12 @@ pub(crate) fn read_sources(
     config: &Config,
     languages: &Languages,
     scope: &Scope,
+    excludes: &GlobalExcludes,
     parsed: &mut Parsed,
     mut on_links: impl FnMut(&SourcePath, &SourceFile, Vec<RawLink>),
     mut on_unread: impl FnMut(&SourcePath, ReadError),
 ) -> Result<FrontHalf, ScanError> {
-    let walked = walk(config, languages, scope);
+    let walked = walk(config, languages, scope, excludes);
     if let Some(error) = ScanError::ignore_too_large(&walked.findings) {
         return Err(error);
     }
@@ -637,6 +649,7 @@ mod tests {
                 &self.config(),
                 Languages::builtin().expect("the built-in cartridges should load"),
                 &Scope::All,
+                &GlobalExcludes::none(),
                 self.config().hash_settings(),
             )
             .map(|(scan, parsed, _untracked)| (scan, parsed))
@@ -649,6 +662,7 @@ mod tests {
                 &self.config(),
                 Languages::builtin().expect("the built-in cartridges should load"),
                 &Scope::All,
+                &GlobalExcludes::none(),
             )
             .expect("a readable project root should scan");
             (scan, untracked.counts().collect())
@@ -659,6 +673,7 @@ mod tests {
                 &self.config(),
                 Languages::builtin().expect("the built-in cartridges should load"),
                 &Scope::All,
+                &GlobalExcludes::none(),
             )
             .expect("a readable project root should scan")
         }
@@ -1067,6 +1082,7 @@ mod tests {
             &config,
             Languages::builtin().expect("the built-in cartridges should load"),
             &Scope::All,
+            &GlobalExcludes::none(),
         );
 
         fs::set_permissions(&project.root, fs::Permissions::from_mode(0o755))

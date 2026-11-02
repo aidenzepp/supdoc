@@ -15,6 +15,7 @@ use crate::output::{Output, OutputSettings, PathStyle, Verbosity};
 use crate::path::AbsolutePath;
 use crate::read::cartridge::Languages;
 use crate::scan::model::{Scope, TargetState};
+use crate::scan::walk::GlobalExcludes;
 
 use super::args::Cli;
 use super::{CliError, Context, Outcome};
@@ -137,6 +138,7 @@ impl Session {
         let context = Context {
             global: cli.global.clone(),
             cwd,
+            global_excludes: GlobalExcludes::none(),
         };
         Self {
             cli,
@@ -198,6 +200,7 @@ impl Project {
             &config,
             Languages::builtin().expect("the built-in cartridges should load"),
             &Scope::All,
+            &GlobalExcludes::none(),
         )
         .expect("the fixture project should scan");
         let mut lock = Lockfile::default();
