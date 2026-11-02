@@ -32,8 +32,8 @@ use super::args::{Limit, ListArgs, TargetArg};
 use super::check::LinkJson;
 use super::fix::timed_out;
 use super::project::{
-    absolute, command_line, ensure_exists, load_config, namespaced_missing, path_outside_config,
-    read_lock,
+    CODE_PATH_MISSING, absolute, command_line, ensure_exists, load_config, namespaced_missing,
+    path_outside_config, read_lock,
 };
 use super::{CliError, Context, Outcome};
 
@@ -497,7 +497,7 @@ impl Wanted {
                 .namespace()
                 .and_then(|name| Some((name, config.namespace(name)?)));
             return Some(match namespaced {
-                Some((name, directory)) if error.code() == "cli-path-missing" => {
+                Some((name, directory)) if error.code() == CODE_PATH_MISSING => {
                     namespaced_missing(typed_file, name, directory, cwd)
                 }
                 _ => error,

@@ -243,7 +243,7 @@ impl std::error::Error for CliError {}
 /// Runs `command`, printing everything through `output`.
 ///
 /// This `match` is complete: it never changes when a command is built. A command that finds
-/// `output` closed returns its normal [`Outcome`]; `main` turns that into a clean exit (06 X13).
+/// `output` closed returns its normal [`Outcome`], so the run keeps its own exit code (06 X13).
 ///
 /// # Errors
 ///
