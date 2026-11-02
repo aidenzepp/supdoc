@@ -517,6 +517,7 @@ mod tests {
     use crate::cli::args::{Cli, Command};
     use crate::cli::testing::{Capture, Project, Run, Session, at};
     use crate::config::Config;
+    use crate::limits::Limits;
     use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
     use crate::output::{OutputSettings, PathStyle, Verbosity};
     use crate::path::AbsolutePath;
@@ -579,7 +580,8 @@ mod tests {
         fn lock(&self) -> Option<Lockfile> {
             let path =
                 AbsolutePath::new(&self.lock_file()).expect("the lockfile path should be absolute");
-            Lockfile::read(&path).expect("the lockfile should be readable and valid")
+            Lockfile::read(&path, Limits::MAX_LOCK_SIZE)
+                .expect("the lockfile should be readable and valid")
         }
 
         /// Records every present link's current hash in `supdoc.lock` under the config's hash
