@@ -353,7 +353,16 @@ fn read_help(file: &str, kind: ErrorKind) -> String {
 /// The types raise their errors through serde, which keeps only the text, so this reads the text
 /// back. The unit tests pin each message so a reworded one fails here, not silently.
 fn parse_help(message: &str) -> Option<String> {
-    if message.starts_with("unknown field") {
+    if message.starts_with("unknown field `max-config-size`") {
+        Some(
+            "Remove `max-config-size` from this file: it guards reading config files, so no \
+             config file can set it. Set it with `SUPDOC_MAX_CONFIG_SIZE=1MiB` or \
+             `--max-config-size 1MiB` instead"
+                .to_owned(),
+        )
+    } else if let Some(help) = limit_help(message) {
+        Some(help)
+    } else if message.starts_with("unknown field") {
         let key = message.split('`').nth(1).unwrap_or_default();
         Some(format!(
             "Remove `{key}`, or rename it to one of the keys the message lists"
@@ -404,6 +413,30 @@ fn parse_help(message: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// The help for a `[limits]` value that isn't `0` or a number with a unit, from the message
+/// [`crate::limits::LimitError`] wrote or the one serde wrote for a value of another type, such as
+/// a float. `None` for any other message.
+fn limit_help(message: &str) -> Option<String> {
+    const DURATION: &str = "a duration such as `parse-timeout = \"10s\"` (also `ms` or `m`)";
+    const SIZE: &str = "a size such as `max-lock-size = \"16MiB\"` (also `B` or `KiB`)";
+    let form = if message.contains("` is not a duration; give a unit") {
+        DURATION.to_owned()
+    } else if message.contains("` is not a size; give a unit") {
+        SIZE.to_owned()
+    } else if message.starts_with("invalid type:")
+        && message.ends_with(
+            "expected a value with a unit, such as \"10s\" or \"256KiB\", or 0 for no limit",
+        )
+    {
+        format!("{DURATION}, or {SIZE}")
+    } else {
+        return None;
+    };
+    Some(format!(
+        "Write the limit as a whole number with its unit in quotes: {form}. `0` means no limit"
+    ))
 }
 
 /// The help for a value of the wrong type, from the type the message says was expected.

@@ -686,7 +686,7 @@ mod helps {
     /// of supdoc's code areas, such as `link-failed` or `cli-usage`.
     fn is_code(text: &str) -> bool {
         const AREAS: &[&str] = &[
-            "check", "cli", "config", "fix", "link", "lock", "read", "resolve", "scan",
+            "check", "cli", "config", "fix", "ignore", "link", "lock", "read", "resolve", "scan",
         ];
         let Some((area, name)) = text.split_once('-') else {
             return false;
@@ -930,6 +930,26 @@ mod helps {
             &["check"],
         ),
         case(
+            "config-parse",
+            |p| p.write("supdoc.config.toml", "[limits]\nparse-timeout = 7\n"),
+            &["check"],
+        ),
+        case(
+            "config-parse",
+            |p| p.write("supdoc.config.toml", "[limits]\nmax-lock-size = 7.5\n"),
+            &["check"],
+        ),
+        case(
+            "config-parse",
+            |p| {
+                p.write(
+                    "supdoc.config.toml",
+                    "[limits]\nmax-config-size = \"1MiB\"\n",
+                );
+            },
+            &["check"],
+        ),
+        case(
             "config-not-found",
             |_| {},
             &["check", "--config", "nope.toml"],
@@ -1103,6 +1123,11 @@ mod helps {
             &["check"],
         ),
         restricted_case("scan-root-unreadable", |p| chmod(p, ".", 0o300), &["check"]),
+        case(
+            "ignore-too-large",
+            |p| p.write(".gitignore", &"#".repeat(300_000)),
+            &["check"],
+        ),
         restricted_case(
             "scan-ignore-file-unreadable",
             |p| {
