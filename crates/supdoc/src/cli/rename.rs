@@ -23,7 +23,6 @@ use serde::Serialize;
 use crate::config::{Config, ConfigError};
 use crate::exit::ExitStatus;
 use crate::finding::{Finding, IndexedText, Location};
-use crate::link::destination::parse_destination;
 use crate::link::{LinkKey, SourcePath, Target};
 use crate::lock::error::LockError;
 use crate::lock::io::write_atomically;
@@ -177,7 +176,7 @@ impl Plan {
             };
             let limit = config.limits_in_effect().parse_timeout.value;
             let edit = SourceFile::read(path.clone(), languages, limit)
-                .and_then(|file| SourceEdit::find(&config, languages, source.clone(), &file, old));
+                .and_then(|file| SourceEdit::find(source.clone(), &file, old));
             match edit {
                 Ok(edit) => sources.extend(edit),
                 Err(error) => return Err(unread_source(&source, &rerun, &error)),
@@ -551,16 +550,14 @@ struct LinkEdit {
 }
 
 impl SourceEdit {
-    /// The links in `file` that supdoc reads and whose destination is written with the prefix
-    /// `old:`, or `None` when there are none (NR6). Several uses of one reference definition
+    /// The links in `file` whose destination is written with the prefix `old:`, tracked or not
+    /// (a bare `old:`, a link to a file no language reads, a fragment link to one), or `None` when there are none (NR6). Several uses of one reference definition
     /// share its range and are renamed once.
     ///
     /// # Errors
     ///
     /// [`ReadError::Timeout`] when the file's read deadline stops reading its links.
     fn find(
-        config: &Config,
-        languages: &Languages,
         source: SourcePath,
         file: &SourceFile,
         old: &NamespaceName,
@@ -569,13 +566,13 @@ impl SourceEdit {
         let prefix = format!("{old}:");
         let mut ranges: Vec<Range<usize>> = links(file)?
             .into_iter()
-            .filter(|raw| {
-                parse_destination(raw, &source, config.namespaces(), languages).is_supdoc()
-            })
             .map(|raw| raw.destination_range)
             .filter(|range| {
-                text.get(range.clone())
-                    .is_some_and(|written| written.starts_with(&prefix))
+                text.get(range.clone()).is_some_and(|written| {
+                    written
+                        .strip_prefix(&prefix)
+                        .is_some_and(|rest| !rest.starts_with(':'))
+                })
             })
             .collect();
         ranges.sort_by_key(|range| (range.start, range.end));
