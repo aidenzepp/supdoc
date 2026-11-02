@@ -58,7 +58,7 @@ const COMMAND: &str = "namespace rename";
 /// a config this one extends, `cli-rename-unreadable-source` when a source or a directory can't
 /// be read, `cli-rename-config-outside-root` when the config is a symlink out of the root, and
 /// `cli-rename-file-changed` when a file changed between planning and writing (all 1),
-/// `cli-rename-write` when a file can't be written, and `cli-rename-output` when the report can't
+/// `cli-rename-write` when a file can't be written, and `cli-output-failed` when the report can't
 /// be written (both 74).
 pub fn run(args: &RenameArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let plan = Plan::build(args, context, output)?;
@@ -71,9 +71,7 @@ pub fn run(args: &RenameArgs, context: &Context, output: &mut Output) -> Result<
     };
     output
         .report(&plan.report(applied), true)
-        .map_err(|error| {
-            CliError::output_failed("cli-rename-output", "the rename report", &error)
-        })?;
+        .map_err(|error| CliError::output_failed("the rename report", &error))?;
     let apply_note = preview_note(
         args.confirm.dry_run,
         &command_line(
@@ -84,9 +82,9 @@ pub fn run(args: &RenameArgs, context: &Context, output: &mut Output) -> Result<
         ),
     );
     for note in plan.notes(applied, &apply_note) {
-        output.note(&note).map_err(|error| {
-            CliError::output_failed("cli-rename-output", "the rename report", &error)
-        })?;
+        output
+            .note(&note)
+            .map_err(|error| CliError::output_failed("the rename report", &error))?;
     }
     Ok(Outcome::Clean)
 }

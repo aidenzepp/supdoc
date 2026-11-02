@@ -56,7 +56,7 @@ const CODE_LOCK_WRITE_FAILED: &str = "fix-lock-write-failed";
 /// Returns the config's own error (78, or 74 when unreadable), `cli-path-missing`,
 /// `cli-path-outside-project` or `cli-path-invalid` for a bad `[PATH]` (2), `cli-path-unreadable` (74) for one that can't be looked up, the lockfile's own
 /// error (78 when invalid, 74 when it can't be read or written), the scan's own error (74),
-/// `fix-write-failed` when a source file could not be written (74), and `cli-fix-output` when the
+/// `fix-write-failed` when a source file could not be written (74), and `cli-output-failed` when the
 /// report cannot be written (74).
 pub fn run(args: &FixArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let planned = Planned::scan(&args.paths, context, output)?;
@@ -138,7 +138,7 @@ impl Planned {
     /// # Errors
     ///
     /// Returns `fix-write-failed` (74) after the report when a source file could not be written,
-    /// the lockfile's or the re-scan's own error, and `cli-fix-output` when the report cannot be
+    /// the lockfile's or the re-scan's own error, and `cli-output-failed` when the report cannot be
     /// written.
     fn finish(
         self,
@@ -168,7 +168,7 @@ impl Planned {
     ///
     /// # Errors
     ///
-    /// Returns `cli-fix-output` when the report cannot be written.
+    /// Returns `cli-output-failed` when the report cannot be written.
     fn preview(self, apply_note: &str, output: &mut Output) -> Result<Outcome, CliError> {
         // The real rule on a copy of the lock, so the preview names exactly the moves `--yes` makes.
         let would = move_lock_entries(
@@ -198,7 +198,7 @@ impl Planned {
         let timed_out = !report.findings.is_empty();
         output
             .report(&report, !timed_out)
-            .map_err(|error| CliError::output_failed("cli-fix-output", "the fix report", &error))?;
+            .map_err(|error| CliError::output_failed("the fix report", &error))?;
         let planned = if report.fixes.is_empty() {
             None
         } else {
@@ -214,7 +214,7 @@ impl Planned {
         };
         output
             .note(&note)
-            .map_err(|error| CliError::output_failed("cli-fix-output", "the fix report", &error))?;
+            .map_err(|error| CliError::output_failed("the fix report", &error))?;
         Ok(if timed_out {
             Outcome::Failing
         } else {
@@ -227,7 +227,7 @@ impl Planned {
     ///
     /// # Errors
     ///
-    /// Returns the re-scan's own error, `cli-fix-output` when the report cannot be written, and
+    /// Returns the re-scan's own error, `cli-output-failed` when the report cannot be written, and
     /// after the report `fix-lock-write-failed` (74) when the lockfile could not be written
     /// (the fixed files are named) or `fix-write-failed` (74) when a source file could not be.
     fn apply(
@@ -270,7 +270,7 @@ impl Planned {
         let ok = write_failed == 0 && !file_changed && written.lock_failure.is_none() && !timed_out;
         output
             .report(&report, ok)
-            .map_err(|error| CliError::output_failed("cli-fix-output", "the fix report", &error))?;
+            .map_err(|error| CliError::output_failed("the fix report", &error))?;
         let note = if !report.fixes.is_empty() {
             let link_count = count(report.fixes.len(), "link", "links");
             let file_count = count(report.files(), "file", "files");
@@ -286,9 +286,9 @@ impl Planned {
             None
         };
         if let Some(note) = note {
-            output.note(&note).map_err(|error| {
-                CliError::output_failed("cli-fix-output", "the fix report", &error)
-            })?;
+            output
+                .note(&note)
+                .map_err(|error| CliError::output_failed("the fix report", &error))?;
         }
 
         if let Some(error) = written.lock_failure {

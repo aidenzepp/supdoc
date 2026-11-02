@@ -69,7 +69,7 @@ fn jsonl_lines_each_parse_and_end_with_summary() {
     assert_eq!(at(summary, "/ok"), false);
     assert_eq!(at(summary, "/summary/passed"), 38);
     assert_eq!(at(summary, "/summary/failed"), 1);
-    assert_eq!(at(summary, "/schema_version"), 1);
+    assert_eq!(at(summary, "/schema_version"), 2);
 }
 
 /// A report with data scalars, like `update`'s, and one `changes` array.

@@ -25,7 +25,7 @@ use super::{CliError, Context, Outcome};
 ///
 /// # Errors
 ///
-/// Returns the config's own error (78, or 74 when unreadable) and `cli-config-output` when the
+/// Returns the config's own error (78, or 74 when unreadable) and `cli-output-failed` when the
 /// report cannot be written (74).
 pub fn run(
     inspect: Inspect<'_>,
@@ -63,11 +63,11 @@ pub fn run(
             })
         }
     };
-    let (code, subject) = match inspect {
-        Inspect::ConfigShow => ("cli-config-output", "the config show report"),
-        Inspect::NamespaceList(_) => ("cli-namespace-output", "the namespace list report"),
+    let subject = match inspect {
+        Inspect::ConfigShow => "the config show report",
+        Inspect::NamespaceList(_) => "the namespace list report",
     };
-    written.map_err(|error| CliError::output_failed(code, subject, &error))?;
+    written.map_err(|error| CliError::output_failed(subject, &error))?;
     Ok(Outcome::Clean)
 }
 
@@ -323,7 +323,7 @@ impl FeaturesJson {
             hash: HashFeatureJson {
                 line_endings: LineEndingsJson {
                     value: config.hash_settings().line_endings,
-                    file: defined_in.map(|file| relative_to(root, file)),
+                    from: defined_in.map(|file| relative_to(root, file)),
                     defined_in: defined_in.cloned(),
                 },
             },
@@ -374,7 +374,7 @@ enum LimitSource {
     Flag,
     /// The `SUPDOC_*` environment variable.
     Env,
-    /// The config file named in `file`.
+    /// The config file named in `from`.
     Config,
     /// The built-in default.
     Default,
@@ -388,7 +388,7 @@ pub(crate) struct LimitJson {
     /// `flag`, `env`, `config` or `default`.
     source: LimitSource,
     /// The config file that set it, relative to the project root, when `source` is `config`.
-    file: Option<String>,
+    from: Option<String>,
     /// Where it came from, for text output.
     #[serde(skip)]
     origin: Source,
@@ -397,7 +397,7 @@ pub(crate) struct LimitJson {
 impl LimitJson {
     /// The report of `setting`, with a config file relative to `root`.
     fn new<T: std::fmt::Display>(root: &AbsolutePath, setting: &Setting<T>) -> Self {
-        let (source, file) = match &setting.source {
+        let (source, from) = match &setting.source {
             Source::Flag => (LimitSource::Flag, None),
             Source::Env => (LimitSource::Env, None),
             Source::Config(file) => (LimitSource::Config, Some(relative_to(root, file))),
@@ -406,7 +406,7 @@ impl LimitJson {
         Self {
             value: setting.value.to_string(),
             source,
-            file,
+            from,
             origin: setting.source.clone(),
         }
     }
@@ -425,7 +425,7 @@ pub(crate) struct LineEndingsJson {
     /// `normalize` or `exact`.
     value: LineEndings,
     /// The config file that set it, relative to the project root. `null` for the default.
-    file: Option<String>,
+    from: Option<String>,
     /// The file that set it, for text output.
     #[serde(skip)]
     defined_in: Option<AbsolutePath>,
