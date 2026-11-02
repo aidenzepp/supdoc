@@ -42,6 +42,16 @@ fn load_error(dir: &TempDir, file: &str) -> ConfigError {
     Config::load_file(&at(dir, file)).expect_err("the fixture config should be rejected")
 }
 
+/// Makes `dir/relative` a git directory with the layout git accepts: `HEAD`, `objects` and `refs`.
+fn make_git_dir(dir: &TempDir, relative: &str) {
+    let git_dir = dir.path().join(relative);
+    fs::create_dir_all(git_dir.join("objects"))
+        .expect("the fixture objects dir should be creatable");
+    fs::create_dir_all(git_dir.join("refs")).expect("the fixture refs dir should be creatable");
+    fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n")
+        .expect("the fixture HEAD should be writable");
+}
+
 /// The text a parse error's span points at.
 fn parse_span_text<'a>(error: &ConfigError, text: &'a str) -> &'a str {
     let ConfigError::Parse { error, .. } = error else {
@@ -88,6 +98,60 @@ fn nearest_config_wins_when_walking_up() {
     assert_eq!(config.root(), &at(&dir, "apps/web"));
     assert!(config.scans(&at(&dir, "apps/web/inner/a.md")));
     assert!(!config.scans(&at(&dir, "outer/a.md")));
+}
+
+#[test]
+fn discovery_stops_at_a_git_directory_and_ignores_the_config_above() {
+    let dir = tree(&[("supdoc.config.toml", ""), ("repo/docs/a.md", "")]);
+    make_git_dir(&dir, "repo/.git");
+    let config = load_from(&dir, "repo/docs");
+
+    assert_eq!(
+        config.files(),
+        [],
+        "the config above the repository's work-tree top should not be found"
+    );
+    assert_eq!(config.root(), &at(&dir, "repo/docs"));
+}
+
+#[test]
+fn discovery_stops_at_a_git_file_as_in_a_worktree_or_submodule() {
+    let dir = tree(&[
+        ("supdoc.config.toml", ""),
+        ("sub/.git", "gitdir: ../.git/modules/sub\n"),
+        ("sub/docs/a.md", ""),
+    ]);
+    let config = load_from(&dir, "sub/docs");
+
+    assert_eq!(
+        config.files(),
+        [],
+        "a submodule without its own config should not use the superproject's"
+    );
+    assert_eq!(config.root(), &at(&dir, "sub/docs"));
+}
+
+#[test]
+fn discovery_finds_the_config_in_the_work_tree_top_itself() {
+    let dir = tree(&[
+        ("supdoc.config.toml", r#"include = ["outer"]"#),
+        ("repo/supdoc.config.toml", r#"include = ["inner"]"#),
+        ("repo/docs/a.md", ""),
+    ]);
+    make_git_dir(&dir, "repo/.git");
+    let config = load_from(&dir, "repo/docs");
+
+    assert_eq!(config.files(), [at(&dir, "repo/supdoc.config.toml")]);
+    assert_eq!(config.root(), &at(&dir, "repo"));
+}
+
+#[test]
+fn discovery_outside_a_repository_climbs_past_directories_without_git() {
+    let dir = tree(&[("supdoc.config.toml", ""), ("a/b/c/doc.md", "")]);
+    let config = load_from(&dir, "a/b/c");
+
+    assert_eq!(config.files(), [at(&dir, "supdoc.config.toml")]);
+    assert_eq!(config.root(), &at(&dir, "."));
 }
 
 #[test]

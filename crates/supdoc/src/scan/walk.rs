@@ -15,7 +15,7 @@ use crate::finding::{Finding, Severity};
 use crate::link::{LinkPathError, SourcePath};
 use crate::lock::error::shell_quote;
 use crate::output::paths::relative_to;
-use crate::path::AbsolutePath;
+use crate::path::{AbsolutePath, holds_git, is_git_dir};
 use crate::read::cartridge::{Cartridge, Languages};
 use crate::scan::model::Scope;
 
@@ -737,35 +737,6 @@ fn own_ignore_files(dir: &Path) -> OwnIgnoreFiles {
         symlinked,
         unreadable,
     }
-}
-
-/// Whether `dir` is the top of a git work tree, as git decides it: `dir/.git`, followed through
-/// symlinks, is a file (a gitfile, which git either uses or refuses to run past), or a git
-/// directory ([`is_git_dir`]). A missing or dangling `.git`, or a directory git rejects, isn't, and
-/// git searches further up.
-///
-/// Effect: reads file metadata in `dir` and its `.git` directory.
-fn holds_git(dir: &Path) -> bool {
-    let dot_git = dir.join(".git");
-    match fs::metadata(&dot_git) {
-        Err(_) => false,
-        Ok(metadata) if metadata.is_file() => true,
-        Ok(_) => is_git_dir(&dot_git),
-    }
-}
-
-/// Whether `git_dir` has the layout git accepts as a repository: a `HEAD` that is a file or a
-/// symlink, not a directory, and `objects` and `refs` directories, followed through symlinks.
-/// `HEAD` isn't read, so whether it names a commit, which git also checks, goes unchecked: above
-/// the root it lies outside the project, and supdoc reads no outside file but its config and
-/// ignore inputs.
-///
-/// Effect: reads file metadata in `git_dir`.
-fn is_git_dir(git_dir: &Path) -> bool {
-    fs::symlink_metadata(git_dir.join("HEAD"))
-        .is_ok_and(|metadata| metadata.is_file() || metadata.is_symlink())
-        && fs::metadata(git_dir.join("objects")).is_ok_and(|metadata| metadata.is_dir())
-        && fs::metadata(git_dir.join("refs")).is_ok_and(|metadata| metadata.is_dir())
 }
 
 /// The rules of `file`, which apply beneath `dir`, and how reading it failed, if it exists but

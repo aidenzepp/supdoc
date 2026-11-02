@@ -16,7 +16,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::limits::{CommandLineLimits, ConfigLimits, Limits};
 use crate::namespace::NamespaceName;
-use crate::path::{AbsolutePath, RelativePath, is_regular_file};
+use crate::path::{AbsolutePath, RelativePath, holds_git, is_regular_file};
 
 use super::pattern::{AnchoredPatterns, PatternList};
 use super::raw::RawConfig;
@@ -44,7 +44,14 @@ fn config_in(dir: &AbsolutePath) -> AbsolutePath {
     dir.join_path(Path::new(CONFIG_FILE_NAME))
 }
 
-/// Walks up from `start` to the nearest directory holding a config file (01 D1).
+/// Walks up from `start` to the nearest directory holding a config file (01 D1), stopping at the
+/// top of the git work tree `start` lies in.
+///
+/// The top is the first directory holding a `.git` as git decides it ([`holds_git`]), the same
+/// test the walk uses for where ignore rules stop. Its own config is still found, but nothing
+/// above it is read, so a stray `supdoc.config.toml` above a repository can't re-root a run
+/// outside it. A submodule or nested repository is a top too, and never reaches the config of the
+/// repository around it. Outside any git work tree the walk climbs to the filesystem root.
 ///
 /// A directory holds one when its entry named `supdoc.config.toml` is a regular file or a
 /// symlink, decided with `symlink_metadata` so the link is never followed to decide. Any other
@@ -71,6 +78,9 @@ pub(super) fn discover(start: &AbsolutePath) -> Result<Option<AbsolutePath>, Con
             } else {
                 Err(ConfigError::SymlinkNotConfig { path: candidate })
             };
+        }
+        if holds_git(current.as_path()) {
+            break;
         }
         dir = current.parent();
     }

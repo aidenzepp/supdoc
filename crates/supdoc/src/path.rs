@@ -117,6 +117,35 @@ pub(crate) fn is_regular_file(path: &Path) -> std::io::Result<bool> {
     std::fs::metadata(path).map(|metadata| metadata.is_file())
 }
 
+/// Whether `dir` is the top of a git work tree, as git decides it: `dir/.git`, followed through
+/// symlinks, is a file (a gitfile, which git either uses or refuses to run past), or a git
+/// directory ([`is_git_dir`]). A missing or dangling `.git`, or a directory git rejects, isn't, and
+/// git searches further up.
+///
+/// Effect: reads file metadata in `dir` and its `.git` directory.
+pub(crate) fn holds_git(dir: &Path) -> bool {
+    let dot_git = dir.join(".git");
+    match std::fs::metadata(&dot_git) {
+        Err(_) => false,
+        Ok(metadata) if metadata.is_file() => true,
+        Ok(_) => is_git_dir(&dot_git),
+    }
+}
+
+/// Whether `git_dir` has the layout git accepts as a repository: a `HEAD` that is a file or a
+/// symlink, not a directory, and `objects` and `refs` directories, followed through symlinks.
+/// `HEAD` isn't read, so whether it names a commit, which git also checks, goes unchecked: above
+/// the root it lies outside the project, and supdoc reads no outside file but its config and
+/// ignore inputs.
+///
+/// Effect: reads file metadata in `git_dir`.
+pub(crate) fn is_git_dir(git_dir: &Path) -> bool {
+    std::fs::symlink_metadata(git_dir.join("HEAD"))
+        .is_ok_and(|metadata| metadata.is_file() || metadata.is_symlink())
+        && std::fs::metadata(git_dir.join("objects")).is_ok_and(|metadata| metadata.is_dir())
+        && std::fs::metadata(git_dir.join("refs")).is_ok_and(|metadata| metadata.is_dir())
+}
+
 /// Where a project file such as `supdoc.config.toml` or `supdoc.lock` really is, judged against
 /// the project root: the directory the file's path names it in.
 #[derive(Debug, Clone, PartialEq, Eq)]
