@@ -54,7 +54,7 @@ const NOTHING_NOTE: &str = "Nothing to update.";
 /// `cli-path-outside-project` or `cli-path-invalid` for a bad `[PATH]` (2), `cli-path-unreadable` (74) for one that can't be looked up, the lockfile's own
 /// error (78 when invalid, 74 when unreadable or unwritable), `lock-settings-mismatch` (78) when
 /// the lockfile's hash settings differ from the config's and the run is narrowed by `[PATHS]` or
-/// `--state`, `scan-root-unreadable` (74), and `cli-update-output` when the report cannot be
+/// `--state`, `scan-root-unreadable` (74), and `cli-output-failed` when the report cannot be
 /// written (74).
 pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let config = load_config(context, output)?;
@@ -118,14 +118,12 @@ pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<
     let report = UpdateReport::new(&model, &plan, &args.state, applied, &paths, context);
     // A file that outlasted `parse-timeout` left its links unread, so the run fails (D1).
     let timed_out = timed_out(&scan).next().is_some();
-    output.report(&report, !timed_out).map_err(|error| {
-        CliError::output_failed("cli-update-output", "the update report", &error)
-    })?;
+    output
+        .report(&report, !timed_out)
+        .map_err(|error| CliError::output_failed("the update report", &error))?;
     output
         .note(&report.closing_note(output.unicode(), &apply_note))
-        .map_err(|error| {
-            CliError::output_failed("cli-update-output", "the update report", &error)
-        })?;
+        .map_err(|error| CliError::output_failed("the update report", &error))?;
     Ok(if timed_out {
         Outcome::Failing
     } else {

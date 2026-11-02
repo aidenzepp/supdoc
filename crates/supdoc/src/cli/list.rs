@@ -54,7 +54,7 @@ use super::{CliError, Context, Outcome};
 /// project, `cli-target-invalid` (2) for a `TARGET` that isn't a target; when no link points at
 /// `TARGET`, `link-unknown-namespace` or `cli-path-missing` (2), `cli-path-unreadable` (74), or
 /// `resolve-not-found` or `resolve-ambiguous` (1); `scan-root-unreadable` (74), and
-/// `cli-list-output` when the report cannot be written (74).
+/// `cli-output-failed` when the report cannot be written (74).
 pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let config = load_config(context, output)?;
     let target = args
@@ -108,7 +108,7 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
     let report = ListReport::new(&matched, args.limit, model.findings, timeouts);
     output
         .report(&report, !timed_out)
-        .map_err(|error| CliError::output_failed("cli-list-output", "the link list", &error))?;
+        .map_err(|error| CliError::output_failed("the link list", &error))?;
     if report.truncated {
         output
             .note(
@@ -116,7 +116,7 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
                     .limit
                     .truncation_note(report.links.len(), total, "links"),
             )
-            .map_err(|error| CliError::output_failed("cli-list-output", "the link list", &error))?;
+            .map_err(|error| CliError::output_failed("the link list", &error))?;
     } else if total == 0 {
         let note = match &target {
             Some(target) => format!("No links to {target}."),
@@ -124,7 +124,7 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
         };
         output
             .note(&note)
-            .map_err(|error| CliError::output_failed("cli-list-output", "the link list", &error))?;
+            .map_err(|error| CliError::output_failed("the link list", &error))?;
     }
     // A file that outlasted `parse-timeout` left its links unchecked, so the run fails (D1).
     Ok(if timed_out {

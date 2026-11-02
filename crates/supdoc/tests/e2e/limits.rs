@@ -61,7 +61,7 @@ fn a_config_file_value_reports_the_file_that_set_it() {
 
     assert_eq!(at(&json, "/data/limits/max_ignore_size/value"), "1KiB");
     assert_eq!(
-        at(&json, "/data/limits/max_ignore_size/file"),
+        at(&json, "/data/limits/max_ignore_size/from"),
         "supdoc.config.toml"
     );
 }

@@ -79,7 +79,8 @@ impl Report for StarterReport {
 ///
 /// Returns `cli-init-nested` when no `-c` is given and a config already governs the current
 /// directory from above, `cli-init-exists` when the target file already exists, and
-/// `cli-init-write` when the file cannot be created or the output cannot be written.
+/// `cli-init-write` when the file cannot be created, and `cli-output-failed` when the
+/// report cannot be written.
 pub fn run(args: &InitArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let target = target(context);
     refuse_inside_project(&target, context)?;
@@ -95,25 +96,21 @@ pub fn run(args: &InitArgs, context: &Context, output: &mut Output) -> Result<Ou
         refuse_if_present(&target, context)?;
         output
             .artifact(&report(false), STARTER, true)
-            .map_err(|error| {
-                CliError::output_failed("cli-init-write", &format!("the report on {label}"), &error)
-            })?;
+            .map_err(|error| CliError::output_failed(&format!("the report on {label}"), &error))?;
         output
             .note(&format!(
                 "Nothing written. Run `{}` to write {label}.",
                 command(context)
             ))
-            .map_err(|error| {
-                CliError::output_failed("cli-init-write", &format!("the report on {label}"), &error)
-            })?;
+            .map_err(|error| CliError::output_failed(&format!("the report on {label}"), &error))?;
     } else {
         write_new(&target, context)?;
-        output.artifact(&report(true), "", true).map_err(|error| {
-            CliError::output_failed("cli-init-write", &format!("the report on {label}"), &error)
-        })?;
-        output.note(&format!("Wrote {label}")).map_err(|error| {
-            CliError::output_failed("cli-init-write", &format!("the report on {label}"), &error)
-        })?;
+        output
+            .artifact(&report(true), "", true)
+            .map_err(|error| CliError::output_failed(&format!("the report on {label}"), &error))?;
+        output
+            .note(&format!("Wrote {label}"))
+            .map_err(|error| CliError::output_failed(&format!("the report on {label}"), &error))?;
     }
     Ok(Outcome::Clean)
 }

@@ -156,9 +156,9 @@ impl CliError {
     ///
     /// Every command's report failure shares this help and the I/O exit code.
     #[must_use]
-    pub(crate) fn output_failed(code: &'static str, subject: &str, error: &OutputError) -> Self {
+    pub(crate) fn output_failed(subject: &str, error: &OutputError) -> Self {
         Self::new(
-            code,
+            "cli-output-failed",
             format!(
                 "cannot write {subject}: {}",
                 without_os_code(&error.to_string())

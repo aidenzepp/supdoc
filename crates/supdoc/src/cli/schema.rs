@@ -368,7 +368,7 @@ mod tests {
     fn check_output_validates_against_the_check_schema_but_not_the_list_schema() {
         let envelope = |command: &str| {
             serde_json::json!({
-                "schema_version": 1, "command": command, "ok": true, "root": "/p",
+                "schema_version": 2, "command": command, "ok": true, "root": "/p",
                 "data": {
                     "summary": {"passed": 1, "failed": 0, "broken": 0, "new": 0, "obsolete": 0},
                     "links": []
