@@ -66,7 +66,12 @@ fn a_config_file_value_reports_the_file_that_set_it() {
     );
 }
 
-/// Rust nested deeply enough that its parse outlasts 1 ms. The comment that opens it puts a
+/// The per-read budget the timeout tests set. It is far above what reading an ordinary file takes,
+/// even on a loaded machine, so only `deep.rs` can outlast it; and far below the seconds
+/// `deep.rs` needs, so it always does. A budget of 1 ms let some other read expire first.
+const TIMEOUT: &str = "250ms";
+
+/// Rust nested deeply enough that its parse outlasts [`TIMEOUT`] by orders of magnitude. The comment that opens it puts a
 /// deadline check right after the parse, so even a read that only looks for links meets it.
 fn deep_rust() -> String {
     format!(
@@ -102,7 +107,7 @@ fn assert_timed_out(run: &crate::support::Run, file: &str) {
     let printed = format!("{}{}", run.stdout, run.stderr);
     assert!(
         printed.contains(&format!(
-            "reading {file} took longer than the 1ms per-read parse timeout"
+            "reading {file} took longer than the {TIMEOUT} per-read parse timeout"
         )),
         "the run should report that reading {file} timed out:\n{printed}",
     );
@@ -112,7 +117,7 @@ fn assert_timed_out(run: &crate::support::Run, file: &str) {
 fn a_source_that_outlasts_the_parse_timeout_fails_check() {
     let project = project_with_deep_source();
 
-    let run = project.supdoc(&["--parse-timeout", "1ms", "check"]);
+    let run = project.supdoc(&["--parse-timeout", TIMEOUT, "check"]);
 
     assert_timed_out(&run, "src/deep.rs");
 }
@@ -120,7 +125,10 @@ fn a_source_that_outlasts_the_parse_timeout_fails_check() {
 #[test]
 fn the_config_key_reaches_the_reader() {
     let project = project_with_deep_source();
-    project.write("supdoc.config.toml", "[limits]\nparse-timeout = \"1ms\"\n");
+    project.write(
+        "supdoc.config.toml",
+        &format!("[limits]\nparse-timeout = \"{TIMEOUT}\"\n"),
+    );
 
     let run = project.supdoc(&["check"]);
 
@@ -134,7 +142,7 @@ fn the_environment_variable_reaches_the_reader() {
     let run = project.supdoc_in_with(
         ".",
         &["check"],
-        &[("SUPDOC_PARSE_TIMEOUT", Path::new("1ms"))],
+        &[("SUPDOC_PARSE_TIMEOUT", Path::new(TIMEOUT))],
     );
 
     assert_timed_out(&run, "src/deep.rs");
@@ -144,7 +152,7 @@ fn the_environment_variable_reaches_the_reader() {
 fn update_exits_1_on_a_read_timeout() {
     let project = project_with_deep_source();
 
-    let run = project.supdoc(&["--parse-timeout", "1ms", "update", "--yes"]);
+    let run = project.supdoc(&["--parse-timeout", TIMEOUT, "update", "--yes"]);
 
     assert_timed_out(&run, "src/deep.rs");
 }
@@ -154,8 +162,8 @@ fn fix_exits_1_on_a_read_timeout_and_never_says_nothing_to_fix() {
     let project = project_with_deep_source();
 
     for args in [
-        &["--parse-timeout", "1ms", "fix"][..],
-        &["--parse-timeout", "1ms", "fix", "--yes"],
+        &["--parse-timeout", TIMEOUT, "fix"][..],
+        &["--parse-timeout", TIMEOUT, "fix", "--yes"],
     ] {
         let run = project.supdoc(args);
 
@@ -177,7 +185,7 @@ fn fix_exits_1_on_a_read_timeout_and_never_says_nothing_to_fix() {
 fn list_reports_a_timed_out_symbol_target_instead_of_matching_text() {
     let project = project_with_deep_target();
 
-    let run = project.supdoc(&["--parse-timeout", "1ms", "list", "src/deep.rs#deep"]);
+    let run = project.supdoc(&["--parse-timeout", TIMEOUT, "list", "src/deep.rs#deep"]);
 
     assert_timed_out(&run, "src/deep.rs");
 }
@@ -187,9 +195,9 @@ fn list_prints_the_timeout_even_when_a_filter_hides_the_timed_out_links() {
     let project = project_with_deep_target();
 
     for args in [
-        &["--parse-timeout", "1ms", "list", "docs/guide.md"][..],
-        &["--parse-timeout", "1ms", "list", "--state", "passed"],
-        &["--parse-timeout", "1ms", "list", "--limit", "1"],
+        &["--parse-timeout", TIMEOUT, "list", "docs/guide.md"][..],
+        &["--parse-timeout", TIMEOUT, "list", "--state", "passed"],
+        &["--parse-timeout", TIMEOUT, "list", "--limit", "1"],
     ] {
         let run = project.supdoc(args);
 
@@ -207,7 +215,7 @@ fn rename_refuses_before_writing_when_a_source_times_out() {
 
     let run = project.supdoc(&[
         "--parse-timeout",
-        "1ms",
+        TIMEOUT,
         "namespace",
         "rename",
         "auth",

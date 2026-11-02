@@ -208,6 +208,17 @@ mod tests {
         deadline
     }
 
+    /// The deep fixture, parsed with no limit so no clock decides whether it parses.
+    fn parsed_deep_rust() -> SourceFile {
+        SourceFile::from_text(
+            rust_path(),
+            deep_rust(),
+            rust(),
+            Deadline::start("0".parse().expect("0 should be a time limit")),
+        )
+        .expect("the deep fixture should parse with no limit")
+    }
+
     fn rust_path() -> AbsolutePath {
         AbsolutePath::new(Path::new("/repo/src/deep.rs"))
             .expect("the fixture path should be absolute")
@@ -247,9 +258,7 @@ mod tests {
 
     #[test]
     fn a_passed_deadline_stops_the_symbols_query_with_no_partial_table() {
-        let file = SourceFile::parse(rust_path(), deep_rust(), rust())
-            .expect("the deep fixture should parse under the default limit")
-            .with_deadline(passed_deadline());
+        let file = parsed_deep_rust().with_deadline(passed_deadline());
 
         let error = file
             .language()
@@ -261,9 +270,7 @@ mod tests {
 
     #[test]
     fn a_passed_deadline_stops_reading_links() {
-        let file = SourceFile::parse(rust_path(), deep_rust(), rust())
-            .expect("the deep fixture should parse under the default limit")
-            .with_deadline(passed_deadline());
+        let file = parsed_deep_rust().with_deadline(passed_deadline());
 
         let error = links(&file).expect_err("reading links should stop at the deadline");
 
@@ -280,9 +287,14 @@ mod tests {
             .expect("the built-in registry should read `.md`");
         // One long paragraph: the block parse has no query, so the inline parse meets the deadline.
         let text = "[a](b.md) ".repeat(20_000);
-        let file = SourceFile::parse(path, text, markdown)
-            .expect("the fixture should parse under the default limit")
-            .with_deadline(passed_deadline());
+        let file = SourceFile::from_text(
+            path,
+            text,
+            markdown,
+            Deadline::start("0".parse().expect("0 should be a time limit")),
+        )
+        .expect("the fixture should parse with no limit")
+        .with_deadline(passed_deadline());
 
         let error = links(&file).expect_err("the inline parse should stop at the deadline");
 
