@@ -9,6 +9,7 @@ use std::fmt::{self, Display, Formatter};
 use crate::link::SymbolPath;
 use crate::lock::error::shell_quote;
 use crate::path::AbsolutePath;
+use crate::read::query::QueryFileError;
 
 /// Why a file couldn't be read and parsed.
 #[derive(Debug)]
@@ -63,6 +64,39 @@ pub enum ReadError {
         /// What went wrong, as a short phrase that reads before "for <file>".
         reason: &'static str,
     },
+}
+
+/// A built-in cartridge that cannot be loaded: a supdoc bug that fails the run (exit 70), not a
+/// problem with any one file.
+#[derive(Debug, thiserror::Error)]
+pub enum CartridgeLoadError {
+    /// A built-in query file doesn't compile against its grammar.
+    #[error("{0}")]
+    Query(&'static QueryFileError),
+
+    /// The Markdown inline grammar can't be loaded into a parser.
+    #[error("the built-in Markdown inline grammar does not load (supdoc bug): {0:?}")]
+    InlineGrammar(&'static tree_sitter::LanguageError),
+}
+
+impl CartridgeLoadError {
+    /// The stable code: `read-cartridge-load`.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        "read-cartridge-load"
+    }
+
+    /// What to do next.
+    #[must_use]
+    pub fn help(&self) -> String {
+        concat!(
+            "Reinstall supdoc with `cargo install --locked supdoc`. If it still fails, report a \
+             bug at ",
+            env!("CARGO_PKG_REPOSITORY"),
+            "/issues, including the output of `supdoc --version`"
+        )
+        .to_owned()
+    }
 }
 
 /// What a file was being read as, which decides what advice fits its [`ReadError`].

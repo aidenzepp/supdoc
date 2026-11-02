@@ -655,7 +655,7 @@ mod tests {
         let key = occurrence.key.clone();
         let links = resolve(
             &config,
-            &Languages::builtin(),
+            Languages::builtin().expect("the built-in cartridges should load"),
             &mut Parsed::default(),
             config.hash_settings(),
             vec![occurrence],
@@ -672,10 +672,10 @@ mod tests {
             let dir = tempfile::TempDir::new().expect("a temp dir should be creatable");
             let path = dir.path().join("a.rs");
             std::fs::write(&path, "fn a() {\r\n}\r\n").expect("the fixture should be writable");
-            let languages = Languages::builtin();
+            let languages = Languages::builtin().expect("the built-in cartridges should load");
             let file = SourceFile::read(
                 AbsolutePath::new(&path).expect("a temp dir path should be absolute"),
-                &languages,
+                languages,
             )
             .expect("the fixture should read");
             hash_file(&file, HashSettings { line_endings })
