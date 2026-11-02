@@ -159,8 +159,8 @@ impl Plan {
         let config_edit = ConfigEdit::read(nearest, config.root(), old, &rerun, context, output)?;
         let parent = parent_definition(&config, old, context, output)?;
 
-        let languages = Languages::builtin();
-        let walked = walk(&config, &languages, &Scope::All);
+        let languages = Languages::builtin().map_err(CliError::from)?;
+        let walked = walk(&config, languages, &Scope::All);
         if let Some(dir) = walked.unread_dirs.first() {
             return Err(unread_dir(dir, config.root(), &rerun));
         }
@@ -174,9 +174,9 @@ impl Plan {
             else {
                 return Err(invalid_source(path, &rerun));
             };
-            match SourceFile::read(path.clone(), &languages) {
+            match SourceFile::read(path.clone(), languages) {
                 Ok(file) => {
-                    sources.extend(SourceEdit::find(&config, &languages, source, &file, old));
+                    sources.extend(SourceEdit::find(&config, languages, source, &file, old));
                 }
                 Err(error) => return Err(unread_source(&source, &rerun, &error)),
             }
@@ -1050,9 +1050,12 @@ web = \"services/web\"
 
         /// Each link's source, target, symbol and state, as `supdoc check` would judge them.
         fn states(&self) -> Vec<(String, String, LinkState)> {
-            let scan =
-                crate::scan::assemble::run(&self.config(), &Languages::builtin(), &Scope::All)
-                    .expect("the fixture project should scan");
+            let scan = crate::scan::assemble::run(
+                &self.config(),
+                Languages::builtin().expect("the built-in cartridges should load"),
+                &Scope::All,
+            )
+            .expect("the fixture project should scan");
             let lock = Lockfile::read(&lock_path(&self.root()))
                 .expect("the lockfile should parse")
                 .unwrap_or_default();

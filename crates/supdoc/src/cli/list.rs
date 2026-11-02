@@ -61,8 +61,12 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
         .map(|typed| parse_target(typed, &config, &context.cwd))
         .transpose()?;
     let lock = read_lock(&config, &context.cwd)?;
-    let scan = crate::scan::assemble::run(&config, &Languages::builtin(), &Scope::All)
-        .map_err(CliError::from)?;
+    let scan = crate::scan::assemble::run(
+        &config,
+        Languages::builtin().map_err(CliError::from)?,
+        &Scope::All,
+    )
+    .map_err(CliError::from)?;
     let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
     let model = reconcile_in(&scan, &lock, &Scope::All, &paths);
 
@@ -344,7 +348,10 @@ impl Wanted {
     /// `typed` resolved in `path`, or the plain text when the file can't be read or has no such
     /// symbol.
     fn resolve_symbol(typed: &SymbolPath, path: &AbsolutePath) -> SymbolFilter {
-        let Ok(file) = SourceFile::read(path.clone(), &Languages::builtin()) else {
+        let Ok(languages) = Languages::builtin() else {
+            return SymbolFilter::Text(typed.clone());
+        };
+        let Ok(file) = SourceFile::read(path.clone(), languages) else {
             return SymbolFilter::Text(typed.clone());
         };
         let table = file.language().symbols(&file);

@@ -482,7 +482,7 @@ mod tests {
         fn assemble(&self) -> (Scan, Parsed) {
             assemble(
                 &self.config(),
-                &Languages::builtin(),
+                Languages::builtin().expect("the built-in cartridges should load"),
                 &Scope::All,
                 self.config().hash_settings(),
             )
@@ -490,8 +490,12 @@ mod tests {
         }
 
         fn scan(&self) -> Scan {
-            run(&self.config(), &Languages::builtin(), &Scope::All)
-                .expect("a readable project root should scan")
+            run(
+                &self.config(),
+                Languages::builtin().expect("the built-in cartridges should load"),
+                &Scope::All,
+            )
+            .expect("a readable project root should scan")
         }
 
         /// The text of `relative` beneath the root, as now on disk.
@@ -887,7 +891,11 @@ mod tests {
         let locked = fs::Permissions::from_mode(0o000);
         fs::set_permissions(&project.root, locked).expect("the root should be lockable");
 
-        let result = run(&config, &Languages::builtin(), &Scope::All);
+        let result = run(
+            &config,
+            Languages::builtin().expect("the built-in cartridges should load"),
+            &Scope::All,
+        );
 
         fs::set_permissions(&project.root, fs::Permissions::from_mode(0o755))
             .expect("the root should be unlockable, so the temp dir can be removed");
