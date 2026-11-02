@@ -435,6 +435,8 @@ mod helps {
     enum Via {
         /// In the project root with an empty environment.
         Plain,
+        /// With `HOME` empty, which is no home directory: every run otherwise gets an empty one.
+        EmptyHome,
         /// With `CLAUDE_CONFIG_DIR` set to a relative path and `HOME` to a directory in the project.
         RelativeClaudeDir,
         /// With standard output sent to a file under a zero file-size limit, so every write to it
@@ -933,12 +935,12 @@ mod helps {
         case(
             "read-timeout",
             |p| {
-                // Deep nesting stalls the symbols query far past 1 ms (SEC-1).
+                // Deep nesting stalls the symbols query far past 250 ms (SEC-1).
                 let deep = format!("fn add() {{{}\n", "{".repeat(65_536));
                 p.write("src/deep.rs", &deep);
                 p.write("docs/guide.md", "[x](../src/deep.rs#add)\n");
             },
-            &["--parse-timeout", "1ms", "check"],
+            &["--parse-timeout", "250ms", "check"],
         ),
         case(
             "read-unsupported-language",
@@ -1315,11 +1317,13 @@ mod helps {
             |p| p.write(".agents/skills/supdoc/SKILL.md", "different"),
             &["skill", "install"],
         ),
-        case(
-            "cli-skill-no-home",
-            |_| {},
-            &["skill", "install", "--global"],
-        ),
+        HelpCase {
+            kind: "cli-skill-no-home",
+            setup: |_| {},
+            args: &["skill", "install", "--global"],
+            via: Via::EmptyHome,
+            needs_permissions: false,
+        },
         restricted_case(
             "cli-skill-write",
             |p| chmod(p, ".", 0o555),
@@ -1406,6 +1410,10 @@ mod helps {
 
         let output = match case.via {
             Via::Plain => project.command(&args, &[]).stdin(Stdio::null()).output(),
+            Via::EmptyHome => project
+                .command(&args, &[("HOME", "")])
+                .stdin(Stdio::null())
+                .output(),
             Via::RelativeClaudeDir => project
                 .command(&args, &[("HOME", home), ("CLAUDE_CONFIG_DIR", "claude")])
                 .stdin(Stdio::null())

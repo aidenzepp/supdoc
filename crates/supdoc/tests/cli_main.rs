@@ -25,10 +25,17 @@ mod support {
     }
 
     /// Runs `supdoc` with `args` in an empty environment.
+    ///
+    /// Git's environment is isolated: `HOME` and `XDG_CONFIG_HOME` are an empty directory and
+    /// `GIT_CONFIG_SYSTEM` a missing file in it, so no run reads the real user's git config.
     pub(crate) fn supdoc(args: &[&str]) -> Run {
+        let empty = tempfile::tempdir().expect("an empty git config directory should be creatable");
         let output = Command::new(env!("CARGO_BIN_EXE_supdoc"))
             .args(args)
             .env_clear()
+            .env("HOME", empty.path())
+            .env("XDG_CONFIG_HOME", empty.path())
+            .env("GIT_CONFIG_SYSTEM", empty.path().join("gitconfig"))
             .output()
             .expect("the supdoc binary should start");
         Run {

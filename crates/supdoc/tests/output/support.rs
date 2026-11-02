@@ -24,6 +24,8 @@ pub fn sub(a: i32, b: i32) -> i32 {
 pub(crate) struct Project {
     /// The project root; removed when the project is dropped.
     dir: tempfile::TempDir,
+    /// An empty directory standing in for the home and config directories, so git config is empty.
+    no_git_config: tempfile::TempDir,
 }
 
 impl Project {
@@ -31,6 +33,8 @@ impl Project {
     pub(crate) fn empty() -> Self {
         Self {
             dir: tempfile::tempdir().expect("a fresh temp directory should be created"),
+            no_git_config: tempfile::tempdir()
+                .expect("an empty git config directory should be creatable"),
         }
     }
 
@@ -155,12 +159,20 @@ impl Project {
     }
 
     /// The `supdoc args` command, run in the project root with only `env` set.
+    ///
+    /// Git's environment is isolated first: `HOME` and `XDG_CONFIG_HOME` are an empty directory
+    /// outside the project and `GIT_CONFIG_SYSTEM` a missing file in it, so no run reads the real
+    /// user's git config. `env` may set any of them.
     pub(crate) fn command(&self, args: &[&str], env: &[(&str, &str)]) -> Command {
+        let empty = self.no_git_config.path();
         let mut command = Command::new(env!("CARGO_BIN_EXE_supdoc"));
         let _command = command
             .args(args)
             .current_dir(self.path())
             .env_clear()
+            .env("HOME", empty)
+            .env("XDG_CONFIG_HOME", empty)
+            .env("GIT_CONFIG_SYSTEM", empty.join("gitconfig"))
             .envs(env.iter().copied());
         command
     }
