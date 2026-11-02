@@ -34,9 +34,6 @@ pub trait Cartridge: Send + Sync + fmt::Debug {
     /// The tree-sitter grammar.
     fn grammar(&self) -> &tree_sitter::Language;
 
-    /// The cartridge's `tags.scm` and `injections.scm`, compiled once, lazily.
-    fn queries(&self) -> &CompiledQueries;
-
     /// The symbols `file` exposes (03 R4). Query-driven cartridges run `tags.scm`.
     ///
     /// # Errors
@@ -79,7 +76,7 @@ impl fmt::Display for LanguageId {
     }
 }
 
-/// A cartridge's queries, compiled against its grammar.
+/// A query-driven cartridge's queries, compiled against its grammar.
 #[derive(Debug)]
 pub struct CompiledQueries {
     /// `tags.scm`: `@definition.*`, `@name` and the `@supdoc.scope*` extensions.
@@ -456,8 +453,6 @@ mod tests {
         extensions: &'static [&'static str],
         /// The grammar, created on first use.
         grammar: OnceLock<tree_sitter::Language>,
-        /// Empty queries, compiled on first use.
-        queries: OnceLock<CompiledQueries>,
     }
 
     impl TestCartridge {
@@ -466,7 +461,6 @@ mod tests {
                 id,
                 extensions,
                 grammar: OnceLock::new(),
-                queries: OnceLock::new(),
             }
         }
     }
@@ -483,16 +477,6 @@ mod tests {
         fn grammar(&self) -> &tree_sitter::Language {
             self.grammar
                 .get_or_init(|| tree_sitter_rust::LANGUAGE.into())
-        }
-
-        fn queries(&self) -> &CompiledQueries {
-            self.queries.get_or_init(|| {
-                let empty = || {
-                    tree_sitter::Query::new(self.grammar(), "")
-                        .expect("an empty query should compile against any grammar")
-                };
-                CompiledQueries::new(empty(), empty())
-            })
         }
 
         fn symbols(&self, _file: &SourceFile) -> Result<SymbolTable, ReadError> {
@@ -586,7 +570,6 @@ mod tests {
         assert_eq!(file.tree().root_node().kind(), "source_file");
         assert_eq!(file.tree().root_node().byte_range(), 0..file.text().len());
         assert_eq!(file.language().id(), LanguageId::new("rust"));
-        assert_eq!(file.language().queries().tags().pattern_count(), 0);
     }
 
     #[test]

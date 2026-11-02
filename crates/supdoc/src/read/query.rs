@@ -51,6 +51,12 @@ pub struct QueryCartridge {
 }
 
 impl QueryCartridge {
+    /// The compiled `tags.scm` and `injections.scm`.
+    #[must_use]
+    pub const fn queries(&self) -> &CompiledQueries {
+        &self.queries
+    }
+
     /// Compiles `tags` and `injections` against `grammar`.
     ///
     /// Built-in cartridges are built once, on first use. A test compiles every one of them, so a
@@ -99,16 +105,12 @@ impl Cartridge for QueryCartridge {
         &self.grammar
     }
 
-    fn queries(&self) -> &CompiledQueries {
-        &self.queries
-    }
-
     fn symbols(&self, file: &SourceFile) -> Result<SymbolTable, ReadError> {
-        tag_symbols(file)
+        tag_symbols(file, &self.queries)
     }
 
     fn markdown_regions(&self, file: &SourceFile) -> Result<Vec<MarkdownRegion>, ReadError> {
-        injected_markdown(file)
+        injected_markdown(file, &self.queries)
     }
 }
 
@@ -124,8 +126,11 @@ impl Cartridge for QueryCartridge {
 /// # Errors
 ///
 /// [`ReadError::Timeout`] when the file's deadline stops the query.
-pub fn injected_markdown(file: &SourceFile) -> Result<Vec<MarkdownRegion>, ReadError> {
-    let query = file.language().queries().injections();
+pub fn injected_markdown(
+    file: &SourceFile,
+    queries: &CompiledQueries,
+) -> Result<Vec<MarkdownRegion>, ReadError> {
+    let query = queries.injections();
     let content = query.capture_index_for_name("injection.content");
     let language = query.capture_index_for_name("injection.language");
     let text = file.text();
