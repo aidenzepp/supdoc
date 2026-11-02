@@ -13,12 +13,14 @@ use serde::Serialize;
 use crate::check::model::{LinkReport, Report as CheckModel};
 use crate::check::reconcile::{self, check_outcome, reconcile_in};
 use crate::finding::{Finding, Location};
+use crate::link::destination::Untracked;
 use crate::link::{LinkKey, SourcePath};
 use crate::output::json::{Envelope, FindingJson};
 use crate::output::summary::render_summary;
 use crate::output::text::{render_finding, visible};
 use crate::output::{Output, PathStyle, Report, Summary, TextContext, Verbosity};
 use crate::read::cartridge::Languages;
+use crate::scan::assemble::UntrackedLinks;
 use crate::state::LinkState;
 
 use super::args::CheckArgs;
@@ -40,8 +42,9 @@ pub fn run(args: &CheckArgs, context: &Context, output: &mut Output) -> Result<O
     let config = load_config(context, output)?;
     let scope = scope(&args.paths, &config, context)?;
     let lock = read_lock(&config, &context.cwd)?;
-    let scan = crate::scan::assemble::run(&config, &Languages::builtin(), &scope)
-        .map_err(CliError::from)?;
+    let (scan, untracked) =
+        crate::scan::assemble::run_with_untracked(&config, &Languages::builtin(), &scope)
+            .map_err(CliError::from)?;
 
     let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
     let model = reconcile_in(&scan, &lock, &scope, &paths);
@@ -49,7 +52,13 @@ pub fn run(args: &CheckArgs, context: &Context, output: &mut Output) -> Result<O
         reconcile::Outcome::Clean => Outcome::Clean,
         reconcile::Outcome::Failing => Outcome::Failing,
     };
-    let report = CheckReport::new(model, output.verbosity());
+    let verbosity = output.verbosity();
+    let report = CheckReport::new(model, verbosity);
+    let report = if verbosity.lists_passed() {
+        report.with_untracked(&untracked)
+    } else {
+        report
+    };
     output
         .report(&report, outcome == Outcome::Clean)
         .map_err(|error| CliError::output_failed("cli-check-output", "the check report", &error))?;
@@ -80,6 +89,9 @@ pub struct CheckReport {
     /// Findings not tied to one link.
     #[serde(skip)]
     loose: Vec<Finding>,
+    /// How many links were left untracked for each reason, printed as text only.
+    #[serde(skip)]
+    untracked: Vec<(Untracked, usize)>,
 }
 
 impl CheckReport {
@@ -97,6 +109,16 @@ impl CheckReport {
             links: shown.iter().map(LinkJson::from).collect(),
             shown,
             loose: model.findings,
+            untracked: Vec::new(),
+        }
+    }
+
+    /// The report, also printing one line per reason that links were left untracked for.
+    #[must_use]
+    pub fn with_untracked(self, untracked: &UntrackedLinks) -> Self {
+        Self {
+            untracked: untracked.counts().collect(),
+            ..self
         }
     }
 }
@@ -134,6 +156,7 @@ impl Report for CheckReport {
                 Entry::Loose(finding) => render_finding(context, finding, out)?,
             }
         }
+        render_untracked(&self.untracked, out)?;
         render_summary(context, &self.summary, out)
     }
 }
@@ -191,6 +214,23 @@ fn render_passed(context: &TextContext, key: &LinkKey, out: &mut dyn Write) -> i
         context.arrow(),
         visible(&key.target_text()),
     )
+}
+
+/// `untracked  directories: 2`, one line per reason links were left untracked for, then a blank
+/// line. Prints nothing when no link was left untracked.
+///
+/// # Errors
+///
+/// Fails if writing to `out` fails.
+fn render_untracked(untracked: &[(Untracked, usize)], out: &mut dyn Write) -> io::Result<()> {
+    for (reason, count) in untracked {
+        writeln!(out, "untracked  {}: {count}", reason.describe())?;
+    }
+    if untracked.is_empty() {
+        Ok(())
+    } else {
+        writeln!(out)
+    }
 }
 
 /// One link as `check --json` and `list --json` show it (07 "JSON output").
@@ -727,6 +767,35 @@ mod tests {
                 .contains("passed  docs/guide.md -> src/lib.rs#add"),
             "stdout: {}",
             verbose_text.stdout
+        );
+    }
+
+    #[test]
+    fn untracked_links_are_counted_by_reason_only_when_verbose() {
+        let project = project();
+        project.write(
+            "docs/more.md",
+            "[home](/), [api](api.html#section), [logo](logo.png) and [web](https://example.com).\n",
+        );
+        project.record_all();
+
+        let normal = project.check(&["check"]);
+        let verbose = project.check(&["-v", "check"]);
+
+        assert_eq!(verbose.exit_code(), 0, "untracked links never fail a check");
+        assert!(
+            !normal.stdout.contains("untracked"),
+            "stdout: {}",
+            normal.stdout
+        );
+        assert!(
+            verbose.stdout.contains(
+                "untracked  URLs or code paths: 1\n\
+                 untracked  directories: 1\n\
+                 untracked  files no language reads: 2\n"
+            ),
+            "stdout: {}",
+            verbose.stdout
         );
     }
 

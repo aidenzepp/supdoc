@@ -164,7 +164,8 @@ impl Written {
 }
 
 /// Resolves every link: groups them by key (S11) and by target, reads each target once, and
-/// records what each target looks like now. Links to a directory are dropped (S13).
+/// records what each target looks like now. Links to a directory are dropped (S13); the second
+/// value counts them, one per place written, for `check -v`.
 ///
 /// Effect: reads target files and the directory listings along their paths.
 pub(crate) fn resolve(
@@ -173,7 +174,7 @@ pub(crate) fn resolve(
     parsed: &mut Parsed,
     settings: HashSettings,
     occurrences: Vec<Occurrence>,
-) -> BTreeMap<LinkKey, ScannedLink> {
+) -> (BTreeMap<LinkKey, ScannedLink>, usize) {
     let mut by_target: BTreeMap<Target, BTreeMap<LinkKey, Vec<Occurrence>>> = BTreeMap::new();
     for occurrence in occurrences {
         by_target
@@ -185,10 +186,15 @@ pub(crate) fn resolve(
     }
 
     let mut links = BTreeMap::new();
+    let mut directory_links = 0;
     for (target, keyed) in by_target {
-        for (key, state, occurrences) in
-            target_states(config, languages, parsed, settings, &target, keyed)
-        {
+        let written = keyed.values().map(Vec::len).sum::<usize>();
+        let Some(states) = target_states(config, languages, parsed, settings, &target, keyed)
+        else {
+            directory_links += written;
+            continue;
+        };
+        for (key, state, occurrences) in states {
             let snippet = occurrences
                 .first()
                 .and_then(|occurrence| occurrence.snippet.clone());
@@ -203,10 +209,11 @@ pub(crate) fn resolve(
             let _replaced = links.insert(key, link);
         }
     }
-    links
+    (links, directory_links)
 }
 
-/// The state of each link into `target`, or nothing when the target isn't tracked.
+/// The state of each link into `target`, or `None` when the target is a directory, which is never
+/// tracked (S13).
 fn target_states(
     config: &Config,
     languages: &Languages,
@@ -214,7 +221,7 @@ fn target_states(
     settings: HashSettings,
     target: &Target,
     keyed: BTreeMap<LinkKey, Vec<Occurrence>>,
-) -> Vec<(LinkKey, TargetState, Vec<Occurrence>)> {
+) -> Option<Vec<(LinkKey, TargetState, Vec<Occurrence>)>> {
     let broken_by = |finding: &dyn Fn(&Occurrence) -> Finding| {
         keyed
             .iter()
@@ -230,21 +237,27 @@ fn target_states(
     };
 
     let path = match locate(config, target) {
-        Located::Directory => return Vec::new(),
-        Located::UnknownNamespace => return broken_by(&|first| unknown_namespace(target, first)),
-        Located::OutsideRoot => return broken_by(&|first| outside_root(target, first)),
+        Located::Directory => return None,
+        Located::UnknownNamespace => {
+            return Some(broken_by(&|first| unknown_namespace(target, first)));
+        }
+        Located::OutsideRoot => return Some(broken_by(&|first| outside_root(target, first))),
         Located::CaseMismatch(real) => {
-            return broken_by(&|first| case_mismatch(target, &real, first));
+            return Some(broken_by(&|first| case_mismatch(target, &real, first)));
         }
         Located::File(path) => path,
     };
     let file = match parsed.read(&path, languages) {
         Ok(file) => file,
-        Err(error) => return broken_by(&|first| read_failed(&error, config.root(), first)),
+        Err(error) => {
+            return Some(broken_by(&|first| {
+                read_failed(&error, config.root(), first)
+            }));
+        }
     };
 
     let mut table: Option<SymbolTable> = None;
-    keyed
+    let states = keyed
         .into_iter()
         .filter_map(|(key, occurrences)| {
             let first = occurrences.first()?;
@@ -281,7 +294,8 @@ fn target_states(
             };
             Some((key, state, occurrences))
         })
-        .collect()
+        .collect();
+    Some(states)
 }
 
 /// Where a target is on disk.
@@ -627,7 +641,7 @@ mod tests {
         .expect("the fixture config should load");
         let occurrence = occurrence("a.rs");
         let key = occurrence.key.clone();
-        let links = resolve(
+        let (links, _directory_links) = resolve(
             &config,
             &Languages::builtin(),
             &mut Parsed::default(),

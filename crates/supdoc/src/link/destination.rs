@@ -8,8 +8,14 @@
 //!    Every path is then normalized lexically (`.`, `..`), so one file has one spelling.
 //!    A path that still climbs (`../x`, `/../x`, `ns:../x`) leaves the project root or the
 //!    namespace's directory, and is a [`LinkError::OutsideRoot`] decided without the filesystem.
-//! 4. Without a `#fragment`, only a file some cartridge reads is a (whole-file) link.
-//! 5. With a fragment, `#heading` alone (the same file) is not tracked; otherwise it is a symbol.
+//! 4. A path that names a directory (it is empty once normalized, as `/`, `./` or a `../` that
+//!    reaches the root, or it ends in `/` or `..`) is navigation, not a supdoc link. With a `#fragment` it
+//!    is a [`LinkError::Directory`]: a symbol lives in a file, not a directory.
+//! 5. With or without a `#fragment`, only a file some cartridge reads is a link (`logo.png` and
+//!    `api.html#section` are not).
+//! 6. With a fragment, `#heading` alone (the same file) is not tracked; otherwise it is a symbol.
+//!
+//! A destination that is not a supdoc link says why, as a [`Destination::NotSupdoc`] reason.
 //!
 //! Paths and fragments are percent-decoded; the prefix and the `scheme://` test are not.
 
@@ -40,6 +46,54 @@ pub struct ParsedLink {
     pub target: Target,
     /// The symbol inside that file, or `None` for a whole-file link.
     pub symbol: Option<SymbolPath>,
+}
+
+/// What a destination is: a supdoc link, a supdoc link that is wrong, or not a supdoc link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Destination {
+    /// A supdoc link to track.
+    Link(ParsedLink),
+    /// A link meant for supdoc that is wrong; callers report it as a finding.
+    Invalid(LinkError),
+    /// Not a supdoc link, and never tracked.
+    NotSupdoc {
+        /// Why it is left untracked.
+        reason: Untracked,
+    },
+}
+
+impl Destination {
+    /// Whether the destination is meant for supdoc, right or wrong.
+    #[must_use]
+    pub const fn is_supdoc(&self) -> bool {
+        !matches!(self, Self::NotSupdoc { .. })
+    }
+}
+
+/// Why a destination is not a supdoc link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Untracked {
+    /// A URL (`https://...`), an ignored scheme (`mailto:`), or a language path (`crate::Foo`).
+    Url,
+    /// A heading in the same file (`#setup`), or an empty destination.
+    SameFile,
+    /// A directory (`/`, `../`, `../src/`), which is navigation.
+    Directory,
+    /// A file no cartridge reads (`logo.png`, `api.html#section`).
+    UntrackedType,
+}
+
+impl Untracked {
+    /// What links left untracked for this reason are, as a plural noun phrase for `-v`.
+    #[must_use]
+    pub const fn describe(self) -> &'static str {
+        match self {
+            Self::Url => "URLs or code paths",
+            Self::SameFile => "headings in the same file",
+            Self::Directory => "directories",
+            Self::UntrackedType => "files no language reads",
+        }
+    }
 }
 
 /// Why a destination that looks like a supdoc link cannot be read.
@@ -84,6 +138,14 @@ pub enum LinkError {
         /// The namespace the path climbs out of, if it is namespaced.
         namespace: Option<NamespaceName>,
     },
+    /// The path names a directory, but the link has a symbol fragment, which only a file holds.
+    #[error("`{directory}` names a directory; link a file")]
+    Directory {
+        /// The destination as written.
+        destination: String,
+        /// The path part as written, before the `#`.
+        directory: String,
+    },
     /// The fragment carries a text fragment (`:~:`), which is not built yet.
     #[error("text fragments (`:~:`) aren't supported yet")]
     TextFragmentUnsupported {
@@ -124,18 +186,20 @@ impl NamespaceNames for BTreeSet<NamespaceName> {
 
 /// Reads `raw`'s destination as written in `source`.
 ///
-/// Returns `None` when the destination is not a supdoc link: a URL, `mailto:`-style scheme,
-/// `name::path` language path, same-file `#anchor`, or a whole-file link to a file no cartridge in
-/// `languages` reads (`logo.png`). `Some(Err(_))` is a link that is meant for supdoc but is wrong.
+/// [`Destination::NotSupdoc`] for a URL, `mailto:`-style scheme, `name::path` language path,
+/// same-file `#anchor`, directory, or file no cartridge in `languages` reads (`logo.png`),
+/// with or without a fragment. [`Destination::Invalid`] is a link meant for supdoc but wrong.
 ///
-/// Pure: it never touches the filesystem, so a link to a missing file is still `Some(Ok(_))`.
+/// Pure: it never touches the filesystem, so a link to a missing file is still a
+/// [`Destination::Link`], and a directory is known only by its spelling (see the module rules).
 #[must_use]
 pub fn parse_destination(
     raw: &RawLink,
     source: &SourcePath,
     namespaces: &impl NamespaceNames,
     languages: &Languages,
-) -> Option<Result<ParsedLink, LinkError>> {
+) -> Destination {
+    let not_supdoc = |reason| Destination::NotSupdoc { reason };
     let destination = raw.destination.trim();
     let (before_fragment, fragment) = match destination.split_once('#') {
         Some((before, fragment)) => (before, Some(fragment)),
@@ -143,12 +207,14 @@ pub fn parse_destination(
     };
 
     if is_not_a_path(before_fragment) {
-        return None;
+        return not_supdoc(Untracked::Url);
     }
     let (namespace, path) = match split_prefix(before_fragment) {
         Some((prefix, path)) => match namespaces_entry(namespaces, prefix) {
             Some(namespace) => (Some(namespace), path),
-            None => return Some(Err(unknown_namespace(prefix, destination, namespaces))),
+            None => {
+                return Destination::Invalid(unknown_namespace(prefix, destination, namespaces));
+            }
         },
         None => (None, before_fragment),
     };
@@ -156,37 +222,55 @@ pub fn parse_destination(
     let fragment = fragment.filter(|fragment| !fragment.is_empty());
     if path.is_empty() && namespace.is_none() {
         // `#setup` (or an empty destination): a heading in this very file, never tracked (R11).
-        return None;
+        return not_supdoc(Untracked::SameFile);
     }
 
     let Some(decoded_path) = percent_decode(path) else {
-        return Some(Err(LinkError::InvalidPath {
+        return Destination::Invalid(LinkError::InvalidPath {
             destination: destination.to_owned(),
             error: LinkPathError::NotUtf8 {
                 path: path.to_owned(),
             },
-        }));
+        });
     };
     let relative = match (&namespace, decoded_path.strip_prefix('/')) {
         (Some(_), _) => normalize(Vec::new(), &decoded_path),
         (None, Some(from_root)) => normalize(Vec::new(), from_root),
         (None, None) => normalize(source_directory(source), &decoded_path),
     };
-
-    if fragment.is_none()
-        && !relative.is_empty()
-        && languages.for_path(Path::new(&relative)).is_none()
-    {
-        return None;
-    }
-    if relative == ".." || relative.starts_with("../") {
-        return Some(Err(LinkError::OutsideRoot {
+    let climbs = relative == ".." || relative.starts_with("../");
+    let outside_root = || {
+        Destination::Invalid(LinkError::OutsideRoot {
             destination: destination.to_owned(),
-            namespace,
-        }));
+            namespace: namespace.clone(),
+        })
+    };
+
+    let names_directory = relative.is_empty()
+        || relative.ends_with('/')
+        || relative == ".."
+        || relative.ends_with("/..");
+    if names_directory {
+        return match fragment {
+            None => not_supdoc(Untracked::Directory),
+            Some(_) if climbs => outside_root(),
+            Some(_) => Destination::Invalid(LinkError::Directory {
+                destination: destination.to_owned(),
+                directory: before_fragment.to_owned(),
+            }),
+        };
+    }
+    if languages.for_path(Path::new(&relative)).is_none() {
+        return not_supdoc(Untracked::UntrackedType);
+    }
+    if climbs {
+        return outside_root();
     }
 
-    Some(build(destination, namespace, &relative, fragment))
+    match build(destination, namespace, &relative, fragment) {
+        Ok(link) => Destination::Link(link),
+        Err(error) => Destination::Invalid(error),
+    }
 }
 
 /// The message for a destination whose path climbs out of where it may point.
@@ -419,12 +503,12 @@ mod tests {
     };
 
     /// Parses `destination` written in `docs/guide.md` with namespaces `auth` and `billing`.
-    fn parse(destination: &str) -> Option<Result<ParsedLink, LinkError>> {
+    fn parse(destination: &str) -> Destination {
         parse_in("docs/guide.md", destination)
     }
 
     /// Parses `destination` written in `source`, with namespaces `auth` and `billing`.
-    fn parse_in(source: &str, destination: &str) -> Option<Result<ParsedLink, LinkError>> {
+    fn parse_in(source: &str, destination: &str) -> Destination {
         let namespaces: BTreeSet<NamespaceName> = ["auth", "billing"]
             .into_iter()
             .map(|name| {
@@ -449,6 +533,11 @@ mod tests {
         )
     }
 
+    /// A destination that is not a supdoc link, for `reason`.
+    const fn untracked(reason: Untracked) -> Destination {
+        Destination::NotSupdoc { reason }
+    }
+
     /// The link a destination should parse to, from its target text and symbol text.
     fn link(target: &str, symbol: Option<&str>) -> ParsedLink {
         ParsedLink {
@@ -469,7 +558,11 @@ mod tests {
             "tel:+15550100",
             "data:text/plain;base64,AAAA",
         ] {
-            assert_eq!(parse(destination), None, "{destination}");
+            assert_eq!(
+                parse(destination),
+                untracked(Untracked::Url),
+                "{destination}"
+            );
         }
     }
 
@@ -481,7 +574,11 @@ mod tests {
             "std::collections::HashMap",
             "::foo",
         ] {
-            assert_eq!(parse(destination), None, "{destination}");
+            assert_eq!(
+                parse(destination),
+                untracked(Untracked::Url),
+                "{destination}"
+            );
         }
     }
 
@@ -489,7 +586,7 @@ mod tests {
     fn configured_prefix_is_a_namespaced_target() {
         assert_eq!(
             parse("auth:src/lib.rs#login"),
-            Some(Ok(link("auth:src/lib.rs", Some("login")))),
+            Destination::Link(link("auth:src/lib.rs", Some("login"))),
         );
     }
 
@@ -497,7 +594,7 @@ mod tests {
     fn namespaced_path_is_not_joined_to_the_source_directory() {
         assert_eq!(
             parse_in("a/b/c.md", "auth:x.rs"),
-            Some(Ok(link("auth:x.rs", None))),
+            Destination::Link(link("auth:x.rs", None)),
         );
     }
 
@@ -511,10 +608,10 @@ mod tests {
         ] {
             assert_eq!(
                 parse_in("a/b/c.md", destination),
-                Some(Err(LinkError::OutsideRoot {
+                Destination::Invalid(LinkError::OutsideRoot {
                     destination: destination.to_owned(),
                     namespace: Some("auth".parse().expect("the fixture name should be valid")),
-                })),
+                }),
                 "{destination} should be decoded before it is normalized",
             );
         }
@@ -529,11 +626,11 @@ mod tests {
         };
         assert_eq!(
             parse("bilng:src/x.rs#f"),
-            Some(Err(LinkError::UnknownNamespace {
+            Destination::Invalid(LinkError::UnknownNamespace {
                 prefix: "bilng".to_owned(),
                 destination: "bilng:src/x.rs#f".to_owned(),
                 known: names(&["billing", "auth"]),
-            })),
+            }),
         );
     }
 
@@ -541,12 +638,12 @@ mod tests {
     fn colon_in_the_path_part_is_an_invalid_path() {
         assert_eq!(
             parse("src/a:b.rs"),
-            Some(Err(LinkError::InvalidPath {
+            Destination::Invalid(LinkError::InvalidPath {
                 destination: "src/a:b.rs".to_owned(),
                 error: LinkPathError::Colon {
                     path: "docs/src/a:b.rs".to_owned(),
                 },
-            })),
+            }),
         );
     }
 
@@ -554,7 +651,7 @@ mod tests {
     fn leading_slash_is_project_root() {
         assert_eq!(
             parse_in("docs/deep/guide.md", "/src/lib.rs#add"),
-            Some(Ok(link("src/lib.rs", Some("add")))),
+            Destination::Link(link("src/lib.rs", Some("add"))),
         );
     }
 
@@ -562,11 +659,11 @@ mod tests {
     fn relative_path_is_joined_to_the_source_directory() {
         assert_eq!(
             parse_in("docs/guide.md", "../src/./lib.rs#add"),
-            Some(Ok(link("src/lib.rs", Some("add")))),
+            Destination::Link(link("src/lib.rs", Some("add"))),
         );
         assert_eq!(
             parse_in("guide.md", "src/lib.rs"),
-            Some(Ok(link("src/lib.rs", None)))
+            Destination::Link(link("src/lib.rs", None))
         );
     }
 
@@ -574,7 +671,7 @@ mod tests {
     fn comment_link_resolves_relative_to_the_code_file() {
         assert_eq!(
             parse_in("src/server.rs", "../docs/b.md"),
-            Some(Ok(link("docs/b.md", None))),
+            Destination::Link(link("docs/b.md", None)),
             "`../docs/b.md` written in `src/server.rs` is `docs/b.md` from the project root",
         );
     }
@@ -582,17 +679,26 @@ mod tests {
     #[test]
     fn root_relative_and_relative_spellings_of_one_file_share_a_key() {
         let from_root = parse_in("docs/guide.md", "/docs/../src/lib.rs#add");
-        assert_eq!(from_root, Some(Ok(link("src/lib.rs", Some("add")))));
+        assert_eq!(
+            from_root,
+            Destination::Link(link("src/lib.rs", Some("add")))
+        );
         assert_eq!(from_root, parse_in("docs/guide.md", "../src/lib.rs#add"));
     }
 
     #[test]
     fn dot_segments_are_normalized_in_root_relative_and_namespaced_paths() {
-        assert_eq!(parse("/./src/lib.rs"), Some(Ok(link("src/lib.rs", None))),);
-        assert_eq!(parse("auth:./lib.rs"), Some(Ok(link("auth:lib.rs", None))),);
+        assert_eq!(
+            parse("/./src/lib.rs"),
+            Destination::Link(link("src/lib.rs", None)),
+        );
+        assert_eq!(
+            parse("auth:./lib.rs"),
+            Destination::Link(link("auth:lib.rs", None)),
+        );
         assert_eq!(
             parse("auth:src/../lib.rs#f"),
-            Some(Ok(link("auth:lib.rs", Some("f")))),
+            Destination::Link(link("auth:lib.rs", Some("f"))),
         );
     }
 
@@ -610,10 +716,10 @@ mod tests {
         ] {
             assert_eq!(
                 parse_in(source, destination),
-                Some(Err(LinkError::OutsideRoot {
+                Destination::Invalid(LinkError::OutsideRoot {
                     destination: destination.to_owned(),
                     namespace: None,
-                })),
+                }),
                 "{destination} in {source}",
             );
         }
@@ -621,14 +727,21 @@ mod tests {
 
     #[test]
     fn climbing_link_to_a_file_no_cartridge_reads_is_still_not_tracked() {
-        assert_eq!(parse_in("guide.md", "../logo.png"), None);
+        assert_eq!(
+            parse_in("guide.md", "../logo.png"),
+            untracked(Untracked::UntrackedType)
+        );
+        assert_eq!(
+            parse_in("guide.md", "../logo.png#x"),
+            untracked(Untracked::UntrackedType)
+        );
     }
 
     #[test]
     fn percent_encoding_is_decoded() {
         assert_eq!(
             parse("../my%20src/lib.rs#a%2Eb"),
-            Some(Ok(link("my src/lib.rs", Some("a.b")))),
+            Destination::Link(link("my src/lib.rs", Some("a.b"))),
         );
     }
 
@@ -636,7 +749,7 @@ mod tests {
     fn malformed_percent_escape_is_kept_as_written() {
         assert_eq!(
             parse("../100%/x.rs#a%zz"),
-            Some(Ok(link("100%/x.rs", Some("a%zz"))))
+            Destination::Link(link("100%/x.rs", Some("a%zz")))
         );
     }
 
@@ -644,58 +757,113 @@ mod tests {
     fn percent_escapes_that_are_not_utf8_are_an_error() {
         assert!(matches!(
             parse("../%FF.rs"),
-            Some(Err(LinkError::InvalidPath {
+            Destination::Invalid(LinkError::InvalidPath {
                 error: LinkPathError::NotUtf8 { .. },
                 ..
-            })),
+            }),
         ));
         assert_eq!(
             parse("../x.rs#%FF"),
-            Some(Err(LinkError::InvalidSymbol {
+            Destination::Invalid(LinkError::InvalidSymbol {
                 fragment: "%FF".to_owned(),
                 reason: FRAGMENT_NOT_UTF8,
-            })),
+            }),
         );
     }
 
     #[test]
     fn plain_link_to_doc_is_a_whole_file_link() {
-        assert_eq!(parse("setup.md"), Some(Ok(link("docs/setup.md", None))));
+        assert_eq!(
+            parse("setup.md"),
+            Destination::Link(link("docs/setup.md", None))
+        );
     }
 
     #[test]
     fn same_file_anchor_is_not_tracked() {
-        assert_eq!(parse("#setup"), None);
-        assert_eq!(parse(""), None);
+        assert_eq!(parse("#setup"), untracked(Untracked::SameFile));
+        assert_eq!(parse(""), untracked(Untracked::SameFile));
     }
 
     #[test]
-    fn whole_file_link_to_unsupported_type_is_not_tracked() {
-        assert_eq!(parse("logo.png"), None);
-        assert_eq!(parse("../src/"), None);
+    fn link_to_a_file_no_cartridge_reads_is_not_tracked_with_or_without_a_fragment() {
+        for destination in ["logo.png", "logo.png#x", "api.html#section", "../src#add"] {
+            assert_eq!(
+                parse(destination),
+                untracked(Untracked::UntrackedType),
+                "{destination}"
+            );
+        }
     }
 
     #[test]
-    fn symbol_link_is_kept_even_for_a_file_no_cartridge_reads() {
+    fn link_to_a_directory_is_not_tracked() {
+        for (source, destination) in [
+            ("docs/guide.md", "../src/"),
+            ("docs/guide.md", "/"),
+            ("docs/guide.md", "../"),
+            ("docs/guide.md", ".."),
+            ("guide.md", "./"),
+            ("guide.md", "../"),
+            ("docs/guide.md", "auth:"),
+        ] {
+            assert_eq!(
+                parse_in(source, destination),
+                untracked(Untracked::Directory),
+                "{destination} in {source}",
+            );
+        }
+    }
+
+    #[test]
+    fn symbol_link_to_a_directory_names_the_directory() {
+        for (destination, directory) in [("/#x", "/"), ("../src/#add", "../src/")] {
+            assert_eq!(
+                parse(destination),
+                Destination::Invalid(LinkError::Directory {
+                    destination: destination.to_owned(),
+                    directory: directory.to_owned(),
+                }),
+                "{destination}",
+            );
+        }
         assert_eq!(
-            parse("logo.png#x"),
-            Some(Ok(link("docs/logo.png", Some("x"))))
+            LinkError::Directory {
+                destination: "/#x".to_owned(),
+                directory: "/".to_owned(),
+            }
+            .to_string(),
+            "`/` names a directory; link a file",
+        );
+    }
+
+    #[test]
+    fn symbol_link_to_a_directory_outside_the_root_is_outside_root() {
+        assert_eq!(
+            parse_in("guide.md", "../#x"),
+            Destination::Invalid(LinkError::OutsideRoot {
+                destination: "../#x".to_owned(),
+                namespace: None,
+            }),
         );
     }
 
     #[test]
     fn empty_fragment_is_a_whole_file_link() {
-        assert_eq!(parse("../src/lib.rs#"), Some(Ok(link("src/lib.rs", None))));
+        assert_eq!(
+            parse("../src/lib.rs#"),
+            Destination::Link(link("src/lib.rs", None))
+        );
     }
 
     #[test]
     fn symbol_with_empty_segment_is_invalid() {
         assert_eq!(
             parse("../src/lib.rs#a..b"),
-            Some(Err(LinkError::InvalidSymbol {
+            Destination::Invalid(LinkError::InvalidSymbol {
                 fragment: "a..b".to_owned(),
                 reason: SymbolPathError::EMPTY_SEGMENT,
-            })),
+            }),
         );
     }
 
@@ -703,16 +871,15 @@ mod tests {
     fn text_fragment_is_reported_not_parsed_as_a_symbol() {
         assert_eq!(
             parse("../src/lib.rs#add:~:text=hello"),
-            Some(Err(LinkError::TextFragmentUnsupported {
+            Destination::Invalid(LinkError::TextFragmentUnsupported {
                 destination: "../src/lib.rs#add:~:text=hello".to_owned(),
-            })),
+            }),
         );
     }
 
     #[test]
     fn invalid_paths_are_reported_with_the_destination() {
         for (destination, error) in [
-            ("/", LinkPathError::Empty),
             (
                 "../a//b.rs",
                 LinkPathError::EmptySegment {
@@ -728,10 +895,10 @@ mod tests {
         ] {
             assert_eq!(
                 parse(destination),
-                Some(Err(LinkError::InvalidPath {
+                Destination::Invalid(LinkError::InvalidPath {
                     destination: destination.to_owned(),
                     error,
-                })),
+                }),
                 "{destination}",
             );
         }
