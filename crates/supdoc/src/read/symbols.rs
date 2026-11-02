@@ -77,7 +77,27 @@ pub fn tag_symbols(file: &SourceFile) -> SymbolTable {
         .filter_map(|definition| definition.symbol(&own_segments, &scopes))
         .collect();
     symbols.sort_by_key(|symbol| (symbol.range.start, std::cmp::Reverse(symbol.range.end)));
-    SymbolTable::new(symbols)
+    SymbolTable::new(merge_accessors(symbols))
+}
+
+/// Folds symbols that share a path and aliases into one spanning all of them: a getter and its
+/// setter, a property and its setter, or an overload's stubs are one symbol, not an ambiguity.
+/// Impls that differ by type arguments have different aliases, so they stay separate.
+fn merge_accessors(symbols: Vec<Symbol>) -> Vec<Symbol> {
+    let mut merged: Vec<Symbol> = Vec::with_capacity(symbols.len());
+    for symbol in symbols {
+        let twin = merged
+            .iter_mut()
+            .find(|seen| seen.path == symbol.path && seen.aliases == symbol.aliases);
+        match twin {
+            Some(seen) => {
+                seen.range.start = seen.range.start.min(symbol.range.start);
+                seen.range.end = seen.range.end.max(symbol.range.end);
+            }
+            None => merged.push(symbol),
+        }
+    }
+    merged
 }
 
 /// What a capture name means to supdoc. Every other capture is ignored.
@@ -296,7 +316,8 @@ impl SymbolTable {
     ///
     /// # Errors
     ///
-    /// - [`ResolveError::Ambiguous`] when several symbols match, listing every full path.
+    /// - [`ResolveError::Ambiguous`] when several symbols match, listing each one's full path, or
+    ///   its first alias when it has one (so impls differing by type arguments stay distinct).
     /// - [`ResolveError::NotFound`] when none does, with the [`SymbolTable::nearest`] paths.
     pub fn resolve(
         &self,
@@ -332,7 +353,10 @@ impl SymbolTable {
             several => Err(ResolveError::Ambiguous {
                 file: file.clone(),
                 query: query.clone(),
-                candidates: several.iter().map(|symbol| symbol.path.clone()).collect(),
+                candidates: several
+                    .iter()
+                    .map(|symbol| symbol.aliases.first().unwrap_or(&symbol.path).clone())
+                    .collect(),
             }),
         }
     }
@@ -461,6 +485,21 @@ mod tests {
                 Err(ResolveError::Ambiguous { ref candidates, .. }) if candidates.len() == 2
             ),
             "two symbols with one path must not be silently picked between",
+        );
+    }
+
+    #[test]
+    fn ambiguous_help_lists_the_first_five_then_counts_the_rest() {
+        let names: Vec<String> = (0..8).map(|n| format!("T{n}.new")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let error = resolved(&table(&refs), "new").expect_err("eight `new` methods are ambiguous");
+
+        let help = error.help_running("supdoc resolve f.rs");
+
+        assert!(
+            help.contains("`T4.new`, and 3 more; `supdoc resolve f.rs` lists every symbol")
+                && !help.contains("T5.new"),
+            "{help}",
         );
     }
 
