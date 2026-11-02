@@ -16,8 +16,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::limits::ConfigLimits;
 use crate::namespace::NamespaceName;
-use crate::path::{AbsolutePath, RelativePath, is_regular_file};
-use crate::scan::walk::holds_git;
+use crate::path::{AbsolutePath, RelativePath, holds_git, is_regular_file};
 
 use super::pattern::{AnchoredPatterns, PatternList};
 use super::raw::RawConfig;
