@@ -21,6 +21,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::config::{Config, ConfigError};
+use crate::exit::ExitStatus;
 use crate::finding::{Finding, IndexedText, Location};
 use crate::link::destination::parse_destination;
 use crate::link::{LinkKey, SourcePath, Target};
@@ -351,7 +352,7 @@ impl Plan {
                 "Run `{}` again to plan from the files as they are now",
                 self.apply_command
             ),
-            CliError::REFUSED_EXIT_CODE,
+            ExitStatus::Failed,
         )
     }
 
@@ -372,7 +373,7 @@ impl Plan {
             "cli-rename-write",
             format!("cannot write {file}: {error}"),
             help,
-            CliError::IO_EXIT_CODE,
+            ExitStatus::Io,
         )
     }
 }
@@ -490,7 +491,7 @@ impl ConfigEdit {
                 "cli-rename-file-changed",
                 format!("{shown} no longer defines `{old}`; nothing was written"),
                 format!("Run `{rerun}` again"),
-                CliError::REFUSED_EXIT_CODE,
+                ExitStatus::Failed,
             ));
         };
         let location = relative
@@ -703,7 +704,7 @@ fn unknown_namespace(config: &Config, old: &NamespaceName, new: &NamespaceName) 
         "cli-rename-unknown-namespace",
         message,
         help,
-        CliError::REFUSED_EXIT_CODE,
+        ExitStatus::Failed,
     )
 }
 
@@ -730,7 +731,7 @@ fn target_exists(
              was changed",
             invocation(context, "namespace list")
         ),
-        CliError::REFUSED_EXIT_CODE,
+        ExitStatus::Failed,
     )
 }
 
@@ -747,7 +748,7 @@ fn inherited(old: &NamespaceName, defined_in: &AbsolutePath) -> CliError {
              that weren't scanned. Nothing was changed",
             defined_in.display()
         ),
-        CliError::REFUSED_EXIT_CODE,
+        ExitStatus::Failed,
     )
 }
 
@@ -764,7 +765,7 @@ fn unread_source(source: &SourcePath, rerun: &str, error: &ReadError) -> CliErro
             &error.help(ReadRole::RenamedSource, &source.to_string()),
             rerun,
         ),
-        CliError::REFUSED_EXIT_CODE,
+        ExitStatus::Failed,
     )
 }
 
@@ -779,7 +780,7 @@ fn invalid_source(path: &AbsolutePath, rerun: &str) -> CliError {
             path.display()
         ),
         then_rerun("Rename the file", rerun),
-        CliError::REFUSED_EXIT_CODE,
+        ExitStatus::Failed,
     )
 }
 
@@ -800,7 +801,7 @@ fn unread_dir(dir: &UnreadDir, root: &AbsolutePath, rerun: &str) -> CliError {
             dir.cause
         ),
         then_rerun(&unread_dir_help(dir.cause), rerun),
-        CliError::REFUSED_EXIT_CODE,
+        ExitStatus::Failed,
     )
 }
 

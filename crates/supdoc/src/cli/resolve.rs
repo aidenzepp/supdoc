@@ -12,6 +12,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::config::Config;
+use crate::exit::ExitStatus;
 use crate::finding::{Finding, IndexedText, Severity};
 use crate::link::SymbolPath;
 use crate::namespace::NamespaceName;
@@ -183,7 +184,7 @@ fn fragment_form(config: &Config, context: &Context, typed: &Path) -> Option<Cli
             "Write it as `{}`",
             command_line(context, "resolve", &[file, symbol], &[])
         ),
-        CliError::USAGE_EXIT_CODE,
+        ExitStatus::Usage,
     ))
 }
 
@@ -193,7 +194,7 @@ fn directory(typed: &Path) -> CliError {
         "cli-path-invalid",
         format!("{} is a directory, not a file", typed.display()),
         "Name one file inside it; `supdoc resolve` lists the symbols of a single file",
-        CliError::USAGE_EXIT_CODE,
+        ExitStatus::Usage,
     )
 }
 
@@ -208,7 +209,7 @@ fn unknown_namespace(config: &Config, name: &NamespaceName) -> CliError {
         "link-unknown-namespace",
         format!("unknown namespace `{name}`"),
         crate::namespace::unknown_namespace_help(name.as_str(), &defined),
-        CliError::USAGE_EXIT_CODE,
+        ExitStatus::Usage,
     )
 }
 
@@ -218,12 +219,12 @@ fn unknown_namespace(config: &Config, name: &NamespaceName) -> CliError {
 /// non-UTF-8 file's help repeats `typed`, the `FILE` as written.
 fn read_failed(error: &ReadError, root: &AbsolutePath, typed: &Path) -> CliError {
     let exit_code = match error {
-        ReadError::Missing { .. } => CliError::USAGE_EXIT_CODE,
-        ReadError::Io { .. } => CliError::IO_EXIT_CODE,
-        ReadError::Internal { .. } => CliError::BUG_EXIT_CODE,
+        ReadError::Missing { .. } => ExitStatus::Usage,
+        ReadError::Io { .. } => ExitStatus::Io,
+        ReadError::Internal { .. } => ExitStatus::Bug,
         ReadError::NotUtf8 { .. }
         | ReadError::TooLarge { .. }
-        | ReadError::UnsupportedLanguage { .. } => CliError::REFUSED_EXIT_CODE,
+        | ReadError::UnsupportedLanguage { .. } => ExitStatus::Failed,
     };
     let shown = relative_to(root, error.path());
     let help = error.help(ReadRole::ResolveArgument, &typed.display().to_string());
@@ -251,7 +252,7 @@ fn resolve_failed(
             &[typed.display().to_string()],
             &[],
         )),
-        CliError::REFUSED_EXIT_CODE,
+        ExitStatus::Failed,
     )
 }
 

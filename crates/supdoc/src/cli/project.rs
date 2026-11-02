@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use crate::check::plan::SettingsChange;
 use crate::config::{Config, ConfigError};
+use crate::exit::ExitStatus;
 use crate::finding::{Location, Snippet};
 use crate::hash::HashSettings;
 use crate::link::SourcePath;
@@ -90,7 +91,7 @@ pub(crate) fn config_failure(
         error.code(),
         error.message_from(&context.cwd),
         error.help_from(&context.cwd),
-        error.exit_code(),
+        error.status(),
     );
     match error_site(error, &context.cwd, output) {
         Some(site) => failure.at(site),
@@ -268,7 +269,7 @@ pub(crate) fn settings_mismatch(config: &Config, change: SettingsChange) -> CliE
         mismatch.code(),
         mismatch.message_from(config.root()),
         mismatch.help(),
-        mismatch.exit_code(),
+        mismatch.status(),
     )
 }
 
@@ -280,7 +281,7 @@ pub(crate) fn lock_failure(error: &LockError, root: &AbsolutePath, cwd: &Absolut
         error.code(),
         error.message_from(root),
         error.help_from(cwd),
-        error.exit_code(),
+        error.status(),
     )
 }
 
@@ -316,7 +317,7 @@ fn path_unreadable(typed: &Path, error: &std::io::Error) -> CliError {
             "Check the permissions on `{}` and on each directory above it",
             typed.display()
         ),
-        CliError::IO_EXIT_CODE,
+        ExitStatus::Io,
     )
 }
 
@@ -333,7 +334,7 @@ pub(crate) fn path_missing(typed: &Path, cwd: &AbsolutePath) -> CliError {
              there",
             shell_quote(&listing_dir(typed, cwd).display().to_string())
         ),
-        CliError::USAGE_EXIT_CODE,
+        ExitStatus::Usage,
     )
 }
 
@@ -358,7 +359,7 @@ pub(crate) fn namespaced_missing(
              `ls {}` lists what is there",
             shell_quote(&shown)
         ),
-        CliError::USAGE_EXIT_CODE,
+        ExitStatus::Usage,
     )
 }
 
@@ -386,7 +387,7 @@ pub(crate) fn path_outside(typed: &Path, root: &AbsolutePath) -> CliError {
             "Pass a path inside `{}`, or run supdoc from the project that contains it",
             root.display()
         ),
-        CliError::USAGE_EXIT_CODE,
+        ExitStatus::Usage,
     )
 }
 
@@ -408,7 +409,7 @@ pub(crate) fn path_outside_config(typed: &Path, config: &Config) -> CliError {
              <dir>/{} …`",
             crate::config::CONFIG_FILE_NAME
         ),
-        CliError::USAGE_EXIT_CODE,
+        ExitStatus::Usage,
     )
 }
 
@@ -418,7 +419,7 @@ pub(crate) fn path_invalid(typed: &Path, error: &impl std::fmt::Display) -> CliE
         "cli-path-invalid",
         format!("{} can't be checked: {error}", typed.display()),
         "Pass a file or directory whose path `supdoc.lock` could record, or leave out `[PATHS]` to cover the whole project",
-        CliError::USAGE_EXIT_CODE,
+        ExitStatus::Usage,
     )
 }
 
@@ -591,7 +592,7 @@ mod tests {
 
         assert_eq!(
             (error.code(), error.exit_code()),
-            ("config-parse", CliError::CONFIG_EXIT_CODE)
+            ("config-parse", ExitStatus::Config.code())
         );
         assert!(
             error.help().contains("`include = [\"docs\"]`"),
