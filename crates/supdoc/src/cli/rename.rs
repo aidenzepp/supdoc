@@ -1817,6 +1817,7 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
             .expect("docs/a.md is a valid source path");
         let read_errors = [
             ReadError::Missing { path: path.clone() },
+            ReadError::NotAFile { path: path.clone() },
             ReadError::Io {
                 path: path.clone(),
                 error: io::Error::from(io::ErrorKind::PermissionDenied),

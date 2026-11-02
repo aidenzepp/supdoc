@@ -226,7 +226,8 @@ fn read_failed(error: &ReadError, root: &AbsolutePath, typed: &Path) -> CliError
         ReadError::Missing { .. } => ExitStatus::Usage,
         ReadError::Io { .. } => ExitStatus::Io,
         ReadError::Internal { .. } => ExitStatus::Bug,
-        ReadError::NotUtf8 { .. }
+        ReadError::NotAFile { .. }
+        | ReadError::NotUtf8 { .. }
         | ReadError::TooLarge { .. }
         | ReadError::Timeout { .. }
         | ReadError::UnsupportedLanguage { .. } => ExitStatus::Failed,
