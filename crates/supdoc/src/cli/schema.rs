@@ -214,6 +214,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::cli::testing::skip;
 
     /// The `schema/` directory at the repository root, where releases ship the schemas.
     fn schema_dir() -> PathBuf {
@@ -234,18 +235,6 @@ mod tests {
             }
             Err(error) => panic!("{} should be readable: {error}", dir.display()),
         }
-    }
-
-    /// Reports that a repository-only test was skipped, since a packaged crate lacks the repository.
-    #[expect(
-        clippy::print_stderr,
-        reason = "a skipped test must say why; the test harness shows captured stderr on request"
-    )]
-    fn skip(missing: &std::path::Path) {
-        eprintln!(
-            "skipped: {} is absent outside the repository",
-            missing.display()
-        );
     }
 
     /// The environment variable that makes the drift tests rewrite the shipped files.

@@ -505,15 +505,14 @@ fn sentence(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::fs;
-    use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex};
+    use std::path::PathBuf;
 
     use clap::Parser as _;
 
     use super::*;
     use crate::cli::args::{Cli, Command};
+    use crate::cli::testing::{Capture, Project, Run, Session, at};
     use crate::config::Config;
     use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
     use crate::output::{OutputSettings, PathStyle, Verbosity};
@@ -535,60 +534,7 @@ mod tests {
     /// A config that hashes every byte as is.
     const EXACT_CONFIG: &str = "[features.hash]\nline-endings = \"exact\"\n";
 
-    /// A buffer `Output` writes into and the test reads back.
-    #[derive(Clone, Default)]
-    struct Capture(Arc<Mutex<Vec<u8>>>);
-
-    impl Capture {
-        fn text(&self) -> String {
-            let bytes = self.0.lock().expect("the capture lock should be free");
-            String::from_utf8(bytes.clone()).expect("captured output should be UTF-8")
-        }
-    }
-
-    impl io::Write for Capture {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .expect("the capture lock should be free")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// The value at `pointer` (RFC 6901) in `json`, or a failure naming what is missing.
-    fn at(json: &serde_json::Value, pointer: &str) -> serde_json::Value {
-        json.pointer(pointer)
-            .unwrap_or_else(|| panic!("`{pointer}` should be in the JSON output: {json}"))
-            .clone()
-    }
-
-    /// What one `supdoc update` run returned and printed.
-    struct Run {
-        result: Result<Outcome, CliError>,
-        stdout: String,
-        stderr: String,
-    }
-
     impl Run {
-        /// The exit code the process would end with.
-        fn exit_code(&self) -> u8 {
-            match &self.result {
-                Ok(outcome) => outcome.exit_code(),
-                Err(error) => error.exit_code(),
-            }
-        }
-
-        /// stdout parsed as the one JSON document `--json` prints.
-        fn json(&self) -> serde_json::Value {
-            serde_json::from_str(&self.stdout)
-                .unwrap_or_else(|error| panic!("stdout should be JSON ({error}): {}", self.stdout))
-        }
-
         /// stdout parsed as JSONL, one value per line.
         fn jsonl(&self) -> Vec<serde_json::Value> {
             self.stdout
@@ -602,43 +548,26 @@ mod tests {
         }
     }
 
-    /// A project in a fresh temporary directory, with the guide and the code it documents.
-    struct Project {
-        dir: tempfile::TempDir,
+    /// A project with the guide and the code it documents.
+    fn project() -> Project {
+        let project = Project::empty();
+        project.write("docs/guide.md", GUIDE);
+        project.write("src/lib.rs", LIB);
+        project
+    }
+
+    /// The temp directory's own name, which any absolute path into the project contains.
+    fn temp_name(project: &Project) -> String {
+        project
+            .dir
+            .path()
+            .file_name()
+            .expect("a temp directory should have a name")
+            .to_string_lossy()
+            .into_owned()
     }
 
     impl Project {
-        fn new() -> Self {
-            let project = Self {
-                dir: tempfile::tempdir().expect("a fresh temp directory should be created"),
-            };
-            project.write("docs/guide.md", GUIDE);
-            project.write("src/lib.rs", LIB);
-            project
-        }
-
-        fn root(&self) -> AbsolutePath {
-            AbsolutePath::new(self.dir.path()).expect("a temp directory should be absolute")
-        }
-
-        /// The temp directory's own name, which any absolute path into the project contains.
-        fn temp_name(&self) -> String {
-            self.dir
-                .path()
-                .file_name()
-                .expect("a temp directory should have a name")
-                .to_string_lossy()
-                .into_owned()
-        }
-
-        fn write(&self, relative: &str, text: &str) {
-            let path = self.dir.path().join(relative);
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).expect("the fixture directory should be created");
-            }
-            fs::write(&path, text).expect("the fixture file should be written");
-        }
-
         fn lock_file(&self) -> PathBuf {
             self.dir.path().join(LOCK_FILE_NAME)
         }
@@ -652,7 +581,7 @@ mod tests {
 
         /// Records every present link's current hash in `supdoc.lock` under the config's hash
         /// settings, independently of `update`.
-        fn record_all(&self) {
+        fn record_hashed(&self) {
             let config = Config::load(&self.root()).expect("the fixture config should load");
             let scan = crate::scan::assemble::run(&config, &Languages::builtin(), &Scope::All)
                 .expect("the fixture project should scan");
@@ -670,64 +599,42 @@ mod tests {
                 .expect("the fixture lockfile should be written");
         }
 
-        /// Every file under the root and its bytes.
-        fn files(&self) -> BTreeMap<PathBuf, Vec<u8>> {
-            fn collect(dir: &Path, found: &mut BTreeMap<PathBuf, Vec<u8>>) {
-                for entry in fs::read_dir(dir).expect("a fixture directory should be readable") {
-                    let path = entry.expect("a directory entry should be readable").path();
-                    if path.is_dir() {
-                        collect(&path, found);
-                    } else {
-                        let bytes = fs::read(&path).expect("a fixture file should be readable");
-                        let _previous = found.insert(path, bytes);
-                    }
-                }
-            }
-            let mut found = BTreeMap::new();
-            collect(self.dir.path(), &mut found);
-            found
-        }
-
         /// Runs `supdoc <args>` from the project root. `args` must hold an `update` command.
         fn update(&self, args: &[&str]) -> Run {
-            self.update_drawing(args, false)
+            self.update_in("", args)
         }
 
-        /// Like [`Self::update`], drawing with Unicode when `unicode` is set and ASCII otherwise.
-        fn update_drawing(&self, args: &[&str], unicode: bool) -> Run {
-            self.update_in("", args, unicode)
+        /// Runs `supdoc <args>` from the directory `relative` under the root.
+        fn update_in(&self, relative: &str, args: &[&str]) -> Run {
+            let mut session = Session::new(self.root_of(relative), args);
+            let Command::Update(update_args) = &session.cli.command else {
+                panic!("`supdoc {}` should be an update command", args.join(" "));
+            };
+            let result = run(update_args, &session.context, &mut session.output);
+            session.finished(result)
         }
 
-        /// Runs `supdoc <args>` from the directory `relative` under the root, drawing with Unicode
-        /// when `unicode` is set.
-        fn update_in(&self, relative: &str, args: &[&str], unicode: bool) -> Run {
-            let cwd = AbsolutePath::new(&self.dir.path().join(relative))
-                .expect("a directory under the root should be absolute");
-            let command_line: Vec<&str> = std::iter::once("supdoc")
-                .chain(args.iter().copied())
-                .collect();
-            let cli = Cli::try_parse_from(&command_line).unwrap_or_else(|error| {
-                panic!("`{}` should parse: {error}", command_line.join(" "))
-            });
-            let Command::Update(update_args) = &cli.command else {
-                panic!("`{}` should be an update command", command_line.join(" "));
+        /// Like [`Self::update`], but drawing with Unicode, which `Session` never does.
+        fn update_unicode(&self, args: &[&str]) -> Run {
+            let session = Session::new(self.root(), args);
+            let Command::Update(update_args) = &session.cli.command else {
+                panic!("`supdoc {}` should be an update command", args.join(" "));
             };
             let settings = OutputSettings {
-                format: cli.global.format(),
-                verbosity: Verbosity::from_flags(cli.global.quiet, cli.global.verbose),
+                format: session.cli.global.format(),
+                verbosity: Verbosity::from_flags(
+                    session.cli.global.quiet,
+                    session.cli.global.verbose,
+                ),
                 color: false,
-                unicode,
+                unicode: true,
                 width: 80,
-                paths: PathStyle::new(cwd.clone(), cwd.clone(), None),
+                paths: PathStyle::new(self.root(), self.root(), None),
             };
             let (stdout, stderr) = (Capture::default(), Capture::default());
             let mut output =
                 Output::new(settings, Box::new(stdout.clone()), Box::new(stderr.clone()));
-            let context = Context {
-                global: cli.global.clone(),
-                cwd,
-            };
-            let result = run(update_args, &context, &mut output);
+            let result = run(update_args, &session.context, &mut output);
             Run {
                 result,
                 stdout: stdout.text(),
@@ -738,9 +645,9 @@ mod tests {
 
     /// A project with one link in each state `update` changes: `failed`, `new` and `obsolete`.
     fn project_with_failed_new_and_obsolete() -> Project {
-        let project = Project::new();
+        let project = project();
         project.write("docs/old.md", "[add](../src/lib.rs#add)\n");
-        project.record_all();
+        project.record_hashed();
         project.write("src/lib.rs", LIB_CHANGED);
         project.write("docs/old.md", "No links any more.\n");
         project.write("docs/new.md", "[the file](../src/lib.rs)\n");
@@ -849,7 +756,7 @@ mod tests {
 
     #[test]
     fn update_text_rows_follow_the_document_not_link_key_order() {
-        let project = Project::new();
+        let project = project();
         project.write("src/a.rs", "pub fn add() {}\n");
         project.write("src/b.rs", "pub fn sub() {}\n");
         project.write(
@@ -886,7 +793,7 @@ mod tests {
     fn update_text_applied_note_separates_counts_with_a_dot_under_unicode() {
         let project = project_with_failed_new_and_obsolete();
 
-        let applied = project.update_drawing(&["update", "--yes"], true);
+        let applied = project.update_unicode(&["update", "--yes"]);
 
         assert_eq!(
             applied.stderr,
@@ -929,8 +836,8 @@ mod tests {
 
     #[test]
     fn update_with_nothing_to_do_prints_no_data_and_leaves_lock_bytes() {
-        let project = Project::new();
-        project.record_all();
+        let project = project();
+        project.record_hashed();
         let before = project.files();
 
         let text = project.update(&["update", "--yes"]);
@@ -949,7 +856,7 @@ mod tests {
 
     #[test]
     fn first_update_yes_creates_lockfile() {
-        let project = Project::new();
+        let project = project();
         assert!(
             project.lock().is_none(),
             "the fixture starts without a lockfile"
@@ -967,7 +874,7 @@ mod tests {
 
     #[test]
     fn update_reports_broken_links_as_findings_and_exits_0() {
-        let project = Project::new();
+        let project = project();
         project.write("docs/broken.md", "See [gone](../src/lib.rs#ad) here.\n");
 
         let run = project.update(&["--json", "update", "--yes"]);
@@ -1008,15 +915,11 @@ mod tests {
 
     #[test]
     fn update_fix_hint_keeps_the_config_when_run_from_another_directory() {
-        let project = Project::new();
+        let project = project();
         project.write("supdoc.config.toml", "");
         project.write("docs/broken.md", "See [gone](../src/lib.rs#ad) here.\n");
 
-        let json = project.update_in(
-            "docs",
-            &["-c", "../supdoc.config.toml", "--json", "update"],
-            false,
-        );
+        let json = project.update_in("docs", &["-c", "../supdoc.config.toml", "--json", "update"]);
 
         let help = at(&json.json(), "/findings/0/help").to_string();
         let printed = "supdoc -c ../supdoc.config.toml fix broken.md --yes";
@@ -1030,12 +933,12 @@ mod tests {
 
     #[test]
     fn update_fix_hint_names_the_source_from_a_subdirectory() {
-        let project = Project::new();
+        let project = project();
         project.write("supdoc.config.toml", "");
         project.write("docs/broken.md", "See [gone](../src/lib.rs#ad) here.\n");
 
-        let text = project.update_in("docs", &["update"], false);
-        let json = project.update_in("docs", &["--json", "update"], false);
+        let text = project.update_in("docs", &["update"]);
+        let json = project.update_in("docs", &["--json", "update"]);
 
         assert_eq!(text.exit_code(), 0, "stderr: {}", text.stderr);
         assert!(
@@ -1049,7 +952,7 @@ mod tests {
             "the JSON hint is the same runnable command: {help}"
         );
         assert!(
-            !text.stdout.contains(&project.temp_name()) && !help.contains(&project.temp_name()),
+            !text.stdout.contains(&temp_name(&project)) && !help.contains(&temp_name(&project)),
             "no temp-dir prefix should leak into: {}{help}",
             text.stdout
         );
@@ -1057,7 +960,7 @@ mod tests {
 
     #[test]
     fn update_shows_a_malformed_link_error_and_closes_on_the_empty_plan() {
-        let project = Project::new();
+        let project = project();
         project.write("docs/guide.md", "See [add](../src//lib.rs#add) here.\n");
 
         let json = project.update(&["--json", "update"]);
@@ -1099,9 +1002,9 @@ mod tests {
 
     #[test]
     fn update_paths_leave_other_entries_alone() {
-        let project = Project::new();
+        let project = project();
         project.write("docs/other.md", "See [add](../src/lib.rs#add).\n");
-        project.record_all();
+        project.record_hashed();
         project.write("src/lib.rs", LIB_CHANGED);
         let lock_before = project.lock().expect("the fixture lockfile should exist");
 
@@ -1131,7 +1034,7 @@ mod tests {
 
     #[test]
     fn update_missing_path_is_usage_error_exit_2() {
-        let project = Project::new();
+        let project = project();
 
         let run = project.update(&["update", "docs/nope.md", "--yes"]);
 
@@ -1147,8 +1050,8 @@ mod tests {
 
     #[test]
     fn update_moved_link_change_names_its_old_key() {
-        let project = Project::new();
-        project.record_all();
+        let project = project();
+        project.record_hashed();
         fs::remove_file(project.dir.path().join("docs/guide.md"))
             .expect("the old doc should be removed");
         project.write("docs/intro.md", GUIDE);
@@ -1181,8 +1084,8 @@ mod tests {
 
     #[test]
     fn update_moved_link_text_names_where_its_history_came_from() {
-        let project = Project::new();
-        project.record_all();
+        let project = project();
+        project.record_hashed();
         fs::remove_file(project.dir.path().join("docs/guide.md"))
             .expect("the old doc should be removed");
         project.write("docs/intro.md", GUIDE);
@@ -1198,11 +1101,11 @@ mod tests {
 
     #[test]
     fn exit_codes_match_table() {
-        let bad_config = Project::new();
+        let bad_config = project();
         bad_config.write("supdoc.config.toml", "include = 3\n");
-        let conflicted_lock = Project::new();
+        let conflicted_lock = project();
         conflicted_lock.write(LOCK_FILE_NAME, "<<<<<<< HEAD\n=======\n>>>>>>> theirs\n");
-        let unreadable_lock = Project::new();
+        let unreadable_lock = project();
         fs::create_dir(unreadable_lock.lock_file())
             .expect("a directory in place of the lockfile should be created");
 
@@ -1231,7 +1134,7 @@ mod tests {
     /// the new setting changes; `docs/plain.md` links to `sub` in an LF `src/plain.rs`, whose hash
     /// it doesn't.
     fn project_recorded_exact() -> Project {
-        let project = Project::new();
+        let project = project();
         project.write("src/lib.rs", LIB_CRLF);
         project.write(
             "src/plain.rs",
@@ -1239,7 +1142,7 @@ mod tests {
         );
         project.write("docs/plain.md", "[sub](../src/plain.rs#sub)\n");
         project.write("supdoc.config.toml", EXACT_CONFIG);
-        project.record_all();
+        project.record_hashed();
         project.write("supdoc.config.toml", "");
         project
     }
@@ -1366,9 +1269,9 @@ mod tests {
 
     #[test]
     fn settings_only_change_counts_as_a_change() {
-        let project = Project::new();
+        let project = project();
         project.write("supdoc.config.toml", EXACT_CONFIG);
-        project.record_all();
+        project.record_hashed();
         project.write("supdoc.config.toml", "");
         let lock_before = project.lock().expect("the fixture lockfile should exist");
 
