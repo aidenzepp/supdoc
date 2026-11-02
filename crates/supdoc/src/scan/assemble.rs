@@ -304,7 +304,7 @@ fn source_links(
                 written,
             }),
             Err(error) => {
-                let key = unknown_namespace_key(config, languages, &raw, source, &error);
+                let key = unknown_namespace_key(source, &error);
                 let repair = unique_repair(config, languages, &raw, source, written.as_ref());
                 let finding = link_finding(
                     config,
@@ -323,32 +323,22 @@ fn source_links(
     }
 }
 
-/// The key `raw` would have if its unknown namespace were configured, so a locked link whose
-/// namespace was renamed or removed in config is broken rather than obsolete (05 C1, C3).
+/// The key `source`'s link would have if its unknown namespace were configured, so a locked link
+/// whose namespace was renamed or removed in config is broken rather than obsolete (05 C1, C3).
 ///
 /// `None` for every other link error, and when the rest of the destination is wrong too: an
 /// invalid path or symbol can't be written as a key.
-fn unknown_namespace_key(
-    config: &Config,
-    languages: &Languages,
-    raw: &RawLink,
-    source: &SourcePath,
-    error: &LinkError,
-) -> Option<LinkKey> {
-    let LinkError::UnknownNamespace { prefix, .. } = error else {
-        return None;
-    };
-    let namespace: NamespaceName = prefix.parse().ok()?;
-    // Parsing reads only namespace names, so adding the missing name is all it takes.
-    let mut names: BTreeSet<NamespaceName> = config.namespaces().keys().cloned().collect();
-    let _absent = names.insert(namespace);
-    let Destination::Link(link) = parse_destination(raw, source, &names, languages) else {
+fn unknown_namespace_key(source: &SourcePath, error: &LinkError) -> Option<LinkKey> {
+    let LinkError::UnknownNamespace {
+        parsed: Some(link), ..
+    } = error
+    else {
         return None;
     };
     Some(LinkKey {
         source: source.clone(),
-        target: link.target,
-        symbol: link.symbol,
+        target: link.target.clone(),
+        symbol: link.symbol.clone(),
     })
 }
 
