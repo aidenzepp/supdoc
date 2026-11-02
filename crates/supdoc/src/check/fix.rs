@@ -56,7 +56,25 @@ pub struct FixResult {
     /// Edits written to disk, in plan order.
     pub applied: Vec<AppliedFix>,
     /// Why files were left alone: `fix-file-changed` and `fix-write-failed` findings.
-    pub skipped: Vec<Finding>,
+    pub skipped: Vec<Skipped>,
+}
+
+/// Why a file's fixes were not applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkippedKind {
+    /// The file changed since the scan (`fix-file-changed`).
+    FileChanged,
+    /// The file could not be rewritten (`fix-write-failed`).
+    WriteFailed,
+}
+
+/// A file left as it was, and the finding that says why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Skipped {
+    /// What went wrong, for callers that count or branch on it.
+    pub kind: SkippedKind,
+    /// The finding reported for it.
+    pub finding: Finding,
 }
 
 /// An edit that is now on disk.
@@ -250,21 +268,19 @@ pub fn apply_fixes(plan: &FixPlan, root: &AbsolutePath, rerun: &str) -> FixResul
                     fix: planned.fix.clone(),
                     moved: planned.moved.clone(),
                 })),
-            Err(Skip::Changed) => result
-                .skipped
-                .push(file_changed(file, planned.len(), rerun)),
+            Err(Skip::Changed) => result.skipped.push(Skipped {
+                kind: SkippedKind::FileChanged,
+                finding: file_changed(file, planned.len(), rerun),
+            }),
             Err(Skip::Unwritable(cause)) => unwritten.push((file, cause)),
         }
     }
     let others_applied = !result.applied.is_empty();
     for (file, cause) in unwritten {
-        result.skipped.push(write_failed(
-            file,
-            &cause,
-            root.as_path(),
-            rerun,
-            others_applied,
-        ));
+        result.skipped.push(Skipped {
+            kind: SkippedKind::WriteFailed,
+            finding: write_failed(file, &cause, root.as_path(), rerun, others_applied),
+        });
     }
     result
 }
@@ -831,9 +847,9 @@ mod tests {
                 result.skipped
             );
         };
-        assert_eq!(skipped.code, CODE_FILE_CHANGED);
+        assert_eq!(skipped.finding.code, CODE_FILE_CHANGED);
         assert_eq!(
-            skipped.message,
+            skipped.finding.message,
             "docs/a.md changed since it was scanned; its 2 fixes were not applied"
         );
     }
@@ -852,8 +868,8 @@ mod tests {
                 result.skipped
             );
         };
-        assert_eq!(skipped.code, CODE_FILE_CHANGED);
-        assert_eq!(skipped.severity, Severity::Warning);
+        assert_eq!(skipped.finding.code, CODE_FILE_CHANGED);
+        assert_eq!(skipped.finding.severity, Severity::Warning);
     }
 
     #[test]
@@ -906,8 +922,8 @@ mod tests {
                 result.skipped
             );
         };
-        assert_eq!(skipped.code, CODE_WRITE_FAILED);
-        let help = skipped.help.as_deref().unwrap_or_default();
+        assert_eq!(skipped.finding.code, CODE_WRITE_FAILED);
+        let help = skipped.finding.help.as_deref().unwrap_or_default();
         assert!(
             help.contains("never rewrites a symlinked file") && help.contains("real.md"),
             "the help should say supdoc never rewrites a symlink and name the real file, got {help:?}"
