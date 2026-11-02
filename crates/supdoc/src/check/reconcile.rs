@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use super::model::{LinkReport, Report};
 use super::moves::{Moves, detect_moves};
-use crate::finding::{Finding, Severity};
+use crate::finding::{Finding, OBSOLETE_CODE, Severity};
 use crate::hash::Hash;
 use crate::link::{LinkKey, LinkRef, SourcePath, Target};
 use crate::lock::error::shell_quote;
@@ -269,7 +269,7 @@ fn new_finding(link: &ScannedLink) -> Finding {
 /// The finding for a lock entry whose link is gone.
 fn obsolete_finding(key: &LinkKey) -> Finding {
     Finding::new(
-        "link-obsolete",
+        OBSOLETE_CODE,
         Severity::Warning,
         format!("{LOCK_FILE_NAME} has an entry for `{key}`, which no longer exists"),
     )
