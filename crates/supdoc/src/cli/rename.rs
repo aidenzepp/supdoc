@@ -24,7 +24,7 @@ use crate::config::{Config, config_size_limit, read_config_text};
 use crate::exit::ExitStatus;
 use crate::finding::{Finding, IndexedText, Location};
 use crate::limits::SizeLimit;
-use crate::link::{LinkKey, SourcePath, Target};
+use crate::link::{LinkKey, RawLink, SourcePath, Target};
 use crate::lock::error::LockError;
 use crate::lock::io::write_atomically;
 use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
@@ -36,10 +36,10 @@ use crate::output::{Output, RecordArray, Report, TextContext, preview_note};
 use crate::path::{AbsolutePath, ProjectFile, resolve_project_file};
 use crate::read::cartridge::{Languages, SourceFile};
 use crate::read::error::{ReadError, ReadRole};
-use crate::read::links::links;
-use crate::scan::assemble::ScanError;
+use crate::scan::assemble::read_sources;
 use crate::scan::model::Scope;
-use crate::scan::walk::{UnreadCause, UnreadDir, walk};
+use crate::scan::targets::Parsed;
+use crate::scan::walk::{UnreadCause, UnreadDir};
 
 use super::args::{RenameArgs, WriteMode};
 use super::project::{command_line, config_failure, invocation, load_config, lock_path, read_lock};
@@ -164,25 +164,28 @@ impl Plan {
         let parent = parent_definition(&config, old, context, output)?;
 
         let languages = Languages::builtin().map_err(CliError::from)?;
-        let walked = walk(&config, languages, &Scope::All);
-        if let Some(error) = ScanError::ignore_too_large(&walked.findings) {
-            return Err(error.into());
-        }
-        if let Some(dir) = walked.unread_dirs.first() {
+        let mut parsed = Parsed::default();
+        let mut sources = Vec::new();
+        let mut unread = None;
+        let front = read_sources(
+            &config,
+            languages,
+            &Scope::All,
+            &mut parsed,
+            |source, file, raws| {
+                sources.extend(SourceEdit::find(source.clone(), file, &raws, old));
+            },
+            |source, error| {
+                let _first = unread.get_or_insert((source.clone(), error));
+            },
+        )?;
+        if let Some(dir) = front.unread_dirs.first() {
             return Err(unread_dir(dir, config.root(), &rerun));
         }
-        let findings = walked.findings;
-        let mut sources = Vec::new();
-        for walked_source in &walked.sources {
-            let (source, path) = (walked_source.source.clone(), &walked_source.path);
-            let limit = config.limits_in_effect().parse_timeout.value;
-            let edit = SourceFile::read(path.clone(), languages, limit)
-                .and_then(|file| SourceEdit::find(source.clone(), &file, old));
-            match edit {
-                Ok(edit) => sources.extend(edit),
-                Err(error) => return Err(unread_source(&source, &rerun, &error)),
-            }
+        if let Some((source, error)) = unread {
+            return Err(unread_source(&source, &rerun, &error));
         }
+        let findings = front.findings;
 
         Ok(Self {
             lock: LockEdit::new(lock, old, new),
@@ -551,20 +554,17 @@ impl SourceEdit {
     /// The links in `file` whose destination is written with the prefix `old:`, tracked or not
     /// (a bare `old:`, a link to a file no language reads, a fragment link to one), or `None` when there are none (NR6). Several uses of one reference definition
     /// share its range and are renamed once.
-    ///
-    /// # Errors
-    ///
-    /// [`ReadError::Timeout`] when the file's read deadline stops reading its links.
     fn find(
         source: SourcePath,
         file: &SourceFile,
+        raws: &[RawLink],
         old: &NamespaceName,
-    ) -> Result<Option<Self>, ReadError> {
+    ) -> Option<Self> {
         let text = file.text();
         let prefix = format!("{old}:");
-        let mut ranges: Vec<Range<usize>> = links(file)?
-            .into_iter()
-            .map(|raw| raw.destination_range)
+        let mut ranges: Vec<Range<usize>> = raws
+            .iter()
+            .map(|raw| raw.destination_range.clone())
             .filter(|range| {
                 text.get(range.clone()).is_some_and(|written| {
                     written
@@ -576,7 +576,7 @@ impl SourceEdit {
         ranges.sort_by_key(|range| (range.start, range.end));
         ranges.dedup();
         if ranges.is_empty() {
-            return Ok(None);
+            return None;
         }
         let indexed = IndexedText::new(text);
         let links = ranges
@@ -586,12 +586,12 @@ impl SourceEdit {
                 destination,
             })
             .collect();
-        Ok(Some(Self {
+        Some(Self {
             file: file.path().clone(),
             source,
             text: text.to_owned(),
             links,
-        }))
+        })
     }
 
     /// The bytes of the `old` prefix in each destination, in file order.
