@@ -1,13 +1,13 @@
 //! Grouping links by target and reading each target once (04, From links to targets, steps 3-6).
 //!
 //! Every distinct target is located on disk, checked to lie inside the project root once symlinks
-//! are followed, checked for case (S12) and for being a directory (S13), then read through [`Parsed`] so a file that is also a source is never parsed twice (S9).
+//! are followed, checked for case (S12) and for being a directory (S13), then read through [`Parsed`] so a target is parsed once. A source is dropped once its links are read, so one that is also a target is parsed a second time (S9).
 //! Each link into it then hashes the whole file or the one symbol it names. Anything that goes
 //! wrong becomes that link's [`TargetState::Broken`] finding, with a [`Fix`] only when exactly one
 //! edit is right.
 
-use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::ops::Range;
@@ -72,6 +72,17 @@ impl Parsed {
                 Ok(slot.insert(file))
             }
         }
+    }
+
+    /// Drops every file except those in `keep`, so sources that are never read as targets free
+    /// their text and tree before any target is hashed.
+    fn retain_only(&mut self, keep: &BTreeSet<AbsolutePath>) {
+        self.files.retain(|path, _file| keep.contains(path));
+    }
+
+    /// Drops the file at `path` once its last link has been hashed.
+    pub(crate) fn forget(&mut self, path: &AbsolutePath) {
+        let _dropped = self.files.remove(path);
     }
 }
 
@@ -185,16 +196,29 @@ pub(crate) fn resolve(
             .push(occurrence);
     }
 
+    let located: Vec<_> = by_target
+        .into_iter()
+        .map(|(target, keyed)| (locate(config, &target), target, keyed))
+        .collect();
+    let to_read: BTreeSet<AbsolutePath> = located
+        .iter()
+        .filter_map(|(at, _target, _keyed)| match at {
+            Located::File(path) => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+    parsed.retain_only(&to_read);
+
     let mut links = BTreeMap::new();
     let mut directory_links = 0;
-    for (target, keyed) in by_target {
-        let written = keyed.values().map(Vec::len).sum::<usize>();
-        let Some(states) = target_states(config, languages, parsed, settings, &target, keyed)
-        else {
-            directory_links += written;
+    for (at, target, keyed) in located {
+        if matches!(at, Located::Directory) {
+            directory_links += keyed.values().map(Vec::len).sum::<usize>();
             continue;
-        };
-        for (key, state, occurrences) in states {
+        }
+        for (key, state, occurrences) in
+            target_states(config, languages, parsed, settings, at, &target, keyed)
+        {
             let snippet = occurrences
                 .first()
                 .and_then(|occurrence| occurrence.snippet.clone());
@@ -212,16 +236,16 @@ pub(crate) fn resolve(
     (links, directory_links)
 }
 
-/// The state of each link into `target`, or `None` when the target is a directory, which is never
-/// tracked (S13).
+/// The state of each link into `target`; a directory yields none, as it is never tracked (S13).
 fn target_states(
     config: &Config,
     languages: &Languages,
     parsed: &mut Parsed,
     settings: HashSettings,
+    at: Located,
     target: &Target,
     keyed: BTreeMap<LinkKey, Vec<Occurrence>>,
-) -> Option<Vec<(LinkKey, TargetState, Vec<Occurrence>)>> {
+) -> Vec<(LinkKey, TargetState, Vec<Occurrence>)> {
     let broken_by = |finding: &dyn Fn(&Occurrence) -> Finding| {
         keyed
             .iter()
@@ -236,28 +260,24 @@ fn target_states(
             .collect::<Vec<_>>()
     };
 
-    let path = match locate(config, target) {
-        Located::Directory => return None,
-        Located::UnknownNamespace => {
-            return Some(broken_by(&|first| unknown_namespace(target, first)));
-        }
-        Located::OutsideRoot => return Some(broken_by(&|first| outside_root(target, first))),
+    let path = match at {
+        Located::Directory => return Vec::new(),
+        Located::UnknownNamespace => return broken_by(&|first| unknown_namespace(target, first)),
+        Located::OutsideRoot => return broken_by(&|first| outside_root(target, first)),
         Located::CaseMismatch(real) => {
-            return Some(broken_by(&|first| case_mismatch(target, &real, first)));
+            return broken_by(&|first| case_mismatch(target, &real, first));
         }
         Located::File(path) => path,
     };
     let file = match parsed.read(&path, languages) {
         Ok(file) => file,
         Err(error) => {
-            return Some(broken_by(&|first| {
-                read_failed(&error, config.root(), first)
-            }));
+            return broken_by(&|first| read_failed(&error, config.root(), first));
         }
     };
 
     let mut table: Option<SymbolTable> = None;
-    let states = keyed
+    let states: Vec<_> = keyed
         .into_iter()
         .filter_map(|(key, occurrences)| {
             let first = occurrences.first()?;
@@ -295,7 +315,8 @@ fn target_states(
             Some((key, state, occurrences))
         })
         .collect();
-    Some(states)
+    parsed.forget(&path);
+    states
 }
 
 /// Where a target is on disk.
