@@ -144,11 +144,11 @@ fn reconcile_with(
             state,
             locations: link.locations().cloned().collect(),
             finding,
-            moved_from: moves.carried.get(key).cloned(),
+            moved_from: moves.carried_from(key).cloned(),
         });
     }
 
-    let used_up: BTreeSet<&LinkKey> = moves.carried.values().collect();
+    let used_up: BTreeSet<LinkKey> = moves.carried().map(|carried| carried.from).collect();
     for key in removed.into_iter().filter(|key| !used_up.contains(key)) {
         report.links.push(LinkReport {
             key: key.clone(),
@@ -202,7 +202,7 @@ fn present_state(
     command_path: &dyn Fn(&SourcePath) -> String,
     notes: &mut Vec<Finding>,
 ) -> (LinkState, Option<Finding>) {
-    let carried_from = moves.carried.get(key);
+    let carried_from = moves.carried_from(key);
     let recorded = lock
         .get(key)
         .or_else(|| carried_from.and_then(|old| lock.get(old)));

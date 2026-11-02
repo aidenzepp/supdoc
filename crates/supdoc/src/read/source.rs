@@ -39,6 +39,7 @@ impl SourceFile {
     ///
     /// - [`ReadError::UnsupportedLanguage`] when no cartridge reads the extension.
     /// - [`ReadError::Missing`] or [`ReadError::Io`] when the file can't be opened or read.
+    /// - [`ReadError::NotAFile`] when it is a directory, FIFO, socket or device.
     /// - [`ReadError::TooLarge`] when it is over [`MAX_FILE_BYTES`].
     /// - [`ReadError::NotUtf8`] when it isn't UTF-8.
     /// - [`ReadError::Timeout`] when the parse takes longer than `limit`. The same deadline,
@@ -71,14 +72,18 @@ impl SourceFile {
 
 /// Reads the whole file, refusing one over [`MAX_FILE_BYTES`] before reading its contents.
 ///
-/// Only a regular file is opened, after following symlinks: opening a FIFO or a device can block
-/// forever, so any other kind is refused before the open.
+/// The file is opened first and judged by the open handle, so what is checked is what is read:
+/// no rename between a check and the open can swap in another file. On Unix the open is
+/// non-blocking, so a FIFO with no writer can't hang it; anything but a regular file, after
+/// following symlinks, is then refused before a byte is read. Some kinds, such as a socket, can't
+/// be opened at all: when the open fails, the path itself is looked at once, and one that isn't a
+/// regular file is refused the same way.
 ///
 /// The read itself is capped too, so a file that grows after the size check is still refused.
 ///
 /// # Errors
 ///
-/// [`ReadError::Missing`], [`ReadError::Io`] (also for a file that is not a regular file) or
+/// [`ReadError::Missing`], [`ReadError::NotAFile`], [`ReadError::Io`] or
 /// [`ReadError::TooLarge`].
 fn read_capped(path: &AbsolutePath) -> Result<Vec<u8>, ReadError> {
     let io_error = |error: io::Error| {
@@ -97,14 +102,17 @@ fn read_capped(path: &AbsolutePath) -> Result<Vec<u8>, ReadError> {
         limit: MAX_FILE_BYTES,
     };
 
-    if !fs::metadata(path.as_path()).map_err(io_error)?.is_file() {
-        return Err(io_error(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "it is not a regular file",
-        )));
+    let file = open_without_blocking(path.as_path()).map_err(|error| {
+        match fs::metadata(path.as_path()) {
+            Ok(metadata) if !metadata.is_file() => ReadError::NotAFile { path: path.clone() },
+            _ => io_error(error),
+        }
+    })?;
+    let metadata = file.metadata().map_err(io_error)?;
+    if !metadata.is_file() {
+        return Err(ReadError::NotAFile { path: path.clone() });
     }
-    let file = File::open(path.as_path()).map_err(io_error)?;
-    let size = file.metadata().map_err(io_error)?.len();
+    let size = metadata.len();
     if size > MAX_FILE_BYTES {
         return Err(too_large(size));
     }
@@ -118,6 +126,36 @@ fn read_capped(path: &AbsolutePath) -> Result<Vec<u8>, ReadError> {
         return Err(too_large(read));
     }
     Ok(bytes)
+}
+
+/// Opens `path` for reading without waiting for a FIFO's writer: on Unix the open is
+/// `O_NONBLOCK`, which leaves a regular file's reads blocking as usual.
+///
+/// Effect: opens a file handle.
+///
+/// # Errors
+///
+/// Whatever the open reports, such as `NotFound` or `PermissionDenied`.
+#[cfg(unix)]
+fn open_without_blocking(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+}
+
+/// Opens `path` for reading. Only Unix has FIFOs that block an open.
+///
+/// Effect: opens a file handle.
+///
+/// # Errors
+///
+/// Whatever the open reports, such as `NotFound` or `PermissionDenied`.
+#[cfg(not(unix))]
+fn open_without_blocking(path: &Path) -> io::Result<File> {
+    File::open(path)
 }
 
 /// The file `path` really is once symlinks are followed, or `path` itself when that can't be
@@ -437,6 +475,83 @@ mod tests {
                     if extension == "png" && supported.contains(&"rs")
             ),
             "the missing .png file should be reported as unsupported, not missing: {error:?}",
+        );
+    }
+
+    /// `SourceFile::read(path)`, run on its own thread so an open that blocks fails the test
+    /// after five seconds instead of hanging it.
+    fn read_within_five_seconds(path: AbsolutePath) -> Result<SourceFile, ReadError> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let _reader = std::thread::spawn(move || {
+            let read = SourceFile::read(
+                path,
+                Languages::builtin().expect("the built-in cartridges should load"),
+                Limits::PARSE_TIMEOUT,
+            );
+            let _sent = sender.send(read);
+        });
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("reading should return within five seconds, not block on the open")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_target_is_not_a_file_and_never_blocks() {
+        let dir = temp_dir();
+        let path = absolute_in(&dir, "pipe.rs");
+        let made = std::process::Command::new("mkfifo")
+            .arg(path.as_path())
+            .status()
+            .expect("mkfifo should run");
+        assert!(made.success(), "mkfifo should create the FIFO");
+
+        let error = read_within_five_seconds(path)
+            .expect_err("a FIFO with no writer is not a file supdoc reads");
+
+        assert!(
+            matches!(error, ReadError::NotAFile { .. }),
+            "a FIFO should be refused as not a regular file: {error:?}"
+        );
+        assert_eq!(error.code(), "read-not-a-file");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn socket_target_is_not_a_file() {
+        let dir = temp_dir();
+        let path = absolute_in(&dir, "x.rs");
+        let _listener = std::os::unix::net::UnixListener::bind(path.as_path())
+            .expect("the socket should bind in the temp dir");
+
+        let error = read_within_five_seconds(path)
+            .expect_err("a socket, which can't be opened, is not a file supdoc reads");
+
+        assert!(
+            matches!(error, ReadError::NotAFile { .. }),
+            "a socket should be refused as not a regular file, not as an I/O error: {error:?}"
+        );
+        assert_eq!(error.code(), "read-not-a-file");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_target_is_not_a_file() {
+        let dir = temp_dir();
+        let path = absolute_in(&dir, "folder.rs");
+        fs::create_dir(path.as_path()).expect("the directory should be creatable");
+
+        let error =
+            read_within_five_seconds(path).expect_err("a directory is not a file supdoc reads");
+
+        assert!(
+            matches!(error, ReadError::NotAFile { .. }),
+            "a directory should be refused as not a regular file: {error:?}"
+        );
+        let help = error.help(ReadRole::Target, "folder.rs");
+        assert!(
+            help.contains("regular file") && !help.contains("chmod"),
+            "the help should ask for a regular file, not a permission change: {help}"
         );
     }
 }

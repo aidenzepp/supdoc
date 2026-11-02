@@ -16,6 +16,7 @@ use crate::check::fix::{
     move_lock_entries, plan_fixes,
 };
 use crate::check::model::Report as CheckModel;
+use crate::check::moves::Move;
 use crate::check::reconcile::reconcile_in;
 use crate::config::Config;
 use crate::exit::ExitStatus;
@@ -169,14 +170,23 @@ impl Planned {
     ///
     /// Returns `cli-fix-output` when the report cannot be written.
     fn preview(self, apply_note: &str, output: &mut Output) -> Result<Outcome, CliError> {
+        // The real rule on a copy of the lock, so the preview names exactly the moves `--yes` makes.
+        let would = move_lock_entries(
+            &mut self.lock.clone(),
+            self.plan
+                .fixes
+                .iter()
+                .filter_map(|planned| planned.moved.as_ref()),
+        );
         let fixes: Vec<FixRecord> = self
             .plan
             .fixes
             .iter()
             .map(|planned| {
-                let moved = planned.moved.clone().filter(|(old, new)| {
-                    self.lock.get(old).is_some() && self.lock.get(new).is_none()
-                });
+                let moved = planned
+                    .moved
+                    .clone()
+                    .filter(|planned| would.contains(planned));
                 FixRecord::new(planned, moved, None, None)
             })
             .collect();
@@ -310,7 +320,10 @@ impl Planned {
     fn write(&self, root: &AbsolutePath, rerun: &str) -> Written {
         let FixResult { applied, skipped } = apply_fixes(&self.plan, root, rerun);
         let mut lock = self.lock.clone();
-        let mut moved = move_lock_entries(&mut lock, &applied);
+        let mut moved = move_lock_entries(
+            &mut lock,
+            applied.iter().filter_map(|applied| applied.moved.as_ref()),
+        );
         let mut lock_failure = None;
         if lock != self.lock
             && let Err(error) = lock.write(&lock_path(root))
@@ -356,13 +369,16 @@ impl Planned {
         &self,
         context: &Context,
         done: &[&PlannedFix],
-        moved: &[(LinkKey, LinkKey)],
+        moved: &[Move],
         states: &CheckModel,
     ) -> Vec<FixRecord> {
         done.iter()
             .zip(new_ranges(done))
             .map(|(planned, range)| {
-                let moved = planned.moved.clone().filter(|pair| moved.contains(pair));
+                let moved = planned
+                    .moved
+                    .clone()
+                    .filter(|planned| moved.contains(planned));
                 let state = state_at(states, &planned.fix.file, range);
                 // `supdoc update` takes the path from the current directory, like the report.
                 let update = (state == Some(LinkState::Failed)).then(|| {
@@ -384,7 +400,7 @@ struct Written {
     /// The lockfile as it is on disk after the run.
     lock: Lockfile,
     /// The lock entries that moved to a rewritten link's new key.
-    moved: Vec<(LinkKey, LinkKey)>,
+    moved: Vec<Move>,
     /// Why the lockfile could not be written, if it could not.
     lock_failure: Option<LockError>,
 }
@@ -656,7 +672,7 @@ impl FixRecord {
     /// the state its link has after the fix when known.
     fn new(
         planned: &PlannedFix,
-        moved: Option<(LinkKey, LinkKey)>,
+        moved: Option<Move>,
         state: Option<LinkState>,
         update_command: Option<String>,
     ) -> Self {
@@ -705,7 +721,7 @@ impl FixRecord {
             before,
             after: replacement.clone(),
             cause: finding.code.to_owned(),
-            moved: moved.map(|(from, to)| MovedJson { from, to }),
+            moved: moved.map(|Move { from, to }| MovedJson { from, to }),
             state,
             source: file.clone(),
             old_link,
@@ -1007,6 +1023,53 @@ mod tests {
             }]),
         );
         assert_eq!(project.files(), before, "a preview writes nothing");
+    }
+
+    #[test]
+    fn colliding_moves_preview_exactly_the_moves_apply_makes() {
+        let project = Project::new();
+        project.write(
+            "docs/guide.md",
+            "# Guide\n\n[one](../src/lib.rs#ad) and [two](../src/lib.rs#addd).\n",
+        );
+        let hash = |text: &str| crate::hash::Hash::digest(text.as_bytes());
+        let key = |symbol: &str| LinkKey {
+            source: "docs/guide.md"
+                .parse()
+                .expect("the fixture source should be valid"),
+            target: "src/lib.rs"
+                .parse()
+                .expect("the fixture target should be valid"),
+            symbol: Some(symbol.parse().expect("the fixture symbol should be valid")),
+        };
+        let before: Lockfile = [(key("ad"), hash("one")), (key("addd"), hash("two"))]
+            .into_iter()
+            .collect();
+        project.write_lock(&before);
+
+        let preview = project.run(&["--json", "fix"]);
+        let previewed: Vec<serde_json::Value> = preview
+            .json()
+            .pointer("/data/fixes")
+            .and_then(serde_json::Value::as_array)
+            .expect("the preview should list fixes")
+            .iter()
+            .filter_map(|fix| fix.get("moved").cloned())
+            .collect();
+        let applied = project.run(&["--json", "fix", "--yes"]);
+        let after = project.lock();
+
+        let moved_in_lock = [key("ad"), key("addd")]
+            .iter()
+            .filter(|old| before.get(old).is_some() && after.get(old).is_none())
+            .count();
+        assert_eq!(applied.exit_code(), 0, "stderr: {}", applied.stderr);
+        assert_eq!(
+            previewed.len(),
+            moved_in_lock,
+            "the preview moves {previewed:?} but the lock changed by {moved_in_lock} entries"
+        );
+        assert_eq!(moved_in_lock, 1, "two moves onto one key can only make one");
     }
 
     #[test]

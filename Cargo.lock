@@ -1037,6 +1037,7 @@ dependencies = [
  "ignore",
  "insta",
  "jsonschema",
+ "libc",
  "schemars",
  "serde",
  "serde_json",
