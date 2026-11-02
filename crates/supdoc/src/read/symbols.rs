@@ -106,10 +106,14 @@ pub fn tag_symbols(file: &SourceFile) -> Result<SymbolTable, ReadError> {
 /// Twins are found through a map keyed by path and aliases, so the fold stays linear in the number
 /// of symbols: a hostile file with many symbols can't stall it (SEC-1).
 fn merge_accessors(symbols: Vec<Symbol>) -> Vec<Symbol> {
+    #[cfg(test)]
+    tests::TWIN_LOOKUPS.set(0);
     let mut merged: Vec<Symbol> = Vec::with_capacity(symbols.len());
     let mut index: HashMap<(SymbolPath, Vec<SymbolPath>), usize> = HashMap::new();
     for symbol in symbols {
         let key = (symbol.path.clone(), symbol.aliases.clone());
+        #[cfg(test)]
+        tests::TWIN_LOOKUPS.set(tests::TWIN_LOOKUPS.get() + 1);
         if let Some(seen) = index.get(&key).and_then(|&at| merged.get_mut(at)) {
             seen.range.start = seen.range.start.min(symbol.range.start);
             seen.range.end = seen.range.end.max(symbol.range.end);
@@ -442,6 +446,11 @@ mod tests {
         )
     }
 
+    thread_local! {
+        /// Twin-map lookups `merge_accessors` made on this thread since it last started.
+        pub(super) static TWIN_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
     fn resolved(table: &SymbolTable, query: &str) -> Result<String, ResolveError> {
         table
             .resolve(&absolute("/repo/src/lib.rs"), &path(query))
@@ -450,7 +459,7 @@ mod tests {
 
     #[test]
     fn merging_many_symbols_folds_twins_and_keeps_the_rest() {
-        // 40 000 symbols: a quadratic fold would compare 800 million pairs, a linear one does not.
+        // 40 000 symbols, bounded by structure not time: the fold must do one map lookup per symbol.
         let count = 20_000;
         let symbol = |name: String, start: usize| Symbol {
             path: path(&name),
@@ -464,6 +473,11 @@ mod tests {
 
         let merged = merge_accessors(symbols);
 
+        assert_eq!(
+            TWIN_LOOKUPS.get(),
+            2 * count,
+            "the fold should look each symbol up once, not compare it with every earlier one"
+        );
         assert_eq!(
             merged.len(),
             count,

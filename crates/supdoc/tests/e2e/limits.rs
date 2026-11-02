@@ -83,6 +83,19 @@ fn project_with_deep_source() -> Project {
     project
 }
 
+/// The `basic` fixture, recorded, plus a doc that links into `src/deep.rs#deep`. The source has no
+/// link text, so only resolving the symbol (never reading `deep.rs` as a source) can time out.
+fn project_with_deep_target() -> Project {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write(
+        "src/deep.rs",
+        &format!("fn deep() {{{}\n", "{".repeat(65_536)),
+    );
+    project.write("docs/deep.md", "[deep](../src/deep.rs#deep)\n");
+    project
+}
+
 /// Asserts that `run` failed, reporting that reading `file` outlasted the per-read timeout.
 fn assert_timed_out(run: &crate::support::Run, file: &str) {
     let _ = run.assert_exit(1);
@@ -162,12 +175,26 @@ fn fix_exits_1_on_a_read_timeout_and_never_says_nothing_to_fix() {
 
 #[test]
 fn list_reports_a_timed_out_symbol_target_instead_of_matching_text() {
-    let project = project_with_deep_source();
-    project.write("docs/deep.md", "[deep](../src/deep.rs#deep)\n");
+    let project = project_with_deep_target();
 
     let run = project.supdoc(&["--parse-timeout", "1ms", "list", "src/deep.rs#deep"]);
 
     assert_timed_out(&run, "src/deep.rs");
+}
+
+#[test]
+fn list_prints_the_timeout_even_when_a_filter_hides_the_timed_out_links() {
+    let project = project_with_deep_target();
+
+    for args in [
+        &["--parse-timeout", "1ms", "list", "docs/guide.md"][..],
+        &["--parse-timeout", "1ms", "list", "--state", "passed"],
+        &["--parse-timeout", "1ms", "list", "--limit", "1"],
+    ] {
+        let run = project.supdoc(args);
+
+        assert_timed_out(&run, "src/deep.rs");
+    }
 }
 
 #[test]
