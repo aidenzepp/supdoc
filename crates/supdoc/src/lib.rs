@@ -130,6 +130,15 @@ pub mod scan {
     /// Walking the project tree for source files.
     pub mod walk;
 
+    /// The ignore engine behind the walk.
+    mod ignore;
+
+    /// Finding a directory's git exclude file.
+    mod git;
+
+    /// Judging explicitly named paths.
+    mod explicit;
+
     /// Assembling a scan from sources, links and targets.
     pub mod assemble;
 
