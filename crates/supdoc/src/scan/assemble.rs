@@ -12,7 +12,7 @@ use crate::config::Config;
 use crate::exit::ExitStatus;
 use crate::finding::{Finding, Fix, LineIndex, Location, Severity, Snippet};
 use crate::hash::HashSettings;
-use crate::link::destination::{LinkError, parse_destination};
+use crate::link::destination::{LinkError, parse_destination, repaired_destination};
 use crate::link::{LinkKey, RawLink, SourcePath};
 use crate::lock::error::shell_quote;
 use crate::namespace::NamespaceName;
@@ -230,8 +230,15 @@ fn source_links(
             }),
             Err(error) => {
                 let key = unknown_namespace_key(config, languages, &raw, source, &error);
-                let finding =
-                    link_finding(config, &error, location.clone(), snippet, written.as_ref());
+                let repair = unique_repair(config, languages, &raw, source, written.as_ref());
+                let finding = link_finding(
+                    config,
+                    &error,
+                    location.clone(),
+                    snippet,
+                    written.as_ref(),
+                    repair.as_ref(),
+                );
                 match key {
                     Some(key) => found.broken.push((key, location, finding)),
                     None => found.unkeyed.push(finding),
@@ -276,16 +283,39 @@ fn add_broken(
 ) {
     for (key, location, finding) in broken {
         match links.entry(key) {
-            Entry::Occupied(mut link) => link.get_mut().locations.push(location),
+            Entry::Occupied(mut link) => link.get_mut().more.push(location),
             Entry::Vacant(slot) => {
                 let _link = slot.insert(ScannedLink {
                     snippet: finding.snippet.clone(),
-                    locations: vec![location],
+                    first: location,
+                    more: Vec::new(),
                     target: TargetState::Broken { finding },
                 });
             }
         }
     }
+}
+
+/// The corrected destination of `raw` and the fix that writes it, when the mechanical repair
+/// (see [`repaired_destination`]) gives a destination that parses and the written text is found
+/// exactly once in the source.
+fn unique_repair(
+    config: &Config,
+    languages: &Languages,
+    raw: &RawLink,
+    source: &SourcePath,
+    written: Option<&Written>,
+) -> Option<(String, Written, std::ops::Range<usize>)> {
+    let repaired = repaired_destination(&raw.destination)?;
+    let candidate = RawLink {
+        destination: repaired.clone(),
+        ..raw.clone()
+    };
+    let _parsed = parse_destination(&candidate, source, config.namespaces(), languages)?.ok()?;
+    let written = written?;
+    let range = raw.destination_range.clone();
+    (written.text_at(&range)?.as_ref() == raw.destination.trim())
+        .then(|| (repaired, written.clone(), range))
 }
 
 /// The finding for a destination that is meant for supdoc but wrong. An unknown namespace gets a
@@ -296,7 +326,17 @@ fn link_finding(
     location: Location,
     snippet: Option<Snippet>,
     written: Option<&Written>,
+    repair: Option<&(String, Written, std::ops::Range<usize>)>,
 ) -> Finding {
+    let repair_fix = |repaired: &str| {
+        let (_, written, range) = repair?;
+        Some(Fix {
+            file: location.file.clone(),
+            scanned: written.text_at(range)?,
+            range: range.clone(),
+            replacement: repaired.to_owned(),
+        })
+    };
     let (code, help, fix) = match error {
         LinkError::UnknownNamespace { prefix, known, .. } => {
             let close =
@@ -318,13 +358,18 @@ fn link_finding(
             let help = crate::namespace::unknown_namespace_help(prefix, &known);
             (CODE_UNKNOWN_NAMESPACE, help, fix)
         }
-        LinkError::InvalidPath { .. } => (
-            "link-invalid-path",
-            "Write the path with `/` between names, relative to this file or to the project \
-             root with a leading `/`"
-                .to_owned(),
-            None,
-        ),
+        LinkError::InvalidPath { .. } => {
+            let rule = "Write the path with `/` between names, relative to this file or to the \
+                        project root with a leading `/`";
+            match repair {
+                Some((repaired, ..)) => (
+                    "link-invalid-path",
+                    format!("Write `{repaired}`. {rule}"),
+                    repair_fix(repaired),
+                ),
+                None => ("link-invalid-path", rule.to_owned(), None),
+            }
+        }
         LinkError::InvalidSymbol { .. } => (
             "link-invalid-symbol",
             "Write the symbol as names joined by `.`, like `Config.validate`".to_owned(),
@@ -335,12 +380,18 @@ fn link_finding(
             targets::OUTSIDE_ROOT_HELP.to_owned(),
             None,
         ),
-        LinkError::TextFragmentUnsupported { .. } => (
-            "link-text-fragment-unsupported",
-            "Remove the `:~:` text fragment from the link. supdoc can't read text fragments yet"
-                .to_owned(),
-            None,
-        ),
+        LinkError::TextFragmentUnsupported { .. } => {
+            let rule = "Remove the `:~:` text fragment from the link. supdoc can't read text \
+                        fragments yet";
+            match repair {
+                Some((repaired, ..)) => (
+                    "link-text-fragment-unsupported",
+                    format!("Write `{repaired}`. {rule}"),
+                    repair_fix(repaired),
+                ),
+                None => ("link-text-fragment-unsupported", rule.to_owned(), None),
+            }
+        }
     };
 
     let finding = Finding::new(code, Severity::Error, error.to_string())
@@ -465,7 +516,7 @@ mod tests {
         fn assemble(&self) -> (Scan, Parsed) {
             assemble(
                 &self.config(),
-                &Languages::builtin(),
+                Languages::builtin().expect("the built-in cartridges should load"),
                 &Scope::All,
                 self.config().hash_settings(),
             )
@@ -473,8 +524,12 @@ mod tests {
         }
 
         fn scan(&self) -> Scan {
-            run(&self.config(), &Languages::builtin(), &Scope::All)
-                .expect("a readable project root should scan")
+            run(
+                &self.config(),
+                Languages::builtin().expect("the built-in cartridges should load"),
+                &Scope::All,
+            )
+            .expect("a readable project root should scan")
         }
 
         /// The text of `relative` beneath the root, as now on disk.
@@ -570,8 +625,7 @@ mod tests {
 
         assert_eq!(scan.links.len(), 1, "both copies should share one link");
         let lines: Vec<u32> = link(&scan, &key("docs/guide.md", "src/lib.rs", Some("add")))
-            .locations
-            .iter()
+            .locations()
             .map(|location| location.line)
             .collect();
         assert_eq!(
@@ -870,7 +924,11 @@ mod tests {
         let locked = fs::Permissions::from_mode(0o000);
         fs::set_permissions(&project.root, locked).expect("the root should be lockable");
 
-        let result = run(&config, &Languages::builtin(), &Scope::All);
+        let result = run(
+            &config,
+            Languages::builtin().expect("the built-in cartridges should load"),
+            &Scope::All,
+        );
 
         fs::set_permissions(&project.root, fs::Permissions::from_mode(0o755))
             .expect("the root should be unlockable, so the temp dir can be removed");

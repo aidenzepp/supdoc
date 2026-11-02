@@ -33,7 +33,7 @@ use crate::output::json::{Envelope, LocationJson};
 use crate::output::paths::relative_or_absolute;
 use crate::output::text::{render_finding, visible};
 use crate::output::{Output, Report, TextContext, preview_note};
-use crate::path::AbsolutePath;
+use crate::path::{AbsolutePath, ProjectFile, resolve_project_file};
 use crate::read::cartridge::{Languages, SourceFile};
 use crate::read::error::{ReadError, ReadRole};
 use crate::read::links::links;
@@ -55,10 +55,10 @@ const COMMAND: &str = "namespace rename";
 /// invalid, 74 when unreadable), `cli-rename-unknown-namespace` when OLD isn't defined,
 /// `cli-rename-target-exists` when NEW already is, `cli-rename-inherited` when OLD comes only from
 /// a config this one extends, `cli-rename-unreadable-source` when a source or a directory can't
-/// be read,
-/// `cli-rename-file-changed` when a file changed between planning and
-/// writing (all 1), `cli-rename-write` when a file can't be written, and `cli-rename-output` when
-/// the report can't be written (both 74).
+/// be read, `cli-rename-config-outside-root` when the config is a symlink out of the root, and
+/// `cli-rename-file-changed` when a file changed between planning and writing (all 1),
+/// `cli-rename-write` when a file can't be written, and `cli-rename-output` when the report can't
+/// be written (both 74).
 pub fn run(args: &RenameArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let plan = Plan::build(args, context, output)?;
     let applied = match args.confirm.mode() {
@@ -148,8 +148,9 @@ impl Plan {
     ///
     /// Returns the config's or the lockfile's own error, `cli-rename-unknown-namespace`,
     /// `cli-rename-target-exists`, `cli-rename-inherited`, `cli-rename-unreadable-source` when a
-    /// source or a directory can't be read, or `cli-rename-file-changed` when the config no longer
-    /// defines OLD once it is read again.
+    /// source or a directory can't be read, `cli-rename-config-outside-root` when the config is a
+    /// symlink out of the root, or `cli-rename-file-changed` when the config no longer defines OLD
+    /// once it is read again.
     fn build(args: &RenameArgs, context: &Context, output: &mut Output) -> Result<Self, CliError> {
         let (old, new) = (&args.old, &args.new);
         let rerun = command_text(args, context);
@@ -159,8 +160,8 @@ impl Plan {
         let config_edit = ConfigEdit::read(nearest, config.root(), old, &rerun, context, output)?;
         let parent = parent_definition(&config, old, context, output)?;
 
-        let languages = Languages::builtin();
-        let walked = walk(&config, &languages, &Scope::All);
+        let languages = Languages::builtin().map_err(CliError::from)?;
+        let walked = walk(&config, languages, &Scope::All);
         if let Some(dir) = walked.unread_dirs.first() {
             return Err(unread_dir(dir, config.root(), &rerun));
         }
@@ -174,9 +175,9 @@ impl Plan {
             else {
                 return Err(invalid_source(path, &rerun));
             };
-            match SourceFile::read(path.clone(), &languages) {
+            match SourceFile::read(path.clone(), languages) {
                 Ok(file) => {
-                    sources.extend(SourceEdit::find(&config, &languages, source, &file, old));
+                    sources.extend(SourceEdit::find(&config, languages, source, &file, old));
                 }
                 Err(error) => return Err(unread_source(&source, &rerun, &error)),
             }
@@ -343,17 +344,7 @@ impl Plan {
 
     /// The error for a file that no longer holds what was read.
     fn file_changed(&self, file: &str) -> CliError {
-        CliError::new(
-            "cli-rename-file-changed",
-            format!(
-                "{file} changed or can't be read since the rename was planned; nothing was written"
-            ),
-            format!(
-                "Run `{}` again to plan from the files as they are now",
-                self.apply_command
-            ),
-            ExitStatus::Failed,
-        )
+        file_changed(file, &self.apply_command)
     }
 
     /// The error for a file that couldn't be written, after the files in `written`.
@@ -455,7 +446,8 @@ fn namespace_key(text: &str, name: &NamespaceName) -> Option<Range<usize>> {
 /// The namespace key to rename in the nearest config.
 #[derive(Debug)]
 struct ConfigEdit {
-    /// The config file.
+    /// The file read, checked and written: the config, or the real file inside the root that a
+    /// symlinked config leads to, so the link stays.
     file: AbsolutePath,
     /// The file as JSON shows it: relative to the project root.
     shown: String,
@@ -473,7 +465,8 @@ impl ConfigEdit {
     ///
     /// # Errors
     ///
-    /// Returns the config's own read error, or `cli-rename-file-changed` when the file no longer
+    /// Returns `cli-rename-config-outside-root` when `file` is a symlink whose real file is outside
+    /// `root`, the config's own read error, or `cli-rename-file-changed` when the file no longer
     /// defines OLD.
     fn read(
         file: &AbsolutePath,
@@ -483,23 +476,26 @@ impl ConfigEdit {
         context: &Context,
         output: &mut Output,
     ) -> Result<Self, CliError> {
-        let text = read_config(file, context, output)?;
         let shown = relative_or_absolute(root, file);
+        let real = match resolve_project_file(file) {
+            Ok(ProjectFile::Inside(real)) => real,
+            Ok(ProjectFile::Outside(real)) => {
+                return Err(config_outside_root(&shown, real.as_ref(), rerun));
+            }
+            // Gone since it was loaded, or its metadata can't be read: the read says why.
+            Ok(ProjectFile::Absent) | Err(_) => file.clone(),
+        };
+        let text = read_config(&real, context, output)?;
         let relative = file.strip_prefix(root).map(Path::to_path_buf);
         let Some(key) = namespace_key(&text, old) else {
-            return Err(CliError::new(
-                "cli-rename-file-changed",
-                format!("{shown} no longer defines `{old}`; nothing was written"),
-                format!("Run `{rerun}` again"),
-                ExitStatus::Failed,
-            ));
+            return Err(file_changed(&shown, rerun));
         };
         let location = relative
             .as_deref()
             .and_then(|path| SourcePath::from_relative(path).ok())
             .and_then(|source| IndexedText::new(&text).locate(source, key.clone()));
         Ok(Self {
-            file: file.clone(),
+            file: real,
             shown,
             text,
             key,
@@ -684,6 +680,49 @@ fn holds(file: &AbsolutePath, text: &str) -> bool {
 fn replace_file(target: &Path, bytes: &[u8]) -> io::Result<()> {
     let permissions = fs::metadata(target)?.permissions();
     write_atomically(target, bytes, Some(&permissions))
+}
+
+/// The `cli-rename-file-changed` error (1) for `file`, shown relative to the project root, which
+/// no longer holds what the rename read; `apply_command` reruns the rename. A rename meets it only
+/// when a file changes between planning and writing, so a test builds it here.
+#[must_use]
+pub fn file_changed(file: &str, apply_command: &str) -> CliError {
+    CliError::new(
+        "cli-rename-file-changed",
+        format!(
+            "{file} changed or can't be read since the rename was planned; nothing was written"
+        ),
+        format!("Run `{apply_command}` again to plan from the files as they are now"),
+        ExitStatus::Failed,
+    )
+}
+
+/// The `cli-rename-config-outside-root` error (1) for the config `shown`, a symlink whose real
+/// file `real` lies outside the project root, where a rename never writes; `rerun` repeats it.
+fn config_outside_root(shown: &str, real: Option<&AbsolutePath>, rerun: &str) -> CliError {
+    let Some(real) = real else {
+        return CliError::new(
+            "cli-rename-config-outside-root",
+            format!("{shown} is a symlink that doesn't resolve to a file; nothing was written"),
+            format!(
+                "Point the symlink at a file inside the project root, then run `{rerun}` again"
+            ),
+            ExitStatus::Failed,
+        );
+    };
+    CliError::new(
+        "cli-rename-config-outside-root",
+        format!(
+            "{shown} is a symlink to {}, outside the project root; nothing was written",
+            real.display()
+        ),
+        format!(
+            "supdoc writes only inside the project root. Rename the namespace in {} yourself, or \
+             replace the symlink with a copy of that file and run `{rerun}` again",
+            real.display()
+        ),
+        ExitStatus::Failed,
+    )
 }
 
 /// The error for an OLD that no config defines, naming the likely intended one and every
@@ -1039,9 +1078,12 @@ web = \"services/web\"
 
         /// Each link's source, target, symbol and state, as `supdoc check` would judge them.
         fn states(&self) -> Vec<(String, String, LinkState)> {
-            let scan =
-                crate::scan::assemble::run(&self.config(), &Languages::builtin(), &Scope::All)
-                    .expect("the fixture project should scan");
+            let scan = crate::scan::assemble::run(
+                &self.config(),
+                Languages::builtin().expect("the built-in cartridges should load"),
+                &Scope::All,
+            )
+            .expect("the fixture project should scan");
             let lock = Lockfile::read(&lock_path(&self.root()))
                 .expect("the lockfile should parse")
                 .unwrap_or_default();

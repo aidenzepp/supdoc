@@ -214,15 +214,14 @@ pub(crate) fn resolve(
         for (key, state, occurrences) in
             target_states(config, languages, parsed, settings, at, &target, keyed)
         {
-            let snippet = occurrences
-                .first()
-                .and_then(|occurrence| occurrence.snippet.clone());
+            let mut occurrences = occurrences.into_iter();
+            let Some(first) = occurrences.next() else {
+                continue;
+            };
             let link = ScannedLink {
-                snippet,
-                locations: occurrences
-                    .into_iter()
-                    .map(|occurrence| occurrence.location)
-                    .collect(),
+                snippet: first.snippet,
+                first: first.location,
+                more: occurrences.map(|occurrence| occurrence.location).collect(),
                 target: state,
             };
             let _replaced = links.insert(key, link);
@@ -664,7 +663,7 @@ mod tests {
         let key = occurrence.key.clone();
         let links = resolve(
             &config,
-            &Languages::builtin(),
+            Languages::builtin().expect("the built-in cartridges should load"),
             &mut Parsed::default(),
             config.hash_settings(),
             vec![occurrence],
@@ -681,10 +680,10 @@ mod tests {
             let dir = tempfile::TempDir::new().expect("a temp dir should be creatable");
             let path = dir.path().join("a.rs");
             std::fs::write(&path, "fn a() {\r\n}\r\n").expect("the fixture should be writable");
-            let languages = Languages::builtin();
+            let languages = Languages::builtin().expect("the built-in cartridges should load");
             let file = SourceFile::read(
                 AbsolutePath::new(&path).expect("a temp dir path should be absolute"),
-                &languages,
+                languages,
             )
             .expect("the fixture should read");
             hash_file(&file, HashSettings { line_endings })

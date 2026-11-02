@@ -194,8 +194,12 @@ impl Project {
     /// Records every present link's current hash in `supdoc.lock`, as `update --yes` would.
     pub(crate) fn record_all(&self) {
         let config = Config::load(&self.root()).expect("the fixture config should load");
-        let scan = crate::scan::assemble::run(&config, &Languages::builtin(), &Scope::All)
-            .expect("the fixture project should scan");
+        let scan = crate::scan::assemble::run(
+            &config,
+            Languages::builtin().expect("the built-in cartridges should load"),
+            &Scope::All,
+        )
+        .expect("the fixture project should scan");
         let mut lock = Lockfile::default();
         for (key, link) in scan.links {
             if let TargetState::Present { hash, .. } = link.target {

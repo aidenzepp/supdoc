@@ -457,10 +457,6 @@ mod helps {
     /// Codes with no binary scenario and no public constructor; their helps are checked by review.
     const UNREACHABLE: &[Unreachable] = &[
         Unreachable {
-            kind: "cli-rename-file-changed",
-            why: "a file must change between planning and writing one rename",
-        },
-        Unreachable {
             kind: "cli-rename-invalid-source-path",
             why: "the walk reports a file with an invalid name as a finding, so rename never meets one",
         },
@@ -518,8 +514,33 @@ mod helps {
             },
         },
         UnitCase {
+            kind: "read-cartridge-load",
+            build: || {
+                let grammar: tree_sitter::Language = tree_sitter_md::LANGUAGE.into();
+                let error = tree_sitter::Query::new(&grammar, "(no_such_node)")
+                    .expect_err("a query for a node the grammar lacks should not compile");
+                let query_file = Box::leak(Box::new(supdoc::read::query::QueryFileError {
+                    language: supdoc::read::cartridge::LanguageId::new("markdown"),
+                    file: "tags.scm",
+                    error,
+                }));
+                let error = supdoc::read::error::CartridgeLoadError::Query(query_file);
+                (error.code().to_owned(), Some(error.help()))
+            },
+        },
+        UnitCase {
             kind: "fix-file-changed",
             build: file_changed_during_fix,
+        },
+        UnitCase {
+            kind: "cli-rename-file-changed",
+            build: || {
+                let error = supdoc::cli::rename::file_changed(
+                    "docs/guide.md",
+                    "supdoc namespace rename core base --yes",
+                );
+                (error.code().to_owned(), Some(error.help().to_owned()))
+            },
         },
     ];
 
@@ -531,9 +552,10 @@ mod helps {
         let root =
             supdoc::path::AbsolutePath::new(&real).expect("a canonical path should be absolute");
         let config = supdoc::config::Config::load(&root).expect("the fixture config should load");
-        let languages = supdoc::read::cartridge::Languages::builtin();
+        let languages = supdoc::read::cartridge::Languages::builtin()
+            .expect("the built-in cartridges should load");
         let scan =
-            supdoc::scan::assemble::run(&config, &languages, &supdoc::scan::model::Scope::All)
+            supdoc::scan::assemble::run(&config, languages, &supdoc::scan::model::Scope::All)
                 .expect("the fixture project should scan");
         let plan = supdoc::check::fix::plan_fixes(&scan);
         project.write(
@@ -1045,6 +1067,11 @@ mod helps {
             &["check", "docs/old.md"],
         ),
         case(
+            "scan-explicit-path-unscanned",
+            |p| p.write("notes.txt", "x\n"),
+            &["check", "notes.txt"],
+        ),
+        case(
             "scan-explicit-path-symlinked",
             |p| {
                 std::os::unix::fs::symlink("src", p.path().join("alias"))
@@ -1136,6 +1163,25 @@ mod helps {
                 );
             },
             &["namespace", "rename", "shared", "common"],
+        ),
+        case(
+            "cli-rename-config-outside-root",
+            |p| {
+                p.write("app/src/lib.rs", "pub fn app() {}\n");
+                std::os::unix::fs::symlink(
+                    "../supdoc.config.toml",
+                    p.path().join("app/supdoc.config.toml"),
+                )
+                .expect("the symlink should be creatable");
+            },
+            &[
+                "-c",
+                "app/supdoc.config.toml",
+                "namespace",
+                "rename",
+                "core",
+                "base",
+            ],
         ),
         restricted_case(
             "cli-rename-unreadable-source",
@@ -1356,9 +1402,20 @@ mod helps {
                     "the help of `{kind}` (built directly) {problem}: {help:?}"
                 ));
             }
-            if kind == "read-internal" && !help.as_deref().is_some_and(|h| h.contains(ISSUES_URL)) {
+            if (kind == "read-internal" || kind == "read-cartridge-load")
+                && !help.as_deref().is_some_and(|h| h.contains(ISSUES_URL))
+            {
                 problems.push(format!(
                     "the help of `{kind}` is an exit-70 help and should name {ISSUES_URL}: {help:?}"
+                ));
+            }
+            if kind == "read-cartridge-load"
+                && !help
+                    .as_deref()
+                    .is_some_and(|h| h.contains("cargo install --locked supdoc"))
+            {
+                problems.push(format!(
+                    "the help of `{kind}` should name `cargo install --locked supdoc`: {help:?}"
                 ));
             }
             let _new = covered.insert(unit.kind.to_owned());

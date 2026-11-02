@@ -32,6 +32,7 @@ tree-sitter-md.workspace = true
 tree-sitter-python.workspace = true
 tree-sitter-rust.workspace = true
 tree-sitter-typescript.workspace = true
+unicode-general-category.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
