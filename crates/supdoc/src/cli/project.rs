@@ -148,6 +148,9 @@ pub(crate) fn absolute(cwd: &AbsolutePath, path: &Path) -> AbsolutePath {
 /// The part of the project `[PATHS]` names: everything when none are given, or when one of them
 /// is the project root itself (04 S10).
 ///
+/// Every path is checked before any of them can widen the scope to the whole project, so a bad
+/// path is refused wherever it appears among the arguments.
+///
 /// # Errors
 ///
 /// Returns `cli-path-missing` for a path that doesn't exist, `cli-path-outside-project` for one
@@ -161,6 +164,7 @@ pub(crate) fn scope(
 ) -> Result<Scope, CliError> {
     let (cwd, root) = (&context.cwd, config.root());
     let mut sources = Vec::with_capacity(paths.len());
+    let mut names_root = false;
     for typed in paths {
         let path = absolute(cwd, typed);
         ensure_exists(&path, typed, cwd)?;
@@ -168,13 +172,14 @@ pub(crate) fn scope(
             return Err(path_outside_config(typed, config));
         };
         if inside.as_os_str().is_empty() {
-            return Ok(Scope::All);
+            names_root = true;
+            continue;
         }
         let source =
             SourcePath::from_relative(inside).map_err(|error| path_invalid(typed, &error))?;
         sources.push(source);
     }
-    Ok(if sources.is_empty() {
+    Ok(if names_root || sources.is_empty() {
         Scope::All
     } else {
         Scope::Paths(sources)
@@ -599,5 +604,71 @@ mod tests {
             "the snippet should hold the offending line: {}",
             site.snippet.text
         );
+    }
+
+    /// `scope` for `paths` typed in the root of the project from [`project_with_docs`].
+    fn scope_in(dir: &tempfile::TempDir, paths: &[&Path]) -> Result<Scope, CliError> {
+        let cwd = AbsolutePath::new(dir.path()).expect("a temp directory should be absolute");
+        let config = Config::load(&cwd).expect("the fixture config should load");
+        let cli = Cli::try_parse_from(["supdoc", "check"]).expect("`supdoc check` should parse");
+        let context = Context {
+            global: cli.global,
+            cwd,
+        };
+        let paths: Vec<PathBuf> = paths.iter().map(|path| path.to_path_buf()).collect();
+        scope(&paths, &config, &context)
+    }
+
+    #[test]
+    fn a_missing_path_is_refused_on_either_side_of_the_root() {
+        let dir = project_with_docs();
+        let (root, missing) = (Path::new("."), Path::new("nope.md"));
+
+        for paths in [[root, missing], [missing, root]] {
+            let error = scope_in(&dir, &paths)
+                .expect_err("a missing path should be refused even beside the root");
+
+            assert_eq!(
+                (error.code(), error.exit_code()),
+                ("cli-path-missing", 2),
+                "paths {paths:?} should be refused for the missing one"
+            );
+        }
+    }
+
+    #[test]
+    fn an_outside_path_is_refused_on_either_side_of_the_root() {
+        let dir = project_with_docs();
+        let elsewhere = tempfile::tempdir().expect("a fresh temp directory should be created");
+        let outside = elsewhere.path().join("passwd");
+        fs::write(&outside, "").expect("the outside file should be written");
+        let root = Path::new(".");
+
+        for paths in [[root, outside.as_path()], [outside.as_path(), root]] {
+            let error = scope_in(&dir, &paths)
+                .expect_err("a path outside the project should be refused even beside the root");
+
+            assert_eq!(
+                (error.code(), error.exit_code()),
+                ("cli-path-outside-project", 2),
+                "paths {paths:?} should be refused for the outside one"
+            );
+        }
+    }
+
+    #[test]
+    fn the_root_beside_valid_paths_scopes_the_whole_project() {
+        let dir = project_with_docs();
+        let (root, docs) = (Path::new("."), Path::new("docs"));
+
+        for paths in [[root, docs], [docs, root]] {
+            let scope = scope_in(&dir, &paths).expect("valid paths should be accepted");
+
+            assert_eq!(
+                scope,
+                Scope::All,
+                "paths {paths:?} name the root, so all of it"
+            );
+        }
     }
 }
