@@ -13,7 +13,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use crate::check::moves::Move;
-use crate::finding::{Finding, Fix, Severity};
+use crate::finding::{Finding, Fix, Location, Severity};
 use crate::link::{LinkKey, SourcePath, SymbolPath, Target, TargetPath};
 use crate::lock::io::write_atomically;
 use crate::lock::model::Lockfile;
@@ -36,7 +36,25 @@ const CODE_WRITE_FAILED: &str = "fix-write-failed";
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FixPlan {
     /// Sorted by file, then position. Edits to one file never overlap.
-    pub fixes: Vec<PlannedFix>,
+    fixes: Vec<PlannedFix>,
+}
+
+impl FixPlan {
+    /// A plan of `fixes`, sorted by file then position, with every fix that overlaps an earlier
+    /// one in the same file dropped.
+    #[must_use]
+    pub fn new(mut fixes: Vec<PlannedFix>) -> Self {
+        fixes.sort_by(|a, b| order(&a.fix, &b.fix));
+        Self {
+            fixes: without_overlaps(fixes, |planned| &planned.fix),
+        }
+    }
+
+    /// The edits, sorted by file then position, never overlapping.
+    #[must_use]
+    pub fn fixes(&self) -> &[PlannedFix] {
+        &self.fixes
+    }
 }
 
 /// One edit, the finding it repairs, and what the file must still contain for it to be safe.
@@ -46,6 +64,13 @@ pub struct PlannedFix {
     pub fix: Fix,
     /// The finding the edit repairs, for the preview.
     pub finding: Finding,
+    /// Where the finding's link is; it contains the edit.
+    pub location: Location,
+    /// The link as scanned: the whole link when the finding's snippet holds it, else the bytes the
+    /// edit replaces.
+    pub old_link: String,
+    /// The link with the edit applied.
+    pub new_link: String,
     /// The lock entry move when this edit rewrites a link wholly, so its entry can follow (05 C6).
     pub moved: Option<Move>,
 }
@@ -103,55 +128,102 @@ pub fn plan_fixes(scan: &Scan) -> FixPlan {
         });
     let loose = scan.findings.iter().map(|finding| (None, finding));
 
-    let mut candidates: Vec<(Option<&LinkKey>, &Finding)> = Vec::new();
+    let mut candidates: Vec<Candidate<'_>> = Vec::new();
     for (key, finding) in linked.chain(loose) {
-        let Some(fix) = &finding.fix else { continue };
+        let Some(fix) = finding.fix.as_deref() else {
+            continue;
+        };
         if !vouches_for(finding, fix) {
             continue;
         }
-        let duplicate = candidates
-            .iter()
-            .any(|(_, other)| other.fix.as_deref() == Some(fix));
-        if !duplicate {
-            candidates.push((key, finding));
+        if !candidates.iter().any(|other| other.fix == fix) {
+            candidates.push(Candidate { key, finding, fix });
         }
     }
-    candidates.sort_by(|(_, a), (_, b)| order(a.fix.as_deref(), b.fix.as_deref()));
+    candidates.sort_by(|a, b| order(a.fix, b.fix));
 
-    let mut kept: Vec<(Option<&LinkKey>, &Finding)> = Vec::new();
-    for candidate in candidates {
-        let overlaps = kept.iter().any(|(_, other)| {
-            other
-                .fix
-                .as_ref()
-                .zip(candidate.1.fix.as_deref())
-                .is_some_and(|(earlier, later)| {
-                    earlier.file == later.file && later.range.start < earlier.range.end
-                })
-        });
-        if !overlaps {
-            kept.push(candidate);
-        }
-    }
+    let kept = without_overlaps(candidates, |candidate| candidate.fix);
 
     let fixes = kept
         .iter()
-        .filter_map(|(key, finding)| {
-            let fix = finding.fix.as_deref()?.clone();
-            let moved = key.and_then(|key| moved_by(scan, key, finding, &fix, &kept));
+        .filter_map(|candidate| {
+            let Candidate { key, finding, fix } = *candidate;
+            let location = finding.location.clone()?;
+            let moved = key.and_then(|key| moved_by(scan, key, finding, fix, &kept));
+            let (old_link, new_link) = link_text(finding, &location, fix);
             Some(PlannedFix {
-                fix,
-                finding: (*finding).clone(),
+                fix: fix.clone(),
+                finding: finding.clone(),
+                location,
+                old_link,
+                new_link,
                 moved,
             })
         })
         .collect();
-    FixPlan { fixes }
+    FixPlan::new(fixes)
+}
+
+/// A fix the scan offers, with the link it belongs to (when it has one) and the finding it repairs.
+#[derive(Clone, Copy)]
+struct Candidate<'a> {
+    /// The link the finding is about, `None` for a finding of no link.
+    key: Option<&'a LinkKey>,
+    /// The finding the fix repairs.
+    finding: &'a Finding,
+    /// The finding's fix.
+    fix: &'a Fix,
+}
+
+/// Keeps each item of `sorted` whose fix does not start inside an earlier kept fix of the same
+/// file; of two overlapping fixes the earlier one wins.
+fn without_overlaps<T>(sorted: Vec<T>, fix: impl Fn(&T) -> &Fix) -> Vec<T> {
+    let mut kept: Vec<T> = Vec::new();
+    for item in sorted {
+        let later = fix(&item);
+        let overlaps = kept.iter().any(|earlier| {
+            let earlier = fix(earlier);
+            earlier.file == later.file && later.range.start < earlier.range.end
+        });
+        if !overlaps {
+            kept.push(item);
+        }
+    }
+    kept
+}
+
+/// The link before and after `fix`. The snippet is a bounded window; the whole link is shown only
+/// when the window holds it, else the replaced bytes and the replacement stand for it.
+fn link_text(finding: &Finding, location: &Location, fix: &Fix) -> (String, String) {
+    let link_range = &location.range;
+    let scanned = |wanted: &Range<usize>| -> Option<String> {
+        let snippet = finding.snippet.as_ref()?;
+        let origin = link_range.start.checked_sub(snippet.highlight.start)?;
+        let from = wanted.start.checked_sub(origin)?;
+        let to = wanted.end.checked_sub(origin)?;
+        snippet.text.get(from..to).map(str::to_owned)
+    };
+    let old_link = scanned(link_range).unwrap_or_else(|| fix.scanned.to_string());
+    let new_link = fix
+        .range
+        .start
+        .checked_sub(link_range.start)
+        .zip(fix.range.end.checked_sub(link_range.start))
+        .and_then(|(from, to)| {
+            Some(format!(
+                "{}{}{}",
+                old_link.get(..from)?,
+                fix.replacement,
+                old_link.get(to..)?
+            ))
+        })
+        .unwrap_or_else(|| fix.replacement.clone());
+    (old_link, new_link)
 }
 
 /// Sorts fixes by file, then by position.
-fn order(a: Option<&Fix>, b: Option<&Fix>) -> std::cmp::Ordering {
-    let key = |fix: Option<&Fix>| fix.map(|fix| (fix.file.clone(), fix.range.start, fix.range.end));
+fn order(a: &Fix, b: &Fix) -> std::cmp::Ordering {
+    let key = |fix: &Fix| (fix.file.clone(), fix.range.start, fix.range.end);
     key(a).cmp(&key(b))
 }
 
@@ -175,7 +247,7 @@ fn moved_by(
     key: &LinkKey,
     finding: &Finding,
     fix: &Fix,
-    kept: &[(Option<&LinkKey>, &Finding)],
+    kept: &[Candidate<'_>],
 ) -> Option<Move> {
     let new = rewritten_key(key, finding.code, &fix.replacement)?;
     if new == *key || scan.links.contains_key(&new) {
@@ -184,10 +256,11 @@ fn moved_by(
     let link = scan.links.get(key)?;
     let rewritten = |range: &Range<usize>, file: &SourcePath| {
         kept.iter()
-            .filter(|(other, _)| *other == Some(key))
-            .filter_map(|(_, other)| other.fix.as_deref())
-            .any(|fix| {
-                fix.file == *file && fix.range.start >= range.start && fix.range.end <= range.end
+            .filter(|other| other.key == Some(key))
+            .any(|other| {
+                other.fix.file == *file
+                    && other.fix.range.start >= range.start
+                    && other.fix.range.end <= range.end
             })
     };
     link.locations()
@@ -256,7 +329,7 @@ fn rewritten_key(key: &LinkKey, code: &str, replacement: &str) -> Option<LinkKey
 #[must_use]
 pub fn apply_fixes(plan: &FixPlan, root: &AbsolutePath, rerun: &str) -> FixResult {
     let mut by_file: BTreeMap<&SourcePath, Vec<&PlannedFix>> = BTreeMap::new();
-    for planned in &plan.fixes {
+    for planned in plan.fixes() {
         by_file.entry(&planned.fix.file).or_default().push(planned);
     }
 
@@ -514,7 +587,7 @@ mod tests {
     }
 
     fn first(plan: &FixPlan) -> &PlannedFix {
-        plan.fixes
+        plan.fixes()
             .first()
             .expect("the plan should hold at least one fix")
     }
@@ -550,7 +623,7 @@ mod tests {
 
         let plan = plan_fixes(&scan);
 
-        assert_eq!(plan.fixes.len(), 1);
+        assert_eq!(plan.fixes().len(), 1);
         assert_eq!(first(&plan).fix.replacement, "add");
     }
 
@@ -561,7 +634,7 @@ mod tests {
             finding.fix = None;
         }
 
-        assert_eq!(plan_fixes(&scan_of([(key, link)])).fixes, vec![]);
+        assert_eq!(plan_fixes(&scan_of([(key, link)])).fixes(), []);
     }
 
     #[test]
@@ -574,7 +647,7 @@ mod tests {
         let plan = plan_fixes(&scan_of([second, first, clash]));
 
         let replacements: Vec<&str> = plan
-            .fixes
+            .fixes()
             .iter()
             .map(|planned| planned.fix.replacement.as_str())
             .collect();
@@ -686,7 +759,7 @@ mod tests {
         let hash = Hash::digest(b"body");
         let mut lock: Lockfile = [(link_key(old), hash)].into_iter().collect();
         let applied: Vec<AppliedFix> = plan
-            .fixes
+            .fixes()
             .iter()
             .map(|planned| AppliedFix {
                 fix: planned.fix.clone(),
@@ -769,7 +842,11 @@ mod tests {
         let plan = plan_fixes(&scan_of([(key, link)]));
         let result = apply_fixes(&plan, &project.root(), "supdoc fix --yes");
 
-        assert_eq!(plan.fixes.len(), 1, "the long link's fix should be planned");
+        assert_eq!(
+            plan.fixes().len(),
+            1,
+            "the long link's fix should be planned"
+        );
         assert_eq!(result.skipped, vec![]);
         assert_eq!(
             project.read("docs/a.md"),
