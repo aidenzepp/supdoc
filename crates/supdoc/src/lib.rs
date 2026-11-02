@@ -11,6 +11,9 @@
     )
 )]
 
+/// The process exit status.
+pub mod exit;
+
 /// The shared "did you mean" rule: one cutoff, one distance metric, a length prefilter.
 pub(crate) mod suggest;
 

@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 use crate::config::{CONFIG_FILE_NAME, Config};
+use crate::exit::ExitStatus;
 use crate::finding::{Finding, Fix, LineIndex, Location, Severity, Snippet};
 use crate::hash::HashSettings;
 use crate::link::destination::{LinkError, parse_destination};
@@ -22,9 +23,6 @@ use crate::read::links::links;
 use crate::scan::model::{Scan, ScannedLink, Scope, TargetState};
 use crate::scan::targets::{self, CODE_UNKNOWN_NAMESPACE, Occurrence, Parsed, Written};
 use crate::scan::walk::walk;
-
-/// Exit status for a scan that couldn't read the project (06 X7).
-const EXIT_IO: u8 = 74;
 
 /// Why a scan couldn't run at all (04 S7). Every smaller problem is a finding instead.
 #[derive(Debug, thiserror::Error)]
@@ -62,9 +60,9 @@ impl ScanError {
 
     /// The process exit status for this error (06 X7): 74, since the project can't be read.
     #[must_use]
-    pub const fn exit_code(&self) -> u8 {
+    pub const fn status(&self) -> ExitStatus {
         match self {
-            Self::RootUnreadable { .. } => EXIT_IO,
+            Self::RootUnreadable { .. } => ExitStatus::Io,
         }
     }
 }
@@ -278,11 +276,12 @@ fn add_broken(
 ) {
     for (key, location, finding) in broken {
         match links.entry(key) {
-            Entry::Occupied(mut link) => link.get_mut().locations.push(location),
+            Entry::Occupied(mut link) => link.get_mut().more.push(location),
             Entry::Vacant(slot) => {
                 let _link = slot.insert(ScannedLink {
                     snippet: finding.snippet.clone(),
-                    locations: vec![location],
+                    first: location,
+                    more: Vec::new(),
                     target: TargetState::Broken { finding },
                 });
             }
@@ -590,8 +589,7 @@ mod tests {
 
         assert_eq!(scan.links.len(), 1, "both copies should share one link");
         let lines: Vec<u32> = link(&scan, &key("docs/guide.md", "src/lib.rs", Some("add")))
-            .locations
-            .iter()
+            .locations()
             .map(|location| location.line)
             .collect();
         assert_eq!(

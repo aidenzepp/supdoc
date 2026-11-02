@@ -4,16 +4,11 @@ use std::fmt;
 use std::io::ErrorKind;
 use std::ops::Range;
 
+use crate::exit::ExitStatus;
 use crate::lock::error::shell_quote;
 use crate::namespace::NamespaceName;
 use crate::output::paths::relative_to;
 use crate::path::{AbsolutePath, RelativePath};
-
-/// Exit status for a config problem the user fixes by editing files (06 X7).
-const EXIT_CONFIG: u8 = 78;
-
-/// Exit status for a config file that exists but cannot be read (06 X7).
-const EXIT_IO: u8 = 74;
 
 /// Why a config could not be loaded.
 ///
@@ -320,9 +315,9 @@ impl ConfigError {
 
     /// The process exit status for this error (06 X7): 74 when a file can't be read, else 78.
     #[must_use]
-    pub fn exit_code(&self) -> u8 {
+    pub fn status(&self) -> ExitStatus {
         match self {
-            Self::Read { .. } => EXIT_IO,
+            Self::Read { .. } => ExitStatus::Io,
             Self::NotFound { .. }
             | Self::Parse { .. }
             | Self::ExtendsMissing { .. }
@@ -330,7 +325,7 @@ impl ConfigError {
             | Self::ExtendsLoop { .. }
             | Self::ExtendsNotConfig { .. }
             | Self::SymlinkNotConfig { .. }
-            | Self::NamespaceOutsideRoot { .. } => EXIT_CONFIG,
+            | Self::NamespaceOutsideRoot { .. } => ExitStatus::Config,
         }
     }
 }
