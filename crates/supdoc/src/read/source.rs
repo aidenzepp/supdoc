@@ -75,7 +75,9 @@ impl SourceFile {
 /// The file is opened first and judged by the open handle, so what is checked is what is read:
 /// no rename between a check and the open can swap in another file. On Unix the open is
 /// non-blocking, so a FIFO with no writer can't hang it; anything but a regular file, after
-/// following symlinks, is then refused before a byte is read.
+/// following symlinks, is then refused before a byte is read. Some kinds, such as a socket, can't
+/// be opened at all: when the open fails, the path itself is looked at once, and one that isn't a
+/// regular file is refused the same way.
 ///
 /// The read itself is capped too, so a file that grows after the size check is still refused.
 ///
@@ -100,7 +102,12 @@ fn read_capped(path: &AbsolutePath) -> Result<Vec<u8>, ReadError> {
         limit: MAX_FILE_BYTES,
     };
 
-    let file = open_without_blocking(path.as_path()).map_err(io_error)?;
+    let file = open_without_blocking(path.as_path()).map_err(|error| {
+        match fs::metadata(path.as_path()) {
+            Ok(metadata) if !metadata.is_file() => ReadError::NotAFile { path: path.clone() },
+            _ => io_error(error),
+        }
+    })?;
     let metadata = file.metadata().map_err(io_error)?;
     if !metadata.is_file() {
         return Err(ReadError::NotAFile { path: path.clone() });
@@ -505,6 +512,24 @@ mod tests {
         assert!(
             matches!(error, ReadError::NotAFile { .. }),
             "a FIFO should be refused as not a regular file: {error:?}"
+        );
+        assert_eq!(error.code(), "read-not-a-file");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn socket_target_is_not_a_file() {
+        let dir = temp_dir();
+        let path = absolute_in(&dir, "x.rs");
+        let _listener = std::os::unix::net::UnixListener::bind(path.as_path())
+            .expect("the socket should bind in the temp dir");
+
+        let error = read_within_five_seconds(path)
+            .expect_err("a socket, which can't be opened, is not a file supdoc reads");
+
+        assert!(
+            matches!(error, ReadError::NotAFile { .. }),
+            "a socket should be refused as not a regular file, not as an I/O error: {error:?}"
         );
         assert_eq!(error.code(), "read-not-a-file");
     }
