@@ -1,19 +1,77 @@
 //! The built-in language registry: [`Languages::builtin`].
+//!
+//! Each query-driven cartridge is registered as a [`LazyCartridge`]: its id, extensions and
+//! grammar are known up front, and its queries compile the first time a file of its language is
+//! read, at most once per run. Choosing a cartridge for a path compiles nothing.
 
+use std::fmt;
 use std::sync::LazyLock;
 
 use tree_sitter::{LanguageError, Parser};
 
-use crate::read::cartridge::{Cartridge, Languages};
-use crate::read::error::CartridgeLoadError;
+use crate::cartridges::{bash, go, js, python, rust, ts, tsx};
+use crate::read::cartridge::{
+    Cartridge, LanguageId, Languages, MarkdownRegion, SourceFile, SymbolTable,
+};
+use crate::read::error::{CartridgeLoadError, ReadError};
+use crate::read::query::QueryFileError;
 
 /// The registry, built the first time it is asked for. `Err` only through a supdoc bug.
-static BUILTIN: LazyLock<Result<Languages, CartridgeLoadError>> =
-    LazyLock::new(|| Ok(Languages::new(load_builtins()?)));
+static BUILTIN: LazyLock<Result<Languages, CartridgeLoadError>> = LazyLock::new(|| {
+    let _loaded = INLINE_GRAMMAR
+        .as_ref()
+        .map_err(CartridgeLoadError::InlineGrammar)?;
+    Ok(Languages::new(vec![
+        &RUST,
+        crate::cartridges::markdown::cartridge::cartridge(),
+        &BASH,
+        &GO,
+        &JAVASCRIPT,
+        &TYPESCRIPT,
+        &TSX,
+        &PYTHON,
+    ]))
+});
 
 /// Whether the Markdown inline grammar loads into a parser, checked once. Reading links needs it.
 static INLINE_GRAMMAR: LazyLock<Result<(), LanguageError>> =
     LazyLock::new(|| Parser::new().set_language(&tree_sitter_md::INLINE_LANGUAGE.into()));
+
+/// Rust, compiled when the first `.rs` file is read.
+static RUST: LazyCartridge = LazyCartridge::new(rust::ID, rust::EXTENSIONS, rust::grammar, || {
+    compiled(rust::cartridge())
+});
+
+/// Bash, compiled when the first shell script is read.
+static BASH: LazyCartridge = LazyCartridge::new(bash::ID, bash::EXTENSIONS, bash::grammar, || {
+    compiled(bash::cartridge())
+});
+
+/// Go, compiled when the first `.go` file is read.
+static GO: LazyCartridge = LazyCartridge::new(go::ID, go::EXTENSIONS, go::grammar, || {
+    compiled(go::cartridge())
+});
+
+/// JavaScript, compiled when the first JavaScript file is read.
+static JAVASCRIPT: LazyCartridge = LazyCartridge::new(js::ID, js::EXTENSIONS, js::grammar, || {
+    compiled(js::cartridge())
+});
+
+/// TypeScript, compiled when the first TypeScript file is read.
+static TYPESCRIPT: LazyCartridge = LazyCartridge::new(ts::ID, ts::EXTENSIONS, ts::grammar, || {
+    compiled(ts::cartridge())
+});
+
+/// TSX, compiled when the first `.tsx` file is read.
+static TSX: LazyCartridge = LazyCartridge::new(tsx::ID, tsx::EXTENSIONS, tsx::grammar, || {
+    compiled(tsx::cartridge())
+});
+
+/// Python, compiled when the first Python file is read.
+static PYTHON: LazyCartridge =
+    LazyCartridge::new(python::ID, python::EXTENSIONS, python::grammar, || {
+        compiled(python::cartridge())
+    });
 
 /// A parser for tree-sitter-md's inline grammar.
 ///
@@ -26,38 +84,112 @@ pub(crate) fn inline_parser() -> Parser {
 }
 
 impl Languages {
-    /// Every cartridge compiled into supdoc, built once per process.
+    /// Every cartridge compiled into supdoc, registered once per process. No query is compiled
+    /// here: each cartridge compiles its own the first time a file of its language is read.
     ///
     /// # Errors
     ///
-    /// [`CartridgeLoadError`] when a built-in query or grammar doesn't load. That is a supdoc bug
-    /// in every case, so the run fails with exit code 70 instead of reading files as an
-    /// unsupported language. The registry's tests load every built-in.
+    /// [`CartridgeLoadError`] when the Markdown inline grammar doesn't load, which every read
+    /// needs. That is a supdoc bug, so the run fails with exit code 70. A built-in query that
+    /// doesn't compile fails the run the same way, as [`ReadError::CartridgeLoad`] when a file
+    /// of its language is read. The registry's tests load every built-in.
     pub(crate) fn builtin() -> Result<&'static Self, &'static CartridgeLoadError> {
         BUILTIN.as_ref()
     }
 }
 
-/// Every built-in cartridge, or the first error that kept one from loading.
+/// A cartridge known by its id, extensions and grammar until a file of its language is read,
+/// which compiles the cartridge it stands for.
+pub(crate) struct LazyCartridge {
+    /// Stable id.
+    id: LanguageId,
+    /// Lowercase extensions without the dot.
+    extensions: &'static [&'static str],
+    /// The grammar, loaded on first use. Loading it compiles nothing.
+    grammar: LazyLock<tree_sitter::Language>,
+    /// The cartridge it stands for. Compiles it on the first call and returns the same result
+    /// after that.
+    compiled: fn() -> Result<&'static dyn Cartridge, CartridgeLoadError>,
+}
+
+impl LazyCartridge {
+    /// A cartridge named `id` for `extensions`, parsing with `grammar` and compiled by `compiled`.
+    #[must_use]
+    pub(crate) const fn new(
+        id: LanguageId,
+        extensions: &'static [&'static str],
+        grammar: fn() -> tree_sitter::Language,
+        compiled: fn() -> Result<&'static dyn Cartridge, CartridgeLoadError>,
+    ) -> Self {
+        Self {
+            id,
+            extensions,
+            grammar: LazyLock::new(grammar),
+            compiled,
+        }
+    }
+
+    /// The compiled cartridge, for a step of reading `file`.
+    ///
+    /// # Errors
+    ///
+    /// [`ReadError::CartridgeLoad`] when it doesn't compile. [`SourceFile::from_text`] loads the
+    /// cartridge before any file exists, so a step of reading one never meets it.
+    fn compiled_for(&self, file: &SourceFile) -> Result<&'static dyn Cartridge, ReadError> {
+        (self.compiled)().map_err(|error| ReadError::CartridgeLoad {
+            path: file.path().clone(),
+            error,
+        })
+    }
+}
+
+impl fmt::Debug for LazyCartridge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LazyCartridge")
+            .field("id", &self.id)
+            .field("extensions", &self.extensions)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Cartridge for LazyCartridge {
+    fn id(&self) -> LanguageId {
+        self.id
+    }
+
+    fn extensions(&self) -> &'static [&'static str] {
+        self.extensions
+    }
+
+    fn grammar(&self) -> &tree_sitter::Language {
+        &self.grammar
+    }
+
+    fn load(&self) -> Result<(), CartridgeLoadError> {
+        (self.compiled)().map(|_cartridge| ())
+    }
+
+    fn symbols(&self, file: &SourceFile) -> Result<SymbolTable, ReadError> {
+        self.compiled_for(file)?.symbols(file)
+    }
+
+    fn markdown_regions(&self, file: &SourceFile) -> Result<Vec<MarkdownRegion>, ReadError> {
+        self.compiled_for(file)?.markdown_regions(file)
+    }
+}
+
+/// A built-in module's cartridge, as the registry hands it out.
 ///
 /// # Errors
 ///
-/// [`CartridgeLoadError`] for the first query file or grammar that doesn't load.
-fn load_builtins() -> Result<Vec<&'static dyn Cartridge>, CartridgeLoadError> {
-    let _loaded = INLINE_GRAMMAR
-        .as_ref()
-        .map_err(CartridgeLoadError::InlineGrammar)?;
-    let query = CartridgeLoadError::Query;
-    Ok(vec![
-        crate::cartridges::rust::cartridge().map_err(query)? as &'static dyn Cartridge,
-        crate::cartridges::markdown::cartridge::cartridge(),
-        crate::cartridges::bash::cartridge().map_err(query)?,
-        crate::cartridges::go::cartridge().map_err(query)?,
-        crate::cartridges::js::cartridge().map_err(query)?,
-        crate::cartridges::ts::cartridge().map_err(query)?,
-        crate::cartridges::tsx::cartridge().map_err(query)?,
-        crate::cartridges::python::cartridge().map_err(query)?,
-    ])
+/// [`CartridgeLoadError::Query`] when one of its query files doesn't compile.
+pub(crate) fn compiled<C: Cartridge>(
+    cartridge: Result<&'static C, &'static QueryFileError>,
+) -> Result<&'static dyn Cartridge, CartridgeLoadError> {
+    match cartridge {
+        Ok(cartridge) => Ok(cartridge),
+        Err(error) => Err(CartridgeLoadError::Query(error)),
+    }
 }
 
 #[cfg(test)]
@@ -71,8 +203,13 @@ mod tests {
 
     #[test]
     fn every_builtin_query_compiles_against_its_grammar() {
-        if let Err(error) = load_builtins() {
-            panic!("{error}");
+        for cartridge in Languages::builtin()
+            .expect("the built-in cartridges should register")
+            .iter()
+        {
+            if let Err(error) = cartridge.load() {
+                panic!("{error}");
+            }
         }
     }
 

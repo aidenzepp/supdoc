@@ -18,16 +18,21 @@ pub(super) const TAGS: &str = concat!(
 /// Link regions: every comment, as `markdown_inline`.
 const INJECTIONS: &str = include_str!("injections.scm");
 
+/// The id, in errors and `info` output.
+pub(crate) const ID: LanguageId = LanguageId::new("typescript");
+
+/// The extensions it reads, lowercase without the dot.
+pub(crate) const EXTENSIONS: &[&str] = &["ts", "mts", "cts"];
+
+/// The grammar. Loading it compiles nothing.
+#[must_use]
+pub(crate) fn grammar() -> tree_sitter::Language {
+    tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
+}
+
 /// The cartridge, compiled the first time it is used.
-static TYPESCRIPT: LazyLock<Result<QueryCartridge, QueryFileError>> = LazyLock::new(|| {
-    QueryCartridge::new(
-        LanguageId::new("typescript"),
-        &["ts", "mts", "cts"],
-        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-        TAGS,
-        INJECTIONS,
-    )
-});
+static TYPESCRIPT: LazyLock<Result<QueryCartridge, QueryFileError>> =
+    LazyLock::new(|| QueryCartridge::new(ID, EXTENSIONS, grammar(), TAGS, INJECTIONS));
 
 /// The TypeScript cartridge.
 ///

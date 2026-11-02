@@ -31,16 +31,22 @@ const INIT: &str = "__init__";
 /// The receiver name those assignments are made through.
 const RECEIVER: &str = "self";
 
+/// The id, in errors and `info` output.
+pub(crate) const ID: LanguageId = LanguageId::new("python");
+
+/// The extensions it reads, lowercase without the dot.
+pub(crate) const EXTENSIONS: &[&str] = &["py", "pyi"];
+
+/// The grammar. Loading it compiles nothing.
+#[must_use]
+pub(crate) fn grammar() -> tree_sitter::Language {
+    tree_sitter_python::LANGUAGE.into()
+}
+
 /// The cartridge, compiled the first time it is used.
 static PYTHON: LazyLock<Result<PythonCartridge, QueryFileError>> = LazyLock::new(|| {
-    QueryCartridge::new(
-        LanguageId::new("python"),
-        &["py", "pyi"],
-        tree_sitter_python::LANGUAGE.into(),
-        TAGS,
-        INJECTIONS,
-    )
-    .map(|queries| PythonCartridge { queries })
+    QueryCartridge::new(ID, EXTENSIONS, grammar(), TAGS, INJECTIONS)
+        .map(|queries| PythonCartridge { queries })
 });
 
 /// The Python cartridge.

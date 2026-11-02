@@ -18,16 +18,21 @@ const TAGS: &str = concat!(
 /// Link regions: every comment, as `markdown_inline`.
 const INJECTIONS: &str = include_str!("injections.scm");
 
+/// The id, in errors and `info` output.
+pub(crate) const ID: LanguageId = LanguageId::new("javascript");
+
+/// The extensions it reads, lowercase without the dot.
+pub(crate) const EXTENSIONS: &[&str] = &["js", "mjs", "cjs", "jsx"];
+
+/// The grammar. Loading it compiles nothing.
+#[must_use]
+pub(crate) fn grammar() -> tree_sitter::Language {
+    tree_sitter_javascript::LANGUAGE.into()
+}
+
 /// The cartridge, compiled the first time it is used.
-static JAVASCRIPT: LazyLock<Result<QueryCartridge, QueryFileError>> = LazyLock::new(|| {
-    QueryCartridge::new(
-        LanguageId::new("javascript"),
-        &["js", "mjs", "cjs", "jsx"],
-        tree_sitter_javascript::LANGUAGE.into(),
-        TAGS,
-        INJECTIONS,
-    )
-});
+static JAVASCRIPT: LazyLock<Result<QueryCartridge, QueryFileError>> =
+    LazyLock::new(|| QueryCartridge::new(ID, EXTENSIONS, grammar(), TAGS, INJECTIONS));
 
 /// The JavaScript cartridge.
 ///

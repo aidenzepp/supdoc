@@ -420,6 +420,7 @@ impl Wanted {
                     ExitStatus::Failed,
                 ));
             }
+            Err(ReadError::CartridgeLoad { error, .. }) => return Err(CliError::from(&error)),
             Err(_) => return Ok(SymbolFilter::Text(typed.clone())),
         };
         let symbol = match table.resolve(file.path(), typed) {

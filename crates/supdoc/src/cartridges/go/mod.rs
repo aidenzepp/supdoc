@@ -14,16 +14,21 @@ const TAGS: &str = include_str!("tags.scm");
 /// Link regions: every comment, as `markdown_inline`.
 const INJECTIONS: &str = include_str!("injections.scm");
 
+/// The id, in errors and `info` output.
+pub(crate) const ID: LanguageId = LanguageId::new("go");
+
+/// The extensions it reads, lowercase without the dot.
+pub(crate) const EXTENSIONS: &[&str] = &["go"];
+
+/// The grammar. Loading it compiles nothing.
+#[must_use]
+pub(crate) fn grammar() -> tree_sitter::Language {
+    tree_sitter_go::LANGUAGE.into()
+}
+
 /// The cartridge, compiled the first time it is used.
-static GO: LazyLock<Result<QueryCartridge, QueryFileError>> = LazyLock::new(|| {
-    QueryCartridge::new(
-        LanguageId::new("go"),
-        &["go"],
-        tree_sitter_go::LANGUAGE.into(),
-        TAGS,
-        INJECTIONS,
-    )
-});
+static GO: LazyLock<Result<QueryCartridge, QueryFileError>> =
+    LazyLock::new(|| QueryCartridge::new(ID, EXTENSIONS, grammar(), TAGS, INJECTIONS));
 
 /// The Go cartridge.
 ///
