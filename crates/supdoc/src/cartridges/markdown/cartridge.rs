@@ -1,55 +1,39 @@
 //! Markdown, the cartridge that combines headings and body regions.
 //!
 //! It is code rather than data: its symbols are [`heading_symbols`] and its link regions are
-//! [`markdown_regions`]. Its query files are empty, because neither answer comes from a query.
+//! [`markdown_regions`]. It has no query files, because neither answer comes from a query.
 
 use std::sync::LazyLock;
 
 use crate::cartridges::markdown::regions::markdown_regions;
 use crate::cartridges::markdown::symbols::heading_symbols;
-use crate::read::cartridge::{
-    Cartridge, CompiledQueries, LanguageId, MarkdownRegion, SourceFile, SymbolTable,
-};
+use crate::read::cartridge::{Cartridge, LanguageId, MarkdownRegion, SourceFile, SymbolTable};
 use crate::read::error::ReadError;
-use crate::read::query::QueryFileError;
 
 /// The Markdown language: block grammar, headings as symbols, body text as link regions.
 #[derive(Debug)]
 pub struct Markdown {
     /// The block grammar.
     grammar: tree_sitter::Language,
-    /// Empty `tags.scm` and `injections.scm`: Markdown reads its own structure.
-    queries: CompiledQueries,
 }
 
-/// The cartridge, compiled the first time it is used.
-static MARKDOWN: LazyLock<Result<Markdown, QueryFileError>> = LazyLock::new(|| {
-    let grammar: tree_sitter::Language = tree_sitter_md::LANGUAGE.into();
-    let id = LanguageId::new("markdown");
-    let compile = |file: &'static str| {
-        tree_sitter::Query::new(&grammar, "").map_err(|error| QueryFileError {
-            language: id,
-            file,
-            error,
-        })
-    };
-    let queries = CompiledQueries::new(compile("tags.scm")?, compile("injections.scm")?);
-    Ok(Markdown { grammar, queries })
+/// Markdown's id, in errors and `info` output.
+const ID: LanguageId = LanguageId::new("markdown");
+
+/// The cartridge, built the first time it is used.
+static MARKDOWN: LazyLock<Markdown> = LazyLock::new(|| Markdown {
+    grammar: tree_sitter_md::LANGUAGE.into(),
 });
 
 /// The Markdown cartridge.
-///
-/// # Errors
-///
-/// The [`QueryFileError`] for an empty query that doesn't compile: a supdoc bug, caught by the
-/// registry's tests.
-pub fn cartridge() -> Result<&'static Markdown, &'static QueryFileError> {
-    MARKDOWN.as_ref()
+#[must_use]
+pub fn cartridge() -> &'static Markdown {
+    &MARKDOWN
 }
 
 impl Cartridge for Markdown {
     fn id(&self) -> LanguageId {
-        LanguageId::new("markdown")
+        ID
     }
 
     fn extensions(&self) -> &'static [&'static str] {
@@ -58,10 +42,6 @@ impl Cartridge for Markdown {
 
     fn grammar(&self) -> &tree_sitter::Language {
         &self.grammar
-    }
-
-    fn queries(&self) -> &CompiledQueries {
-        &self.queries
     }
 
     fn symbols(&self, file: &SourceFile) -> Result<SymbolTable, ReadError> {

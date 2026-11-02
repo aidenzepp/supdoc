@@ -496,9 +496,7 @@ mod tests {
             );
         }
     }
-    use crate::read::cartridge::{
-        Cartridge, CompiledQueries, LanguageId, MarkdownRegion, SourceFile, SymbolTable,
-    };
+    use crate::read::cartridge::{Cartridge, LanguageId, MarkdownRegion, SourceFile, SymbolTable};
     use crate::read::error::ReadError;
 
     /// A data-only cartridge that claims `extensions`; only its extensions matter here.
@@ -508,8 +506,6 @@ mod tests {
         extensions: &'static [&'static str],
         /// The grammar, created on first use.
         grammar: OnceLock<tree_sitter::Language>,
-        /// Empty queries, compiled on first use.
-        queries: OnceLock<CompiledQueries>,
     }
 
     impl Cartridge for ExtensionOnly {
@@ -526,16 +522,6 @@ mod tests {
                 .get_or_init(|| tree_sitter_rust::LANGUAGE.into())
         }
 
-        fn queries(&self) -> &CompiledQueries {
-            self.queries.get_or_init(|| {
-                let empty = || {
-                    tree_sitter::Query::new(self.grammar(), "")
-                        .expect("an empty query should compile against any grammar")
-                };
-                CompiledQueries::new(empty(), empty())
-            })
-        }
-
         fn symbols(&self, _file: &SourceFile) -> Result<SymbolTable, ReadError> {
             Ok(SymbolTable::default())
         }
@@ -548,7 +534,6 @@ mod tests {
     static READS_RS_AND_MD: ExtensionOnly = ExtensionOnly {
         extensions: &["rs", "md"],
         grammar: OnceLock::new(),
-        queries: OnceLock::new(),
     };
 
     /// Parses `destination` written in `docs/guide.md` with namespaces `auth` and `billing`.

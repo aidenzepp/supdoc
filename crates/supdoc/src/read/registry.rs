@@ -40,7 +40,7 @@ fn load_builtins() -> Result<Vec<&'static dyn Cartridge>, CartridgeLoadError> {
     let query = CartridgeLoadError::Query;
     Ok(vec![
         crate::cartridges::rust::cartridge().map_err(query)? as &'static dyn Cartridge,
-        crate::cartridges::markdown::cartridge::cartridge().map_err(query)?,
+        crate::cartridges::markdown::cartridge::cartridge(),
         crate::cartridges::bash::cartridge().map_err(query)?,
         crate::cartridges::go::cartridge().map_err(query)?,
         crate::cartridges::js::cartridge().map_err(query)?,
@@ -56,7 +56,8 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::read::query::MARKDOWN_INLINE;
+    use crate::cartridges::python::PythonCartridge;
+    use crate::read::query::{MARKDOWN_INLINE, QueryCartridge};
 
     #[test]
     fn every_builtin_query_compiles_against_its_grammar() {
@@ -108,12 +109,40 @@ mod tests {
     #[test]
     fn every_builtin_injection_query_marks_markdown_inline() {
         // Markdown finds its regions with its own code; every other cartridge is query-driven.
-        for cartridge in Languages::builtin()
-            .expect("the built-in cartridges should load")
-            .iter()
-            .filter(|c| c.id().as_str() != "markdown")
-        {
-            let query = cartridge.queries().injections();
+        let cartridges = [
+            (
+                "rust",
+                crate::cartridges::rust::cartridge().map(QueryCartridge::queries),
+            ),
+            (
+                "bash",
+                crate::cartridges::bash::cartridge().map(QueryCartridge::queries),
+            ),
+            (
+                "go",
+                crate::cartridges::go::cartridge().map(QueryCartridge::queries),
+            ),
+            (
+                "js",
+                crate::cartridges::js::cartridge().map(QueryCartridge::queries),
+            ),
+            (
+                "ts",
+                crate::cartridges::ts::cartridge().map(QueryCartridge::queries),
+            ),
+            (
+                "tsx",
+                crate::cartridges::tsx::cartridge().map(QueryCartridge::queries),
+            ),
+            (
+                "python",
+                crate::cartridges::python::cartridge().map(PythonCartridge::queries),
+            ),
+        ];
+        for (id, queries) in cartridges {
+            let query = queries
+                .expect("the built-in cartridges should load")
+                .injections();
             let marks = (0..query.pattern_count()).any(|pattern| {
                 query.property_settings(pattern).iter().any(|property| {
                     &*property.key == "injection.language"
@@ -122,8 +151,7 @@ mod tests {
             });
             assert!(
                 marks,
-                "{}'s injections.scm marks no region as {MARKDOWN_INLINE}",
-                cartridge.id()
+                "{id}'s injections.scm marks no region as {MARKDOWN_INLINE}"
             );
         }
     }
