@@ -11,8 +11,9 @@ use std::sync::LazyLock;
 use tree_sitter::Node;
 
 use crate::link::{SymbolPath, SymbolSegment};
+use crate::read::cartridge::CompiledQueries;
 use crate::read::cartridge::{
-    Cartridge, CompiledQueries, LanguageId, MarkdownRegion, SourceFile, Symbol, SymbolTable,
+    Cartridge, LanguageId, MarkdownRegion, SourceFile, Symbol, SymbolTable,
 };
 use crate::read::error::ReadError;
 use crate::read::query::{QueryCartridge, QueryFileError};
@@ -58,6 +59,14 @@ pub struct PythonCartridge {
     queries: QueryCartridge,
 }
 
+impl PythonCartridge {
+    /// The compiled `tags.scm` and `injections.scm`.
+    #[must_use]
+    pub const fn queries(&self) -> &CompiledQueries {
+        self.queries.queries()
+    }
+}
+
 impl Cartridge for PythonCartridge {
     fn id(&self) -> LanguageId {
         self.queries.id()
@@ -69,10 +78,6 @@ impl Cartridge for PythonCartridge {
 
     fn grammar(&self) -> &tree_sitter::Language {
         self.queries.grammar()
-    }
-
-    fn queries(&self) -> &CompiledQueries {
-        self.queries.queries()
     }
 
     fn symbols(&self, file: &SourceFile) -> Result<SymbolTable, ReadError> {
@@ -100,6 +105,8 @@ impl Cartridge for PythonCartridge {
 /// Classes are looked up by range and names by path through maps, so the walk stays linear in the
 /// size of the file and its symbol table: a file with many classes can't stall it (SEC-1).
 fn init_attributes(file: &SourceFile, tagged: &SymbolTable) -> Vec<Symbol> {
+    #[cfg(test)]
+    tests::CLASS_LOOKUPS.set(0);
     let mut classes: HashMap<Range<usize>, &Symbol> = HashMap::new();
     for symbol in tagged.iter() {
         let _first = classes.entry(symbol.range.clone()).or_insert(symbol);
@@ -113,6 +120,8 @@ fn init_attributes(file: &SourceFile, tagged: &SymbolTable) -> Vec<Symbol> {
         if node.kind() != "class_definition" {
             continue;
         }
+        #[cfg(test)]
+        tests::CLASS_LOOKUPS.set(tests::CLASS_LOOKUPS.get() + 1);
         let Some(class) = classes.get(&node.byte_range()) else {
             continue;
         };
@@ -204,6 +213,11 @@ mod tests {
     use crate::path::AbsolutePath;
     use crate::read::error::ResolveError;
     use crate::read::hash::{hash_file, hash_symbol};
+
+    thread_local! {
+        /// Class-map lookups `init_attributes` made on this thread since it last started.
+        pub(super) static CLASS_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
 
     /// Every kind of definition the cartridge names, once.
     const FIXTURE: &str = r#""""A fixture. See [guide](guide.md)."""
@@ -443,7 +457,7 @@ def outer():
 
     #[test]
     fn python_many_classes_each_name_their_init_attributes() {
-        // 3 000 classes: matching each class against every symbol would make this quadratic.
+        // 3 000 classes, bounded by structure not time: one map lookup per class definition.
         let count = 3_000;
         let text = (0..count)
             .map(|index| {
@@ -455,6 +469,11 @@ def outer():
 
         let table = symbols(&file);
 
+        assert_eq!(
+            CLASS_LOOKUPS.get(),
+            count,
+            "each class should be looked up once, not matched against every symbol"
+        );
         let attributes = table
             .iter()
             .filter(|symbol| symbol.path.last() == "x")
