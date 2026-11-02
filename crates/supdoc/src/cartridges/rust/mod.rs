@@ -482,4 +482,16 @@ pub mod util {
             Hash::digest(b"fn add() { 1 }"),
         );
     }
+
+    #[test]
+    fn rust_impl_type_spellings_name_their_methods() {
+        let file = parse(
+            "struct Bar;\nstruct S;\ntrait T { fn t(&self); }\nimpl T for &Bar { fn t(&self) {} }\nimpl m::S { fn new() {} }\nimpl<'a> &'a Bar { fn by_ref(&self) {} }\n",
+        );
+
+        assert_eq!(
+            paths(&symbols(&file)),
+            ["Bar", "S", "T", "T.t", "Bar.T.t", "S.new", "Bar.by_ref"],
+        );
+    }
 }
