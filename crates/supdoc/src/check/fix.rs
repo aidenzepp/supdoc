@@ -172,8 +172,7 @@ fn moved_by(
                 fix.file == *file && fix.range.start >= range.start && fix.range.end <= range.end
             })
     };
-    link.locations
-        .iter()
+    link.locations()
         .all(|location| rewritten(&location.range, &location.file))
         .then(|| (key.clone(), new))
 }
@@ -478,7 +477,8 @@ mod tests {
             key(source, old),
             ScannedLink {
                 snippet: None,
-                locations: vec![location(link_range)],
+                first: location(link_range),
+                more: Vec::new(),
                 target: TargetState::Broken { finding },
             },
         )
@@ -578,7 +578,15 @@ mod tests {
             key("docs/a.md", "add"),
             ScannedLink {
                 snippet: None,
-                locations: Vec::new(),
+                first: Location::in_text(
+                    "docs/a.md"
+                        .parse()
+                        .expect("the fixture source should be valid"),
+                    "[a](b)",
+                    0..6,
+                )
+                .expect("the fixture range should be locatable"),
+                more: Vec::new(),
                 target: TargetState::Present {
                     hash: Hash::digest(b"body"),
                     syntax_errors: false,
@@ -599,9 +607,9 @@ mod tests {
     #[test]
     fn a_link_written_twice_with_one_fix_moves_nothing() {
         let (key, mut link) = broken("docs/a.md", DOC, "ad", "add");
-        let mut second = link.locations.clone().remove(0);
+        let mut second = link.first.clone();
         second.range = 0..1;
-        link.locations.push(second);
+        link.more.push(second);
 
         let plan = plan_fixes(&scan_of([(key, link)]));
 
@@ -636,7 +644,8 @@ mod tests {
             });
         let link = ScannedLink {
             snippet: None,
-            locations: vec![location],
+            first: location,
+            more: Vec::new(),
             target: TargetState::Broken { finding },
         };
         let plan = plan_fixes(&scan_of([(link_key(old), link)]));
