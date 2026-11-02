@@ -370,7 +370,7 @@ function local() {
 }
 ";
 
-    const SHARED_SYMBOLS: [&str; 32] = [
+    const SHARED_SYMBOLS: [&str; 30] = [
         "Outer.Inner",
         "Outer.Inner.X",
         "Outer.Inner.V",
@@ -396,8 +396,6 @@ function local() {
         "api",
         "api.timeout",
         "api.get",
-        "over",
-        "over",
         "over",
         "Holder",
         "Holder.x",
