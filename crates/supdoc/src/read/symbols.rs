@@ -19,7 +19,7 @@ use tree_sitter::{Node, QueryCursor, QueryCursorOptions, StreamingIterator};
 
 use crate::link::SymbolPath;
 use crate::path::AbsolutePath;
-use crate::read::cartridge::{SourceFile, Symbol, SymbolTable};
+use crate::read::cartridge::{CompiledQueries, SourceFile, Symbol, SymbolTable};
 use crate::read::error::{ReadError, ResolveError};
 use crate::suggest::{distance, is_close};
 
@@ -34,8 +34,8 @@ const NEAREST: usize = 3;
 ///
 /// [`ReadError::Timeout`] when the file's deadline stops the query. Its matches so far are
 /// dropped, so a symbol table is never partial.
-pub fn tag_symbols(file: &SourceFile) -> Result<SymbolTable, ReadError> {
-    let query = file.language().queries().tags();
+pub fn tag_symbols(file: &SourceFile, queries: &CompiledQueries) -> Result<SymbolTable, ReadError> {
+    let query = queries.tags();
     let roles: Vec<Role> = query
         .capture_names()
         .iter()
