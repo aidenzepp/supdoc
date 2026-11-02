@@ -81,8 +81,11 @@ pub enum ReadError {
     },
 }
 
+/// The code of [`ReadError::Timeout`]. Every command that meets it exits 1 (D1).
+pub const CODE_TIMEOUT: &str = "read-timeout";
+
 /// How to raise the per-file read ceiling: its key, variable and flag, and the value that lifts it.
-const TIMEOUT_KNOBS: &str = "Raise the limit with `parse-timeout` under `[limits]` in \
+const TIMEOUT_KNOBS: &str = "Raise the per-read limit with `parse-timeout` under `[limits]` in \
      `supdoc.config.toml`, `SUPDOC_PARSE_TIMEOUT` or `--parse-timeout` (such as `30s`, or `0` for \
      no limit)";
 
@@ -117,7 +120,7 @@ impl ReadError {
             Self::NotUtf8 { .. } => "read-not-utf8",
             Self::TooLarge { .. } => "read-too-large",
             Self::UnsupportedLanguage { .. } => "read-unsupported-language",
-            Self::Timeout { .. } => "read-timeout",
+            Self::Timeout { .. } => CODE_TIMEOUT,
             Self::Internal { .. } => "read-internal",
         }
     }
@@ -152,7 +155,7 @@ impl ReadError {
                 format!("no language for `.{extension}` files ({shown})")
             }
             Self::Timeout { limit, .. } => {
-                format!("reading {shown} took longer than the {limit} parse timeout")
+                format!("reading {shown} took longer than the {limit} per-read parse timeout")
             }
             Self::Internal { reason, .. } => {
                 format!("{reason} for {shown} (supdoc bug)")

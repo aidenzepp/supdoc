@@ -232,6 +232,24 @@ mod tests {
     }
 
     #[test]
+    fn a_passed_deadline_stops_an_inline_markdown_parse() {
+        let path = AbsolutePath::new(Path::new("/repo/docs/long.md"))
+            .expect("the fixture path should be absolute");
+        let markdown = Languages::builtin()
+            .for_path(Path::new("long.md"))
+            .expect("the built-in registry should read `.md`");
+        // One long paragraph: the block parse has no query, so the inline parse meets the deadline.
+        let text = "[a](b.md) ".repeat(20_000);
+        let file = SourceFile::parse(path, text, markdown)
+            .expect("the fixture should parse under the default limit")
+            .with_deadline(passed_deadline());
+
+        let error = links(&file).expect_err("the inline parse should stop at the deadline");
+
+        assert_timed_out(&error, "an inline Markdown parse");
+    }
+
+    #[test]
     fn no_limit_never_stops_a_read() {
         let file = SourceFile::from_text(
             rust_path(),

@@ -326,7 +326,7 @@ impl FeaturesJson {
 /// The `[limits]` ceilings in effect, each with where it came from.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct LimitsJson {
-    /// How long one file may take to read.
+    /// How long one read of a file may take.
     parse_timeout: LimitJson,
     /// How large `supdoc.lock` may be.
     max_lock_size: LimitJson,

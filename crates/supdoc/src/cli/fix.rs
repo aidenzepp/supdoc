@@ -28,6 +28,7 @@ use crate::output::text::{render_finding, visible};
 use crate::output::{Output, PathStyle, Report, TextContext, preview_note};
 use crate::path::AbsolutePath;
 use crate::read::cartridge::Languages;
+use crate::read::error::CODE_TIMEOUT;
 use crate::scan::model::{Scan, Scope, TargetState};
 use crate::state::LinkState;
 
@@ -89,6 +90,9 @@ struct Planned {
     paths: PathStyle,
     /// Broken links in scope, fixable or not, for the note when nothing can be fixed.
     broken: usize,
+    /// One `read-timeout` per file that outlasted `parse-timeout`. Its links were never checked
+    /// for fixes, so the run fails rather than saying there is nothing to fix (D1).
+    timeouts: Vec<Finding>,
 }
 
 impl Planned {
@@ -113,6 +117,12 @@ impl Planned {
                 scope.contains(&key.source) && matches!(link.target, TargetState::Broken { .. })
             })
             .count();
+        // Every link into a timed-out target carries the same finding; one per file is enough.
+        let mut files = BTreeSet::new();
+        let timeouts: Vec<Finding> = timed_out(&scan)
+            .filter(|finding| files.insert(finding.message.clone()))
+            .cloned()
+            .collect();
         let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
         Ok(Self {
             plan: plan_fixes(&scan),
@@ -120,6 +130,7 @@ impl Planned {
             config,
             lock,
             broken,
+            timeouts,
         })
     }
 
@@ -174,12 +185,15 @@ impl Planned {
         let report = FixReport {
             applied: false,
             fixes,
-            findings: Vec::new(),
+            findings: self.timeouts,
         };
+        let timed_out = !report.findings.is_empty();
         output
-            .report(&report, true)
+            .report(&report, !timed_out)
             .map_err(|error| CliError::output_failed("cli-fix-output", "the fix report", &error))?;
-        let note = if report.fixes.is_empty() {
+        let note = if timed_out {
+            timeout_note(report.findings.len())
+        } else if report.fixes.is_empty() {
             nothing_to_fix(self.broken)
         } else {
             let fix_count = count(report.fixes.len(), "fix", "fixes");
@@ -189,7 +203,35 @@ impl Planned {
         output
             .note(&note)
             .map_err(|error| CliError::output_failed("cli-fix-output", "the fix report", &error))?;
-        Ok(Outcome::Clean)
+        Ok(if timed_out {
+            Outcome::Failing
+        } else {
+            Outcome::Clean
+        })
+    }
+
+    /// One record per fix in `done`, with the lock entries it `moved` and the state `states` gives
+    /// the link now.
+    fn records(
+        &self,
+        done: &[&PlannedFix],
+        moved: &[(LinkKey, LinkKey)],
+        states: &CheckModel,
+        context: &Context,
+    ) -> Vec<FixRecord> {
+        done.iter()
+            .zip(new_ranges(done))
+            .map(|(planned, range)| {
+                let moved = planned.moved.clone().filter(|pair| moved.contains(pair));
+                let state = state_at(states, &planned.fix.file, range);
+                // `supdoc update` takes the path from the current directory, like the report.
+                let update = (state == Some(LinkState::Failed)).then(|| {
+                    let path = self.paths.text(&planned.fix.file);
+                    command_line(context, "update", &[path.as_str()], &["--yes"])
+                });
+                FixRecord::new(planned, moved, state, update)
+            })
+            .collect()
     }
 
     /// Writes every fix whose file still matches the scan, carries the lock entries of rewritten
@@ -239,20 +281,7 @@ impl Planned {
             let scope = Scope::Paths(fixed.into_iter().collect());
             reconcile_in(&scan(&self.config, &scope)?, &lock, &scope, &self.paths)
         };
-        let fixes: Vec<FixRecord> = done
-            .iter()
-            .zip(new_ranges(&done))
-            .map(|(planned, range)| {
-                let moved = planned.moved.clone().filter(|pair| moved.contains(pair));
-                let state = state_at(&states, &planned.fix.file, range);
-                // `supdoc update` takes the path from the current directory, like the report.
-                let update = (state == Some(LinkState::Failed)).then(|| {
-                    let path = self.paths.text(&planned.fix.file);
-                    command_line(context, "update", &[path.as_str()], &["--yes"])
-                });
-                FixRecord::new(planned, moved, state, update)
-            })
-            .collect();
+        let fixes = self.records(&done, &moved, &states, context);
 
         let write_failed = skipped
             .iter()
@@ -261,12 +290,14 @@ impl Planned {
         let file_changed = skipped
             .iter()
             .any(|finding| finding.code == CODE_FILE_CHANGED);
+        let timed_out = !self.timeouts.is_empty();
+        let timeout_count = self.timeouts.len();
         let report = FixReport {
             applied: true,
             fixes,
-            findings: skipped,
+            findings: self.timeouts.into_iter().chain(skipped).collect(),
         };
-        let ok = write_failed == 0 && !file_changed && lock_failure.is_none();
+        let ok = write_failed == 0 && !file_changed && lock_failure.is_none() && !timed_out;
         output
             .report(&report, ok)
             .map_err(|error| CliError::output_failed("cli-fix-output", "the fix report", &error))?;
@@ -277,6 +308,8 @@ impl Planned {
             Some(format!(
                 "Fixed {link_count} in {file_count}. Run `{update}` to record them."
             ))
+        } else if timed_out {
+            Some(timeout_note(timeout_count))
         } else if self.plan.fixes.is_empty() {
             Some(nothing_to_fix(self.broken))
         } else {
@@ -305,7 +338,7 @@ impl Planned {
                 !report.fixes.is_empty(),
                 &rerun,
             ))
-        } else if file_changed {
+        } else if file_changed || timed_out {
             Ok(Outcome::Failing)
         } else {
             Ok(Outcome::Clean)
@@ -390,6 +423,29 @@ fn count(n: usize, one: &str, many: &str) -> String {
     } else {
         format!("{n} {many}")
     }
+}
+
+/// The note for a run in which `files` files outlasted `parse-timeout`, so their links got no
+/// fixes.
+fn timeout_note(files: usize) -> String {
+    let files = count(files, "file", "files");
+    format!(
+        "Reading {files} took longer than `parse-timeout` allows per read, so links there got no \
+         fixes; raise the limit and run supdoc fix again."
+    )
+}
+
+/// Every `read-timeout` in `scan`: a source whose links weren't read, then each link into a
+/// target that wasn't. Every command that meets one exits 1 (D1).
+pub(crate) fn timed_out(scan: &Scan) -> impl Iterator<Item = &Finding> {
+    let targets = scan.links.values().filter_map(|link| match &link.target {
+        TargetState::Broken { finding } => Some(finding),
+        TargetState::Present { .. } => None,
+    });
+    scan.findings
+        .iter()
+        .chain(targets)
+        .filter(|finding| finding.code == CODE_TIMEOUT)
 }
 
 /// The note for a run with nothing to fix, naming the broken links left as they are (Q8).

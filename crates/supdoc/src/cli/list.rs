@@ -26,11 +26,12 @@ use crate::output::text::{render_finding, visible};
 use crate::output::{Output, PathStyle, Report, Summary, TextContext};
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile, SymbolTable};
-use crate::read::error::ResolveError;
+use crate::read::error::{ReadError, ReadRole, ResolveError};
 use crate::scan::model::Scope;
 
 use super::args::{Limit, ListArgs, TargetArg};
 use super::check::LinkJson;
+use super::fix::timed_out;
 use super::project::{
     absolute, command_line, ensure_exists, load_config, path_outside_config, read_lock,
 };
@@ -67,7 +68,10 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
     let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
     let model = reconcile_in(&scan, &lock, &Scope::All, &paths);
 
-    let wanted = target.as_ref().map(|target| Wanted::new(target, &config));
+    let wanted = target
+        .as_ref()
+        .map(|target| Wanted::new(target, &config))
+        .transpose()?;
     let linked: Vec<LinkReport> = model
         .links
         .into_iter()
@@ -89,9 +93,10 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
         .collect();
 
     let total = matched.len();
+    let timed_out = timed_out(&scan).next().is_some();
     let report = ListReport::new(&matched, args.limit, model.findings);
     output
-        .report(&report, true)
+        .report(&report, !timed_out)
         .map_err(|error| CliError::output_failed("cli-list-output", "the link list", &error))?;
     if report.truncated {
         output
@@ -110,7 +115,12 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
             .note(&note)
             .map_err(|error| CliError::output_failed("cli-list-output", "the link list", &error))?;
     }
-    Ok(Outcome::Clean)
+    // A file that outlasted `parse-timeout` left its links unchecked, so the run fails (D1).
+    Ok(if timed_out {
+        Outcome::Failing
+    } else {
+        Outcome::Clean
+    })
 }
 
 /// The JSON Schema of `supdoc list`'s `--json` output: the whole envelope, with `data` typed as
@@ -330,40 +340,63 @@ enum SymbolFilter {
 impl Wanted {
     /// Resolves what `target` names: a plain path is relative to the project root, as
     /// [`parse_target`] leaves it, then the symbol is looked up in the file itself.
-    fn new(target: &LinkRef, config: &Config) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// `read-timeout` (1) when reading the file to resolve the symbol outlasts `parse-timeout`.
+    fn new(target: &LinkRef, config: &Config) -> Result<Self, CliError> {
         let place = Place::of(&target.target, config.root(), config);
         let symbol = match (&target.symbol, &place) {
             (None, _) => SymbolFilter::Any,
             (Some(typed), Place::Unlocated(_)) => SymbolFilter::Text(typed.clone()),
-            (Some(typed), Place::File(path)) => Self::resolve_symbol(typed, path, config),
+            (Some(typed), Place::File(path)) => Self::resolve_symbol(typed, path, config)?,
         };
-        Self { place, symbol }
+        Ok(Self { place, symbol })
     }
 
-    /// `typed` resolved in `path`, or the plain text when the file can't be read in time or has
-    /// no such symbol.
-    fn resolve_symbol(typed: &SymbolPath, path: &AbsolutePath, config: &Config) -> SymbolFilter {
+    /// `typed` resolved in `path`, or the plain text when the file can't be read or has no such
+    /// symbol.
+    ///
+    /// # Errors
+    ///
+    /// `read-timeout` (1) when reading the file outlasts `parse-timeout`: the run never falls
+    /// back to matching text for a file it stopped reading.
+    fn resolve_symbol(
+        typed: &SymbolPath,
+        path: &AbsolutePath,
+        config: &Config,
+    ) -> Result<SymbolFilter, CliError> {
         let limit = config.limits_in_effect().parse_timeout.value;
         let read = SourceFile::read(path.clone(), &Languages::builtin(), limit)
             .and_then(|file| Ok((file.language().symbols(&file)?, file)));
-        let Ok((table, file)) = read else {
-            return SymbolFilter::Text(typed.clone());
+        let (table, file) = match read {
+            Ok(read) => read,
+            Err(error @ ReadError::Timeout { .. }) => {
+                let shown = relative_to(config.root(), error.path());
+                return Err(CliError::new(
+                    error.code(),
+                    error.message_naming(&shown),
+                    error.help(ReadRole::Target, &shown),
+                    ExitStatus::Failed,
+                ));
+            }
+            Err(_) => return Ok(SymbolFilter::Text(typed.clone())),
         };
         let symbol = match table.resolve(file.path(), typed) {
             Ok(found) => found.path.clone(),
             Err(error) => {
-                return SymbolFilter::Unresolved {
+                return Ok(SymbolFilter::Unresolved {
                     typed: typed.clone(),
                     error,
-                };
+                });
             }
         };
-        SymbolFilter::Resolved {
+        Ok(SymbolFilter::Resolved {
             typed: typed.clone(),
             table,
             file: file.path().clone(),
             symbol,
-        }
+        })
     }
 
     /// Whether the link `key` points at the wanted file, and at the wanted symbol when one was

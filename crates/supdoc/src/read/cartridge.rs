@@ -219,9 +219,10 @@ impl SourceFile {
     }
 }
 
-/// When reading one file must stop: its [`TimeLimit`], counted from just before its parse. One
-/// deadline covers the parse and every later query and inline parse of the same file, since a
-/// pathological file can stall in any of them (SEC-1).
+/// When one read of a file must stop: its [`TimeLimit`], counted from just before its parse. One
+/// deadline covers the parse and every later query and inline parse of that read, since a
+/// pathological file can stall in any of them (SEC-1). The budget is per read: a file read once
+/// as a source and again as a target gets it twice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Deadline {
     /// The ceiling it was started with, for the error.

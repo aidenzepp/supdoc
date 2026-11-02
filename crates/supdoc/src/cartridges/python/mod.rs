@@ -4,11 +4,13 @@
 //! both beside this file. Queries can't match at an arbitrary depth, so the attributes a class
 //! assigns anywhere inside `__init__` are found here instead, by walking the tree.
 
+use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::sync::LazyLock;
 
 use tree_sitter::Node;
 
-use crate::link::SymbolSegment;
+use crate::link::{SymbolPath, SymbolSegment};
 use crate::read::cartridge::{
     Cartridge, CompiledQueries, LanguageId, MarkdownRegion, SourceFile, Symbol, SymbolTable,
 };
@@ -94,7 +96,15 @@ impl Cartridge for PythonCartridge {
 /// The symbol is the first assignment to `x`. A class attribute of the same name, already in
 /// `tagged`, keeps the name. Assignments inside a nested function or class belong to that scope's
 /// own `self`, so they are skipped.
+///
+/// Classes are looked up by range and names by path through maps, so the walk stays linear in the
+/// size of the file and its symbol table: a file with many classes can't stall it (SEC-1).
 fn init_attributes(file: &SourceFile, tagged: &SymbolTable) -> Vec<Symbol> {
+    let mut classes: HashMap<Range<usize>, &Symbol> = HashMap::new();
+    for symbol in tagged.iter() {
+        let _first = classes.entry(symbol.range.clone()).or_insert(symbol);
+    }
+    let mut taken: HashSet<SymbolPath> = tagged.iter().map(|symbol| symbol.path.clone()).collect();
     let mut attributes: Vec<Symbol> = Vec::new();
     let mut pending = vec![file.tree().root_node()];
     while let Some(node) = pending.pop() {
@@ -103,10 +113,7 @@ fn init_attributes(file: &SourceFile, tagged: &SymbolTable) -> Vec<Symbol> {
         if node.kind() != "class_definition" {
             continue;
         }
-        let Some(class) = tagged
-            .iter()
-            .find(|symbol| symbol.range == node.byte_range())
-        else {
+        let Some(class) = classes.get(&node.byte_range()) else {
             continue;
         };
         for init in node
@@ -116,8 +123,7 @@ fn init_attributes(file: &SourceFile, tagged: &SymbolTable) -> Vec<Symbol> {
         {
             for (name, assignment) in assigned_attributes(init, file.text()) {
                 let path = class.path.child(name);
-                let taken = |symbol: &Symbol| symbol.path == path;
-                if !tagged.iter().any(taken) && !attributes.iter().any(taken) {
+                if taken.insert(path.clone()) {
                     attributes.push(Symbol {
                         path,
                         aliases: Vec::new(),
@@ -432,6 +438,31 @@ def outer():
             hash(&before, &before_table, "add"),
             hash(&after, &after_table, "add"),
             "the edit is inside `add`",
+        );
+    }
+
+    #[test]
+    fn python_many_classes_each_name_their_init_attributes() {
+        // 3 000 classes: matching each class against every symbol would make this quadratic.
+        let count = 3_000;
+        let text = (0..count)
+            .map(|index| {
+                format!("class C{index}:\n    def __init__(self):\n        self.x = {index}\n\n")
+            })
+            .collect::<Vec<_>>()
+            .concat();
+        let file = parse(&text);
+
+        let table = symbols(&file);
+
+        let attributes = table
+            .iter()
+            .filter(|symbol| symbol.path.last() == "x")
+            .count();
+        assert_eq!(attributes, count, "every class should name its `x`");
+        assert_eq!(
+            text_of(&file, resolved(&file, &table, "C2999.x")),
+            "self.x = 2999"
         );
     }
 

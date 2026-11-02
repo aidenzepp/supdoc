@@ -101,18 +101,20 @@ pub fn tag_symbols(file: &SourceFile) -> Result<SymbolTable, ReadError> {
 /// Folds symbols that share a path and aliases into one spanning all of them: a getter and its
 /// setter, a property and its setter, or an overload's stubs are one symbol, not an ambiguity.
 /// Impls that differ by type arguments have different aliases, so they stay separate.
+///
+/// Twins are found through a map keyed by path and aliases, so the fold stays linear in the number
+/// of symbols: a hostile file with many symbols can't stall it (SEC-1).
 fn merge_accessors(symbols: Vec<Symbol>) -> Vec<Symbol> {
     let mut merged: Vec<Symbol> = Vec::with_capacity(symbols.len());
+    let mut index: HashMap<(SymbolPath, Vec<SymbolPath>), usize> = HashMap::new();
     for symbol in symbols {
-        let twin = merged
-            .iter_mut()
-            .find(|seen| seen.path == symbol.path && seen.aliases == symbol.aliases);
-        match twin {
-            Some(seen) => {
-                seen.range.start = seen.range.start.min(symbol.range.start);
-                seen.range.end = seen.range.end.max(symbol.range.end);
-            }
-            None => merged.push(symbol),
+        let key = (symbol.path.clone(), symbol.aliases.clone());
+        if let Some(seen) = index.get(&key).and_then(|&at| merged.get_mut(at)) {
+            seen.range.start = seen.range.start.min(symbol.range.start);
+            seen.range.end = seen.range.end.max(symbol.range.end);
+        } else {
+            let _new = index.insert(key, merged.len());
+            merged.push(symbol);
         }
     }
     merged
@@ -443,6 +445,34 @@ mod tests {
         table
             .resolve(&absolute("/repo/src/lib.rs"), &path(query))
             .map(|symbol| symbol.path.to_string())
+    }
+
+    #[test]
+    fn merging_many_symbols_folds_twins_and_keeps_the_rest() {
+        // 40 000 symbols: a quadratic fold would compare 800 million pairs, a linear one does not.
+        let count = 20_000;
+        let symbol = |name: String, start: usize| Symbol {
+            path: path(&name),
+            aliases: Vec::new(),
+            range: start..start + 1,
+        };
+        let symbols = (0..count)
+            .map(|index| symbol(format!("s{index}"), index))
+            .chain((0..count).map(|index| symbol(format!("s{index}"), count + index)))
+            .collect();
+
+        let merged = merge_accessors(symbols);
+
+        assert_eq!(
+            merged.len(),
+            count,
+            "each pair of twins should fold into one"
+        );
+        assert_eq!(
+            merged.first().map(|symbol| symbol.range.clone()),
+            Some(0..count + 1),
+            "the folded symbol should span both twins"
+        );
     }
 
     #[test]
