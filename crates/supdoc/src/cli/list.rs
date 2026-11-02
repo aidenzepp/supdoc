@@ -16,7 +16,6 @@ use crate::check::reconcile::reconcile_in;
 use crate::config::Config;
 use crate::finding::Finding;
 use crate::link::{LinkKey, LinkRef, SymbolPath, Target};
-use crate::lock::error::shell_quote;
 use crate::namespace::NamespaceName;
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
@@ -31,7 +30,8 @@ use crate::scan::model::Scope;
 use super::args::{Limit, ListArgs, TargetArg};
 use super::check::LinkJson;
 use super::project::{
-    absolute, command_line, ensure_exists, load_config, path_outside_config, read_lock,
+    absolute, command_line, ensure_exists, load_config, namespaced_missing, path_outside_config,
+    read_lock,
 };
 use super::{CliError, Context, Outcome};
 
@@ -446,31 +446,6 @@ impl Wanted {
     }
 }
 
-/// The error for a namespaced `TARGET` whose file doesn't exist. Its path is relative to the
-/// namespace's `directory`, not the current directory, so the help lists that directory as seen
-/// from `cwd`.
-fn namespaced_missing(
-    typed: &Path,
-    name: &NamespaceName,
-    directory: &AbsolutePath,
-    cwd: &AbsolutePath,
-) -> CliError {
-    let shown = match relative_to(cwd, directory) {
-        empty if empty.is_empty() => ".".to_owned(),
-        shown => shown,
-    };
-    CliError::new(
-        "cli-path-missing",
-        format!("{} does not exist", typed.display()),
-        format!(
-            "The path after `{name}:` is relative to the `{name}` namespace's directory. \
-             `ls {}` lists what is there",
-            shell_quote(&shown)
-        ),
-        CliError::USAGE_EXIT_CODE,
-    )
-}
-
 /// The error for a namespace the config doesn't define, naming the closest defined one.
 fn unknown_namespace(config: &Config, name: &NamespaceName) -> CliError {
     let defined: Vec<&str> = config
@@ -478,21 +453,10 @@ fn unknown_namespace(config: &Config, name: &NamespaceName) -> CliError {
         .keys()
         .map(NamespaceName::as_str)
         .collect();
-    let help = match crate::suggest::close_match(name.as_str(), defined.iter().copied()) {
-        Some(nearest) => format!(
-            "did you mean `{nearest}`? Defined namespaces: `{}`",
-            defined.join("`, `")
-        ),
-        None if defined.is_empty() => format!(
-            "Define `{name}` under `[namespaces]` in {}",
-            crate::config::CONFIG_FILE_NAME
-        ),
-        None => format!("Defined namespaces: `{}`", defined.join("`, `")),
-    };
     CliError::new(
         "link-unknown-namespace",
         format!("unknown namespace `{name}`"),
-        help,
+        crate::namespace::unknown_namespace_help(name.as_str(), &defined),
         CliError::USAGE_EXIT_CODE,
     )
 }

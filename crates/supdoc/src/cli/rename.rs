@@ -20,7 +20,7 @@ use std::path::Path;
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::config::{CONFIG_FILE_NAME, Config, ConfigError};
+use crate::config::{Config, ConfigError};
 use crate::finding::{Finding, IndexedText, Location};
 use crate::link::destination::parse_destination;
 use crate::link::{LinkKey, SourcePath, Target};
@@ -38,7 +38,6 @@ use crate::read::error::{ReadError, ReadRole};
 use crate::read::links::links;
 use crate::scan::model::Scope;
 use crate::scan::walk::{UnreadCause, UnreadDir, walk};
-use crate::suggest::close_match;
 
 use super::args::{RenameArgs, WriteMode};
 use super::project::{command_line, config_failure, invocation, load_config, lock_path, read_lock};
@@ -694,19 +693,7 @@ fn unknown_namespace(config: &Config, old: &NamespaceName, new: &NamespaceName) 
         .keys()
         .map(NamespaceName::as_str)
         .collect();
-    let listed = names
-        .iter()
-        .map(|name| format!("`{name}`"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let help = match close_match(old.as_str(), names.iter().copied()) {
-        _ if names.is_empty() => format!(
-            "No namespaces are configured. Define one under `[namespaces]` in {CONFIG_FILE_NAME} \
-             first"
-        ),
-        Some(close) => format!("did you mean `{close}`? Configured namespaces: {listed}"),
-        None => format!("Configured namespaces: {listed}"),
-    };
+    let help = crate::namespace::unknown_namespace_help(old.as_str(), &names);
     let message = if config.namespace(new).is_some() {
         format!("no namespace is named `{old}`, but `{new}` is defined: the rename looks done")
     } else {
@@ -966,6 +953,7 @@ mod tests {
     use crate::check::reconcile::reconcile_at_root;
     use crate::cli::args::{Command, NamespaceCommand};
     use crate::cli::testing::{Project, Run, Session, at};
+    use crate::config::CONFIG_FILE_NAME;
     use crate::state::LinkState;
 
     /// A parent config whose namespace lies inside `app/`, so `app/` may inherit it.
