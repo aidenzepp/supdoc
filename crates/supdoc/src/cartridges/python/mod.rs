@@ -602,7 +602,8 @@ def outer():
 
     #[test]
     fn python_files_use_the_python_cartridge() {
-        let languages = crate::read::cartridge::Languages::builtin();
+        let languages = crate::read::cartridge::Languages::builtin()
+            .expect("the built-in cartridges should load");
 
         for name in ["tools/build.py", "stubs/app.pyi"] {
             assert_eq!(

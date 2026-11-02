@@ -8,8 +8,12 @@ use std::sync::LazyLock;
 use crate::read::cartridge::LanguageId;
 use crate::read::query::{QueryCartridge, QueryFileError};
 
-/// Symbols: `@definition.*` and `@name`.
-const TAGS: &str = include_str!("tags.scm");
+/// Symbols: `@definition.*` and `@name`, shared with the TSX cartridge.
+pub(super) const TAGS: &str = concat!(
+    include_str!("tags.scm"),
+    "\n",
+    include_str!("../js/object_members.scm")
+);
 
 /// Link regions: every comment, as `markdown_inline`.
 const INJECTIONS: &str = include_str!("injections.scm");
@@ -313,7 +317,8 @@ namespace util {
 
     #[test]
     fn ts_module_variants_use_the_typescript_cartridge() {
-        let languages = crate::read::cartridge::Languages::builtin();
+        let languages = crate::read::cartridge::Languages::builtin()
+            .expect("the built-in cartridges should load");
 
         for name in ["a.ts", "a.mts", "a.cts"] {
             assert_eq!(
@@ -324,5 +329,103 @@ namespace util {
                 "{name}",
             );
         }
+    }
+
+    /// Declarations the TypeScript and TSX cartridges must name identically.
+    const SHARED_FIXTURE: &str = r"namespace Outer.Inner {
+  export const X = 1;
+  export var V = 2;
+  var hidden = 3;
+  const kept = 4;
+}
+namespace A.B.C {
+  export const Z = 1;
+}
+namespace A.B.C.D {
+  export const Lost = 1;
+}
+export var legacy = 1;
+export declare function connect(url: string): void;
+export declare const VERSION: string;
+declare namespace Lib {
+  function open(): void;
+  const NAME: string;
+}
+export declare class Client {
+  #token: string;
+  close(): void;
+  private secret(): void;
+}
+export interface Options {
+  retries: number;
+}
+var old = { run() {}, n: 1 };
+const api = { timeout: 30, get() {} };
+export function over(a: string): void;
+export function over(a: number): void;
+export function over(a: any) {}
+class Holder {
+  x = { inner() {} };
+  #hidden() {}
+}
+function local() {
+  const o = { skipped() {} };
+}
+";
+
+    const SHARED_SYMBOLS: [&str; 30] = [
+        "Outer.Inner",
+        "Outer.Inner.X",
+        "Outer.Inner.V",
+        "Outer.Inner.hidden",
+        "Outer.Inner.kept",
+        "A.B.C",
+        "A.B.C.Z",
+        "legacy",
+        "connect",
+        "VERSION",
+        "Lib",
+        "Lib.open",
+        "Lib.NAME",
+        "Client",
+        "Client.#token",
+        "Client.close",
+        "Client.secret",
+        "Options",
+        "Options.retries",
+        "old",
+        "old.run",
+        "old.n",
+        "api",
+        "api.timeout",
+        "api.get",
+        "over",
+        "Holder",
+        "Holder.x",
+        "Holder.#hidden",
+        "local",
+    ];
+
+    #[test]
+    fn ts_names_the_patterns_the_old_goldens_missed() {
+        let file = parse(SHARED_FIXTURE);
+
+        assert_eq!(paths(&symbols(&file)), SHARED_SYMBOLS);
+    }
+
+    #[test]
+    fn ts_and_tsx_name_one_fixture_identically() {
+        let tsx =
+            crate::cartridges::tsx::cartridge().expect("the built-in TSX queries should compile");
+        let path = AbsolutePath::new(Path::new("/repo/src/lib.tsx"))
+            .expect("the fixture path should be absolute");
+        let tsx_file = SourceFile::parse(path, SHARED_FIXTURE.to_owned(), tsx)
+            .expect("tree-sitter should return a tree");
+
+        assert_eq!(
+            paths(&symbols(&tsx_file)),
+            paths(&symbols(&parse(SHARED_FIXTURE))),
+            "renaming `.ts` to `.tsx` must not change which symbols a file has",
+        );
     }
 }

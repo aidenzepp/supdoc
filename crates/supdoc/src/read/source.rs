@@ -177,6 +177,7 @@ mod tests {
 
     fn rust() -> &'static dyn Cartridge {
         Languages::builtin()
+            .expect("the built-in cartridges should load")
             .for_path(Path::new("deep.rs"))
             .expect("the built-in registry should read `.rs`")
     }
@@ -236,6 +237,7 @@ mod tests {
         let path = AbsolutePath::new(Path::new("/repo/docs/long.md"))
             .expect("the fixture path should be absolute");
         let markdown = Languages::builtin()
+            .expect("the built-in cartridges should load")
             .for_path(Path::new("long.md"))
             .expect("the built-in registry should read `.md`");
         // One long paragraph: the block parse has no query, so the inline parse meets the deadline.
@@ -283,8 +285,12 @@ mod tests {
         let path = absolute_in(&dir, "lib.rs");
         fs::write(path.as_path(), "fn add() {}\n").expect("the fixture should be writable");
 
-        let file = SourceFile::read(path.clone(), &Languages::builtin(), Limits::PARSE_TIMEOUT)
-            .expect("a small UTF-8 Rust file should read");
+        let file = SourceFile::read(
+            path.clone(),
+            Languages::builtin().expect("the built-in cartridges should load"),
+            Limits::PARSE_TIMEOUT,
+        )
+        .expect("a small UTF-8 Rust file should read");
 
         assert_eq!(file.path(), &path);
         assert_eq!(file.text(), "fn add() {}\n");
@@ -298,8 +304,12 @@ mod tests {
         let path = absolute_in(&dir, "lib.rs");
         fs::write(path.as_path(), b"fn a() {}\n// \xff\n").expect("the fixture should be writable");
 
-        let error = SourceFile::read(path.clone(), &Languages::builtin(), Limits::PARSE_TIMEOUT)
-            .expect_err("a file with an invalid UTF-8 byte should be rejected");
+        let error = SourceFile::read(
+            path.clone(),
+            Languages::builtin().expect("the built-in cartridges should load"),
+            Limits::PARSE_TIMEOUT,
+        )
+        .expect_err("a file with an invalid UTF-8 byte should be rejected");
 
         assert!(
             matches!(&error, ReadError::NotUtf8 { offset: 13, .. }),
@@ -324,8 +334,12 @@ mod tests {
         file.set_len(MAX_FILE_BYTES + 1)
             .expect("the fixture should be resizable");
 
-        let error = SourceFile::read(path, &Languages::builtin(), Limits::PARSE_TIMEOUT)
-            .expect_err("a file one byte over the limit should be rejected");
+        let error = SourceFile::read(
+            path,
+            Languages::builtin().expect("the built-in cartridges should load"),
+            Limits::PARSE_TIMEOUT,
+        )
+        .expect_err("a file one byte over the limit should be rejected");
 
         assert!(
             matches!(
@@ -345,8 +359,12 @@ mod tests {
         let dir = temp_dir();
         let path = absolute_in(&dir, "gone.rs");
 
-        let error = SourceFile::read(path, &Languages::builtin(), Limits::PARSE_TIMEOUT)
-            .expect_err("a file that doesn't exist can't be read");
+        let error = SourceFile::read(
+            path,
+            Languages::builtin().expect("the built-in cartridges should load"),
+            Limits::PARSE_TIMEOUT,
+        )
+        .expect_err("a file that doesn't exist can't be read");
 
         assert_eq!(error.code(), "read-missing", "got {error:?}");
     }
@@ -361,8 +379,12 @@ mod tests {
         std::os::unix::fs::symlink(dir.path().join(".env"), link.as_path())
             .expect("the symlink should be creatable");
 
-        let error = SourceFile::read(link, &Languages::builtin(), Limits::PARSE_TIMEOUT)
-            .expect_err("a .env file behind a .py name must not be parsed as Python");
+        let error = SourceFile::read(
+            link,
+            Languages::builtin().expect("the built-in cartridges should load"),
+            Limits::PARSE_TIMEOUT,
+        )
+        .expect_err("a .env file behind a .py name must not be parsed as Python");
 
         assert_eq!(error.code(), "read-unsupported-language", "got {error:?}");
         assert!(
@@ -381,8 +403,12 @@ mod tests {
         std::os::unix::fs::symlink(dir.path().join("real.rs"), link.as_path())
             .expect("the symlink should be creatable");
 
-        let file = SourceFile::read(link.clone(), &Languages::builtin(), Limits::PARSE_TIMEOUT)
-            .expect("a symlink to a Rust file should read as Rust");
+        let file = SourceFile::read(
+            link.clone(),
+            Languages::builtin().expect("the built-in cartridges should load"),
+            Limits::PARSE_TIMEOUT,
+        )
+        .expect("a symlink to a Rust file should read as Rust");
 
         assert_eq!(
             file.path(),
@@ -397,8 +423,12 @@ mod tests {
         let dir = temp_dir();
         let path = absolute_in(&dir, "logo.png");
 
-        let error = SourceFile::read(path, &Languages::builtin(), Limits::PARSE_TIMEOUT)
-            .expect_err("no cartridge reads .png files");
+        let error = SourceFile::read(
+            path,
+            Languages::builtin().expect("the built-in cartridges should load"),
+            Limits::PARSE_TIMEOUT,
+        )
+        .expect_err("no cartridge reads .png files");
 
         assert!(
             matches!(

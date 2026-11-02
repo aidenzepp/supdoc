@@ -69,9 +69,13 @@ pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<
     {
         return Err(settings_mismatch(&config, change));
     }
-    let scan =
-        crate::scan::assemble::run_with_settings(&config, &Languages::builtin(), &scope, settings)
-            .map_err(CliError::from)?;
+    let scan = crate::scan::assemble::run_with_settings(
+        &config,
+        Languages::builtin().map_err(CliError::from)?,
+        &scope,
+        settings,
+    )
+    .map_err(CliError::from)?;
 
     // `supdoc fix PATH` takes `PATH` relative to the current directory, so hints name it from there.
     let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
@@ -582,8 +586,12 @@ mod tests {
         /// settings, independently of `update`.
         fn record_hashed(&self) {
             let config = Config::load(&self.root()).expect("the fixture config should load");
-            let scan = crate::scan::assemble::run(&config, &Languages::builtin(), &Scope::All)
-                .expect("the fixture project should scan");
+            let scan = crate::scan::assemble::run(
+                &config,
+                Languages::builtin().expect("the built-in cartridges should load"),
+                &Scope::All,
+            )
+            .expect("the fixture project should scan");
             let mut lock = Lockfile::default();
             lock.set_hash_settings(config.hash_settings());
             for (key, link) in scan.links {
@@ -1331,8 +1339,12 @@ mod tests {
         /// The state counts `supdoc check` would report for the whole project now.
         fn check_all(&self) -> Summary {
             let config = Config::load(&self.root()).expect("the fixture config should load");
-            let scan = crate::scan::assemble::run(&config, &Languages::builtin(), &Scope::All)
-                .expect("the fixture project should scan");
+            let scan = crate::scan::assemble::run(
+                &config,
+                Languages::builtin().expect("the built-in cartridges should load"),
+                &Scope::All,
+            )
+            .expect("the fixture project should scan");
             let lock = self.lock().unwrap_or_default();
             let root = self.root();
             let paths = PathStyle::new(root.clone(), root, None);

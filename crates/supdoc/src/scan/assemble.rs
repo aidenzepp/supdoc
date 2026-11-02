@@ -8,7 +8,7 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
-use crate::config::{CONFIG_FILE_NAME, Config};
+use crate::config::Config;
 use crate::exit::ExitStatus;
 use crate::finding::{Finding, Fix, LineIndex, Location, Severity, Snippet};
 use crate::hash::HashSettings;
@@ -356,7 +356,12 @@ fn link_finding(
                     replacement: close.to_owned(),
                 })
             });
-            let help = namespace_help(prefix, close, config);
+            let known: Vec<&str> = config
+                .namespaces()
+                .keys()
+                .map(NamespaceName::as_str)
+                .collect();
+            let help = crate::namespace::unknown_namespace_help(prefix, &known);
             (CODE_UNKNOWN_NAMESPACE, help, fix)
         }
         LinkError::InvalidPath { .. } => {
@@ -408,31 +413,6 @@ fn link_finding(
     }
 }
 
-/// What to do about the unknown namespace `prefix`: the likely intended one, then every
-/// configured namespace.
-fn namespace_help(prefix: &str, close: Option<&str>, config: &Config) -> String {
-    let configured: Vec<String> = config
-        .namespaces()
-        .keys()
-        .map(|name| format!("`{name}`"))
-        .collect();
-    match close {
-        _ if configured.is_empty() => format!(
-            "No namespaces are configured. Define `{prefix}` under `[namespaces]` in \
-             {CONFIG_FILE_NAME}, or remove the prefix"
-        ),
-        Some(close) => format!(
-            "did you mean `{close}`? `supdoc fix` can change it. Configured namespaces: {}",
-            configured.join(", ")
-        ),
-        None => format!(
-            "Configured namespaces: {}. Define `{prefix}` under `[namespaces]` in \
-             {CONFIG_FILE_NAME}, or correct the prefix",
-            configured.join(", ")
-        ),
-    }
-}
-
 /// The warning for a walked source that couldn't be read. Its links weren't checked, and its lock
 /// entries are kept (05 C5).
 ///
@@ -473,6 +453,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use tempfile::TempDir;
+
+    use crate::config::CONFIG_FILE_NAME;
 
     use super::*;
     use crate::check::reconcile::{Outcome, check_outcome, reconcile_at_root};
@@ -543,7 +525,7 @@ mod tests {
         fn assemble(&self) -> (Scan, Parsed) {
             assemble(
                 &self.config(),
-                &Languages::builtin(),
+                Languages::builtin().expect("the built-in cartridges should load"),
                 &Scope::All,
                 self.config().hash_settings(),
             )
@@ -551,8 +533,12 @@ mod tests {
         }
 
         fn scan(&self) -> Scan {
-            run(&self.config(), &Languages::builtin(), &Scope::All)
-                .expect("a readable project root should scan")
+            run(
+                &self.config(),
+                Languages::builtin().expect("the built-in cartridges should load"),
+                &Scope::All,
+            )
+            .expect("a readable project root should scan")
         }
 
         /// The text of `relative` beneath the root, as now on disk.
@@ -947,7 +933,11 @@ mod tests {
         let locked = fs::Permissions::from_mode(0o000);
         fs::set_permissions(&project.root, locked).expect("the root should be lockable");
 
-        let result = run(&config, &Languages::builtin(), &Scope::All);
+        let result = run(
+            &config,
+            Languages::builtin().expect("the built-in cartridges should load"),
+            &Scope::All,
+        );
 
         fs::set_permissions(&project.root, fs::Permissions::from_mode(0o755))
             .expect("the root should be unlockable, so the temp dir can be removed");

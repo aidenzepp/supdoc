@@ -17,7 +17,9 @@ use crate::hash::HashSettings;
 use crate::link::SourcePath;
 use crate::lock::error::{LockError, SettingsMismatch, shell_quote};
 use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
+use crate::namespace::NamespaceName;
 use crate::output::Output;
+use crate::output::paths::relative_to;
 use crate::path::AbsolutePath;
 use crate::scan::model::Scope;
 
@@ -340,6 +342,31 @@ pub(crate) fn path_missing(typed: &Path, cwd: &AbsolutePath) -> CliError {
             "Check the path, which is relative to the current directory. `ls {}` lists what is \
              there",
             shell_quote(&listing_dir(typed, cwd).display().to_string())
+        ),
+        ExitStatus::Usage,
+    )
+}
+
+/// The error for a namespaced `TARGET` whose file doesn't exist. Its path is relative to the
+/// namespace's `directory`, not the current directory, so the help lists that directory as seen
+/// from `cwd`.
+pub(crate) fn namespaced_missing(
+    typed: &Path,
+    name: &NamespaceName,
+    directory: &AbsolutePath,
+    cwd: &AbsolutePath,
+) -> CliError {
+    let shown = match relative_to(cwd, directory) {
+        empty if empty.is_empty() => ".".to_owned(),
+        shown => shown,
+    };
+    CliError::new(
+        "cli-path-missing",
+        format!("{} does not exist", typed.display()),
+        format!(
+            "The path after `{name}:` is relative to the `{name}` namespace's directory. \
+             `ls {}` lists what is there",
+            shell_quote(&shown)
         ),
         ExitStatus::Usage,
     )

@@ -44,6 +44,7 @@ pub fn tag_symbols(file: &SourceFile) -> Result<SymbolTable, ReadError> {
     let text = file.text();
 
     let mut definitions: Vec<Definition> = Vec::new();
+    // A node may name several things (`X, Y int`), so a definition is its node and its name.
     let mut seen_definitions = HashSet::new();
     let mut scopes: HashMap<usize, Scope> = HashMap::new();
 
@@ -71,7 +72,7 @@ pub fn tag_symbols(file: &SourceFile) -> Result<SymbolTable, ReadError> {
         }
         if let Some(node) = captured.definition {
             let Some(name) = captured.name else { continue };
-            if seen_definitions.insert(node.id()) {
+            if seen_definitions.insert((node.id(), name.clone())) {
                 definitions.push(Definition {
                     node,
                     parents: captured.scope.segments(),

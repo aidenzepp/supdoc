@@ -318,4 +318,25 @@ func (r *Ring[T]) Push(item T) {
 
         assert_eq!(region_texts(&file), Vec::<&str>::new());
     }
+
+    #[test]
+    fn go_names_every_name_one_declaration_declares() {
+        let file = parse(
+            "package p\n\ntype Point struct {\n\tX, Y int\n}\n\nconst Lo, Hi = 0, 9\n\nvar P, Q = 1, 2\n\nvar (\n\tA = 1\n\tB, C = 2, 3\n)\n",
+        );
+
+        assert_eq!(
+            paths(&symbols(&file)),
+            [
+                "Point", "Point.X", "Point.Y", "Lo", "Hi", "P", "Q", "A", "B", "C"
+            ],
+        );
+    }
+
+    #[test]
+    fn go_function_local_types_are_symbols_under_the_function() {
+        let file = parse("package p\n\nfunc F() {\n\ttype local struct{}\n\tvar skipped int\n}\n");
+
+        assert_eq!(paths(&symbols(&file)), ["F", "F.local"]);
+    }
 }

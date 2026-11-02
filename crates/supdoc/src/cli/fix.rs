@@ -352,7 +352,8 @@ impl Planned {
 ///
 /// Returns the scan's own error, such as an unreadable root (74).
 fn scan(config: &Config, scope: &Scope) -> Result<Scan, CliError> {
-    crate::scan::assemble::run(config, &Languages::builtin(), scope).map_err(CliError::from)
+    crate::scan::assemble::run(config, Languages::builtin().map_err(CliError::from)?, scope)
+        .map_err(CliError::from)
 }
 
 /// Where each fix's replacement sits in its file once every fix before it in that file is
@@ -767,8 +768,12 @@ mod tests {
 
         fn scan(&self) -> Scan {
             let config = Config::load(&self.root()).expect("the fixture config should load");
-            crate::scan::assemble::run(&config, &Languages::builtin(), &Scope::All)
-                .expect("the fixture project should scan")
+            crate::scan::assemble::run(
+                &config,
+                Languages::builtin().expect("the built-in cartridges should load"),
+                &Scope::All,
+            )
+            .expect("the fixture project should scan")
         }
 
         /// The current hash of every present link.

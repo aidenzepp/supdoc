@@ -90,6 +90,7 @@ mod tests {
     /// `GUIDE` parsed with whichever cartridge the built-in registry picks for `name`.
     fn registered_file(name: &str) -> SourceFile {
         let language = Languages::builtin()
+            .expect("the built-in cartridges should load")
             .for_path(Path::new(name))
             .unwrap_or_else(|| panic!("the registry should claim `{name}`"));
         let path = AbsolutePath::new(&Path::new("/repo/docs").join(name))
