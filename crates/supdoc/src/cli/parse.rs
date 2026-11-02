@@ -10,8 +10,8 @@ use clap::builder::{FalseyValueParser, TypedValueParser as _};
 use clap::error::ErrorKind;
 use clap::{CommandFactory as _, Parser, ValueEnum};
 
-use super::CliError;
 use super::args::{Cli, resolve_format};
+use crate::exit::ExitStatus;
 use crate::output::OutputFormat;
 use crate::output::json::FatalJson;
 
@@ -76,17 +76,17 @@ fn printout(error: &clap::Error, args: &[OsString], format: OutputFormat) -> Pri
         | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => Printout {
             stream: Stream::Stdout,
             text: ensure_newline(text),
-            exit_code: 0,
+            exit_code: ExitStatus::Clean.code(),
         },
         _ if format.is_json() => Printout {
             stream: Stream::Stderr,
             text: usage_error_json(&text, &command),
-            exit_code: CliError::USAGE_EXIT_CODE,
+            exit_code: ExitStatus::Usage.code(),
         },
         _ => Printout {
             stream: Stream::Stderr,
             text: ensure_newline(text),
-            exit_code: CliError::USAGE_EXIT_CODE,
+            exit_code: ExitStatus::Usage.code(),
         },
     }
 }
@@ -196,7 +196,7 @@ fn usage_error_json(rendered: &str, command: &HelpCommand) -> String {
         kind: USAGE_ERROR_CODE.to_owned(),
         message: message.to_owned(),
         help: Some(help),
-        exit_code: CliError::USAGE_EXIT_CODE,
+        exit_code: ExitStatus::Usage.code(),
         location: None,
     };
     // Serializing plain strings and numbers cannot fail; the fallback keeps stderr valid JSON anyway.

@@ -17,6 +17,7 @@ use crate::check::fix::{
 use crate::check::model::Report as CheckModel;
 use crate::check::reconcile::reconcile_in;
 use crate::config::Config;
+use crate::exit::ExitStatus;
 use crate::finding::{Finding, Fix};
 use crate::link::{LinkKey, SourcePath};
 use crate::lock::error::LockError;
@@ -422,7 +423,7 @@ fn sources_unwritten(files: usize, others_applied: bool, rerun: &str) -> CliErro
         CODE_WRITE_FAILED,
         message,
         format!("Make the files writable and run `{rerun}` again"),
-        CliError::IO_EXIT_CODE,
+        ExitStatus::Io,
     )
 }
 
@@ -455,7 +456,7 @@ fn lock_unwritten(
              to carry the history over, or run `{update}` on them to lock the fixed \
              links afresh without it"
         ),
-        CliError::IO_EXIT_CODE,
+        ExitStatus::Io,
     )
 }
 
