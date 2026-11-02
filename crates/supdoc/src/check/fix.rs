@@ -77,14 +77,6 @@ pub struct Skipped {
     pub finding: Finding,
 }
 
-impl std::ops::Deref for Skipped {
-    type Target = Finding;
-
-    fn deref(&self) -> &Finding {
-        &self.finding
-    }
-}
-
 /// An edit that is now on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppliedFix {
@@ -855,9 +847,9 @@ mod tests {
                 result.skipped
             );
         };
-        assert_eq!(skipped.code, CODE_FILE_CHANGED);
+        assert_eq!(skipped.finding.code, CODE_FILE_CHANGED);
         assert_eq!(
-            skipped.message,
+            skipped.finding.message,
             "docs/a.md changed since it was scanned; its 2 fixes were not applied"
         );
     }
@@ -876,8 +868,8 @@ mod tests {
                 result.skipped
             );
         };
-        assert_eq!(skipped.code, CODE_FILE_CHANGED);
-        assert_eq!(skipped.severity, Severity::Warning);
+        assert_eq!(skipped.finding.code, CODE_FILE_CHANGED);
+        assert_eq!(skipped.finding.severity, Severity::Warning);
     }
 
     #[test]
@@ -930,8 +922,8 @@ mod tests {
                 result.skipped
             );
         };
-        assert_eq!(skipped.code, CODE_WRITE_FAILED);
-        let help = skipped.help.as_deref().unwrap_or_default();
+        assert_eq!(skipped.finding.code, CODE_WRITE_FAILED);
+        let help = skipped.finding.help.as_deref().unwrap_or_default();
         assert!(
             help.contains("never rewrites a symlinked file") && help.contains("real.md"),
             "the help should say supdoc never rewrites a symlink and name the real file, got {help:?}"
