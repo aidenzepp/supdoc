@@ -12,6 +12,7 @@ use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+use crate::check::moves::Move;
 use crate::finding::{Finding, Fix, Severity};
 use crate::link::{LinkKey, SourcePath, SymbolPath, Target, TargetPath};
 use crate::lock::io::write_atomically;
@@ -45,9 +46,8 @@ pub struct PlannedFix {
     pub fix: Fix,
     /// The finding the edit repairs, for the preview.
     pub finding: Finding,
-    /// The old and new key when this edit rewrites a link wholly, so its lock entry can follow
-    /// (05 C6).
-    pub moved: Option<(LinkKey, LinkKey)>,
+    /// The lock entry move when this edit rewrites a link wholly, so its entry can follow (05 C6).
+    pub moved: Option<Move>,
 }
 
 /// What [`apply_fixes`] did.
@@ -82,8 +82,8 @@ pub struct Skipped {
 pub struct AppliedFix {
     /// The edit.
     pub fix: Fix,
-    /// The old and new key of a link this edit rewrote, for [`move_lock_entries`].
-    pub moved: Option<(LinkKey, LinkKey)>,
+    /// The move of the lock entry of a link this edit rewrote, for [`move_lock_entries`].
+    pub moved: Option<Move>,
 }
 
 /// Picks every fix the scan offers that can be verified before it is applied.
@@ -176,7 +176,7 @@ fn moved_by(
     finding: &Finding,
     fix: &Fix,
     kept: &[(Option<&LinkKey>, &Finding)],
-) -> Option<(LinkKey, LinkKey)> {
+) -> Option<Move> {
     let new = rewritten_key(key, finding.code, &fix.replacement)?;
     if new == *key || scan.links.contains_key(&new) {
         return None;
@@ -192,7 +192,10 @@ fn moved_by(
     };
     link.locations()
         .all(|location| rewritten(&location.range, &location.file))
-        .then(|| (key.clone(), new))
+        .then(|| Move {
+            from: key.clone(),
+            to: new,
+        })
 }
 
 /// `key` after a fix of kind `code` wrote `replacement` into it. Only the two kinds whose result
@@ -431,14 +434,17 @@ fn write_failed(
 ///
 /// An entry is never overwritten: if the new key already has one, both stay as they are. Returns
 /// the moves that happened, so a caller reports only those.
-pub fn move_lock_entries(lock: &mut Lockfile, applied: &[AppliedFix]) -> Vec<(LinkKey, LinkKey)> {
+pub fn move_lock_entries<'a>(
+    lock: &mut Lockfile,
+    wanted: impl IntoIterator<Item = &'a Move>,
+) -> Vec<Move> {
     let mut moved = Vec::new();
-    for (old, new) in applied.iter().filter_map(|applied| applied.moved.as_ref()) {
-        if lock.get(new).is_none()
-            && let Some(hash) = lock.remove(old)
+    for planned in wanted {
+        if lock.get(&planned.to).is_none()
+            && let Some(hash) = lock.remove(&planned.from)
         {
-            let _previous = lock.insert(new.clone(), hash);
-            moved.push((old.clone(), new.clone()));
+            let _previous = lock.insert(planned.to.clone(), hash);
+            moved.push(planned.clone());
         }
     }
     moved
@@ -584,7 +590,10 @@ mod tests {
 
         assert_eq!(
             first(&plan).moved,
-            Some((key("docs/a.md", "ad"), key("docs/a.md", "add")))
+            Some(Move {
+                from: key("docs/a.md", "ad"),
+                to: key("docs/a.md", "add")
+            })
         );
     }
 
@@ -667,7 +676,10 @@ mod tests {
         let plan = plan_fixes(&scan_of([(link_key(old), link)]));
         assert_eq!(
             first(&plan).moved,
-            Some((link_key(old), link_key(new))),
+            Some(Move {
+                from: link_key(old),
+                to: link_key(new)
+            }),
             "the key for `{written}` in {source} should move to the real path"
         );
 
@@ -681,7 +693,7 @@ mod tests {
                 moved: planned.moved.clone(),
             })
             .collect();
-        let _moved = move_lock_entries(&mut lock, &applied);
+        let _moved = move_lock_entries(&mut lock, applied.iter().filter_map(|a| a.moved.as_ref()));
         assert_eq!(
             lock.get(&link_key(new)),
             Some(hash),
@@ -944,13 +956,19 @@ mod tests {
                 replacement: String::new(),
                 scanned: Box::default(),
             },
-            moved: Some((key("docs/a.md", "ad"), key("docs/a.md", "add"))),
+            moved: Some(Move {
+                from: key("docs/a.md", "ad"),
+                to: key("docs/a.md", "add"),
+            }),
         }];
 
-        let moved = move_lock_entries(&mut lock, &applied);
+        let moved = move_lock_entries(&mut lock, applied.iter().filter_map(|a| a.moved.as_ref()));
         assert_eq!(
             moved,
-            vec![(key("docs/a.md", "ad"), key("docs/a.md", "add"))]
+            vec![Move {
+                from: key("docs/a.md", "ad"),
+                to: key("docs/a.md", "add")
+            }]
         );
 
         assert_eq!(lock.get(&key("docs/a.md", "add")), Some(hash));
@@ -975,10 +993,13 @@ mod tests {
                 replacement: String::new(),
                 scanned: Box::default(),
             },
-            moved: Some((key("docs/a.md", "ad"), key("docs/a.md", "add"))),
+            moved: Some(Move {
+                from: key("docs/a.md", "ad"),
+                to: key("docs/a.md", "add"),
+            }),
         }];
 
-        let moved = move_lock_entries(&mut lock, &applied);
+        let moved = move_lock_entries(&mut lock, applied.iter().filter_map(|a| a.moved.as_ref()));
         assert_eq!(
             moved,
             vec![],
