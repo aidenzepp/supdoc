@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::hash::{HashSettings, LineEndings};
-use crate::limits::ConfigLimits;
+use crate::limits::{CommandLineLimits, ConfigLimits, Limits};
 use crate::namespace::NamespaceName;
 use crate::path::AbsolutePath;
 
@@ -97,6 +97,9 @@ pub struct Config {
     line_endings: Option<(LineEndings, AbsolutePath)>,
     /// Each `[limits]` key from the nearest config that sets it, with that file.
     limits: ConfigLimits,
+    /// Every ceiling in effect: `limits` over the defaults, under the command line once
+    /// [`Config::with_command_line`] has applied it.
+    in_effect: Limits,
 }
 
 impl Config {
@@ -140,6 +143,7 @@ impl Config {
             namespaces: BTreeMap::new(),
             line_endings: None,
             limits: ConfigLimits::default(),
+            in_effect: Limits::resolve(&CommandLineLimits::default(), &ConfigLimits::default()),
         }
     }
 
@@ -242,6 +246,21 @@ impl Config {
     #[must_use]
     pub fn limits(&self) -> &ConfigLimits {
         &self.limits
+    }
+
+    /// This config with the ceilings `given` on the command line put in effect over its own, by
+    /// flag beats variable beats config beats default.
+    #[must_use]
+    pub fn with_command_line(mut self, given: &CommandLineLimits) -> Self {
+        self.in_effect = Limits::resolve(given, &self.limits);
+        self
+    }
+
+    /// Every ceiling in effect, and where each came from. Every reader takes its ceiling from
+    /// here, so one run applies one value.
+    #[must_use]
+    pub fn limits_in_effect(&self) -> &Limits {
+        &self.in_effect
     }
 }
 

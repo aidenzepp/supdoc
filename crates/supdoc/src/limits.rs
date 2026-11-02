@@ -18,7 +18,7 @@ const KIB: u64 = 1024;
 /// One MiB in bytes.
 const MIB: u64 = 1024 * KIB;
 
-/// A time ceiling: how long one file may take to read. `None` is no limit.
+/// A time ceiling: how long one read of a file may take. `None` is no limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimeLimit(Option<Duration>);
 
@@ -281,7 +281,8 @@ pub struct Setting<T> {
 /// Every ceiling in effect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Limits {
-    /// How long one file may take to parse and query.
+    /// How long one read of a file may take to parse and query. A file read both as a source and
+    /// as a target gets this budget for each read.
     pub parse_timeout: Setting<TimeLimit>,
     /// How large `supdoc.lock` may be.
     pub max_lock_size: Setting<SizeLimit>,

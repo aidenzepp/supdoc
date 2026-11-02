@@ -6,6 +6,7 @@
 
 use std::fmt::{self, Display, Formatter};
 
+use crate::limits::TimeLimit;
 use crate::link::SymbolPath;
 use crate::lock::error::shell_quote;
 use crate::path::AbsolutePath;
@@ -56,6 +57,21 @@ pub enum ReadError {
         supported: Vec<&'static str>,
     },
 
+    /// Reading the file took longer than `parse-timeout`: its parse, a query or an inline parse
+    /// was stopped (SEC-1). Nothing it had read so far is kept.
+    Timeout {
+        /// The file being read.
+        path: AbsolutePath,
+        /// The ceiling in effect.
+        limit: TimeLimit,
+        /// The step that was stopped, as it reads after "stopped": "the parse".
+        step: &'static str,
+        /// The byte that step had reached.
+        offset: usize,
+        /// The file's size in bytes.
+        size: usize,
+    },
+
     /// A condition supdoc guarantees cannot happen did (tree-sitter producing no tree, a symbol
     /// whose range lies outside its file), so this is a bug.
     Internal {
@@ -64,6 +80,22 @@ pub enum ReadError {
         /// What went wrong, as a short phrase that reads before "for <file>".
         reason: &'static str,
     },
+}
+
+/// The code of [`ReadError::Timeout`]. Every command that meets it exits 1 (D1).
+pub const CODE_TIMEOUT: &str = "read-timeout";
+
+/// How to raise the per-file read ceiling: its key, variable and flag, and the value that lifts it.
+const TIMEOUT_KNOBS: &str = "Raise the per-read limit with `parse-timeout` under `[limits]` in \
+     `supdoc.config.toml`, `SUPDOC_PARSE_TIMEOUT` or `--parse-timeout` (such as `30s`, or `0` for \
+     no limit)";
+
+/// `text` with its first letter in upper case, to open a sentence.
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
 }
 
 /// A built-in cartridge that cannot be loaded: a supdoc bug that fails the run (exit 70), not a
@@ -122,6 +154,7 @@ impl ReadError {
             Self::NotUtf8 { .. } => "read-not-utf8",
             Self::TooLarge { .. } => "read-too-large",
             Self::UnsupportedLanguage { .. } => "read-unsupported-language",
+            Self::Timeout { .. } => CODE_TIMEOUT,
             Self::Internal { .. } => "read-internal",
         }
     }
@@ -135,6 +168,7 @@ impl ReadError {
             | Self::NotUtf8 { path, .. }
             | Self::TooLarge { path, .. }
             | Self::UnsupportedLanguage { path, .. }
+            | Self::Timeout { path, .. }
             | Self::Internal { path, .. } => path,
         }
     }
@@ -154,6 +188,9 @@ impl ReadError {
             Self::UnsupportedLanguage { extension, .. } => {
                 format!("no language for `.{extension}` files ({shown})")
             }
+            Self::Timeout { limit, .. } => {
+                format!("reading {shown} took longer than the {limit} per-read parse timeout")
+            }
             Self::Internal { reason, .. } => {
                 format!("{reason} for {shown} (supdoc bug)")
             }
@@ -162,8 +199,8 @@ impl ReadError {
 
     /// What to do next, for a file read in `role`, with the file named as `shown`.
     ///
-    /// Only a file that is missing, not UTF-8 or too large reads differently by role; the
-    /// other errors give the same advice whoever asked.
+    /// Only a file that is missing, not UTF-8, too large or timed out reads differently by role;
+    /// the other errors give the same advice whoever asked.
     #[must_use]
     pub fn help(&self, role: ReadRole, shown: &str) -> String {
         match (self, role) {
@@ -197,6 +234,22 @@ impl ReadError {
                 "Link to a symbol in a file under `{limit}` bytes. Generated files usually \
                  shouldn't be linked"
             ),
+            (
+                Self::Timeout {
+                    step, offset, size, ..
+                },
+                role,
+            ) => {
+                let exclude = if role == ReadRole::ScannedSource {
+                    ", or add the file to `exclude` in `supdoc.config.toml`"
+                } else {
+                    ""
+                };
+                format!(
+                    "{} stopped at byte {offset} of {size}. {TIMEOUT_KNOBS}{exclude}",
+                    capitalized(step)
+                )
+            }
             (Self::Io { .. }, _) => {
                 "Check that the current user can read the file, for example with `chmod u+r` on it"
                     .to_owned()

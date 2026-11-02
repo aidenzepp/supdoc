@@ -175,10 +175,11 @@ impl Plan {
             else {
                 return Err(invalid_source(path, &rerun));
             };
-            match SourceFile::read(path.clone(), languages) {
-                Ok(file) => {
-                    sources.extend(SourceEdit::find(&config, languages, source, &file, old));
-                }
+            let limit = config.limits_in_effect().parse_timeout.value;
+            let edit = SourceFile::read(path.clone(), languages, limit)
+                .and_then(|file| SourceEdit::find(&config, languages, source.clone(), &file, old));
+            match edit {
+                Ok(edit) => sources.extend(edit),
                 Err(error) => return Err(unread_source(&source, &rerun, &error)),
             }
         }
@@ -553,16 +554,20 @@ impl SourceEdit {
     /// The links in `file` that supdoc reads and whose destination is written with the prefix
     /// `old:`, or `None` when there are none (NR6). Several uses of one reference definition
     /// share its range and are renamed once.
+    ///
+    /// # Errors
+    ///
+    /// [`ReadError::Timeout`] when the file's read deadline stops reading its links.
     fn find(
         config: &Config,
         languages: &Languages,
         source: SourcePath,
         file: &SourceFile,
         old: &NamespaceName,
-    ) -> Option<Self> {
+    ) -> Result<Option<Self>, ReadError> {
         let text = file.text();
         let prefix = format!("{old}:");
-        let mut ranges: Vec<Range<usize>> = links(file)
+        let mut ranges: Vec<Range<usize>> = links(file)?
             .into_iter()
             .filter(|raw| {
                 parse_destination(raw, &source, config.namespaces(), languages).is_supdoc()
@@ -576,7 +581,7 @@ impl SourceEdit {
         ranges.sort_by_key(|range| (range.start, range.end));
         ranges.dedup();
         if ranges.is_empty() {
-            return None;
+            return Ok(None);
         }
         let indexed = IndexedText::new(text);
         let links = ranges
@@ -586,12 +591,12 @@ impl SourceEdit {
                 destination,
             })
             .collect();
-        Some(Self {
+        Ok(Some(Self {
             file: file.path().clone(),
             source,
             text: text.to_owned(),
             links,
-        })
+        }))
     }
 
     /// The bytes of the `old` prefix in each destination, in file order.

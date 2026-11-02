@@ -499,6 +499,7 @@ mod tests {
     use crate::read::cartridge::{
         Cartridge, CompiledQueries, LanguageId, MarkdownRegion, SourceFile, SymbolTable,
     };
+    use crate::read::error::ReadError;
 
     /// A data-only cartridge that claims `extensions`; only its extensions matter here.
     #[derive(Debug)]
@@ -535,12 +536,12 @@ mod tests {
             })
         }
 
-        fn symbols(&self, _file: &SourceFile) -> SymbolTable {
-            SymbolTable::default()
+        fn symbols(&self, _file: &SourceFile) -> Result<SymbolTable, ReadError> {
+            Ok(SymbolTable::default())
         }
 
-        fn markdown_regions(&self, _file: &SourceFile) -> Vec<MarkdownRegion> {
-            Vec::new()
+        fn markdown_regions(&self, _file: &SourceFile) -> Result<Vec<MarkdownRegion>, ReadError> {
+            Ok(Vec::new())
         }
     }
 

@@ -26,16 +26,21 @@ use unicode_general_category::{GeneralCategory, get_general_category};
 
 use crate::link::{SymbolPath, SymbolSegment};
 use crate::read::cartridge::{SourceFile, Symbol, SymbolTable};
+use crate::read::error::ReadError;
 
 /// The symbols of a Markdown `file`: one per nameable heading, in document order.
-#[must_use]
-pub fn heading_symbols(file: &SourceFile) -> SymbolTable {
+///
+/// # Errors
+///
+/// [`ReadError::Timeout`] when the file's deadline stops a heading's inline parse. No partial
+/// table is returned.
+pub fn heading_symbols(file: &SourceFile) -> Result<SymbolTable, ReadError> {
     let root = file.tree().root_node();
     let mut headings = Vec::new();
     collect_headings(root, true, &mut headings);
 
     let mut reader = HeadingReader {
-        text: file.text(),
+        file,
         inline: inline_parser(),
     };
     let mut anchors = Siblings::default();
@@ -43,7 +48,7 @@ pub fn heading_symbols(file: &SourceFile) -> SymbolTable {
     let mut symbols = Vec::new();
     for (index, heading) in headings.iter().enumerate() {
         if !heading.section {
-            if let Ok(slug) = SymbolSegment::new(slugify(&reader.display(heading.node))) {
+            if let Ok(slug) = SymbolSegment::new(slugify(&reader.display(heading.node)?)) {
                 let _anchor = anchors.claim(&slug);
             }
             continue;
@@ -54,7 +59,7 @@ pub fn heading_symbols(file: &SourceFile) -> SymbolTable {
         {
             let _closed = open.pop();
         }
-        let Ok(slug) = SymbolSegment::new(slugify(&reader.display(heading.node))) else {
+        let Ok(slug) = SymbolSegment::new(slugify(&reader.display(heading.node)?)) else {
             continue;
         };
         let Some(parent) = open.last_mut() else {
@@ -77,7 +82,7 @@ pub fn heading_symbols(file: &SourceFile) -> SymbolTable {
             children: Siblings::default(),
         });
     }
-    SymbolTable::new(symbols)
+    Ok(SymbolTable::new(symbols))
 }
 
 /// A heading found in the block tree.
@@ -164,16 +169,20 @@ fn inline_parser() -> Option<Parser> {
 }
 
 /// Reads what a heading displays.
-struct HeadingReader<'text> {
-    /// The file's text.
-    text: &'text str,
+struct HeadingReader<'file> {
+    /// The file whose headings are read, for its text and its deadline.
+    file: &'file SourceFile,
     /// Reads a heading's inline markup.
     inline: Option<Parser>,
 }
 
 impl HeadingReader<'_> {
     /// The text `heading` displays, with its markup removed. Empty for an empty heading.
-    fn display(&mut self, heading: Node<'_>) -> String {
+    ///
+    /// # Errors
+    ///
+    /// [`ReadError::Timeout`] when the file's deadline stops the inline parse.
+    fn display(&mut self, heading: Node<'_>) -> Result<String, ReadError> {
         let content = if heading.kind() == "setext_heading" {
             let mut cursor = heading.walk();
             heading
@@ -183,20 +192,25 @@ impl HeadingReader<'_> {
         } else {
             first_inline(heading)
         };
-        let Some(raw) = content.and_then(|node| self.text.get(node.byte_range())) else {
-            return String::new();
+        let Some(raw) = content.and_then(|node| self.file.text().get(node.byte_range())) else {
+            return Ok(String::new());
         };
-        self.inline
-            .as_mut()
-            .and_then(|parser| parser.parse(raw, None))
-            .map_or_else(
-                || raw.to_owned(),
-                |tree| {
-                    let mut shown = String::new();
-                    displayed_text(tree.root_node(), raw, &mut shown);
-                    shown
-                },
-            )
+        let tree = match self.inline.as_mut() {
+            Some(parser) => self
+                .file
+                .deadline()
+                .parse(parser, raw)
+                .map_err(|stopped| self.file.timed_out("a heading's inline parse", stopped))?,
+            None => None,
+        };
+        Ok(tree.map_or_else(
+            || raw.to_owned(),
+            |tree| {
+                let mut shown = String::new();
+                displayed_text(tree.root_node(), raw, &mut shown);
+                shown
+            },
+        ))
     }
 }
 
@@ -327,13 +341,14 @@ mod tests {
         let path = AbsolutePath::new(Path::new("/repo/docs/guide.md"))
             .expect("the fixture path should be absolute");
         let markdown = cartridge().expect("the built-in Markdown cartridge should load");
-        SourceFile::from_text(path, text.to_owned(), markdown)
+        SourceFile::parse(path, text.to_owned(), markdown)
             .expect("the Markdown grammar should parse any text")
     }
 
     /// Every symbol as `path` or `path (alias, alias)`, in document order.
     fn names(text: &str) -> Vec<String> {
         heading_symbols(&parse(text))
+            .expect("the fixture should read")
             .iter()
             .map(|symbol| {
                 let aliases: Vec<String> = symbol.aliases.iter().map(ToString::to_string).collect();
@@ -347,7 +362,7 @@ mod tests {
     }
 
     fn resolved_text<'a>(file: &'a SourceFile, query: &str) -> &'a str {
-        let table = heading_symbols(file);
+        let table = heading_symbols(file).expect("the fixture should read");
         let symbol = table
             .resolve(
                 file.path(),
@@ -422,7 +437,7 @@ mod tests {
         let before = parse("# Guide\n\n## Setup\n\nInstall it.\n\n## Usage\n\nRun it.\n");
         let after = parse("# Guide\n\n## Setup\n\nInstall it twice.\n\n## Usage\n\nRun it.\n");
         let hash = |file: &SourceFile, query: &str| {
-            let table = heading_symbols(file);
+            let table = heading_symbols(file).expect("the fixture should read");
             let symbol = table
                 .resolve(
                     file.path(),

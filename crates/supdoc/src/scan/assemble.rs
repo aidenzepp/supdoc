@@ -162,12 +162,17 @@ fn assemble(
         else {
             continue;
         };
-        match parsed.read(path, languages) {
-            Ok(file) => {
-                source_links(config, languages, &source, file, &mut found);
+        let limit = config.limits_in_effect().parse_timeout.value;
+        let read = parsed
+            .read(path, languages, limit)
+            .and_then(|file| Ok((links(file)?, file)));
+        match read {
+            Ok((raws, file)) => {
+                source_links(config, languages, &source, file, raws, &mut found);
                 parsed.forget(path);
             }
             Err(error) => {
+                parsed.forget(path);
                 findings.push(unreadable_source(&source, &error));
                 let _new = unread_sources.insert(source);
             }
@@ -236,17 +241,18 @@ struct SourceLinks {
     untracked: UntrackedLinks,
 }
 
-/// Adds every supdoc link in `file` to `found`, in file order (03 R10).
+/// Adds `raws`, the links read from `file`, to `found`, in file order (03 R10).
 fn source_links(
     config: &Config,
     languages: &Languages,
     source: &SourcePath,
     file: &SourceFile,
+    raws: Vec<RawLink>,
     found: &mut SourceLinks,
 ) {
     let text = file.text();
     let lines = LineIndex::new(text);
-    for raw in links(file) {
+    for raw in raws {
         let parsed = match parse_destination(&raw, source, config.namespaces(), languages) {
             Destination::Link(link) => Ok(link),
             Destination::Invalid(error) => Err(error),
@@ -475,16 +481,19 @@ fn unreadable_source(source: &SourcePath, error: &ReadError) -> Finding {
         line: 1,
         column: 1,
     };
-    Finding::new(
-        error.code(),
-        Severity::Warning,
-        error.message_naming(source),
-    )
-    .with_location(start)
-    .with_help(format!(
-        "Links in {source} weren't checked. {}",
-        error.help(ReadRole::ScannedSource, &source.to_string())
-    ))
+    // A file that outlasts the read deadline may be hostile, so it fails the run rather than
+    // passing with its links unchecked (SEC-1).
+    let severity = if matches!(error, ReadError::Timeout { .. }) {
+        Severity::Error
+    } else {
+        Severity::Warning
+    };
+    Finding::new(error.code(), severity, error.message_naming(source))
+        .with_location(start)
+        .with_help(format!(
+            "Links in {source} weren't checked. {}",
+            error.help(ReadRole::ScannedSource, &source.to_string())
+        ))
 }
 
 #[cfg(test)]

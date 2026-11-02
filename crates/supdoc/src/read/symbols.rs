@@ -12,14 +12,15 @@
 //! `@supdoc.scope.qualifier.arguments`), the symbol additionally answers to the path with those
 //! arguments written out, so `impl Foo<u8>` and `impl Foo<u16>` stay distinguishable (03 R5).
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 
-use tree_sitter::{Node, QueryCursor, StreamingIterator};
+use tree_sitter::{Node, QueryCursor, QueryCursorOptions, StreamingIterator};
 
 use crate::link::SymbolPath;
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{SourceFile, Symbol, SymbolTable};
-use crate::read::error::ResolveError;
+use crate::read::error::{ReadError, ResolveError};
 use crate::suggest::{distance, is_close};
 
 /// How many near-misses a `NotFound` suggests.
@@ -28,8 +29,12 @@ const NEAREST: usize = 3;
 /// The symbols `file` exposes, named by its cartridge's `tags.scm` (03 R4).
 ///
 /// Symbols come back in file order: by start offset, outer before inner.
-#[must_use]
-pub fn tag_symbols(file: &SourceFile) -> SymbolTable {
+///
+/// # Errors
+///
+/// [`ReadError::Timeout`] when the file's deadline stops the query. Its matches so far are
+/// dropped, so a symbol table is never partial.
+pub fn tag_symbols(file: &SourceFile) -> Result<SymbolTable, ReadError> {
     let query = file.language().queries().tags();
     let roles: Vec<Role> = query
         .capture_names()
@@ -43,8 +48,18 @@ pub fn tag_symbols(file: &SourceFile) -> SymbolTable {
     let mut seen_definitions = HashSet::new();
     let mut scopes: HashMap<usize, Scope> = HashMap::new();
 
+    let deadline = file.deadline();
+    let stopped = Cell::new(None);
+    let mut progress = |state: &tree_sitter::QueryCursorState| {
+        deadline.check(state.current_byte_offset(), &stopped)
+    };
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(query, file.tree().root_node(), text.as_bytes());
+    let mut matches = cursor.matches_with_options(
+        query,
+        file.tree().root_node(),
+        text.as_bytes(),
+        QueryCursorOptions::new().progress_callback(&mut progress),
+    );
     while let Some(found) = matches.next() {
         let mut captured = Captured::default();
         for capture in found.captures() {
@@ -68,6 +83,9 @@ pub fn tag_symbols(file: &SourceFile) -> SymbolTable {
             scopes.entry(node.id()).or_default().merge(captured.scope);
         }
     }
+    if let Some(stopped) = stopped.get() {
+        return Err(file.timed_out("the symbols query", stopped));
+    }
 
     let own_segments: HashMap<usize, Vec<Segment>> = definitions
         .iter()
@@ -78,24 +96,26 @@ pub fn tag_symbols(file: &SourceFile) -> SymbolTable {
         .filter_map(|definition| definition.symbol(&own_segments, &scopes))
         .collect();
     symbols.sort_by_key(|symbol| (symbol.range.start, std::cmp::Reverse(symbol.range.end)));
-    SymbolTable::new(merge_accessors(symbols))
+    Ok(SymbolTable::new(merge_accessors(symbols)))
 }
 
 /// Folds symbols that share a path and aliases into one spanning all of them: a getter and its
 /// setter, a property and its setter, or an overload's stubs are one symbol, not an ambiguity.
 /// Impls that differ by type arguments have different aliases, so they stay separate.
+///
+/// Twins are found through a map keyed by path and aliases, so the fold stays linear in the number
+/// of symbols: a hostile file with many symbols can't stall it (SEC-1).
 fn merge_accessors(symbols: Vec<Symbol>) -> Vec<Symbol> {
     let mut merged: Vec<Symbol> = Vec::with_capacity(symbols.len());
+    let mut index: HashMap<(SymbolPath, Vec<SymbolPath>), usize> = HashMap::new();
     for symbol in symbols {
-        let twin = merged
-            .iter_mut()
-            .find(|seen| seen.path == symbol.path && seen.aliases == symbol.aliases);
-        match twin {
-            Some(seen) => {
-                seen.range.start = seen.range.start.min(symbol.range.start);
-                seen.range.end = seen.range.end.max(symbol.range.end);
-            }
-            None => merged.push(symbol),
+        let key = (symbol.path.clone(), symbol.aliases.clone());
+        if let Some(seen) = index.get(&key).and_then(|&at| merged.get_mut(at)) {
+            seen.range.start = seen.range.start.min(symbol.range.start);
+            seen.range.end = seen.range.end.max(symbol.range.end);
+        } else {
+            let _new = index.insert(key, merged.len());
+            merged.push(symbol);
         }
     }
     merged
@@ -426,6 +446,34 @@ mod tests {
         table
             .resolve(&absolute("/repo/src/lib.rs"), &path(query))
             .map(|symbol| symbol.path.to_string())
+    }
+
+    #[test]
+    fn merging_many_symbols_folds_twins_and_keeps_the_rest() {
+        // 40 000 symbols: a quadratic fold would compare 800 million pairs, a linear one does not.
+        let count = 20_000;
+        let symbol = |name: String, start: usize| Symbol {
+            path: path(&name),
+            aliases: Vec::new(),
+            range: start..start + 1,
+        };
+        let symbols = (0..count)
+            .map(|index| symbol(format!("s{index}"), index))
+            .chain((0..count).map(|index| symbol(format!("s{index}"), count + index)))
+            .collect();
+
+        let merged = merge_accessors(symbols);
+
+        assert_eq!(
+            merged.len(),
+            count,
+            "each pair of twins should fold into one"
+        );
+        assert_eq!(
+            merged.first().map(|symbol| symbol.range.clone()),
+            Some(0..count + 1),
+            "the folded symbol should span both twins"
+        );
     }
 
     #[test]
