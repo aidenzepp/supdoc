@@ -23,13 +23,11 @@ use supdoc::cli::args::{Cli, GlobalArgs};
 use supdoc::cli::parse::{Parsed, Printout, Stream, parse_from};
 use supdoc::cli::skill::SkillDirs;
 use supdoc::cli::{CliError, Context, run};
+use supdoc::exit::ExitStatus;
 use supdoc::finding::{Finding, Severity};
 use supdoc::output::format::supports_unicode;
 use supdoc::output::{Output, OutputSettings, PathStyle, Verbosity};
 use supdoc::path::AbsolutePath;
-
-/// The exit code for an I/O error (06 X7).
-const IO_EXIT_CODE: u8 = 74;
 
 /// Terminal width when `COLUMNS` says nothing usable.
 const DEFAULT_WIDTH: usize = 80;
@@ -55,7 +53,7 @@ fn exit_code() -> u8 {
         Ok(cwd) => (cwd, None),
         Err(error) => match AbsolutePath::new(Path::new(MAIN_SEPARATOR_STR)) {
             Some(root) => (root, Some(error)),
-            None => return IO_EXIT_CODE,
+            None => return ExitStatus::Io.code(),
         },
     };
     let mut output = Output::stdio(settings(&global, cwd.clone()), choice(global.color));
@@ -67,7 +65,7 @@ fn exit_code() -> u8 {
     };
 
     match result {
-        Ok(_) if output.is_closed() => 0,
+        Ok(_) if output.is_closed() => ExitStatus::Clean.code(),
         Ok(outcome) => outcome.exit_code(),
         Err(error) => report(&mut output, &error),
     }
@@ -87,7 +85,7 @@ fn current_dir() -> Result<AbsolutePath, CliError> {
                 "cli-no-cwd",
                 "could not read the current directory",
                 "`cd` to a directory that exists and that you can read, then run supdoc again",
-                IO_EXIT_CODE,
+                ExitStatus::Io,
             )
         })
 }
@@ -102,8 +100,8 @@ fn print(printout: &Printout) -> u8 {
     };
     match written {
         Ok(()) => printout.exit_code,
-        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => 0,
-        Err(_) => IO_EXIT_CODE,
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => ExitStatus::Clean.code(),
+        Err(_) => ExitStatus::Io.code(),
     }
 }
 
@@ -123,11 +121,11 @@ fn write_all(mut sink: impl Write, text: &str) -> io::Result<()> {
 fn report(output: &mut Output, error: &CliError) -> u8 {
     let written = output.fatal(&fatal_finding(error), error.exit_code());
     if output.is_closed() {
-        0
+        ExitStatus::Clean.code()
     } else if written.is_ok() {
         error.exit_code()
     } else {
-        IO_EXIT_CODE
+        ExitStatus::Io.code()
     }
 }
 
@@ -202,6 +200,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use supdoc::cli::ErrorSite;
+    use supdoc::exit::ExitStatus;
     use supdoc::finding::{Location, Snippet};
     use supdoc::link::SourcePath;
     use supdoc::output::OutputFormat;
@@ -250,7 +249,7 @@ mod tests {
             "config-parse",
             "supdoc.config.toml: invalid value",
             "Correct the config as the message says",
-            CliError::CONFIG_EXIT_CODE,
+            ExitStatus::Config,
         )
         .at(ErrorSite { location, snippet })
     }
@@ -310,7 +309,12 @@ mod tests {
 
     #[test]
     fn a_fatal_error_without_a_site_has_no_location() {
-        let error = CliError::new("cli-no-cwd", "no directory", "run it elsewhere", 74);
+        let error = CliError::new(
+            "cli-no-cwd",
+            "no directory",
+            "run it elsewhere",
+            ExitStatus::Io,
+        );
 
         let text = stderr_of(OutputFormat::Text, &error);
         let json = stderr_of(OutputFormat::Json, &error);

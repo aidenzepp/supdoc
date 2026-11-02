@@ -5,6 +5,9 @@ use std::ops::Range;
 
 use crate::link::SourcePath;
 
+/// The code of a finding about a lockfile entry whose link is gone.
+pub const OBSOLETE_CODE: &str = "link-obsolete";
+
 /// One problem, linter style. Produced by the scanner and checks, rendered by output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {

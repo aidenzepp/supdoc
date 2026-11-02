@@ -401,6 +401,7 @@ mod tests {
     use super::*;
     use crate::cli::args::{Command, ConfigCommand, NamespaceCommand};
     use crate::cli::testing::{Project, Run, Session, at};
+    use crate::exit::ExitStatus;
 
     impl Project {
         /// Runs `supdoc <args>` from the project root.
@@ -566,7 +567,7 @@ mod tests {
             .expect_err("a config with a wrong type should not load");
         assert_eq!(
             (error.code(), error.exit_code()),
-            ("config-parse", CliError::CONFIG_EXIT_CODE)
+            ("config-parse", ExitStatus::Config.code())
         );
         assert_eq!(run.stdout, "", "a fatal error leaves stdout empty");
     }

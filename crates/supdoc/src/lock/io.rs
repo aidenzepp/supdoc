@@ -356,7 +356,7 @@ mod tests {
             "got: {error}"
         );
         assert_eq!(error.code(), "lock-read");
-        assert_eq!(error.exit_code(), 74);
+        assert_eq!(error.status(), crate::exit::ExitStatus::Io);
     }
 
     #[cfg(unix)]
