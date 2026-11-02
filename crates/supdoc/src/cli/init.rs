@@ -11,7 +11,7 @@ use std::path::Path;
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::config::CONFIG_FILE_NAME;
+use crate::config::{CONFIG_FILE_NAME, discover_config};
 use crate::exit::ExitStatus;
 use crate::lock::error::shell_quote;
 use crate::output::json::Envelope;
@@ -77,10 +77,12 @@ impl Report for StarterReport {
 ///
 /// # Errors
 ///
-/// Returns `cli-init-exists` when the target file already exists, and `cli-init-write` when the
-/// file cannot be created or the output cannot be written.
+/// Returns `cli-init-nested` when no `-c` is given and a config already governs the current
+/// directory from above, `cli-init-exists` when the target file already exists, and
+/// `cli-init-write` when the file cannot be created or the output cannot be written.
 pub fn run(args: &InitArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
     let target = target(context);
+    refuse_inside_project(&target, context)?;
     let label = relative_to(&context.cwd, &target);
     let report = |applied| StarterReport {
         applied,
@@ -166,6 +168,35 @@ fn require_parent_directory(target: &AbsolutePath, context: &Context) -> Result<
             context,
         )),
         Err(error) => Err(write_failed(target, &error, context)),
+    }
+}
+
+/// Fails with `cli-init-nested` when no `-c` was given and discovery finds a config above the
+/// default target: a second config there would become the nearest one and split the project.
+///
+/// A config at the target itself is left to the `cli-init-exists` check, and a discovery error
+/// is left to the commands that read the config.
+///
+/// # Errors
+///
+/// Returns `cli-init-nested` when a config other than the default target is found.
+fn refuse_inside_project(target: &AbsolutePath, context: &Context) -> Result<(), CliError> {
+    if context.global.config.is_some() {
+        return Ok(());
+    }
+    match discover_config(&context.cwd) {
+        Ok(Some(ancestor)) if ancestor != *target => Err(CliError::new(
+            "cli-init-nested",
+            format!(
+                "{} already configures this directory",
+                relative_to(&context.cwd, &ancestor)
+            ),
+            "A second config here would split the project: a new root and lockfile, and none of \
+             the namespaces above. To start a separate project on purpose, run \
+             `supdoc init -c ./supdoc.config.toml`.",
+            ExitStatus::Usage,
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -324,6 +355,33 @@ mod tests {
                 cwd,
             },
         )
+    }
+
+    #[test]
+    fn refuses_inside_a_configured_project_unless_config_is_given() {
+        let dir = tempfile::tempdir().expect("a temp directory should be created");
+        std::fs::write(dir.path().join(CONFIG_FILE_NAME), "# root\n")
+            .expect("the root config should be written");
+        std::fs::create_dir(dir.path().join("sub")).expect("the sub directory should be created");
+        let sub = tempfile::TempDir::new_in(dir.path().join("sub"))
+            .expect("a nested directory should be created");
+
+        let (args, context) = context_in(&sub, &[]);
+        let (result, _, _) = run_captured(&args, &context);
+        let error = result.expect_err("init should refuse below a configured directory");
+        assert_eq!(error.code(), "cli-init-nested");
+        assert!(
+            !sub.path().join(CONFIG_FILE_NAME).exists(),
+            "nothing is written when init refuses"
+        );
+
+        let (args, context) = context_in(&sub, &["-c", "./supdoc.config.toml"]);
+        let (result, _, _) = run_captured(&args, &context);
+        let _outcome = result.expect("init -c should write the nested config on purpose");
+        assert!(
+            sub.path().join(CONFIG_FILE_NAME).exists(),
+            "the config is written"
+        );
     }
 
     fn config_path(dir: &tempfile::TempDir) -> std::path::PathBuf {

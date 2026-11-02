@@ -387,6 +387,8 @@ mod helps {
         FullStdout,
         /// From a current directory that a shell removed after entering it.
         RemovedCwd,
+        /// From a new subdirectory of the project, which has a config at its root.
+        Subdirectory,
     }
 
     /// One way to make `supdoc` print a message with a given code, and the help it carries, if any.
@@ -563,10 +565,11 @@ mod helps {
             "# API\n\nEdited after the scan.\n\nSee [ad](../src/lib.rs#ad).\n",
         );
         let result = supdoc::check::fix::apply_fixes(&plan, &root, "supdoc fix --yes");
-        let finding = result
+        let finding = &result
             .skipped
             .first()
-            .expect("a doc edited after the scan should be skipped");
+            .expect("a doc edited after the scan should be skipped")
+            .finding;
         (finding.code.to_owned(), finding.help.clone())
     }
 
@@ -1093,6 +1096,14 @@ mod helps {
             &["check"],
         ),
         restricted_case("scan-root-unreadable", |p| chmod(p, ".", 0o300), &["check"]),
+        restricted_case(
+            "scan-ignore-file-unreadable",
+            |p| {
+                p.write(".gitignore", "gen/\n");
+                chmod(p, ".gitignore", 0o000);
+            },
+            &["check"],
+        ),
         case(
             "scan-ignore-file-symlink",
             |p| {
@@ -1224,6 +1235,13 @@ mod helps {
             needs_permissions: false,
         },
         HelpCase {
+            kind: "cli-init-nested",
+            setup: |_| {},
+            args: &["init"],
+            via: Via::Subdirectory,
+            needs_permissions: false,
+        },
+        HelpCase {
             kind: "cli-no-cwd",
             setup: |_| {},
             args: &["check"],
@@ -1307,6 +1325,7 @@ mod helps {
                     .stdout(sink)
                     .output()
             }
+            Via::Subdirectory => shell(&project, "mkdir sub && cd sub", &args).output(),
             Via::RemovedCwd => {
                 shell(&project, "mkdir gone && cd gone && rmdir ../gone", &args).output()
             }

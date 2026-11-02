@@ -1,15 +1,14 @@
 //! TSX: pure data that names TypeScript-with-JSX symbols and finds links in comments.
 //!
-//! Symbols come from `tags.scm` and link regions from `injections.scm`, both beside this file.
+//! Symbols come from the TypeScript cartridge's `tags.scm`, which this grammar shares, and link
+//! regions from `injections.scm` beside this file.
 //! The golden symbol list in the tests is the public contract: users type these paths into docs.
 
 use std::sync::LazyLock;
 
+use crate::cartridges::ts::TAGS;
 use crate::read::cartridge::LanguageId;
 use crate::read::query::{QueryCartridge, QueryFileError};
-
-/// Symbols: `@definition.*` and `@name`.
-const TAGS: &str = include_str!("tags.scm");
 
 /// Link regions: every comment, as `markdown_inline`.
 const INJECTIONS: &str = include_str!("injections.scm");
