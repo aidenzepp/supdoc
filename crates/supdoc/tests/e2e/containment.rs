@@ -716,3 +716,92 @@ fn skill_install_accepts_an_existing_file_of_any_name_as_the_config() {
         "the skill should be installed beside the named file"
     );
 }
+
+/// Moves `file` into `dir/` inside `project` and leaves a relative symlink to it in its place.
+fn link_into(project: &Project, dir: &str, file: &str) {
+    fs::create_dir_all(project.path(dir)).expect("the fixture directory should be creatable");
+    fs::rename(project.path(file), project.path(&format!("{dir}/{file}")))
+        .expect("the file should move into the directory");
+    std::os::unix::fs::symlink(format!("{dir}/{file}"), project.path(file))
+        .expect("the symlink should be creatable");
+}
+
+/// Whether `file` in `project` is still a symlink.
+fn is_symlink(project: &Project, file: &str) -> bool {
+    fs::symlink_metadata(project.path(file)).is_ok_and(|metadata| metadata.is_symlink())
+}
+
+#[test]
+fn namespace_rename_writes_through_an_in_root_config_symlink_and_keeps_it() {
+    let project = Project::fixture("namespaced");
+    project.record();
+    link_into(&project, "shared", "supdoc.config.toml");
+
+    let _ = project
+        .supdoc(&["namespace", "rename", "auth", "identity", "--yes"])
+        .assert_exit(0);
+
+    assert!(
+        is_symlink(&project, "supdoc.config.toml"),
+        "the config symlink must stay a symlink"
+    );
+    let real = project.read("shared/supdoc.config.toml");
+    assert!(
+        real.contains("identity = \"services/auth\""),
+        "the real config gets the rename:\n{real}"
+    );
+}
+
+#[test]
+fn update_writes_through_an_in_root_lockfile_symlink_and_keeps_it() {
+    let project = Project::fixture("namespaced");
+    project.record();
+    link_into(&project, "state", "supdoc.lock");
+    project.write(
+        "docs/more.md",
+        "The [`add`](../src/lib.rs#add) function again.\n",
+    );
+
+    let _ = project.supdoc(&["update", "--yes"]).assert_exit(0);
+
+    assert!(
+        is_symlink(&project, "supdoc.lock"),
+        "the lockfile symlink must stay a symlink"
+    );
+    let real = project.read("state/supdoc.lock");
+    assert!(
+        real.contains("docs/more.md"),
+        "the real lockfile records the new link:\n{real}"
+    );
+}
+
+#[test]
+fn namespace_rename_refuses_a_config_symlinked_out_of_the_root_naming_its_real_file() {
+    let project = Project::fixture("namespaced");
+    project.record();
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let real = fs::canonicalize(outside.path())
+        .expect("the outside directory should resolve")
+        .join("supdoc.config.toml");
+    fs::rename(project.path("supdoc.config.toml"), &real)
+        .expect("the config should move outside the project");
+    std::os::unix::fs::symlink(&real, project.path("supdoc.config.toml"))
+        .expect("the symlink should be creatable");
+    let before = fs::read_to_string(&real).expect("the outside config should be readable");
+
+    let run = project.supdoc(&["namespace", "rename", "auth", "identity", "--yes"]);
+
+    let _ = run.assert_exit(1);
+    assert!(
+        run.stderr.contains("cli-rename-config-outside-root")
+            && run.stderr.contains(&real.display().to_string()),
+        "the refusal names the real file\nstderr:\n{}",
+        run.stderr
+    );
+    assert_eq!(
+        fs::read_to_string(&real).expect("the outside config should be readable"),
+        before,
+        "nothing outside the root is written"
+    );
+    assert!(is_symlink(&project, "supdoc.config.toml"));
+}
