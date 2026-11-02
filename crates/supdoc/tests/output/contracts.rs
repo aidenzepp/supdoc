@@ -1094,6 +1094,14 @@ mod helps {
             &["check"],
         ),
         restricted_case("scan-root-unreadable", |p| chmod(p, ".", 0o300), &["check"]),
+        restricted_case(
+            "scan-ignore-file-unreadable",
+            |p| {
+                p.write(".gitignore", "gen/\n");
+                chmod(p, ".gitignore", 0o000);
+            },
+            &["check"],
+        ),
         case(
             "scan-ignore-file-symlink",
             |p| {
