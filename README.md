@@ -41,8 +41,8 @@ symbols too: `[setup](docs/guide.md#install)`.
 `update`, `fix`, `namespace rename` and `skill install` preview their changes unless given `--yes`.
 `init` writes immediately; use `--dry-run` to preview it. Every command accepts `--json` and `--jsonl`
 for machine-readable output. Adding optional fields, or new values of an existing enum (states, actions, kinds,
-JSONL record types), keeps `schema_version`; removing or renaming bumps it, so consumers must tolerate values they
-do not know. Exit codes: 0 clean, 1 failing or refused, 2 usage error, 70 supdoc bug, 74 I/O
+JSONL record types), keeps `schema_version`; removing or renaming bumps it (currently 2, since 0.2), so consumers must tolerate
+values they do not know. Exit codes: 0 clean, 1 failing or refused, 2 usage error, 70 supdoc bug, 74 I/O
 error, 78 config or lockfile error.
 
 ## Configuration
@@ -50,7 +50,8 @@ error, 78 config or lockfile error.
 supdoc works without a config. `supdoc init` writes a `supdoc.config.toml` with every key commented out:
 `include` and `exclude` globs, `extends` to inherit another config, and `[namespaces]` to give a directory a
 short name, so `auth:src/session.rs#login` works from any file. supdoc searches upward from the current
-directory for the config, and `supdoc.lock` sits beside it.
+directory for the config, stopping at the top of the git work tree, and `-c` overrides that search. `supdoc.lock`
+sits beside the config.
 
 `[features.hash]` sets `line-endings`. The default, `"normalize"`, drops the CR of each CRLF before hashing, so
 a checkout with Windows line endings still matches the lock. `"exact"` hashes every byte as is. `supdoc config

@@ -41,7 +41,7 @@ use super::{CliError, Context, Outcome};
 /// `cli-path-missing` for a missing `FILE` (all 2), `cli-path-unreadable` (74) for a `FILE` that
 /// can't be looked up, the file's own read
 /// error (1, or 74 for I/O and 70 for a supdoc bug), `resolve-not-found` or `resolve-ambiguous`
-/// for a `SYMBOL` that names no single symbol (1), and `cli-resolve-output` when the report
+/// for a `SYMBOL` that names no single symbol (1), and `cli-output-failed` when the report
 /// cannot be written (74).
 pub fn run(
     args: &ResolveArgs,
@@ -89,24 +89,20 @@ pub fn run(
         truncated,
         findings,
     };
-    output.report(&report, true).map_err(|error| {
-        CliError::output_failed("cli-resolve-output", "the resolve report", &error)
-    })?;
+    output
+        .report(&report, true)
+        .map_err(|error| CliError::output_failed("the resolve report", &error))?;
     if truncated {
         output
             .note(&args.limit.truncation_note(listed, total, "symbols"))
-            .map_err(|error| {
-                CliError::output_failed("cli-resolve-output", "the resolve report", &error)
-            })?;
+            .map_err(|error| CliError::output_failed("the resolve report", &error))?;
     } else if listed == 0 {
         output
             .note(&format!(
                 "{} has no symbols; link to the whole file instead.",
                 report.shown_as
             ))
-            .map_err(|error| {
-                CliError::output_failed("cli-resolve-output", "the resolve report", &error)
-            })?;
+            .map_err(|error| CliError::output_failed("the resolve report", &error))?;
     }
     Ok(Outcome::Clean)
 }

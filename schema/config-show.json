@@ -162,7 +162,7 @@
     "LimitJson": {
       "description": "One limit and where it came from.",
       "properties": {
-        "file": {
+        "from": {
           "description": "The config file that set it, relative to the project root, when `source` is `config`.",
           "type": [
             "string",
@@ -199,7 +199,7 @@
         },
         {
           "const": "config",
-          "description": "The config file named in `file`.",
+          "description": "The config file named in `from`.",
           "type": "string"
         },
         {
@@ -255,7 +255,7 @@
     "LineEndingsJson": {
       "description": "The `line-endings` setting and the file that set it.",
       "properties": {
-        "file": {
+        "from": {
           "description": "The config file that set it, relative to the project root. `null` for the default.",
           "type": [
             "string",

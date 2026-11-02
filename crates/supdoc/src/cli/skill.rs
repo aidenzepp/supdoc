@@ -109,7 +109,7 @@ impl SkillDirs {
 /// `cli-skill-outside-root` when a project copy would be written through a symlink out of the
 /// project, before anything is written or previewed, `cli-skill-write` when a copy cannot be
 /// written, `cli-skill-relative-claude-dir` when `--global` is given and `CLAUDE_CONFIG_DIR` is
-/// relative, and `cli-skill-output` when the report cannot be written.
+/// relative, and `cli-output-failed` when the report cannot be written.
 pub fn run(
     args: &SkillInstallArgs,
     dirs: &SkillDirs,
@@ -161,14 +161,12 @@ pub fn run(
         ),
     );
     let report = SkillInstallReport::new(applied, args.global, changes, context);
-    output.report(&report, true).map_err(|error| {
-        CliError::output_failed("cli-skill-output", "the skill install report", &error)
-    })?;
+    output
+        .report(&report, true)
+        .map_err(|error| CliError::output_failed("the skill install report", &error))?;
     output
         .note(report.closing_note(&apply_note))
-        .map_err(|error| {
-            CliError::output_failed("cli-skill-output", "the skill install report", &error)
-        })?;
+        .map_err(|error| CliError::output_failed("the skill install report", &error))?;
     Ok(Outcome::Clean)
 }
 

@@ -9,7 +9,7 @@ use crate::path::AbsolutePath;
 /// The version of the JSON shape. Adding optional fields keeps it; removing or renaming bumps it
 /// (07 G10). New values of an existing enum (states, actions, kinds, JSONL record types) also keep
 /// it, so consumers must tolerate values they do not know.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// The one object every command writes under `--json`, with the same top-level keys each time.
 ///
