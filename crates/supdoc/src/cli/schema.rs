@@ -12,6 +12,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
+use crate::exit::ExitStatus;
 use crate::output::json::FatalJson;
 use crate::output::{Output, OutputError, Report, TextContext};
 
@@ -113,7 +114,7 @@ fn to_value(schema: schemars::Schema, what: &str) -> Result<Value, CliError> {
                 env!("CARGO_PKG_REPOSITORY"),
                 "/issues with the command you ran and the output of `supdoc --version`"
             ),
-            CliError::BUG_EXIT_CODE,
+            ExitStatus::Bug,
         )
     })
 }
@@ -205,7 +206,7 @@ fn write_failed(error: &OutputError) -> CliError {
         format!("could not write the schema: {error}"),
         "check that standard output is open and writable, or redirect it to a file with \
          `supdoc schema > supdoc.schema.json`",
-        CliError::IO_EXIT_CODE,
+        ExitStatus::Io,
     )
 }
 

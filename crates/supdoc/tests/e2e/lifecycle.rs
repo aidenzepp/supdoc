@@ -356,3 +356,32 @@ fn update_jsonl_summary_carries_the_line_endings_change_only_when_the_settings_c
         "a run that changes no settings should carry no line-endings fields: {unchanged}"
     );
 }
+
+#[test]
+fn a_renamed_doc_checked_by_its_new_path_keeps_its_history_and_new_state_accepts_no_drift() {
+    let project = Project::fixture("basic");
+    project.record();
+    std::fs::rename(project.path("docs/guide.md"), project.path("docs/intro.md"))
+        .expect("the fixture doc should rename");
+    project.replace("src/lib.rs", "x + A", "x * A");
+
+    let check = project.supdoc(&["check", "docs/intro.md"]);
+    let _ = check.assert_exit(1);
+    assert!(
+        check.stdout.contains("check-moved") && check.stdout.contains("link-failed"),
+        "a scoped check of the renamed doc should carry its history and fail the changed link: {}",
+        check.stdout
+    );
+
+    let _ = project
+        .supdoc(&["update", "docs/intro.md", "--state", "new", "--yes"])
+        .assert_exit(0);
+
+    let full = project.supdoc(&["check"]);
+    let _ = full.assert_exit(1);
+    assert!(
+        full.stdout.contains("link-failed") && !full.stdout.contains("link-obsolete"),
+        "`--state new` only moves the entries, so the changed link still fails: {}",
+        full.stdout
+    );
+}
