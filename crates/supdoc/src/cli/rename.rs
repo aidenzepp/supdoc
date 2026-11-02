@@ -3,8 +3,9 @@
 //!
 //! The run is `config → lockfile → plan → preview or (verify → write) → report`. [`Plan::build`]
 //! reads every file and decides every edit, and writes nothing. [`Plan::apply`] first checks that
-//! each file it will touch still holds what was read, refusing the whole rename if one doesn't, then writes sources, `supdoc.lock` and the config in that order,
-//! each atomically, stopping at the first failure. The config is last, so it names OLD until every link has
+//! each file it will touch still holds what was read, refusing the whole rename if one doesn't,
+//! then writes sources, `supdoc.lock` and the config in that order, each atomically, stopping at
+//! the first failure. The config is last, so it names OLD until every link has
 //! moved, and running the command again finishes an interrupted rename.
 //!
 //! Links are found the way the scan finds them, never by searching text: only the `OLD`
@@ -463,8 +464,8 @@ struct ConfigEdit {
 }
 
 impl ConfigEdit {
-    /// Reads `file` and finds the key OLD in it with `toml_edit`, so comments and order stay as
-    /// they are.
+    /// Reads `file` and finds the key OLD in it with `toml_edit`, so comments and order
+    /// stay as they are.
     ///
     /// # Errors
     ///
@@ -554,8 +555,9 @@ struct LinkEdit {
 
 impl SourceEdit {
     /// The links in `file` whose destination is written with the prefix `old:`, tracked or not
-    /// (a bare `old:`, a link to a file no language reads, a fragment link to one), or `None` when there are none. Several uses of one reference definition
-    /// share its range and are renamed once.
+    /// (a bare `old:`, a link to a file no language reads, a fragment link to one), or `None` when
+    /// there are none. Several uses of one reference definition share its range and are renamed
+    /// once.
     fn find(
         source: SourcePath,
         file: &SourceFile,

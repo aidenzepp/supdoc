@@ -1,7 +1,9 @@
 //! Grouping links by target and reading each target once.
 //!
 //! Every distinct target is located on disk, checked to lie inside the project root once symlinks
-//! are followed, checked for case and for being a directory, then read through [`Parsed`] so a target is parsed once. A source is dropped once its links are read, so one that is also a target is parsed a second time.
+//! are followed, checked for case and for being a directory, then read through [`Parsed`] so a
+//! target is parsed once. A source is dropped once its links are read, so one that is also a
+//! target is parsed a second time.
 //! Each link into it then hashes the whole file or the one symbol it names. Anything that goes
 //! wrong becomes that link's [`TargetState::Broken`] finding, with a [`Fix`] only when exactly one
 //! edit is right.
@@ -545,7 +547,7 @@ fn read_failed(error: &ReadError, root: &AbsolutePath, first: &Occurrence) -> Fi
 }
 
 /// The finding for a symbol that doesn't resolve. A `resolve-not-found` gets a fix when exactly
-/// one symbol in the file is a close match.
+/// one symbol in the file is a close match; the fixer never guesses.
 ///
 /// The message and help name the file relative to the project `root`, so no finding carries a
 /// machine-specific absolute path. A file outside the root climbs out of it with `..`.

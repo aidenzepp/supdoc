@@ -68,8 +68,7 @@ impl Verbosity {
     }
 }
 
-/// Everything text rendering needs, passed in explicitly so rendering touches no global state
-///.
+/// Everything text rendering needs, passed in explicitly so rendering touches no global state.
 #[derive(Debug, Clone)]
 pub(crate) struct TextContext {
     /// Whether to emit ANSI color.

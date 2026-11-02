@@ -200,7 +200,8 @@ pub(crate) fn lock_path(root: &AbsolutePath) -> AbsolutePath {
     root.join_path(Path::new(LOCK_FILE_NAME))
 }
 
-/// The lockfile in `config`'s root, or an empty one when there is none yet, refusing one recorded under different hash settings than `config` resolves to.
+/// The lockfile in `config`'s root, or an empty one when there is none yet,
+/// refusing one recorded under different hash settings than `config` resolves to.
 ///
 /// Every command but `update` reads the lock through here, so a `passed` verdict always means the
 /// target's bytes, read under the lock's recorded settings, hash to the recorded value. A help

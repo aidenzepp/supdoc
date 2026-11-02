@@ -15,9 +15,9 @@ pub(crate) const MIGRATION_STATES: [LinkState; 3] =
 
 /// A move of the whole lockfile to new hash settings.
 ///
-/// Only a full update can build one: no `[PATHS]` and every state in [`MIGRATION_STATES`] selected
-///. Entries the plan leaves alone keep their old hashes under the new settings, which
-/// is only safe when the plan re-records every entry it can.
+/// Only a full update can build one: no `[PATHS]` and every state in [`MIGRATION_STATES`] selected.
+/// Entries the plan leaves alone keep their old hashes under the new settings, which is only
+/// safe when the plan re-records every entry it can.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Migration {
     /// The settings the scan hashed with.

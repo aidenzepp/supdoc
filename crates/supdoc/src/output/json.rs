@@ -6,8 +6,9 @@ use crate::finding::{Finding, Fix, Location, Severity};
 use crate::output::report::Report;
 use crate::path::AbsolutePath;
 
-/// The version of the JSON shape. Adding optional fields keeps it; removing or renaming bumps it. New values of an existing enum (states, actions, kinds,
-/// JSONL record types) also keep it, so consumers must tolerate values they do not know.
+/// The version of the JSON shape. Adding optional fields keeps it; removing or renaming bumps it.
+/// New values of an existing enum (states, actions, kinds, JSONL record types) also keep it, so
+/// consumers must tolerate values they do not know.
 pub(crate) const SCHEMA_VERSION: u32 = 2;
 
 /// The one object every command writes under `--json`, with the same top-level keys each time.

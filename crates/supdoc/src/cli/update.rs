@@ -473,8 +473,7 @@ fn render_rows(context: &TextContext, rows: &[ChangeRow], out: &mut dyn Write) -
     Ok(())
 }
 
-/// The cause of a broken link, as a top-level finding, or `None` for a link in any other state
-///.
+/// The cause of a broken link, as a top-level finding, or `None` for a link in any other state.
 ///
 /// Its help adds that update can't record the link. It points at `supdoc fix` only when the
 /// finding carries a fix, so the command repairs that cause, and names the link's source as
