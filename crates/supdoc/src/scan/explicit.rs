@@ -1,0 +1,354 @@
+//! Judging the paths a scan names explicitly (04 S10).
+
+use std::fs;
+use std::path::Path;
+
+use ignore::Match;
+
+use crate::config::{CONFIG_FILE_NAME, Config, PatternDefinition};
+use crate::finding::{Finding, Severity};
+use crate::link::SourcePath;
+use crate::lock::error::shell_quote;
+use crate::output::paths::relative_to;
+use crate::path::AbsolutePath;
+use crate::read::cartridge::Languages;
+use crate::scan::ignore::{IgnoreRules, IgnoredBy};
+use crate::scan::model::Scope;
+use crate::scan::walk::{UnreadDir, WalkedSource, is_nested_project, is_vcs_dir};
+
+/// Warnings for each explicitly named path that the walk skipped because of the config or an
+/// ignore file (04 S10). A path beneath one of `unread_dirs` gets none: that directory's own
+/// warning already explains it.
+pub(super) fn explicit_path_warnings(
+    config: &Config,
+    languages: &Languages,
+    scope: &Scope,
+    rules: &IgnoreRules,
+    sources: &[WalkedSource],
+    unread_dirs: &[UnreadDir],
+) -> Vec<Finding> {
+    let Scope::Paths(listed) = scope else {
+        return Vec::new();
+    };
+    listed
+        .iter()
+        .filter(|path| {
+            let path = config.root().as_path().join(path.as_str());
+            !unread_dirs
+                .iter()
+                .any(|dir| path.starts_with(dir.path.as_path()))
+        })
+        .filter_map(|path| explicit_path_warning(config, languages, rules, sources, path))
+        .collect()
+}
+
+/// The warning for one explicitly named path, or `None` when it was walked or is missing. A path
+/// in a version-control or nested-project directory, or of a type no cartridge reads, gets a
+/// `scan-explicit-path-unscanned` warning. A path that is a symlink, or lies under a symlinked directory, is never walked, so it always
+/// gets a warning.
+pub(super) fn explicit_path_warning(
+    config: &Config,
+    languages: &Languages,
+    rules: &IgnoreRules,
+    sources: &[WalkedSource],
+    listed: &SourcePath,
+) -> Option<Finding> {
+    let root = config.root();
+    let path = AbsolutePath::new(&root.as_path().join(listed.as_str()))?;
+    let kind = fs::symlink_metadata(path.as_path()).ok()?.file_type();
+    if let Some(skipped) = skipped_dir(root, listed) {
+        return Some(unscanned(listed, &Unscanned::Dir(skipped)));
+    }
+    if kind.is_symlink() {
+        return Some(symlinked(root, listed, &path, Symlink::Itself));
+    }
+    if !kind.is_file() && !kind.is_dir() {
+        return None;
+    }
+
+    let ignored_by = ignore_rule(rules, root, &path, kind.is_dir());
+    let is_source_file = kind.is_file() && languages.for_path(path.as_path()).is_some();
+    let walked = sources
+        .binary_search_by(|walked| walked.path.cmp(&path))
+        .is_ok();
+
+    if let Some(rule) = ignored_by {
+        return Some(ignored(listed, &rule));
+    }
+    let excluded_by = config.excluded_by(&path);
+    if let Some(pattern) = excluded_by.filter(|_| is_source_file || kind.is_dir()) {
+        return Some(excluded(
+            listed,
+            Some(pattern),
+            &defined_in(root, config.exclude_definition()),
+        ));
+    }
+    if is_source_file && !config.scans(&path) {
+        return Some(excluded(
+            listed,
+            None,
+            &defined_in(root, config.include_definition()),
+        ));
+    }
+    // The walk never enters a symlinked directory, so nothing under one is walked and no rule
+    // names it.
+    if has_symlinked_parent(root, listed) {
+        return Some(symlinked(root, listed, &path, Symlink::Parent));
+    }
+    // The walk skipped it, but asking each rule again found none that does: say so, rather than
+    // blame a rule that may not exist.
+    if is_source_file && !walked {
+        return Some(unscanned(
+            listed,
+            &Unscanned::Unreached {
+                in_work_tree: rules.in_work_tree,
+            },
+        ));
+    }
+    (kind.is_file() && !is_source_file).then(|| unscanned(listed, &Unscanned::UnreadType))
+}
+
+/// Why the walk never reads an explicitly named path.
+pub(super) enum Unscanned {
+    /// A directory on the way is skipped whatever the user names.
+    Dir(SkippedDir),
+    /// No cartridge reads files of this type.
+    UnreadType,
+    /// The walk didn't reach it, and no rule found explains why, as when it is named in a case
+    /// other than its own on a case-insensitive file system. In a git work tree,
+    /// `git check-ignore` may name a rule supdoc missed.
+    Unreached {
+        /// Whether the root lies in a git work tree.
+        in_work_tree: bool,
+    },
+}
+
+/// A directory the walk never enters, whatever the user names.
+pub(super) enum SkippedDir {
+    /// A version-control directory, at this project-relative path.
+    Vcs(String),
+    /// A separate project with its own config, at this project-relative path.
+    Project(String),
+}
+
+/// The finding for an explicit path the walk never reads for a reason that isn't a user setting.
+pub(super) fn unscanned(listed: &SourcePath, why: &Unscanned) -> Finding {
+    let listed = listed.as_str();
+    let (reason, help) = match why {
+        Unscanned::Dir(SkippedDir::Vcs(dir)) => (
+            format!("is inside `{dir}`, a version-control directory supdoc never scans"),
+            "Pass a path outside it, or stop passing this one".to_owned(),
+        ),
+        Unscanned::Dir(SkippedDir::Project(dir)) => (
+            format!("is inside `{dir}`, a separate project with its own {CONFIG_FILE_NAME}"),
+            format!("Run `supdoc check` inside `{dir}`, or stop passing this path"),
+        ),
+        Unscanned::UnreadType => (
+            "has a type no language supdoc reads".to_owned(),
+            "Pass a `.md` or `.rs` file instead, or stop passing this one".to_owned(),
+        ),
+        Unscanned::Unreached { in_work_tree } => (
+            "the walk didn't reach it, and supdoc found no rule that skips it".to_owned(),
+            if *in_work_tree {
+                format!(
+                    "Check that `{listed}` matches its name on disk, case included. `git \
+                     check-ignore -v -- {}` may show a rule that skips it",
+                    shell_quote(listed),
+                )
+            } else {
+                format!(
+                    "Check that `{listed}` matches its name on disk, case included, and can be \
+                     read, or stop passing it"
+                )
+            },
+        ),
+    };
+    Finding::new(
+        "scan-explicit-path-unscanned",
+        Severity::Warning,
+        format!("{listed} was named on the command line but {reason}"),
+    )
+    .with_help(help)
+}
+
+/// Whether a directory above `listed`, inside `root`, is a symlink.
+pub(super) fn has_symlinked_parent(root: &AbsolutePath, listed: &SourcePath) -> bool {
+    let mut current = root.as_path().to_path_buf();
+    let mut segments = listed.as_str().split('/').peekable();
+    while let Some(segment) = segments.next() {
+        if segments.peek().is_none() {
+            break;
+        }
+        current.push(segment);
+        if fs::symlink_metadata(&current).is_ok_and(|metadata| metadata.is_symlink()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Where the symlink sits that keeps the walk from an explicitly named path.
+#[derive(Clone, Copy)]
+pub(super) enum Symlink {
+    /// The named path is itself a symlink, which the walk doesn't follow.
+    Itself,
+    /// A directory above the named path is a symlink, which the walk doesn't enter.
+    Parent,
+}
+
+/// The finding for an explicit path that is a symlink or is reached through a symlinked
+/// directory, neither of which the walk follows. It suggests the real path only when that lies
+/// inside the project.
+pub(super) fn symlinked(
+    root: &AbsolutePath,
+    listed: &SourcePath,
+    path: &AbsolutePath,
+    symlink: Symlink,
+) -> Finding {
+    let listed = listed.as_str();
+    let message = match symlink {
+        Symlink::Itself => format!(
+            "{listed} was named on the command line but is a symlink, which supdoc doesn't follow",
+        ),
+        Symlink::Parent => format!(
+            "{listed} was named on the command line but is reached through a symlinked directory, which supdoc doesn't enter",
+        ),
+    };
+    let finding = Finding::new("scan-explicit-path-symlinked", Severity::Warning, message);
+    let real = fs::canonicalize(path.as_path()).ok().and_then(|real| {
+        let real_root = fs::canonicalize(root.as_path()).ok()?;
+        let relative = real.strip_prefix(real_root).ok()?;
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        (!relative.is_empty()).then_some(relative)
+    });
+    match real {
+        Some(real) => finding.with_help(format!("Pass the real path `{real}` instead")),
+        None => finding.with_help("Pass the real path inside the project instead"),
+    }
+}
+
+/// The config file that set a pattern key, relative to the project `root`, or the default config
+/// name when no file sets it.
+pub(super) fn defined_in(root: &AbsolutePath, definition: Option<PatternDefinition<'_>>) -> String {
+    definition.map_or_else(
+        || CONFIG_FILE_NAME.to_owned(),
+        |definition| relative_to(root, definition.file()),
+    )
+}
+
+/// The finding for an explicit path that the config excludes, naming the `exclude` pattern when
+/// one matched and otherwise blaming `include`, each in the config `file` that set it.
+pub(super) fn excluded(listed: &SourcePath, pattern: Option<&str>, file: &str) -> Finding {
+    let listed = listed.as_str();
+    match pattern {
+        Some(pattern) => Finding::new(
+            "scan-explicit-path-excluded",
+            Severity::Warning,
+            format!(
+                "{listed} was named on the command line but is excluded by `{pattern}` in `exclude` in {file}",
+            ),
+        )
+        .with_help(format!(
+            "Remove `{pattern}` from `exclude` in {file} to check it, or stop passing it"
+        )),
+        None => Finding::new(
+            "scan-explicit-path-excluded",
+            Severity::Warning,
+            format!(
+                "{listed} was named on the command line but is not matched by `include` in {file}",
+            ),
+        )
+        .with_help(format!(
+            "Add `{listed}` to `include` in {file} to check it, or stop passing it"
+        )),
+    }
+}
+
+/// The finding for an explicit path that an ignore file skips, naming the rule and its file as
+/// far as `by` may, and in a git work tree offering `git check-ignore` to show the rule.
+pub(super) fn ignored(listed: &SourcePath, by: &IgnoredBy) -> Finding {
+    let listed = listed.as_str();
+    let show_rule = if by.check_ignore {
+        format!(
+            ". `git check-ignore -v -- {}` shows the rule",
+            shell_quote(listed)
+        )
+    } else {
+        String::new()
+    };
+    let help = format!(
+        "Remove that rule from {file} to check `{listed}`, or stop passing it{show_rule}",
+        file = by.file,
+    );
+    Finding::new(
+        "scan-explicit-path-ignored",
+        Severity::Warning,
+        format!(
+            "{listed} was named on the command line but is ignored by {rule}",
+            rule = by.rule,
+        ),
+    )
+    .with_help(help)
+}
+
+/// The version-control directory or nested project that `listed` or one of its parent directories
+/// is, which the walk skips whatever the user names (04 S2, S4). A symlink is never judged here:
+/// the walk doesn't follow it, so it gets the symlink warning.
+pub(super) fn skipped_dir(root: &AbsolutePath, listed: &SourcePath) -> Option<SkippedDir> {
+    let mut current = root.as_path().to_path_buf();
+    let mut relative = String::new();
+    for segment in listed.as_str().split('/') {
+        current.push(segment);
+        if !relative.is_empty() {
+            relative.push('/');
+        }
+        relative.push_str(segment);
+        if is_vcs_dir(&current) {
+            return Some(SkippedDir::Vcs(relative));
+        }
+        let is_real_dir = fs::symlink_metadata(&current).is_ok_and(|metadata| metadata.is_dir());
+        if is_real_dir && is_nested_project(&current) {
+            return Some(SkippedDir::Project(relative));
+        }
+    }
+    None
+}
+
+/// Describes the ignore rule that keeps the walk from reaching `path`, or `None` when none does.
+///
+/// It asks what the walk asked, with the same [`IgnoreRules`] and in the order the walk would:
+/// each directory on the way down from the root, then `path` itself. The walk never enters a
+/// symlinked directory, so nothing beneath one is judged. A rule is quoted with its file only when
+/// that file lies inside the root and is no symlink; any other is blamed on "an ignore file", and
+/// its file named by kind and, unless above the root, by path, so no line from outside the root
+/// is ever printed (04 S15).
+///
+/// Effect: reads ignore files and file metadata beneath the root.
+pub(super) fn ignore_rule(
+    rules: &IgnoreRules,
+    root: &AbsolutePath,
+    path: &AbsolutePath,
+    is_dir: bool,
+) -> Option<IgnoredBy> {
+    let mut current = root.as_path().to_path_buf();
+    let mut components = path.strip_prefix(root)?.components().peekable();
+    while let Some(component) = components.next() {
+        let is_last = components.peek().is_none();
+        let dir = rules.level(&current);
+        current.push(component);
+        if !is_last && is_symlink(&current) {
+            return None;
+        }
+        if let Match::Ignore(rule) = rules.matched(dir.as_deref(), &current, !is_last || is_dir) {
+            return Some(rule.describe(root, rules.in_work_tree));
+        }
+    }
+    None
+}
+
+/// Whether `path` is itself a symlink.
+///
+/// Effect: reads `path`'s metadata.
+pub(super) fn is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+}
