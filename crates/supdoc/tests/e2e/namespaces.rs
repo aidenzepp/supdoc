@@ -155,3 +155,25 @@ fn namespace_rename_prints_the_walk_findings_without_changing_its_other_lines() 
         );
     }
 }
+
+#[test]
+fn namespace_rename_rewrites_untracked_links_by_their_written_prefix() {
+    let project = Project::fixture("namespaced");
+    project.write(
+        "docs/untracked.md",
+        "[bare](auth:) [page](auth:x.html#s) [logo](auth:logo.png)\n",
+    );
+    project.record();
+    let _ = project.supdoc(&["check"]).assert_exit(0);
+
+    let _ = project
+        .supdoc(&["namespace", "rename", "auth", "identity", "--yes"])
+        .assert_exit(0);
+
+    assert_eq!(
+        project.read("docs/untracked.md"),
+        "[bare](identity:) [page](identity:x.html#s) [logo](identity:logo.png)\n",
+        "every link written with the `auth:` prefix should move to `identity:`"
+    );
+    let _ = project.supdoc(&["check"]).assert_exit(0);
+}
