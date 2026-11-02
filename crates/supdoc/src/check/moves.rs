@@ -8,14 +8,32 @@ use std::collections::BTreeMap;
 
 use crate::link::{LinkKey, SymbolPath, Target};
 
+/// A lock entry moving from one key to another: the `from` entry's hash becomes `to`'s.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Move {
+    /// The key the entry is under now, which is used up by the move.
+    pub from: LinkKey,
+    /// The key the entry moves to.
+    pub to: LinkKey,
+}
+
 /// What detection decided about the new links it was given.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct Moves {
-    /// New key to the old key whose hash it inherits. The old entry is used up.
-    pub(super) carried: BTreeMap<LinkKey, LinkKey>,
+    /// Each new key with the old key whose hash it inherits. The old entry is used up.
+    pub(super) carried: Vec<Move>,
     /// New keys that had candidates but no unique pairing, with every candidate they matched.
     /// Nothing is carried for these, so they stay plain `new`.
     pub(super) ambiguous: BTreeMap<LinkKey, Vec<LinkKey>>,
+}
+
+impl Moves {
+    /// The old key whose hash `to` inherits, if it inherits one.
+    pub(super) fn carried_from(&self, to: &LinkKey) -> Option<&LinkKey> {
+        self.carried
+            .iter()
+            .find_map(|carried| (carried.to == *to).then_some(&carried.from))
+    }
 }
 
 /// Pairs each of `new` (links with no lock entry) with the one entry of `obsolete` (lock entries
@@ -44,7 +62,10 @@ pub(super) fn detect_moves(new: &[&LinkKey], obsolete: &[&LinkKey]) -> Moves {
         };
         match matching.as_slice() {
             [only] if claims.get(&pointed_at) == Some(&1) => {
-                let _previous = moves.carried.insert(fresh.clone(), (*only).clone());
+                moves.carried.push(Move {
+                    from: (*only).clone(),
+                    to: fresh.clone(),
+                });
             }
             _ => {
                 let _previous = moves
@@ -86,7 +107,7 @@ mod tests {
 
         let moves = detect_moves(&[&new], &[&old]);
 
-        assert_eq!(moves.carried.get(&new), Some(&old));
+        assert_eq!(moves.carried_from(&new), Some(&old));
         assert!(moves.ambiguous.is_empty());
     }
 
