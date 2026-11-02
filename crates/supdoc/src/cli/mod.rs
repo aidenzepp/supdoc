@@ -220,7 +220,7 @@ impl From<&CartridgeLoadError> for CliError {
             error.code(),
             error.to_string(),
             error.help(),
-            Self::BUG_EXIT_CODE,
+            ExitStatus::Bug,
         )
     }
 }
