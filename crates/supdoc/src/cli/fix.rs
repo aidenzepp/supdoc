@@ -189,14 +189,18 @@ impl Planned {
         output
             .report(&report, !timed_out)
             .map_err(|error| CliError::output_failed("cli-fix-output", "the fix report", &error))?;
-        let note = if timed_out {
-            timeout_note(report.findings.len())
-        } else if report.fixes.is_empty() {
-            nothing_to_fix(self.broken)
+        let planned = if report.fixes.is_empty() {
+            None
         } else {
             let fix_count = count(report.fixes.len(), "fix", "fixes");
             let file_count = count(report.files(), "file", "files");
-            format!("{fix_count} in {file_count}. {apply_note}")
+            Some(format!("{fix_count} in {file_count}. {apply_note}"))
+        };
+        let note = match (timed_out, planned) {
+            (true, Some(planned)) => format!("{} {planned}", timeout_note(report.findings.len())),
+            (true, None) => timeout_note(report.findings.len()),
+            (false, Some(planned)) => planned,
+            (false, None) => nothing_to_fix(self.broken),
         };
         output
             .note(&note)
@@ -750,6 +754,7 @@ mod tests {
     use super::*;
     use crate::cli::args::Command;
     use crate::cli::testing::{Run, Session, at};
+    use crate::limits::Limits;
     use crate::lock::model::LOCK_FILE_NAME;
 
     /// A guide whose link misspells `add` as `ad`, which has exactly one near match.
@@ -854,7 +859,7 @@ mod tests {
         fn lock(&self) -> Lockfile {
             let path = AbsolutePath::new(&self.path(LOCK_FILE_NAME))
                 .expect("the lockfile path should be absolute");
-            Lockfile::read(&path)
+            Lockfile::read(&path, Limits::MAX_LOCK_SIZE)
                 .expect("the lockfile should be valid")
                 .expect("the lockfile should exist")
         }

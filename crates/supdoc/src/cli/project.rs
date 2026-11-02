@@ -245,7 +245,8 @@ pub(crate) fn read_lock_for_update(
     cwd: &AbsolutePath,
 ) -> Result<LockForUpdate, CliError> {
     let configured = config.hash_settings();
-    let read = Lockfile::read(&lock_path(config.root()))
+    let limit = config.limits_in_effect().max_lock_size.value;
+    let read = Lockfile::read(&lock_path(config.root()), limit)
         .map_err(|error| lock_failure(&error, config.root(), cwd))?;
     let Some(lock) = read else {
         let mut empty = Lockfile::default();

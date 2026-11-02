@@ -97,8 +97,14 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
         .collect();
 
     let total = matched.len();
-    let timed_out = timed_out(&scan).next().is_some();
-    let report = ListReport::new(&matched, args.limit, model.findings);
+    // Every link into a timed-out target carries the same finding; one per message is enough.
+    let mut seen = std::collections::BTreeSet::new();
+    let timeouts: Vec<Finding> = timed_out(&scan)
+        .filter(|finding| seen.insert(finding.message.clone()))
+        .cloned()
+        .collect();
+    let timed_out = !timeouts.is_empty();
+    let report = ListReport::new(&matched, args.limit, model.findings, timeouts);
     output
         .report(&report, !timed_out)
         .map_err(|error| CliError::output_failed("cli-list-output", "the link list", &error))?;
@@ -202,10 +208,32 @@ pub(crate) struct ListReport {
 
 impl ListReport {
     /// The report for `matched`, showing at most `limit` links.
-    fn new(matched: &[LinkReport], limit: Limit, loose: Vec<Finding>) -> Self {
+    ///
+    /// `timeouts` are the read-timeout findings that set the exit code. Any the shown links or
+    /// `loose` don't already carry join `loose`, so a hidden timed-out target still says why the
+    /// run failed.
+    fn new(
+        matched: &[LinkReport],
+        limit: Limit,
+        mut loose: Vec<Finding>,
+        timeouts: Vec<Finding>,
+    ) -> Self {
         let summary = Summary::tally(matched.iter().map(|link| link.state));
         let truncated = limit.truncated(matched.len());
         let listed: Vec<&LinkReport> = limit.take(matched).collect();
+        let shown: Vec<Finding> = listed
+            .iter()
+            .filter_map(|link| link.finding.clone())
+            .collect();
+        for timeout in timeouts {
+            let carried = shown
+                .iter()
+                .chain(&loose)
+                .any(|finding| finding.message == timeout.message);
+            if !carried {
+                loose.push(timeout);
+            }
+        }
         Self {
             summary,
             links: listed.iter().map(|link| LinkJson::from(*link)).collect(),

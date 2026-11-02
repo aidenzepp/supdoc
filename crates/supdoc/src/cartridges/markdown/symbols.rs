@@ -335,6 +335,7 @@ mod tests {
     use crate::cartridges::markdown::cartridge::cartridge;
     use crate::hash::HashSettings;
     use crate::path::AbsolutePath;
+    use crate::read::cartridge::Deadline;
     use crate::read::hash::hash_symbol;
 
     fn parse(text: &str) -> SourceFile {
@@ -359,6 +360,31 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn a_passed_deadline_stops_a_headings_inline_parse() {
+        let deadline = Deadline::start("1ms".parse().expect("1ms should be a time limit"));
+        while !deadline.passed() {
+            std::hint::spin_loop();
+        }
+        // One long heading: the block parse has no query, so the inline parse meets the deadline.
+        let file = parse(&format!("# {}\n", "[a](b.md) ".repeat(20_000))).with_deadline(deadline);
+
+        let error =
+            heading_symbols(&file).expect_err("the inline parse should stop at the deadline");
+
+        assert_eq!(error.code(), "read-timeout", "{error}");
+        assert!(
+            matches!(
+                error,
+                ReadError::Timeout {
+                    step: "a heading's inline parse",
+                    ..
+                }
+            ),
+            "the timeout should name the heading's inline parse: {error:?}"
+        );
     }
 
     fn resolved_text<'a>(file: &'a SourceFile, query: &str) -> &'a str {
