@@ -6,6 +6,7 @@ use std::path::Path;
 use tempfile::TempDir;
 
 use super::*;
+use crate::exit::ExitStatus;
 use crate::path::RelativePath;
 
 /// Writes `files` (relative path, contents) under a fresh temp dir.
@@ -451,7 +452,7 @@ fn malformed_toml_is_parse_error_without_help() {
     let error = load_error(&dir, "supdoc.config.toml");
 
     assert_eq!(error.code(), "config-parse");
-    assert_eq!(error.exit_code(), 78);
+    assert_eq!(error.status(), ExitStatus::Config);
     assert_eq!(error.help(), None, "{error}");
 }
 
@@ -667,7 +668,7 @@ fn unreadable_config_is_read_error() {
     let error = load_error(&dir, "supdoc.config.toml");
 
     assert_eq!(error.code(), "config-read");
-    assert_eq!(error.exit_code(), 74);
+    assert_eq!(error.status(), ExitStatus::Io);
 }
 
 #[test]
@@ -839,7 +840,7 @@ fn extends_naming_another_file_is_refused_without_printing_it() {
     let error = load_error(&dir, "project/supdoc.config.toml");
 
     assert_eq!(error.code(), "config-extends-not-config", "got {error:?}");
-    assert_eq!(error.exit_code(), 78);
+    assert_eq!(error.status(), ExitStatus::Config);
     let shown = format!("{error} {}", error.help().unwrap_or_default());
     assert!(
         !shown.contains("hunter2"),
@@ -864,7 +865,7 @@ fn extends_naming_a_fifo_is_refused_without_opening_it() {
     let error = load_error(&dir, "supdoc.config.toml");
 
     assert_eq!(error.code(), "config-extends-not-config", "got {error:?}");
-    assert_eq!(error.exit_code(), 78);
+    assert_eq!(error.status(), ExitStatus::Config);
 }
 
 #[test]
@@ -928,7 +929,7 @@ fn extends_naming_a_missing_config_does_not_tell_the_user_to_name_one() {
 fn refusal_shown(error: &ConfigError, project: &str) -> (&'static str, u8, Option<String>, String) {
     (
         error.code(),
-        error.exit_code(),
+        error.status().code(),
         error.help().map(|help| help.replace(project, "P")),
         error.to_string().replace(project, "P"),
     )
@@ -1337,7 +1338,7 @@ fn namespace_outside_the_root_is_a_config_error() {
         "config-namespace-outside-root",
         "got {error:?}"
     );
-    assert_eq!(error.exit_code(), 78);
+    assert_eq!(error.status(), ExitStatus::Config);
     assert!(error.to_string().contains("`up`"), "{error}");
 }
 
@@ -1367,7 +1368,7 @@ fn namespace_through_a_symlink_loop_is_not_called_outside() {
     let cwd = at(&dir, "project");
 
     assert_eq!(error.code(), "config-namespace-outside-root", "{error:?}");
-    assert_eq!(error.exit_code(), 78);
+    assert_eq!(error.status(), ExitStatus::Config);
     assert_eq!(
         error.message_from(&cwd),
         "supdoc.config.toml sets namespace `loop` to a, which supdoc can't follow to a real \
@@ -1636,4 +1637,83 @@ fn line_endings_provenance_names_the_defining_file() {
         Some(&at(&dir, "supdoc.config.toml"))
     );
     assert_eq!(load_from(&default, ".").line_endings_defined_in(), None);
+}
+
+// [limits]
+
+#[test]
+fn limits_parse_from_the_toml_table_with_the_file_that_wrote_them() {
+    let dir = tree(&[(
+        "supdoc.config.toml",
+        "[limits]\nparse-timeout = \"30s\"\nmax-lock-size = \"1MiB\"\nmax-ignore-size = \"0\"\n",
+    )]);
+    let config = load_from(&dir, ".");
+    let limits = config.limits();
+
+    let file = at(&dir, "supdoc.config.toml");
+    let (timeout, from) = limits
+        .parse_timeout
+        .as_ref()
+        .expect("parse-timeout should be set");
+    assert_eq!(timeout.to_string(), "30s");
+    assert_eq!(from, &file);
+    let (lock, _) = limits
+        .max_lock_size
+        .as_ref()
+        .expect("max-lock-size should be set");
+    assert_eq!(lock.to_string(), "1MiB");
+    let (ignore, _) = limits
+        .max_ignore_size
+        .as_ref()
+        .expect("max-ignore-size should be set");
+    assert_eq!(ignore.get(), None, "0 should mean no limit");
+}
+
+#[test]
+fn an_unknown_limits_key_is_refused_as_a_parse_error() {
+    let text = "[limits]\nparse-timeouts = \"30s\"\n";
+    let dir = tree(&[("supdoc.config.toml", text)]);
+    let error = load_error(&dir, "supdoc.config.toml");
+
+    assert_eq!(error.code(), "config-parse");
+    assert_eq!(parse_span_text(&error, text), "parse-timeouts");
+}
+
+#[test]
+fn max_config_size_in_a_config_file_is_refused() {
+    let text = "[limits]\nmax-config-size = \"1MiB\"\n";
+    let dir = tree(&[("supdoc.config.toml", text)]);
+    let error = load_error(&dir, "supdoc.config.toml");
+
+    assert_eq!(error.code(), "config-parse");
+    assert_eq!(parse_span_text(&error, text), "max-config-size");
+}
+
+#[test]
+fn the_nearest_config_in_the_extends_chain_wins_each_limit() {
+    let dir = tree(&[
+        (
+            "base/supdoc.config.toml",
+            "[limits]\nparse-timeout = \"30s\"\nmax-lock-size = \"1MiB\"\n",
+        ),
+        (
+            "supdoc.config.toml",
+            "extends = \"base/supdoc.config.toml\"\n[limits]\nparse-timeout = \"5s\"\n",
+        ),
+    ]);
+    let config = load_from(&dir, ".");
+    let limits = config.limits();
+
+    let (timeout, from) = limits
+        .parse_timeout
+        .as_ref()
+        .expect("parse-timeout should be set");
+    assert_eq!(timeout.to_string(), "5s");
+    assert_eq!(from, &at(&dir, "supdoc.config.toml"));
+    let (lock, from) = limits
+        .max_lock_size
+        .as_ref()
+        .expect("max-lock-size should be inherited");
+    assert_eq!(lock.to_string(), "1MiB");
+    assert_eq!(from, &at(&dir, "base/supdoc.config.toml"));
 }
