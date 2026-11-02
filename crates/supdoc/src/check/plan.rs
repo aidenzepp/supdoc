@@ -136,7 +136,7 @@ fn hash_to_record(
 mod tests {
     use super::*;
     use crate::check::reconcile::reconcile_at_root;
-    use crate::finding::{Finding, Severity};
+    use crate::finding::{Finding, Location, Severity};
     use crate::hash::LineEndings;
     use crate::scan::model::{ScannedLink, Scope};
 
@@ -163,7 +163,9 @@ mod tests {
                 .into_iter()
                 .map(|(key, target)| {
                     let link = ScannedLink {
-                        locations: Vec::new(),
+                        first: Location::in_text(key.source.clone(), "[a](b)", 0..6)
+                            .expect("the fixture range should be locatable"),
+                        more: Vec::new(),
                         snippet: None,
                         target,
                     };

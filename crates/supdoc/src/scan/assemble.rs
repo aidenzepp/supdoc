@@ -278,11 +278,12 @@ fn add_broken(
 ) {
     for (key, location, finding) in broken {
         match links.entry(key) {
-            Entry::Occupied(mut link) => link.get_mut().locations.push(location),
+            Entry::Occupied(mut link) => link.get_mut().more.push(location),
             Entry::Vacant(slot) => {
                 let _link = slot.insert(ScannedLink {
                     snippet: finding.snippet.clone(),
-                    locations: vec![location],
+                    first: location,
+                    more: Vec::new(),
                     target: TargetState::Broken { finding },
                 });
             }
@@ -590,8 +591,7 @@ mod tests {
 
         assert_eq!(scan.links.len(), 1, "both copies should share one link");
         let lines: Vec<u32> = link(&scan, &key("docs/guide.md", "src/lib.rs", Some("add")))
-            .locations
-            .iter()
+            .locations()
             .map(|location| location.line)
             .collect();
         assert_eq!(

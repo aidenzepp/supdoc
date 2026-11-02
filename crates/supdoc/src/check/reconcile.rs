@@ -114,7 +114,7 @@ fn reconcile_with(
         report.links.push(LinkReport {
             key: key.clone(),
             state,
-            locations: link.locations.clone(),
+            locations: link.locations().cloned().collect(),
             finding,
             moved_from: moves.carried.get(key).cloned(),
         });
@@ -208,19 +208,13 @@ fn reference_of(key: &LinkKey) -> LinkRef {
 /// `docs/guide.md:3 → src/lib.rs#add`: where the link is written, then what it points at.
 fn describe(key: &LinkKey, link: &ScannedLink) -> String {
     let reference = reference_of(key);
-    let written_at = link.locations.first().map_or_else(
-        || key.source.to_string(),
-        |location| format!("{}:{}", location.file, location.line),
-    );
+    let written_at = format!("{}:{}", link.first.file, link.first.line);
     format!("{written_at} → {reference}")
 }
 
 /// Puts `finding` at the link's first location, if it has one.
 fn at_first_location(finding: Finding, link: &ScannedLink) -> Finding {
-    match link.locations.first().cloned() {
-        Some(location) => finding.with_location(location),
-        None => finding,
-    }
+    finding.with_location(link.first.clone())
 }
 
 /// Puts `finding` at the link's first location, with the source lines that location covers.
@@ -346,7 +340,8 @@ mod tests {
         let snippet = Snippet::capture("[a](b)", 0..6);
         ScannedLink {
             snippet,
-            locations: vec![location],
+            first: location,
+            more: Vec::new(),
             target,
         }
     }
