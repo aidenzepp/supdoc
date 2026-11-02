@@ -4,32 +4,30 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
+use crate::limits::{Limits, TimeLimit};
 use crate::path::AbsolutePath;
-use crate::read::cartridge::{Cartridge, Languages, SourceFile};
+use crate::read::cartridge::{Cartridge, Deadline, Languages, SourceFile};
 use crate::read::error::ReadError;
 
 /// The largest file supdoc reads: 16 MiB (03 R13).
 pub const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 impl SourceFile {
-    /// Parses `text` with `language`'s grammar. Pure: the text is already in memory.
+    /// Parses `text` with `language`'s grammar under the default `parse-timeout`
+    /// ([`Limits::PARSE_TIMEOUT`]). Pure apart from reading the clock: the text is already in
+    /// memory.
     ///
     /// A file with syntax errors still parses; check [`SourceFile::has_syntax_errors`] (03 R8).
     ///
     /// # Errors
     ///
-    /// [`ReadError::Internal`] if tree-sitter returns no tree. supdoc sets no timeout or
-    /// cancellation, so that is a supdoc bug.
+    /// As [`SourceFile::from_text`].
     pub fn parse(
         path: AbsolutePath,
         text: String,
         language: &'static dyn Cartridge,
     ) -> Result<Self, ReadError> {
-        let internal = ReadError::Internal {
-            path: path.clone(),
-            reason: "tree-sitter returned no tree",
-        };
-        Self::from_text(path, text, language).ok_or(internal)
+        Self::from_text(path, text, language, Deadline::start(Limits::PARSE_TIMEOUT))
     }
 
     /// Reads `path` from the filesystem and parses it with the cartridge `languages` picks for
@@ -43,8 +41,14 @@ impl SourceFile {
     /// - [`ReadError::Missing`] or [`ReadError::Io`] when the file can't be opened or read.
     /// - [`ReadError::TooLarge`] when it is over [`MAX_FILE_BYTES`].
     /// - [`ReadError::NotUtf8`] when it isn't UTF-8.
+    /// - [`ReadError::Timeout`] when the parse takes longer than `limit`. The same deadline,
+    ///   started just before the parse, then bounds every query and inline parse of the file.
     /// - [`ReadError::Internal`] when tree-sitter returns no tree.
-    pub fn read(path: AbsolutePath, languages: &Languages) -> Result<Self, ReadError> {
+    pub fn read(
+        path: AbsolutePath,
+        languages: &Languages,
+        limit: TimeLimit,
+    ) -> Result<Self, ReadError> {
         let real = real_file(&path);
         let Some(language) = languages.for_path(&real) else {
             return Err(unsupported(path, &real, languages));
@@ -54,7 +58,7 @@ impl SourceFile {
             path: path.clone(),
             offset: error.utf8_error().valid_up_to(),
         })?;
-        Self::parse(path, text, language)
+        Self::from_text(path, text, language, Deadline::start(limit))
     }
 
     /// Whether the tree has any `ERROR` or missing node. The file is still symbolized and hashed,
@@ -149,6 +153,103 @@ mod tests {
     use std::fs;
 
     use super::*;
+    use crate::read::error::ReadRole;
+    use crate::read::links::links;
+
+    /// Rust text nested deeply enough that its parse and its queries run long past 1 ms.
+    fn deep_rust() -> String {
+        format!("/// [a](a.md)\nfn add() {{{}\n", "{".repeat(65_536))
+    }
+
+    /// A 1 ms deadline that has already passed: waits out the millisecond.
+    fn passed_deadline() -> Deadline {
+        let deadline = Deadline::start("1ms".parse().expect("1ms should be a time limit"));
+        while !deadline.passed() {
+            std::hint::spin_loop();
+        }
+        deadline
+    }
+
+    fn rust_path() -> AbsolutePath {
+        AbsolutePath::new(Path::new("/repo/src/deep.rs"))
+            .expect("the fixture path should be absolute")
+    }
+
+    fn rust() -> &'static dyn Cartridge {
+        Languages::builtin()
+            .for_path(Path::new("deep.rs"))
+            .expect("the built-in registry should read `.rs`")
+    }
+
+    fn assert_timed_out(error: &ReadError, step: &str) {
+        assert_eq!(error.code(), "read-timeout", "{error}");
+        let ReadError::Timeout { step: stopped, .. } = error else {
+            panic!("expected a timeout, got {error:?}");
+        };
+        assert_eq!(*stopped, step);
+        let help = error.help(ReadRole::Target, "src/deep.rs");
+        for knob in [
+            "parse-timeout",
+            "SUPDOC_PARSE_TIMEOUT",
+            "--parse-timeout",
+            "stopped at byte",
+        ] {
+            assert!(help.contains(knob), "the help should name `{knob}`: {help}");
+        }
+    }
+
+    #[test]
+    fn a_passed_deadline_stops_the_parse() {
+        let error = SourceFile::from_text(rust_path(), deep_rust(), rust(), passed_deadline())
+            .expect_err("the parse should stop at the deadline");
+
+        assert_timed_out(&error, "the parse");
+    }
+
+    #[test]
+    fn a_passed_deadline_stops_the_symbols_query_with_no_partial_table() {
+        let file = SourceFile::parse(rust_path(), deep_rust(), rust())
+            .expect("the deep fixture should parse under the default limit")
+            .with_deadline(passed_deadline());
+
+        let error = file
+            .language()
+            .symbols(&file)
+            .expect_err("the symbols query should stop at the deadline");
+
+        assert_timed_out(&error, "the symbols query");
+    }
+
+    #[test]
+    fn a_passed_deadline_stops_reading_links() {
+        let file = SourceFile::parse(rust_path(), deep_rust(), rust())
+            .expect("the deep fixture should parse under the default limit")
+            .with_deadline(passed_deadline());
+
+        let error = links(&file).expect_err("reading links should stop at the deadline");
+
+        assert_timed_out(&error, "the injections query");
+    }
+
+    #[test]
+    fn no_limit_never_stops_a_read() {
+        let file = SourceFile::from_text(
+            rust_path(),
+            "/// [a](a.md)\nfn add() {}\n".to_owned(),
+            rust(),
+            Deadline::start("0".parse().expect("0 should be a time limit")),
+        )
+        .expect("a file with no limit should parse");
+
+        assert_eq!(
+            file.language()
+                .symbols(&file)
+                .map(|table| table.iter().count())
+                .ok(),
+            Some(1)
+        );
+        assert_eq!(links(&file).map(|found| found.len()).ok(), Some(1));
+    }
 
     fn absolute_in(dir: &tempfile::TempDir, name: &str) -> AbsolutePath {
         AbsolutePath::new(&dir.path().join(name)).expect("a temp dir path should be absolute")
@@ -164,7 +265,7 @@ mod tests {
         let path = absolute_in(&dir, "lib.rs");
         fs::write(path.as_path(), "fn add() {}\n").expect("the fixture should be writable");
 
-        let file = SourceFile::read(path.clone(), &Languages::builtin())
+        let file = SourceFile::read(path.clone(), &Languages::builtin(), Limits::PARSE_TIMEOUT)
             .expect("a small UTF-8 Rust file should read");
 
         assert_eq!(file.path(), &path);
@@ -179,7 +280,7 @@ mod tests {
         let path = absolute_in(&dir, "lib.rs");
         fs::write(path.as_path(), b"fn a() {}\n// \xff\n").expect("the fixture should be writable");
 
-        let error = SourceFile::read(path.clone(), &Languages::builtin())
+        let error = SourceFile::read(path.clone(), &Languages::builtin(), Limits::PARSE_TIMEOUT)
             .expect_err("a file with an invalid UTF-8 byte should be rejected");
 
         assert!(
@@ -205,7 +306,7 @@ mod tests {
         file.set_len(MAX_FILE_BYTES + 1)
             .expect("the fixture should be resizable");
 
-        let error = SourceFile::read(path, &Languages::builtin())
+        let error = SourceFile::read(path, &Languages::builtin(), Limits::PARSE_TIMEOUT)
             .expect_err("a file one byte over the limit should be rejected");
 
         assert!(
@@ -226,7 +327,7 @@ mod tests {
         let dir = temp_dir();
         let path = absolute_in(&dir, "gone.rs");
 
-        let error = SourceFile::read(path, &Languages::builtin())
+        let error = SourceFile::read(path, &Languages::builtin(), Limits::PARSE_TIMEOUT)
             .expect_err("a file that doesn't exist can't be read");
 
         assert_eq!(error.code(), "read-missing", "got {error:?}");
@@ -242,7 +343,7 @@ mod tests {
         std::os::unix::fs::symlink(dir.path().join(".env"), link.as_path())
             .expect("the symlink should be creatable");
 
-        let error = SourceFile::read(link, &Languages::builtin())
+        let error = SourceFile::read(link, &Languages::builtin(), Limits::PARSE_TIMEOUT)
             .expect_err("a .env file behind a .py name must not be parsed as Python");
 
         assert_eq!(error.code(), "read-unsupported-language", "got {error:?}");
@@ -262,7 +363,7 @@ mod tests {
         std::os::unix::fs::symlink(dir.path().join("real.rs"), link.as_path())
             .expect("the symlink should be creatable");
 
-        let file = SourceFile::read(link.clone(), &Languages::builtin())
+        let file = SourceFile::read(link.clone(), &Languages::builtin(), Limits::PARSE_TIMEOUT)
             .expect("a symlink to a Rust file should read as Rust");
 
         assert_eq!(
@@ -278,7 +379,7 @@ mod tests {
         let dir = temp_dir();
         let path = absolute_in(&dir, "logo.png");
 
-        let error = SourceFile::read(path, &Languages::builtin())
+        let error = SourceFile::read(path, &Languages::builtin(), Limits::PARSE_TIMEOUT)
             .expect_err("no cartridge reads .png files");
 
         assert!(

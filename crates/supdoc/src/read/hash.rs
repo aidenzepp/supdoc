@@ -113,7 +113,10 @@ mod tests {
 
     fn symbol_hash_with(text: &str, path: &str, settings: HashSettings) -> Hash {
         let file = parse(text);
-        let table = file.language().symbols(&file);
+        let table = file
+            .language()
+            .symbols(&file)
+            .expect("the fixture should read");
         let query: SymbolPath = path.parse().expect("the fixture symbol should be valid");
         let symbol = table
             .resolve(file.path(), &query)

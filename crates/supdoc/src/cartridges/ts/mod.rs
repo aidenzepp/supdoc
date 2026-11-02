@@ -105,7 +105,9 @@ namespace util {
     }
 
     fn symbols(file: &SourceFile) -> SymbolTable {
-        file.language().symbols(file)
+        file.language()
+            .symbols(file)
+            .expect("the fixture should read")
     }
 
     fn paths(table: &SymbolTable) -> Vec<String> {

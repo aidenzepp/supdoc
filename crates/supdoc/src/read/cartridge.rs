@@ -5,13 +5,19 @@
 //! `Languages::builtin`) live in the sibling modules; this module fixes the shapes they share.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt;
-use std::ops::Range;
+use std::ops::{ControlFlow, Range};
 use std::path::Path;
+use std::time::Instant;
 
+use tree_sitter::{ParseOptions, Parser, Tree};
+
+use crate::limits::TimeLimit;
 use crate::link::SymbolPath;
 use crate::path::AbsolutePath;
+use crate::read::error::ReadError;
 
 /// One language. The rest of supdoc only ever talks to this trait (03 R3).
 ///
@@ -32,12 +38,21 @@ pub trait Cartridge: Send + Sync + fmt::Debug {
     fn queries(&self) -> &CompiledQueries;
 
     /// The symbols `file` exposes (03 R4). Query-driven cartridges run `tags.scm`.
-    fn symbols(&self, file: &SourceFile) -> SymbolTable;
+    ///
+    /// # Errors
+    ///
+    /// [`ReadError::Timeout`] when `file`'s [`Deadline`] passes first. No partial table is ever
+    /// returned.
+    fn symbols(&self, file: &SourceFile) -> Result<SymbolTable, ReadError>;
 
     /// The regions of `file` written in Markdown, where links are read, in file order (03 R9, R14).
     /// Query-driven cartridges return the `injections.scm` captures whose `injection.language` is
     /// `markdown_inline`, with each run of adjacent line comments joined into one region.
-    fn markdown_regions(&self, file: &SourceFile) -> Vec<MarkdownRegion>;
+    ///
+    /// # Errors
+    ///
+    /// [`ReadError::Timeout`] when `file`'s [`Deadline`] passes first.
+    fn markdown_regions(&self, file: &SourceFile) -> Result<Vec<MarkdownRegion>, ReadError>;
 }
 
 /// A cartridge's stable id: `"rust"`, `"markdown"`.
@@ -105,28 +120,78 @@ pub struct SourceFile {
     tree: tree_sitter::Tree,
     /// The language that parsed it.
     language: &'static dyn Cartridge,
+    /// When reading the file must stop: started before the parse, and checked by every later
+    /// parse and query of the file (SEC-1).
+    deadline: Deadline,
 }
 
 impl SourceFile {
-    /// Parses `text` with `language`'s grammar. Pure: the text is already in memory.
+    /// Parses `text` with `language`'s grammar, giving up when `deadline` passes. Pure apart from
+    /// reading the clock: the text is already in memory.
     ///
-    /// `None` only if the grammar can't be loaded into a parser or tree-sitter returns no tree.
-    /// supdoc sets no timeout or cancellation, so either one is a supdoc bug, not a user error.
-    #[must_use]
+    /// # Errors
+    ///
+    /// - [`ReadError::Timeout`] when `deadline` passes during the parse.
+    /// - [`ReadError::Internal`] when the grammar can't be loaded into a parser or tree-sitter
+    ///   returns no tree for another reason, which is a supdoc bug.
     pub fn from_text(
         path: AbsolutePath,
         text: String,
         language: &'static dyn Cartridge,
-    ) -> Option<Self> {
-        let mut parser = tree_sitter::Parser::new();
-        parser.set_language(language.grammar()).ok()?;
-        let tree = parser.parse(&text, None)?;
-        Some(Self {
-            path,
-            text,
-            tree,
-            language,
-        })
+        deadline: Deadline,
+    ) -> Result<Self, ReadError> {
+        let internal = |path: &AbsolutePath, reason| ReadError::Internal {
+            path: path.clone(),
+            reason,
+        };
+        let mut parser = Parser::new();
+        if parser.set_language(language.grammar()).is_err() {
+            return Err(internal(&path, "the grammar could not be loaded"));
+        }
+        match deadline.parse(&mut parser, &text) {
+            Ok(Some(tree)) => Ok(Self {
+                path,
+                text,
+                tree,
+                language,
+                deadline,
+            }),
+            Ok(None) => Err(internal(&path, "tree-sitter returned no tree")),
+            Err(stopped) => Err(ReadError::Timeout {
+                limit: deadline.limit(),
+                step: "the parse",
+                offset: stopped.offset,
+                size: text.len(),
+                path,
+            }),
+        }
+    }
+
+    /// The error for a step of reading this file that `deadline` stopped at `stopped`: `step`
+    /// reads after "stopped", as in "the symbols query".
+    #[must_use]
+    pub fn timed_out(&self, step: &'static str, stopped: Stopped) -> ReadError {
+        ReadError::Timeout {
+            path: self.path.clone(),
+            limit: self.deadline.limit(),
+            step,
+            offset: stopped.offset,
+            size: self.text.len(),
+        }
+    }
+
+    /// When reading this file must stop.
+    #[must_use]
+    pub const fn deadline(&self) -> Deadline {
+        self.deadline
+    }
+
+    /// This file under `deadline` instead, so a test can stop a query after a parse that ran.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn with_deadline(mut self, deadline: Deadline) -> Self {
+        self.deadline = deadline;
+        self
     }
 
     /// Where the file was read from.
@@ -151,6 +216,86 @@ impl SourceFile {
     #[must_use]
     pub fn language(&self) -> &'static dyn Cartridge {
         self.language
+    }
+}
+
+/// When reading one file must stop: its [`TimeLimit`], counted from just before its parse. One
+/// deadline covers the parse and every later query and inline parse of the same file, since a
+/// pathological file can stall in any of them (SEC-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Deadline {
+    /// The ceiling it was started with, for the error.
+    limit: TimeLimit,
+    /// The moment it passes, or `None` for no limit.
+    at: Option<Instant>,
+}
+
+/// How far a parse or query got before its [`Deadline`] stopped it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stopped {
+    /// The byte tree-sitter had reached.
+    pub offset: usize,
+}
+
+impl Deadline {
+    /// A deadline `limit` from now. Effect: reads the clock.
+    #[must_use]
+    pub fn start(limit: TimeLimit) -> Self {
+        Self {
+            limit,
+            at: limit
+                .get()
+                .and_then(|duration| Instant::now().checked_add(duration)),
+        }
+    }
+
+    /// The ceiling it was started with.
+    #[must_use]
+    pub const fn limit(self) -> TimeLimit {
+        self.limit
+    }
+
+    /// Whether it has passed. Effect: reads the clock.
+    #[must_use]
+    pub fn passed(self) -> bool {
+        self.at.is_some_and(|at| Instant::now() >= at)
+    }
+
+    /// A tree-sitter progress check: breaks once the deadline has passed, recording in `stopped`
+    /// the byte the parse or query had reached.
+    pub fn check(self, offset: usize, stopped: &Cell<Option<Stopped>>) -> ControlFlow<()> {
+        if self.passed() {
+            stopped.set(Some(Stopped { offset }));
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    }
+
+    /// `parser`'s tree for `text`, using whatever language and included ranges `parser` already
+    /// has. `Ok(None)` when tree-sitter returns no tree for another reason.
+    ///
+    /// # Errors
+    ///
+    /// [`Stopped`] when the deadline passes during the parse. The parser is reset, so it can be
+    /// used again.
+    pub fn parse(self, parser: &mut Parser, text: &str) -> Result<Option<Tree>, Stopped> {
+        let stopped = Cell::new(None);
+        let mut progress =
+            |state: &tree_sitter::ParseState| self.check(state.current_byte_offset(), &stopped);
+        let bytes = text.as_bytes();
+        let tree = parser.parse_with_options(
+            &mut |offset, _point| bytes.get(offset..).unwrap_or_default(),
+            None,
+            Some(ParseOptions::new().progress_callback(&mut progress)),
+        );
+        match stopped.get() {
+            Some(stopped) => {
+                parser.reset();
+                Err(stopped)
+            }
+            None => Ok(tree),
+        }
     }
 }
 
@@ -299,6 +444,7 @@ mod tests {
     use std::sync::OnceLock;
 
     use super::*;
+    use crate::limits::Limits;
 
     /// A data-only cartridge over the Rust grammar, standing in for any language.
     #[derive(Debug)]
@@ -348,12 +494,12 @@ mod tests {
             })
         }
 
-        fn symbols(&self, _file: &SourceFile) -> SymbolTable {
-            SymbolTable::default()
+        fn symbols(&self, _file: &SourceFile) -> Result<SymbolTable, ReadError> {
+            Ok(SymbolTable::default())
         }
 
-        fn markdown_regions(&self, _file: &SourceFile) -> Vec<MarkdownRegion> {
-            Vec::new()
+        fn markdown_regions(&self, _file: &SourceFile) -> Result<Vec<MarkdownRegion>, ReadError> {
+            Ok(Vec::new())
         }
     }
 
@@ -426,8 +572,13 @@ mod tests {
         let path = AbsolutePath::new(Path::new("/repo/src/lib.rs"))
             .expect("the fixture path should be absolute");
 
-        let file = SourceFile::from_text(path.clone(), "fn add() {}".to_owned(), &RUST)
-            .expect("the Rust grammar should parse Rust text");
+        let file = SourceFile::from_text(
+            path.clone(),
+            "fn add() {}".to_owned(),
+            &RUST,
+            Deadline::start(Limits::PARSE_TIMEOUT),
+        )
+        .expect("the Rust grammar should parse Rust text");
 
         assert_eq!(file.path(), &path);
         assert_eq!(file.text(), "fn add() {}");

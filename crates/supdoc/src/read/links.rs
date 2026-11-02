@@ -41,24 +41,29 @@ use tree_sitter::{Node, Parser, Tree};
 
 use crate::link::RawLink;
 use crate::read::cartridge::{MarkdownRegion, SourceFile};
+use crate::read::error::ReadError;
 
 /// Every link in `file`'s Markdown regions, in file order (03 R9, R14).
 ///
 /// Destinations are returned as written, after reference resolution and without the `<…>` that
 /// may wrap them, with the file bytes they are written at. Reading them is `parse_destination`'s
 /// job.
-#[must_use]
-pub fn links(file: &SourceFile) -> Vec<RawLink> {
+///
+/// # Errors
+///
+/// [`ReadError::Timeout`] when the file's deadline stops the regions query or an inline parse.
+/// No links are returned then, not even those read before it.
+pub fn links(file: &SourceFile) -> Result<Vec<RawLink>, ReadError> {
     let Some(mut parser) = inline_parser() else {
         // The inline grammar is compiled in; a test proves it loads, so this is unreachable.
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let text = file.text();
     let mut document = document_definitions(file);
 
     let mut parsed = Vec::new();
-    for region in file.language().markdown_regions(file) {
-        if let Some(tree) = parse_region(&mut parser, text, &region) {
+    for region in file.language().markdown_regions(file)? {
+        if let Some(tree) = parse_region(&mut parser, file, &region)? {
             parsed.push((tree, region));
         }
     }
@@ -93,7 +98,7 @@ pub fn links(file: &SourceFile) -> Vec<RawLink> {
         links.extend(found.resolve(document.as_ref().unwrap_or(local), reader));
     }
     links.sort_by_key(|link| (link.range.start, link.range.end));
-    links
+    Ok(links)
 }
 
 /// A parser for tree-sitter-md's inline grammar, or `None` if the grammar can't be loaded.
@@ -105,24 +110,34 @@ fn inline_parser() -> Option<Parser> {
     Some(parser)
 }
 
-/// Parses only `region`'s ranges of `text`, together, with the inline grammar. The tree keeps
-/// `text`'s offsets.
+/// Parses only `region`'s ranges of `file`'s text, together, with the inline grammar, under the
+/// file's deadline. The tree keeps the text's offsets.
 ///
 /// `None` if the region has no `[` byte, since every link and every reference definition starts
 /// with one and the parse would find nothing. Also `None` if tree-sitter rejects the ranges or
-/// returns no tree. [`MarkdownRegion`] holds only ranges tree-sitter accepts, and supdoc sets no
-/// timeout or cancellation, so neither happens.
-fn parse_region(parser: &mut Parser, text: &str, region: &MarkdownRegion) -> Option<Tree> {
+/// returns no tree. [`MarkdownRegion`] holds only ranges tree-sitter accepts, and only the
+/// deadline stops a parse, so neither happens.
+///
+/// # Errors
+///
+/// [`ReadError::Timeout`] when the file's deadline stops the parse.
+fn parse_region(
+    parser: &mut Parser,
+    file: &SourceFile,
+    region: &MarkdownRegion,
+) -> Result<Option<Tree>, ReadError> {
+    let text = file.text();
     let has_bracket = region.ranges().iter().any(|range| {
         text.as_bytes()
             .get(range.start_byte..range.end_byte)
             .is_some_and(|bytes| bytes.contains(&b'['))
     });
-    if !has_bracket {
-        return None;
+    if !has_bracket || parser.set_included_ranges(region.ranges()).is_err() {
+        return Ok(None);
     }
-    parser.set_included_ranges(region.ranges()).ok()?;
-    parser.parse(text, None)
+    file.deadline()
+        .parse(parser, text)
+        .map_err(|stopped| file.timed_out("an inline Markdown parse", stopped))
 }
 
 /// A file's text read through one region, so a node that spans a run of line comments reads
@@ -496,6 +511,7 @@ mod tests {
     /// Each link as `(text, destination)`, in the order `links` returned them.
     fn pairs(file: &SourceFile) -> Vec<(String, String)> {
         links(file)
+            .expect("the fixture should read")
             .into_iter()
             .map(|link| (link.text, link.destination))
             .collect()
@@ -507,6 +523,7 @@ mod tests {
 
     fn destinations(file: &SourceFile) -> Vec<String> {
         links(file)
+            .expect("the fixture should read")
             .into_iter()
             .map(|link| link.destination)
             .collect()
@@ -524,6 +541,7 @@ mod tests {
     /// Each link as `(text, destination, source slice)`, in the order `links` returned them.
     fn spans(file: &SourceFile) -> Vec<(String, String, String)> {
         links(file)
+            .expect("the fixture should read")
             .into_iter()
             .map(|link| {
                 let slice = file.text().get(link.range.clone()).unwrap_or_default();
@@ -544,8 +562,9 @@ mod tests {
         let parsed: Vec<bool> = file
             .language()
             .markdown_regions(&file)
+            .expect("the fixture should read")
             .iter()
-            .map(|region| parse_region(&mut parser, file.text(), region).is_some())
+            .map(|region| parse_region(&mut parser, &file, region).is_ok_and(|tree| tree.is_some()))
             .collect();
         assert_eq!(parsed, [false, true]);
         assert_eq!(destinations(&file), ["docs/a.md"]);
@@ -564,7 +583,7 @@ mod tests {
         let text = "# Guide\n\nThe [`add`](../src/lib.rs#add) function.\n";
         let file = markdown_file(text);
 
-        let found = links(&file);
+        let found = links(&file).expect("the fixture should read");
 
         assert_eq!(
             found,
@@ -585,6 +604,7 @@ mod tests {
     /// Each link's destination as written in the file, read back through `destination_range`.
     fn written_destinations(file: &SourceFile) -> Vec<String> {
         links(file)
+            .expect("the fixture should read")
             .into_iter()
             .map(|link| {
                 let written = file.text().get(link.destination_range.clone());
@@ -603,7 +623,7 @@ mod tests {
         let text = "See [the x fn][xfn].\n\n[xfn]: auth:src/x.rs\n";
         let file = markdown_file(text);
 
-        let found = links(&file);
+        let found = links(&file).expect("the fixture should read");
         let link = found
             .first()
             .expect("`[the x fn][xfn]` is defined, so it is a link");
@@ -625,7 +645,7 @@ mod tests {
             "fn a() {}\n/// See [the x fn][xfn].\n///\n/// [xfn]: <auth:src/x.rs>\nfn f() {}\n";
         let file = rust_file(text);
 
-        let found = links(&file);
+        let found = links(&file).expect("the fixture should read");
         let link = found
             .first()
             .expect("`[the x fn][xfn]` is defined, so it is a link");
@@ -643,7 +663,7 @@ mod tests {
             "fn a() {}\n/// See [the session\n/// rules](<../docs/auth.md#sessions>).\nfn f() {}\n";
         let file = rust_file(text);
 
-        let found = links(&file);
+        let found = links(&file).expect("the fixture should read");
         let link = found.first().expect("the two `///` lines hold one link");
 
         assert_eq!(
@@ -742,7 +762,7 @@ mod tests {
         let file = markdown_file("- [x] done\n* [ ] todo\n\nSee [x].\n");
 
         assert!(
-            links(&file).is_empty(),
+            links(&file).expect("the fixture should read").is_empty(),
             "task-list items are not definitions, so `[x]` has no destination",
         );
     }
@@ -831,7 +851,7 @@ mod tests {
         let text = "fn a() {}\n\nfn b() {\n    // see [b](../docs/b.md)\n}\n";
         let file = rust_file(text);
 
-        let found = links(&file);
+        let found = links(&file).expect("the fixture should read");
         let link = found.first().expect("the comment holds one link");
 
         assert_eq!(text.get(link.range.clone()), Some("[b](../docs/b.md)"));
@@ -845,14 +865,14 @@ mod tests {
     fn syntax_shown_in_a_comment_code_span_is_not_a_link() {
         let file = rust_file("/// Links look like `[text](path#symbol)`.\nfn scanner() {}\n");
 
-        assert_eq!(links(&file), []);
+        assert_eq!(links(&file).expect("the fixture should read"), []);
     }
 
     #[test]
     fn string_literal_that_looks_like_a_link_is_not_a_link() {
         let file = rust_file("fn f() { let s = \"[a](b.rs#c)\"; }\n");
 
-        assert_eq!(links(&file), []);
+        assert_eq!(links(&file).expect("the fixture should read"), []);
     }
 
     #[test]
@@ -870,7 +890,7 @@ mod tests {
             "fn a() {}\n/// See [the session\n/// rules](../docs/auth.md#sessions).\nfn f() {}\n";
         let file = rust_file(text);
 
-        let found = links(&file);
+        let found = links(&file).expect("the fixture should read");
         let link = found.first().expect("the two `///` lines hold one link");
 
         assert_eq!(
@@ -913,7 +933,7 @@ mod tests {
             let file = rust_file(text);
 
             assert_eq!(
-                links(&file),
+                links(&file).expect("the fixture should read"),
                 [],
                 "the comments are separate regions: {text:?}"
             );
@@ -964,14 +984,14 @@ mod tests {
     fn bracket_mid_sentence_is_not_a_comment_definition() {
         let file = rust_file("/* Note [x]: y.rs is text. [x] */\nfn f() {}\n");
 
-        assert_eq!(links(&file), []);
+        assert_eq!(links(&file).expect("the fixture should read"), []);
     }
 
     #[test]
     fn rustdoc_shortcut_without_definition_is_not_a_link() {
         let file = rust_file("/// Returns a [`Vec`] of [`Config`]s.\nfn f() {}\n");
 
-        assert_eq!(links(&file), []);
+        assert_eq!(links(&file).expect("the fixture should read"), []);
     }
 
     #[test]

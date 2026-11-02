@@ -49,9 +49,13 @@ pub fn run(
     let command = command_text(args, context);
     let config = load_config(context, output)?;
     let path = locate(&config, context, &args.file)?;
-    let file = SourceFile::read(path, &Languages::builtin())
+    let limit = config.limits_in_effect().parse_timeout.value;
+    let file = SourceFile::read(path, &Languages::builtin(), limit)
         .map_err(|error| read_failed(&error, config.root(), &args.file))?;
-    let table = file.language().symbols(&file);
+    let table = file
+        .language()
+        .symbols(&file)
+        .map_err(|error| read_failed(&error, config.root(), &args.file))?;
 
     let text = IndexedText::new(file.text());
     let (symbols, query, total) = if let Some(query) = &args.symbol {
@@ -229,6 +233,7 @@ fn read_failed(error: &ReadError, root: &AbsolutePath, typed: &Path) -> CliError
         ReadError::Internal { .. } => ExitStatus::Bug,
         ReadError::NotUtf8 { .. }
         | ReadError::TooLarge { .. }
+        | ReadError::Timeout { .. }
         | ReadError::UnsupportedLanguage { .. } => ExitStatus::Failed,
     };
     let shown = relative_to(root, error.path());

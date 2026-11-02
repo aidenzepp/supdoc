@@ -335,18 +335,20 @@ impl Wanted {
         let symbol = match (&target.symbol, &place) {
             (None, _) => SymbolFilter::Any,
             (Some(typed), Place::Unlocated(_)) => SymbolFilter::Text(typed.clone()),
-            (Some(typed), Place::File(path)) => Self::resolve_symbol(typed, path),
+            (Some(typed), Place::File(path)) => Self::resolve_symbol(typed, path, config),
         };
         Self { place, symbol }
     }
 
-    /// `typed` resolved in `path`, or the plain text when the file can't be read or has no such
-    /// symbol.
-    fn resolve_symbol(typed: &SymbolPath, path: &AbsolutePath) -> SymbolFilter {
-        let Ok(file) = SourceFile::read(path.clone(), &Languages::builtin()) else {
+    /// `typed` resolved in `path`, or the plain text when the file can't be read in time or has
+    /// no such symbol.
+    fn resolve_symbol(typed: &SymbolPath, path: &AbsolutePath, config: &Config) -> SymbolFilter {
+        let limit = config.limits_in_effect().parse_timeout.value;
+        let read = SourceFile::read(path.clone(), &Languages::builtin(), limit)
+            .and_then(|file| Ok((file.language().symbols(&file)?, file)));
+        let Ok((table, file)) = read else {
             return SymbolFilter::Text(typed.clone());
         };
-        let table = file.language().symbols(&file);
         let symbol = match table.resolve(file.path(), typed) {
             Ok(found) => found.path.clone(),
             Err(error) => {

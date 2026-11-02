@@ -18,11 +18,14 @@
 //! A run of adjacent line comments of the same kind is one link region, in every language: see
 //! [`injected_markdown`].
 
-use tree_sitter::{Point, QueryCursor, Range, StreamingIterator};
+use std::cell::Cell;
+
+use tree_sitter::{Point, QueryCursor, QueryCursorOptions, Range, StreamingIterator};
 
 use crate::read::cartridge::{
     Cartridge, CompiledQueries, LanguageId, MarkdownRegion, SourceFile, SymbolTable,
 };
+use crate::read::error::ReadError;
 use crate::read::symbols::tag_symbols;
 
 /// The `injection.language` that marks a region where links are read (03 R9).
@@ -100,11 +103,11 @@ impl Cartridge for QueryCartridge {
         &self.queries
     }
 
-    fn symbols(&self, file: &SourceFile) -> SymbolTable {
+    fn symbols(&self, file: &SourceFile) -> Result<SymbolTable, ReadError> {
         tag_symbols(file)
     }
 
-    fn markdown_regions(&self, file: &SourceFile) -> Vec<MarkdownRegion> {
+    fn markdown_regions(&self, file: &SourceFile) -> Result<Vec<MarkdownRegion>, ReadError> {
         injected_markdown(file)
     }
 }
@@ -117,13 +120,21 @@ impl Cartridge for QueryCartridge {
 /// A run of adjacent line comments of the same kind (`///`, `//`, `#`) is one region made of the
 /// comment bodies, so a link may wrap across lines and a reference definition applies to the
 /// whole run. Block comments and docstrings are one region each. See [`join_line_comments`].
-#[must_use]
-pub fn injected_markdown(file: &SourceFile) -> Vec<MarkdownRegion> {
+///
+/// # Errors
+///
+/// [`ReadError::Timeout`] when the file's deadline stops the query.
+pub fn injected_markdown(file: &SourceFile) -> Result<Vec<MarkdownRegion>, ReadError> {
     let query = file.language().queries().injections();
     let content = query.capture_index_for_name("injection.content");
     let language = query.capture_index_for_name("injection.language");
     let text = file.text();
 
+    let deadline = file.deadline();
+    let stopped = Cell::new(None);
+    let mut progress = |state: &tree_sitter::QueryCursorState| {
+        deadline.check(state.current_byte_offset(), &stopped)
+    };
     let mut regions = Vec::new();
     let mut cursor = QueryCursor::new();
     // Only the bytes that can open a comment (or, in Python, a docstring) are searched, so the
@@ -134,9 +145,17 @@ pub fn injected_markdown(file: &SourceFile) -> Vec<MarkdownRegion> {
         if offset < searched_to || !opens_injection(byte, python) {
             continue;
         }
+        if deadline.check(offset, &stopped).is_break() {
+            break;
+        }
         searched_to = offset + 1;
         let _window = cursor.set_byte_range(offset..offset + 1);
-        let mut matches = cursor.matches(query, file.tree().root_node(), text.as_bytes());
+        let mut matches = cursor.matches_with_options(
+            query,
+            file.tree().root_node(),
+            text.as_bytes(),
+            QueryCursorOptions::new().progress_callback(&mut progress),
+        );
         while let Some(found) = matches.next() {
             let set = query
                 .property_settings(found.pattern_index)
@@ -162,9 +181,12 @@ pub fn injected_markdown(file: &SourceFile) -> Vec<MarkdownRegion> {
             }
         }
     }
+    if let Some(stopped) = stopped.get() {
+        return Err(file.timed_out("the injections query", stopped));
+    }
     regions.sort_by_key(|range| (range.start_byte, range.end_byte));
     regions.dedup();
-    join_line_comments(regions, text)
+    Ok(join_line_comments(regions, text))
 }
 
 /// Whether `byte` can start a comment in any built-in grammar (`//`, `/*`, `#`), or, in Python, a
@@ -296,6 +318,7 @@ mod tests {
     fn region_texts(file: &SourceFile) -> Vec<String> {
         file.language()
             .markdown_regions(file)
+            .expect("the fixture should read")
             .iter()
             .map(|region| {
                 region
@@ -348,7 +371,10 @@ mod tests {
         let text = "fn f() {}\n  // one\n  // two";
         let file = rust_file(text);
 
-        let regions = file.language().markdown_regions(&file);
+        let regions = file
+            .language()
+            .markdown_regions(&file)
+            .expect("the fixture should read");
         let region = regions.first().expect("the two comments are one region");
         let ranges: Vec<_> = region
             .ranges()

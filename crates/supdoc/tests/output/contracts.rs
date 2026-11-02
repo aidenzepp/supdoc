@@ -853,6 +853,16 @@ mod helps {
             &["check"],
         ),
         case(
+            "read-timeout",
+            |p| {
+                // Deep nesting stalls the symbols query far past 1 ms (SEC-1).
+                let deep = format!("fn add() {{{}\n", "{".repeat(65_536));
+                p.write("src/deep.rs", &deep);
+                p.write("docs/guide.md", "[x](../src/deep.rs#add)\n");
+            },
+            &["--parse-timeout", "1ms", "check"],
+        ),
+        case(
             "read-unsupported-language",
             |p| {
                 p.write("src/data.xyz", "x");

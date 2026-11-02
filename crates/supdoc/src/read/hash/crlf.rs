@@ -26,8 +26,8 @@ fn parse(language: &'static dyn Cartridge, text: &str) -> SourceFile {
         .expect("every cartridge should claim an extension");
     let path = AbsolutePath::new(Path::new(&format!("/repo/fixture.{extension}")))
         .expect("the fixture path should be absolute");
-    SourceFile::from_text(path, text.to_owned(), language)
-        .unwrap_or_else(|| panic!("`{}` should parse the fixture", language.id()))
+    SourceFile::parse(path, text.to_owned(), language)
+        .unwrap_or_else(|error| panic!("`{}` should parse the fixture: {error}", language.id()))
 }
 
 /// Asserts that `lf` and its CRLF twin yield the same symbols with the same hashes.
@@ -37,8 +37,18 @@ fn assert_crlf_matches_lf(id: &str, lf: &str) {
     let language = cartridge(id);
     let lf_file = parse(language, lf);
     let crlf_file = parse(language, &crlf);
-    let lf_symbols: Vec<_> = language.symbols(&lf_file).iter().cloned().collect();
-    let crlf_symbols: Vec<_> = language.symbols(&crlf_file).iter().cloned().collect();
+    let lf_symbols: Vec<_> = language
+        .symbols(&lf_file)
+        .expect("the fixture should read")
+        .iter()
+        .cloned()
+        .collect();
+    let crlf_symbols: Vec<_> = language
+        .symbols(&crlf_file)
+        .expect("the fixture should read")
+        .iter()
+        .cloned()
+        .collect();
 
     assert!(
         lf_symbols.iter().any(|symbol| {

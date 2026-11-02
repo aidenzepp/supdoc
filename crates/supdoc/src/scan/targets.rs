@@ -16,6 +16,7 @@ use std::path::Path;
 use crate::config::{CONFIG_FILE_NAME, Config};
 use crate::finding::{Finding, Fix, Location, Severity, Snippet};
 use crate::hash::HashSettings;
+use crate::limits::TimeLimit;
 use crate::link::{LinkKey, Target};
 use crate::output::paths::relative_to;
 use crate::path::AbsolutePath;
@@ -60,11 +61,12 @@ impl Parsed {
         &mut self,
         path: &AbsolutePath,
         languages: &Languages,
+        limit: TimeLimit,
     ) -> Result<&SourceFile, ReadError> {
         match self.files.entry(path.clone()) {
             Entry::Occupied(parsed) => Ok(parsed.into_mut()),
             Entry::Vacant(slot) => {
-                let file = SourceFile::read(path.clone(), languages)?;
+                let file = SourceFile::read(path.clone(), languages, limit)?;
                 #[cfg(test)]
                 {
                     self.parses += 1;
@@ -262,12 +264,27 @@ fn target_states(
         }
         Located::File(path) => path,
     };
-    let file = match parsed.read(&path, languages) {
+    let limit = config.limits_in_effect().parse_timeout.value;
+    let file = match parsed.read(&path, languages, limit) {
         Ok(file) => file,
         Err(error) => return broken_by(&|first| read_failed(&error, config.root(), first)),
     };
+    // Symbols are read once, before any link, so a deadline that stops the query breaks every
+    // link into the file alike and no link resolves against a partial table.
+    let needs_symbols = keyed.keys().any(|key| key.symbol.is_some());
+    let table = if needs_symbols {
+        match file.language().symbols(file) {
+            Ok(table) => Some(table),
+            Err(error) => {
+                let states = broken_by(&|first| read_failed(&error, config.root(), first));
+                parsed.forget(&path);
+                return states;
+            }
+        }
+    } else {
+        None
+    };
 
-    let mut table: Option<SymbolTable> = None;
     let states: Vec<_> = keyed
         .into_iter()
         .filter_map(|(key, occurrences)| {
@@ -279,7 +296,7 @@ fn target_states(
                     syntax_errors,
                 },
                 Some(symbol) => {
-                    let table = table.get_or_insert_with(|| file.language().symbols(file));
+                    let table = table.as_ref()?;
                     match table.resolve(file.path(), symbol) {
                         Ok(found) => match hash_symbol(file, found, settings) {
                             Ok(hash) => TargetState::Present {
@@ -578,6 +595,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::hash::{HashSettings, LineEndings};
+    use crate::limits::Limits;
     use crate::link::SourcePath;
 
     fn absolute(raw: &str) -> AbsolutePath {
@@ -676,6 +694,7 @@ mod tests {
             let file = SourceFile::read(
                 AbsolutePath::new(&path).expect("a temp dir path should be absolute"),
                 &languages,
+                Limits::PARSE_TIMEOUT,
             )
             .expect("the fixture should read");
             hash_file(&file, HashSettings { line_endings })

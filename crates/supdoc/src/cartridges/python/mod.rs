@@ -12,6 +12,7 @@ use crate::link::SymbolSegment;
 use crate::read::cartridge::{
     Cartridge, CompiledQueries, LanguageId, MarkdownRegion, SourceFile, Symbol, SymbolTable,
 };
+use crate::read::error::ReadError;
 use crate::read::query::{QueryCartridge, QueryFileError};
 
 /// Symbols: `@definition.*` and `@name`.
@@ -72,18 +73,18 @@ impl Cartridge for PythonCartridge {
         self.queries.queries()
     }
 
-    fn symbols(&self, file: &SourceFile) -> SymbolTable {
-        let tagged = self.queries.symbols(file);
+    fn symbols(&self, file: &SourceFile) -> Result<SymbolTable, ReadError> {
+        let tagged = self.queries.symbols(file)?;
         let attributes = init_attributes(file, &tagged);
         if attributes.is_empty() {
-            return tagged;
+            return Ok(tagged);
         }
         let mut symbols: Vec<Symbol> = tagged.iter().cloned().chain(attributes).collect();
         symbols.sort_by_key(|symbol| (symbol.range.start, std::cmp::Reverse(symbol.range.end)));
-        SymbolTable::new(symbols)
+        Ok(SymbolTable::new(symbols))
     }
 
-    fn markdown_regions(&self, file: &SourceFile) -> Vec<MarkdownRegion> {
+    fn markdown_regions(&self, file: &SourceFile) -> Result<Vec<MarkdownRegion>, ReadError> {
         self.queries.markdown_regions(file)
     }
 }
@@ -249,7 +250,9 @@ def outer():
     }
 
     fn symbols(file: &SourceFile) -> SymbolTable {
-        file.language().symbols(file)
+        file.language()
+            .symbols(file)
+            .expect("the fixture should read")
     }
 
     fn paths(table: &SymbolTable) -> Vec<String> {
@@ -276,6 +279,7 @@ def outer():
     fn region_texts(file: &SourceFile) -> Vec<String> {
         file.language()
             .markdown_regions(file)
+            .expect("the fixture should read")
             .iter()
             .map(|region| {
                 region
