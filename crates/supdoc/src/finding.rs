@@ -6,33 +6,33 @@ use std::ops::Range;
 use crate::link::SourcePath;
 
 /// The code of a finding about a lockfile entry whose link is gone.
-pub const OBSOLETE_CODE: &str = "link-obsolete";
+pub(crate) const OBSOLETE_CODE: &str = "link-obsolete";
 
 /// One problem, linter style. Produced by the scanner and checks, rendered by output.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Finding {
+pub(crate) struct Finding {
     /// Stable code from the owning module: `read-missing`, `link-unknown-namespace`,
     /// `scan-case-mismatch`. Never reworded.
-    pub code: &'static str,
+    pub(crate) code: &'static str,
     /// How bad it is.
-    pub severity: Severity,
+    pub(crate) severity: Severity,
     /// Where it is, when it is about one place in a source file.
-    pub location: Option<Location>,
+    pub(crate) location: Option<Location>,
     /// What happened, in one line.
-    pub message: String,
+    pub(crate) message: String,
     /// What to do next.
-    pub help: Option<String>,
+    pub(crate) help: Option<String>,
     /// An exact edit, present only when there's exactly one correct fix. The fixer never guesses.
-    pub fix: Option<Box<Fix>>,
+    pub(crate) fix: Option<Box<Fix>>,
     /// The source lines this finding covers, captured when it is created so rendering never reads
     /// files (07 G11).
-    pub snippet: Option<Snippet>,
+    pub(crate) snippet: Option<Snippet>,
 }
 
 impl Finding {
     /// A finding with only its code, severity and message. Add the rest with the `with_*` methods.
     #[must_use]
-    pub fn new(code: &'static str, severity: Severity, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, severity: Severity, message: impl Into<String>) -> Self {
         Self {
             code,
             severity,
@@ -46,7 +46,7 @@ impl Finding {
 
     /// Sets where the finding is.
     #[must_use]
-    pub fn with_location(self, location: Location) -> Self {
+    pub(crate) fn with_location(self, location: Location) -> Self {
         Self {
             location: Some(location),
             ..self
@@ -55,7 +55,7 @@ impl Finding {
 
     /// Sets what to do next.
     #[must_use]
-    pub fn with_help(self, help: impl Into<String>) -> Self {
+    pub(crate) fn with_help(self, help: impl Into<String>) -> Self {
         Self {
             help: Some(help.into()),
             ..self
@@ -64,7 +64,7 @@ impl Finding {
 
     /// Sets the one correct edit.
     #[must_use]
-    pub fn with_fix(self, fix: Fix) -> Self {
+    pub(crate) fn with_fix(self, fix: Fix) -> Self {
         Self {
             fix: Some(Box::new(fix)),
             ..self
@@ -73,7 +73,7 @@ impl Finding {
 
     /// Sets the captured source excerpt.
     #[must_use]
-    pub fn with_snippet(self, snippet: Snippet) -> Self {
+    pub(crate) fn with_snippet(self, snippet: Snippet) -> Self {
         Self {
             snippet: Some(snippet),
             ..self
@@ -84,7 +84,7 @@ impl Finding {
 /// How bad a finding is (07 G5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
-pub enum Severity {
+pub(crate) enum Severity {
     /// Fails `check`.
     Error,
     /// Reported; fails `check` only under `--deny-warnings`.
@@ -95,21 +95,21 @@ pub enum Severity {
 
 /// One place in a source file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Location {
+pub(crate) struct Location {
     /// The source file.
-    pub file: SourcePath,
+    pub(crate) file: SourcePath,
     /// Byte range, for fixes.
-    pub range: Range<usize>,
+    pub(crate) range: Range<usize>,
     /// 1-based line of `range.start`, for humans.
-    pub line: u32,
+    pub(crate) line: u32,
     /// 1-based column of `range.start`, counted in characters.
-    pub column: u32,
+    pub(crate) column: u32,
 }
 
 /// The byte offset where each line of a text starts, computed once so that many lookups cost one
 /// scan of the text instead of one scan each.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LineIndex {
+pub(crate) struct LineIndex {
     /// Start offsets of every line, ascending; the first is always 0.
     starts: Vec<usize>,
 }
@@ -117,7 +117,7 @@ pub struct LineIndex {
 impl LineIndex {
     /// Indexes the lines of `text`.
     #[must_use]
-    pub fn new(text: &str) -> Self {
+    pub(crate) fn new(text: &str) -> Self {
         let newlines = text.match_indices('\n').map(|(at, _)| at + 1);
         Self {
             starts: std::iter::once(0).chain(newlines).collect(),
@@ -126,7 +126,7 @@ impl LineIndex {
 
     /// The 1-based line containing byte `offset`.
     #[must_use]
-    pub fn line_of(&self, offset: usize) -> usize {
+    pub(crate) fn line_of(&self, offset: usize) -> usize {
         self.starts.partition_point(|&start| start <= offset)
     }
 
@@ -142,7 +142,7 @@ impl LineIndex {
 /// A text with its [`LineIndex`], so every location and snippet taken from it costs a lookup
 /// instead of a scan of the whole text.
 #[derive(Debug, Clone)]
-pub struct IndexedText<'text> {
+pub(crate) struct IndexedText<'text> {
     /// The text the index was built from.
     text: &'text str,
     /// Where each line of `text` starts.
@@ -152,7 +152,7 @@ pub struct IndexedText<'text> {
 impl<'text> IndexedText<'text> {
     /// Indexes `text` once.
     #[must_use]
-    pub fn new(text: &'text str) -> Self {
+    pub(crate) fn new(text: &'text str) -> Self {
         Self {
             text,
             index: LineIndex::new(text),
@@ -163,7 +163,7 @@ impl<'text> IndexedText<'text> {
     ///
     /// `None` if `offset` is past the end of the text or not on a character boundary.
     #[must_use]
-    pub fn position(&self, offset: usize) -> Option<(u32, u32)> {
+    pub(crate) fn position(&self, offset: usize) -> Option<(u32, u32)> {
         let line_start = self.index.line_start(offset);
         let column = self.text.get(line_start..offset)?.chars().count() + 1;
         let line = self.index.line_of(offset);
@@ -172,14 +172,8 @@ impl<'text> IndexedText<'text> {
 
     /// Locates `range` in the text, as [`Location::in_text`] does.
     #[must_use]
-    pub fn locate(&self, file: SourcePath, range: Range<usize>) -> Option<Location> {
+    pub(crate) fn locate(&self, file: SourcePath, range: Range<usize>) -> Option<Location> {
         Location::in_indexed(file, self.text, &self.index, range)
-    }
-
-    /// Captures the lines `range` covers, as [`Snippet::capture`] does.
-    #[must_use]
-    pub fn snippet(&self, range: Range<usize>) -> Option<Snippet> {
-        Snippet::capture_indexed(self.text, &self.index, range)
     }
 }
 
@@ -189,13 +183,13 @@ impl Location {
     /// `None` if `range` is reversed, runs past the end of `text`, or doesn't fall on character
     /// boundaries.
     #[must_use]
-    pub fn in_text(file: SourcePath, text: &str, range: Range<usize>) -> Option<Self> {
+    pub(crate) fn in_text(file: SourcePath, text: &str, range: Range<usize>) -> Option<Self> {
         Self::in_indexed(file, text, &LineIndex::new(text), range)
     }
 
     /// Like [`in_text`](Self::in_text), for many ranges of one `text` whose `index` was built once.
     #[must_use]
-    pub fn in_indexed(
+    pub(crate) fn in_indexed(
         file: SourcePath,
         text: &str,
         index: &LineIndex,
@@ -217,27 +211,27 @@ impl Location {
 
 /// Replace `range` in `file` with `replacement`. Applied by `supdoc fix --yes` (05).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Fix {
+pub(crate) struct Fix {
     /// The source file to edit.
-    pub file: SourcePath,
+    pub(crate) file: SourcePath,
     /// The bytes to replace.
-    pub range: Range<usize>,
+    pub(crate) range: Range<usize>,
     /// The new text.
-    pub replacement: String,
+    pub(crate) replacement: String,
     /// The bytes `range` held in the scanned text. `supdoc fix` applies the edit only if the file
     /// still holds them. Never serialized: this type has no serde derive.
-    pub scanned: Box<str>,
+    pub(crate) scanned: Box<str>,
 }
 
 /// A bounded window of the lines a finding's range covers, captured when the finding is created (07 G11).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Snippet {
+pub(crate) struct Snippet {
     /// 1-based line number of the first line of `text`.
-    pub first_line: u32,
+    pub(crate) first_line: u32,
     /// The covered lines, cut to a window around the range, without the final newline.
-    pub text: String,
+    pub(crate) text: String,
     /// The highlighted range, relative to `text`.
-    pub highlight: Range<usize>,
+    pub(crate) highlight: Range<usize>,
 }
 
 /// Bytes of the covered lines kept on each side of the highlighted range.
@@ -253,13 +247,17 @@ impl Snippet {
     /// `None` if `range` is reversed, runs past the end of `text`, or doesn't fall on character
     /// boundaries.
     #[must_use]
-    pub fn capture(text: &str, range: Range<usize>) -> Option<Self> {
+    pub(crate) fn capture(text: &str, range: Range<usize>) -> Option<Self> {
         Self::capture_indexed(text, &LineIndex::new(text), range)
     }
 
     /// Like [`capture`](Self::capture), for many ranges of one `text` whose `index` was built once.
     #[must_use]
-    pub fn capture_indexed(text: &str, index: &LineIndex, range: Range<usize>) -> Option<Self> {
+    pub(crate) fn capture_indexed(
+        text: &str,
+        index: &LineIndex,
+        range: Range<usize>,
+    ) -> Option<Self> {
         // Rejects a reversed range, one past the end, or one splitting a character.
         let _covered: &str = text.get(range.clone())?;
         let line_start = index.line_start(range.start);

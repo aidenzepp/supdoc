@@ -63,7 +63,7 @@ const ERROR: &str = "error";
 ///
 /// Returns `cli-schema-serialize` if a schema cannot become JSON, and `cli-schema-write` when
 /// standard output cannot be written for a reason other than a closed pipe.
-pub fn run(
+pub(crate) fn run(
     args: &SchemaArgs,
     _context: &Context,
     output: &mut Output,

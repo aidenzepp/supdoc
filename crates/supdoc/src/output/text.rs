@@ -18,7 +18,7 @@ use crate::output::format::TextContext;
 /// # Errors
 ///
 /// Fails if writing to `out` fails.
-pub fn render_finding(
+pub(crate) fn render_finding(
     context: &TextContext,
     finding: &Finding,
     out: &mut dyn Write,
@@ -108,7 +108,7 @@ fn with_source_column(
 impl TextContext {
     /// The arrow between two things in a row: `→`, or `->` when drawing in ASCII (07 G12).
     #[must_use]
-    pub const fn arrow(&self) -> &'static str {
+    pub(crate) const fn arrow(&self) -> &'static str {
         if self.unicode { "→" } else { "->" }
     }
 }
@@ -143,7 +143,7 @@ fn renderer(context: &TextContext) -> Renderer {
 /// text from untrusted files can't drive the terminal, reorder or hide what is shown, or fake an
 /// extra line (an ESC becomes the six characters `\u{1b}`).
 #[must_use]
-pub fn visible(text: &str) -> String {
+pub(crate) fn visible(text: &str) -> String {
     let mut shown = String::with_capacity(text.len());
     for character in text.chars() {
         push_visible(&mut shown, character, false);

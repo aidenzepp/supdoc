@@ -14,7 +14,7 @@ use crate::path::AbsolutePath;
 ///
 /// Parsing changes nothing on disk, so every variant leaves the lockfile as it was.
 #[derive(Debug, thiserror::Error)]
-pub enum ParseLockError {
+pub(crate) enum ParseLockError {
     /// A merge left `<<<<<<<`, `=======` or `>>>>>>>` at the start of a line.
     #[error("unresolved merge conflict at line {line}")]
     ConflictMarkers {
@@ -91,7 +91,7 @@ pub(crate) fn shell_quote(text: &str) -> String {
 impl ParseLockError {
     /// A stable identifier for machine-readable output.
     #[must_use]
-    pub const fn code(&self) -> &'static str {
+    pub(crate) const fn code(&self) -> &'static str {
         match self {
             Self::ConflictMarkers { .. } => "lock-conflict",
             Self::NewerVersion { .. } => "lock-newer-version",
@@ -102,7 +102,7 @@ impl ParseLockError {
 
     /// What to do about it.
     #[must_use]
-    pub fn help(&self) -> &'static str {
+    pub(crate) fn help(&self) -> &'static str {
         match self {
             Self::ConflictMarkers { .. } => {
                 "Resolve the conflict, keeping both sides' entries, then run `supdoc check`. \
@@ -144,7 +144,7 @@ impl ParseLockError {
 /// No variant has a `source` field: the reason is already in the message, so a renderer walking
 /// `source()` would print it twice.
 #[derive(Debug)]
-pub enum LockError {
+pub(crate) enum LockError {
     /// The file exists but could not be read.
     Read {
         /// The lockfile.
@@ -201,7 +201,7 @@ pub enum LockError {
 impl LockError {
     /// A stable identifier for machine-readable output.
     #[must_use]
-    pub fn code(&self) -> &'static str {
+    pub(crate) fn code(&self) -> &'static str {
         match self {
             Self::Read { .. } | Self::NotRegularFile { .. } => "lock-read",
             Self::OutsideRoot { .. } => "lock-outside-root",
@@ -213,7 +213,7 @@ impl LockError {
 
     /// The lockfile this error is about.
     #[must_use]
-    pub fn path(&self) -> &AbsolutePath {
+    pub(crate) fn path(&self) -> &AbsolutePath {
         match self {
             Self::Read { path, .. }
             | Self::NotRegularFile { path }
@@ -227,7 +227,7 @@ impl LockError {
     /// The message, naming the lockfile relative to `root`, the project root, as the read
     /// messages name files, so no message carries a machine-specific absolute path.
     #[must_use]
-    pub fn message_from(&self, root: &AbsolutePath) -> String {
+    pub(crate) fn message_from(&self, root: &AbsolutePath) -> String {
         self.message_naming(&relative_to(root, self.path()))
     }
 
@@ -254,7 +254,7 @@ impl LockError {
     /// in, so a command in the help runs as written. Read and write failures branch on the
     /// I/O error's kind, so a full disk is never answered with a `chmod`.
     #[must_use]
-    pub fn help_from(&self, cwd: &AbsolutePath) -> String {
+    pub(crate) fn help_from(&self, cwd: &AbsolutePath) -> String {
         let shown = || shell_quote(&relative_to(cwd, self.path()));
         match self {
             Self::Read { error, .. } => read_help(error.kind(), &shown()),
@@ -300,7 +300,7 @@ impl LockError {
     /// The process exit status for this error (06 X7): 78 when the text is invalid or the file
     /// is refused, else 74.
     #[must_use]
-    pub const fn status(&self) -> ExitStatus {
+    pub(crate) const fn status(&self) -> ExitStatus {
         match self {
             Self::Parse { .. } | Self::OutsideRoot { .. } | Self::TooLarge { .. } => {
                 ExitStatus::Config
@@ -370,13 +370,13 @@ impl std::error::Error for LockError {}
 /// `Display` names the config file by its absolute path; [`SettingsMismatch::message_from`] names
 /// it relative to the project root.
 #[derive(Debug)]
-pub struct SettingsMismatch {
+pub(crate) struct SettingsMismatch {
     /// The setting the lock records.
-    pub recorded: LineEndings,
+    pub(crate) recorded: LineEndings,
     /// The setting the config resolves to.
-    pub configured: LineEndings,
+    pub(crate) configured: LineEndings,
     /// The config file that set it, or `None` when the default applies.
-    pub configured_in: Option<AbsolutePath>,
+    pub(crate) configured_in: Option<AbsolutePath>,
 }
 
 impl Display for SettingsMismatch {
@@ -392,7 +392,7 @@ impl SettingsMismatch {
     /// The message, naming the config file that set the value relative to `root`, the project
     /// root, so no message carries a machine-specific absolute path.
     #[must_use]
-    pub fn message_from(&self, root: &AbsolutePath) -> String {
+    pub(crate) fn message_from(&self, root: &AbsolutePath) -> String {
         let file = self
             .configured_in
             .as_ref()
@@ -415,13 +415,13 @@ impl SettingsMismatch {
 
     /// A stable identifier for machine-readable output.
     #[must_use]
-    pub const fn code(&self) -> &'static str {
+    pub(crate) const fn code() -> &'static str {
         "lock-settings-mismatch"
     }
 
     /// What to do about it: migrate the lock to the config, or set the config to the lock.
     #[must_use]
-    pub fn help(&self) -> String {
+    pub(crate) fn help(&self) -> String {
         format!(
             "Run `supdoc update` with no paths and no --state to preview re-recording every link \
              with line-endings = \"{}\", then add --yes. To keep the lockfile as it is, set \
@@ -432,7 +432,7 @@ impl SettingsMismatch {
 
     /// The process exit status (06 X7): 78, a config or lockfile problem.
     #[must_use]
-    pub const fn status(&self) -> ExitStatus {
+    pub(crate) const fn status() -> ExitStatus {
         ExitStatus::Config
     }
 }
@@ -504,10 +504,8 @@ mod tests {
 
     #[test]
     fn settings_mismatch_is_lock_settings_mismatch_with_exit_78() {
-        let error = mismatch(None);
-
-        assert_eq!(error.code(), "lock-settings-mismatch");
-        assert_eq!(error.status(), ExitStatus::Config);
+        assert_eq!(SettingsMismatch::code(), "lock-settings-mismatch");
+        assert_eq!(SettingsMismatch::status(), ExitStatus::Config);
     }
 
     #[test]

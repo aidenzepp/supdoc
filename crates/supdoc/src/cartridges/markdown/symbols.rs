@@ -34,7 +34,7 @@ use crate::read::error::ReadError;
 ///
 /// [`ReadError::Timeout`] when the file's deadline stops a heading's inline parse. No partial
 /// table is returned.
-pub fn heading_symbols(file: &SourceFile) -> Result<SymbolTable, ReadError> {
+pub(crate) fn heading_symbols(file: &SourceFile) -> Result<SymbolTable, ReadError> {
     let root = file.tree().root_node();
     let mut headings = Vec::new();
     collect_headings(root, true, &mut headings);
@@ -229,11 +229,7 @@ fn symbol(path: SymbolPath, anchor: SymbolSegment, range: Range<usize>) -> Symbo
     } else {
         vec![anchor]
     };
-    Symbol {
-        path,
-        aliases,
-        range,
-    }
+    Symbol::new(path, aliases, range)
 }
 
 /// The text `node` shows once rendered: markup delimiters dropped, links and images reduced to
@@ -352,11 +348,12 @@ mod tests {
             .expect("the fixture should read")
             .iter()
             .map(|symbol| {
-                let aliases: Vec<String> = symbol.aliases.iter().map(ToString::to_string).collect();
+                let aliases: Vec<String> =
+                    symbol.aliases().iter().map(ToString::to_string).collect();
                 if aliases.is_empty() {
-                    symbol.path.to_string()
+                    symbol.path().to_string()
                 } else {
-                    format!("{} ({})", symbol.path, aliases.join(", "))
+                    format!("{} ({})", symbol.path(), aliases.join(", "))
                 }
             })
             .collect()
@@ -396,7 +393,7 @@ mod tests {
             )
             .expect("the query should resolve to one heading");
         file.text()
-            .get(symbol.range.clone())
+            .get(symbol.range().clone())
             .expect("a heading range should lie on character boundaries")
     }
 

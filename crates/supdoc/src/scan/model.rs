@@ -11,7 +11,7 @@ use crate::link::{LinkKey, SourcePath};
 
 /// Which part of the project to scan.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Scope {
+pub(crate) enum Scope {
     /// Every source under the root.
     All,
     /// Only these files and directories (04 S10), relative to the project root. Converting what
@@ -24,7 +24,7 @@ impl Scope {
     /// listed file or lies under a listed directory. Matches whole path segments, so `docs`
     /// contains `docs/a.md` but not `docs2/a.md`.
     #[must_use]
-    pub fn contains(&self, source: &SourcePath) -> bool {
+    pub(crate) fn contains(&self, source: &SourcePath) -> bool {
         match self {
             Self::All => true,
             Self::Paths(paths) => paths.iter().any(|listed| lies_under(source, listed)),
@@ -43,22 +43,22 @@ fn lies_under(source: &SourcePath, path: &SourcePath) -> bool {
 
 /// Every link found in one run, plus problems not tied to a single link.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Scan {
+pub(crate) struct Scan {
     /// One per [`LinkKey`] (04 S11), sorted.
-    pub links: BTreeMap<LinkKey, ScannedLink>,
+    pub(crate) links: BTreeMap<LinkKey, ScannedLink>,
     /// Problems not tied to one link (unreadable directories, excluded explicit paths, and links
     /// too malformed to have a key, like an invalid symbol), sorted (04 S8). A link's own problem
     /// lives in its [`TargetState::Broken`]. Never fatal.
-    pub findings: Vec<Finding>,
+    pub(crate) findings: Vec<Finding>,
     /// Sources that were walked but couldn't be read. Their lock entries are never judged
     /// obsolete (05 C5).
-    pub unread_sources: BTreeSet<SourcePath>,
+    pub(crate) unread_sources: BTreeSet<SourcePath>,
     /// Sources holding a link too malformed to have a key. Such a link may be an edit of a locked
     /// one, so none of the source's lock entries are judged obsolete while it remains.
-    pub keyless_error_sources: BTreeSet<SourcePath>,
+    pub(crate) keyless_error_sources: BTreeSet<SourcePath>,
     /// Directories the walk couldn't read, relative to the root. Every source beneath one is
     /// unread too, so its lock entries are never judged obsolete either (05 C5).
-    pub unread_dirs: BTreeSet<SourcePath>,
+    pub(crate) unread_dirs: BTreeSet<SourcePath>,
 }
 
 impl Scan {
@@ -66,7 +66,7 @@ impl Scan {
     /// directory the walk couldn't read. Its links are unknown, so none of its lock entries can
     /// be judged (05 C5).
     #[must_use]
-    pub fn is_unread(&self, source: &SourcePath) -> bool {
+    pub(crate) fn is_unread(&self, source: &SourcePath) -> bool {
         self.unread_sources.contains(source)
             || self.unread_dirs.iter().any(|dir| lies_under(source, dir))
     }
@@ -74,27 +74,27 @@ impl Scan {
 
 /// One link, wherever it appears in its source, and the current state of its target.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScannedLink {
+pub(crate) struct ScannedLink {
     /// The first place this link appears in its source.
-    pub first: Location,
+    pub(crate) first: Location,
     /// Every later place this link appears, in order.
-    pub more: Vec<Location>,
+    pub(crate) more: Vec<Location>,
     /// The source lines of the first location, captured at scan time (07 G11), when they could be.
-    pub snippet: Option<Snippet>,
+    pub(crate) snippet: Option<Snippet>,
     /// What the target looks like right now.
-    pub target: TargetState,
+    pub(crate) target: TargetState,
 }
 
 impl ScannedLink {
     /// Every place this link appears in its source, first one first. Never empty.
-    pub fn locations(&self) -> impl Iterator<Item = &Location> {
+    pub(crate) fn locations(&self) -> impl Iterator<Item = &Location> {
         std::iter::once(&self.first).chain(&self.more)
     }
 }
 
 /// What a link's target looks like right now.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TargetState {
+pub(crate) enum TargetState {
     /// Resolved and hashed. Compared with the lockfile by 05.
     Present {
         /// The hash of the symbol's bytes, or of the whole file.

@@ -2,7 +2,7 @@
 
 /// How a supdoc run ends, as the process exit status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExitStatus {
+pub(crate) enum ExitStatus {
     /// Nothing is wrong. Exit status 0.
     Clean,
     /// The command ran, and what it checks is failing or a change was refused. Exit status 1.
@@ -20,7 +20,7 @@ pub enum ExitStatus {
 impl ExitStatus {
     /// The number the process exits with.
     #[must_use]
-    pub const fn code(self) -> u8 {
+    pub(crate) const fn code(self) -> u8 {
         match self {
             Self::Clean => 0,
             Self::Failed => 1,

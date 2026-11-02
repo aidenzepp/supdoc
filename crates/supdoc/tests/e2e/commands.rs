@@ -2,10 +2,6 @@
 //! arguments. The commands and schema names come from the clap definition, so a new one is covered
 //! too.
 
-use clap::CommandFactory;
-use supdoc::cli::args::Cli;
-use supdoc::exit::ExitStatus;
-
 use crate::support::Project;
 
 /// The arguments a leaf command can't run without, for the `namespaced` fixture.
@@ -39,8 +35,8 @@ fn assert_none_is_a_usage_error(project: &Project, invocations: &[Vec<&str>]) {
     for argv in invocations {
         let run = project.supdoc(argv);
         let rejected = [
-            i32::from(ExitStatus::Usage.code()),
-            i32::from(ExitStatus::Bug.code()),
+            i32::from(supdoc::testing::usage_exit_code()),
+            i32::from(supdoc::testing::bug_exit_code()),
             101,
         ];
         if run.code.is_none_or(|code| rejected.contains(&code)) {
@@ -63,7 +59,7 @@ fn assert_none_is_a_usage_error(project: &Project, invocations: &[Vec<&str>]) {
 fn no_command_is_a_usage_error() {
     let project = Project::fixture("namespaced");
     let mut commands = Vec::new();
-    leaf_commands(&Cli::command(), "", &mut commands);
+    leaf_commands(&supdoc::testing::command(), "", &mut commands);
 
     let invocations: Vec<Vec<&str>> = commands
         .iter()
@@ -85,7 +81,7 @@ fn no_command_is_a_usage_error() {
 #[test]
 fn no_command_schema_is_a_usage_error() {
     let project = Project::fixture("namespaced");
-    let cli = Cli::command();
+    let cli = supdoc::testing::command();
     let names: Vec<String> = cli
         .find_subcommand("schema")
         .and_then(|schema| {

@@ -41,7 +41,7 @@ impl Report for ScriptReport {
 ///
 /// Returns `cli-completions-write` when standard output cannot be written for a reason other
 /// than a closed pipe.
-pub fn run(
+pub(crate) fn run(
     args: &CompletionsArgs,
     _context: &Context,
     output: &mut Output,

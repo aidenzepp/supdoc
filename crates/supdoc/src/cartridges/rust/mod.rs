@@ -31,7 +31,7 @@ static RUST: LazyLock<Result<QueryCartridge, QueryFileError>> = LazyLock::new(||
 ///
 /// The [`QueryFileError`] for a built-in query that doesn't compile: a supdoc bug, caught by the
 /// registry's tests.
-pub fn cartridge() -> Result<&'static QueryCartridge, &'static QueryFileError> {
+pub(crate) fn cartridge() -> Result<&'static QueryCartridge, &'static QueryFileError> {
     RUST.as_ref()
 }
 
@@ -137,7 +137,10 @@ pub mod util {
     }
 
     fn paths(table: &SymbolTable) -> Vec<String> {
-        table.iter().map(|symbol| symbol.path.to_string()).collect()
+        table
+            .iter()
+            .map(|symbol| symbol.path().to_string())
+            .collect()
     }
 
     fn query(raw: &str) -> SymbolPath {
@@ -158,7 +161,7 @@ pub mod util {
 
     fn text_of<'f>(file: &'f SourceFile, symbol: &Symbol) -> &'f str {
         file.text()
-            .get(symbol.range.clone())
+            .get(symbol.range().clone())
             .expect("a symbol's range should be valid for its file")
     }
 
@@ -270,13 +273,13 @@ pub mod util {
             let node = file
                 .tree()
                 .root_node()
-                .descendant_for_byte_range(symbol.range.start, symbol.range.end)
+                .descendant_for_byte_range(symbol.range().start, symbol.range().end)
                 .expect("a symbol's range should lie inside the tree");
             assert_eq!(
                 node.byte_range(),
-                symbol.range,
+                symbol.range(),
                 "`{}` should cover exactly one node, not {:?}",
-                symbol.path,
+                symbol.path(),
                 text_of(&file, symbol),
             );
         }
@@ -355,7 +358,7 @@ pub mod util {
 
         assert!(text_of(&file, new).starts_with("pub fn new()"));
         assert_eq!(
-            resolve(&file, &table, "new").map(|symbol| symbol.path.to_string()),
+            resolve(&file, &table, "new").map(|symbol| symbol.path().to_string()),
             Ok("RingBuffer.new".to_owned()),
             "the one-segment shorthand works when `new` is unique",
         );

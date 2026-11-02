@@ -5,7 +5,7 @@ use crate::output::paths::PathStyle;
 
 /// The format data is written in (06 X5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, clap::ValueEnum)]
-pub enum OutputFormat {
+pub(crate) enum OutputFormat {
     /// Human-readable, with source excerpts.
     Text,
     /// One JSON document on stdout (see `supdoc schema`).
@@ -19,14 +19,14 @@ pub enum OutputFormat {
 impl OutputFormat {
     /// Whether this format is machine-readable JSON, one way or another.
     #[must_use]
-    pub const fn is_json(self) -> bool {
+    pub(crate) const fn is_json(self) -> bool {
         matches!(self, Self::Json | Self::Jsonl)
     }
 }
 
 /// How much to say (07 G6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Verbosity {
+pub(crate) enum Verbosity {
     /// `-q`: errors only, with no summary line.
     Quiet,
     /// The default: errors, warnings, notes and the summary.
@@ -38,7 +38,7 @@ pub enum Verbosity {
 impl Verbosity {
     /// Combines `--quiet` and the number of `--verbose` flags. Quiet wins.
     #[must_use]
-    pub const fn from_flags(quiet: bool, verbose: u8) -> Self {
+    pub(crate) const fn from_flags(quiet: bool, verbose: u8) -> Self {
         match (quiet, verbose) {
             (true, _) => Self::Quiet,
             (false, 0) => Self::Normal,
@@ -48,7 +48,7 @@ impl Verbosity {
 
     /// Whether a finding of `severity` is shown. Quiet shows only errors.
     #[must_use]
-    pub const fn shows(self, severity: Severity) -> bool {
+    pub(crate) const fn shows(self, severity: Severity) -> bool {
         match severity {
             Severity::Error => true,
             Severity::Warning | Severity::Note => !matches!(self, Self::Quiet),
@@ -57,13 +57,13 @@ impl Verbosity {
 
     /// Whether the summary line is printed.
     #[must_use]
-    pub const fn shows_summary(self) -> bool {
+    pub(crate) const fn shows_summary(self) -> bool {
         !matches!(self, Self::Quiet)
     }
 
     /// Whether passed links are listed.
     #[must_use]
-    pub const fn lists_passed(self) -> bool {
+    pub(crate) const fn lists_passed(self) -> bool {
         matches!(self, Self::Verbose)
     }
 }
@@ -71,22 +71,22 @@ impl Verbosity {
 /// Everything text rendering needs, passed in explicitly so rendering touches no global state
 /// (07 "Rust design").
 #[derive(Debug, Clone)]
-pub struct TextContext {
+pub(crate) struct TextContext {
     /// Whether to emit ANSI color.
-    pub color: bool,
+    pub(crate) color: bool,
     /// Whether to draw with Unicode box characters instead of ASCII.
-    pub unicode: bool,
+    pub(crate) unicode: bool,
     /// The terminal width in columns.
-    pub width: usize,
+    pub(crate) width: usize,
     /// How paths are shown.
-    pub paths: PathStyle,
+    pub(crate) paths: PathStyle,
     /// How much to say.
-    pub verbosity: Verbosity,
+    pub(crate) verbosity: Verbosity,
 }
 
 /// Whether text output may draw with Unicode box characters: when color is on, and the terminal
 /// isn't `TERM=dumb` (07 G12).
 #[must_use]
-pub fn supports_unicode(color: bool, term: Option<&str>) -> bool {
+pub(crate) fn supports_unicode(color: bool, term: Option<&str>) -> bool {
     color && term != Some("dumb")
 }

@@ -10,11 +10,11 @@ use crate::link::{LinkKey, SymbolPath, Target};
 
 /// A lock entry moving from one key to another: the `from` entry's hash becomes `to`'s.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Move {
+pub(crate) struct Move {
     /// The key the entry is under now, which is used up by the move.
-    pub from: LinkKey,
+    pub(crate) from: LinkKey,
     /// The key the entry moves to.
-    pub to: LinkKey,
+    pub(crate) to: LinkKey,
 }
 
 /// What detection decided about the new links it was given.

@@ -23,7 +23,7 @@ impl Languages {
     /// [`CartridgeLoadError`] when a built-in query or grammar doesn't load. That is a supdoc bug
     /// in every case, so the run fails with exit code 70 instead of reading files as an
     /// unsupported language. The registry's tests load every built-in.
-    pub fn builtin() -> Result<&'static Self, &'static CartridgeLoadError> {
+    pub(crate) fn builtin() -> Result<&'static Self, &'static CartridgeLoadError> {
         BUILTIN.as_ref()
     }
 }

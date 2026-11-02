@@ -38,7 +38,11 @@ use super::{CliError, Context, Outcome};
 /// `cli-path-outside-project` or `cli-path-invalid` for a bad `[PATH]` (2), `cli-path-unreadable` (74) for one that can't be looked up, the lockfile's own
 /// error (78 when invalid, 74 when unreadable), `scan-root-unreadable` (74), and
 /// `cli-output-failed` when the report cannot be written (74).
-pub fn run(args: &CheckArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
+pub(crate) fn run(
+    args: &CheckArgs,
+    context: &Context,
+    output: &mut Output,
+) -> Result<Outcome, CliError> {
     let config = load_config(context, output)?;
     let scope = scope(&args.paths, &config, context)?;
     let lock = read_lock(&config, &context.cwd)?;
@@ -72,7 +76,7 @@ pub fn run(args: &CheckArgs, context: &Context, output: &mut Output) -> Result<O
 /// The JSON Schema of `supdoc check`'s `--json` output: the whole envelope, with `data` typed as
 /// [`CheckReport`].
 #[must_use]
-pub fn schema() -> schemars::Schema {
+pub(crate) fn schema() -> schemars::Schema {
     schemars::schema_for!(Envelope<'static, CheckReport>)
 }
 
@@ -82,7 +86,7 @@ pub fn schema() -> schemars::Schema {
 /// JSON puts `summary` and `links` under `data`; the envelope carries the loose findings. Passed
 /// links are always counted but listed only under `--verbose` (07 G6).
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct CheckReport {
+pub(crate) struct CheckReport {
     /// How many links are in each state, passed ones included.
     summary: Summary,
     /// The links shown, each with the finding that explains its state.
@@ -101,7 +105,7 @@ pub struct CheckReport {
 impl CheckReport {
     /// The report for `model`, listing passed links only when `verbosity` asks for them.
     #[must_use]
-    pub fn new(model: CheckModel, verbosity: Verbosity) -> Self {
+    pub(crate) fn new(model: CheckModel, verbosity: Verbosity) -> Self {
         let summary = Summary::tally(model.links.iter().map(|link| link.state));
         let shown: Vec<LinkReport> = model
             .links
@@ -119,7 +123,7 @@ impl CheckReport {
 
     /// The report, also printing one line per reason that links were left untracked for.
     #[must_use]
-    pub fn with_untracked(self, untracked: &UntrackedLinks) -> Self {
+    pub(crate) fn with_untracked(self, untracked: &UntrackedLinks) -> Self {
         Self {
             untracked: untracked.counts().collect(),
             ..self
@@ -246,17 +250,17 @@ fn render_untracked(untracked: &[(Untracked, usize)], out: &mut dyn Write) -> io
 /// `source`, `target` and `symbol` sit beside the state. The explaining finding is nested
 /// without a location, since `locations` already says where the link is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
-pub struct LinkJson {
+pub(crate) struct LinkJson {
     /// The link's state.
-    pub state: LinkState,
+    pub(crate) state: LinkState,
     /// Which link: `source`, `target` and, for a symbol link, `symbol`.
     #[serde(flatten)]
-    pub key: LinkKey,
+    pub(crate) key: LinkKey,
     /// Every place it appears in its source. Empty only for `obsolete`.
-    pub locations: Vec<LinkLocationJson>,
+    pub(crate) locations: Vec<LinkLocationJson>,
     /// The finding that explains the state. Left out for `passed`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub finding: Option<FindingJson>,
+    pub(crate) finding: Option<FindingJson>,
 }
 
 impl From<&LinkReport> for LinkJson {
@@ -272,15 +276,15 @@ impl From<&LinkReport> for LinkJson {
 
 /// Where a link appears in its source. The file is the link's `source`, so it isn't repeated.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
-pub struct LinkLocationJson {
+pub(crate) struct LinkLocationJson {
     /// 1-based line.
-    pub line: u32,
+    pub(crate) line: u32,
     /// 1-based column, in characters.
-    pub column: u32,
+    pub(crate) column: u32,
     /// Start byte offset.
-    pub start: usize,
+    pub(crate) start: usize,
     /// End byte offset.
-    pub end: usize,
+    pub(crate) end: usize,
 }
 
 impl From<&Location> for LinkLocationJson {

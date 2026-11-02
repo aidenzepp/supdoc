@@ -11,27 +11,28 @@ use sha2::{Digest, Sha256};
 /// comparisons can't be thrown off by upper- versus lower-case hex.
 #[derive(Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(try_from = "String")]
-pub struct Hash([u8; 32]);
+pub(crate) struct Hash([u8; 32]);
 
 impl Hash {
     /// The number of hex characters in a rendered hash.
-    pub const HEX_LEN: usize = 64;
+    pub(crate) const HEX_LEN: usize = 64;
 
     /// The SHA-256 digest of `bytes`.
     #[must_use]
-    pub fn digest(bytes: &[u8]) -> Self {
+    pub(crate) fn digest(bytes: &[u8]) -> Self {
         Self(Sha256::digest(bytes).into())
     }
 
     /// Wraps an already computed digest.
     #[must_use]
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+    pub(crate) const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 
     /// The raw digest.
+    #[cfg(test)]
     #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; 32] {
+    pub(crate) const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 }
@@ -118,7 +119,7 @@ impl serde::Serialize for Hash {
     schemars::JsonSchema,
 )]
 #[serde(rename_all = "kebab-case")]
-pub enum LineEndings {
+pub(crate) enum LineEndings {
     /// Each CR immediately followed by LF is dropped before hashing (B.4).
     #[default]
     Normalize,
@@ -138,15 +139,15 @@ impl fmt::Display for LineEndings {
 
 /// Every setting that changes a hash. Recorded in `supdoc.lock` (02 L10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct HashSettings {
+pub(crate) struct HashSettings {
     /// How line endings are treated before hashing.
-    pub line_endings: LineEndings,
+    pub(crate) line_endings: LineEndings,
 }
 
 /// A string is not 64 hex characters.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("invalid hash `{input}`: expected 64 hex characters")]
-pub struct HashParseError {
+pub(crate) struct HashParseError {
     /// The rejected text, as written.
     input: String,
 }

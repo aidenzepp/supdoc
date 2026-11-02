@@ -41,16 +41,16 @@ const FRAGMENT_NOT_UTF8: &str = "it is not valid UTF-8 after percent-decoding";
 
 /// A destination understood as a supdoc link: the file it points at and, optionally, a symbol.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedLink {
+pub(crate) struct ParsedLink {
     /// The file the link points at, as it will be written in the lockfile.
-    pub target: Target,
+    pub(crate) target: Target,
     /// The symbol inside that file, or `None` for a whole-file link.
-    pub symbol: Option<SymbolPath>,
+    pub(crate) symbol: Option<SymbolPath>,
 }
 
 /// What a destination is: a supdoc link, a supdoc link that is wrong, or not a supdoc link.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Destination {
+pub(crate) enum Destination {
     /// A supdoc link to track.
     Link(ParsedLink),
     /// A link meant for supdoc that is wrong; callers report it as a finding.
@@ -62,17 +62,9 @@ pub enum Destination {
     },
 }
 
-impl Destination {
-    /// Whether the destination is meant for supdoc, right or wrong.
-    #[must_use]
-    pub const fn is_supdoc(&self) -> bool {
-        !matches!(self, Self::NotSupdoc { .. })
-    }
-}
-
 /// Why a destination is not a supdoc link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Untracked {
+pub(crate) enum Untracked {
     /// A URL (`https://...`), an ignored scheme (`mailto:`), or a language path (`crate::Foo`).
     Url,
     /// A heading in the same file (`#setup`), or an empty destination.
@@ -80,18 +72,18 @@ pub enum Untracked {
     /// A directory (`/`, `../`, `../src/`), which is navigation.
     Directory,
     /// A file no cartridge reads (`logo.png`, `api.html#section`).
-    UntrackedType,
+    UnreadType,
 }
 
 impl Untracked {
     /// What links left untracked for this reason are, as a plural noun phrase for `-v`.
     #[must_use]
-    pub const fn describe(self) -> &'static str {
+    pub(crate) const fn describe(self) -> &'static str {
         match self {
             Self::Url => "URLs or code paths",
             Self::SameFile => "headings in the same file",
             Self::Directory => "directories",
-            Self::UntrackedType => "files no language reads",
+            Self::UnreadType => "files no language reads",
         }
     }
 }
@@ -100,7 +92,7 @@ impl Untracked {
 ///
 /// One link's problem, not the file's: callers report it as a finding and keep going.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum LinkError {
+pub(crate) enum LinkError {
     /// The prefix before `:` is not a configured namespace (and is not a URL or `name::path`).
     #[error("unknown namespace `{prefix}` in `{destination}`")]
     UnknownNamespace {
@@ -163,7 +155,7 @@ pub enum LinkError {
 ///
 /// The result is only a candidate; the caller decides whether it parses.
 #[must_use]
-pub fn repaired_destination(destination: &str) -> Option<String> {
+pub(crate) fn repaired_destination(destination: &str) -> Option<String> {
     let destination = destination.trim();
     let (path, fragment) = match destination.split_once('#') {
         Some((path, fragment)) => (path, Some(fragment)),
@@ -190,7 +182,7 @@ pub fn repaired_destination(destination: &str) -> Option<String> {
 
 /// The namespace names a destination may use as a prefix. Parsing reads only the names, never a
 /// namespace's directory.
-pub trait NamespaceNames {
+pub(crate) trait NamespaceNames {
     /// Whether `name` is configured.
     fn defines(&self, name: &NamespaceName) -> bool;
 
@@ -227,7 +219,7 @@ impl NamespaceNames for BTreeSet<NamespaceName> {
 /// Pure: it never touches the filesystem, so a link to a missing file is still a
 /// [`Destination::Link`], and a directory is known only by its spelling (see the module rules).
 #[must_use]
-pub fn parse_destination(
+pub(crate) fn parse_destination(
     raw: &RawLink,
     source: &SourcePath,
     namespaces: &impl NamespaceNames,
@@ -302,7 +294,7 @@ pub fn parse_destination(
         };
     }
     if languages.for_path(Path::new(&relative)).is_none() {
-        return not_supdoc(Untracked::UntrackedType);
+        return not_supdoc(Untracked::UnreadType);
     }
     if climbs {
         return outside_root();
@@ -788,11 +780,11 @@ mod tests {
     fn climbing_link_to_a_file_no_cartridge_reads_is_still_not_tracked() {
         assert_eq!(
             parse_in("guide.md", "../logo.png"),
-            untracked(Untracked::UntrackedType)
+            untracked(Untracked::UnreadType)
         );
         assert_eq!(
             parse_in("guide.md", "../logo.png#x"),
-            untracked(Untracked::UntrackedType)
+            untracked(Untracked::UnreadType)
         );
     }
 
@@ -849,7 +841,7 @@ mod tests {
         for destination in ["logo.png", "logo.png#x", "api.html#section", "../src#add"] {
             assert_eq!(
                 parse(destination),
-                untracked(Untracked::UntrackedType),
+                untracked(Untracked::UnreadType),
                 "{destination}"
             );
         }

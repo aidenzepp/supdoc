@@ -27,7 +27,7 @@ use super::{CliError, Context, Outcome};
 ///
 /// Returns the config's own error (78, or 74 when unreadable) and `cli-output-failed` when the
 /// report cannot be written (74).
-pub fn run(
+pub(crate) fn run(
     inspect: Inspect<'_>,
     context: &Context,
     output: &mut Output,
@@ -50,7 +50,7 @@ pub fn run(
             let report = NamespaceListReport::new(&config, args.limit);
             output.report(&report, true).and_then(|()| {
                 if report.truncated {
-                    output.note(&args.limit.truncation_note(
+                    output.note(&Limit::truncation_note(
                         report.namespaces.len(),
                         report.total,
                         "namespaces",
@@ -74,14 +74,14 @@ pub fn run(
 /// The JSON Schema of the `--json` output of `supdoc config show`: the whole envelope, with `data`
 /// typed as the command's report.
 #[must_use]
-pub fn config_show_schema() -> schemars::Schema {
+pub(crate) fn config_show_schema() -> schemars::Schema {
     schemars::schema_for!(Envelope<'static, ConfigShowReport>)
 }
 
 /// The JSON Schema of the `--json` output of `supdoc namespace list`: the whole envelope, with
 /// `data` typed as the command's report. The shape is the same for every `--limit`.
 #[must_use]
-pub fn namespace_list_schema() -> schemars::Schema {
+pub(crate) fn namespace_list_schema() -> schemars::Schema {
     schemars::schema_for!(Envelope<'static, NamespaceListReport>)
 }
 

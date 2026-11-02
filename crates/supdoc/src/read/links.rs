@@ -53,7 +53,7 @@ use crate::read::error::ReadError;
 ///
 /// [`ReadError::Timeout`] when the file's deadline stops the regions query or an inline parse.
 /// No links are returned then, not even those read before it.
-pub fn links(file: &SourceFile) -> Result<Vec<RawLink>, ReadError> {
+pub(crate) fn links(file: &SourceFile) -> Result<Vec<RawLink>, ReadError> {
     let Some(mut parser) = inline_parser() else {
         // `Languages::builtin` fails the run when this grammar doesn't load, so no file gets here.
         return Ok(Vec::new());

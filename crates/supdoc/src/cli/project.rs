@@ -278,10 +278,10 @@ pub(crate) fn settings_mismatch(config: &Config, change: SettingsChange) -> CliE
         configured_in: config.line_endings_defined_in().cloned(),
     };
     CliError::new(
-        mismatch.code(),
+        SettingsMismatch::code(),
         mismatch.message_from(config.root()),
         mismatch.help(),
-        mismatch.status(),
+        SettingsMismatch::status(),
     )
 }
 

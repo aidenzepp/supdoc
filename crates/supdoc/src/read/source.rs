@@ -4,13 +4,17 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use crate::limits::{Limits, TimeLimit};
+#[cfg(test)]
+use crate::limits::Limits;
+use crate::limits::TimeLimit;
 use crate::path::AbsolutePath;
-use crate::read::cartridge::{Cartridge, Deadline, Languages, SourceFile};
+#[cfg(test)]
+use crate::read::cartridge::Cartridge;
+use crate::read::cartridge::{Deadline, Languages, SourceFile};
 use crate::read::error::ReadError;
 
 /// The largest file supdoc reads: 16 MiB (03 R13).
-pub const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+pub(crate) const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 impl SourceFile {
     /// Parses `text` with `language`'s grammar under the default `parse-timeout`
@@ -22,7 +26,8 @@ impl SourceFile {
     /// # Errors
     ///
     /// As [`SourceFile::from_text`].
-    pub fn parse(
+    #[cfg(test)]
+    pub(crate) fn parse(
         path: AbsolutePath,
         text: String,
         language: &'static dyn Cartridge,
@@ -45,7 +50,7 @@ impl SourceFile {
     /// - [`ReadError::Timeout`] when the parse takes longer than `limit`. The same deadline,
     ///   started just before the parse, then bounds every query and inline parse of the file.
     /// - [`ReadError::Internal`] when tree-sitter returns no tree.
-    pub fn read(
+    pub(crate) fn read(
         path: AbsolutePath,
         languages: &Languages,
         limit: TimeLimit,
@@ -65,7 +70,7 @@ impl SourceFile {
     /// Whether the tree has any `ERROR` or missing node. The file is still symbolized and hashed,
     /// but its hashes may change once it parses cleanly (03 R8).
     #[must_use]
-    pub fn has_syntax_errors(&self) -> bool {
+    pub(crate) fn has_syntax_errors(&self) -> bool {
         self.tree().root_node().has_error()
     }
 }

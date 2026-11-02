@@ -29,7 +29,7 @@ use crate::read::error::ReadError;
 use crate::read::symbols::tag_symbols;
 
 /// The `injection.language` that marks a region where links are read (03 R9).
-pub const MARKDOWN_INLINE: &str = "markdown_inline";
+pub(crate) const MARKDOWN_INLINE: &str = "markdown_inline";
 
 /// Markers that open a line comment, longest first so `///` isn't read as `//`.
 ///
@@ -39,7 +39,7 @@ const LINE_COMMENT_MARKERS: [&str; 5] = ["///", "//!", "//", "#!", "#"];
 
 /// A cartridge that is only data: its grammar and two compiled query files.
 #[derive(Debug)]
-pub struct QueryCartridge {
+pub(crate) struct QueryCartridge {
     /// Stable id.
     id: LanguageId,
     /// Lowercase extensions without the dot.
@@ -52,8 +52,9 @@ pub struct QueryCartridge {
 
 impl QueryCartridge {
     /// The compiled `tags.scm` and `injections.scm`.
+    #[cfg(test)]
     #[must_use]
-    pub const fn queries(&self) -> &CompiledQueries {
+    pub(crate) const fn queries(&self) -> &CompiledQueries {
         &self.queries
     }
 
@@ -65,7 +66,7 @@ impl QueryCartridge {
     /// # Errors
     ///
     /// [`QueryFileError`] naming the query file that doesn't compile and tree-sitter's reason.
-    pub fn new(
+    pub(crate) fn new(
         id: LanguageId,
         extensions: &'static [&'static str],
         grammar: tree_sitter::Language,
@@ -126,7 +127,7 @@ impl Cartridge for QueryCartridge {
 /// # Errors
 ///
 /// [`ReadError::Timeout`] when the file's deadline stops the query.
-pub fn injected_markdown(
+pub(crate) fn injected_markdown(
     file: &SourceFile,
     queries: &CompiledQueries,
 ) -> Result<Vec<MarkdownRegion>, ReadError> {
@@ -295,13 +296,13 @@ fn line_comment_body(range: Range, marker: &str, text: &str) -> Range {
 /// A built-in query file doesn't compile against its grammar.
 #[derive(Debug, thiserror::Error)]
 #[error("the built-in {file} for {language} does not compile (supdoc bug): {error}")]
-pub struct QueryFileError {
+pub(crate) struct QueryFileError {
     /// The cartridge.
-    pub language: LanguageId,
+    pub(crate) language: LanguageId,
     /// `tags.scm` or `injections.scm`.
-    pub file: &'static str,
+    pub(crate) file: &'static str,
     /// tree-sitter's reason, with row and column.
-    pub error: tree_sitter::QueryError,
+    pub(crate) error: tree_sitter::QueryError,
 }
 
 #[cfg(test)]

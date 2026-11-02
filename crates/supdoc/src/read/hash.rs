@@ -14,11 +14,11 @@ use crate::read::cartridge::{SourceFile, Symbol};
 
 /// A symbol whose range does not fit the file it was asked to be hashed in.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SymbolOutsideFile {
+pub(crate) struct SymbolOutsideFile {
     /// The symbol's byte range.
-    pub range: Range<usize>,
+    pub(crate) range: Range<usize>,
     /// The file's length in bytes.
-    pub len: usize,
+    pub(crate) len: usize,
 }
 
 /// The hash of `symbol`'s bytes in `file`, `file.text()[symbol.range]`, under `settings`, failing
@@ -30,21 +30,21 @@ pub struct SymbolOutsideFile {
 ///
 /// Returns [`SymbolOutsideFile`] when `symbol`'s range does not fit `file` (a symbol from another
 /// file), so such a symbol can never record a hash of no bytes.
-pub fn hash_symbol(
+pub(crate) fn hash_symbol(
     file: &SourceFile,
     symbol: &Symbol,
     settings: HashSettings,
 ) -> Result<Hash, SymbolOutsideFile> {
     let text = file.text().as_bytes();
-    digest_range(text, symbol.range.clone(), settings).ok_or_else(|| SymbolOutsideFile {
-        range: symbol.range.clone(),
+    digest_range(text, symbol.range().clone(), settings).ok_or_else(|| SymbolOutsideFile {
+        range: symbol.range().clone(),
         len: text.len(),
     })
 }
 
 /// The hash of every byte of `file`, under `settings`.
 #[must_use]
-pub fn hash_file(file: &SourceFile, settings: HashSettings) -> Hash {
+pub(crate) fn hash_file(file: &SourceFile, settings: HashSettings) -> Hash {
     let text = file.text().as_bytes();
     digest_range(text, 0..text.len(), settings).unwrap_or_else(|| Hash::digest(b""))
 }
@@ -173,13 +173,13 @@ mod tests {
     #[test]
     fn range_outside_the_file_is_refused() {
         let file = parse("fn add() {}\n");
-        let foreign = Symbol {
-            path: "elsewhere"
+        let foreign = Symbol::new(
+            "elsewhere"
                 .parse()
                 .expect("the fixture symbol should be valid"),
-            aliases: Vec::new(),
-            range: 100..200,
-        };
+            Vec::new(),
+            100..200,
+        );
 
         assert_eq!(
             hash_symbol(&file, &foreign, NORMALIZE),
@@ -193,13 +193,13 @@ mod tests {
 
     /// A symbol over an explicit byte range of `file`, as a grammar would report it.
     fn range_symbol(range: Range<usize>) -> Symbol {
-        Symbol {
-            path: "fixture"
+        Symbol::new(
+            "fixture"
                 .parse()
                 .expect("the fixture symbol should be valid"),
-            aliases: Vec::new(),
+            Vec::new(),
             range,
-        }
+        )
     }
 
     #[test]

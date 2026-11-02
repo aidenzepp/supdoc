@@ -8,21 +8,21 @@ use crate::hash::{Hash, HashSettings};
 use crate::link::LinkKey;
 
 /// The lockfile's name, in the project root.
-pub const LOCK_FILE_NAME: &str = "supdoc.lock";
+pub(crate) const LOCK_FILE_NAME: &str = "supdoc.lock";
 
 /// The on-disk format version this supdoc reads and writes (02 L7).
 ///
 /// Until the first release, v1 is still being defined: format and hashing changes redefine v1
 /// rather than bump it. From the first published release on, any change bumps it, including a
 /// new key under `[features.hash]`. Changing a setting's value is data, not a format change.
-pub const FORMAT_VERSION: u32 = 1;
+pub(crate) const FORMAT_VERSION: u32 = 1;
 
 /// Every recorded link, the hash it was last confirmed against, and the settings those hashes
 /// were computed under.
 ///
 /// Keyed by [`LinkKey`], so entries are unique and sorted in canonical order by construction.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Lockfile {
+pub(crate) struct Lockfile {
     /// The `[features.hash]` settings every recorded hash was computed under (02 L10).
     hash: HashSettings,
     /// The entries, in canonical order.
@@ -32,7 +32,7 @@ pub struct Lockfile {
 impl Lockfile {
     /// The settings every recorded hash was computed under.
     #[must_use]
-    pub const fn hash_settings(&self) -> HashSettings {
+    pub(crate) const fn hash_settings(&self) -> HashSettings {
         self.hash
     }
 
@@ -46,39 +46,41 @@ impl Lockfile {
 
     /// The recorded hash for `key`, if any.
     #[must_use]
-    pub fn get(&self, key: &LinkKey) -> Option<Hash> {
+    pub(crate) fn get(&self, key: &LinkKey) -> Option<Hash> {
         self.links.get(key).copied()
     }
 
     /// Records `hash` for `key`, returning the previous hash, if any.
-    pub fn insert(&mut self, key: LinkKey, hash: Hash) -> Option<Hash> {
+    pub(crate) fn insert(&mut self, key: LinkKey, hash: Hash) -> Option<Hash> {
         self.links.insert(key, hash)
     }
 
     /// Removes the entry for `key`, returning its hash, if any.
-    pub fn remove(&mut self, key: &LinkKey) -> Option<Hash> {
+    pub(crate) fn remove(&mut self, key: &LinkKey) -> Option<Hash> {
         self.links.remove(key)
     }
 
     /// Every entry, in canonical order.
-    pub fn iter(&self) -> impl Iterator<Item = (&LinkKey, Hash)> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&LinkKey, Hash)> {
         self.links.iter().map(|(key, hash)| (key, *hash))
     }
 
     /// Keeps only the entries for which `keep` returns `true`.
-    pub fn retain(&mut self, mut keep: impl FnMut(&LinkKey, Hash) -> bool) {
+    #[cfg(test)]
+    pub(crate) fn retain(&mut self, mut keep: impl FnMut(&LinkKey, Hash) -> bool) {
         self.links.retain(|key, hash| keep(key, *hash));
     }
 
     /// The number of entries.
+    #[cfg(test)]
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.links.len()
     }
 
     /// Whether there are no entries.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.links.is_empty()
     }
 }

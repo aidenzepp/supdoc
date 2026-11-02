@@ -10,7 +10,7 @@ use crate::path::AbsolutePath;
 /// Built once in `main` from the current directory and `$GITHUB_WORKSPACE`, with the current
 /// directory standing in for the project root until [`PathStyle::set_root`] is told the real one.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PathStyle {
+pub(crate) struct PathStyle {
     /// The current directory: text output is relative to it so terminals can link it.
     cwd: AbsolutePath,
     /// The project root, which source paths are relative to.
@@ -22,7 +22,7 @@ pub struct PathStyle {
 impl PathStyle {
     /// A style for a run in `cwd` on the project at `root`.
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         cwd: AbsolutePath,
         root: AbsolutePath,
         github_workspace: Option<AbsolutePath>,
@@ -36,25 +36,25 @@ impl PathStyle {
 
     /// The project root, shown in the JSON envelope.
     #[must_use]
-    pub fn root(&self) -> &AbsolutePath {
+    pub(crate) fn root(&self) -> &AbsolutePath {
         &self.root
     }
 
     /// Replaces the project root once a command has found it, keeping the current directory and
     /// `$GITHUB_WORKSPACE`.
-    pub fn set_root(&mut self, root: AbsolutePath) {
+    pub(crate) fn set_root(&mut self, root: AbsolutePath) {
         self.root = root;
     }
 
     /// A source file as text output shows it: relative to the current directory.
     #[must_use]
-    pub fn text(&self, source: &SourcePath) -> String {
+    pub(crate) fn text(&self, source: &SourcePath) -> String {
         self.text_absolute(&self.absolute(source))
     }
 
     /// An absolute path as text output shows it: relative to the current directory.
     #[must_use]
-    pub fn text_absolute(&self, path: &AbsolutePath) -> String {
+    pub(crate) fn text_absolute(&self, path: &AbsolutePath) -> String {
         relative_to(&self.cwd, path)
     }
 
@@ -63,14 +63,14 @@ impl PathStyle {
     ///
     /// A path outside the workspace stays absolute, because a relative one could not name it.
     #[must_use]
-    pub fn github(&self, source: &SourcePath) -> String {
+    pub(crate) fn github(&self, source: &SourcePath) -> String {
         let base = self.github_workspace.as_ref().unwrap_or(&self.root);
         relative_or_absolute(base, &self.absolute(source))
     }
 
     /// A source file as JSON shows it: relative to the project root, like `supdoc.lock`.
     #[must_use]
-    pub fn json(source: &SourcePath) -> String {
+    pub(crate) fn json(source: &SourcePath) -> String {
         source.as_str().to_owned()
     }
 

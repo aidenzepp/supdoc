@@ -15,7 +15,7 @@ use crate::output::text::visible;
 /// # Errors
 ///
 /// Fails if writing to `out` fails.
-pub fn render_annotations(
+pub(crate) fn render_annotations(
     paths: &PathStyle,
     verbosity: Verbosity,
     findings: &[&Finding],
@@ -33,7 +33,7 @@ pub fn render_annotations(
 /// [`visible`], like text output, so bidi and control characters from untrusted files can't
 /// reorder or hide what the PR shows; then the workflow-command escapes apply.
 #[must_use]
-pub fn annotation(paths: &PathStyle, finding: &Finding) -> String {
+pub(crate) fn annotation(paths: &PathStyle, finding: &Finding) -> String {
     let command = match finding.severity {
         Severity::Error => "error",
         Severity::Warning => "warning",
@@ -87,7 +87,7 @@ fn message(finding: &Finding) -> String {
 
 /// Escapes the message part of a workflow command: `%`, carriage return and newline.
 #[must_use]
-pub fn escape_data(text: &str) -> String {
+pub(crate) fn escape_data(text: &str) -> String {
     text.replace('%', "%25")
         .replace('\r', "%0D")
         .replace('\n', "%0A")
@@ -95,6 +95,6 @@ pub fn escape_data(text: &str) -> String {
 
 /// Escapes a property value: everything a message escapes, plus `:` and `,`.
 #[must_use]
-pub fn escape_property(text: &str) -> String {
+pub(crate) fn escape_property(text: &str) -> String {
     escape_data(text).replace(':', "%3A").replace(',', "%2C")
 }

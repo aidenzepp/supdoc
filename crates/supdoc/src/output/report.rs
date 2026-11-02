@@ -10,24 +10,24 @@ use crate::output::summary::Summary;
 
 /// An array field of a report that JSONL writes as one record per element.
 #[derive(Debug, Clone, Copy)]
-pub struct RecordArray {
+pub(crate) struct RecordArray {
     /// The field's name in the serialized report.
-    pub key: &'static str,
+    pub(crate) key: &'static str,
     /// The `type` each record is tagged with.
-    pub record_type: &'static str,
+    pub(crate) record_type: &'static str,
 }
 
 impl RecordArray {
     /// A record array read from field `key`, tagged `record_type`.
     #[must_use]
-    pub const fn new(key: &'static str, record_type: &'static str) -> Self {
+    pub(crate) const fn new(key: &'static str, record_type: &'static str) -> Self {
         Self { key, record_type }
     }
 }
 
 /// Every piece of output data implements this. JSON comes from `Serialize`, the schema from
 /// `JsonSchema`, and the other formats from the methods here.
-pub trait Report: serde::Serialize + schemars::JsonSchema {
+pub(crate) trait Report: serde::Serialize + schemars::JsonSchema {
     /// The command that produced this report: `check`, `update`, `list`...
     fn command(&self) -> &'static str;
 

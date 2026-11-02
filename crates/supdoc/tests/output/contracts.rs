@@ -548,37 +548,23 @@ mod helps {
         build: fn() -> (String, Option<String>),
     }
 
-    /// Codes no binary run can print reliably, built through the library instead.
+    /// Codes no binary run can print reliably, built through the library's test seam instead:
+    /// tree-sitter returning no tree, a built-in query that fails to compile, and a doc edited
+    /// between planning and writing a fix or a rename.
     const UNIT_CASES: &[UnitCase] = &[
         UnitCase {
             kind: "read-internal",
             build: || {
-                let path =
-                    supdoc::path::AbsolutePath::new(std::path::Path::new("/project/src/lib.rs"))
-                        .expect("the fixture path should be absolute");
-                let error = supdoc::read::error::ReadError::Internal {
-                    path,
-                    reason: "tree-sitter returned no tree",
-                };
-                (
-                    error.code().to_owned(),
-                    Some(error.help(supdoc::read::error::ReadRole::ScannedSource, "file")),
-                )
+                let message =
+                    supdoc::testing::read_internal().expect("the fixture path should be absolute");
+                (message.code, message.help)
             },
         },
         UnitCase {
             kind: "read-cartridge-load",
             build: || {
-                let grammar: tree_sitter::Language = tree_sitter_md::LANGUAGE.into();
-                let error = tree_sitter::Query::new(&grammar, "(no_such_node)")
-                    .expect_err("a query for a node the grammar lacks should not compile");
-                let query_file = Box::leak(Box::new(supdoc::read::query::QueryFileError {
-                    language: supdoc::read::cartridge::LanguageId::new("markdown"),
-                    file: "tags.scm",
-                    error,
-                }));
-                let error = supdoc::read::error::CartridgeLoadError::Query(query_file);
-                (error.code().to_owned(), Some(error.help()))
+                let message = supdoc::testing::read_cartridge_load();
+                (message.code, message.help)
             },
         },
         UnitCase {
@@ -588,11 +574,8 @@ mod helps {
         UnitCase {
             kind: "cli-rename-file-changed",
             build: || {
-                let error = supdoc::cli::rename::file_changed(
-                    "docs/guide.md",
-                    "supdoc namespace rename core base --yes",
-                );
-                (error.code().to_owned(), Some(error.help().to_owned()))
+                let message = supdoc::testing::rename_file_changed();
+                (message.code, message.help)
             },
         },
     ];
@@ -602,30 +585,14 @@ mod helps {
         let project = Project::clean();
         project.write("docs/api.md", "# API\n\nSee [ad](../src/lib.rs#ad).\n");
         let real = std::fs::canonicalize(project.path()).expect("the project root should resolve");
-        let root =
-            supdoc::path::AbsolutePath::new(&real).expect("a canonical path should be absolute");
-        let config = supdoc::config::Config::load(&root).expect("the fixture config should load");
-        let languages = supdoc::read::cartridge::Languages::builtin()
-            .expect("the built-in cartridges should load");
-        let scan = supdoc::scan::assemble::run(
-            &config,
-            languages,
-            &supdoc::scan::model::Scope::All,
-            &supdoc::scan::walk::GlobalExcludes::none(),
-        )
-        .expect("the fixture project should scan");
-        let plan = supdoc::check::fix::plan_fixes(&scan);
-        project.write(
-            "docs/api.md",
-            "# API\n\nEdited after the scan.\n\nSee [ad](../src/lib.rs#ad).\n",
-        );
-        let result = supdoc::check::fix::apply_fixes(&plan, &root, "supdoc fix --yes");
-        let finding = &result
-            .skipped
-            .first()
-            .expect("a doc edited after the scan should be skipped")
-            .finding;
-        (finding.code.to_owned(), finding.help.clone())
+        let message = supdoc::testing::fix_file_changed(&real, || {
+            project.write(
+                "docs/api.md",
+                "# API\n\nEdited after the scan.\n\nSee [ad](../src/lib.rs#ad).\n",
+            );
+        })
+        .expect("a doc edited after the scan should be skipped");
+        (message.code, message.help)
     }
 
     /// Every `(kind, help)` pair under `value`: any object with a `kind` string, and its `help` string

@@ -81,7 +81,11 @@ impl Report for StarterReport {
 /// directory from above, `cli-init-exists` when the target file already exists, and
 /// `cli-init-write` when the file cannot be created, and `cli-output-failed` when the
 /// report cannot be written.
-pub fn run(args: &InitArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
+pub(crate) fn run(
+    args: &InitArgs,
+    context: &Context,
+    output: &mut Output,
+) -> Result<Outcome, CliError> {
     let target = target(context);
     refuse_inside_project(&target, context)?;
     let label = relative_to(&context.cwd, &target);
@@ -118,7 +122,7 @@ pub fn run(args: &InitArgs, context: &Context, output: &mut Output) -> Result<Ou
 /// The JSON Schema of `supdoc init`'s `--json` output: the whole envelope, with `data` typed as
 /// the starter report.
 #[must_use]
-pub fn schema() -> schemars::Schema {
+pub(crate) fn schema() -> schemars::Schema {
     schemars::schema_for!(Envelope<'static, StarterReport>)
 }
 

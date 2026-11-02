@@ -22,11 +22,11 @@ use crate::path::AbsolutePath;
 use pattern::{AnchoredPatterns, PatternList};
 
 pub(crate) use error::size_text;
-pub use error::{ConfigError, NamespaceEscape};
-pub use pattern::PatternDefinition;
+pub(crate) use error::{ConfigError, NamespaceEscape};
+pub(crate) use pattern::PatternDefinition;
 
 /// The file name supdoc looks for in each directory.
-pub const CONFIG_FILE_NAME: &str = "supdoc.config.toml";
+pub(crate) const CONFIG_FILE_NAME: &str = "supdoc.config.toml";
 
 /// The metadata of `dir`'s entry named `supdoc.config.toml`, if that entry counts as a config.
 ///
@@ -58,7 +58,7 @@ pub(crate) fn discover_config(start: &AbsolutePath) -> Result<Option<AbsolutePat
 ///
 /// Constructed only while the chain is merged, after its directory is found inside the root.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Namespace {
+pub(crate) struct Namespace {
     /// The directory, resolved from the config that wrote it. It may not exist (01 D7).
     dir: AbsolutePath,
     /// The nearest config file in the chain that defines this namespace.
@@ -68,20 +68,20 @@ pub struct Namespace {
 impl Namespace {
     /// The directory the namespace names.
     #[must_use]
-    pub fn dir(&self) -> &AbsolutePath {
+    pub(crate) fn dir(&self) -> &AbsolutePath {
         &self.dir
     }
 
     /// The config file that defined the namespace.
     #[must_use]
-    pub fn defined_in(&self) -> &AbsolutePath {
+    pub(crate) fn defined_in(&self) -> &AbsolutePath {
         &self.defined_in
     }
 }
 
 /// A fully resolved config. Constructed only by [`Config::load`] and [`Config::load_file`].
 #[derive(Debug, Clone)]
-pub struct Config {
+pub(crate) struct Config {
     /// The directory of the config that was found, not of anything it extends.
     root: AbsolutePath,
     /// `root` with every symlink followed: the boundary supdoc reads inside.
@@ -113,7 +113,7 @@ impl Config {
     ///
     /// Returns a [`ConfigError`] if the config, or a file it extends, can't be read, parsed or
     /// followed.
-    pub fn load(start: &AbsolutePath) -> Result<Self, ConfigError> {
+    pub(crate) fn load(start: &AbsolutePath) -> Result<Self, ConfigError> {
         Self::load_under(start, &CommandLineLimits::default())
     }
 
@@ -126,7 +126,7 @@ impl Config {
     ///
     /// As [`Config::load`], and [`ConfigError::TooLarge`] for a config file in the chain larger
     /// than `max-config-size`.
-    pub fn load_under(
+    pub(crate) fn load_under(
         start: &AbsolutePath,
         given: &CommandLineLimits,
     ) -> Result<Self, ConfigError> {
@@ -144,7 +144,8 @@ impl Config {
     ///
     /// Returns [`ConfigError::NotFound`] if `file` doesn't exist, and the other variants as
     /// [`Config::load`] does.
-    pub fn load_file(file: &AbsolutePath) -> Result<Self, ConfigError> {
+    #[cfg(test)]
+    pub(crate) fn load_file(file: &AbsolutePath) -> Result<Self, ConfigError> {
         Self::load_file_under(file, &CommandLineLimits::default())
     }
 
@@ -157,7 +158,7 @@ impl Config {
     ///
     /// As [`Config::load_file`], and [`ConfigError::TooLarge`] for a config file in the chain
     /// larger than `max-config-size`.
-    pub fn load_file_under(
+    pub(crate) fn load_file_under(
         file: &AbsolutePath,
         given: &CommandLineLimits,
     ) -> Result<Self, ConfigError> {
@@ -182,7 +183,7 @@ impl Config {
 
     /// The project root: the directory of the config that was found. `supdoc.lock` sits here.
     #[must_use]
-    pub fn root(&self) -> &AbsolutePath {
+    pub(crate) fn root(&self) -> &AbsolutePath {
         &self.root
     }
 
@@ -193,19 +194,19 @@ impl Config {
     ///
     /// Effect: reads file metadata and symlinks along `path`.
     #[must_use]
-    pub fn contains(&self, path: &Path) -> bool {
+    pub(crate) fn contains(&self, path: &Path) -> bool {
         confine::real_location(path).is_some_and(|real| real.starts_with(&self.real_root))
     }
 
     /// The config files in the chain, child first. Empty when running on defaults.
     #[must_use]
-    pub fn files(&self) -> &[AbsolutePath] {
+    pub(crate) fn files(&self) -> &[AbsolutePath] {
         &self.files
     }
 
     /// Whether `path` is included and not excluded.
     #[must_use]
-    pub fn scans(&self, path: &AbsolutePath) -> bool {
+    pub(crate) fn scans(&self, path: &AbsolutePath) -> bool {
         self.include.matches(path)
             && !self
                 .exclude
@@ -217,7 +218,7 @@ impl Config {
     /// when no pattern does. Patterns match everything beneath what they name, so a path inside
     /// an excluded directory is excluded by that directory's pattern.
     #[must_use]
-    pub fn excluded_by(&self, path: &AbsolutePath) -> Option<&str> {
+    pub(crate) fn excluded_by(&self, path: &AbsolutePath) -> Option<&str> {
         self.exclude.as_ref()?.first_match(path)
     }
 
@@ -225,41 +226,41 @@ impl Config {
     ///
     /// The directory may not exist: that is checked when a link through it is read (01 D7).
     #[must_use]
-    pub fn namespace(&self, name: &NamespaceName) -> Option<&AbsolutePath> {
+    pub(crate) fn namespace(&self, name: &NamespaceName) -> Option<&AbsolutePath> {
         self.namespaces.get(name).map(Namespace::dir)
     }
 
     /// Every namespace, by name.
     #[must_use]
-    pub fn namespaces(&self) -> &BTreeMap<NamespaceName, Namespace> {
+    pub(crate) fn namespaces(&self) -> &BTreeMap<NamespaceName, Namespace> {
         &self.namespaces
     }
 
     /// The `include` patterns as written and the file that set them, or `None` when no config
     /// file sets `include` and the default (everything) applies.
     #[must_use]
-    pub fn include_definition(&self) -> Option<PatternDefinition<'_>> {
+    pub(crate) fn include_definition(&self) -> Option<PatternDefinition<'_>> {
         self.include.definition()
     }
 
     /// The `exclude` patterns as written and the file that set them, or `None` when no config
     /// file sets `exclude`.
     #[must_use]
-    pub fn exclude_definition(&self) -> Option<PatternDefinition<'_>> {
+    pub(crate) fn exclude_definition(&self) -> Option<PatternDefinition<'_>> {
         self.exclude.as_ref()?.definition()
     }
 
     /// The config file that defined the namespace `name`, or `None` if the config doesn't define
     /// it. When several files in the chain define it, this is the nearest one.
     #[must_use]
-    pub fn namespace_defined_in(&self, name: &NamespaceName) -> Option<&AbsolutePath> {
+    pub(crate) fn namespace_defined_in(&self, name: &NamespaceName) -> Option<&AbsolutePath> {
         self.namespaces.get(name).map(Namespace::defined_in)
     }
 
     /// The resolved hash settings: each key from the nearest config that sets it, else the
     /// default.
     #[must_use]
-    pub fn hash_settings(&self) -> HashSettings {
+    pub(crate) fn hash_settings(&self) -> HashSettings {
         HashSettings {
             line_endings: self
                 .line_endings
@@ -271,20 +272,21 @@ impl Config {
 
     /// The config file that set `line-endings`, or `None` when the default applies.
     #[must_use]
-    pub fn line_endings_defined_in(&self) -> Option<&AbsolutePath> {
+    pub(crate) fn line_endings_defined_in(&self) -> Option<&AbsolutePath> {
         self.line_endings.as_ref().map(|(_, file)| file)
     }
 
     /// Each `[limits]` key from the nearest config that sets it, and that file.
     #[must_use]
-    pub fn limits(&self) -> &ConfigLimits {
+    #[cfg(test)]
+    pub(crate) fn limits(&self) -> &ConfigLimits {
         &self.limits
     }
 
     /// This config with the ceilings `given` on the command line put in effect over its own, by
     /// flag beats variable beats config beats default.
     #[must_use]
-    pub fn with_command_line(mut self, given: &CommandLineLimits) -> Self {
+    pub(crate) fn with_command_line(mut self, given: &CommandLineLimits) -> Self {
         self.in_effect = Limits::resolve(given, &self.limits);
         self
     }
@@ -292,7 +294,7 @@ impl Config {
     /// Every ceiling in effect, and where each came from. Every reader takes its ceiling from
     /// here, so one run applies one value.
     #[must_use]
-    pub fn limits_in_effect(&self) -> &Limits {
+    pub(crate) fn limits_in_effect(&self) -> &Limits {
         &self.in_effect
     }
 }

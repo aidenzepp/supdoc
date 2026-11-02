@@ -14,7 +14,7 @@ use crate::read::query::QueryFileError;
 
 /// Why a file couldn't be read and parsed.
 #[derive(Debug)]
-pub enum ReadError {
+pub(crate) enum ReadError {
     /// The file doesn't exist.
     Missing {
         /// The file that was looked for.
@@ -90,7 +90,7 @@ pub enum ReadError {
 }
 
 /// The code of [`ReadError::Timeout`]. Every command that meets it exits 1 (D1).
-pub const CODE_TIMEOUT: &str = "read-timeout";
+pub(crate) const CODE_TIMEOUT: &str = "read-timeout";
 
 /// How to raise the per-file read ceiling: its key, variable and flag, and the value that lifts it.
 const TIMEOUT_KNOBS: &str = "Raise the per-read limit with `parse-timeout` under `[limits]` in \
@@ -128,7 +128,7 @@ fn capitalized(text: &str) -> String {
 /// A built-in cartridge that cannot be loaded: a supdoc bug that fails the run (exit 70), not a
 /// problem with any one file.
 #[derive(Debug, thiserror::Error)]
-pub enum CartridgeLoadError {
+pub(crate) enum CartridgeLoadError {
     /// A built-in query file doesn't compile against its grammar.
     #[error("{0}")]
     Query(&'static QueryFileError),
@@ -141,13 +141,13 @@ pub enum CartridgeLoadError {
 impl CartridgeLoadError {
     /// The stable code: `read-cartridge-load`.
     #[must_use]
-    pub const fn code(&self) -> &'static str {
+    pub(crate) const fn code() -> &'static str {
         "read-cartridge-load"
     }
 
     /// What to do next.
     #[must_use]
-    pub fn help(&self) -> String {
+    pub(crate) fn help() -> String {
         concat!(
             "Reinstall supdoc with `cargo install --locked supdoc`. If it still fails, report a \
              bug at ",
@@ -160,7 +160,7 @@ impl CartridgeLoadError {
 
 /// What a file was being read as, which decides what advice fits its [`ReadError`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReadRole {
+pub(crate) enum ReadRole {
     /// A walked source file being scanned for links; `exclude` removes it from the scan.
     ScannedSource,
     /// A walked source file being renamed past, which must never be offered `exclude`.
@@ -174,7 +174,7 @@ pub enum ReadRole {
 impl ReadError {
     /// The stable code for this error: `read-missing`, `read-not-utf8`, …
     #[must_use]
-    pub fn code(&self) -> &'static str {
+    pub(crate) fn code(&self) -> &'static str {
         match self {
             Self::Missing { .. } => "read-missing",
             Self::NotAFile { .. } => "read-not-a-file",
@@ -189,7 +189,7 @@ impl ReadError {
 
     /// The file that couldn't be read.
     #[must_use]
-    pub fn path(&self) -> &AbsolutePath {
+    pub(crate) fn path(&self) -> &AbsolutePath {
         match self {
             Self::Missing { path }
             | Self::NotAFile { path }
@@ -204,7 +204,7 @@ impl ReadError {
 
     /// The message, naming the file as `shown` instead of by its absolute path.
     #[must_use]
-    pub fn message_naming(&self, shown: &dyn Display) -> String {
+    pub(crate) fn message_naming(&self, shown: &dyn Display) -> String {
         match self {
             Self::Missing { .. } => format!("{shown} does not exist"),
             Self::NotAFile { .. } => format!("{shown} is not a regular file"),
@@ -235,7 +235,7 @@ impl ReadError {
     /// Only a file that is missing, not a regular file, not UTF-8, too large or timed out reads
     /// differently by role; the other errors give the same advice whoever asked.
     #[must_use]
-    pub fn help(&self, role: ReadRole, shown: &str) -> String {
+    pub(crate) fn help(&self, role: ReadRole, shown: &str) -> String {
         match (self, role) {
             (Self::Missing { .. }, ReadRole::Target) => {
                 format!("If `{shown}` moved, update the link to its new path")
@@ -341,7 +341,7 @@ impl std::error::Error for ReadError {}
 
 /// Why a symbol path names no single symbol in a file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResolveError {
+pub(crate) enum ResolveError {
     /// Nothing in the file has that path.
     NotFound {
         /// The file searched.
@@ -368,7 +368,7 @@ pub enum ResolveError {
 impl ResolveError {
     /// The stable code for this error: `resolve-not-found` or `resolve-ambiguous`.
     #[must_use]
-    pub fn code(&self) -> &'static str {
+    pub(crate) fn code(&self) -> &'static str {
         match self {
             Self::NotFound { .. } => "resolve-not-found",
             Self::Ambiguous { .. } => "resolve-ambiguous",
@@ -376,8 +376,9 @@ impl ResolveError {
     }
 
     /// What to do next, naming the file by its absolute path.
+    #[cfg(test)]
     #[must_use]
-    pub fn help(&self) -> String {
+    pub(crate) fn help(&self) -> String {
         self.help_running(&format!(
             "supdoc resolve {}",
             shell_quote(&self.file().display().to_string())
@@ -386,7 +387,7 @@ impl ResolveError {
 
     /// The message, naming the file as `shown` instead of by its absolute path.
     #[must_use]
-    pub fn message_naming(&self, shown: &dyn Display) -> String {
+    pub(crate) fn message_naming(&self, shown: &dyn Display) -> String {
         match self {
             Self::NotFound { query, .. } => format!("no symbol `{query}` in {shown}"),
             Self::Ambiguous {
@@ -398,14 +399,14 @@ impl ResolveError {
     /// What to do next, with `command` as the whole shell command that lists the file's symbols,
     /// so a run that was given `-c` or a relative path repeats both.
     #[must_use]
-    pub fn help_running(&self, command: &str) -> String {
+    pub(crate) fn help_running(&self, command: &str) -> String {
         self.help_listing(&format!("`{command}` lists every symbol"))
     }
 
     /// What to do next, for a `shown` path relative to the project root. A scan cannot know the
     /// caller's directory, so the hint says where to run the command.
     #[must_use]
-    pub fn help_from_root(&self, shown: &dyn Display) -> String {
+    pub(crate) fn help_from_root(&self, shown: &dyn Display) -> String {
         self.help_listing(&format!(
             "run `supdoc resolve {}` from the project root to list its symbols",
             shell_quote(&shown.to_string())
@@ -450,7 +451,7 @@ impl ResolveError {
 
     /// The file searched.
     #[must_use]
-    pub fn file(&self) -> &AbsolutePath {
+    pub(crate) fn file(&self) -> &AbsolutePath {
         match self {
             Self::NotFound { file, .. } | Self::Ambiguous { file, .. } => file,
         }

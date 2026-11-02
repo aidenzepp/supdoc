@@ -28,7 +28,7 @@ impl Lockfile {
     /// (`max-lock-size`), measured on the open file before any of it is read, and never read past
     /// one byte over `limit` should it grow meanwhile. Otherwise fails if the file exists but
     /// cannot be read, or its text is not a valid lockfile.
-    pub fn read(path: &AbsolutePath, limit: SizeLimit) -> Result<Option<Self>, LockError> {
+    pub(crate) fn read(path: &AbsolutePath, limit: SizeLimit) -> Result<Option<Self>, LockError> {
         let read_failed = |error| LockError::Read {
             path: path.clone(),
             error,
@@ -93,7 +93,7 @@ impl Lockfile {
     /// `OutsideRoot` for a symlink that doesn't lead to a `supdoc.lock` inside the root, so no
     /// write ever lands outside it. Otherwise fails if the temporary file cannot be written or
     /// moved into place. Any existing lockfile is left unchanged.
-    pub fn write(&self, path: &AbsolutePath) -> Result<(), LockError> {
+    pub(crate) fn write(&self, path: &AbsolutePath) -> Result<(), LockError> {
         let to_error = |error| LockError::Write {
             path: path.clone(),
             error,

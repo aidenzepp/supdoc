@@ -1,6 +1,9 @@
 //! supdoc tracks links from documentation to code and reports when the linked code changes.
 //!
-//! The crate root: the top-level modules of the library.
+//! The crate root. The library is the `supdoc` binary's implementation, not a stable API: its
+//! public surface is [`main`], the binary's one entry point, and [`testing`], the seam the
+//! integration tests use to reach codes no binary run can print. Every other module is
+//! crate-private.
 
 #![cfg_attr(
     test,
@@ -12,123 +15,123 @@
 )]
 
 /// The process exit status.
-pub mod exit;
+pub(crate) mod exit;
 
 /// The shared "did you mean" rule: one cutoff, one distance metric, a length prefilter.
 pub(crate) mod suggest;
 
 /// Absolute and project-relative paths, normalized lexically.
-pub mod path;
+pub(crate) mod path;
 
 /// Links from documentation to code: keys, references and destinations.
-pub mod link;
+pub(crate) mod link;
 
 /// Namespace names that prefix link destinations.
-pub mod namespace;
+pub(crate) mod namespace;
 
 /// Content hashes of linked code.
-pub mod hash;
+pub(crate) mod hash;
 
 /// Findings: severity, location, snippet and suggested fix.
-pub mod finding;
+pub(crate) mod finding;
 
 /// The state of a link compared with the lockfile.
-pub mod state;
+pub(crate) mod state;
 
 /// Loading `supdoc.config.toml` and its `extends` chain.
-pub mod config;
+pub(crate) mod config;
 
 /// The `[limits]` ceilings: units, precedence and where each value came from.
-pub mod limits;
+pub(crate) mod limits;
 
 /// The `supdoc.lock` lockfile: its in-memory model and its file format.
-pub mod lock {
+pub(crate) mod lock {
     /// The in-memory lockfile.
-    pub mod model;
+    pub(crate) mod model;
 
     /// Parsing the lockfile text.
-    pub mod parse;
+    pub(crate) mod parse;
 
     /// Rendering the lockfile text.
-    pub mod render;
+    pub(crate) mod render;
 
     /// Reading and atomically writing the lockfile.
-    pub mod io;
+    pub(crate) mod io;
 
     /// Lockfile errors.
-    pub mod error;
+    pub(crate) mod error;
 }
 
 /// Reading source files: parsing, symbols, hashing and link extraction.
-pub mod read {
+pub(crate) mod read {
     /// The `Cartridge` trait that plugs a language into supdoc.
-    pub mod cartridge;
+    pub(crate) mod cartridge;
 
     /// A source file read into memory.
-    pub mod source;
+    pub(crate) mod source;
 
     /// Cartridges driven by tree-sitter query files.
-    pub mod query;
+    pub(crate) mod query;
 
     /// Symbol tables built from `tags.scm` captures, and symbol resolution.
-    pub mod symbols;
+    pub(crate) mod symbols;
 
     /// Hashing a symbol's bytes or a whole file.
-    pub mod hash;
+    pub(crate) mod hash;
 
     /// The built-in language registry.
-    pub mod registry;
+    pub(crate) mod registry;
 
     /// Reading and resolution errors.
-    pub mod error;
+    pub(crate) mod error;
 
     /// Finding links in a file's Markdown regions.
-    pub mod links;
+    pub(crate) mod links;
 }
 
 /// Built-in language cartridges.
-pub mod cartridges {
+pub(crate) mod cartridges {
     /// Rust, the reference cartridge.
-    pub mod rust;
+    pub(crate) mod rust;
 
     /// TypeScript.
-    pub mod ts;
+    pub(crate) mod ts;
 
     /// TSX.
-    pub mod tsx;
+    pub(crate) mod tsx;
 
     /// JavaScript.
-    pub mod js;
+    pub(crate) mod js;
 
     /// Python.
-    pub mod python;
+    pub(crate) mod python;
 
     /// Go.
-    pub mod go;
+    pub(crate) mod go;
 
     /// Bash.
-    pub mod bash;
+    pub(crate) mod bash;
 
     /// Markdown.
-    pub mod markdown {
+    pub(crate) mod markdown {
         /// The Markdown cartridge.
-        pub mod cartridge;
+        pub(crate) mod cartridge;
 
         /// Headings as GitHub anchors and dotted symbol paths.
-        pub mod symbols;
+        pub(crate) mod symbols;
 
         /// The Markdown regions where links are read.
-        pub mod regions;
+        pub(crate) mod regions;
     }
 }
 
 /// Scanning a project for links and the state of their targets.
-pub mod scan {
+pub(crate) mod scan {
     /// The scan result.
-    pub mod model;
+    pub(crate) mod model;
 
     /// Walking the project tree for source files.
-    pub mod walk;
+    pub(crate) mod walk;
 
     /// The ignore engine behind the walk.
     mod ignore;
@@ -140,32 +143,45 @@ pub mod scan {
     mod explicit;
 
     /// Assembling a scan from sources, links and targets.
-    pub mod assemble;
+    pub(crate) mod assemble;
 
     /// Grouping links by target and resolving each target once.
-    pub mod targets;
+    pub(crate) mod targets;
 }
 
 /// Comparing a scan with the lockfile and planning changes.
-pub mod check {
+pub(crate) mod check {
     /// The check report.
-    pub mod model;
+    pub(crate) mod model;
 
     /// Reconciling scanned links with lockfile entries.
-    pub mod reconcile;
+    pub(crate) mod reconcile;
 
     /// Detecting links whose target moved.
-    pub mod moves;
+    pub(crate) mod moves;
 
     /// Check outcomes and update plans.
-    pub mod plan;
+    pub(crate) mod plan;
 
     /// Planning and applying fixes to documentation and the lockfile.
-    pub mod fix;
+    pub(crate) mod fix;
 }
 
 /// Rendering reports as text, JSON and JSONL.
-pub mod output;
+pub(crate) mod output;
 
 /// The command-line interface: arguments and commands.
-pub mod cli;
+pub(crate) mod cli;
+
+/// The process boundary: reading the environment and turning a run into an exit code.
+mod process;
+
+pub mod testing;
+
+/// Runs the `supdoc` command with the process's arguments and environment.
+///
+/// The `supdoc` binary is this one call.
+#[must_use]
+pub fn main() -> std::process::ExitCode {
+    std::process::ExitCode::from(process::exit_code())
+}

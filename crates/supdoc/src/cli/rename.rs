@@ -60,7 +60,11 @@ const COMMAND: &str = "namespace rename";
 /// `cli-rename-file-changed` when a file changed between planning and writing (all 1),
 /// `cli-rename-write` when a file can't be written, and `cli-output-failed` when the report can't
 /// be written (both 74).
-pub fn run(args: &RenameArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
+pub(crate) fn run(
+    args: &RenameArgs,
+    context: &Context,
+    output: &mut Output,
+) -> Result<Outcome, CliError> {
     let plan = Plan::build(args, context, output)?;
     let applied = match args.confirm.mode() {
         WriteMode::Preview => false,
@@ -112,7 +116,7 @@ fn rename_command(args: &RenameArgs, context: &Context, flags: &[&str]) -> Strin
 /// The JSON Schema of `supdoc namespace rename`'s `--json` output: the whole envelope, with `data`
 /// typed as [`RenameReport`].
 #[must_use]
-pub fn schema() -> schemars::Schema {
+pub(crate) fn schema() -> schemars::Schema {
     schemars::schema_for!(Envelope<'static, RenameReport>)
 }
 
@@ -687,7 +691,7 @@ fn replace_file(target: &Path, bytes: &[u8]) -> io::Result<()> {
 /// no longer holds what the rename read; `apply_command` reruns the rename. A rename meets it only
 /// when a file changes between planning and writing, so a test builds it here.
 #[must_use]
-pub fn file_changed(file: &str, apply_command: &str) -> CliError {
+pub(crate) fn file_changed(file: &str, apply_command: &str) -> CliError {
     CliError::new(
         "cli-rename-file-changed",
         format!(

@@ -4,7 +4,9 @@ use std::io::{self, Write};
 
 use crate::finding::Finding;
 use crate::output::format::{OutputFormat, TextContext, Verbosity};
-use crate::output::json::{Envelope, FatalJson, FindingJson};
+#[cfg(test)]
+use crate::output::json::FindingJson;
+use crate::output::json::{Envelope, FatalJson};
 use crate::output::paths::PathStyle;
 use crate::output::report::Report;
 use crate::output::{github, jsonl, text};
@@ -12,19 +14,19 @@ use crate::path::AbsolutePath;
 
 /// What `main` decides about output before any command runs.
 #[derive(Debug, Clone)]
-pub struct OutputSettings {
+pub(crate) struct OutputSettings {
     /// The format data is written in.
-    pub format: OutputFormat,
+    pub(crate) format: OutputFormat,
     /// How much to say.
-    pub verbosity: Verbosity,
+    pub(crate) verbosity: Verbosity,
     /// Whether text output carries ANSI color.
-    pub color: bool,
+    pub(crate) color: bool,
     /// Whether text output draws with Unicode instead of ASCII (07 G12).
-    pub unicode: bool,
+    pub(crate) unicode: bool,
     /// The terminal width in columns.
-    pub width: usize,
+    pub(crate) width: usize,
     /// How paths are shown.
-    pub paths: PathStyle,
+    pub(crate) paths: PathStyle,
 }
 
 impl OutputSettings {
@@ -42,7 +44,7 @@ impl OutputSettings {
 
 /// Why output could not be written.
 #[derive(Debug, thiserror::Error)]
-pub enum OutputError {
+pub(crate) enum OutputError {
     /// Writing to stdout or stderr failed for a reason other than a closed pipe.
     #[error("could not write supdoc's output: {0}")]
     Write(#[from] io::Error),
@@ -56,7 +58,7 @@ pub enum OutputError {
 /// A closed pipe, as in `supdoc list | head`, is not an error: the first write that meets one
 /// marks that stream closed, and later writes to it are dropped quietly (06 X13). The other
 /// stream keeps working, and the run keeps its own exit code.
-pub struct Output {
+pub(crate) struct Output {
     /// How to write.
     settings: OutputSettings,
     /// Where data goes.
@@ -82,7 +84,11 @@ impl std::fmt::Debug for Output {
 impl Output {
     /// Output that writes to `stdout` and `stderr`.
     #[must_use]
-    pub fn new(settings: OutputSettings, stdout: Box<dyn Write>, stderr: Box<dyn Write>) -> Self {
+    pub(crate) fn new(
+        settings: OutputSettings,
+        stdout: Box<dyn Write>,
+        stderr: Box<dyn Write>,
+    ) -> Self {
         Self {
             settings,
             stdout,
@@ -95,7 +101,7 @@ impl Output {
     /// Output on the process's own stdout and stderr, with ANSI codes stripped wherever
     /// `choice` and the terminal say color is off.
     #[must_use]
-    pub fn stdio(settings: OutputSettings, choice: anstream::ColorChoice) -> Self {
+    pub(crate) fn stdio(settings: OutputSettings, choice: anstream::ColorChoice) -> Self {
         Self::new(
             settings,
             Box::new(anstream::AutoStream::new(io::stdout(), choice)),
@@ -106,25 +112,26 @@ impl Output {
     /// Sets the project root once `Config::load` has found it. Everything written after this
     /// call, including the JSON `root`, uses it; text paths stay relative to the current
     /// directory.
-    pub fn set_root(&mut self, root: AbsolutePath) {
+    pub(crate) fn set_root(&mut self, root: AbsolutePath) {
         self.settings.paths.set_root(root);
     }
 
     /// Whether text output draws with Unicode instead of ASCII (07 G12).
     #[must_use]
-    pub const fn unicode(&self) -> bool {
+    pub(crate) const fn unicode(&self) -> bool {
         self.settings.unicode
     }
 
     /// How much to say, as `main` decided it from the flags.
     #[must_use]
-    pub const fn verbosity(&self) -> Verbosity {
+    pub(crate) const fn verbosity(&self) -> Verbosity {
         self.settings.verbosity
     }
 
     /// Whether the reader of stdout closed the pipe. The run's exit code does not change.
+    #[cfg(test)]
     #[must_use]
-    pub const fn is_closed(&self) -> bool {
+    pub(crate) const fn is_closed(&self) -> bool {
         self.stdout_closed
     }
 
@@ -135,7 +142,7 @@ impl Output {
     ///
     /// Fails if the report can't be turned into JSON or a write fails for any reason but a
     /// closed pipe.
-    pub fn report<R: Report>(&mut self, report: &R, ok: bool) -> Result<(), OutputError> {
+    pub(crate) fn report<R: Report>(&mut self, report: &R, ok: bool) -> Result<(), OutputError> {
         let mut bytes = Vec::new();
         match self.settings.format {
             OutputFormat::Text => report.render_text(&self.settings.text_context(), &mut bytes)?,
@@ -175,7 +182,7 @@ impl Output {
     ///
     /// Fails if the report can't be turned into JSON or a write fails for any reason but a
     /// closed pipe.
-    pub fn artifact<R: Report>(
+    pub(crate) fn artifact<R: Report>(
         &mut self,
         report: &R,
         raw: &str,
@@ -192,7 +199,8 @@ impl Output {
     /// # Errors
     ///
     /// Fails if a write fails for any reason but a closed pipe.
-    pub fn diag(&mut self, finding: &Finding) -> Result<(), OutputError> {
+    #[cfg(test)]
+    pub(crate) fn diag(&mut self, finding: &Finding) -> Result<(), OutputError> {
         if !self.settings.verbosity.shows(finding.severity) {
             return Ok(());
         }
@@ -218,7 +226,7 @@ impl Output {
     /// # Errors
     ///
     /// Fails if a write fails for any reason but a closed pipe.
-    pub fn note(&mut self, note: &str) -> Result<(), OutputError> {
+    pub(crate) fn note(&mut self, note: &str) -> Result<(), OutputError> {
         if !self.settings.verbosity.shows_summary() || self.settings.format.is_json() {
             return Ok(());
         }
@@ -236,7 +244,7 @@ impl Output {
     /// # Errors
     ///
     /// Fails if a write fails for any reason but a closed pipe.
-    pub fn fatal(&mut self, finding: &Finding, exit_code: u8) -> Result<(), OutputError> {
+    pub(crate) fn fatal(&mut self, finding: &Finding, exit_code: u8) -> Result<(), OutputError> {
         let mut bytes = Vec::new();
         if self.settings.format.is_json() {
             serde_json::to_writer(&mut bytes, &FatalJson::new(finding, exit_code))?;
