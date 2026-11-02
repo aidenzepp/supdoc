@@ -215,6 +215,9 @@ impl ReadError {
             Self::TooLarge { size, limit, .. } => {
                 format!("{shown} is {size} bytes; the limit is {limit}")
             }
+            Self::UnsupportedLanguage { extension, .. } if extension.is_empty() => {
+                format!("supdoc can't read symbols in {shown}: it has no file extension")
+            }
             Self::UnsupportedLanguage { extension, .. } => {
                 format!("no language for `.{extension}` files ({shown})")
             }
@@ -301,7 +304,8 @@ impl ReadError {
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!(
-                    "supdoc reads {listed}. A whole-file link to this type can't be tracked yet"
+                    "Remove the `#fragment` to link the whole file (supdoc leaves it untracked), \
+                     or link a symbol in a file supdoc reads: {listed}"
                 )
             }
             (Self::Internal { .. }, _) => concat!(
@@ -572,7 +576,22 @@ mod tests {
         );
         assert_eq!(
             error.help(ReadRole::Target, "logo.png"),
-            "supdoc reads `.md`, `.rs`. A whole-file link to this type can't be tracked yet",
+            "Remove the `#fragment` to link the whole file (supdoc leaves it untracked), or \
+             link a symbol in a file supdoc reads: `.md`, `.rs`",
+        );
+    }
+
+    #[test]
+    fn extensionless_file_message_says_it_has_no_extension() {
+        let error = ReadError::UnsupportedLanguage {
+            path: absolute("/repo/Makefile"),
+            extension: String::new(),
+            supported: vec!["rs"],
+        };
+
+        assert_eq!(
+            error.message_naming(&"Makefile"),
+            "supdoc can't read symbols in Makefile: it has no file extension"
         );
     }
 
