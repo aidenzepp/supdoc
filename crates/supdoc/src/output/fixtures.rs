@@ -11,7 +11,7 @@ use crate::link::SourcePath;
 use crate::output::format::{OutputFormat, TextContext, Verbosity};
 use crate::output::json::FindingJson;
 use crate::output::paths::PathStyle;
-use crate::output::report::Report;
+use crate::output::report::{RecordArray, Report};
 use crate::output::sink::{Output, OutputSettings};
 use crate::output::summary::{Summary, render_summary};
 use crate::output::text::render_finding;
@@ -221,6 +221,10 @@ impl LinkFixture {
 }
 
 impl Report for CheckFixture {
+    fn record_arrays(&self) -> &'static [RecordArray] {
+        const { &[RecordArray::new("links", "link")] }
+    }
+
     fn command(&self) -> &'static str {
         self.command
     }

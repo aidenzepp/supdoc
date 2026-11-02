@@ -43,6 +43,6 @@ pub use format::{OutputFormat, TextContext, Verbosity};
 pub use json::{Envelope, FindingJson, SCHEMA_VERSION};
 pub use paths::PathStyle;
 pub use preview::preview_note;
-pub use report::Report;
+pub use report::{RecordArray, Report};
 pub use sink::{Output, OutputError, OutputSettings};
 pub use summary::Summary;

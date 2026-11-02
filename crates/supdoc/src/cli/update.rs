@@ -25,7 +25,7 @@ use crate::hash::LineEndings;
 use crate::link::LinkKey;
 use crate::output::json::Envelope;
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, PathStyle, Report, Summary, TextContext, preview_note};
+use crate::output::{Output, PathStyle, RecordArray, Report, Summary, TextContext, preview_note};
 use crate::read::cartridge::Languages;
 use crate::state::LinkState;
 
@@ -238,6 +238,10 @@ impl UpdateReport {
 }
 
 impl Report for UpdateReport {
+    fn record_arrays(&self) -> &'static [RecordArray] {
+        const { &[RecordArray::new("changes", "change")] }
+    }
+
     fn command(&self) -> &'static str {
         "update"
     }

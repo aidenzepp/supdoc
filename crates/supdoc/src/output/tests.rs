@@ -14,7 +14,7 @@ use crate::output::format::{OutputFormat, Verbosity, supports_unicode};
 use crate::output::github::{annotation, escape_data, escape_property};
 use crate::output::jsonl;
 use crate::output::paths::PathStyle;
-use crate::output::report::Report;
+use crate::output::report::{RecordArray, Report};
 use crate::output::sink::{Output, OutputError};
 use crate::output::summary::Summary;
 use crate::output::text::render_finding;
@@ -82,6 +82,10 @@ struct ScalarFixture {
 }
 
 impl Report for ScalarFixture {
+    fn record_arrays(&self) -> &'static [RecordArray] {
+        const { &[RecordArray::new("changes", "change")] }
+    }
+
     fn command(&self) -> &'static str {
         "update"
     }

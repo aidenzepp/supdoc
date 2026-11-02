@@ -27,7 +27,7 @@ use crate::lock::model::Lockfile;
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, PathStyle, Report, TextContext, preview_note};
+use crate::output::{Output, PathStyle, RecordArray, Report, TextContext, preview_note};
 use crate::path::AbsolutePath;
 use crate::read::cartridge::Languages;
 use crate::read::error::CODE_TIMEOUT;
@@ -609,6 +609,10 @@ impl FixReport {
 }
 
 impl Report for FixReport {
+    fn record_arrays(&self) -> &'static [RecordArray] {
+        const { &[RecordArray::new("fixes", "fix")] }
+    }
+
     fn command(&self) -> &'static str {
         "fix"
     }

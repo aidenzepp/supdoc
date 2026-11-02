@@ -22,7 +22,7 @@ use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
 use crate::output::summary::render_summary;
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, PathStyle, Report, Summary, TextContext};
+use crate::output::{Output, PathStyle, RecordArray, Report, Summary, TextContext};
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile, SymbolTable};
 use crate::read::error::{ReadError, ReadRole, ResolveError};
@@ -248,6 +248,10 @@ impl ListReport {
 }
 
 impl Report for ListReport {
+    fn record_arrays(&self) -> &'static [RecordArray] {
+        const { &[RecordArray::new("links", "link")] }
+    }
+
     fn command(&self) -> &'static str {
         "list"
     }

@@ -162,6 +162,61 @@ fn jsonl_output_has_nothing_but_json_lines_on_stdout() {
     }
 }
 
+#[test]
+fn jsonl_carries_every_data_field_that_json_has() {
+    let commands: Vec<&[&str]> = JSON_SUCCESSES
+        .iter()
+        .copied()
+        .filter(|args| !matches!(args.first(), Some(&"schema" | &"completions")))
+        .collect();
+    for project in [Project::clean(), Project::dirty()] {
+        for args in &commands {
+            let json = project.run(&with_format(args, &["--json"]));
+            let jsonl = project.run(&with_format(args, &["--jsonl"]));
+
+            let document: serde_json::Value = serde_json::from_str(&json.stdout)
+                .unwrap_or_else(|error| panic!("`supdoc {}` --json: {error}", json.args));
+            let Some(data) = document.get("data").and_then(serde_json::Value::as_object) else {
+                continue;
+            };
+            let lines: Vec<serde_json::Value> = jsonl
+                .stdout
+                .lines()
+                .map(|line| {
+                    serde_json::from_str(line)
+                        .unwrap_or_else(|error| panic!("`supdoc {}`: {error}", jsonl.args))
+                })
+                .collect();
+            let summary = lines
+                .last()
+                .expect("a JSONL stream ends with its summary line");
+            let records = lines
+                .iter()
+                .filter(|line| !matches!(line["type"].as_str(), Some("summary" | "finding")))
+                .count();
+            for (key, value) in data {
+                assert!(
+                    summary.get(key).is_some() || value.is_array(),
+                    "`supdoc {}`: `--json` data key `{key}` is missing from the `--jsonl` summary:\n{}",
+                    jsonl.args,
+                    jsonl.stdout
+                );
+            }
+            let array_elements: usize = data
+                .iter()
+                .filter(|(key, _)| summary.get(*key).is_none())
+                .filter_map(|(_, value)| value.as_array().map(Vec::len))
+                .sum();
+            assert_eq!(
+                records, array_elements,
+                "`supdoc {}`: `--jsonl` should carry one record per element of the `--json` arrays \
+                 it left off the summary:\n{}",
+                jsonl.args, jsonl.stdout
+            );
+        }
+    }
+}
+
 /// `ok` from the JSON envelope on stdout, or from the JSONL summary line, if there is one.
 fn reported_ok(run: &Run) -> Option<bool> {
     let last = run.stdout.lines().last()?;

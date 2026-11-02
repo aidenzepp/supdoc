@@ -18,7 +18,7 @@ use crate::link::{LinkKey, SourcePath};
 use crate::output::json::{Envelope, FindingJson};
 use crate::output::summary::render_summary;
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, PathStyle, Report, Summary, TextContext, Verbosity};
+use crate::output::{Output, PathStyle, RecordArray, Report, Summary, TextContext, Verbosity};
 use crate::read::cartridge::Languages;
 use crate::scan::assemble::UntrackedLinks;
 use crate::state::LinkState;
@@ -127,6 +127,10 @@ impl CheckReport {
 }
 
 impl Report for CheckReport {
+    fn record_arrays(&self) -> &'static [RecordArray] {
+        const { &[RecordArray::new("links", "link")] }
+    }
+
     fn command(&self) -> &'static str {
         "check"
     }

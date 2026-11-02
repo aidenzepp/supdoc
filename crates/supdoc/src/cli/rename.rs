@@ -32,7 +32,7 @@ use crate::namespace::NamespaceName;
 use crate::output::json::{Envelope, LocationJson};
 use crate::output::paths::relative_or_absolute;
 use crate::output::text::{render_finding, visible};
-use crate::output::{Output, Report, TextContext, preview_note};
+use crate::output::{Output, RecordArray, Report, TextContext, preview_note};
 use crate::path::{AbsolutePath, ProjectFile, resolve_project_file};
 use crate::read::cartridge::{Languages, SourceFile};
 use crate::read::error::{ReadError, ReadRole};
@@ -938,6 +938,10 @@ impl RenameKind {
 }
 
 impl Report for RenameReport {
+    fn record_arrays(&self) -> &'static [RecordArray] {
+        const { &[RecordArray::new("changes", "change")] }
+    }
+
     fn command(&self) -> &'static str {
         COMMAND
     }
