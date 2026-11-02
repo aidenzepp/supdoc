@@ -503,7 +503,7 @@ impl Write for FullDisk {
 }
 
 #[test]
-fn a_closed_pipe_is_a_quiet_clean_stop() {
+fn a_closed_stdout_drops_data_but_not_what_goes_to_stderr() {
     let stderr = Capture::default();
     let mut output = Output::new(
         settings(OutputFormat::Text, Verbosity::Normal),
@@ -518,8 +518,43 @@ fn a_closed_pipe_is_a_quiet_clean_stop() {
     assert!(output.is_closed());
     output
         .note("later")
+        .expect("a note should still be written");
+    assert_eq!(stderr.text(), "later\n", "stderr is not closed with stdout");
+}
+
+#[test]
+fn a_fatal_error_reaches_stderr_after_stdout_closed() {
+    let stderr = Capture::default();
+    let mut output = Output::new(
+        settings(OutputFormat::Text, Verbosity::Normal),
+        Box::new(ClosedPipe),
+        Box::new(stderr.clone()),
+    );
+    output
+        .report(&check_report(), false)
+        .expect("a closed pipe should not be an error");
+
+    output
+        .fatal(&Finding::new("cli-test", Severity::Error, "boom"), 74)
+        .expect("a fatal error should be written");
+
+    assert!(stderr.text().contains("boom"), "got: {}", stderr.text());
+}
+
+#[test]
+fn a_closed_stderr_drops_later_stderr_writes_quietly() {
+    let mut output = Output::new(
+        settings(OutputFormat::Text, Verbosity::Normal),
+        Box::new(Capture::default()),
+        Box::new(ClosedPipe),
+    );
+
+    output.note("first").expect("a closed pipe is not an error");
+    output
+        .note("second")
         .expect("writes after a closed pipe are dropped");
-    assert_eq!(stderr.text(), "", "nothing more is written once closed");
+
+    assert!(!output.is_closed(), "only stderr closed");
 }
 
 #[test]

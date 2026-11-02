@@ -67,7 +67,6 @@ fn exit_code() -> u8 {
     };
 
     match result {
-        Ok(_) if output.is_closed() => 0,
         Ok(outcome) => outcome.exit_code(),
         Err(error) => report(&mut output, &error),
     }
@@ -119,12 +118,10 @@ fn write_all(mut sink: impl Write, text: &str) -> io::Result<()> {
 
 /// Prints `error` as a fatal error in the requested format and returns its exit code.
 ///
-/// A closed pipe is not a failure of supdoc, so it exits 0.
+/// A closed pipe does not change the exit code: the error's own code stands (06 X13).
 fn report(output: &mut Output, error: &CliError) -> u8 {
     let written = output.fatal(&fatal_finding(error), error.exit_code());
-    if output.is_closed() {
-        0
-    } else if written.is_ok() {
+    if written.is_ok() {
         error.exit_code()
     } else {
         IO_EXIT_CODE
