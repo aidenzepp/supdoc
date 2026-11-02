@@ -786,9 +786,9 @@ fn explicit_path_warnings(
         .collect()
 }
 
-/// The warning for one explicitly named path, or `None` when it was walked or is skipped for a
-/// reason that isn't a user setting (missing, a version-control or nested-project directory).
-/// A path that is a symlink, or lies under a symlinked directory, is never walked, so it always
+/// The warning for one explicitly named path, or `None` when it was walked or is missing. A path
+/// in a version-control or nested-project directory, or of a type no cartridge reads, gets a
+/// `scan-explicit-path-unscanned` warning. A path that is a symlink, or lies under a symlinked directory, is never walked, so it always
 /// gets a warning.
 fn explicit_path_warning(
     config: &Config,
@@ -800,8 +800,8 @@ fn explicit_path_warning(
     let root = config.root();
     let path = AbsolutePath::new(&root.as_path().join(listed.as_str()))?;
     let kind = fs::symlink_metadata(path.as_path()).ok()?.file_type();
-    if is_inside_skipped_dir(root, listed) {
-        return None;
+    if let Some(skipped) = skipped_dir(root, listed) {
+        return Some(unscanned(listed, &Unscanned::Dir(skipped)));
     }
     if kind.is_symlink() {
         return Some(symlinked(root, listed, &path, Symlink::Itself));
@@ -842,7 +842,48 @@ fn explicit_path_warning(
     if is_source_file && !walked {
         return Some(ignored(listed, "an ignore file"));
     }
-    None
+    (kind.is_file() && !is_source_file).then(|| unscanned(listed, &Unscanned::UnreadType))
+}
+
+/// Why the walk never reads an explicitly named path.
+enum Unscanned {
+    /// A directory on the way is skipped whatever the user names.
+    Dir(SkippedDir),
+    /// No cartridge reads files of this type.
+    UnreadType,
+}
+
+/// A directory the walk never enters, whatever the user names.
+enum SkippedDir {
+    /// A version-control directory, at this project-relative path.
+    Vcs(String),
+    /// A separate project with its own config, at this project-relative path.
+    Project(String),
+}
+
+/// The finding for an explicit path the walk never reads for a reason that isn't a user setting.
+fn unscanned(listed: &SourcePath, why: &Unscanned) -> Finding {
+    let listed = listed.as_str();
+    let (reason, help) = match why {
+        Unscanned::Dir(SkippedDir::Vcs(dir)) => (
+            format!("is inside `{dir}`, a version-control directory supdoc never scans"),
+            "Pass a path outside it, or stop passing this one".to_owned(),
+        ),
+        Unscanned::Dir(SkippedDir::Project(dir)) => (
+            format!("is inside `{dir}`, a separate project with its own {CONFIG_FILE_NAME}"),
+            format!("Run `supdoc check` inside `{dir}`, or stop passing this path"),
+        ),
+        Unscanned::UnreadType => (
+            "has a type no language supdoc reads".to_owned(),
+            "Pass a `.md` or `.rs` file instead, or stop passing this one".to_owned(),
+        ),
+    };
+    Finding::new(
+        "scan-explicit-path-unscanned",
+        Severity::Warning,
+        format!("{listed} was named on the command line but {reason}"),
+    )
+    .with_help(help)
 }
 
 /// Whether a directory above `listed`, inside `root`, is a symlink.
@@ -892,7 +933,8 @@ fn symlinked(
     let real = fs::canonicalize(path.as_path()).ok().and_then(|real| {
         let real_root = fs::canonicalize(root.as_path()).ok()?;
         let relative = real.strip_prefix(real_root).ok()?;
-        Some(relative.to_string_lossy().replace('\\', "/"))
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        (!relative.is_empty()).then_some(relative)
     });
     match real {
         Some(real) => finding.with_help(format!("Pass the real path `{real}` instead")),
@@ -953,14 +995,27 @@ fn ignored(listed: &SourcePath, rule: &str) -> Finding {
     ))
 }
 
-/// Whether `listed` or one of its parent directories is a version-control directory or a nested
-/// project, which the walk skips whatever the user names (04 S2, S4).
-fn is_inside_skipped_dir(root: &AbsolutePath, listed: &SourcePath) -> bool {
+/// The version-control directory or nested project that `listed` or one of its parent directories
+/// is, which the walk skips whatever the user names (04 S2, S4). A symlink is never judged here:
+/// the walk doesn't follow it, so it gets the symlink warning.
+fn skipped_dir(root: &AbsolutePath, listed: &SourcePath) -> Option<SkippedDir> {
     let mut current = root.as_path().to_path_buf();
-    listed.as_str().split('/').any(|segment| {
+    let mut relative = String::new();
+    for segment in listed.as_str().split('/') {
         current.push(segment);
-        is_vcs_dir(&current) || (current.is_dir() && is_nested_project(&current))
-    })
+        if !relative.is_empty() {
+            relative.push('/');
+        }
+        relative.push_str(segment);
+        if is_vcs_dir(&current) {
+            return Some(SkippedDir::Vcs(relative));
+        }
+        let is_real_dir = fs::symlink_metadata(&current).is_ok_and(|metadata| metadata.is_dir());
+        if is_real_dir && is_nested_project(&current) {
+            return Some(SkippedDir::Project(relative));
+        }
+    }
+    None
 }
 
 /// Describes the ignore rule that keeps the walk from reaching `path`, or `None` when none does.
@@ -2160,20 +2215,53 @@ mod tests {
     }
 
     #[test]
-    fn explicit_paths_the_walk_never_enters_give_no_warning() {
+    fn explicit_paths_the_walk_never_enters_get_one_unscanned_warning() {
         let project = Project::new();
         project.write("inner/supdoc.config.toml", "");
         project.write("inner/a.rs", "");
         project.write(".git/stray.rs", "");
+        project.write("notes.txt", "x\n");
 
-        let walk = project.walk(&paths(&["inner/a.rs", ".git/stray.rs", "missing.rs"]));
+        let walk = project.walk(&paths(&[
+            "inner/a.rs",
+            ".git/stray.rs",
+            "notes.txt",
+            "missing.rs",
+        ]));
 
         assert!(walk.sources.is_empty());
-        assert!(
-            walk.findings.is_empty(),
-            "unexpected findings: {:?}",
+        let codes: Vec<_> = walk.findings.iter().map(|finding| finding.code).collect();
+        assert_eq!(
+            codes, ["scan-explicit-path-unscanned"; 3],
+            "findings: {:?}",
             walk.findings
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_to_a_nested_project_or_the_root_are_warned_about() {
+        let project = Project::new();
+        project.write("inner/supdoc.config.toml", "");
+        std::os::unix::fs::symlink("inner", project.dir.path().join("to_inner"))
+            .expect("the symlink should be creatable");
+        std::os::unix::fs::symlink(".", project.dir.path().join("to_root"))
+            .expect("the symlink should be creatable");
+
+        let walk = project.walk(&paths(&["to_inner", "to_root"]));
+
+        let codes: Vec<_> = walk.findings.iter().map(|finding| finding.code).collect();
+        assert_eq!(
+            codes, ["scan-explicit-path-symlinked"; 2],
+            "findings: {:?}",
+            walk.findings
+        );
+        let help = walk
+            .findings
+            .get(1)
+            .and_then(|finding| finding.help.as_deref())
+            .unwrap_or_default();
+        assert!(!help.contains("``"), "empty suggestion in: {help}");
     }
 
     #[cfg(unix)]
