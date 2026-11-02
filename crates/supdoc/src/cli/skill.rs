@@ -19,6 +19,7 @@ use serde::Serialize;
 
 use crate::config::confine::real_location;
 use crate::config::{ConfigError, discover_config};
+use crate::exit::ExitStatus;
 use crate::finding::{Finding, Severity};
 use crate::lock::error::shell_quote;
 use crate::lock::io::write_atomically;
@@ -501,7 +502,7 @@ fn outside_root(
              use a real directory instead, run `rm {typed_link}` (this removes only the link, \
              not the directory it points to), then `mkdir {typed_link}`"
         ),
-        CliError::REFUSED_EXIT_CODE,
+        ExitStatus::Failed,
     )
 }
 
@@ -511,7 +512,7 @@ fn no_home() -> CliError {
         "cli-skill-no-home",
         "`--global` installs into your home directory, but HOME is not set",
         "Set HOME, for example `export HOME=/home/you`, or drop `--global` to install into the project",
-        CliError::USAGE_EXIT_CODE,
+        ExitStatus::Usage,
     )
 }
 
@@ -525,7 +526,7 @@ fn relative_claude_dir(value: &OsString) -> CliError {
             value.to_string_lossy()
         ),
         format!("Set `{CLAUDE_CONFIG_DIR}` to an absolute path, or unset it to use `~/.claude`"),
-        CliError::USAGE_EXIT_CODE,
+        ExitStatus::Usage,
     )
 }
 
@@ -550,7 +551,7 @@ fn write_failed(
         "cli-skill-write",
         format!("cannot write {}: {}", change.shown, cause(error)),
         format!("Check that you can create and write files in `{shown_directory}`"),
-        CliError::IO_EXIT_CODE,
+        ExitStatus::Io,
     )
 }
 
@@ -773,7 +774,7 @@ mod tests {
             .expect_err("--global needs HOME");
 
         assert_eq!(error.code(), "cli-skill-no-home");
-        assert_eq!(error.exit_code(), CliError::USAGE_EXIT_CODE);
+        assert_eq!(error.exit_code(), ExitStatus::Usage.code());
     }
 
     #[test]
@@ -790,7 +791,7 @@ mod tests {
         );
         let error = destinations(true, &root, &dirs).expect_err("relative should be refused");
         assert_eq!(error.code(), "cli-skill-relative-claude-dir");
-        assert_eq!(error.exit_code(), CliError::USAGE_EXIT_CODE);
+        assert_eq!(error.exit_code(), ExitStatus::Usage.code());
         assert!(
             error.to_string().contains("rel/claude"),
             "the message should name the value: {error}"
@@ -989,7 +990,7 @@ mod tests {
 
         let error = run.result.as_ref().expect_err("the write should fail");
         assert_eq!(error.code(), "cli-skill-write");
-        assert_eq!(run.exit_code(), CliError::IO_EXIT_CODE);
+        assert_eq!(run.exit_code(), ExitStatus::Io.code());
     }
 
     #[test]
@@ -1054,7 +1055,7 @@ mod tests {
             .as_ref()
             .expect_err("an install through a symlink out of the project should be refused");
         assert_eq!(error.code(), "cli-skill-outside-root", "got {error:?}");
-        assert_eq!(run.exit_code(), CliError::REFUSED_EXIT_CODE);
+        assert_eq!(run.exit_code(), ExitStatus::Failed.code());
         let real = fs::canonicalize(destination).expect("the destination should resolve");
         assert!(
             error
@@ -1204,7 +1205,7 @@ mod tests {
                     .expect_err("a config symlink that is not a config should be refused");
                 assert_eq!(
                     (error.code(), error.exit_code()),
-                    ("config-symlink-not-config", CliError::CONFIG_EXIT_CODE),
+                    ("config-symlink-not-config", ExitStatus::Config.code()),
                     "{name} target with {flags:?}"
                 );
                 assert_eq!(

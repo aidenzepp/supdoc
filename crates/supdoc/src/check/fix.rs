@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::finding::{Finding, Fix, Severity};
 use crate::link::{LinkKey, SourcePath, SymbolPath, Target, TargetPath};
@@ -253,14 +253,18 @@ pub fn apply_fixes(plan: &FixPlan, root: &AbsolutePath, rerun: &str) -> FixResul
             Err(Skip::Changed) => result
                 .skipped
                 .push(file_changed(file, planned.len(), rerun)),
-            Err(Skip::Io(error)) => unwritten.push((file, error)),
+            Err(Skip::Unwritable(cause)) => unwritten.push((file, cause)),
         }
     }
     let others_applied = !result.applied.is_empty();
-    for (file, error) in unwritten {
-        result
-            .skipped
-            .push(write_failed(file, &error, rerun, others_applied));
+    for (file, cause) in unwritten {
+        result.skipped.push(write_failed(
+            file,
+            &cause,
+            root.as_path(),
+            rerun,
+            others_applied,
+        ));
     }
     result
 }
@@ -271,12 +275,31 @@ enum Skip {
     /// The file no longer matches the scan.
     Changed,
     /// The file could not be read or written.
+    Unwritable(Unwritable),
+}
+
+/// Why a file that still exists could not be rewritten.
+#[derive(Debug)]
+enum Unwritable {
+    /// The source is a symlink.
+    Symlink {
+        /// The file the link resolves to, if that can be found.
+        real: Option<PathBuf>,
+    },
+    /// The source is neither a regular file nor a symlink.
+    NotRegular,
+    /// The operating system refused the read or the write.
     Io(io::Error),
 }
 
 impl From<io::Error> for Skip {
+    /// A file that vanished since the scan changed; any other error is an I/O failure.
     fn from(error: io::Error) -> Self {
-        Self::Io(error)
+        if error.kind() == io::ErrorKind::NotFound {
+            Self::Changed
+        } else {
+            Self::Unwritable(Unwritable::Io(error))
+        }
     }
 }
 
@@ -284,12 +307,18 @@ impl From<io::Error> for Skip {
 ///
 /// # Errors
 ///
-/// [`Skip::Changed`] if any edit's expected bytes are gone; [`Skip::Io`] if the file is not a
-/// regular file or cannot be read or written. The file is unchanged in both cases.
+/// [`Skip::Changed`] if any edit's expected bytes are gone; [`Skip::Unwritable`] if the file is
+/// not a regular file or cannot be read or written. A file that vanished is `Changed`. The file is unchanged in both cases.
 fn rewrite_file(path: &Path, planned: &[&PlannedFix]) -> Result<(), Skip> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_file() {
-        return Err(Skip::Io(io::Error::other("not a regular file")));
+        return Err(Skip::Unwritable(if metadata.is_symlink() {
+            Unwritable::Symlink {
+                real: fs::canonicalize(path).ok(),
+            }
+        } else {
+            Unwritable::NotRegular
+        }));
     }
     let mut bytes = fs::read(path)?;
     let unchanged = planned.iter().all(|planned| {
@@ -333,7 +362,8 @@ fn file_changed(file: &SourcePath, count: usize, rerun: &str) -> Finding {
 /// The `fix-write-failed` finding for `file`.
 fn write_failed(
     file: &SourcePath,
-    error: &io::Error,
+    cause: &Unwritable,
+    root: &Path,
     rerun: &str,
     others_applied: bool,
 ) -> Finding {
@@ -342,14 +372,42 @@ fn write_failed(
     } else {
         ""
     };
+    let (reason, help) = match cause {
+        Unwritable::Symlink { real } => {
+            let real = real.as_deref().map_or_else(
+                || "the file it points to".to_owned(),
+                |real| format!("`{}`", real.strip_prefix(root).unwrap_or(real).display()),
+            );
+            (
+                "it is a symlink".to_owned(),
+                format!(
+                    "supdoc never rewrites a symlinked file. Apply the fix to {real} by hand, then run `{rerun}` again{others}"
+                ),
+            )
+        }
+        Unwritable::NotRegular => (
+            "it is not a regular file".to_owned(),
+            format!("supdoc only rewrites regular files. Apply the fix by hand{others}"),
+        ),
+        Unwritable::Io(error) => (
+            error.to_string(),
+            if error.kind() == io::ErrorKind::PermissionDenied {
+                format!(
+                    "The file was left as it was. Run `chmod u+w {file}`, then run `{rerun}` again{others}"
+                )
+            } else {
+                format!(
+                    "The file was left as it was. Make it writable and run `{rerun}` again{others}"
+                )
+            },
+        ),
+    };
     Finding::new(
         CODE_WRITE_FAILED,
         Severity::Error,
-        format!("cannot write {file}: {error}"),
+        format!("cannot write {file}: {reason}"),
     )
-    .with_help(format!(
-        "The file was left as it was. Make it writable and run `{rerun}` again{others}"
-    ))
+    .with_help(help)
 }
 
 /// Moves the lock entry of every rewritten link to its new key (05 C6), so a fixed link keeps its
@@ -781,7 +839,7 @@ mod tests {
     }
 
     #[test]
-    fn a_vanished_file_is_reported_as_a_write_failure() {
+    fn a_vanished_file_is_reported_as_changed() {
         let project = Project::with(&[("docs/b.md", DOC)]);
         let plan = plan_fixes(&scan_of([broken("docs/a.md", DOC, "ad", "add")]));
 
@@ -794,8 +852,8 @@ mod tests {
                 result.skipped
             );
         };
-        assert_eq!(skipped.code, CODE_WRITE_FAILED);
-        assert_eq!(skipped.severity, Severity::Error);
+        assert_eq!(skipped.code, CODE_FILE_CHANGED);
+        assert_eq!(skipped.severity, Severity::Warning);
     }
 
     #[test]
@@ -835,7 +893,7 @@ mod tests {
     #[test]
     fn a_symlinked_source_is_never_replaced() {
         let project = Project::with(&[("real.md", DOC)]);
-        std::os::unix::fs::symlink("../real.md", project.dir.path().join("docs-link.md"))
+        std::os::unix::fs::symlink("real.md", project.dir.path().join("docs-link.md"))
             .expect("the fixture symlink should be creatable");
         let plan = plan_fixes(&scan_of([broken("docs-link.md", DOC, "ad", "add")]));
 
@@ -849,6 +907,11 @@ mod tests {
             );
         };
         assert_eq!(skipped.code, CODE_WRITE_FAILED);
+        let help = skipped.help.as_deref().unwrap_or_default();
+        assert!(
+            help.contains("never rewrites a symlinked file") && help.contains("real.md"),
+            "the help should say supdoc never rewrites a symlink and name the real file, got {help:?}"
+        );
         assert_eq!(project.read("real.md"), DOC);
     }
 

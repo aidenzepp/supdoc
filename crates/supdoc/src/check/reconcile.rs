@@ -1,10 +1,11 @@
 //! Reconciliation: the pure join of a scan and the lockfile that gives every link its state (05).
 
 use std::collections::BTreeSet;
+use std::{fs, io};
 
 use super::model::{LinkReport, Report};
 use super::moves::{Moves, detect_moves};
-use crate::finding::{Finding, Severity};
+use crate::finding::{Finding, OBSOLETE_CODE, Severity};
 use crate::hash::Hash;
 use crate::link::{LinkKey, LinkRef, SourcePath, Target};
 use crate::lock::error::shell_quote;
@@ -24,18 +25,34 @@ pub enum Outcome {
 
 /// Gives every [`LinkKey`] in `scope` the state the 05 table says.
 ///
-/// Pure: reads nothing but its arguments. Links outside `scope` are not judged, and neither are
-/// lock entries written in sources that couldn't be read this run (05 C5). A source with a broken
-/// link is treated the same way, whether the link is too malformed to have a key (a link error)
-/// or has a key whose target can't be resolved (such as an unknown namespace): that link may be
-/// an edit of a locked one, so none of the source's entries are judged obsolete while it
-/// remains broken. Other sources are unaffected.
+/// Links outside `scope` are not judged, and neither are lock entries written in sources that
+/// couldn't be read this run (05 C5). A source with a broken link is treated the same way,
+/// whether the link is too malformed to have a key (a link error) or has a key whose target can't
+/// be resolved (such as an unknown namespace): that link may be an edit of a locked one, so none
+/// of the source's entries are judged obsolete while it remains broken. Other sources are
+/// unaffected.
+///
+/// A link in `scope` can still have moved from a source outside it (05 C6). A scoped walk never
+/// reads those sources, so an out-of-scope lock entry is a move candidate only when it points
+/// where a new in-scope link points and its source file no longer exists. That file is the one
+/// thing read here, once per such entry.
 ///
 /// The commands in findings' help name files as `paths` shows them: relative to the current
 /// directory, so a command copied from the help runs where the user is.
 #[must_use]
 pub fn reconcile_in(scan: &Scan, lock: &Lockfile, scope: &Scope, paths: &PathStyle) -> Report {
-    reconcile_with(scan, lock, scope, &|source| paths.text(source))
+    let root = paths.root().as_path();
+    let source_is_gone = |source: &SourcePath| {
+        fs::symlink_metadata(root.join(source.as_str()))
+            .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+    };
+    reconcile_with(
+        scan,
+        lock,
+        scope,
+        &|source| paths.text(source),
+        &source_is_gone,
+    )
 }
 
 /// [`reconcile_in`] for a run at the project root, for tests that don't look at help paths.
@@ -46,12 +63,14 @@ pub(crate) fn reconcile_at_root(scan: &Scan, lock: &Lockfile, scope: &Scope) -> 
     reconcile_in(scan, lock, scope, &PathStyle::new(root.clone(), root, None))
 }
 
-/// Reconciles, writing each source file in a help command as `command_path` gives it.
+/// Reconciles, writing each source file in a help command as `command_path` gives it, and asking
+/// `source_is_gone` whether an out-of-scope source no longer exists.
 fn reconcile_with(
     scan: &Scan,
     lock: &Lockfile,
     scope: &Scope,
     command_path: &dyn Fn(&SourcePath) -> String,
+    source_is_gone: &dyn Fn(&SourcePath) -> bool,
 ) -> Report {
     let scanned: Vec<(&LinkKey, &ScannedLink)> = scan
         .links
@@ -83,7 +102,16 @@ fn reconcile_with(
         .filter(|key| !scan.is_unread(&key.source))
         .filter(|key| !sources_with_broken_links.contains(&key.source))
         .collect();
-    let moves = detect_moves(&unlocked, &removed);
+    let unlocked_references: BTreeSet<LinkRef> =
+        unlocked.iter().map(|key| reference_of(key)).collect();
+    let departed = lock
+        .iter()
+        .map(|(key, _)| key)
+        .filter(|key| !scope.contains(&key.source))
+        .filter(|key| unlocked_references.contains(&reference_of(key)))
+        .filter(|key| source_is_gone(&key.source));
+    let candidates: Vec<&LinkKey> = removed.iter().copied().chain(departed).collect();
+    let moves = detect_moves(&unlocked, &candidates);
 
     let mut report = Report {
         links: Vec::new(),
@@ -190,9 +218,9 @@ fn present_state(
         ),
         None => {
             if let Some(candidates) = moves.ambiguous.get(key) {
-                notes.push(move_ambiguous_note(key, link, candidates));
+                notes.push(move_ambiguous_note(key, link, candidates, command_path));
             }
-            (LinkState::New, Some(new_finding(link)))
+            (LinkState::New, Some(new_finding(key, link, command_path)))
         }
     }
 }
@@ -248,22 +276,37 @@ fn failed_finding(
 }
 
 /// The finding for a link with no lock entry.
-fn new_finding(link: &ScannedLink) -> Finding {
+fn new_finding(
+    key: &LinkKey,
+    link: &ScannedLink,
+    command_path: &dyn Fn(&SourcePath) -> String,
+) -> Finding {
     at_first_site(
         Finding::new(
             "link-new",
             Severity::Error,
             format!("this link isn't recorded in {LOCK_FILE_NAME} yet"),
         )
-        .with_help("once it's accurate, run `supdoc update --state new --yes`"),
+        .with_help(format!(
+            "once it's accurate, run `{}`",
+            record_new_command(key, command_path)
+        )),
         link,
+    )
+}
+
+/// The command that records the new links in `key`'s source, and no others.
+fn record_new_command(key: &LinkKey, command_path: &dyn Fn(&SourcePath) -> String) -> String {
+    format!(
+        "supdoc update {} --state new --yes",
+        shell_quote(&command_path(&key.source))
     )
 }
 
 /// The finding for a lock entry whose link is gone.
 fn obsolete_finding(key: &LinkKey) -> Finding {
     Finding::new(
-        "link-obsolete",
+        OBSOLETE_CODE,
         Severity::Warning,
         format!("{LOCK_FILE_NAME} has an entry for `{key}`, which no longer exists"),
     )
@@ -287,7 +330,12 @@ fn moved_note(key: &LinkKey, link: &ScannedLink, old: &LinkKey) -> Finding {
 }
 
 /// The note saying why a link that looks moved was not given a history.
-fn move_ambiguous_note(key: &LinkKey, link: &ScannedLink, candidates: &[LinkKey]) -> Finding {
+fn move_ambiguous_note(
+    key: &LinkKey,
+    link: &ScannedLink,
+    candidates: &[LinkKey],
+    command_path: &dyn Fn(&SourcePath) -> String,
+) -> Finding {
     let reason = match candidates {
         [only] => format!(
             "the removed link `{only}` could have been its old location, but another new link matches it too"
@@ -303,7 +351,10 @@ fn move_ambiguous_note(key: &LinkKey, link: &ScannedLink, candidates: &[LinkKey]
             Severity::Note,
             format!("{} is new; {reason}", describe(key, link)),
         )
-        .with_help("reread it, then run `supdoc update --state new --yes`"),
+        .with_help(format!(
+            "reread it, then run `{}`",
+            record_new_command(key, command_path)
+        )),
         link,
     )
 }
@@ -742,6 +793,83 @@ mod tests {
                 "check-move-ambiguous",
                 "docs/intro.md:1 → src/lib.rs#add is new; 2 removed links could have been its old location"
             )],
+        );
+    }
+
+    /// Reconciles `scan` in `scope` at the root, with `gone` naming the only sources that no
+    /// longer exist on disk.
+    fn reconcile_scoped(scan: &Scan, lock: &Lockfile, scope: &Scope, gone: &[&str]) -> Report {
+        reconcile_with(scan, lock, scope, &|source| source.to_string(), &|source| {
+            gone.contains(&source.as_str())
+        })
+    }
+
+    #[test]
+    fn a_scoped_link_carries_the_history_of_an_out_of_scope_source_that_is_gone() {
+        let old = key("docs/guide.md", Some("add"));
+        let fresh = key("docs/intro.md", Some("add"));
+        let scan = scan_of(vec![(fresh.clone(), present(b"add v2"))]);
+        let lock = lock_of(&[(&old, b"add v1")]);
+        let scope = Scope::Paths(vec![fresh.source.clone()]);
+
+        let report = reconcile_scoped(&scan, &lock, &scope, &["docs/guide.md"]);
+
+        assert_eq!(
+            state_of(&report, &fresh),
+            Some(LinkState::Failed),
+            "a renamed doc checked by its new path must still fail on changed code",
+        );
+        assert_eq!(
+            report
+                .links
+                .iter()
+                .map(|link| &link.key)
+                .collect::<Vec<_>>(),
+            [&fresh],
+            "the out-of-scope old entry is used up, not reported",
+        );
+        assert_eq!(
+            report
+                .links
+                .first()
+                .and_then(|link| link.moved_from.clone()),
+            Some(old),
+        );
+    }
+
+    #[test]
+    fn an_out_of_scope_source_that_still_exists_is_not_a_move_candidate() {
+        let other = key("docs/guide.md", Some("add"));
+        let fresh = key("docs/intro.md", Some("add"));
+        let scan = scan_of(vec![(fresh.clone(), present(b"add v2"))]);
+        let lock = lock_of(&[(&other, b"add v1")]);
+        let scope = Scope::Paths(vec![fresh.source.clone()]);
+
+        let report = reconcile_scoped(&scan, &lock, &scope, &[]);
+
+        assert_eq!(state_of(&report, &fresh), Some(LinkState::New));
+        assert!(
+            report.findings.iter().all(|f| f.code != "check-moved"),
+            "a live source outside the scope was never read, so it can't have moved: {:?}",
+            report.findings,
+        );
+    }
+
+    #[test]
+    fn new_link_help_records_only_its_own_source() {
+        let fresh = key("docs/my guide.md", Some("add"));
+        let scan = scan_of(vec![(fresh.clone(), present(b"v1"))]);
+
+        let report = reconcile_scoped(&scan, &Lockfile::default(), &Scope::All, &[]);
+
+        let help = report
+            .links
+            .first()
+            .and_then(|link| link.finding.as_ref())
+            .and_then(|finding| finding.help.clone());
+        assert_eq!(
+            help.as_deref(),
+            Some("once it's accurate, run `supdoc update 'docs/my guide.md' --state new --yes`"),
         );
     }
 
