@@ -34,7 +34,10 @@ const NEAREST: usize = 3;
 ///
 /// [`ReadError::Timeout`] when the file's deadline stops the query. Its matches so far are
 /// dropped, so a symbol table is never partial.
-pub fn tag_symbols(file: &SourceFile, queries: &CompiledQueries) -> Result<SymbolTable, ReadError> {
+pub(crate) fn tag_symbols(
+    file: &SourceFile,
+    queries: &CompiledQueries,
+) -> Result<SymbolTable, ReadError> {
     let query = queries.tags();
     let roles: Vec<Role> = query
         .capture_names()
@@ -95,7 +98,7 @@ pub fn tag_symbols(file: &SourceFile, queries: &CompiledQueries) -> Result<Symbo
         .iter()
         .filter_map(|definition| definition.symbol(&own_segments, &scopes))
         .collect();
-    symbols.sort_by_key(|symbol| (symbol.range.start, std::cmp::Reverse(symbol.range.end)));
+    symbols.sort_by_key(|symbol| (symbol.range().start, std::cmp::Reverse(symbol.range().end)));
     Ok(SymbolTable::new(merge_accessors(symbols)))
 }
 
@@ -111,12 +114,11 @@ fn merge_accessors(symbols: Vec<Symbol>) -> Vec<Symbol> {
     let mut merged: Vec<Symbol> = Vec::with_capacity(symbols.len());
     let mut index: HashMap<(SymbolPath, Vec<SymbolPath>), usize> = HashMap::new();
     for symbol in symbols {
-        let key = (symbol.path.clone(), symbol.aliases.clone());
+        let key = (symbol.path().clone(), symbol.aliases().to_vec());
         #[cfg(test)]
         tests::TWIN_LOOKUPS.set(tests::TWIN_LOOKUPS.get() + 1);
         if let Some(seen) = index.get(&key).and_then(|&at| merged.get_mut(at)) {
-            seen.range.start = seen.range.start.min(symbol.range.start);
-            seen.range.end = seen.range.end.max(symbol.range.end);
+            seen.cover(&symbol.range());
         } else {
             let _new = index.insert(key, merged.len());
             merged.push(symbol);
@@ -324,11 +326,7 @@ impl Definition<'_> {
         } else {
             Vec::new()
         };
-        Some(Symbol {
-            path,
-            aliases,
-            range: self.node.byte_range(),
-        })
+        Some(Symbol::new(path, aliases, self.node.byte_range()))
     }
 }
 
@@ -344,21 +342,21 @@ impl SymbolTable {
     /// - [`ResolveError::Ambiguous`] when several symbols match, listing each one's full path, or
     ///   its first alias when it has one (so impls differing by type arguments stay distinct).
     /// - [`ResolveError::NotFound`] when none does, with the [`SymbolTable::nearest`] paths.
-    pub fn resolve(
+    pub(crate) fn resolve(
         &self,
         file: &AbsolutePath,
         query: &SymbolPath,
     ) -> Result<&Symbol, ResolveError> {
         let exact: Vec<&Symbol> = self
             .iter()
-            .filter(|symbol| symbol.path == *query || symbol.aliases.contains(query))
+            .filter(|symbol| symbol.path() == query || symbol.aliases().contains(query))
             .collect();
         let matches = if exact.is_empty() && query.segments().len() == 1 {
             self.iter()
                 .filter(|symbol| {
-                    symbol.path.last() == query.last()
+                    symbol.path().last() == query.last()
                         || symbol
-                            .aliases
+                            .aliases()
                             .iter()
                             .any(|alias| alias.last() == query.last())
                 })
@@ -380,7 +378,7 @@ impl SymbolTable {
                 query: query.clone(),
                 candidates: several
                     .iter()
-                    .map(|symbol| symbol.aliases.first().unwrap_or(&symbol.path).clone())
+                    .map(|symbol| symbol.aliases().first().unwrap_or(symbol.path()).clone())
                     .collect(),
             }),
         }
@@ -390,12 +388,12 @@ impl SymbolTable {
     /// fixer's cutoff) or end in the same name, such as a trait method under another path, closest
     /// first. Ties keep file order.
     #[must_use]
-    pub fn nearest(&self, query: &SymbolPath) -> Vec<SymbolPath> {
+    pub(crate) fn nearest(&self, query: &SymbolPath) -> Vec<SymbolPath> {
         let wanted = query.to_string();
         let mut seen = HashSet::new();
         let mut scored: Vec<(usize, &SymbolPath)> = self
             .iter()
-            .flat_map(|symbol| std::iter::once(&symbol.path).chain(&symbol.aliases))
+            .flat_map(|symbol| std::iter::once(symbol.path()).chain(symbol.aliases()))
             .filter(|path| seen.insert(*path))
             .filter(|path| {
                 let shown = path.to_string();
@@ -437,11 +435,7 @@ mod tests {
             paths
                 .iter()
                 .zip(0..)
-                .map(|(raw, start)| Symbol {
-                    path: path(raw),
-                    aliases: Vec::new(),
-                    range: start..start + 1,
-                })
+                .map(|(raw, start)| Symbol::new(path(raw), Vec::new(), start..start + 1))
                 .collect(),
         )
     }
@@ -454,18 +448,15 @@ mod tests {
     fn resolved(table: &SymbolTable, query: &str) -> Result<String, ResolveError> {
         table
             .resolve(&absolute("/repo/src/lib.rs"), &path(query))
-            .map(|symbol| symbol.path.to_string())
+            .map(|symbol| symbol.path().to_string())
     }
 
     #[test]
     fn merging_many_symbols_folds_twins_and_keeps_the_rest() {
         // 40 000 symbols, bounded by structure not time: the fold must do one map lookup per symbol.
         let count = 20_000;
-        let symbol = |name: String, start: usize| Symbol {
-            path: path(&name),
-            aliases: Vec::new(),
-            range: start..start + 1,
-        };
+        let symbol =
+            |name: String, start: usize| Symbol::new(path(&name), Vec::new(), start..start + 1);
         let symbols = (0..count)
             .map(|index| symbol(format!("s{index}"), index))
             .chain((0..count).map(|index| symbol(format!("s{index}"), count + index)))
@@ -484,7 +475,7 @@ mod tests {
             "each pair of twins should fold into one"
         );
         assert_eq!(
-            merged.first().map(|symbol| symbol.range.clone()),
+            merged.first().map(|symbol| symbol.range().clone()),
             Some(0..count + 1),
             "the folded symbol should span both twins"
         );
@@ -568,11 +559,11 @@ mod tests {
 
     #[test]
     fn alias_resolves_to_its_symbol() {
-        let table = SymbolTable::new(vec![Symbol {
-            path: path("news.whats-new"),
-            aliases: vec![path("whats-new-1")],
-            range: 0..1,
-        }]);
+        let table = SymbolTable::new(vec![Symbol::new(
+            path("news.whats-new"),
+            vec![path("whats-new-1")],
+            0..1,
+        )]);
 
         assert_eq!(
             resolved(&table, "whats-new-1"),

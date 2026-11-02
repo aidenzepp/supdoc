@@ -35,7 +35,7 @@ static JAVASCRIPT: LazyLock<Result<QueryCartridge, QueryFileError>> = LazyLock::
 ///
 /// The [`QueryFileError`] for a built-in query that doesn't compile: a supdoc bug, caught by the
 /// registry's tests.
-pub fn cartridge() -> Result<&'static QueryCartridge, &'static QueryFileError> {
+pub(crate) fn cartridge() -> Result<&'static QueryCartridge, &'static QueryFileError> {
     JAVASCRIPT.as_ref()
 }
 
@@ -114,7 +114,10 @@ function outer() {
     }
 
     fn paths(table: &SymbolTable) -> Vec<String> {
-        table.iter().map(|symbol| symbol.path.to_string()).collect()
+        table
+            .iter()
+            .map(|symbol| symbol.path().to_string())
+            .collect()
     }
 
     fn resolved<'t>(file: &SourceFile, table: &'t SymbolTable, raw: &str) -> &'t Symbol {
@@ -126,7 +129,7 @@ function outer() {
 
     fn text_of<'f>(file: &'f SourceFile, symbol: &Symbol) -> &'f str {
         file.text()
-            .get(symbol.range.clone())
+            .get(symbol.range().clone())
             .expect("a symbol's range should be valid for its file")
     }
 
@@ -226,13 +229,13 @@ function outer() {
             let node = file
                 .tree()
                 .root_node()
-                .descendant_for_byte_range(symbol.range.start, symbol.range.end)
+                .descendant_for_byte_range(symbol.range().start, symbol.range().end)
                 .expect("a symbol's range should lie inside the tree");
             assert_eq!(
                 node.byte_range(),
-                symbol.range,
+                symbol.range(),
                 "`{}` should cover exactly one node, not {:?}",
-                symbol.path,
+                symbol.path(),
                 text_of(&file, symbol),
             );
         }

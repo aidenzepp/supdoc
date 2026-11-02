@@ -20,7 +20,7 @@ use std::fmt;
     schemars::JsonSchema,
 )]
 #[serde(rename_all = "lowercase")]
-pub enum LinkState {
+pub(crate) enum LinkState {
     /// The target's hash matches the lock entry.
     Passed,
     /// The target's hash differs from the lock entry: the code changed since the doc was confirmed.
@@ -35,7 +35,8 @@ pub enum LinkState {
 
 impl LinkState {
     /// Every state, in declaration order.
-    pub const ALL: [Self; 5] = [
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 5] = [
         Self::Passed,
         Self::Failed,
         Self::Broken,
@@ -45,7 +46,7 @@ impl LinkState {
 
     /// The lowercase name used in output and on the command line.
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Passed => "passed",
             Self::Failed => "failed",

@@ -13,12 +13,12 @@ use std::path::{Component, Path, PathBuf};
 /// Lexical normalization is supdoc's defined meaning of a path; symlinks are not resolved.
 /// A `..` at the root stays at the root, the same way the operating system treats `/..`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct AbsolutePath(PathBuf);
+pub(crate) struct AbsolutePath(PathBuf);
 
 impl AbsolutePath {
     /// Normalizes `path`, or returns `None` if it is relative.
     #[must_use]
-    pub fn new(path: &Path) -> Option<Self> {
+    pub(crate) fn new(path: &Path) -> Option<Self> {
         if !path.is_absolute() {
             return None;
         }
@@ -31,7 +31,7 @@ impl AbsolutePath {
     ///
     /// Infallible: absolute plus relative is always absolute.
     #[must_use]
-    pub fn join(&self, rel: &RelativePath) -> Self {
+    pub(crate) fn join(&self, rel: &RelativePath) -> Self {
         let mut joined = self.0.clone();
         push_normalized(&mut joined, rel.as_path());
         Self(joined)
@@ -42,7 +42,7 @@ impl AbsolutePath {
     ///
     /// Infallible: the result is absolute either way, so no caller needs a fallback.
     #[must_use]
-    pub fn join_path(&self, path: &Path) -> Self {
+    pub(crate) fn join_path(&self, path: &Path) -> Self {
         let mut joined = if path.is_absolute() {
             PathBuf::new()
         } else {
@@ -54,13 +54,13 @@ impl AbsolutePath {
 
     /// The directory containing this path, or `None` at the filesystem root.
     #[must_use]
-    pub fn parent(&self) -> Option<Self> {
+    pub(crate) fn parent(&self) -> Option<Self> {
         self.0.parent().map(|parent| Self(parent.to_path_buf()))
     }
 
     /// The path as a standard library [`Path`], for filesystem calls.
     #[must_use]
-    pub fn as_path(&self) -> &Path {
+    pub(crate) fn as_path(&self) -> &Path {
         &self.0
     }
 
@@ -68,13 +68,13 @@ impl AbsolutePath {
     ///
     /// Matching is by whole components, so `/repo/docsy` is not under `/repo/docs`.
     #[must_use]
-    pub fn strip_prefix(&self, base: &AbsolutePath) -> Option<&Path> {
+    pub(crate) fn strip_prefix(&self, base: &AbsolutePath) -> Option<&Path> {
         self.0.strip_prefix(&base.0).ok()
     }
 
     /// A displayable form of the path, for messages.
     #[must_use]
-    pub fn display(&self) -> std::path::Display<'_> {
+    pub(crate) fn display(&self) -> std::path::Display<'_> {
         self.0.display()
     }
 }
@@ -215,19 +215,13 @@ fn push_normalized(base: &mut PathBuf, path: &Path) {
 /// A path with no root or prefix component, written relative to some file. May contain `..`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(try_from = "String")]
-pub struct RelativePath(PathBuf);
+pub(crate) struct RelativePath(PathBuf);
 
 impl RelativePath {
     /// The path as a standard library [`Path`].
     #[must_use]
-    pub fn as_path(&self) -> &Path {
+    pub(crate) fn as_path(&self) -> &Path {
         &self.0
-    }
-
-    /// A displayable form of the path, for messages.
-    #[must_use]
-    pub fn display(&self) -> std::path::Display<'_> {
-        self.0.display()
     }
 }
 
@@ -253,7 +247,7 @@ impl TryFrom<String> for RelativePath {
     "`{}` is an absolute path; write it relative to the file that contains it",
     .path.display()
 )]
-pub struct RelativePathError {
+pub(crate) struct RelativePathError {
     /// The rejected path, as written.
     path: PathBuf,
 }

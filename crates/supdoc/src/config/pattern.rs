@@ -253,7 +253,7 @@ impl AnchoredPatterns {
 
 /// The raw `include` or `exclude` patterns of a config, and the file that wrote them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PatternDefinition<'a> {
+pub(crate) struct PatternDefinition<'a> {
     /// The patterns exactly as written, in order.
     patterns: &'a [String],
     /// The config file that set the key, which may be a parent reached through `extends`.
@@ -263,13 +263,13 @@ pub struct PatternDefinition<'a> {
 impl<'a> PatternDefinition<'a> {
     /// The patterns exactly as written, in order.
     #[must_use]
-    pub fn patterns(&self) -> &'a [String] {
+    pub(crate) fn patterns(&self) -> &'a [String] {
         self.patterns
     }
 
     /// The config file that set the key.
     #[must_use]
-    pub fn file(&self) -> &'a AbsolutePath {
+    pub(crate) fn file(&self) -> &'a AbsolutePath {
         self.file
     }
 }

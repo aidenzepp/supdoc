@@ -20,12 +20,12 @@ const MIB: u64 = 1024 * KIB;
 
 /// A time ceiling: how long one read of a file may take. `None` is no limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TimeLimit(Option<Duration>);
+pub(crate) struct TimeLimit(Option<Duration>);
 
 impl TimeLimit {
     /// The ceiling, or `None` when there is no limit.
     #[must_use]
-    pub const fn get(self) -> Option<Duration> {
+    pub(crate) const fn get(self) -> Option<Duration> {
         self.0
     }
 }
@@ -64,12 +64,12 @@ impl fmt::Display for TimeLimit {
 
 /// A size ceiling in bytes. `None` is no limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SizeLimit(Option<u64>);
+pub(crate) struct SizeLimit(Option<u64>);
 
 impl SizeLimit {
     /// The ceiling in bytes, or `None` when there is no limit.
     #[must_use]
-    pub const fn get(self) -> Option<u64> {
+    pub(crate) const fn get(self) -> Option<u64> {
         self.0
     }
 }
@@ -132,7 +132,7 @@ fn split(text: &str, kind: Kind) -> Result<(u64, &str), LimitError> {
 
 /// A limit value that isn't `0` or a number with a known unit.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LimitError {
+pub(crate) struct LimitError {
     /// The value as written.
     text: String,
     /// Which units would have been accepted.
@@ -224,7 +224,7 @@ impl<'de> serde::Deserialize<'de> for SizeLimit {
 
 /// Where a ceiling's value came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Source {
+pub(crate) enum Source {
     /// Its command-line flag.
     Flag,
     /// Its `SUPDOC_*` environment variable.
@@ -237,74 +237,74 @@ pub enum Source {
 
 /// A value given on the command line, through the flag itself or its environment variable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Given<T> {
+pub(crate) struct Given<T> {
     /// The value.
-    pub value: T,
+    pub(crate) value: T,
     /// `true` when the environment variable gave it, `false` for the flag.
-    pub from_env: bool,
+    pub(crate) from_env: bool,
 }
 
 /// The ceilings the command line gives, each through its flag or its variable.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct CommandLineLimits {
+pub(crate) struct CommandLineLimits {
     /// `--parse-timeout` or `SUPDOC_PARSE_TIMEOUT`.
-    pub parse_timeout: Option<Given<TimeLimit>>,
+    pub(crate) parse_timeout: Option<Given<TimeLimit>>,
     /// `--max-lock-size` or `SUPDOC_MAX_LOCK_SIZE`.
-    pub max_lock_size: Option<Given<SizeLimit>>,
+    pub(crate) max_lock_size: Option<Given<SizeLimit>>,
     /// `--max-config-size` or `SUPDOC_MAX_CONFIG_SIZE`. No config key sets it, since it must apply
     /// before a config file is parsed.
-    pub max_config_size: Option<Given<SizeLimit>>,
+    pub(crate) max_config_size: Option<Given<SizeLimit>>,
     /// `--max-ignore-size` or `SUPDOC_MAX_IGNORE_SIZE`.
-    pub max_ignore_size: Option<Given<SizeLimit>>,
+    pub(crate) max_ignore_size: Option<Given<SizeLimit>>,
 }
 
 /// The ceilings the config chain sets, each from the nearest file that sets it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ConfigLimits {
+pub(crate) struct ConfigLimits {
     /// `parse-timeout` and the file that set it.
-    pub parse_timeout: Option<(TimeLimit, AbsolutePath)>,
+    pub(crate) parse_timeout: Option<(TimeLimit, AbsolutePath)>,
     /// `max-lock-size` and the file that set it.
-    pub max_lock_size: Option<(SizeLimit, AbsolutePath)>,
+    pub(crate) max_lock_size: Option<(SizeLimit, AbsolutePath)>,
     /// `max-ignore-size` and the file that set it.
-    pub max_ignore_size: Option<(SizeLimit, AbsolutePath)>,
+    pub(crate) max_ignore_size: Option<(SizeLimit, AbsolutePath)>,
 }
 
 /// One ceiling in effect and where it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Setting<T> {
+pub(crate) struct Setting<T> {
     /// The ceiling.
-    pub value: T,
+    pub(crate) value: T,
     /// Where it came from.
-    pub source: Source,
+    pub(crate) source: Source,
 }
 
 /// Every ceiling in effect.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Limits {
+pub(crate) struct Limits {
     /// How long one read of a file may take to parse and query. A file read both as a source and
     /// as a target gets this budget for each read.
-    pub parse_timeout: Setting<TimeLimit>,
+    pub(crate) parse_timeout: Setting<TimeLimit>,
     /// How large `supdoc.lock` may be.
-    pub max_lock_size: Setting<SizeLimit>,
+    pub(crate) max_lock_size: Setting<SizeLimit>,
     /// How large each config file in the `extends` chain may be.
-    pub max_config_size: Setting<SizeLimit>,
+    pub(crate) max_config_size: Setting<SizeLimit>,
     /// How large each ignore file may be.
-    pub max_ignore_size: Setting<SizeLimit>,
+    pub(crate) max_ignore_size: Setting<SizeLimit>,
 }
 
 impl Limits {
     /// The default time a file may take to read: 10 s.
-    pub const PARSE_TIMEOUT: TimeLimit = TimeLimit(Some(Duration::from_secs(10)));
+    pub(crate) const PARSE_TIMEOUT: TimeLimit = TimeLimit(Some(Duration::from_secs(10)));
     /// The default lock size ceiling: 16 MiB.
-    pub const MAX_LOCK_SIZE: SizeLimit = SizeLimit(Some(16 * MIB));
+    pub(crate) const MAX_LOCK_SIZE: SizeLimit = SizeLimit(Some(16 * MIB));
     /// The default config size ceiling: 256 KiB.
-    pub const MAX_CONFIG_SIZE: SizeLimit = SizeLimit(Some(256 * KIB));
+    pub(crate) const MAX_CONFIG_SIZE: SizeLimit = SizeLimit(Some(256 * KIB));
     /// The default ignore file size ceiling: 256 KiB.
-    pub const MAX_IGNORE_SIZE: SizeLimit = SizeLimit(Some(256 * KIB));
+    pub(crate) const MAX_IGNORE_SIZE: SizeLimit = SizeLimit(Some(256 * KIB));
 
     /// Each ceiling from the command line, else the config, else its default.
     #[must_use]
-    pub fn resolve(command_line: &CommandLineLimits, config: &ConfigLimits) -> Self {
+    pub(crate) fn resolve(command_line: &CommandLineLimits, config: &ConfigLimits) -> Self {
         Self {
             parse_timeout: pick(
                 command_line.parse_timeout,

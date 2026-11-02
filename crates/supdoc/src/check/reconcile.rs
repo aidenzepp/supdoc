@@ -16,7 +16,7 @@ use crate::state::LinkState;
 
 /// Whether `check` passes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Outcome {
+pub(crate) enum Outcome {
     /// Nothing needs attention.
     Clean,
     /// At least one link fails the check.
@@ -40,7 +40,12 @@ pub enum Outcome {
 /// The commands in findings' help name files as `paths` shows them: relative to the current
 /// directory, so a command copied from the help runs where the user is.
 #[must_use]
-pub fn reconcile_in(scan: &Scan, lock: &Lockfile, scope: &Scope, paths: &PathStyle) -> Report {
+pub(crate) fn reconcile_in(
+    scan: &Scan,
+    lock: &Lockfile,
+    scope: &Scope,
+    paths: &PathStyle,
+) -> Report {
     let root = paths.root().as_path();
     let source_is_gone = |source: &SourcePath| {
         fs::symlink_metadata(root.join(source.as_str()))
@@ -170,7 +175,7 @@ fn reconcile_with(
 /// error finding, such as a link too malformed to have a key (03 R10). `obsolete` links only
 /// warn, and `deny_warnings` makes them, and every warning finding, fail it too.
 #[must_use]
-pub fn check_outcome(report: &Report, deny_warnings: bool) -> Outcome {
+pub(crate) fn check_outcome(report: &Report, deny_warnings: bool) -> Outcome {
     let failing_link = report.links.iter().any(|link| match link.state {
         LinkState::Failed | LinkState::Broken | LinkState::New => true,
         LinkState::Obsolete => deny_warnings,

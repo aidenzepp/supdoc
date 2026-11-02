@@ -34,7 +34,7 @@ const CODE_WRITE_FAILED: &str = "fix-write-failed";
 
 /// The edits `supdoc fix` would make. The preview is this value rendered (05 C2).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct FixPlan {
+pub(crate) struct FixPlan {
     /// Sorted by file, then position. Edits to one file never overlap.
     fixes: Vec<PlannedFix>,
 }
@@ -43,7 +43,7 @@ impl FixPlan {
     /// A plan of `fixes`, sorted by file then position, with every fix that overlaps an earlier
     /// one in the same file dropped.
     #[must_use]
-    pub fn new(mut fixes: Vec<PlannedFix>) -> Self {
+    pub(crate) fn new(mut fixes: Vec<PlannedFix>) -> Self {
         fixes.sort_by(|a, b| order(&a.fix, &b.fix));
         Self {
             fixes: without_overlaps(fixes, |planned| &planned.fix),
@@ -52,41 +52,41 @@ impl FixPlan {
 
     /// The edits, sorted by file then position, never overlapping.
     #[must_use]
-    pub fn fixes(&self) -> &[PlannedFix] {
+    pub(crate) fn fixes(&self) -> &[PlannedFix] {
         &self.fixes
     }
 }
 
 /// One edit, the finding it repairs, and what the file must still contain for it to be safe.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlannedFix {
+pub(crate) struct PlannedFix {
     /// The exact edit.
-    pub fix: Fix,
+    pub(crate) fix: Fix,
     /// The finding the edit repairs, for the preview.
-    pub finding: Finding,
+    pub(crate) finding: Finding,
     /// Where the finding's link is; it contains the edit.
-    pub location: Location,
+    pub(crate) location: Location,
     /// The link as scanned: the whole link when the finding's snippet holds it, else the bytes the
     /// edit replaces.
-    pub old_link: String,
+    pub(crate) old_link: String,
     /// The link with the edit applied.
-    pub new_link: String,
+    pub(crate) new_link: String,
     /// The lock entry move when this edit rewrites a link wholly, so its entry can follow (05 C6).
-    pub moved: Option<Move>,
+    pub(crate) moved: Option<Move>,
 }
 
 /// What [`apply_fixes`] did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct FixResult {
+pub(crate) struct FixResult {
     /// Edits written to disk, in plan order.
-    pub applied: Vec<AppliedFix>,
+    pub(crate) applied: Vec<AppliedFix>,
     /// Why files were left alone: `fix-file-changed` and `fix-write-failed` findings.
-    pub skipped: Vec<Skipped>,
+    pub(crate) skipped: Vec<Skipped>,
 }
 
 /// Why a file's fixes were not applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SkippedKind {
+pub(crate) enum SkippedKind {
     /// The file changed since the scan (`fix-file-changed`).
     FileChanged,
     /// The file could not be rewritten (`fix-write-failed`).
@@ -95,20 +95,20 @@ pub enum SkippedKind {
 
 /// A file left as it was, and the finding that says why.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Skipped {
+pub(crate) struct Skipped {
     /// What went wrong, for callers that count or branch on it.
-    pub kind: SkippedKind,
+    pub(crate) kind: SkippedKind,
     /// The finding reported for it.
-    pub finding: Finding,
+    pub(crate) finding: Finding,
 }
 
 /// An edit that is now on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppliedFix {
+pub(crate) struct AppliedFix {
     /// The edit.
-    pub fix: Fix,
+    pub(crate) fix: Fix,
     /// The move of the lock entry of a link this edit rewrote, for [`move_lock_entries`].
-    pub moved: Option<Move>,
+    pub(crate) moved: Option<Move>,
 }
 
 /// Picks every fix the scan offers that can be verified before it is applied.
@@ -118,7 +118,7 @@ pub struct AppliedFix {
 /// file the earlier one wins; the other link simply stays broken and shows up again on the next
 /// scan.
 #[must_use]
-pub fn plan_fixes(scan: &Scan) -> FixPlan {
+pub(crate) fn plan_fixes(scan: &Scan) -> FixPlan {
     let linked = scan
         .links
         .iter()
@@ -327,7 +327,7 @@ fn rewritten_key(key: &LinkKey, code: &str, replacement: &str) -> Option<LinkKey
 /// `rerun` is the command a skipped file's help says to run again. A write failure's help says the
 /// other fixes were applied only when some were.
 #[must_use]
-pub fn apply_fixes(plan: &FixPlan, root: &AbsolutePath, rerun: &str) -> FixResult {
+pub(crate) fn apply_fixes(plan: &FixPlan, root: &AbsolutePath, rerun: &str) -> FixResult {
     let mut by_file: BTreeMap<&SourcePath, Vec<&PlannedFix>> = BTreeMap::new();
     for planned in plan.fixes() {
         by_file.entry(&planned.fix.file).or_default().push(planned);
@@ -507,7 +507,7 @@ fn write_failed(
 ///
 /// An entry is never overwritten: if the new key already has one, both stay as they are. Returns
 /// the moves that happened, so a caller reports only those.
-pub fn move_lock_entries<'a>(
+pub(crate) fn move_lock_entries<'a>(
     lock: &mut Lockfile,
     wanted: impl IntoIterator<Item = &'a Move>,
 ) -> Vec<Move> {

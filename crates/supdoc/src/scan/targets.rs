@@ -567,7 +567,7 @@ fn resolve_failed(
     };
     let names: Vec<String> = table
         .iter()
-        .flat_map(|symbol| std::iter::once(&symbol.path).chain(&symbol.aliases))
+        .flat_map(|symbol| std::iter::once(symbol.path()).chain(symbol.aliases()))
         .map(ToString::to_string)
         .collect();
     let close = close_match(&query.to_string(), names.iter().map(String::as_str));

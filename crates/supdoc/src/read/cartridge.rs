@@ -24,7 +24,7 @@ use crate::read::error::ReadError;
 /// Most languages are data: a grammar plus tree-sitter's own `tags.scm` and `injections.scm`
 /// query files. Languages that need real code (Python's `__init__` attributes, Markdown's
 /// headings) override `symbols` or `markdown_regions` with their own logic.
-pub trait Cartridge: Send + Sync + fmt::Debug {
+pub(crate) trait Cartridge: Send + Sync + fmt::Debug {
     /// Stable id: `"rust"`, `"markdown"`. Appears in errors and `info` output.
     fn id(&self) -> LanguageId;
 
@@ -54,18 +54,18 @@ pub trait Cartridge: Send + Sync + fmt::Debug {
 
 /// A cartridge's stable id: `"rust"`, `"markdown"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct LanguageId(&'static str);
+pub(crate) struct LanguageId(&'static str);
 
 impl LanguageId {
     /// Wraps a built-in id. Ids are lowercase and fixed at compile time.
     #[must_use]
-    pub const fn new(id: &'static str) -> Self {
+    pub(crate) const fn new(id: &'static str) -> Self {
         Self(id)
     }
 
     /// The id as text.
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         self.0
     }
 }
@@ -78,7 +78,7 @@ impl fmt::Display for LanguageId {
 
 /// A query-driven cartridge's queries, compiled against its grammar.
 #[derive(Debug)]
-pub struct CompiledQueries {
+pub(crate) struct CompiledQueries {
     /// `tags.scm`: `@definition.*`, `@name` and the `@supdoc.scope*` extensions.
     tags: tree_sitter::Query,
     /// `injections.scm`: `@injection.content` with `injection.language`.
@@ -88,19 +88,19 @@ pub struct CompiledQueries {
 impl CompiledQueries {
     /// Pairs the two compiled query files.
     #[must_use]
-    pub fn new(tags: tree_sitter::Query, injections: tree_sitter::Query) -> Self {
+    pub(crate) fn new(tags: tree_sitter::Query, injections: tree_sitter::Query) -> Self {
         Self { tags, injections }
     }
 
     /// The compiled `tags.scm`.
     #[must_use]
-    pub fn tags(&self) -> &tree_sitter::Query {
+    pub(crate) fn tags(&self) -> &tree_sitter::Query {
         &self.tags
     }
 
     /// The compiled `injections.scm`.
     #[must_use]
-    pub fn injections(&self) -> &tree_sitter::Query {
+    pub(crate) fn injections(&self) -> &tree_sitter::Query {
         &self.injections
     }
 }
@@ -108,7 +108,7 @@ impl CompiledQueries {
 /// A parsed file. Text and tree are held together, so every byte range in the tree is valid for
 /// the text. That is what makes hashing infallible.
 #[derive(Debug)]
-pub struct SourceFile {
+pub(crate) struct SourceFile {
     /// Where the file was read from.
     path: AbsolutePath,
     /// The whole file, UTF-8.
@@ -131,7 +131,7 @@ impl SourceFile {
     /// - [`ReadError::Timeout`] when `deadline` passes during the parse.
     /// - [`ReadError::Internal`] when the grammar can't be loaded into a parser or tree-sitter
     ///   returns no tree for another reason, which is a supdoc bug.
-    pub fn from_text(
+    pub(crate) fn from_text(
         path: AbsolutePath,
         text: String,
         language: &'static dyn Cartridge,
@@ -167,7 +167,7 @@ impl SourceFile {
     /// The error for a step of reading this file that `deadline` stopped at `stopped`: `step`
     /// reads after "stopped", as in "the symbols query".
     #[must_use]
-    pub fn timed_out(&self, step: &'static str, stopped: Stopped) -> ReadError {
+    pub(crate) fn timed_out(&self, step: &'static str, stopped: Stopped) -> ReadError {
         ReadError::Timeout {
             path: self.path.clone(),
             limit: self.deadline.limit(),
@@ -179,7 +179,7 @@ impl SourceFile {
 
     /// When reading this file must stop.
     #[must_use]
-    pub const fn deadline(&self) -> Deadline {
+    pub(crate) const fn deadline(&self) -> Deadline {
         self.deadline
     }
 
@@ -193,25 +193,25 @@ impl SourceFile {
 
     /// Where the file was read from.
     #[must_use]
-    pub fn path(&self) -> &AbsolutePath {
+    pub(crate) fn path(&self) -> &AbsolutePath {
         &self.path
     }
 
     /// The whole file.
     #[must_use]
-    pub fn text(&self) -> &str {
+    pub(crate) fn text(&self) -> &str {
         &self.text
     }
 
     /// The syntax tree.
     #[must_use]
-    pub fn tree(&self) -> &tree_sitter::Tree {
+    pub(crate) fn tree(&self) -> &tree_sitter::Tree {
         &self.tree
     }
 
     /// The language that parsed the file.
     #[must_use]
-    pub fn language(&self) -> &'static dyn Cartridge {
+    pub(crate) fn language(&self) -> &'static dyn Cartridge {
         self.language
     }
 }
@@ -221,7 +221,7 @@ impl SourceFile {
 /// pathological file can stall in any of them (SEC-1). The budget is per read: a file read once
 /// as a source and again as a target gets it twice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Deadline {
+pub(crate) struct Deadline {
     /// The ceiling it was started with, for the error.
     limit: TimeLimit,
     /// The moment it passes, or `None` for no limit.
@@ -230,15 +230,15 @@ pub struct Deadline {
 
 /// How far a parse or query got before its [`Deadline`] stopped it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Stopped {
+pub(crate) struct Stopped {
     /// The byte tree-sitter had reached.
-    pub offset: usize,
+    pub(crate) offset: usize,
 }
 
 impl Deadline {
     /// A deadline `limit` from now. Effect: reads the clock.
     #[must_use]
-    pub fn start(limit: TimeLimit) -> Self {
+    pub(crate) fn start(limit: TimeLimit) -> Self {
         Self {
             limit,
             at: limit
@@ -249,19 +249,19 @@ impl Deadline {
 
     /// The ceiling it was started with.
     #[must_use]
-    pub const fn limit(self) -> TimeLimit {
+    pub(crate) const fn limit(self) -> TimeLimit {
         self.limit
     }
 
     /// Whether it has passed. Effect: reads the clock.
     #[must_use]
-    pub fn passed(self) -> bool {
+    pub(crate) fn passed(self) -> bool {
         self.at.is_some_and(|at| Instant::now() >= at)
     }
 
     /// A tree-sitter progress check: breaks once the deadline has passed, recording in `stopped`
     /// the byte the parse or query had reached.
-    pub fn check(self, offset: usize, stopped: &Cell<Option<Stopped>>) -> ControlFlow<()> {
+    pub(crate) fn check(self, offset: usize, stopped: &Cell<Option<Stopped>>) -> ControlFlow<()> {
         if self.passed() {
             stopped.set(Some(Stopped { offset }));
             ControlFlow::Break(())
@@ -277,7 +277,7 @@ impl Deadline {
     ///
     /// [`Stopped`] when the deadline passes during the parse. The parser is reset, so it can be
     /// used again.
-    pub fn parse(self, parser: &mut Parser, text: &str) -> Result<Option<Tree>, Stopped> {
+    pub(crate) fn parse(self, parser: &mut Parser, text: &str) -> Result<Option<Tree>, Stopped> {
         let stopped = Cell::new(None);
         let mut progress =
             |state: &tree_sitter::ParseState| self.check(state.current_byte_offset(), &stopped);
@@ -299,18 +299,58 @@ impl Deadline {
 
 /// One addressable symbol in a file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Symbol {
+pub(crate) struct Symbol {
     /// Full dotted path: `Config.validate`, `RingBuffer.new`, `news.whats-new`.
-    pub path: SymbolPath,
+    path: SymbolPath,
     /// Extra names that also resolve here (Markdown's GitHub anchor, 03 R12).
-    pub aliases: Vec<SymbolPath>,
+    aliases: Vec<SymbolPath>,
     /// Byte range in the file; valid for the `SourceFile` the symbol came from.
-    pub range: Range<usize>,
+    range: Range<usize>,
+}
+
+impl Symbol {
+    /// A symbol at `path`, also named by `aliases`, covering `range` of its file.
+    #[must_use]
+    pub(crate) const fn new(
+        path: SymbolPath,
+        aliases: Vec<SymbolPath>,
+        range: Range<usize>,
+    ) -> Self {
+        Self {
+            path,
+            aliases,
+            range,
+        }
+    }
+
+    /// Full dotted path: `Config.validate`, `RingBuffer.new`, `news.whats-new`.
+    #[must_use]
+    pub(crate) const fn path(&self) -> &SymbolPath {
+        &self.path
+    }
+
+    /// Extra names that also resolve here (Markdown's GitHub anchor, 03 R12).
+    #[must_use]
+    pub(crate) fn aliases(&self) -> &[SymbolPath] {
+        &self.aliases
+    }
+
+    /// Byte range in the file; valid for the `SourceFile` the symbol came from.
+    #[must_use]
+    pub(crate) fn range(&self) -> Range<usize> {
+        self.range.clone()
+    }
+
+    /// Widens the range to also cover `other`, for twins merged into one symbol.
+    pub(crate) fn cover(&mut self, other: &Range<usize>) {
+        self.range.start = self.range.start.min(other.start);
+        self.range.end = self.range.end.max(other.end);
+    }
 }
 
 /// Every symbol a file exposes, in the order the cartridge produced them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SymbolTable {
+pub(crate) struct SymbolTable {
     /// The symbols.
     symbols: Vec<Symbol>,
 }
@@ -318,12 +358,12 @@ pub struct SymbolTable {
 impl SymbolTable {
     /// Collects a file's symbols.
     #[must_use]
-    pub fn new(symbols: Vec<Symbol>) -> Self {
+    pub(crate) fn new(symbols: Vec<Symbol>) -> Self {
         Self { symbols }
     }
 
     /// Every symbol, in the order the cartridge produced them.
-    pub fn iter(&self) -> impl Iterator<Item = &Symbol> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Symbol> {
         self.symbols.iter()
     }
 }
@@ -334,7 +374,7 @@ impl SymbolTable {
 /// comments is one region of several ranges, one per comment body without its marker, so a link
 /// or a reference definition can span its lines while every node keeps the file's own offsets.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MarkdownRegion {
+pub(crate) struct MarkdownRegion {
     /// Non-empty, in file order and not overlapping: what `Parser::set_included_ranges` accepts.
     ranges: Vec<tree_sitter::Range>,
 }
@@ -344,7 +384,7 @@ impl MarkdownRegion {
     ///
     /// `None` if `ranges` is empty, or a range ends before it starts or overlaps the one before it.
     #[must_use]
-    pub fn new(ranges: Vec<tree_sitter::Range>) -> Option<Self> {
+    pub(crate) fn new(ranges: Vec<tree_sitter::Range>) -> Option<Self> {
         let well_formed = ranges
             .iter()
             .all(|range| range.start_byte <= range.end_byte);
@@ -357,7 +397,7 @@ impl MarkdownRegion {
 
     /// The ranges, in file order.
     #[must_use]
-    pub fn ranges(&self) -> &[tree_sitter::Range] {
+    pub(crate) fn ranges(&self) -> &[tree_sitter::Range] {
         &self.ranges
     }
 
@@ -366,7 +406,11 @@ impl MarkdownRegion {
     /// For a run of line comments this is the text without the markers between its lines, which
     /// is how a link that wraps across lines reads.
     #[must_use]
-    pub fn text_within<'text>(&self, span: Range<usize>, text: &'text str) -> Cow<'text, str> {
+    pub(crate) fn text_within<'text>(
+        &self,
+        span: Range<usize>,
+        text: &'text str,
+    ) -> Cow<'text, str> {
         let mut pieces = self.ranges.iter().filter_map(|range| {
             let start = span.start.max(range.start_byte);
             let end = span.end.min(range.end_byte);
@@ -400,7 +444,7 @@ impl From<tree_sitter::Range> for MarkdownRegion {
 /// Passed in explicitly, never reached through a global, so a project-specific set can be built
 /// later without changing anything that consumes it.
 #[derive(Debug)]
-pub struct Languages {
+pub(crate) struct Languages {
     /// Every cartridge, each once, in registration order.
     cartridges: Vec<&'static dyn Cartridge>,
     /// Lowercase extension → the first cartridge registered for it.
@@ -411,7 +455,7 @@ impl Languages {
     /// Registers `cartridges` in order. If two claim the same extension, the first one registered
     /// keeps it; the built-in registry's tests guarantee that never happens there.
     #[must_use]
-    pub fn new(cartridges: Vec<&'static dyn Cartridge>) -> Self {
+    pub(crate) fn new(cartridges: Vec<&'static dyn Cartridge>) -> Self {
         let mut by_extension = HashMap::new();
         for &cartridge in &cartridges {
             for &extension in cartridge.extensions() {
@@ -426,13 +470,13 @@ impl Languages {
 
     /// The cartridge for `path`'s extension, matched case-insensitively.
     #[must_use]
-    pub fn for_path(&self, path: &Path) -> Option<&'static dyn Cartridge> {
+    pub(crate) fn for_path(&self, path: &Path) -> Option<&'static dyn Cartridge> {
         let extension = path.extension()?.to_str()?.to_ascii_lowercase();
         self.by_extension.get(extension.as_str()).copied()
     }
 
     /// Every cartridge, each once, in registration order.
-    pub fn iter(&self) -> impl Iterator<Item = &'static dyn Cartridge> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &'static dyn Cartridge> {
         self.cartridges.iter().copied()
     }
 }
@@ -574,10 +618,12 @@ mod tests {
 
     #[test]
     fn symbol_table_iterates_in_cartridge_order() {
-        let symbol = |path: &str, range: Range<usize>| Symbol {
-            path: path.parse().expect("the fixture symbol should be valid"),
-            aliases: Vec::new(),
-            range,
+        let symbol = |path: &str, range: Range<usize>| {
+            Symbol::new(
+                path.parse().expect("the fixture symbol should be valid"),
+                Vec::new(),
+                range,
+            )
         };
         let table = SymbolTable::new(vec![symbol("b", 0..1), symbol("a", 2..3)]);
 

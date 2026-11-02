@@ -56,7 +56,11 @@ const NOTHING_NOTE: &str = "Nothing to update.";
 /// the lockfile's hash settings differ from the config's and the run is narrowed by `[PATHS]` or
 /// `--state`, `scan-root-unreadable` (74), and `cli-output-failed` when the report cannot be
 /// written (74).
-pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
+pub(crate) fn run(
+    args: &UpdateArgs,
+    context: &Context,
+    output: &mut Output,
+) -> Result<Outcome, CliError> {
     let config = load_config(context, output)?;
     let scope = scope(&args.paths, &config, context)?;
     let LockForUpdate {
@@ -134,7 +138,7 @@ pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<
 /// The JSON Schema of `supdoc update`'s `--json` output: the whole envelope, with `data` typed as
 /// [`UpdateReport`].
 #[must_use]
-pub fn schema() -> schemars::Schema {
+pub(crate) fn schema() -> schemars::Schema {
     schemars::schema_for!(Envelope<'static, UpdateReport>)
 }
 

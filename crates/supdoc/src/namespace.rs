@@ -9,12 +9,12 @@ use std::str::FromStr;
 /// The two-character minimum keeps a name from reading like a Windows drive (`C:src`).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize)]
 #[serde(try_from = "String")]
-pub struct NamespaceName(String);
+pub(crate) struct NamespaceName(String);
 
 impl NamespaceName {
     /// The name as written.
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -100,7 +100,7 @@ impl serde::Serialize for NamespaceName {
 
 /// Why a string is not a valid [`NamespaceName`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum NamespaceNameError {
+pub(crate) enum NamespaceNameError {
     /// The name is empty or starts with something other than an ASCII letter.
     #[error("namespace names must start with an ASCII letter (got '{name}')")]
     InvalidStart {

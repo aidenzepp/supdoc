@@ -53,7 +53,7 @@ fn assert_crlf_matches_lf(id: &str, lf: &str) {
 
     assert!(
         lf_symbols.iter().any(|symbol| {
-            lf.get(symbol.range.clone())
+            lf.get(symbol.range().clone())
                 .expect("a symbol range should lie on character boundaries")
                 .contains('\n')
         }),
@@ -66,7 +66,8 @@ fn assert_crlf_matches_lf(id: &str, lf: &str) {
     );
     for (lf_symbol, crlf_symbol) in lf_symbols.iter().zip(&crlf_symbols) {
         assert_eq!(
-            lf_symbol.path, crlf_symbol.path,
+            lf_symbol.path(),
+            crlf_symbol.path(),
             "{id}: symbol paths differ"
         );
         assert_eq!(
@@ -75,9 +76,9 @@ fn assert_crlf_matches_lf(id: &str, lf: &str) {
             hash_symbol(&crlf_file, crlf_symbol, NORMALIZE)
                 .expect("the symbol should lie in its own file"),
             "{id}: `{}` hashes differently under CRLF (LF range {:?}, CRLF range {:?})",
-            lf_symbol.path,
-            lf_symbol.range,
-            crlf_symbol.range,
+            lf_symbol.path(),
+            lf_symbol.range(),
+            crlf_symbol.range(),
         );
     }
 }

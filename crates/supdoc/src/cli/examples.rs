@@ -5,7 +5,7 @@
 //! leaf blocks' bodies, so the two can never differ.
 
 /// Shown after the top-level help: the three tasks people reach for first.
-pub const TOP_EXAMPLES: &str = "\
+pub(crate) const TOP_EXAMPLES: &str = "\
 Examples:
   # Are the docs still accurate? (CI gate)
   supdoc check
@@ -18,7 +18,7 @@ Examples:
   supdoc list src/lib.rs#add";
 
 /// Shown after `supdoc check --help`.
-pub const CHECK_EXAMPLES: &str = "\
+pub(crate) const CHECK_EXAMPLES: &str = "\
 Examples:
   # Check every link in the project
   supdoc check
@@ -33,7 +33,7 @@ Examples:
   supdoc check --json";
 
 /// Shown after `supdoc update --help`.
-pub const UPDATE_EXAMPLES: &str = "\
+pub(crate) const UPDATE_EXAMPLES: &str = "\
 Examples:
   # Preview what would be accepted into supdoc.lock
   supdoc update
@@ -48,7 +48,7 @@ Examples:
   supdoc update --dry-run --json";
 
 /// Shown after `supdoc fix --help`.
-pub const FIX_EXAMPLES: &str = "\
+pub(crate) const FIX_EXAMPLES: &str = "\
 Examples:
   # Preview the repairs
   supdoc fix
@@ -63,7 +63,7 @@ Examples:
   supdoc fix --dry-run --json";
 
 /// Shown after `supdoc list --help`.
-pub const LIST_EXAMPLES: &str = "\
+pub(crate) const LIST_EXAMPLES: &str = "\
 Examples:
   # Every link and its state (first 100)
   supdoc list
@@ -78,7 +78,7 @@ Examples:
   supdoc list auth:src/session.rs --json";
 
 /// Shown after `supdoc resolve --help`.
-pub const RESOLVE_EXAMPLES: &str = "\
+pub(crate) const RESOLVE_EXAMPLES: &str = "\
 Examples:
   # The symbols a file exposes
   supdoc resolve src/config.rs
@@ -144,16 +144,16 @@ macro_rules! skill_install_body {
 }
 
 /// Shown after `supdoc config show --help`.
-pub const CONFIG_SHOW_EXAMPLES: &str = concat!("Examples:", config_show_body!());
+pub(crate) const CONFIG_SHOW_EXAMPLES: &str = concat!("Examples:", config_show_body!());
 
 /// Shown after `supdoc namespace list --help`.
-pub const NAMESPACE_LIST_EXAMPLES: &str = concat!("Examples:", namespace_list_body!());
+pub(crate) const NAMESPACE_LIST_EXAMPLES: &str = concat!("Examples:", namespace_list_body!());
 
 /// Shown after `supdoc namespace rename --help`.
-pub const NAMESPACE_RENAME_EXAMPLES: &str = concat!("Examples:", namespace_rename_body!());
+pub(crate) const NAMESPACE_RENAME_EXAMPLES: &str = concat!("Examples:", namespace_rename_body!());
 
 /// Shown after `supdoc init --help`.
-pub const INIT_EXAMPLES: &str = "\
+pub(crate) const INIT_EXAMPLES: &str = "\
 Examples:
   # Write a starter supdoc.config.toml
   supdoc init
@@ -165,7 +165,7 @@ Examples:
   supdoc init --dry-run --json";
 
 /// Shown after `supdoc schema --help`.
-pub const SCHEMA_EXAMPLES: &str = "\
+pub(crate) const SCHEMA_EXAMPLES: &str = "\
 Examples:
   # The JSON Schema of `supdoc check --json`
   supdoc schema check
@@ -174,7 +174,7 @@ Examples:
   supdoc schema";
 
 /// Shown after `supdoc completions --help`.
-pub const COMPLETIONS_EXAMPLES: &str = "\
+pub(crate) const COMPLETIONS_EXAMPLES: &str = "\
 Examples:
   # Install zsh completions
   supdoc completions zsh > ~/.zfunc/_supdoc
@@ -183,13 +183,13 @@ Examples:
   supdoc completions zsh --json";
 
 /// Shown after `supdoc skill install --help`.
-pub const SKILL_INSTALL_EXAMPLES: &str = concat!("Examples:", skill_install_body!());
+pub(crate) const SKILL_INSTALL_EXAMPLES: &str = concat!("Examples:", skill_install_body!());
 
 /// Shown after `supdoc config --help`.
-pub const CONFIG_EXAMPLES: &str = concat!("Examples:", config_show_body!());
+pub(crate) const CONFIG_EXAMPLES: &str = concat!("Examples:", config_show_body!());
 
 /// Shown after `supdoc namespace --help`.
-pub const NAMESPACE_EXAMPLES: &str = concat!(
+pub(crate) const NAMESPACE_EXAMPLES: &str = concat!(
     "Examples:",
     namespace_list_body!(),
     "\n",
@@ -197,4 +197,4 @@ pub const NAMESPACE_EXAMPLES: &str = concat!(
 );
 
 /// Shown after `supdoc skill --help`.
-pub const SKILL_EXAMPLES: &str = concat!("Examples:", skill_install_body!());
+pub(crate) const SKILL_EXAMPLES: &str = concat!("Examples:", skill_install_body!());

@@ -24,7 +24,7 @@ use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile, Symbol};
 use crate::read::error::{ReadError, ReadRole, ResolveError};
 
-use super::args::ResolveArgs;
+use super::args::{Limit, ResolveArgs};
 use super::project::{
     absolute, command_line, ensure_exists, load_config, namespaced_missing, path_outside_config,
 };
@@ -43,7 +43,7 @@ use super::{CliError, Context, Outcome};
 /// error (1, or 74 for I/O and 70 for a supdoc bug), `resolve-not-found` or `resolve-ambiguous`
 /// for a `SYMBOL` that names no single symbol (1), and `cli-output-failed` when the report
 /// cannot be written (74).
-pub fn run(
+pub(crate) fn run(
     args: &ResolveArgs,
     context: &Context,
     output: &mut Output,
@@ -94,7 +94,7 @@ pub fn run(
         .map_err(|error| CliError::output_failed("the resolve report", &error))?;
     if truncated {
         output
-            .note(&args.limit.truncation_note(listed, total, "symbols"))
+            .note(&Limit::truncation_note(listed, total, "symbols"))
             .map_err(|error| CliError::output_failed("the resolve report", &error))?;
     } else if listed == 0 {
         output
@@ -110,7 +110,7 @@ pub fn run(
 /// The JSON Schema of `supdoc resolve`'s `--json` output: the whole envelope, with `data` typed as
 /// [`ResolveReport`].
 #[must_use]
-pub fn schema() -> schemars::Schema {
+pub(crate) fn schema() -> schemars::Schema {
     schemars::schema_for!(Envelope<'static, ResolveReport>)
 }
 
@@ -326,14 +326,14 @@ pub(crate) struct SymbolJson {
 impl SymbolJson {
     /// `symbol` as found in the indexed text of its file.
     fn new(text: &IndexedText<'_>, symbol: &Symbol) -> Self {
-        let (line, column) = text.position(symbol.range.start).unwrap_or((1, 1));
+        let (line, column) = text.position(symbol.range().start).unwrap_or((1, 1));
         Self {
-            path: symbol.path.to_string(),
-            aliases: symbol.aliases.iter().map(SymbolPath::to_string).collect(),
+            path: symbol.path().to_string(),
+            aliases: symbol.aliases().iter().map(SymbolPath::to_string).collect(),
             line,
             column,
-            start: symbol.range.start,
-            end: symbol.range.end,
+            start: symbol.range().start,
+            end: symbol.range().end,
         }
     }
 }

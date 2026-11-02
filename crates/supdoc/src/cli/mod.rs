@@ -4,49 +4,49 @@
 //! `run` function, so building a command means editing only its own file.
 
 /// Command-line argument definitions.
-pub mod args;
+pub(crate) mod args;
 
 /// Example invocations shown in help.
-pub mod examples;
+pub(crate) mod examples;
 
 /// Parsing arguments, including JSON usage errors.
-pub mod parse;
+pub(crate) mod parse;
 
 /// Setup shared by every command that loads the config.
-pub mod project;
+pub(crate) mod project;
 
 /// `supdoc init`.
-pub mod init;
+pub(crate) mod init;
 
 /// `supdoc completions`.
-pub mod completions;
+pub(crate) mod completions;
 
 /// `supdoc resolve`.
-pub mod resolve;
+pub(crate) mod resolve;
 
 /// `supdoc config show` and `supdoc namespace list`.
-pub mod config;
+pub(crate) mod config;
 
 /// `supdoc check`.
-pub mod check;
+pub(crate) mod check;
 
 /// `supdoc update`.
-pub mod update;
+pub(crate) mod update;
 
 /// `supdoc list`.
-pub mod list;
+pub(crate) mod list;
 
 /// `supdoc fix`.
-pub mod fix;
+pub(crate) mod fix;
 
 /// `supdoc namespace rename`.
-pub mod rename;
+pub(crate) mod rename;
 
 /// `supdoc skill install`.
-pub mod skill;
+pub(crate) mod skill;
 
 /// `supdoc schema`.
-pub mod schema;
+pub(crate) mod schema;
 
 /// Test doubles the unit tests of this module share.
 #[cfg(test)]
@@ -66,18 +66,18 @@ use args::{Command, ConfigCommand, GlobalArgs, Inspect, NamespaceCommand, SkillC
 
 /// Everything a command receives besides its own arguments.
 #[derive(Debug)]
-pub struct Context {
+pub(crate) struct Context {
     /// The flags every command accepts.
-    pub global: GlobalArgs,
+    pub(crate) global: GlobalArgs,
     /// The current directory, read once by `main` (01).
-    pub cwd: AbsolutePath,
+    pub(crate) cwd: AbsolutePath,
     /// The git global excludes file every walk honors, found once by `main`.
-    pub global_excludes: GlobalExcludes,
+    pub(crate) global_excludes: GlobalExcludes,
 }
 
 /// How a command that ran to completion ended (06 X7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Outcome {
+pub(crate) enum Outcome {
     /// Nothing is wrong. Exit code 0.
     Clean,
     /// The command ran, and what it checks is failing or was refused. Exit code 1.
@@ -87,7 +87,7 @@ pub enum Outcome {
 impl Outcome {
     /// The process exit code: 0 or 1.
     #[must_use]
-    pub const fn exit_code(self) -> u8 {
+    pub(crate) const fn exit_code(self) -> u8 {
         match self {
             Self::Clean => ExitStatus::Clean,
             Self::Failing => ExitStatus::Failed,
@@ -99,11 +99,11 @@ impl Outcome {
 /// The place in a file that a [`CliError`] is about, with its source line captured so rendering
 /// never reads files (07 G11).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ErrorSite {
+pub(crate) struct ErrorSite {
     /// The file, line and column.
-    pub location: Location,
+    pub(crate) location: Location,
     /// The source lines to show under the message.
-    pub snippet: Snippet,
+    pub(crate) snippet: Snippet,
 }
 
 /// A command that could not finish: a stable code, what happened, what to do next, and the exit
@@ -112,7 +112,7 @@ pub struct ErrorSite {
 /// Commands convert the errors of the modules they call with [`CliError::new`], using that
 /// module's own `code()`, `help()` and `exit_code()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CliError {
+pub(crate) struct CliError {
     /// Stable code, never reworded: `config-extends-missing`.
     code: &'static str,
     /// What happened, in one line.
@@ -128,7 +128,7 @@ pub struct CliError {
 impl CliError {
     /// An error with every part its JSON form needs.
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         code: &'static str,
         message: impl Into<String>,
         help: impl Into<String>,
@@ -145,7 +145,7 @@ impl CliError {
 
     /// The same error, pointing at `site` in a file.
     #[must_use]
-    pub fn at(self, site: ErrorSite) -> Self {
+    pub(crate) fn at(self, site: ErrorSite) -> Self {
         Self {
             site: Some(Box::new(site)),
             ..self
@@ -171,37 +171,31 @@ impl CliError {
 
     /// The stable code.
     #[must_use]
-    pub const fn code(&self) -> &'static str {
+    pub(crate) const fn code(&self) -> &'static str {
         self.code
     }
 
     /// What happened.
     #[must_use]
-    pub fn message(&self) -> &str {
+    pub(crate) fn message(&self) -> &str {
         &self.message
     }
 
     /// What to do next.
     #[must_use]
-    pub fn help(&self) -> &str {
+    pub(crate) fn help(&self) -> &str {
         &self.help
-    }
-
-    /// The process exit status.
-    #[must_use]
-    pub const fn status(&self) -> ExitStatus {
-        self.status
     }
 
     /// The process exit code.
     #[must_use]
-    pub const fn exit_code(&self) -> u8 {
+    pub(crate) const fn exit_code(&self) -> u8 {
         self.status.code()
     }
 
     /// Where in a file it happened, if it is about one place.
     #[must_use]
-    pub fn site(&self) -> Option<&ErrorSite> {
+    pub(crate) fn site(&self) -> Option<&ErrorSite> {
         self.site.as_deref()
     }
 }
@@ -220,9 +214,9 @@ impl From<ScanError> for CliError {
 impl From<&CartridgeLoadError> for CliError {
     fn from(error: &CartridgeLoadError) -> Self {
         Self::new(
-            error.code(),
+            CartridgeLoadError::code(),
             error.to_string(),
-            error.help(),
+            CartridgeLoadError::help(),
             ExitStatus::Bug,
         )
     }
@@ -254,7 +248,7 @@ impl std::error::Error for CliError {}
 /// # Errors
 ///
 /// Returns the command's own [`CliError`].
-pub fn run(
+pub(crate) fn run(
     command: &Command,
     skill_dirs: &skill::SkillDirs,
     context: &Context,

@@ -19,7 +19,7 @@ use crate::path::{AbsolutePath, RelativePath};
 /// No variant has a `source` field: the reason is already in the message, so a renderer walking
 /// `source()` would print it twice.
 #[derive(Debug)]
-pub enum ConfigError {
+pub(crate) enum ConfigError {
     /// `--config` named a file that isn't there.
     NotFound {
         /// The file that was asked for.
@@ -132,7 +132,7 @@ pub enum ConfigError {
 
 /// How a namespace's directory ends up outside the project root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NamespaceEscape {
+pub(crate) enum NamespaceEscape {
     /// The directory as written lies outside the root.
     AsWritten,
     /// The directory as written lies inside the root, and a symlink along it leads out.
@@ -145,7 +145,7 @@ pub enum NamespaceEscape {
 impl ConfigError {
     /// Stable, machine-readable identity. Never reworded.
     #[must_use]
-    pub fn code(&self) -> &'static str {
+    pub(crate) fn code(&self) -> &'static str {
         match self {
             Self::NotFound { .. } => "config-not-found",
             Self::Read { .. } => "config-read",
@@ -164,7 +164,7 @@ impl ConfigError {
     /// error's location does. No config loaded, so there is no project root to name them from.
     /// A namespace's directory that lies outside the root, and the root itself, stay absolute.
     #[must_use]
-    pub fn message_from(&self, cwd: &AbsolutePath) -> String {
+    pub(crate) fn message_from(&self, cwd: &AbsolutePath) -> String {
         self.describe(&|file| relative_to(cwd, file))
     }
 
@@ -253,15 +253,16 @@ impl ConfigError {
     /// by its absolute path.
     ///
     /// `None` when the message is already the fix.
+    #[cfg(test)]
     #[must_use]
-    pub fn help(&self) -> Option<String> {
+    pub(crate) fn help(&self) -> Option<String> {
         self.hint(&|file| file.display().to_string())
     }
 
     /// What to do next, naming any file relative to `cwd`, the directory supdoc runs in, so a
     /// command in the help runs as written. Every error has one.
     #[must_use]
-    pub fn help_from(&self, cwd: &AbsolutePath) -> String {
+    pub(crate) fn help_from(&self, cwd: &AbsolutePath) -> String {
         self.hint(&|file| relative_to(cwd, file))
             .unwrap_or_else(|| GLOB_OR_SYNTAX_HELP.to_owned())
     }
@@ -341,7 +342,7 @@ impl ConfigError {
 
     /// The process exit status for this error (06 X7): 74 when a file can't be read, else 78.
     #[must_use]
-    pub fn status(&self) -> ExitStatus {
+    pub(crate) fn status(&self) -> ExitStatus {
         match self {
             Self::Read { .. } => ExitStatus::Io,
             Self::NotFound { .. }

@@ -13,7 +13,7 @@ use crate::link::{LinkPathError, SourcePath};
 use crate::lock::error::shell_quote;
 use crate::output::paths::relative_to;
 use crate::path::AbsolutePath;
-use crate::read::cartridge::{Cartridge, Languages};
+use crate::read::cartridge::Languages;
 use crate::scan::explicit::explicit_path_warnings;
 pub(crate) use crate::scan::ignore::CODE_IGNORE_TOO_LARGE;
 use crate::scan::ignore::{IgnoreRules, symlinked_ignore_file, unreadable_ignore_file};
@@ -24,41 +24,39 @@ const VCS_DIRS: [&str; 4] = [".git", ".hg", ".svn", ".jj"];
 
 /// The files a scan reads links from, and the problems met while finding them.
 #[derive(Debug)]
-pub struct Walk {
+pub(crate) struct Walk {
     /// Sorted by path (04 S8). Every entry is under the root, passes [`Config::scans`], is inside
     /// the [`Scope`], and has a cartridge (04 S6).
-    pub sources: Vec<WalkedSource>,
+    pub(crate) sources: Vec<WalkedSource>,
     /// Unreadable directories, symlinked ignore files that weren't read, and explicitly named
     /// paths that are excluded or ignored, sorted.
-    pub findings: Vec<Finding>,
+    pub(crate) findings: Vec<Finding>,
     /// The directories the walk couldn't read, sorted by path. Nothing beneath one was walked, so
     /// its sources and their links are unknown (05 C5).
-    pub unread_dirs: Vec<UnreadDir>,
+    pub(crate) unread_dirs: Vec<UnreadDir>,
 }
 
 /// A file the walk found to read links from.
 #[derive(Debug)]
-pub struct WalkedSource {
+pub(crate) struct WalkedSource {
     /// Its path relative to the root, as links name it.
-    pub source: SourcePath,
+    pub(crate) source: SourcePath,
     /// Its path on disk.
-    pub path: AbsolutePath,
-    /// The cartridge that reads it.
-    pub cartridge: &'static dyn Cartridge,
+    pub(crate) path: AbsolutePath,
 }
 
 /// A directory the walk couldn't read, so nothing beneath it was walked.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct UnreadDir {
+pub(crate) struct UnreadDir {
     /// The directory, as the walk met it.
-    pub path: AbsolutePath,
+    pub(crate) path: AbsolutePath,
     /// Why it wasn't read.
-    pub cause: UnreadCause,
+    pub(crate) cause: UnreadCause,
 }
 
 /// Why the walk didn't read a directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum UnreadCause {
+pub(crate) enum UnreadCause {
     /// Listing it failed, with what the operating system reported, such as `permission denied`.
     Io(io::ErrorKind),
 }
@@ -95,7 +93,7 @@ impl UnreadDir {
 /// The git global excludes file, such as `~/.config/git/ignore`, found once by `main` so the walk
 /// reads no git config itself and an in-process run reads none of the user's.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct GlobalExcludes {
+pub(crate) struct GlobalExcludes {
     /// The file, whether or not it exists. `None` when there is no home directory to find it in.
     /// Kept as git names it, not lexically normalized, so the operating system resolves a `..`
     /// after a symlink as git does.
@@ -105,7 +103,7 @@ pub struct GlobalExcludes {
 impl GlobalExcludes {
     /// No global excludes file, for runs that must not depend on the user's git config.
     #[must_use]
-    pub const fn none() -> Self {
+    pub(crate) const fn none() -> Self {
         Self { file: None }
     }
 
@@ -117,7 +115,7 @@ impl GlobalExcludes {
     ///
     /// Effect: reads environment variables and the user's and system git config.
     #[must_use]
-    pub fn find(cwd: &AbsolutePath) -> Self {
+    pub(crate) fn find(cwd: &AbsolutePath) -> Self {
         Self {
             file: ignore::gitignore::gitconfig_excludes_path().map(|file| cwd.as_path().join(file)),
         }
@@ -140,7 +138,7 @@ impl GlobalExcludes {
 ///
 /// Effect: reads directory listings, ignore files and file metadata.
 #[must_use]
-pub fn walk(
+pub(crate) fn walk(
     config: &Config,
     languages: &Languages,
     scope: &Scope,
@@ -298,7 +296,7 @@ fn as_source(
     if !config.scans(&path) {
         return None;
     }
-    let cartridge = languages.for_path(path.as_path())?;
+    let _cartridge = languages.for_path(path.as_path())?;
     let relative_path = path.strip_prefix(config.root())?;
     let relative = match SourcePath::from_relative(relative_path) {
         Ok(relative) => relative,
@@ -307,7 +305,6 @@ fn as_source(
     scope.contains(&relative).then_some(Ok(WalkedSource {
         source: relative,
         path,
-        cartridge,
     }))
 }
 
@@ -707,20 +704,6 @@ mod tests {
         let first = project.sources(&Scope::All);
         assert_eq!(first, ["B.rs", "a/b.rs", "a.rs", "m/n/o.rs", "z.rs"]);
         assert_eq!(project.sources(&Scope::All), first);
-    }
-
-    #[test]
-    fn each_source_carries_the_cartridge_for_its_extension() {
-        let project = Project::new();
-        project.write("lib.rs", "");
-
-        let walk = project.walk(&Scope::All);
-        let languages: Vec<_> = walk
-            .sources
-            .iter()
-            .map(|walked| walked.cartridge.id().as_str())
-            .collect();
-        assert_eq!(languages, ["rust"]);
     }
 
     #[test]

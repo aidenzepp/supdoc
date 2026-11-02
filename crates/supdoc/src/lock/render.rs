@@ -14,7 +14,7 @@ impl Lockfile {
     /// The same entries always render to the same bytes. Infallible: `toml_edit` only displays
     /// documents.
     #[must_use]
-    pub fn render(&self) -> String {
+    pub(crate) fn render(&self) -> String {
         let mut document = DocumentMut::new();
         set(
             document.as_table_mut(),

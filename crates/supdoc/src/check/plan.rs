@@ -10,7 +10,7 @@ use crate::scan::model::{Scan, Scope, TargetState};
 use crate::state::LinkState;
 
 /// The states an update must select to move the lockfile to new hash settings (B.5).
-pub const MIGRATION_STATES: [LinkState; 3] =
+pub(crate) const MIGRATION_STATES: [LinkState; 3] =
     [LinkState::Failed, LinkState::New, LinkState::Obsolete];
 
 /// A move of the whole lockfile to new hash settings.
@@ -19,7 +19,7 @@ pub const MIGRATION_STATES: [LinkState; 3] =
 /// (B.5). Entries the plan leaves alone keep their old hashes under the new settings (B-Q4), which
 /// is only safe when the plan re-records every entry it can.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Migration {
+pub(crate) struct Migration {
     /// The settings the scan hashed with.
     settings: HashSettings,
 }
@@ -28,7 +28,11 @@ impl Migration {
     /// The migration to `settings` for an update over `scope` selecting `states`, or `None` when
     /// that update is not a full one.
     #[must_use]
-    pub fn for_update(settings: HashSettings, scope: &Scope, states: &[LinkState]) -> Option<Self> {
+    pub(crate) fn for_update(
+        settings: HashSettings,
+        scope: &Scope,
+        states: &[LinkState],
+    ) -> Option<Self> {
         (matches!(scope, Scope::All) && MIGRATION_STATES.iter().all(|state| states.contains(state)))
             .then_some(Self { settings })
     }
@@ -36,37 +40,37 @@ impl Migration {
 
 /// What `update` would do.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UpdatePlan {
+pub(crate) struct UpdatePlan {
     /// Every lock entry that would change, in report order.
-    pub changes: Vec<LockChange>,
+    pub(crate) changes: Vec<LockChange>,
     /// The hash settings the lockfile is re-recorded under, when they differ from the ones it
     /// records (B.5). A change of settings alone is a change: `next` is then `Some`.
-    pub settings: Option<SettingsChange>,
+    pub(crate) settings: Option<SettingsChange>,
     /// The lockfile after the changes, or `None` when there is nothing to do, so the file isn't
     /// rewritten and its modification time and git status stay quiet.
-    pub next: Option<Lockfile>,
+    pub(crate) next: Option<Lockfile>,
 }
 
 /// The lockfile's recorded hash settings, and the different ones the config resolves to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SettingsChange {
+pub(crate) struct SettingsChange {
     /// The settings the lockfile records.
-    pub from: HashSettings,
+    pub(crate) from: HashSettings,
     /// The settings the config resolves to, which the scan hashed with.
-    pub to: HashSettings,
+    pub(crate) to: HashSettings,
 }
 
 impl SettingsChange {
     /// The change from `from` to `to`, or `None` when they are the same.
     #[must_use]
-    pub fn between(from: HashSettings, to: HashSettings) -> Option<Self> {
+    pub(crate) fn between(from: HashSettings, to: HashSettings) -> Option<Self> {
         (from != to).then_some(Self { from, to })
     }
 }
 
 /// One change to the lockfile.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LockChange {
+pub(crate) enum LockChange {
     /// Add an entry for a link that had none: a `new` link, or a link that moved keys (05 C6).
     Record(LinkKey),
     /// Replace an entry's hash with the code's current hash: a `failed` link.
@@ -88,7 +92,7 @@ pub enum LockChange {
 /// When the migration's settings differ from the lock's, every link whose hash they change looks
 /// `failed`, and is accepted like any other.
 #[must_use]
-pub fn plan_update(
+pub(crate) fn plan_update(
     report: &Report,
     scan: &Scan,
     lock: &Lockfile,

@@ -17,7 +17,7 @@ use crate::output::json::FatalJson;
 
 /// What parsing the command line produced.
 #[derive(Debug)]
-pub enum Parsed {
+pub(crate) enum Parsed {
     /// A valid command line: run it.
     Run(Box<Cli>),
     /// Help, a version, or a usage error: print it and exit.
@@ -26,18 +26,18 @@ pub enum Parsed {
 
 /// Text for `main` to write, and the exit code to finish with.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Printout {
+pub(crate) struct Printout {
     /// Where the text goes.
-    pub stream: Stream,
+    pub(crate) stream: Stream,
     /// The text, ending in a newline.
-    pub text: String,
+    pub(crate) text: String,
     /// The process exit code: 0 for help and version, 2 for a usage error (06 X7).
-    pub exit_code: u8,
+    pub(crate) exit_code: u8,
 }
 
 /// The standard stream a [`Printout`] belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Stream {
+pub(crate) enum Stream {
     /// Data the user asked for: help and version.
     Stdout,
     /// Errors.
@@ -45,7 +45,7 @@ pub enum Stream {
 }
 
 /// The code of the error printed when the command line cannot be parsed.
-pub const USAGE_ERROR_CODE: &str = "cli-usage";
+pub(crate) const USAGE_ERROR_CODE: &str = "cli-usage";
 
 /// Parses `args` (the program name first).
 ///
@@ -53,7 +53,7 @@ pub const USAGE_ERROR_CODE: &str = "cli-usage";
 /// printed as JSON, since a failed parse leaves no flags to read. clap itself reads the
 /// environment to fill flags.
 #[must_use]
-pub fn parse_from<I, T>(args: I, env: impl Fn(&str) -> Option<String>) -> Parsed
+pub(crate) fn parse_from<I, T>(args: I, env: impl Fn(&str) -> Option<String>) -> Parsed
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString>,

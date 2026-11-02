@@ -12,14 +12,14 @@ use std::str::FromStr;
 use crate::namespace::{NamespaceName, NamespaceNameError};
 
 /// Parsing a Markdown link destination into a link target (03 R10).
-pub mod destination;
+pub(crate) mod destination;
 
 /// A file that contains links (a doc **or a code file**), relative to the project root.
 ///
 /// `/`-separated, not empty, with no `.`, `..` or empty segments (02 L5).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize)]
 #[serde(try_from = "String")]
-pub struct SourcePath(String);
+pub(crate) struct SourcePath(String);
 
 impl SourcePath {
     /// Builds a source path from a relative filesystem path, joining its components with `/`.
@@ -27,7 +27,7 @@ impl SourcePath {
     /// # Errors
     ///
     /// Fails if `path` is rooted, contains `..`, is empty, or has a component that isn't UTF-8.
-    pub fn from_relative(path: &Path) -> Result<Self, LinkPathError> {
+    pub(crate) fn from_relative(path: &Path) -> Result<Self, LinkPathError> {
         let mut segments = Vec::new();
         for component in path.components() {
             match component {
@@ -57,7 +57,7 @@ impl SourcePath {
 
     /// The path as written, with `/` separators.
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -83,12 +83,12 @@ impl FromStr for SourcePath {
 /// `/`-separated, not empty, with no `.`, `..` or empty segments. supdoc reads no target outside
 /// the project root, so a target that climbs with `..` can't be represented.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TargetPath(String);
+pub(crate) struct TargetPath(String);
 
 impl TargetPath {
     /// The path as written, with `/` separators.
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -143,7 +143,7 @@ fn check_link_path(path: &str, climbs: fn(String) -> LinkPathError) -> Result<()
 
 /// Why a string is not a valid project-relative link path.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum LinkPathError {
+pub(crate) enum LinkPathError {
     /// The path is empty.
     #[error("the path is empty")]
     Empty,
@@ -216,7 +216,7 @@ pub enum LinkPathError {
 /// Ordering puts plain paths before namespaced ones, then sorts by namespace and path.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize)]
 #[serde(try_from = "String")]
-pub enum Target {
+pub(crate) enum Target {
     /// `src/lib.rs`, `docs/guide.md`: relative to the project root.
     Path(TargetPath),
     /// `auth:src/lib.rs`: relative to the namespace's directory.
@@ -231,7 +231,7 @@ pub enum Target {
 impl Target {
     /// The namespace, if the target is namespaced.
     #[must_use]
-    pub fn namespace(&self) -> Option<&NamespaceName> {
+    pub(crate) fn namespace(&self) -> Option<&NamespaceName> {
         match self {
             Self::Path(_) => None,
             Self::Namespaced { namespace, .. } => Some(namespace),
@@ -240,7 +240,7 @@ impl Target {
 
     /// The path, relative to the project root or to the namespace's directory.
     #[must_use]
-    pub fn path(&self) -> &TargetPath {
+    pub(crate) fn path(&self) -> &TargetPath {
         match self {
             Self::Path(path) | Self::Namespaced { path, .. } => path,
         }
@@ -288,7 +288,7 @@ impl fmt::Display for Target {
 
 /// Why a string is not a valid [`Target`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum TargetError {
+pub(crate) enum TargetError {
     /// The text before `:` is not a valid namespace name.
     #[error(transparent)]
     Namespace(#[from] NamespaceNameError),
@@ -302,14 +302,14 @@ pub enum TargetError {
 /// One or more segments, none empty and none containing `.`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize)]
 #[serde(try_from = "String")]
-pub struct SymbolPath(Vec<String>);
+pub(crate) struct SymbolPath(Vec<String>);
 
 /// One segment of a [`SymbolPath`]: non-empty and free of `.`.
 ///
 /// Holding one proves the segment is valid, so [`SymbolPath::root`] and [`SymbolPath::child`]
 /// cannot fail.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SymbolSegment(String);
+pub(crate) struct SymbolSegment(String);
 
 impl SymbolSegment {
     /// Checks `name` as a symbol path segment.
@@ -317,33 +317,27 @@ impl SymbolSegment {
     /// # Errors
     ///
     /// Fails if `name` is empty or contains `.`.
-    pub fn new(name: String) -> Result<Self, SymbolPathError> {
+    pub(crate) fn new(name: String) -> Result<Self, SymbolPathError> {
         SymbolPath::from_segments(vec![name]).map(|path| Self(path.0.into_iter().collect()))
     }
 
     /// This segment with `-number` appended, which keeps it valid.
     #[must_use]
-    pub fn numbered(&self, number: usize) -> Self {
+    pub(crate) fn numbered(&self, number: usize) -> Self {
         Self(format!("{}-{number}", self.0))
-    }
-
-    /// The segment's text.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
 impl SymbolPath {
     /// A one-segment path.
     #[must_use]
-    pub fn root(segment: SymbolSegment) -> Self {
+    pub(crate) fn root(segment: SymbolSegment) -> Self {
         Self(vec![segment.0])
     }
 
     /// This path extended by one more segment.
     #[must_use]
-    pub fn child(&self, segment: SymbolSegment) -> Self {
+    pub(crate) fn child(&self, segment: SymbolSegment) -> Self {
         let mut segments = self.0.clone();
         segments.push(segment.0);
         Self(segments)
@@ -354,7 +348,7 @@ impl SymbolPath {
     /// # Errors
     ///
     /// Fails if there are no segments, or a segment is empty or contains `.`.
-    pub fn from_segments(segments: Vec<String>) -> Result<Self, SymbolPathError> {
+    pub(crate) fn from_segments(segments: Vec<String>) -> Result<Self, SymbolPathError> {
         let invalid = |reason| SymbolPathError {
             input: segments.join("."),
             reason,
@@ -373,13 +367,13 @@ impl SymbolPath {
 
     /// The segments, outermost first. Never empty.
     #[must_use]
-    pub fn segments(&self) -> &[String] {
+    pub(crate) fn segments(&self) -> &[String] {
         &self.0
     }
 
     /// The last segment: the symbol's own name.
     #[must_use]
-    pub fn last(&self) -> &str {
+    pub(crate) fn last(&self) -> &str {
         // Construction guarantees at least one segment, so the fallback is never used.
         self.0.last().map_or("", String::as_str)
     }
@@ -416,35 +410,35 @@ impl fmt::Display for SymbolPath {
 /// Why a string is not a valid [`SymbolPath`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("invalid symbol `{input}`: {reason}")]
-pub struct SymbolPathError {
+pub(crate) struct SymbolPathError {
     /// The rejected symbol, as written.
-    pub input: String,
+    pub(crate) input: String,
     /// What is wrong with it, as a phrase (`a segment is empty`).
-    pub reason: &'static str,
+    pub(crate) reason: &'static str,
 }
 
 impl SymbolPathError {
     /// The reason for an empty symbol.
-    pub const EMPTY: &'static str = "the symbol is empty";
+    pub(crate) const EMPTY: &'static str = "the symbol is empty";
     /// The reason for `a..b`, `.a` or `a.`.
-    pub const EMPTY_SEGMENT: &'static str = "a segment is empty";
+    pub(crate) const EMPTY_SEGMENT: &'static str = "a segment is empty";
     /// The reason for a segment built with a `.` inside it.
-    pub const DOT_IN_SEGMENT: &'static str = "a segment contains `.`";
+    pub(crate) const DOT_IN_SEGMENT: &'static str = "a segment contains `.`";
 }
 
 /// Identity of one lock entry (02 L2). Field order is the sort order (02 L1).
 #[derive(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, schemars::JsonSchema,
 )]
-pub struct LinkKey {
+pub(crate) struct LinkKey {
     /// The file the link is written in.
-    pub source: SourcePath,
+    pub(crate) source: SourcePath,
     /// The file the link points at.
-    pub target: Target,
+    pub(crate) target: Target,
     /// `None` = whole file. `Option`'s ordering puts whole-file entries first. Left out of JSON
     /// when `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub symbol: Option<SymbolPath>,
+    pub(crate) symbol: Option<SymbolPath>,
 }
 
 impl fmt::Display for LinkKey {
@@ -458,7 +452,7 @@ impl fmt::Display for LinkKey {
 impl LinkKey {
     /// The target part alone, as `path`, `path#symbol` or `ns:path#symbol`.
     #[must_use]
-    pub fn target_text(&self) -> String {
+    pub(crate) fn target_text(&self) -> String {
         let mut text = String::new();
         // A `String` never fails to take a write, so the result carries no information.
         let _ = write_target(&mut text, &self.target, self.symbol.as_ref());
@@ -487,11 +481,11 @@ fn write_target(
 ///
 /// Used where a user names a target on the command line (`supdoc list src/lib.rs#add`).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct LinkRef {
+pub(crate) struct LinkRef {
     /// The file.
-    pub target: Target,
+    pub(crate) target: Target,
     /// `None` = the whole file.
-    pub symbol: Option<SymbolPath>,
+    pub(crate) symbol: Option<SymbolPath>,
 }
 
 impl FromStr for LinkRef {
@@ -519,7 +513,7 @@ impl fmt::Display for LinkRef {
 
 /// Why a string is not a valid [`LinkRef`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum LinkRefError {
+pub(crate) enum LinkRefError {
     /// The part before `#` is not a valid target.
     #[error(transparent)]
     Target(#[from] TargetError),
@@ -530,17 +524,17 @@ pub enum LinkRefError {
 
 /// A link exactly as found in a source file, before its destination is understood (03).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RawLink {
+pub(crate) struct RawLink {
     /// The link text, for diagnostics.
-    pub text: String,
+    pub(crate) text: String,
     /// The destination as written, after reference-link resolution.
-    pub destination: String,
+    pub(crate) destination: String,
     /// Where the link sits in the source file, in bytes.
-    pub range: Range<usize>,
+    pub(crate) range: Range<usize>,
     /// Where the destination is written in the source file, in bytes, without the `<…>` that may
     /// wrap it: inside the link for an inline link, in its `[label]:` definition for a reference
     /// link. Every use of one label shares its definition's range.
-    pub destination_range: Range<usize>,
+    pub(crate) destination_range: Range<usize>,
 }
 
 /// Serializes a value as its `Display` text.

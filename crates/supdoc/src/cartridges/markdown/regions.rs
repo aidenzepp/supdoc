@@ -22,7 +22,7 @@ const INLINE_KINDS: [&str; 2] = ["inline", "pipe_table_cell"];
 /// Meant for a file parsed by tree-sitter-md's block grammar; any other tree has no such nodes and
 /// yields no regions.
 #[must_use]
-pub fn markdown_regions(file: &SourceFile) -> Vec<MarkdownRegion> {
+pub(crate) fn markdown_regions(file: &SourceFile) -> Vec<MarkdownRegion> {
     let mut regions = Vec::new();
     let mut pending: Vec<Node<'_>> = vec![file.tree().root_node()];
     while let Some(node) = pending.pop() {

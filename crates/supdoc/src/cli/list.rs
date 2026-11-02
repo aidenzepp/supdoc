@@ -55,7 +55,11 @@ use super::{CliError, Context, Outcome};
 /// `TARGET`, `link-unknown-namespace` or `cli-path-missing` (2), `cli-path-unreadable` (74), or
 /// `resolve-not-found` or `resolve-ambiguous` (1); `scan-root-unreadable` (74), and
 /// `cli-output-failed` when the report cannot be written (74).
-pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
+pub(crate) fn run(
+    args: &ListArgs,
+    context: &Context,
+    output: &mut Output,
+) -> Result<Outcome, CliError> {
     let config = load_config(context, output)?;
     let target = args
         .target
@@ -111,11 +115,7 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
         .map_err(|error| CliError::output_failed("the link list", &error))?;
     if report.truncated {
         output
-            .note(
-                &args
-                    .limit
-                    .truncation_note(report.links.len(), total, "links"),
-            )
+            .note(&Limit::truncation_note(report.links.len(), total, "links"))
             .map_err(|error| CliError::output_failed("the link list", &error))?;
     } else if total == 0 {
         let note = match &target {
@@ -137,7 +137,7 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
 /// The JSON Schema of `supdoc list`'s `--json` output: the whole envelope, with `data` typed as
 /// [`ListReport`].
 #[must_use]
-pub fn schema() -> schemars::Schema {
+pub(crate) fn schema() -> schemars::Schema {
     schemars::schema_for!(Envelope<'static, ListReport>)
 }
 
@@ -423,7 +423,7 @@ impl Wanted {
             Err(_) => return Ok(SymbolFilter::Text(typed.clone())),
         };
         let symbol = match table.resolve(file.path(), typed) {
-            Ok(found) => found.path.clone(),
+            Ok(found) => found.path().clone(),
             Err(error) => {
                 return Ok(SymbolFilter::Unresolved {
                     typed: typed.clone(),
@@ -463,7 +463,7 @@ impl Wanted {
                 typed == written
                     || table
                         .resolve(file, written)
-                        .is_ok_and(|found| found.path == *symbol)
+                        .is_ok_and(|found| found.path() == symbol)
             }
         }
     }
@@ -544,7 +544,7 @@ mod tests {
 
     /// The code the guides point at.
     const LIB: &str = "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\n\
-                       pub fn sub(a: i32, b: i32) -> i32 {\n    a - b\n}\n";
+                       pub(crate) fn sub(a: i32, b: i32) -> i32 {\n    a - b\n}\n";
 
     /// A project with the code the guides point at.
     fn project() -> Project {

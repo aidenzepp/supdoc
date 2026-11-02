@@ -28,7 +28,7 @@ use crate::scan::walk::{CODE_IGNORE_TOO_LARGE, GlobalExcludes, UnreadDir, walk};
 
 /// Why a scan couldn't run at all (04 S7). Every smaller problem is a finding instead.
 #[derive(Debug, thiserror::Error)]
-pub enum ScanError {
+pub(crate) enum ScanError {
     /// The project root itself can't be listed, so no result would mean anything.
     #[error("cannot read the project root {}: {error}", .root.display())]
     RootUnreadable {
@@ -64,7 +64,7 @@ impl ScanError {
 
     /// The stable code for this error: `scan-root-unreadable`.
     #[must_use]
-    pub fn code(&self) -> &'static str {
+    pub(crate) fn code(&self) -> &'static str {
         match self {
             Self::RootUnreadable { .. } => "scan-root-unreadable",
             Self::IgnoreTooLarge { .. } => CODE_IGNORE_TOO_LARGE,
@@ -73,7 +73,7 @@ impl ScanError {
 
     /// What to do next.
     #[must_use]
-    pub fn help(&self) -> String {
+    pub(crate) fn help(&self) -> String {
         match self {
             Self::RootUnreadable { root, .. } => format!(
                 "Give the current user read and search access to the project root, for example \
@@ -87,7 +87,7 @@ impl ScanError {
     /// The process exit status for this error (06 X7): 74 when the project can't be read, 78 for
     /// an ignore file over its configured ceiling.
     #[must_use]
-    pub const fn status(&self) -> ExitStatus {
+    pub(crate) const fn status(&self) -> ExitStatus {
         match self {
             Self::RootUnreadable { .. } => ExitStatus::Io,
             Self::IgnoreTooLarge { .. } => ExitStatus::Config,
@@ -106,7 +106,7 @@ impl ScanError {
 ///
 /// [`ScanError::RootUnreadable`] when the project root can't be listed, and
 /// [`ScanError::IgnoreTooLarge`] when an ignore file the walk met is over `max-ignore-size`.
-pub fn run(
+pub(crate) fn run(
     config: &Config,
     languages: &Languages,
     scope: &Scope,
@@ -121,7 +121,7 @@ pub fn run(
 /// # Errors
 ///
 /// As [`run`].
-pub fn run_with_settings(
+pub(crate) fn run_with_settings(
     config: &Config,
     languages: &Languages,
     scope: &Scope,
@@ -136,7 +136,7 @@ pub fn run_with_settings(
 /// # Errors
 ///
 /// As [`run`].
-pub fn run_with_untracked(
+pub(crate) fn run_with_untracked(
     config: &Config,
     languages: &Languages,
     scope: &Scope,
@@ -148,7 +148,7 @@ pub fn run_with_untracked(
 
 /// How many links a scan left untracked for each reason, one per place written.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct UntrackedLinks(BTreeMap<Untracked, usize>);
+pub(crate) struct UntrackedLinks(BTreeMap<Untracked, usize>);
 
 impl UntrackedLinks {
     /// Counts `count` more links left untracked for `reason`.
@@ -159,7 +159,7 @@ impl UntrackedLinks {
     }
 
     /// Each reason at least one link was left untracked for, with how many, in reason order.
-    pub fn counts(&self) -> impl Iterator<Item = (Untracked, usize)> + '_ {
+    pub(crate) fn counts(&self) -> impl Iterator<Item = (Untracked, usize)> + '_ {
         self.0.iter().map(|(reason, count)| (*reason, *count))
     }
 }
@@ -587,7 +587,7 @@ mod tests {
 
     /// Two functions, `add` and `sub`.
     const LIB: &str = "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\n\
-                       pub fn sub(a: i32, b: i32) -> i32 {\n    a - b\n}\n";
+                       pub(crate) fn sub(a: i32, b: i32) -> i32 {\n    a - b\n}\n";
 
     /// A project on disk. Its root holds `supdoc.config.toml` and may sit below the temp dir, so
     /// a test can place files outside the root.
@@ -1035,7 +1035,7 @@ mod tests {
         assert_eq!(scan.findings, Vec::new());
         assert_eq!(
             untracked,
-            [(Untracked::Directory, 3), (Untracked::UntrackedType, 2)],
+            [(Untracked::Directory, 3), (Untracked::UnreadType, 2)],
             "`../src/`, `/` and the `dir.rs` directory are directories; `../src#add` and \
              `api.html#section` name no file a language reads",
         );

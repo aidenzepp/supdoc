@@ -4,34 +4,34 @@
 //! implement [`Report`], so every format of every report can be tested without files or a terminal.
 
 /// How output is shown: format, verbosity, and the context text rendering needs.
-pub mod format;
+pub(crate) mod format;
 
 /// How paths are shown in each format (07 G7).
-pub mod paths;
+pub(crate) mod paths;
 
 /// The closing note of a preview.
-pub mod preview;
+pub(crate) mod preview;
 
 /// The summary line and its counts.
-pub mod summary;
+pub(crate) mod summary;
 
 /// The `Report` trait every piece of output data implements.
-pub mod report;
+pub(crate) mod report;
 
 /// Text rendering of findings with `annotate-snippets`.
-pub mod text;
+pub(crate) mod text;
 
 /// The JSON envelope and the wire form of findings.
-pub mod json;
+pub(crate) mod json;
 
 /// JSONL records.
-pub mod jsonl;
+pub(crate) mod jsonl;
 
 /// GitHub Actions workflow commands.
-pub mod github;
+pub(crate) mod github;
 
 /// The `Output` value that owns stdout and stderr.
-pub mod sink;
+pub(crate) mod sink;
 
 #[cfg(test)]
 mod fixtures;
@@ -39,10 +39,9 @@ mod fixtures;
 #[cfg(test)]
 mod tests;
 
-pub use format::{OutputFormat, TextContext, Verbosity};
-pub use json::{Envelope, FindingJson, SCHEMA_VERSION};
-pub use paths::PathStyle;
-pub use preview::preview_note;
-pub use report::{RecordArray, Report};
-pub use sink::{Output, OutputError, OutputSettings};
-pub use summary::Summary;
+pub(crate) use format::{OutputFormat, TextContext, Verbosity};
+pub(crate) use paths::PathStyle;
+pub(crate) use preview::preview_note;
+pub(crate) use report::{RecordArray, Report};
+pub(crate) use sink::{Output, OutputError, OutputSettings};
+pub(crate) use summary::Summary;

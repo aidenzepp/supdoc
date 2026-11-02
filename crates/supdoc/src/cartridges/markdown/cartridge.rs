@@ -12,7 +12,7 @@ use crate::read::error::ReadError;
 
 /// The Markdown language: block grammar, headings as symbols, body text as link regions.
 #[derive(Debug)]
-pub struct Markdown {
+pub(crate) struct Markdown {
     /// The block grammar.
     grammar: tree_sitter::Language,
 }
@@ -27,7 +27,7 @@ static MARKDOWN: LazyLock<Markdown> = LazyLock::new(|| Markdown {
 
 /// The Markdown cartridge.
 #[must_use]
-pub fn cartridge() -> &'static Markdown {
+pub(crate) fn cartridge() -> &'static Markdown {
     &MARKDOWN
 }
 
@@ -89,7 +89,7 @@ mod tests {
             .resolve(file.path(), &query)
             .unwrap_or_else(|error| panic!("`{raw}` should resolve: {error}"));
         file.text()
-            .get(symbol.range.clone())
+            .get(symbol.range().clone())
             .expect("a symbol's range should be valid for its file")
             .to_owned()
     }

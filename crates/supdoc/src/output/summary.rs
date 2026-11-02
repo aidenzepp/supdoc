@@ -9,23 +9,23 @@ use crate::state::LinkState;
 
 /// How many links are in each state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
-pub struct Summary {
+pub(crate) struct Summary {
     /// Links whose target still matches the lockfile.
-    pub passed: usize,
+    pub(crate) passed: usize,
     /// Links whose target changed since the doc was confirmed.
-    pub failed: usize,
+    pub(crate) failed: usize,
     /// Links whose target can't be found.
-    pub broken: usize,
+    pub(crate) broken: usize,
     /// Links with no lock entry yet.
-    pub new: usize,
+    pub(crate) new: usize,
     /// Lock entries whose link no longer exists.
-    pub obsolete: usize,
+    pub(crate) obsolete: usize,
 }
 
 impl Summary {
     /// Counts `states`.
     #[must_use]
-    pub fn tally(states: impl IntoIterator<Item = LinkState>) -> Self {
+    pub(crate) fn tally(states: impl IntoIterator<Item = LinkState>) -> Self {
         let mut summary = Self::default();
         for state in states {
             *summary.slot(state) += 1;
@@ -35,7 +35,7 @@ impl Summary {
 
     /// The count for `state`.
     #[must_use]
-    pub fn count(&self, state: LinkState) -> usize {
+    pub(crate) fn count(&self, state: LinkState) -> usize {
         match state {
             LinkState::Passed => self.passed,
             LinkState::Failed => self.failed,
@@ -61,7 +61,7 @@ impl Summary {
     /// A run with no links at all says `0 passed`, so the line is never empty. Without `unicode`
     /// the counts are separated by `, ` instead of `·`, so the line is plain ASCII (07 G12).
     #[must_use]
-    pub fn line(&self, color: bool, unicode: bool) -> String {
+    pub(crate) fn line(&self, color: bool, unicode: bool) -> String {
         const WORST_FIRST: [LinkState; 5] = [
             LinkState::Failed,
             LinkState::Broken,
@@ -102,7 +102,7 @@ fn paint(color: bool, state: LinkState, text: &str) -> String {
 /// # Errors
 ///
 /// Fails if writing to `out` fails.
-pub fn render_summary(
+pub(crate) fn render_summary(
     context: &TextContext,
     summary: &Summary,
     out: &mut dyn Write,

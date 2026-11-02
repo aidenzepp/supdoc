@@ -11,6 +11,7 @@ use std::sync::LazyLock;
 use tree_sitter::Node;
 
 use crate::link::{SymbolPath, SymbolSegment};
+#[cfg(test)]
 use crate::read::cartridge::CompiledQueries;
 use crate::read::cartridge::{
     Cartridge, LanguageId, MarkdownRegion, SourceFile, Symbol, SymbolTable,
@@ -48,21 +49,22 @@ static PYTHON: LazyLock<Result<PythonCartridge, QueryFileError>> = LazyLock::new
 ///
 /// The [`QueryFileError`] for a built-in query that doesn't compile: a supdoc bug, caught by the
 /// registry's tests.
-pub fn cartridge() -> Result<&'static PythonCartridge, &'static QueryFileError> {
+pub(crate) fn cartridge() -> Result<&'static PythonCartridge, &'static QueryFileError> {
     PYTHON.as_ref()
 }
 
 /// Python: the data-driven cartridge, plus the attributes `__init__` assigns to `self`.
 #[derive(Debug)]
-pub struct PythonCartridge {
+pub(crate) struct PythonCartridge {
     /// Everything the queries express.
     queries: QueryCartridge,
 }
 
 impl PythonCartridge {
     /// The compiled `tags.scm` and `injections.scm`.
+    #[cfg(test)]
     #[must_use]
-    pub const fn queries(&self) -> &CompiledQueries {
+    pub(crate) const fn queries(&self) -> &CompiledQueries {
         self.queries.queries()
     }
 }
@@ -87,7 +89,7 @@ impl Cartridge for PythonCartridge {
             return Ok(tagged);
         }
         let mut symbols: Vec<Symbol> = tagged.iter().cloned().chain(attributes).collect();
-        symbols.sort_by_key(|symbol| (symbol.range.start, std::cmp::Reverse(symbol.range.end)));
+        symbols.sort_by_key(|symbol| (symbol.range().start, std::cmp::Reverse(symbol.range().end)));
         Ok(SymbolTable::new(symbols))
     }
 
@@ -109,9 +111,10 @@ fn init_attributes(file: &SourceFile, tagged: &SymbolTable) -> Vec<Symbol> {
     tests::CLASS_LOOKUPS.set(0);
     let mut classes: HashMap<Range<usize>, &Symbol> = HashMap::new();
     for symbol in tagged.iter() {
-        let _first = classes.entry(symbol.range.clone()).or_insert(symbol);
+        let _first = classes.entry(symbol.range().clone()).or_insert(symbol);
     }
-    let mut taken: HashSet<SymbolPath> = tagged.iter().map(|symbol| symbol.path.clone()).collect();
+    let mut taken: HashSet<SymbolPath> =
+        tagged.iter().map(|symbol| symbol.path().clone()).collect();
     let mut attributes: Vec<Symbol> = Vec::new();
     let mut pending = vec![file.tree().root_node()];
     while let Some(node) = pending.pop() {
@@ -131,18 +134,14 @@ fn init_attributes(file: &SourceFile, tagged: &SymbolTable) -> Vec<Symbol> {
             .flat_map(|body| init_methods(body, file.text()))
         {
             for (name, assignment) in assigned_attributes(init, file.text()) {
-                let path = class.path.child(name);
+                let path = class.path().child(name);
                 if taken.insert(path.clone()) {
-                    attributes.push(Symbol {
-                        path,
-                        aliases: Vec::new(),
-                        range: assignment.byte_range(),
-                    });
+                    attributes.push(Symbol::new(path, Vec::new(), assignment.byte_range()));
                 }
             }
         }
     }
-    attributes.sort_by_key(|symbol| symbol.range.start);
+    attributes.sort_by_key(|symbol| symbol.range().start);
     attributes
 }
 
@@ -276,7 +275,10 @@ def outer():
     }
 
     fn paths(table: &SymbolTable) -> Vec<String> {
-        table.iter().map(|symbol| symbol.path.to_string()).collect()
+        table
+            .iter()
+            .map(|symbol| symbol.path().to_string())
+            .collect()
     }
 
     fn query(raw: &str) -> SymbolPath {
@@ -291,7 +293,7 @@ def outer():
 
     fn text_of<'f>(file: &'f SourceFile, symbol: &Symbol) -> &'f str {
         file.text()
-            .get(symbol.range.clone())
+            .get(symbol.range().clone())
             .expect("a symbol's range should be valid for its file")
     }
 
@@ -413,13 +415,13 @@ def outer():
             let node = file
                 .tree()
                 .root_node()
-                .descendant_for_byte_range(symbol.range.start, symbol.range.end)
+                .descendant_for_byte_range(symbol.range().start, symbol.range().end)
                 .expect("a symbol's range should lie inside the tree");
             assert_eq!(
                 node.byte_range(),
-                symbol.range,
+                symbol.range(),
                 "`{}` should cover exactly one node, not {:?}",
-                symbol.path,
+                symbol.path(),
                 text_of(&file, symbol),
             );
         }
@@ -476,7 +478,7 @@ def outer():
         );
         let attributes = table
             .iter()
-            .filter(|symbol| symbol.path.last() == "x")
+            .filter(|symbol| symbol.path().last() == "x")
             .count();
         assert_eq!(attributes, count, "every class should name its `x`");
         assert_eq!(

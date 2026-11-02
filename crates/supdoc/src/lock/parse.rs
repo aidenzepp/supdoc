@@ -135,7 +135,7 @@ impl Lockfile {
     /// Fails, in this order of priority, on leftover merge-conflict markers, a `version` newer
     /// than [`FORMAT_VERSION`], invalid TOML or a malformed field (including a missing or
     /// unknown one, and a missing `[features.hash]` table), and two entries with the same key but different hashes.
-    pub fn parse(text: &str) -> Result<Self, ParseLockError> {
+    pub(crate) fn parse(text: &str) -> Result<Self, ParseLockError> {
         if let Some(index) = text.lines().position(|line| {
             CONFLICT_MARKERS
                 .iter()

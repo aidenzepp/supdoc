@@ -59,7 +59,7 @@ const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
 
 /// What `CLAUDE_CONFIG_DIR` said, keeping a relative value instead of dropping it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ClaudeConfigDir {
+pub(crate) enum ClaudeConfigDir {
     /// Unset or empty: Claude Code's directory is `~/.claude`.
     Unset,
     /// An absolute directory.
@@ -70,18 +70,18 @@ pub enum ClaudeConfigDir {
 
 /// The directories `skill install --global` writes under, read once by `main`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SkillDirs {
+pub(crate) struct SkillDirs {
     /// The user's home directory (`HOME`), when set to an absolute path.
-    pub home: Option<AbsolutePath>,
+    pub(crate) home: Option<AbsolutePath>,
     /// Claude Code's config directory (`CLAUDE_CONFIG_DIR`).
-    pub claude_config_dir: ClaudeConfigDir,
+    pub(crate) claude_config_dir: ClaudeConfigDir,
 }
 
 impl SkillDirs {
     /// Reads `HOME` and `CLAUDE_CONFIG_DIR` through `var`.
     ///
     /// An unset or empty value is absent, and a relative `HOME` counts as unset.
-    pub fn from_vars(var: impl Fn(&str) -> Option<OsString>) -> Self {
+    pub(crate) fn from_vars(var: impl Fn(&str) -> Option<OsString>) -> Self {
         let set = |name: &str| var(name).filter(|value| !value.is_empty());
         let claude_config_dir = match set(CLAUDE_CONFIG_DIR) {
             None => ClaudeConfigDir::Unset,
@@ -110,7 +110,7 @@ impl SkillDirs {
 /// project, before anything is written or previewed, `cli-skill-write` when a copy cannot be
 /// written, `cli-skill-relative-claude-dir` when `--global` is given and `CLAUDE_CONFIG_DIR` is
 /// relative, and `cli-output-failed` when the report cannot be written.
-pub fn run(
+pub(crate) fn run(
     args: &SkillInstallArgs,
     dirs: &SkillDirs,
     context: &Context,
@@ -173,7 +173,7 @@ pub fn run(
 /// The JSON Schema of `supdoc skill install`'s `--json` output: the whole envelope, with `data`
 /// typed as [`SkillInstallReport`].
 #[must_use]
-pub fn schema() -> schemars::Schema {
+pub(crate) fn schema() -> schemars::Schema {
     schemars::schema_for!(Envelope<'static, SkillInstallReport>)
 }
 

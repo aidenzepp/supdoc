@@ -6,25 +6,25 @@ use crate::state::LinkState;
 
 /// The result of comparing a scan with the lockfile.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Report {
+pub(crate) struct Report {
     /// One per [`LinkKey`] in scope, sorted.
-    pub links: Vec<LinkReport>,
+    pub(crate) links: Vec<LinkReport>,
     /// Findings not tied to one link: from the scan, plus moved-link notes and syntax-error
     /// warnings.
-    pub findings: Vec<Finding>,
+    pub(crate) findings: Vec<Finding>,
 }
 
 /// One link and its state.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LinkReport {
+pub(crate) struct LinkReport {
     /// Which link.
-    pub key: LinkKey,
+    pub(crate) key: LinkKey,
     /// Its state.
-    pub state: LinkState,
+    pub(crate) state: LinkState,
     /// Every place it appears. Empty only for `obsolete`, since that link no longer exists.
-    pub locations: Vec<Location>,
+    pub(crate) locations: Vec<Location>,
     /// The finding that explains this state (none for `passed`).
-    pub finding: Option<Finding>,
+    pub(crate) finding: Option<Finding>,
     /// Set when a hash was carried from an old key (05 C6).
-    pub moved_from: Option<LinkKey>,
+    pub(crate) moved_from: Option<LinkKey>,
 }

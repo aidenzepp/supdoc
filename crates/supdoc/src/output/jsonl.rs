@@ -10,7 +10,7 @@ use crate::output::report::{RecordArray, Report};
 /// A report that can't be serialized yields one `error` record saying so, so the stream never
 /// silently loses data.
 #[must_use]
-pub fn split_records<R: Report + ?Sized>(report: &R) -> Vec<Value> {
+pub(crate) fn split_records<R: Report + ?Sized>(report: &R) -> Vec<Value> {
     let value = match serde_json::to_value(report) {
         Ok(value) => value,
         Err(error) => {
@@ -34,7 +34,7 @@ pub fn split_records<R: Report + ?Sized>(report: &R) -> Vec<Value> {
 
 /// Every line of a report: its records, its loose findings, then the summary.
 #[must_use]
-pub fn lines<R: Report>(report: &R, ok: bool) -> Vec<Value> {
+pub(crate) fn lines<R: Report>(report: &R, ok: bool) -> Vec<Value> {
     let mut lines = report.jsonl_records();
     for finding in report.findings() {
         lines.push(tagged(

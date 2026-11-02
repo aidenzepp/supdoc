@@ -59,7 +59,11 @@ const CODE_LOCK_WRITE_FAILED: &str = "fix-lock-write-failed";
 /// error (78 when invalid, 74 when it can't be read or written), the scan's own error (74),
 /// `fix-write-failed` when a source file could not be written (74), and `cli-output-failed` when the
 /// report cannot be written (74).
-pub fn run(args: &FixArgs, context: &Context, output: &mut Output) -> Result<Outcome, CliError> {
+pub(crate) fn run(
+    args: &FixArgs,
+    context: &Context,
+    output: &mut Output,
+) -> Result<Outcome, CliError> {
     let planned = Planned::scan(&args.paths, context, output)?;
     planned.finish(
         args.confirm.mode(),
@@ -73,7 +77,7 @@ pub fn run(args: &FixArgs, context: &Context, output: &mut Output) -> Result<Out
 /// The JSON Schema of `supdoc fix`'s `--json` output: the whole envelope, with `data` typed as
 /// [`FixReport`].
 #[must_use]
-pub fn schema() -> schemars::Schema {
+pub(crate) fn schema() -> schemars::Schema {
     schemars::schema_for!(Envelope<'static, FixReport>)
 }
 
