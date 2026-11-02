@@ -21,6 +21,7 @@ use crate::path::AbsolutePath;
 
 use pattern::{AnchoredPatterns, PatternList};
 
+pub(crate) use error::size_text;
 pub use error::{ConfigError, NamespaceEscape};
 pub use pattern::PatternDefinition;
 
@@ -113,9 +114,25 @@ impl Config {
     /// Returns a [`ConfigError`] if the config, or a file it extends, can't be read, parsed or
     /// followed.
     pub fn load(start: &AbsolutePath) -> Result<Self, ConfigError> {
+        Self::load_under(start, &CommandLineLimits::default())
+    }
+
+    /// [`Config::load`] with the ceilings `given` on the command line in effect, including
+    /// `max-config-size` while each config file is read.
+    ///
+    /// Reads the filesystem.
+    ///
+    /// # Errors
+    ///
+    /// As [`Config::load`], and [`ConfigError::TooLarge`] for a config file in the chain larger
+    /// than `max-config-size`.
+    pub fn load_under(
+        start: &AbsolutePath,
+        given: &CommandLineLimits,
+    ) -> Result<Self, ConfigError> {
         match chain::discover(start)? {
-            Some(file) => Self::load_file(&file),
-            None => Ok(Self::defaults(start)),
+            Some(file) => Self::load_file_under(&file, given),
+            None => Ok(Self::defaults(start).with_command_line(given)),
         }
     }
 
@@ -128,8 +145,27 @@ impl Config {
     /// Returns [`ConfigError::NotFound`] if `file` doesn't exist, and the other variants as
     /// [`Config::load`] does.
     pub fn load_file(file: &AbsolutePath) -> Result<Self, ConfigError> {
-        let layers = chain::read_chain(file)?;
-        chain::merge(chain::directory_of(file), layers)
+        Self::load_file_under(file, &CommandLineLimits::default())
+    }
+
+    /// [`Config::load_file`] with the ceilings `given` on the command line in effect, including
+    /// `max-config-size` while each config file is read.
+    ///
+    /// Reads the filesystem.
+    ///
+    /// # Errors
+    ///
+    /// As [`Config::load_file`], and [`ConfigError::TooLarge`] for a config file in the chain
+    /// larger than `max-config-size`.
+    pub fn load_file_under(
+        file: &AbsolutePath,
+        given: &CommandLineLimits,
+    ) -> Result<Self, ConfigError> {
+        let cap = Limits::resolve(given, &ConfigLimits::default())
+            .max_config_size
+            .value;
+        let layers = chain::read_chain(file, cap)?;
+        Ok(chain::merge(chain::directory_of(file), layers)?.with_command_line(given))
     }
 
     /// The config used when no file is found: scan everything beneath `root`.

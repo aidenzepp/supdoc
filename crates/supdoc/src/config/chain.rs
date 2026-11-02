@@ -9,12 +9,12 @@
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
-use std::fs;
-use std::io::ErrorKind;
+use std::fs::{self, File};
+use std::io::{self, ErrorKind, Read as _};
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
-use crate::limits::{CommandLineLimits, ConfigLimits, Limits};
+use crate::limits::{CommandLineLimits, ConfigLimits, Limits, SizeLimit};
 use crate::namespace::NamespaceName;
 use crate::path::{AbsolutePath, RelativePath, holds_git, is_regular_file};
 
@@ -103,14 +103,15 @@ fn leads_to_config(path: &AbsolutePath) -> bool {
     })
 }
 
-/// Reads `file` and every config it extends, child first.
+/// Reads `file` and every config it extends, child first, refusing any larger than `limit`
+/// (`max-config-size`) before it is parsed.
 ///
 /// `file` must exist: a missing start file is [`ConfigError::NotFound`].
 ///
 /// # Errors
 ///
 /// Returns the first [`ConfigError`] found while reading, parsing or following `extends`.
-pub(super) fn read_chain(file: &AbsolutePath) -> Result<Vec<Layer>, ConfigError> {
+pub(super) fn read_chain(file: &AbsolutePath, limit: SizeLimit) -> Result<Vec<Layer>, ConfigError> {
     let root = directory_of(file);
     let mut layers = Vec::new();
     // Each visited file with the name the filesystem knows it by, so a loop through a symlink
@@ -118,7 +119,7 @@ pub(super) fn read_chain(file: &AbsolutePath) -> Result<Vec<Layer>, ConfigError>
     let mut visited: Vec<(PathBuf, AbsolutePath)> = Vec::new();
     let mut next = Some(file.clone());
     while let Some(current) = next.take() {
-        let text = read_text(&current, layers.is_empty())?;
+        let text = read_text(&current, layers.is_empty(), limit)?;
         let raw: RawConfig = toml::from_str(&text).map_err(|error| ConfigError::Parse {
             path: current.clone(),
             error,
@@ -153,14 +154,18 @@ fn identity(file: &AbsolutePath) -> PathBuf {
     fs::canonicalize(file.as_path()).unwrap_or_else(|_| file.as_path().to_path_buf())
 }
 
-/// Reads a config file's text. The start file being absent is `NotFound`; any other file
-/// was already confirmed to exist.
+/// Reads a config file's text, at most `limit` bytes of it. The start file being absent is
+/// `NotFound`; any other file was already confirmed to exist.
+///
+/// The size is checked on the open handle, and the read stops one byte past the limit on that same
+/// handle, so a file that grows after the check is still refused.
 ///
 /// # Errors
 ///
-/// `NotFound` for a missing start file, otherwise `Read` with the operating system's reason.
-fn read_text(file: &AbsolutePath, is_start: bool) -> Result<String, ConfigError> {
-    fs::read_to_string(file.as_path()).map_err(|error| {
+/// `NotFound` for a missing start file, `TooLarge` for a file over `limit`, otherwise `Read` with
+/// the operating system's reason, `InvalidData` for text that isn't UTF-8.
+fn read_text(file: &AbsolutePath, is_start: bool, limit: SizeLimit) -> Result<String, ConfigError> {
+    let failed = |error: io::Error| {
         if is_start && error.kind() == ErrorKind::NotFound {
             ConfigError::NotFound { path: file.clone() }
         } else {
@@ -169,6 +174,38 @@ fn read_text(file: &AbsolutePath, is_start: bool) -> Result<String, ConfigError>
                 error,
             }
         }
+    };
+    let too_large = |size, limit| ConfigError::TooLarge {
+        path: file.clone(),
+        size,
+        limit,
+    };
+    let handle = File::open(file.as_path()).map_err(failed)?;
+    let mut bytes = Vec::new();
+    match limit.get() {
+        Some(limit) => {
+            let size = handle.metadata().map_err(failed)?.len();
+            if size > limit {
+                return Err(too_large(size, limit));
+            }
+            let _read = handle
+                .take(limit.saturating_add(1))
+                .read_to_end(&mut bytes)
+                .map_err(failed)?;
+            let held = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            if held > limit {
+                return Err(too_large(held, limit));
+            }
+        }
+        None => {
+            let _read = (&handle).read_to_end(&mut bytes).map_err(failed)?;
+        }
+    }
+    String::from_utf8(bytes).map_err(|_| {
+        failed(io::Error::new(
+            ErrorKind::InvalidData,
+            "stream did not contain valid UTF-8",
+        ))
     })
 }
 

@@ -37,13 +37,12 @@ use super::{CliError, Context, ErrorSite, cause};
 ///
 /// Returns the config's own error, with its code, help and exit code.
 pub(crate) fn load_config(context: &Context, output: &mut Output) -> Result<Config, CliError> {
+    let given = &context.global.limits.0;
     let loaded = match &context.global.config {
-        Some(file) => Config::load_file(&absolute(&context.cwd, file)),
-        None => Config::load(&context.cwd),
+        Some(file) => Config::load_file_under(&absolute(&context.cwd, file), given),
+        None => Config::load_under(&context.cwd, given),
     };
-    let config = loaded
-        .map_err(|error| config_failure(&error, context, output))?
-        .with_command_line(&context.global.limits.0);
+    let config = loaded.map_err(|error| config_failure(&error, context, output))?;
     output.set_root(config.root().clone());
     Ok(config)
 }
@@ -118,6 +117,7 @@ fn config_span(error: &ConfigError) -> Option<(&AbsolutePath, Range<usize>)> {
             .map(|file| (file, span.clone())),
         ConfigError::NotFound { .. }
         | ConfigError::Read { .. }
+        | ConfigError::TooLarge { .. }
         | ConfigError::SymlinkNotConfig { .. } => None,
     }
 }

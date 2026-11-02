@@ -3,14 +3,14 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
-use std::io::{self, BufRead as _};
+use std::io::{self, BufRead as _, Read as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder, Glob};
 use ignore::{DirEntry, Match, WalkBuilder};
 
-use crate::config::{CONFIG_FILE_NAME, Config, PatternDefinition, config_entry};
+use crate::config::{CONFIG_FILE_NAME, Config, PatternDefinition, config_entry, size_text};
 use crate::finding::{Finding, Severity};
 use crate::limits::SizeLimit;
 use crate::link::{LinkPathError, SourcePath};
@@ -762,42 +762,72 @@ fn own_ignore_files(dir: &Path, limit: SizeLimit) -> OwnIgnoreFiles {
 /// The rules of `file`, which apply beneath `dir`, and how reading it failed, if it exists but
 /// couldn't be read in full. A missing file has no rules, one that can't be opened none, one whose
 /// reading stops partway the rules before that point, and a line that isn't a valid pattern is
-/// left out, as git and the walker treat them. A file larger than `limit` is not read at all: it
-/// has no rules and fails as [`ReadFailure::TooLarge`], which fails the run rather than widening
-/// the scan unnoticed.
+/// left out, as git and the walker treat them. A leading UTF-8 byte order mark is dropped, as git
+/// drops it.
 ///
-/// Effect: reads `file`'s metadata and then `file`, following symlinks.
+/// A file larger than `limit` has no rules and fails as [`ReadFailure::TooLarge`], which fails the
+/// run rather than widening the scan unnoticed. The size is checked on the open handle and the read
+/// stops one byte past the limit on that same handle, so a file that grows after the check is
+/// still refused.
+///
+/// Effect: reads `file`, following symlinks.
 fn rules_in(dir: &Path, file: &Path, limit: SizeLimit) -> (Gitignore, Option<ReadFailure>) {
-    if let Some((size, limit)) = limit.get().and_then(|limit| {
-        let size = fs::metadata(file).ok()?.len();
-        (size > limit).then_some((size, limit))
-    }) {
-        return (
-            Gitignore::empty(),
-            Some(ReadFailure::TooLarge { size, limit }),
-        );
-    }
+    let (bytes, mut failure) = match read_capped(file, limit) {
+        Ok(read) => read,
+        Err(failure) => return (Gitignore::empty(), failure),
+    };
     let mut builder = GitignoreBuilder::new(dir);
-    let failure = builder.add(file).and_then(|error| read_failure(&error));
+    for (index, line) in bytes.lines().enumerate() {
+        let Ok(line) = line else {
+            failure = Some(ReadFailure::Partial);
+            break;
+        };
+        let line = if index == 0 {
+            line.trim_start_matches('\u{feff}')
+        } else {
+            &line
+        };
+        let _invalid_pattern = builder.add_line(Some(file.to_path_buf()), line);
+    }
     let rules = builder.build().unwrap_or_else(|_| Gitignore::empty());
     (rules, failure)
 }
 
-/// How `error`, from reading an ignore file, says reading failed: denied permission, or any other
-/// failure partway. `None` when the file is missing or only a line isn't a valid pattern.
-fn read_failure(error: &ignore::Error) -> Option<ReadFailure> {
-    match error {
-        ignore::Error::Io(error) => match error.kind() {
-            io::ErrorKind::NotFound => None,
-            io::ErrorKind::PermissionDenied => Some(ReadFailure::Denied),
-            _ => Some(ReadFailure::Partial),
-        },
-        ignore::Error::Partial(errors) => errors.iter().filter_map(read_failure).min(),
-        ignore::Error::WithPath { err, .. }
-        | ignore::Error::WithDepth { err, .. }
-        | ignore::Error::WithLineNumber { err, .. } => read_failure(err),
-        _ => None,
-    }
+/// The bytes of `file`, at most `limit` of them, and [`ReadFailure::Partial`] when reading stopped
+/// partway, with the bytes read before that point.
+///
+/// # Errors
+///
+/// `None` when `file` is missing, [`ReadFailure::Denied`] when it can't be opened for lack of
+/// permission, [`ReadFailure::TooLarge`] when it holds more than `limit` bytes, and
+/// [`ReadFailure::Partial`] when it can't be opened for any other reason.
+fn read_capped(
+    file: &Path,
+    limit: SizeLimit,
+) -> Result<(Vec<u8>, Option<ReadFailure>), Option<ReadFailure>> {
+    let handle = fs::File::open(file).map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => None,
+        io::ErrorKind::PermissionDenied => Some(ReadFailure::Denied),
+        _ => Some(ReadFailure::Partial),
+    })?;
+    let too_large = |size, limit| Some(ReadFailure::TooLarge { size, limit });
+    let mut bytes = Vec::new();
+    let read = match limit.get() {
+        Some(limit) => {
+            let size = handle.metadata().map_or(0, |metadata| metadata.len());
+            if size > limit {
+                return Err(too_large(size, limit));
+            }
+            let read = handle.take(limit.saturating_add(1)).read_to_end(&mut bytes);
+            let held = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            if held > limit {
+                return Err(too_large(held, limit));
+            }
+            read
+        }
+        None => (&handle).read_to_end(&mut bytes),
+    };
+    Ok((bytes, read.err().map(|_| ReadFailure::Partial)))
 }
 
 /// The rules of `dir`'s git exclude file, and whether they may be quoted.
@@ -927,6 +957,9 @@ fn unreadable_ignore_file(root: &AbsolutePath, file: &UnreadableFile) -> Finding
     }
 }
 
+/// The code for an ignore file over `max-ignore-size`, which the scan turns into a fatal error.
+pub(crate) const CODE_IGNORE_TOO_LARGE: &str = "ignore-too-large";
+
 /// The error for `named`, an ignore file of `size` bytes over the `limit` (`max-ignore-size`). It
 /// was not read, so the files its rules would hide would be checked: the run fails instead of
 /// quietly widening the scan. The help names the key, variable and flag that raise the limit, with
@@ -934,7 +967,7 @@ fn unreadable_ignore_file(root: &AbsolutePath, file: &UnreadableFile) -> Finding
 fn too_large_ignore_file(named: &str, size: u64, limit: u64) -> Finding {
     let raised = size_text(size.saturating_add(1).next_power_of_two());
     Finding::new(
-        "ignore-too-large",
+        CODE_IGNORE_TOO_LARGE,
         Severity::Error,
         format!(
             "{named} is {} (limit {}), so it was not read",
@@ -948,24 +981,6 @@ fn too_large_ignore_file(named: &str, size: u64, limit: u64) -> Finding {
          `SUPDOC_MAX_IGNORE_SIZE={raised}` or `--max-ignore-size {raised}`, or add its directory \
          to `exclude`. `0` means no limit"
     ))
-}
-
-/// `bytes` in the largest unit, `B`, `KiB` or `MiB`, that divides it; a size with a remainder is
-/// shown in `KiB` or `MiB` to one decimal place, rounded down, as `292.9KiB`.
-fn size_text(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * KIB;
-    let (unit, scale) = match bytes {
-        b if b >= MIB => ("MiB", MIB),
-        b if b >= KIB => ("KiB", KIB),
-        _ => return format!("{bytes}B"),
-    };
-    if bytes.is_multiple_of(scale) {
-        format!("{}{unit}", bytes / scale)
-    } else {
-        let tenths = bytes.saturating_mul(10) / scale;
-        format!("{}.{}{unit}", tenths / 10, tenths % 10)
-    }
 }
 
 /// Whether the walk keeps `entry`. Only directories are refused here; files are judged by

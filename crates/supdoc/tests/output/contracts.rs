@@ -950,6 +950,11 @@ mod helps {
             &["check"],
         ),
         case(
+            "config-too-large",
+            |p| config_with(p, &"#".repeat(300_000)),
+            &["check"],
+        ),
+        case(
             "config-not-found",
             |_| {},
             &["check", "--config", "nope.toml"],
