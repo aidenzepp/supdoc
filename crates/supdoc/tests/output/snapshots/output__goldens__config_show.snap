@@ -10,5 +10,9 @@ lockfile   supdoc.lock
 include    **  (default)
 exclude    (none)  (default)
 line-endings  normalize  (default)
+parse-timeout   10s  (default)
+max-lock-size   16MiB  (default)
+max-config-size 256KiB  (default)
+max-ignore-size 256KiB  (default)
 namespace  core -> src  (supdoc.config.toml)
 --- stderr
