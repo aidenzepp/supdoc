@@ -174,13 +174,13 @@ impl Planned {
         let would = move_lock_entries(
             &mut self.lock.clone(),
             self.plan
-                .fixes
+                .fixes()
                 .iter()
                 .filter_map(|planned| planned.moved.as_ref()),
         );
         let fixes: Vec<FixRecord> = self
             .plan
-            .fixes
+            .fixes()
             .iter()
             .map(|planned| {
                 let moved = planned
@@ -241,7 +241,7 @@ impl Planned {
         let written = self.write(root, &rerun);
         let done: Vec<&PlannedFix> = self
             .plan
-            .fixes
+            .fixes()
             .iter()
             .filter(|planned| {
                 written
@@ -280,7 +280,7 @@ impl Planned {
             ))
         } else if timed_out {
             Some(timeout_note(timeout_count))
-        } else if self.plan.fixes.is_empty() {
+        } else if self.plan.fixes().is_empty() {
             Some(nothing_to_fix(self.broken))
         } else {
             None
@@ -683,39 +683,11 @@ impl FixRecord {
             scanned: _,
         } = &planned.fix;
         let finding = &planned.finding;
-        // A planned fix lies inside its finding's location and snippet, so these slices exist.
-        let (line, column, link_range) = finding
-            .location
-            .as_ref()
-            .map_or((0, 0, range.clone()), |location| {
-                (location.line, location.column, location.range.clone())
-            });
         let before = planned.fix.scanned.to_string();
-        // The snippet is a bounded window; the whole link is shown only when the window holds it.
-        let scanned = |wanted: &std::ops::Range<usize>| -> Option<String> {
-            let snippet = finding.snippet.as_ref()?;
-            let origin = link_range.start.checked_sub(snippet.highlight.start)?;
-            let from = wanted.start.checked_sub(origin)?;
-            let to = wanted.end.checked_sub(origin)?;
-            snippet.text.get(from..to).map(str::to_owned)
-        };
-        let old_link = scanned(&link_range).unwrap_or_else(|| before.clone());
-        let new_link = range
-            .start
-            .checked_sub(link_range.start)
-            .zip(range.end.checked_sub(link_range.start))
-            .and_then(|(from, to)| {
-                Some(format!(
-                    "{}{replacement}{}",
-                    old_link.get(..from)?,
-                    old_link.get(to..)?
-                ))
-            })
-            .unwrap_or_else(|| replacement.clone());
         Self {
             file: PathStyle::json(file),
-            line,
-            column,
+            line: planned.location.line,
+            column: planned.location.column,
             start: range.start,
             end: range.end,
             before,
@@ -724,8 +696,8 @@ impl FixRecord {
             moved: moved.map(|Move { from, to }| MovedJson { from, to }),
             state,
             source: file.clone(),
-            old_link,
-            new_link,
+            old_link: planned.old_link.clone(),
+            new_link: planned.new_link.clone(),
             update_command,
         }
     }
@@ -1529,7 +1501,7 @@ mod tests {
         );
 
         let planned: BTreeSet<(String, String)> = plan_fixes(&scan)
-            .fixes
+            .fixes()
             .iter()
             .map(|planned| {
                 (
