@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::hash::{HashSettings, LineEndings};
+use crate::limits::ConfigLimits;
 use crate::namespace::NamespaceName;
 use crate::path::AbsolutePath;
 
@@ -94,6 +95,8 @@ pub struct Config {
     namespaces: BTreeMap<NamespaceName, Namespace>,
     /// The nearest `[features.hash] line-endings` and the file that set it, if any file did.
     line_endings: Option<(LineEndings, AbsolutePath)>,
+    /// Each `[limits]` key from the nearest config that sets it, with that file.
+    limits: ConfigLimits,
 }
 
 impl Config {
@@ -136,6 +139,7 @@ impl Config {
             exclude: None,
             namespaces: BTreeMap::new(),
             line_endings: None,
+            limits: ConfigLimits::default(),
         }
     }
 
@@ -232,6 +236,12 @@ impl Config {
     #[must_use]
     pub fn line_endings_defined_in(&self) -> Option<&AbsolutePath> {
         self.line_endings.as_ref().map(|(_, file)| file)
+    }
+
+    /// Each `[limits]` key from the nearest config that sets it, and that file.
+    #[must_use]
+    pub fn limits(&self) -> &ConfigLimits {
+        &self.limits
     }
 }
 
