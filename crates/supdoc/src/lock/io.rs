@@ -1,13 +1,14 @@
 //! Reading and atomically writing `supdoc.lock` (02 L9).
 
 use std::fs;
-use std::io::{self, Write as _};
+use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::error::LockError;
 use super::model::{LOCK_FILE_NAME, Lockfile};
+use crate::limits::SizeLimit;
 use crate::path::{AbsolutePath, ProjectFile, is_regular_file, resolve_project_file};
 
 impl Lockfile {
@@ -23,9 +24,11 @@ impl Lockfile {
     ///
     /// `OutsideRoot` for a symlink that doesn't lead to a `supdoc.lock` inside the root, whether
     /// or not its target exists. `NotRegularFile` for a directory, FIFO or other non-file, refused
-    /// before it is opened so a FIFO can't block the read. Otherwise fails if the file exists but
+    /// before it is opened so a FIFO can't block the read. `TooLarge` for a file over `limit`
+    /// (`max-lock-size`), measured on the open file before any of it is read, and never read past
+    /// one byte over `limit` should it grow meanwhile. Otherwise fails if the file exists but
     /// cannot be read, or its text is not a valid lockfile.
-    pub fn read(path: &AbsolutePath) -> Result<Option<Self>, LockError> {
+    pub fn read(path: &AbsolutePath, limit: SizeLimit) -> Result<Option<Self>, LockError> {
         let read_failed = |error| LockError::Read {
             path: path.clone(),
             error,
@@ -41,11 +44,31 @@ impl Lockfile {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(read_failed(error)),
         }
-        let text = match fs::read_to_string(&file) {
-            Ok(text) => text,
+        let opened = match fs::File::open(&file) {
+            Ok(opened) => opened,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(read_failed(error)),
         };
+        let too_large = |size| LockError::TooLarge {
+            path: path.clone(),
+            size,
+            limit,
+        };
+        let size = opened.metadata().map_err(read_failed)?.len();
+        if limit.get().is_some_and(|max| size > max) {
+            return Err(too_large(size));
+        }
+        // One byte past the ceiling is enough to tell a file that grew after the measure.
+        let ceiling = limit.get().map_or(u64::MAX, |max| max.saturating_add(1));
+        let mut text = String::new();
+        let read = opened
+            .take(ceiling)
+            .read_to_string(&mut text)
+            .map_err(read_failed)?;
+        let read = u64::try_from(read).unwrap_or(u64::MAX);
+        if limit.get().is_some_and(|max| read > max) {
+            return Err(too_large(read));
+        }
         Self::parse(&text)
             .map(Some)
             .map_err(|error| LockError::Parse {
@@ -193,6 +216,7 @@ pub(crate) fn write_atomically(
 mod tests {
     use super::*;
     use crate::hash::Hash;
+    use crate::limits::Limits;
     use crate::link::LinkKey;
 
     fn lock_with_one_entry(content: &[u8]) -> Lockfile {
@@ -217,7 +241,8 @@ mod tests {
     fn missing_lockfile_reads_as_none() {
         let dir = tempfile::tempdir().expect("a temp directory should be creatable");
 
-        let read = Lockfile::read(&lock_path(&dir)).expect("a missing file is not an error");
+        let read = Lockfile::read(&lock_path(&dir), Limits::MAX_LOCK_SIZE)
+            .expect("a missing file is not an error");
 
         assert_eq!(read, None);
     }
@@ -232,7 +257,8 @@ mod tests {
             .expect("writing to a temp directory should succeed");
 
         assert_eq!(
-            Lockfile::read(&path).expect("the written lockfile should read back"),
+            Lockfile::read(&path, Limits::MAX_LOCK_SIZE)
+                .expect("the written lockfile should read back"),
             Some(lock)
         );
     }
@@ -249,7 +275,7 @@ mod tests {
         new.write(&path).expect("the second write should succeed");
 
         assert_eq!(
-            Lockfile::read(&path).expect("it should read back"),
+            Lockfile::read(&path, Limits::MAX_LOCK_SIZE).expect("it should read back"),
             Some(new)
         );
         let names: Vec<_> = fs::read_dir(dir.path())
@@ -273,7 +299,8 @@ mod tests {
         let path = lock_path(&dir);
         fs::write(path.as_path(), "version = 2\n").expect("the fixture should be writable");
 
-        let error = Lockfile::read(&path).expect_err("a newer lockfile should be rejected");
+        let error = Lockfile::read(&path, Limits::MAX_LOCK_SIZE)
+            .expect_err("a newer lockfile should be rejected");
 
         assert_eq!(error.code(), "lock-newer-version");
         assert!(
@@ -301,7 +328,8 @@ mod tests {
         let error = result.expect_err("writing into a read-only directory should fail");
         assert_eq!(error.code(), "lock-write");
         assert_eq!(
-            Lockfile::read(&path).expect("the old lockfile should still read"),
+            Lockfile::read(&path, Limits::MAX_LOCK_SIZE)
+                .expect("the old lockfile should still read"),
             Some(old)
         );
     }
@@ -349,7 +377,8 @@ mod tests {
         let path = lock_path(&dir);
         fs::create_dir(path.as_path()).expect("the directory should be creatable");
 
-        let error = Lockfile::read(&path).expect_err("a directory should be refused");
+        let error = Lockfile::read(&path, Limits::MAX_LOCK_SIZE)
+            .expect_err("a directory should be refused");
 
         assert!(
             matches!(error, LockError::NotRegularFile { .. }),
@@ -370,7 +399,8 @@ mod tests {
             .expect("mkfifo should run");
         assert!(made.success(), "mkfifo should create the FIFO");
 
-        let error = Lockfile::read(&path).expect_err("a FIFO should be refused, not opened");
+        let error = Lockfile::read(&path, Limits::MAX_LOCK_SIZE)
+            .expect_err("a FIFO should be refused, not opened");
 
         assert!(
             matches!(error, LockError::NotRegularFile { .. }),
@@ -385,13 +415,59 @@ mod tests {
         fs::write(path.as_path(), b"version = 1\n# caf\xe9\n")
             .expect("the fixture should be writable");
 
-        let error = Lockfile::read(&path).expect_err("Latin-1 text should be refused");
+        let error = Lockfile::read(&path, Limits::MAX_LOCK_SIZE)
+            .expect_err("Latin-1 text should be refused");
         let help = error.help_from(&path.parent().expect("the lockfile should have a parent"));
 
         assert_eq!(error.code(), "lock-read");
         assert!(
             help.contains("not UTF-8") && !help.contains("chmod"),
             "got: {help}"
+        );
+    }
+
+    #[test]
+    fn lockfile_over_max_lock_size_is_refused_with_its_size() {
+        let dir = tempfile::tempdir().expect("a temp directory should be creatable");
+        let path = lock_path(&dir);
+        lock_with_one_entry(b"x")
+            .write(&path)
+            .expect("writing to a temp directory should succeed");
+        let size = fs::metadata(path.as_path())
+            .expect("the lockfile should have metadata")
+            .len();
+        let limit: SizeLimit = "16B".parse().expect("16B should be a size");
+
+        let error = Lockfile::read(&path, limit).expect_err("a lock over 16 B should be refused");
+
+        assert!(
+            matches!(error, LockError::TooLarge { size: measured, .. } if measured == size),
+            "got: {error}"
+        );
+        assert_eq!(
+            (error.code(), error.status()),
+            ("lock-too-large", crate::exit::ExitStatus::Config)
+        );
+    }
+
+    #[test]
+    fn lockfile_at_max_lock_size_or_with_no_limit_reads() {
+        let dir = tempfile::tempdir().expect("a temp directory should be creatable");
+        let path = lock_path(&dir);
+        let lock = lock_with_one_entry(b"x");
+        lock.write(&path)
+            .expect("writing to a temp directory should succeed");
+        let size = fs::metadata(path.as_path())
+            .expect("the lockfile should have metadata")
+            .len();
+        let exact: SizeLimit = format!("{size}B").parse().expect("the size should parse");
+        let none: SizeLimit = "0".parse().expect("0 should be no limit");
+
+        let read = (Lockfile::read(&path, exact), Lockfile::read(&path, none));
+
+        assert!(
+            matches!(&read, (Ok(Some(a)), Ok(Some(b))) if *a == lock && *b == lock),
+            "a lock exactly at the limit, and one under no limit, should read: {read:?}"
         );
     }
 
@@ -436,8 +512,11 @@ mod tests {
             "the symlink must stay a symlink"
         );
         assert_eq!(
-            Lockfile::read(&AbsolutePath::new(&real).expect("the real path should be absolute"))
-                .expect("the real file should read back"),
+            Lockfile::read(
+                &AbsolutePath::new(&real).expect("the real path should be absolute"),
+                Limits::MAX_LOCK_SIZE
+            )
+            .expect("the real file should read back"),
             Some(new),
             "the real file gets the new text"
         );

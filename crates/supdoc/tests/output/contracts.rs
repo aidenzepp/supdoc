@@ -1039,6 +1039,11 @@ mod helps {
             &["check"],
         ),
         case(
+            "lock-too-large",
+            |_| {},
+            &["--max-lock-size", "16B", "check"],
+        ),
+        case(
             "lock-outside-root",
             |p| {
                 let lock = p.path().join("supdoc.lock");

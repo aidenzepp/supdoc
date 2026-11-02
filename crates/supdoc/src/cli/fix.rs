@@ -750,6 +750,7 @@ mod tests {
     use super::*;
     use crate::cli::args::Command;
     use crate::cli::testing::{Run, Session, at};
+    use crate::limits::Limits;
     use crate::lock::model::LOCK_FILE_NAME;
 
     /// A guide whose link misspells `add` as `ad`, which has exactly one near match.
@@ -854,7 +855,7 @@ mod tests {
         fn lock(&self) -> Lockfile {
             let path = AbsolutePath::new(&self.path(LOCK_FILE_NAME))
                 .expect("the lockfile path should be absolute");
-            Lockfile::read(&path)
+            Lockfile::read(&path, Limits::MAX_LOCK_SIZE)
                 .expect("the lockfile should be valid")
                 .expect("the lockfile should exist")
         }
