@@ -49,26 +49,31 @@ impl Lockfile {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(read_failed(error)),
         };
-        let too_large = |size| LockError::TooLarge {
+        let size = opened.metadata().map_err(read_failed)?.len();
+        let too_large = |grew| LockError::TooLarge {
             path: path.clone(),
             size,
             limit,
+            grew,
         };
-        let size = opened.metadata().map_err(read_failed)?.len();
         if limit.get().is_some_and(|max| size > max) {
-            return Err(too_large(size));
+            return Err(too_large(false));
         }
-        // One byte past the ceiling is enough to tell a file that grew after the measure.
+        // One byte past the ceiling is enough to tell a file that grew after the measure. The
+        // length is checked before decoding, so a file cut off mid-character by the ceiling is
+        // still reported as too large, never as unreadable.
         let ceiling = limit.get().map_or(u64::MAX, |max| max.saturating_add(1));
-        let mut text = String::new();
+        let mut bytes = Vec::new();
         let read = opened
             .take(ceiling)
-            .read_to_string(&mut text)
+            .read_to_end(&mut bytes)
             .map_err(read_failed)?;
         let read = u64::try_from(read).unwrap_or(u64::MAX);
         if limit.get().is_some_and(|max| read > max) {
-            return Err(too_large(read));
+            return Err(too_large(true));
         }
+        let text = String::from_utf8(bytes)
+            .map_err(|error| read_failed(io::Error::new(io::ErrorKind::InvalidData, error)))?;
         Self::parse(&text)
             .map(Some)
             .map_err(|error| LockError::Parse {
@@ -441,9 +446,21 @@ mod tests {
         let error = Lockfile::read(&path, limit).expect_err("a lock over 16 B should be refused");
 
         assert!(
-            matches!(error, LockError::TooLarge { size: measured, .. } if measured == size),
+            matches!(error, LockError::TooLarge { size: measured, grew: false, .. } if measured == size),
             "got: {error}"
         );
+        let help = error.help_from(&path.parent().expect("the lockfile should have a parent"));
+        for named in [
+            "max-lock-size",
+            "SUPDOC_MAX_LOCK_SIZE",
+            "--max-lock-size",
+            &size.to_string(),
+        ] {
+            assert!(
+                help.contains(named),
+                "the help should name {named}, got: {help}"
+            );
+        }
         assert_eq!(
             (error.code(), error.status()),
             ("lock-too-large", crate::exit::ExitStatus::Config)

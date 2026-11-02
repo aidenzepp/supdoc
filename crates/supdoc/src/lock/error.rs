@@ -173,10 +173,12 @@ pub enum LockError {
     TooLarge {
         /// The lockfile.
         path: AbsolutePath,
-        /// Its size in bytes, as measured on the open file, or as far as it was read if it grew.
+        /// Its size in bytes, as measured on the open file before reading.
         size: u64,
         /// The `max-lock-size` in effect.
         limit: SizeLimit,
+        /// Whether it was within the limit when measured but grew past it while being read.
+        grew: bool,
     },
 
     /// The file was read but its text is not a valid lockfile.
@@ -237,6 +239,9 @@ impl LockError {
             Self::OutsideRoot { .. } => format!(
                 "{shown} is a symlink that doesn't lead to a supdoc.lock inside the project root"
             ),
+            Self::TooLarge {
+                limit, grew: true, ..
+            } => format!("{shown} grew past the max-lock-size limit of {limit} while it was read"),
             Self::TooLarge { size, limit, .. } => {
                 format!("{shown} is {size} bytes; the max-lock-size limit is {limit}")
             }
@@ -261,6 +266,13 @@ impl LockError {
             Self::OutsideRoot { .. } => format!(
                 "supdoc reads only a supdoc.lock inside the project root. Remove the symlink with \
                  `rm {}`, then run `supdoc update --yes` to record the links again",
+                shown()
+            ),
+            Self::TooLarge { grew: true, .. } => format!(
+                "Something wrote {} while supdoc read it. Run the same command again once nothing \
+                 is writing it. If it really holds that many links, raise `max-lock-size` under \
+                 `[limits]` in `supdoc.config.toml`, `SUPDOC_MAX_LOCK_SIZE` or `--max-lock-size` \
+                 (such as `64MiB`, or `0` for no limit)",
                 shown()
             ),
             Self::TooLarge { size, .. } => format!(
