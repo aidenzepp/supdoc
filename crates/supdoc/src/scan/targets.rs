@@ -213,15 +213,14 @@ pub(crate) fn resolve(
         for (key, state, occurrences) in
             target_states(config, languages, parsed, settings, at, &target, keyed)
         {
-            let snippet = occurrences
-                .first()
-                .and_then(|occurrence| occurrence.snippet.clone());
+            let mut occurrences = occurrences.into_iter();
+            let Some(first) = occurrences.next() else {
+                continue;
+            };
             let link = ScannedLink {
-                snippet,
-                locations: occurrences
-                    .into_iter()
-                    .map(|occurrence| occurrence.location)
-                    .collect(),
+                snippet: first.snippet,
+                first: first.location,
+                more: occurrences.map(|occurrence| occurrence.location).collect(),
                 target: state,
             };
             let _replaced = links.insert(key, link);

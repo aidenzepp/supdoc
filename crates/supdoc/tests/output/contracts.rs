@@ -1061,6 +1061,11 @@ mod helps {
             &["check", "docs/old.md"],
         ),
         case(
+            "scan-explicit-path-unscanned",
+            |p| p.write("notes.txt", "x\n"),
+            &["check", "notes.txt"],
+        ),
+        case(
             "scan-explicit-path-symlinked",
             |p| {
                 std::os::unix::fs::symlink("src", p.path().join("alias"))

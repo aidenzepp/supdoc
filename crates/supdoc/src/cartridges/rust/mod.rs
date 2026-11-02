@@ -427,7 +427,7 @@ pub mod util {
             matches!(
                 resolve(&file, &table, "Foo.new"),
                 Err(ResolveError::Ambiguous { ref candidates, .. })
-                    if candidates == &[query("Foo.new"), query("Foo.new")]
+                    if candidates == &[query("Foo<u8>.new"), query("Foo<u16>.new")]
             ),
             "plain `Foo.new` matches both impls",
         );
