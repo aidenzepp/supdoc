@@ -173,14 +173,8 @@ impl Plan {
         }
         let findings = walked.findings;
         let mut sources = Vec::new();
-        for (path, _cartridge) in &walked.sources {
-            // The walk only returns files beneath the root whose paths are valid source paths.
-            let Some(source) = path
-                .strip_prefix(config.root())
-                .and_then(|relative| SourcePath::from_relative(relative).ok())
-            else {
-                return Err(invalid_source(path, &rerun));
-            };
+        for walked_source in &walked.sources {
+            let (source, path) = (walked_source.source.clone(), &walked_source.path);
             let limit = config.limits_in_effect().parse_timeout.value;
             let edit = SourceFile::read(path.clone(), languages, limit)
                 .and_then(|file| SourceEdit::find(source.clone(), &file, old));
@@ -812,21 +806,6 @@ fn unread_source(source: &SourcePath, rerun: &str, error: &ReadError) -> CliErro
             &error.help(ReadRole::RenamedSource, &source.to_string()),
             rerun,
         ),
-        ExitStatus::Failed,
-    )
-}
-
-/// The error for a walked file whose name isn't a valid source path. The walk reports such a file
-/// as a finding instead of returning it, so this guards the invariant rather than skipping.
-fn invalid_source(path: &AbsolutePath, rerun: &str) -> CliError {
-    CliError::new(
-        "cli-rename-invalid-source-path",
-        format!(
-            "{} has a name that isn't a valid source path; its links can't be renamed, so \
-             nothing was written",
-            path.display()
-        ),
-        then_rerun("Rename the file", rerun),
         ExitStatus::Failed,
     )
 }

@@ -184,14 +184,8 @@ fn assemble(
     let mut parsed = Parsed::default();
     let mut unread_sources = BTreeSet::new();
     let mut found = SourceLinks::default();
-    for (path, _cartridge) in &walked.sources {
-        // The walk only returns files beneath the root whose paths are valid source paths.
-        let Some(source) = path
-            .strip_prefix(root)
-            .and_then(|relative| SourcePath::from_relative(relative).ok())
-        else {
-            continue;
-        };
+    for walked_source in &walked.sources {
+        let (source, path) = (walked_source.source.clone(), &walked_source.path);
         let limit = config.limits_in_effect().parse_timeout.value;
         let read = parsed
             .read(path, languages, limit)
