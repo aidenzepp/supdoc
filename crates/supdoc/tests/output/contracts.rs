@@ -1064,6 +1064,11 @@ mod helps {
             &["check"],
         ),
         case(
+            "lock-too-large",
+            |_| {},
+            &["--max-lock-size", "16B", "check"],
+        ),
+        case(
             "lock-outside-root",
             |p| {
                 let lock = p.path().join("supdoc.lock");
@@ -1411,6 +1416,24 @@ mod helps {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn lock_over_max_lock_size_is_refused_with_exit_78() {
+        let project = Project::clean();
+
+        let output = project
+            .command(&["--max-lock-size", "16B", "check"], &[])
+            .stdin(Stdio::null())
+            .output()
+            .expect("the supdoc binary should start");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(78), "stderr: {stderr}");
+        assert!(
+            stderr.contains("error[lock-too-large]"),
+            "the run should report lock-too-large, got: {stderr}"
+        );
     }
 
     #[test]

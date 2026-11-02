@@ -23,6 +23,7 @@ use serde::Serialize;
 use crate::config::{Config, config_size_limit, read_config_text};
 use crate::exit::ExitStatus;
 use crate::finding::{Finding, IndexedText, Location};
+use crate::limits::SizeLimit;
 use crate::link::{LinkKey, SourcePath, Target};
 use crate::lock::error::LockError;
 use crate::lock::io::write_atomically;
@@ -128,6 +129,8 @@ struct Plan {
     apply_command: String,
     /// The project root, where `supdoc.lock` sits.
     root: AbsolutePath,
+    /// The `max-lock-size` in effect, for reading the lockfile again before writing.
+    max_lock_size: SizeLimit,
     /// The key to rename in the nearest config.
     config: ConfigEdit,
     /// A config further up the `extends` chain that also defines OLD, left as it is (NR5).
@@ -193,6 +196,7 @@ impl Plan {
             new: new.clone(),
             apply_command: rename_command(args, context, &["--yes"]),
             root: config.root().clone(),
+            max_lock_size: config.limits_in_effect().max_lock_size.value,
             config: config_edit,
             parent,
             sources,
@@ -255,7 +259,8 @@ impl Plan {
             }
         }
         if !self.lock.moved.is_empty() {
-            let now = Lockfile::read(&lock_path(&self.root)).map(Option::unwrap_or_default);
+            let now = Lockfile::read(&lock_path(&self.root), self.max_lock_size)
+                .map(Option::unwrap_or_default);
             if now.ok().as_ref() != Some(&self.lock.read) {
                 return Err(self.file_changed(LOCK_FILE_NAME));
             }
@@ -997,6 +1002,7 @@ mod tests {
     use crate::cli::args::{Command, NamespaceCommand};
     use crate::cli::testing::{Project, Run, Session, at};
     use crate::config::CONFIG_FILE_NAME;
+    use crate::limits::Limits;
     use crate::state::LinkState;
 
     /// A parent config whose namespace lies inside `app/`, so `app/` may inherit it.
@@ -1069,7 +1075,7 @@ web = \"services/web\"
         }
 
         fn lockfile(&self) -> Lockfile {
-            Lockfile::read(&lock_path(&self.root()))
+            Lockfile::read(&lock_path(&self.root()), Limits::MAX_LOCK_SIZE)
                 .expect("the lockfile should parse")
                 .expect("the lockfile should exist")
         }
@@ -1087,7 +1093,7 @@ web = \"services/web\"
                 &Scope::All,
             )
             .expect("the fixture project should scan");
-            let lock = Lockfile::read(&lock_path(&self.root()))
+            let lock = Lockfile::read(&lock_path(&self.root()), Limits::MAX_LOCK_SIZE)
                 .expect("the lockfile should parse")
                 .unwrap_or_default();
             reconcile_at_root(&scan, &lock, &Scope::All)

@@ -5,6 +5,7 @@ use std::io::ErrorKind;
 
 use crate::exit::ExitStatus;
 use crate::hash::LineEndings;
+use crate::limits::SizeLimit;
 use crate::link::LinkKey;
 use crate::output::paths::relative_to;
 use crate::path::AbsolutePath;
@@ -168,6 +169,18 @@ pub enum LockError {
         path: AbsolutePath,
     },
 
+    /// The lockfile is larger than `max-lock-size`, so supdoc refuses it before reading it.
+    TooLarge {
+        /// The lockfile.
+        path: AbsolutePath,
+        /// Its size in bytes, as measured on the open file before reading.
+        size: u64,
+        /// The `max-lock-size` in effect.
+        limit: SizeLimit,
+        /// Whether it was within the limit when measured but grew past it while being read.
+        grew: bool,
+    },
+
     /// The file was read but its text is not a valid lockfile.
     Parse {
         /// The lockfile.
@@ -192,6 +205,7 @@ impl LockError {
         match self {
             Self::Read { .. } | Self::NotRegularFile { .. } => "lock-read",
             Self::OutsideRoot { .. } => "lock-outside-root",
+            Self::TooLarge { .. } => "lock-too-large",
             Self::Parse { error, .. } => error.code(),
             Self::Write { .. } => "lock-write",
         }
@@ -204,6 +218,7 @@ impl LockError {
             Self::Read { path, .. }
             | Self::NotRegularFile { path }
             | Self::OutsideRoot { path }
+            | Self::TooLarge { path, .. }
             | Self::Parse { path, .. }
             | Self::Write { path, .. } => path,
         }
@@ -224,6 +239,12 @@ impl LockError {
             Self::OutsideRoot { .. } => format!(
                 "{shown} is a symlink that doesn't lead to a supdoc.lock inside the project root"
             ),
+            Self::TooLarge {
+                limit, grew: true, ..
+            } => format!("{shown} grew past the max-lock-size limit of {limit} while it was read"),
+            Self::TooLarge { size, limit, .. } => {
+                format!("{shown} is {size} bytes; the max-lock-size limit is {limit}")
+            }
             Self::Parse { error, .. } => format!("{shown}: {error}"),
             Self::Write { error, .. } => format!("cannot write {shown}: {error}"),
         }
@@ -247,6 +268,21 @@ impl LockError {
                  `rm {}`, then run `supdoc update --yes` to record the links again",
                 shown()
             ),
+            Self::TooLarge { grew: true, .. } => format!(
+                "Something wrote {} while supdoc read it. Run the same command again once nothing \
+                 is writing it. If it really holds that many links, raise `max-lock-size` under \
+                 `[limits]` in `supdoc.config.toml`, `SUPDOC_MAX_LOCK_SIZE` or `--max-lock-size` \
+                 (such as `64MiB`, or `0` for no limit)",
+                shown()
+            ),
+            Self::TooLarge { size, .. } => format!(
+                "supdoc refuses a lockfile this large before reading it. If {} really holds that \
+                 many links, raise the limit above {size} bytes with `max-lock-size` under \
+                 `[limits]` in `supdoc.config.toml`, `SUPDOC_MAX_LOCK_SIZE` or `--max-lock-size` \
+                 (such as `64MiB`, or `0` for no limit). Otherwise restore it with `git checkout \
+                 -- {0}`",
+                shown()
+            ),
             Self::Parse { error, .. } => error.help().to_owned(),
             Self::Write { error, path } => {
                 let directory = path.parent().map_or_else(
@@ -266,7 +302,9 @@ impl LockError {
     #[must_use]
     pub const fn status(&self) -> ExitStatus {
         match self {
-            Self::Parse { .. } | Self::OutsideRoot { .. } => ExitStatus::Config,
+            Self::Parse { .. } | Self::OutsideRoot { .. } | Self::TooLarge { .. } => {
+                ExitStatus::Config
+            }
             Self::Read { .. } | Self::NotRegularFile { .. } | Self::Write { .. } => ExitStatus::Io,
         }
     }
