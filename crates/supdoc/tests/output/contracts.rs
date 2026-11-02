@@ -902,6 +902,17 @@ mod helps {
             |p| p.write("docs/guide.md", "[x](../src/gone.rs#add)\n"),
             &["check"],
         ),
+        case(
+            "read-not-a-file",
+            |p| {
+                let made = std::process::Command::new("mkfifo")
+                    .arg(p.path().join("src/p.rs"))
+                    .status()
+                    .expect("mkfifo should run");
+                assert!(made.success(), "mkfifo should create the FIFO");
+            },
+            &["resolve", "src/p.rs"],
+        ),
         restricted_case("read-io", |p| chmod(p, "src/lib.rs", 0o000), &["check"]),
         restricted_case("read-io", |p| chmod(p, "docs/old.md", 0o000), &["check"]),
         case(

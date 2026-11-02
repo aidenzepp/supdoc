@@ -34,6 +34,9 @@ tree-sitter-rust.workspace = true
 tree-sitter-typescript.workspace = true
 unicode-general-category.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 insta.workspace = true
 jsonschema.workspace = true

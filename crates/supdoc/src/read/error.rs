@@ -21,6 +21,13 @@ pub enum ReadError {
         path: AbsolutePath,
     },
 
+    /// The path is a directory, FIFO, socket or device once symlinks are followed: supdoc reads
+    /// only regular files.
+    NotAFile {
+        /// The path that was opened.
+        path: AbsolutePath,
+    },
+
     /// The filesystem refused the read.
     Io {
         /// The file being read.
@@ -90,6 +97,26 @@ const TIMEOUT_KNOBS: &str = "Raise the per-read limit with `parse-timeout` under
      `supdoc.config.toml`, `SUPDOC_PARSE_TIMEOUT` or `--parse-timeout` (such as `30s`, or `0` for \
      no limit)";
 
+/// What to do about a read the filesystem refused with `kind`: only a permission error is fixed
+/// by `chmod`.
+fn io_help(kind: std::io::ErrorKind) -> String {
+    use std::io::ErrorKind;
+
+    match kind {
+        ErrorKind::PermissionDenied => {
+            "Check that the current user can read the file, for example with `chmod u+r` on it"
+                .to_owned()
+        }
+        ErrorKind::NotADirectory => {
+            "A part of the path that should be a directory is a file. Check the path with `ls -l`"
+                .to_owned()
+        }
+        _ => "Check the file, any symlink loop on its path and the filesystem it is on (`ls -l` \
+              on each part of the path), then run supdoc again"
+            .to_owned(),
+    }
+}
+
 /// `text` with its first letter in upper case, to open a sentence.
 fn capitalized(text: &str) -> String {
     let mut chars = text.chars();
@@ -150,6 +177,7 @@ impl ReadError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Missing { .. } => "read-missing",
+            Self::NotAFile { .. } => "read-not-a-file",
             Self::Io { .. } => "read-io",
             Self::NotUtf8 { .. } => "read-not-utf8",
             Self::TooLarge { .. } => "read-too-large",
@@ -164,6 +192,7 @@ impl ReadError {
     pub fn path(&self) -> &AbsolutePath {
         match self {
             Self::Missing { path }
+            | Self::NotAFile { path }
             | Self::Io { path, .. }
             | Self::NotUtf8 { path, .. }
             | Self::TooLarge { path, .. }
@@ -178,6 +207,7 @@ impl ReadError {
     pub fn message_naming(&self, shown: &dyn Display) -> String {
         match self {
             Self::Missing { .. } => format!("{shown} does not exist"),
+            Self::NotAFile { .. } => format!("{shown} is not a regular file"),
             Self::Io { error, .. } => format!("cannot read {shown}: {error}"),
             Self::NotUtf8 { offset, .. } => {
                 format!("{shown} is not UTF-8 (first invalid byte at offset {offset})")
@@ -199,8 +229,8 @@ impl ReadError {
 
     /// What to do next, for a file read in `role`, with the file named as `shown`.
     ///
-    /// Only a file that is missing, not UTF-8, too large or timed out reads differently by role;
-    /// the other errors give the same advice whoever asked.
+    /// Only a file that is missing, not a regular file, not UTF-8, too large or timed out reads
+    /// differently by role; the other errors give the same advice whoever asked.
     #[must_use]
     pub fn help(&self, role: ReadRole, shown: &str) -> String {
         match (self, role) {
@@ -250,10 +280,20 @@ impl ReadError {
                     capitalized(step)
                 )
             }
-            (Self::Io { .. }, _) => {
-                "Check that the current user can read the file, for example with `chmod u+r` on it"
-                    .to_owned()
+            (Self::NotAFile { .. }, ReadRole::Target) => format!(
+                "Point the link at a regular file; `{shown}` is a directory, FIFO, socket or device"
+            ),
+            (Self::NotAFile { .. }, ReadRole::ResolveArgument) => {
+                format!("Resolve a regular file; `{shown}` is a directory, FIFO, socket or device")
             }
+            (Self::NotAFile { .. }, ReadRole::ScannedSource) => format!(
+                "Replace `{shown}` with a regular file, or add it to `exclude` in \
+                 `supdoc.config.toml`"
+            ),
+            (Self::NotAFile { .. }, ReadRole::RenamedSource) => {
+                format!("Replace `{shown}` with a regular file")
+            }
+            (Self::Io { error, .. }, _) => io_help(error.kind()),
             (Self::UnsupportedLanguage { supported, .. }, _) => {
                 let listed = supported
                     .iter()
