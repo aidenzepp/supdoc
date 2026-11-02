@@ -3,8 +3,8 @@
 //! too.
 
 use clap::CommandFactory;
-use supdoc::cli::CliError;
 use supdoc::cli::args::Cli;
+use supdoc::exit::ExitStatus;
 
 use crate::support::Project;
 
@@ -39,8 +39,8 @@ fn assert_none_is_a_usage_error(project: &Project, invocations: &[Vec<&str>]) {
     for argv in invocations {
         let run = project.supdoc(argv);
         let rejected = [
-            i32::from(CliError::USAGE_EXIT_CODE),
-            i32::from(CliError::BUG_EXIT_CODE),
+            i32::from(ExitStatus::Usage.code()),
+            i32::from(ExitStatus::Bug.code()),
             101,
         ];
         if run.code.is_none_or(|code| rejected.contains(&code)) {
