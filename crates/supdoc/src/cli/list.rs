@@ -292,9 +292,7 @@ impl Place {
                 None => return Self::Unlocated(target.clone()),
             },
         };
-        // Joining a relative path onto an absolute one is always absolute.
-        let file = AbsolutePath::new(&base.as_path().join(target.path().as_str()))
-            .unwrap_or_else(|| base.clone());
+        let file = base.join_path(Path::new(target.path().as_str()));
         if !config.contains(base.as_path()) || !config.contains(file.as_path()) {
             return Self::Unlocated(target.clone());
         }
