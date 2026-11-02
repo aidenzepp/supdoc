@@ -342,6 +342,30 @@ fn pattern_with_parent_segment_is_rejected() {
 }
 
 #[test]
+fn pattern_with_dot_segment_is_rejected_with_the_corrected_pattern() {
+    for (written, corrected) in [("./docs", "docs"), ("docs/./api", "docs/api"), (".", "**")] {
+        let text = format!("include = [\"{written}\"]\n");
+        let dir = tree(&[("supdoc.config.toml", &text)]);
+        let error = load_error(&dir, "supdoc.config.toml");
+
+        assert_eq!(error.code(), "config-parse", "{written}: {error}");
+        assert!(
+            error.to_string().contains(&format!(
+                "pattern `{written}` has a `.` segment; write `{corrected}`"
+            )),
+            "{written}: {error}"
+        );
+        assert!(
+            error
+                .help()
+                .is_some_and(|help| help.starts_with(&format!("Write `{corrected}`"))),
+            "{written}: {:?}",
+            error.help()
+        );
+    }
+}
+
+#[test]
 fn pattern_set_too_large_to_compile_names_the_cause_and_count() {
     let patterns: Vec<String> = (0..7000)
         .map(|index| format!("\"**/generated/module{index}/**/*.rs\""))

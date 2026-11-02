@@ -393,6 +393,12 @@ fn parse_help(message: &str) -> Option<String> {
             "Patterns match only files under this config's directory. Remove `..`, or move the \
              pattern into the config of a directory that holds `{pattern}`"
         ))
+    } else if message.starts_with("pattern `") && message.contains("` has a `.` segment; write `") {
+        let corrected = message.split('`').nth(5).unwrap_or_default();
+        Some(format!(
+            "Write `{corrected}`: patterns match paths under this config's directory, which never \
+             contain a `.` segment"
+        ))
     } else if let Some((count, _)) =
         message.split_once(" patterns are too many or too complex to match together")
     {
