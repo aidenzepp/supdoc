@@ -35,6 +35,9 @@ pub mod state;
 /// Loading `supdoc.config.toml` and its `extends` chain.
 pub mod config;
 
+/// The `[limits]` ceilings: units, precedence and where each value came from.
+pub mod limits;
+
 /// The `supdoc.lock` lockfile: its in-memory model and its file format.
 pub mod lock {
     /// The in-memory lockfile.

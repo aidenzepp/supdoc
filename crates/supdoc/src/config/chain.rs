@@ -14,6 +14,7 @@ use std::io::ErrorKind;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
+use crate::limits::ConfigLimits;
 use crate::namespace::NamespaceName;
 use crate::path::{AbsolutePath, RelativePath, is_regular_file};
 
@@ -303,6 +304,7 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Result<Config, Co
     let mut exclude = None;
     let mut written = BTreeMap::new();
     let mut line_endings = None;
+    let mut limits = ConfigLimits::default();
     for Layer { file, raw } in layers {
         let base = directory_of(&file);
         for (name, relative) in raw.namespaces {
@@ -329,6 +331,15 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Result<Config, Co
                 .and_then(|hash| hash.line_endings)
                 .map(|value| (value, file.clone()));
         }
+        if let Some(raw_limits) = raw.limits {
+            nearest(&mut limits.parse_timeout, raw_limits.parse_timeout, &file);
+            nearest(&mut limits.max_lock_size, raw_limits.max_lock_size, &file);
+            nearest(
+                &mut limits.max_ignore_size,
+                raw_limits.max_ignore_size,
+                &file,
+            );
+        }
         files.push(file);
     }
     let real_root = super::real_root(&root);
@@ -349,7 +360,15 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Result<Config, Co
         exclude,
         namespaces,
         line_endings,
+        limits,
     })
+}
+
+/// Fills `slot` with `value` and the `file` that wrote it, unless a nearer file already did.
+fn nearest<T>(slot: &mut Option<(T, AbsolutePath)>, value: Option<T>, file: &AbsolutePath) {
+    if slot.is_none() {
+        *slot = value.map(|value| (value, file.clone()));
+    }
 }
 
 /// The namespace `name`, once its directory is found inside the root after symlinks are followed.

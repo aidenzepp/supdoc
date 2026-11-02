@@ -22,6 +22,10 @@
           "$ref": "#/$defs/PatternsJson",
           "description": "The files to read links from."
         },
+        "limits": {
+          "$ref": "#/$defs/LimitsJson",
+          "description": "Every `[limits]` ceiling in effect and where it came from."
+        },
         "lockfile": {
           "description": "The project's lockfile, whether or not it exists yet.",
           "type": "string"
@@ -40,7 +44,8 @@
         "include",
         "exclude",
         "namespaces",
-        "features"
+        "features",
+        "limits"
       ],
       "type": "object"
     },
@@ -151,6 +156,84 @@
       },
       "required": [
         "line_endings"
+      ],
+      "type": "object"
+    },
+    "LimitJson": {
+      "description": "One limit and where it came from.",
+      "properties": {
+        "file": {
+          "description": "The config file that set it, relative to the project root, when `source` is `config`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/LimitSource",
+          "description": "`flag`, `env`, `config` or `default`."
+        },
+        "value": {
+          "description": "The ceiling with its unit, such as `10s` or `256KiB`; `0` for no limit.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
+        "source"
+      ],
+      "type": "object"
+    },
+    "LimitSource": {
+      "description": "Where a limit's value came from, as JSON names it.",
+      "oneOf": [
+        {
+          "const": "flag",
+          "description": "The command-line flag.",
+          "type": "string"
+        },
+        {
+          "const": "env",
+          "description": "The `SUPDOC_*` environment variable.",
+          "type": "string"
+        },
+        {
+          "const": "config",
+          "description": "The config file named in `file`.",
+          "type": "string"
+        },
+        {
+          "const": "default",
+          "description": "The built-in default.",
+          "type": "string"
+        }
+      ]
+    },
+    "LimitsJson": {
+      "description": "The `[limits]` ceilings in effect, each with where it came from.",
+      "properties": {
+        "max-config-size": {
+          "$ref": "#/$defs/LimitJson",
+          "description": "How large each config file may be. Set only by flag or environment variable."
+        },
+        "max-ignore-size": {
+          "$ref": "#/$defs/LimitJson",
+          "description": "How large each ignore file may be."
+        },
+        "max-lock-size": {
+          "$ref": "#/$defs/LimitJson",
+          "description": "How large `supdoc.lock` may be."
+        },
+        "parse-timeout": {
+          "$ref": "#/$defs/LimitJson",
+          "description": "How long one file may take to read."
+        }
+      },
+      "required": [
+        "parse-timeout",
+        "max-lock-size",
+        "max-config-size",
+        "max-ignore-size"
       ],
       "type": "object"
     },
