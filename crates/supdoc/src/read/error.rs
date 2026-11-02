@@ -229,7 +229,7 @@ pub enum ResolveError {
         file: AbsolutePath,
         /// The path asked for.
         query: SymbolPath,
-        /// The full path of every match, in file order.
+        /// Every match in file order: its full path, or its first alias when it has one.
         candidates: Vec<SymbolPath>,
     },
 }
@@ -304,7 +304,15 @@ impl ResolveError {
                 }
             }
             Self::Ambiguous { candidates, .. } => {
-                format!("write one of the full paths: {}", quoted(candidates))
+                let first: Vec<SymbolPath> =
+                    candidates.iter().take(AMBIGUOUS_LISTED).cloned().collect();
+                let more = candidates.len().saturating_sub(AMBIGUOUS_LISTED);
+                let listed = quoted(&first);
+                if more == 0 {
+                    format!("write one of the full paths: {listed}")
+                } else {
+                    format!("write one of the full paths: {listed}, and {more} more; {list}")
+                }
             }
         }
     }
@@ -325,6 +333,9 @@ impl Display for ResolveError {
 }
 
 impl std::error::Error for ResolveError {}
+
+/// How many ambiguous candidates the help names before summarizing the rest.
+const AMBIGUOUS_LISTED: usize = 5;
 
 /// `` `a`, `b`, `c` ``
 fn quoted(paths: &[SymbolPath]) -> String {

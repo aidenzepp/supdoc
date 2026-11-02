@@ -11,6 +11,9 @@
     )
 )]
 
+/// The process exit status.
+pub mod exit;
+
 /// The shared "did you mean" rule: one cutoff, one distance metric, a length prefilter.
 pub(crate) mod suggest;
 
@@ -34,6 +37,9 @@ pub mod state;
 
 /// Loading `supdoc.config.toml` and its `extends` chain.
 pub mod config;
+
+/// The `[limits]` ceilings: units, precedence and where each value came from.
+pub mod limits;
 
 /// The `supdoc.lock` lockfile: its in-memory model and its file format.
 pub mod lock {
