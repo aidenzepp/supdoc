@@ -1638,3 +1638,82 @@ fn line_endings_provenance_names_the_defining_file() {
     );
     assert_eq!(load_from(&default, ".").line_endings_defined_in(), None);
 }
+
+// [limits]
+
+#[test]
+fn limits_parse_from_the_toml_table_with_the_file_that_wrote_them() {
+    let dir = tree(&[(
+        "supdoc.config.toml",
+        "[limits]\nparse-timeout = \"30s\"\nmax-lock-size = \"1MiB\"\nmax-ignore-size = \"0\"\n",
+    )]);
+    let config = load_from(&dir, ".");
+    let limits = config.limits();
+
+    let file = at(&dir, "supdoc.config.toml");
+    let (timeout, from) = limits
+        .parse_timeout
+        .as_ref()
+        .expect("parse-timeout should be set");
+    assert_eq!(timeout.to_string(), "30s");
+    assert_eq!(from, &file);
+    let (lock, _) = limits
+        .max_lock_size
+        .as_ref()
+        .expect("max-lock-size should be set");
+    assert_eq!(lock.to_string(), "1MiB");
+    let (ignore, _) = limits
+        .max_ignore_size
+        .as_ref()
+        .expect("max-ignore-size should be set");
+    assert_eq!(ignore.get(), None, "0 should mean no limit");
+}
+
+#[test]
+fn an_unknown_limits_key_is_refused_as_a_parse_error() {
+    let text = "[limits]\nparse-timeouts = \"30s\"\n";
+    let dir = tree(&[("supdoc.config.toml", text)]);
+    let error = load_error(&dir, "supdoc.config.toml");
+
+    assert_eq!(error.code(), "config-parse");
+    assert_eq!(parse_span_text(&error, text), "parse-timeouts");
+}
+
+#[test]
+fn max_config_size_in_a_config_file_is_refused() {
+    let text = "[limits]\nmax-config-size = \"1MiB\"\n";
+    let dir = tree(&[("supdoc.config.toml", text)]);
+    let error = load_error(&dir, "supdoc.config.toml");
+
+    assert_eq!(error.code(), "config-parse");
+    assert_eq!(parse_span_text(&error, text), "max-config-size");
+}
+
+#[test]
+fn the_nearest_config_in_the_extends_chain_wins_each_limit() {
+    let dir = tree(&[
+        (
+            "base/supdoc.config.toml",
+            "[limits]\nparse-timeout = \"30s\"\nmax-lock-size = \"1MiB\"\n",
+        ),
+        (
+            "supdoc.config.toml",
+            "extends = \"base/supdoc.config.toml\"\n[limits]\nparse-timeout = \"5s\"\n",
+        ),
+    ]);
+    let config = load_from(&dir, ".");
+    let limits = config.limits();
+
+    let (timeout, from) = limits
+        .parse_timeout
+        .as_ref()
+        .expect("parse-timeout should be set");
+    assert_eq!(timeout.to_string(), "5s");
+    assert_eq!(from, &at(&dir, "supdoc.config.toml"));
+    let (lock, from) = limits
+        .max_lock_size
+        .as_ref()
+        .expect("max-lock-size should be inherited");
+    assert_eq!(lock.to_string(), "1MiB");
+    assert_eq!(from, &at(&dir, "base/supdoc.config.toml"));
+}

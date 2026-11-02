@@ -10,13 +10,14 @@ use serde::Serialize;
 
 use crate::config::{Config, PatternDefinition};
 use crate::hash::LineEndings;
+use crate::limits::{Limits, Setting, Source};
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
 use crate::output::text::visible;
 use crate::output::{Output, Report, TextContext, Verbosity};
 use crate::path::AbsolutePath;
 
-use super::args::{Inspect, Limit};
+use super::args::{Inspect, Limit, LimitFlags};
 use super::project::{load_config, lock_path};
 use super::{CliError, Context, Outcome};
 
@@ -34,7 +35,10 @@ pub fn run(
     let config = load_config(context, output)?;
     let written = match inspect {
         Inspect::ConfigShow => output
-            .report(&ConfigShowReport::new(&config), true)
+            .report(
+                &ConfigShowReport::new(&config, &context.global.limits),
+                true,
+            )
             .and_then(|()| {
                 if config.files().is_empty() {
                     output.note(&format!(
@@ -99,6 +103,8 @@ pub(crate) struct ConfigShowReport {
     namespaces: Vec<NamespaceJson>,
     /// The feature settings in effect.
     features: FeaturesJson,
+    /// Every `[limits]` ceiling in effect and where it came from.
+    limits: LimitsJson,
     /// The files in the chain, for text output.
     #[serde(skip)]
     chain: Vec<AbsolutePath>,
@@ -109,9 +115,10 @@ pub(crate) struct ConfigShowReport {
 
 impl ConfigShowReport {
     /// The report for `config`.
-    fn new(config: &Config) -> Self {
+    fn new(config: &Config, flags: &LimitFlags) -> Self {
         let root = config.root();
         Self {
+            limits: LimitsJson::new(root, &Limits::resolve(&flags.0, config.limits())),
             files: config
                 .files()
                 .iter()
@@ -169,6 +176,17 @@ impl Report for ConfigShowReport {
             None => "(default)".to_owned(),
         };
         writeln!(out, "line-endings  {}  {origin}", line_endings.value)?;
+        for (key, limit) in self.limits.rows() {
+            let origin = match &limit.origin {
+                Source::Flag => format!("(from --{key})"),
+                Source::Env => format!("(from SUPDOC_{})", key.to_uppercase().replace('-', "_")),
+                Source::Config(file) => {
+                    format!("(from {})", visible(&context.paths.text_absolute(file)))
+                }
+                Source::Default => "(default)".to_owned(),
+            };
+            writeln!(out, "{key:<15} {}  {origin}", limit.value)?;
+        }
         for namespace in &self.namespaces {
             writeln!(
                 out,
@@ -304,6 +322,87 @@ impl FeaturesJson {
                     defined_in: defined_in.cloned(),
                 },
             },
+        }
+    }
+}
+
+/// The `[limits]` ceilings in effect, each with where it came from.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct LimitsJson {
+    /// How long one file may take to read.
+    parse_timeout: LimitJson,
+    /// How large `supdoc.lock` may be.
+    max_lock_size: LimitJson,
+    /// How large each config file may be. Set only by flag or environment variable.
+    max_config_size: LimitJson,
+    /// How large each ignore file may be.
+    max_ignore_size: LimitJson,
+}
+
+impl LimitsJson {
+    /// The report of `limits`, with config files relative to `root`.
+    fn new(root: &AbsolutePath, limits: &Limits) -> Self {
+        Self {
+            parse_timeout: LimitJson::new(root, &limits.parse_timeout),
+            max_lock_size: LimitJson::new(root, &limits.max_lock_size),
+            max_config_size: LimitJson::new(root, &limits.max_config_size),
+            max_ignore_size: LimitJson::new(root, &limits.max_ignore_size),
+        }
+    }
+
+    /// Each limit with its key, in the order text output shows them.
+    const fn rows(&self) -> [(&'static str, &LimitJson); 4] {
+        [
+            ("parse-timeout", &self.parse_timeout),
+            ("max-lock-size", &self.max_lock_size),
+            ("max-config-size", &self.max_config_size),
+            ("max-ignore-size", &self.max_ignore_size),
+        ]
+    }
+}
+
+/// Where a limit's value came from, as JSON names it.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum LimitSource {
+    /// The command-line flag.
+    Flag,
+    /// The `SUPDOC_*` environment variable.
+    Env,
+    /// The config file named in `file`.
+    Config,
+    /// The built-in default.
+    Default,
+}
+
+/// One limit and where it came from.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct LimitJson {
+    /// The ceiling with its unit, such as `10s` or `256KiB`; `0` for no limit.
+    value: String,
+    /// `flag`, `env`, `config` or `default`.
+    source: LimitSource,
+    /// The config file that set it, relative to the project root, when `source` is `config`.
+    file: Option<String>,
+    /// Where it came from, for text output.
+    #[serde(skip)]
+    origin: Source,
+}
+
+impl LimitJson {
+    /// The report of `setting`, with a config file relative to `root`.
+    fn new<T: std::fmt::Display>(root: &AbsolutePath, setting: &Setting<T>) -> Self {
+        let (source, file) = match &setting.source {
+            Source::Flag => (LimitSource::Flag, None),
+            Source::Env => (LimitSource::Env, None),
+            Source::Config(file) => (LimitSource::Config, Some(relative_to(root, file))),
+            Source::Default => (LimitSource::Default, None),
+        };
+        Self {
+            value: setting.value.to_string(),
+            source,
+            file,
+            origin: setting.source.clone(),
         }
     }
 }

@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::hash::LineEndings;
+use crate::limits::{SizeLimit, TimeLimit};
 use crate::namespace::NamespaceName;
 use crate::path::RelativePath;
 
@@ -27,6 +28,20 @@ pub(crate) struct RawConfig {
     pub(crate) namespaces: BTreeMap<NamespaceName, toml::Spanned<RelativePath>>,
     /// `None` inherits every toggle from the parent.
     pub(crate) features: Option<RawFeatures>,
+    /// `None` inherits every ceiling from the parent.
+    pub(crate) limits: Option<RawLimits>,
+}
+
+/// The `[limits]` table. `max-config-size` is not a key: it must apply before a file is parsed.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub(crate) struct RawLimits {
+    /// `None` inherits the parent's setting.
+    pub(crate) parse_timeout: Option<TimeLimit>,
+    /// `None` inherits the parent's setting.
+    pub(crate) max_lock_size: Option<SizeLimit>,
+    /// `None` inherits the parent's setting.
+    pub(crate) max_ignore_size: Option<SizeLimit>,
 }
 
 /// The `[features]` table: one sub-table per area (01 D10).
