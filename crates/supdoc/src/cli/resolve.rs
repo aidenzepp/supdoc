@@ -221,7 +221,7 @@ fn read_failed(error: &ReadError, root: &AbsolutePath, typed: &Path) -> CliError
     let exit_code = match error {
         ReadError::Missing { .. } => ExitStatus::Usage,
         ReadError::Io { .. } => ExitStatus::Io,
-        ReadError::Internal { .. } => ExitStatus::Bug,
+        ReadError::CartridgeLoad { .. } | ReadError::Internal { .. } => ExitStatus::Bug,
         ReadError::NotAFile { .. }
         | ReadError::NotUtf8 { .. }
         | ReadError::TooLarge { .. }

@@ -23,7 +23,7 @@ use crate::link::{LinkKey, Target};
 use crate::output::paths::relative_to;
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile, SymbolTable};
-use crate::read::error::{ReadError, ReadRole, ResolveError};
+use crate::read::error::{CartridgeLoadError, ReadError, ReadRole, ResolveError};
 use crate::read::hash::{hash_file, hash_symbol};
 use crate::scan::model::{ScannedLink, TargetState};
 use crate::suggest::close_match;
@@ -46,6 +46,9 @@ pub(crate) const OUTSIDE_ROOT_HELP: &str = "Link to a file inside the project ro
 pub(crate) struct Parsed {
     /// Every file read so far.
     files: BTreeMap<AbsolutePath, SourceFile>,
+    /// The first built-in cartridge that didn't load when a file of its language was read. The
+    /// scan fails with it rather than reporting that file.
+    cartridge_failure: Option<CartridgeLoadError>,
     /// How many files were parsed, so a test can prove none was parsed twice.
     #[cfg(test)]
     pub(crate) parses: usize,
@@ -54,7 +57,8 @@ pub(crate) struct Parsed {
 impl Parsed {
     /// The file at `path`, read and parsed on the first request and reused after that.
     ///
-    /// A failed read is not remembered, so asking again reads again; it parsed nothing.
+    /// A failed read is not remembered, so asking again reads again; it parsed nothing. A
+    /// cartridge that didn't load is remembered in [`Parsed::cartridge_failure`].
     ///
     /// # Errors
     ///
@@ -68,7 +72,12 @@ impl Parsed {
         match self.files.entry(path.clone()) {
             Entry::Occupied(parsed) => Ok(parsed.into_mut()),
             Entry::Vacant(slot) => {
-                let file = SourceFile::read(path.clone(), languages, limit)?;
+                let file =
+                    SourceFile::read(path.clone(), languages, limit).inspect_err(|error| {
+                        if let ReadError::CartridgeLoad { error, .. } = error {
+                            let _first = self.cartridge_failure.get_or_insert(*error);
+                        }
+                    })?;
                 #[cfg(test)]
                 {
                     self.parses += 1;
@@ -76,6 +85,12 @@ impl Parsed {
                 Ok(slot.insert(file))
             }
         }
+    }
+
+    /// The first built-in cartridge that didn't load during a read, which fails the scan.
+    #[must_use]
+    pub(crate) const fn cartridge_failure(&self) -> Option<CartridgeLoadError> {
+        self.cartridge_failure
     }
 
     /// Drops every file except those in `keep`, so sources that are never read as targets free

@@ -2,7 +2,8 @@
 //! ([`ResolveError`]).
 //!
 //! Each error has a stable `code()` and a `help()` that says what to do next. Both are about one
-//! file, so callers turn them into findings rather than stopping the run.
+//! file, so callers turn them into findings rather than stopping the run. The one exception is
+//! [`ReadError::CartridgeLoad`], a supdoc bug that fails the run with exit code 70.
 
 use std::fmt::{self, Display, Formatter};
 
@@ -79,6 +80,15 @@ pub(crate) enum ReadError {
         size: usize,
     },
 
+    /// The cartridge for the file's language doesn't load: a supdoc bug that fails the whole run
+    /// with exit code 70, never a finding about the file.
+    CartridgeLoad {
+        /// The file whose read compiled the cartridge.
+        path: AbsolutePath,
+        /// Why the cartridge doesn't load.
+        error: CartridgeLoadError,
+    },
+
     /// A condition supdoc guarantees cannot happen did (tree-sitter producing no tree, a symbol
     /// whose range lies outside its file), so this is a bug.
     Internal {
@@ -127,7 +137,7 @@ fn capitalized(text: &str) -> String {
 
 /// A built-in cartridge that cannot be loaded: a supdoc bug that fails the run (exit 70), not a
 /// problem with any one file.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, Copy, thiserror::Error)]
 pub(crate) enum CartridgeLoadError {
     /// A built-in query file doesn't compile against its grammar.
     #[error("{0}")]
@@ -183,6 +193,7 @@ impl ReadError {
             Self::TooLarge { .. } => "read-too-large",
             Self::UnsupportedLanguage { .. } => "read-unsupported-language",
             Self::Timeout { .. } => CODE_TIMEOUT,
+            Self::CartridgeLoad { .. } => CartridgeLoadError::code(),
             Self::Internal { .. } => "read-internal",
         }
     }
@@ -198,6 +209,7 @@ impl ReadError {
             | Self::TooLarge { path, .. }
             | Self::UnsupportedLanguage { path, .. }
             | Self::Timeout { path, .. }
+            | Self::CartridgeLoad { path, .. }
             | Self::Internal { path, .. } => path,
         }
     }
@@ -224,6 +236,7 @@ impl ReadError {
             Self::Timeout { limit, .. } => {
                 format!("reading {shown} took longer than the {limit} per-read parse timeout")
             }
+            Self::CartridgeLoad { error, .. } => error.to_string(),
             Self::Internal { reason, .. } => {
                 format!("{reason} for {shown} (supdoc bug)")
             }
@@ -308,6 +321,7 @@ impl ReadError {
                      or link a symbol in a file supdoc reads: {listed}"
                 )
             }
+            (Self::CartridgeLoad { .. }, _) => CartridgeLoadError::help(),
             (Self::Internal { .. }, _) => concat!(
                 "Report a bug at ",
                 env!("CARGO_PKG_REPOSITORY"),

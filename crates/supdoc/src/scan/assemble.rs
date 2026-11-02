@@ -20,7 +20,7 @@ use crate::lock::error::shell_quote;
 use crate::namespace::NamespaceName;
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile};
-use crate::read::error::{ReadError, ReadRole};
+use crate::read::error::{CartridgeLoadError, ReadError, ReadRole};
 use crate::read::links::links;
 use crate::scan::model::{Scan, ScannedLink, Scope, TargetState};
 use crate::scan::targets::{self, CODE_UNKNOWN_NAMESPACE, Occurrence, Parsed, Written};
@@ -37,6 +37,10 @@ pub(crate) enum ScanError {
         /// What the operating system reported.
         error: std::io::Error,
     },
+    /// A built-in cartridge didn't load when a file of its language was read: a supdoc bug, so
+    /// no result would mean anything.
+    #[error("{0}")]
+    CartridgeLoad(#[from] CartridgeLoadError),
     /// An ignore file is larger than `max-ignore-size`, so it wasn't read. Skipping it would widen
     /// the scan, so the scan doesn't run.
     #[error("{message}")]
@@ -67,6 +71,7 @@ impl ScanError {
     pub(crate) fn code(&self) -> &'static str {
         match self {
             Self::RootUnreadable { .. } => "scan-root-unreadable",
+            Self::CartridgeLoad(_) => CartridgeLoadError::code(),
             Self::IgnoreTooLarge { .. } => CODE_IGNORE_TOO_LARGE,
         }
     }
@@ -80,16 +85,18 @@ impl ScanError {
                  with `chmod u+rx {}`",
                 shell_quote(&root.display().to_string())
             ),
+            Self::CartridgeLoad(_) => CartridgeLoadError::help(),
             Self::IgnoreTooLarge { help, .. } => help.clone(),
         }
     }
 
-    /// The process exit status for this error: 74 when the project can't be read, 78 for
-    /// an ignore file over its configured ceiling.
+    /// The process exit status for this error: 74 when the project can't be read, 70 for a
+    /// built-in cartridge that doesn't load, 78 for an ignore file over its configured ceiling.
     #[must_use]
     pub(crate) const fn status(&self) -> ExitStatus {
         match self {
             Self::RootUnreadable { .. } => ExitStatus::Io,
+            Self::CartridgeLoad(_) => ExitStatus::Bug,
             Self::IgnoreTooLarge { .. } => ExitStatus::Config,
         }
     }
@@ -104,8 +111,9 @@ impl ScanError {
 ///
 /// # Errors
 ///
-/// [`ScanError::RootUnreadable`] when the project root can't be listed, and
-/// [`ScanError::IgnoreTooLarge`] when an ignore file the walk met is over `max-ignore-size`.
+/// [`ScanError::RootUnreadable`] when the project root can't be listed,
+/// [`ScanError::IgnoreTooLarge`] when an ignore file the walk met is over `max-ignore-size`, and
+/// [`ScanError::CartridgeLoad`] when a source or target's built-in cartridge doesn't load.
 pub(crate) fn run(
     config: &Config,
     languages: &Languages,
@@ -213,6 +221,9 @@ fn assemble(
 
     let (mut links, directory_links) =
         targets::resolve(config, languages, &mut parsed, settings, found.occurrences);
+    if let Some(error) = parsed.cartridge_failure() {
+        return Err(error.into());
+    }
     let mut untracked = found.untracked;
     untracked.add(Untracked::Directory, directory_links);
     add_broken(&mut links, found.broken);
@@ -262,7 +273,8 @@ pub(crate) struct FrontHalf {
 ///
 /// # Errors
 ///
-/// [`ScanError::IgnoreTooLarge`] when an ignore file the walk met is over `max-ignore-size`.
+/// [`ScanError::IgnoreTooLarge`] when an ignore file the walk met is over `max-ignore-size`, and
+/// [`ScanError::CartridgeLoad`] when a source's built-in cartridge doesn't load.
 pub(crate) fn read_sources(
     config: &Config,
     languages: &Languages,
@@ -284,6 +296,7 @@ pub(crate) fn read_sources(
             .and_then(|file| Ok((links(file)?, file)));
         match read {
             Ok((raws, file)) => on_links(source, file, raws),
+            Err(ReadError::CartridgeLoad { error, .. }) => return Err(error.into()),
             Err(error) => on_unread(source, error),
         }
         parsed.forget(path);
@@ -1364,5 +1377,85 @@ mod tests {
                 "{code}: the snippet should be the file's own bytes at its position",
             );
         }
+    }
+
+    /// Rust whose `tags.scm` doesn't compile, standing in for a broken built-in.
+    static BROKEN_RUST_QUERIES: std::sync::LazyLock<
+        Result<crate::read::query::QueryCartridge, crate::read::query::QueryFileError>,
+    > = std::sync::LazyLock::new(|| {
+        crate::read::query::QueryCartridge::new(
+            crate::cartridges::rust::ID,
+            crate::cartridges::rust::EXTENSIONS,
+            crate::cartridges::rust::grammar(),
+            "(no_such_node) @name",
+            "",
+        )
+    });
+
+    /// The Rust cartridge, registered the way the built-ins are, with queries that don't compile.
+    static BROKEN_RUST: crate::read::registry::LazyCartridge =
+        crate::read::registry::LazyCartridge::new(
+            crate::cartridges::rust::ID,
+            crate::cartridges::rust::EXTENSIONS,
+            crate::cartridges::rust::grammar,
+            || crate::read::registry::compiled(BROKEN_RUST_QUERIES.as_ref()),
+        );
+
+    /// Scans `project` with Markdown and the broken Rust cartridge.
+    fn scan_with_broken_rust(project: &Project) -> Result<Scan, ScanError> {
+        let languages = Languages::new(vec![
+            &BROKEN_RUST,
+            crate::cartridges::markdown::cartridge::cartridge(),
+        ]);
+        run(
+            &project.config(),
+            &languages,
+            &Scope::All,
+            &GlobalExcludes::none(),
+        )
+    }
+
+    /// The code and exit status `error` gives a command.
+    fn cli_failure(error: ScanError) -> (&'static str, u8) {
+        let error = crate::cli::CliError::from(error);
+        (error.code(), error.exit_code())
+    }
+
+    #[test]
+    fn a_broken_builtin_is_not_compiled_until_a_file_of_its_language_is_read() {
+        let project = Project::new();
+        project.write("docs/guide.md", "# Guide\n\nSee [the guide](other.md).\n");
+        project.write("docs/other.md", "# Other\n");
+
+        let scan = scan_with_broken_rust(&project);
+
+        assert!(
+            scan.is_ok(),
+            "a project with no Rust file should scan with a broken Rust cartridge: {scan:?}"
+        );
+    }
+
+    #[test]
+    fn a_broken_builtin_fails_the_run_with_exit_70_when_a_source_of_its_language_is_read() {
+        let project = Project::new();
+        project.write("docs/guide.md", "# Guide\n");
+        project.write("src/lib.rs", LIB);
+
+        let error = scan_with_broken_rust(&project)
+            .expect_err("reading a Rust source should fail the scan, not become a finding");
+
+        assert_eq!(cli_failure(error), ("read-cartridge-load", 70));
+    }
+
+    #[test]
+    fn a_broken_builtin_fails_the_run_with_exit_70_when_a_target_of_its_language_is_read() {
+        let project = Project::with_config("include = [\"docs/**\"]\n");
+        project.write("docs/guide.md", "See [add](../src/lib.rs#add).\n");
+        project.write("src/lib.rs", LIB);
+
+        let error = scan_with_broken_rust(&project)
+            .expect_err("reading a Rust target should fail the scan, not break the link");
+
+        assert_eq!(cli_failure(error), ("read-cartridge-load", 70));
     }
 }

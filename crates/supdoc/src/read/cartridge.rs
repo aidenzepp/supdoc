@@ -17,7 +17,7 @@ use tree_sitter::{ParseOptions, Parser, Tree};
 use crate::limits::TimeLimit;
 use crate::link::SymbolPath;
 use crate::path::AbsolutePath;
-use crate::read::error::ReadError;
+use crate::read::error::{CartridgeLoadError, ReadError};
 
 /// One language. The rest of supdoc only ever talks to this trait.
 ///
@@ -31,8 +31,19 @@ pub(crate) trait Cartridge: Send + Sync + fmt::Debug {
     /// File extensions this language reads: lowercase, without the dot (`["ts", "mts", "cts"]`).
     fn extensions(&self) -> &'static [&'static str];
 
-    /// The tree-sitter grammar.
+    /// The tree-sitter grammar. Loading it compiles nothing.
     fn grammar(&self) -> &tree_sitter::Language;
+
+    /// Compiles whatever the cartridge builds before its first file is read, once per run.
+    /// [`SourceFile::from_text`] calls it, so every [`SourceFile`] has a loaded cartridge.
+    ///
+    /// # Errors
+    ///
+    /// [`CartridgeLoadError`] when a built-in query doesn't compile: a supdoc bug that fails the
+    /// run with exit code 70.
+    fn load(&self) -> Result<(), CartridgeLoadError> {
+        Ok(())
+    }
 
     /// The symbols `file` exposes. Query-driven cartridges run `tags.scm`.
     ///
@@ -128,6 +139,8 @@ impl SourceFile {
     ///
     /// # Errors
     ///
+    /// - [`ReadError::CartridgeLoad`] when `language`'s built-in queries don't compile, which is
+    ///   a supdoc bug that fails the run.
     /// - [`ReadError::Timeout`] when `deadline` passes during the parse.
     /// - [`ReadError::Internal`] when the grammar can't be loaded into a parser or tree-sitter
     ///   returns no tree for another reason, which is a supdoc bug.
@@ -137,6 +150,9 @@ impl SourceFile {
         language: &'static dyn Cartridge,
         deadline: Deadline,
     ) -> Result<Self, ReadError> {
+        if let Err(error) = language.load() {
+            return Err(ReadError::CartridgeLoad { path, error });
+        }
         let internal = |path: &AbsolutePath, reason| ReadError::Internal {
             path: path.clone(),
             reason,
