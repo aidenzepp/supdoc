@@ -457,10 +457,6 @@ mod helps {
     /// Codes with no binary scenario and no public constructor; their helps are checked by review.
     const UNREACHABLE: &[Unreachable] = &[
         Unreachable {
-            kind: "cli-rename-file-changed",
-            why: "a file must change between planning and writing one rename",
-        },
-        Unreachable {
             kind: "cli-rename-invalid-source-path",
             why: "the walk reports a file with an invalid name as a finding, so rename never meets one",
         },
@@ -520,6 +516,16 @@ mod helps {
         UnitCase {
             kind: "fix-file-changed",
             build: file_changed_during_fix,
+        },
+        UnitCase {
+            kind: "cli-rename-file-changed",
+            build: || {
+                let error = supdoc::cli::rename::file_changed(
+                    "docs/guide.md",
+                    "supdoc namespace rename core base --yes",
+                );
+                (error.code().to_owned(), Some(error.help().to_owned()))
+            },
         },
     ];
 
@@ -1136,6 +1142,25 @@ mod helps {
                 );
             },
             &["namespace", "rename", "shared", "common"],
+        ),
+        case(
+            "cli-rename-config-outside-root",
+            |p| {
+                p.write("app/src/lib.rs", "pub fn app() {}\n");
+                std::os::unix::fs::symlink(
+                    "../supdoc.config.toml",
+                    p.path().join("app/supdoc.config.toml"),
+                )
+                .expect("the symlink should be creatable");
+            },
+            &[
+                "-c",
+                "app/supdoc.config.toml",
+                "namespace",
+                "rename",
+                "core",
+                "base",
+            ],
         ),
         restricted_case(
             "cli-rename-unreadable-source",

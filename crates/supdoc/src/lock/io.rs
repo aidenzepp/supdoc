@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::error::LockError;
 use super::model::{LOCK_FILE_NAME, Lockfile};
-use crate::path::{AbsolutePath, is_regular_file};
+use crate::path::{AbsolutePath, ProjectFile, is_regular_file, resolve_project_file};
 
 impl Lockfile {
     /// Reads and parses the lockfile at `path`. `Ok(None)` if the file doesn't exist; the
@@ -57,32 +57,42 @@ impl Lockfile {
     /// Writes the canonical text to `path`: a temporary file in the same directory, then a
     /// rename, so an interrupted run never leaves half a lockfile.
     ///
+    /// A `path` that is a symlink to a `supdoc.lock` inside the root is written through: the real
+    /// file [`Lockfile::read`] reads gets the new text and the symlink stays.
+    ///
     /// # Errors
     ///
-    /// Fails if the temporary file cannot be written or moved into place. Any existing lockfile
-    /// is left unchanged.
+    /// `OutsideRoot` for a symlink that doesn't lead to a `supdoc.lock` inside the root, so no
+    /// write ever lands outside it. Otherwise fails if the temporary file cannot be written or
+    /// moved into place. Any existing lockfile is left unchanged.
     pub fn write(&self, path: &AbsolutePath) -> Result<(), LockError> {
         let to_error = |error| LockError::Write {
             path: path.clone(),
             error,
         };
-        write_atomically(path.as_path(), self.render().as_bytes(), None).map_err(to_error)
+        let target = match locate(path).map_err(to_error)? {
+            Located::Absent => path.as_path().to_path_buf(),
+            Located::Inside(file) => file,
+            Located::Outside => return Err(LockError::OutsideRoot { path: path.clone() }),
+        };
+        write_atomically(&target, self.render().as_bytes(), None).map_err(to_error)
     }
 }
 
-/// Where the lockfile at a path really is, as far as reading it goes.
+/// Where the lockfile at a path really is, the one file reading and writing it both use.
 enum Located {
     /// Nothing is there.
     Absent,
-    /// The file to read: the path itself, or the real file a symlink there leads to inside the
-    /// project root.
+    /// The file to read and write: the path itself, or the real file a symlink there leads to
+    /// inside the project root.
     Inside(PathBuf),
     /// A symlink that doesn't lead to a `supdoc.lock` inside the root: dangling, looping,
     /// pointing outside or at a file of another name, deliberately not told apart.
     Outside,
 }
 
-/// Finds the file to read for the lockfile at `path`, whose directory is the project root.
+/// Finds the file to read or write for the lockfile at `path`, whose directory is the project
+/// root.
 ///
 /// Effect: reads metadata and symlinks along `path`.
 ///
@@ -90,21 +100,13 @@ enum Located {
 ///
 /// Fails if `path`'s own metadata can't be read for a reason other than its absence.
 fn locate(path: &AbsolutePath) -> io::Result<Located> {
-    let metadata = match fs::symlink_metadata(path.as_path()) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Located::Absent),
-        Err(error) => return Err(error),
-    };
-    if !metadata.file_type().is_symlink() {
-        return Ok(Located::Inside(path.as_path().to_path_buf()));
-    }
-    let root = path.as_path().parent().map(fs::canonicalize);
-    let real = fs::canonicalize(path.as_path());
-    Ok(match (root, real) {
-        (Some(Ok(root)), Ok(real)) if real.starts_with(&root) && is_named_lockfile(&real) => {
-            Located::Inside(real)
+    Ok(match resolve_project_file(path)? {
+        ProjectFile::Absent => Located::Absent,
+        // The path itself when it isn't a symlink; otherwise its real file must be a lockfile.
+        ProjectFile::Inside(file) if file == *path || is_named_lockfile(file.as_path()) => {
+            Located::Inside(file.as_path().to_path_buf())
         }
-        _ => Located::Outside,
+        ProjectFile::Inside(_) | ProjectFile::Outside(_) => Located::Outside,
     })
 }
 
@@ -406,6 +408,61 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&taken).expect("the planted file should be readable"),
             "planted"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_through_an_in_root_symlink_updates_the_real_file_and_keeps_the_link() {
+        let dir = tempfile::tempdir().expect("a temp directory should be creatable");
+        let real = dir.path().join("state/supdoc.lock");
+        fs::create_dir_all(dir.path().join("state")).expect("the state dir should be creatable");
+        lock_with_one_entry(b"old")
+            .write(&AbsolutePath::new(&real).expect("the real path should be absolute"))
+            .expect("the real lockfile should be writable");
+        let path = lock_path(&dir);
+        std::os::unix::fs::symlink("state/supdoc.lock", path.as_path())
+            .expect("the symlink should be creatable");
+        let new = lock_with_one_entry(b"new");
+
+        new.write(&path)
+            .expect("writing through the in-root symlink should succeed");
+
+        assert!(
+            fs::symlink_metadata(path.as_path())
+                .expect("the link should still exist")
+                .file_type()
+                .is_symlink(),
+            "the symlink must stay a symlink"
+        );
+        assert_eq!(
+            Lockfile::read(&AbsolutePath::new(&real).expect("the real path should be absolute"))
+                .expect("the real file should read back"),
+            Some(new),
+            "the real file gets the new text"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_refuses_a_symlink_out_of_the_root_and_leaves_its_target_alone() {
+        let project = tempfile::tempdir().expect("a temp directory should be creatable");
+        let outside = tempfile::tempdir().expect("a temp directory should be creatable");
+        let victim = outside.path().join("supdoc.lock");
+        fs::write(&victim, "victim").expect("the outside file should be writable");
+        let path = lock_path(&project);
+        std::os::unix::fs::symlink(&victim, path.as_path())
+            .expect("the symlink should be creatable");
+
+        let written = lock_with_one_entry(b"x").write(&path);
+
+        assert!(
+            matches!(written, Err(LockError::OutsideRoot { .. })),
+            "a symlink out of the root should be refused: {written:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(&victim).expect("the outside file should be readable"),
+            "victim"
         );
     }
 }
