@@ -457,16 +457,10 @@ mod helps {
     }
 
     /// Codes with no binary scenario and no public constructor; their helps are checked by review.
-    const UNREACHABLE: &[Unreachable] = &[
-        Unreachable {
-            kind: "cli-rename-invalid-source-path",
-            why: "the walk reports a file with an invalid name as a finding, so rename never meets one",
-        },
-        Unreachable {
-            kind: "cli-schema-serialize",
-            why: "a built-in JSON Schema must fail to serialize, which is a supdoc bug",
-        },
-    ];
+    const UNREACHABLE: &[Unreachable] = &[Unreachable {
+        kind: "cli-schema-serialize",
+        why: "a built-in JSON Schema must fail to serialize, which is a supdoc bug",
+    }];
 
     /// A code that prints no help on purpose, and why.
     struct Helpless {
