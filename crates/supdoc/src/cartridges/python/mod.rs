@@ -11,8 +11,9 @@ use std::sync::LazyLock;
 use tree_sitter::Node;
 
 use crate::link::{SymbolPath, SymbolSegment};
+use crate::read::cartridge::CompiledQueries;
 use crate::read::cartridge::{
-    Cartridge, CompiledQueries, LanguageId, MarkdownRegion, SourceFile, Symbol, SymbolTable,
+    Cartridge, LanguageId, MarkdownRegion, SourceFile, Symbol, SymbolTable,
 };
 use crate::read::error::ReadError;
 use crate::read::query::{QueryCartridge, QueryFileError};
@@ -58,6 +59,14 @@ pub struct PythonCartridge {
     queries: QueryCartridge,
 }
 
+impl PythonCartridge {
+    /// The compiled `tags.scm` and `injections.scm`.
+    #[must_use]
+    pub const fn queries(&self) -> &CompiledQueries {
+        self.queries.queries()
+    }
+}
+
 impl Cartridge for PythonCartridge {
     fn id(&self) -> LanguageId {
         self.queries.id()
@@ -69,10 +78,6 @@ impl Cartridge for PythonCartridge {
 
     fn grammar(&self) -> &tree_sitter::Language {
         self.queries.grammar()
-    }
-
-    fn queries(&self) -> &CompiledQueries {
-        self.queries.queries()
     }
 
     fn symbols(&self, file: &SourceFile) -> Result<SymbolTable, ReadError> {
