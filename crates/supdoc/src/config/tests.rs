@@ -6,6 +6,7 @@ use std::path::Path;
 use tempfile::TempDir;
 
 use super::*;
+use crate::exit::ExitStatus;
 use crate::path::RelativePath;
 
 /// Writes `files` (relative path, contents) under a fresh temp dir.
@@ -427,7 +428,7 @@ fn malformed_toml_is_parse_error_without_help() {
     let error = load_error(&dir, "supdoc.config.toml");
 
     assert_eq!(error.code(), "config-parse");
-    assert_eq!(error.exit_code(), 78);
+    assert_eq!(error.status(), ExitStatus::Config);
     assert_eq!(error.help(), None, "{error}");
 }
 
@@ -643,7 +644,7 @@ fn unreadable_config_is_read_error() {
     let error = load_error(&dir, "supdoc.config.toml");
 
     assert_eq!(error.code(), "config-read");
-    assert_eq!(error.exit_code(), 74);
+    assert_eq!(error.status(), ExitStatus::Io);
 }
 
 #[test]
@@ -815,7 +816,7 @@ fn extends_naming_another_file_is_refused_without_printing_it() {
     let error = load_error(&dir, "project/supdoc.config.toml");
 
     assert_eq!(error.code(), "config-extends-not-config", "got {error:?}");
-    assert_eq!(error.exit_code(), 78);
+    assert_eq!(error.status(), ExitStatus::Config);
     let shown = format!("{error} {}", error.help().unwrap_or_default());
     assert!(
         !shown.contains("hunter2"),
@@ -840,7 +841,7 @@ fn extends_naming_a_fifo_is_refused_without_opening_it() {
     let error = load_error(&dir, "supdoc.config.toml");
 
     assert_eq!(error.code(), "config-extends-not-config", "got {error:?}");
-    assert_eq!(error.exit_code(), 78);
+    assert_eq!(error.status(), ExitStatus::Config);
 }
 
 #[test]
@@ -904,7 +905,7 @@ fn extends_naming_a_missing_config_does_not_tell_the_user_to_name_one() {
 fn refusal_shown(error: &ConfigError, project: &str) -> (&'static str, u8, Option<String>, String) {
     (
         error.code(),
-        error.exit_code(),
+        error.status().code(),
         error.help().map(|help| help.replace(project, "P")),
         error.to_string().replace(project, "P"),
     )
@@ -1313,7 +1314,7 @@ fn namespace_outside_the_root_is_a_config_error() {
         "config-namespace-outside-root",
         "got {error:?}"
     );
-    assert_eq!(error.exit_code(), 78);
+    assert_eq!(error.status(), ExitStatus::Config);
     assert!(error.to_string().contains("`up`"), "{error}");
 }
 
@@ -1343,7 +1344,7 @@ fn namespace_through_a_symlink_loop_is_not_called_outside() {
     let cwd = at(&dir, "project");
 
     assert_eq!(error.code(), "config-namespace-outside-root", "{error:?}");
-    assert_eq!(error.exit_code(), 78);
+    assert_eq!(error.status(), ExitStatus::Config);
     assert_eq!(
         error.message_from(&cwd),
         "supdoc.config.toml sets namespace `loop` to a, which supdoc can't follow to a real \
