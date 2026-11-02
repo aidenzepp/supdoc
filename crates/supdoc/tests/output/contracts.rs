@@ -387,6 +387,8 @@ mod helps {
         FullStdout,
         /// From a current directory that a shell removed after entering it.
         RemovedCwd,
+        /// From a new subdirectory of the project, which has a config at its root.
+        Subdirectory,
     }
 
     /// One way to make `supdoc` print a message with a given code, and the help it carries, if any.
@@ -1233,6 +1235,13 @@ mod helps {
             needs_permissions: false,
         },
         HelpCase {
+            kind: "cli-init-nested",
+            setup: |_| {},
+            args: &["init"],
+            via: Via::Subdirectory,
+            needs_permissions: false,
+        },
+        HelpCase {
             kind: "cli-no-cwd",
             setup: |_| {},
             args: &["check"],
@@ -1316,6 +1325,7 @@ mod helps {
                     .stdout(sink)
                     .output()
             }
+            Via::Subdirectory => shell(&project, "mkdir sub && cd sub", &args).output(),
             Via::RemovedCwd => {
                 shell(&project, "mkdir gone && cd gone && rmdir ../gone", &args).output()
             }
