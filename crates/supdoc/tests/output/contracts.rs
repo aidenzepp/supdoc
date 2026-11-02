@@ -563,10 +563,11 @@ mod helps {
             "# API\n\nEdited after the scan.\n\nSee [ad](../src/lib.rs#ad).\n",
         );
         let result = supdoc::check::fix::apply_fixes(&plan, &root, "supdoc fix --yes");
-        let finding = result
+        let finding = &result
             .skipped
             .first()
-            .expect("a doc edited after the scan should be skipped");
+            .expect("a doc edited after the scan should be skipped")
+            .finding;
         (finding.code.to_owned(), finding.help.clone())
     }
 
