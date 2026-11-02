@@ -8,8 +8,12 @@ use std::sync::LazyLock;
 use crate::read::cartridge::LanguageId;
 use crate::read::query::{QueryCartridge, QueryFileError};
 
-/// Symbols: `@definition.*` and `@name`.
-const TAGS: &str = include_str!("tags.scm");
+/// Symbols: `@definition.*` and `@name`, with the object-member rule TypeScript shares.
+const TAGS: &str = concat!(
+    include_str!("tags.scm"),
+    "\n",
+    include_str!("object_members.scm")
+);
 
 /// Link regions: every comment, as `markdown_inline`.
 const INJECTIONS: &str = include_str!("injections.scm");
@@ -324,5 +328,19 @@ function outer() {
 
         assert!(!file.tree().root_node().has_error());
         assert_eq!(paths(&symbols(&file)), ["App"]);
+    }
+
+    #[test]
+    fn javascript_object_members_follow_one_rule_for_const_let_and_var() {
+        let file = parse(
+            "const a = { run() {}, n: 1 };\nlet b = { run() {} };\nvar c = { run() {}, n: 1 };\nexport const d = { n: 1 };\nfunction f() {\n  const local = { run() {} };\n}\n",
+        );
+
+        assert_eq!(
+            paths(&symbols(&file)),
+            [
+                "a", "a.run", "a.n", "b", "b.run", "c", "c.run", "c.n", "d", "d.n", "f"
+            ],
+        );
     }
 }

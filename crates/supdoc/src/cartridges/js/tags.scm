@@ -32,18 +32,3 @@
         (variable_declaration (variable_declarator name: (identifier) @name) @definition.variable)
       ])
   ])
-
-; Members of an object literal bound at the top of a module: `api.get`, `api.timeout`
-
-(program
-  [
-    (lexical_declaration (variable_declarator value: (object (method_definition name: (property_identifier) @name) @definition.method)))
-    (export_statement
-      declaration: (lexical_declaration (variable_declarator value: (object (method_definition name: (property_identifier) @name) @definition.method))))
-  ])
-(program
-  [
-    (lexical_declaration (variable_declarator value: (object (pair key: (property_identifier) @name) @definition.field)))
-    (export_statement
-      declaration: (lexical_declaration (variable_declarator value: (object (pair key: (property_identifier) @name) @definition.field))))
-  ])

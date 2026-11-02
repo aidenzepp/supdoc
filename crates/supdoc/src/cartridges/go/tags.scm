@@ -1,7 +1,9 @@
 ; Go symbols. Written in tree-sitter's tags.scm conventions plus the
 ; @supdoc.scope.name extension. Unlike the grammar's bundled tags.scm, this covers struct
 ; fields, interface methods, constants and variables, and names methods by their receiver.
-; Package-level names only: a local `var` or `const` inside a function is not addressable.
+; Constants and variables are package-level only: a local `var` or `const` inside a function is
+; not addressable. Types are addressable at any depth, so a local `type local struct{}` inside
+; `F` is `F.local`.
 
 ; Functions
 
@@ -31,10 +33,11 @@
 (field_declaration name: (field_identifier) @name) @definition.field
 (method_elem name: (field_identifier) @name) @definition.method
 
-; Constants and variables
+; Constants and variables. A `const_spec` has no per-name field (the grammar puts `name` on the
+; whole list), so its names are the identifiers that are its direct children.
 
 (source_file
-  (const_declaration (const_spec name: (identifier) @name) @definition.constant))
+  (const_declaration (const_spec (identifier) @name) @definition.constant))
 (source_file
   (var_declaration (var_spec name: (identifier) @name) @definition.constant))
 (source_file

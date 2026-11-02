@@ -117,6 +117,54 @@ pub(crate) fn is_regular_file(path: &Path) -> std::io::Result<bool> {
     std::fs::metadata(path).map(|metadata| metadata.is_file())
 }
 
+/// Where a project file such as `supdoc.config.toml` or `supdoc.lock` really is, judged against
+/// the project root: the directory the file's path names it in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProjectFile {
+    /// Nothing is at the path.
+    Absent,
+    /// The file to read and write: the path itself, or the real file a symlink there leads to
+    /// inside the root. Writing here keeps the symlink.
+    Inside(AbsolutePath),
+    /// A symlink whose real file is outside the root, with that real file, or `None` when the
+    /// symlink leads nowhere (dangling or looping).
+    Outside(Option<AbsolutePath>),
+}
+
+/// Resolves the project file at `path`, whose directory is the project root, so a command reads
+/// and rewrites the same real file and never writes outside the root. A path that isn't a
+/// symlink is its own file, whatever kind it is; a symlink is followed and its real file kept
+/// only when it lies inside the root once both are resolved.
+///
+/// Effect: reads the metadata of `path` and, for a symlink, every link along it and its root.
+///
+/// # Errors
+///
+/// Fails if `path`'s own metadata can't be read for a reason other than its absence.
+pub(crate) fn resolve_project_file(path: &AbsolutePath) -> std::io::Result<ProjectFile> {
+    let metadata = match std::fs::symlink_metadata(path.as_path()) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ProjectFile::Absent);
+        }
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_symlink() {
+        return Ok(ProjectFile::Inside(path.clone()));
+    }
+    let real = std::fs::canonicalize(path.as_path())
+        .ok()
+        .and_then(|real| AbsolutePath::new(&real));
+    let root = path
+        .as_path()
+        .parent()
+        .and_then(|root| std::fs::canonicalize(root).ok());
+    Ok(match (real, root) {
+        (Some(real), Some(root)) if real.as_path().starts_with(&root) => ProjectFile::Inside(real),
+        (real, _) => ProjectFile::Outside(real),
+    })
+}
+
 /// Appends `path` to `base` one component at a time, dropping `.` and resolving `..` lexically.
 ///
 /// `base` must already be normalized. A `..` that would climb above the root is dropped, because
@@ -319,5 +367,78 @@ mod tests {
             rejected.is_err(),
             "an absolute path should fail to deserialize: {rejected:?}"
         );
+    }
+
+    /// A fresh directory holding `project/` and `outside/`, both resolved, so paths compare
+    /// equal to what `canonicalize` returns.
+    fn two_dirs() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().expect("a fresh temp directory should be created");
+        let base = std::fs::canonicalize(dir.path()).expect("the temp directory should resolve");
+        let (project, outside) = (base.join("project"), base.join("outside"));
+        for made in [&project, &outside] {
+            std::fs::create_dir_all(made.join("state")).expect("the fixture dirs should be made");
+            std::fs::write(made.join("state/supdoc.lock"), "version = 1\n")
+                .expect("the fixture file should be written");
+        }
+        (dir, project, outside)
+    }
+
+    fn resolved(path: &Path) -> ProjectFile {
+        let path = AbsolutePath::new(path).expect("the fixture path should be absolute");
+        resolve_project_file(&path).expect("the fixture path's metadata should be readable")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_project_file_follows_an_in_root_symlink_to_its_real_file() {
+        let (_dir, project, _outside) = two_dirs();
+        let link = project.join("supdoc.lock");
+        std::os::unix::fs::symlink("state/supdoc.lock", &link)
+            .expect("the symlink should be creatable");
+
+        assert_eq!(
+            resolved(&link),
+            ProjectFile::Inside(
+                AbsolutePath::new(&project.join("state/supdoc.lock"))
+                    .expect("the real path should be absolute")
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_project_file_names_the_real_file_of_a_symlink_out_of_the_root() {
+        let (_dir, project, outside) = two_dirs();
+        let link = project.join("supdoc.lock");
+        std::os::unix::fs::symlink(outside.join("state/supdoc.lock"), &link)
+            .expect("the symlink should be creatable");
+
+        assert_eq!(
+            resolved(&link),
+            ProjectFile::Outside(AbsolutePath::new(&outside.join("state/supdoc.lock")))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_project_file_counts_a_dangling_symlink_as_outside_with_no_real_file() {
+        let (_dir, project, _outside) = two_dirs();
+        let link = project.join("supdoc.lock");
+        std::os::unix::fs::symlink("state/missing.lock", &link)
+            .expect("the symlink should be creatable");
+
+        assert_eq!(resolved(&link), ProjectFile::Outside(None));
+    }
+
+    #[test]
+    fn resolve_project_file_keeps_a_plain_file_and_reports_a_missing_one_absent() {
+        let (_dir, project, _outside) = two_dirs();
+        let plain = project.join("state/supdoc.lock");
+
+        assert_eq!(
+            resolved(&plain),
+            ProjectFile::Inside(AbsolutePath::new(&plain).expect("the path should be absolute"))
+        );
+        assert_eq!(resolved(&project.join("supdoc.lock")), ProjectFile::Absent);
     }
 }
