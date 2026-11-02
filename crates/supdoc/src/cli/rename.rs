@@ -171,6 +171,7 @@ impl Plan {
             &config,
             languages,
             &Scope::All,
+            &context.global_excludes,
             &mut parsed,
             |source, file, raws| {
                 sources.extend(SourceEdit::find(source.clone(), file, &raws, old));
@@ -986,6 +987,7 @@ mod tests {
     use crate::cli::testing::{Project, Run, Session, at};
     use crate::config::CONFIG_FILE_NAME;
     use crate::limits::Limits;
+    use crate::scan::walk::GlobalExcludes;
     use crate::state::LinkState;
 
     /// A parent config whose namespace lies inside `app/`, so `app/` may inherit it.
@@ -1074,6 +1076,7 @@ web = \"services/web\"
                 &self.config(),
                 Languages::builtin().expect("the built-in cartridges should load"),
                 &Scope::All,
+                &GlobalExcludes::none(),
             )
             .expect("the fixture project should scan");
             let lock = Lockfile::read(&lock_path(&self.root()), Limits::MAX_LOCK_SIZE)

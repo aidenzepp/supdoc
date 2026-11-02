@@ -605,9 +605,13 @@ mod helps {
         let config = supdoc::config::Config::load(&root).expect("the fixture config should load");
         let languages = supdoc::read::cartridge::Languages::builtin()
             .expect("the built-in cartridges should load");
-        let scan =
-            supdoc::scan::assemble::run(&config, languages, &supdoc::scan::model::Scope::All)
-                .expect("the fixture project should scan");
+        let scan = supdoc::scan::assemble::run(
+            &config,
+            languages,
+            &supdoc::scan::model::Scope::All,
+            &supdoc::scan::walk::GlobalExcludes::none(),
+        )
+        .expect("the fixture project should scan");
         let plan = supdoc::check::fix::plan_fixes(&scan);
         project.write(
             "docs/api.md",

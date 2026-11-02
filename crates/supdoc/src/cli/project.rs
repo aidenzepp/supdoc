@@ -444,6 +444,7 @@ mod tests {
     use super::*;
     use crate::cli::args::Cli;
     use crate::output::{OutputSettings, PathStyle, Verbosity};
+    use crate::scan::walk::GlobalExcludes;
 
     #[test]
     fn read_lock_refuses_mismatched_settings_with_78() {
@@ -486,6 +487,7 @@ mod tests {
         let context = Context {
             global: cli.global,
             cwd,
+            global_excludes: GlobalExcludes::none(),
         };
         load_config(&context, &mut output)
     }
@@ -649,6 +651,7 @@ mod tests {
         let context = Context {
             global: cli.global,
             cwd,
+            global_excludes: GlobalExcludes::none(),
         };
         let paths: Vec<PathBuf> = paths.iter().map(|path| path.to_path_buf()).collect();
         scope(&paths, &config, &context)

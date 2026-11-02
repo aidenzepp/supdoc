@@ -116,11 +116,41 @@ impl UnreadDir {
     }
 }
 
+/// The git global excludes file, such as `~/.config/git/ignore`, found once by `main` so the walk
+/// reads no git config itself and an in-process run reads none of the user's.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GlobalExcludes {
+    /// The file, whether or not it exists. `None` when there is no home directory to find it in.
+    file: Option<AbsolutePath>,
+}
+
+impl GlobalExcludes {
+    /// No global excludes file, for runs that must not depend on the user's git config.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self { file: None }
+    }
+
+    /// The file git reads as the global excludes, found as the walker's own lookup finds it:
+    /// `core.excludesFile` from `GIT_CONFIG_GLOBAL`, `~/.gitconfig`, the XDG git config or the
+    /// system git config, else `$XDG_CONFIG_HOME/git/ignore`, else `~/.config/git/ignore`. A
+    /// relative path counts from `cwd`. Whether it exists is left to the walk, where a missing file
+    /// has no rules.
+    ///
+    /// Effect: reads environment variables and the user's and system git config.
+    #[must_use]
+    pub fn find(cwd: &AbsolutePath) -> Self {
+        Self {
+            file: ignore::gitignore::gitconfig_excludes_path().map(|file| cwd.join_path(&file)),
+        }
+    }
+}
+
 /// Walks the project beneath `config.root()` and returns its sources.
 ///
 /// The rules apply in order to each entry (04, The walk): ignore files ([`IgnoreRules`]: each
 /// directory's `.ignore`, `.gitignore` and `.git/info/exclude`, those of the directories above the
-/// root up to the top of its git work tree, and the global excludes file, even outside a git
+/// root up to the top of its git work tree, and the global `excludes` file, even outside a git
 /// repository), version-control directories, nested projects, symlinks, then `Config::scans` and
 /// the cartridge check. Hidden files are walked. Targets are never looked up here, so none of
 /// these rules apply to them.
@@ -132,10 +162,16 @@ impl UnreadDir {
 ///
 /// Effect: reads directory listings, ignore files and file metadata.
 #[must_use]
-pub fn walk(config: &Config, languages: &Languages, scope: &Scope) -> Walk {
+pub fn walk(
+    config: &Config,
+    languages: &Languages,
+    scope: &Scope,
+    excludes: &GlobalExcludes,
+) -> Walk {
     let root = config.root();
     let rules = Arc::new(IgnoreRules::new(
         root,
+        excludes,
         config.limits_in_effect().max_ignore_size.value,
     ));
     let mut sources = Vec::new();
@@ -258,8 +294,10 @@ struct IgnoreRules {
     /// The rules of the directory just above the root, linked to those above it up to the top of
     /// the git work tree. `None` when no directory above applies.
     above: Option<Arc<Level>>,
-    /// The global excludes file, such as `~/.config/git/ignore`.
+    /// The rules of the global excludes file, such as `~/.config/git/ignore`.
     global: Gitignore,
+    /// The global excludes file, when it exists but couldn't be read in full.
+    global_unreadable: Option<UnreadableFile>,
     /// Whether the root lies in a git work tree, where `git check-ignore` can name a rule.
     in_work_tree: bool,
     /// The rules of the root and of each directory beneath it read so far, by path.
@@ -400,12 +438,12 @@ impl Rule<'_> {
 
 impl IgnoreRules {
     /// The rules for a walk of `root`. Reads the ignore files of the directories above it, up to
-    /// the top of its git work tree, and the global excludes file now; the root's own, and those
-    /// beneath it, as the walk asks.
+    /// the top of its git work tree, and the global `excludes` file now; the root's own, and those
+    /// beneath it, as the walk asks. Every one of them is read under `limit`.
     ///
     /// Effect: resolves `root`'s symlinks, reads file metadata in it and the directories above
-    /// it, and reads ignore files, git files and git config.
-    fn new(root: &AbsolutePath, limit: SizeLimit) -> Self {
+    /// it, and reads ignore files and git files.
+    fn new(root: &AbsolutePath, excludes: &GlobalExcludes, limit: SizeLimit) -> Self {
         let canonical_root = fs::canonicalize(root.as_path()).ok();
         let top = canonical_root
             .as_deref()
@@ -427,12 +465,24 @@ impl IgnoreRules {
             .and_then(|(canonical, top)| canonical.ancestors().nth(top))
             .or(canonical_root.as_deref())
             .unwrap_or_else(|| root.as_path());
-        let (global, _unreadable) = GitignoreBuilder::new(anchor).build_global();
+        let (global, global_unreadable) = excludes.file.as_ref().map_or_else(
+            || (Gitignore::empty(), None),
+            |file| {
+                let (rules, failure) = rules_in(anchor, file.as_path(), limit);
+                let unreadable = failure.map(|failure| UnreadableFile {
+                    path: file.clone(),
+                    origin: Origin::Global,
+                    failure,
+                });
+                (rules, unreadable)
+            },
+        );
         Self {
             root: root.clone(),
             canonical_root,
             above,
             global,
+            global_unreadable,
             in_work_tree: top.is_some(),
             inside: Mutex::new(HashMap::new()),
             limit,
@@ -547,10 +597,11 @@ impl IgnoreRules {
             .collect()
     }
 
-    /// Every ignore file the walk met that exists but couldn't be read: those above the root, all
-    /// read up front, and those of the directories inside it read so far.
+    /// Every ignore file the walk met that exists but couldn't be read: the global excludes file
+    /// and those above the root, all read up front, and those of the directories inside it read so
+    /// far.
     fn unreadable_files(&self) -> Vec<UnreadableFile> {
-        let mut files = Vec::new();
+        let mut files: Vec<UnreadableFile> = self.global_unreadable.iter().cloned().collect();
         let mut above = self.above.as_deref();
         while let Some(level) = above {
             files.extend(level.unreadable.iter().cloned());
@@ -1536,6 +1587,7 @@ mod tests {
                 &config,
                 Languages::builtin().expect("the built-in cartridges should load"),
                 scope,
+                &GlobalExcludes::none(),
             )
         }
 
@@ -2473,6 +2525,7 @@ mod tests {
             config,
             Languages::builtin().expect("the built-in cartridges should load"),
             &Scope::All,
+            &GlobalExcludes::none(),
         );
         let names = walked
             .sources
@@ -2536,11 +2589,13 @@ mod tests {
             &config,
             Languages::builtin().expect("the built-in cartridges should load"),
             &Scope::All,
+            &GlobalExcludes::none(),
         );
         let one = walk(
             &config,
             Languages::builtin().expect("the built-in cartridges should load"),
             &paths(&["out.rs"]),
+            &GlobalExcludes::none(),
         );
 
         let walked: Vec<_> = all
@@ -2813,6 +2868,7 @@ mod tests {
             &config,
             Languages::builtin().expect("the built-in cartridges should load"),
             &Scope::All,
+            &GlobalExcludes::none(),
         );
         fs::set_permissions(&file, fs::Permissions::from_mode(0o644))
             .expect("the fixture ignore file permissions should be restorable");
@@ -2837,6 +2893,7 @@ mod tests {
             &config,
             Languages::builtin().expect("the built-in cartridges should load"),
             &paths(&["out.rs"]),
+            &GlobalExcludes::none(),
         );
 
         assert_eq!(codes(&walked), ["scan-explicit-path-ignored"]);

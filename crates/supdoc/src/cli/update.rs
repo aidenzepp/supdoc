@@ -73,6 +73,7 @@ pub fn run(args: &UpdateArgs, context: &Context, output: &mut Output) -> Result<
         &config,
         Languages::builtin().map_err(CliError::from)?,
         &scope,
+        &context.global_excludes,
         settings,
     )
     .map_err(CliError::from)?;
@@ -526,6 +527,7 @@ mod tests {
     use crate::output::{OutputSettings, PathStyle, Verbosity};
     use crate::path::AbsolutePath;
     use crate::scan::model::{Scope, TargetState};
+    use crate::scan::walk::GlobalExcludes;
 
     /// A file that documents `add` in `src/lib.rs`.
     const GUIDE: &str = "# Guide\n\nThe [add](../src/lib.rs#add) function sums.\n";
@@ -596,6 +598,7 @@ mod tests {
                 &config,
                 Languages::builtin().expect("the built-in cartridges should load"),
                 &Scope::All,
+                &GlobalExcludes::none(),
             )
             .expect("the fixture project should scan");
             let mut lock = Lockfile::default();
@@ -1349,6 +1352,7 @@ mod tests {
                 &config,
                 Languages::builtin().expect("the built-in cartridges should load"),
                 &Scope::All,
+                &GlobalExcludes::none(),
             )
             .expect("the fixture project should scan");
             let lock = self.lock().unwrap_or_default();

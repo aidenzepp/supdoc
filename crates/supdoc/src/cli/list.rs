@@ -67,6 +67,7 @@ pub fn run(args: &ListArgs, context: &Context, output: &mut Output) -> Result<Ou
         &config,
         Languages::builtin().map_err(CliError::from)?,
         &Scope::All,
+        &context.global_excludes,
     )
     .map_err(CliError::from)?;
     let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);

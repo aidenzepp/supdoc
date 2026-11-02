@@ -46,6 +46,7 @@ pub fn run(args: &CheckArgs, context: &Context, output: &mut Output) -> Result<O
         &config,
         Languages::builtin().map_err(CliError::from)?,
         &scope,
+        &context.global_excludes,
     )
     .map_err(CliError::from)?;
 
