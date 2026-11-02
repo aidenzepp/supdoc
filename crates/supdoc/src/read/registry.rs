@@ -1,33 +1,53 @@
 //! The built-in language registry: [`Languages::builtin`] (03 R1, The registry).
 
+use std::sync::LazyLock;
+
+use tree_sitter::{LanguageError, Parser};
+
 use crate::read::cartridge::{Cartridge, Languages};
-use crate::read::query::QueryFileError;
+use crate::read::error::CartridgeLoadError;
+
+/// The registry, built the first time it is asked for. `Err` only through a supdoc bug.
+static BUILTIN: LazyLock<Result<Languages, CartridgeLoadError>> =
+    LazyLock::new(|| Ok(Languages::new(load_builtins()?)));
+
+/// Whether the Markdown inline grammar loads into a parser, checked once. Reading links needs it.
+static INLINE_GRAMMAR: LazyLock<Result<(), LanguageError>> =
+    LazyLock::new(|| Parser::new().set_language(&tree_sitter_md::INLINE_LANGUAGE.into()));
 
 impl Languages {
-    /// Every cartridge compiled into supdoc.
+    /// Every cartridge compiled into supdoc, built once per process.
     ///
-    /// A built-in cartridge whose queries don't compile is left out, so its files read as an
-    /// unsupported language instead of crashing the run. The registry's tests compile every
-    /// built-in, so that only happens through a supdoc bug.
-    #[must_use]
-    pub fn builtin() -> Self {
-        Self::new(builtins().into_iter().filter_map(Result::ok).collect())
+    /// # Errors
+    ///
+    /// [`CartridgeLoadError`] when a built-in query or grammar doesn't load. That is a supdoc bug
+    /// in every case, so the run fails with exit code 70 instead of reading files as an
+    /// unsupported language. The registry's tests load every built-in.
+    pub fn builtin() -> Result<&'static Self, &'static CartridgeLoadError> {
+        BUILTIN.as_ref()
     }
 }
 
-/// Every built-in cartridge, or the error that kept it from compiling.
-fn builtins() -> Vec<Result<&'static dyn Cartridge, &'static QueryFileError>> {
-    vec![
-        crate::cartridges::rust::cartridge().map(|rust| rust as &'static dyn Cartridge),
-        crate::cartridges::markdown::cartridge::cartridge()
-            .map(|markdown| markdown as &'static dyn Cartridge),
-        crate::cartridges::bash::cartridge().map(|bash| bash as &'static dyn Cartridge),
-        crate::cartridges::go::cartridge().map(|go| go as &'static dyn Cartridge),
-        crate::cartridges::js::cartridge().map(|js| js as &'static dyn Cartridge),
-        crate::cartridges::ts::cartridge().map(|ts| ts as &'static dyn Cartridge),
-        crate::cartridges::tsx::cartridge().map(|tsx| tsx as &'static dyn Cartridge),
-        crate::cartridges::python::cartridge().map(|python| python as &'static dyn Cartridge),
-    ]
+/// Every built-in cartridge, or the first error that kept one from loading.
+///
+/// # Errors
+///
+/// [`CartridgeLoadError`] for the first query file or grammar that doesn't load.
+fn load_builtins() -> Result<Vec<&'static dyn Cartridge>, CartridgeLoadError> {
+    let _loaded = INLINE_GRAMMAR
+        .as_ref()
+        .map_err(CartridgeLoadError::InlineGrammar)?;
+    let query = CartridgeLoadError::Query;
+    Ok(vec![
+        crate::cartridges::rust::cartridge().map_err(query)? as &'static dyn Cartridge,
+        crate::cartridges::markdown::cartridge::cartridge().map_err(query)?,
+        crate::cartridges::bash::cartridge().map_err(query)?,
+        crate::cartridges::go::cartridge().map_err(query)?,
+        crate::cartridges::js::cartridge().map_err(query)?,
+        crate::cartridges::ts::cartridge().map_err(query)?,
+        crate::cartridges::tsx::cartridge().map_err(query)?,
+        crate::cartridges::python::cartridge().map_err(query)?,
+    ])
 }
 
 #[cfg(test)]
@@ -40,19 +60,18 @@ mod tests {
 
     #[test]
     fn every_builtin_query_compiles_against_its_grammar() {
-        for built in builtins() {
-            assert!(
-                built.is_ok(),
-                "{}",
-                built.err().map(ToString::to_string).unwrap_or_default()
-            );
+        if let Err(error) = load_builtins() {
+            panic!("{error}");
         }
     }
 
     #[test]
     fn every_extension_maps_to_exactly_one_cartridge() {
         let mut owners: HashMap<&str, Vec<&str>> = HashMap::new();
-        for cartridge in Languages::builtin().iter() {
+        for cartridge in Languages::builtin()
+            .expect("the built-in cartridges should load")
+            .iter()
+        {
             for extension in cartridge.extensions() {
                 owners
                     .entry(extension)
@@ -70,7 +89,10 @@ mod tests {
 
     #[test]
     fn every_extension_is_lowercase_without_a_dot() {
-        for cartridge in Languages::builtin().iter() {
+        for cartridge in Languages::builtin()
+            .expect("the built-in cartridges should load")
+            .iter()
+        {
             for extension in cartridge.extensions() {
                 assert!(
                     !extension.is_empty()
@@ -87,6 +109,7 @@ mod tests {
     fn every_builtin_injection_query_marks_markdown_inline() {
         // Markdown finds its regions with its own code; every other cartridge is query-driven.
         for cartridge in Languages::builtin()
+            .expect("the built-in cartridges should load")
             .iter()
             .filter(|c| c.id().as_str() != "markdown")
         {
@@ -107,7 +130,7 @@ mod tests {
 
     #[test]
     fn rust_files_use_the_rust_cartridge() {
-        let languages = Languages::builtin();
+        let languages = Languages::builtin().expect("the built-in cartridges should load");
 
         assert_eq!(
             languages

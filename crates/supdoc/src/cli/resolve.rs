@@ -25,7 +25,9 @@ use crate::read::cartridge::{Languages, SourceFile, Symbol};
 use crate::read::error::{ReadError, ReadRole, ResolveError};
 
 use super::args::ResolveArgs;
-use super::project::{absolute, command_line, ensure_exists, load_config, path_outside_config};
+use super::project::{
+    absolute, command_line, ensure_exists, load_config, namespaced_missing, path_outside_config,
+};
 use super::{CliError, Context, Outcome};
 
 /// Runs `supdoc resolve`: prints every symbol in `FILE`, or the one `SYMBOL` names.
@@ -49,7 +51,7 @@ pub fn run(
     let command = command_text(args, context);
     let config = load_config(context, output)?;
     let path = locate(&config, context, &args.file)?;
-    let file = SourceFile::read(path, &Languages::builtin())
+    let file = SourceFile::read(path, Languages::builtin().map_err(CliError::from)?)
         .map_err(|error| read_failed(&error, config.root(), &args.file))?;
     let table = file.language().symbols(&file);
 
@@ -133,11 +135,13 @@ fn locate(config: &Config, context: &Context, typed: &Path) -> Result<AbsolutePa
         let name = NamespaceName::from_str(name).ok()?;
         (!rest.is_empty()).then_some((name, rest))
     });
+    let mut missing_in = None;
     let found = match namespaced {
         Some((name, rest)) => {
             let directory = config
                 .namespace(&name)
                 .ok_or_else(|| unknown_namespace(config, &name))?;
+            missing_in = Some((name, directory));
             directory.join_path(Path::new(rest))
         }
         None => absolute(cwd, typed),
@@ -150,7 +154,12 @@ fn locate(config: &Config, context: &Context, typed: &Path) -> Result<AbsolutePa
     {
         return Err(error);
     }
-    ensure_exists(&found, typed, cwd)?;
+    ensure_exists(&found, typed, cwd).map_err(|error| match missing_in {
+        Some((name, directory)) if error.code() == "cli-path-missing" => {
+            namespaced_missing(typed, &name, directory, cwd)
+        }
+        _ => error,
+    })?;
     if found.as_path().is_dir() {
         return Err(directory(typed));
     }
@@ -196,24 +205,10 @@ fn unknown_namespace(config: &Config, name: &NamespaceName) -> CliError {
         .keys()
         .map(NamespaceName::as_str)
         .collect();
-    let nearest = crate::suggest::close_match(name.as_str(), defined.iter().copied());
-    let listed = defined
-        .iter()
-        .map(|name| format!("`{name}`"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let help = match (nearest, defined.is_empty()) {
-        (Some(nearest), _) => format!("did you mean `{nearest}`? Defined namespaces: {listed}"),
-        (None, false) => format!("Defined namespaces: {listed}"),
-        (None, true) => format!(
-            "Define `{name}` under `[namespaces]` in {}",
-            crate::config::CONFIG_FILE_NAME
-        ),
-    };
     CliError::new(
         "link-unknown-namespace",
         format!("unknown namespace `{name}`"),
-        help,
+        crate::namespace::unknown_namespace_help(name.as_str(), &defined),
         ExitStatus::Usage,
     )
 }
@@ -533,6 +528,23 @@ mod tests {
         let error = run.error();
         assert_eq!(error.code(), "link-unknown-namespace");
         assert!(error.help().contains("`auth`"), "help: {}", error.help());
+    }
+
+    #[test]
+    fn resolve_missing_namespaced_file_names_the_namespace_directory() {
+        let project = project();
+        project.write("services/auth/login.rs", "pub fn login() {}\n");
+
+        let run = project.resolve(&["resolve", "auth:nope.rs"]);
+
+        assert_eq!(run.exit_code(), 2);
+        let error = run.error();
+        assert_eq!(error.code(), "cli-path-missing");
+        assert!(
+            error.help().contains("`auth` namespace's directory"),
+            "help: {}",
+            error.help()
+        );
     }
 
     #[test]

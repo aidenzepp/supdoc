@@ -304,7 +304,7 @@ function outer() {
 
     #[test]
     fn javascript_files_use_javascript_grammar() {
-        let languages = Languages::builtin();
+        let languages = Languages::builtin().expect("the built-in cartridges should load");
 
         for name in ["a.js", "a.mjs", "a.cjs", "a.jsx"] {
             let cartridge = languages
