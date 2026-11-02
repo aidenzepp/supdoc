@@ -12,7 +12,8 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::check::fix::{
-    FixPlan, FixResult, PlannedFix, apply_fixes, move_lock_entries, plan_fixes,
+    AppliedFix, FixPlan, FixResult, PlannedFix, Skipped, SkippedKind, apply_fixes,
+    move_lock_entries, plan_fixes,
 };
 use crate::check::model::Report as CheckModel;
 use crate::check::reconcile::reconcile_in;
@@ -35,14 +36,11 @@ use super::args::{FixArgs, WriteMode};
 use super::project::{command_line, load_config, lock_path, read_lock, scope};
 use super::{CliError, Context, Outcome};
 
-/// The code of the finding for a source file `apply_fixes` could not write.
+/// The code of the fatal error for source files `apply_fixes` could not write.
 const CODE_WRITE_FAILED: &str = "fix-write-failed";
 
 /// The code of the fatal error for sources rewritten while the lockfile could not be written.
 const CODE_LOCK_WRITE_FAILED: &str = "fix-lock-write-failed";
-
-/// The code of the finding for a source file that changed between the scan and the write.
-const CODE_FILE_CHANGED: &str = "fix-file-changed";
 
 /// Runs `supdoc fix`: previews every certain fix, or with `--yes` applies them and reports the
 /// state each fixed link has now.
@@ -208,65 +206,34 @@ impl Planned {
     ) -> Result<Outcome, CliError> {
         let root = self.config.root();
         let rerun = command_line(context, "fix", paths, &["--yes"]);
-        let FixResult { applied, skipped } = apply_fixes(&self.plan, root, &rerun);
-
-        let mut lock = self.lock.clone();
-        let mut moved = move_lock_entries(&mut lock, &applied);
-        let mut lock_failure = None;
-        if lock != self.lock
-            && let Err(error) = lock.write(&lock_path(root))
-        {
-            // The write is atomic, so the lockfile on disk is still the one that was read.
-            lock = self.lock.clone();
-            moved.clear();
-            lock_failure = Some(error);
-        }
-
+        let written = self.write(root, &rerun);
         let done: Vec<&PlannedFix> = self
             .plan
             .fixes
             .iter()
-            .filter(|planned| applied.iter().any(|applied| applied.fix == planned.fix))
-            .collect();
-        let fixed_files = shown_files(&done, root, &context.cwd);
-        let states = if done.is_empty() {
-            CheckModel::default()
-        } else {
-            let fixed: BTreeSet<SourcePath> = done
-                .iter()
-                .map(|planned| planned.fix.file.clone())
-                .collect();
-            let scope = Scope::Paths(fixed.into_iter().collect());
-            reconcile_in(&scan(&self.config, &scope)?, &lock, &scope, &self.paths)
-        };
-        let fixes: Vec<FixRecord> = done
-            .iter()
-            .zip(new_ranges(&done))
-            .map(|(planned, range)| {
-                let moved = planned.moved.clone().filter(|pair| moved.contains(pair));
-                let state = state_at(&states, &planned.fix.file, range);
-                // `supdoc update` takes the path from the current directory, like the report.
-                let update = (state == Some(LinkState::Failed)).then(|| {
-                    let path = self.paths.text(&planned.fix.file);
-                    command_line(context, "update", &[path.as_str()], &["--yes"])
-                });
-                FixRecord::new(planned, moved, state, update)
+            .filter(|planned| {
+                written
+                    .applied
+                    .iter()
+                    .any(|applied| applied.fix == planned.fix)
             })
             .collect();
+        let fixed_files = shown_files(&done, root, &context.cwd);
+        let states = self.rescan(&done, &written.lock)?;
+        let fixes = self.records(context, &done, &written.moved, &states);
 
-        let write_failed = skipped
-            .iter()
-            .filter(|finding| finding.code == CODE_WRITE_FAILED)
-            .count();
-        let file_changed = skipped
-            .iter()
-            .any(|finding| finding.code == CODE_FILE_CHANGED);
+        let write_failed = count_skipped(&written.skipped, SkippedKind::WriteFailed);
+        let file_changed = count_skipped(&written.skipped, SkippedKind::FileChanged) > 0;
         let report = FixReport {
             applied: true,
             fixes,
-            findings: skipped,
+            findings: written
+                .skipped
+                .into_iter()
+                .map(|skipped| skipped.finding)
+                .collect(),
         };
-        let ok = write_failed == 0 && !file_changed && lock_failure.is_none();
+        let ok = write_failed == 0 && !file_changed && written.lock_failure.is_none();
         output
             .report(&report, ok)
             .map_err(|error| CliError::output_failed("cli-fix-output", "the fix report", &error))?;
@@ -288,7 +255,7 @@ impl Planned {
             })?;
         }
 
-        if let Some(error) = lock_failure {
+        if let Some(error) = written.lock_failure {
             let changed: BTreeSet<&SourcePath> =
                 done.iter().map(|planned| &planned.fix.file).collect();
             Err(lock_unwritten(
@@ -311,6 +278,97 @@ impl Planned {
             Ok(Outcome::Clean)
         }
     }
+
+    /// Phase one: rewrites the source files, then moves the lock entries of rewritten links and
+    /// writes the lockfile if any moved.
+    fn write(&self, root: &AbsolutePath, rerun: &str) -> Written {
+        let FixResult { applied, skipped } = apply_fixes(&self.plan, root, rerun);
+        let mut lock = self.lock.clone();
+        let mut moved = move_lock_entries(&mut lock, &applied);
+        let mut lock_failure = None;
+        if lock != self.lock
+            && let Err(error) = lock.write(&lock_path(root))
+        {
+            // The write is atomic, so the lockfile on disk is still the one that was read.
+            lock = self.lock.clone();
+            moved.clear();
+            lock_failure = Some(error);
+        }
+        Written {
+            applied,
+            skipped,
+            lock,
+            moved,
+            lock_failure,
+        }
+    }
+
+    /// Phase two: scans the fixed files again and reconciles them with `lock`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the re-scan's own error.
+    fn rescan(&self, done: &[&PlannedFix], lock: &Lockfile) -> Result<CheckModel, CliError> {
+        if done.is_empty() {
+            return Ok(CheckModel::default());
+        }
+        let fixed: BTreeSet<SourcePath> = done
+            .iter()
+            .map(|planned| planned.fix.file.clone())
+            .collect();
+        let scope = Scope::Paths(fixed.into_iter().collect());
+        Ok(reconcile_in(
+            &scan(&self.config, &scope)?,
+            lock,
+            &scope,
+            &self.paths,
+        ))
+    }
+
+    /// Phase three: one record per applied fix, with the state its link has now.
+    fn records(
+        &self,
+        context: &Context,
+        done: &[&PlannedFix],
+        moved: &[(LinkKey, LinkKey)],
+        states: &CheckModel,
+    ) -> Vec<FixRecord> {
+        done.iter()
+            .zip(new_ranges(done))
+            .map(|(planned, range)| {
+                let moved = planned.moved.clone().filter(|pair| moved.contains(pair));
+                let state = state_at(states, &planned.fix.file, range);
+                // `supdoc update` takes the path from the current directory, like the report.
+                let update = (state == Some(LinkState::Failed)).then(|| {
+                    let path = self.paths.text(&planned.fix.file);
+                    command_line(context, "update", &[path.as_str()], &["--yes"])
+                });
+                FixRecord::new(planned, moved, state, update)
+            })
+            .collect()
+    }
+}
+
+/// What phase one of an apply left behind.
+struct Written {
+    /// The edits on disk.
+    applied: Vec<AppliedFix>,
+    /// The files left alone.
+    skipped: Vec<Skipped>,
+    /// The lockfile as it is on disk after the run.
+    lock: Lockfile,
+    /// The lock entries that moved to a rewritten link's new key.
+    moved: Vec<(LinkKey, LinkKey)>,
+    /// Why the lockfile could not be written, if it could not.
+    lock_failure: Option<LockError>,
+}
+
+/// How many skips are of `kind`.
+fn count_skipped(skipped: &[Skipped], kind: SkippedKind) -> usize {
+    skipped
+        .iter()
+        .filter(|skipped| skipped.kind == kind)
+        .count()
 }
 
 /// Scans `scope` with the built-in languages.
