@@ -220,3 +220,150 @@ fn rename_refuses_before_writing_when_a_source_times_out() {
         ["supdoc.config.toml", "supdoc.lock", "docs/guide.md"].map(|file| project.read(file));
     assert_eq!(before, after, "a refused rename should write nothing");
 }
+
+/// Everything `run` wrote, stdout then stderr, for checks that don't care which stream.
+fn all_output(run: &crate::support::Run) -> String {
+    format!("{}{}", run.stdout, run.stderr)
+}
+
+/// Text just past the default 256 KiB ceiling for configs and ignore files.
+fn oversized(first_line: &str) -> String {
+    format!("{first_line}\n{}\n", "#".repeat(300_000))
+}
+
+#[test]
+fn an_oversized_dot_ignore_at_the_root_is_refused_with_advice_to_shorten_it() {
+    let project = Project::fixture("basic");
+    project.write(".ignore", &oversized("gen/"));
+
+    let run = project.supdoc(&["check"]);
+
+    let _ = run.assert_exit(78);
+    let output = all_output(&run);
+    assert!(
+        output.contains("ignore-too-large") && output.contains("or shorten the file"),
+        "a root `.ignore` over the cap should be refused, and not sent to `exclude`:\n{output}"
+    );
+}
+
+#[test]
+fn an_oversized_nested_gitignore_suggests_excluding_its_directory() {
+    let project = Project::fixture("basic");
+    project.write("docs/.gitignore", &oversized("gen/"));
+
+    let run = project.supdoc(&["check"]);
+
+    let _ = run.assert_exit(78);
+    let output = all_output(&run);
+    assert!(
+        output.contains("ignore-too-large") && output.contains("add its directory to `exclude`"),
+        "a nested `.gitignore` over the cap should suggest excluding its directory:\n{output}"
+    );
+}
+
+#[test]
+fn an_oversized_git_exclude_file_is_refused() {
+    let project = Project::fixture("basic");
+    project.write(".git/HEAD", "ref: refs/heads/main\n");
+    for dir in [".git/objects", ".git/refs"] {
+        std::fs::create_dir_all(project.path(dir))
+            .expect("the fixture git directory should be creatable");
+    }
+    project.write(".git/info/exclude", &oversized("gen/"));
+
+    let run = project.supdoc(&["check"]);
+
+    let _ = run.assert_exit(78);
+    assert!(
+        all_output(&run).contains("ignore-too-large"),
+        "an oversized `.git/info/exclude` should be refused:\n{}",
+        all_output(&run)
+    );
+}
+
+#[test]
+fn zero_lifts_the_ignore_size_ceiling() {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write(".gitignore", &oversized("gen/"));
+
+    let _ = project
+        .supdoc(&["--max-ignore-size", "0", "check"])
+        .assert_exit(0);
+}
+
+#[test]
+fn an_oversized_config_is_refused_and_zero_lifts_the_ceiling() {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write(
+        "supdoc.config.toml",
+        &oversized("# padded past the ceiling"),
+    );
+
+    let refused = project.supdoc(&["check"]);
+    let lifted = project.supdoc_in_with(
+        ".",
+        &["check"],
+        &[("SUPDOC_MAX_CONFIG_SIZE", Path::new("0"))],
+    );
+
+    let _ = refused.assert_exit(78);
+    assert!(
+        all_output(&refused).contains("config-too-large"),
+        "a config over the cap should be refused:\n{}",
+        all_output(&refused)
+    );
+    let _ = lifted.assert_exit(0);
+}
+
+#[test]
+fn a_bare_number_limit_gets_help_showing_the_unit_form() {
+    let project = Project::fixture("basic");
+    project.write("supdoc.config.toml", "[limits]\nparse-timeout = 7\n");
+
+    let run = project.supdoc(&["check"]);
+
+    let _ = run.assert_exit(78);
+    let output = all_output(&run);
+    assert!(
+        output.contains(
+            "Write the limit as a whole number with its unit in quotes: a duration such as \
+             `parse-timeout = \"10s\"` (also `ms` or `m`). `0` means no limit"
+        ),
+        "a bare number should get the unit-form help:\n{output}"
+    );
+}
+
+#[test]
+fn a_float_limit_gets_help_showing_both_unit_forms() {
+    let project = Project::fixture("basic");
+    project.write("supdoc.config.toml", "[limits]\nmax-lock-size = 7.5\n");
+
+    let run = project.supdoc(&["check"]);
+
+    let _ = run.assert_exit(78);
+    let output = all_output(&run);
+    assert!(
+        output.contains("a size such as `max-lock-size = \"16MiB\"` (also `B` or `KiB`)"),
+        "a float should get the unit-form help:\n{output}"
+    );
+}
+
+#[test]
+fn max_config_size_in_a_config_file_points_at_the_variable_and_the_flag() {
+    let project = Project::fixture("basic");
+    project.write(
+        "supdoc.config.toml",
+        "[limits]\nmax-config-size = \"1MiB\"\n",
+    );
+
+    let run = project.supdoc(&["check"]);
+
+    let _ = run.assert_exit(78);
+    let output = all_output(&run);
+    assert!(
+        output.contains("Set it with `SUPDOC_MAX_CONFIG_SIZE=1MiB` or `--max-config-size 1MiB`"),
+        "the help should name the variable and the flag:\n{output}"
+    );
+}

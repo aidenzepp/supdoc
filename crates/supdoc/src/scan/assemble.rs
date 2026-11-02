@@ -49,6 +49,19 @@ pub enum ScanError {
 }
 
 impl ScanError {
+    /// The refusal for the first `ignore-too-large` among a walk's `findings`, if there is one.
+    /// Every command that walks the project refuses with it before it reads a source or writes.
+    #[must_use]
+    pub(crate) fn ignore_too_large(findings: &[Finding]) -> Option<Self> {
+        let too_large = findings
+            .iter()
+            .find(|finding| finding.code == CODE_IGNORE_TOO_LARGE)?;
+        Some(Self::IgnoreTooLarge {
+            message: too_large.message.clone(),
+            help: too_large.help.clone().unwrap_or_default(),
+        })
+    }
+
     /// The stable code for this error: `scan-root-unreadable`.
     #[must_use]
     pub fn code(&self) -> &'static str {
@@ -164,15 +177,8 @@ fn assemble(
     }
 
     let walked = walk(config, languages, scope);
-    if let Some(too_large) = walked
-        .findings
-        .iter()
-        .find(|finding| finding.code == CODE_IGNORE_TOO_LARGE)
-    {
-        return Err(ScanError::IgnoreTooLarge {
-            message: too_large.message.clone(),
-            help: too_large.help.clone().unwrap_or_default(),
-        });
+    if let Some(error) = ScanError::ignore_too_large(&walked.findings) {
+        return Err(error);
     }
     let mut findings = walked.findings;
     let mut parsed = Parsed::default();

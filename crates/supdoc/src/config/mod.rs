@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::hash::{HashSettings, LineEndings};
-use crate::limits::{CommandLineLimits, ConfigLimits, Limits};
+use crate::limits::{CommandLineLimits, ConfigLimits, Limits, SizeLimit};
 use crate::namespace::NamespaceName;
 use crate::path::AbsolutePath;
 
@@ -161,10 +161,7 @@ impl Config {
         file: &AbsolutePath,
         given: &CommandLineLimits,
     ) -> Result<Self, ConfigError> {
-        let cap = Limits::resolve(given, &ConfigLimits::default())
-            .max_config_size
-            .value;
-        let layers = chain::read_chain(file, cap)?;
+        let layers = chain::read_chain(file, config_size_limit(given))?;
         Ok(chain::merge(chain::directory_of(file), layers)?.with_command_line(given))
     }
 
@@ -298,6 +295,29 @@ impl Config {
     pub fn limits_in_effect(&self) -> &Limits {
         &self.in_effect
     }
+}
+
+/// The `max-config-size` in effect for `given`: no config file sets it, so the command line and
+/// the default decide it alone.
+pub(crate) fn config_size_limit(given: &CommandLineLimits) -> SizeLimit {
+    Limits::resolve(given, &ConfigLimits::default())
+        .max_config_size
+        .value
+}
+
+/// The text of the config file `file`, refused as [`ConfigError::TooLarge`] past `limit`, the one
+/// capped read every config file goes through.
+///
+/// Effect: reads `file`.
+///
+/// # Errors
+///
+/// [`ConfigError::TooLarge`] for a file over `limit`, otherwise [`ConfigError::Read`].
+pub(crate) fn read_config_text(
+    file: &AbsolutePath,
+    limit: SizeLimit,
+) -> Result<String, ConfigError> {
+    chain::read_text(file, false, limit)
 }
 
 /// `root` with every symlink followed, or `root` as written when it can't be resolved.

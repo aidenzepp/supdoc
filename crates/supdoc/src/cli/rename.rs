@@ -20,7 +20,7 @@ use std::path::Path;
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::config::{Config, ConfigError};
+use crate::config::{Config, config_size_limit, read_config_text};
 use crate::exit::ExitStatus;
 use crate::finding::{Finding, IndexedText, Location};
 use crate::link::{LinkKey, SourcePath, Target};
@@ -36,6 +36,7 @@ use crate::path::{AbsolutePath, ProjectFile, resolve_project_file};
 use crate::read::cartridge::{Languages, SourceFile};
 use crate::read::error::{ReadError, ReadRole};
 use crate::read::links::links;
+use crate::scan::assemble::ScanError;
 use crate::scan::model::Scope;
 use crate::scan::walk::{UnreadCause, UnreadDir, walk};
 
@@ -161,6 +162,9 @@ impl Plan {
 
         let languages = Languages::builtin().map_err(CliError::from)?;
         let walked = walk(&config, languages, &Scope::All);
+        if let Some(error) = ScanError::ignore_too_large(&walked.findings) {
+            return Err(error.into());
+        }
         if let Some(dir) = walked.unread_dirs.first() {
             return Err(unread_dir(dir, config.root(), &rerun));
         }
@@ -418,20 +422,15 @@ fn parent_definition(
 ///
 /// # Errors
 ///
-/// Returns the config's own read error (74), naming the file relative to the current directory, as
-/// every config error does.
+/// Returns the config's own read error (74), or `config-too-large` (78) past `max-config-size`,
+/// naming the file relative to the current directory, as every config error does.
 fn read_config(
     file: &AbsolutePath,
     context: &Context,
     output: &mut Output,
 ) -> Result<String, CliError> {
-    fs::read_to_string(file.as_path()).map_err(|error| {
-        let error = ConfigError::Read {
-            path: file.clone(),
-            error,
-        };
-        config_failure(&error, context, output)
-    })
+    read_config_text(file, config_size_limit(&context.global.limits.0))
+        .map_err(|error| config_failure(&error, context, output))
 }
 
 /// Where the key `name` is written under `[namespaces]` in the config `text`, whether as a

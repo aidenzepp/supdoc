@@ -827,6 +827,15 @@ fn read_capped(
         }
         None => (&handle).read_to_end(&mut bytes),
     };
+    if read.is_err() {
+        // A read that stops partway may stop inside a line: drop that cut-off line, as the
+        // ignore crate's line reader does, so it never becomes a shorter, wider rule.
+        let whole = bytes
+            .iter()
+            .rposition(|&byte| byte == b'\n')
+            .map_or(0, |end| end + 1);
+        bytes.truncate(whole);
+    }
     Ok((bytes, read.err().map(|_| ReadFailure::Partial)))
 }
 
@@ -930,7 +939,7 @@ fn symlinked_ignore_file(root: &AbsolutePath, file: &AbsolutePath) -> Finding {
 fn unreadable_ignore_file(root: &AbsolutePath, file: &UnreadableFile) -> Finding {
     let named = file.origin.name(root, Some(file.path.as_path()));
     if let ReadFailure::TooLarge { size, limit } = file.failure {
-        return too_large_ignore_file(&named, size, limit);
+        return too_large_ignore_file(&named, size, limit, is_nested(root, file));
     }
     let message = match file.failure {
         ReadFailure::Denied => format!("{named} can't be read, so its rules don't apply"),
@@ -961,11 +970,21 @@ fn unreadable_ignore_file(root: &AbsolutePath, file: &UnreadableFile) -> Finding
 pub(crate) const CODE_IGNORE_TOO_LARGE: &str = "ignore-too-large";
 
 /// The error for `named`, an ignore file of `size` bytes over the `limit` (`max-ignore-size`). It
-/// was not read, so the files its rules would hide would be checked: the run fails instead of
-/// quietly widening the scan. The help names the key, variable and flag that raise the limit, with
-/// the next power of two above the measured size.
-fn too_large_ignore_file(named: &str, size: u64, limit: u64) -> Finding {
+/// was not read, so the files its rules would hide would be checked: the scan stops instead of
+/// quietly widening. The help names the key, variable and flag that raise the limit, with the next
+/// power of two above the measured size. Only a `nested` file, one beneath the root, can be left
+/// out by excluding its directory; any other is the root's own, git's or above the root.
+fn too_large_ignore_file(named: &str, size: u64, limit: u64, nested: bool) -> Finding {
     let raised = size_text(size.saturating_add(1).next_power_of_two());
+    let raise = format!(
+        "raise the limit with `[limits] max-ignore-size = \"{raised}\"` in {CONFIG_FILE_NAME}, \
+         `SUPDOC_MAX_IGNORE_SIZE={raised}` or `--max-ignore-size {raised}`"
+    );
+    let next = if nested {
+        format!("{raise}, or add its directory to `exclude`")
+    } else {
+        format!("{raise}, or shorten the file")
+    };
     Finding::new(
         CODE_IGNORE_TOO_LARGE,
         Severity::Error,
@@ -977,10 +996,25 @@ fn too_large_ignore_file(named: &str, size: u64, limit: u64) -> Finding {
     )
     .with_help(format!(
         "Real ignore files are a few KiB, and each pattern costs memory. If this file is real, \
-         raise the limit with `[limits] max-ignore-size = \"{raised}\"` in {CONFIG_FILE_NAME}, \
-         `SUPDOC_MAX_IGNORE_SIZE={raised}` or `--max-ignore-size {raised}`, or add its directory \
-         to `exclude`. `0` means no limit"
+         {next}. `0` means no limit"
     ))
+}
+
+/// Whether `file` is a `.ignore` or `.gitignore` in a directory beneath the root, which an
+/// `exclude` of that directory leaves out. The root's own, a git exclude file and any file above
+/// the root are not.
+fn is_nested(root: &AbsolutePath, file: &UnreadableFile) -> bool {
+    let is_own_file = file
+        .path
+        .as_path()
+        .file_name()
+        .is_some_and(|name| name == ".ignore" || name == ".gitignore");
+    file.origin == Origin::Inside
+        && is_own_file
+        && file
+            .path
+            .parent()
+            .is_some_and(|dir| dir != *root && dir.as_path().starts_with(root.as_path()))
 }
 
 /// Whether the walk keeps `entry`. Only directories are refused here; files are judged by

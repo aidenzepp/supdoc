@@ -164,7 +164,11 @@ fn identity(file: &AbsolutePath) -> PathBuf {
 ///
 /// `NotFound` for a missing start file, `TooLarge` for a file over `limit`, otherwise `Read` with
 /// the operating system's reason, `InvalidData` for text that isn't UTF-8.
-fn read_text(file: &AbsolutePath, is_start: bool, limit: SizeLimit) -> Result<String, ConfigError> {
+pub(super) fn read_text(
+    file: &AbsolutePath,
+    is_start: bool,
+    limit: SizeLimit,
+) -> Result<String, ConfigError> {
     let failed = |error: io::Error| {
         if is_start && error.kind() == ErrorKind::NotFound {
             ConfigError::NotFound { path: file.clone() }
