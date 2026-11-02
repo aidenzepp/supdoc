@@ -889,11 +889,8 @@ mod helps {
         ),
         case(
             "read-unsupported-language",
-            |p| {
-                p.write("src/data.xyz", "x");
-                p.write("docs/guide.md", "[x](../src/data.xyz#add)\n");
-            },
-            &["check"],
+            |p| p.write("src/data.xyz", "x"),
+            &["resolve", "src/data.xyz"],
         ),
         case(
             "read-syntax-errors",
