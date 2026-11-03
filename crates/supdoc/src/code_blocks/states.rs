@@ -153,20 +153,21 @@ impl BlockState {
     }
 
     /// Why the block is in this state, when it has a reason to give. `tag` is the block's
-    /// language tag.
+    /// language tag and `tool` the name of the formatter chosen for it, when one was.
     #[must_use]
-    pub(crate) fn reason(&self, tag: Option<&str>) -> Option<String> {
+    pub(crate) fn reason(&self, tag: Option<&str>, tool: Option<&str>) -> Option<String> {
         match self {
             Self::Passed => None,
             Self::Failed(Failure::SourceMissing) => {
                 Some("an excerpt's source is missing".to_owned())
             }
-            Self::Failed(Failure::Unformatted) => {
-                Some(format!("`{}` would format it differently", tool_of(tag)))
-            }
-            Self::Failed(Failure::ToolFailed) => Some(format!("`{}` failed", tool_of(tag))),
+            Self::Failed(Failure::Unformatted) => Some(format!(
+                "`{}` would format it differently",
+                tool_of(tag, tool)
+            )),
+            Self::Failed(Failure::ToolFailed) => Some(format!("`{}` failed", tool_of(tag, tool))),
             Self::Failed(Failure::ToolTimeout) => {
-                Some(format!("`{}` passed the time limit", tool_of(tag)))
+                Some(format!("`{}` passed the time limit", tool_of(tag, tool)))
             }
             Self::Stale => Some("the block differs from its source".to_owned()),
             Self::OptedOut { reason } => reason.clone(),
@@ -191,16 +192,19 @@ impl BlockState {
             Self::UnknownLanguage => {
                 Some(format!("supdoc has no checker for `{}`", tag.unwrap_or("")))
             }
-            Self::ToolMissing => Some(format!("`{}` isn't on PATH", tool_of(tag))),
+            Self::ToolMissing => Some(format!("`{}` isn't on PATH", tool_of(tag, tool))),
         }
     }
 }
 
-/// The name of the formatter for blocks tagged `tag`, or `its tool`.
-fn tool_of(tag: Option<&str>) -> &'static str {
-    tag.and_then(Language::from_tag)
-        .and_then(formatter)
-        .map_or("its tool", |tool| tool.name)
+/// The name of the formatter chosen for the block, else the default for blocks tagged `tag`, or
+/// `its tool`.
+fn tool_of<'a>(tag: Option<&str>, chosen: Option<&'a str>) -> &'a str {
+    chosen.unwrap_or_else(|| {
+        tag.and_then(Language::from_tag)
+            .and_then(formatter)
+            .map_or("its tool", |tool| tool.name)
+    })
 }
 
 /// How many blocks are in each state. `blocks` is the sum of the others.

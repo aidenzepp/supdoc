@@ -204,7 +204,7 @@ pub(crate) fn evaluate(
             .flatten();
         records.push(BlockRecord {
             at: block.fence.clone(),
-            reason: skip_reason.or_else(|| state.reason(language.as_deref())),
+            reason: skip_reason.or_else(|| state.reason(language.as_deref(), None)),
             tool,
             dialect: code_blocks.dialect(),
             language,
@@ -274,7 +274,9 @@ impl Evaluation {
                 Found::Missing => BlockState::ToolMissing,
                 Found::InsideRoot(_) => BlockState::NotChecked(NotChecked::ToolInsideRoot),
             };
-            record.reason = record.state.reason(record.language.as_deref());
+            record.reason = record
+                .state
+                .reason(record.language.as_deref(), Some(tool.name));
         }
         if self.counts.is_some() {
             self.counts = Some(CodeBlockCounts::tally(
@@ -302,7 +304,7 @@ fn run_formatter(
     let pending = record.pending.as_ref()?;
     let input = pending.input.as_str();
     let doc = root.join(record.at.file.as_str());
-    let mut args = format::args(tool.language, &doc, record.index)?;
+    let mut args = format::args(tool, &doc, record.index)?;
     if tool.language == Language::Shell {
         args.extend(shell::dialect_args(record.dialect));
     }
