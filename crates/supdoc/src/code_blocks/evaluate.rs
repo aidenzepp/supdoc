@@ -1,6 +1,7 @@
 //! The per-block pipeline that `check` runs: judges each code block and returns its findings.
 
 use std::ops::Range;
+use std::path::Path;
 
 use crate::config::Config;
 use crate::finding::{Finding, Location, Severity};
@@ -8,11 +9,12 @@ use crate::read::cartridge::Languages;
 use crate::read::error::CartridgeLoadError;
 
 use super::block::{CodeBlock, Info};
+use super::excerpt;
 use super::info::{
-    InfoString, KNOWN_ATTRIBUTES, is_known_attribute, parenthesized_spelling, reasoned,
+    InfoString, KNOWN_ATTRIBUTES, SourceKind, is_known_attribute, parenthesized_spelling, reasoned,
     source_attributes,
 };
-use super::source::{self, Unresolved};
+use super::source::{self, SourceText, Unresolved};
 
 /// The code for an info-string attribute supdoc doesn't know.
 const UNKNOWN_ATTRIBUTE: &str = "code-block-unknown-attribute";
@@ -21,9 +23,11 @@ const UNKNOWN_ATTRIBUTE: &str = "code-block-unknown-attribute";
 const IGNORE_REASON: &str = "code-block-ignore-reason";
 
 /// The findings for `blocks`, in block order, reading each `from(...)` and `uses(...)` source
-/// with `languages`. Nothing when `config` leaves `[features.code-blocks]` off.
+/// with `languages`, and one `code-block-stale` error for each `from(...)` block whose body
+/// differs from its parts. Nothing when `config` leaves `[features.code-blocks]` off.
 ///
-/// Effect: reads every source file the blocks name, contained in the project root.
+/// Effect: reads every source file the blocks name, contained in the project root, and each doc
+/// holding a `from(...)` block.
 ///
 /// # Errors
 ///
@@ -38,12 +42,47 @@ pub(crate) fn evaluate(
     if config.code_blocks().is_none() {
         return Ok(findings);
     }
-    for info in blocks.iter().filter_map(|block| block.info.as_ref()) {
+    let mut doc: Option<(&str, Option<String>)> = None;
+    for block in blocks {
+        let Some(info) = block.info.as_ref() else {
+            continue;
+        };
         findings.extend(unknown_attributes(info));
         findings.extend(missing_reasons(info));
-        findings.extend(missing_sources(config, languages, info)?);
+        let sources = sources(config, languages, info)?;
+        findings.extend(sources.missing);
+        let Some(parts) = sources.parts else {
+            continue;
+        };
+        let file = block.fence.file.as_str();
+        if doc.as_ref().is_none_or(|(read, _)| *read != file) {
+            doc = Some((file, read_doc(config, file)));
+        }
+        let Some((_, Some(text))) = doc.as_ref() else {
+            continue;
+        };
+        let line_endings = config.hash_settings().line_endings;
+        let expected = excerpt::expected(&parts, line_endings);
+        findings.extend(excerpt::stale(block, text, &expected, line_endings));
     }
     Ok(findings)
+}
+
+/// The text of `doc`, relative to the project root, as it is on disk now. `None` when it can't
+/// be read; its blocks then get no stale finding.
+///
+/// Effect: reads the doc.
+fn read_doc(config: &Config, doc: &str) -> Option<String> {
+    std::fs::read_to_string(config.root().join_path(Path::new(doc))).ok()
+}
+
+/// What a block's `from(...)` and `uses(...)` values resolved to.
+struct Sources {
+    /// One `code-block-source-missing` error for each value that doesn't resolve.
+    missing: Vec<Finding>,
+    /// Every `from(...)` part's text, in written order, when the block has one and each
+    /// resolves.
+    parts: Option<Vec<SourceText>>,
 }
 
 /// One `code-block-unknown-attribute` warning at `info` for a language word holding commas, and
@@ -108,28 +147,39 @@ fn missing_reasons(info: &Info) -> Vec<Finding> {
         .collect()
 }
 
-/// One `code-block-source-missing` error at each `from(...)` or `uses(...)` value in `info` that
-/// doesn't resolve to a contained, readable file or symbol.
+/// Reads every `from(...)` and `uses(...)` value in `info`: one `code-block-source-missing`
+/// error at each that doesn't resolve to a contained, readable file or symbol, and the
+/// `from(...)` parts' text when all of them resolve.
 ///
 /// # Errors
 ///
 /// [`CartridgeLoadError`] when a source's built-in cartridge doesn't load.
-fn missing_sources(
+fn sources(
     config: &Config,
     languages: &Languages,
     info: &Info,
-) -> Result<Vec<Finding>, CartridgeLoadError> {
+) -> Result<Sources, CartridgeLoadError> {
     let doc = info.location.file.as_str();
-    let mut findings = Vec::new();
+    let mut missing = Vec::new();
+    let mut parts = Vec::new();
+    let mut part_missing = false;
     for attribute in source_attributes(&info.text) {
-        let missing = match source::read(config, languages, doc, attribute.kind, attribute.value) {
-            Ok(_text) => continue,
+        let unresolved = match source::read(config, languages, doc, attribute.kind, attribute.value)
+        {
+            Ok(text) => {
+                if attribute.kind == SourceKind::From {
+                    parts.push(text);
+                }
+                continue;
+            }
             Err(Unresolved::CartridgeLoad(error)) => return Err(error),
-            Err(Unresolved::Missing(missing)) => missing,
+            Err(Unresolved::Missing(unresolved)) => unresolved,
         };
-        findings.extend(value_location(info, attribute.range).map(|at| missing.finding(at)));
+        part_missing |= attribute.kind == SourceKind::From;
+        missing.extend(value_location(info, attribute.range).map(|at| unresolved.finding(at)));
     }
-    Ok(findings)
+    let parts = (!part_missing && !parts.is_empty()).then_some(parts);
+    Ok(Sources { missing, parts })
 }
 
 /// Where `range`, a byte range of `info`'s text, lies in the doc. An info string is one line, so

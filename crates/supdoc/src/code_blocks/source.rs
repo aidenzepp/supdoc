@@ -1,8 +1,9 @@
 //! Reading a `from(...)` or `uses(...)` source: its path resolved and contained, then the whole
 //! file or one symbol's text read.
 //!
-//! A path is relative to the doc's directory, to the project root when it starts with `/`, or to
-//! a namespace's directory when written `ns:path`. After lexical normalization it may not climb
+//! A path follows the link path grammar ([`split_namespace`], [`percent_decode`]): it is relative to
+//! the doc's directory, to the project root when it starts with `/`, or to a namespace's directory
+//! when written `ns:path` with no `/` before the `:`, and `%XX` escapes are decoded. After lexical normalization it may not climb
 //! out of the root (or the namespace), and the file it names must lie inside the root once
 //! symlinks are followed. A source outside is refused before it is opened, so nothing of it is
 //! read or shown.
@@ -13,7 +14,7 @@ use crate::config::Config;
 use crate::finding::{Finding, Location, Severity};
 use crate::namespace::{NamespaceName, unknown_namespace_help};
 use crate::output::paths::relative_to;
-use crate::path::AbsolutePath;
+use crate::path::{AbsolutePath, percent_decode, split_namespace};
 use crate::read::cartridge::{Languages, SourceFile};
 use crate::read::error::{CartridgeLoadError, ReadError, ReadRole};
 
@@ -65,6 +66,15 @@ impl From<Missing> for Unresolved {
     }
 }
 
+/// The text a source value names, and the indentation its first line has in the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SourceText {
+    /// The whole file, or the symbol's bytes.
+    pub(crate) text: String,
+    /// The whitespace before the symbol on its first line in the file; empty for a whole file.
+    pub(crate) indent: String,
+}
+
 /// The text the `kind` attribute's `value` names: the whole file for `PATH`, or the symbol's
 /// bytes for `PATH#SYMBOL`. `doc` is the doc holding the block, relative to the project root
 /// with `/` separators.
@@ -85,7 +95,7 @@ pub(crate) fn read(
     doc: &str,
     kind: SourceKind,
     value: &str,
-) -> Result<String, Unresolved> {
+) -> Result<SourceText, Unresolved> {
     let (path, symbol) = match value.split_once('#') {
         Some((path, symbol)) => (path, Some(symbol)),
         None => (value, None),
@@ -102,7 +112,10 @@ pub(crate) fn read(
     let source = SourceFile::read(file, languages, limit)
         .map_err(|error| read_failed(&error, config.root(), kind))?;
     let Some(symbol) = symbol else {
-        return Ok(source.text().to_owned());
+        return Ok(SourceText {
+            text: source.text().to_owned(),
+            indent: String::new(),
+        });
     };
     let table = source
         .language()
@@ -118,17 +131,28 @@ pub(crate) fn read(
             error.message_naming(&shown),
             error.help_from_root(&shown),
         ))),
-        Some(Ok(found)) => source
-            .text()
-            .get(found.range())
-            .map(str::to_owned)
-            .ok_or_else(|| {
-                Unresolved::Missing(Missing::new(
-                    format!("the symbol `{symbol}` lies outside {shown} (supdoc bug)"),
-                    "report this at https://github.com/aidenzepp/supdoc/issues",
-                ))
-            }),
+        Some(Ok(found)) => symbol_text(source.text(), found.range()).ok_or_else(|| {
+            Unresolved::Missing(Missing::new(
+                format!("the symbol `{symbol}` lies outside {shown} (supdoc bug)"),
+                "report this at https://github.com/aidenzepp/supdoc/issues",
+            ))
+        }),
     }
+}
+
+/// The bytes of `range` in `text`, with the whitespace that starts `range`'s line before it.
+/// `None` when `range` doesn't lie on character boundaries inside `text`.
+fn symbol_text(text: &str, range: std::ops::Range<usize>) -> Option<SourceText> {
+    let line_start = text
+        .get(..range.start)?
+        .rfind('\n')
+        .map_or(0, |found| found + 1);
+    let before = text.get(line_start..range.start)?;
+    let indent_len = before.len() - before.trim_start_matches([' ', '\t']).len();
+    Some(SourceText {
+        text: text.get(range)?.to_owned(),
+        indent: before.get(..indent_len)?.to_owned(),
+    })
 }
 
 /// The file `path` names, contained in the project root, without opening it.
@@ -151,9 +175,17 @@ fn locate(
         ));
     }
     let root = config.root();
-    let (boundary, base, rest) = if let Some(rest) = path.strip_prefix('/') {
-        (root.clone(), root.clone(), rest)
-    } else if let Some((prefix, rest)) = path.split_once(':') {
+    let (prefix, written) = match split_namespace(path) {
+        Some((prefix, rest)) => (Some(prefix), rest),
+        None => (None, path),
+    };
+    let Some(decoded) = percent_decode(written) else {
+        return Err(Missing::new(
+            format!("`{name}({path})` isn't valid UTF-8 after percent-decoding"),
+            "write the path's non-ASCII characters as they are, or as `%XX` escapes of UTF-8",
+        ));
+    };
+    let (boundary, base, rest) = if let Some(prefix) = prefix {
         let directory = prefix
             .parse::<NamespaceName>()
             .ok()
@@ -169,13 +201,15 @@ fn locate(
                 unknown_namespace_help(prefix, &known),
             ));
         };
-        (directory.clone(), directory.clone(), rest)
+        (directory.clone(), directory.clone(), decoded.as_str())
+    } else if let Some(rest) = decoded.strip_prefix('/') {
+        (root.clone(), root.clone(), rest)
     } else {
         let doc_directory = root
             .join_path(Path::new(doc))
             .parent()
             .unwrap_or_else(|| root.clone());
-        (root.clone(), doc_directory, path)
+        (root.clone(), doc_directory, decoded.as_str())
     };
 
     let file = base.join_path(Path::new(rest));
@@ -271,6 +305,11 @@ mod tests {
         /// Reads `value` as `kind` for a block in `docs/guide.md`. A fixture never meets a
         /// cartridge that doesn't load.
         fn read(&self, kind: SourceKind, value: &str) -> Result<String, Missing> {
+            self.read_text(kind, value).map(|found| found.text)
+        }
+
+        /// Like [`read`](Self::read), keeping the symbol's indentation.
+        fn read_text(&self, kind: SourceKind, value: &str) -> Result<SourceText, Missing> {
             let result = read(
                 &self.config(),
                 Languages::builtin().expect("the built-in cartridges should load"),
@@ -314,6 +353,46 @@ mod tests {
 
         assert_eq!(found.as_deref(), Ok("pub fn add() {}"));
         assert!(unknown.is_err(), "{unknown:?}");
+    }
+
+    #[test]
+    fn a_colon_after_a_slash_is_part_of_the_path_not_a_namespace() {
+        let fixture = Fixture::new("[namespaces]\nsrc = \"src\"\n");
+        fs::create_dir_all(fixture.root.path().join("docs/src"))
+            .expect("docs/src should be creatable");
+        fs::write(
+            fixture.root.path().join("docs/src/a:b.rs"),
+            "pub fn ab() {}\n",
+        )
+        .expect("the colon file should be writable");
+
+        let found = fixture.read(SourceKind::From, "src/a:b.rs#ab");
+
+        assert_eq!(found.as_deref(), Ok("pub fn ab() {}"));
+    }
+
+    #[test]
+    fn a_percent_escape_is_decoded_as_a_link_decodes_it() {
+        let fixture = Fixture::new("");
+        fs::write(fixture.root.path().join("docs/a b.rs"), "pub fn ab() {}\n")
+            .expect("the spaced file should be writable");
+
+        let found = fixture.read(SourceKind::From, "a%20b.rs#ab");
+
+        assert_eq!(found.as_deref(), Ok("pub fn ab() {}"));
+    }
+
+    #[test]
+    fn a_method_keeps_the_indentation_of_its_first_line() {
+        let fixture = Fixture::new("");
+
+        let method = fixture.read_text(SourceKind::From, "/src/lib.rs#Limits.resolve");
+
+        assert_eq!(
+            method.map(|found| found.indent).as_deref(),
+            Ok("    "),
+            "a method in an impl is indented four spaces"
+        );
     }
 
     #[test]

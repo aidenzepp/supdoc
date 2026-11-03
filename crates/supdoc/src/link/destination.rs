@@ -30,6 +30,7 @@ use crate::link::{
     LinkPathError, RawLink, SourcePath, SymbolPath, SymbolPathError, Target, TargetPath,
 };
 use crate::namespace::NamespaceName;
+use crate::path::{percent_decode, split_namespace};
 use crate::read::cartridge::Languages;
 
 /// Schemes that name no path and never take `//`.
@@ -237,7 +238,7 @@ pub(crate) fn parse_destination(
     if is_not_a_path(before_fragment) {
         return not_supdoc(Untracked::Url);
     }
-    let (namespace, path) = match split_prefix(before_fragment) {
+    let (namespace, path) = match split_namespace(before_fragment) {
         Some((prefix, path)) => match namespaces_entry(namespaces, prefix) {
             Some(namespace) => (Some(namespace), path),
             None => {
@@ -388,12 +389,6 @@ fn has_scheme_shape(prefix: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
 }
 
-/// Splits `prefix:path` when `prefix` is written before any `/`; `docs/a:b.md` has no prefix.
-fn split_prefix(text: &str) -> Option<(&str, &str)> {
-    let (prefix, path) = text.split_once(':')?;
-    (!prefix.contains('/')).then_some((prefix, path))
-}
-
 /// The configured namespace spelled `prefix`, if any.
 fn namespaces_entry(namespaces: &impl NamespaceNames, prefix: &str) -> Option<NamespaceName> {
     let name = NamespaceName::from_str(prefix).ok()?;
@@ -452,43 +447,6 @@ fn normalize<'a>(mut segments: Vec<&'a str>, relative: &'a str) -> String {
         }
     }
     segments.join("/")
-}
-
-/// Decodes `%XX` escapes. A `%` not followed by two hex digits stays as written, as in `CommonMark`.
-/// `None` when the decoded bytes are not UTF-8.
-fn percent_decode(text: &str) -> Option<String> {
-    let mut bytes = Vec::with_capacity(text.len());
-    let mut remaining = text.bytes();
-    while let Some(byte) = remaining.next() {
-        if byte != b'%' {
-            bytes.push(byte);
-            continue;
-        }
-        let mut lookahead = remaining.clone();
-        let decoded = lookahead
-            .next()
-            .and_then(hex_value)
-            .zip(lookahead.next().and_then(hex_value))
-            .map(|(high, low)| high * 16 + low);
-        match decoded {
-            Some(value) => {
-                bytes.push(value);
-                remaining = lookahead;
-            }
-            None => bytes.push(byte),
-        }
-    }
-    String::from_utf8(bytes).ok()
-}
-
-/// The value of one ASCII hex digit.
-fn hex_value(digit: u8) -> Option<u8> {
-    match digit {
-        b'0'..=b'9' => Some(digit - b'0'),
-        b'a'..=b'f' => Some(digit - b'a' + 10),
-        b'A'..=b'F' => Some(digit - b'A' + 10),
-        _ => None,
-    }
 }
 
 #[cfg(test)]

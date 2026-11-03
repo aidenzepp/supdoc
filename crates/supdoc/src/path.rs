@@ -277,6 +277,52 @@ impl fmt::Display for RelativePath {
     }
 }
 
+/// The path grammar a link destination and a code block's `from(...)` or `uses(...)` share.
+///
+/// Splits `prefix:path` when `prefix` is written before any `/`; `docs/a:b.md` has no prefix.
+#[must_use]
+pub(crate) fn split_namespace(text: &str) -> Option<(&str, &str)> {
+    let (prefix, path) = text.split_once(':')?;
+    (!prefix.contains('/')).then_some((prefix, path))
+}
+
+/// Decodes `%XX` escapes. A `%` not followed by two hex digits stays as written, as in `CommonMark`.
+/// `None` when the decoded bytes are not UTF-8.
+pub(crate) fn percent_decode(text: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(text.len());
+    let mut remaining = text.bytes();
+    while let Some(byte) = remaining.next() {
+        if byte != b'%' {
+            bytes.push(byte);
+            continue;
+        }
+        let mut lookahead = remaining.clone();
+        let decoded = lookahead
+            .next()
+            .and_then(hex_value)
+            .zip(lookahead.next().and_then(hex_value))
+            .map(|(high, low)| high * 16 + low);
+        match decoded {
+            Some(value) => {
+                bytes.push(value);
+                remaining = lookahead;
+            }
+            None => bytes.push(byte),
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// The value of one ASCII hex digit.
+fn hex_value(digit: u8) -> Option<u8> {
+    match digit {
+        b'0'..=b'9' => Some(digit - b'0'),
+        b'a'..=b'f' => Some(digit - b'a' + 10),
+        b'A'..=b'F' => Some(digit - b'A' + 10),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
