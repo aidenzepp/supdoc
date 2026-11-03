@@ -91,16 +91,26 @@ struct Pending {
     block: CodeBlock,
     /// The doc it was found in, which its fix is checked against.
     doc: Arc<FixDoc>,
-    /// What a formatter reads for it.
+    /// What a formatter reads for it: for a Rust block, its text with hidden lines' `# ` removed.
     input: String,
+    /// A Rust block's hidden lines, which its fix must keep.
+    hidden: Option<rust::Hidden>,
 }
 
 impl Pending {
-    /// `block`, found in `doc`, ready for the format step. `None` when its body isn't inside
-    /// `doc`.
-    fn of(block: &CodeBlock, doc: &Arc<FixDoc>) -> Option<Self> {
+    /// `block`, found in `doc`, ready for the format step: read through [`rust::unhide`] when
+    /// `tool` is a Rust tool. `None` when its body isn't inside `doc`.
+    fn of(block: &CodeBlock, doc: &Arc<FixDoc>, tool: Option<&Tool>) -> Option<Self> {
+        let input = format::input(block, doc.text())?;
+        let (input, hidden) = if tool.is_some_and(|tool| tool.language == Language::Rust) {
+            let (checked, hidden) = rust::unhide(&input);
+            (checked, Some(hidden))
+        } else {
+            (input, None)
+        };
         Some(Self {
-            input: format::input(block, doc.text())?,
+            input,
+            hidden,
             block: block.clone(),
             doc: Arc::clone(doc),
         })
@@ -201,7 +211,7 @@ pub(crate) fn evaluate(
                 doc.as_ref()?
                     .1
                     .as_ref()
-                    .and_then(|text| Pending::of(block, text))
+                    .and_then(|text| Pending::of(block, text, tool))
             })
             .flatten();
         records.push(BlockRecord {
@@ -392,9 +402,14 @@ fn run_formatter(
     let verdict = format::judge(input, runner::run(&call, env, root));
     let finding = format::finding(&verdict, tool, &record.at, timeout);
     let findings = match (&verdict, finding) {
-        (format::Verdict::Unformatted(output), Some(unformatted)) => {
-            format::fixed(unformatted, &pending.block, &pending.doc, output, tool)
-        }
+        (format::Verdict::Unformatted(output), Some(unformatted)) => format::fixed(
+            unformatted,
+            &pending.block,
+            &pending.doc,
+            output,
+            tool,
+            pending.hidden.as_ref(),
+        ),
         (_, finding) => finding.into_iter().collect(),
     };
     Some((verdict, findings))

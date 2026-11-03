@@ -28,7 +28,8 @@ const TOOL_FAILED: &str = "code-block-tool-failed";
 /// The code for a tool that passed the `[limits] code-block-timeout` limit.
 const TOOL_TIMEOUT: &str = "code-block-tool-timeout";
 
-/// The code for formatter output `fix` refuses to write, because it would escape the block.
+/// The code for formatter output `fix` refuses to write, because it would escape the block or
+/// change its hidden lines.
 const FIX_UNSAFE: &str = "code-block-fix-unsafe";
 
 /// How many spaces may lead a line that still closes a fence.
@@ -166,7 +167,10 @@ pub(crate) fn finding(
 
 /// `unformatted`, the `code-block-unformatted` error `tool` gave `block` in `doc`, with the fix
 /// that makes the block's body `output`, the formatter's stdout, when [`safe_fix`] allows it. When
-/// it refuses, the error keeps no fix and its `code-block-fix-unsafe` warning follows. The error
+/// the block has `hidden` lines, `output` is first written back with their `# ` prefixes by
+/// [`rust::Hidden::rehide`]; when they can't be matched one-to-one, the error keeps no fix and a
+/// `code-block-fix-unsafe` warning at the first unmatched hidden line follows. When [`safe_fix`]
+/// refuses, the error keeps no fix and its `code-block-fix-unsafe` warning follows. The error
 /// alone when the block's ranges don't lie inside `doc`.
 #[must_use]
 pub(crate) fn fixed(
@@ -175,13 +179,31 @@ pub(crate) fn fixed(
     doc: &FixDoc,
     output: &str,
     tool: &Tool,
+    hidden: Option<&rust::Hidden>,
 ) -> Vec<Finding> {
     let name = tool.name;
-    let body = output
+    let what = format!("`{name}`'s output");
+    let output = output
         .strip_suffix("\r\n")
         .or_else(|| output.strip_suffix('\n'))
         .unwrap_or(output);
-    match safe_fix(block, doc, body, &format!("`{name}`'s output")) {
+    let rehidden;
+    let body = match hidden.map(|hidden| hidden.rehide(output)) {
+        None => output,
+        Some(Ok(written)) => {
+            rehidden = written;
+            &rehidden
+        }
+        Some(Err(line)) => {
+            let at = rust::LineMap::of(block, doc.text())
+                .and_then(|map| map.doc_line(line).cloned())
+                .unwrap_or_else(|| block.fence.clone());
+            let warning =
+                refused(block, &Refusal::ChangesHiddenLines, &what, '`').with_location(at);
+            return vec![unformatted, warning];
+        }
+    };
+    match safe_fix(block, doc, body, &what) {
         Guarded::Fix(fix) => {
             let help = format!(
                 "run `supdoc fix {} --yes` to apply `{name}`'s output",
@@ -245,6 +267,8 @@ enum Refusal {
     ChangesBlocks,
     /// The doc couldn't be parsed again within `parse-timeout` to check the fix.
     Unchecked,
+    /// The formatter changed, added, removed or reordered the block's hidden `# ` lines.
+    ChangesHiddenLines,
 }
 
 /// The fix that makes `block`'s body in `doc` read `body`, which holds no final line ending,
@@ -309,6 +333,11 @@ fn refused(block: &CodeBlock, refusal: &Refusal, what: &str, marker: char) -> Fi
         Refusal::Unchecked => (
             "couldn't be checked, because the doc didn't parse again within `parse-timeout`",
             "raise the limit with `--parse-timeout 30s`, or edit the block by hand".to_owned(),
+        ),
+        Refusal::ChangesHiddenLines => (
+            "would change its hidden `# ` lines",
+            "edit the block's hidden lines by hand to match the formatter, or mark the block `ignore(<why>)`"
+                .to_owned(),
         ),
     };
     Finding::new(
@@ -472,7 +501,7 @@ mod tests {
         let unformatted = finding(&verdict, tool, &block.fence, None)
             .expect("an unformatted block has a finding");
         let doc = FixDoc::new(Arc::from(text), Limits::PARSE_TIMEOUT);
-        fixed(unformatted, block, &doc, output, tool)
+        fixed(unformatted, block, &doc, output, tool, None)
     }
 
     /// `text` with the one fix in `findings` applied.
