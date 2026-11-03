@@ -6,7 +6,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::config::Config;
 use crate::finding::{Finding, Location, Severity};
 use crate::hash::Hash;
-use crate::link::LinkKey;
 use crate::lock::model::LOCK_FILE_NAME;
 use crate::read::cartridge::Languages;
 use crate::read::error::CartridgeLoadError;
@@ -109,17 +108,6 @@ pub(crate) fn current<'block>(
         }
     }
     Ok(current)
-}
-
-/// The lockfile key of `target` (`path#symbol` or `ns:path#symbol`) written in `doc`, or `None`
-/// when either doesn't parse.
-pub(crate) fn key(doc: &str, target: &str) -> Option<LinkKey> {
-    let (path, symbol) = target.split_once('#')?;
-    Some(LinkKey {
-        source: doc.parse().ok()?,
-        target: path.parse().ok()?,
-        symbol: Some(symbol.parse().ok()?),
-    })
 }
 
 /// The findings for `written` against `recorded`, the lockfile's `(doc, target, hash)` entries:

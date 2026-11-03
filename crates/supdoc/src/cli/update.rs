@@ -462,7 +462,7 @@ fn plan_uses(
         .written
         .iter()
         .filter_map(|value| {
-            uses::key(value.at.file.as_str(), &value.target).map(|key| (key, value.hash))
+            Lockfile::use_key(value.at.file.as_str(), &value.target).map(|key| (key, value.hash))
         })
         .collect();
     let mut changes = Vec::new();
