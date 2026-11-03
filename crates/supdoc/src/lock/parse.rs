@@ -7,7 +7,7 @@ use serde::de::Error as _;
 use toml::Spanned;
 
 use super::error::ParseLockError;
-use super::model::{FORMAT_VERSION, Lockfile};
+use super::model::{BASE_FORMAT_VERSION, FORMAT_VERSION, Lockfile};
 use crate::finding::LineIndex;
 use crate::hash::{Hash, HashSettings, LineEndings};
 use crate::link::{LinkKey, SourcePath, SymbolPath, Target};
@@ -22,7 +22,7 @@ struct VersionProbe {
     version: Option<u32>,
 }
 
-/// The whole v1 file.
+/// The whole file, in either format version.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawLockfile {
@@ -34,6 +34,18 @@ struct RawLockfile {
     /// The entries, each with the position it was written at.
     #[serde(default)]
     link: Vec<Spanned<RawLink>>,
+    /// The `[code-blocks]` section, absent in a format 1 file.
+    #[serde(default, rename = "code-blocks")]
+    code_blocks: RawCodeBlocks,
+}
+
+/// The `[code-blocks]` table.
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCodeBlocks {
+    /// The `[[code-blocks.uses]]` entries, each with the position it was written at.
+    #[serde(default)]
+    uses: Vec<Spanned<RawLink>>,
 }
 
 /// The `[features]` table. Only the hash settings are recorded in the lock.
@@ -75,18 +87,18 @@ struct RawLink {
     hash: Hash,
 }
 
-/// Accepts only [`FORMAT_VERSION`]; newer files are caught earlier.
+/// Accepts [`BASE_FORMAT_VERSION`] through [`FORMAT_VERSION`]; newer files are caught earlier.
 ///
 /// # Errors
 ///
 /// Fails if the value is not a `u32` or is not the current version.
 fn current_version<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
     let version = u32::deserialize(deserializer)?;
-    if version == FORMAT_VERSION {
+    if (BASE_FORMAT_VERSION..=FORMAT_VERSION).contains(&version) {
         Ok(version)
     } else {
         Err(D::Error::custom(format_args!(
-            "unsupported lockfile format {version}: this supdoc reads format {FORMAT_VERSION}"
+            "unsupported lockfile format {version}: this supdoc reads formats {BASE_FORMAT_VERSION} and {FORMAT_VERSION}"
         )))
     }
 }
@@ -126,6 +138,47 @@ fn features_are_missing(text: &str, error: &toml::de::Error) -> bool {
     }
 }
 
+/// Keys `raw` by [`LinkKey`], collapsing identical duplicates.
+///
+/// # Errors
+///
+/// Fails if two entries share a key but differ in hash.
+fn collect_entries(
+    lines: &LineIndex,
+    raw: Vec<Spanned<RawLink>>,
+) -> Result<BTreeMap<LinkKey, Hash>, ParseLockError> {
+    let mut entries: BTreeMap<LinkKey, (Hash, usize)> = BTreeMap::new();
+    for link in raw {
+        let line = lines.line_of(link.span().start);
+        let RawLink {
+            source,
+            target,
+            symbol,
+            hash,
+        } = link.into_inner();
+        let key = LinkKey {
+            source,
+            target,
+            symbol,
+        };
+        if let Some(&(first_hash, first_line)) = entries.get(&key) {
+            if first_hash != hash {
+                return Err(ParseLockError::ConflictingDuplicate {
+                    key,
+                    first_line,
+                    second_line: line,
+                });
+            }
+        } else {
+            let _ = entries.insert(key, (hash, line));
+        }
+    }
+    Ok(entries
+        .into_iter()
+        .map(|(key, (hash, _))| (key, hash))
+        .collect())
+}
+
 impl Lockfile {
     /// Reads lockfile text. Entries may be in any order and identical duplicates collapse into
     /// one; [`render`](Self::render) then writes them canonically.
@@ -154,36 +207,12 @@ impl Lockfile {
 
         let raw: RawLockfile = toml::from_str(text).map_err(|error| toml_error(text, error))?;
         let lines = LineIndex::new(text);
-        let mut entries: BTreeMap<LinkKey, (Hash, usize)> = BTreeMap::new();
-        for link in raw.link {
-            let line = lines.line_of(link.span().start);
-            let RawLink {
-                source,
-                target,
-                symbol,
-                hash,
-            } = link.into_inner();
-            let key = LinkKey {
-                source,
-                target,
-                symbol,
-            };
-            if let Some(&(first_hash, first_line)) = entries.get(&key) {
-                if first_hash != hash {
-                    return Err(ParseLockError::ConflictingDuplicate {
-                        key,
-                        first_line,
-                        second_line: line,
-                    });
-                }
-            } else {
-                let _ = entries.insert(key, (hash, line));
-            }
+        let link_entries = collect_entries(&lines, raw.link)?;
+        let uses = collect_entries(&lines, raw.code_blocks.uses)?;
+        let mut lock: Self = link_entries.into_iter().collect();
+        for (key, hash) in uses {
+            let _ = lock.insert_use(key, hash);
         }
-        let mut lock: Self = entries
-            .into_iter()
-            .map(|(key, (hash, _))| (key, hash))
-            .collect();
         lock.set_hash_settings(raw.features.hash.into());
         Ok(lock)
     }
@@ -499,14 +528,14 @@ hash = \"41aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d2\"
 
     #[test]
     fn newer_version_asks_for_upgrade_not_unknown_field() {
-        let text = "version = 2\n\n[[link]]\nfuture_field = true\n";
+        let text = "version = 3\n\n[[link]]\nfuture_field = true\n";
 
         let error = parse_error(text);
 
         assert_eq!(error.code(), "lock-newer-version");
         assert_eq!(
             error.to_string(),
-            "lockfile format 2 is newer than this supdoc supports (1)"
+            "lockfile format 3 is newer than this supdoc supports (2)"
         );
     }
 
@@ -638,5 +667,93 @@ hash = \"41aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d2\"
         )]);
 
         assert_eq!(parse_error(&text).code(), "lock-parse");
+    }
+
+    /// A `[[code-blocks.uses]]` table, with `symbol` omitted for whole-file targets.
+    fn use_entry(source: &str, target: &str, symbol: Option<&str>, hash: &str) -> String {
+        entry(source, target, symbol, hash).replace("[[link]]", "[[code-blocks.uses]]")
+    }
+
+    #[test]
+    fn code_blocks_uses_round_trip_after_links() {
+        let mut lock: Lockfile = [(key("docs/a.md", "src/lib.rs", Some("add")), hash(HASH_A))]
+            .into_iter()
+            .collect();
+        let _ = lock.insert_use(
+            key("docs/b.md", "src/lib.rs", Some("Type.method")),
+            hash(HASH_B),
+        );
+        let _ = lock.insert_use(key("docs/a.md", "src/lib.rs", None), hash(HASH_A));
+
+        let rendered = lock.render();
+        let reparsed = parse(&rendered);
+
+        assert!(
+            rendered.starts_with(
+                "# This file is generated by supdoc. Do not edit by hand.\nversion = 2\n"
+            ),
+            "a lock with uses entries should be format 2, got:\n{rendered}"
+        );
+        let link_at = rendered.find("[[link]]").expect("the link should render");
+        let first_use = rendered
+            .find("[[code-blocks.uses]]")
+            .expect("the uses entries should render");
+        assert!(link_at < first_use, "uses should follow links:\n{rendered}");
+        assert!(
+            rendered
+                .find("docs/a.md\"\ntarget = \"src/lib.rs\"\nhash")
+                .expect("the whole-file entry should render")
+                < rendered
+                    .find("docs/b.md")
+                    .expect("the second entry should render"),
+            "uses should be sorted:\n{rendered}"
+        );
+        assert_eq!(reparsed, lock);
+        assert_eq!(reparsed.render(), rendered);
+    }
+
+    #[test]
+    fn lock_without_uses_renders_as_format_1() {
+        let lock: Lockfile = [(key("docs/a.md", "src/lib.rs", None), hash(HASH_A))]
+            .into_iter()
+            .collect();
+
+        let rendered = lock.render();
+
+        assert!(
+            rendered.contains("\nversion = 1\n") && !rendered.contains("code-blocks"),
+            "no uses entries should leave the format 1 text, got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn format_2_file_is_accepted() {
+        let text = file(&[use_entry("docs/a.md", "src/lib.rs", None, HASH_A)])
+            .replace("version = 1", "version = 2");
+
+        let lock = parse(&text);
+
+        assert_eq!(
+            lock.uses().collect::<Vec<_>>(),
+            [(&key("docs/a.md", "src/lib.rs", None), hash(HASH_A))]
+        );
+        assert!(lock.is_empty(), "the link entries should be untouched");
+    }
+
+    #[test]
+    fn malformed_uses_entry_is_refused_with_its_line() {
+        let text = file(&[
+            use_entry("docs/a.md", "src/lib.rs", None, HASH_A),
+            "[[code-blocks.uses]]\nsource = \"docs/b.md\"\n".to_owned(),
+        ])
+        .replace("version = 1", "version = 2");
+
+        let error = parse_error(&text);
+
+        assert_eq!(error.code(), "lock-parse");
+        assert!(
+            error.to_string().contains("(line"),
+            "the error should carry its line, got: {error}"
+        );
     }
 }
