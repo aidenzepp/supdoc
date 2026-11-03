@@ -150,3 +150,61 @@ fn format_output_that_would_close_the_fence_is_never_written() {
         "no finding should offer the fix: {json}"
     );
 }
+
+/// The kinds of `json`'s findings, asserting none offers a fix.
+fn kinds_without_fixes(json: &serde_json::Value) -> Vec<String> {
+    let findings = array_at(json, "/findings");
+    assert!(
+        findings.iter().all(|finding| finding.get("fix").is_none()),
+        "no finding should offer a fix: {json}"
+    );
+    findings
+        .iter()
+        .filter_map(|finding| finding["kind"].as_str().map(str::to_owned))
+        .collect()
+}
+
+#[test]
+fn format_output_with_a_nul_before_a_tab_indented_fence_is_never_written() {
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let project = project_with_shfmt(
+        outside.path(),
+        "printf 'echo hi\\000\\n\\t```\\nINJECTED\\n'",
+    );
+    let path = [("PATH", outside.path())];
+
+    let _fix = project
+        .supdoc_in_with(".", &["fix", "--yes"], &path)
+        .assert_exit(0);
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &path)
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(project.read("docs/blocks.md"), UNFORMATTED_DOC);
+    assert_eq!(
+        kinds_without_fixes(&json),
+        ["code-block-unformatted", "code-block-fix-unsafe"],
+        "{json}"
+    );
+}
+
+#[test]
+fn an_excerpt_whose_source_has_a_fence_line_is_never_written() {
+    let doc = "# Blocks\n\n```rust from(../src/fence.rs#fence)\nfn fence() {}\n```\n\nAfter.\n";
+    let project = project_with(doc);
+    project.write(
+        "src/fence.rs",
+        "pub fn fence() -> &'static str {\n    r\"\n```\nINJECTED\n\"\n}\n",
+    );
+
+    let _fix = project.supdoc(&["fix", "--yes"]).assert_exit(0);
+    let json = project.supdoc(&["check", "--json"]).assert_exit(1).json();
+
+    assert_eq!(project.read("docs/blocks.md"), doc);
+    assert_eq!(
+        kinds_without_fixes(&json),
+        ["code-block-stale", "code-block-fix-unsafe"],
+        "{json}"
+    );
+}

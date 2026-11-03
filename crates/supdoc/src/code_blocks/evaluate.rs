@@ -17,7 +17,7 @@ use crate::read::error::CartridgeLoadError;
 
 use super::block::{CodeBlock, Info};
 use super::excerpt;
-use super::format;
+use super::format::{self, FixDoc};
 use super::info::{
     KNOWN_ATTRIBUTES, SourceKind, is_known_attribute, parenthesized_spelling, reasoned,
     source_attributes,
@@ -79,27 +79,28 @@ pub(crate) struct BlockRecord {
 struct Pending {
     /// The block.
     block: CodeBlock,
-    /// The text of the doc it was found in.
-    text: Arc<str>,
+    /// The doc it was found in, which its fix is checked against.
+    doc: Arc<FixDoc>,
     /// What a formatter reads for it.
     input: String,
 }
 
 impl Pending {
-    /// `block`, found in `text`, ready for the format step. `None` when its body isn't inside
-    /// `text`.
-    fn of(block: &CodeBlock, text: &Arc<str>) -> Option<Self> {
+    /// `block`, found in `doc`, ready for the format step. `None` when its body isn't inside
+    /// `doc`.
+    fn of(block: &CodeBlock, doc: &Arc<FixDoc>) -> Option<Self> {
         Some(Self {
-            input: format::input(block, text)?,
+            input: format::input(block, doc.text())?,
             block: block.clone(),
-            text: Arc::clone(text),
+            doc: Arc::clone(doc),
         })
     }
 }
 
 /// The findings for `blocks`, in block order, reading each `from(...)` and `uses(...)` source
 /// with `languages`, and one `code-block-stale` error for each `from(...)` block whose body
-/// differs from its parts. Then the `uses(...)` findings against `lock`'s `[code-blocks]`
+/// differs from its parts, followed by a `code-block-fix-unsafe` warning when
+/// [`format::safe_fix`] refuses its fix. Then the `uses(...)` findings against `lock`'s `[code-blocks]`
 /// section, judging a doc's recorded targets obsolete only when `in_scope` holds for it and none
 /// of its `uses(...)` values fails to resolve. With them, each block's [`BlockState`], counted.
 /// Nothing when `config` leaves `[features.code-blocks]` off.
@@ -123,7 +124,11 @@ pub(crate) fn evaluate(
     };
     let mut findings = Vec::new();
     let mut states: Vec<BlockState> = Vec::with_capacity(blocks.len());
-    let mut doc: Option<(&str, Option<Arc<str>>)> = None;
+    let mut doc: Option<(&str, Option<Arc<FixDoc>>)> = None;
+    let parse_timeout = config.limits_in_effect().parse_timeout.value;
+    let read = |file: &str| {
+        read_doc(config, file).map(|text| Arc::new(FixDoc::new(Arc::from(text), parse_timeout)))
+    };
     let mut written = Vec::new();
     let mut unresolved_uses = BTreeSet::new();
     let recorded: BTreeMap<(&str, String), Hash> = lock
@@ -162,20 +167,21 @@ pub(crate) fn evaluate(
             if let Some(parts) = sources.parts {
                 let file = block.fence.file.as_str();
                 if doc.as_ref().is_none_or(|(read, _)| *read != file) {
-                    doc = Some((file, read_doc(config, file).map(Arc::from)));
+                    doc = Some((file, read(file)));
                 }
                 let stale = doc
                     .as_ref()
                     .and_then(|(_, text)| text.as_ref())
-                    .and_then(|text| {
+                    .map(|text| {
                         let line_endings = config.hash_settings().line_endings;
                         let expected = excerpt::expected(&parts, line_endings);
                         excerpt::stale(block, text, &expected, line_endings)
-                    });
-                outcome = Some(if stale.is_some() {
-                    Excerpt::Stale
-                } else {
+                    })
+                    .unwrap_or_default();
+                outcome = Some(if stale.is_empty() {
                     Excerpt::Current
+                } else {
+                    Excerpt::Stale
                 });
                 findings.extend(stale);
             }
@@ -185,7 +191,7 @@ pub(crate) fn evaluate(
         let pending = if state == BlockState::NotChecked(NotChecked::Pending) {
             let file = block.fence.file.as_str();
             if doc.as_ref().is_none_or(|(read, _)| *read != file) {
-                doc = Some((file, read_doc(config, file).map(Arc::from)));
+                doc = Some((file, read(file)));
             }
             doc.as_ref()
                 .and_then(|(_, text)| text.as_ref())
@@ -223,8 +229,9 @@ impl Evaluation {
     /// found elsewhere runs, hardened, on each block of a language with a format step, which
     /// passes it or fails it with one `code-block-unformatted`, `code-block-tool-failed` or
     /// `code-block-tool-timeout` error; a language without a format step stays pending. An
-    /// unformatted block's error carries the fix to the formatter's output, unless that output
-    /// would close the block's fence, which adds a `code-block-fix-unsafe` warning instead.
+    /// unformatted block's error carries the fix to the formatter's output, unless
+    /// [`format::safe_fix`] finds it could end the block early, which adds a
+    /// `code-block-fix-unsafe` warning instead.
     ///
     /// Effect: reads file metadata along `PATH`, resolves symlinks, and runs each found formatter
     /// once per block, killing it at the timeout.
@@ -279,8 +286,8 @@ impl Evaluation {
 
 /// Runs `tool`, found at `program`, on `record`'s block from `root` with `env`, under `timeout`:
 /// its verdict and findings, an unformatted block's error carrying the fix to the formatter's
-/// output, or followed by a `code-block-fix-unsafe` warning when that output would close the
-/// block's fence. `None` when the block's language has no format step yet or its input
+/// output, or followed by a `code-block-fix-unsafe` warning when [`format::safe_fix`] finds that
+/// output could end the block early. `None` when the block's language has no format step yet or its input
 /// couldn't be read, so it stays pending.
 ///
 /// Effect: runs the tool, killing it at the timeout.
@@ -309,7 +316,7 @@ fn run_formatter(
     let finding = format::finding(&verdict, tool, &record.at, timeout);
     let findings = match (&verdict, finding) {
         (format::Verdict::Unformatted(output), Some(unformatted)) => {
-            format::fixed(unformatted, &pending.block, &pending.text, output, tool)
+            format::fixed(unformatted, &pending.block, &pending.doc, output, tool)
         }
         (_, finding) => finding.into_iter().collect(),
     };
