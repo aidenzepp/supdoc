@@ -67,6 +67,10 @@
         "target": {
           "$ref": "#/$defs/Target",
           "description": "The file the link points at."
+        },
+        "uses": {
+          "description": "Whether the entry is a `[[code-blocks.uses]]` one rather than a link's. Left out when not.",
+          "type": "boolean"
         }
       },
       "required": [
