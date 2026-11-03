@@ -5,7 +5,7 @@ use std::ops::Range;
 use crate::finding::Location;
 use crate::read::cartridge::SourceFile;
 
-use super::markdown;
+use super::{doc_comments, markdown};
 
 /// One fenced code block, located in its file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,8 +38,24 @@ pub(crate) struct BodyLine {
     pub(crate) content: Range<usize>,
 }
 
+impl CodeBlock {
+    /// The language of a block with no info string: `rust` in a Rust file's doc comments, where
+    /// rustdoc reads an untagged fence as Rust, and none in Markdown.
+    ///
+    /// Test-only until block states (CB-11) consume it.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn default_language(&self) -> Option<&'static str> {
+        std::path::Path::new(self.fence.file.as_str())
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
+            .then_some("rust")
+    }
+}
+
 /// Every code block in `file`, in file order, located by `locate`, which turns a byte range of
-/// the file into a [`Location`]. Only Markdown files hold blocks so far.
+/// the file into a [`Location`]. Markdown files hold blocks, and so do the `///` and `//!` doc
+/// comments of Rust files.
 #[must_use]
 pub(crate) fn blocks_in(
     file: &SourceFile,
@@ -47,6 +63,7 @@ pub(crate) fn blocks_in(
 ) -> Vec<CodeBlock> {
     match file.language().id().as_str() {
         "markdown" => markdown::blocks(file, locate),
+        "rust" => doc_comments::blocks(file, locate),
         _ => Vec::new(),
     }
 }
@@ -71,8 +88,16 @@ pub(crate) fn replacement_for(
         .body
         .iter()
         .map(|line| text.get(line.prefix.clone()))
-        .find(|prefix| prefix.is_none_or(|prefix| !prefix.is_empty()))
-        .unwrap_or(Some(""))?;
+        .find(|prefix| prefix.is_none_or(|prefix| !prefix.is_empty() && !is_bare_marker(prefix)))
+        .or_else(|| {
+            block
+                .body
+                .iter()
+                .map(|line| text.get(line.prefix.clone()))
+                .next()
+        })
+        .flatten()
+        .unwrap_or_default();
     let crlf = text.get(first.content.clone())?.ends_with('\r');
     let mut replacement = prefixed(body, prefix, if crlf { "\r\n" } else { "\n" });
     if text.get(last.content.clone())?.ends_with('\r') {
@@ -91,11 +116,26 @@ fn empty_body_replacement(
     let fence = text.get(block.fence.range.clone())?;
     let start = block.fence.range.start + fence.find('\n')? + 1;
     let closing = text.get(start..block.fence.range.end)?;
-    let prefix_len = closing.len() - closing.trim_start_matches([' ', '\t', '>']).len();
+    let indent = closing.len() - closing.trim_start_matches([' ', '\t']).len();
+    let marker = closing
+        .get(indent..)
+        .and_then(|rest| {
+            ["///", "//!"]
+                .into_iter()
+                .find(|marker| rest.starts_with(marker))
+        })
+        .map_or(0, str::len);
+    let rest = closing.get(indent + marker..)?;
+    let prefix_len = closing.len() - rest.trim_start_matches([' ', '\t', '>']).len();
     let prefix = closing.get(..prefix_len)?;
     let mut replacement = prefixed(body, prefix, "\n");
     replacement.push('\n');
     Some((start..start, replacement))
+}
+
+/// Whether `prefix` is a doc-comment marker with no space after it, as on a blank doc line.
+fn is_bare_marker(prefix: &str) -> bool {
+    prefix.ends_with("///") || prefix.ends_with("//!")
 }
 
 /// `body`'s lines, each led by `prefix` (trimmed on a blank line), joined by `newline`. A line's
