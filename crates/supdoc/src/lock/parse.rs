@@ -24,7 +24,7 @@ struct VersionProbe {
 
 /// The whole file, in either format version.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct RawLockfile {
     /// Checked to be the current version; not needed afterwards.
     #[serde(rename = "version", deserialize_with = "current_version")]
@@ -35,7 +35,7 @@ struct RawLockfile {
     #[serde(default)]
     link: Vec<Spanned<RawLink>>,
     /// The `[code-blocks]` section, absent in a format 1 file.
-    #[serde(default, rename = "code-blocks")]
+    #[serde(default)]
     code_blocks: RawCodeBlocks,
 }
 
