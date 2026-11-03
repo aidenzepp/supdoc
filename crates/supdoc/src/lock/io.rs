@@ -302,7 +302,7 @@ mod tests {
     fn invalid_lockfile_text_reports_its_path_and_code() {
         let dir = tempfile::tempdir().expect("a temp directory should be creatable");
         let path = lock_path(&dir);
-        fs::write(path.as_path(), "version = 2\n").expect("the fixture should be writable");
+        fs::write(path.as_path(), "version = 3\n").expect("the fixture should be writable");
 
         let error = Lockfile::read(&path, Limits::MAX_LOCK_SIZE)
             .expect_err("a newer lockfile should be rejected");

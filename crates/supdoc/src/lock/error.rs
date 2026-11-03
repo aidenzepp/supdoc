@@ -452,8 +452,8 @@ mod tests {
         let errors = [
             ParseLockError::ConflictMarkers { line: 1 },
             ParseLockError::NewerVersion {
-                found: 2,
-                supported: 1,
+                found: 3,
+                supported: 2,
             },
             ParseLockError::ConflictingDuplicate {
                 key,

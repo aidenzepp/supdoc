@@ -25,15 +25,19 @@ const VCS_DIRS: [&str; 4] = [".git", ".hg", ".svn", ".jj"];
 /// The files a scan reads links from, and the problems met while finding them.
 #[derive(Debug)]
 pub(crate) struct Walk {
-    /// Sorted by path. Every entry is under the root, passes [`Config::scans`], is inside
-    /// the [`Scope`], and has a cartridge.
+    /// Sorted by path. Every entry is under the root, is wanted by linking or code-blocks
+    /// ([`Wants`]), is inside the [`Scope`], and has a cartridge.
     pub(crate) sources: Vec<WalkedSource>,
     /// Unreadable directories, symlinked ignore files that weren't read, and explicitly named
     /// paths that are excluded or ignored, sorted.
     pub(crate) findings: Vec<Finding>,
-    /// The directories the walk couldn't read, sorted by path. Nothing beneath one was walked, so
-    /// its sources and their links are unknown.
+    /// The directories the walk couldn't read and linking would have walked, sorted by path.
+    /// Nothing beneath one was walked, so its sources and their links are unknown.
     pub(crate) unread_dirs: Vec<UnreadDir>,
+    /// The directories the walk couldn't read that only code-blocks walks, because linking's
+    /// `exclude` names them, sorted by path. Kept apart, with no finding in `findings`, so a wider
+    /// code-blocks scope never changes linking's results.
+    pub(crate) code_blocks_unread_dirs: Vec<UnreadDir>,
 }
 
 /// A file the walk found to read links from.
@@ -43,6 +47,31 @@ pub(crate) struct WalkedSource {
     pub(crate) source: SourcePath,
     /// Its path on disk.
     pub(crate) path: AbsolutePath,
+    /// Which features read it: at least one does.
+    pub(crate) wants: Wants,
+}
+
+/// Which features read a walked source. Each feature has its own `include` and `exclude`, and the
+/// walk covers the union of their scopes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Wants {
+    /// Linking reads its links: [`Config::scans`] holds.
+    pub(crate) links: bool,
+    /// Code-blocks reads its code blocks: the feature is on and
+    /// [`CodeBlocks::scans`](crate::config::code_blocks::CodeBlocks::scans) holds.
+    pub(crate) code_blocks: bool,
+}
+
+impl Wants {
+    /// Which features read `path`, by their `include` and `exclude` alone.
+    fn of(config: &Config, path: &AbsolutePath) -> Self {
+        Self {
+            links: config.scans(path),
+            code_blocks: config
+                .code_blocks()
+                .is_some_and(|code_blocks| code_blocks.scans(path)),
+        }
+    }
 }
 
 /// A directory the walk couldn't read, so nothing beneath it was walked.
@@ -74,7 +103,7 @@ impl UnreadDir {
     ///
     /// The message names the directory relative to the project `root`, as the read messages name
     /// files, so no finding carries a machine-specific absolute path.
-    fn finding(&self, root: &AbsolutePath) -> Finding {
+    pub(crate) fn finding(&self, root: &AbsolutePath) -> Finding {
         let shown = relative_to(root, &self.path);
         Finding::new(
             "scan-unreadable-dir",
@@ -166,6 +195,9 @@ pub(crate) fn walk(
     }
     sources.sort_by(|left, right| left.path.cmp(&right.path));
     unread_dirs.sort();
+    let (unread_dirs, code_blocks_unread_dirs): (Vec<UnreadDir>, Vec<UnreadDir>) = unread_dirs
+        .into_iter()
+        .partition(|dir| config.excluded_by(&dir.path).is_none());
 
     let mut findings: Vec<Finding> = unread_dirs.iter().map(|dir| dir.finding(root)).collect();
     findings.extend(invalid_names);
@@ -201,6 +233,7 @@ pub(crate) fn walk(
         sources,
         findings,
         unread_dirs,
+        code_blocks_unread_dirs,
     }
 }
 
@@ -225,8 +258,8 @@ fn walker(config: &Config, scope: &Scope, rules: &Arc<IgnoreRules>) -> ignore::W
 }
 
 /// Whether the walk keeps `entry`. Only directories are refused here; files are judged by
-/// [`as_source`]. A directory that `exclude` names is never entered, so nothing under it is read
-/// and no finding can come from inside it.
+/// [`as_source`]. A directory that every feature's `exclude` names is never entered, so nothing
+/// under it is read and no finding can come from inside it.
 fn descend_into(config: &Config, scope: &Scope, entry: &DirEntry) -> bool {
     let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
     if !is_dir || entry.depth() == 0 {
@@ -238,9 +271,15 @@ fn descend_into(config: &Config, scope: &Scope, entry: &DirEntry) -> bool {
         && may_hold_sources(config.root(), scope, entry.path())
 }
 
-/// Whether the config's `exclude` names the directory `dir`.
+/// Whether the directory `dir` is excluded from both scopes: linking's `exclude` names it, and
+/// code-blocks is off or its `exclude` names it too. A directory one scope still wants is walked.
 fn is_excluded_dir(config: &Config, dir: &Path) -> bool {
-    AbsolutePath::new(dir).is_some_and(|dir| config.excluded_by(&dir).is_some())
+    AbsolutePath::new(dir).is_some_and(|dir| {
+        config.excluded_by(&dir).is_some()
+            && config
+                .code_blocks()
+                .is_none_or(|code_blocks| code_blocks.excludes(&dir))
+    })
 }
 
 /// Whether `dir` is named like a version-control directory.
@@ -293,7 +332,8 @@ fn as_source(
         return None;
     }
     let path = AbsolutePath::new(entry.path())?;
-    if !config.scans(&path) {
+    let wants = Wants::of(config, &path);
+    if !wants.links && !wants.code_blocks {
         return None;
     }
     let _cartridge = languages.for_path(path.as_path())?;
@@ -305,6 +345,7 @@ fn as_source(
     scope.contains(&relative).then_some(Ok(WalkedSource {
         source: relative,
         path,
+        wants,
     }))
 }
 
@@ -1890,6 +1931,116 @@ mod tests {
         assert_eq!(
             message, "skipped private: permission denied",
             "the warning should name the directory relative to the root, not absolutely"
+        );
+    }
+
+    /// Each walked source, relative to the root, with whether linking and code-blocks want it.
+    fn wanted(project: &Project) -> Vec<(String, bool, bool)> {
+        project
+            .walk(&Scope::All)
+            .sources
+            .iter()
+            .map(|walked| {
+                (
+                    project.relative(&walked.path),
+                    walked.wants.links,
+                    walked.wants.code_blocks,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn code_blocks_include_walks_beyond_a_narrower_link_include() {
+        let project = Project::new();
+        project.write(
+            CONFIG_FILE_NAME,
+            "include = [\"docs\"]\n[features.code-blocks]\ninclude = [\"skills/**\"]\n",
+        );
+        project.write("docs/a.md", "");
+        project.write("skills/b.md", "");
+        project.write("other/c.md", "");
+
+        assert_eq!(
+            wanted(&project),
+            [
+                ("docs/a.md".to_owned(), true, false),
+                ("skills/b.md".to_owned(), false, true),
+            ],
+            "linking should keep `docs` and code-blocks should add `skills`"
+        );
+    }
+
+    #[test]
+    fn a_directory_excluded_by_one_scope_only_is_still_walked() {
+        let project = Project::new();
+        project.write(
+            CONFIG_FILE_NAME,
+            "exclude = [\"skills\"]\n[features.code-blocks]\nexclude = [\"docs\"]\n",
+        );
+        project.write("docs/a.md", "");
+        project.write("skills/b.md", "");
+
+        assert_eq!(
+            wanted(&project),
+            [
+                ("docs/a.md".to_owned(), true, false),
+                ("skills/b.md".to_owned(), false, true),
+            ],
+            "each directory is excluded by one scope only, so the other still reads it"
+        );
+    }
+
+    #[test]
+    fn links_are_not_read_from_code_blocks_only_files() {
+        let project = Project::new();
+        project.write(
+            CONFIG_FILE_NAME,
+            "include = [\"docs\"]\n[features.code-blocks]\ninclude = [\"skills\"]\n",
+        );
+        project.write("docs/a.md", "[a](../skills/b.md)\n");
+        project.write("skills/b.md", "[b](../docs/a.md)\n");
+        let config = Config::load_file(
+            &AbsolutePath::new(&project.dir.path().join(CONFIG_FILE_NAME))
+                .expect("the temporary directory should be absolute"),
+        )
+        .expect("the fixture config should be valid");
+        let mut read = Vec::new();
+
+        let _front = crate::scan::assemble::read_sources(
+            &config,
+            Languages::builtin().expect("the built-in cartridges should load"),
+            &Scope::All,
+            &GlobalExcludes::none(),
+            &mut crate::scan::targets::Parsed::default(),
+            |source, _file, raws| read.push((source.as_str().to_owned(), raws.len())),
+            |source, error| panic!("{source} should be readable: {error:?}"),
+        )
+        .expect("the fixture project should be read");
+
+        assert_eq!(
+            read,
+            [("docs/a.md".to_owned(), 1)],
+            "only linking's sources should have their links read"
+        );
+    }
+
+    #[test]
+    fn gitignore_applies_to_both_scopes() {
+        let project = Project::new();
+        project.write(
+            CONFIG_FILE_NAME,
+            "include = [\"docs\"]\n[features.code-blocks]\ninclude = [\"skills\"]\n",
+        );
+        project.write(".gitignore", "docs/draft.md\nskills/draft.md\n");
+        project.write("docs/draft.md", "");
+        project.write("docs/final.md", "");
+        project.write("skills/draft.md", "");
+        project.write("skills/final.md", "");
+
+        assert_eq!(
+            project.sources(&Scope::All),
+            ["docs/final.md", "skills/final.md"]
         );
     }
 }
