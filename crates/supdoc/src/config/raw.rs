@@ -40,6 +40,8 @@ pub(crate) struct RawLimits {
     /// `None` inherits the parent's setting.
     pub(crate) parse_timeout: Option<TimeLimit>,
     /// `None` inherits the parent's setting.
+    pub(crate) code_block_timeout: Option<TimeLimit>,
+    /// `None` inherits the parent's setting.
     pub(crate) max_lock_size: Option<SizeLimit>,
     /// `None` inherits the parent's setting.
     pub(crate) max_ignore_size: Option<SizeLimit>,

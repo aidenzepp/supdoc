@@ -249,6 +249,8 @@ pub(crate) struct Given<T> {
 pub(crate) struct CommandLineLimits {
     /// `--parse-timeout` or `SUPDOC_PARSE_TIMEOUT`.
     pub(crate) parse_timeout: Option<Given<TimeLimit>>,
+    /// `--code-block-timeout` or `SUPDOC_CODE_BLOCK_TIMEOUT`.
+    pub(crate) code_block_timeout: Option<Given<TimeLimit>>,
     /// `--max-lock-size` or `SUPDOC_MAX_LOCK_SIZE`.
     pub(crate) max_lock_size: Option<Given<SizeLimit>>,
     /// `--max-config-size` or `SUPDOC_MAX_CONFIG_SIZE`. No config key sets it, since it must apply
@@ -263,6 +265,8 @@ pub(crate) struct CommandLineLimits {
 pub(crate) struct ConfigLimits {
     /// `parse-timeout` and the file that set it.
     pub(crate) parse_timeout: Option<(TimeLimit, AbsolutePath)>,
+    /// `code-block-timeout` and the file that set it.
+    pub(crate) code_block_timeout: Option<(TimeLimit, AbsolutePath)>,
     /// `max-lock-size` and the file that set it.
     pub(crate) max_lock_size: Option<(SizeLimit, AbsolutePath)>,
     /// `max-ignore-size` and the file that set it.
@@ -284,6 +288,8 @@ pub(crate) struct Limits {
     /// How long one read of a file may take to parse and query. A file read both as a source and
     /// as a target gets this budget for each read.
     pub(crate) parse_timeout: Setting<TimeLimit>,
+    /// How long one code block may run. `0` means no limit.
+    pub(crate) code_block_timeout: Setting<TimeLimit>,
     /// How large `supdoc.lock` may be.
     pub(crate) max_lock_size: Setting<SizeLimit>,
     /// How large each config file in the `extends` chain may be.
@@ -295,6 +301,8 @@ pub(crate) struct Limits {
 impl Limits {
     /// The default time a file may take to read: 10 s.
     pub(crate) const PARSE_TIMEOUT: TimeLimit = TimeLimit(Some(Duration::from_secs(10)));
+    /// The default time one code block may run: 10 s.
+    pub(crate) const CODE_BLOCK_TIMEOUT: TimeLimit = TimeLimit(Some(Duration::from_secs(10)));
     /// The default lock size ceiling: 16 MiB.
     pub(crate) const MAX_LOCK_SIZE: SizeLimit = SizeLimit(Some(16 * MIB));
     /// The default config size ceiling: 256 KiB.
@@ -310,6 +318,11 @@ impl Limits {
                 command_line.parse_timeout,
                 config.parse_timeout.as_ref(),
                 Self::PARSE_TIMEOUT,
+            ),
+            code_block_timeout: pick(
+                command_line.code_block_timeout,
+                config.code_block_timeout.as_ref(),
+                Self::CODE_BLOCK_TIMEOUT,
             ),
             max_lock_size: pick(
                 command_line.max_lock_size,
@@ -403,6 +416,7 @@ mod tests {
             .expect("the root should be absolute");
         let config = ConfigLimits {
             parse_timeout: Some((time("30s").expect("30s"), file.clone())),
+            code_block_timeout: Some((time("20s").expect("20s"), file.clone())),
             max_lock_size: Some((size("1MiB").expect("1MiB"), file.clone())),
             max_ignore_size: None,
         };
@@ -421,5 +435,35 @@ mod tests {
         assert_eq!(limits.max_lock_size.source, Source::Config(file));
         assert_eq!(limits.max_ignore_size.source, Source::Default);
         assert_eq!(limits.max_config_size.value, Limits::MAX_CONFIG_SIZE);
+    }
+
+    #[test]
+    fn code_block_timeout_defaults_to_ten_seconds_and_zero_means_no_limit() {
+        let limits = Limits::resolve(&CommandLineLimits::default(), &ConfigLimits::default());
+        assert_eq!(limits.code_block_timeout.value.to_string(), "10s");
+        assert_eq!(limits.code_block_timeout.source, Source::Default);
+        assert_eq!(time("0").map(TimeLimit::get), Ok(None));
+    }
+
+    #[test]
+    fn code_block_timeout_takes_flag_then_env_then_config() {
+        let file = AbsolutePath::new(Path::new(std::path::MAIN_SEPARATOR_STR))
+            .expect("the root should be absolute");
+        let config = ConfigLimits {
+            code_block_timeout: Some((time("20s").expect("20s"), file.clone())),
+            ..ConfigLimits::default()
+        };
+        let from_config = Limits::resolve(&CommandLineLimits::default(), &config);
+        assert_eq!(from_config.code_block_timeout.source, Source::Config(file));
+        let env = CommandLineLimits {
+            code_block_timeout: Some(Given {
+                value: time("5s").expect("5s"),
+                from_env: true,
+            }),
+            ..CommandLineLimits::default()
+        };
+        let from_env = Limits::resolve(&env, &config);
+        assert_eq!(from_env.code_block_timeout.source, Source::Env);
+        assert_eq!(from_env.code_block_timeout.value.to_string(), "5s");
     }
 }
