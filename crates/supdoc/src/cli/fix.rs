@@ -1,4 +1,5 @@
-//! `supdoc fix`: rewrites broken links whose repair is certain.
+//! `supdoc fix`: rewrites broken links whose repair is certain, and refreshes stale
+//! `from(...)` code blocks.
 //!
 //! The run is `config → lockfile → scan → plan_fixes`, then either the preview, or `apply_fixes →
 //! move lock entries → write the lockfile if an entry moved → scan the fixed files again →
@@ -18,6 +19,7 @@ use crate::check::fix::{
 use crate::check::model::Report as CheckModel;
 use crate::check::moves::Move;
 use crate::check::reconcile::reconcile_in;
+use crate::code_blocks::evaluate::evaluate;
 use crate::config::Config;
 use crate::exit::ExitStatus;
 use crate::finding::{Finding, Fix};
@@ -44,6 +46,9 @@ const CODE_WRITE_FAILED: &str = "fix-write-failed";
 
 /// The code of the fatal error for sources rewritten while the lockfile could not be written.
 const CODE_LOCK_WRITE_FAILED: &str = "fix-lock-write-failed";
+
+/// The code of a `from(...)` block whose body differs from its source, which `fix` refreshes.
+const CODE_STALE: &str = "code-block-stale";
 
 /// Runs `supdoc fix`: previews every certain fix, or with `--yes` applies them and reports the
 /// state each fixed link has now.
@@ -96,6 +101,8 @@ struct Planned {
     paths: PathStyle,
     /// Broken links in scope, fixable or not, for the note when nothing can be fixed.
     broken: usize,
+    /// Stale `from(...)` blocks, fixable or not, for the note when nothing can be fixed.
+    stale: usize,
     /// The command that lists the broken links, as typed here: it keeps this run's `[PATH]` and `-c`.
     check_command: String,
     /// The command that runs this fix again without `--yes`, keeping this run's `[PATH]` and `-c`.
@@ -106,11 +113,13 @@ struct Planned {
 }
 
 impl Planned {
-    /// Loads the config and the lockfile, scans `paths` and plans every certain fix.
+    /// Loads the config and the lockfile, scans `paths`, judges the code blocks as `check` does,
+    /// and plans every certain fix: broken links and stale `from(...)` blocks alike.
     ///
     /// # Errors
     ///
-    /// Returns the config's, the lockfile's or the scan's own error, or a `[PATH]` usage error.
+    /// Returns the config's, the lockfile's or the scan's own error, a `[PATH]` usage error, or
+    /// `read-cartridge-load` (70) when a built-in cartridge doesn't load.
     fn scan(
         paths: &[std::path::PathBuf],
         context: &Context,
@@ -119,7 +128,20 @@ impl Planned {
         let config = load_config(context, output)?;
         let scope = scope(paths, &config, context)?;
         let lock = read_lock(&config, &context.cwd)?;
-        let scan = scan(&config, &scope, &context.global_excludes)?;
+        let mut scan = scan(&config, &scope, &context.global_excludes)?;
+        let in_scope = |doc: &str| {
+            doc.parse::<SourcePath>()
+                .is_ok_and(|doc| scope.contains(&doc) && !scan.is_unread(&doc))
+        };
+        let languages = Languages::builtin().map_err(CliError::from)?;
+        let code_block_findings = evaluate(&config, languages, &scan.code_blocks, &lock, in_scope)
+            .map_err(|error| CliError::from(&error))?;
+        scan.findings.extend(code_block_findings);
+        let stale = scan
+            .findings
+            .iter()
+            .filter(|finding| finding.code == CODE_STALE)
+            .count();
         let broken = scan
             .links
             .iter()
@@ -147,6 +169,7 @@ impl Planned {
             excludes: context.global_excludes.clone(),
             lock,
             broken,
+            stale,
             check_command,
             fix_command,
             timeouts,
@@ -233,7 +256,7 @@ impl Planned {
             ),
             (true, None) => timeout_note(report.findings.len(), &self.fix_command),
             (false, Some(planned)) => planned,
-            (false, None) => nothing_to_fix(self.broken, &self.check_command),
+            (false, None) => nothing_to_fix(self.broken, self.stale, &self.check_command),
         };
         output
             .note(&note)
@@ -295,16 +318,30 @@ impl Planned {
             .report(&report, ok)
             .map_err(|error| CliError::output_failed("the fix report", &error))?;
         let note = if !report.fixes.is_empty() {
-            let link_count = count(report.fixes.len(), "link", "links");
+            // A refreshed block has nothing to record, so only rewritten links name `update`.
+            let blocks = done
+                .iter()
+                .filter(|planned| planned.finding.code == CODE_STALE)
+                .count();
+            let links = done.len() - blocks;
             let file_count = count(report.files(), "file", "files");
-            let update = command_line(context, "update", &fixed_files, &["--yes"]);
-            Some(format!(
-                "Fixed {link_count} in {file_count}. Run `{update}` to record them."
-            ))
+            let block_count = count(blocks, "code block", "code blocks");
+            Some(if links == 0 {
+                format!("Fixed {block_count} in {file_count}.")
+            } else {
+                let link_count = count(links, "link", "links");
+                let what = if blocks == 0 {
+                    link_count
+                } else {
+                    format!("{link_count} and {block_count}")
+                };
+                let update = command_line(context, "update", &fixed_files, &["--yes"]);
+                format!("Fixed {what} in {file_count}. Run `{update}` to record them.")
+            })
         } else if timed_out {
             Some(timeout_note(timeout_count, &rerun))
         } else if self.plan.fixes().is_empty() {
-            Some(nothing_to_fix(self.broken, &self.check_command))
+            Some(nothing_to_fix(self.broken, self.stale, &self.check_command))
         } else {
             None
         };
@@ -544,16 +581,29 @@ pub(crate) fn timed_out(scan: &Scan) -> impl Iterator<Item = &Finding> {
         .filter(|finding| finding.code == CODE_TIMEOUT)
 }
 
-/// The note for a run with nothing to fix, naming the broken links left as they are.
-/// `check` is the command that lists them.
-fn nothing_to_fix(broken: usize, check: &str) -> String {
-    match broken {
-        0 => "Nothing to fix.".to_owned(),
-        1 => format!("Nothing to fix. 1 broken link has no certain fix; run `{check}` to see it."),
-        n => format!(
-            "Nothing to fix. {n} broken links have no certain fix; run `{check}` to see them."
-        ),
+/// The note for a run with nothing to fix, naming the `broken` links and `stale` code blocks
+/// left as they are. `check` is the command that lists them.
+fn nothing_to_fix(broken: usize, stale: usize, check: &str) -> String {
+    let left: Vec<String> = [
+        (broken, "broken link", "broken links"),
+        (stale, "stale code block", "stale code blocks"),
+    ]
+    .into_iter()
+    .filter(|(n, ..)| *n > 0)
+    .map(|(n, one, many)| count(n, one, many))
+    .collect();
+    if left.is_empty() {
+        return "Nothing to fix.".to_owned();
     }
+    let (verb, them) = if broken + stale == 1 {
+        ("has", "it")
+    } else {
+        ("have", "them")
+    };
+    format!(
+        "Nothing to fix. {} {verb} no certain fix; run `{check}` to see {them}.",
+        left.join(" and ")
+    )
 }
 
 /// The error that ends a run in which `files` source files could not be written. The report
