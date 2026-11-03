@@ -3,8 +3,9 @@
 //!
 //! The modules cover: `commands`, `helps` and `json` (command surface and output), `lifecycle`
 //! (init, update, check), `containment`, `resolve`, `paths`, `ignore`, `namespaces` and `languages`
-//! (what links resolve to), `list` and `list_containment` (the `list` command), and `limits`
-//! (the size, timeout and similar limits).
+//! (what links resolve to), `list` and `list_containment` (the `list` command), `limits`
+//! (the size, timeout and similar limits), and `code_blocks`, `code_blocks_fix`,
+//! `code_blocks_python` and `code_blocks_rust` (checking the code blocks in docs).
 //!
 //! The suite began as a port of docref's integration tests (`docref/tests/integration.rs`), adjusted
 //! to supdoc's decisions:
@@ -74,6 +75,14 @@ fn permissions_restrict_this_user(test: &str) -> bool {
     restricted
 }
 
+#[cfg(test)]
+mod code_blocks;
+#[cfg(test)]
+mod code_blocks_fix;
+#[cfg(test)]
+mod code_blocks_python;
+#[cfg(test)]
+mod code_blocks_rust;
 #[cfg(test)]
 mod commands;
 #[cfg(test)]

@@ -18,6 +18,7 @@ use crate::limits::{CommandLineLimits, ConfigLimits, Limits, SizeLimit};
 use crate::namespace::NamespaceName;
 use crate::path::{AbsolutePath, RelativePath, holds_git, is_regular_file};
 
+use super::code_blocks;
 use super::pattern::{AnchoredPatterns, PatternList};
 use super::raw::RawConfig;
 use super::{CONFIG_FILE_NAME, Config, ConfigError, Namespace, NamespaceEscape, config_entry};
@@ -353,6 +354,7 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Result<Config, Co
     let mut exclude = None;
     let mut written = BTreeMap::new();
     let mut line_endings = None;
+    let mut code_blocks = None;
     let mut limits = ConfigLimits::default();
     for Layer { file, raw } in layers {
         let base = directory_of(&file);
@@ -373,13 +375,15 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Result<Config, Co
                 .exclude
                 .map(|list| AnchoredPatterns::written_by(file.clone(), base.clone(), list));
         }
+        let (hash, raw_code_blocks) = raw.features.map_or((None, None), |features| {
+            (features.hash, features.code_blocks)
+        });
         if line_endings.is_none() {
-            line_endings = raw
-                .features
-                .and_then(|features| features.hash)
+            line_endings = hash
                 .and_then(|hash| hash.line_endings)
                 .map(|value| (value, file.clone()));
         }
+        code_blocks = code_blocks::merge(code_blocks, raw_code_blocks);
         if let Some(raw_limits) = raw.limits {
             nearest(&mut limits.parse_timeout, raw_limits.parse_timeout, &file);
             nearest(&mut limits.max_lock_size, raw_limits.max_lock_size, &file);
@@ -409,6 +413,7 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Result<Config, Co
         exclude,
         namespaces,
         line_endings,
+        code_blocks,
         in_effect: Limits::resolve(&CommandLineLimits::default(), &limits),
         limits,
     })
