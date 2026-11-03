@@ -194,7 +194,7 @@ impl Evaluation {
                     found
                 };
             record.state = match found {
-                Found::OnPath => continue,
+                Found::OnPath(_) => continue,
                 Found::Missing => BlockState::ToolMissing,
                 Found::InsideRoot(_) => BlockState::NotChecked(NotChecked::ToolInsideRoot),
             };
@@ -213,7 +213,7 @@ impl Evaluation {
 fn tool_warning(tool: &Tool, found: &Found, at: &Location) -> Option<Finding> {
     let name = tool.name;
     let finding = match found {
-        Found::OnPath => return None,
+        Found::OnPath(_) => return None,
         Found::Missing => Finding::new(
             TOOL_MISSING,
             Severity::Warning,

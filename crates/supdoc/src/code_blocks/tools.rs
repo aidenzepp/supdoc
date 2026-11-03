@@ -123,40 +123,73 @@ pub(crate) fn formatter(language: Language) -> Option<&'static Tool> {
 /// Where a tool's binary was found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Found {
-    /// On `PATH`, outside the project root.
-    OnPath,
+    /// On `PATH`, outside the project root, at the real path held: the path a tool is run by.
+    OnPath(PathBuf),
     /// On `PATH`, but its real path is inside the project root, so the checkout chose it.
     InsideRoot(PathBuf),
     /// Not on `PATH`.
     Missing,
 }
 
-/// Looks `binary` up on `env`'s `PATH`, judging the first match against the real path of `root`.
+/// Looks `binary` up on `env`'s `PATH`, judging the first match's real path against `root`.
 ///
 /// Effect: reads file metadata along `PATH` and resolves symlinks.
 #[must_use]
 pub(crate) fn find(binary: &str, env: &ToolEnv, root: &Path) -> Found {
-    let Some(real) = first_on_path(binary, env.path()) else {
+    let Some(real) = env.path().and_then(|path| first_on_path(binary, path)) else {
         return Found::Missing;
     };
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    if real.starts_with(&root) {
+    if inside(&real, root) {
         Found::InsideRoot(real)
     } else {
-        Found::OnPath
+        Found::OnPath(real)
     }
 }
 
-/// The real path of the first executable regular file named `binary` in a `PATH` entry, in
-/// order. Empty and relative entries are skipped.
+/// The `PATH` entries a lookup searches, in order: the absolute ones. An empty entry (the
+/// current directory to a shell) and every relative one are skipped.
+fn search_dirs(path: &OsStr) -> impl Iterator<Item = PathBuf> {
+    std::env::split_paths(path).filter(|dir| dir.is_absolute())
+}
+
+/// The real path of the first executable regular file named `binary` in [`search_dirs`].
 ///
 /// Effect: reads file metadata and resolves symlinks.
-fn first_on_path(binary: &str, path: Option<&OsStr>) -> Option<PathBuf> {
-    std::env::split_paths(path?)
-        .filter(|dir| dir.is_absolute())
+fn first_on_path(binary: &str, path: &OsStr) -> Option<PathBuf> {
+    search_dirs(path)
         .map(|dir| dir.join(binary))
         .filter(|candidate| is_executable_file(candidate))
         .find_map(|candidate| candidate.canonicalize().ok())
+}
+
+/// Whether `real`, a resolved path, is inside `root`: under the root's real path by whole
+/// components, or under a directory that is the root's own file however it is spelled.
+///
+/// Effect: reads the metadata of `root` and of each ancestor of `real`.
+fn inside(real: &Path, root: &Path) -> bool {
+    let real_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    real.starts_with(&real_root) || under_same_file(real, root)
+}
+
+/// Whether some ancestor of `real` has the same device and inode as `root`, so a firmlink or
+/// bind-mount spelling of the root counts as the root.
+///
+/// Effect: reads the metadata of `root` and of each ancestor of `real`.
+#[cfg(unix)]
+fn under_same_file(real: &Path, root: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    let Ok(root) = std::fs::metadata(root) else {
+        return false;
+    };
+    real.ancestors()
+        .filter_map(|ancestor| std::fs::metadata(ancestor).ok())
+        .any(|meta| meta.dev() == root.dev() && meta.ino() == root.ino())
+}
+
+/// Whether some ancestor of `real` is `root` by file identity: never known off Unix.
+#[cfg(not(unix))]
+fn under_same_file(_real: &Path, _root: &Path) -> bool {
+    false
 }
 
 /// Whether `path`, following symlinks, is a regular file someone may execute.
@@ -181,12 +214,12 @@ fn executable(_meta: &std::fs::Metadata) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::os::unix::fs::{PermissionsExt as _, symlink};
     use std::path::Path;
 
-    use super::{Found, ToolEnv, find};
+    use super::{Found, ToolEnv, find, search_dirs, under_same_file};
 
     /// Writes an executable `#!/bin/sh` stub named `name` in `dir`.
     fn stub(dir: &Path, name: &str) {
@@ -264,6 +297,10 @@ mod tests {
         let (_dir, root, outside) = dirs();
         stub(&outside, "shfmt");
         stub(&root.join("bin"), "shfmt");
+        let real = outside
+            .join("shfmt")
+            .canonicalize()
+            .expect("the stub should resolve");
 
         assert_eq!(
             find(
@@ -271,7 +308,7 @@ mod tests {
                 &env_with_path(&[&outside, &root.join("bin")]),
                 &root
             ),
-            Found::OnPath
+            Found::OnPath(real)
         );
         assert!(matches!(
             find(
@@ -281,5 +318,68 @@ mod tests {
             ),
             Found::InsideRoot(_)
         ));
+    }
+
+    #[test]
+    fn an_empty_entry_and_dot_are_not_searched() {
+        let dirs: Vec<_> = search_dirs(OsStr::new(":.::./bin:/usr/bin:")).collect();
+
+        assert_eq!(dirs, [Path::new("/usr/bin")]);
+    }
+
+    #[test]
+    fn a_path_directory_that_is_a_symlink_into_the_root_is_refused() {
+        let (_dir, root, outside) = dirs();
+        stub(&root.join("bin"), "shfmt");
+        symlink(root.join("bin"), outside.join("bin"))
+            .expect("the fixture symlink should be creatable");
+
+        let found = find("shfmt", &env_with_path(&[&outside.join("bin")]), &root);
+
+        assert!(matches!(found, Found::InsideRoot(_)), "{found:?}");
+    }
+
+    #[test]
+    fn a_root_reached_through_a_symlink_is_judged_by_its_real_path() {
+        let (dir, root, outside) = dirs();
+        stub(&root.join("bin"), "shfmt");
+        stub(&outside, "ruff");
+        let alias = dir.path().join("alias");
+        symlink(&root, &alias).expect("the fixture symlink should be creatable");
+
+        let inside = find("shfmt", &env_with_path(&[&root.join("bin")]), &alias);
+        let elsewhere = find("ruff", &env_with_path(&[&outside]), &alias);
+
+        assert!(matches!(inside, Found::InsideRoot(_)), "{inside:?}");
+        assert!(matches!(elsewhere, Found::OnPath(_)), "{elsewhere:?}");
+    }
+
+    #[test]
+    fn a_sibling_root_sharing_the_name_prefix_is_not_inside() {
+        let (dir, root, _outside) = dirs();
+        let sibling = dir.path().join("root2");
+        stub(&sibling.join("bin"), "shfmt");
+
+        let found = find("shfmt", &env_with_path(&[&sibling.join("bin")]), &root);
+
+        assert!(matches!(found, Found::OnPath(_)), "{found:?}");
+    }
+
+    #[test]
+    fn a_same_inode_alias_of_the_root_is_inside() {
+        let (dir, root, _outside) = dirs();
+        stub(&root.join("bin"), "shfmt");
+        let alias = dir.path().join("alias");
+        symlink(&root, &alias).expect("the fixture symlink should be creatable");
+        let real = root
+            .join("bin/shfmt")
+            .canonicalize()
+            .expect("the stub should resolve");
+
+        assert!(
+            !real.starts_with(&alias),
+            "the alias should not be a path prefix"
+        );
+        assert!(under_same_file(&real, &alias));
     }
 }
