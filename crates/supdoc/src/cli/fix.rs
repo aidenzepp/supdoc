@@ -20,6 +20,7 @@ use crate::check::model::Report as CheckModel;
 use crate::check::moves::Move;
 use crate::check::reconcile::reconcile_in;
 use crate::code_blocks::evaluate::evaluate;
+use crate::code_blocks::tools::ToolEnv;
 use crate::config::Config;
 use crate::exit::ExitStatus;
 use crate::finding::{Finding, Fix};
@@ -50,6 +51,9 @@ const CODE_LOCK_WRITE_FAILED: &str = "fix-lock-write-failed";
 /// The code of a `from(...)` block whose body differs from its source, which `fix` refreshes.
 const CODE_STALE: &str = "code-block-stale";
 
+/// The code of a block its formatter would change, which `fix` rewrites when it carries a fix.
+const CODE_UNFORMATTED: &str = "code-block-unformatted";
+
 /// Runs `supdoc fix`: previews every certain fix, or with `--yes` applies them and reports the
 /// state each fixed link has now.
 ///
@@ -66,10 +70,11 @@ const CODE_STALE: &str = "code-block-stale";
 /// report cannot be written (74).
 pub(crate) fn run(
     args: &FixArgs,
+    tools: &ToolEnv,
     context: &Context,
     output: &mut Output,
 ) -> Result<Outcome, CliError> {
-    let planned = Planned::scan(&args.paths, context, output)?;
+    let planned = Planned::scan(&args.paths, tools, context, output)?;
     planned.finish(
         args.confirm.mode(),
         args.confirm.dry_run,
@@ -101,7 +106,8 @@ struct Planned {
     paths: PathStyle,
     /// Broken links in scope, fixable or not, for the note when nothing can be fixed.
     broken: usize,
-    /// Stale `from(...)` blocks, fixable or not, for the note when nothing can be fixed.
+    /// Stale `from(...)` blocks, fixable or not, and blocks with a formatter fix, for the note
+    /// when nothing can be fixed.
     stale: usize,
     /// The command that lists the broken links, as typed here: it keeps this run's `[PATH]` and `-c`.
     check_command: String,
@@ -114,7 +120,8 @@ struct Planned {
 
 impl Planned {
     /// Loads the config and the lockfile, scans `paths`, judges the code blocks as `check` does,
-    /// and plans every certain fix: broken links and stale `from(...)` blocks alike.
+    /// running each formatter found on `tools`' `PATH`, and plans every certain fix: broken
+    /// links, stale `from(...)` blocks and formatter output alike.
     ///
     /// # Errors
     ///
@@ -122,6 +129,7 @@ impl Planned {
     /// `read-cartridge-load` (70) when a built-in cartridge doesn't load.
     fn scan(
         paths: &[std::path::PathBuf],
+        tools: &ToolEnv,
         context: &Context,
         output: &mut Output,
     ) -> Result<Self, CliError> {
@@ -134,13 +142,14 @@ impl Planned {
                 .is_ok_and(|doc| scope.contains(&doc) && !scan.is_unread(&doc))
         };
         let languages = Languages::builtin().map_err(CliError::from)?;
-        let evaluation = evaluate(&config, languages, &scan.code_blocks, &lock, in_scope)
+        let mut evaluation = evaluate(&config, languages, &scan.code_blocks, &lock, in_scope)
             .map_err(|error| CliError::from(&error))?;
+        evaluation.look_up_tools(tools, config.root().as_path());
         scan.findings.extend(evaluation.findings);
         let stale = scan
             .findings
             .iter()
-            .filter(|finding| finding.code == CODE_STALE)
+            .filter(|finding| is_block_fix(finding))
             .count();
         let broken = scan
             .links
@@ -321,7 +330,7 @@ impl Planned {
             // A refreshed block has nothing to record, so only rewritten links name `update`.
             let blocks = done
                 .iter()
-                .filter(|planned| planned.finding.code == CODE_STALE)
+                .filter(|planned| is_block_fix(&planned.finding))
                 .count();
             let links = done.len() - blocks;
             let file_count = count(report.files(), "file", "files");
@@ -579,6 +588,12 @@ pub(crate) fn timed_out(scan: &Scan) -> impl Iterator<Item = &Finding> {
         .iter()
         .chain(targets)
         .filter(|finding| finding.code == CODE_TIMEOUT)
+}
+
+/// Whether `finding` is a code block's own fix: a stale `from(...)` block, or formatter output.
+/// Neither has anything for `update` to record.
+fn is_block_fix(finding: &Finding) -> bool {
+    finding.code == CODE_STALE || (finding.code == CODE_UNFORMATTED && finding.fix.is_some())
 }
 
 /// The note for a run with nothing to fix, naming the `broken` links and `stale` code blocks
@@ -1317,8 +1332,13 @@ mod tests {
             let args = fix_args(&session);
             (args.paths.clone(), args.confirm.mode())
         };
-        let planned = Planned::scan(&paths, &session.context, &mut session.output)
-            .expect("the fixture project should plan");
+        let planned = Planned::scan(
+            &paths,
+            &ToolEnv::default(),
+            &session.context,
+            &mut session.output,
+        )
+        .expect("the fixture project should plan");
         let edited = format!("Edited after the scan.\n{GUIDE}");
         project.write("docs/guide.md", &edited);
 
@@ -1386,8 +1406,13 @@ mod tests {
             let args = fix_args(&session);
             (args.paths.clone(), args.confirm.mode())
         };
-        let planned = Planned::scan(&paths, &session.context, &mut session.output)
-            .expect("the fixture project should plan");
+        let planned = Planned::scan(
+            &paths,
+            &ToolEnv::default(),
+            &session.context,
+            &mut session.output,
+        )
+        .expect("the fixture project should plan");
         let edited = format!("Edited after the scan.\n{GUIDE}");
         project.write("docs/guide.md", &edited);
         let locked = project.path("locked");

@@ -838,6 +838,13 @@ mod helps {
             needs_permissions: false,
         },
         HelpCase {
+            kind: "code-block-fix-unsafe",
+            setup: |p| shfmt_runs(p, "printf 'echo hi\\n```\\n'"),
+            args: &["check"],
+            via: Via::OutsideTools,
+            needs_permissions: false,
+        },
+        HelpCase {
             kind: "code-block-tool-timeout",
             setup: |p| shfmt_runs(p, "/bin/sleep 30"),
             args: &["check", "--code-block-timeout", "200ms"],
