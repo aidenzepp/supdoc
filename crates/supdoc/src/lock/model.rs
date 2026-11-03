@@ -82,6 +82,17 @@ impl Lockfile {
         self.uses.iter().map(|(key, hash)| (key, *hash))
     }
 
+    /// The key of `target` (`path#symbol` or `ns:path#symbol`) written in `doc`, or `None` when
+    /// either doesn't parse.
+    pub(crate) fn use_key(doc: &str, target: &str) -> Option<LinkKey> {
+        let (path, symbol) = target.split_once('#')?;
+        Some(LinkKey {
+            source: doc.parse().ok()?,
+            target: path.parse().ok()?,
+            symbol: Some(symbol.parse().ok()?),
+        })
+    }
+
     /// Every `uses=` entry as `(source, target, hash)`, in canonical order: the doc it is
     /// written in, relative to the root, and its target as `path#symbol` or `ns:path#symbol`.
     /// Strings, so code-blocks reads the section without naming a link key.
