@@ -7,6 +7,7 @@ use crate::config::code_blocks::Edition;
 use crate::finding::{IndexedText, Location};
 
 use super::block::CodeBlock;
+use super::format::{ParseError, first_line};
 
 /// The macros that read a file or an environment variable at compile time.
 const COMPILE_TIME_READS: [&str; 5] = [
@@ -589,6 +590,18 @@ fn is_rust_whitespace(c: char) -> bool {
     c.is_whitespace() || matches!(c, '\u{200E}' | '\u{200F}')
 }
 
+/// rustfmt's syntax-error report: stderr opening with `error:` and, when it can place it, a
+/// `--> <stdin>:L:C` line. `None` for any other stderr.
+#[must_use]
+pub(crate) fn parse_error(stderr: &str) -> Option<ParseError> {
+    stderr.starts_with("error:").then(|| ParseError {
+        line: stderr
+            .lines()
+            .find_map(|line| line.split_once("-->").map(|(_, at)| first_line(at)))
+            .flatten(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -596,10 +609,11 @@ mod tests {
 
     use super::{
         Found, LineMap, MAX_SCAN_BYTES, Scan, attribute_edition, compile_time_read, config_args,
-        format_args, scan, unhide,
+        format_args, parse_error, scan, unhide,
     };
     use crate::cartridges::markdown::cartridge::cartridge;
     use crate::code_blocks::block::blocks_in;
+    use crate::code_blocks::format::ParseError;
     use crate::config::code_blocks::Edition;
     use crate::finding::Location;
     use crate::path::AbsolutePath;
@@ -911,5 +925,26 @@ mod tests {
             .expect("the link should be creatable");
 
         assert_eq!(config_args(root.path()), Vec::<std::ffi::OsString>::new());
+    }
+
+    #[test]
+    fn an_error_report_with_a_position_is_a_parse_error_at_that_line() {
+        assert_eq!(
+            parse_error("error: expected one of `;`\n --> <stdin>:3:9\n  |\n"),
+            Some(ParseError { line: Some(2) })
+        );
+    }
+
+    #[test]
+    fn an_error_report_without_a_position_is_a_parse_error_without_a_line() {
+        assert_eq!(
+            parse_error("error: unexpected closing delimiter\n"),
+            Some(ParseError { line: None })
+        );
+    }
+
+    #[test]
+    fn stderr_not_opening_with_error_is_not_a_parse_error() {
+        assert_eq!(parse_error("warning: x\n"), None);
     }
 }

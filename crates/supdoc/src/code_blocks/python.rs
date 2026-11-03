@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 use std::path::Path;
 
+use super::format::{ParseError, first_line};
 use super::tools::Tool;
 
 /// `ruff format` or `black`'s arguments for the `index`th block (1-based) of `doc`, the doc's
@@ -27,11 +28,27 @@ pub(crate) fn format_args(tool: &Tool, doc: &Path, index: usize) -> Option<Vec<O
     Some(args)
 }
 
+/// `tool`'s syntax-error report in `stderr`: ruff's "Failed to parse <path>:L:C: ..." or black's
+/// "Cannot parse: L:C: ...". `None` for any other stderr.
+#[must_use]
+pub(crate) fn parse_error(tool: &Tool, stderr: &str) -> Option<ParseError> {
+    let marker = match tool.name {
+        "ruff-format" => "Failed to parse",
+        "black" => "Cannot parse",
+        _ => return None,
+    };
+    let (_, rest) = stderr.split_once(marker)?;
+    Some(ParseError {
+        line: first_line(rest.lines().next().unwrap_or_default()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
-    use super::format_args;
+    use super::{format_args, parse_error};
+    use crate::code_blocks::format::ParseError;
     use crate::code_blocks::tools::TOOLS;
 
     fn args_of(name: &str, index: usize) -> Option<Vec<std::ffi::OsString>> {
@@ -67,5 +84,39 @@ mod tests {
     #[test]
     fn no_other_tool_gets_python_arguments() {
         assert_eq!(args_of("shfmt", 1), None);
+    }
+
+    fn tool(name: &str) -> &'static crate::code_blocks::tools::Tool {
+        TOOLS
+            .iter()
+            .find(|tool| tool.name == name)
+            .expect("the tool table should list the formatter")
+    }
+
+    #[test]
+    fn ruffs_failed_to_parse_is_a_parse_error_at_its_line() {
+        assert_eq!(
+            parse_error(
+                tool("ruff-format"),
+                "error: Failed to parse /p/a.md.1.py:4:7: Expected an expression\n"
+            ),
+            Some(ParseError { line: Some(3) })
+        );
+    }
+
+    #[test]
+    fn blacks_cannot_parse_is_a_parse_error_at_its_line() {
+        assert_eq!(
+            parse_error(
+                tool("black"),
+                "error: cannot format /p/a.md.1.py: Cannot parse: 2:4: x = (\n"
+            ),
+            Some(ParseError { line: Some(1) })
+        );
+    }
+
+    #[test]
+    fn other_stderr_is_not_a_parse_error() {
+        assert_eq!(parse_error(tool("black"), "error: boom\n"), None);
     }
 }

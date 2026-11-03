@@ -85,6 +85,8 @@ pub(crate) enum Failure {
     Unformatted,
     /// Its tool exited unexpectedly or wrote past the output cap.
     ToolFailed,
+    /// Its tool reported a syntax error in it.
+    ParseFailed,
     /// Its tool passed the `[limits] code-block-timeout` limit.
     ToolTimeout,
 }
@@ -175,6 +177,9 @@ impl BlockState {
                 tool_of(tag, tool)
             )),
             Self::Failed(Failure::ToolFailed) => Some(format!("`{}` failed", tool_of(tag, tool))),
+            Self::Failed(Failure::ParseFailed) => {
+                Some(format!("`{}` couldn't parse it", tool_of(tag, tool)))
+            }
             Self::Failed(Failure::ToolTimeout) => {
                 Some(format!("`{}` passed the time limit", tool_of(tag, tool)))
             }

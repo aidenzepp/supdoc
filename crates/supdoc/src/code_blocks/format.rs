@@ -25,6 +25,9 @@ const UNFORMATTED: &str = "code-block-unformatted";
 /// The code for a tool that exited unexpectedly or wrote past the output cap.
 const TOOL_FAILED: &str = "code-block-tool-failed";
 
+/// The code for a block its language's tool couldn't parse.
+const PARSE: &str = "code-block-parse";
+
 /// The code for a tool that passed the `[limits] code-block-timeout` limit.
 const TOOL_TIMEOUT: &str = "code-block-tool-timeout";
 
@@ -47,8 +50,52 @@ pub(crate) enum Verdict {
     Unformatted(String),
     /// The formatter failed; the detail says how.
     ToolFailed(String),
+    /// The formatter reported a syntax error in the block.
+    ParseFailed {
+        /// The first lines of the tool's stderr.
+        detail: String,
+        /// The block body line (0-based) the tool named, when it named one.
+        line: Option<usize>,
+    },
     /// The formatter passed its timeout.
     TimedOut,
+}
+
+/// A syntax error a formatter reported: the line it named, when it named one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ParseError {
+    /// The body line (0-based) the tool named.
+    pub(crate) line: Option<usize>,
+}
+
+/// The 0-based line of the first `line:column` pair in `text`, `None` when it has none.
+#[must_use]
+pub(crate) fn first_line(text: &str) -> Option<usize> {
+    let mut rest = text;
+    while let Some(at) = rest.find(|c: char| c.is_ascii_digit()) {
+        let from = rest.get(at..)?;
+        let digits = from
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(from.len());
+        let after = from.get(digits..)?;
+        let column = after.strip_prefix(':');
+        if column.is_some_and(|column| column.starts_with(|c: char| c.is_ascii_digit())) {
+            return from.get(..digits)?.parse::<usize>().ok()?.checked_sub(1);
+        }
+        rest = after;
+    }
+    None
+}
+
+/// Whether `stderr`, from `tool`, is its syntax-error report rather than another failure. The
+/// runner gives no exit status beyond success, so each tool is told by its message alone.
+#[must_use]
+fn parse_error(tool: &Tool, stderr: &str) -> Option<ParseError> {
+    match tool.language {
+        Language::Shell => shell::parse_error(stderr),
+        Language::Rust => rust::parse_error(stderr),
+        Language::Python => python::parse_error(tool, stderr),
+    }
 }
 
 impl Verdict {
@@ -59,6 +106,7 @@ impl Verdict {
             Self::Formatted => states::BlockState::Passed,
             Self::Unformatted(_) => states::BlockState::Failed(states::Failure::Unformatted),
             Self::ToolFailed(_) => states::BlockState::Failed(states::Failure::ToolFailed),
+            Self::ParseFailed { .. } => states::BlockState::Failed(states::Failure::ParseFailed),
             Self::TimedOut => states::BlockState::Failed(states::Failure::ToolTimeout),
         }
     }
@@ -96,9 +144,9 @@ pub(crate) fn input(block: &CodeBlock, text: &str) -> Option<String> {
 
 /// Judges a formatter's `result` on `input`: equal output passes, other output is unformatted and
 /// kept, output that isn't UTF-8 and a non-zero exit are failures (the exit carrying the first
-/// lines of stderr), and a timeout is a timeout.
+/// lines of stderr, and a parse failure when `tool`'s stderr is its syntax-error report), and a timeout is a timeout.
 #[must_use]
-pub(crate) fn judge(input: &str, result: Result<Ran, Failure>) -> Verdict {
+pub(crate) fn judge(tool: &Tool, input: &str, result: Result<Ran, Failure>) -> Verdict {
     match result {
         Ok(ran) if ran.success && ran.stdout == input.as_bytes() => Verdict::Formatted,
         Ok(ran) if ran.success => String::from_utf8(ran.stdout).map_or_else(
@@ -108,6 +156,12 @@ pub(crate) fn judge(input: &str, result: Result<Ran, Failure>) -> Verdict {
         Ok(ran) => {
             let stderr = String::from_utf8_lossy(&ran.stderr);
             let lines: Vec<&str> = stderr.lines().take(STDERR_LINES).collect();
+            if let Some(error) = parse_error(tool, &stderr) {
+                return Verdict::ParseFailed {
+                    detail: lines.join("\n"),
+                    line: error.line,
+                };
+            }
             Verdict::ToolFailed(if lines.is_empty() {
                 "it exited unsuccessfully and printed nothing to stderr".to_owned()
             } else {
@@ -149,6 +203,15 @@ pub(crate) fn finding(
         )
         .with_help(format!(
             "fix what `{name}` reports, or mark the block `ignore(<why>)`"
+        )),
+        Verdict::ParseFailed { detail, .. } => Finding::new(
+            PARSE,
+            Severity::Error,
+            format!("`{name}` couldn't parse the block: {detail}"),
+        )
+        .with_help(format!(
+            "fix the code, write the lines the block needs to parse as hidden `# ` lines (Rust), \
+             or mark the block `ignore(<why>)` or `no_format(<why>)`; `{name}` doesn't run on a block it can't parse"
         )),
         Verdict::TimedOut => Finding::new(
             TOOL_TIMEOUT,
@@ -515,6 +578,11 @@ mod tests {
         out
     }
 
+    /// The shell formatter.
+    fn shfmt() -> &'static crate::code_blocks::tools::Tool {
+        formatter(Language::Shell).expect("shell has a formatter")
+    }
+
     /// A successful run that printed `stdout`.
     fn printed(stdout: &str) -> Ran {
         Ran {
@@ -527,11 +595,11 @@ mod tests {
     #[test]
     fn equal_output_passes_and_other_output_is_unformatted() {
         assert_eq!(
-            judge("echo hi\n", Ok(printed("echo hi\n"))),
+            judge(shfmt(), "echo hi\n", Ok(printed("echo hi\n"))),
             Verdict::Formatted
         );
         assert_eq!(
-            judge("echo  hi\n", Ok(printed("echo hi\n"))),
+            judge(shfmt(), "echo  hi\n", Ok(printed("echo hi\n"))),
             Verdict::Unformatted("echo hi\n".to_owned())
         );
     }
@@ -545,7 +613,7 @@ mod tests {
         });
 
         assert_eq!(
-            judge("x\n", ran),
+            judge(shfmt(), "x\n", ran),
             Verdict::ToolFailed("1\n2\n3\n4\n5".to_owned())
         );
     }
