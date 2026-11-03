@@ -20,9 +20,11 @@ use crate::check::plan::{
     LockChange, MIGRATION_STATES, Migration, SettingsChange, UpdatePlan, plan_update,
 };
 use crate::check::reconcile::reconcile_in;
+use crate::code_blocks::uses::{self, Current};
 use crate::finding::Finding;
 use crate::hash::LineEndings;
-use crate::link::LinkKey;
+use crate::link::{LinkKey, SourcePath};
+use crate::lock::model::Lockfile;
 use crate::output::json::Envelope;
 use crate::output::text::{render_finding, visible};
 use crate::output::{Output, PathStyle, RecordArray, Report, Summary, TextContext, preview_note};
@@ -73,9 +75,10 @@ pub(crate) fn run(
     {
         return Err(settings_mismatch(&config, change));
     }
+    let languages = Languages::builtin().map_err(CliError::from)?;
     let scan = crate::scan::assemble::run_with_settings(
         &config,
-        Languages::builtin().map_err(CliError::from)?,
+        languages,
         &scope,
         &context.global_excludes,
         settings,
@@ -88,7 +91,25 @@ pub(crate) fn run(
     let migration = Migration::for_update(settings, &scope, &args.state);
     let plan = plan_update(&model, &scan, &lock, &args.state, migration);
     let applied = args.confirm.mode() == WriteMode::Apply;
-    if applied && let Some(next) = &plan.next {
+    let in_scope = |doc: &str| {
+        doc.parse::<SourcePath>()
+            .is_ok_and(|doc| scope.contains(&doc) && !scan.is_unread(&doc))
+    };
+    let current = if config.code_blocks().is_some() {
+        let blocks = scan.code_blocks.iter().filter(|block| {
+            block
+                .info
+                .as_ref()
+                .is_some_and(|info| in_scope(info.location.file.as_str()))
+        });
+        uses::current(&config, languages, blocks).map_err(|error| CliError::from(&error))?
+    } else {
+        Current::default()
+    };
+    let mut next = plan.next.clone().unwrap_or_else(|| lock.clone());
+    let use_changes = plan_uses(&lock, &mut next, &current, in_scope);
+    let next = (plan.next.is_some() || !use_changes.is_empty()).then_some(next);
+    if applied && let Some(next) = &next {
         next.write(&lock_path(config.root()))
             .map_err(|error| lock_failure(&error, config.root(), &context.cwd))?;
     }
@@ -119,7 +140,8 @@ pub(crate) fn run(
             &flags,
         ),
     );
-    let report = UpdateReport::new(&model, &plan, &args.state, applied, &paths, context);
+    let report = UpdateReport::new(&model, &plan, &args.state, applied, &paths, context)
+        .with_uses(use_changes, current.missing);
     // A file that outlasted `parse-timeout` left its links unread, so the run fails.
     let timed_out = timed_out(&scan).next().is_some();
     output
@@ -203,6 +225,29 @@ impl UpdateReport {
                 .collect(),
             rows,
         }
+    }
+
+    /// This report with the `uses(...)` changes `update` makes, and the `uses(...)` values that
+    /// don't resolve and so aren't recorded.
+    fn with_uses(mut self, changes: Vec<(Action, LinkKey)>, missing: Vec<Finding>) -> Self {
+        for (action, key) in changes {
+            let row = ChangeRow {
+                action,
+                state: match action {
+                    Action::Accept => LinkState::Failed,
+                    Action::Record => LinkState::New,
+                    Action::Remove => LinkState::Obsolete,
+                },
+                key,
+                locations: Vec::new(),
+                moved_from: None,
+                uses: true,
+            };
+            self.changes.push(ChangeJson::from(&row));
+            self.rows.push(row);
+        }
+        self.findings.extend(missing);
+        self
     }
 
     /// What the run says on stderr when it is done. A settings change alone is a
@@ -344,6 +389,9 @@ pub(crate) struct ChangeJson {
     /// The entry a moved link carries its history from.
     #[serde(skip_serializing_if = "Option::is_none")]
     moved_from: Option<LinkKey>,
+    /// Whether the entry is a `[[code-blocks.uses]]` one rather than a link's. Left out when not.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    uses: bool,
 }
 
 impl From<&ChangeRow> for ChangeJson {
@@ -354,6 +402,7 @@ impl From<&ChangeRow> for ChangeJson {
             key: row.key.clone(),
             locations: row.locations.clone(),
             moved_from: row.moved_from.clone(),
+            uses: row.uses,
         }
     }
 }
@@ -371,6 +420,8 @@ struct ChangeRow {
     locations: Vec<LinkLocationJson>,
     /// The entry a moved link carries its history from.
     moved_from: Option<LinkKey>,
+    /// Whether the entry is a `[[code-blocks.uses]]` one.
+    uses: bool,
 }
 
 impl ChangeRow {
@@ -393,8 +444,46 @@ impl ChangeRow {
                 .map(|link| link.locations.iter().map(LinkLocationJson::from).collect())
                 .unwrap_or_default(),
             moved_from: link.and_then(|link| link.moved_from.clone()),
+            uses: false,
         }
     }
+}
+
+/// Brings `next`'s `[[code-blocks.uses]]` entries in line with `current` for the docs `in_scope`,
+/// and returns each change. Entries of other docs stay, and so do a doc's own records while one of
+/// its values doesn't resolve.
+fn plan_uses(
+    lock: &Lockfile,
+    next: &mut Lockfile,
+    current: &Current,
+    in_scope: impl Fn(&str) -> bool,
+) -> Vec<(Action, LinkKey)> {
+    let written: BTreeMap<LinkKey, _> = current
+        .written
+        .iter()
+        .filter_map(|value| {
+            uses::key(value.at.file.as_str(), &value.target).map(|key| (key, value.hash))
+        })
+        .collect();
+    let mut changes = Vec::new();
+    for (key, hash) in &written {
+        match next.insert_use(key.clone(), *hash) {
+            None => changes.push((Action::Record, key.clone())),
+            Some(old) if old != *hash => changes.push((Action::Accept, key.clone())),
+            Some(_) => {}
+        }
+    }
+    for (key, _) in lock.uses() {
+        let doc = key.source.as_str();
+        if in_scope(doc)
+            && !current.unresolved.contains(doc)
+            && !written.contains_key(key)
+            && next.remove_use(key).is_some()
+        {
+            changes.push((Action::Remove, key.clone()));
+        }
+    }
+    changes
 }
 
 /// Writes the settings line that leads a migration's rows, as `settings  line-endings  exact ->

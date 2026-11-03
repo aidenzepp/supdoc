@@ -3,9 +3,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::config::Config;
 use crate::finding::{Finding, Location, Severity};
 use crate::hash::Hash;
+use crate::link::LinkKey;
 use crate::lock::model::LOCK_FILE_NAME;
+use crate::read::cartridge::Languages;
+use crate::read::error::CartridgeLoadError;
+
+use super::block::CodeBlock;
+use super::info::{SourceKind, source_attributes};
+use super::source::{self, Unresolved};
 
 /// The code for a `uses(...)` target whose symbol changed since it was recorded.
 const CHANGED: &str = "code-block-uses-changed";
@@ -25,6 +33,67 @@ pub(crate) struct Written {
     pub(crate) target: String,
     /// The symbol's current hash.
     pub(crate) hash: Hash,
+}
+
+/// What `supdoc update` records: the `uses(...)` values the docs write now.
+#[derive(Debug, Default)]
+pub(crate) struct Current {
+    /// Every value that resolves, with its current hash.
+    pub(crate) written: Vec<Written>,
+    /// The docs with a value that doesn't resolve. Their stale records are kept.
+    pub(crate) unresolved: BTreeSet<String>,
+    /// One `code-block-source-missing` error for each value that doesn't resolve.
+    pub(crate) missing: Vec<Finding>,
+}
+
+/// The current hash of each `uses(...)` value in `blocks`, whatever the block's language.
+///
+/// Effect: reads every source file the values name, contained in the project root.
+///
+/// # Errors
+///
+/// [`CartridgeLoadError`] when a source's built-in cartridge doesn't load.
+pub(crate) fn current<'block>(
+    config: &Config,
+    languages: &Languages,
+    blocks: impl IntoIterator<Item = &'block CodeBlock>,
+) -> Result<Current, CartridgeLoadError> {
+    let mut current = Current::default();
+    for block in blocks {
+        let Some(info) = block.info.as_ref() else {
+            continue;
+        };
+        let doc = info.location.file.as_str();
+        for attribute in source_attributes(&info.text) {
+            if attribute.kind != SourceKind::Uses {
+                continue;
+            }
+            match source::read_use(config, languages, doc, attribute.value) {
+                Ok(found) => current.written.push(Written {
+                    at: info.location.clone(),
+                    target: found.target,
+                    hash: found.hash,
+                }),
+                Err(Unresolved::CartridgeLoad(error)) => return Err(error),
+                Err(Unresolved::Missing(missing)) => {
+                    let _ = current.unresolved.insert(doc.to_owned());
+                    current.missing.push(missing.finding(info.location.clone()));
+                }
+            }
+        }
+    }
+    Ok(current)
+}
+
+/// The lockfile key of `target` (`path#symbol` or `ns:path#symbol`) written in `doc`, or `None`
+/// when either doesn't parse.
+pub(crate) fn key(doc: &str, target: &str) -> Option<LinkKey> {
+    let (path, symbol) = target.split_once('#')?;
+    Some(LinkKey {
+        source: doc.parse().ok()?,
+        target: path.parse().ok()?,
+        symbol: Some(symbol.parse().ok()?),
+    })
 }
 
 /// The findings for `written` against `recorded`, the lockfile's `(doc, target, hash)` entries:
