@@ -723,6 +723,36 @@ fn check_with_shfmt(script: &str, args: &[&str], exit: i32) -> serde_json::Value
 }
 
 #[test]
+fn shell_format_with_the_real_shfmt_passes_formatted_blocks_and_fails_others() {
+    let Some(dir) = std::env::var_os("PATH")
+        .iter()
+        .flat_map(std::env::split_paths)
+        .find(|dir| dir.is_absolute() && dir.join("shfmt").is_file())
+    else {
+        // Written to the process's stderr directly, which `cargo test` shows for a passing test.
+        let _ignored = std::io::Write::write_all(
+            &mut std::io::stderr(),
+            b"SKIPPED shell_format_with_the_real_shfmt: shfmt is not on PATH\n",
+        );
+        return;
+    };
+    let project = project_with_shell_blocks();
+    project.write(
+        "docs/blocks.md",
+        "# Blocks\n\n```sh\necho hi\n```\n\n```sh\nif true;then echo bye;fi\n```\n",
+    );
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", &dir)])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-unformatted"], "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/failed"), 1, "{json}");
+}
+
+#[test]
 fn shell_format_equal_output_passes_every_block() {
     let json = check_with_shfmt("/bin/cat", &[], 0);
 
@@ -757,8 +787,8 @@ fn shell_format_a_non_zero_exit_quotes_stderr_and_names_the_block_by_its_index()
         "{json}"
     );
     let text = json.to_string();
-    assert!(text.contains("docs/blocks.md/1.sh"), "{json}");
-    assert!(text.contains("docs/blocks.md/2.sh"), "{json}");
+    assert!(text.contains("docs/blocks.md.1.sh"), "{json}");
+    assert!(text.contains("docs/blocks.md.2.sh"), "{json}");
 }
 
 #[test]

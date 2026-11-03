@@ -270,6 +270,7 @@ fn run_formatter(
     let args: Vec<&std::ffi::OsStr> = args.iter().map(std::ffi::OsString::as_os_str).collect();
     let call = Call {
         program,
+        name: tool.binary,
         args: &args,
         extra: &[],
         stdin: input.as_bytes(),

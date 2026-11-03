@@ -28,6 +28,9 @@ const POLL: Duration = Duration::from_millis(5);
 pub(crate) struct Call<'call> {
     /// The binary's absolute real path, as the lookup returned it.
     pub(crate) program: &'call Path,
+    /// The tool's own name, passed as `argv[0]`, so a multi-call binary reached through a
+    /// symlink (a rustup proxy) runs as the tool it was looked up as.
+    pub(crate) name: &'call str,
     /// The arguments, after the program.
     pub(crate) args: &'call [&'call OsStr],
     /// Variables the call needs beyond [`ToolEnv`]'s.
@@ -62,7 +65,8 @@ pub(crate) enum Failure {
 
 /// Runs `call` with `env`'s variables, from [`neutral_dir`] judged against `root`.
 ///
-/// Effect: spawns the tool and, on a timeout or the cap, kills its process group.
+/// Effect: spawns the tool and kills its process group once it exits, passes its timeout or
+/// writes past the cap.
 ///
 /// # Errors
 ///
@@ -70,6 +74,7 @@ pub(crate) enum Failure {
 pub(crate) fn run(call: &Call<'_>, env: &ToolEnv, root: &Path) -> Result<Ran, Failure> {
     let deadline = call.timeout.map(|timeout| Instant::now() + timeout);
     let mut child = Command::new(call.program)
+        .arg0(call.name)
         .args(call.args)
         .env_clear()
         .envs(env.vars())
@@ -142,7 +147,11 @@ pub(crate) fn run(call: &Call<'_>, env: &ToolEnv, root: &Path) -> Result<Ran, Fa
     }
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break status,
+            Ok(Some(status)) => {
+                // Anything the tool left running in its group, holding no stream, dies with it.
+                kill_group(child.id());
+                break status;
+            }
             Ok(None) if deadline.is_some_and(|deadline| Instant::now() >= deadline) => {
                 return Err(kill(child, Failure::TimedOut));
             }
@@ -163,15 +172,23 @@ pub(crate) fn run(call: &Call<'_>, env: &ToolEnv, root: &Path) -> Result<Ran, Fa
 /// Effect: signals the tool's process group and waits for the tool itself to exit.
 fn kill(mut child: Child, failure: Failure) -> Failure {
     let _gone = child.kill();
+    kill_group(child.id());
+    let _reaped = child.wait();
+    failure
+}
+
+/// Best effort, sends `SIGKILL` to every process in the group `pgid` through `/bin/kill`. A group
+/// already empty is not an error.
+///
+/// Effect: signals the process group.
+fn kill_group(pgid: u32) {
     let _group = Command::new("/bin/kill")
-        .args(["-KILL", "--", &format!("-{}", child.id())])
+        .args(["-KILL", "--", &format!("-{pgid}")])
         .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
-    let _reaped = child.wait();
-    failure
 }
 
 /// The working directory a tool runs in: `cwd` under `$XDG_CACHE_HOME/supdoc/code-blocks`, or
@@ -200,11 +217,21 @@ pub(crate) fn neutral_dir(env: &ToolEnv, root: &Path) -> PathBuf {
 }
 
 /// Whether `dir`, created mode 0700 when missing, is an empty directory only its owner reaches,
-/// outside `root`.
+/// outside `root`. Nothing is created unless the deepest existing ancestor of `dir` is outside
+/// `root`.
 ///
-/// Effect: creates the directory and reads its metadata and entries.
+/// Effect: reads metadata along `dir`, then creates the directory and reads its entries.
 fn usable(dir: &Path, root: &Path) -> bool {
     use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+    let Ok(real_root) = root.canonicalize() else {
+        return false;
+    };
+    let existing = dir
+        .ancestors()
+        .find_map(|ancestor| ancestor.canonicalize().ok());
+    if existing.is_none_or(|existing| existing.starts_with(&real_root)) {
+        return false;
+    }
     let _created = std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -212,7 +239,7 @@ fn usable(dir: &Path, root: &Path) -> bool {
     let Ok(meta) = std::fs::symlink_metadata(dir) else {
         return false;
     };
-    let (Ok(real), Ok(real_root)) = (dir.canonicalize(), root.canonicalize()) else {
+    let Ok(real) = dir.canonicalize() else {
         return false;
     };
     meta.is_dir()
@@ -283,6 +310,7 @@ mod tests {
     ) -> Result<Ran, Failure> {
         let call = Call {
             program: &fixture.stub,
+            name: "tool",
             args: &[],
             extra,
             stdin,
@@ -353,12 +381,31 @@ mod tests {
     }
 
     #[test]
-    fn a_home_inside_the_root_falls_back_to_slash() {
+    fn a_home_inside_the_root_falls_back_to_slash_and_creates_nothing() {
         let fixture = fixture("true");
         let home = fixture.root.join("home");
         let env = ToolEnv::from_vars(|name| (name == "HOME").then(|| home.clone().into()));
 
         assert_eq!(neutral_dir(&env, &fixture.root), Path::new("/"));
+        assert!(!home.exists(), "nothing should be created inside the root");
+    }
+
+    #[test]
+    fn the_tool_runs_with_its_own_name_as_argv0() {
+        let fixture = fixture("true");
+        // `/bin/sh` reading a script from stdin reports its own argv[0] as `$0`.
+        let call = Call {
+            program: Path::new("/bin/sh"),
+            name: "shfmt",
+            args: &[],
+            extra: &[],
+            stdin: b"echo \"$0\"\n",
+            timeout: Some(Duration::from_secs(5)),
+        };
+
+        let ran = run(&call, &fixture.env, &fixture.root).expect("sh should run");
+
+        assert_eq!(String::from_utf8_lossy(&ran.stdout), "shfmt\n");
     }
 
     #[test]
@@ -383,19 +430,76 @@ mod tests {
         assert_eq!(ran.stdout.len(), CAP);
     }
 
+    /// Whether `/bin/kill -0` still reaches `target`, a pid or a negated process group, within
+    /// two seconds of polling: `false` once it is gone.
+    fn still_alive(target: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            let alive = std::process::Command::new("/bin/kill")
+                .args(["-0", "--", target])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("/bin/kill should run")
+                .success();
+            if !alive {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        true
+    }
+
+    /// The `(pid, pgid)` a stub wrote to `file` as `<sleep pid> <its own pid>`.
+    fn written_ids(file: &Path) -> (String, String) {
+        let ids = fs::read_to_string(file).expect("the stub should write its ids");
+        let mut ids = ids.split_whitespace().map(str::to_owned);
+        let sleep = ids.next().expect("the stub should write the sleep's pid");
+        let group = ids.next().expect("the stub should write its own pid");
+        (sleep, format!("-{group}"))
+    }
+
     #[test]
-    fn a_child_holding_stdout_dies_at_the_timeout() {
-        let fixture = fixture("sleep 30 &\nexit 0");
+    fn a_child_holding_stdout_dies_with_its_group_at_the_timeout() {
+        let ids = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let file = ids.path().join("ids");
+        let fixture = fixture(&format!(
+            "/bin/sleep 30 &\necho \"$! $$\" > '{}'\nexit 0",
+            file.display()
+        ));
         let started = Instant::now();
 
         let result = run_stub(&fixture, b"", &[], Some(Duration::from_millis(200)));
+        let elapsed = started.elapsed();
+        let (sleep, group) = written_ids(&file);
 
         assert!(matches!(result, Err(Failure::TimedOut)), "{result:?}");
+        assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
         assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "took {:?}",
-            started.elapsed()
+            !still_alive(&sleep),
+            "the sleep {sleep} outlived the timeout"
         );
+        assert!(
+            !still_alive(&group),
+            "the group {group} outlived the timeout"
+        );
+    }
+
+    #[test]
+    fn a_child_left_running_after_a_clean_exit_dies_with_its_group() {
+        let ids = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let file = ids.path().join("ids");
+        let fixture = fixture(&format!(
+            "/bin/sleep 30 >/dev/null 2>&1 &\necho \"$! $$\" > '{}'\nexit 0",
+            file.display()
+        ));
+
+        let ran = run_stub(&fixture, b"", &[], Some(Duration::from_secs(5)))
+            .expect("the stub should exit cleanly");
+        let (sleep, group) = written_ids(&file);
+
+        assert!(ran.success);
+        assert!(!still_alive(&sleep), "the sleep {sleep} outlived the tool");
+        assert!(!still_alive(&group), "the group {group} outlived the tool");
     }
 
     #[test]
