@@ -151,6 +151,7 @@ fn from_and_uses_that_resolve_draw_no_finding() {
             lib.trim_end_matches('\n')
         ),
     );
+    record_use(&project, "src/lib.rs", "add", ADD);
 
     let json = project.supdoc(&["check", "--json"]).assert_exit(0).json();
 
@@ -297,9 +298,9 @@ fn project_with_use() -> Project {
     project
 }
 
-/// Records `symbol_text`'s hash for the block's `uses(...)` target in `supdoc.lock`, as
-/// `supdoc update` will.
-fn record_use(project: &Project, symbol_text: &str) {
+/// Records `symbol_text`'s hash in `supdoc.lock` for `docs/blocks.md`'s `uses(...)` target
+/// `target#symbol`, as `supdoc update` will.
+fn record_use(project: &Project, target: &str, symbol: &str, symbol_text: &str) {
     use std::fmt::Write as _;
 
     use sha2::{Digest, Sha256};
@@ -316,7 +317,7 @@ fn record_use(project: &Project, symbol_text: &str) {
     project.write(
         "supdoc.lock",
         &format!(
-            "{lock}\n[[code-blocks.uses]]\nsource = \"docs/blocks.md\"\ntarget = \"src/counter.rs\"\nsymbol = \"Counter.bump\"\nhash = \"{hash}\"\n"
+            "{lock}\n[[code-blocks.uses]]\nsource = \"docs/blocks.md\"\ntarget = \"{target}\"\nsymbol = \"{symbol}\"\nhash = \"{hash}\"\n"
         ),
     );
 }
@@ -326,7 +327,7 @@ fn uses_an_unrecorded_target_is_new_and_passes_once_recorded() {
     let project = project_with_use();
 
     let unrecorded = project.supdoc(&["check", "--json"]).assert_exit(1).json();
-    record_use(&project, BUMP);
+    record_use(&project, "src/counter.rs", "Counter.bump", BUMP);
     let recorded = project.supdoc(&["check", "--json"]).assert_exit(0).json();
 
     assert_eq!(
@@ -340,7 +341,7 @@ fn uses_an_unrecorded_target_is_new_and_passes_once_recorded() {
 #[test]
 fn uses_a_recorded_method_that_changes_fails_the_check() {
     let project = project_with_use();
-    record_use(&project, BUMP);
+    record_use(&project, "src/counter.rs", "Counter.bump", BUMP);
     let _passing = project.supdoc(&["check"]).assert_exit(0);
 
     project.replace("src/counter.rs", "        1\n", "        2\n");
