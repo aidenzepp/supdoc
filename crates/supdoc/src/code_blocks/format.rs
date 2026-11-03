@@ -63,14 +63,14 @@ impl Verdict {
     }
 }
 
-/// The formatter's arguments for the `index`th block (1-based) of `doc`, the doc's absolute path.
+/// `tool`'s arguments for the `index`th block (1-based) of `doc`, the doc's absolute path.
 /// `None` while `language` has no format step, which leaves its blocks pending.
 #[must_use]
-pub(crate) fn args(language: Language, doc: &Path, index: usize) -> Option<Vec<OsString>> {
-    match language {
+pub(crate) fn args(tool: &Tool, doc: &Path, index: usize) -> Option<Vec<OsString>> {
+    match tool.language {
         Language::Shell => Some(shell::format_args(doc, index)),
         Language::Rust => Some(rust::format_args()),
-        Language::Python => python::format_args(doc, index),
+        Language::Python => python::format_args(tool, doc, index),
     }
 }
 
