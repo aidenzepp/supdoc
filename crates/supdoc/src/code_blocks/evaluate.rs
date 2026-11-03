@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::Config;
-use crate::config::code_blocks::Language;
+use crate::config::code_blocks::{CodeBlocks, Dialect, Formatter, Language};
 use crate::finding::{Finding, Location, Severity};
 use crate::hash::Hash;
 use crate::lock::model::Lockfile;
@@ -23,9 +23,10 @@ use super::info::{
     source_attributes,
 };
 use super::runner::{self, Call};
+use super::shell;
 use super::source::{self, SourceText, Unresolved};
 use super::states::{Excerpt, NotChecked, state_of, tag_of};
-use super::tools::{Found, Tool, ToolEnv, find, formatter};
+use super::tools::{Found, Step, TOOLS, Tool, ToolEnv, find, formatter};
 use super::uses::{self, UseState, Written};
 
 pub(crate) use super::states::{BlockState, CodeBlockCounts};
@@ -70,6 +71,10 @@ pub(crate) struct BlockRecord {
     pub(crate) uses: Vec<(String, UseState)>,
     /// The block's 1-based position among the blocks of its doc.
     index: usize,
+    /// The formatter the config selects for it, while the block is pending.
+    tool: Option<&'static Tool>,
+    /// The shell dialect shfmt parses it as.
+    dialect: Dialect,
     /// What the format step needs, kept while the block is pending.
     pending: Option<Pending>,
 }
@@ -150,17 +155,12 @@ pub(crate) fn evaluate(
             findings.extend(missing_reasons(info));
             let sources = sources(config, languages, info)?;
             findings.extend(sources.missing);
-            let doc_name = block.fence.file.as_str();
-            block_uses.extend(sources.uses.iter().map(|value| {
-                let hash = recorded.get(&(doc_name, value.target.clone()));
-                (value.target.clone(), UseState::of(value, hash))
-            }));
-            block_uses.extend(
-                sources
-                    .unresolved
-                    .into_iter()
-                    .map(|value| (value, UseState::Missing)),
-            );
+            block_uses.extend(use_states(
+                &sources.uses,
+                sources.unresolved,
+                &recorded,
+                block.fence.file.as_str(),
+            ));
             written.extend(sources.uses);
             unresolved_uses.extend(sources.use_missing.then_some(block.fence.file.as_str()));
             outcome = sources.from_missing.then_some(Excerpt::SourceMissing);
@@ -188,20 +188,25 @@ pub(crate) fn evaluate(
         }
         let state = state_of(block, outcome, |language| code_blocks.checks(language));
         let language = tag_of(block).map(str::to_owned);
-        let pending = if state == BlockState::NotChecked(NotChecked::Pending) {
-            let file = block.fence.file.as_str();
-            if doc.as_ref().is_none_or(|(read, _)| *read != file) {
-                doc = Some((file, read(file)));
-            }
-            doc.as_ref()
-                .and_then(|(_, text)| text.as_ref())
-                .and_then(|text| Pending::of(block, text))
-        } else {
-            None
-        };
+        let (state, tool, skip_reason) =
+            format_choice(block, state, language.as_deref(), code_blocks);
+        let pending = (state == BlockState::NotChecked(NotChecked::Pending))
+            .then(|| {
+                let file = block.fence.file.as_str();
+                if doc.as_ref().is_none_or(|(read, _)| *read != file) {
+                    doc = Some((file, read(file)));
+                }
+                doc.as_ref()?
+                    .1
+                    .as_ref()
+                    .and_then(|text| Pending::of(block, text))
+            })
+            .flatten();
         records.push(BlockRecord {
             at: block.fence.clone(),
-            reason: state.reason(language.as_deref()),
+            reason: skip_reason.or_else(|| state.reason(language.as_deref())),
+            tool,
+            dialect: code_blocks.dialect(),
             language,
             state: state.clone(),
             uses: block_uses,
@@ -242,12 +247,7 @@ impl Evaluation {
             if record.state != BlockState::NotChecked(NotChecked::Pending) {
                 continue;
             }
-            let Some(tool) = record
-                .language
-                .as_deref()
-                .and_then(Language::from_tag)
-                .and_then(formatter)
-            else {
+            let Some(tool) = record.tool else {
                 continue;
             };
             let found =
@@ -302,7 +302,10 @@ fn run_formatter(
     let pending = record.pending.as_ref()?;
     let input = pending.input.as_str();
     let doc = root.join(record.at.file.as_str());
-    let args = format::args(tool.language, &doc, record.index)?;
+    let mut args = format::args(tool.language, &doc, record.index)?;
+    if tool.language == Language::Shell {
+        args.extend(shell::dialect_args(record.dialect));
+    }
     let args: Vec<&std::ffi::OsStr> = args.iter().map(std::ffi::OsString::as_os_str).collect();
     let call = Call {
         program,
@@ -321,6 +324,65 @@ fn run_formatter(
         (_, finding) => finding.into_iter().collect(),
     };
     Some((verdict, findings))
+}
+
+/// Each resolved `uses(...)` value of `doc_name` with its state against `recorded`, then each
+/// `unresolved` one as missing.
+fn use_states(
+    resolved: &[Written],
+    unresolved: Vec<String>,
+    recorded: &BTreeMap<(&str, String), Hash>,
+    doc_name: &str,
+) -> Vec<(String, UseState)> {
+    let found = resolved.iter().map(|value| {
+        let hash = recorded.get(&(doc_name, value.target.clone()));
+        (value.target.clone(), UseState::of(value, hash))
+    });
+    let missing = unresolved
+        .into_iter()
+        .map(|value| (value, UseState::Missing));
+    found.chain(missing).collect()
+}
+
+/// What the format step does with `block`, in `state`: a pending block marked `no_format(...)`
+/// or in a language with `formatter = false` leaves it, with the author's reason when given;
+/// any other pending block keeps its state with the formatter selected for `tag`.
+fn format_choice(
+    block: &CodeBlock,
+    state: BlockState,
+    tag: Option<&str>,
+    code_blocks: &CodeBlocks,
+) -> (BlockState, Option<&'static Tool>, Option<String>) {
+    if state != BlockState::NotChecked(NotChecked::Pending) {
+        return (state, None, None);
+    }
+    let language = tag.and_then(Language::from_tag);
+    let no_format = block.info.as_ref().and_then(|info| {
+        info.parsed()
+            .attributes
+            .iter()
+            .find_map(|attribute| reasoned(attribute).filter(|found| found.name == "no_format"))
+    });
+    if let Some(found) = no_format {
+        let skipped = BlockState::NotChecked(NotChecked::FormatSkipped);
+        return (skipped, None, found.reason.map(str::to_owned));
+    }
+    if language.is_some_and(|language| code_blocks.formatter(language) == Some(&Formatter::Off)) {
+        return (BlockState::NotChecked(NotChecked::FormatOff), None, None);
+    }
+    let tool = language.and_then(|language| selected(code_blocks, language));
+    (state, tool, None)
+}
+
+/// The formatter `code_blocks` selects for `language`: the named one, or the default. `None` when
+/// the language has none.
+fn selected(code_blocks: &CodeBlocks, language: Language) -> Option<&'static Tool> {
+    match code_blocks.formatter(language) {
+        Some(Formatter::Named(name)) => TOOLS.iter().find(|tool| {
+            tool.language == language && tool.step == Step::Format && tool.name == name
+        }),
+        Some(Formatter::Off) | None => formatter(language),
+    }
 }
 
 /// The one warning for `tool`, found as `found`, at `at`, the first block that needs it. `None`

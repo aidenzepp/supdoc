@@ -19,6 +19,7 @@ use crate::path::AbsolutePath;
 
 use self::python::RawPython;
 use self::rust::RawRust;
+pub(crate) use self::shell::Dialect;
 use self::shell::RawShell;
 use super::pattern::{AnchoredPatterns, PatternList};
 
@@ -46,15 +47,117 @@ impl Language {
     }
 }
 
-/// Which language tables some file in the chain wrote.
-#[derive(Debug, Clone, Copy, Default)]
+/// A language's `formatter` key, validated against the formatters known for that language.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Formatter {
+    /// `formatter = false`: the format step is off for the language.
+    Off,
+    /// `formatter = "<name>"`: one of the language's known formatters.
+    Named(String),
+}
+
+/// Reads a `formatter` value: a name from `known`, or `false`. A `{ command = [...] }` table is
+/// refused until custom commands have a trust model.
+///
+/// # Errors
+///
+/// The deserializer's error when the value is `true`, a table, an unknown name or any other type.
+fn deserialize_formatter<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+    language: &'static str,
+    known: &'static [&'static str],
+) -> Result<Option<Formatter>, D::Error> {
+    use std::fmt;
+
+    use serde::de::{Error, MapAccess, Visitor};
+
+    struct Reader {
+        language: &'static str,
+        known: &'static [&'static str],
+    }
+    impl<'de> Visitor<'de> for Reader {
+        type Value = Formatter;
+
+        fn expecting(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(out, "a {} formatter name or `false`", self.language)
+        }
+
+        fn visit_bool<E: Error>(self, value: bool) -> Result<Formatter, E> {
+            if value {
+                Err(E::custom(format!(
+                    "`formatter = true` names no tool; write one of {} or `false`",
+                    tool_list(self.known)
+                )))
+            } else {
+                Ok(Formatter::Off)
+            }
+        }
+
+        fn visit_str<E: Error>(self, value: &str) -> Result<Formatter, E> {
+            if self.known.contains(&value) {
+                Ok(Formatter::Named(value.to_owned()))
+            } else {
+                Err(E::custom(format!(
+                    "`{value}` isn't a known {} formatter; the known tools are {}",
+                    self.language,
+                    tool_list(self.known)
+                )))
+            }
+        }
+
+        fn visit_map<A: MapAccess<'de>>(self, _map: A) -> Result<Formatter, A::Error> {
+            Err(A::Error::custom(format!(
+                "a custom formatter command needs trust and arrives in a later release; the known {} tools are {}",
+                self.language,
+                tool_list(self.known)
+            )))
+        }
+    }
+
+    deserializer
+        .deserialize_any(Reader { language, known })
+        .map(Some)
+}
+
+/// `known` as backticked names joined by `, `.
+fn tool_list(known: &[&str]) -> String {
+    known
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// What some file in the chain wrote for one language.
+#[derive(Debug, Clone, Default)]
+struct Table {
+    /// The language's table is written.
+    written: bool,
+    /// The nearest `formatter` written.
+    formatter: Option<Formatter>,
+}
+
+impl Table {
+    /// This table with `raw`'s keys behind it: the nearer value of each key wins.
+    fn behind(self, written: bool, formatter: Option<Formatter>) -> Self {
+        Self {
+            written: self.written || written,
+            formatter: self.formatter.or(formatter),
+        }
+    }
+}
+
+/// Which language tables the chain wrote, with their keys.
+#[derive(Debug, Clone, Default)]
 struct Languages {
-    /// `[features.code-blocks.rust]` is written.
-    rust: bool,
-    /// `[features.code-blocks.shell]` is written.
-    shell: bool,
-    /// `[features.code-blocks.python]` is written.
-    python: bool,
+    /// `[features.code-blocks.rust]`.
+    rust: Table,
+    /// `[features.code-blocks.shell]`.
+    shell: Table,
+    /// `[features.code-blocks.python]`.
+    python: Table,
+    /// The nearest shell `dialect` written.
+    dialect: Option<Dialect>,
 }
 
 /// The `[features.code-blocks]` table, exactly as written. Any other key inside it is refused as
@@ -117,10 +220,27 @@ impl CodeBlocks {
     /// Whether `language`'s table is written, turning its blocks' checks on.
     #[must_use]
     pub(crate) const fn checks(&self, language: Language) -> bool {
+        self.table(language).written
+    }
+
+    /// `language`'s `formatter` key: `None` selects its default formatter.
+    #[must_use]
+    pub(crate) const fn formatter(&self, language: Language) -> Option<&Formatter> {
+        self.table(language).formatter.as_ref()
+    }
+
+    /// The shell dialect shfmt parses with: `bash` unless `dialect` says otherwise.
+    #[must_use]
+    pub(crate) fn dialect(&self) -> Dialect {
+        self.languages.dialect.unwrap_or_default()
+    }
+
+    /// `language`'s table as written.
+    const fn table(&self, language: Language) -> &Table {
         match language {
-            Language::Rust => self.languages.rust,
-            Language::Shell => self.languages.shell,
-            Language::Python => self.languages.python,
+            Language::Rust => &self.languages.rust,
+            Language::Shell => &self.languages.shell,
+            Language::Python => &self.languages.python,
         }
     }
 
@@ -165,9 +285,22 @@ pub(super) fn merge(
         include: nearer.include.or_else(|| include.map(anchor)),
         exclude: nearer.exclude.or_else(|| exclude.map(anchor)),
         languages: Languages {
-            rust: nearer.languages.rust || rust.is_some(),
-            shell: nearer.languages.shell || shell.is_some(),
-            python: nearer.languages.python || python.is_some(),
+            rust: nearer
+                .languages
+                .rust
+                .behind(rust.is_some(), rust.and_then(|raw| raw.formatter)),
+            dialect: nearer
+                .languages
+                .dialect
+                .or(shell.as_ref().and_then(|raw| raw.dialect)),
+            shell: nearer
+                .languages
+                .shell
+                .behind(shell.is_some(), shell.and_then(|raw| raw.formatter)),
+            python: nearer
+                .languages
+                .python
+                .behind(python.is_some(), python.and_then(|raw| raw.formatter)),
         },
     })
 }
@@ -178,7 +311,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::Language;
+    use super::{Dialect, Formatter, Language};
     use crate::config::Config;
     use crate::exit::ExitStatus;
     use crate::path::AbsolutePath;
@@ -385,5 +518,84 @@ mod tests {
                 .contains("pattern `./skills` has a `.` segment; write `skills`"),
             "got {error}"
         );
+    }
+
+    /// The error from loading `[features.code-blocks.<table>]` holding `line`.
+    fn refused(table: &str, line: &str) -> String {
+        let dir = tree(&[(
+            "supdoc.config.toml",
+            &format!("[features.code-blocks.{table}]\n{line}\n"),
+        )]);
+        let error = Config::load_file(&at(&dir, "supdoc.config.toml"))
+            .expect_err("the value should be refused");
+        assert_eq!(error.code(), "config-parse", "got {error:?}");
+        assert_eq!(error.status(), ExitStatus::Config);
+        error.to_string()
+    }
+
+    #[test]
+    fn a_known_formatter_name_or_false_is_selected() {
+        let dir = tree(&[(
+            "supdoc.config.toml",
+            "[features.code-blocks.python]\nformatter = \"black\"\n\
+             [features.code-blocks.rust]\nformatter = false\n",
+        )]);
+
+        let config = Config::load(&at(&dir, ".")).expect("the fixture config should load");
+        let code_blocks = config.code_blocks().expect("the table is written");
+
+        assert_eq!(
+            code_blocks.formatter(Language::Python),
+            Some(&Formatter::Named("black".to_owned()))
+        );
+        assert_eq!(code_blocks.formatter(Language::Rust), Some(&Formatter::Off));
+    }
+
+    #[test]
+    fn an_unknown_formatter_name_is_refused_naming_the_known_tools() {
+        let message = refused("python", "formatter = \"autopep8\"");
+
+        assert!(message.contains("`ruff-format`, `black`"), "got {message}");
+    }
+
+    #[test]
+    fn a_formatter_from_another_language_is_refused() {
+        let message = refused("rust", "formatter = \"shfmt\"");
+
+        assert!(message.contains("`rustfmt`"), "got {message}");
+    }
+
+    #[test]
+    fn a_custom_command_table_is_refused_until_trust_exists() {
+        let message = refused("shell", "formatter = { command = [\"shfmt\"] }");
+
+        assert!(message.contains("needs trust"), "got {message}");
+    }
+
+    #[test]
+    fn the_shell_dialect_defaults_to_bash_and_takes_posix_and_mksh() {
+        for (line, expected) in [
+            ("", Dialect::Bash),
+            ("dialect = \"posix\"", Dialect::Posix),
+            ("dialect = \"mksh\"", Dialect::Mksh),
+        ] {
+            let dir = tree(&[(
+                "supdoc.config.toml",
+                &format!("[features.code-blocks.shell]\n{line}\n"),
+            )]);
+            let config = Config::load(&at(&dir, ".")).expect("the fixture config should load");
+
+            let found = config
+                .code_blocks()
+                .expect("the table is written")
+                .dialect();
+
+            assert_eq!(found, expected, "`{line}`");
+        }
+    }
+
+    #[test]
+    fn an_unknown_dialect_is_refused() {
+        let _message = refused("shell", "dialect = \"zsh\"");
     }
 }
