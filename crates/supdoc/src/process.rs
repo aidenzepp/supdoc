@@ -52,7 +52,14 @@ pub(crate) fn exit_code() -> u8 {
             cwd,
             global_excludes,
         };
-        run(&command, &SkillDirs::from_vars(var), &context, &mut output)
+        let tools = crate::code_blocks::tools::ToolEnv::from_vars(var);
+        run(
+            &command,
+            &SkillDirs::from_vars(var),
+            &tools,
+            &context,
+            &mut output,
+        )
     };
 
     match result {

@@ -461,7 +461,9 @@ fn summary_counts_each_block_once_worst_first_after_the_links_line() {
     let lines = summary_lines(&run.stdout);
     assert_eq!(
         lines.get(1).map(String::as_str),
-        Some("Code blocks  1 failed, 1 unknown language, 3 not checked, 1 opted out"),
+        Some(
+            "Code blocks  1 failed, 1 tool missing, 1 unknown language, 2 not checked, 1 opted out"
+        ),
         "the code-block line should follow the Links line:\n{}",
         run.stdout
     );
@@ -629,6 +631,99 @@ fn a_rust_doc_fence_leading_with_an_attribute_counts_as_rust_not_unknown() {
     assert_eq!(
         at(&json, "/data/summary/code_blocks/not_checked"),
         1,
+        "{json}"
+    );
+}
+
+/// A recorded `basic` project with the shell table on and two `sh` blocks in `docs/blocks.md`.
+fn project_with_shell_blocks() -> Project {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write(
+        "supdoc.config.toml",
+        "[features.code-blocks]\n[features.code-blocks.shell]\n",
+    );
+    project.write(
+        "docs/blocks.md",
+        "# Blocks\n\n```sh\necho hi\n```\n\n```sh\necho bye\n```\n",
+    );
+    project
+}
+
+/// Writes an executable `#!/bin/sh` stub named `name` in `dir`.
+fn stub(dir: &std::path::Path, name: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::create_dir_all(dir).expect("the stub directory should be creatable");
+    let path = dir.join(name);
+    std::fs::write(&path, "#!/bin/sh\nexit 0\n").expect("the stub should be writable");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("the stub should be made executable");
+}
+
+#[test]
+fn tool_missing_from_path_warns_once_and_counts_each_block() {
+    let project = project_with_shell_blocks();
+
+    let json = project.supdoc(&["check", "--json"]).assert_exit(0).json();
+    let _denied = project.supdoc(&["check", "--deny-warnings"]).assert_exit(1);
+
+    assert_eq!(finding_kinds(&json), ["code-block-tool-missing"], "{json}");
+    assert_eq!(
+        at(&json, "/data/summary/code_blocks/tool_missing"),
+        2,
+        "{json}"
+    );
+    assert_eq!(
+        at(&json, "/data/code_blocks/0/state"),
+        "tool_missing",
+        "{json}"
+    );
+}
+
+#[test]
+fn tool_inside_the_checkout_is_refused_and_its_blocks_not_checked() {
+    let project = project_with_shell_blocks();
+    let bin = project.path("bin");
+    stub(&bin, "shfmt");
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", &bin)])
+        .assert_exit(0)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+    assert_eq!(
+        at(&json, "/data/summary/code_blocks/not_checked"),
+        2,
+        "{json}"
+    );
+    assert_eq!(
+        at(&json, "/data/code_blocks/1/reason"),
+        "tool inside checkout",
+        "{json}"
+    );
+}
+
+#[test]
+fn tool_found_outside_the_checkout_leaves_its_blocks_pending() {
+    let project = project_with_shell_blocks();
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    stub(outside.path(), "shfmt");
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(0)
+        .json();
+
+    assert!(finding_kinds(&json).is_empty(), "{json}");
+    assert_eq!(
+        at(&json, "/data/summary/code_blocks/not_checked"),
+        2,
+        "{json}"
+    );
+    assert_eq!(
+        at(&json, "/data/summary/code_blocks/tool_missing"),
+        0,
         "{json}"
     );
 }

@@ -6,6 +6,7 @@ use crate::config::code_blocks::Language;
 
 use super::block::CodeBlock;
 use super::info::reasoned;
+use super::tools::formatter;
 
 /// The one state a code block is in. A block takes the first that applies, in this order:
 ///
@@ -20,6 +21,10 @@ use super::info::reasoned;
 /// 5. A tag of a configured language: [`NotChecked::Pending`], until its format and lint steps
 ///    exist.
 /// 6. Any other tag: [`UnknownLanguage`](Self::UnknownLanguage).
+///
+/// `check` then looks up each pending language's tool: a tool not on `PATH` makes its blocks
+/// [`ToolMissing`](Self::ToolMissing), and one whose real path is inside the checkout makes them
+/// [`NotChecked::ToolInsideRoot`].
 ///
 /// Only what the author wrote and the config decide a state: supdoc never guesses a block into a
 /// skip state. `uses(...)` findings leave the state alone.
@@ -40,6 +45,8 @@ pub(crate) enum BlockState {
     NotChecked(NotChecked),
     /// The block's language has no checker in supdoc.
     UnknownLanguage,
+    /// The tool the block's language needs isn't on `PATH`.
+    ToolMissing,
 }
 
 /// Why a block was not checked.
@@ -51,6 +58,8 @@ pub(crate) enum NotChecked {
     LanguageOff,
     /// The block's language is on, but its format and lint steps don't exist yet.
     Pending,
+    /// The tool's binary on `PATH` is inside the checkout, so the checkout chose it.
+    ToolInsideRoot,
 }
 
 /// What a block's `from(...)` values came to.
@@ -121,6 +130,7 @@ impl BlockState {
             Self::OptedOut { .. } => "opted_out",
             Self::NotChecked(_) => "not_checked",
             Self::UnknownLanguage => "unknown_language",
+            Self::ToolMissing => "tool_missing",
         }
     }
 
@@ -146,8 +156,16 @@ impl BlockState {
             Self::NotChecked(NotChecked::Pending) => {
                 Some("its format and lint steps aren't built yet".to_owned())
             }
+            Self::NotChecked(NotChecked::ToolInsideRoot) => Some("tool inside checkout".to_owned()),
             Self::UnknownLanguage => {
                 Some(format!("supdoc has no checker for `{}`", tag.unwrap_or("")))
+            }
+            Self::ToolMissing => {
+                let tool = tag
+                    .and_then(Language::from_tag)
+                    .and_then(formatter)
+                    .map_or("its tool", |tool| tool.name);
+                Some(format!("`{tool}` isn't on PATH"))
             }
         }
     }
@@ -209,6 +227,7 @@ impl CodeBlockCounts {
                 BlockState::OptedOut { .. } => &mut counts.opted_out,
                 BlockState::NotChecked(_) => &mut counts.not_checked,
                 BlockState::UnknownLanguage => &mut counts.unknown_language,
+                BlockState::ToolMissing => &mut counts.tool_missing,
             } += 1;
         }
         counts
@@ -403,14 +422,15 @@ mod tests {
             BlockState::OptedOut { reason: None },
             BlockState::NotChecked(NotChecked::Text),
             BlockState::UnknownLanguage,
+            BlockState::ToolMissing,
         ];
 
         let counts = CodeBlockCounts::tally(&states);
 
-        assert_eq!(counts.blocks, 6);
+        assert_eq!(counts.blocks, 7);
         assert_eq!(
             counts.line(false, true),
-            "Code blocks  1 failed · 1 unknown language · 1 not checked · 1 opted out · 2 passed"
+            "Code blocks  1 failed · 1 tool missing · 1 unknown language · 1 not checked · 1 opted out · 2 passed"
         );
         assert_eq!(
             CodeBlockCounts::default().line(false, false),
