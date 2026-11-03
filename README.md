@@ -71,9 +71,18 @@ Threat model, for a checkout you don't trust:
   (or the file `GIT_CONFIG_SYSTEM` names) for the system. It never quotes a rule line from an ignore file
   outside the root, or a line from a git config.
 - It reads, hashes, lists symbols from and quotes no other file outside the root, linked files included.
+  A formatter it runs on a code block may still read its own config files, as the next bullet says.
 - It doesn't promise to hide whether a path outside the root exists. An out-and-back symlink can change
   which error or exit code appears. That is accepted: on ordinary `pull_request` CI, a PR can already run
   commands.
+- **Checking code blocks.** With a `[features.code-blocks]` table, `supdoc check` and `supdoc fix` check the
+  code blocks in your docs with your project's own tools. supdoc runs only tools from its own table that read
+  the block and plain config files: rustfmt, shfmt, ruff, black, shellcheck, and clippy on a block on its own.
+  Each block goes to the tool on standard input, so the tool opens no other source file. supdoc ignores a
+  `rust-toolchain.toml` that names a path, never downloads a toolchain, never uses a tool installed inside
+  the checkout, and skips Rust blocks that read files or environment variables at compile time
+  (`include_str!`, `env!` and the like). Each tool still reads its own config files, which can sit outside
+  the project, and its errors can quote them.
 
 ### Differences from git
 
@@ -143,10 +152,15 @@ attributes either (` ```rust,ignore ` is one unknown word); supdoc warns and nam
 supdoc checks what is written and never skips a block on its own. To exclude a block, mark it and say why:
 
 - `ignore(reason)`: check nothing in this block. rustdoc reads it as its own `ignore` too.
-- `no_format(reason)` and `no_lint(reason)`: skip only formatting or only linting. supdoc doesn't format
-  or lint blocks yet, so for now these record the intent.
+- `no_format(reason)` and `no_lint(reason)`: skip only formatting or only linting. supdoc doesn't lint
+  blocks yet, so for now `no_lint` records the intent.
 
 A marker without a reason still takes effect, with a `code-block-ignore-reason` warning.
+
+A language table turns on its formatter: with `[features.code-blocks.shell]`, shell blocks go through
+`shfmt`, found on `PATH`. A block the formatter would change fails with `code-block-unformatted`, and
+`supdoc fix --yes` replaces its body with the formatter's output. supdoc refuses that fix, with a
+`code-block-fix-unsafe` warning, when a line of the output would close the block's fence.
 
 A Rust snippet that needs surrounding code to make sense takes one of three explicit forms:
 

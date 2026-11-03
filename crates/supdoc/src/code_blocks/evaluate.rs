@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::Config;
@@ -69,8 +70,31 @@ pub(crate) struct BlockRecord {
     pub(crate) uses: Vec<(String, UseState)>,
     /// The block's 1-based position among the blocks of its doc.
     index: usize,
-    /// What a formatter reads for the block, kept while it is pending.
-    input: Option<String>,
+    /// What the format step needs, kept while the block is pending.
+    pending: Option<Pending>,
+}
+
+/// A pending block as the format step reads and fixes it.
+#[derive(Debug, Clone)]
+struct Pending {
+    /// The block.
+    block: CodeBlock,
+    /// The text of the doc it was found in.
+    text: Arc<str>,
+    /// What a formatter reads for it.
+    input: String,
+}
+
+impl Pending {
+    /// `block`, found in `text`, ready for the format step. `None` when its body isn't inside
+    /// `text`.
+    fn of(block: &CodeBlock, text: &Arc<str>) -> Option<Self> {
+        Some(Self {
+            input: format::input(block, text)?,
+            block: block.clone(),
+            text: Arc::clone(text),
+        })
+    }
 }
 
 /// The findings for `blocks`, in block order, reading each `from(...)` and `uses(...)` source
@@ -99,7 +123,7 @@ pub(crate) fn evaluate(
     };
     let mut findings = Vec::new();
     let mut states: Vec<BlockState> = Vec::with_capacity(blocks.len());
-    let mut doc: Option<(&str, Option<String>)> = None;
+    let mut doc: Option<(&str, Option<Arc<str>>)> = None;
     let mut written = Vec::new();
     let mut unresolved_uses = BTreeSet::new();
     let recorded: BTreeMap<(&str, String), Hash> = lock
@@ -138,7 +162,7 @@ pub(crate) fn evaluate(
             if let Some(parts) = sources.parts {
                 let file = block.fence.file.as_str();
                 if doc.as_ref().is_none_or(|(read, _)| *read != file) {
-                    doc = Some((file, read_doc(config, file)));
+                    doc = Some((file, read_doc(config, file).map(Arc::from)));
                 }
                 let stale = doc
                     .as_ref()
@@ -158,14 +182,14 @@ pub(crate) fn evaluate(
         }
         let state = state_of(block, outcome, |language| code_blocks.checks(language));
         let language = tag_of(block).map(str::to_owned);
-        let input = if state == BlockState::NotChecked(NotChecked::Pending) {
+        let pending = if state == BlockState::NotChecked(NotChecked::Pending) {
             let file = block.fence.file.as_str();
             if doc.as_ref().is_none_or(|(read, _)| *read != file) {
-                doc = Some((file, read_doc(config, file)));
+                doc = Some((file, read_doc(config, file).map(Arc::from)));
             }
             doc.as_ref()
-                .and_then(|(_, text)| text.as_deref())
-                .and_then(|text| format::input(block, text))
+                .and_then(|(_, text)| text.as_ref())
+                .and_then(|text| Pending::of(block, text))
         } else {
             None
         };
@@ -176,7 +200,7 @@ pub(crate) fn evaluate(
             state: state.clone(),
             uses: block_uses,
             index,
-            input,
+            pending,
         });
         states.push(state);
     }
@@ -198,7 +222,9 @@ impl Evaluation {
     /// inside `root` makes them not checked with one `code-block-not-checked` warning. A tool
     /// found elsewhere runs, hardened, on each block of a language with a format step, which
     /// passes it or fails it with one `code-block-unformatted`, `code-block-tool-failed` or
-    /// `code-block-tool-timeout` error; a language without a format step stays pending.
+    /// `code-block-tool-timeout` error; a language without a format step stays pending. An
+    /// unformatted block's error carries the fix to the formatter's output, unless that output
+    /// would close the block's fence, which adds a `code-block-fix-unsafe` warning instead.
     ///
     /// Effect: reads file metadata along `PATH`, resolves symlinks, and runs each found formatter
     /// once per block, killing it at the timeout.
@@ -229,8 +255,8 @@ impl Evaluation {
             record.state = match found {
                 Found::OnPath(program) => {
                     let Some(state) = run_formatter(tool, &program, record, env, root, timeout)
-                        .map(|(verdict, finding)| {
-                            self.findings.extend(finding);
+                        .map(|(verdict, findings)| {
+                            self.findings.extend(findings);
                             verdict.state()
                         })
                     else {
@@ -252,7 +278,9 @@ impl Evaluation {
 }
 
 /// Runs `tool`, found at `program`, on `record`'s block from `root` with `env`, under `timeout`:
-/// its verdict and finding. `None` when the block's language has no format step yet or its input
+/// its verdict and findings, an unformatted block's error carrying the fix to the formatter's
+/// output, or followed by a `code-block-fix-unsafe` warning when that output would close the
+/// block's fence. `None` when the block's language has no format step yet or its input
 /// couldn't be read, so it stays pending.
 ///
 /// Effect: runs the tool, killing it at the timeout.
@@ -263,8 +291,9 @@ fn run_formatter(
     env: &ToolEnv,
     root: &Path,
     timeout: Option<Duration>,
-) -> Option<(format::Verdict, Option<Finding>)> {
-    let input = record.input.as_deref()?;
+) -> Option<(format::Verdict, Vec<Finding>)> {
+    let pending = record.pending.as_ref()?;
+    let input = pending.input.as_str();
     let doc = root.join(record.at.file.as_str());
     let args = format::args(tool.language, &doc, record.index)?;
     let args: Vec<&std::ffi::OsStr> = args.iter().map(std::ffi::OsString::as_os_str).collect();
@@ -278,7 +307,13 @@ fn run_formatter(
     };
     let verdict = format::judge(input, runner::run(&call, env, root));
     let finding = format::finding(&verdict, tool, &record.at, timeout);
-    Some((verdict, finding))
+    let findings = match (&verdict, finding) {
+        (format::Verdict::Unformatted(output), Some(unformatted)) => {
+            format::fixed(unformatted, &pending.block, &pending.text, output, tool)
+        }
+        (_, finding) => finding.into_iter().collect(),
+    };
+    Some((verdict, findings))
 }
 
 /// The one warning for `tool`, found as `found`, at `at`, the first block that needs it. `None`

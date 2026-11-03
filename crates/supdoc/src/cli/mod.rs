@@ -258,7 +258,7 @@ pub(crate) fn run(
     match command {
         Command::Check(args) => check::run(args, tools, context, output),
         Command::Update(args) => update::run(args, context, output),
-        Command::Fix(args) => fix::run(args, context, output),
+        Command::Fix(args) => fix::run(args, tools, context, output),
         Command::List(args) => list::run(args, context, output),
         Command::Resolve(args) => resolve::run(args, context, output),
         Command::Init(args) => init::run(args, context, output),
