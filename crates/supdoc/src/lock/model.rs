@@ -77,6 +77,15 @@ impl Lockfile {
         self.uses.iter().map(|(key, hash)| (key, *hash))
     }
 
+    /// Every `uses=` entry as `(source, target, hash)`, in canonical order: the doc it is
+    /// written in, relative to the root, and its target as `path#symbol` or `ns:path#symbol`.
+    /// Strings, so code-blocks reads the section without naming a link key.
+    pub(crate) fn recorded_uses(&self) -> impl Iterator<Item = (&str, String, Hash)> {
+        self.uses
+            .iter()
+            .map(|(key, hash)| (key.source.as_str(), key.target_text(), *hash))
+    }
+
     /// Every entry, in canonical order.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&LinkKey, Hash)> {
         self.links.iter().map(|(key, hash)| (key, *hash))

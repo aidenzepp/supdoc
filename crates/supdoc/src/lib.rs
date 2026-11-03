@@ -168,7 +168,8 @@ pub(crate) mod check {
 }
 
 /// Checking the code blocks in documentation: finding each block, reading its info string and
-/// judging it. Kept apart from linking: nothing here reads links, targets or the lockfile.
+/// judging it. Kept apart from linking: nothing here reads links or targets, and the lockfile
+/// only through its `[code-blocks]` accessors.
 pub(crate) mod code_blocks {
     /// A block's info string: its language and attributes.
     pub(crate) mod info;
@@ -187,6 +188,9 @@ pub(crate) mod code_blocks {
 
     /// Comparing an excerpt with its source.
     mod excerpt;
+
+    /// Tracking `uses(...)` targets against the lockfile.
+    mod uses;
 
     /// Block states and their counts.
     mod states;
