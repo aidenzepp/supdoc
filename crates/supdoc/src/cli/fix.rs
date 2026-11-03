@@ -134,9 +134,9 @@ impl Planned {
                 .is_ok_and(|doc| scope.contains(&doc) && !scan.is_unread(&doc))
         };
         let languages = Languages::builtin().map_err(CliError::from)?;
-        let code_block_findings = evaluate(&config, languages, &scan.code_blocks, &lock, in_scope)
+        let evaluation = evaluate(&config, languages, &scan.code_blocks, &lock, in_scope)
             .map_err(|error| CliError::from(&error))?;
-        scan.findings.extend(code_block_findings);
+        scan.findings.extend(evaluation.findings);
         let stale = scan
             .findings
             .iter()
