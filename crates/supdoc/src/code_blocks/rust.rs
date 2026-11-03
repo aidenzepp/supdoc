@@ -62,10 +62,57 @@ pub(crate) const MAX_SCAN_BYTES: usize = 256 * 1024;
 pub(crate) enum Scan {
     /// The block holds no compile-time read.
     Clean,
-    /// The block holds this compile-time read, spelled as `include_str!` or `#[path]`.
-    Read(String),
+    /// The block holds this compile-time read, or can't be scanned past a point that could hide
+    /// one.
+    Read(Found),
     /// The block is over [`MAX_SCAN_BYTES`], so it wasn't scanned.
     TooLarge,
+}
+
+/// What made the scan refuse a block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Found {
+    /// A call of this macro, named without its `!`: `include_str`.
+    Macro(String),
+    /// An attribute with `path =` in it.
+    PathAttribute,
+    /// Something the scan can't read past, which could hide a read, described as "an
+    /// unterminated block comment".
+    Unscannable(&'static str),
+}
+
+impl Found {
+    /// What the block has, for the warning: "uses `env!`, which reads ...".
+    #[must_use]
+    pub(crate) fn why(&self) -> String {
+        match self {
+            Self::Macro(name) => format!(
+                "uses `{name}!`, which reads a file or environment variable at compile time"
+            ),
+            Self::PathAttribute => {
+                "uses a `path` attribute, which reads a file at compile time".to_owned()
+            }
+            Self::Unscannable(what) => {
+                format!("has {what}, which could hide a compile-time read from supdoc's scan")
+            }
+        }
+    }
+
+    /// How the author can fix it, for the warning's help.
+    #[must_use]
+    pub(crate) fn help(&self) -> String {
+        match self {
+            Self::Macro(name) => {
+                format!("remove the `{name}!` from the block, or mark it `ignore(<why>)`")
+            }
+            Self::PathAttribute => {
+                "remove the `path` attribute from the block, or mark it `ignore(<why>)`".to_owned()
+            }
+            Self::Unscannable(_) => {
+                "close it so the block is valid Rust, or mark the block `ignore(<why>)`".to_owned()
+            }
+        }
+    }
 }
 
 /// Scans `input`, a Rust block, for a compile-time read: a call of `include!`, `include_str!`,
@@ -74,7 +121,10 @@ pub(crate) enum Scan {
 /// `#![path = ..]`, `#[cfg_attr(.., path = ..)]`). [`Scan::TooLarge`] past [`MAX_SCAN_BYTES`].
 ///
 /// One linear pass: [`Tokens`] skips comments and string and character literals once each, and
-/// each token is judged from the one or two before it.
+/// each token is judged from the one or two before it. The scan fails closed: an unterminated
+/// block comment, string or character literal, or a first line starting `#!` but not `#![`, is
+/// [`Found::Unscannable`]. Identifiers are ASCII, so any other character ends a word, which can
+/// only add matches.
 #[must_use]
 pub(crate) fn compile_time_read(input: &str) -> Scan {
     if input.len() > MAX_SCAN_BYTES {
@@ -84,18 +134,24 @@ pub(crate) fn compile_time_read(input: &str) -> Scan {
 }
 
 /// The first compile-time read in `input`, by [`compile_time_read`]'s rules, without the size cap.
-fn scan(input: &str) -> Option<String> {
+fn scan(input: &str) -> Option<Found> {
+    if input.starts_with("#!") && !input.starts_with("#![") {
+        return Some(Found::Unscannable(
+            "a `#!` first line that isn't an inner attribute",
+        ));
+    }
     let mut before = Token::Other;
     let mut before_that = Token::Other;
     // The bracket depth inside the attribute being read, or 0 outside one.
     let mut attribute = 0_usize;
-    for token in Tokens::new(input) {
+    let mut tokens = Tokens::new(input);
+    for token in tokens.by_ref() {
         match token {
             Token::Punct('!') => {
                 if let Token::Ident(word) = before
                     && COMPILE_TIME_READS.contains(&word)
                 {
-                    return Some(format!("{word}!"));
+                    return Some(Found::Macro(word.to_owned()));
                 }
             }
             Token::Punct('[') if attribute > 0 => attribute += 1,
@@ -108,14 +164,14 @@ fn scan(input: &str) -> Option<String> {
             }
             Token::Punct(']') => attribute = attribute.saturating_sub(1),
             Token::Punct('=') if attribute > 0 && before == Token::Ident("path") => {
-                return Some("#[path]".to_owned());
+                return Some(Found::PathAttribute);
             }
             _ => {}
         }
         before_that = before;
         before = token;
     }
-    None
+    tokens.unterminated
 }
 
 /// One token of a Rust block, as far as the scan needs it.
@@ -135,12 +191,24 @@ struct Tokens<'text> {
     text: &'text str,
     /// The byte offset of the next unread character.
     at: usize,
+    /// What the text ended inside, when it ended inside a comment or a literal.
+    unterminated: Option<Found>,
 }
 
 impl<'text> Tokens<'text> {
     /// The tokens of `text`.
     const fn new(text: &'text str) -> Self {
-        Self { text, at: 0 }
+        Self {
+            text,
+            at: 0,
+            unterminated: None,
+        }
+    }
+
+    /// Records that the text ended inside `what`.
+    fn ended_inside(&mut self, what: &'static str) {
+        self.at = self.text.len();
+        self.unterminated = Some(Found::Unscannable(what));
     }
 
     /// The text from the next unread character.
@@ -183,6 +251,7 @@ impl<'text> Tokens<'text> {
                 self.at += c.len_utf8();
             }
         }
+        self.ended_inside("an unterminated block comment");
     }
 
     /// Moves past a `"` string the cursor is on, honoring `\` escapes, or to the end.
@@ -196,6 +265,7 @@ impl<'text> Tokens<'text> {
                 _ => {}
             }
         }
+        self.ended_inside("an unterminated string");
     }
 
     /// Moves past a raw string whose `r` the cursor is past, `hashes` `#`s before its `"`, or to
@@ -217,6 +287,7 @@ impl<'text> Tokens<'text> {
                 }
             }
         }
+        self.ended_inside("an unterminated string");
     }
 
     /// The `#`s from the cursor, then whether a `"` follows them.
@@ -231,7 +302,7 @@ impl<'text> Iterator for Tokens<'text> {
 
     fn next(&mut self) -> Option<Token<'text>> {
         loop {
-            self.bump_while(char::is_whitespace);
+            self.bump_while(is_rust_whitespace);
             let rest = self.rest();
             let c = rest.chars().next()?;
             if rest.starts_with("//") {
@@ -256,17 +327,24 @@ impl<'text> Iterator for Tokens<'text> {
 
 impl<'text> Tokens<'text> {
     /// Reads a character literal or a lifetime the cursor is on: `'\..'` and `'x'` are
-    /// literals, and anything else is a lifetime or label.
+    /// literals, and `'` before an ASCII identifier is a lifetime or label. Anything else is an
+    /// unterminated character literal.
     fn quote(&mut self) {
         self.bump(1);
         if self.peek(0) == Some('\\') {
             self.bump(2);
             self.bump_while(|c| c != '\'' && c != '\n');
-            self.bump(1);
+            if self.peek(0) == Some('\'') {
+                self.bump(1);
+            } else {
+                self.ended_inside("an unterminated character literal");
+            }
         } else if self.peek(1) == Some('\'') {
             self.bump(2);
-        } else {
+        } else if self.peek(0).is_some_and(is_ident_char) {
             self.bump_while(is_ident_char);
+        } else {
+            self.ended_inside("an unterminated character literal");
         }
     }
 
@@ -303,9 +381,16 @@ impl<'text> Tokens<'text> {
     }
 }
 
-/// Whether `c` can be part of a Rust identifier or number.
-fn is_ident_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
+/// Whether `c` can be part of an identifier or number, by the scan's ASCII-only rule: any other
+/// character ends a word, which can only split words and so only add matches.
+const fn is_ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Whether rustc skips `c` as whitespace: [`char::is_whitespace`] plus the left-to-right and
+/// right-to-left marks, U+200E and U+200F.
+fn is_rust_whitespace(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '\u{200E}' | '\u{200F}')
 }
 
 #[cfg(test)]
@@ -313,11 +398,16 @@ mod tests {
 
     use std::time::{Duration, Instant};
 
-    use super::{MAX_SCAN_BYTES, Scan, compile_time_read, config_args, format_args, scan};
+    use super::{Found, MAX_SCAN_BYTES, Scan, compile_time_read, config_args, format_args, scan};
 
     #[test]
     fn rustfmt_reads_the_block_as_2024_and_prints_it() {
         assert_eq!(format_args(), ["--edition", "2024", "--emit", "stdout"]);
+    }
+
+    /// A refusal for a call of `name!`.
+    fn read_of(name: &str) -> Scan {
+        Scan::Read(Found::Macro(name.to_owned()))
     }
 
     #[test]
@@ -325,21 +415,76 @@ mod tests {
         for (block, read) in [
             (
                 "const S: &str = include_str!(\"/etc/passwd\");\n",
-                "include_str!",
+                read_of("include_str"),
             ),
-            ("fn f() { let _ = std::env!(\"HOME\"); }\n", "env!"),
-            ("fn f() { option_env /* x */ !(\"A\"); }\n", "option_env!"),
-            ("include_bytes\n!(\"x\");\n", "include_bytes!"),
-            ("r#include!(\"x\");\n", "include!"),
-            ("#[path = \"/outside.rs\"]\nmod m;\n", "#[path]"),
-            ("# [ cfg_attr(all(), path=\"/o.rs\") ]\nmod m;\n", "#[path]"),
+            ("fn f() { let _ = std::env!(\"HOME\"); }\n", read_of("env")),
+            (
+                "fn f() { option_env /* x */ !(\"A\"); }\n",
+                read_of("option_env"),
+            ),
+            ("include_bytes\n!(\"x\");\n", read_of("include_bytes")),
+            ("r#include!(\"x\");\n", read_of("include")),
+            (
+                "const S: &str = \u{b2}include_str!(\"x\");\n",
+                read_of("include_str"),
+            ),
+            ("const S: &str = \u{e9}env!(\"x\");\n", read_of("env")),
+            ("const S: &str = env\u{200E}!(\"x\");\n", read_of("env")),
+            ("const S: &str = env\u{200F}!(\"x\");\n", read_of("env")),
+            (
+                "#[path = \"/outside.rs\"]\nmod m;\n",
+                Scan::Read(Found::PathAttribute),
+            ),
+            (
+                "# [ cfg_attr(all(), path=\"/o.rs\") ]\nmod m;\n",
+                Scan::Read(Found::PathAttribute),
+            ),
+            (
+                "#\u{200E}[path = \"/o.rs\"]\nmod m;\n",
+                Scan::Read(Found::PathAttribute),
+            ),
+        ] {
+            assert_eq!(compile_time_read(block), read, "{block:?}");
+        }
+    }
+
+    #[test]
+    fn what_the_scan_cant_read_past_fails_closed() {
+        for (block, what) in [
+            (
+                "fn f() {}\n/* env!(\"A\")\n",
+                "an unterminated block comment",
+            ),
+            ("const S: &str = \"env!(\"A\");\n", "an unterminated string"),
+            ("const S: &str = r#\"x\";\n", "an unterminated string"),
+            (
+                "const C: char = '\"; env!(\"A\");\n",
+                "an unterminated character literal",
+            ),
+            (
+                "const C: char = '\\u{41};\n",
+                "an unterminated character literal",
+            ),
+            ("const C: char = '", "an unterminated character literal"),
+            (
+                "#!/usr/bin/env rust\nfn main() {}\n",
+                "a `#!` first line that isn't an inner attribute",
+            ),
+            (
+                "#! [allow(unused)]\nfn main() {}\n",
+                "a `#!` first line that isn't an inner attribute",
+            ),
         ] {
             assert_eq!(
                 compile_time_read(block),
-                Scan::Read(read.to_owned()),
+                Scan::Read(Found::Unscannable(what)),
                 "{block:?}"
             );
         }
+        assert_eq!(
+            compile_time_read("#![allow(unused)]\nfn main() {}\n"),
+            Scan::Clean
+        );
     }
 
     #[test]
@@ -349,6 +494,7 @@ mod tests {
             "use std::env;\nfn f() -> String { env::var(\"A\").unwrap_or_default() }\n",
             "#[serde(rename = \"path\")]\nstruct S;\n",
             "fn environment() {}\nmacro_rules! my_env { () => {} }\nmy_env!();\n",
+            "fn f<'a>(x: &'a str) -> &'a str { 'outer: loop { break 'outer x; } }\n",
         ] {
             assert_eq!(compile_time_read(block), Scan::Clean, "{block:?}");
         }
@@ -359,15 +505,12 @@ mod tests {
         for block in [
             "const S: &str = \"env!(x) #[path = y]\";\n",
             "const S: &str = r#\"include!(\"x\")\"#;\n// env!(\"A\")\n/* include_str!(\"b\") */\n",
-            "fn f<'a>(c: char) -> bool { c == '\"' || c == '\\'' }\n",
+            "fn f(c: char) -> bool { c == '\"' || c == '\\'' }\n",
         ] {
             assert_eq!(compile_time_read(block), Scan::Clean, "{block:?}");
         }
         let after_a_string = "const S: &str = \"/*\"; const T: &str = env!(\"HOME\"); // */\n";
-        assert_eq!(
-            compile_time_read(after_a_string),
-            Scan::Read("env!".to_owned())
-        );
+        assert_eq!(compile_time_read(after_a_string), read_of("env"));
     }
 
     #[test]

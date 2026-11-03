@@ -235,3 +235,25 @@ fn rust_format_with_the_real_rustfmt_passes_formatted_blocks_and_fails_others() 
     assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
     assert_eq!(at(&json, "/data/summary/code_blocks/failed"), 1, "{json}");
 }
+
+#[test]
+fn a_block_over_the_scan_cap_is_not_checked_with_one_warning() {
+    let body = format!("fn main() {{}}\n{}", "// padding line\n".repeat(20_000));
+    let project = project_with_rust_doc(&format!("# Blocks\n\n```rust\n{body}```\n"));
+    let stub = Stub::new();
+
+    let json = stub.check(&project, 0);
+
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+    assert_eq!(
+        at(&json, "/data/summary/code_blocks/not_checked"),
+        1,
+        "{json}"
+    );
+    assert_eq!(
+        at(&json, "/data/code_blocks/0/reason"),
+        "too large to scan",
+        "{json}"
+    );
+    assert_eq!(stub.record("runs"), "", "rustfmt should never run");
+}

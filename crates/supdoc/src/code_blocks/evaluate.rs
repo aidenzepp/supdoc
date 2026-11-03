@@ -513,20 +513,17 @@ fn toolchain_warning(refusal: Refusal, file: &str, at: &Location) -> Finding {
 }
 
 /// The `code-block-not-checked` warning, at `at`, for a Rust block `scan` refused: one holding a
-/// compile-time read such as `include_str!`, or one too large to scan. `None` for a clean block.
+/// compile-time read such as `include_str!` or something that could hide one, or one too large
+/// to scan. `None` for a clean block.
 fn scan_warning(scan: &Scan, at: &Location) -> Option<Finding> {
     let finding = match scan {
         Scan::Clean => return None,
-        Scan::Read(read) => Finding::new(
+        Scan::Read(found) => Finding::new(
             NOT_CHECKED,
             Severity::Warning,
-            format!(
-                "the block uses `{read}`, which reads a file or environment variable at compile time, so it isn't checked"
-            ),
+            format!("the block {}, so it isn't checked", found.why()),
         )
-        .with_help(format!(
-            "remove the `{read}` from the block, or mark it `ignore(<why>)`"
-        )),
+        .with_help(found.help()),
         Scan::TooLarge => Finding::new(
             NOT_CHECKED,
             Severity::Warning,
