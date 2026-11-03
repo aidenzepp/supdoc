@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::Config;
-use crate::config::code_blocks::{CodeBlocks, Dialect, Formatter, Language};
+use crate::config::code_blocks::{CodeBlocks, Dialect, Edition, Formatter, Language};
 use crate::finding::{Finding, Location, Severity};
 use crate::hash::Hash;
 use crate::lock::model::Lockfile;
@@ -78,6 +78,8 @@ pub(crate) struct BlockRecord {
     tool: Option<&'static Tool>,
     /// The shell dialect shfmt parses it as.
     dialect: Dialect,
+    /// The edition its `edition20xx` attribute or the config's `edition` names, if either does.
+    edition: Option<Edition>,
     /// What the format step needs, kept while the block is pending.
     pending: Option<Pending>,
 }
@@ -139,10 +141,7 @@ pub(crate) fn evaluate(
     };
     let mut written = Vec::new();
     let mut unresolved_uses = BTreeSet::new();
-    let recorded: BTreeMap<(&str, String), Hash> = lock
-        .recorded_uses()
-        .map(|(doc, target, hash)| ((doc, target), hash))
-        .collect();
+    let recorded = recorded_by_target(lock);
     let mut records = Vec::with_capacity(blocks.len());
     let mut index = 0;
     for (position, block) in blocks.iter().enumerate() {
@@ -210,6 +209,7 @@ pub(crate) fn evaluate(
             reason: skip_reason.or_else(|| state.reason(language.as_deref(), None)),
             tool,
             dialect: code_blocks.dialect(),
+            edition: block_edition(block).or_else(|| code_blocks.edition()),
             language,
             state: state.clone(),
             uses: block_uses,
@@ -327,6 +327,8 @@ struct RustSetup {
     toolchain: Toolchain,
     /// `--config-path` for an in-root `rustfmt.toml`, or nothing.
     config: Vec<OsString>,
+    /// The edition for a block that names none: the root `Cargo.toml`'s, else 2024.
+    edition: Edition,
 }
 
 impl RustSetup {
@@ -337,6 +339,7 @@ impl RustSetup {
         Self {
             toolchain: toolchain::read(root),
             config: rust::config_args(root),
+            edition: toolchain::cargo_edition(root).unwrap_or(Edition::E2024),
         }
     }
 }
@@ -361,7 +364,11 @@ fn run_formatter(
     let pending = record.pending.as_ref()?;
     let input = pending.input.as_str();
     let doc = root.join(record.at.file.as_str());
-    let mut args = format::args(tool, &doc, record.index)?;
+    let edition = record
+        .edition
+        .or_else(|| rust.map(|rust| rust.edition))
+        .unwrap_or(Edition::E2024);
+    let mut args = format::args(tool, &doc, record.index, edition)?;
     if tool.language == Language::Shell {
         args.extend(shell::dialect_args(record.dialect));
     }
@@ -409,6 +416,19 @@ fn use_states(
         .into_iter()
         .map(|value| (value, UseState::Missing));
     found.chain(missing).collect()
+}
+
+/// Each use the lockfile records, keyed by its doc and target.
+fn recorded_by_target(lock: &Lockfile) -> BTreeMap<(&str, String), Hash> {
+    lock.recorded_uses()
+        .map(|(doc, target, hash)| ((doc, target), hash))
+        .collect()
+}
+
+/// The edition `block`'s own `edition20xx` attribute names, when it has one.
+fn block_edition(block: &CodeBlock) -> Option<Edition> {
+    let info = block.info.as_ref()?;
+    rust::attribute_edition(&info.parsed().attributes)
 }
 
 /// What the format step does with `block`, in `state`: a pending block marked `no_format(...)`
