@@ -3,6 +3,8 @@
 use std::ffi::OsString;
 use std::path::Path;
 
+use crate::config::code_blocks::Edition;
+
 /// The macros that read a file or an environment variable at compile time.
 const COMPILE_TIME_READS: [&str; 5] = [
     "include",
@@ -15,12 +17,20 @@ const COMPILE_TIME_READS: [&str; 5] = [
 /// The `rustfmt.toml` names rustfmt reads, in its own order.
 const CONFIG_FILES: [&str; 2] = [".rustfmt.toml", "rustfmt.toml"];
 
-/// `rustfmt`'s arguments for any block: `--edition 2024 --emit stdout`. The block arrives on
+/// The edition a block's own `edition20xx` attribute names; the first one wins.
+#[must_use]
+pub(crate) fn attribute_edition(attributes: &[&str]) -> Option<Edition> {
+    attributes
+        .iter()
+        .find_map(|word| word.strip_prefix("edition").and_then(Edition::from_year))
+}
+
+/// `rustfmt`'s arguments for any block: `--edition <year> --emit stdout`. The block arrives on
 /// stdin as written, with no wrapping; rustfmt takes no stdin file name, so the doc and the
 /// block's index don't appear.
 #[must_use]
-pub(crate) fn format_args() -> Vec<OsString> {
-    ["--edition", "2024", "--emit", "stdout"]
+pub(crate) fn format_args(edition: Edition) -> Vec<OsString> {
+    ["--edition", edition.year(), "--emit", "stdout"]
         .into_iter()
         .map(OsString::from)
         .collect()
@@ -398,11 +408,27 @@ mod tests {
 
     use std::time::{Duration, Instant};
 
-    use super::{Found, MAX_SCAN_BYTES, Scan, compile_time_read, config_args, format_args, scan};
+    use super::{
+        Found, MAX_SCAN_BYTES, Scan, attribute_edition, compile_time_read, config_args,
+        format_args, scan,
+    };
+    use crate::config::code_blocks::Edition;
 
     #[test]
     fn rustfmt_reads_the_block_as_2024_and_prints_it() {
-        assert_eq!(format_args(), ["--edition", "2024", "--emit", "stdout"]);
+        assert_eq!(
+            format_args(Edition::E2024),
+            ["--edition", "2024", "--emit", "stdout"]
+        );
+    }
+
+    #[test]
+    fn a_block_attribute_names_its_edition() {
+        assert_eq!(
+            attribute_edition(&["no_run", "edition2018"]),
+            Some(Edition::E2018)
+        );
+        assert_eq!(attribute_edition(&["edition2030", "ignore"]), None);
     }
 
     /// A refusal for a call of `name!`.

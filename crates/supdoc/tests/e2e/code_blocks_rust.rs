@@ -193,6 +193,72 @@ fn a_compile_time_read_is_not_checked_and_never_reaches_rustfmt() {
     );
 }
 
+/// The year rustfmt's stub was given after `--edition`.
+fn edition_run(stub: &Stub) -> String {
+    let argv = stub.record("argv");
+    let mut lines = argv.lines();
+    assert_eq!(lines.next(), Some("--edition"), "{argv}");
+    lines
+        .next()
+        .expect("`--edition` should be followed by a year")
+        .to_owned()
+}
+
+#[test]
+fn edition_defaults_to_2024_and_follows_the_root_cargo_toml() {
+    let project = project_with_rust_doc("```rust\nfn main() {}\n```\n");
+    let stub = Stub::new();
+    let _json = stub.check(&project, 0);
+    assert_eq!(edition_run(&stub), "2024");
+
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"x\"\nedition = \"2018\"\n",
+    );
+    let _json = stub.check(&project, 0);
+    assert_eq!(edition_run(&stub), "2018");
+
+    project.write(
+        "Cargo.toml",
+        "[package]\nedition = \"2018\"\n[workspace.package]\nedition = \"2021\"\n",
+    );
+    let _json = stub.check(&project, 0);
+    assert_eq!(edition_run(&stub), "2021");
+}
+
+#[test]
+fn edition_config_beats_cargo_toml_and_the_block_attribute_beats_both() {
+    let project = project_with_rust_doc("```rust\nfn main() {}\n```\n");
+    project.write("Cargo.toml", "[package]\nedition = \"2018\"\n");
+    project.write(
+        "supdoc.config.toml",
+        "[features.code-blocks]\n[features.code-blocks.rust]\nedition = \"2015\"\n",
+    );
+    let stub = Stub::new();
+    let _json = stub.check(&project, 0);
+    assert_eq!(edition_run(&stub), "2015");
+
+    project.write("docs/blocks.md", "```rust edition2021\nfn main() {}\n```\n");
+    let _json = stub.check(&project, 0);
+    assert_eq!(edition_run(&stub), "2021");
+}
+
+#[test]
+fn edition_config_outside_the_four_known_is_a_config_error() {
+    let project = project_with_rust_doc("```rust\nfn main() {}\n```\n");
+    project.write(
+        "supdoc.config.toml",
+        "[features.code-blocks]\n[features.code-blocks.rust]\nedition = \"2030\"\n",
+    );
+    let stub = Stub::new();
+
+    let _failed = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", stub.dir.path())])
+        .assert_exit(78);
+
+    assert_eq!(stub.record("runs"), "", "rustfmt should never run");
+}
+
 /// The absolute `PATH` directory holding `rustfmt`, when one does.
 fn rustfmt_dir() -> Option<PathBuf> {
     std::env::var_os("PATH")

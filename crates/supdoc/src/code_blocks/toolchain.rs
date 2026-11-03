@@ -8,6 +8,8 @@ use std::ffi::OsString;
 use std::io::Read as _;
 use std::path::Path;
 
+use crate::config::code_blocks::Edition;
+
 /// The toolchain files supdoc reads, in rustup's order: `rust-toolchain` wins when both exist.
 const FILES: [&str; 2] = ["rust-toolchain", "rust-toolchain.toml"];
 
@@ -72,6 +74,31 @@ pub(crate) fn read(root: &Path) -> Toolchain {
         Ok(text) => parse(&text).unwrap_or_else(|refusal| Toolchain::Refused { refusal, file }),
         Err(refusal) => Toolchain::Refused { refusal, file },
     }
+}
+
+/// The edition the root's `Cargo.toml` names: `[workspace.package] edition`, then `[package]
+/// edition`. Read only through an in-root real path, as a regular file of at most 64 KiB, and
+/// never executed. `None` when there is no such file, it can't be read or parsed, or no edition
+/// in it is one of `2015`, `2018`, `2021` or `2024`.
+///
+/// Effect: resolves symlinks and reads the file.
+#[must_use]
+pub(crate) fn cargo_edition(root: &Path) -> Option<Edition> {
+    let text = read_inside(&root.join("Cargo.toml"), root).ok()?;
+    edition_in(&text)
+}
+
+/// The edition `text`, a `Cargo.toml`, names: its workspace package's, then its package's.
+fn edition_in(text: &str) -> Option<Edition> {
+    let table = text.parse::<toml::Table>().ok()?;
+    let named = |section: Option<&toml::Value>| {
+        section
+            .and_then(|section| section.get("edition"))
+            .and_then(toml::Value::as_str)
+            .and_then(Edition::from_year)
+    };
+    named(table.get("workspace").and_then(|w| w.get("package")))
+        .or_else(|| named(table.get("package")))
 }
 
 /// The text of `file` when its real path is a regular UTF-8 file under `root`'s real path and
@@ -208,7 +235,8 @@ fn is_host_triple(triple: &str) -> bool {
 mod tests {
     use std::ffi::OsString;
 
-    use super::{Refusal, Toolchain, is_valid_channel, parse, read};
+    use super::{Refusal, Toolchain, cargo_edition, edition_in, is_valid_channel, parse, read};
+    use crate::config::code_blocks::Edition;
 
     #[test]
     fn channels_with_dates_and_host_triples_are_valid() {
@@ -317,6 +345,41 @@ mod tests {
                 file: "rust-toolchain"
             }
         );
+    }
+
+    #[test]
+    fn a_workspace_edition_beats_a_package_edition() {
+        assert_eq!(
+            edition_in("[package]\nedition = \"2018\"\n[workspace.package]\nedition = \"2021\"\n"),
+            Some(Edition::E2021)
+        );
+        assert_eq!(
+            edition_in("[package]\nname = \"x\"\nedition = \"2018\"\n"),
+            Some(Edition::E2018)
+        );
+    }
+
+    #[test]
+    fn an_unknown_or_inherited_edition_falls_through() {
+        assert_eq!(
+            edition_in("[workspace.package]\nedition = \"2030\"\n[package]\nedition = \"2015\"\n"),
+            Some(Edition::E2015)
+        );
+        assert_eq!(edition_in("[package]\nedition.workspace = true\n"), None);
+        assert_eq!(edition_in("not toml ["), None);
+    }
+
+    #[test]
+    fn a_cargo_toml_linked_outside_the_root_is_not_read() {
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let root = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let target = outside.path().join("Cargo.toml");
+        std::fs::write(&target, "[package]\nedition = \"2018\"\n")
+            .expect("the outside file should be writable");
+        std::os::unix::fs::symlink(&target, root.path().join("Cargo.toml"))
+            .expect("the link should be creatable");
+
+        assert_eq!(cargo_edition(root.path()), None);
     }
 
     #[test]

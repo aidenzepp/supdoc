@@ -18,6 +18,7 @@ mod shell;
 use crate::path::AbsolutePath;
 
 use self::python::RawPython;
+pub(crate) use self::rust::Edition;
 use self::rust::RawRust;
 pub(crate) use self::shell::Dialect;
 use self::shell::RawShell;
@@ -158,6 +159,8 @@ struct Languages {
     python: Table,
     /// The nearest shell `dialect` written.
     dialect: Option<Dialect>,
+    /// The nearest Rust `edition` written.
+    edition: Option<Edition>,
 }
 
 /// The `[features.code-blocks]` table, exactly as written. Any other key inside it is refused as
@@ -229,6 +232,12 @@ impl CodeBlocks {
         self.table(language).formatter.as_ref()
     }
 
+    /// The Rust `edition` key, when written.
+    #[must_use]
+    pub(crate) const fn edition(&self) -> Option<Edition> {
+        self.languages.edition
+    }
+
     /// The shell dialect shfmt parses with: `bash` unless `dialect` says otherwise.
     #[must_use]
     pub(crate) fn dialect(&self) -> Dialect {
@@ -285,6 +294,10 @@ pub(super) fn merge(
         include: nearer.include.or_else(|| include.map(anchor)),
         exclude: nearer.exclude.or_else(|| exclude.map(anchor)),
         languages: Languages {
+            edition: nearer
+                .languages
+                .edition
+                .or(rust.as_ref().and_then(|raw| raw.edition)),
             rust: nearer
                 .languages
                 .rust

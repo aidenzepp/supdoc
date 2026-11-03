@@ -7,7 +7,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use crate::cartridges::{markdown, rust as rust_cartridge};
-use crate::config::code_blocks::Language;
+use crate::config::code_blocks::{Edition, Language};
 use crate::finding::{Finding, Fix, LineIndex, Location, Severity};
 use crate::limits::TimeLimit;
 use crate::path::AbsolutePath;
@@ -66,10 +66,15 @@ impl Verdict {
 /// `tool`'s arguments for the `index`th block (1-based) of `doc`, the doc's absolute path.
 /// `None` while `language` has no format step, which leaves its blocks pending.
 #[must_use]
-pub(crate) fn args(tool: &Tool, doc: &Path, index: usize) -> Option<Vec<OsString>> {
+pub(crate) fn args(
+    tool: &Tool,
+    doc: &Path,
+    index: usize,
+    edition: Edition,
+) -> Option<Vec<OsString>> {
     match tool.language {
         Language::Shell => Some(shell::format_args(doc, index)),
-        Language::Rust => Some(rust::format_args()),
+        Language::Rust => Some(rust::format_args(edition)),
         Language::Python => python::format_args(tool, doc, index),
     }
 }
