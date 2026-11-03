@@ -104,6 +104,62 @@ Outside any git repository, with no `.git` in the root or above it, there is no 
 applies the project's own `.gitignore` and `.ignore` files and the global excludes file, and reads none above
 the project root.
 
+## Code blocks
+
+supdoc can also keep the code blocks in your docs in step with the code. It's off until the config has a
+`[features.code-blocks]` table; an empty table turns it on:
+
+```toml
+[features.code-blocks]
+# include = ["docs/**"]   default: the top-level `include`
+# exclude = []            default: the top-level `exclude`
+```
+
+`include` and `exclude` choose which files' code blocks are read, with the same globs as the top-level keys.
+Each defaults to the top-level value, and setting one never changes which files links are read from.
+
+Mark a block by writing attributes after its language, separated by spaces:
+
+- **`from(PATH#SYMBOL)`**: the block is exactly that symbol's text. `PATH` is relative to the doc, and a
+  dotted symbol names a member, such as `src/limits.rs#Limits.resolve`. Repeat it to show several symbols;
+  the parts join in order with one blank line between them. `supdoc check` fails with `code-block-stale` when
+  the block no longer matches, and `supdoc fix --yes` copies the current text in.
+- **`uses(PATH#SYMBOL)`**: the block is written by hand but depends on that symbol, in any language. It's
+  tracked like a link: `supdoc update --yes` records the symbol's hash in `supdoc.lock`, and `supdoc check`
+  fails when the symbol changes, until you reread the block and run `update` again. It may repeat.
+
+````markdown
+```rust from(../src/limits.rs#Limits.resolve)
+pub fn resolve(&self) -> u32 {
+    self.max
+}
+```
+````
+
+Attributes are always parenthesized, never `key=value`: rustdoc rejects the `=` and then stops treating the
+block as Rust, so it loses highlighting and drops out of `cargo test --doc`. A comma doesn't separate
+attributes either (` ```rust,ignore ` is one unknown word); supdoc warns and names the spaced spelling.
+
+supdoc checks what is written and never skips a block on its own. To exclude a block, mark it and say why:
+
+- `ignore(reason)`: check nothing in this block. rustdoc reads it as its own `ignore` too.
+- `no_format(reason)` and `no_lint(reason)`: skip only formatting or only linting. supdoc doesn't format
+  or lint blocks yet, so for now these record the intent.
+
+A marker without a reason still takes effect, with a `code-block-ignore-reason` warning.
+
+A Rust snippet that needs surrounding code to make sense takes one of three explicit forms:
+
+1. **Show the real code.** If it's the project's own code, make it a `from(...)` block, so it can't drift.
+2. **Write the context into the block** with hidden `# ` lines (`# use std::time::Instant;`,
+   `# fn main() {` … `# }`), as rustdoc already supports.
+3. **Keep it partial and say so**: `no_lint(needs crate context)`, or `ignore(placeholder)` for a block
+   that doesn't parse on its own.
+
+Most renderers hide the attributes: GitHub, markdown-it, Docusaurus, mdBook and TypeDoc show only the
+highlighted code. Mintlify shows any text after the language as the block's title, so marked blocks there
+carry their attributes as a header.
+
 ## Agent skill
 
 [`SKILL.md`](SKILL.md) teaches coding agents to use supdoc: find the docs behind code before changing it, and
