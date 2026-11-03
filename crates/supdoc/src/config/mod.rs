@@ -3,6 +3,7 @@
 //! Every check happens while the TOML is read, so a loaded [`Config`] holds only valid values.
 
 mod chain;
+pub(crate) mod code_blocks;
 pub(crate) mod confine;
 mod error;
 mod pattern;
@@ -14,6 +15,7 @@ mod tests;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use self::code_blocks::CodeBlocks;
 use crate::hash::{HashSettings, LineEndings};
 use crate::limits::{CommandLineLimits, ConfigLimits, Limits, SizeLimit};
 use crate::namespace::NamespaceName;
@@ -96,6 +98,9 @@ pub(crate) struct Config {
     namespaces: BTreeMap<NamespaceName, Namespace>,
     /// The nearest `[features.hash] line-endings` and the file that set it, if any file did.
     line_endings: Option<(LineEndings, AbsolutePath)>,
+    /// The resolved `[features.code-blocks]` settings, or `None` when no file in the chain writes
+    /// the table and the feature is off.
+    code_blocks: Option<CodeBlocks>,
     /// Each `[limits]` key from the nearest config that sets it, with that file.
     limits: ConfigLimits,
     /// Every ceiling in effect: `limits` over the defaults, under the command line once
@@ -176,6 +181,7 @@ impl Config {
             exclude: None,
             namespaces: BTreeMap::new(),
             line_endings: None,
+            code_blocks: None,
             limits: ConfigLimits::default(),
             in_effect: Limits::resolve(&CommandLineLimits::default(), &ConfigLimits::default()),
         }
@@ -268,6 +274,12 @@ impl Config {
                 .map(|(value, _)| *value)
                 .unwrap_or_default(),
         }
+    }
+
+    /// The resolved `[features.code-blocks]` settings, or `None` when the feature is off.
+    #[must_use]
+    pub(crate) const fn code_blocks(&self) -> Option<&CodeBlocks> {
+        self.code_blocks.as_ref()
     }
 
     /// The config file that set `line-endings`, or `None` when the default applies.

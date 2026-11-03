@@ -708,7 +708,8 @@ mod helps {
     /// of supdoc's code areas, such as `link-failed` or `cli-usage`.
     fn is_code(text: &str) -> bool {
         const AREAS: &[&str] = &[
-            "check", "cli", "config", "fix", "ignore", "link", "lock", "read", "resolve", "scan",
+            "check", "cli", "code", "config", "fix", "ignore", "link", "lock", "read", "resolve",
+            "scan",
         ];
         let Some((area, name)) = text.split_once('-') else {
             return false;
@@ -776,6 +777,44 @@ mod helps {
 
     /// Every message with a `help` that a user can be made to see, one way to reach each code.
     const HELP_CASES: &[HelpCase] = &[
+        case(
+            "code-block-unknown-attribute",
+            |p| {
+                config_with(p, "[features.code-blocks]\n");
+                p.write("docs/blocks.md", "# B\n\n```sh hidden\necho hi\n```\n");
+            },
+            &["check"],
+        ),
+        case(
+            "code-block-unknown-attribute",
+            |p| {
+                config_with(p, "[features.code-blocks]\n");
+                p.write(
+                    "docs/blocks.md",
+                    "# B\n\n```rust,ignore\nfn main() {}\n```\n",
+                );
+            },
+            &["check"],
+        ),
+        case(
+            "code-block-ignore-reason",
+            |p| {
+                config_with(p, "[features.code-blocks]\n");
+                p.write("docs/blocks.md", "# B\n\n```sh ignore\necho hi\n```\n");
+            },
+            &["check"],
+        ),
+        case(
+            "code-block-unknown-attribute",
+            |p| {
+                config_with(p, "[features.code-blocks]\n");
+                p.write(
+                    "docs/blocks.md",
+                    "# B\n\n```rust from=../src/lib.rs#add\nfn main() {}\n```\n",
+                );
+            },
+            &["check"],
+        ),
         case(
             "link-failed",
             |p| {

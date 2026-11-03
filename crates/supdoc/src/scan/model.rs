@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::code_blocks::block::CodeBlock;
 use crate::finding::{Finding, Location, Snippet};
 use crate::hash::Hash;
 use crate::link::{LinkKey, SourcePath};
@@ -59,6 +60,9 @@ pub(crate) struct Scan {
     /// Directories the walk couldn't read, relative to the root. Every source beneath one is
     /// unread too, so its lock entries are never judged obsolete either.
     pub(crate) unread_dirs: BTreeSet<SourcePath>,
+    /// Every code block in the scanned sources, in file order. Empty unless
+    /// `[features.code-blocks]` is on.
+    pub(crate) code_blocks: Vec<CodeBlock>,
 }
 
 impl Scan {
