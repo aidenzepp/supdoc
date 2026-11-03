@@ -35,6 +35,13 @@ impl ToolEnv {
         }
     }
 
+    /// Each passed variable that is set, with its value: the whole environment a tool gets.
+    pub(crate) fn vars(&self) -> impl Iterator<Item = (&'static str, &OsStr)> {
+        self.vars
+            .iter()
+            .map(|(name, value)| (*name, value.as_os_str()))
+    }
+
     /// `PATH`, when it is set.
     fn path(&self) -> Option<&OsStr> {
         self.vars

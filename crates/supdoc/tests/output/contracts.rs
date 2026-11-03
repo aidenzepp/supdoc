@@ -446,6 +446,9 @@ mod helps {
         RemovedCwd,
         /// From a new subdirectory of the project, which has a config at its root.
         Subdirectory,
+        /// With `PATH` set to a directory outside the project holding a copy of each file the
+        /// setup wrote under the project's `tools` directory, made executable.
+        OutsideTools,
         /// With `PATH` set to the project's `bin` directory.
         ProjectPath,
     }
@@ -807,8 +810,40 @@ mod helps {
         project.write("docs/api.md", "# API\n\nSee [ad](../src/lib.rs#ad).\n");
     }
 
+    /// A shell-table project with one `sh` block whose `shfmt`, outside the project, runs
+    /// `script`.
+    fn shfmt_runs(project: &Project, script: &str) {
+        config_with(
+            project,
+            "[features.code-blocks]\n[features.code-blocks.shell]\n",
+        );
+        project.write("docs/blocks.md", "# B\n\n```sh\necho hi\n```\n");
+        project.write("tools/shfmt", &format!("#!/bin/sh\n{script}\n"));
+    }
+
     /// Every message with a `help` that a user can be made to see, one way to reach each code.
     const HELP_CASES: &[HelpCase] = &[
+        HelpCase {
+            kind: "code-block-unformatted",
+            setup: |p| shfmt_runs(p, "echo formatted"),
+            args: &["check"],
+            via: Via::OutsideTools,
+            needs_permissions: false,
+        },
+        HelpCase {
+            kind: "code-block-tool-failed",
+            setup: |p| shfmt_runs(p, "echo 'shfmt: bad input' >&2\nexit 1"),
+            args: &["check"],
+            via: Via::OutsideTools,
+            needs_permissions: false,
+        },
+        HelpCase {
+            kind: "code-block-tool-timeout",
+            setup: |p| shfmt_runs(p, "/bin/sleep 30"),
+            args: &["check", "--code-block-timeout", "200ms"],
+            via: Via::OutsideTools,
+            needs_permissions: false,
+        },
         case(
             "code-block-tool-missing",
             |p| {
@@ -1549,6 +1584,30 @@ mod helps {
                     .output()
             }
             Via::Subdirectory => shell(&project, "mkdir sub && cd sub", &args).output(),
+            Via::OutsideTools => {
+                use std::os::unix::fs::PermissionsExt as _;
+                let outside =
+                    tempfile::TempDir::new().expect("a temporary directory should be creatable");
+                let tools = std::fs::read_dir(project.path().join("tools"))
+                    .expect("the setup should write a tools directory");
+                for entry in tools {
+                    let from = entry.expect("a tools entry should be readable").path();
+                    let to = outside
+                        .path()
+                        .join(from.file_name().expect("a tool has a name"));
+                    let _bytes = std::fs::copy(&from, &to).expect("the stub should copy");
+                    std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o755))
+                        .expect("the stub should be made executable");
+                }
+                let path = outside
+                    .path()
+                    .to_str()
+                    .expect("the temp path should be UTF-8");
+                project
+                    .command(&args, &[("PATH", path)])
+                    .stdin(Stdio::null())
+                    .output()
+            }
             Via::ProjectPath => {
                 let bin = project.path().join("bin");
                 let path = bin.to_str().expect("the temp path should be UTF-8");

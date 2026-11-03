@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::Path;
+use std::time::Duration;
 
 use crate::config::Config;
 use crate::config::code_blocks::Language;
@@ -15,10 +16,12 @@ use crate::read::error::CartridgeLoadError;
 
 use super::block::{CodeBlock, Info};
 use super::excerpt;
+use super::format;
 use super::info::{
     KNOWN_ATTRIBUTES, SourceKind, is_known_attribute, parenthesized_spelling, reasoned,
     source_attributes,
 };
+use super::runner::{self, Call};
 use super::source::{self, SourceText, Unresolved};
 use super::states::{Excerpt, NotChecked, state_of, tag_of};
 use super::tools::{Found, Tool, ToolEnv, find, formatter};
@@ -47,6 +50,8 @@ pub(crate) struct Evaluation {
     pub(crate) counts: Option<CodeBlockCounts>,
     /// One record per block, in block order. Empty when `[features.code-blocks]` is off.
     pub(crate) records: Vec<BlockRecord>,
+    /// How long one tool run may take, from `[limits] code-block-timeout`. `None` is no limit.
+    timeout: Option<Duration>,
 }
 
 /// What `check` knows about one block.
@@ -62,6 +67,10 @@ pub(crate) struct BlockRecord {
     pub(crate) reason: Option<String>,
     /// Each `uses(...)` target the block writes, with its state.
     pub(crate) uses: Vec<(String, UseState)>,
+    /// The block's 1-based position among the blocks of its doc.
+    index: usize,
+    /// What a formatter reads for the block, kept while it is pending.
+    input: Option<String>,
 }
 
 /// The findings for `blocks`, in block order, reading each `from(...)` and `uses(...)` source
@@ -98,7 +107,13 @@ pub(crate) fn evaluate(
         .map(|(doc, target, hash)| ((doc, target), hash))
         .collect();
     let mut records = Vec::with_capacity(blocks.len());
-    for block in blocks {
+    let mut index = 0;
+    for (position, block) in blocks.iter().enumerate() {
+        let same_doc = position
+            .checked_sub(1)
+            .and_then(|previous| blocks.get(previous))
+            .is_some_and(|previous| previous.fence.file == block.fence.file);
+        index = if same_doc { index + 1 } else { 1 };
         let mut outcome = None;
         let mut block_uses = Vec::new();
         if let Some(info) = block.info.as_ref() {
@@ -143,12 +158,25 @@ pub(crate) fn evaluate(
         }
         let state = state_of(block, outcome, |language| code_blocks.checks(language));
         let language = tag_of(block).map(str::to_owned);
+        let input = if state == BlockState::NotChecked(NotChecked::Pending) {
+            let file = block.fence.file.as_str();
+            if doc.as_ref().is_none_or(|(read, _)| *read != file) {
+                doc = Some((file, read_doc(config, file)));
+            }
+            doc.as_ref()
+                .and_then(|(_, text)| text.as_deref())
+                .and_then(|text| format::input(block, text))
+        } else {
+            None
+        };
         records.push(BlockRecord {
             at: block.fence.clone(),
             reason: state.reason(language.as_deref()),
             language,
             state: state.clone(),
             uses: block_uses,
+            index,
+            input,
         });
         states.push(state);
     }
@@ -159,6 +187,7 @@ pub(crate) fn evaluate(
         findings,
         counts: Some(CodeBlockCounts::tally(&states)),
         records,
+        timeout: config.limits_in_effect().code_block_timeout.value.get(),
     })
 }
 
@@ -167,10 +196,14 @@ impl Evaluation {
     /// A tool not found makes its blocks [`BlockState::ToolMissing`] with one
     /// `code-block-tool-missing` warning naming its install command; one whose real path is
     /// inside `root` makes them not checked with one `code-block-not-checked` warning. A tool
-    /// found elsewhere leaves them pending: nothing runs yet.
+    /// found elsewhere runs, hardened, on each block of a language with a format step, which
+    /// passes it or fails it with one `code-block-unformatted`, `code-block-tool-failed` or
+    /// `code-block-tool-timeout` error; a language without a format step stays pending.
     ///
-    /// Effect: reads file metadata along `PATH` and resolves symlinks.
+    /// Effect: reads file metadata along `PATH`, resolves symlinks, and runs each found formatter
+    /// once per block, killing it at the timeout.
     pub(crate) fn look_up_tools(&mut self, env: &ToolEnv, root: &Path) {
+        let timeout = self.timeout;
         let mut looked_up: Vec<(&'static str, Found)> = Vec::new();
         for record in &mut self.records {
             if record.state != BlockState::NotChecked(NotChecked::Pending) {
@@ -194,7 +227,17 @@ impl Evaluation {
                     found
                 };
             record.state = match found {
-                Found::OnPath(_) => continue,
+                Found::OnPath(program) => {
+                    let Some(state) = run_formatter(tool, &program, record, env, root, timeout)
+                        .map(|(verdict, finding)| {
+                            self.findings.extend(finding);
+                            verdict.state()
+                        })
+                    else {
+                        continue;
+                    };
+                    state
+                }
                 Found::Missing => BlockState::ToolMissing,
                 Found::InsideRoot(_) => BlockState::NotChecked(NotChecked::ToolInsideRoot),
             };
@@ -206,6 +249,36 @@ impl Evaluation {
             ));
         }
     }
+}
+
+/// Runs `tool`, found at `program`, on `record`'s block from `root` with `env`, under `timeout`:
+/// its verdict and finding. `None` when the block's language has no format step yet or its input
+/// couldn't be read, so it stays pending.
+///
+/// Effect: runs the tool, killing it at the timeout.
+fn run_formatter(
+    tool: &Tool,
+    program: &Path,
+    record: &BlockRecord,
+    env: &ToolEnv,
+    root: &Path,
+    timeout: Option<Duration>,
+) -> Option<(format::Verdict, Option<Finding>)> {
+    let input = record.input.as_deref()?;
+    let doc = root.join(record.at.file.as_str());
+    let args = format::args(tool.language, &doc, record.index)?;
+    let args: Vec<&std::ffi::OsStr> = args.iter().map(std::ffi::OsString::as_os_str).collect();
+    let call = Call {
+        program,
+        name: tool.binary,
+        args: &args,
+        extra: &[],
+        stdin: input.as_bytes(),
+        timeout,
+    };
+    let verdict = format::judge(input, runner::run(&call, env, root));
+    let finding = format::finding(&verdict, tool, &record.at, timeout);
+    Some((verdict, finding))
 }
 
 /// The one warning for `tool`, found as `found`, at `at`, the first block that needs it. `None`

@@ -704,26 +704,189 @@ fn tool_inside_the_checkout_is_refused_and_its_blocks_not_checked() {
     );
 }
 
-#[test]
-fn tool_found_outside_the_checkout_leaves_its_blocks_pending() {
+/// Runs `check --json` on [`project_with_shell_blocks`] with an `shfmt` stub running `script`,
+/// outside the checkout, as the only `PATH` entry, after `args`, asserting it exits `exit`.
+fn check_with_shfmt(script: &str, args: &[&str], exit: i32) -> serde_json::Value {
+    use std::os::unix::fs::PermissionsExt as _;
     let project = project_with_shell_blocks();
     let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
-    stub(outside.path(), "shfmt");
+    let path = outside.path().join("shfmt");
+    std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("the stub should be writable");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("the stub should be made executable");
+    let mut all = vec!["check", "--json"];
+    all.extend_from_slice(args);
+    project
+        .supdoc_in_with(".", &all, &[("PATH", outside.path())])
+        .assert_exit(exit)
+        .json()
+}
+
+#[test]
+fn shell_format_with_the_real_shfmt_passes_formatted_blocks_and_fails_others() {
+    let Some(dir) = std::env::var_os("PATH")
+        .iter()
+        .flat_map(std::env::split_paths)
+        .find(|dir| dir.is_absolute() && dir.join("shfmt").is_file())
+    else {
+        // Written to the process's stderr directly, which `cargo test` shows for a passing test.
+        let _ignored = std::io::Write::write_all(
+            &mut std::io::stderr(),
+            b"SKIPPED shell_format_with_the_real_shfmt: shfmt is not on PATH\n",
+        );
+        return;
+    };
+    let project = project_with_shell_blocks();
+    project.write(
+        "docs/blocks.md",
+        "# Blocks\n\n```sh\necho hi\n```\n\n```sh\nif true;then echo bye;fi\n```\n",
+    );
 
     let json = project
-        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
-        .assert_exit(0)
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", &dir)])
+        .assert_exit(1)
         .json();
 
+    assert_eq!(finding_kinds(&json), ["code-block-unformatted"], "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/failed"), 1, "{json}");
+}
+
+#[test]
+fn shell_format_equal_output_passes_every_block() {
+    let json = check_with_shfmt("/bin/cat", &[], 0);
+
     assert!(finding_kinds(&json).is_empty(), "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 2, "{json}");
     assert_eq!(
         at(&json, "/data/summary/code_blocks/not_checked"),
-        2,
-        "{json}"
-    );
-    assert_eq!(
-        at(&json, "/data/summary/code_blocks/tool_missing"),
         0,
         "{json}"
     );
+}
+
+#[test]
+fn shell_format_different_output_is_unformatted() {
+    let json = check_with_shfmt("echo formatted", &[], 1);
+
+    assert_eq!(
+        finding_kinds(&json),
+        ["code-block-unformatted", "code-block-unformatted"],
+        "{json}"
+    );
+    assert_eq!(at(&json, "/data/summary/code_blocks/failed"), 2, "{json}");
+}
+
+#[test]
+fn shell_format_a_non_zero_exit_quotes_stderr_and_names_the_block_by_its_index() {
+    let json = check_with_shfmt("echo \"bad $2\" >&2\nexit 1", &[], 1);
+
+    assert_eq!(
+        finding_kinds(&json),
+        ["code-block-tool-failed", "code-block-tool-failed"],
+        "{json}"
+    );
+    let text = json.to_string();
+    assert!(text.contains("docs/blocks.md.1.sh"), "{json}");
+    assert!(text.contains("docs/blocks.md.2.sh"), "{json}");
+}
+
+#[test]
+fn shell_format_a_tool_past_the_timeout_is_killed_and_reported() {
+    let started = std::time::Instant::now();
+    let json = check_with_shfmt("/bin/sleep 30", &["--code-block-timeout", "200ms"], 1);
+
+    assert_eq!(
+        finding_kinds(&json),
+        ["code-block-tool-timeout", "code-block-tool-timeout"],
+        "{json}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "took {:?}",
+        started.elapsed()
+    );
+}
+
+/// Whether `/bin/kill -0` still reaches the process `pid` within two seconds of polling.
+fn still_alive(pid: &str) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        let alive = std::process::Command::new("/bin/kill")
+            .args(["-0", pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("/bin/kill should run")
+            .success();
+        if !alive {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    true
+}
+
+#[test]
+fn sigterm_during_a_tool_run_kills_the_tool_and_ends_supdoc_by_sigterm() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::process::ExitStatusExt as _;
+    let project = project_with_shell_blocks();
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let pid_file = outside.path().join("pid");
+    let stub = outside.path().join("shfmt");
+    std::fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\nexec /bin/sleep 30\n",
+            pid_file.display()
+        ),
+    )
+    .expect("the stub should be writable");
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+        .expect("the stub should be made executable");
+    let started = std::time::Instant::now();
+    let mut supdoc = std::process::Command::new(env!("CARGO_BIN_EXE_supdoc"))
+        .args(["check", "--code-block-timeout", "60s"])
+        .current_dir(project.path("."))
+        .env_clear()
+        .env("PATH", outside.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the supdoc binary should start");
+
+    let tool = loop {
+        if let Some(pid) = std::fs::read_to_string(&pid_file)
+            .ok()
+            .filter(|text| text.ends_with('\n'))
+        {
+            break pid.trim().to_owned();
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the stub tool never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let sent = std::process::Command::new("/bin/kill")
+        .args(["-TERM", &supdoc.id().to_string()])
+        .status()
+        .expect("/bin/kill should run");
+    let status = loop {
+        if let Some(status) = supdoc.try_wait().expect("the run should be waitable") {
+            break status;
+        }
+        if started.elapsed() > std::time::Duration::from_secs(10) {
+            drop(supdoc.kill());
+            panic!("supdoc did not exit after SIGTERM");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+
+    assert!(sent.success(), "SIGTERM should be delivered");
+    assert!(
+        status.signal() == Some(15) || status.code() == Some(143),
+        "supdoc should end by SIGTERM: {status:?}"
+    );
+    assert!(!still_alive(&tool), "the stub tool {tool} outlived supdoc");
 }
