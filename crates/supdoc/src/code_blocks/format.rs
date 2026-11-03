@@ -13,7 +13,7 @@ use crate::limits::TimeLimit;
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Cartridge, Deadline, SourceFile};
 
-use super::block::{CodeBlock, blocks_in, replacement_for};
+use super::block::{CodeBlock, replacement_for, try_blocks_in};
 use super::runner::{Failure, Ran};
 use super::states;
 use super::tools::Tool;
@@ -172,7 +172,10 @@ pub(crate) fn fixed(
     tool: &Tool,
 ) -> Vec<Finding> {
     let name = tool.name;
-    let body = output.strip_suffix('\n').unwrap_or(output);
+    let body = output
+        .strip_suffix("\r\n")
+        .or_else(|| output.strip_suffix('\n'))
+        .unwrap_or(output);
     match safe_fix(block, doc, body, &format!("`{name}`'s output")) {
         Guarded::Fix(fix) => {
             let help = format!(
@@ -384,9 +387,10 @@ fn fences(block: &CodeBlock, text: &str, limit: TimeLimit) -> Option<Vec<Fence>>
     let parsed =
         SourceFile::from_text(path, text.to_owned(), language, Deadline::start(limit)).ok()?;
     let index = LineIndex::new(text);
-    let fences = blocks_in(&parsed, |range| {
+    let fences = try_blocks_in(&parsed, |range| {
         Location::in_indexed(file.clone(), text, &index, range)
     })
+    .ok()?
     .into_iter()
     .map(|found| {
         let range = found.fence.range;
@@ -610,6 +614,15 @@ mod tests {
         let findings = fixed_in(&block, text, "echo hi\0\n\t```\nINJECTED\n");
 
         refused(&findings, "a NUL can hide the fence line from the parse");
+    }
+
+    #[test]
+    fn output_ending_in_crlf_is_not_read_as_a_bare_cr() {
+        let text = "```sh\necho  hi\n```\n";
+
+        let findings = fixed_with(text, "echo hi\r\n");
+
+        assert_eq!(applied(text, &findings), "```sh\necho hi\n```\n");
     }
 
     #[test]

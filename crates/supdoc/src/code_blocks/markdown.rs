@@ -11,6 +11,7 @@ use tree_sitter::{Node, Tree};
 
 use crate::finding::Location;
 use crate::read::cartridge::SourceFile;
+use crate::read::error::ReadError;
 
 use super::block::{BodyLine, CodeBlock, Info};
 
@@ -18,25 +19,40 @@ use super::block::{BodyLine, CodeBlock, Info};
 ///
 /// A Markdown renderer reads a NUL as an ordinary character (U+FFFD), but tree-sitter-md doesn't,
 /// so a NUL could hide a fence line from supdoc that a renderer sees. A file holding one is parsed again
-/// with each NUL as `?`, which keeps every offset, and its blocks are read from that tree. When
-/// that parse fails, the file's own tree is read.
-pub(super) fn blocks(
+/// with each NUL as `?`, which keeps every offset, and its blocks are read only from that tree.
+///
+/// # Errors
+///
+/// The [`ReadError`] of the parse with each NUL replaced when it fails: the file's own tree can't
+/// see past a NUL, so it is never read instead.
+pub(super) fn try_blocks(
     file: &SourceFile,
     locate: impl Fn(Range<usize>) -> Option<Location>,
-) -> Vec<CodeBlock> {
+) -> Result<Vec<CodeBlock>, ReadError> {
     let text = file.text();
     if !text.contains('\0') {
-        return blocks_of_tree(text, file.tree(), &locate);
+        return Ok(blocks_of_tree(text, file.tree(), &locate));
     }
-    match SourceFile::from_text(
+    let cleaned = SourceFile::from_text(
         file.path().clone(),
         text.replace('\0', "?"),
         file.language(),
         file.deadline(),
-    ) {
-        Ok(cleaned) => blocks_of_tree(text, cleaned.tree(), &locate),
-        Err(_) => blocks_of_tree(text, file.tree(), &locate),
-    }
+    );
+    blocks_from_parse(text, cleaned, &locate)
+}
+
+/// The blocks of `text` read from `cleaned`, the parse of `text` with each NUL replaced.
+///
+/// # Errors
+///
+/// The [`ReadError`] `cleaned` failed with.
+fn blocks_from_parse(
+    text: &str,
+    cleaned: Result<SourceFile, ReadError>,
+    locate: &impl Fn(Range<usize>) -> Option<Location>,
+) -> Result<Vec<CodeBlock>, ReadError> {
+    Ok(blocks_of_tree(text, cleaned?.tree(), locate))
 }
 
 /// Every fenced code block in `tree`, parsed from `text` or a copy with the same offsets, in file
@@ -298,5 +314,26 @@ mod tests {
             .and_then(|block| block.body.first())
             .expect("the first block should have a body line");
         assert_eq!(slice(text, &first.content), "echo \0");
+    }
+
+    #[test]
+    fn a_failed_replaced_parse_is_an_error_never_zero_blocks() {
+        let text = "```sh\necho \0\n```\n";
+        let path = AbsolutePath::new(Path::new("/repo/docs/guide.md"))
+            .expect("the fixture path should be absolute");
+        let failed = Err(ReadError::Timeout {
+            path,
+            limit: "10s".parse().expect("10s is a valid limit"),
+            step: "the parse",
+            offset: 0,
+            size: text.len(),
+        });
+
+        let result = blocks_from_parse(text, failed, &|_| None);
+
+        assert!(
+            matches!(result, Err(ReadError::Timeout { .. })),
+            "{result:?}"
+        );
     }
 }
