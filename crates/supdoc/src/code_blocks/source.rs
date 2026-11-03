@@ -12,11 +12,13 @@ use std::path::Path;
 
 use crate::config::Config;
 use crate::finding::{Finding, Location, Severity};
+use crate::hash::Hash;
 use crate::namespace::{NamespaceName, unknown_namespace_help};
 use crate::output::paths::relative_to;
 use crate::path::{AbsolutePath, percent_decode, split_namespace};
-use crate::read::cartridge::{Languages, SourceFile};
+use crate::read::cartridge::{Languages, SourceFile, Symbol};
 use crate::read::error::{CartridgeLoadError, ReadError, ReadRole};
+use crate::read::hash::hash_symbol;
 
 use super::info::SourceKind;
 
@@ -86,9 +88,8 @@ pub(crate) struct SourceText {
 ///
 /// [`Unresolved::CartridgeLoad`] when the source's built-in cartridge doesn't load. Otherwise
 /// [`Unresolved::Missing`] for an unknown namespace, a URL, a path that climbs out of the root or its
-/// namespace, a symlink out of the root, a `uses(...)` without a symbol, a missing or unreadable
-/// file, a directory, a file no cartridge reads, a timeout, and a missing, ambiguous or malformed
-/// symbol.
+/// namespace, a symlink out of the root, a `uses(...)` without a symbol, a missing or unreadable file, a directory, a file no
+/// cartridge reads, a timeout, and a missing, ambiguous or malformed symbol.
 pub(crate) fn read(
     config: &Config,
     languages: &Languages,
@@ -96,32 +97,124 @@ pub(crate) fn read(
     kind: SourceKind,
     value: &str,
 ) -> Result<SourceText, Unresolved> {
-    let (path, symbol) = match value.split_once('#') {
+    let (path, symbol) = split_value(value);
+    if kind == SourceKind::Uses && symbol.is_none() {
+        return Err(symbolless(value));
+    }
+    let located = locate(config, doc, kind, path)?;
+    resolve(
+        config,
+        languages,
+        &located,
+        kind,
+        value,
+        symbol,
+        |source, found| match found {
+            None => Some(SourceText {
+                text: source.text().to_owned(),
+                indent: String::new(),
+            }),
+            Some(found) => symbol_text(source.text(), found.range()),
+        },
+    )
+}
+
+/// What a `uses(...)` value names: its target as the lockfile keys it, and that symbol's hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Use {
+    /// `path#symbol` or `ns:path#symbol`, the path relative to the project root or to the
+    /// namespace's directory, with `/` separators.
+    pub(crate) target: String,
+    /// The symbol's hash under the config's `[features.hash]` settings.
+    pub(crate) hash: Hash,
+}
+
+/// The target and current hash of the symbol a `uses(...)` `value` names. `doc` is the doc
+/// holding the block, relative to the project root with `/` separators.
+///
+/// Effect: as [`read`].
+///
+/// # Errors
+///
+/// As [`read`].
+pub(crate) fn read_use(
+    config: &Config,
+    languages: &Languages,
+    doc: &str,
+    value: &str,
+) -> Result<Use, Unresolved> {
+    let kind = SourceKind::Uses;
+    let (path, Some(symbol)) = split_value(value) else {
+        return Err(symbolless(value));
+    };
+    let located = locate(config, doc, kind, path)?;
+    let settings = config.hash_settings();
+    let hash = resolve(
+        config,
+        languages,
+        &located,
+        kind,
+        value,
+        Some(symbol),
+        |source, found| found.and_then(|found| hash_symbol(source, found, settings).ok()),
+    )?;
+    Ok(Use {
+        target: format!("{}#{symbol}", located.target),
+        hash,
+    })
+}
+
+/// The failure for a `uses(...)` `value` without a symbol.
+fn symbolless(value: &str) -> Unresolved {
+    Unresolved::Missing(Missing::new(
+        format!("`uses({value})` names no symbol"),
+        format!("write it as `uses({value}#SYMBOL)`; `uses(...)` tracks one symbol"),
+    ))
+}
+
+/// `value` split at its first `#` into the path and the symbol, if any.
+fn split_value(value: &str) -> (&str, Option<&str>) {
+    match value.split_once('#') {
         Some((path, symbol)) => (path, Some(symbol)),
         None => (value, None),
-    };
-    let name = kind.name();
-    if kind == SourceKind::Uses && symbol.is_none() {
-        return Err(Unresolved::Missing(Missing::new(
-            format!("`{name}({value})` names no symbol"),
-            format!("write it as `{name}({value}#SYMBOL)`; `uses(...)` tracks one symbol"),
-        )));
     }
-    let file = locate(config, doc, kind, path)?;
+}
+
+/// Reads and parses `located`'s file, resolves `symbol` in it, and gives both to `take`. A
+/// `None` from `take` means the symbol doesn't fit the file: a supdoc bug, reported as missing.
+///
+/// Effect: reads and parses the file under `parse-timeout`.
+///
+/// # Errors
+///
+/// As [`read`].
+fn resolve<T>(
+    config: &Config,
+    languages: &Languages,
+    located: &Located,
+    kind: SourceKind,
+    value: &str,
+    symbol: Option<&str>,
+    take: impl FnOnce(&SourceFile, Option<&Symbol>) -> Option<T>,
+) -> Result<T, Unresolved> {
+    let name = kind.name();
     let limit = config.limits_in_effect().parse_timeout.value;
-    let source = SourceFile::read(file, languages, limit)
+    let source = SourceFile::read(located.file.clone(), languages, limit)
         .map_err(|error| read_failed(&error, config.root(), kind))?;
+    let shown = relative_to(config.root(), source.path());
+    let outside = || {
+        Unresolved::Missing(Missing::new(
+            format!("the symbol in `{name}({value})` lies outside {shown} (supdoc bug)"),
+            "report this at https://github.com/aidenzepp/supdoc/issues",
+        ))
+    };
     let Some(symbol) = symbol else {
-        return Ok(SourceText {
-            text: source.text().to_owned(),
-            indent: String::new(),
-        });
+        return take(&source, None).ok_or_else(outside);
     };
     let table = source
         .language()
         .symbols(&source)
         .map_err(|error| read_failed(&error, config.root(), kind))?;
-    let shown = relative_to(config.root(), source.path());
     match table.resolve_text(source.path(), symbol) {
         None => Err(Unresolved::Missing(Missing::new(
             format!("`{symbol}` in `{name}({value})` isn't a symbol path"),
@@ -131,12 +224,7 @@ pub(crate) fn read(
             error.message_naming(&shown),
             error.help_from_root(&shown),
         ))),
-        Some(Ok(found)) => symbol_text(source.text(), found.range()).ok_or_else(|| {
-            Unresolved::Missing(Missing::new(
-                format!("the symbol `{symbol}` lies outside {shown} (supdoc bug)"),
-                "report this at https://github.com/aidenzepp/supdoc/issues",
-            ))
-        }),
+        Some(Ok(found)) => take(&source, Some(found)).ok_or_else(outside),
     }
 }
 
@@ -155,18 +243,22 @@ fn symbol_text(text: &str, range: std::ops::Range<usize>) -> Option<SourceText> 
     })
 }
 
+/// A source path resolved and contained, before its file is opened.
+struct Located {
+    /// The file.
+    file: AbsolutePath,
+    /// The file as the lockfile names a target: relative to the project root, or `ns:path`
+    /// relative to the namespace's directory.
+    target: String,
+}
+
 /// The file `path` names, contained in the project root, without opening it.
 ///
 /// # Errors
 ///
 /// A [`Missing`] for a URL, an unknown namespace, a climb out of the root or the namespace, or a
 /// file whose real location is outside the root.
-fn locate(
-    config: &Config,
-    doc: &str,
-    kind: SourceKind,
-    path: &str,
-) -> Result<AbsolutePath, Missing> {
+fn locate(config: &Config, doc: &str, kind: SourceKind, path: &str) -> Result<Located, Missing> {
     let name = kind.name();
     if path.contains("://") {
         return Err(Missing::new(
@@ -228,7 +320,12 @@ fn locate(
             "a symlink along the path leads out of the project root; name a file inside it",
         ));
     }
-    Ok(file)
+    let inside = relative_to(&boundary, &file);
+    let target = match prefix {
+        Some(prefix) => format!("{prefix}:{inside}"),
+        None => inside,
+    };
+    Ok(Located { file, target })
 }
 
 /// How a message names `boundary`: the project root, or a namespace's directory by its path.

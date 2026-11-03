@@ -56,8 +56,12 @@ pub(crate) fn run(
         &context.global_excludes,
     )
     .map_err(CliError::from)?;
-    let code_block_findings =
-        evaluate(&config, languages, &scan.code_blocks).map_err(|error| CliError::from(&error))?;
+    let in_scope = |doc: &str| {
+        doc.parse::<SourcePath>()
+            .is_ok_and(|doc| scope.contains(&doc) && !scan.is_unread(&doc))
+    };
+    let code_block_findings = evaluate(&config, languages, &scan.code_blocks, &lock, in_scope)
+        .map_err(|error| CliError::from(&error))?;
     scan.findings.extend(code_block_findings);
 
     let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);

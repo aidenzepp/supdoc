@@ -786,6 +786,20 @@ mod helps {
         );
     }
 
+    /// Records, in the project's `supdoc.lock`, a `uses(...)` target `src/lib.rs#add` for
+    /// `docs/blocks.md` with a hash no symbol has.
+    fn record_use(project: &Project) {
+        let lock = project.path().join("supdoc.lock");
+        let text = std::fs::read_to_string(&lock).expect("the clean project's lock should read");
+        let entry = format!(
+            "\n[[code-blocks.uses]]\nsource = \"docs/blocks.md\"\ntarget = \"src/lib.rs\"\n\
+             symbol = \"add\"\nhash = \"{}\"\n",
+            "0".repeat(64)
+        );
+        std::fs::write(&lock, text.replace("version = 1", "version = 2") + &entry)
+            .expect("the lock should be writable");
+    }
+
     /// A doc whose one link `supdoc fix` can repair: `ad` is a misspelling of `add`.
     fn fixable(project: &Project) {
         project.write("docs/api.md", "# API\n\nSee [ad](../src/lib.rs#ad).\n");
@@ -850,6 +864,37 @@ mod helps {
                     "docs/blocks.md",
                     "# B\n\n```rust from(../src/lib.rs#add)\nfn add() {}\n```\n",
                 );
+            },
+            &["check"],
+        ),
+        case(
+            "code-block-uses-changed",
+            |p| {
+                config_with(p, "[features.code-blocks]\n");
+                record_use(p);
+                p.write(
+                    "docs/blocks.md",
+                    "# B\n\n```rust uses(../src/lib.rs#add)\nfn add() {}\n```\n",
+                );
+            },
+            &["check"],
+        ),
+        case(
+            "code-block-uses-new",
+            |p| {
+                config_with(p, "[features.code-blocks]\n");
+                p.write(
+                    "docs/blocks.md",
+                    "# B\n\n```rust uses(../src/lib.rs#add)\nfn add() {}\n```\n",
+                );
+            },
+            &["check"],
+        ),
+        case(
+            "code-block-uses-obsolete",
+            |p| {
+                config_with(p, "[features.code-blocks]\n");
+                record_use(p);
             },
             &["check"],
         ),

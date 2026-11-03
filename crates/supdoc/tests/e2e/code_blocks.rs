@@ -151,6 +151,7 @@ fn from_and_uses_that_resolve_draw_no_finding() {
             lib.trim_end_matches('\n')
         ),
     );
+    record_use(&project, "src/lib.rs", "add", ADD);
 
     let json = project.supdoc(&["check", "--json"]).assert_exit(0).json();
 
@@ -274,4 +275,77 @@ fn excerpt_a_missing_part_reports_only_the_missing_source() {
         ["code-block-source-missing"],
         "{json}"
     );
+}
+
+/// The source the `uses_` tests track: `Counter.bump`, a method inside its `impl`.
+const COUNTER: &str =
+    "pub struct Counter;\n\nimpl Counter {\n    pub fn bump(&self) -> i32 {\n        1\n    }\n}\n";
+
+/// The bytes of `Counter.bump` in [`COUNTER`], as supdoc hashes them.
+const BUMP: &str = "pub fn bump(&self) -> i32 {\n        1\n    }";
+
+/// A recorded `basic` project with the feature on, `src/counter.rs` holding [`COUNTER`], and
+/// `docs/blocks.md` holding a hand-written `impl` block marked `uses(../src/counter.rs#Counter.bump)`.
+fn project_with_use() -> Project {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write("supdoc.config.toml", "[features.code-blocks]\n");
+    project.write("src/counter.rs", COUNTER);
+    project.write(
+        "docs/blocks.md",
+        "# Blocks\n\n```rust uses(../src/counter.rs#Counter.bump)\nimpl Counter {\n    pub fn bump(&self) -> i32 { 1 }\n}\n```\n",
+    );
+    project
+}
+
+/// Records `symbol_text`'s hash in `supdoc.lock` for `docs/blocks.md`'s `uses(...)` target
+/// `target#symbol`, as `supdoc update` will.
+fn record_use(project: &Project, target: &str, symbol: &str, symbol_text: &str) {
+    use std::fmt::Write as _;
+
+    use sha2::{Digest, Sha256};
+    let hash =
+        Sha256::digest(symbol_text.as_bytes())
+            .iter()
+            .fold(String::new(), |mut hex, byte| {
+                let _ = write!(hex, "{byte:02x}");
+                hex
+            });
+    let lock = project
+        .read("supdoc.lock")
+        .replace("version = 1", "version = 2");
+    project.write(
+        "supdoc.lock",
+        &format!(
+            "{lock}\n[[code-blocks.uses]]\nsource = \"docs/blocks.md\"\ntarget = \"{target}\"\nsymbol = \"{symbol}\"\nhash = \"{hash}\"\n"
+        ),
+    );
+}
+
+#[test]
+fn uses_an_unrecorded_target_is_new_and_passes_once_recorded() {
+    let project = project_with_use();
+
+    let unrecorded = project.supdoc(&["check", "--json"]).assert_exit(1).json();
+    record_use(&project, "src/counter.rs", "Counter.bump", BUMP);
+    let recorded = project.supdoc(&["check", "--json"]).assert_exit(0).json();
+
+    assert_eq!(
+        finding_kinds(&unrecorded),
+        ["code-block-uses-new"],
+        "{unrecorded}"
+    );
+    assert!(finding_kinds(&recorded).is_empty(), "{recorded}");
+}
+
+#[test]
+fn uses_a_recorded_method_that_changes_fails_the_check() {
+    let project = project_with_use();
+    record_use(&project, "src/counter.rs", "Counter.bump", BUMP);
+    let _passing = project.supdoc(&["check"]).assert_exit(0);
+
+    project.replace("src/counter.rs", "        1\n", "        2\n");
+    let json = project.supdoc(&["check", "--json"]).assert_exit(1).json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-uses-changed"], "{json}");
 }
