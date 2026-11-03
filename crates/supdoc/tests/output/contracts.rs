@@ -797,6 +797,25 @@ mod helps {
             &["check"],
         ),
         case(
+            "code-block-ignore-reason",
+            |p| {
+                config_with(p, "[features.code-blocks]\n");
+                p.write("docs/blocks.md", "# B\n\n```sh ignore\necho hi\n```\n");
+            },
+            &["check"],
+        ),
+        case(
+            "code-block-unknown-attribute",
+            |p| {
+                config_with(p, "[features.code-blocks]\n");
+                p.write(
+                    "docs/blocks.md",
+                    "# B\n\n```rust from=../src/lib.rs#add\nfn main() {}\n```\n",
+                );
+            },
+            &["check"],
+        ),
+        case(
             "link-failed",
             |p| {
                 p.write(
