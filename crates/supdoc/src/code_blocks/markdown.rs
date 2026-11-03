@@ -14,29 +14,38 @@ use crate::read::cartridge::SourceFile;
 
 use super::block::{BodyLine, CodeBlock, Info};
 
-/// Every fenced code block in `file`, a Markdown file, in file order.
+/// Every fenced code block in `file`, a Markdown file, in file order, or `None` when its blocks
+/// can't be read reliably.
 ///
 /// A Markdown renderer reads a NUL as an ordinary character (U+FFFD), but tree-sitter-md doesn't,
 /// so a NUL could hide a fence line from supdoc that a renderer sees. A file holding one is parsed again
-/// with each NUL as `?`, which keeps every offset, and its blocks are read from that tree. When
-/// that parse fails, the file's own tree is read.
-pub(super) fn blocks(
+/// with each NUL as `?`, which keeps every offset, and its blocks are read only from that tree.
+/// When that parse fails the file's own tree is not read, because it can't see past a NUL: there
+/// are no blocks.
+pub(super) fn try_blocks(
     file: &SourceFile,
     locate: impl Fn(Range<usize>) -> Option<Location>,
-) -> Vec<CodeBlock> {
+) -> Option<Vec<CodeBlock>> {
     let text = file.text();
     if !text.contains('\0') {
-        return blocks_of_tree(text, file.tree(), &locate);
+        return Some(blocks_of_tree(text, file.tree(), &locate));
     }
-    match SourceFile::from_text(
+    let cleaned = SourceFile::from_text(
         file.path().clone(),
         text.replace('\0', "?"),
         file.language(),
         file.deadline(),
-    ) {
-        Ok(cleaned) => blocks_of_tree(text, cleaned.tree(), &locate),
-        Err(_) => blocks_of_tree(text, file.tree(), &locate),
-    }
+    )
+    .ok()?;
+    Some(blocks_of_tree(text, cleaned.tree(), &locate))
+}
+
+/// Every fenced code block in `file`, or none when [`try_blocks`] can't read them.
+pub(super) fn blocks(
+    file: &SourceFile,
+    locate: impl Fn(Range<usize>) -> Option<Location>,
+) -> Vec<CodeBlock> {
+    try_blocks(file, locate).unwrap_or_default()
 }
 
 /// Every fenced code block in `tree`, parsed from `text` or a copy with the same offsets, in file

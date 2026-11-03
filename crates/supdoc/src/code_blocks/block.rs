@@ -78,10 +78,21 @@ pub(crate) fn blocks_in(
     file: &SourceFile,
     locate: impl Fn(Range<usize>) -> Option<Location>,
 ) -> Vec<CodeBlock> {
+    try_blocks_in(file, locate).unwrap_or_default()
+}
+
+/// Like [`blocks_in`], but `None` when `file`'s blocks can't be read reliably (a Markdown file
+/// holding a NUL whose parse with each NUL replaced failed), so a caller that checks an edit can
+/// refuse it rather than compare two empty block lists.
+#[must_use]
+pub(crate) fn try_blocks_in(
+    file: &SourceFile,
+    locate: impl Fn(Range<usize>) -> Option<Location>,
+) -> Option<Vec<CodeBlock>> {
     match file.language().id().as_str() {
-        "markdown" => markdown::blocks(file, locate),
-        "rust" => doc_comments::blocks(file, locate),
-        _ => Vec::new(),
+        "markdown" => markdown::try_blocks(file, locate),
+        "rust" => Some(doc_comments::blocks(file, locate)),
+        _ => Some(Vec::new()),
     }
 }
 
