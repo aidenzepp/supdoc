@@ -1,12 +1,13 @@
 //! The per-block pipeline that `check` runs: judges each code block and returns its findings
 //! and the count of blocks in each state.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::Path;
 
 use crate::config::Config;
 use crate::finding::{Finding, Location, Severity};
+use crate::hash::Hash;
 use crate::lock::model::Lockfile;
 use crate::read::cartridge::Languages;
 use crate::read::error::CartridgeLoadError;
@@ -14,14 +15,14 @@ use crate::read::error::CartridgeLoadError;
 use super::block::{CodeBlock, Info};
 use super::excerpt;
 use super::info::{
-    InfoString, KNOWN_ATTRIBUTES, SourceKind, is_known_attribute, parenthesized_spelling, reasoned,
+    KNOWN_ATTRIBUTES, SourceKind, is_known_attribute, parenthesized_spelling, reasoned,
     source_attributes,
 };
 use super::source::{self, SourceText, Unresolved};
-use super::states::{BlockState, Excerpt, state_of};
-use super::uses::{self, Written};
+use super::states::{Excerpt, state_of, tag_of};
+use super::uses::{self, UseState, Written};
 
-pub(crate) use super::states::CodeBlockCounts;
+pub(crate) use super::states::{BlockState, CodeBlockCounts};
 
 /// The code for an info-string attribute supdoc doesn't know.
 const UNKNOWN_ATTRIBUTE: &str = "code-block-unknown-attribute";
@@ -36,6 +37,23 @@ pub(crate) struct Evaluation {
     pub(crate) findings: Vec<Finding>,
     /// How many blocks are in each state. `None` when `[features.code-blocks]` is off.
     pub(crate) counts: Option<CodeBlockCounts>,
+    /// One record per block, in block order. Empty when `[features.code-blocks]` is off.
+    pub(crate) records: Vec<BlockRecord>,
+}
+
+/// What `check` knows about one block.
+#[derive(Debug, Clone)]
+pub(crate) struct BlockRecord {
+    /// Where the block's opening fence is.
+    pub(crate) at: Location,
+    /// The language tag the block is read as, if it has one.
+    pub(crate) language: Option<String>,
+    /// The block's state.
+    pub(crate) state: BlockState,
+    /// Why it is in that state, when there is a reason.
+    pub(crate) reason: Option<String>,
+    /// Each `uses(...)` target the block writes, with its state.
+    pub(crate) uses: Vec<(String, UseState)>,
 }
 
 /// The findings for `blocks`, in block order, reading each `from(...)` and `uses(...)` source
@@ -67,13 +85,30 @@ pub(crate) fn evaluate(
     let mut doc: Option<(&str, Option<String>)> = None;
     let mut written = Vec::new();
     let mut unresolved_uses = BTreeSet::new();
+    let recorded: BTreeMap<(&str, String), Hash> = lock
+        .recorded_uses()
+        .map(|(doc, target, hash)| ((doc, target), hash))
+        .collect();
+    let mut records = Vec::with_capacity(blocks.len());
     for block in blocks {
         let mut outcome = None;
+        let mut block_uses = Vec::new();
         if let Some(info) = block.info.as_ref() {
             findings.extend(unknown_attributes(info));
             findings.extend(missing_reasons(info));
             let sources = sources(config, languages, info)?;
             findings.extend(sources.missing);
+            let doc_name = block.fence.file.as_str();
+            block_uses.extend(sources.uses.iter().map(|value| {
+                let hash = recorded.get(&(doc_name, value.target.clone()));
+                (value.target.clone(), UseState::of(value, hash))
+            }));
+            block_uses.extend(
+                sources
+                    .unresolved
+                    .into_iter()
+                    .map(|value| (value, UseState::Missing)),
+            );
             written.extend(sources.uses);
             unresolved_uses.extend(sources.use_missing.then_some(block.fence.file.as_str()));
             outcome = sources.from_missing.then_some(Excerpt::SourceMissing);
@@ -98,9 +133,16 @@ pub(crate) fn evaluate(
                 findings.extend(stale);
             }
         }
-        states.push(state_of(block, outcome, |language| {
-            code_blocks.checks(language)
-        }));
+        let state = state_of(block, outcome, |language| code_blocks.checks(language));
+        let language = tag_of(block).map(str::to_owned);
+        records.push(BlockRecord {
+            at: block.fence.clone(),
+            reason: state.reason(language.as_deref()),
+            language,
+            state: state.clone(),
+            uses: block_uses,
+        });
+        states.push(state);
     }
     findings.extend(uses::judge(&written, lock.recorded_uses(), |doc| {
         in_scope(doc) && !unresolved_uses.contains(doc)
@@ -108,6 +150,7 @@ pub(crate) fn evaluate(
     Ok(Evaluation {
         findings,
         counts: Some(CodeBlockCounts::tally(&states)),
+        records,
     })
 }
 
@@ -130,6 +173,8 @@ struct Sources {
     uses: Vec<Written>,
     /// Whether some `uses(...)` value doesn't resolve.
     use_missing: bool,
+    /// Each `uses(...)` value that doesn't resolve, as written.
+    unresolved: Vec<String>,
     /// Whether some `from(...)` value doesn't resolve.
     from_missing: bool,
 }
@@ -137,7 +182,7 @@ struct Sources {
 /// One `code-block-unknown-attribute` warning at `info` for a language word holding commas, and
 /// one for each attribute outside the closed list.
 fn unknown_attributes(info: &Info) -> Vec<Finding> {
-    let parsed = InfoString::parse(&info.text);
+    let parsed = info.parsed();
     let comma = parsed.spaced_language().map(|spaced| {
         Finding::new(
             UNKNOWN_ATTRIBUTE,
@@ -177,7 +222,7 @@ fn unknown_attributes(info: &Info) -> Vec<Finding> {
 /// One `code-block-ignore-reason` warning at `info` for each `ignore`, `no_format` or `no_lint`
 /// without a reason. The attribute still takes effect.
 fn missing_reasons(info: &Info) -> Vec<Finding> {
-    let parsed = InfoString::parse(&info.text);
+    let parsed = info.parsed();
     parsed
         .attributes
         .iter()
@@ -214,7 +259,8 @@ fn sources(
     let mut uses = Vec::new();
     let mut part_missing = false;
     let mut use_missing = false;
-    for attribute in source_attributes(&info.text) {
+    let mut unresolved_uses = Vec::new();
+    for attribute in source_attributes(&info.text, info.in_rust_doc()) {
         let at = value_location(info, attribute.range);
         let result = match attribute.kind {
             SourceKind::From => {
@@ -238,6 +284,9 @@ fn sources(
         };
         part_missing |= attribute.kind == SourceKind::From;
         use_missing |= attribute.kind == SourceKind::Uses;
+        if attribute.kind == SourceKind::Uses {
+            unresolved_uses.push(attribute.value.to_owned());
+        }
         missing.extend(at.map(|at| unresolved.finding(at)));
     }
     let parts = (!part_missing && !parts.is_empty()).then_some(parts);
@@ -246,6 +295,7 @@ fn sources(
         parts,
         uses,
         use_missing,
+        unresolved: unresolved_uses,
         from_missing: part_missing,
     })
 }

@@ -3,6 +3,16 @@
     "CheckReport": {
       "description": "What `check` prints: the counts, the links to show, and the findings not tied to one link\n\nJSON puts `summary` and `links` under `data`; the envelope carries the loose findings. Passed\nlinks are always counted but listed only under `--verbose`.",
       "properties": {
+        "code_blocks": {
+          "description": "The code blocks shown: the ones not passed, or every one under `--verbose`. Absent\nwhen `[features.code-blocks]` is off.",
+          "items": {
+            "$ref": "#/$defs/CodeBlockJson"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "links": {
           "description": "The links shown, each with the finding that explains its state.",
           "items": {
@@ -11,13 +21,213 @@
           "type": "array"
         },
         "summary": {
-          "$ref": "#/$defs/Summary",
-          "description": "How many links are in each state, passed ones included."
+          "$ref": "#/$defs/CheckSummary",
+          "description": "How many links are in each state, passed ones included, and how many code blocks."
         }
       },
       "required": [
         "summary",
         "links"
+      ],
+      "type": "object"
+    },
+    "CheckSummary": {
+      "description": "`data.summary`: the link counts flattened, with the code block counts beside them when\n`[features.code-blocks]` is on.",
+      "properties": {
+        "broken": {
+          "description": "Links whose target can't be found.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "code_blocks": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeBlockCounts"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How many code blocks are in each state."
+        },
+        "failed": {
+          "description": "Links whose target changed since the doc was confirmed.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "new": {
+          "description": "Links with no lock entry yet.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "obsolete": {
+          "description": "Lock entries whose link no longer exists.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "passed": {
+          "description": "Links whose target still matches the lockfile.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "passed",
+        "failed",
+        "broken",
+        "new",
+        "obsolete"
+      ],
+      "type": "object"
+    },
+    "CodeBlockCounts": {
+      "description": "How many blocks are in each state. `blocks` is the sum of the others.",
+      "properties": {
+        "blocks": {
+          "description": "Every block counted.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "failed": {
+          "description": "Blocks with a failed check or a missing excerpt source.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "format_off": {
+          "description": "Blocks whose language has `formatter = false`.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "format_skipped": {
+          "description": "Blocks the author marked `no_format(...)`.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lint_off": {
+          "description": "Blocks whose language has `linter = false`.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lint_skipped": {
+          "description": "Blocks the author marked `no_lint(...)`.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "not_checked": {
+          "description": "Blocks nothing checked: text, a language turned off, or a step not built yet.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "opted_out": {
+          "description": "Blocks the author marked `ignore(...)`.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "passed": {
+          "description": "Blocks whose checks all passed.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stale": {
+          "description": "Excerpts that differ from their source.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tool_missing": {
+          "description": "Blocks whose selected tool isn't installed.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unknown_language": {
+          "description": "Blocks in a language supdoc has no checker for.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "blocks",
+        "passed",
+        "failed",
+        "stale",
+        "opted_out",
+        "not_checked",
+        "format_off",
+        "format_skipped",
+        "lint_off",
+        "lint_skipped",
+        "unknown_language",
+        "tool_missing"
+      ],
+      "type": "object"
+    },
+    "CodeBlockJson": {
+      "description": "One code block as `check --json` shows it.",
+      "properties": {
+        "column": {
+          "description": "1-based column, in characters.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "file": {
+          "$ref": "#/$defs/SourcePath",
+          "description": "The doc or source file, relative to the project root."
+        },
+        "language": {
+          "description": "The language tag the block is read as. Left out for an untagged block outside Rust docs.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "line": {
+          "description": "1-based line of the opening fence.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "description": "Why the block is in that state, when it has a reason.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "description": "`passed`, `failed`, `stale`, `opted_out`, `not_checked` or `unknown_language`.",
+          "type": "string"
+        },
+        "uses": {
+          "description": "Each `uses(...)` target the block writes, with its state.",
+          "items": {
+            "$ref": "#/$defs/UseJson"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "file",
+        "line",
+        "column",
+        "state",
+        "uses"
       ],
       "type": "object"
     },
@@ -289,49 +499,6 @@
       "description": "A file path relative to the project root, with `/` separators.",
       "type": "string"
     },
-    "Summary": {
-      "description": "How many links are in each state.",
-      "properties": {
-        "broken": {
-          "description": "Links whose target can't be found.",
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "failed": {
-          "description": "Links whose target changed since the doc was confirmed.",
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "new": {
-          "description": "Links with no lock entry yet.",
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "obsolete": {
-          "description": "Lock entries whose link no longer exists.",
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "passed": {
-          "description": "Links whose target still matches the lockfile.",
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "passed",
-        "failed",
-        "broken",
-        "new",
-        "obsolete"
-      ],
-      "type": "object"
-    },
     "SymbolPath": {
       "description": "A dotted symbol path such as `Config.validate`.",
       "type": "string"
@@ -339,6 +506,49 @@
     "Target": {
       "description": "Where a link points: `path` or `namespace:path`.",
       "type": "string"
+    },
+    "UseJson": {
+      "description": "One `uses(...)` target of a code block and where it stands against the lockfile.",
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/UseState",
+          "description": "`passed`, `changed`, `new` or `missing`."
+        },
+        "target": {
+          "description": "The target as written: `path#symbol`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target",
+        "state"
+      ],
+      "type": "object"
+    },
+    "UseState": {
+      "description": "Where one `uses(...)` target stands against the lockfile.",
+      "oneOf": [
+        {
+          "const": "passed",
+          "description": "The symbol's hash is the recorded one.",
+          "type": "string"
+        },
+        {
+          "const": "changed",
+          "description": "The symbol changed since it was recorded.",
+          "type": "string"
+        },
+        {
+          "const": "new",
+          "description": "The lockfile doesn't record it for this doc.",
+          "type": "string"
+        },
+        {
+          "const": "missing",
+          "description": "The value doesn't resolve.",
+          "type": "string"
+        }
+      ]
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

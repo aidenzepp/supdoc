@@ -482,3 +482,153 @@ fn summary_has_no_code_block_line_without_the_table() {
         run.stdout
     );
 }
+
+/// A recorded `basic` project with the feature on and one block of each kind in
+/// `docs/blocks.md`: a failed excerpt, an unknown language, two opted out and a passing one.
+fn project_with_mixed_blocks() -> Project {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write("supdoc.config.toml", "[features.code-blocks]\n");
+    project.write(
+        "docs/blocks.md",
+        "# Blocks\n\n```rust from(../src/lib.rs#gone)\nfn gone() {}\n```\n\n\
+         ```toml\na = 1\n```\n\n```toml\nb = 2\n```\n\n\
+         ```py ignore(needs a server)\nprint()\n```\n\n```text\nplain\n```\n",
+    );
+    project
+}
+
+#[test]
+fn json_counts_sit_beside_the_link_counts_and_list_the_blocks_not_passed() {
+    let project = project_with_mixed_blocks();
+
+    let json = project.supdoc(&["check", "--json"]).assert_exit(1).json();
+
+    assert_eq!(at(&json, "/data/summary/code_blocks/blocks"), 5, "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/unknown_language"), 2);
+    assert!(
+        at(&json, "/data/summary/passed").is_u64(),
+        "the link counts should keep their path: {json}"
+    );
+    let blocks = array_at(&json, "/data/code_blocks");
+    assert_eq!(blocks.len(), 5, "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/state"), "failed", "{json}");
+    assert_eq!(
+        at(&json, "/data/code_blocks/0/file"),
+        "docs/blocks.md",
+        "{json}"
+    );
+    assert_eq!(at(&json, "/data/code_blocks/0/line"), 3, "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/language"), "rust", "{json}");
+    assert_eq!(
+        at(&json, "/data/code_blocks/3/reason"),
+        "needs a server",
+        "{json}"
+    );
+    assert_eq!(at(&json, "/schema_version"), 2);
+}
+
+#[test]
+fn json_leaves_out_code_blocks_when_the_feature_is_off() {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write("docs/blocks.md", "# Blocks\n\n```toml\na = 1\n```\n");
+
+    let json = project.supdoc(&["check", "--json"]).assert_exit(0).json();
+
+    assert!(json.pointer("/data/code_blocks").is_none(), "{json}");
+    assert!(
+        json.pointer("/data/summary/code_blocks").is_none(),
+        "{json}"
+    );
+}
+
+#[test]
+fn json_lists_each_uses_target_with_its_state() {
+    let project = project_with_use();
+    let _recorded = project.supdoc(&["update", "--yes"]).assert_exit(0);
+    project.replace("src/counter.rs", "1", "2");
+
+    let json = project.supdoc(&["check", "--json"]).assert_exit(1).json();
+
+    let blocks = array_at(&json, "/data/code_blocks");
+    assert_eq!(blocks.len(), 1, "{json}");
+    assert_eq!(
+        at(&json, "/data/code_blocks/0/uses/0/target"),
+        "src/counter.rs#Counter.bump",
+        "{json}"
+    );
+    assert_eq!(
+        at(&json, "/data/code_blocks/0/uses/0/state"),
+        "changed",
+        "{json}"
+    );
+}
+
+#[test]
+fn json_jsonl_writes_one_code_block_record_per_entry_and_the_counts_on_the_summary() {
+    let project = project_with_mixed_blocks();
+
+    let run = project.supdoc(&["--jsonl", "check"]);
+    let _failed = run.assert_exit(1);
+
+    let lines: Vec<serde_json::Value> = run
+        .stdout
+        .lines()
+        .map(|line| {
+            serde_json::from_str(line)
+                .unwrap_or_else(|error| panic!("each line should be JSON ({error}): {line}"))
+        })
+        .collect();
+    let records = lines
+        .iter()
+        .filter(|line| line["type"] == "code_block")
+        .count();
+    let summary = lines.last().expect("the stream should end with a summary");
+    assert_eq!(records, 5, "{}", run.stdout);
+    assert_eq!(summary["type"], "summary", "{}", run.stdout);
+    assert_eq!(at(summary, "/summary/code_blocks/blocks"), 5, "{summary}");
+}
+
+#[test]
+fn verbose_text_lists_unknown_languages_with_counts_and_reasons() {
+    let project = project_with_mixed_blocks();
+
+    let run = project.supdoc(&["check", "-v"]);
+    let _failed = run.assert_exit(1);
+
+    for line in [
+        "unknown language  toml: 2",
+        "opted out  docs/blocks.md:15 (needs a server)",
+    ] {
+        assert!(
+            run.stdout.contains(line),
+            "missing `{line}`:\n{}",
+            run.stdout
+        );
+    }
+}
+
+#[test]
+fn a_rust_doc_fence_leading_with_an_attribute_counts_as_rust_not_unknown() {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write("supdoc.config.toml", "[features.code-blocks]\n");
+    project.write(
+        "src/blocks.rs",
+        "/// ```no_run\n/// fn main() {}\n/// ```\npub fn f() {}\n",
+    );
+
+    let json = project.supdoc(&["check", "--json"]).assert_exit(0).json();
+
+    assert_eq!(
+        at(&json, "/data/summary/code_blocks/unknown_language"),
+        0,
+        "{json}"
+    );
+    assert_eq!(
+        at(&json, "/data/summary/code_blocks/not_checked"),
+        1,
+        "{json}"
+    );
+}

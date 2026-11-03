@@ -35,6 +35,32 @@ pub(crate) struct Written {
     pub(crate) hash: Hash,
 }
 
+/// Where one `uses(...)` target stands against the lockfile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum UseState {
+    /// The symbol's hash is the recorded one.
+    Passed,
+    /// The symbol changed since it was recorded.
+    Changed,
+    /// The lockfile doesn't record it for this doc.
+    New,
+    /// The value doesn't resolve.
+    Missing,
+}
+
+impl UseState {
+    /// The state of `written` against the hash `recorded` holds for it, if any.
+    #[must_use]
+    pub(crate) fn of(written: &Written, recorded: Option<&Hash>) -> Self {
+        match recorded {
+            Some(hash) if *hash == written.hash => Self::Passed,
+            Some(_) => Self::Changed,
+            None => Self::New,
+        }
+    }
+}
+
 /// What `supdoc update` records: the `uses(...)` values the docs write now.
 #[derive(Debug, Default)]
 pub(crate) struct Current {
@@ -64,7 +90,7 @@ pub(crate) fn current<'block>(
             continue;
         };
         let doc = info.location.file.as_str();
-        for attribute in source_attributes(&info.text) {
+        for attribute in source_attributes(&info.text, info.in_rust_doc()) {
             if attribute.kind != SourceKind::Uses {
                 continue;
             }

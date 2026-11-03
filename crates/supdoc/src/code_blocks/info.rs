@@ -18,10 +18,25 @@ pub(crate) struct InfoString<'text> {
 impl<'text> InfoString<'text> {
     /// Splits `text` into its language and attributes. Never fails: judging the words is the
     /// caller's job.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn parse(text: &'text str) -> Self {
-        let mut words = words(text, char::is_whitespace);
-        let language = words.next().unwrap_or_default();
+        Self::parse_in(text, false)
+    }
+
+    /// Like [`parse`](Self::parse), for a fence in a Rust doc comment when `rust_doc`: there a
+    /// first word that is a known attribute (`no_run`, `ignore(...)`, `edition2021`...) is an
+    /// attribute, as rustdoc reads it, and the language is left empty, which means Rust.
+    #[must_use]
+    pub(crate) fn parse_in(text: &'text str, rust_doc: bool) -> Self {
+        let mut words = words(text, char::is_whitespace).peekable();
+        let leads_with_attribute =
+            rust_doc && words.peek().is_some_and(|word| leads_a_rust_fence(word));
+        let language = if leads_with_attribute {
+            ""
+        } else {
+            words.next().unwrap_or_default()
+        };
         Self {
             language,
             attributes: words.collect(),
@@ -58,6 +73,12 @@ pub(crate) fn is_known_attribute(attribute: &str) -> bool {
                 | "compile_fail"
                 | "should_panic"
         )
+}
+
+/// Whether `word`, first in a Rust doc comment's info string, is an attribute rather than a
+/// language. `run` is not one: rustdoc has no such attribute.
+fn leads_a_rust_fence(word: &str) -> bool {
+    word != "run" && is_known_attribute(word)
 }
 
 /// Whether `attribute` is `from(PATH#SYMBOL)` or `uses(PATH#SYMBOL)` with a non-blank argument.
@@ -116,10 +137,20 @@ pub(crate) struct SourceAttribute<'text> {
 /// Every well-formed `from(...)` and `uses(...)` attribute in the info string `text`, in the order
 /// written. Each may repeat.
 #[must_use]
-pub(crate) fn source_attributes(text: &str) -> Vec<SourceAttribute<'_>> {
-    let mut ranges = word_ranges(text, char::is_whitespace).into_iter();
-    // The first word is the language, never an attribute.
-    let _language = ranges.next();
+pub(crate) fn source_attributes(text: &str, rust_doc: bool) -> Vec<SourceAttribute<'_>> {
+    let mut ranges = word_ranges(text, char::is_whitespace)
+        .into_iter()
+        .peekable();
+    // The first word is the language, never an attribute, unless a Rust doc comment's fence
+    // leads with an attribute.
+    let leads_with_attribute = rust_doc
+        && ranges
+            .peek()
+            .and_then(|word| text.get(word.clone()))
+            .is_some_and(leads_a_rust_fence);
+    if !leads_with_attribute {
+        let _language = ranges.next();
+    }
     ranges
         .filter_map(|word| {
             let attribute = text.get(word.clone())?;
@@ -236,6 +267,38 @@ mod tests {
     }
 
     #[test]
+    fn a_rust_doc_fence_leading_with_an_attribute_has_no_language() {
+        for first in [
+            "ignore(slow)",
+            "no_run",
+            "should_panic",
+            "edition2021",
+            "from(a.rs#f)",
+        ] {
+            let text = format!("{first} no_lint");
+            let info = InfoString::parse_in(&text, true);
+
+            assert_eq!(info.language, "", "first word `{first}`");
+            assert_eq!(info.attributes, [first, "no_lint"], "first word `{first}`");
+        }
+        let uses = source_attributes("uses(a.rs#f) no_run", true);
+        assert_eq!(
+            uses.len(),
+            1,
+            "a leading `uses(...)` is read in a Rust doc comment"
+        );
+    }
+
+    #[test]
+    fn markdown_and_other_first_words_stay_the_language() {
+        let markdown = InfoString::parse_in("no_run rust", false);
+        assert_eq!(markdown.language, "no_run");
+        let rust_doc = InfoString::parse_in("run rust", true);
+        assert_eq!(rust_doc.language, "run");
+        assert_eq!(source_attributes("from(a.rs#f)", false).len(), 0);
+    }
+
+    #[test]
     fn known_attributes_are_the_closed_list() {
         let known = [
             "ignore",
@@ -346,7 +409,7 @@ mod tests {
     fn source_attributes_keep_their_order_and_value_ranges() {
         let text = "rust from( a.rs#f ) no_run uses(/b.rs#T.m) from(c.rs) from()";
 
-        let found = source_attributes(text);
+        let found = source_attributes(text, false);
 
         let values: Vec<(SourceKind, &str)> = found.iter().map(|s| (s.kind, s.value)).collect();
         assert_eq!(
