@@ -69,7 +69,7 @@ impl Verdict {
 pub(crate) fn args(language: Language, doc: &Path, index: usize) -> Option<Vec<OsString>> {
     match language {
         Language::Shell => Some(shell::format_args(doc, index)),
-        Language::Rust => rust::format_args(doc, index),
+        Language::Rust => Some(rust::format_args()),
         Language::Python => python::format_args(doc, index),
     }
 }

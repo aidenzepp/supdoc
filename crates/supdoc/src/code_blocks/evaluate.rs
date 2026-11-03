@@ -2,6 +2,7 @@
 //! and the count of blocks in each state.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{OsStr, OsString};
 use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
@@ -23,9 +24,11 @@ use super::info::{
     source_attributes,
 };
 use super::runner::{self, Call};
+use super::rust;
 use super::shell;
 use super::source::{self, SourceText, Unresolved};
 use super::states::{Excerpt, NotChecked, state_of, tag_of};
+use super::toolchain::{self, Refusal, Toolchain};
 use super::tools::{Found, Step, TOOLS, Tool, ToolEnv, find, formatter};
 use super::uses::{self, UseState, Written};
 
@@ -243,6 +246,8 @@ impl Evaluation {
     pub(crate) fn look_up_tools(&mut self, env: &ToolEnv, root: &Path) {
         let timeout = self.timeout;
         let mut looked_up: Vec<(&'static str, Found)> = Vec::new();
+        let mut rust_setup: Option<RustSetup> = None;
+        let mut toolchain_warned = false;
         for record in &mut self.records {
             if record.state != BlockState::NotChecked(NotChecked::Pending) {
                 continue;
@@ -250,6 +255,31 @@ impl Evaluation {
             let Some(tool) = record.tool else {
                 continue;
             };
+            let rust = (tool.language == Language::Rust)
+                .then(|| &*rust_setup.get_or_insert_with(|| RustSetup::read(root)));
+            if let Some(rust) = rust {
+                let refused = if let Toolchain::Refused(refusal) = rust.toolchain {
+                    if !toolchain_warned {
+                        toolchain_warned = true;
+                        self.findings.push(toolchain_warning(refusal, &record.at));
+                    }
+                    Some(NotChecked::ToolchainPath)
+                } else {
+                    let read = record
+                        .pending
+                        .as_ref()
+                        .and_then(|pending| rust::compile_time_read(&pending.input));
+                    read.map(|read| {
+                        self.findings.push(compile_time_warning(&read, &record.at));
+                        NotChecked::CompileTimeRead
+                    })
+                };
+                if let Some(refused) = refused {
+                    record.state = BlockState::NotChecked(refused);
+                    record.reason = record.state.reason(record.language.as_deref());
+                    continue;
+                }
+            }
             let found =
                 if let Some((_, found)) = looked_up.iter().find(|(name, _)| *name == tool.name) {
                     found.clone()
@@ -261,12 +291,11 @@ impl Evaluation {
                 };
             record.state = match found {
                 Found::OnPath(program) => {
-                    let Some(state) = run_formatter(tool, &program, record, env, root, timeout)
-                        .map(|(verdict, findings)| {
-                            self.findings.extend(findings);
-                            verdict.state()
-                        })
-                    else {
+                    let ran = run_formatter(tool, &program, record, env, root, timeout, rust);
+                    let Some(state) = ran.map(|(verdict, findings)| {
+                        self.findings.extend(findings);
+                        verdict.state()
+                    }) else {
                         continue;
                     };
                     state
@@ -284,7 +313,29 @@ impl Evaluation {
     }
 }
 
-/// Runs `tool`, found at `program`, on `record`'s block from `root` with `env`, under `timeout`:
+/// What every Rust tool call in a run shares, read once from the root.
+#[derive(Debug)]
+struct RustSetup {
+    /// The toolchain the root's `rust-toolchain(.toml)` pins.
+    toolchain: Toolchain,
+    /// `--config-path` for an in-root `rustfmt.toml`, or nothing.
+    config: Vec<OsString>,
+}
+
+impl RustSetup {
+    /// Reads `root`'s toolchain file and finds its `rustfmt.toml`, each only inside `root`.
+    ///
+    /// Effect: reads file metadata, resolves symlinks, and reads the toolchain file.
+    fn read(root: &Path) -> Self {
+        Self {
+            toolchain: toolchain::read(root),
+            config: rust::config_args(root),
+        }
+    }
+}
+
+/// Runs `tool`, found at `program`, on `record`'s block from `root` with `env`, under `timeout`,
+/// adding `rust`'s config arguments and toolchain variables for a Rust tool:
 /// its verdict and findings, an unformatted block's error carrying the fix to the formatter's
 /// output, or followed by a `code-block-fix-unsafe` warning when [`format::safe_fix`] finds that
 /// output could end the block early. `None` when the block's language has no format step yet or its input
@@ -298,6 +349,7 @@ fn run_formatter(
     env: &ToolEnv,
     root: &Path,
     timeout: Option<Duration>,
+    rust: Option<&RustSetup>,
 ) -> Option<(format::Verdict, Vec<Finding>)> {
     let pending = record.pending.as_ref()?;
     let input = pending.input.as_str();
@@ -306,12 +358,20 @@ fn run_formatter(
     if tool.language == Language::Shell {
         args.extend(shell::dialect_args(record.dialect));
     }
-    let args: Vec<&std::ffi::OsStr> = args.iter().map(std::ffi::OsString::as_os_str).collect();
+    if let Some(rust) = rust {
+        args.extend(rust.config.iter().cloned());
+    }
+    let vars = rust.map(|rust| rust.toolchain.env()).unwrap_or_default();
+    let extra: Vec<(&str, &OsStr)> = vars
+        .iter()
+        .map(|(name, value)| (*name, value.as_os_str()))
+        .collect();
+    let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
     let call = Call {
         program,
         name: tool.binary,
         args: &args,
-        extra: &[],
+        extra: &extra,
         stdin: input.as_bytes(),
         timeout,
     };
@@ -411,6 +471,48 @@ fn tool_warning(tool: &Tool, found: &Found, at: &Location) -> Option<Finding> {
         )),
     };
     Some(finding.with_location(at.clone()))
+}
+
+/// The one `code-block-not-checked` warning, at `at`, for the root's toolchain file refused for
+/// `refusal`, which leaves every Rust block unchecked.
+fn toolchain_warning(refusal: Refusal, at: &Location) -> Finding {
+    let (why, help) = match refusal {
+        Refusal::Path => (
+            "names a toolchain `path`, which would run a binary the checkout chose",
+            "pin a channel such as `stable` or `1.85.0` instead of a `path`",
+        ),
+        Refusal::InvalidChannel => (
+            "names a channel supdoc doesn't accept, or doesn't parse",
+            "name `stable`, `beta`, `nightly` or a version such as `1.85.0`, optionally with `-YYYY-MM-DD`",
+        ),
+        Refusal::Outside => (
+            "resolves outside the project, or isn't a regular file of at most 64 KiB",
+            "make `rust-toolchain.toml` a regular file inside the project",
+        ),
+    };
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        format!("the project's `rust-toolchain` file {why}, so its Rust blocks aren't checked"),
+    )
+    .with_help(help)
+    .with_location(at.clone())
+}
+
+/// The `code-block-not-checked` warning, at `at`, for a Rust block holding `read`, a
+/// compile-time read such as `include_str!`.
+fn compile_time_warning(read: &str, at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        format!(
+            "the block uses `{read}`, which reads a file or environment variable at compile time, so it isn't checked"
+        ),
+    )
+    .with_help(format!(
+        "remove the `{read}` from the block, or mark it `ignore(<why>)`"
+    ))
+    .with_location(at.clone())
 }
 
 /// The text of `doc`, relative to the project root, as it is on disk now. `None` when it can't
