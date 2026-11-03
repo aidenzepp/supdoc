@@ -31,9 +31,13 @@ pub(crate) struct Walk {
     /// Unreadable directories, symlinked ignore files that weren't read, and explicitly named
     /// paths that are excluded or ignored, sorted.
     pub(crate) findings: Vec<Finding>,
-    /// The directories the walk couldn't read, sorted by path. Nothing beneath one was walked, so
-    /// its sources and their links are unknown.
+    /// The directories the walk couldn't read and linking would have walked, sorted by path.
+    /// Nothing beneath one was walked, so its sources and their links are unknown.
     pub(crate) unread_dirs: Vec<UnreadDir>,
+    /// The directories the walk couldn't read that only code-blocks walks, because linking's
+    /// `exclude` names them, sorted by path. Kept apart, with no finding in `findings`, so a wider
+    /// code-blocks scope never changes linking's results.
+    pub(crate) code_blocks_unread_dirs: Vec<UnreadDir>,
 }
 
 /// A file the walk found to read links from.
@@ -99,7 +103,7 @@ impl UnreadDir {
     ///
     /// The message names the directory relative to the project `root`, as the read messages name
     /// files, so no finding carries a machine-specific absolute path.
-    fn finding(&self, root: &AbsolutePath) -> Finding {
+    pub(crate) fn finding(&self, root: &AbsolutePath) -> Finding {
         let shown = relative_to(root, &self.path);
         Finding::new(
             "scan-unreadable-dir",
@@ -191,6 +195,9 @@ pub(crate) fn walk(
     }
     sources.sort_by(|left, right| left.path.cmp(&right.path));
     unread_dirs.sort();
+    let (unread_dirs, code_blocks_unread_dirs): (Vec<UnreadDir>, Vec<UnreadDir>) = unread_dirs
+        .into_iter()
+        .partition(|dir| config.excluded_by(&dir.path).is_none());
 
     let mut findings: Vec<Finding> = unread_dirs.iter().map(|dir| dir.finding(root)).collect();
     findings.extend(invalid_names);
@@ -226,6 +233,7 @@ pub(crate) fn walk(
         sources,
         findings,
         unread_dirs,
+        code_blocks_unread_dirs,
     }
 }
 

@@ -207,12 +207,22 @@ fn assemble(
         &mut parsed,
         &front.sources,
         |walked, file, raws| source_links(config, languages, walked, file, raws, &mut found),
-        |source, error| {
-            findings.push(unreadable_source(source, &error));
-            let _new = unread_sources.insert(source.clone());
+        |walked, error| {
+            findings.push(unreadable_source(&walked.source, &error));
+            // A file only code-blocks reads stays out of linking's unread sources, so its locked
+            // links are judged exactly as without code-blocks.
+            if walked.wants.links {
+                let _new = unread_sources.insert(walked.source.clone());
+            }
         },
     )?;
     findings.extend(front.findings);
+    findings.extend(
+        front
+            .code_blocks_unread_dirs
+            .iter()
+            .map(|dir| dir.finding(root)),
+    );
 
     // The root itself was read and walked above, so every unread directory lies beneath it.
     let unread_dirs = front
@@ -287,7 +297,7 @@ pub(crate) fn read_sources(
     excludes: &GlobalExcludes,
     parsed: &mut Parsed,
     mut on_links: impl FnMut(&SourcePath, &SourceFile, Vec<RawLink>),
-    on_unread: impl FnMut(&SourcePath, ReadError),
+    mut on_unread: impl FnMut(&SourcePath, ReadError),
 ) -> Result<FrontHalf, ScanError> {
     let walked = walk_checked(config, languages, scope, excludes)?;
     read_walked(
@@ -296,7 +306,7 @@ pub(crate) fn read_sources(
         parsed,
         walked.sources.iter().filter(|source| source.wants.links),
         |walked, file, raws| on_links(&walked.source, file, raws),
-        on_unread,
+        |walked, error| on_unread(&walked.source, error),
     )?;
     Ok(FrontHalf {
         findings: walked.findings,
@@ -339,7 +349,7 @@ fn read_walked<'walk>(
     parsed: &mut Parsed,
     sources: impl IntoIterator<Item = &'walk WalkedSource>,
     mut on_read: impl FnMut(&WalkedSource, &SourceFile, Vec<RawLink>),
-    mut on_unread: impl FnMut(&SourcePath, ReadError),
+    mut on_unread: impl FnMut(&WalkedSource, ReadError),
 ) -> Result<(), ScanError> {
     let limit = config.limits_in_effect().parse_timeout.value;
     for walked in sources {
@@ -356,7 +366,7 @@ fn read_walked<'walk>(
         match read {
             Ok((raws, file)) => on_read(walked, file, raws),
             Err(ReadError::CartridgeLoad { error, .. }) => return Err(error.into()),
-            Err(error) => on_unread(&walked.source, error),
+            Err(error) => on_unread(walked, error),
         }
         parsed.forget(&walked.path);
     }
@@ -1167,6 +1177,79 @@ mod tests {
             .expect("the root should be unlockable, so the temp dir can be removed");
         let error = result.expect_err("an unreadable root should stop the scan");
         assert_eq!(error.code(), "scan-root-unreadable");
+    }
+
+    /// Links in `docs`, code blocks in `skills` too: `skills` is in code-blocks' scope only.
+    const CODE_BLOCKS_WIDER: &str =
+        "exclude = [\"skills\"]\n[features.code-blocks]\nexclude = []\n";
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_only_code_blocks_walks_leaves_linking_unchanged_when_unreadable() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let project = Project::with_config(CODE_BLOCKS_WIDER);
+        project.write("src/lib.rs", LIB);
+        project.write("docs/guide.md", "No links any more.\n");
+        project.write("skills/a.md", "```rust\nfn main() {}\n```\n");
+        let gone = key("docs/guide.md", "src/lib.rs", Some("add"));
+        let lock: Lockfile = [(gone.clone(), Hash::digest(b"add"))].into_iter().collect();
+        let skills = project.root.join("skills");
+        fs::set_permissions(&skills, fs::Permissions::from_mode(0o000))
+            .expect("the fixture directory permissions should be settable");
+
+        let scan = project.scan();
+        let config = project.config();
+        let front = read_sources(
+            &config,
+            Languages::builtin().expect("the built-in cartridges should load"),
+            &Scope::All,
+            &GlobalExcludes::none(),
+            &mut Parsed::default(),
+            |_source, _file, _raws| {},
+            |source, error| panic!("{source} should be readable: {error:?}"),
+        );
+
+        fs::set_permissions(&skills, fs::Permissions::from_mode(0o755))
+            .expect("the fixture directory should be unlockable, so the temp dir can be removed");
+        let front = front.expect("the fixture project should be read");
+        assert!(
+            scan.unread_dirs.is_empty() && scan.unread_sources.is_empty(),
+            "linking's unread state should hold only linking's scope: {:?} {:?}",
+            scan.unread_dirs,
+            scan.unread_sources
+        );
+        assert!(
+            scan.findings
+                .iter()
+                .any(|finding| finding.code == "scan-unreadable-dir"),
+            "the unreadable directory should still be reported: {:?}",
+            scan.findings
+        );
+        let report = reconcile_at_root(&scan, &lock, &Scope::All);
+        let states: Vec<(LinkKey, LinkState)> = report
+            .links
+            .iter()
+            .map(|link| (link.key.clone(), link.state))
+            .collect();
+        assert_eq!(states, [(gone, LinkState::Obsolete)]);
+        assert!(
+            front.unread_dirs.is_empty(),
+            "namespace rename should not refuse over a directory linking never reads: {:?}",
+            front.unread_dirs
+        );
+    }
+
+    #[test]
+    fn a_file_only_code_blocks_reads_is_not_unread_for_linking() {
+        let project = Project::with_config(CODE_BLOCKS_WIDER);
+        project.write_bytes("skills/bad.md", b"not UTF-8 \xff\n");
+
+        let scan = project.scan();
+
+        assert!(scan.unread_sources.is_empty(), "{:?}", scan.unread_sources);
+        let codes: Vec<&str> = scan.findings.iter().map(|finding| finding.code).collect();
+        assert_eq!(codes, ["read-not-utf8"]);
     }
 
     #[test]
