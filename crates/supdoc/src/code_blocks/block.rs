@@ -4,6 +4,7 @@ use std::ops::Range;
 
 use crate::finding::Location;
 use crate::read::cartridge::SourceFile;
+use crate::read::error::ReadError;
 
 use super::info::InfoString;
 use super::{doc_comments, markdown};
@@ -73,6 +74,7 @@ fn is_rust_file(file: &str) -> bool {
 /// Every code block in `file`, in file order, located by `locate`, which turns a byte range of
 /// the file into a [`Location`]. Markdown files hold blocks, and so do the `///` and `//!` doc
 /// comments of Rust files.
+#[cfg(test)]
 #[must_use]
 pub(crate) fn blocks_in(
     file: &SourceFile,
@@ -81,18 +83,21 @@ pub(crate) fn blocks_in(
     try_blocks_in(file, locate).unwrap_or_default()
 }
 
-/// Like [`blocks_in`], but `None` when `file`'s blocks can't be read reliably (a Markdown file
-/// holding a NUL whose parse with each NUL replaced failed), so a caller that checks an edit can
-/// refuse it rather than compare two empty block lists.
-#[must_use]
+/// Like [`blocks_in`], but an error when `file`'s blocks can't be read reliably (a Markdown file
+/// holding a NUL whose parse with each NUL replaced failed), so a caller can report or refuse
+/// rather than treat the file as holding no blocks.
+///
+/// # Errors
+///
+/// The [`ReadError`] of the failed parse.
 pub(crate) fn try_blocks_in(
     file: &SourceFile,
     locate: impl Fn(Range<usize>) -> Option<Location>,
-) -> Option<Vec<CodeBlock>> {
+) -> Result<Vec<CodeBlock>, ReadError> {
     match file.language().id().as_str() {
         "markdown" => markdown::try_blocks(file, locate),
-        "rust" => Some(doc_comments::blocks(file, locate)),
-        _ => Some(Vec::new()),
+        "rust" => doc_comments::blocks(file, locate),
+        _ => Ok(Vec::new()),
     }
 }
 

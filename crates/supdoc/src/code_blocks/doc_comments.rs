@@ -10,6 +10,7 @@ use std::ops::Range;
 use crate::cartridges::markdown::cartridge::cartridge as markdown_cartridge;
 use crate::finding::Location;
 use crate::read::cartridge::{MarkdownRegion, SourceFile};
+use crate::read::error::ReadError;
 
 use super::block::{BodyLine, CodeBlock};
 use super::markdown;
@@ -60,42 +61,61 @@ impl Run {
 }
 
 /// Every code block in the doc comments of `file`, a Rust file, in file order.
+///
+/// # Errors
+///
+/// The [`ReadError`] of the first region whose Markdown, or its NUL-replaced re-parse, can't be
+/// parsed: the file's blocks are then unknown, not none.
 pub(super) fn blocks(
     file: &SourceFile,
     locate: impl Fn(Range<usize>) -> Option<Location>,
-) -> Vec<CodeBlock> {
-    let Ok(regions) = file.language().markdown_regions(file) else {
-        return Vec::new();
-    };
-    regions
-        .iter()
-        .flat_map(|region| region_blocks(file, region, &locate))
-        .collect()
+) -> Result<Vec<CodeBlock>, ReadError> {
+    let regions = file.language().markdown_regions(file)?;
+    let mut blocks = Vec::new();
+    for region in &regions {
+        blocks.extend(region_blocks(file, region, &locate)?);
+    }
+    Ok(blocks)
 }
 
 /// The blocks of `region` when it is a run of `///` or `//!` lines.
+///
+/// # Errors
+///
+/// The [`ReadError`] of a failed parse of the run's Markdown.
 fn region_blocks(
     file: &SourceFile,
     region: &MarkdownRegion,
     locate: &impl Fn(Range<usize>) -> Option<Location>,
-) -> Vec<CodeBlock> {
+) -> Result<Vec<CodeBlock>, ReadError> {
     let text = file.text();
     let Some((run, markdown)) = read_run(text, region) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    let Ok(parsed) = SourceFile::from_text(
+    let parsed = SourceFile::from_text(
         file.path().clone(),
         markdown,
         markdown_cartridge(),
         file.deadline(),
-    ) else {
-        return Vec::new();
-    };
+    );
+    blocks_of_run(&run, parsed, locate)
+}
+
+/// The blocks of `run`, read from `parsed`, the parse of its Markdown text.
+///
+/// # Errors
+///
+/// The [`ReadError`] `parsed` failed with, or that of its NUL-replaced re-parse.
+fn blocks_of_run(
+    run: &Run,
+    parsed: Result<SourceFile, ReadError>,
+    locate: &impl Fn(Range<usize>) -> Option<Location>,
+) -> Result<Vec<CodeBlock>, ReadError> {
     let mapped = |range| run.range_to_file(range).and_then(locate);
-    markdown::blocks(&parsed, mapped)
+    Ok(markdown::try_blocks(&parsed?, mapped)?
         .into_iter()
-        .filter_map(|block| to_file(&run, block))
-        .collect()
+        .filter_map(|block| to_file(run, block))
+        .collect())
 }
 
 /// `region` as a [`Run`] and its Markdown text, or `None` when it isn't a doc-comment run.
@@ -252,6 +272,27 @@ mod tests {
         assert_eq!(
             lines(text, &block),
             [("/// ", "a"), ("///", ""), ("/// ", "b")]
+        );
+    }
+
+    #[test]
+    fn a_failed_markdown_parse_of_a_run_is_an_error_never_zero_blocks() {
+        let path = AbsolutePath::new(Path::new("/repo/src/lib.rs"))
+            .expect("the fixture path should be absolute");
+        let failed = Err(ReadError::Timeout {
+            path,
+            limit: "10s".parse().expect("10s is a valid limit"),
+            step: "the parse",
+            offset: 0,
+            size: 0,
+        });
+        let run = Run { lines: Vec::new() };
+
+        let result = blocks_of_run(&run, failed, &|_| None);
+
+        assert!(
+            matches!(result, Err(ReadError::Timeout { .. })),
+            "{result:?}"
         );
     }
 }

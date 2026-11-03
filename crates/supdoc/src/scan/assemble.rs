@@ -8,7 +8,7 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
-use crate::code_blocks::block::{CodeBlock, blocks_in};
+use crate::code_blocks::block::{CodeBlock, try_blocks_in};
 use crate::config::Config;
 use crate::exit::ExitStatus;
 use crate::finding::{Finding, Fix, LineIndex, Location, Severity, Snippet};
@@ -305,7 +305,10 @@ pub(crate) fn read_sources(
         languages,
         parsed,
         walked.sources.iter().filter(|source| source.wants.links),
-        |walked, file, raws| on_links(&walked.source, file, raws),
+        |walked, file, raws| {
+            on_links(&walked.source, file, raws);
+            Ok(())
+        },
         |walked, error| on_unread(&walked.source, error),
     )?;
     Ok(FrontHalf {
@@ -348,7 +351,7 @@ fn read_walked<'walk>(
     languages: &Languages,
     parsed: &mut Parsed,
     sources: impl IntoIterator<Item = &'walk WalkedSource>,
-    mut on_read: impl FnMut(&WalkedSource, &SourceFile, Vec<RawLink>),
+    mut on_read: impl FnMut(&WalkedSource, &SourceFile, Vec<RawLink>) -> Result<(), ReadError>,
     mut on_unread: impl FnMut(&WalkedSource, ReadError),
 ) -> Result<(), ScanError> {
     let limit = config.limits_in_effect().parse_timeout.value;
@@ -364,7 +367,11 @@ fn read_walked<'walk>(
                 Ok((raws, file))
             });
         match read {
-            Ok((raws, file)) => on_read(walked, file, raws),
+            Ok((raws, file)) => {
+                if let Err(error) = on_read(walked, file, raws) {
+                    on_unread(walked, error);
+                }
+            }
             Err(ReadError::CartridgeLoad { error, .. }) => return Err(error.into()),
             Err(error) => on_unread(walked, error),
         }
@@ -399,6 +406,10 @@ struct SourceLinks {
 
 /// Adds `raws`, the links read from `walked`'s `file`, to `found`, in file order, and its code
 /// blocks when code-blocks wants the file.
+///
+/// # Errors
+///
+/// The [`ReadError`] of a failed block parse; nothing is added then, and the source is unread.
 fn source_links(
     config: &Config,
     languages: &Languages,
@@ -406,14 +417,16 @@ fn source_links(
     file: &SourceFile,
     raws: Vec<RawLink>,
     found: &mut SourceLinks,
-) {
+) -> Result<(), ReadError> {
     let source = &walked.source;
     let text = file.text();
     let lines = LineIndex::new(text);
     if walked.wants.code_blocks {
-        found.code_blocks.extend(blocks_in(file, |range| {
+        // Read first, so a source whose blocks can't be read adds nothing and is reported unread.
+        let blocks = try_blocks_in(file, |range| {
             Location::in_indexed(source.clone(), text, &lines, range)
-        }));
+        })?;
+        found.code_blocks.extend(blocks);
     }
     for raw in raws {
         let parsed = match parse_destination(&raw, source, config.namespaces(), languages) {
@@ -460,6 +473,7 @@ fn source_links(
             }
         }
     }
+    Ok(())
 }
 
 /// The key `source`'s link would have if its unknown namespace were configured, so a locked link

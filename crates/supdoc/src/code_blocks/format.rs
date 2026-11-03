@@ -389,7 +389,8 @@ fn fences(block: &CodeBlock, text: &str, limit: TimeLimit) -> Option<Vec<Fence>>
     let index = LineIndex::new(text);
     let fences = try_blocks_in(&parsed, |range| {
         Location::in_indexed(file.clone(), text, &index, range)
-    })?
+    })
+    .ok()?
     .into_iter()
     .map(|found| {
         let range = found.fence.range;
