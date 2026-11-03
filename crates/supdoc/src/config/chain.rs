@@ -386,6 +386,11 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Result<Config, Co
         code_blocks = code_blocks::merge(code_blocks, raw_code_blocks, &file, &base);
         if let Some(raw_limits) = raw.limits {
             nearest(&mut limits.parse_timeout, raw_limits.parse_timeout, &file);
+            nearest(
+                &mut limits.code_block_timeout,
+                raw_limits.code_block_timeout,
+                &file,
+            );
             nearest(&mut limits.max_lock_size, raw_limits.max_lock_size, &file);
             nearest(
                 &mut limits.max_ignore_size,

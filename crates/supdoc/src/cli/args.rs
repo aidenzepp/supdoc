@@ -104,7 +104,7 @@ pub(crate) struct GlobalArgs {
     pub(crate) limits: LimitFlags,
 }
 
-/// The `--parse-timeout`, `--max-lock-size`, `--max-config-size` and `--max-ignore-size` flags.
+/// The `--parse-timeout`, `--code-block-timeout`, `--max-lock-size`, `--max-config-size` and `--max-ignore-size` flags.
 ///
 /// Written by hand rather than derived, so each value keeps whether its flag or its `SUPDOC_*`
 /// variable gave it, which `config show` reports.
@@ -112,12 +112,18 @@ pub(crate) struct GlobalArgs {
 pub(crate) struct LimitFlags(pub CommandLineLimits);
 
 /// The clap id, flag, variable, value name, help and default of each limit flag.
-const LIMIT_FLAGS: [(&str, &str, &str, &str); 4] = [
+const LIMIT_FLAGS: [(&str, &str, &str, &str); 5] = [
     (
         "parse-timeout",
         "SUPDOC_PARSE_TIMEOUT",
         "DURATION",
         "Stop each read of a file after this long, such as 10s or 500ms; 0 for no limit",
+    ),
+    (
+        "code-block-timeout",
+        "SUPDOC_CODE_BLOCK_TIMEOUT",
+        "DURATION",
+        "Stop each code block after this long, such as 10s or 500ms; 0 for no limit",
     ),
     (
         "max-lock-size",
@@ -141,9 +147,10 @@ const LIMIT_FLAGS: [(&str, &str, &str, &str); 4] = [
 
 impl LimitFlags {
     /// The default each flag's help shows, in [`LIMIT_FLAGS`] order.
-    fn defaults() -> [String; 4] {
+    fn defaults() -> [String; 5] {
         [
             Limits::PARSE_TIMEOUT.to_string(),
+            Limits::CODE_BLOCK_TIMEOUT.to_string(),
             Limits::MAX_LOCK_SIZE.to_string(),
             Limits::MAX_CONFIG_SIZE.to_string(),
             Limits::MAX_IGNORE_SIZE.to_string(),
@@ -165,6 +172,7 @@ impl clap::FromArgMatches for LimitFlags {
     fn from_arg_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
         Ok(Self(CommandLineLimits {
             parse_timeout: given(matches, "parse-timeout"),
+            code_block_timeout: given(matches, "code-block-timeout"),
             max_lock_size: given(matches, "max-lock-size"),
             max_config_size: given(matches, "max-config-size"),
             max_ignore_size: given(matches, "max-ignore-size"),
