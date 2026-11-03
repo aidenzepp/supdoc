@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 
-use tree_sitter::Node;
+use tree_sitter::{Node, Tree};
 
 use crate::finding::Location;
 use crate::read::cartridge::SourceFile;
@@ -15,16 +15,42 @@ use crate::read::cartridge::SourceFile;
 use super::block::{BodyLine, CodeBlock, Info};
 
 /// Every fenced code block in `file`, a Markdown file, in file order.
+///
+/// A Markdown renderer reads a NUL as an ordinary character (U+FFFD), but tree-sitter-md doesn't,
+/// so a NUL could hide a fence line from supdoc that a renderer sees. A file holding one is parsed again
+/// with each NUL as `?`, which keeps every offset, and its blocks are read from that tree. When
+/// that parse fails, the file's own tree is read.
 pub(super) fn blocks(
     file: &SourceFile,
     locate: impl Fn(Range<usize>) -> Option<Location>,
 ) -> Vec<CodeBlock> {
     let text = file.text();
+    if !text.contains('\0') {
+        return blocks_of_tree(text, file.tree(), &locate);
+    }
+    match SourceFile::from_text(
+        file.path().clone(),
+        text.replace('\0', "?"),
+        file.language(),
+        file.deadline(),
+    ) {
+        Ok(cleaned) => blocks_of_tree(text, cleaned.tree(), &locate),
+        Err(_) => blocks_of_tree(text, file.tree(), &locate),
+    }
+}
+
+/// Every fenced code block in `tree`, parsed from `text` or a copy with the same offsets, in file
+/// order.
+fn blocks_of_tree(
+    text: &str,
+    tree: &Tree,
+    locate: &impl Fn(Range<usize>) -> Option<Location>,
+) -> Vec<CodeBlock> {
     let mut blocks = Vec::new();
-    let mut pending: Vec<Node<'_>> = vec![file.tree().root_node()];
+    let mut pending: Vec<Node<'_>> = vec![tree.root_node()];
     while let Some(node) = pending.pop() {
         if node.kind() == "fenced_code_block" {
-            blocks.extend(block(text, node, &locate));
+            blocks.extend(block(text, node, locate));
             continue;
         }
         let mut cursor = node.walk();
@@ -255,5 +281,22 @@ mod tests {
             .map(|line| slice(text, &line.content))
             .collect();
         assert_eq!(contents, ["echo one", "echo two"]);
+    }
+
+    #[test]
+    fn a_nul_inside_an_earlier_block_hides_none_of_the_later_blocks() {
+        let text = "```sh\necho \0\n```\n\n```sh\necho two\n```\n\n- item\n\n  ```py\n  x\n  ```\n";
+        let blocks = blocks_of(text);
+
+        let infos: Vec<Option<&str>> = blocks
+            .iter()
+            .map(|block| block.info.as_ref().map(|info| info.text.as_str()))
+            .collect();
+        assert_eq!(infos, [Some("sh"), Some("sh"), Some("py")], "{blocks:?}");
+        let first = blocks
+            .first()
+            .and_then(|block| block.body.first())
+            .expect("the first block should have a body line");
+        assert_eq!(slice(text, &first.content), "echo \0");
     }
 }

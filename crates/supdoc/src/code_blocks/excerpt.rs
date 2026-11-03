@@ -4,10 +4,11 @@
 //! line has in the source, so a method reads from column 0, and the parts join in written order
 //! with one blank line between them. No tool runs on an excerpt.
 
-use crate::finding::{Finding, Fix, Severity};
+use crate::finding::{Finding, Severity};
 use crate::hash::LineEndings;
 
-use super::block::{CodeBlock, replacement_for};
+use super::block::CodeBlock;
+use super::format::{self, FixDoc, Guarded};
 use super::source::SourceText;
 
 /// The code for a `from(...)` block that differs from its source.
@@ -70,45 +71,44 @@ fn body(block: &CodeBlock, text: &str, line_endings: LineEndings) -> Option<Stri
     Some(lines.join("\n"))
 }
 
-/// One `code-block-stale` error at `block` when its body in `text`, the doc it was found in,
-/// isn't byte for byte `expected`. Its fix replaces exactly the body, keeping container prefixes.
+/// The `code-block-stale` error at `block` when its body in `doc`, the doc it was found in, isn't
+/// byte for byte `expected`, with nothing after it. Its fix replaces exactly the body, keeping
+/// container prefixes, when [`format::safe_fix`] allows it; when it refuses, the error keeps no
+/// fix and its `code-block-fix-unsafe` warning follows. Empty when the body is `expected`, or its
+/// ranges don't lie inside `doc`.
 #[must_use]
 pub(crate) fn stale(
     block: &CodeBlock,
-    text: &str,
+    doc: &FixDoc,
     expected: &str,
     line_endings: LineEndings,
-) -> Option<Finding> {
-    if body(block, text, line_endings)? == expected {
-        return None;
+) -> Vec<Finding> {
+    if body(block, doc.text(), line_endings).is_none_or(|body| body == expected) {
+        return Vec::new();
     }
-    let (range, replacement) = replacement_for(block, text, expected)?;
-    let scanned = text.get(range.clone())?.into();
-    let doc = block.fence.file.clone();
-    let help = format!(
-        "run `supdoc fix {} --yes` to copy the source into the block",
-        doc.as_str()
-    );
-    Some(
-        Finding::new(
-            STALE,
-            Severity::Error,
-            "the `from(...)` block differs from its source",
-        )
-        .with_location(block.fence.clone())
-        .with_help(help)
-        .with_fix(Fix {
-            file: doc,
-            range,
-            replacement,
-            scanned,
-        }),
+    let error = Finding::new(
+        STALE,
+        Severity::Error,
+        "the `from(...)` block differs from its source",
     )
+    .with_location(block.fence.clone());
+    match format::safe_fix(block, doc, expected, "the `from(...)` source") {
+        Guarded::Fix(fix) => {
+            let help = format!(
+                "run `supdoc fix {} --yes` to copy the source into the block",
+                fix.file.as_str()
+            );
+            vec![error.with_help(help).with_fix(fix)]
+        }
+        Guarded::Unplaced => Vec::new(),
+        Guarded::Refused(unsafe_fix) => vec![error, unsafe_fix],
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::Arc;
 
     use tempfile::TempDir;
 
@@ -119,6 +119,7 @@ mod tests {
     use crate::code_blocks::source::{Unresolved, read};
     use crate::config::Config;
     use crate::finding::Location;
+    use crate::limits::Limits;
     use crate::path::AbsolutePath;
     use crate::read::cartridge::{Languages, SourceFile};
 
@@ -169,6 +170,22 @@ mod tests {
         blocks.remove(0)
     }
 
+    /// The one finding [`stale`] gives `block` in `text`, if any.
+    fn stale_of(
+        block: &CodeBlock,
+        text: &str,
+        expected: &str,
+        line_endings: LineEndings,
+    ) -> Option<Finding> {
+        let doc = FixDoc::new(Arc::from(text), Limits::PARSE_TIMEOUT);
+        let mut findings = stale(block, &doc, expected, line_endings);
+        assert!(
+            findings.len() <= 1,
+            "expected one finding at most: {findings:?}"
+        );
+        findings.pop()
+    }
+
     /// `text` with `finding`'s fix applied.
     fn fixed(text: &str, finding: &Finding) -> String {
         let fix = finding
@@ -215,8 +232,8 @@ mod tests {
         let text = "# G\n\n```rust from(/src/lib.rs#add)\r\npub fn add() {}\r\n```\r\n";
         let block = block_of(text);
 
-        let normalized = stale(&block, text, "pub fn add() {}", LineEndings::Normalize);
-        let exact = stale(&block, text, "pub fn add() {}", LineEndings::Exact);
+        let normalized = stale_of(&block, text, "pub fn add() {}", LineEndings::Normalize);
+        let exact = stale_of(&block, text, "pub fn add() {}", LineEndings::Exact);
 
         assert!(normalized.is_none(), "{normalized:?}");
         assert!(exact.is_some(), "a CR is a difference under `exact`");
@@ -228,7 +245,7 @@ mod tests {
             "# G\n\n```rust from(/src/lib.rs#add)\nfn old() {}\nfn older() {}\n```\n\nAfter.\n";
         let block = block_of(text);
 
-        let finding = stale(&block, text, RESOLVE, LineEndings::Normalize)
+        let finding = stale_of(&block, text, RESOLVE, LineEndings::Normalize)
             .expect("a differing body should be stale");
 
         assert_eq!(finding.code, STALE);
@@ -243,7 +260,7 @@ mod tests {
         let text = "- Add:\n\n  ```rust from(/src/lib.rs#add)\n  fn old() {}\n  ```\n";
         let block = block_of(text);
 
-        let finding = stale(
+        let finding = stale_of(
             &block,
             text,
             "fn a() {}\n\nfn b() {}",
@@ -262,7 +279,7 @@ mod tests {
         let text = "> ```rust from(/src/lib.rs#add)\n> fn old() {}\n> ```\n";
         let block = block_of(text);
 
-        let finding = stale(&block, text, "fn a() {}", LineEndings::Normalize)
+        let finding = stale_of(&block, text, "fn a() {}", LineEndings::Normalize)
             .expect("a differing body should be stale");
 
         assert_eq!(
@@ -276,12 +293,30 @@ mod tests {
         let text = "```rust from(/src/lib.rs#add)\n```\n";
         let block = block_of(text);
 
-        let finding = stale(&block, text, "pub fn add() {}", LineEndings::Normalize)
+        let finding = stale_of(&block, text, "pub fn add() {}", LineEndings::Normalize)
             .expect("an empty body should be stale");
 
         assert_eq!(
             fixed(text, &finding),
             "```rust from(/src/lib.rs#add)\npub fn add() {}\n```\n"
         );
+    }
+
+    #[test]
+    fn a_source_with_a_line_that_would_close_the_fence_gets_no_fix_and_a_warning() {
+        let text = "- Add:\n\n  ```rust from(/src/lib.rs#add)\n  fn old() {}\n  ```\n";
+        let block = block_of(text);
+
+        for expected in ["let s = r\"\n```\n\";", "let s = \"\0\n\t```\";"] {
+            let doc = FixDoc::new(Arc::from(text), Limits::PARSE_TIMEOUT);
+            let findings = stale(&block, &doc, expected, LineEndings::Normalize);
+
+            let codes: Vec<&str> = findings.iter().map(|finding| finding.code).collect();
+            assert_eq!(codes, [STALE, "code-block-fix-unsafe"], "{expected:?}");
+            assert!(
+                findings.iter().all(|finding| finding.fix.is_none()),
+                "{expected:?} should get no fix"
+            );
+        }
     }
 }

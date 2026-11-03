@@ -159,8 +159,10 @@ A marker without a reason still takes effect, with a `code-block-ignore-reason` 
 
 A language table turns on its formatter: with `[features.code-blocks.shell]`, shell blocks go through
 `shfmt`, found on `PATH`. A block the formatter would change fails with `code-block-unformatted`, and
-`supdoc fix --yes` replaces its body with the formatter's output. supdoc refuses that fix, with a
-`code-block-fix-unsafe` warning, when a line of the output would close the block's fence.
+`supdoc fix --yes` replaces its body with the formatter's output. supdoc refuses that fix, and the fix
+for a stale `from(...)` block, with a `code-block-fix-unsafe` warning when the new body could end the
+block early: it holds a control character other than a tab or a line ending, a line of it would close
+the fence, or the doc, parsed again with the fix applied, no longer holds the same fenced blocks.
 
 A Rust snippet that needs surrounding code to make sense takes one of three explicit forms:
 
