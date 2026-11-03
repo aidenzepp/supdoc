@@ -7,6 +7,7 @@ use crate::limits::{SizeLimit, TimeLimit};
 use crate::namespace::NamespaceName;
 use crate::path::RelativePath;
 
+use super::code_blocks::RawCodeBlocks;
 use super::pattern::PatternList;
 
 /// One `supdoc.config.toml` before it is merged with the files it extends.
@@ -44,12 +45,14 @@ pub(crate) struct RawLimits {
     pub(crate) max_ignore_size: Option<SizeLimit>,
 }
 
-/// The `[features]` table: one sub-table per area.
+/// The `[features]` table: one sub-table per area, named in kebab-case.
 #[derive(Debug, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub(crate) struct RawFeatures {
     /// `None` inherits the hash toggles from the parent.
     pub(crate) hash: Option<RawHashFeatures>,
+    /// `Some` turns code-block checking on, here and in every config that extends this one.
+    pub(crate) code_blocks: Option<RawCodeBlocks>,
 }
 
 /// The `[features.hash]` table.

@@ -12,6 +12,7 @@ use serde::Serialize;
 
 use crate::check::model::{LinkReport, Report as CheckModel};
 use crate::check::reconcile::{self, check_outcome, reconcile_in};
+use crate::code_blocks::evaluate::evaluate;
 use crate::finding::{Finding, Location};
 use crate::link::destination::Untracked;
 use crate::link::{LinkKey, SourcePath};
@@ -46,13 +47,15 @@ pub(crate) fn run(
     let config = load_config(context, output)?;
     let scope = scope(&args.paths, &config, context)?;
     let lock = read_lock(&config, &context.cwd)?;
-    let (scan, untracked) = crate::scan::assemble::run_with_untracked(
+    let (mut scan, untracked) = crate::scan::assemble::run_with_untracked(
         &config,
         Languages::builtin().map_err(CliError::from)?,
         &scope,
         &context.global_excludes,
     )
     .map_err(CliError::from)?;
+    let code_block_findings = evaluate(&config, &scan.code_blocks);
+    scan.findings.extend(code_block_findings);
 
     let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
     let model = reconcile_in(&scan, &lock, &scope, &paths);

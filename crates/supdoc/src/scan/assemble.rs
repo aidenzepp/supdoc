@@ -8,6 +8,7 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
+use crate::code_blocks::block::{CodeBlock, blocks_in};
 use crate::config::Config;
 use crate::exit::ExitStatus;
 use crate::finding::{Finding, Fix, LineIndex, Location, Severity, Snippet};
@@ -250,6 +251,7 @@ fn assemble(
         unread_sources,
         keyless_error_sources,
         unread_dirs,
+        code_blocks: found.code_blocks,
     };
     Ok((scan, parsed, untracked))
 }
@@ -327,6 +329,8 @@ struct SourceLinks {
     unkeyed: Vec<Finding>,
     /// Links that are not supdoc links, counted by reason.
     untracked: UntrackedLinks,
+    /// Every code block in the sources, in file order, when `[features.code-blocks]` is on.
+    code_blocks: Vec<CodeBlock>,
 }
 
 /// Adds `raws`, the links read from `file`, to `found`, in file order.
@@ -340,6 +344,11 @@ fn source_links(
 ) {
     let text = file.text();
     let lines = LineIndex::new(text);
+    if config.code_blocks().is_some() {
+        found.code_blocks.extend(blocks_in(file, |range| {
+            Location::in_indexed(source.clone(), text, &lines, range)
+        }));
+    }
     for raw in raws {
         let parsed = match parse_destination(&raw, source, config.namespaces(), languages) {
             Destination::Link(link) => Ok(link),
