@@ -816,6 +816,17 @@ mod helps {
             &["check"],
         ),
         case(
+            "code-block-source-missing",
+            |p| {
+                config_with(p, "[features.code-blocks]\n");
+                p.write(
+                    "docs/blocks.md",
+                    "# B\n\n```rust from(../src/lib.rs#addd)\nfn add() {}\n```\n",
+                );
+            },
+            &["check"],
+        ),
+        case(
             "link-failed",
             |p| {
                 p.write(

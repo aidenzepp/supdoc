@@ -1,12 +1,17 @@
 //! The per-block pipeline that `check` runs: judges each code block and returns its findings.
 
+use std::ops::Range;
+
 use crate::config::Config;
-use crate::finding::{Finding, Severity};
+use crate::finding::{Finding, Location, Severity};
+use crate::read::cartridge::Languages;
 
 use super::block::{CodeBlock, Info};
 use super::info::{
     InfoString, KNOWN_ATTRIBUTES, is_known_attribute, parenthesized_spelling, reasoned,
+    source_attributes,
 };
+use super::source;
 
 /// The code for an info-string attribute supdoc doesn't know.
 const UNKNOWN_ATTRIBUTE: &str = "code-block-unknown-attribute";
@@ -14,10 +19,16 @@ const UNKNOWN_ATTRIBUTE: &str = "code-block-unknown-attribute";
 /// The code for an `ignore`, `no_format` or `no_lint` written without a reason.
 const IGNORE_REASON: &str = "code-block-ignore-reason";
 
-/// The findings for `blocks`, in block order. Nothing when `config` leaves
-/// `[features.code-blocks]` off.
+/// The findings for `blocks`, in block order, reading each `from(...)` and `uses(...)` source
+/// with `languages`. Nothing when `config` leaves `[features.code-blocks]` off.
+///
+/// Effect: reads every source file the blocks name, contained in the project root.
 #[must_use]
-pub(crate) fn evaluate(config: &Config, blocks: &[CodeBlock]) -> Vec<Finding> {
+pub(crate) fn evaluate(
+    config: &Config,
+    languages: &Languages,
+    blocks: &[CodeBlock],
+) -> Vec<Finding> {
     if config.code_blocks().is_none() {
         return Vec::new();
     }
@@ -27,6 +38,7 @@ pub(crate) fn evaluate(config: &Config, blocks: &[CodeBlock]) -> Vec<Finding> {
         .flat_map(|info| {
             let mut findings = unknown_attributes(info);
             findings.extend(missing_reasons(info));
+            findings.extend(missing_sources(config, languages, info));
             findings
         })
         .collect()
@@ -92,4 +104,32 @@ fn missing_reasons(info: &Info) -> Vec<Finding> {
             .with_help(format!("write it as `{name}(<why>)`"))
         })
         .collect()
+}
+
+/// One `code-block-source-missing` error at each `from(...)` or `uses(...)` value in `info` that
+/// doesn't resolve to a contained, readable file or symbol.
+fn missing_sources(config: &Config, languages: &Languages, info: &Info) -> Vec<Finding> {
+    let doc = info.location.file.as_str();
+    source_attributes(&info.text)
+        .into_iter()
+        .filter_map(|attribute| {
+            let missing =
+                source::read(config, languages, doc, attribute.kind, attribute.value).err()?;
+            let at = value_location(info, attribute.range)?;
+            Some(missing.finding(at))
+        })
+        .collect()
+}
+
+/// Where `range`, a byte range of `info`'s text, lies in the doc. An info string is one line, so
+/// the value shares its line.
+fn value_location(info: &Info, range: Range<usize>) -> Option<Location> {
+    let before = info.text.get(..range.start)?.chars().count();
+    let start = info.location.range.start + range.start;
+    Some(Location {
+        file: info.location.file.clone(),
+        range: start..info.location.range.start + range.end,
+        line: info.location.line,
+        column: info.location.column + u32::try_from(before).ok()?,
+    })
 }

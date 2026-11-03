@@ -1,6 +1,8 @@
 //! Checking the code blocks in docs: the `[features.code-blocks]` gate and the warnings `check`
 //! gives for a block's info string.
 
+use std::os::unix::fs::symlink;
+
 use crate::support::{Project, array_at};
 
 /// The codes of a `--json` check's loose findings, in order.
@@ -107,4 +109,101 @@ fn ignore_with_blank_parentheses_warns_and_with_a_reason_does_not() {
         "{blank_json}"
     );
     assert!(finding_kinds(&reasoned_json).is_empty(), "{reasoned_json}");
+}
+
+/// A recorded `basic` project with the feature on and a `rust` block in `docs/blocks.md`
+/// carrying `attributes`, with `config` appended to the config.
+fn project_with_rust_block(attributes: &str, config: &str) -> Project {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write(
+        "supdoc.config.toml",
+        &format!("[features.code-blocks]\n{config}"),
+    );
+    project.write(
+        "docs/blocks.md",
+        &format!("# Blocks\n\n```rust {attributes}\nfn add() {{}}\n```\n"),
+    );
+    project
+}
+
+/// How many `code-block-source-missing` findings a `--json` check printed.
+fn source_missing_count(json: &serde_json::Value) -> usize {
+    finding_kinds(json)
+        .iter()
+        .filter(|kind| *kind == "code-block-source-missing")
+        .count()
+}
+
+#[test]
+fn from_and_uses_that_resolve_draw_no_finding() {
+    let project = project_with_rust_block(
+        "from(../src/lib.rs#add) uses(/src/lib.rs#add) from(core:lib.rs)",
+        "\n[namespaces]\ncore = \"src\"\n",
+    );
+
+    let json = project.supdoc(&["check", "--json"]).assert_exit(0).json();
+
+    assert!(finding_kinds(&json).is_empty(), "{json}");
+}
+
+#[test]
+fn from_a_missing_symbol_or_file_fails_once_per_value() {
+    let project = project_with_rust_block(
+        "from(../src/lib.rs#addd) uses(/src/gone.rs#add) from(../src/lib.rs#add)",
+        "",
+    );
+
+    let run = project.supdoc(&["check", "--json"]);
+    let json = run.assert_exit(1).json();
+
+    assert_eq!(source_missing_count(&json), 2, "{json}");
+}
+
+#[test]
+fn from_a_climb_an_unknown_namespace_or_a_url_fails() {
+    let project = project_with_rust_block(
+        "from(../../outside.rs#add) uses(nope:lib.rs#add) from(https://example.com/a.rs)",
+        "",
+    );
+
+    let json = project.supdoc(&["check", "--json"]).assert_exit(1).json();
+
+    assert_eq!(source_missing_count(&json), 3, "{json}");
+}
+
+#[test]
+fn from_or_uses_through_a_symlink_out_of_the_root_never_shows_the_outside_file() {
+    let marker = "OUTSIDE_MARKER_7f3a";
+    let outside = tempfile::tempdir().expect("an outside directory should be creatable");
+    std::fs::write(
+        outside.path().join("secret.rs"),
+        format!("pub fn secret() {{ let _ = \"{marker}\"; }}\n"),
+    )
+    .expect("the outside file should be writable");
+    let project = project_with_rust_block(
+        "from(/src/secret.rs#secret) uses(/src/secret.rs#secret)",
+        "",
+    );
+    symlink(
+        outside.path().join("secret.rs"),
+        project.path("src/secret.rs"),
+    )
+    .expect("the symlink should be creatable");
+
+    let json_run = project.supdoc(&["check", "--json"]);
+    let text_run = project.supdoc(&["check"]);
+
+    let json = json_run.assert_exit(1).json();
+    let _ = text_run.assert_exit(1);
+    assert_eq!(source_missing_count(&json), 2, "{json}");
+    for run in [&json_run, &text_run] {
+        assert!(
+            !run.stdout.contains(marker) && !run.stderr.contains(marker),
+            "`supdoc {}` showed the outside file\nstdout:\n{}\nstderr:\n{}",
+            run.args,
+            run.stdout,
+            run.stderr
+        );
+    }
 }
