@@ -346,7 +346,7 @@ fn hidden_lines_in_a_formatted_block_pass_with_the_real_rustfmt() {
         return;
     };
     let project = project_with_rust_doc(
-        "# Blocks\n\n```rust\n# use std::fmt::Write as _;\n# fn main() {\n    let x = 1;\n# }\n```\n",
+        "# Blocks\n\n```rust\n# use std::fmt::Write as _;\n# fn main() {\n    # let x = 1;\n    let _y = x;\n# }\n```\n",
     );
 
     let json = project
@@ -362,7 +362,9 @@ fn hidden_lines_keep_their_prefix_when_the_real_rustfmt_fixes_the_block() {
     let Some(vars) = real_rustfmt("hidden_lines_keep_their_prefix") else {
         return;
     };
-    let project = project_with_rust_doc("# Blocks\n\n```rust\n# fn main() {\nlet x=1;\n# }\n```\n");
+    let project = project_with_rust_doc(
+        "# Blocks\n\n```rust\n# fn main() {\n    # let x = 1;\nlet y=x;\n# }\n```\n",
+    );
     let vars = borrowed(&vars);
 
     let _fix = project
@@ -375,7 +377,7 @@ fn hidden_lines_keep_their_prefix_when_the_real_rustfmt_fixes_the_block() {
 
     assert_eq!(
         project.read("docs/blocks.md"),
-        "# Blocks\n\n```rust\n# fn main() {\n    let x = 1;\n# }\n```\n",
+        "# Blocks\n\n```rust\n# fn main() {\n    # let x = 1;\n    let y = x;\n# }\n```\n",
         "the fix should format the shown line and keep each hidden line's `# `"
     );
     assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
