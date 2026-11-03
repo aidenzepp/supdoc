@@ -141,6 +141,16 @@ fn from_and_uses_that_resolve_draw_no_finding() {
         "from(../src/lib.rs#add) uses(/src/lib.rs#add) from(core:lib.rs)",
         "\n[namespaces]\ncore = \"src\"\n",
     );
+    let lib = std::fs::read_to_string(project.path("src/lib.rs"))
+        .expect("the fixture lib should be readable");
+    project.write(
+        "docs/blocks.md",
+        &format!(
+            "# Blocks\n\n```rust from(../src/lib.rs#add) uses(/src/lib.rs#add) from(core:lib.rs)\n\
+             {ADD}\n\n{}\n```\n",
+            lib.trim_end_matches('\n')
+        ),
+    );
 
     let json = project.supdoc(&["check", "--json"]).assert_exit(0).json();
 
@@ -206,4 +216,62 @@ fn from_or_uses_through_a_symlink_out_of_the_root_never_shows_the_outside_file()
             run.stderr
         );
     }
+}
+
+/// The `add` function of the `basic` fixture's `src/lib.rs`, as an excerpt holds it.
+const ADD: &str = "fn add(x: i32) -> i32 {\n    x + A\n}";
+
+/// A recorded `basic` project with the feature on and `docs/blocks.md` holding one
+/// `from(../src/lib.rs#add)` block whose body is `body`.
+fn project_with_excerpt(body: &str) -> Project {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write("supdoc.config.toml", "[features.code-blocks]\n");
+    project.write(
+        "docs/blocks.md",
+        &format!("# Blocks\n\n```rust from(../src/lib.rs#add)\n{body}\n```\n"),
+    );
+    project
+}
+
+#[test]
+fn excerpt_an_exact_copy_passes() {
+    let project = project_with_excerpt(ADD);
+
+    let json = project.supdoc(&["check", "--json"]).assert_exit(0).json();
+
+    assert!(finding_kinds(&json).is_empty(), "{json}");
+}
+
+#[test]
+fn excerpt_an_edited_symbol_makes_the_block_stale() {
+    let project = project_with_excerpt(ADD);
+    project.write(
+        "src/lib.rs",
+        "const A: i32 = 10;\n\nfn add(x: i32) -> i32 {\n    x + A + 1\n}\n",
+    );
+
+    let json = project.supdoc(&["check", "--json"]).assert_exit(1).json();
+
+    assert!(
+        finding_kinds(&json).contains(&"code-block-stale".to_owned()),
+        "{json}"
+    );
+}
+
+#[test]
+fn excerpt_a_missing_part_reports_only_the_missing_source() {
+    let project = project_with_excerpt("stale text");
+    project.write(
+        "docs/blocks.md",
+        "# Blocks\n\n```rust from(../src/lib.rs#add) from(../src/lib.rs#gone)\nstale\n```\n",
+    );
+
+    let json = project.supdoc(&["check", "--json"]).assert_exit(1).json();
+
+    assert_eq!(
+        finding_kinds(&json),
+        ["code-block-source-missing"],
+        "{json}"
+    );
 }

@@ -50,3 +50,69 @@ pub(crate) fn blocks_in(
         _ => Vec::new(),
     }
 }
+
+/// The edit that makes `block`'s body read `body`: the byte range of `text`, the file the block
+/// was found in, and its replacement. Each new line is re-prefixed with the container prefix the
+/// body's first prefixed line has (a list item's indent or a quote's `> `), trimmed on a blank
+/// line, and the body's line ending (LF or CRLF) is kept. `body` holds no final line ending.
+///
+/// `None` when the block's ranges don't lie inside `text`, or its body is empty and its fence is
+/// never closed.
+#[must_use]
+pub(crate) fn replacement_for(
+    block: &CodeBlock,
+    text: &str,
+    body: &str,
+) -> Option<(Range<usize>, String)> {
+    let Some((first, last)) = block.body.first().zip(block.body.last()) else {
+        return empty_body_replacement(block, text, body);
+    };
+    let prefix = block
+        .body
+        .iter()
+        .map(|line| text.get(line.prefix.clone()))
+        .find(|prefix| prefix.is_none_or(|prefix| !prefix.is_empty()))
+        .unwrap_or(Some(""))?;
+    let crlf = text.get(first.content.clone())?.ends_with('\r');
+    let mut replacement = prefixed(body, prefix, if crlf { "\r\n" } else { "\n" });
+    if text.get(last.content.clone())?.ends_with('\r') {
+        replacement.push('\r');
+    }
+    Some((first.prefix.start..last.content.end, replacement))
+}
+
+/// The insertion that fills `block`'s empty body with `body`, just after its opening fence's
+/// line, prefixed like the closing fence's line.
+fn empty_body_replacement(
+    block: &CodeBlock,
+    text: &str,
+    body: &str,
+) -> Option<(Range<usize>, String)> {
+    let fence = text.get(block.fence.range.clone())?;
+    let start = block.fence.range.start + fence.find('\n')? + 1;
+    let closing = text.get(start..block.fence.range.end)?;
+    let prefix_len = closing.len() - closing.trim_start_matches([' ', '\t', '>']).len();
+    let prefix = closing.get(..prefix_len)?;
+    let mut replacement = prefixed(body, prefix, "\n");
+    replacement.push('\n');
+    Some((start..start, replacement))
+}
+
+/// `body`'s lines, each led by `prefix` (trimmed on a blank line), joined by `newline`. A line's
+/// own CR is dropped when `newline` brings one.
+fn prefixed(body: &str, prefix: &str, newline: &str) -> String {
+    body.split('\n')
+        .map(|line| match newline {
+            "\r\n" => line.strip_suffix('\r').unwrap_or(line),
+            _ => line,
+        })
+        .map(|line| {
+            if line.is_empty() {
+                prefix.trim_end().to_owned()
+            } else {
+                format!("{prefix}{line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(newline)
+}
