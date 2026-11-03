@@ -5,13 +5,14 @@ use std::ops::Range;
 use crate::config::Config;
 use crate::finding::{Finding, Location, Severity};
 use crate::read::cartridge::Languages;
+use crate::read::error::CartridgeLoadError;
 
 use super::block::{CodeBlock, Info};
 use super::info::{
     InfoString, KNOWN_ATTRIBUTES, is_known_attribute, parenthesized_spelling, reasoned,
     source_attributes,
 };
-use super::source;
+use super::source::{self, Unresolved};
 
 /// The code for an info-string attribute supdoc doesn't know.
 const UNKNOWN_ATTRIBUTE: &str = "code-block-unknown-attribute";
@@ -23,25 +24,26 @@ const IGNORE_REASON: &str = "code-block-ignore-reason";
 /// with `languages`. Nothing when `config` leaves `[features.code-blocks]` off.
 ///
 /// Effect: reads every source file the blocks name, contained in the project root.
-#[must_use]
+///
+/// # Errors
+///
+/// [`CartridgeLoadError`] when a source's built-in cartridge doesn't load: a supdoc bug that
+/// fails the run (exit 70).
 pub(crate) fn evaluate(
     config: &Config,
     languages: &Languages,
     blocks: &[CodeBlock],
-) -> Vec<Finding> {
+) -> Result<Vec<Finding>, CartridgeLoadError> {
+    let mut findings = Vec::new();
     if config.code_blocks().is_none() {
-        return Vec::new();
+        return Ok(findings);
     }
-    blocks
-        .iter()
-        .filter_map(|block| block.info.as_ref())
-        .flat_map(|info| {
-            let mut findings = unknown_attributes(info);
-            findings.extend(missing_reasons(info));
-            findings.extend(missing_sources(config, languages, info));
-            findings
-        })
-        .collect()
+    for info in blocks.iter().filter_map(|block| block.info.as_ref()) {
+        findings.extend(unknown_attributes(info));
+        findings.extend(missing_reasons(info));
+        findings.extend(missing_sources(config, languages, info)?);
+    }
+    Ok(findings)
 }
 
 /// One `code-block-unknown-attribute` warning at `info` for a language word holding commas, and
@@ -108,17 +110,26 @@ fn missing_reasons(info: &Info) -> Vec<Finding> {
 
 /// One `code-block-source-missing` error at each `from(...)` or `uses(...)` value in `info` that
 /// doesn't resolve to a contained, readable file or symbol.
-fn missing_sources(config: &Config, languages: &Languages, info: &Info) -> Vec<Finding> {
+///
+/// # Errors
+///
+/// [`CartridgeLoadError`] when a source's built-in cartridge doesn't load.
+fn missing_sources(
+    config: &Config,
+    languages: &Languages,
+    info: &Info,
+) -> Result<Vec<Finding>, CartridgeLoadError> {
     let doc = info.location.file.as_str();
-    source_attributes(&info.text)
-        .into_iter()
-        .filter_map(|attribute| {
-            let missing =
-                source::read(config, languages, doc, attribute.kind, attribute.value).err()?;
-            let at = value_location(info, attribute.range)?;
-            Some(missing.finding(at))
-        })
-        .collect()
+    let mut findings = Vec::new();
+    for attribute in source_attributes(&info.text) {
+        let missing = match source::read(config, languages, doc, attribute.kind, attribute.value) {
+            Ok(_text) => continue,
+            Err(Unresolved::CartridgeLoad(error)) => return Err(error),
+            Err(Unresolved::Missing(missing)) => missing,
+        };
+        findings.extend(value_location(info, attribute.range).map(|at| missing.finding(at)));
+    }
+    Ok(findings)
 }
 
 /// Where `range`, a byte range of `info`'s text, lies in the doc. An info string is one line, so

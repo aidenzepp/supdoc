@@ -15,7 +15,7 @@ use crate::namespace::{NamespaceName, unknown_namespace_help};
 use crate::output::paths::relative_to;
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile};
-use crate::read::error::{ReadError, ReadRole};
+use crate::read::error::{CartridgeLoadError, ReadError, ReadRole};
 
 use super::info::SourceKind;
 
@@ -49,6 +49,22 @@ impl Missing {
     }
 }
 
+/// Why a source value doesn't resolve.
+#[derive(Debug)]
+pub(crate) enum Unresolved {
+    /// The value is wrong: one `code-block-source-missing` error at it.
+    Missing(Missing),
+    /// A built-in cartridge doesn't load: a supdoc bug that fails the whole run with
+    /// `read-cartridge-load` (exit 70), never a finding about the value.
+    CartridgeLoad(CartridgeLoadError),
+}
+
+impl From<Missing> for Unresolved {
+    fn from(missing: Missing) -> Self {
+        Self::Missing(missing)
+    }
+}
+
 /// The text the `kind` attribute's `value` names: the whole file for `PATH`, or the symbol's
 /// bytes for `PATH#SYMBOL`. `doc` is the doc holding the block, relative to the project root
 /// with `/` separators.
@@ -58,7 +74,8 @@ impl Missing {
 ///
 /// # Errors
 ///
-/// A [`Missing`] for an unknown namespace, a URL, a path that climbs out of the root or its
+/// [`Unresolved::CartridgeLoad`] when the source's built-in cartridge doesn't load. Otherwise
+/// [`Unresolved::Missing`] for an unknown namespace, a URL, a path that climbs out of the root or its
 /// namespace, a symlink out of the root, a `uses(...)` without a symbol, a missing or unreadable
 /// file, a directory, a file no cartridge reads, a timeout, and a missing, ambiguous or malformed
 /// symbol.
@@ -68,17 +85,17 @@ pub(crate) fn read(
     doc: &str,
     kind: SourceKind,
     value: &str,
-) -> Result<String, Missing> {
+) -> Result<String, Unresolved> {
     let (path, symbol) = match value.split_once('#') {
         Some((path, symbol)) => (path, Some(symbol)),
         None => (value, None),
     };
     let name = kind.name();
     if kind == SourceKind::Uses && symbol.is_none() {
-        return Err(Missing::new(
+        return Err(Unresolved::Missing(Missing::new(
             format!("`{name}({value})` names no symbol"),
             format!("write it as `{name}({value}#SYMBOL)`; `uses(...)` tracks one symbol"),
-        ));
+        )));
     }
     let file = locate(config, doc, kind, path)?;
     let limit = config.limits_in_effect().parse_timeout.value;
@@ -93,23 +110,23 @@ pub(crate) fn read(
         .map_err(|error| read_failed(&error, config.root(), kind))?;
     let shown = relative_to(config.root(), source.path());
     match table.resolve_text(source.path(), symbol) {
-        None => Err(Missing::new(
+        None => Err(Unresolved::Missing(Missing::new(
             format!("`{symbol}` in `{name}({value})` isn't a symbol path"),
             "name a symbol by its dotted path, such as `Type.method`, with no empty part",
-        )),
-        Some(Err(error)) => Err(Missing::new(
+        ))),
+        Some(Err(error)) => Err(Unresolved::Missing(Missing::new(
             error.message_naming(&shown),
             error.help_from_root(&shown),
-        )),
+        ))),
         Some(Ok(found)) => source
             .text()
             .get(found.range())
             .map(str::to_owned)
             .ok_or_else(|| {
-                Missing::new(
+                Unresolved::Missing(Missing::new(
                     format!("the symbol `{symbol}` lies outside {shown} (supdoc bug)"),
                     "report this at https://github.com/aidenzepp/supdoc/issues",
-                )
+                ))
             }),
     }
 }
@@ -189,8 +206,12 @@ fn boundary_name(boundary: &AbsolutePath, root: &AbsolutePath) -> String {
     }
 }
 
-/// The [`Missing`] for a source file that can't be read, naming it relative to `root`.
-fn read_failed(error: &ReadError, root: &AbsolutePath, kind: SourceKind) -> Missing {
+/// Why a source file can't be read, naming it relative to `root`. A cartridge that doesn't load
+/// is [`Unresolved::CartridgeLoad`], never a finding.
+fn read_failed(error: &ReadError, root: &AbsolutePath, kind: SourceKind) -> Unresolved {
+    if let ReadError::CartridgeLoad { error, .. } = error {
+        return Unresolved::CartridgeLoad(*error);
+    }
     let shown = relative_to(root, error.path());
     let name = kind.name();
     let help = match error {
@@ -203,7 +224,7 @@ fn read_failed(error: &ReadError, root: &AbsolutePath, kind: SourceKind) -> Miss
         }
         _ => error.help(ReadRole::ResolveArgument, &shown),
     };
-    Missing::new(error.message_naming(&shown), help)
+    Unresolved::Missing(Missing::new(error.message_naming(&shown), help))
 }
 
 #[cfg(test)]
@@ -247,15 +268,20 @@ mod tests {
                 .expect("the fixture config should load")
         }
 
-        /// Reads `value` as `kind` for a block in `docs/guide.md`.
+        /// Reads `value` as `kind` for a block in `docs/guide.md`. A fixture never meets a
+        /// cartridge that doesn't load.
         fn read(&self, kind: SourceKind, value: &str) -> Result<String, Missing> {
-            read(
+            let result = read(
                 &self.config(),
                 Languages::builtin().expect("the built-in cartridges should load"),
                 "docs/guide.md",
                 kind,
                 value,
-            )
+            );
+            result.map_err(|unresolved| match unresolved {
+                Unresolved::Missing(missing) => missing,
+                Unresolved::CartridgeLoad(error) => panic!("a built-in cartridge failed: {error}"),
+            })
         }
     }
 
@@ -360,6 +386,34 @@ mod tests {
             let result = fixture.read(kind, value);
 
             assert!(result.is_err(), "{value}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn a_cartridge_that_does_not_load_is_fatal_not_a_finding() {
+        let grammar: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        let query_error = tree_sitter::Query::new(&grammar, "(not_a_node")
+            .expect_err("an unclosed query should not compile");
+        let broken: &'static crate::read::query::QueryFileError =
+            Box::leak(Box::new(crate::read::query::QueryFileError {
+                language: crate::read::cartridge::LanguageId::new("rust"),
+                file: "tags.scm",
+                error: query_error,
+            }));
+        let root = AbsolutePath::new(Path::new("/repo")).expect("the fixture root is absolute");
+        let error = ReadError::CartridgeLoad {
+            path: AbsolutePath::new(Path::new("/repo/src/lib.rs"))
+                .expect("the fixture path is absolute"),
+            error: CartridgeLoadError::Query(broken),
+        };
+
+        for kind in [SourceKind::From, SourceKind::Uses] {
+            let unresolved = read_failed(&error, &root, kind);
+
+            assert!(
+                matches!(unresolved, Unresolved::CartridgeLoad(_)),
+                "{unresolved:?}"
+            );
         }
     }
 }
