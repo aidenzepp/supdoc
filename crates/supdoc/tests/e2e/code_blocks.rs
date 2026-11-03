@@ -704,26 +704,76 @@ fn tool_inside_the_checkout_is_refused_and_its_blocks_not_checked() {
     );
 }
 
-#[test]
-fn tool_found_outside_the_checkout_leaves_its_blocks_pending() {
+/// Runs `check --json` on [`project_with_shell_blocks`] with an `shfmt` stub running `script`,
+/// outside the checkout, as the only `PATH` entry, after `args`, asserting it exits `exit`.
+fn check_with_shfmt(script: &str, args: &[&str], exit: i32) -> serde_json::Value {
+    use std::os::unix::fs::PermissionsExt as _;
     let project = project_with_shell_blocks();
     let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
-    stub(outside.path(), "shfmt");
+    let path = outside.path().join("shfmt");
+    std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("the stub should be writable");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("the stub should be made executable");
+    let mut all = vec!["check", "--json"];
+    all.extend_from_slice(args);
+    project
+        .supdoc_in_with(".", &all, &[("PATH", outside.path())])
+        .assert_exit(exit)
+        .json()
+}
 
-    let json = project
-        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
-        .assert_exit(0)
-        .json();
+#[test]
+fn shell_format_equal_output_passes_every_block() {
+    let json = check_with_shfmt("/bin/cat", &[], 0);
 
     assert!(finding_kinds(&json).is_empty(), "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 2, "{json}");
     assert_eq!(
         at(&json, "/data/summary/code_blocks/not_checked"),
-        2,
-        "{json}"
-    );
-    assert_eq!(
-        at(&json, "/data/summary/code_blocks/tool_missing"),
         0,
         "{json}"
+    );
+}
+
+#[test]
+fn shell_format_different_output_is_unformatted() {
+    let json = check_with_shfmt("echo formatted", &[], 1);
+
+    assert_eq!(
+        finding_kinds(&json),
+        ["code-block-unformatted", "code-block-unformatted"],
+        "{json}"
+    );
+    assert_eq!(at(&json, "/data/summary/code_blocks/failed"), 2, "{json}");
+}
+
+#[test]
+fn shell_format_a_non_zero_exit_quotes_stderr_and_names_the_block_by_its_index() {
+    let json = check_with_shfmt("echo \"bad $2\" >&2\nexit 1", &[], 1);
+
+    assert_eq!(
+        finding_kinds(&json),
+        ["code-block-tool-failed", "code-block-tool-failed"],
+        "{json}"
+    );
+    let text = json.to_string();
+    assert!(text.contains("docs/blocks.md/1.sh"), "{json}");
+    assert!(text.contains("docs/blocks.md/2.sh"), "{json}");
+}
+
+#[test]
+fn shell_format_a_tool_past_the_timeout_is_killed_and_reported() {
+    let started = std::time::Instant::now();
+    let json = check_with_shfmt("/bin/sleep 30", &["--code-block-timeout", "200ms"], 1);
+
+    assert_eq!(
+        finding_kinds(&json),
+        ["code-block-tool-timeout", "code-block-tool-timeout"],
+        "{json}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "took {:?}",
+        started.elapsed()
     );
 }

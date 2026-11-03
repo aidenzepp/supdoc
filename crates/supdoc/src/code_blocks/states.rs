@@ -18,13 +18,14 @@ use super::tools::formatter;
 ///    with no tag in a Rust doc comment is Rust, as rustdoc reads it.
 /// 4. A Rust, shell or Python tag whose `[features.code-blocks.<language>]` table is absent:
 ///    [`NotChecked::LanguageOff`].
-/// 5. A tag of a configured language: [`NotChecked::Pending`], until its format and lint steps
-///    exist.
+/// 5. A tag of a configured language: [`NotChecked::Pending`] until its tool runs.
 /// 6. Any other tag: [`UnknownLanguage`](Self::UnknownLanguage).
 ///
 /// `check` then looks up each pending language's tool: a tool not on `PATH` makes its blocks
 /// [`ToolMissing`](Self::ToolMissing), and one whose real path is inside the checkout makes them
-/// [`NotChecked::ToolInsideRoot`].
+/// [`NotChecked::ToolInsideRoot`]. A tool found outside it runs on each block of a language whose
+/// format step exists (shell), which leaves it [`Passed`](Self::Passed) or
+/// [`Failed`](Self::Failed); a Rust or Python block stays pending.
 ///
 /// Only what the author wrote and the config decide a state: supdoc never guesses a block into a
 /// skip state. `uses(...)` findings leave the state alone.
@@ -32,8 +33,8 @@ use super::tools::formatter;
 pub(crate) enum BlockState {
     /// Every check run on the block passed.
     Passed,
-    /// A check failed, or an excerpt's source is missing.
-    Failed,
+    /// A check failed, or an excerpt's source is missing, for the reason held.
+    Failed(Failure),
     /// An excerpt differs from its source.
     Stale,
     /// The author wrote `ignore(...)`.
@@ -62,6 +63,19 @@ pub(crate) enum NotChecked {
     ToolInsideRoot,
 }
 
+/// Why a block failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Failure {
+    /// One of its `from(...)` sources is missing.
+    SourceMissing,
+    /// Its formatter's output differs from it.
+    Unformatted,
+    /// Its tool exited unexpectedly or wrote past the output cap.
+    ToolFailed,
+    /// Its tool passed the `[limits] code-block-timeout` limit.
+    ToolTimeout,
+}
+
 /// What a block's `from(...)` values came to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Excerpt {
@@ -82,7 +96,7 @@ pub(crate) fn state_of(
     on: impl Fn(Language) -> bool,
 ) -> BlockState {
     match excerpt {
-        Some(Excerpt::SourceMissing) => return BlockState::Failed,
+        Some(Excerpt::SourceMissing) => return BlockState::Failed(Failure::SourceMissing),
         Some(Excerpt::Stale) => return BlockState::Stale,
         Some(Excerpt::Current) => return BlockState::Passed,
         None => {}
@@ -125,7 +139,7 @@ impl BlockState {
     pub(crate) const fn name(&self) -> &'static str {
         match self {
             Self::Passed => "passed",
-            Self::Failed => "failed",
+            Self::Failed(_) => "failed",
             Self::Stale => "stale",
             Self::OptedOut { .. } => "opted_out",
             Self::NotChecked(_) => "not_checked",
@@ -140,7 +154,16 @@ impl BlockState {
     pub(crate) fn reason(&self, tag: Option<&str>) -> Option<String> {
         match self {
             Self::Passed => None,
-            Self::Failed => Some("an excerpt's source is missing".to_owned()),
+            Self::Failed(Failure::SourceMissing) => {
+                Some("an excerpt's source is missing".to_owned())
+            }
+            Self::Failed(Failure::Unformatted) => {
+                Some(format!("`{}` would format it differently", tool_of(tag)))
+            }
+            Self::Failed(Failure::ToolFailed) => Some(format!("`{}` failed", tool_of(tag))),
+            Self::Failed(Failure::ToolTimeout) => {
+                Some(format!("`{}` passed the time limit", tool_of(tag)))
+            }
             Self::Stale => Some("the block differs from its source".to_owned()),
             Self::OptedOut { reason } => reason.clone(),
             Self::NotChecked(NotChecked::Text) => Some("the block is text, not code".to_owned()),
@@ -160,15 +183,16 @@ impl BlockState {
             Self::UnknownLanguage => {
                 Some(format!("supdoc has no checker for `{}`", tag.unwrap_or("")))
             }
-            Self::ToolMissing => {
-                let tool = tag
-                    .and_then(Language::from_tag)
-                    .and_then(formatter)
-                    .map_or("its tool", |tool| tool.name);
-                Some(format!("`{tool}` isn't on PATH"))
-            }
+            Self::ToolMissing => Some(format!("`{}` isn't on PATH", tool_of(tag))),
         }
     }
+}
+
+/// The name of the formatter for blocks tagged `tag`, or `its tool`.
+fn tool_of(tag: Option<&str>) -> &'static str {
+    tag.and_then(Language::from_tag)
+        .and_then(formatter)
+        .map_or("its tool", |tool| tool.name)
 }
 
 /// How many blocks are in each state. `blocks` is the sum of the others.
@@ -222,7 +246,7 @@ impl CodeBlockCounts {
             counts.blocks += 1;
             *match state {
                 BlockState::Passed => &mut counts.passed,
-                BlockState::Failed => &mut counts.failed,
+                BlockState::Failed(_) => &mut counts.failed,
                 BlockState::Stale => &mut counts.stale,
                 BlockState::OptedOut { .. } => &mut counts.opted_out,
                 BlockState::NotChecked(_) => &mut counts.not_checked,
@@ -281,7 +305,7 @@ fn paint(color: bool, tone: Tone, text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockState, CodeBlockCounts, Excerpt, NotChecked, state_of};
+    use super::{BlockState, CodeBlockCounts, Excerpt, Failure, NotChecked, state_of};
     use crate::code_blocks::block::{CodeBlock, Info};
     use crate::config::code_blocks::Language;
     use crate::finding::Location;
@@ -317,7 +341,10 @@ mod tests {
     fn an_excerpt_takes_its_outcome_before_ignore() {
         let block = block("docs/a.md", Some("rust from(src/a.rs) ignore(why)"));
         let cases = [
-            (Excerpt::SourceMissing, BlockState::Failed),
+            (
+                Excerpt::SourceMissing,
+                BlockState::Failed(Failure::SourceMissing),
+            ),
             (Excerpt::Stale, BlockState::Stale),
             (Excerpt::Current, BlockState::Passed),
         ];
@@ -418,7 +445,7 @@ mod tests {
         let states = [
             BlockState::Passed,
             BlockState::Passed,
-            BlockState::Failed,
+            BlockState::Failed(Failure::Unformatted),
             BlockState::OptedOut { reason: None },
             BlockState::NotChecked(NotChecked::Text),
             BlockState::UnknownLanguage,
