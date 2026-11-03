@@ -1,13 +1,18 @@
 //! The format step: a formatter's output compared with the block.
 
 use std::ffi::OsString;
+use std::ops::Range;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::cartridges::{markdown, rust as rust_cartridge};
 use crate::config::code_blocks::Language;
-use crate::finding::{Finding, Fix, Location, Severity};
+use crate::finding::{Finding, Fix, LineIndex, Location, Severity};
+use crate::limits::Limits;
+use crate::path::AbsolutePath;
+use crate::read::cartridge::{Cartridge, Deadline, SourceFile};
 
-use super::block::{CodeBlock, replacement_for};
+use super::block::{CodeBlock, blocks_in, replacement_for};
 use super::runner::{Failure, Ran};
 use super::states;
 use super::tools::Tool;
@@ -155,9 +160,11 @@ pub(crate) fn finding(
 
 /// `unformatted`, the `code-block-unformatted` error `tool` gave `block` in `text`, with a fix
 /// that replaces exactly the block's body with `output`, the formatter's stdout, through
-/// [`replacement_for`], so container and doc-comment prefixes stay. When a line of `output` would
-/// close the block's fence, the error keeps no fix and a `code-block-fix-unsafe` warning follows
-/// it. The error alone when the block's ranges don't lie inside `text`.
+/// [`replacement_for`], so container and doc-comment prefixes stay. When `output` could end the
+/// block early (a bare CR, which Markdown reads as a line ending; a line that would close the
+/// fence; or a doc that, parsed again with the fix applied, no longer holds the same blocks), the
+/// error keeps no fix and a `code-block-fix-unsafe` warning follows it. The error alone when the
+/// block's ranges don't lie inside `text`, or the doc can't be parsed again.
 #[must_use]
 pub(crate) fn fixed(
     unformatted: Finding,
@@ -170,17 +177,32 @@ pub(crate) fn fixed(
         return vec![unformatted];
     };
     let name = tool.name;
-    if output.lines().any(|line| closes(line, marker, length)) {
+    let refuse = |unformatted: Finding, why: &str, help: String| {
         let unsafe_fix = Finding::new(
             FIX_UNSAFE,
             Severity::Warning,
-            format!("`{name}`'s output for the block has a line that would close its fence, so `fix` won't write it"),
+            format!("`{name}`'s output for the block {why}, so `fix` won't write it"),
         )
-        .with_help(format!(
-            "lengthen the block's fences past the output's longest run of `{marker}`, or mark the block `ignore(<why>)`"
-        ))
+        .with_help(help)
         .with_location(block.fence.clone());
-        return vec![unformatted, unsafe_fix];
+        vec![unformatted, unsafe_fix]
+    };
+    let lengthen = format!(
+        "lengthen the block's fences past the output's longest run of `{marker}`, or mark the block `ignore(<why>)`"
+    );
+    if has_bare_cr(output) {
+        return refuse(
+            unformatted,
+            "has a bare carriage return, which Markdown reads as a line ending",
+            "mark the block `ignore(<why>)`".to_owned(),
+        );
+    }
+    if output.lines().any(|line| closes(line, marker, length)) {
+        return refuse(
+            unformatted,
+            "has a line that would close its fence",
+            lengthen,
+        );
     }
     let body = output.strip_suffix('\n').unwrap_or(output);
     let Some((range, replacement)) = replacement_for(block, text, body) else {
@@ -189,6 +211,17 @@ pub(crate) fn fixed(
     let Some(scanned) = text.get(range.clone()) else {
         return vec![unformatted];
     };
+    match keeps_blocks(block, text, &range, &replacement) {
+        Some(true) => {}
+        Some(false) => {
+            return refuse(
+                unformatted,
+                "would end its fence early or change the doc's other blocks",
+                lengthen,
+            );
+        }
+        None => return vec![unformatted],
+    }
     let doc = block.fence.file.clone();
     let help = format!(
         "run `supdoc fix {} --yes` to apply `{name}`'s output",
@@ -200,6 +233,90 @@ pub(crate) fn fixed(
         replacement,
         scanned: scanned.into(),
     })]
+}
+
+/// Whether `output` holds a CR that no LF follows: a line ending to Markdown, but not to
+/// [`str::lines`].
+fn has_bare_cr(output: &str) -> bool {
+    output
+        .split('\r')
+        .skip(1)
+        .any(|after| !after.starts_with('\n'))
+}
+
+/// One fenced block as the re-parse check compares it.
+#[derive(Debug, PartialEq, Eq)]
+struct Fence {
+    /// From the opening fence through the closing one, as [`CodeBlock::fence`] spans it.
+    range: Range<usize>,
+    /// The opening fence's line: its fence and info string.
+    opening: String,
+}
+
+/// Whether `text`, `block`'s doc, still holds the same fenced blocks once `range` reads
+/// `replacement`: as many, each opening with the same line and spanning the same text, shifted
+/// past the edit. So `block`'s new body neither closes it early nor spills into the doc. Both
+/// texts are parsed the way their blocks were found. `None` when either can't be parsed.
+fn keeps_blocks(
+    block: &CodeBlock,
+    text: &str,
+    range: &Range<usize>,
+    replacement: &str,
+) -> Option<bool> {
+    let mut edited = text.to_owned();
+    edited.replace_range(range.clone(), replacement);
+    let before = fences(block, text)?;
+    let after = fences(block, &edited)?;
+    let shift = |offset: usize| {
+        if offset >= range.end {
+            offset - range.len() + replacement.len()
+        } else {
+            offset
+        }
+    };
+    Some(
+        before.len() == after.len()
+            && before.iter().zip(&after).all(|(old, new)| {
+                new.range == (shift(old.range.start)..shift(old.range.end))
+                    && new.opening == old.opening
+            }),
+    )
+}
+
+/// The fenced blocks of `text`, parsed as `block`'s doc is: as Markdown, or for its doc
+/// comments when the doc is a Rust file. `None` when the parse fails.
+fn fences(block: &CodeBlock, text: &str) -> Option<Vec<Fence>> {
+    let file = &block.fence.file;
+    let language: &'static dyn Cartridge = if Path::new(file.as_str())
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
+    {
+        rust_cartridge::cartridge().ok()?
+    } else {
+        markdown::cartridge::cartridge()
+    };
+    // The path only names the doc in a parse error, which this check discards.
+    let path = AbsolutePath::new(Path::new("/"))?.join_path(Path::new(file.as_str()));
+    let parsed = SourceFile::from_text(
+        path,
+        text.to_owned(),
+        language,
+        Deadline::start(Limits::PARSE_TIMEOUT),
+    )
+    .ok()?;
+    let index = LineIndex::new(text);
+    let fences = blocks_in(&parsed, |range| {
+        Location::in_indexed(file.clone(), text, &index, range)
+    })
+    .into_iter()
+    .map(|found| {
+        let range = found.fence.range;
+        let rest = text.get(range.start..).unwrap_or_default();
+        let opening = rest.split('\n').next().unwrap_or_default().to_owned();
+        Fence { range, opening }
+    })
+    .collect();
+    Some(fences)
 }
 
 /// The character and length of `block`'s opening fence in `text`: the first run of backticks or
@@ -229,38 +346,41 @@ fn closes(line: &str, marker: char, length: usize) -> bool {
 mod tests {
     use super::{Verdict, finding, fixed, judge};
     use crate::cartridges::markdown::cartridge::cartridge;
+    use crate::cartridges::rust;
     use crate::code_blocks::block::{CodeBlock, blocks_in};
     use crate::code_blocks::runner::Ran;
     use crate::code_blocks::tools::formatter;
     use crate::config::code_blocks::Language;
     use crate::finding::{Finding, Location};
     use crate::path::AbsolutePath;
-    use crate::read::cartridge::SourceFile;
+    use crate::read::cartridge::{Cartridge, SourceFile};
 
-    /// The one code block in the Markdown `text`, as `docs/guide.md`.
-    fn block_of(text: &str) -> CodeBlock {
-        let path = AbsolutePath::new(std::path::Path::new("/repo/docs/guide.md"))
+    /// The one code block in `text`, as the doc `doc` (relative to `/repo`), parsed by `language`.
+    fn block_of(doc: &str, text: &str, language: &'static dyn Cartridge) -> CodeBlock {
+        let path = AbsolutePath::new(&std::path::Path::new("/repo").join(doc))
             .expect("the fixture path is absolute");
-        let file = SourceFile::parse(path, text.to_owned(), cartridge())
+        let file = SourceFile::parse(path, text.to_owned(), language)
             .expect("tree-sitter should return a tree");
         let mut blocks = blocks_in(&file, |range| {
-            let source = "docs/guide.md"
-                .parse()
-                .expect("the fixture source should be valid");
+            let source = doc.parse().expect("the fixture source should be valid");
             Location::in_text(source, text, range)
         });
         assert_eq!(blocks.len(), 1, "expected one block in {text:?}");
         blocks.remove(0)
     }
 
-    /// What `shfmt` printing `output` makes of the one block in `text`.
+    /// What `shfmt` printing `output` makes of the one block in `text`, a Markdown doc.
     fn fixed_with(text: &str, output: &str) -> Vec<Finding> {
-        let block = block_of(text);
+        fixed_in(&block_of("docs/guide.md", text, cartridge()), text, output)
+    }
+
+    /// What `shfmt` printing `output` makes of `block`, found in `text`.
+    fn fixed_in(block: &CodeBlock, text: &str, output: &str) -> Vec<Finding> {
         let tool = formatter(Language::Shell).expect("shell has a formatter");
         let verdict = Verdict::Unformatted(output.to_owned());
         let unformatted = finding(&verdict, tool, &block.fence, None)
             .expect("an unformatted block has a finding");
-        fixed(unformatted, &block, text, output, tool)
+        fixed(unformatted, block, text, output, tool)
     }
 
     /// `text` with the one fix in `findings` applied.
@@ -370,5 +490,99 @@ mod tests {
                 "{output:?} can't close a four-backtick fence: {findings:?}"
             );
         }
+    }
+
+    /// Asserts `findings` are the error and the `code-block-fix-unsafe` warning, neither with a fix.
+    fn refused(findings: &[Finding], why: &str) {
+        let codes: Vec<&str> = findings.iter().map(|finding| finding.code).collect();
+        assert_eq!(
+            codes,
+            ["code-block-unformatted", "code-block-fix-unsafe"],
+            "{why}"
+        );
+        assert!(
+            findings.iter().all(|finding| finding.fix.is_none()),
+            "{why}: no finding should carry a fix"
+        );
+    }
+
+    #[test]
+    fn a_bare_cr_before_a_fence_line_is_refused() {
+        let findings = fixed_with("```sh\necho  hi\n```\n", "echo hi\r```\nrm -rf ~\n");
+
+        refused(&findings, "a bare CR ends a line in Markdown");
+    }
+
+    #[test]
+    fn a_tab_indented_fence_that_closes_the_block_is_refused() {
+        let text = "- item\n\n  ```sh\n  echo  hi\n  ```\n";
+
+        let findings = fixed_with(text, "echo hi\n\t```\nrm -rf ~\n");
+
+        refused(
+            &findings,
+            "two spaces and a tab reach column 4, two past the item's indent",
+        );
+    }
+
+    #[test]
+    fn a_tab_indented_fence_in_an_ordered_list_item_is_refused() {
+        let text = "1. item\n\n   ```sh\n   echo  hi\n   ```\n";
+
+        let findings = fixed_with(text, "echo hi\n\t```\n");
+
+        refused(
+            &findings,
+            "the item's indent and a tab leave the fence one column in",
+        );
+    }
+
+    #[test]
+    fn a_tab_indented_fence_in_a_quote_is_refused() {
+        let text = "> ```sh\n> echo  hi\n> ```\n";
+
+        let findings = fixed_with(text, "echo hi\n\t```\n");
+
+        refused(
+            &findings,
+            "after `> `, a tab reaches column 4, two past the quote's",
+        );
+    }
+
+    #[test]
+    fn a_tab_indented_fence_in_a_rust_doc_comment_is_refused() {
+        let text = "/// - item\n///\n///   ```sh\n///   echo  hi\n///   ```\nfn f() {}\n";
+        let language = rust::cartridge().expect("the built-in Rust queries should compile");
+        let block = block_of("src/lib.rs", text, language);
+
+        let findings = fixed_in(&block, text, "echo hi\n\t```\n");
+
+        refused(&findings, "the doc comment's list item closes on the tab");
+    }
+
+    #[test]
+    fn a_normal_reformat_in_a_rust_doc_comment_is_fixed() {
+        let text = "/// ```sh\n/// echo  hi\n/// ```\nfn f() {}\n";
+        let language = rust::cartridge().expect("the built-in Rust queries should compile");
+        let block = block_of("src/lib.rs", text, language);
+
+        let findings = fixed_in(&block, text, "echo hi\n\techo\n");
+
+        assert_eq!(
+            applied(text, &findings),
+            "/// ```sh\n/// echo hi\n/// \techo\n/// ```\nfn f() {}\n"
+        );
+    }
+
+    #[test]
+    fn a_tab_indented_body_line_in_a_quote_is_fixed() {
+        let text = "> ```sh\n> echo  hi\n> ```\n";
+
+        let findings = fixed_with(text, "if true; then\n\t:\nfi\n");
+
+        assert_eq!(
+            applied(text, &findings),
+            "> ```sh\n> if true; then\n> \t:\n> fi\n> ```\n"
+        );
     }
 }
