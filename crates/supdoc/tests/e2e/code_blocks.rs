@@ -890,3 +890,74 @@ fn sigterm_during_a_tool_run_kills_the_tool_and_ends_supdoc_by_sigterm() {
     );
     assert!(!still_alive(&tool), "the stub tool {tool} outlived supdoc");
 }
+
+/// Runs `check --json` on [`project_with_shell_blocks`] with `config` as its config and an
+/// `shfmt` stub running `script` as the only `PATH` entry, outside the checkout.
+fn check_shell_with(config: &str, script: &str) -> serde_json::Value {
+    use std::os::unix::fs::PermissionsExt as _;
+    let project = project_with_shell_blocks();
+    project.write("supdoc.config.toml", config);
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let path = outside.path().join("shfmt");
+    std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("the stub should be writable");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("the stub should be made executable");
+    project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(1)
+        .json()
+}
+
+#[test]
+fn selection_formatter_false_counts_format_off_and_never_runs_the_tool() {
+    let project = project_with_shell_blocks();
+    project.write(
+        "supdoc.config.toml",
+        "[features.code-blocks]\n[features.code-blocks.shell]\nformatter = false\n",
+    );
+
+    let json = project.supdoc(&["check", "--json"]).assert_exit(0).json();
+    let run = project.supdoc(&["check", "-v"]);
+
+    assert_eq!(
+        at(&json, "/data/summary/code_blocks/format_off"),
+        2,
+        "{json}"
+    );
+    assert!(finding_kinds(&json).is_empty(), "{json}");
+    assert!(run.stdout.contains("format off"), "{}", run.stdout);
+}
+
+#[test]
+fn selection_no_format_counts_format_skipped_with_its_reason() {
+    let project = project_with_shell_blocks();
+    project.write(
+        "docs/blocks.md",
+        "# Blocks\n\n```sh no_format(hand aligned)\necho   hi\n```\n",
+    );
+
+    let json = project.supdoc(&["check", "--json"]).assert_exit(0).json();
+    let run = project.supdoc(&["check", "-v"]);
+
+    assert_eq!(
+        at(&json, "/data/summary/code_blocks/format_skipped"),
+        1,
+        "{json}"
+    );
+    assert_eq!(
+        at(&json, "/data/code_blocks/0/reason"),
+        "hand aligned",
+        "{json}"
+    );
+    assert!(run.stdout.contains("(hand aligned)"), "{}", run.stdout);
+}
+
+#[test]
+fn selection_dialect_posix_reaches_shfmt_as_ln_posix() {
+    let json = check_shell_with(
+        "[features.code-blocks]\n[features.code-blocks.shell]\ndialect = \"posix\"\n",
+        "echo \"args: $*\" >&2\nexit 1",
+    );
+
+    assert!(json.to_string().contains("-ln posix"), "{json}");
+}

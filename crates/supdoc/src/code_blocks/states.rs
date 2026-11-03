@@ -61,6 +61,10 @@ pub(crate) enum NotChecked {
     Pending,
     /// The tool's binary on `PATH` is inside the checkout, so the checkout chose it.
     ToolInsideRoot,
+    /// The block's language has `formatter = false`.
+    FormatOff,
+    /// The author marked the block `no_format(...)`.
+    FormatSkipped,
 }
 
 /// Why a block failed.
@@ -180,6 +184,10 @@ impl BlockState {
                 Some("its format and lint steps aren't built yet".to_owned())
             }
             Self::NotChecked(NotChecked::ToolInsideRoot) => Some("tool inside checkout".to_owned()),
+            Self::NotChecked(NotChecked::FormatOff) => Some("`formatter = false`".to_owned()),
+            Self::NotChecked(NotChecked::FormatSkipped) => {
+                Some("the author skipped formatting".to_owned())
+            }
             Self::UnknownLanguage => {
                 Some(format!("supdoc has no checker for `{}`", tag.unwrap_or("")))
             }
@@ -249,6 +257,8 @@ impl CodeBlockCounts {
                 BlockState::Failed(_) => &mut counts.failed,
                 BlockState::Stale => &mut counts.stale,
                 BlockState::OptedOut { .. } => &mut counts.opted_out,
+                BlockState::NotChecked(NotChecked::FormatOff) => &mut counts.format_off,
+                BlockState::NotChecked(NotChecked::FormatSkipped) => &mut counts.format_skipped,
                 BlockState::NotChecked(_) => &mut counts.not_checked,
                 BlockState::UnknownLanguage => &mut counts.unknown_language,
                 BlockState::ToolMissing => &mut counts.tool_missing,
