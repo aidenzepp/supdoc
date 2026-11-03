@@ -3,7 +3,7 @@
 
 use std::os::unix::fs::symlink;
 
-use crate::support::{Project, array_at};
+use crate::support::{Project, array_at, at};
 
 /// The codes of a `--json` check's loose findings, in order.
 fn finding_kinds(json: &serde_json::Value) -> Vec<String> {
@@ -348,4 +348,85 @@ fn uses_a_recorded_method_that_changes_fails_the_check() {
     let json = project.supdoc(&["check", "--json"]).assert_exit(1).json();
 
     assert_eq!(finding_kinds(&json), ["code-block-uses-changed"], "{json}");
+}
+
+#[test]
+fn update_preview_lists_the_new_use_and_writes_nothing() {
+    let project = project_with_use();
+    let before = project.read("supdoc.lock");
+
+    let json = project.supdoc(&["update", "--json"]).assert_exit(0).json();
+
+    let changes = array_at(&json, "/data/changes");
+    assert_eq!(changes.len(), 1, "{json}");
+    assert_eq!(at(&json, "/data/changes/0/action"), "record", "{json}");
+    assert_eq!(at(&json, "/data/changes/0/uses"), true, "{json}");
+    assert_eq!(
+        project.read("supdoc.lock"),
+        before,
+        "a preview should not write the lockfile"
+    );
+}
+
+#[test]
+fn update_yes_records_the_use_and_the_next_check_passes() {
+    let project = project_with_use();
+    let _failing = project.supdoc(&["check"]).assert_exit(1);
+
+    let _written = project.supdoc(&["update", "--yes"]).assert_exit(0);
+    let recorded = project.supdoc(&["check", "--json"]).assert_exit(0).json();
+
+    assert!(finding_kinds(&recorded).is_empty(), "{recorded}");
+    assert!(
+        project.read("supdoc.lock").contains("[[code-blocks.uses]]"),
+        "the lockfile should hold the recorded use"
+    );
+
+    project.replace("src/counter.rs", "        1\n", "        2\n");
+    let _changed = project.supdoc(&["check"]).assert_exit(1);
+    let _accepted = project.supdoc(&["update", "--yes"]).assert_exit(0);
+    let _passing = project.supdoc(&["check"]).assert_exit(0);
+}
+
+#[test]
+fn update_of_one_doc_keeps_another_docs_entries() {
+    let project = project_with_use();
+    project.write(
+        "docs/other.md",
+        "# Other\n\n```rust uses(../src/counter.rs#Counter.bump)\nimpl Counter {}\n```\n",
+    );
+    let _both = project.supdoc(&["update", "--yes"]).assert_exit(0);
+    let both = project.read("supdoc.lock");
+    project.write("docs/other.md", "# Other\n");
+
+    let _one = project
+        .supdoc(&["update", "docs/blocks.md", "--yes"])
+        .assert_exit(0);
+
+    assert_eq!(
+        project.read("supdoc.lock"),
+        both,
+        "updating one doc should keep the entries of a doc outside its scope"
+    );
+}
+
+#[test]
+fn update_does_not_record_a_use_that_does_not_resolve() {
+    let project = project_with_use();
+    project.replace("docs/blocks.md", "Counter.bump", "Counter.missing");
+
+    let json = project
+        .supdoc(&["update", "--yes", "--json"])
+        .assert_exit(0)
+        .json();
+
+    assert_eq!(
+        finding_kinds(&json),
+        ["code-block-source-missing"],
+        "{json}"
+    );
+    assert!(
+        !project.read("supdoc.lock").contains("code-blocks"),
+        "an unresolved target should not be recorded"
+    );
 }

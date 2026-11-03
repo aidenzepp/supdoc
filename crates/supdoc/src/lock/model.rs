@@ -72,6 +72,11 @@ impl Lockfile {
         self.uses.insert(key, hash)
     }
 
+    /// Removes the `uses=` entry for `key`, returning its hash, if any.
+    pub(crate) fn remove_use(&mut self, key: &LinkKey) -> Option<Hash> {
+        self.uses.remove(key)
+    }
+
     /// Every `uses=` entry, in canonical order.
     pub(crate) fn uses(&self) -> impl Iterator<Item = (&LinkKey, Hash)> {
         self.uses.iter().map(|(key, hash)| (key, *hash))

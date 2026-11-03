@@ -190,7 +190,7 @@ pub(crate) mod code_blocks {
     mod excerpt;
 
     /// Tracking `uses(...)` targets against the lockfile.
-    mod uses;
+    pub(crate) mod uses;
 
     /// Block states and their counts.
     mod states;
