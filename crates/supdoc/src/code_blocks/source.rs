@@ -1,1 +1,419 @@
-//! Reading an excerpt's `from=` source under the same containment as link targets.
+//! Reading a `from(...)` or `uses(...)` source: its path resolved and contained, then the whole
+//! file or one symbol's text read.
+//!
+//! A path is relative to the doc's directory, to the project root when it starts with `/`, or to
+//! a namespace's directory when written `ns:path`. After lexical normalization it may not climb
+//! out of the root (or the namespace), and the file it names must lie inside the root once
+//! symlinks are followed. A source outside is refused before it is opened, so nothing of it is
+//! read or shown.
+
+use std::path::Path;
+
+use crate::config::Config;
+use crate::finding::{Finding, Location, Severity};
+use crate::namespace::{NamespaceName, unknown_namespace_help};
+use crate::output::paths::relative_to;
+use crate::path::AbsolutePath;
+use crate::read::cartridge::{Languages, SourceFile};
+use crate::read::error::{CartridgeLoadError, ReadError, ReadRole};
+
+use super::info::SourceKind;
+
+/// The code for a `from(...)` or `uses(...)` value that doesn't resolve.
+pub(crate) const SOURCE_MISSING: &str = "code-block-source-missing";
+
+/// Why a source value doesn't resolve, as a finding's message and help.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Missing {
+    /// What is wrong, naming the value as written or the file relative to the root.
+    message: String,
+    /// What to do next.
+    help: String,
+}
+
+impl Missing {
+    /// A failure with `message` and `help`.
+    fn new(message: impl Into<String>, help: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            help: help.into(),
+        }
+    }
+
+    /// The `code-block-source-missing` error at `at`, the value as written. It has no fix.
+    #[must_use]
+    pub(crate) fn finding(self, at: Location) -> Finding {
+        Finding::new(SOURCE_MISSING, Severity::Error, self.message)
+            .with_location(at)
+            .with_help(self.help)
+    }
+}
+
+/// Why a source value doesn't resolve.
+#[derive(Debug)]
+pub(crate) enum Unresolved {
+    /// The value is wrong: one `code-block-source-missing` error at it.
+    Missing(Missing),
+    /// A built-in cartridge doesn't load: a supdoc bug that fails the whole run with
+    /// `read-cartridge-load` (exit 70), never a finding about the value.
+    CartridgeLoad(CartridgeLoadError),
+}
+
+impl From<Missing> for Unresolved {
+    fn from(missing: Missing) -> Self {
+        Self::Missing(missing)
+    }
+}
+
+/// The text the `kind` attribute's `value` names: the whole file for `PATH`, or the symbol's
+/// bytes for `PATH#SYMBOL`. `doc` is the doc holding the block, relative to the project root
+/// with `/` separators.
+///
+/// Effect: follows symlinks along the path, then reads and parses the file under
+/// `parse-timeout`. A file outside the root is never opened.
+///
+/// # Errors
+///
+/// [`Unresolved::CartridgeLoad`] when the source's built-in cartridge doesn't load. Otherwise
+/// [`Unresolved::Missing`] for an unknown namespace, a URL, a path that climbs out of the root or its
+/// namespace, a symlink out of the root, a `uses(...)` without a symbol, a missing or unreadable
+/// file, a directory, a file no cartridge reads, a timeout, and a missing, ambiguous or malformed
+/// symbol.
+pub(crate) fn read(
+    config: &Config,
+    languages: &Languages,
+    doc: &str,
+    kind: SourceKind,
+    value: &str,
+) -> Result<String, Unresolved> {
+    let (path, symbol) = match value.split_once('#') {
+        Some((path, symbol)) => (path, Some(symbol)),
+        None => (value, None),
+    };
+    let name = kind.name();
+    if kind == SourceKind::Uses && symbol.is_none() {
+        return Err(Unresolved::Missing(Missing::new(
+            format!("`{name}({value})` names no symbol"),
+            format!("write it as `{name}({value}#SYMBOL)`; `uses(...)` tracks one symbol"),
+        )));
+    }
+    let file = locate(config, doc, kind, path)?;
+    let limit = config.limits_in_effect().parse_timeout.value;
+    let source = SourceFile::read(file, languages, limit)
+        .map_err(|error| read_failed(&error, config.root(), kind))?;
+    let Some(symbol) = symbol else {
+        return Ok(source.text().to_owned());
+    };
+    let table = source
+        .language()
+        .symbols(&source)
+        .map_err(|error| read_failed(&error, config.root(), kind))?;
+    let shown = relative_to(config.root(), source.path());
+    match table.resolve_text(source.path(), symbol) {
+        None => Err(Unresolved::Missing(Missing::new(
+            format!("`{symbol}` in `{name}({value})` isn't a symbol path"),
+            "name a symbol by its dotted path, such as `Type.method`, with no empty part",
+        ))),
+        Some(Err(error)) => Err(Unresolved::Missing(Missing::new(
+            error.message_naming(&shown),
+            error.help_from_root(&shown),
+        ))),
+        Some(Ok(found)) => source
+            .text()
+            .get(found.range())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                Unresolved::Missing(Missing::new(
+                    format!("the symbol `{symbol}` lies outside {shown} (supdoc bug)"),
+                    "report this at https://github.com/aidenzepp/supdoc/issues",
+                ))
+            }),
+    }
+}
+
+/// The file `path` names, contained in the project root, without opening it.
+///
+/// # Errors
+///
+/// A [`Missing`] for a URL, an unknown namespace, a climb out of the root or the namespace, or a
+/// file whose real location is outside the root.
+fn locate(
+    config: &Config,
+    doc: &str,
+    kind: SourceKind,
+    path: &str,
+) -> Result<AbsolutePath, Missing> {
+    let name = kind.name();
+    if path.contains("://") {
+        return Err(Missing::new(
+            format!("`{name}({path})` is a URL"),
+            format!("`{name}(...)` reads a file in this project: write its path, not a URL"),
+        ));
+    }
+    let root = config.root();
+    let (boundary, base, rest) = if let Some(rest) = path.strip_prefix('/') {
+        (root.clone(), root.clone(), rest)
+    } else if let Some((prefix, rest)) = path.split_once(':') {
+        let directory = prefix
+            .parse::<NamespaceName>()
+            .ok()
+            .and_then(|namespace| config.namespace(&namespace));
+        let Some(directory) = directory else {
+            let known: Vec<&str> = config
+                .namespaces()
+                .keys()
+                .map(NamespaceName::as_str)
+                .collect();
+            return Err(Missing::new(
+                format!("`{name}({path})` names the unknown namespace `{prefix}`"),
+                unknown_namespace_help(prefix, &known),
+            ));
+        };
+        (directory.clone(), directory.clone(), rest)
+    } else {
+        let doc_directory = root
+            .join_path(Path::new(doc))
+            .parent()
+            .unwrap_or_else(|| root.clone());
+        (root.clone(), doc_directory, path)
+    };
+
+    let file = base.join_path(Path::new(rest));
+    if file.strip_prefix(&boundary).is_none() {
+        return Err(Missing::new(
+            format!(
+                "`{name}({path})` climbs out of {}",
+                boundary_name(&boundary, root)
+            ),
+            "name a file inside the project root; supdoc never reads a source outside it",
+        ));
+    }
+    if !config.contains(boundary.as_path()) || !config.contains(file.as_path()) {
+        return Err(Missing::new(
+            format!("`{name}({path})` is outside the project root"),
+            "a symlink along the path leads out of the project root; name a file inside it",
+        ));
+    }
+    Ok(file)
+}
+
+/// How a message names `boundary`: the project root, or a namespace's directory by its path.
+fn boundary_name(boundary: &AbsolutePath, root: &AbsolutePath) -> String {
+    if boundary == root {
+        "the project root".to_owned()
+    } else {
+        format!("its namespace directory `{}`", relative_to(root, boundary))
+    }
+}
+
+/// Why a source file can't be read, naming it relative to `root`. A cartridge that doesn't load
+/// is [`Unresolved::CartridgeLoad`], never a finding.
+fn read_failed(error: &ReadError, root: &AbsolutePath, kind: SourceKind) -> Unresolved {
+    if let ReadError::CartridgeLoad { error, .. } = error {
+        return Unresolved::CartridgeLoad(*error);
+    }
+    let shown = relative_to(root, error.path());
+    let name = kind.name();
+    let help = match error {
+        ReadError::Missing { .. } => format!(
+            "check the path in `{name}(...)`: it is relative to this doc's directory, to the \
+             project root when it starts with `/`, or to a namespace when written `ns:path`"
+        ),
+        ReadError::NotAFile { .. } => {
+            format!("`{shown}` is a directory or special file; name a regular file")
+        }
+        _ => error.help(ReadRole::ResolveArgument, &shown),
+    };
+    Unresolved::Missing(Missing::new(error.message_naming(&shown), help))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::symlink;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    /// The library every test reads from: `add` and `Limits.resolve`.
+    const LIB: &str =
+        "pub fn add() {}\n\npub struct Limits;\n\nimpl Limits {\n    pub fn resolve() {}\n}\n";
+
+    /// A project with `config` as its config, `src/lib.rs` holding [`LIB`], and a `docs/`
+    /// directory, plus a secret file in a separate directory outside it.
+    struct Fixture {
+        /// The project root.
+        root: TempDir,
+        /// A directory outside the root holding `secret.rs`.
+        outside: TempDir,
+    }
+
+    impl Fixture {
+        fn new(config: &str) -> Self {
+            let root = TempDir::new().expect("a temp root should be creatable");
+            let outside = TempDir::new().expect("a temp outside dir should be creatable");
+            fs::write(root.path().join("supdoc.config.toml"), config)
+                .expect("the config should be writable");
+            fs::create_dir_all(root.path().join("src")).expect("src should be creatable");
+            fs::create_dir_all(root.path().join("docs")).expect("docs should be creatable");
+            fs::write(root.path().join("src/lib.rs"), LIB).expect("the lib should be writable");
+            fs::write(outside.path().join("secret.rs"), "pub fn secret() {}\n")
+                .expect("the secret should be writable");
+            Self { root, outside }
+        }
+
+        fn config(&self) -> Config {
+            Config::load(&AbsolutePath::new(self.root.path()).expect("a temp path is absolute"))
+                .expect("the fixture config should load")
+        }
+
+        /// Reads `value` as `kind` for a block in `docs/guide.md`. A fixture never meets a
+        /// cartridge that doesn't load.
+        fn read(&self, kind: SourceKind, value: &str) -> Result<String, Missing> {
+            let result = read(
+                &self.config(),
+                Languages::builtin().expect("the built-in cartridges should load"),
+                "docs/guide.md",
+                kind,
+                value,
+            );
+            result.map_err(|unresolved| match unresolved {
+                Unresolved::Missing(missing) => missing,
+                Unresolved::CartridgeLoad(error) => panic!("a built-in cartridge failed: {error}"),
+            })
+        }
+    }
+
+    #[test]
+    fn a_relative_path_resolves_from_the_doc_directory() {
+        let fixture = Fixture::new("");
+
+        let text = fixture.read(SourceKind::From, "../src/lib.rs#add");
+
+        assert_eq!(text.as_deref(), Ok("pub fn add() {}"));
+    }
+
+    #[test]
+    fn a_leading_slash_resolves_from_the_root_and_a_bare_path_reads_the_whole_file() {
+        let fixture = Fixture::new("");
+
+        let method = fixture.read(SourceKind::Uses, "/src/lib.rs#Limits.resolve");
+        let whole = fixture.read(SourceKind::From, "/src/lib.rs");
+
+        assert_eq!(method.as_deref(), Ok("pub fn resolve() {}"));
+        assert_eq!(whole.as_deref(), Ok(LIB));
+    }
+
+    #[test]
+    fn a_namespace_resolves_from_its_directory_and_an_unknown_one_fails() {
+        let fixture = Fixture::new("[namespaces]\ncore = \"src\"\n");
+
+        let found = fixture.read(SourceKind::From, "core:lib.rs#add");
+        let unknown = fixture.read(SourceKind::From, "nope:lib.rs#add");
+
+        assert_eq!(found.as_deref(), Ok("pub fn add() {}"));
+        assert!(unknown.is_err(), "{unknown:?}");
+    }
+
+    #[test]
+    fn a_climb_out_of_the_root_or_a_namespace_is_refused() {
+        let fixture = Fixture::new("[namespaces]\ncore = \"src\"\n");
+
+        for value in [
+            "../../outside.rs",
+            "/../outside.rs",
+            "core:../docs/guide.md",
+            "core:/etc/hosts",
+        ] {
+            let result = fixture.read(SourceKind::From, value);
+
+            assert!(
+                result
+                    .as_ref()
+                    .is_err_and(|missing| missing.message.contains("climbs out")),
+                "{value}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_in_root_symlink_to_an_outside_file_is_refused_without_a_read() {
+        let fixture = Fixture::new("");
+        symlink(
+            fixture.outside.path().join("secret.rs"),
+            fixture.root.path().join("src/link.rs"),
+        )
+        .expect("the symlink should be creatable");
+
+        for kind in [SourceKind::From, SourceKind::Uses] {
+            let result = fixture.read(kind, "/src/link.rs#secret");
+
+            let missing = result.expect_err("an outside source should be refused");
+            assert!(
+                missing.message.contains("outside the project root"),
+                "{missing:?}"
+            );
+            assert!(
+                !missing.message.contains("secret()") && !missing.help.contains("secret()"),
+                "{missing:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_symbol_suggests_the_nearest_name() {
+        let fixture = Fixture::new("");
+
+        let missing = fixture
+            .read(SourceKind::From, "/src/lib.rs#addd")
+            .expect_err("a misspelled symbol should not resolve");
+
+        assert!(missing.help.contains("`add`"), "{missing:?}");
+    }
+
+    #[test]
+    fn a_url_a_directory_a_missing_file_and_a_symbolless_uses_fail() {
+        let fixture = Fixture::new("");
+
+        for (kind, value) in [
+            (SourceKind::From, "https://example.com/lib.rs#add"),
+            (SourceKind::From, "/src"),
+            (SourceKind::From, "/src/gone.rs#add"),
+            (SourceKind::Uses, "/src/lib.rs"),
+            (SourceKind::From, "/supdoc.config.toml#add"),
+        ] {
+            let result = fixture.read(kind, value);
+
+            assert!(result.is_err(), "{value}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn a_cartridge_that_does_not_load_is_fatal_not_a_finding() {
+        let grammar: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        let query_error = tree_sitter::Query::new(&grammar, "(not_a_node")
+            .expect_err("an unclosed query should not compile");
+        let broken: &'static crate::read::query::QueryFileError =
+            Box::leak(Box::new(crate::read::query::QueryFileError {
+                language: crate::read::cartridge::LanguageId::new("rust"),
+                file: "tags.scm",
+                error: query_error,
+            }));
+        let root = AbsolutePath::new(Path::new("/repo")).expect("the fixture root is absolute");
+        let error = ReadError::CartridgeLoad {
+            path: AbsolutePath::new(Path::new("/repo/src/lib.rs"))
+                .expect("the fixture path is absolute"),
+            error: CartridgeLoadError::Query(broken),
+        };
+
+        for kind in [SourceKind::From, SourceKind::Uses] {
+            let unresolved = read_failed(&error, &root, kind);
+
+            assert!(
+                matches!(unresolved, Unresolved::CartridgeLoad(_)),
+                "{unresolved:?}"
+            );
+        }
+    }
+}

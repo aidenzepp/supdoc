@@ -37,8 +37,9 @@ use super::{CliError, Context, Outcome};
 ///
 /// Returns the config's own error (78, or 74 when unreadable), `cli-path-missing`,
 /// `cli-path-outside-project` or `cli-path-invalid` for a bad `[PATH]` (2), `cli-path-unreadable` (74) for one that can't be looked up, the lockfile's own
-/// error (78 when invalid, 74 when unreadable), `scan-root-unreadable` (74), and
-/// `cli-output-failed` when the report cannot be written (74).
+/// error (78 when invalid, 74 when unreadable), `scan-root-unreadable` (74),
+/// `read-cartridge-load` (70) when a built-in cartridge doesn't load, and `cli-output-failed`
+/// when the report cannot be written (74).
 pub(crate) fn run(
     args: &CheckArgs,
     context: &Context,
@@ -47,14 +48,16 @@ pub(crate) fn run(
     let config = load_config(context, output)?;
     let scope = scope(&args.paths, &config, context)?;
     let lock = read_lock(&config, &context.cwd)?;
+    let languages = Languages::builtin().map_err(CliError::from)?;
     let (mut scan, untracked) = crate::scan::assemble::run_with_untracked(
         &config,
-        Languages::builtin().map_err(CliError::from)?,
+        languages,
         &scope,
         &context.global_excludes,
     )
     .map_err(CliError::from)?;
-    let code_block_findings = evaluate(&config, &scan.code_blocks);
+    let code_block_findings =
+        evaluate(&config, languages, &scan.code_blocks).map_err(|error| CliError::from(&error))?;
     scan.findings.extend(code_block_findings);
 
     let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);

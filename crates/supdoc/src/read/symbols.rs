@@ -384,6 +384,23 @@ impl SymbolTable {
         }
     }
 
+    /// The one symbol the dotted text `query` (`Type.method`) names, as [`SymbolTable::resolve`]
+    /// finds it, for callers that hold the path only as written.
+    ///
+    /// `None` when `query` isn't a symbol path: it is empty or has an empty segment.
+    ///
+    /// # Errors
+    ///
+    /// As [`SymbolTable::resolve`], inside the `Some`.
+    pub(crate) fn resolve_text(
+        &self,
+        file: &AbsolutePath,
+        query: &str,
+    ) -> Option<Result<&Symbol, ResolveError>> {
+        let query: SymbolPath = query.parse().ok()?;
+        Some(self.resolve(file, &query))
+    }
+
     /// Up to three paths (full paths or aliases) that are close misspellings of `query` (the
     /// fixer's cutoff) or end in the same name, such as a trait method under another path, closest
     /// first. Ties keep file order.
@@ -569,6 +586,26 @@ mod tests {
             resolved(&table, "whats-new-1"),
             Ok("news.whats-new".to_owned())
         );
+    }
+
+    #[test]
+    fn dotted_text_resolves_like_its_symbol_path_and_malformed_text_is_none() {
+        let table = table(&["Limits.resolve", "add"]);
+        let file = absolute("/repo/src/lib.rs");
+
+        let found = table
+            .resolve_text(&file, "Limits.resolve")
+            .and_then(Result::ok)
+            .map(|symbol| symbol.path().to_string());
+        let missing = table.resolve_text(&file, "Limits.reslove");
+
+        assert_eq!(found.as_deref(), Some("Limits.resolve"));
+        assert!(
+            matches!(missing, Some(Err(ResolveError::NotFound { .. }))),
+            "{missing:?}"
+        );
+        assert!(table.resolve_text(&file, "").is_none());
+        assert!(table.resolve_text(&file, "Limits..resolve").is_none());
     }
 
     #[test]

@@ -4,6 +4,8 @@
 //! everything before the first space. Text inside parentheses stays whole, so
 //! `ignore(needs a server)` is one attribute.
 
+use std::ops::Range;
+
 /// The words of one info string, borrowed from its text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InfoString<'text> {
@@ -80,6 +82,67 @@ pub(crate) fn parenthesized_spelling(attribute: &str) -> Option<String> {
     })
 }
 
+/// Which attribute names an excerpt's source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceKind {
+    /// `from(PATH[#SYMBOL])`: the block is exactly that text.
+    From,
+    /// `uses(PATH#SYMBOL)`: the block is hand-written but depends on that symbol.
+    Uses,
+}
+
+impl SourceKind {
+    /// The attribute's name, as written.
+    #[must_use]
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::From => "from",
+            Self::Uses => "uses",
+        }
+    }
+}
+
+/// One `from(...)` or `uses(...)` value, borrowed from its info string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SourceAttribute<'text> {
+    /// Which attribute it is.
+    pub(crate) kind: SourceKind,
+    /// The trimmed text between the parentheses: `PATH#SYMBOL`, or `PATH` alone.
+    pub(crate) value: &'text str,
+    /// Where `value` lies in the info string, in bytes.
+    pub(crate) range: Range<usize>,
+}
+
+/// Every well-formed `from(...)` and `uses(...)` attribute in the info string `text`, in the order
+/// written. Each may repeat.
+#[must_use]
+pub(crate) fn source_attributes(text: &str) -> Vec<SourceAttribute<'_>> {
+    let mut ranges = word_ranges(text, char::is_whitespace).into_iter();
+    // The first word is the language, never an attribute.
+    let _language = ranges.next();
+    ranges
+        .filter_map(|word| {
+            let attribute = text.get(word.clone())?;
+            [SourceKind::From, SourceKind::Uses]
+                .into_iter()
+                .find_map(|kind| {
+                    let argument = attribute
+                        .strip_prefix(kind.name())?
+                        .strip_prefix('(')?
+                        .strip_suffix(')')?;
+                    let value = argument.trim();
+                    let leading = argument.len() - argument.trim_start().len();
+                    let start = word.start + kind.name().len() + 1 + leading;
+                    (!value.is_empty()).then(|| SourceAttribute {
+                        kind,
+                        value,
+                        range: start..start + value.len(),
+                    })
+                })
+        })
+        .collect()
+}
+
 /// An `ignore`, `no_format` or `no_lint` attribute, split into its name and the reason it gives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Reasoned<'text> {
@@ -112,6 +175,14 @@ pub(crate) const KNOWN_ATTRIBUTES: &str = "`ignore(reason)`, `no_format(reason)`
 /// The non-empty pieces of `text` between characters that `separates`, skipping separators inside
 /// parentheses.
 fn words(text: &str, separates: fn(char) -> bool) -> impl Iterator<Item = &str> {
+    word_ranges(text, separates)
+        .into_iter()
+        .filter_map(|range| text.get(range))
+}
+
+/// Where each non-empty piece of `text` between characters that `separates` lies, skipping
+/// separators inside parentheses.
+fn word_ranges(text: &str, separates: fn(char) -> bool) -> Vec<Range<usize>> {
     let mut depth = 0_usize;
     let mut start = 0;
     let mut pieces = Vec::new();
@@ -120,14 +191,15 @@ fn words(text: &str, separates: fn(char) -> bool) -> impl Iterator<Item = &str> 
             '(' => depth += 1,
             ')' => depth = depth.saturating_sub(1),
             _ if depth == 0 && separates(c) => {
-                pieces.extend(text.get(start..offset));
+                pieces.push(start..offset);
                 start = offset + c.len_utf8();
             }
             _ => {}
         }
     }
-    pieces.extend(text.get(start..));
-    pieces.into_iter().filter(|piece| !piece.is_empty())
+    pieces.push(start..text.len());
+    pieces.retain(|range| !range.is_empty());
+    pieces
 }
 
 #[cfg(test)]
@@ -267,6 +339,30 @@ mod tests {
 
             assert_eq!(reasoned(&attribute), None, "{attribute}");
             assert!(!is_known_attribute(&attribute), "{attribute}");
+        }
+    }
+
+    #[test]
+    fn source_attributes_keep_their_order_and_value_ranges() {
+        let text = "rust from( a.rs#f ) no_run uses(/b.rs#T.m) from(c.rs) from()";
+
+        let found = source_attributes(text);
+
+        let values: Vec<(SourceKind, &str)> = found.iter().map(|s| (s.kind, s.value)).collect();
+        assert_eq!(
+            values,
+            [
+                (SourceKind::From, "a.rs#f"),
+                (SourceKind::Uses, "/b.rs#T.m"),
+                (SourceKind::From, "c.rs"),
+            ]
+        );
+        for source in &found {
+            assert_eq!(
+                text.get(source.range.clone()),
+                Some(source.value),
+                "{source:?}"
+            );
         }
     }
 }
