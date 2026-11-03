@@ -14,6 +14,7 @@ annotate-snippets.workspace = true
 anstream.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
+ctrlc.workspace = true
 globset.workspace = true
 ignore.workspace = true
 schemars.workspace = true

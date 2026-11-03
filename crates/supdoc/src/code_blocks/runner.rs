@@ -16,6 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::tools::ToolEnv;
+use crate::process::LiveGroup;
 
 /// The most bytes supdoc reads from each of a tool's stdout and stderr.
 const CAP: usize = 1024 * 1024;
@@ -86,6 +87,8 @@ pub(crate) fn run(call: &Call<'_>, env: &ToolEnv, root: &Path) -> Result<Ran, Fa
         .process_group(0)
         .spawn()
         .map_err(Failure::Spawn)?;
+    // Held until this function returns, by which point every path has reaped the tool.
+    let _live = LiveGroup::register(child.id());
     if let Some(mut stdin) = child.stdin.take() {
         let bytes = call.stdin.to_vec();
         drop(thread::spawn(move || {

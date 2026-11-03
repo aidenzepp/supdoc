@@ -2,10 +2,15 @@
 //!
 //! `exit_code` reads the environment variables the commands need and hands them down. Clap reads
 //! the `SUPDOC_*` flags from the same lookup.
+//!
+//! It also installs the one termination handler: on SIGINT, SIGTERM or SIGHUP every tool process
+//! group still registered as live is killed, and supdoc exits 130.
 
 use std::ffi::OsStr;
 use std::io::{self, IsTerminal, Write};
 use std::path::{MAIN_SEPARATOR_STR, Path};
+use std::process::{Command, Stdio};
+use std::sync::{Mutex, PoisonError};
 
 use crate::cli::args::{Cli, GlobalArgs};
 use crate::cli::parse::{Parsed, Printout, Stream, parse_from};
@@ -22,10 +27,82 @@ use clap::ColorChoice;
 /// Terminal width when `COLUMNS` says nothing usable.
 const DEFAULT_WIDTH: usize = 80;
 
+/// The exit code after a termination signal: 128 plus SIGINT's number, as shells report Ctrl-C.
+const INTERRUPTED: i32 = 130;
+
+/// The process group ids of the tools running now, each registered by a [`LiveGroup`].
+static LIVE_GROUPS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// A tool's process group, registered as live while this value exists, so a termination signal
+/// kills it. Dropped once the tool is reaped.
+#[derive(Debug)]
+pub(crate) struct LiveGroup(u32);
+
+impl LiveGroup {
+    /// Registers `pgid` as live until the returned value is dropped.
+    #[must_use]
+    pub(crate) fn register(pgid: u32) -> Self {
+        LIVE_GROUPS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(pgid);
+        Self(pgid)
+    }
+}
+
+impl Drop for LiveGroup {
+    fn drop(&mut self) {
+        let mut live = LIVE_GROUPS.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(at) = live.iter().position(|pgid| *pgid == self.0) {
+            let _removed = live.swap_remove(at);
+        }
+    }
+}
+
+/// Whether `pgid` is registered as live.
+#[cfg(test)]
+fn is_live(pgid: u32) -> bool {
+    LIVE_GROUPS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(&pgid)
+}
+
+/// Best effort, sends `SIGKILL` to every live tool process group through `/bin/kill`.
+///
+/// Effect: signals each registered process group.
+fn kill_live_groups() {
+    let live = LIVE_GROUPS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    for pgid in live {
+        let _group = Command::new("/bin/kill")
+            .args(["-KILL", "--", &format!("-{pgid}")])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+/// Installs the handler for SIGINT, SIGTERM and SIGHUP: kill every live tool group, then exit
+/// 130. If it can't be installed the run goes on with the default signal behavior.
+///
+/// Effect: starts the signal-handling thread.
+fn handle_termination() {
+    let _installed = ctrlc::set_handler(|| {
+        kill_live_groups();
+        std::process::exit(INTERRUPTED);
+    });
+}
+
 /// Parses, runs and reports, and returns the process exit code.
 ///
 /// Builds the one [`Output`] of the run, and every command prints through it.
 pub(crate) fn exit_code() -> u8 {
+    handle_termination();
     let var = |name: &str| std::env::var_os(name);
     let cli = match parse_from(std::env::args_os(), |name| {
         var(name).and_then(|value| value.into_string().ok())
@@ -207,6 +284,23 @@ mod tests {
     use crate::output::OutputFormat;
 
     use super::*;
+
+    #[test]
+    fn a_live_group_is_registered_until_it_is_dropped() {
+        // Far above any `pid_max`, so no running tool's group shares these ids.
+        let first = LiveGroup::register(4_000_000_001);
+        let second = LiveGroup::register(4_000_000_002);
+
+        assert!(is_live(4_000_000_001) && is_live(4_000_000_002));
+        drop(first);
+        assert!(!is_live(4_000_000_001), "a dropped group should be removed");
+        assert!(
+            is_live(4_000_000_002),
+            "only the dropped group should be removed"
+        );
+        drop(second);
+        assert!(!is_live(4_000_000_002));
+    }
 
     #[test]
     fn closed_stdout_keeps_the_exit_code_of_help_and_of_a_usage_error() {

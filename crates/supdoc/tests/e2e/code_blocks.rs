@@ -807,3 +807,82 @@ fn shell_format_a_tool_past_the_timeout_is_killed_and_reported() {
         started.elapsed()
     );
 }
+
+/// Whether `/bin/kill -0` still reaches the process `pid` within two seconds of polling.
+fn still_alive(pid: &str) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        let alive = std::process::Command::new("/bin/kill")
+            .args(["-0", pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("/bin/kill should run")
+            .success();
+        if !alive {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    true
+}
+
+#[test]
+fn sigterm_during_a_tool_run_kills_the_tool_and_exits_130() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let project = project_with_shell_blocks();
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let pid_file = outside.path().join("pid");
+    let stub = outside.path().join("shfmt");
+    std::fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\nexec /bin/sleep 30\n",
+            pid_file.display()
+        ),
+    )
+    .expect("the stub should be writable");
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+        .expect("the stub should be made executable");
+    let started = std::time::Instant::now();
+    let mut supdoc = std::process::Command::new(env!("CARGO_BIN_EXE_supdoc"))
+        .args(["check", "--code-block-timeout", "60s"])
+        .current_dir(project.path("."))
+        .env_clear()
+        .env("PATH", outside.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the supdoc binary should start");
+
+    let tool = loop {
+        if let Some(pid) = std::fs::read_to_string(&pid_file)
+            .ok()
+            .filter(|text| text.ends_with('\n'))
+        {
+            break pid.trim().to_owned();
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the stub tool never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let sent = std::process::Command::new("/bin/kill")
+        .args(["-TERM", &supdoc.id().to_string()])
+        .status()
+        .expect("/bin/kill should run");
+    let status = loop {
+        if let Some(status) = supdoc.try_wait().expect("the run should be waitable") {
+            break status;
+        }
+        if started.elapsed() > std::time::Duration::from_secs(10) {
+            drop(supdoc.kill());
+            panic!("supdoc did not exit after SIGTERM");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+
+    assert!(sent.success(), "SIGTERM should be delivered");
+    assert_eq!(status.code(), Some(130), "{status:?}");
+    assert!(!still_alive(&tool), "the stub tool {tool} outlived supdoc");
+}
