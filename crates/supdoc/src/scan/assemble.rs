@@ -25,7 +25,9 @@ use crate::read::error::{CartridgeLoadError, ReadError, ReadRole};
 use crate::read::links::links;
 use crate::scan::model::{Scan, ScannedLink, Scope, TargetState};
 use crate::scan::targets::{self, CODE_UNKNOWN_NAMESPACE, Occurrence, Parsed, Written};
-use crate::scan::walk::{CODE_IGNORE_TOO_LARGE, GlobalExcludes, UnreadDir, walk};
+use crate::scan::walk::{
+    CODE_IGNORE_TOO_LARGE, GlobalExcludes, UnreadDir, Walk, WalkedSource, walk,
+};
 
 /// Why a scan couldn't run at all. Every smaller problem is a finding instead.
 #[derive(Debug, thiserror::Error)]
@@ -198,13 +200,13 @@ fn assemble(
     let mut parsed = Parsed::default();
     let mut unread_sources = BTreeSet::new();
     let mut found = SourceLinks::default();
-    let front = read_sources(
+    let front = walk_checked(config, languages, scope, excludes)?;
+    read_walked(
         config,
         languages,
-        scope,
-        excludes,
         &mut parsed,
-        |source, file, raws| source_links(config, languages, source, file, raws, &mut found),
+        &front.sources,
+        |walked, file, raws| source_links(config, languages, walked, file, raws, &mut found),
         |source, error| {
             findings.push(unreadable_source(source, &error));
             let _new = unread_sources.insert(source.clone());
@@ -267,9 +269,10 @@ pub(crate) struct FrontHalf {
 
 /// The front half of a scan, shared with `namespace rename`: walks the project under the global
 /// `excludes` file, refuses an
-/// oversized ignore file, then reads each source once under the config's read deadline and hands
-/// its parsed file and raw links to `on_links`, or its failure to `on_unread`. Each file is
-/// dropped once its callback returns.
+/// oversized ignore file, then reads each source linking wants once under the config's read
+/// deadline and hands its parsed file and raw links to `on_links`, or its failure to `on_unread`.
+/// A source only code-blocks wants is never read here. Each file is dropped once its callback
+/// returns.
 ///
 /// Effect: reads the filesystem.
 ///
@@ -284,29 +287,80 @@ pub(crate) fn read_sources(
     excludes: &GlobalExcludes,
     parsed: &mut Parsed,
     mut on_links: impl FnMut(&SourcePath, &SourceFile, Vec<RawLink>),
-    mut on_unread: impl FnMut(&SourcePath, ReadError),
+    on_unread: impl FnMut(&SourcePath, ReadError),
 ) -> Result<FrontHalf, ScanError> {
-    let walked = walk(config, languages, scope, excludes);
-    if let Some(error) = ScanError::ignore_too_large(&walked.findings) {
-        return Err(error);
-    }
-    let limit = config.limits_in_effect().parse_timeout.value;
-    for walked_source in &walked.sources {
-        let (source, path) = (&walked_source.source, &walked_source.path);
-        let read = parsed
-            .read(path, languages, limit)
-            .and_then(|file| Ok((links(file)?, file)));
-        match read {
-            Ok((raws, file)) => on_links(source, file, raws),
-            Err(ReadError::CartridgeLoad { error, .. }) => return Err(error.into()),
-            Err(error) => on_unread(source, error),
-        }
-        parsed.forget(path);
-    }
+    let walked = walk_checked(config, languages, scope, excludes)?;
+    read_walked(
+        config,
+        languages,
+        parsed,
+        walked.sources.iter().filter(|source| source.wants.links),
+        |walked, file, raws| on_links(&walked.source, file, raws),
+        on_unread,
+    )?;
     Ok(FrontHalf {
         findings: walked.findings,
         unread_dirs: walked.unread_dirs,
     })
+}
+
+/// Walks the project under the global `excludes` file and refuses an oversized ignore file.
+///
+/// Effect: reads directory listings, ignore files and file metadata.
+///
+/// # Errors
+///
+/// [`ScanError::IgnoreTooLarge`] when an ignore file the walk met is over `max-ignore-size`.
+fn walk_checked(
+    config: &Config,
+    languages: &Languages,
+    scope: &Scope,
+    excludes: &GlobalExcludes,
+) -> Result<Walk, ScanError> {
+    let walked = walk(config, languages, scope, excludes);
+    match ScanError::ignore_too_large(&walked.findings) {
+        Some(error) => Err(error),
+        None => Ok(walked),
+    }
+}
+
+/// Reads each of `sources` once under the config's read deadline and hands its parsed file to
+/// `on_read`, with its raw links when linking wants it and none otherwise, or its failure to
+/// `on_unread`. Each file is dropped once its callback returns.
+///
+/// Effect: reads the filesystem.
+///
+/// # Errors
+///
+/// [`ScanError::CartridgeLoad`] when a source's built-in cartridge doesn't load.
+fn read_walked<'walk>(
+    config: &Config,
+    languages: &Languages,
+    parsed: &mut Parsed,
+    sources: impl IntoIterator<Item = &'walk WalkedSource>,
+    mut on_read: impl FnMut(&WalkedSource, &SourceFile, Vec<RawLink>),
+    mut on_unread: impl FnMut(&SourcePath, ReadError),
+) -> Result<(), ScanError> {
+    let limit = config.limits_in_effect().parse_timeout.value;
+    for walked in sources {
+        let read = parsed
+            .read(&walked.path, languages, limit)
+            .and_then(|file| {
+                let raws = if walked.wants.links {
+                    links(file)?
+                } else {
+                    Vec::new()
+                };
+                Ok((raws, file))
+            });
+        match read {
+            Ok((raws, file)) => on_read(walked, file, raws),
+            Err(ReadError::CartridgeLoad { error, .. }) => return Err(error.into()),
+            Err(error) => on_unread(&walked.source, error),
+        }
+        parsed.forget(&walked.path);
+    }
+    Ok(())
 }
 
 /// Where a finding sits, for sorting by file then position. Findings about no one place sort
@@ -329,22 +383,24 @@ struct SourceLinks {
     unkeyed: Vec<Finding>,
     /// Links that are not supdoc links, counted by reason.
     untracked: UntrackedLinks,
-    /// Every code block in the sources, in file order, when `[features.code-blocks]` is on.
+    /// Every code block in the sources code-blocks wants, in file order.
     code_blocks: Vec<CodeBlock>,
 }
 
-/// Adds `raws`, the links read from `file`, to `found`, in file order.
+/// Adds `raws`, the links read from `walked`'s `file`, to `found`, in file order, and its code
+/// blocks when code-blocks wants the file.
 fn source_links(
     config: &Config,
     languages: &Languages,
-    source: &SourcePath,
+    walked: &WalkedSource,
     file: &SourceFile,
     raws: Vec<RawLink>,
     found: &mut SourceLinks,
 ) {
+    let source = &walked.source;
     let text = file.text();
     let lines = LineIndex::new(text);
-    if config.code_blocks().is_some() {
+    if walked.wants.code_blocks {
         found.code_blocks.extend(blocks_in(file, |range| {
             Location::in_indexed(source.clone(), text, &lines, range)
         }));

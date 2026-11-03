@@ -383,7 +383,7 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Result<Config, Co
                 .and_then(|hash| hash.line_endings)
                 .map(|value| (value, file.clone()));
         }
-        code_blocks = code_blocks::merge(code_blocks, raw_code_blocks);
+        code_blocks = code_blocks::merge(code_blocks, raw_code_blocks, &file, &base);
         if let Some(raw_limits) = raw.limits {
             nearest(&mut limits.parse_timeout, raw_limits.parse_timeout, &file);
             nearest(&mut limits.max_lock_size, raw_limits.max_lock_size, &file);
@@ -405,6 +405,7 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Result<Config, Co
         .collect::<Result<_, ConfigError>>()?;
     let include = include
         .unwrap_or_else(|| AnchoredPatterns::built_in(root.clone(), PatternList::everything()));
+    let code_blocks = code_blocks.map(|written| written.resolve(&include, exclude.as_ref()));
     Ok(Config {
         root,
         real_root,
