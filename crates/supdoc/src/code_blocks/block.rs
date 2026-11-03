@@ -41,9 +41,6 @@ pub(crate) struct BodyLine {
 impl CodeBlock {
     /// The language of a block with no info string: `rust` in a Rust file's doc comments, where
     /// rustdoc reads an untagged fence as Rust, and none in Markdown.
-    ///
-    /// Test-only until block states (CB-11) consume it.
-    #[cfg(test)]
     #[must_use]
     pub(crate) fn default_language(&self) -> Option<&'static str> {
         std::path::Path::new(self.fence.file.as_str())
