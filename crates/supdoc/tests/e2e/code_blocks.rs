@@ -827,8 +827,9 @@ fn still_alive(pid: &str) -> bool {
 }
 
 #[test]
-fn sigterm_during_a_tool_run_kills_the_tool_and_exits_130() {
+fn sigterm_during_a_tool_run_kills_the_tool_and_ends_supdoc_by_sigterm() {
     use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::process::ExitStatusExt as _;
     let project = project_with_shell_blocks();
     let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
     let pid_file = outside.path().join("pid");
@@ -883,6 +884,9 @@ fn sigterm_during_a_tool_run_kills_the_tool_and_exits_130() {
     };
 
     assert!(sent.success(), "SIGTERM should be delivered");
-    assert_eq!(status.code(), Some(130), "{status:?}");
+    assert!(
+        status.signal() == Some(15) || status.code() == Some(143),
+        "supdoc should end by SIGTERM: {status:?}"
+    );
     assert!(!still_alive(&tool), "the stub tool {tool} outlived supdoc");
 }

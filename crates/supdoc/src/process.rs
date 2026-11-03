@@ -4,7 +4,8 @@
 //! the `SUPDOC_*` flags from the same lookup.
 //!
 //! It also installs the one termination handler: on SIGINT, SIGTERM or SIGHUP every tool process
-//! group still registered as live is killed, and supdoc exits 130.
+//! group still registered as live is killed, and supdoc then ends as that signal's default action
+//! would have ended it.
 
 use std::ffi::OsStr;
 use std::io::{self, IsTerminal, Write};
@@ -26,9 +27,6 @@ use clap::ColorChoice;
 
 /// Terminal width when `COLUMNS` says nothing usable.
 const DEFAULT_WIDTH: usize = 80;
-
-/// The exit code after a termination signal: 128 plus SIGINT's number, as shells report Ctrl-C.
-const INTERRUPTED: i32 = 130;
 
 /// The process group ids of the tools running now, each registered by a [`LiveGroup`].
 static LIVE_GROUPS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
@@ -87,15 +85,23 @@ fn kill_live_groups() {
     }
 }
 
-/// Installs the handler for SIGINT, SIGTERM and SIGHUP: kill every live tool group, then exit
-/// 130. If it can't be installed the run goes on with the default signal behavior.
+/// Installs the handler for SIGINT, SIGTERM and SIGHUP: on one thread, kill every live tool group,
+/// then end the process as the signal's default action would. If it can't be installed the run
+/// goes on with the default signal behavior.
 ///
-/// Effect: starts the signal-handling thread.
+/// Effect: registers the signals and starts the signal-handling thread.
 fn handle_termination() {
-    let _installed = ctrlc::set_handler(|| {
-        kill_live_groups();
-        std::process::exit(INTERRUPTED);
-    });
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+    let Ok(mut signals) = signal_hook::iterator::Signals::new([SIGINT, SIGTERM, SIGHUP]) else {
+        return;
+    };
+    drop(std::thread::spawn(move || {
+        for signal in signals.forever() {
+            kill_live_groups();
+            // Resets the signal to its default action and raises it, which ends the process.
+            let _ended = signal_hook::low_level::emulate_default_handler(signal);
+        }
+    }));
 }
 
 /// Parses, runs and reports, and returns the process exit code.
