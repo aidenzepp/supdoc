@@ -66,3 +66,45 @@ fn known_attributes_and_a_bare_language_draw_no_warning() {
 
     assert!(finding_kinds(&json).is_empty(), "{json}");
 }
+
+/// A recorded `basic` project with the feature on and one `sh` block carrying `attributes`.
+fn project_with_block(attributes: &str) -> Project {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write("supdoc.config.toml", "[features.code-blocks]\n");
+    project.write(
+        "docs/blocks.md",
+        &format!("# Blocks\n\n```sh {attributes}\necho hi\n```\n"),
+    );
+    project
+}
+
+#[test]
+fn ignore_without_a_reason_warns_and_fails_only_under_deny_warnings() {
+    let project = project_with_block("ignore");
+
+    let warned = project.supdoc(&["check", "--json"]).assert_exit(0).json();
+    let _denied = project.supdoc(&["check", "--deny-warnings"]).assert_exit(1);
+
+    assert_eq!(
+        finding_kinds(&warned),
+        ["code-block-ignore-reason"],
+        "{warned}"
+    );
+}
+
+#[test]
+fn ignore_with_blank_parentheses_warns_and_with_a_reason_does_not() {
+    let blank = project_with_block("no_lint(  )");
+    let reasoned = project_with_block("no_lint(slow, needs a server)");
+
+    let blank_json = blank.supdoc(&["check", "--json"]).assert_exit(0).json();
+    let reasoned_json = reasoned.supdoc(&["check", "--json"]).assert_exit(0).json();
+
+    assert_eq!(
+        finding_kinds(&blank_json),
+        ["code-block-ignore-reason"],
+        "{blank_json}"
+    );
+    assert!(finding_kinds(&reasoned_json).is_empty(), "{reasoned_json}");
+}

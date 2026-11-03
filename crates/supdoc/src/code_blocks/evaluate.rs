@@ -4,10 +4,15 @@ use crate::config::Config;
 use crate::finding::{Finding, Severity};
 
 use super::block::{CodeBlock, Info};
-use super::info::{InfoString, KNOWN_ATTRIBUTES, is_known_attribute};
+use super::info::{
+    InfoString, KNOWN_ATTRIBUTES, is_known_attribute, parenthesized_spelling, reasoned,
+};
 
 /// The code for an info-string attribute supdoc doesn't know.
 const UNKNOWN_ATTRIBUTE: &str = "code-block-unknown-attribute";
+
+/// The code for an `ignore`, `no_format` or `no_lint` written without a reason.
+const IGNORE_REASON: &str = "code-block-ignore-reason";
 
 /// The findings for `blocks`, in block order. Nothing when `config` leaves
 /// `[features.code-blocks]` off.
@@ -19,7 +24,11 @@ pub(crate) fn evaluate(config: &Config, blocks: &[CodeBlock]) -> Vec<Finding> {
     blocks
         .iter()
         .filter_map(|block| block.info.as_ref())
-        .flat_map(unknown_attributes)
+        .flat_map(|info| {
+            let mut findings = unknown_attributes(info);
+            findings.extend(missing_reasons(info));
+            findings
+        })
         .collect()
 }
 
@@ -55,9 +64,32 @@ fn unknown_attributes(info: &Info) -> Vec<Finding> {
                 ),
             )
             .with_location(info.location.clone())
-            .with_help(format!(
-                "remove `{attribute}` or correct it to one of {KNOWN_ATTRIBUTES}"
-            ))
+            .with_help(match parenthesized_spelling(attribute) {
+                Some(spelling) => format!("write `{attribute}` as `{spelling}`"),
+                None => format!("remove `{attribute}` or correct it to one of {KNOWN_ATTRIBUTES}"),
+            })
         });
     comma.into_iter().chain(unknown).collect()
+}
+
+/// One `code-block-ignore-reason` warning at `info` for each `ignore`, `no_format` or `no_lint`
+/// without a reason. The attribute still takes effect.
+fn missing_reasons(info: &Info) -> Vec<Finding> {
+    let parsed = InfoString::parse(&info.text);
+    parsed
+        .attributes
+        .iter()
+        .filter_map(|attribute| reasoned(attribute))
+        .filter(|found| found.reason.is_none())
+        .map(|found| {
+            let name = found.name;
+            Finding::new(
+                IGNORE_REASON,
+                Severity::Warning,
+                format!("the `{}` block's `{name}` doesn't say why", parsed.language),
+            )
+            .with_location(info.location.clone())
+            .with_help(format!("write it as `{name}(<why>)`"))
+        })
+        .collect()
 }

@@ -714,11 +714,19 @@ mod helps {
         let Some((area, name)) = text.split_once('-') else {
             return false;
         };
+        // Every `code` code is `code-block-<name>`; `code-blocks` is the feature and table name.
         AREAS.contains(&area)
+            && (area != "code" || name.starts_with("block-"))
             && name.starts_with(|c: char| c.is_ascii_lowercase())
             && name
                 .chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    }
+
+    #[test]
+    fn code_blocks_is_a_name_not_a_code() {
+        assert!(!is_code("code-blocks"), "`code-blocks` is the feature name");
+        assert!(is_code("code-block-stale"), "`code-block-stale` is a code");
     }
 
     /// A lockfile entry for `docs/old.md`'s link, with a hash that disagrees with the recorded one.
@@ -792,6 +800,25 @@ mod helps {
                 p.write(
                     "docs/blocks.md",
                     "# B\n\n```rust,ignore\nfn main() {}\n```\n",
+                );
+            },
+            &["check"],
+        ),
+        case(
+            "code-block-ignore-reason",
+            |p| {
+                config_with(p, "[features.code-blocks]\n");
+                p.write("docs/blocks.md", "# B\n\n```sh ignore\necho hi\n```\n");
+            },
+            &["check"],
+        ),
+        case(
+            "code-block-unknown-attribute",
+            |p| {
+                config_with(p, "[features.code-blocks]\n");
+                p.write(
+                    "docs/blocks.md",
+                    "# B\n\n```rust from=../src/lib.rs#add\nfn main() {}\n```\n",
                 );
             },
             &["check"],

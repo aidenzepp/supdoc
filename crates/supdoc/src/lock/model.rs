@@ -15,7 +15,11 @@ pub(crate) const LOCK_FILE_NAME: &str = "supdoc.lock";
 /// Until the first release, v1 is still being defined: format and hashing changes redefine v1
 /// rather than bump it. From the first published release on, any change bumps it, including a
 /// new key under `[features.hash]`. Changing a setting's value is data, not a format change.
-pub(crate) const FORMAT_VERSION: u32 = 1;
+pub(crate) const FORMAT_VERSION: u32 = 2;
+
+/// The version a lock without `[[code-blocks.uses]]` entries is written as, and the oldest this
+/// supdoc reads. Format 2 only adds the `[code-blocks]` section.
+pub(crate) const BASE_FORMAT_VERSION: u32 = 1;
 
 /// Every recorded link, the hash it was last confirmed against, and the settings those hashes
 /// were computed under.
@@ -27,6 +31,9 @@ pub(crate) struct Lockfile {
     hash: HashSettings,
     /// The entries, in canonical order.
     links: BTreeMap<LinkKey, Hash>,
+    /// The `[[code-blocks.uses]]` entries: each `uses=` target a code block names, in canonical
+    /// order.
+    uses: BTreeMap<LinkKey, Hash>,
 }
 
 impl Lockfile {
@@ -60,6 +67,16 @@ impl Lockfile {
         self.links.remove(key)
     }
 
+    /// Records `hash` for the `uses=` target `key`, returning the previous hash, if any.
+    pub(crate) fn insert_use(&mut self, key: LinkKey, hash: Hash) -> Option<Hash> {
+        self.uses.insert(key, hash)
+    }
+
+    /// Every `uses=` entry, in canonical order.
+    pub(crate) fn uses(&self) -> impl Iterator<Item = (&LinkKey, Hash)> {
+        self.uses.iter().map(|(key, hash)| (key, *hash))
+    }
+
     /// Every entry, in canonical order.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&LinkKey, Hash)> {
         self.links.iter().map(|(key, hash)| (key, *hash))
@@ -91,6 +108,7 @@ impl FromIterator<(LinkKey, Hash)> for Lockfile {
         Self {
             hash: HashSettings::default(),
             links: entries.into_iter().collect(),
+            uses: BTreeMap::new(),
         }
     }
 }
