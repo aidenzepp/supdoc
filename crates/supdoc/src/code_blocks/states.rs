@@ -5,7 +5,7 @@ use annotate_snippets::renderer::{AnsiColor, Style};
 use crate::config::code_blocks::Language;
 
 use super::block::CodeBlock;
-use super::info::{InfoString, reasoned};
+use super::info::reasoned;
 
 /// The one state a code block is in. A block takes the first that applies, in this order:
 ///
@@ -78,10 +78,7 @@ pub(crate) fn state_of(
         Some(Excerpt::Current) => return BlockState::Passed,
         None => {}
     }
-    let parsed = block
-        .info
-        .as_ref()
-        .map(|info| InfoString::parse(&info.text));
+    let parsed = block.info.as_ref().map(|info| info.parsed());
     let ignored = parsed
         .iter()
         .flat_map(|parsed| &parsed.attributes)
@@ -91,11 +88,7 @@ pub(crate) fn state_of(
             reason: found.reason.map(str::to_owned),
         };
     }
-    let tag = parsed
-        .map(|parsed| parsed.language)
-        .filter(|tag| !tag.is_empty())
-        .or_else(|| block.default_language());
-    match tag {
+    match tag_of(block) {
         None | Some("text" | "console" | "output") => BlockState::NotChecked(NotChecked::Text),
         Some(tag) => match Language::from_tag(tag) {
             Some(language) if on(language) => BlockState::NotChecked(NotChecked::Pending),
@@ -105,8 +98,63 @@ pub(crate) fn state_of(
     }
 }
 
+/// The language tag `block` is read as: the first word of its info string, or Rust for an untagged
+/// fence in a Rust doc comment, as rustdoc reads it. `None` for an untagged block elsewhere.
+#[must_use]
+pub(crate) fn tag_of(block: &CodeBlock) -> Option<&str> {
+    block
+        .info
+        .as_ref()
+        .map(|info| info.parsed().language)
+        .filter(|tag| !tag.is_empty())
+        .or_else(|| block.default_language())
+}
+
+impl BlockState {
+    /// The state's name in JSON.
+    #[must_use]
+    pub(crate) const fn name(&self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Stale => "stale",
+            Self::OptedOut { .. } => "opted_out",
+            Self::NotChecked(_) => "not_checked",
+            Self::UnknownLanguage => "unknown_language",
+        }
+    }
+
+    /// Why the block is in this state, when it has a reason to give. `tag` is the block's
+    /// language tag.
+    #[must_use]
+    pub(crate) fn reason(&self, tag: Option<&str>) -> Option<String> {
+        match self {
+            Self::Passed => None,
+            Self::Failed => Some("an excerpt's source is missing".to_owned()),
+            Self::Stale => Some("the block differs from its source".to_owned()),
+            Self::OptedOut { reason } => reason.clone(),
+            Self::NotChecked(NotChecked::Text) => Some("the block is text, not code".to_owned()),
+            Self::NotChecked(NotChecked::LanguageOff) => {
+                let table = match tag.and_then(Language::from_tag) {
+                    Some(Language::Rust) => "rust",
+                    Some(Language::Shell) => "shell",
+                    Some(Language::Python) => "python",
+                    None => "language",
+                };
+                Some(format!("no `[features.code-blocks.{table}]` table"))
+            }
+            Self::NotChecked(NotChecked::Pending) => {
+                Some("its format and lint steps aren't built yet".to_owned())
+            }
+            Self::UnknownLanguage => {
+                Some(format!("supdoc has no checker for `{}`", tag.unwrap_or("")))
+            }
+        }
+    }
+}
+
 /// How many blocks are in each state. `blocks` is the sum of the others.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub(crate) struct CodeBlockCounts {
     /// Every block counted.
     pub(crate) blocks: usize,
@@ -295,6 +343,28 @@ mod tests {
         assert_eq!(
             state(&block("src/lib.rs", None)),
             BlockState::NotChecked(NotChecked::Pending)
+        );
+    }
+
+    #[test]
+    fn a_rust_doc_fence_leading_with_a_known_attribute_is_rust_with_that_attribute() {
+        assert_eq!(
+            state(&block("src/lib.rs", Some("no_run"))),
+            BlockState::NotChecked(NotChecked::Pending)
+        );
+        assert_eq!(
+            state(&block("src/lib.rs", Some("ignore(slow)"))),
+            BlockState::OptedOut {
+                reason: Some("slow".to_owned())
+            }
+        );
+    }
+
+    #[test]
+    fn markdown_keeps_the_first_word_as_the_language_even_when_it_is_an_attribute() {
+        assert_eq!(
+            state(&block("docs/a.md", Some("no_run"))),
+            BlockState::UnknownLanguage
         );
     }
 

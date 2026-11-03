@@ -5,6 +5,7 @@
 //!
 //! This module also owns the wire form of one link, [`LinkJson`], which `list` shares.
 
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 use schemars::JsonSchema;
@@ -12,7 +13,8 @@ use serde::Serialize;
 
 use crate::check::model::{LinkReport, Report as CheckModel};
 use crate::check::reconcile::{self, check_outcome, reconcile_in};
-use crate::code_blocks::evaluate::{CodeBlockCounts, evaluate};
+use crate::code_blocks::evaluate::{BlockRecord, BlockState, CodeBlockCounts, evaluate};
+use crate::code_blocks::uses::UseState;
 use crate::finding::{Finding, Location};
 use crate::link::destination::Untracked;
 use crate::link::{LinkKey, SourcePath};
@@ -71,7 +73,11 @@ pub(crate) fn run(
         reconcile::Outcome::Failing => Outcome::Failing,
     };
     let verbosity = output.verbosity();
-    let report = CheckReport::new(model, verbosity).with_code_blocks(evaluation.counts);
+    let report = CheckReport::new(model, verbosity).with_code_blocks(
+        evaluation.counts,
+        evaluation.records,
+        verbosity,
+    );
     let report = if verbosity.lists_passed() {
         report.with_untracked(&untracked)
     } else {
@@ -96,7 +102,11 @@ pub(crate) fn schema() -> schemars::Schema {
 /// links are always counted but listed only under `--verbose`.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct CheckReport {
-    /// How many links are in each state, passed ones included.
+    /// How many links are in each state, passed ones included, and how many code blocks.
+    #[serde(rename = "summary")]
+    counts: CheckSummary,
+    /// The link counts alone, for the summary line.
+    #[serde(skip)]
     summary: Summary,
     /// The links shown, each with the finding that explains its state.
     links: Vec<LinkJson>,
@@ -111,7 +121,78 @@ pub(crate) struct CheckReport {
     untracked: Vec<(Untracked, usize)>,
     /// How many code blocks are in each state, when `[features.code-blocks]` is on.
     #[serde(skip)]
+    code_block_counts: Option<CodeBlockCounts>,
+    /// The code blocks shown: the ones not passed, or every one under `--verbose`. Absent
+    /// when `[features.code-blocks]` is off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code_blocks: Option<Vec<CodeBlockJson>>,
+    /// The same blocks with their reasons, for `--verbose` text.
+    #[serde(skip)]
+    shown_blocks: Vec<BlockRecord>,
+}
+
+/// `data.summary`: the link counts flattened, with the code block counts beside them when
+/// `[features.code-blocks]` is on.
+#[derive(Debug, Serialize, JsonSchema)]
+struct CheckSummary {
+    /// The link counts, at the paths they have always had.
+    #[serde(flatten)]
+    links: Summary,
+    /// How many code blocks are in each state.
+    #[serde(skip_serializing_if = "Option::is_none")]
     code_blocks: Option<CodeBlockCounts>,
+}
+
+/// One code block as `check --json` shows it.
+#[derive(Debug, Serialize, JsonSchema)]
+struct CodeBlockJson {
+    /// The doc or source file, relative to the project root.
+    file: SourcePath,
+    /// 1-based line of the opening fence.
+    line: u32,
+    /// 1-based column, in characters.
+    column: u32,
+    /// The language tag the block is read as. Left out for an untagged block outside Rust docs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    language: Option<String>,
+    /// `passed`, `failed`, `stale`, `opted_out`, `not_checked` or `unknown_language`.
+    state: &'static str,
+    /// Why the block is in that state, when it has a reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    /// Each `uses(...)` target the block writes, with its state.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    uses: Vec<UseJson>,
+}
+
+/// One `uses(...)` target of a code block and where it stands against the lockfile.
+#[derive(Debug, Serialize, JsonSchema)]
+struct UseJson {
+    /// The target as written: `path#symbol`.
+    target: String,
+    /// `passed`, `changed`, `new` or `missing`.
+    state: UseState,
+}
+
+impl From<&BlockRecord> for CodeBlockJson {
+    fn from(record: &BlockRecord) -> Self {
+        Self {
+            file: record.at.file.clone(),
+            line: record.at.line,
+            column: record.at.column,
+            language: record.language.clone(),
+            state: record.state.name(),
+            reason: record.reason.clone(),
+            uses: record
+                .uses
+                .iter()
+                .map(|(target, state)| UseJson {
+                    target: target.clone(),
+                    state: *state,
+                })
+                .collect(),
+        }
+    }
 }
 
 impl CheckReport {
@@ -125,20 +206,43 @@ impl CheckReport {
             .filter(|link| link.state != LinkState::Passed || verbosity.lists_passed())
             .collect();
         Self {
+            counts: CheckSummary {
+                links: summary,
+                code_blocks: None,
+            },
             summary,
             links: shown.iter().map(LinkJson::from).collect(),
             shown,
             loose: model.findings,
             untracked: Vec::new(),
+            code_block_counts: None,
             code_blocks: None,
+            shown_blocks: Vec::new(),
         }
     }
 
-    /// The report, also printing the `Code blocks` line from `counts` when it holds them.
+    /// The report, also holding the code block counts and records when `counts` has them: the
+    /// `Code blocks` line, `summary.code_blocks`, and the blocks not passed, or every block when
+    /// `verbosity` lists passed links.
     #[must_use]
-    pub(crate) fn with_code_blocks(self, counts: Option<CodeBlockCounts>) -> Self {
+    pub(crate) fn with_code_blocks(
+        self,
+        counts: Option<CodeBlockCounts>,
+        records: Vec<BlockRecord>,
+        verbosity: Verbosity,
+    ) -> Self {
+        let shown: Vec<BlockRecord> = records
+            .into_iter()
+            .filter(|record| record.state != BlockState::Passed || verbosity.lists_passed())
+            .collect();
         Self {
-            code_blocks: counts,
+            counts: CheckSummary {
+                links: self.summary,
+                code_blocks: counts,
+            },
+            code_blocks: counts.map(|_| shown.iter().map(CodeBlockJson::from).collect()),
+            code_block_counts: counts,
+            shown_blocks: shown,
             ..self
         }
     }
@@ -155,7 +259,12 @@ impl CheckReport {
 
 impl Report for CheckReport {
     fn record_arrays(&self) -> &'static [RecordArray] {
-        const { &[RecordArray::new("links", "link")] }
+        const {
+            &[
+                RecordArray::new("links", "link"),
+                RecordArray::new("code_blocks", "code_block"),
+            ]
+        }
     }
 
     fn command(&self) -> &'static str {
@@ -192,12 +301,16 @@ impl Report for CheckReport {
         }
         render_untracked(&self.untracked, out)?;
         render_summary(context, &self.summary, out)?;
-        match &self.code_blocks {
+        match &self.code_block_counts {
             Some(counts) if context.verbosity.shows_summary() => {
-                writeln!(out, "{}", counts.line(context.color, context.unicode))
+                writeln!(out, "{}", counts.line(context.color, context.unicode))?;
             }
-            _ => Ok(()),
+            _ => {}
         }
+        if context.verbosity.lists_passed() {
+            render_block_reasons(context, &self.shown_blocks, out)?;
+        }
+        Ok(())
     }
 }
 
@@ -254,6 +367,44 @@ fn render_passed(context: &TextContext, key: &LinkKey, out: &mut dyn Write) -> i
         context.arrow(),
         visible(&key.target_text()),
     )
+}
+
+/// Under `--verbose`, one line per unknown language with its count, then one line per opted-out,
+/// not-checked, format-off, format-skipped, lint-off or lint-skipped block with its reason.
+///
+/// # Errors
+///
+/// Fails if writing to `out` fails.
+fn render_block_reasons(
+    context: &TextContext,
+    blocks: &[BlockRecord],
+    out: &mut dyn Write,
+) -> io::Result<()> {
+    let mut unknown: BTreeMap<&str, usize> = BTreeMap::new();
+    for block in blocks
+        .iter()
+        .filter(|block| block.state == BlockState::UnknownLanguage)
+    {
+        *unknown
+            .entry(block.language.as_deref().unwrap_or_default())
+            .or_default() += 1;
+    }
+    for (language, count) in &unknown {
+        writeln!(out, "unknown language  {}: {count}", visible(language))?;
+    }
+    for block in blocks {
+        let label = match block.state {
+            BlockState::OptedOut { .. } => "opted out",
+            BlockState::NotChecked(_) => "not checked",
+            _ => continue,
+        };
+        let place = format!("{}:{}", context.paths.text(&block.at.file), block.at.line);
+        match &block.reason {
+            Some(reason) => writeln!(out, "{label}  {} ({})", visible(&place), visible(reason))?,
+            None => writeln!(out, "{label}  {}", visible(&place))?,
+        }
+    }
+    Ok(())
 }
 
 /// `untracked  directories: 2`, one line per reason links were left untracked for, then a blank

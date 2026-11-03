@@ -5,6 +5,7 @@ use std::ops::Range;
 use crate::finding::Location;
 use crate::read::cartridge::SourceFile;
 
+use super::info::InfoString;
 use super::{doc_comments, markdown};
 
 /// One fenced code block, located in its file.
@@ -28,6 +29,21 @@ pub(crate) struct Info {
     pub(crate) location: Location,
 }
 
+impl Info {
+    /// The info string split into language and attributes, read as rustdoc reads it when the
+    /// block is in a Rust file's doc comments.
+    #[must_use]
+    pub(crate) fn parsed(&self) -> InfoString<'_> {
+        InfoString::parse_in(&self.text, self.in_rust_doc())
+    }
+
+    /// Whether the info string is in a Rust file's doc comments.
+    #[must_use]
+    pub(crate) fn in_rust_doc(&self) -> bool {
+        is_rust_file(self.location.file.as_str())
+    }
+}
+
 /// One line of a block's body, split where its container's prefix ends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BodyLine {
@@ -43,11 +59,15 @@ impl CodeBlock {
     /// rustdoc reads an untagged fence as Rust, and none in Markdown.
     #[must_use]
     pub(crate) fn default_language(&self) -> Option<&'static str> {
-        std::path::Path::new(self.fence.file.as_str())
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
-            .then_some("rust")
+        is_rust_file(self.fence.file.as_str()).then_some("rust")
     }
+}
+
+/// Whether `file` is a Rust source file, by its extension.
+fn is_rust_file(file: &str) -> bool {
+    std::path::Path::new(file)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
 }
 
 /// Every code block in `file`, in file order, located by `locate`, which turns a byte range of
