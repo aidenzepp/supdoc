@@ -12,7 +12,7 @@ use serde::Serialize;
 
 use crate::check::model::{LinkReport, Report as CheckModel};
 use crate::check::reconcile::{self, check_outcome, reconcile_in};
-use crate::code_blocks::evaluate::evaluate;
+use crate::code_blocks::evaluate::{CodeBlockCounts, evaluate};
 use crate::finding::{Finding, Location};
 use crate::link::destination::Untracked;
 use crate::link::{LinkKey, SourcePath};
@@ -60,9 +60,9 @@ pub(crate) fn run(
         doc.parse::<SourcePath>()
             .is_ok_and(|doc| scope.contains(&doc) && !scan.is_unread(&doc))
     };
-    let code_block_findings = evaluate(&config, languages, &scan.code_blocks, &lock, in_scope)
+    let evaluation = evaluate(&config, languages, &scan.code_blocks, &lock, in_scope)
         .map_err(|error| CliError::from(&error))?;
-    scan.findings.extend(code_block_findings);
+    scan.findings.extend(evaluation.findings);
 
     let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
     let model = reconcile_in(&scan, &lock, &scope, &paths);
@@ -71,7 +71,7 @@ pub(crate) fn run(
         reconcile::Outcome::Failing => Outcome::Failing,
     };
     let verbosity = output.verbosity();
-    let report = CheckReport::new(model, verbosity);
+    let report = CheckReport::new(model, verbosity).with_code_blocks(evaluation.counts);
     let report = if verbosity.lists_passed() {
         report.with_untracked(&untracked)
     } else {
@@ -109,6 +109,9 @@ pub(crate) struct CheckReport {
     /// How many links were left untracked for each reason, printed as text only.
     #[serde(skip)]
     untracked: Vec<(Untracked, usize)>,
+    /// How many code blocks are in each state, when `[features.code-blocks]` is on.
+    #[serde(skip)]
+    code_blocks: Option<CodeBlockCounts>,
 }
 
 impl CheckReport {
@@ -127,6 +130,16 @@ impl CheckReport {
             shown,
             loose: model.findings,
             untracked: Vec::new(),
+            code_blocks: None,
+        }
+    }
+
+    /// The report, also printing the `Code blocks` line from `counts` when it holds them.
+    #[must_use]
+    pub(crate) fn with_code_blocks(self, counts: Option<CodeBlockCounts>) -> Self {
+        Self {
+            code_blocks: counts,
+            ..self
         }
     }
 
@@ -178,7 +191,13 @@ impl Report for CheckReport {
             }
         }
         render_untracked(&self.untracked, out)?;
-        render_summary(context, &self.summary, out)
+        render_summary(context, &self.summary, out)?;
+        match &self.code_blocks {
+            Some(counts) if context.verbosity.shows_summary() => {
+                writeln!(out, "{}", counts.line(context.color, context.unicode))
+            }
+            _ => Ok(()),
+        }
     }
 }
 

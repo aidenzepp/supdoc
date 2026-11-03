@@ -1,4 +1,5 @@
-//! The per-block pipeline that `check` runs: judges each code block and returns its findings.
+//! The per-block pipeline that `check` runs: judges each code block and returns its findings
+//! and the count of blocks in each state.
 
 use std::collections::BTreeSet;
 use std::ops::Range;
@@ -17,7 +18,10 @@ use super::info::{
     source_attributes,
 };
 use super::source::{self, SourceText, Unresolved};
+use super::states::{BlockState, Excerpt, state_of};
 use super::uses::{self, Written};
+
+pub(crate) use super::states::CodeBlockCounts;
 
 /// The code for an info-string attribute supdoc doesn't know.
 const UNKNOWN_ATTRIBUTE: &str = "code-block-unknown-attribute";
@@ -25,12 +29,21 @@ const UNKNOWN_ATTRIBUTE: &str = "code-block-unknown-attribute";
 /// The code for an `ignore`, `no_format` or `no_lint` written without a reason.
 const IGNORE_REASON: &str = "code-block-ignore-reason";
 
+/// What judging the code blocks found.
+#[derive(Debug, Default)]
+pub(crate) struct Evaluation {
+    /// The findings, in block order, then the `uses(...)` findings.
+    pub(crate) findings: Vec<Finding>,
+    /// How many blocks are in each state. `None` when `[features.code-blocks]` is off.
+    pub(crate) counts: Option<CodeBlockCounts>,
+}
+
 /// The findings for `blocks`, in block order, reading each `from(...)` and `uses(...)` source
 /// with `languages`, and one `code-block-stale` error for each `from(...)` block whose body
 /// differs from its parts. Then the `uses(...)` findings against `lock`'s `[code-blocks]`
 /// section, judging a doc's recorded targets obsolete only when `in_scope` holds for it and none
-/// of its `uses(...)` values fails to resolve. Nothing when `config` leaves
-/// `[features.code-blocks]` off.
+/// of its `uses(...)` values fails to resolve. With them, each block's [`BlockState`], counted.
+/// Nothing when `config` leaves `[features.code-blocks]` off.
 ///
 /// Effect: reads every source file the blocks name, contained in the project root, and each doc
 /// holding a `from(...)` block.
@@ -45,42 +58,57 @@ pub(crate) fn evaluate(
     blocks: &[CodeBlock],
     lock: &Lockfile,
     in_scope: impl Fn(&str) -> bool,
-) -> Result<Vec<Finding>, CartridgeLoadError> {
+) -> Result<Evaluation, CartridgeLoadError> {
+    let Some(code_blocks) = config.code_blocks() else {
+        return Ok(Evaluation::default());
+    };
     let mut findings = Vec::new();
-    if config.code_blocks().is_none() {
-        return Ok(findings);
-    }
+    let mut states: Vec<BlockState> = Vec::with_capacity(blocks.len());
     let mut doc: Option<(&str, Option<String>)> = None;
     let mut written = Vec::new();
     let mut unresolved_uses = BTreeSet::new();
     for block in blocks {
-        let Some(info) = block.info.as_ref() else {
-            continue;
-        };
-        findings.extend(unknown_attributes(info));
-        findings.extend(missing_reasons(info));
-        let sources = sources(config, languages, info)?;
-        findings.extend(sources.missing);
-        written.extend(sources.uses);
-        unresolved_uses.extend(sources.use_missing.then_some(block.fence.file.as_str()));
-        let Some(parts) = sources.parts else {
-            continue;
-        };
-        let file = block.fence.file.as_str();
-        if doc.as_ref().is_none_or(|(read, _)| *read != file) {
-            doc = Some((file, read_doc(config, file)));
+        let mut outcome = None;
+        if let Some(info) = block.info.as_ref() {
+            findings.extend(unknown_attributes(info));
+            findings.extend(missing_reasons(info));
+            let sources = sources(config, languages, info)?;
+            findings.extend(sources.missing);
+            written.extend(sources.uses);
+            unresolved_uses.extend(sources.use_missing.then_some(block.fence.file.as_str()));
+            outcome = sources.from_missing.then_some(Excerpt::SourceMissing);
+            if let Some(parts) = sources.parts {
+                let file = block.fence.file.as_str();
+                if doc.as_ref().is_none_or(|(read, _)| *read != file) {
+                    doc = Some((file, read_doc(config, file)));
+                }
+                let stale = doc
+                    .as_ref()
+                    .and_then(|(_, text)| text.as_ref())
+                    .and_then(|text| {
+                        let line_endings = config.hash_settings().line_endings;
+                        let expected = excerpt::expected(&parts, line_endings);
+                        excerpt::stale(block, text, &expected, line_endings)
+                    });
+                outcome = Some(if stale.is_some() {
+                    Excerpt::Stale
+                } else {
+                    Excerpt::Current
+                });
+                findings.extend(stale);
+            }
         }
-        let Some((_, Some(text))) = doc.as_ref() else {
-            continue;
-        };
-        let line_endings = config.hash_settings().line_endings;
-        let expected = excerpt::expected(&parts, line_endings);
-        findings.extend(excerpt::stale(block, text, &expected, line_endings));
+        states.push(state_of(block, outcome, |language| {
+            code_blocks.checks(language)
+        }));
     }
     findings.extend(uses::judge(&written, lock.recorded_uses(), |doc| {
         in_scope(doc) && !unresolved_uses.contains(doc)
     }));
-    Ok(findings)
+    Ok(Evaluation {
+        findings,
+        counts: Some(CodeBlockCounts::tally(&states)),
+    })
 }
 
 /// The text of `doc`, relative to the project root, as it is on disk now. `None` when it can't
@@ -102,6 +130,8 @@ struct Sources {
     uses: Vec<Written>,
     /// Whether some `uses(...)` value doesn't resolve.
     use_missing: bool,
+    /// Whether some `from(...)` value doesn't resolve.
+    from_missing: bool,
 }
 
 /// One `code-block-unknown-attribute` warning at `info` for a language word holding commas, and
@@ -216,6 +246,7 @@ fn sources(
         parts,
         uses,
         use_missing,
+        from_missing: part_missing,
     })
 }
 

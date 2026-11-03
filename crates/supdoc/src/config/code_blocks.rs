@@ -7,10 +7,55 @@
 //! `include` and `exclude` choose which files code-blocks reads, independently of linking: each
 //! defaults to the top-level key of the same name, and setting one never changes which files
 //! linking reads.
+//!
+//! A language is on exactly when its table, `[features.code-blocks.rust]`, `.shell` or
+//! `.python`, is written in some file of the chain; an empty table turns it on.
+
+mod python;
+mod rust;
+mod shell;
 
 use crate::path::AbsolutePath;
 
+use self::python::RawPython;
+use self::rust::RawRust;
+use self::shell::RawShell;
 use super::pattern::{AnchoredPatterns, PatternList};
+
+/// A language supdoc has a `[features.code-blocks]` table for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Language {
+    /// Rust: tagged `rust` or `rs`.
+    Rust,
+    /// Shell: tagged `sh`, `bash` or `shell`.
+    Shell,
+    /// Python: tagged `python`, `py` or `python3`.
+    Python,
+}
+
+impl Language {
+    /// The language a block's tag names, when it is one of the aliases above.
+    #[must_use]
+    pub(crate) fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "rust" | "rs" => Some(Self::Rust),
+            "sh" | "bash" | "shell" => Some(Self::Shell),
+            "python" | "py" | "python3" => Some(Self::Python),
+            _ => None,
+        }
+    }
+}
+
+/// Which language tables some file in the chain wrote.
+#[derive(Debug, Clone, Copy, Default)]
+struct Languages {
+    /// `[features.code-blocks.rust]` is written.
+    rust: bool,
+    /// `[features.code-blocks.shell]` is written.
+    shell: bool,
+    /// `[features.code-blocks.python]` is written.
+    python: bool,
+}
 
 /// The `[features.code-blocks]` table, exactly as written. Any other key inside it is refused as
 /// `config-parse`.
@@ -22,6 +67,12 @@ pub(crate) struct RawCodeBlocks {
     /// Files removed from code-blocks' `include`, with the top-level `exclude` rules. `None`
     /// inherits; `Some(empty)` deliberately excludes nothing.
     exclude: Option<PatternList>,
+    /// `[features.code-blocks.rust]`, when written.
+    rust: Option<RawRust>,
+    /// `[features.code-blocks.shell]`, when written.
+    shell: Option<RawShell>,
+    /// `[features.code-blocks.python]`, when written.
+    python: Option<RawPython>,
 }
 
 /// The table's keys merged across the chain, before the top-level defaults fill the gaps.
@@ -31,6 +82,8 @@ pub(super) struct Written {
     include: Option<AnchoredPatterns>,
     /// The nearest `exclude` written inside the table, anchored at the file that wrote it.
     exclude: Option<AnchoredPatterns>,
+    /// The language tables written in any layer.
+    languages: Languages,
 }
 
 impl Written {
@@ -44,6 +97,7 @@ impl Written {
         CodeBlocks {
             include: self.include.unwrap_or_else(|| include.clone()),
             exclude: self.exclude.or_else(|| exclude.cloned()),
+            languages: self.languages,
         }
     }
 }
@@ -55,9 +109,21 @@ pub(crate) struct CodeBlocks {
     include: AnchoredPatterns,
     /// Files removed from `include`, if any.
     exclude: Option<AnchoredPatterns>,
+    /// The language tables written.
+    languages: Languages,
 }
 
 impl CodeBlocks {
+    /// Whether `language`'s table is written, turning its blocks' checks on.
+    #[must_use]
+    pub(crate) const fn checks(&self, language: Language) -> bool {
+        match language {
+            Language::Rust => self.languages.rust,
+            Language::Shell => self.languages.shell,
+            Language::Python => self.languages.python,
+        }
+    }
+
     /// Whether code-blocks reads `path`: included and not excluded.
     #[must_use]
     pub(crate) fn scans(&self, path: &AbsolutePath) -> bool {
@@ -83,7 +149,14 @@ pub(super) fn merge(
     file: &AbsolutePath,
     base: &AbsolutePath,
 ) -> Option<Written> {
-    let Some(RawCodeBlocks { include, exclude }) = raw else {
+    let Some(RawCodeBlocks {
+        include,
+        exclude,
+        rust,
+        shell,
+        python,
+    }) = raw
+    else {
         return nearer;
     };
     let anchor = |list| AnchoredPatterns::written_by(file.clone(), base.clone(), list);
@@ -91,6 +164,11 @@ pub(super) fn merge(
     Some(Written {
         include: nearer.include.or_else(|| include.map(anchor)),
         exclude: nearer.exclude.or_else(|| exclude.map(anchor)),
+        languages: Languages {
+            rust: nearer.languages.rust || rust.is_some(),
+            shell: nearer.languages.shell || shell.is_some(),
+            python: nearer.languages.python || python.is_some(),
+        },
     })
 }
 
@@ -100,6 +178,7 @@ mod tests {
 
     use tempfile::TempDir;
 
+    use super::Language;
     use crate::config::Config;
     use crate::exit::ExitStatus;
     use crate::path::AbsolutePath;
@@ -219,6 +298,74 @@ mod tests {
 
         assert!(code_blocks.scans(&at(&dir, "skills/a.md")));
         assert!(!code_blocks.scans(&at(&dir, "apps/web/skills/a.md")));
+    }
+
+    #[test]
+    fn a_written_language_table_turns_that_language_on() {
+        let dir = tree(&[(
+            "supdoc.config.toml",
+            "[features.code-blocks.rust]\n[features.code-blocks.python]\n",
+        )]);
+
+        let config = Config::load(&at(&dir, ".")).expect("the fixture config should load");
+        let code_blocks = config
+            .code_blocks()
+            .expect("a language table turns the feature on");
+
+        assert!(code_blocks.checks(Language::Rust));
+        assert!(code_blocks.checks(Language::Python));
+        assert!(
+            !code_blocks.checks(Language::Shell),
+            "an absent table should leave its language off"
+        );
+    }
+
+    #[test]
+    fn a_language_table_is_inherited_through_extends() {
+        let dir = tree(&[
+            ("supdoc.config.toml", "[features.code-blocks.shell]\n"),
+            (
+                "apps/web/supdoc.config.toml",
+                "extends = \"../../supdoc.config.toml\"\n[features.code-blocks]\n",
+            ),
+        ]);
+
+        let config = Config::load(&at(&dir, "apps/web")).expect("the fixture config should load");
+        let code_blocks = config.code_blocks().expect("the table is written");
+
+        assert!(code_blocks.checks(Language::Shell));
+    }
+
+    #[test]
+    fn an_unknown_key_inside_a_language_table_is_refused_as_a_parse_error() {
+        let dir = tree(&[(
+            "supdoc.config.toml",
+            "[features.code-blocks.shell]\nflavor = \"zsh\"\n",
+        )]);
+
+        let error = Config::load_file(&at(&dir, "supdoc.config.toml"))
+            .expect_err("an unknown key inside a language table should be refused");
+
+        assert_eq!(error.code(), "config-parse", "got {error:?}");
+        assert_eq!(error.status(), ExitStatus::Config);
+    }
+
+    #[test]
+    fn each_alias_names_its_language() {
+        let cases = [
+            ("rust", Some(Language::Rust)),
+            ("rs", Some(Language::Rust)),
+            ("sh", Some(Language::Shell)),
+            ("bash", Some(Language::Shell)),
+            ("shell", Some(Language::Shell)),
+            ("python", Some(Language::Python)),
+            ("py", Some(Language::Python)),
+            ("python3", Some(Language::Python)),
+            ("zsh", None),
+        ];
+        for (tag, expected) in cases {
+            assert_eq!(Language::from_tag(tag), expected, "tag `{tag}`");
+        }
     }
 
     #[test]

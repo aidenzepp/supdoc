@@ -430,3 +430,55 @@ fn update_does_not_record_a_use_that_does_not_resolve() {
         "an unresolved target should not be recorded"
     );
 }
+
+/// The text check's lines from `Links` on, with `·` separators written as `, `.
+fn summary_lines(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .skip_while(|line| !line.starts_with("Links  "))
+        .map(|line| line.replace(" · ", ", "))
+        .collect()
+}
+
+#[test]
+fn summary_counts_each_block_once_worst_first_after_the_links_line() {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write(
+        "supdoc.config.toml",
+        "[features.code-blocks]\n[features.code-blocks.rust]\n",
+    );
+    project.write(
+        "docs/blocks.md",
+        "# Blocks\n\n```rust from(../src/lib.rs#gone)\nfn gone() {}\n```\n\n\
+         ```rust\nfn main() {}\n```\n\n```sh\necho hi\n```\n\n```text\nplain\n```\n\n\
+         ```toml\na = 1\n```\n\n```py ignore(needs a server)\nprint()\n```\n",
+    );
+
+    let run = project.supdoc(&["check"]);
+    let _failed = run.assert_exit(1);
+
+    let lines = summary_lines(&run.stdout);
+    assert_eq!(
+        lines.get(1).map(String::as_str),
+        Some("Code blocks  1 failed, 1 unknown language, 3 not checked, 1 opted out"),
+        "the code-block line should follow the Links line:\n{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn summary_has_no_code_block_line_without_the_table() {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write("docs/blocks.md", "# Blocks\n\n```rust\nfn main() {}\n```\n");
+
+    let run = project.supdoc(&["check"]);
+    let _passed = run.assert_exit(0);
+
+    assert!(
+        !run.stdout.contains("Code blocks"),
+        "with the feature off there should be no code-block line:\n{}",
+        run.stdout
+    );
+}
