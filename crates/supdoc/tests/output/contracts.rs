@@ -704,6 +704,9 @@ mod helps {
         codes
     }
 
+    /// Config keys that look like codes but are not.
+    const NOT_CODES: &[&str] = &["code-block-timeout"];
+
     /// Whether `text` has the shape of a code: `area-name` in kebab-case, whose first word is one
     /// of supdoc's code areas, such as `link-failed` or `cli-usage`.
     fn is_code(text: &str) -> bool {
@@ -715,7 +718,8 @@ mod helps {
             return false;
         };
         // Every `code` code is `code-block-<name>`; `code-blocks` is the feature and table name.
-        AREAS.contains(&area)
+        !NOT_CODES.contains(&text)
+            && AREAS.contains(&area)
             && (area != "code" || name.starts_with("block-"))
             && name.starts_with(|c: char| c.is_ascii_lowercase())
             && name
@@ -727,6 +731,10 @@ mod helps {
     fn code_blocks_is_a_name_not_a_code() {
         assert!(!is_code("code-blocks"), "`code-blocks` is the feature name");
         assert!(is_code("code-block-stale"), "`code-block-stale` is a code");
+        assert!(
+            !is_code("code-block-timeout"),
+            "`code-block-timeout` is a `[limits]` key"
+        );
     }
 
     /// A lockfile entry for `docs/old.md`'s link, with a hash that disagrees with the recorded one.
