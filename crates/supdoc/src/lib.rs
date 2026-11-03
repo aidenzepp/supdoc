@@ -167,6 +167,34 @@ pub(crate) mod check {
     pub(crate) mod fix;
 }
 
+/// Checking the code blocks in documentation: finding each block, reading its info string and
+/// judging it. Kept apart from linking: nothing here reads links, targets or the lockfile.
+pub(crate) mod code_blocks {
+    /// A block's info string: its language and attributes.
+    pub(crate) mod info;
+
+    /// A code block, and finding the blocks in a file by its language.
+    pub(crate) mod block;
+
+    /// Fenced code blocks in Markdown files.
+    mod markdown;
+
+    /// Code blocks in Rust doc comments.
+    mod doc_comments;
+
+    /// Reading an excerpt's source.
+    mod source;
+
+    /// Comparing an excerpt with its source.
+    mod excerpt;
+
+    /// Block states and their counts.
+    mod states;
+
+    /// The per-block pipeline `check` runs.
+    pub(crate) mod evaluate;
+}
+
 /// Rendering reports as text, JSON and JSONL.
 pub(crate) mod output;
 
