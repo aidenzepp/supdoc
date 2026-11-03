@@ -792,6 +792,29 @@ fn shell_format_a_non_zero_exit_quotes_stderr_and_names_the_block_by_its_index()
 }
 
 #[test]
+fn parse_shfmt_syntax_error_is_code_block_parse_at_the_tools_line() {
+    let json = check_with_shfmt("echo \"$0:1:1: bad\" >&2\nexit 1", &[], 1);
+
+    assert_eq!(
+        finding_kinds(&json),
+        ["code-block-parse", "code-block-parse"],
+        "{json}"
+    );
+    assert!(json.to_string().contains("ignore(<why>)"), "{json}");
+}
+
+#[test]
+fn parse_other_failures_stay_tool_failed() {
+    let json = check_with_shfmt("echo oops >&2\nexit 1", &[], 1);
+
+    assert_eq!(
+        finding_kinds(&json),
+        ["code-block-tool-failed", "code-block-tool-failed"],
+        "{json}"
+    );
+}
+
+#[test]
 fn shell_format_a_tool_past_the_timeout_is_killed_and_reported() {
     let started = std::time::Instant::now();
     let json = check_with_shfmt("/bin/sleep 30", &["--code-block-timeout", "200ms"], 1);

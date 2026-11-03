@@ -838,6 +838,13 @@ mod helps {
             needs_permissions: false,
         },
         HelpCase {
+            kind: "code-block-parse",
+            setup: |p| shfmt_runs(p, "echo \"$0:1:1: syntax error\" >&2\nexit 1"),
+            args: &["check"],
+            via: Via::OutsideTools,
+            needs_permissions: false,
+        },
+        HelpCase {
             kind: "code-block-fix-unsafe",
             setup: |p| shfmt_runs(p, "printf 'echo hi\\n```\\n'"),
             args: &["check"],

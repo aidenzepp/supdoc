@@ -399,8 +399,16 @@ fn run_formatter(
         stdin: input.as_bytes(),
         timeout,
     };
-    let verdict = format::judge(input, runner::run(&call, env, root));
-    let finding = format::finding(&verdict, tool, &record.at, timeout);
+    let verdict = format::judge(tool, input, runner::run(&call, env, root));
+    let at = match &verdict {
+        format::Verdict::ParseFailed {
+            line: Some(line), ..
+        } => rust::LineMap::of(&pending.block, pending.doc.text())
+            .and_then(|map| map.doc_line(*line).cloned())
+            .unwrap_or_else(|| record.at.clone()),
+        _ => record.at.clone(),
+    };
+    let finding = format::finding(&verdict, tool, &at, timeout);
     let findings = match (&verdict, finding) {
         (format::Verdict::Unformatted(output), Some(unformatted)) => format::fixed(
             unformatted,

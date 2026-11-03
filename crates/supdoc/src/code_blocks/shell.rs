@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 use std::path::Path;
 
+use super::format::{ParseError, first_line};
 use crate::config::code_blocks::Dialect;
 
 /// `shfmt`'s `-ln <dialect>` arguments.
@@ -27,11 +28,22 @@ pub(crate) fn format_args(doc: &Path, index: usize) -> Vec<OsString> {
     ]
 }
 
+/// `shfmt`'s syntax-error report: a line `<path>:L:C: <message>`. `None` for any other stderr.
+#[must_use]
+pub(crate) fn parse_error(stderr: &str) -> Option<ParseError> {
+    let first = stderr.lines().next()?;
+    let line = first_line(first)?;
+    first
+        .contains(": ")
+        .then_some(ParseError { line: Some(line) })
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
-    use super::{dialect_args, format_args};
+    use super::{dialect_args, format_args, parse_error};
+    use crate::code_blocks::format::ParseError;
     use crate::config::code_blocks::Dialect;
 
     #[test]
@@ -45,5 +57,18 @@ mod tests {
     #[test]
     fn the_dialect_becomes_shfmts_language_flag() {
         assert_eq!(dialect_args(Dialect::Posix), ["-ln", "posix"]);
+    }
+
+    #[test]
+    fn a_path_line_column_report_is_a_parse_error_at_that_line() {
+        assert_eq!(
+            parse_error("/p/a.md.1.sh:3:5: `fi` must close an `if`\n"),
+            Some(ParseError { line: Some(2) })
+        );
+    }
+
+    #[test]
+    fn stderr_without_a_position_is_not_a_parse_error() {
+        assert_eq!(parse_error("shfmt: bad input\n"), None);
     }
 }
