@@ -336,6 +336,8 @@ impl FeaturesJson {
 pub(crate) struct LimitsJson {
     /// How long one read of a file may take.
     parse_timeout: LimitJson,
+    /// How long one code block may run.
+    code_block_timeout: LimitJson,
     /// How large `supdoc.lock` may be.
     max_lock_size: LimitJson,
     /// How large each config file may be. Set only by flag or environment variable.
@@ -349,6 +351,7 @@ impl LimitsJson {
     fn new(root: &AbsolutePath, limits: &Limits) -> Self {
         Self {
             parse_timeout: LimitJson::new(root, &limits.parse_timeout),
+            code_block_timeout: LimitJson::new(root, &limits.code_block_timeout),
             max_lock_size: LimitJson::new(root, &limits.max_lock_size),
             max_config_size: LimitJson::new(root, &limits.max_config_size),
             max_ignore_size: LimitJson::new(root, &limits.max_ignore_size),
@@ -356,9 +359,10 @@ impl LimitsJson {
     }
 
     /// Each limit with its key, in the order text output shows them.
-    const fn rows(&self) -> [(&'static str, &LimitJson); 4] {
+    const fn rows(&self) -> [(&'static str, &LimitJson); 5] {
         [
             ("parse-timeout", &self.parse_timeout),
+            ("code-block-timeout", &self.code_block_timeout),
             ("max-lock-size", &self.max_lock_size),
             ("max-config-size", &self.max_config_size),
             ("max-ignore-size", &self.max_ignore_size),

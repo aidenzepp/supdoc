@@ -35,6 +35,45 @@ fn an_environment_variable_beats_the_config_file() {
 }
 
 #[test]
+fn code_block_timeout_takes_flag_then_variable_then_config_then_default() {
+    let project = Project::fixture("basic");
+    let show = |args: &[&str], env: &[(&str, &Path)]| {
+        project.supdoc_in_with(".", args, env).assert_exit(0).json()
+    };
+    let base = ["config", "show", "--json"];
+    let env = [("SUPDOC_CODE_BLOCK_TIMEOUT", Path::new("5s"))];
+
+    let json = show(&base, &[]);
+    assert_eq!(at(&json, "/data/limits/code_block_timeout/value"), "10s");
+    assert_eq!(
+        at(&json, "/data/limits/code_block_timeout/source"),
+        "default"
+    );
+
+    project.write(
+        "supdoc.config.toml",
+        "[limits]\ncode-block-timeout = \"30s\"\n",
+    );
+    let json = show(&base, &[]);
+    assert_eq!(at(&json, "/data/limits/code_block_timeout/value"), "30s");
+    assert_eq!(
+        at(&json, "/data/limits/code_block_timeout/source"),
+        "config"
+    );
+
+    let json = show(&base, &env);
+    assert_eq!(at(&json, "/data/limits/code_block_timeout/value"), "5s");
+    assert_eq!(at(&json, "/data/limits/code_block_timeout/source"), "env");
+
+    let json = show(
+        &["config", "show", "--json", "--code-block-timeout", "0"],
+        &env,
+    );
+    assert_eq!(at(&json, "/data/limits/code_block_timeout/value"), "0");
+    assert_eq!(at(&json, "/data/limits/code_block_timeout/source"), "flag");
+}
+
+#[test]
 fn a_flag_after_the_subcommand_still_counts_as_a_flag() {
     let project = Project::fixture("basic");
     project.write("supdoc.config.toml", "[limits]\nmax-lock-size = \"1MiB\"\n");
