@@ -4,6 +4,9 @@ use std::ffi::OsString;
 use std::path::Path;
 
 use crate::config::code_blocks::Edition;
+use crate::finding::{IndexedText, Location};
+
+use super::block::CodeBlock;
 
 /// The macros that read a file or an environment variable at compile time.
 const COMPILE_TIME_READS: [&str; 5] = [
@@ -61,6 +64,189 @@ pub(crate) fn config_args(root: &Path) -> Vec<OsString> {
             vec![OsString::from("--config-path"), real.into_os_string()]
         }
         _ => Vec::new(),
+    }
+}
+
+/// What a Rust block's tools don't see as written: its hidden lines and its `##`-escaped lines.
+/// No line is added or removed, so the checked text's lines are the block's lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Hidden {
+    /// Each hidden line, in order.
+    lines: Vec<HiddenLine>,
+    /// Each `##`-escaped line: its checked text without leading whitespace, and how many shown
+    /// lines with that same text come before it.
+    escaped: Vec<(String, usize)>,
+}
+
+/// One hidden line of a Rust block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HiddenLine {
+    /// Its 0-based line in the checked text.
+    at: usize,
+    /// Its checked text: its indentation and the text after `# `, or empty for a blank one.
+    checked: String,
+    /// The line as the author wrote it, which a fix writes back unchanged.
+    written: String,
+}
+
+/// `input`, a Rust block with every line LF-ended, as its tools check it, with what it hides.
+/// As in rustdoc, a line whose text after its leading whitespace is `#` alone or starts with
+/// `# ` is hidden: it is checked as its indentation and the text after `# ` (empty when that is
+/// blank). A line whose text after its leading whitespace starts `##` is checked without that
+/// first `#`. `#[` and `#!` are ordinary lines.
+///
+/// The indentation stays so a hidden line inside a body is checked where the formatter wants
+/// it; whitespace means nothing else to the compiler.
+#[must_use]
+pub(crate) fn unhide(input: &str) -> (String, Hidden) {
+    let mut checked = String::with_capacity(input.len());
+    let mut hidden = Hidden {
+        lines: Vec::new(),
+        escaped: Vec::new(),
+    };
+    let mut seen = Seen::default();
+    for (at, line) in input.split_terminator('\n').enumerate() {
+        let rest = line.trim_start();
+        let indent = line.get(..line.len() - rest.len()).unwrap_or_default();
+        if let Some(escaped) = rest.strip_prefix('#').filter(|_| rest.starts_with("##")) {
+            let occurrence = seen.count(escaped);
+            hidden.escaped.push((escaped.to_owned(), occurrence));
+            checked.push_str(indent);
+            checked.push_str(escaped);
+        } else if let Some(text) = (rest == "#").then_some("").or(rest.strip_prefix("# ")) {
+            let text = if text.trim().is_empty() {
+                String::new()
+            } else {
+                format!("{indent}{text}")
+            };
+            checked.push_str(&text);
+            hidden.lines.push(HiddenLine {
+                at,
+                checked: text,
+                written: line.to_owned(),
+            });
+        } else {
+            let _occurrence = seen.count(rest);
+            checked.push_str(line);
+        }
+        checked.push('\n');
+    }
+    (checked, hidden)
+}
+
+/// How many shown lines with each text, without leading whitespace, have been read so far.
+#[derive(Debug, Default)]
+struct Seen(std::collections::HashMap<String, usize>);
+
+impl Seen {
+    /// How many shown lines reading `text` came before this one, counting this one from now on.
+    fn count(&mut self, text: &str) -> usize {
+        let count = self.0.entry(text.to_owned()).or_default();
+        *count += 1;
+        *count - 1
+    }
+}
+
+impl Hidden {
+    /// `output`, a formatter's output for the checked text with no final line ending, written
+    /// back as the block. Each hidden line goes back exactly as the author wrote it. A shown line
+    /// gets its `#` escape back after its indentation when it is the same occurrence of the same
+    /// text as an escaped line, or when it would otherwise read as hidden or escaped.
+    ///
+    /// # Errors
+    ///
+    /// The checked-text line of the first hidden line that can't be matched one-to-one with a
+    /// line of `output`: its text or indentation changed, it was removed, or its place among
+    /// `output`'s lines is ambiguous, so the formatter added, removed or reordered hidden lines.
+    pub(crate) fn rehide(&self, output: &str) -> Result<String, usize> {
+        let lines: Vec<&str> = output.split('\n').collect();
+        let earliest = first_matches(lines.iter().copied().enumerate(), self.lines.iter())?;
+        let mut latest = first_matches(
+            lines.iter().copied().enumerate().rev(),
+            self.lines.iter().rev(),
+        )?;
+        latest.reverse();
+        if let Some((line, _)) = self
+            .lines
+            .iter()
+            .zip(earliest.iter().zip(&latest))
+            .find(|(_, (early, late))| early != late)
+        {
+            return Err(line.at);
+        }
+        let mut hidden = earliest.into_iter().zip(&self.lines).peekable();
+        let mut seen = Seen::default();
+        let written: Vec<String> = lines
+            .iter()
+            .enumerate()
+            .map(|(at, line)| {
+                if let Some((_, original)) = hidden.next_if(|(found, _)| *found == at) {
+                    return original.written.clone();
+                }
+                let rest = line.trim_start();
+                let indent = line.get(..line.len() - rest.len()).unwrap_or_default();
+                let occurrence = seen.count(rest);
+                let was_escaped = self
+                    .escaped
+                    .iter()
+                    .any(|(text, nth)| text == rest && *nth == occurrence);
+                let must_escape = rest == "#" || rest.starts_with("# ") || rest.starts_with("##");
+                if was_escaped || must_escape {
+                    format!("{indent}#{rest}")
+                } else {
+                    (*line).to_owned()
+                }
+            })
+            .collect();
+        Ok(written.join("\n"))
+    }
+}
+
+/// The output line each of `hidden` matches, walking `lines` in the given order and taking the
+/// first line equal to its checked text each time.
+///
+/// # Errors
+///
+/// The checked-text line of the first hidden line with no match.
+fn first_matches<'output, 'hidden>(
+    mut lines: impl Iterator<Item = (usize, &'output str)>,
+    hidden: impl Iterator<Item = &'hidden HiddenLine>,
+) -> Result<Vec<usize>, usize> {
+    hidden
+        .map(|line| {
+            lines
+                .find(|(_, output)| *output == line.checked)
+                .map(|(found, _)| found)
+                .ok_or(line.at)
+        })
+        .collect()
+}
+
+/// Where each line of a block's checked text is in its doc. No line is added or removed, so the
+/// checked text's `n`th line is the block body's `n`th line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LineMap {
+    /// Each body line's text in the doc, located.
+    lines: Vec<Location>,
+}
+
+impl LineMap {
+    /// The map for `block`, found in `text`. `None` when a body line isn't inside `text`.
+    #[must_use]
+    pub(crate) fn of(block: &CodeBlock, text: &str) -> Option<Self> {
+        let indexed = IndexedText::new(text);
+        let lines = block
+            .body
+            .iter()
+            .map(|line| indexed.locate(block.fence.file.clone(), line.content.clone()))
+            .collect::<Option<_>>()?;
+        Some(Self { lines })
+    }
+
+    /// Where the checked text's `line`th line (0-based) is in the doc.
+    #[must_use]
+    pub(crate) fn doc_line(&self, line: usize) -> Option<&Location> {
+        self.lines.get(line)
     }
 }
 
@@ -409,10 +595,142 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        Found, MAX_SCAN_BYTES, Scan, attribute_edition, compile_time_read, config_args,
-        format_args, scan,
+        Found, LineMap, MAX_SCAN_BYTES, Scan, attribute_edition, compile_time_read, config_args,
+        format_args, scan, unhide,
     };
+    use crate::cartridges::markdown::cartridge::cartridge;
+    use crate::code_blocks::block::blocks_in;
     use crate::config::code_blocks::Edition;
+    use crate::finding::Location;
+    use crate::path::AbsolutePath;
+    use crate::read::cartridge::SourceFile;
+
+    #[test]
+    fn a_hidden_line_is_checked_without_its_prefix_and_no_line_is_added() {
+        let (checked, _) = unhide("# fn main() {\nlet x = 1;\n#\n# }\n");
+
+        assert_eq!(checked, "fn main() {\nlet x = 1;\n\n}\n");
+    }
+
+    #[test]
+    fn a_double_hash_is_a_literal_hash_and_is_written_back_escaped() {
+        let (checked, hidden) = unhide("## not hidden\n##\n");
+
+        assert_eq!(checked, "# not hidden\n#\n");
+        assert_eq!(
+            hidden.rehide("# not hidden\n#"),
+            Ok("## not hidden\n##".to_owned())
+        );
+    }
+
+    #[test]
+    fn an_indented_hidden_line_keeps_its_indentation_and_is_written_back_as_written() {
+        let block = "# fn main() {\n    # let x = 1;\n    #\nlet y=x;\n# }\n";
+
+        let (checked, hidden) = unhide(block);
+
+        assert_eq!(checked, "fn main() {\n    let x = 1;\n\nlet y=x;\n}\n");
+        assert_eq!(
+            hidden.rehide("fn main() {\n    let x = 1;\n\n    let y = x;\n}"),
+            Ok("# fn main() {\n    # let x = 1;\n    #\n    let y = x;\n# }".to_owned())
+        );
+    }
+
+    #[test]
+    fn an_escaped_line_keeps_its_escape_and_an_unescaped_twin_stays_unescaped() {
+        let block = "#[derive(Debug)]\nstruct S;\n##[derive(Debug)]\nstruct  T;\n";
+
+        let (checked, hidden) = unhide(block);
+
+        assert_eq!(
+            checked,
+            "#[derive(Debug)]\nstruct S;\n#[derive(Debug)]\nstruct  T;\n"
+        );
+        assert_eq!(
+            hidden.rehide("#[derive(Debug)]\nstruct S;\n#[derive(Debug)]\nstruct T;"),
+            Ok("#[derive(Debug)]\nstruct S;\n##[derive(Debug)]\nstruct T;".to_owned())
+        );
+    }
+
+    #[test]
+    fn attributes_and_inner_attributes_are_not_hidden() {
+        let block = "#![allow(unused)]\n#[derive(Debug)]\nstruct S;\n";
+
+        let (checked, hidden) = unhide(block);
+
+        assert_eq!(checked, block);
+        assert_eq!(
+            hidden.rehide(block.trim_end()),
+            Ok(block.trim_end().to_owned())
+        );
+    }
+
+    #[test]
+    fn formatter_output_gets_each_hidden_lines_prefix_back() {
+        let (checked, hidden) = unhide("# fn main() {\nlet x=1;\n# }\n");
+        assert_eq!(checked, "fn main() {\nlet x=1;\n}\n");
+
+        let written = hidden.rehide("fn main() {\n    let x = 1;\n}");
+
+        assert_eq!(written, Ok("# fn main() {\n    let x = 1;\n# }".to_owned()));
+    }
+
+    #[test]
+    fn hidden_lines_that_cant_be_matched_one_to_one_are_refused() {
+        let (_, hidden) = unhide("# use std::fmt;\n# fn main() {\nlet x=1;\n# }\n");
+
+        for (output, first, why) in [
+            (
+                "fn main() {\n    let x = 1;\n}",
+                0,
+                "a hidden line was removed",
+            ),
+            (
+                "use std::fmt;\nfn main() {\n    let x = 1; }",
+                3,
+                "a hidden line's text changed",
+            ),
+            (
+                "fn main() {\nuse std::fmt;\n    let x = 1;\n}",
+                1,
+                "two hidden lines swapped",
+            ),
+            (
+                "use std::fmt;\nfn main() {\n    let x = || {};\n}\n}",
+                3,
+                "a shown `}` makes the hidden `}` ambiguous",
+            ),
+        ] {
+            assert_eq!(hidden.rehide(output), Err(first), "{why}: {output:?}");
+        }
+    }
+
+    #[test]
+    fn the_line_map_points_each_checked_line_at_its_doc_line() {
+        let text = "# Doc\n\n- item\n\n  ```rust\n  # fn main() {\n  let x = 1;\n  # }\n  ```\n";
+        let path = AbsolutePath::new(std::path::Path::new("/repo/docs/a.md"))
+            .expect("the fixture path is absolute");
+        let file = SourceFile::parse(path, text.to_owned(), cartridge())
+            .expect("tree-sitter should return a tree");
+        let blocks = blocks_in(&file, |range| {
+            let source = "docs/a.md"
+                .parse()
+                .expect("the fixture source should be valid");
+            Location::in_text(source, text, range)
+        });
+        let block = blocks.first().expect("the doc holds one block");
+
+        let map = LineMap::of(block, text).expect("the block lies inside its doc");
+
+        let lines: Vec<(u32, u32)> = (0..3)
+            .map(|line| {
+                let at = map.doc_line(line).expect("each body line is mapped");
+                (at.line, at.column)
+            })
+            .collect();
+        assert_eq!(lines, [(6, 3), (7, 3), (8, 3)]);
+        assert_eq!(map.doc_line(3), None, "the block has three lines");
+    }
 
     #[test]
     fn rustfmt_reads_the_block_as_2024_and_prints_it() {

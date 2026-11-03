@@ -267,20 +267,18 @@ fn rustfmt_dir() -> Option<PathBuf> {
         .find(|dir| dir.is_absolute() && dir.join("rustfmt").is_file())
 }
 
-#[test]
-fn rust_format_with_the_real_rustfmt_passes_formatted_blocks_and_fails_others() {
+/// The variables that run the real `rustfmt`: `PATH` holding only its directory, and the real
+/// user's rustup and cargo homes, through which the rustup proxy finds its toolchains. `None`,
+/// with a note on stderr naming `test`, when `rustfmt` is not on `PATH`.
+fn real_rustfmt(test: &str) -> Option<Vec<(&'static str, PathBuf)>> {
     let Some(dir) = rustfmt_dir() else {
         // Written to the process's stderr directly, which `cargo test` shows for a passing test.
         let _ignored = std::io::Write::write_all(
             &mut std::io::stderr(),
-            b"SKIPPED rust_format_with_the_real_rustfmt: rustfmt is not on PATH\n",
+            format!("SKIPPED {test}: rustfmt is not on PATH\n").as_bytes(),
         );
-        return;
+        return None;
     };
-    let project = project_with_rust_doc(
-        "# Blocks\n\n```rust\nfn main() {}\n```\n\n```rust\nfn main(){let x=1;}\n```\n",
-    );
-    // The rustup proxy finds its toolchains through the real user's rustup and cargo homes.
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let rustup_home = std::env::var_os("RUSTUP_HOME")
         .map(PathBuf::from)
@@ -288,12 +286,30 @@ fn rust_format_with_the_real_rustfmt_passes_formatted_blocks_and_fails_others() 
     let cargo_home = std::env::var_os("CARGO_HOME")
         .map(PathBuf::from)
         .or_else(|| home.as_ref().map(|home| home.join(".cargo")));
-    let mut vars: Vec<(&str, &Path)> = vec![("PATH", &dir)];
-    vars.extend(rustup_home.as_deref().map(|path| ("RUSTUP_HOME", path)));
-    vars.extend(cargo_home.as_deref().map(|path| ("CARGO_HOME", path)));
+    let mut vars = vec![("PATH", dir)];
+    vars.extend(rustup_home.map(|path| ("RUSTUP_HOME", path)));
+    vars.extend(cargo_home.map(|path| ("CARGO_HOME", path)));
+    Some(vars)
+}
+
+/// `vars` as the borrowed pairs a run takes.
+fn borrowed<'vars>(vars: &'vars [(&'static str, PathBuf)]) -> Vec<(&'static str, &'vars Path)> {
+    vars.iter()
+        .map(|(name, path)| (*name, path.as_path()))
+        .collect()
+}
+
+#[test]
+fn rust_format_with_the_real_rustfmt_passes_formatted_blocks_and_fails_others() {
+    let Some(vars) = real_rustfmt("rust_format_with_the_real_rustfmt") else {
+        return;
+    };
+    let project = project_with_rust_doc(
+        "# Blocks\n\n```rust\nfn main() {}\n```\n\n```rust\nfn main(){let x=1;}\n```\n",
+    );
 
     let json = project
-        .supdoc_in_with(".", &["check", "--json"], &vars)
+        .supdoc_in_with(".", &["check", "--json"], &borrowed(&vars))
         .assert_exit(1)
         .json();
 
@@ -322,4 +338,47 @@ fn a_block_over_the_scan_cap_is_not_checked_with_one_warning() {
         "{json}"
     );
     assert_eq!(stub.record("runs"), "", "rustfmt should never run");
+}
+
+#[test]
+fn hidden_lines_in_a_formatted_block_pass_with_the_real_rustfmt() {
+    let Some(vars) = real_rustfmt("hidden_lines_in_a_formatted_block_pass") else {
+        return;
+    };
+    let project = project_with_rust_doc(
+        "# Blocks\n\n```rust\n# use std::fmt::Write as _;\n# fn main() {\n    # let x = 1;\n    let _y = x;\n# }\n```\n",
+    );
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &borrowed(&vars))
+        .assert_exit(0)
+        .json();
+
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+}
+
+#[test]
+fn hidden_lines_keep_their_prefix_when_the_real_rustfmt_fixes_the_block() {
+    let Some(vars) = real_rustfmt("hidden_lines_keep_their_prefix") else {
+        return;
+    };
+    let project = project_with_rust_doc(
+        "# Blocks\n\n```rust\n# fn main() {\n    # let x = 1;\nlet y=x;\n# }\n```\n",
+    );
+    let vars = borrowed(&vars);
+
+    let _fix = project
+        .supdoc_in_with(".", &["fix", "--yes"], &vars)
+        .assert_exit(0);
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &vars)
+        .assert_exit(0)
+        .json();
+
+    assert_eq!(
+        project.read("docs/blocks.md"),
+        "# Blocks\n\n```rust\n# fn main() {\n    # let x = 1;\n    let y = x;\n# }\n```\n",
+        "the fix should format the shown line and keep each hidden line's `# `"
+    );
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
 }
