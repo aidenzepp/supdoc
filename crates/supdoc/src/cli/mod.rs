@@ -251,11 +251,12 @@ impl std::error::Error for CliError {}
 pub(crate) fn run(
     command: &Command,
     skill_dirs: &skill::SkillDirs,
+    tools: &crate::code_blocks::tools::ToolEnv,
     context: &Context,
     output: &mut Output,
 ) -> Result<Outcome, CliError> {
     match command {
-        Command::Check(args) => check::run(args, context, output),
+        Command::Check(args) => check::run(args, tools, context, output),
         Command::Update(args) => update::run(args, context, output),
         Command::Fix(args) => fix::run(args, context, output),
         Command::List(args) => list::run(args, context, output),

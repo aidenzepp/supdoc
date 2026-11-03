@@ -6,6 +6,7 @@ use std::ops::Range;
 use std::path::Path;
 
 use crate::config::Config;
+use crate::config::code_blocks::Language;
 use crate::finding::{Finding, Location, Severity};
 use crate::hash::Hash;
 use crate::lock::model::Lockfile;
@@ -19,7 +20,8 @@ use super::info::{
     source_attributes,
 };
 use super::source::{self, SourceText, Unresolved};
-use super::states::{Excerpt, state_of, tag_of};
+use super::states::{Excerpt, NotChecked, state_of, tag_of};
+use super::tools::{Found, Tool, ToolEnv, find, formatter};
 use super::uses::{self, UseState, Written};
 
 pub(crate) use super::states::{BlockState, CodeBlockCounts};
@@ -29,6 +31,12 @@ const UNKNOWN_ATTRIBUTE: &str = "code-block-unknown-attribute";
 
 /// The code for an `ignore`, `no_format` or `no_lint` written without a reason.
 const IGNORE_REASON: &str = "code-block-ignore-reason";
+
+/// The code for a selected tool that isn't on `PATH`.
+const TOOL_MISSING: &str = "code-block-tool-missing";
+
+/// The code for blocks a hardening rule refused to check.
+const NOT_CHECKED: &str = "code-block-not-checked";
 
 /// What judging the code blocks found.
 #[derive(Debug, Default)]
@@ -152,6 +160,80 @@ pub(crate) fn evaluate(
         counts: Some(CodeBlockCounts::tally(&states)),
         records,
     })
+}
+
+impl Evaluation {
+    /// Looks up the formatter of each pending block's language on `env`'s `PATH`, once per tool.
+    /// A tool not found makes its blocks [`BlockState::ToolMissing`] with one
+    /// `code-block-tool-missing` warning naming its install command; one whose real path is
+    /// inside `root` makes them not checked with one `code-block-not-checked` warning. A tool
+    /// found elsewhere leaves them pending: nothing runs yet.
+    ///
+    /// Effect: reads file metadata along `PATH` and resolves symlinks.
+    pub(crate) fn look_up_tools(&mut self, env: &ToolEnv, root: &Path) {
+        let mut looked_up: Vec<(&'static str, Found)> = Vec::new();
+        for record in &mut self.records {
+            if record.state != BlockState::NotChecked(NotChecked::Pending) {
+                continue;
+            }
+            let Some(tool) = record
+                .language
+                .as_deref()
+                .and_then(Language::from_tag)
+                .and_then(formatter)
+            else {
+                continue;
+            };
+            let found =
+                if let Some((_, found)) = looked_up.iter().find(|(name, _)| *name == tool.name) {
+                    found.clone()
+                } else {
+                    let found = find(tool.binary, env, root);
+                    self.findings.extend(tool_warning(tool, &found, &record.at));
+                    looked_up.push((tool.name, found.clone()));
+                    found
+                };
+            record.state = match found {
+                Found::OnPath(_) => continue,
+                Found::Missing => BlockState::ToolMissing,
+                Found::InsideRoot(_) => BlockState::NotChecked(NotChecked::ToolInsideRoot),
+            };
+            record.reason = record.state.reason(record.language.as_deref());
+        }
+        if self.counts.is_some() {
+            self.counts = Some(CodeBlockCounts::tally(
+                self.records.iter().map(|record| &record.state),
+            ));
+        }
+    }
+}
+
+/// The one warning for `tool`, found as `found`, at `at`, the first block that needs it. `None`
+/// when it is on `PATH` outside the root.
+fn tool_warning(tool: &Tool, found: &Found, at: &Location) -> Option<Finding> {
+    let name = tool.name;
+    let finding = match found {
+        Found::OnPath(_) => return None,
+        Found::Missing => Finding::new(
+            TOOL_MISSING,
+            Severity::Warning,
+            format!("`{name}` isn't on PATH, so its blocks aren't checked"),
+        )
+        .with_help(format!("install it with `{}`", tool.install)),
+        Found::InsideRoot(real) => Finding::new(
+            NOT_CHECKED,
+            Severity::Warning,
+            format!(
+                "`{name}` on PATH is `{}`, inside the checkout, so its blocks aren't checked",
+                real.display()
+            ),
+        )
+        .with_help(format!(
+            "put a `{}` from outside the project first on PATH",
+            tool.binary
+        )),
+    };
+    Some(finding.with_location(at.clone()))
 }
 
 /// The text of `doc`, relative to the project root, as it is on disk now. `None` when it can't

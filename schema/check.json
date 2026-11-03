@@ -211,7 +211,7 @@
           ]
         },
         "state": {
-          "description": "`passed`, `failed`, `stale`, `opted_out`, `not_checked` or `unknown_language`.",
+          "description": "`passed`, `failed`, `stale`, `opted_out`, `not_checked`, `unknown_language` or\n`tool_missing`.",
           "type": "string"
         },
         "uses": {

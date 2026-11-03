@@ -195,6 +195,33 @@ pub(crate) mod code_blocks {
     /// Block states and their counts.
     mod states;
 
+    /// The known-tool table, the environment tools get, and the binary lookup on `PATH`.
+    pub(crate) mod tools;
+
+    /// The hardened spawn of a tool on one block.
+    mod runner;
+
+    /// The format step.
+    mod format;
+
+    /// Rust's format and lint steps.
+    mod rust;
+
+    /// Shell's format and lint steps.
+    mod shell;
+
+    /// Python's format and lint steps.
+    mod python;
+
+    /// Reading the Rust toolchain a project pins.
+    mod toolchain;
+
+    /// The result cache.
+    mod cache;
+
+    /// The lint step.
+    mod lint;
+
     /// The per-block pipeline `check` runs.
     pub(crate) mod evaluate;
 }

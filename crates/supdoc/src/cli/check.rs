@@ -14,6 +14,7 @@ use serde::Serialize;
 use crate::check::model::{LinkReport, Report as CheckModel};
 use crate::check::reconcile::{self, check_outcome, reconcile_in};
 use crate::code_blocks::evaluate::{BlockRecord, BlockState, CodeBlockCounts, evaluate};
+use crate::code_blocks::tools::ToolEnv;
 use crate::code_blocks::uses::UseState;
 use crate::finding::{Finding, Location};
 use crate::link::destination::Untracked;
@@ -44,6 +45,7 @@ use super::{CliError, Context, Outcome};
 /// when the report cannot be written (74).
 pub(crate) fn run(
     args: &CheckArgs,
+    tools: &ToolEnv,
     context: &Context,
     output: &mut Output,
 ) -> Result<Outcome, CliError> {
@@ -62,8 +64,9 @@ pub(crate) fn run(
         doc.parse::<SourcePath>()
             .is_ok_and(|doc| scope.contains(&doc) && !scan.is_unread(&doc))
     };
-    let evaluation = evaluate(&config, languages, &scan.code_blocks, &lock, in_scope)
+    let mut evaluation = evaluate(&config, languages, &scan.code_blocks, &lock, in_scope)
         .map_err(|error| CliError::from(&error))?;
+    evaluation.look_up_tools(tools, config.root().as_path());
     scan.findings.extend(evaluation.findings);
 
     let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
@@ -155,7 +158,8 @@ struct CodeBlockJson {
     /// The language tag the block is read as. Left out for an untagged block outside Rust docs.
     #[serde(skip_serializing_if = "Option::is_none")]
     language: Option<String>,
-    /// `passed`, `failed`, `stale`, `opted_out`, `not_checked` or `unknown_language`.
+    /// `passed`, `failed`, `stale`, `opted_out`, `not_checked`, `unknown_language` or
+    /// `tool_missing`.
     state: &'static str,
     /// Why the block is in that state, when it has a reason.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -396,6 +400,7 @@ fn render_block_reasons(
         let label = match block.state {
             BlockState::OptedOut { .. } => "opted out",
             BlockState::NotChecked(_) => "not checked",
+            BlockState::ToolMissing => "tool missing",
             _ => continue,
         };
         let place = format!("{}:{}", context.paths.text(&block.at.file), block.at.line);
@@ -523,7 +528,12 @@ mod tests {
         let Command::Check(check_args) = &session.cli.command else {
             panic!("`supdoc {}` should be a check command", args.join(" "));
         };
-        let result = run(check_args, &session.context, &mut session.output);
+        let result = run(
+            check_args,
+            &ToolEnv::default(),
+            &session.context,
+            &mut session.output,
+        );
         session.finished(result)
     }
 

@@ -984,6 +984,7 @@ mod tests {
             let result = crate::cli::run(
                 &session.cli.command,
                 &crate::cli::skill::SkillDirs::from_vars(|_| None),
+                &crate::code_blocks::tools::ToolEnv::default(),
                 &session.context,
                 &mut session.output,
             );

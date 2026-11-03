@@ -446,6 +446,8 @@ mod helps {
         RemovedCwd,
         /// From a new subdirectory of the project, which has a config at its root.
         Subdirectory,
+        /// With `PATH` set to the project's `bin` directory.
+        ProjectPath,
     }
 
     /// One way to make `supdoc` print a message with a given code, and the help it carries, if any.
@@ -807,6 +809,31 @@ mod helps {
 
     /// Every message with a `help` that a user can be made to see, one way to reach each code.
     const HELP_CASES: &[HelpCase] = &[
+        case(
+            "code-block-tool-missing",
+            |p| {
+                config_with(p, "[features.code-blocks]\n[features.code-blocks.shell]\n");
+                p.write("docs/blocks.md", "# B\n\n```sh\necho hi\n```\n");
+            },
+            &["check"],
+        ),
+        HelpCase {
+            kind: "code-block-not-checked",
+            setup: |p| {
+                use std::os::unix::fs::PermissionsExt as _;
+                config_with(p, "[features.code-blocks]\n[features.code-blocks.shell]\n");
+                p.write("docs/blocks.md", "# B\n\n```sh\necho hi\n```\n");
+                p.write("bin/shfmt", "#!/bin/sh\n");
+                std::fs::set_permissions(
+                    p.path().join("bin/shfmt"),
+                    std::fs::Permissions::from_mode(0o755),
+                )
+                .expect("the stub should be made executable");
+            },
+            args: &["check"],
+            via: Via::ProjectPath,
+            needs_permissions: false,
+        },
         case(
             "code-block-unknown-attribute",
             |p| {
@@ -1522,6 +1549,14 @@ mod helps {
                     .output()
             }
             Via::Subdirectory => shell(&project, "mkdir sub && cd sub", &args).output(),
+            Via::ProjectPath => {
+                let bin = project.path().join("bin");
+                let path = bin.to_str().expect("the temp path should be UTF-8");
+                project
+                    .command(&args, &[("PATH", path)])
+                    .stdin(Stdio::null())
+                    .output()
+            }
             Via::RemovedCwd => {
                 shell(&project, "mkdir gone && cd gone && rmdir ../gone", &args).output()
             }
