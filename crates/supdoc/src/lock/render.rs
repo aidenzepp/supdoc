@@ -53,8 +53,6 @@ impl Lockfile {
             );
         }
         if self.uses().next().is_some() {
-            // The TOML key is the field name in kebab-case, as the parser reads it.
-            let code_blocks_key = "code_blocks".replace('_', "-");
             let mut code_blocks = Table::new();
             code_blocks.set_implicit(true);
             set(
@@ -64,7 +62,7 @@ impl Lockfile {
             );
             set(
                 document.as_table_mut(),
-                &code_blocks_key,
+                "code-blocks",
                 Item::Table(code_blocks),
             );
         }
