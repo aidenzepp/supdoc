@@ -54,124 +54,266 @@ pub(crate) fn config_args(root: &Path) -> Vec<OsString> {
     }
 }
 
-/// The compile-time read `input`, a Rust block, holds, spelled as written: a call of `include!`,
-/// `include_str!`, `include_bytes!`, `env!` or `option_env!`, with any whitespace or comment
-/// before the `!`, or an attribute with a `path =` in it (`#[path = ...]`, `#[cfg_attr(.., path
-/// = ...)]`). `None` when it holds none.
+/// The largest block, in bytes, the compile-time-read scan reads. A bigger one is not checked.
+pub(crate) const MAX_SCAN_BYTES: usize = 256 * 1024;
+
+/// What the compile-time-read scan found in a Rust block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Scan {
+    /// The block holds no compile-time read.
+    Clean,
+    /// The block holds this compile-time read, spelled as `include_str!` or `#[path]`.
+    Read(String),
+    /// The block is over [`MAX_SCAN_BYTES`], so it wasn't scanned.
+    TooLarge,
+}
+
+/// Scans `input`, a Rust block, for a compile-time read: a call of `include!`, `include_str!`,
+/// `include_bytes!`, `env!` or `option_env!` (comments and whitespace may sit before the `!`,
+/// and `r#env` counts), or an attribute with `path =` anywhere in its brackets (`#[path = ..]`,
+/// `#![path = ..]`, `#[cfg_attr(.., path = ..)]`). [`Scan::TooLarge`] past [`MAX_SCAN_BYTES`].
 ///
-/// The scan reads every position of the text, comments and strings included, so a comment or a
-/// string can only add a match, never hide one.
+/// One linear pass: [`Tokens`] skips comments and string and character literals once each, and
+/// each token is judged from the one or two before it.
 #[must_use]
-pub(crate) fn compile_time_read(input: &str) -> Option<String> {
-    let bytes = input.as_bytes();
-    for (start, _) in input.char_indices() {
-        let before = start.checked_sub(1).and_then(|at| bytes.get(at));
-        if before.is_some_and(|byte| is_ident_byte(*byte)) {
-            continue;
+pub(crate) fn compile_time_read(input: &str) -> Scan {
+    if input.len() > MAX_SCAN_BYTES {
+        return Scan::TooLarge;
+    }
+    scan(input).map_or(Scan::Clean, Scan::Read)
+}
+
+/// The first compile-time read in `input`, by [`compile_time_read`]'s rules, without the size cap.
+fn scan(input: &str) -> Option<String> {
+    let mut before = Token::Other;
+    let mut before_that = Token::Other;
+    // The bracket depth inside the attribute being read, or 0 outside one.
+    let mut attribute = 0_usize;
+    for token in Tokens::new(input) {
+        match token {
+            Token::Punct('!') => {
+                if let Token::Ident(word) = before
+                    && COMPILE_TIME_READS.contains(&word)
+                {
+                    return Some(format!("{word}!"));
+                }
+            }
+            Token::Punct('[') if attribute > 0 => attribute += 1,
+            Token::Punct('[') => {
+                let opens = before == Token::Punct('#')
+                    || (before == Token::Punct('!') && before_that == Token::Punct('#'));
+                if opens {
+                    attribute = 1;
+                }
+            }
+            Token::Punct(']') => attribute = attribute.saturating_sub(1),
+            Token::Punct('=') if attribute > 0 && before == Token::Ident("path") => {
+                return Some("#[path]".to_owned());
+            }
+            _ => {}
         }
-        let rest = input.get(start..).unwrap_or_default();
-        let word_end = rest.find(|c: char| !is_ident_char(c)).unwrap_or(rest.len());
-        let word = rest.get(..word_end).unwrap_or_default();
-        if COMPILE_TIME_READS.contains(&word)
-            && skip_trivia(rest.get(word_end..).unwrap_or_default()).starts_with('!')
-        {
-            return Some(format!("{word}!"));
-        }
-        if rest.starts_with('#') && attribute_has_path(rest.get(1..).unwrap_or_default()) {
-            return Some("#[path]".to_owned());
-        }
+        before_that = before;
+        before = token;
     }
     None
 }
 
-/// Whether `after_hash`, the text after a `#`, opens an attribute (an optional `!`, then `[`,
-/// trivia allowed between) whose bracketed body holds the word `path` followed by `=`.
-fn attribute_has_path(after_hash: &str) -> bool {
-    let mut rest = skip_trivia(after_hash);
-    if let Some(inner) = rest.strip_prefix('!') {
-        rest = skip_trivia(inner);
+/// One token of a Rust block, as far as the scan needs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Token<'text> {
+    /// An identifier or keyword, without a raw `r#` prefix.
+    Ident(&'text str),
+    /// One punctuation character.
+    Punct(char),
+    /// A literal, a lifetime, or anything else the scan doesn't judge.
+    Other,
+}
+
+/// The tokens of a Rust block, skipping whitespace and comments. Each byte is read once.
+struct Tokens<'text> {
+    /// The block.
+    text: &'text str,
+    /// The byte offset of the next unread character.
+    at: usize,
+}
+
+impl<'text> Tokens<'text> {
+    /// The tokens of `text`.
+    const fn new(text: &'text str) -> Self {
+        Self { text, at: 0 }
     }
-    let Some(body) = rest.strip_prefix('[') else {
-        return false;
-    };
-    let mut depth = 1_usize;
-    let end = body
-        .char_indices()
-        .find(|(_, c)| {
+
+    /// The text from the next unread character.
+    fn rest(&self) -> &'text str {
+        self.text.get(self.at..).unwrap_or_default()
+    }
+
+    /// The character `skip` characters past the next unread one.
+    fn peek(&self, skip: usize) -> Option<char> {
+        self.rest().chars().nth(skip)
+    }
+
+    /// Moves past the next `count` characters.
+    fn bump(&mut self, count: usize) {
+        for c in self.rest().chars().take(count) {
+            self.at += c.len_utf8();
+        }
+    }
+
+    /// Moves past characters while `keep` holds.
+    fn bump_while(&mut self, keep: impl Fn(char) -> bool) {
+        let rest = self.rest();
+        self.at += rest.find(|c: char| !keep(c)).unwrap_or(rest.len());
+    }
+
+    /// Moves past a `/* */` comment the cursor is on, nesting as Rust does, or to the end.
+    fn block_comment(&mut self) {
+        let mut depth = 0_usize;
+        while let Some(c) = self.peek(0) {
+            if self.rest().starts_with("/*") {
+                depth += 1;
+                self.bump(2);
+            } else if self.rest().starts_with("*/") {
+                self.bump(2);
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return;
+                }
+            } else {
+                self.at += c.len_utf8();
+            }
+        }
+    }
+
+    /// Moves past a `"` string the cursor is on, honoring `\` escapes, or to the end.
+    fn string(&mut self) {
+        self.bump(1);
+        while let Some(c) = self.peek(0) {
+            self.at += c.len_utf8();
             match c {
-                '[' => depth += 1,
-                ']' => depth -= 1,
+                '\\' => self.bump(1),
+                '"' => return,
                 _ => {}
             }
-            depth == 0
-        })
-        .map_or(body.len(), |(at, _)| at);
-    let body = body.get(..end).unwrap_or_default();
-    body.match_indices("path").any(|(at, _)| {
-        let before = at
-            .checked_sub(1)
-            .and_then(|before| body.as_bytes().get(before));
-        let after = body.get(at + "path".len()..).unwrap_or_default();
-        !before.is_some_and(|byte| is_ident_byte(*byte))
-            && !after.starts_with(is_ident_char)
-            && skip_trivia(after).starts_with('=')
-    })
-}
-
-/// `text` after any leading whitespace, `//` line comments and (nested) `/* */` block comments.
-fn skip_trivia(mut text: &str) -> &str {
-    loop {
-        let trimmed = text.trim_start();
-        if let Some(comment) = trimmed.strip_prefix("//") {
-            text = comment
-                .find('\n')
-                .map_or("", |end| comment.get(end..).unwrap_or_default());
-        } else if trimmed.starts_with("/*") {
-            text = after_block_comment(trimmed);
-        } else {
-            return trimmed;
         }
     }
-}
 
-/// `text`, which starts with `/*`, after the block comment it opens, nesting as Rust does. Empty
-/// when the comment never closes.
-fn after_block_comment(text: &str) -> &str {
-    let mut depth = 0_usize;
-    let mut at = 0;
-    while let Some(rest) = text.get(at..) {
-        if rest.starts_with("/*") {
-            depth += 1;
-            at += 2;
-        } else if rest.starts_with("*/") {
-            depth -= 1;
-            at += 2;
-            if depth == 0 {
-                return text.get(at..).unwrap_or_default();
+    /// Moves past a raw string whose `r` the cursor is past, `hashes` `#`s before its `"`, or to
+    /// the end. Each `#` after a `"` is read once.
+    fn raw_string(&mut self, hashes: usize) {
+        self.bump(hashes + 1);
+        while let Some(c) = self.peek(0) {
+            self.at += c.len_utf8();
+            if c == '"' {
+                let closing = self
+                    .rest()
+                    .chars()
+                    .take(hashes)
+                    .take_while(|c| *c == '#')
+                    .count();
+                self.bump(closing);
+                if closing == hashes {
+                    return;
+                }
             }
-        } else if let Some(c) = rest.chars().next() {
-            at += c.len_utf8();
-        } else {
-            break;
         }
     }
-    ""
+
+    /// The `#`s from the cursor, then whether a `"` follows them.
+    fn hashes_then_quote(&self) -> (usize, bool) {
+        let hashes = self.rest().chars().take_while(|c| *c == '#').count();
+        (hashes, self.peek(hashes) == Some('"'))
+    }
 }
 
-/// Whether `c` can be part of a Rust identifier, by the ASCII rule a token scan needs.
+impl<'text> Iterator for Tokens<'text> {
+    type Item = Token<'text>;
+
+    fn next(&mut self) -> Option<Token<'text>> {
+        loop {
+            self.bump_while(char::is_whitespace);
+            let rest = self.rest();
+            let c = rest.chars().next()?;
+            if rest.starts_with("//") {
+                self.bump_while(|c| c != '\n');
+            } else if rest.starts_with("/*") {
+                self.block_comment();
+            } else if c == '"' {
+                self.string();
+                return Some(Token::Other);
+            } else if c == '\'' {
+                self.quote();
+                return Some(Token::Other);
+            } else if is_ident_char(c) {
+                return Some(self.word());
+            } else {
+                self.bump(1);
+                return Some(Token::Punct(c));
+            }
+        }
+    }
+}
+
+impl<'text> Tokens<'text> {
+    /// Reads a character literal or a lifetime the cursor is on: `'\..'` and `'x'` are
+    /// literals, and anything else is a lifetime or label.
+    fn quote(&mut self) {
+        self.bump(1);
+        if self.peek(0) == Some('\\') {
+            self.bump(2);
+            self.bump_while(|c| c != '\'' && c != '\n');
+            self.bump(1);
+        } else if self.peek(1) == Some('\'') {
+            self.bump(2);
+        } else {
+            self.bump_while(is_ident_char);
+        }
+    }
+
+    /// Reads an identifier, a raw identifier, a prefixed or raw string, or a number the cursor is
+    /// on.
+    fn word(&mut self) -> Token<'text> {
+        let start = self.at;
+        self.bump_while(is_ident_char);
+        let word = self.text.get(start..self.at).unwrap_or_default();
+        if word.starts_with(|c: char| c.is_ascii_digit()) {
+            return Token::Other;
+        }
+        let raw_prefix = matches!(word, "r" | "br" | "cr");
+        let (hashes, quote) = self.hashes_then_quote();
+        if raw_prefix && quote {
+            self.raw_string(hashes);
+            return Token::Other;
+        }
+        if matches!(word, "b" | "c") && self.peek(0) == Some('"') {
+            self.string();
+            return Token::Other;
+        }
+        if matches!(word, "b") && self.peek(0) == Some('\'') {
+            self.quote();
+            return Token::Other;
+        }
+        if word == "r" && hashes == 1 && self.peek(1).is_some_and(is_ident_char) {
+            self.bump(1);
+            let start = self.at;
+            self.bump_while(is_ident_char);
+            return Token::Ident(self.text.get(start..self.at).unwrap_or_default());
+        }
+        Token::Ident(word)
+    }
+}
+
+/// Whether `c` can be part of a Rust identifier or number.
 fn is_ident_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_'
-}
-
-/// Whether `byte` can be part of an ASCII Rust identifier.
-fn is_ident_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
+    c.is_alphanumeric() || c == '_'
 }
 
 #[cfg(test)]
 mod tests {
 
-    use super::{compile_time_read, config_args, format_args};
+    use std::time::{Duration, Instant};
+
+    use super::{MAX_SCAN_BYTES, Scan, compile_time_read, config_args, format_args, scan};
 
     #[test]
     fn rustfmt_reads_the_block_as_2024_and_prints_it() {
@@ -192,7 +334,11 @@ mod tests {
             ("#[path = \"/outside.rs\"]\nmod m;\n", "#[path]"),
             ("# [ cfg_attr(all(), path=\"/o.rs\") ]\nmod m;\n", "#[path]"),
         ] {
-            assert_eq!(compile_time_read(block).as_deref(), Some(read), "{block:?}");
+            assert_eq!(
+                compile_time_read(block),
+                Scan::Read(read.to_owned()),
+                "{block:?}"
+            );
         }
     }
 
@@ -204,7 +350,47 @@ mod tests {
             "#[serde(rename = \"path\")]\nstruct S;\n",
             "fn environment() {}\nmacro_rules! my_env { () => {} }\nmy_env!();\n",
         ] {
-            assert_eq!(compile_time_read(block), None, "{block:?}");
+            assert_eq!(compile_time_read(block), Scan::Clean, "{block:?}");
+        }
+    }
+
+    #[test]
+    fn reads_in_strings_and_comments_are_not_code_and_cant_hide_code() {
+        for block in [
+            "const S: &str = \"env!(x) #[path = y]\";\n",
+            "const S: &str = r#\"include!(\"x\")\"#;\n// env!(\"A\")\n/* include_str!(\"b\") */\n",
+            "fn f<'a>(c: char) -> bool { c == '\"' || c == '\\'' }\n",
+        ] {
+            assert_eq!(compile_time_read(block), Scan::Clean, "{block:?}");
+        }
+        let after_a_string = "const S: &str = \"/*\"; const T: &str = env!(\"HOME\"); // */\n";
+        assert_eq!(
+            compile_time_read(after_a_string),
+            Scan::Read("env!".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_block_over_the_cap_is_too_large_to_scan() {
+        let block = "x".repeat(MAX_SCAN_BYTES + 1);
+
+        assert_eq!(compile_time_read(&block), Scan::TooLarge);
+    }
+
+    #[test]
+    fn pathological_blocks_scan_in_one_linear_pass() {
+        let limit = Duration::from_secs(1);
+        for (name, block) in [
+            ("200k `#[`", "#[".repeat(200_000)),
+            ("100k `env /*`", "env /*".repeat(100_000)),
+            ("100k `include /* */`", "include /* */ ".repeat(100_000)),
+            ("100k raw strings", "r#\"\"".repeat(100_000)),
+        ] {
+            let started = Instant::now();
+            let _found = scan(&block);
+            let took = started.elapsed();
+
+            assert!(took < limit, "{name} took {took:?}, over {limit:?}");
         }
     }
 

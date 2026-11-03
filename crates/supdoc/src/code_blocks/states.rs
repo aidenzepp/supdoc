@@ -24,8 +24,9 @@ use super::tools::formatter;
 /// `check` then looks up each pending language's tool: a tool not on `PATH` makes its blocks
 /// [`ToolMissing`](Self::ToolMissing), and one whose real path is inside the checkout makes them
 /// [`NotChecked::ToolInsideRoot`]. A Rust block is refused first when the root's toolchain file
-/// can't be used ([`NotChecked::ToolchainPath`]) or the block reads a file or variable at compile
-/// time ([`NotChecked::CompileTimeRead`]). A tool found outside the checkout runs on each block,
+/// can't be used ([`NotChecked::ToolchainPath`]), the block reads a file or variable at compile
+/// time ([`NotChecked::CompileTimeRead`]), or it is too large to scan for one
+/// ([`NotChecked::TooLargeToScan`]). A tool found outside the checkout runs on each block,
 /// which leaves it [`Passed`](Self::Passed) or [`Failed`](Self::Failed).
 ///
 /// Only what the author wrote and the config decide a state: supdoc never guesses a block into a
@@ -71,6 +72,8 @@ pub(crate) enum NotChecked {
     ToolchainPath,
     /// The Rust block reads a file or an environment variable at compile time.
     CompileTimeRead,
+    /// The Rust block is too large for the compile-time-read scan.
+    TooLargeToScan,
 }
 
 /// Why a block failed.
@@ -197,6 +200,7 @@ impl BlockState {
             }
             Self::NotChecked(NotChecked::ToolchainPath) => Some("toolchain path".to_owned()),
             Self::NotChecked(NotChecked::CompileTimeRead) => Some("compile-time read".to_owned()),
+            Self::NotChecked(NotChecked::TooLargeToScan) => Some("too large to scan".to_owned()),
             Self::UnknownLanguage => {
                 Some(format!("supdoc has no checker for `{}`", tag.unwrap_or("")))
             }

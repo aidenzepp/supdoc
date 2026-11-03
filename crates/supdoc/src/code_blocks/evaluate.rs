@@ -24,7 +24,7 @@ use super::info::{
     source_attributes,
 };
 use super::runner::{self, Call};
-use super::rust;
+use super::rust::{self, Scan};
 use super::shell;
 use super::source::{self, SourceText, Unresolved};
 use super::states::{Excerpt, NotChecked, state_of, tag_of};
@@ -258,21 +258,24 @@ impl Evaluation {
             let rust = (tool.language == Language::Rust)
                 .then(|| &*rust_setup.get_or_insert_with(|| RustSetup::read(root)));
             if let Some(rust) = rust {
-                let refused = if let Toolchain::Refused(refusal) = rust.toolchain {
+                let refused = if let Toolchain::Refused { refusal, file } = rust.toolchain {
                     if !toolchain_warned {
                         toolchain_warned = true;
-                        self.findings.push(toolchain_warning(refusal, &record.at));
+                        self.findings
+                            .push(toolchain_warning(refusal, file, &record.at));
                     }
                     Some(NotChecked::ToolchainPath)
                 } else {
-                    let read = record
-                        .pending
-                        .as_ref()
-                        .and_then(|pending| rust::compile_time_read(&pending.input));
-                    read.map(|read| {
-                        self.findings.push(compile_time_warning(&read, &record.at));
-                        NotChecked::CompileTimeRead
-                    })
+                    let scan = record.pending.as_ref().map_or(Scan::Clean, |pending| {
+                        rust::compile_time_read(&pending.input)
+                    });
+                    let refused = match &scan {
+                        Scan::Clean => None,
+                        Scan::Read(_) => Some(NotChecked::CompileTimeRead),
+                        Scan::TooLarge => Some(NotChecked::TooLargeToScan),
+                    };
+                    self.findings.extend(scan_warning(&scan, &record.at));
+                    refused
                 };
                 if let Some(refused) = refused {
                     record.state = BlockState::NotChecked(refused);
@@ -477,46 +480,64 @@ fn tool_warning(tool: &Tool, found: &Found, at: &Location) -> Option<Finding> {
     Some(finding.with_location(at.clone()))
 }
 
-/// The one `code-block-not-checked` warning, at `at`, for the root's toolchain file refused for
+/// The one `code-block-not-checked` warning, at `at`, for the root's toolchain `file` refused for
 /// `refusal`, which leaves every Rust block unchecked.
-fn toolchain_warning(refusal: Refusal, at: &Location) -> Finding {
+fn toolchain_warning(refusal: Refusal, file: &str, at: &Location) -> Finding {
     let (why, help) = match refusal {
         Refusal::Path => (
-            "names a toolchain `path`, which would run a binary the checkout chose",
-            "pin a channel such as `stable` or `1.85.0` instead of a `path`",
+            "names a toolchain `path`, which would run a binary the checkout chose".to_owned(),
+            format!("pin a channel such as `stable` or `1.85.0` in `{file}` instead of a `path`"),
         ),
         Refusal::InvalidChannel => (
-            "names a channel supdoc doesn't accept, or doesn't parse",
-            "name `stable`, `beta`, `nightly` or a version such as `1.85.0`, optionally with `-YYYY-MM-DD`",
+            "names a channel supdoc doesn't accept, or doesn't parse".to_owned(),
+            format!(
+                "in `{file}`, name `stable`, `beta`, `nightly` or a version such as `1.85.0`, optionally with `-YYYY-MM-DD`"
+            ),
         ),
         Refusal::Outside => (
-            "resolves outside the project, or isn't a regular file of at most 64 KiB",
-            "make `rust-toolchain.toml` a regular file inside the project",
+            "is a link that resolves outside the project".to_owned(),
+            format!("replace `{file}` with a regular file inside the project"),
+        ),
+        Refusal::Unreadable => (
+            "couldn't be read as a regular UTF-8 file of at most 64 KiB".to_owned(),
+            format!("make `{file}` a readable UTF-8 text file of at most 64 KiB"),
         ),
     };
     Finding::new(
         NOT_CHECKED,
         Severity::Warning,
-        format!("the project's `rust-toolchain` file {why}, so its Rust blocks aren't checked"),
+        format!("the project's `{file}` {why}, so its Rust blocks aren't checked"),
     )
     .with_help(help)
     .with_location(at.clone())
 }
 
-/// The `code-block-not-checked` warning, at `at`, for a Rust block holding `read`, a
-/// compile-time read such as `include_str!`.
-fn compile_time_warning(read: &str, at: &Location) -> Finding {
-    Finding::new(
-        NOT_CHECKED,
-        Severity::Warning,
-        format!(
-            "the block uses `{read}`, which reads a file or environment variable at compile time, so it isn't checked"
-        ),
-    )
-    .with_help(format!(
-        "remove the `{read}` from the block, or mark it `ignore(<why>)`"
-    ))
-    .with_location(at.clone())
+/// The `code-block-not-checked` warning, at `at`, for a Rust block `scan` refused: one holding a
+/// compile-time read such as `include_str!`, or one too large to scan. `None` for a clean block.
+fn scan_warning(scan: &Scan, at: &Location) -> Option<Finding> {
+    let finding = match scan {
+        Scan::Clean => return None,
+        Scan::Read(read) => Finding::new(
+            NOT_CHECKED,
+            Severity::Warning,
+            format!(
+                "the block uses `{read}`, which reads a file or environment variable at compile time, so it isn't checked"
+            ),
+        )
+        .with_help(format!(
+            "remove the `{read}` from the block, or mark it `ignore(<why>)`"
+        )),
+        Scan::TooLarge => Finding::new(
+            NOT_CHECKED,
+            Severity::Warning,
+            format!(
+                "the block is over {} KiB, too large to scan for compile-time reads, so it isn't checked",
+                rust::MAX_SCAN_BYTES / 1024
+            ),
+        )
+        .with_help("split the block, or mark it `ignore(<why>)`"),
+    };
+    Some(finding.with_location(at.clone()))
 }
 
 /// The text of `doc`, relative to the project root, as it is on disk now. `None` when it can't

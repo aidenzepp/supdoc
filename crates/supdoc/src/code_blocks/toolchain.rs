@@ -22,7 +22,12 @@ pub(crate) enum Toolchain {
     /// A valid channel name, passed as `RUSTUP_TOOLCHAIN`.
     Channel(String),
     /// The file can't be used safely; the Rust blocks aren't checked.
-    Refused(Refusal),
+    Refused {
+        /// Why.
+        refusal: Refusal,
+        /// The refused file's name in the root: `rust-toolchain` or `rust-toolchain.toml`.
+        file: &'static str,
+    },
 }
 
 /// Why the root's toolchain file was refused.
@@ -32,8 +37,10 @@ pub(crate) enum Refusal {
     Path,
     /// Its channel isn't a name supdoc accepts, or the file doesn't parse.
     InvalidChannel,
-    /// Its real path is outside the root, or it isn't a regular file supdoc can read.
+    /// Its real path is outside the root.
     Outside,
+    /// It can't be resolved or read, isn't a regular file, isn't UTF-8, or is over 64 KiB.
+    Unreadable,
 }
 
 impl Toolchain {
@@ -56,67 +63,87 @@ impl Toolchain {
 #[must_use]
 pub(crate) fn read(root: &Path) -> Toolchain {
     let Some(file) = FILES
-        .iter()
-        .map(|name| root.join(name))
-        .find(|path| std::fs::symlink_metadata(path).is_ok())
+        .into_iter()
+        .find(|name| std::fs::symlink_metadata(root.join(name)).is_ok())
     else {
         return Toolchain::Default;
     };
-    let Some(text) = read_inside(&file, root) else {
-        return Toolchain::Refused(Refusal::Outside);
-    };
-    parse(&text)
+    match read_inside(&root.join(file), root) {
+        Ok(text) => parse(&text).unwrap_or_else(|refusal| Toolchain::Refused { refusal, file }),
+        Err(refusal) => Toolchain::Refused { refusal, file },
+    }
 }
 
-/// The text of `file` when its real path is a regular file under `root`'s real path and is at
-/// most [`MAX_BYTES`] long. `None` otherwise.
+/// The text of `file` when its real path is a regular UTF-8 file under `root`'s real path and
+/// is at most [`MAX_BYTES`] long.
+///
+/// # Errors
+///
+/// [`Refusal::Outside`] when its real path leaves the root, and [`Refusal::Unreadable`] when it
+/// can't be resolved, opened or read, isn't a regular file, isn't UTF-8, or is too long.
 ///
 /// Effect: resolves symlinks and reads the file.
-fn read_inside(file: &Path, root: &Path) -> Option<String> {
-    let real_root = root.canonicalize().ok()?;
-    let real = file.canonicalize().ok()?;
-    if !real.starts_with(&real_root) || !std::fs::metadata(&real).ok()?.is_file() {
-        return None;
+fn read_inside(file: &Path, root: &Path) -> Result<String, Refusal> {
+    let unreadable = |_| Refusal::Unreadable;
+    let real_root = root.canonicalize().map_err(unreadable)?;
+    let real = file.canonicalize().map_err(unreadable)?;
+    if !real.starts_with(&real_root) {
+        return Err(Refusal::Outside);
+    }
+    if !std::fs::metadata(&real).map_err(unreadable)?.is_file() {
+        return Err(Refusal::Unreadable);
     }
     let mut text = String::new();
     let _read = std::fs::File::open(&real)
-        .ok()?
+        .map_err(unreadable)?
         .take(MAX_BYTES + 1)
         .read_to_string(&mut text)
-        .ok()?;
-    (text.len() as u64 <= MAX_BYTES).then_some(text)
+        .map_err(unreadable)?;
+    if text.len() as u64 > MAX_BYTES {
+        return Err(Refusal::Unreadable);
+    }
+    Ok(text)
 }
 
 /// What a toolchain file's `text` pins: a legacy one-line channel, or TOML with a `[toolchain]`
 /// table whose `path` key is refused and whose `channel` must be valid.
-#[must_use]
-fn parse(text: &str) -> Toolchain {
+///
+/// # Errors
+///
+/// [`Refusal::Path`] for a `path` key, and [`Refusal::InvalidChannel`] for a channel
+/// [`is_valid_channel`] rejects or text that doesn't parse.
+fn parse(text: &str) -> Result<Toolchain, Refusal> {
     let trimmed = text.trim();
     if !trimmed.contains('\n') && !trimmed.starts_with('[') && !trimmed.contains('=') {
         return channel(trimmed);
     }
-    let Ok(table) = text.parse::<toml::Table>() else {
-        return Toolchain::Refused(Refusal::InvalidChannel);
-    };
-    let Some(toolchain) = table.get("toolchain").and_then(toml::Value::as_table) else {
-        return Toolchain::Refused(Refusal::InvalidChannel);
-    };
+    let table = text
+        .parse::<toml::Table>()
+        .map_err(|_| Refusal::InvalidChannel)?;
+    let toolchain = table
+        .get("toolchain")
+        .and_then(toml::Value::as_table)
+        .ok_or(Refusal::InvalidChannel)?;
     if toolchain.contains_key("path") {
-        return Toolchain::Refused(Refusal::Path);
+        return Err(Refusal::Path);
     }
     match toolchain.get("channel") {
-        None => Toolchain::Default,
+        None => Ok(Toolchain::Default),
         Some(toml::Value::String(name)) => channel(name),
-        Some(_) => Toolchain::Refused(Refusal::InvalidChannel),
+        Some(_) => Err(Refusal::InvalidChannel),
     }
 }
 
-/// `name` as a pinned channel when [`is_valid_channel`] accepts it.
-fn channel(name: &str) -> Toolchain {
+/// `name` as a pinned channel.
+///
+/// # Errors
+///
+/// [`Refusal::InvalidChannel`] when [`is_valid_channel`] rejects it.
+fn channel(name: &str) -> Result<Toolchain, Refusal> {
     if is_valid_channel(name) {
-        Toolchain::Channel(name.to_owned())
+        Ok(Toolchain::Channel(name.to_owned()))
     } else {
-        Toolchain::Refused(Refusal::InvalidChannel)
+        Err(Refusal::InvalidChannel)
     }
 }
 
@@ -223,7 +250,7 @@ mod tests {
     fn a_path_key_is_refused_even_beside_a_valid_channel() {
         assert_eq!(
             parse("[toolchain]\nchannel = \"stable\"\npath = \"/opt/evil\"\n"),
-            Toolchain::Refused(Refusal::Path)
+            Err(Refusal::Path)
         );
     }
 
@@ -231,15 +258,15 @@ mod tests {
     fn a_toml_channel_and_a_legacy_line_are_both_read() {
         assert_eq!(
             parse("[toolchain]\nchannel = \"1.85.0\"\ncomponents = [\"rustfmt\"]\n"),
-            Toolchain::Channel("1.85.0".to_owned())
+            Ok(Toolchain::Channel("1.85.0".to_owned()))
         );
         assert_eq!(
             parse("nightly-2025-01-31\n"),
-            Toolchain::Channel("nightly-2025-01-31".to_owned())
+            Ok(Toolchain::Channel("nightly-2025-01-31".to_owned()))
         );
         assert_eq!(
             parse("[toolchain]\nchannel = \"evil/x\"\n"),
-            Toolchain::Refused(Refusal::InvalidChannel)
+            Err(Refusal::InvalidChannel)
         );
     }
 
@@ -268,7 +295,28 @@ mod tests {
         std::os::unix::fs::symlink(&target, root.path().join("rust-toolchain.toml"))
             .expect("the link should be creatable");
 
-        assert_eq!(read(root.path()), Toolchain::Refused(Refusal::Outside));
+        assert_eq!(
+            read(root.path()),
+            Toolchain::Refused {
+                refusal: Refusal::Outside,
+                file: "rust-toolchain.toml"
+            }
+        );
+    }
+
+    #[test]
+    fn an_in_root_toolchain_file_that_isnt_utf_8_is_unreadable_not_outside() {
+        let root = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        std::fs::write(root.path().join("rust-toolchain"), b"stable\xff\n")
+            .expect("the toolchain file should be writable");
+
+        assert_eq!(
+            read(root.path()),
+            Toolchain::Refused {
+                refusal: Refusal::Unreadable,
+                file: "rust-toolchain"
+            }
+        );
     }
 
     #[test]
