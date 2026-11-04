@@ -1479,7 +1479,11 @@ fn shell_lint_with_the_real_shellcheck_passes_a_clean_block_and_fails_a_placehol
         .assert_exit(1)
         .json();
 
-    assert_eq!(at(&json, "/data/code_blocks/0/state"), "passed", "{json}");
+    // `code_blocks` lists only the blocks that didn't pass: `echo $1` (SC2086) and the placeholder.
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/failed"), 2, "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/line"), 7, "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/state"), "failed", "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/1/line"), 11, "{json}");
     assert_eq!(at(&json, "/data/code_blocks/1/state"), "failed", "{json}");
-    assert_eq!(at(&json, "/data/code_blocks/2/state"), "failed", "{json}");
 }
