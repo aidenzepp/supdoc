@@ -682,6 +682,9 @@ fn scan(input: &str, compiles: bool) -> Option<Found> {
             "a `#!` first line that isn't an inner attribute",
         ));
     }
+    if compiles && starts_with_frontmatter(input) {
+        return Some(Found::Unscannable(FRONTMATTER));
+    }
     let mut lexer = Tokens::new(input, compiles);
     let tokens: Vec<Token<'_>> = lexer.by_ref().collect();
     // Each token, a raw identifier read as the identifier it names.
@@ -1001,6 +1004,19 @@ fn unlisted_attribute(tokens: &[Token<'_>]) -> Option<Found> {
         }
     }
     None
+}
+
+/// What [`before_compiling`] calls a block that may open with frontmatter.
+pub(crate) const FRONTMATTER: &str = "frontmatter";
+
+/// Whether `input`'s first line that isn't blank starts, after any indentation, with three or
+/// more `-`: rustc may read it as frontmatter, whose text the scan doesn't follow, so before
+/// compiling such a block fails closed rather than modeling rustc's frontmatter rules.
+fn starts_with_frontmatter(input: &str) -> bool {
+    input
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .is_some_and(|line| line.trim_start().starts_with("---"))
 }
 
 /// One token of a Rust block, as far as the scan needs it.
@@ -1411,9 +1427,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        EmitDir, Found, LineMap, MAX_SCAN_BYTES, Scan, Token, Tokens, attribute_edition,
-        before_compiling, clippy_args, clippy_conf_dir, compile_time_read, config_args,
-        format_args, lint_verdict, parse_error, scan, unhide,
+        EmitDir, FRONTMATTER, Found, LineMap, MAX_SCAN_BYTES, Scan, Token, Tokens,
+        attribute_edition, before_compiling, clippy_args, clippy_conf_dir, compile_time_read,
+        config_args, format_args, lint_verdict, parse_error, scan, unhide,
     };
     use crate::cartridges::markdown::cartridge::cartridge;
     use crate::code_blocks::block::blocks_in;
@@ -2365,6 +2381,30 @@ mod tests {
         assert_eq!(
             before_compiling("fn f() { println!(\"x\"); let _ = std::env::args(); }\n"),
             Scan::Clean
+        );
+    }
+
+    #[test]
+    fn before_compiling_a_block_opening_with_frontmatter_is_refused() {
+        let read = "pub static Z: &str = include_str!(\"/outside/x.txt\");";
+        for block in [
+            format!("---\n\"\n---\n{read} // \"\n"),
+            "---\n\"\n---\npub const D: u8 = include!(\"/outside/m.rs\"); // \"\n".to_owned(),
+            format!("---\n/*\n---\n{read} // */\n"),
+            format!("---cargo\n\"\n---\n{read} // \"\n"),
+            format!("\n  \n---\n\"\n---\n{read} // \"\n"),
+            "----\n[package]\n----\nfn main() {}\n".to_owned(),
+        ] {
+            assert_eq!(
+                before_compiling(&block),
+                Scan::Read(Found::Unscannable(FRONTMATTER)),
+                "{block:?}"
+            );
+        }
+        assert_eq!(
+            before_compiling("fn main() {}\nconst S: &str = \"\n---\n\";\n"),
+            Scan::Clean,
+            "a `---` after the first line isn't frontmatter"
         );
     }
 }

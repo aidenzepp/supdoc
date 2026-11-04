@@ -915,6 +915,10 @@ fn rust_refusal(
             NotChecked::OutlineModule,
             name.map(|name| format!("outline module `{name}`")),
         )),
+        Scan::Read(rust::Found::Unscannable(rust::FRONTMATTER)) => Some((
+            NotChecked::CompileTimeRead,
+            Some("compile-time read: frontmatter".to_owned()),
+        )),
         Scan::Read(rust::Found::Character(c)) => Some((
             NotChecked::CompileTimeRead,
             Some(format!(
