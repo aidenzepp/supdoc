@@ -166,8 +166,13 @@ struct CodeBlockJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     language: Option<String>,
     /// `passed`, `failed`, `stale`, `opted_out`, `not_checked`, `unknown_language` or
-    /// `tool_missing`.
+    /// `tool_missing`: `failed` when a step that ran failed, `passed` when the steps that ran all
+    /// passed.
     state: &'static str,
+    /// What the format step did: `ran`, `off`, `skipped` or `not_run`.
+    format: &'static str,
+    /// What the lint step did: `ran`, `off`, `skipped` or `not_run`.
+    lint: &'static str,
     /// Why the block is in that state, when it has a reason.
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
@@ -193,6 +198,8 @@ impl From<&BlockRecord> for CodeBlockJson {
             column: record.at.column,
             language: record.language.clone(),
             state: record.state.name(),
+            format: record.steps.format.name(),
+            lint: record.steps.lint.name(),
             reason: record.reason.clone(),
             uses: record
                 .uses
