@@ -112,12 +112,10 @@ fn handle_termination() {
         // Set first, so the main thread can't see a killed tool and end before the re-raise.
         TERMINATING.store(signal, Ordering::SeqCst);
         kill_live_groups();
-        // Resets the signal to its default action and raises it, which ends the process.
+        // Resets the signal to its default action and raises it, which ends the process. No
+        // fallback is needed: for SIGINT, SIGTERM and SIGHUP, signal-hook 0.4 raises the signal
+        // and aborts if raising fails, so this call never returns.
         let _ended = signal_hook::low_level::emulate_default_handler(signal);
-        // Defense only: for these signals signal-hook 0.4 raises the signal, aborts if raising
-        // fails, and never returns. Should a later version return, end with the shell's code for
-        // the signal rather than leave the main thread waiting for good.
-        std::process::exit(128 + signal);
     }));
 }
 
