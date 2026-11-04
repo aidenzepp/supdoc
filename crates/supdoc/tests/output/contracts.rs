@@ -1487,6 +1487,7 @@ mod helps {
         case("cli-target-invalid", |_| {}, &["list", "src/lib.rs#a..b"]),
         case("cli-init-exists", |_| {}, &["init"]),
         case("cli-trust-path", |_| {}, &["trust", "nowhere"]),
+        case("cli-trust-broad-root", |_| {}, &["trust", "/"]),
         case(
             "cli-trust-path",
             |p| {

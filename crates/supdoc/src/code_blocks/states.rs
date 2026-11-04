@@ -8,7 +8,7 @@ use annotate_snippets::renderer::{AnsiColor, Style};
 use crate::config::code_blocks::{CodeBlocks, Language, Mode};
 
 use super::block::CodeBlock;
-use super::evaluate::CLIPPY_NEEDS_TRUST;
+use super::evaluate::{CLIPPY_NEEDS_TRUST, CLIPPY_TRUST_OFF};
 use super::info::{StepValue, reasoned, step_attribute};
 use super::tools::{self, Step, ToolCartridge, formatter};
 
@@ -199,14 +199,20 @@ pub(crate) struct Steps {
 }
 
 impl Steps {
-    /// Whether a step was held because the operator hasn't granted the checkout trust.
-    pub(crate) fn held_for_trust(&self) -> bool {
-        [&self.format, &self.lint].into_iter().any(|step| {
-            *step
-                == StepState::Unrunnable {
-                    reason: CLIPPY_NEEDS_TRUST,
+    /// The reason a step was held because the operator hasn't granted the checkout trust:
+    /// [`CLIPPY_NEEDS_TRUST`], or [`CLIPPY_TRUST_OFF`] when `SUPDOC_TRUST=0` turned it off.
+    /// `None` when no step was held for that.
+    pub(crate) fn held_for_trust(&self) -> Option<&'static str> {
+        [&self.format, &self.lint]
+            .into_iter()
+            .find_map(|step| match step {
+                StepState::Unrunnable { reason }
+                    if [CLIPPY_NEEDS_TRUST, CLIPPY_TRUST_OFF].contains(reason) =>
+                {
+                    Some(*reason)
                 }
-        })
+                _ => None,
+            })
     }
 
     /// The steps due on `block`, in `state`, under `code_blocks`. Only a
@@ -598,10 +604,13 @@ fn by_count(reasons: &BTreeMap<&'static str, usize>) -> Vec<(&'static str, usize
 }
 
 /// `reason`, a step's full reason for not running, as the summary line names it: "clippy needs
-/// trust" for a step held for want of trust, else the reason as written.
+/// trust" for a step held for want of trust, "`SUPDOC_TRUST=0` turned trust off" when the
+/// variable held it, else the reason as written.
 fn short_reason(reason: &'static str) -> &'static str {
     if reason == CLIPPY_NEEDS_TRUST {
         "clippy needs trust"
+    } else if reason == CLIPPY_TRUST_OFF {
+        "`SUPDOC_TRUST=0` turned trust off"
     } else {
         reason
     }
