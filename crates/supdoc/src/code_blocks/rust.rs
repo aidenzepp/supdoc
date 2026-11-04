@@ -512,6 +512,9 @@ pub(crate) enum Found {
     Name(String),
     /// Before compiling: a `$` metavariable inside an attribute.
     MetavariableAttribute,
+    /// Before compiling: an attribute whose path's first segment isn't in
+    /// [`ALLOWED_ATTRIBUTES`], named by that segment (empty when it doesn't start with a name).
+    Attribute(String),
     /// Before compiling: a module not written inline outside any macro, with its name when the
     /// word after `mod` is one: `x` in `mod x;`.
     OutlineModule(Option<String>),
@@ -537,6 +540,12 @@ impl Found {
             Self::MetavariableAttribute => {
                 "has a `$` metavariable in an attribute, which a macro could make a `path` attribute".to_owned()
             }
+            Self::Attribute(name) if name.is_empty() => {
+                "has an attribute whose path doesn't start with a name, which supdoc can't check for a compile-time read".to_owned()
+            }
+            Self::Attribute(name) => format!(
+                "uses the `{name}` attribute, which isn't on supdoc's list of attributes that never read a file at compile time"
+            ),
             Self::OutlineModule(Some(name)) => format!(
                 "declares the outline module `{name}`, which rustc would read from a file outside the block"
             ),
@@ -565,6 +574,12 @@ impl Found {
             Self::MetavariableAttribute => {
                 "build the attribute without a metavariable, or mark the block `ignore(<why>)`".to_owned()
             }
+            Self::Attribute(name) if name.is_empty() => {
+                "name the attribute plainly, or mark the block `ignore(<why>)`".to_owned()
+            }
+            Self::Attribute(name) => format!(
+                "remove the `{name}` attribute from the block, or mark it `ignore(<why>)`"
+            ),
             Self::OutlineModule(_) => {
                 "write the module inline as `mod name { .. }` outside any macro, or mark the block `ignore(<why>)`".to_owned()
             }
@@ -634,25 +649,37 @@ fn scan(input: &str, compiles: bool) -> Option<Found> {
     };
     // The bracket depth inside the attribute being read, or 0 outside one.
     let mut attribute = 0_usize;
-    // Each open delimiter, marked when it opened a macro's input or a `macro_rules!` body.
-    let mut open: Vec<bool> = Vec::new();
-    // How many of `open` are marked.
-    let mut in_macro = 0_usize;
-    // Whether the next delimiter opens a macro's input: a `name!` or `macro_rules! name` ended.
-    let mut macro_next = false;
+    let mut nesting = Nesting::default();
+    // The macro whose input or body the next delimiter opens: a `name!` or `macro_rules! name`
+    // just ended.
+    let mut macro_next: Option<MacroKind> = None;
     for (index, &token) in tokens.iter().enumerate() {
         let before = at(index.checked_sub(1));
         let before_that = at(index.checked_sub(2));
         let next = at(index.checked_add(1));
         let after_next = at(index.checked_add(2));
-        let opens_macro = std::mem::take(&mut macro_next);
+        let opens_macro = macro_next.take();
         match token {
             Token::Punct('!') => {
                 if let Token::Ident(word) = before {
                     if COMPILE_TIME_READS.contains(&word) {
                         return Some(Found::Macro(word.to_owned()));
                     }
-                    macro_next = true;
+                    macro_next = Some(if word == "macro_rules" {
+                        MacroKind::Definition
+                    } else {
+                        MacroKind::Call
+                    });
+                }
+            }
+            Token::Punct('#') if compiles && nesting.in_call > 0 => {
+                return Some(Found::Unscannable("a `#` inside a macro call's input"));
+            }
+            Token::Punct('#') if compiles => {
+                let starts_attribute = next == Token::Punct('[')
+                    || (next == Token::Punct('!') && after_next == Token::Punct('['));
+                if !starts_attribute {
+                    return Some(Found::Unscannable("a `#` that doesn't start an attribute"));
                 }
             }
             Token::Punct('[') if attribute > 0 => attribute += 1,
@@ -661,6 +688,12 @@ fn scan(input: &str, compiles: bool) -> Option<Found> {
                     || (before == Token::Punct('!') && before_that == Token::Punct('#'));
                 if opens {
                     attribute = 1;
+                    if compiles
+                        && let Some(found) =
+                            unlisted_attribute(tokens.get(index + 1..).unwrap_or_default())
+                    {
+                        return Some(found);
+                    }
                 }
             }
             Token::Punct(']') => attribute = attribute.saturating_sub(1),
@@ -686,26 +719,137 @@ fn scan(input: &str, compiles: bool) -> Option<Found> {
                     Token::Ident(name) => Some(name.to_owned()),
                     _ => None,
                 };
-                if in_macro > 0 || name.is_none() || after_next != Token::Punct('{') {
+                if nesting.in_macro > 0 || name.is_none() || after_next != Token::Punct('{') {
                     return Some(Found::OutlineModule(name));
                 }
             }
-            Token::Ident(_) if opens_macro && before == Token::Punct('!') => macro_next = true,
+            Token::Ident(_) if opens_macro.is_some() && before == Token::Punct('!') => {
+                macro_next = opens_macro;
+            }
             _ => {}
         }
+        nesting.track(token, opens_macro);
+    }
+    lexer.unterminated
+}
+
+/// The delimiters open at a point of the scan, and how many of them opened a macro's input.
+#[derive(Debug, Default)]
+struct Nesting {
+    /// Each open delimiter, with the macro whose input or body it opened, if any.
+    open: Vec<Option<MacroKind>>,
+    /// How many of `open` opened a macro call's input or a `macro_rules!` body.
+    in_macro: usize,
+    /// How many of `open` opened a macro call's input.
+    in_call: usize,
+}
+
+impl Nesting {
+    /// Follows `token`: an opening delimiter opens `opens_macro`'s input or body when it is
+    /// `Some`, and a closing one closes the innermost delimiter.
+    fn track(&mut self, token: Token<'_>, opens_macro: Option<MacroKind>) {
         match token {
             Token::Punct('(' | '[' | '{') => {
-                open.push(opens_macro);
-                in_macro += usize::from(opens_macro);
+                self.open.push(opens_macro);
+                self.in_macro += usize::from(opens_macro.is_some());
+                self.in_call += usize::from(opens_macro == Some(MacroKind::Call));
             }
             Token::Punct(')' | ']' | '}') => {
-                let closes_macro = open.pop() == Some(true);
-                in_macro = in_macro.saturating_sub(usize::from(closes_macro));
+                let closed = self.open.pop().flatten();
+                self.in_macro = self.in_macro.saturating_sub(usize::from(closed.is_some()));
+                self.in_call = self
+                    .in_call
+                    .saturating_sub(usize::from(closed == Some(MacroKind::Call)));
             }
             _ => {}
         }
     }
-    lexer.unterminated
+}
+
+/// What a delimiter after `name!` opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MacroKind {
+    /// A macro call's input, whose tokens the macro can rearrange: a `#` in it could become an
+    /// attribute around any bracket group.
+    Call,
+    /// A `macro_rules!` body.
+    Definition,
+}
+
+/// The attributes a block may use before it is compiled, by the first segment of each
+/// attribute's path.
+///
+/// An allowlist, not a denylist: some built-in attributes read a file at compile time even when
+/// rustc only emits metadata (`#[debugger_visualizer(natvis_file = "..")]`, `#[path = ".."]`),
+/// and a later Rust may add more. Each of these only sets lint levels, conditions, derives,
+/// documentation or codegen hints. `doc` is safe: `#[doc = include_str!(..)]` is refused by the
+/// read-macro rule, and a `doc` with a literal reads nothing.
+const ALLOWED_ATTRIBUTES: [&str; 23] = [
+    "allow",
+    "warn",
+    "deny",
+    "forbid",
+    "expect",
+    "cfg",
+    "cfg_attr",
+    "derive",
+    "doc",
+    "must_use",
+    "inline",
+    "cold",
+    "track_caller",
+    "repr",
+    "non_exhaustive",
+    "deprecated",
+    "test",
+    "ignore",
+    "should_panic",
+    "automatically_derived",
+    "rustfmt",
+    "clippy",
+    "diagnostic",
+];
+
+/// The first attribute in `tokens`, the tokens after an attribute's `[`, whose path's first
+/// segment isn't in [`ALLOWED_ATTRIBUTES`]: the attribute itself, and each attribute a
+/// `cfg_attr(<predicate>, <attribute>, ..)` in it applies, however deeply nested. A path that
+/// doesn't start with a name is refused too. `None` when every one is allowed. One pass up to
+/// the attribute's closing `]`.
+fn unlisted_attribute(tokens: &[Token<'_>]) -> Option<Found> {
+    // The delimiter depth inside the attribute.
+    let mut depth = 0_usize;
+    // The depth of each open `cfg_attr(..)`'s parentheses, whose top-level commas each start an
+    // attribute.
+    let mut cfg_attrs: Vec<usize> = Vec::new();
+    let mut path_next = true;
+    for (index, &token) in tokens.iter().enumerate() {
+        let closes = matches!(token, Token::Punct(')' | ']' | '}'));
+        if std::mem::take(&mut path_next) && !closes {
+            match token {
+                Token::Ident("path") => return Some(Found::PathAttribute),
+                Token::Ident(name) if ALLOWED_ATTRIBUTES.contains(&name) => {
+                    if name == "cfg_attr" && tokens.get(index + 1) == Some(&Token::Punct('(')) {
+                        cfg_attrs.push(depth + 1);
+                    }
+                }
+                Token::Ident(name) => return Some(Found::Attribute(name.to_owned())),
+                Token::Punct('$') => return Some(Found::MetavariableAttribute),
+                _ => return Some(Found::Attribute(String::new())),
+            }
+        }
+        match token {
+            Token::Punct('(' | '[' | '{') => depth += 1,
+            Token::Punct(')' | ']' | '}') => {
+                if cfg_attrs.last() == Some(&depth) {
+                    let _closed = cfg_attrs.pop();
+                }
+                depth = depth.checked_sub(1)?;
+            }
+            Token::Punct(',') if cfg_attrs.last() == Some(&depth) => path_next = true,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// One token of a Rust block, as far as the scan needs it.
@@ -1597,9 +1741,70 @@ mod tests {
             "mod inline {\n    pub fn f() {}\n}\nfn main() { inline::f(); println!(\"{}\", 1); }\n",
             "#[derive(Debug)]\nstruct S { path: String }\n",
             "fn environment() -> bool { true != false }\n",
-            "# #[expect(clippy::ptr_arg, reason = \"x\")]\npub fn f(v: &Vec<i32>) {}\n",
+            "#[expect(clippy::ptr_arg, reason = \"x\")]\npub fn f(v: &Vec<i32>) {}\n",
         ] {
             assert_eq!(before_compiling(block), Scan::Clean, "{block:?}");
+        }
+    }
+
+    #[test]
+    fn before_compiling_attributes_off_the_allowlist_are_refused() {
+        let unlisted = |name: &str| Scan::Read(Found::Attribute(name.to_owned()));
+        for (block, refused) in [
+            (
+                "#![debugger_visualizer(natvis_file = \"/etc/passwd\")]\n",
+                unlisted("debugger_visualizer"),
+            ),
+            (
+                "#![debugger_visualizer(gdb_script_file = \"/etc/passwd\")]\n",
+                unlisted("debugger_visualizer"),
+            ),
+            ("#[no_mangle]\npub fn f() {}\n", unlisted("no_mangle")),
+            (
+                "#![cfg_attr(all(), debugger_visualizer(natvis_file = \"/etc/passwd\"))]\n",
+                unlisted("debugger_visualizer"),
+            ),
+            (
+                "#[cfg_attr(all(), allow(unused), cfg_attr(all(), macro_export))]\nfn f() {}\n",
+                unlisted("macro_export"),
+            ),
+            ("#[::core::prelude::v1::test]\nfn f() {}\n", unlisted("")),
+        ] {
+            assert_eq!(before_compiling(block), refused, "{block:?}");
+        }
+    }
+
+    #[test]
+    fn before_compiling_allowlisted_attributes_pass() {
+        let block = "#![allow(unused)]\n#![cfg_attr(all(), warn(clippy::pedantic),)]\n\
+                     #[derive(Debug, Clone)]\n#[must_use]\n#[repr(C)]\n#[non_exhaustive]\n\
+                     #[doc = \"text\"]\n#[cfg_attr(test, derive(Default), deprecated(note = \"x\"))]\n\
+                     pub struct S {\n    #[allow(dead_code)]\n    x: [u8; 2],\n}\n\
+                     #[rustfmt::skip]\n#[inline]\n#[track_caller]\npub fn f() {}\n\
+                     #[diagnostic::on_unimplemented(message = \"x\")]\npub trait T {}\n";
+
+        assert_eq!(before_compiling(block), Scan::Clean);
+    }
+
+    #[test]
+    fn before_compiling_a_hash_a_macro_could_pair_with_any_bracket_group_is_refused() {
+        for (block, what) in [
+            (
+                "macro_rules! m { ($h:tt $a:tt $b:tt) => { $h $b fn f() {} }; }\n\
+                 m!(#[allow(unused)] [debugger_visualizer(natvis_file = \"/etc/passwd\")]);\n",
+                "a `#` inside a macro call's input",
+            ),
+            (
+                "macro_rules! m { ($b:tt) => { # $b fn f() {} }; }\n\
+                 m!([debugger_visualizer(natvis_file = \"/etc/passwd\")]);\n",
+                "a `#` that doesn't start an attribute",
+            ),
+        ] {
+            assert_eq!(
+                before_compiling(block),
+                Scan::Read(Found::Unscannable(what)),
+                "{block:?}"
+            );
         }
     }
 }

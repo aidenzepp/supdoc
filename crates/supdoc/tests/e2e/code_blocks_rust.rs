@@ -647,3 +647,34 @@ fn clippy_is_not_run_without_a_private_working_directory() {
         "{json}"
     );
 }
+
+#[test]
+fn clippy_never_compiles_a_block_with_an_attribute_off_the_allowlist() {
+    let project = project_with_rust_config(
+        "formatter = false\n",
+        "# Blocks\n\n```rust\n#![debugger_visualizer(natvis_file = \"/etc/passwd\")]\n```\n",
+    );
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let runs = outside.path().join("runs");
+    let stub = outside.path().join("clippy-driver");
+    std::fs::write(
+        &stub,
+        format!("#!/bin/sh\necho run >> '{}'\n", runs.display()),
+    )
+    .expect("the stub should be writable");
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+        .expect("the stub should be made executable");
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(0)
+        .json();
+
+    assert!(!runs.exists(), "clippy should never see the block");
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+    assert_eq!(
+        at(&json, "/data/code_blocks/0/reason"),
+        "compile-time read: `debugger_visualizer` attribute",
+        "{json}"
+    );
+}

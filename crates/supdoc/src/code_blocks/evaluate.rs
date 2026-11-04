@@ -303,13 +303,15 @@ impl Evaluation {
                 let compiles = linter.is_some_and(|linter| linter.language == Language::Rust);
                 let refused =
                     rust_refusal(record, rust, compiles, &mut toolchain_warned, &mut slots);
-                if let Some(refused) = refused {
+                if let Some((refused, named)) = refused {
                     record.state = BlockState::NotChecked(refused);
-                    record.reason = record.state.reason(
-                        &record.steps,
-                        record.language.as_deref(),
-                        Some(tool.name),
-                    );
+                    record.reason = named.or_else(|| {
+                        record.state.reason(
+                            &record.steps,
+                            record.language.as_deref(),
+                            Some(tool.name),
+                        )
+                    });
                     continue;
                 }
             }
@@ -883,20 +885,21 @@ fn selected(code_blocks: &CodeBlocks, language: Language) -> Option<&'static Too
 /// was refused (adding its one warning to `slots` unless `warned`), or the block reads at compile
 /// time or is too large to scan (adding that warning). When the block `compiles`, because
 /// clippy will lint it, [`rust::before_compiling`]'s stricter rules apply, which also refuse an
-/// outline module.
+/// outline module and an attribute off the allowlist. With the state, a reason naming that
+/// attribute or module when there is one, which replaces the state's own.
 fn rust_refusal(
     record: &BlockRecord,
     rust: &RustSetup,
     compiles: bool,
     warned: &mut bool,
     slots: &mut Vec<Slot>,
-) -> Option<NotChecked> {
+) -> Option<(NotChecked, Option<String>)> {
     if let Toolchain::Refused { refusal, file } = rust.toolchain {
         if !*warned {
             *warned = true;
             slots.push(Slot::Found(toolchain_warning(refusal, file, &record.at)));
         }
-        return Some(NotChecked::ToolchainPath);
+        return Some((NotChecked::ToolchainPath, None));
     }
     let scan = record.pending.as_ref().map_or(Scan::Clean, |pending| {
         if compiles {
@@ -908,9 +911,16 @@ fn rust_refusal(
     slots.extend(scan_warning(&scan, &record.at).map(Slot::Found));
     match scan {
         Scan::Clean => None,
-        Scan::Read(rust::Found::OutlineModule(_)) => Some(NotChecked::OutlineModule),
-        Scan::Read(_) => Some(NotChecked::CompileTimeRead),
-        Scan::TooLarge => Some(NotChecked::TooLargeToScan),
+        Scan::Read(rust::Found::OutlineModule(name)) => Some((
+            NotChecked::OutlineModule,
+            name.map(|name| format!("outline module `{name}`")),
+        )),
+        Scan::Read(rust::Found::Attribute(name)) if !name.is_empty() => Some((
+            NotChecked::CompileTimeRead,
+            Some(format!("compile-time read: `{name}` attribute")),
+        )),
+        Scan::Read(_) => Some((NotChecked::CompileTimeRead, None)),
+        Scan::TooLarge => Some((NotChecked::TooLargeToScan, None)),
     }
 }
 
