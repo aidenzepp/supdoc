@@ -125,8 +125,9 @@ pub(crate) fn input(block: &CodeBlock, text: &str) -> Option<String> {
 /// kept, output that isn't UTF-8 and a non-zero exit are failures (the exit carrying the first
 /// lines of stderr), and a timeout is a timeout. A non-zero exit is a parse failure only when
 /// `tool`'s stderr is its syntax-error report (see [`ToolCartridge::parse_error`]; the runner
-/// gives no exit status beyond success, so each tool is told by its message alone) and places the error on a line; a report without a
-/// location, like any other non-zero exit, is a tool failure. Stderr after exit 0 is never judged.
+/// gives no exit status beyond success, so each tool is told by its message alone) and places
+/// the error on a line; a report without a location, like any other non-zero exit, is a tool
+/// failure. Stderr after exit 0 is never judged.
 #[must_use]
 pub(crate) fn judge(tool: &ToolCartridge, input: &str, result: Result<Ran, Failure>) -> Verdict {
     match result {
@@ -231,9 +232,9 @@ pub(crate) fn finding(
 }
 
 /// `unformatted`, the `code-block-unformatted` error `tool` gave `block` in `doc`, with the fix
-/// that makes the block's body `output`, the formatter's stdout, when [`safe_fix`] allows it. When
-/// [`safe_fix`] refuses, the error keeps no fix and its `code-block-fix-unsafe` warning follows. The error
-/// alone when the block's ranges don't lie inside `doc`.
+/// that makes the block's body `output`, the formatter's stdout, when [`safe_fix`] allows it.
+/// When [`safe_fix`] refuses, the error keeps no fix and its `code-block-fix-unsafe` warning
+/// follows. The error alone when the block's ranges don't lie inside `doc`.
 #[must_use]
 pub(crate) fn fixed(
     unformatted: Finding,

@@ -195,7 +195,7 @@ pub(crate) mod code_blocks {
     /// Block states and their counts.
     mod states;
 
-    /// The known-tool table, the environment tools get, and the binary lookup on `PATH`.
+    /// The tool cartridges, the environment tools get, and the binary lookup on `PATH`.
     pub(crate) mod tools;
 
     /// The hardened spawn of a tool on one block.

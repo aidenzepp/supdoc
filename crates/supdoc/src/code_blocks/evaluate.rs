@@ -119,8 +119,8 @@ impl Pending {
 /// The findings for `blocks`, in block order, reading each `from(...)` and `uses(...)` source
 /// with `languages`, and one `code-block-stale` error for each `from(...)` block whose body
 /// differs from its parts, followed by a `code-block-fix-unsafe` warning when
-/// [`format::safe_fix`] refuses its fix. Then the `uses(...)` findings against `lock`'s `[code-blocks]`
-/// section, judging a doc's recorded targets obsolete only when `in_scope` holds for it and none
+/// [`format::safe_fix`] refuses its fix. Then the `uses(...)` findings against `lock`'s
+/// `[code-blocks]` section, judging a doc's recorded targets obsolete only when `in_scope` holds for it and none
 /// of its `uses(...)` values fails to resolve. Their help commands name each doc as `paths`
 /// shows it, relative to the current directory. With them, each block's [`BlockState`], counted.
 /// Nothing when `config` leaves `[features.code-blocks]` off.
@@ -587,13 +587,12 @@ struct Session<'run> {
 }
 
 /// Runs `tool`, found at `program`, on `record`'s block from `session`'s root with its env, under
-/// its timeout, or reads the run from its cache when the key is there,
-/// adding `rust`'s config arguments and toolchain variables for a Rust tool:
-/// its verdict and findings, an unformatted block's error carrying the fix to the formatter's
-/// output, or followed by a `code-block-fix-unsafe` warning when [`format::safe_fix`] finds that
-/// output could end the block early. `None` when its input couldn't be read, so it stays
-/// pending. A run whose verdict [`format::Verdict::cacheable`]
-/// allows is stored in the cache.
+/// its timeout, or reads the run from its cache when the key is there, adding `rust`'s config
+/// arguments and toolchain variables for a Rust tool: its verdict and findings, an unformatted
+/// block's error carrying the fix to the formatter's output, or followed by a
+/// `code-block-fix-unsafe` warning when [`format::safe_fix`] finds that output could end the
+/// block early. `None` when its input couldn't be read, so it stays pending. A run whose verdict
+/// [`format::Verdict::cacheable`] allows is stored in the cache.
 ///
 /// Effect: reads the cache, runs the tool, killing it at the timeout, and writes the cache.
 fn run_formatter(
@@ -660,8 +659,8 @@ fn run_formatter(
 
 /// Runs `tool`, a linter found at `program`, on `record`'s block as [`cached_run`] does: its
 /// verdict and findings, one `code-block-lint` error per diagnostic or the tool's failure. `None`
-/// when its input couldn't be read. A Rust block
-/// goes to clippy through [`run_clippy`] with `rust`'s setup.
+/// when its input couldn't be read. A Rust block goes to clippy through [`run_clippy`] with
+/// `rust`'s setup.
 ///
 /// Effect: reads the cache, runs the tool, killing it at the timeout, and writes the cache.
 fn run_linter(
@@ -710,10 +709,10 @@ fn run_linter(
     Some(Ok((verdict, findings)))
 }
 
-/// Runs `tool`, clippy found at `program`, on `record`'s Rust block alone, read as `pending`, as [`run_linter`]
-/// does: `clippy-driver` with its cartridge's arguments for the block's edition and `rust`'s
-/// project lints, `rust`'s toolchain variables and `CLIPPY_CONF_DIR`, and nothing else from the project.
-/// Its metadata goes to a fresh [`rust::EmitDir`], removed after the run whatever its outcome.
+/// Runs `tool`, clippy found at `program`, on `record`'s Rust block alone, read as `pending`, as
+/// [`run_linter`] does: `clippy-driver` with its cartridge's arguments for the block's edition
+/// and `rust`'s project lints, `rust`'s toolchain variables and `CLIPPY_CONF_DIR`, and nothing
+/// else from the project. Its metadata goes to a fresh [`rust::EmitDir`], removed after the run whatever its outcome.
 ///
 /// # Errors
 ///
@@ -988,8 +987,9 @@ fn found_runs(
 }
 
 /// The formatter and linter `code_blocks` selects for a block in `language`, in `state`, whose
-/// `steps` are due (none unless the block is pending), each through the [`static_tier`] gate: each `None` when its step isn't due, the language
-/// has none, or the gate turned its step in `steps` unrunnable.
+/// `steps` are due (none unless the block is pending), each through the [`static_tier`] gate:
+/// each `None` when its step isn't due, the language has none, or the gate turned its step in
+/// `steps` unrunnable.
 fn selected_tools(
     code_blocks: &CodeBlocks,
     steps: &mut Steps,

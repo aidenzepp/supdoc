@@ -48,8 +48,8 @@ impl Edition {
 }
 
 /// The `[features.code-blocks.rust]` table, exactly as written. Its keys are `formatter`,
-/// `linter` and `edition`, plus one options table per tool,; any other key is refused as `config-parse`, and an empty table turns the language
-/// on.
+/// `linter` and `edition`, plus one options table per tool; any other key is refused as
+/// `config-parse`, and an empty table turns the language on.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawRust {

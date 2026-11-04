@@ -39,8 +39,9 @@ use super::{CliError, Context, Outcome};
 /// # Errors
 ///
 /// Returns the config's own error (78, or 74 when unreadable), `cli-path-missing`,
-/// `cli-path-outside-project` or `cli-path-invalid` for a bad `[PATH]` (2), `cli-path-unreadable` (74) for one that can't be looked up, the lockfile's own
-/// error (78 when invalid, 74 when unreadable), `scan-root-unreadable` (74),
+/// `cli-path-outside-project` or `cli-path-invalid` for a bad `[PATH]` (2),
+/// `cli-path-unreadable` (74) for one that can't be looked up, the lockfile's own error (78 when
+/// invalid, 74 when unreadable), `scan-root-unreadable` (74),
 /// `read-cartridge-load` (70) when a built-in cartridge doesn't load, and `cli-output-failed`
 /// when the report cannot be written (74).
 pub(crate) fn run(
