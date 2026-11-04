@@ -406,27 +406,26 @@ enum CargoHomeProblem {
 ///
 /// An unset or empty `CARGO_HOME` falls back to `$HOME/.cargo`. A relative `CARGO_HOME` or `HOME`
 /// is no cargo home, since cargo would read it from wherever supdoc happens to run.
+///
+/// # Errors
+///
+/// Returns the [`CargoHomeProblem`]: a relative or missing path, or one that is not UTF-8.
 fn cargo_home_from(
     cargo_home: Option<OsString>,
     home: Option<OsString>,
 ) -> Result<PathBuf, CargoHomeProblem> {
-    let found = match cargo_home.filter(|value| !value.is_empty()) {
-        Some(value) => {
-            let path = PathBuf::from(value);
-            if path.is_absolute() {
-                path
-            } else {
-                return Err(CargoHomeProblem::RelativeSet);
-            }
+    let found = if let Some(value) = cargo_home.filter(|value| !value.is_empty()) {
+        let path = PathBuf::from(value);
+        if !path.is_absolute() {
+            return Err(CargoHomeProblem::RelativeSet);
         }
-        None => {
-            let home = home
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-                .filter(|path| path.is_absolute())
-                .ok_or(CargoHomeProblem::Unset)?;
-            home.join(".cargo")
-        }
+        path
+    } else {
+        home.filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .ok_or(CargoHomeProblem::Unset)?
+            .join(".cargo")
     };
     if found.to_str().is_some() {
         Ok(found)
