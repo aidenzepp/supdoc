@@ -170,12 +170,31 @@ pub(crate) fn exit_detail(stderr: &[u8]) -> String {
 /// The verdict on a run that reached no exit: a timeout, or a tool failure saying how it failed.
 #[must_use]
 pub(crate) fn failed(failure: Failure) -> Verdict {
+    failure_detail(failure).map_or(Verdict::TimedOut, Verdict::ToolFailed)
+}
+
+/// How a run that reached no exit failed, naming the cap it passed; `None` for a timeout.
+#[must_use]
+pub(crate) fn failure_detail(failure: Failure) -> Option<String> {
     match failure {
-        Failure::TimedOut => Verdict::TimedOut,
-        Failure::OverCap(stream) => {
-            Verdict::ToolFailed(format!("it wrote more than 1 MiB to {stream}"))
+        Failure::TimedOut => None,
+        Failure::OverCap { stream, cap } => {
+            Some(format!("it wrote more than {} to {stream}", size(cap)))
         }
-        Failure::Spawn(error) => Verdict::ToolFailed(format!("it couldn't start: {error}")),
+        Failure::Spawn(error) => Some(format!("it couldn't start: {error}")),
+    }
+}
+
+/// `bytes` in the largest whole binary unit: `16 MiB`, `64 KiB` or `100 bytes`.
+fn size(bytes: usize) -> String {
+    const KIB: usize = 1024;
+    const MIB: usize = 1024 * KIB;
+    if bytes != 0 && bytes.is_multiple_of(MIB) {
+        format!("{} MiB", bytes / MIB)
+    } else if bytes != 0 && bytes.is_multiple_of(KIB) {
+        format!("{} KiB", bytes / KIB)
+    } else {
+        format!("{bytes} bytes")
     }
 }
 
@@ -514,10 +533,11 @@ fn closes(line: &str, marker: char, length: usize) -> bool {
 mod tests {
     use std::sync::Arc;
 
-    use super::{FixDoc, Verdict, finding, fixed, judge};
+    use super::{FixDoc, Verdict, failed, finding, fixed, judge};
     use crate::cartridges::markdown::cartridge::cartridge;
     use crate::cartridges::rust;
     use crate::code_blocks::block::{CodeBlock, blocks_in};
+    use crate::code_blocks::runner::Failure;
     use crate::code_blocks::runner::Ran;
     use crate::code_blocks::tools::formatter;
     use crate::config::code_blocks::Language;
@@ -538,6 +558,27 @@ mod tests {
         });
         assert_eq!(blocks.len(), 1, "expected one block in {text:?}");
         blocks.remove(0)
+    }
+
+    #[test]
+    fn an_over_cap_failure_names_the_cap_it_passed() {
+        let verdicts = [1024 * 1024, 16 * 1024 * 1024, 2048, 100].map(|cap| {
+            failed(Failure::OverCap {
+                stream: "stdout",
+                cap,
+            })
+        });
+
+        assert_eq!(
+            verdicts,
+            [
+                "it wrote more than 1 MiB to stdout",
+                "it wrote more than 16 MiB to stdout",
+                "it wrote more than 2 KiB to stdout",
+                "it wrote more than 100 bytes to stdout",
+            ]
+            .map(|detail| Verdict::ToolFailed(detail.to_owned()))
+        );
     }
 
     /// What `shfmt` printing `output` makes of the one block in `text`, a Markdown doc.

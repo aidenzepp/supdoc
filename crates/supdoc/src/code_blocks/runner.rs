@@ -35,7 +35,7 @@ pub(crate) enum Cwd {
         not(test),
         expect(
             dead_code,
-            reason = "the project build for clippy (P5-07F) is its first caller"
+            reason = "the project build for clippy (P5-07F) calls it, and has no caller until P5-07H"
         )
     )]
     Root,
@@ -82,8 +82,13 @@ pub(crate) enum Failure {
     Spawn(std::io::Error),
     /// It passed its timeout and was killed.
     TimedOut,
-    /// It wrote more than its cap to the named stream and was killed.
-    OverCap(&'static str),
+    /// It wrote more than its cap to a stream and was killed.
+    OverCap {
+        /// The stream: `stdout` or `stderr`.
+        stream: &'static str,
+        /// The cap it passed, in bytes.
+        cap: usize,
+    },
 }
 
 /// Runs `call` with `env`'s variables, from [`neutral_dir`] judged against `root` or from
@@ -177,7 +182,7 @@ pub(crate) fn run(call: &Call<'_>, env: &ToolEnv, root: &Path) -> Result<Ran, Fa
             Err(false) => break,
         };
         if bytes.len() > cap {
-            return Err(kill(child, Failure::OverCap(name)));
+            return Err(kill(child, Failure::OverCap { stream: name, cap }));
         }
         if name == "stdout" {
             stdout = Some(bytes);
@@ -538,7 +543,13 @@ mod tests {
         let result = run_stub(&fixture, b"", &[], Some(Duration::from_secs(5)));
 
         assert!(
-            matches!(result, Err(Failure::OverCap("stdout"))),
+            matches!(
+                result,
+                Err(Failure::OverCap {
+                    stream: "stdout",
+                    cap: CAP
+                })
+            ),
             "{result:?}"
         );
     }
@@ -570,7 +581,13 @@ mod tests {
         );
 
         assert!(
-            matches!(result, Err(Failure::OverCap("stderr"))),
+            matches!(
+                result,
+                Err(Failure::OverCap {
+                    stream: "stderr",
+                    cap: SMALL_CAP
+                })
+            ),
             "{result:?}"
         );
     }
@@ -590,6 +607,24 @@ mod tests {
         .expect("output at the call's cap should pass");
 
         assert_eq!(ran.stdout.len(), SMALL_CAP);
+    }
+
+    #[test]
+    fn output_under_a_cap_above_the_default_is_kept_whole() {
+        // Over the default cap, under the call's: the read limit must follow the call's cap.
+        let fixture = fixture(&format!("head -c {} /dev/zero", 2 * CAP));
+
+        let ran = run_stub_with(
+            &fixture,
+            b"",
+            &[],
+            Some(Duration::from_secs(5)),
+            Cwd::Neutral,
+            4 * CAP,
+        )
+        .expect("output under the call's cap should pass");
+
+        assert_eq!(ran.stdout.len(), 2 * CAP);
     }
 
     /// Whether `/bin/kill -0` still reaches `target`, a pid or a negated process group, within
