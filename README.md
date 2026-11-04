@@ -11,6 +11,17 @@ code behind a link changes, so the docs can be updated with it.
 
 > **Status:** v0.1, published on [crates.io](https://crates.io/crates/supdoc). Expect rough edges.
 
+## Install and upgrade
+
+```sh
+cargo install supdoc --locked     # install
+supdoc upgrade                    # preview the latest version; add --yes to install it
+supdoc upgrade 0.3.0              # preview a specific version, a downgrade if it is older
+```
+
+`supdoc upgrade` works only for a cargo install from crates.io and refuses any other install, naming what it
+sees.
+
 ## How it works
 
 1. Link docs, or code comments, to code with ordinary Markdown links: `[add](src/lib.rs#add)` links one
@@ -28,6 +39,7 @@ symbols too: `[setup](docs/guide.md#install)`.
 |---|---|
 | `supdoc check [PATH]...` | Checks links against `supdoc.lock`; exits 1 when one needs attention (CI gate) |
 | `supdoc update [PATH]...` | Records the current code's hashes in `supdoc.lock` |
+| `supdoc upgrade [VERSION]` | Installs a newer (or older) supdoc with cargo; previews unless `--yes` |
 | `supdoc fix [PATH]...` | Repairs broken links whose fix is certain, rewrites stale `from(...)` code blocks from their sources, and replaces unformatted code blocks with the formatter's output |
 | `supdoc list [TARGET]` | Lists links and their states, such as who documents `src/lib.rs#add` |
 | `supdoc resolve FILE [SYMBOL]` | Lists a file's symbols, or checks that one resolves |
@@ -39,7 +51,7 @@ symbols too: `[setup](docs/guide.md#install)`.
 | `supdoc skill install` | Installs supdoc's agent skill |
 | `supdoc trust [PATH]`, `supdoc trust --revoke [PATH]` | Trusts a checkout to run its code blocks' tools, or stops trusting it |
 
-`update`, `fix`, `namespace rename` and `skill install` preview their changes unless given `--yes`.
+`update`, `fix`, `upgrade`, `namespace rename` and `skill install` preview their changes unless given `--yes`.
 `init` writes immediately; use `--dry-run` to preview it. Every command accepts `--json` and `--jsonl`
 for machine-readable output. Adding optional fields, or new values of an existing enum (states, actions, kinds,
 JSONL record types), keeps `schema_version`; removing or renaming bumps it (currently 2, since 0.2), so consumers must tolerate
@@ -76,6 +88,8 @@ Threat model, for a checkout you don't trust:
 - It doesn't promise to hide whether a path outside the root exists. An out-and-back symlink can change
   which error or exit code appears. That is accepted: on ordinary `pull_request` CI, a PR can already run
   commands.
+- **Network.** `supdoc upgrade` is supdoc's only network access: it runs `cargo`, which talks to crates.io.
+  No other command touches the network, and no command checks for updates on its own.
 - **Checking code blocks.** With a `[features.code-blocks]` table, `supdoc check` and `supdoc fix` check the
   code blocks in your docs with your project's own tools. What runs depends on whether you trust the checkout:
   - **Any checkout (the default):** supdoc runs only tools from its own table that read the block and plain
@@ -188,6 +202,9 @@ A language table turns on its formatter: with `[features.code-blocks.shell]`, sh
 for a stale `from(...)` block, with a `code-block-fix-unsafe` warning when the new body could end the
 block early: it holds a control character other than a tab or a line ending, a line of it would close
 the fence, or the doc, parsed again with the fix applied, no longer holds the same fenced blocks.
+
+A Rust block that uses a name it doesn't define fails with `code-block-missing-name`, once per name at the
+line that first uses it; its other lint diagnostics are dropped, since they follow from the missing name.
 
 The language table selects tools and holds the language's own settings; each tool's options live in the
 tool's own table:

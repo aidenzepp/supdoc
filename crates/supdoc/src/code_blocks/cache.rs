@@ -27,7 +27,7 @@ const RULES_VERSION: u32 = 1;
 /// The first bytes of every entry, naming its format.
 const MAGIC: &[u8] = b"supdoc code-block cache 1\n";
 
-/// How many bytes of a tool's stderr an entry keeps.
+/// The most bytes of a tool's stderr an entry holds; a run with more is not stored.
 const STDERR_CAP: usize = 64 * 1024;
 
 /// The largest entry read back: the runner's 1 MiB output cap, the stderr cap and the framing.
@@ -162,11 +162,15 @@ impl Cache {
         decode(&fs::read(path).ok()?, key)
     }
 
-    /// Stores `ran` under `key`, its stderr capped, through a temporary file renamed into place.
-    /// A failed write leaves no entry and is otherwise ignored.
+    /// Stores `ran` under `key` through a temporary file renamed into place. A run whose stderr
+    /// is longer than `STDERR_CAP` is not stored: a cut stderr could hide the diagnostic a later
+    /// run needs. A failed write leaves no entry and is otherwise ignored.
     ///
     /// Effect: writes and renames a file in the cache directory.
     pub(crate) fn put(&self, key: Key, ran: &Ran) {
+        if ran.stderr.len() > STDERR_CAP {
+            return;
+        }
         let count = WRITES.fetch_add(1, Ordering::Relaxed);
         let temporary = self
             .dir
@@ -255,9 +259,9 @@ fn resolved(path: &Path) -> Option<PathBuf> {
 }
 
 /// `ran`'s entry under `key`: the magic, the key, the exit, both stream lengths, the streams,
-/// then a sha256 of all of it.
+/// then a sha256 of all of it. `ran.stderr` must not exceed `STDERR_CAP`; `Cache::put` checks.
 fn encode(key: Key, ran: &Ran) -> Vec<u8> {
-    let stderr = ran.stderr.get(..STDERR_CAP).unwrap_or(&ran.stderr);
+    let stderr = &ran.stderr;
     let mut bytes =
         Vec::with_capacity(MAGIC.len() + 32 + 17 + ran.stdout.len() + stderr.len() + 32);
     bytes.extend_from_slice(MAGIC);
@@ -442,21 +446,39 @@ mod tests {
         assert_ne!(nested, above, "a config above the root");
     }
 
+    /// A failed run whose stderr is `len` bytes.
+    fn loud(len: usize) -> Ran {
+        Ran {
+            success: false,
+            stdout: Vec::new(),
+            stderr: vec![b'e'; len],
+        }
+    }
+
     #[test]
-    fn stderr_is_capped_when_stored() {
+    fn stderr_at_the_cap_is_stored_whole() {
         let dir = temp();
         let cache = Cache::at(dir.path().join("cache"), 10).expect("the cache should open");
         let key = key_of(&program(dir.path()), "x\n", dir.path());
-        let loud = Ran {
-            success: false,
-            stdout: Vec::new(),
-            stderr: vec![b'e'; STDERR_CAP + 10],
-        };
 
-        cache.put(key, &loud);
+        cache.put(key, &loud(STDERR_CAP));
 
         let stored = cache.get(key).expect("the entry should read back");
         assert_eq!(stored.stderr.len(), STDERR_CAP);
+    }
+
+    #[test]
+    fn stderr_one_byte_over_the_cap_is_not_stored() {
+        let dir = temp();
+        let cache = Cache::at(dir.path().join("cache"), 10).expect("the cache should open");
+        let key = key_of(&program(dir.path()), "x\n", dir.path());
+
+        cache.put(key, &loud(STDERR_CAP + 1));
+
+        assert!(
+            cache.get(key).is_none(),
+            "a cut stderr must never be cached"
+        );
     }
 
     #[test]

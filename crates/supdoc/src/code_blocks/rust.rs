@@ -172,8 +172,26 @@ struct RustcSpan {
 /// The diagnostics in `clippy-driver --error-format=json`'s `stderr`: each JSON line at level
 /// `error` or `warning`, at its primary span in the block, or at line 0 (the fence) when it has
 /// none there. The summaries rustc closes with, which have neither a code nor a span, are left
-/// out, as is any line that isn't a diagnostic.
+/// out, as is any line that isn't a diagnostic. When any is a missing name
+/// ([`lint::missing_name`]), only the missing names remain, one per distinct name at its first
+/// span: the rest are knock-ons of an error that stops clippy's lints.
 fn rustc_diagnostics(stderr: &[u8]) -> Vec<Diagnostic> {
+    let found = all_rustc_diagnostics(stderr);
+    if found
+        .iter()
+        .all(|found| lint::missing_name(found).is_none())
+    {
+        return found;
+    }
+    let mut seen = std::collections::HashSet::new();
+    found
+        .into_iter()
+        .filter(|found| lint::missing_name(found).is_some_and(|name| seen.insert(name.to_owned())))
+        .collect()
+}
+
+/// Every diagnostic [`rustc_diagnostics`] reads, before it drops knock-ons.
+fn all_rustc_diagnostics(stderr: &[u8]) -> Vec<Diagnostic> {
     stderr
         .split(|byte| *byte == b'\n')
         .filter_map(|line| serde_json::from_slice::<RustcDiagnostic>(line).ok())
@@ -1558,7 +1576,7 @@ mod tests {
                     span("<anon>", true, 2, 13)
                 ),
             ),
-            rustc_line("error", Some("E0425"), &span("/rustc/lib.rs", true, 7, 1)),
+            rustc_line("error", Some("E0308"), &span("/rustc/lib.rs", true, 7, 1)),
             rustc_line("warning", None, ""),
             rustc_line("error", None, ""),
             rustc_line("note", Some("x"), &span("<anon>", true, 1, 1)),
@@ -1587,7 +1605,7 @@ mod tests {
                 Diagnostic {
                     line: 0,
                     column: 0,
-                    rule: "E0425".to_owned(),
+                    rule: "E0308".to_owned(),
                     message: "m".to_owned(),
                 },
             ]),
@@ -1605,6 +1623,72 @@ mod tests {
             ),
             Verdict::Clean
         );
+    }
+
+    /// One diagnostic line with `message`, at line 1 of the block.
+    fn named_line(level: &str, code: &str, message: &str) -> String {
+        rustc_line(level, Some(code), &span("<anon>", true, 1, 1)).replace("\"m\"", message)
+    }
+
+    /// The diagnostics of a clippy run that printed `lines`.
+    fn diagnostics_of(lines: &[String]) -> Vec<Diagnostic> {
+        match lint_verdict(
+            "",
+            Ok(Ran {
+                success: false,
+                stdout: Vec::new(),
+                stderr: lines.concat().into_bytes(),
+            }),
+        ) {
+            Verdict::Diagnostics(found) => found,
+            other => panic!("expected diagnostics, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn one_missing_name_reported_twice_is_one_diagnostic() {
+        let found = diagnostics_of(&[
+            named_line(
+                "error",
+                "E0425",
+                "\"cannot find function `missing` in this scope\"",
+            ),
+            named_line(
+                "error",
+                "E0425",
+                "\"cannot find function `missing` in this scope\"",
+            ),
+            named_line("error", "E0432", "\"unresolved import `proj::Nope`\""),
+        ]);
+
+        let names: Vec<_> = found.iter().filter_map(super::lint::missing_name).collect();
+        assert_eq!(names, ["missing", "proj::Nope"], "{found:?}");
+    }
+
+    #[test]
+    fn a_missing_name_drops_the_blocks_other_diagnostics() {
+        let found = diagnostics_of(&[
+            named_line("warning", "clippy::ptr_arg", "\"m\""),
+            named_line(
+                "error",
+                "E0425",
+                "\"cannot find function `nope` in this scope\"",
+            ),
+        ]);
+
+        let rules: Vec<_> = found.iter().map(|found| found.rule.as_str()).collect();
+        assert_eq!(rules, ["E0425"], "{found:?}");
+    }
+
+    #[test]
+    fn without_a_missing_name_the_diagnostics_are_unchanged() {
+        let found = diagnostics_of(&[
+            named_line("warning", "clippy::ptr_arg", "\"m\""),
+            named_line("error", "E0308", "\"mismatched types\""),
+            named_line("warning", "clippy::ptr_arg", "\"m\""),
+        ]);
+
+        assert_eq!(found.len(), 3, "{found:?}");
     }
 
     #[test]

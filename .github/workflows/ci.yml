@@ -28,7 +28,7 @@ jobs:
       - name: Install code-block tools
         # Pinned shfmt and ruff binaries, checked against ci/tools.sha256, and black with every
         # dependency hash-pinned in ci/requirements-black.txt. Those files name the sources.
-        # shellcheck is the runner's own.
+        # shellcheck is pinned the same way, so the runner's own older one is never used.
         run: |
           set -euo pipefail
           tools="$RUNNER_TEMP/code-block-tools"
@@ -36,10 +36,13 @@ jobs:
           cd "$tools/download"
           curl -fsSLO https://github.com/mvdan/sh/releases/download/v3.14.1/shfmt_v3.14.1_linux_amd64
           curl -fsSLO https://github.com/astral-sh/ruff/releases/download/0.17.3/ruff-x86_64-unknown-linux-gnu.tar.gz
+          curl -fsSLO https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.gz
           grep -v '^#' "$GITHUB_WORKSPACE/ci/tools.sha256" | sha256sum --strict -c -
           install -m 0755 shfmt_v3.14.1_linux_amd64 "$tools/bin/shfmt"
           tar -xzf ruff-x86_64-unknown-linux-gnu.tar.gz
           install -m 0755 ruff-x86_64-unknown-linux-gnu/ruff "$tools/bin/ruff"
+          tar -xzf shellcheck-v0.11.0.linux.x86_64.tar.gz
+          install -m 0755 shellcheck-v0.11.0/shellcheck "$tools/bin/shellcheck"
           python3 -m venv "$tools/black"
           "$tools/black/bin/python" -m pip install --quiet --disable-pip-version-check \
             --require-hashes --only-binary=:all: -r "$GITHUB_WORKSPACE/ci/requirements-black.txt"
@@ -48,12 +51,23 @@ jobs:
           "$tools/bin/shfmt" --version
           "$tools/bin/ruff" --version
           "$tools/bin/black" --version
-          shellcheck --version
+          "$tools/bin/shellcheck" --version
       - name: Test
         env:
           # A real-tool test whose tool is missing fails here instead of skipping.
           SUPDOC_REQUIRE_REAL_TOOLS: "1"
         run: cargo test --workspace
+      - name: Check supdoc's own docs
+        env:
+          # supdoc's own repo: CI already runs this PR's code, so trusting its config adds no risk.
+          # NEVER add a `pull_request_target` or `workflow_run` trigger to this workflow while
+          # SUPDOC_TRUST is set: those run with secrets on untrusted code.
+          SUPDOC_TRUST: "1"
+        run: |
+          set -euo pipefail
+          # PATH carries the pinned shellcheck, shfmt, ruff and black from the install step.
+          [ "$(command -v shellcheck)" = "$RUNNER_TEMP/code-block-tools/bin/shellcheck" ]
+          cargo run --quiet -p supdoc -- check --deny-warnings
       - name: Package
         run: cargo package -p supdoc --locked
 

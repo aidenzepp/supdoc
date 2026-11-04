@@ -67,6 +67,10 @@ pub(crate) struct Evaluation {
     pub(crate) records: Vec<BlockRecord>,
     /// How long one tool run may take, from `[limits] code-block-timeout`. `None` is no limit.
     timeout: Option<Duration>,
+    /// How long building the project may take, from `[limits] code-block-build-timeout`. `None`
+    /// is no limit. Nothing reads it yet.
+    #[expect(dead_code, reason = "the project build reads it in P5-07H")]
+    build_timeout: Option<Duration>,
 }
 
 /// What `check` knows about one block.
@@ -155,9 +159,10 @@ pub(crate) fn evaluate(
     };
     let mut findings = Vec::new();
     let mut doc: Option<(&str, Option<Arc<FixDoc>>)> = None;
-    let parse_timeout = config.limits_in_effect().parse_timeout.value;
+    let limits = config.limits_in_effect();
     let read = |file: &str| {
-        read_doc(config, file).map(|text| Arc::new(FixDoc::new(Arc::from(text), parse_timeout)))
+        read_doc(config, file)
+            .map(|text| Arc::new(FixDoc::new(Arc::from(text), limits.parse_timeout.value)))
     };
     let mut written = Vec::new();
     let mut unresolved_uses = BTreeSet::new();
@@ -245,7 +250,8 @@ pub(crate) fn evaluate(
         findings,
         counts: Some(tally(&records)),
         records,
-        timeout: config.limits_in_effect().code_block_timeout.value.get(),
+        timeout: limits.code_block_timeout.value.get(),
+        build_timeout: limits.code_block_build_timeout.value.get(),
     })
 }
 
@@ -854,6 +860,7 @@ fn run_linter(
         &pending.block,
         pending.doc.text(),
         session.timeout,
+        false,
     );
     Some(Ok((verdict, findings)))
 }
@@ -947,6 +954,7 @@ fn run_clippy(
         &pending.block,
         pending.doc.text(),
         session.timeout,
+        false,
     );
     Ok((verdict, findings))
 }
@@ -980,6 +988,8 @@ fn cached_run<V>(
         extra: run.extra,
         stdin: run.input.as_bytes(),
         timeout,
+        cwd: runner::Cwd::Neutral,
+        cap: runner::CAP,
     };
     let result = spawn(&call);
     let stored = result.as_ref().ok().cloned();
@@ -1501,14 +1511,15 @@ mod tests {
 
     use super::{
         BlockRecord, LintRan, MAX_WORKERS, Pending, RustSetup, Session, in_parallel, run_clippy,
+        rust_refusal,
     };
     use crate::cartridges::markdown::cartridge::cartridge as markdown;
     use crate::code_blocks::block::blocks_in;
     use crate::code_blocks::format::FixDoc;
     use crate::code_blocks::lint::Verdict;
     use crate::code_blocks::states::{BlockState, NotChecked, Steps};
-    use crate::code_blocks::tools::{CARTRIDGES, Found, ToolCartridge, ToolEnv, find};
-    use crate::config::code_blocks::Dialect;
+    use crate::code_blocks::tools::{CARTRIDGES, Found, Invocation, ToolCartridge, ToolEnv, find};
+    use crate::config::code_blocks::{Dialect, Edition};
     use crate::finding::Location;
     use crate::path::AbsolutePath;
     use crate::read::cartridge::SourceFile;
@@ -1636,6 +1647,83 @@ mod tests {
         tempfile::TempDir::new().expect("a temporary directory should be creatable")
     }
 
+    /// The probe `e2_rawcstr_2018_leak.rs`, its marker path a fixed non-existent one: before
+    /// edition 2021 `cr#"` is `cr`, `#` and a string, which hides an `include!` from a scan that
+    /// reads it as a raw C string.
+    const E2_PROBE: &str = "pub const A: &str = stringify!(cr#\" \");\n\
+                            include!(\"/nonexistent/supdoc-probe/secret.rs\"); // \"#;\n";
+
+    /// The probe's record with `edition` as its attribute's, under a project at
+    /// `project_edition`: the scan's verdict for it with clippy as its linter, and the
+    /// `--edition` pair in the argv `run_clippy` builds for it.
+    fn scan_and_argv(
+        attribute: Option<Edition>,
+        project_edition: &str,
+    ) -> (Option<(NotChecked, Option<String>)>, Vec<String>) {
+        let root = temporary();
+        std::fs::write(
+            root.path().join("Cargo.toml"),
+            format!("[package]\nname = \"p\"\nedition = \"{project_edition}\"\n"),
+        )
+        .expect("the manifest should be writable");
+        let mut record = rust_record(root.path(), &format!("```rust\n{E2_PROBE}```\n"));
+        record.edition = attribute;
+        let rust = RustSetup::read(root.path());
+        let refusal = rust_refusal(&record, &rust, true, &mut false, &mut Vec::new());
+        let doc = root.path().join("docs/a.md");
+        let args = clippy().args(&Invocation {
+            doc: &doc,
+            index: record.index,
+            edition: rust.edition_of(&record),
+            dialect: record.dialect,
+            project: &rust.lints,
+            emit: None,
+        });
+        let args = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        (refusal, args)
+    }
+
+    /// Asserts that the probe is refused as a compile-time read and clippy gets `--edition 2018`.
+    fn assert_read_as_2018(attribute: Option<Edition>, project_edition: &str) {
+        let (refusal, args) = scan_and_argv(attribute, project_edition);
+
+        assert!(
+            matches!(refusal, Some((NotChecked::CompileTimeRead, _))),
+            "{refusal:?}"
+        );
+        assert!(
+            args.windows(2).any(|pair| pair == ["--edition", "2018"]),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn the_scan_reads_a_block_as_its_attribute_edition_like_clippy() {
+        assert_read_as_2018(Some(Edition::E2018), "2024");
+    }
+
+    #[test]
+    fn the_scan_reads_a_block_as_the_project_edition_like_clippy() {
+        assert_read_as_2018(None, "2018");
+    }
+
+    #[test]
+    fn a_2021_block_of_the_probe_is_not_refused_the_2018_way_and_gets_2021() {
+        let (refusal, args) = scan_and_argv(Some(Edition::E2021), "2018");
+
+        assert!(
+            !matches!(refusal, Some((NotChecked::CompileTimeRead, _))),
+            "{refusal:?}"
+        );
+        assert!(
+            args.windows(2).any(|pair| pair == ["--edition", "2021"]),
+            "{args:?}"
+        );
+    }
+
     #[test]
     fn a_block_whose_text_could_not_be_read_settles_unreadable_not_pending_or_passed() {
         let (root, bin) = (temporary(), temporary());
@@ -1653,6 +1741,7 @@ mod tests {
             counts: None,
             records: vec![record],
             timeout: None,
+            build_timeout: None,
         };
         let env =
             ToolEnv::from_vars(|name| (name == "PATH").then(|| bin.path().as_os_str().to_owned()));

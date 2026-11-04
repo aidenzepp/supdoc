@@ -525,10 +525,17 @@ mod helps {
     }
 
     /// Codes with no binary scenario and no public constructor; their helps are checked by review.
-    const UNREACHABLE: &[Unreachable] = &[Unreachable {
-        kind: "cli-schema-serialize",
-        why: "a built-in JSON Schema must fail to serialize, which is a supdoc bug",
-    }];
+    const UNREACHABLE: &[Unreachable] = &[
+        Unreachable {
+            kind: "cli-schema-serialize",
+            why: "a built-in JSON Schema must fail to serialize, which is a supdoc bug",
+        },
+        Unreachable {
+            kind: "code-block-missing-name",
+            why: "needs a clippy run, which `check` holds until the trust lift; unit-tested in \
+                  code_blocks::lint",
+        },
+    ];
 
     /// A code that prints no help on purpose, and why.
     struct Helpless {
@@ -716,7 +723,7 @@ mod helps {
     }
 
     /// Config keys that look like codes but are not.
-    const NOT_CODES: &[&str] = &["code-block-timeout"];
+    const NOT_CODES: &[&str] = &["code-block-timeout", "code-block-build-timeout"];
 
     /// Whether `text` has the shape of a code: `area-name` in kebab-case, whose first word is one
     /// of supdoc's code areas, such as `link-failed` or `cli-usage`.
@@ -1461,6 +1468,7 @@ mod helps {
         case("cli-usage", |_| {}, &["check", "--no-such-flag"]),
         case("cli-path-missing", |_| {}, &["check", "docs/nope.md"]),
         case("cli-path-missing", |_| {}, &["resolve", "nope.rs"]),
+        case("cli-update-version-argument", |_| {}, &["update", "0.3.1"]),
         case(
             "cli-resolve-fragment",
             |_| {},
