@@ -20,8 +20,8 @@ use crate::hash::Hash;
 use super::runner::Ran;
 use super::tools::{Tool, ToolEnv};
 
-/// The version of the rules that decide what a tool reads for a block: hidden-line handling and
-/// wrapping. Raised whenever they change, so results judged under old rules are never reused.
+/// The version of the rules that decide what a tool reads for a block, such as wrapping. Raised
+/// whenever they change, so results judged under old rules are never reused.
 const RULES_VERSION: u32 = 1;
 
 /// The first bytes of every entry, naming its format.
@@ -63,7 +63,7 @@ pub(crate) struct Run<'run> {
     pub(crate) args: &'run [&'run OsStr],
     /// The variables it gets beyond the passed environment, such as the pinned toolchain.
     pub(crate) extra: &'run [(&'run str, &'run OsStr)],
-    /// The checked text, after hidden-line handling.
+    /// The text the tool reads.
     pub(crate) input: &'run str,
     /// The doc's absolute path, the virtual path's directory the tool's config search starts from.
     pub(crate) doc: &'run Path,

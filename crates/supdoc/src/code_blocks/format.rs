@@ -33,8 +33,7 @@ const PARSE: &str = "code-block-parse";
 /// The code for a tool that passed the `[limits] code-block-timeout` limit.
 const TOOL_TIMEOUT: &str = "code-block-tool-timeout";
 
-/// The code for formatter output `fix` refuses to write, because it would escape the block or
-/// change its hidden lines.
+/// The code for formatter output `fix` refuses to write, because it would escape the block.
 const FIX_UNSAFE: &str = "code-block-fix-unsafe";
 
 /// How many spaces may lead a line that still closes a fence.
@@ -240,8 +239,8 @@ pub(crate) fn finding(
             format!("`{name}` couldn't parse the block: {detail}"),
         )
         .with_help(format!(
-            "fix the code, write the lines the block needs to parse as hidden `# ` lines (Rust), \
-             or mark the block `ignore(<why>)` or `no_format(<why>)`; `{name}` doesn't run on a block it can't parse"
+            "fix the code, or mark the block `ignore(<why>)` or `no_format(<why>)`; \
+             `{name}` doesn't run on a block it can't parse"
         )),
         Verdict::TimedOut => Finding::new(
             TOOL_TIMEOUT,
@@ -260,10 +259,7 @@ pub(crate) fn finding(
 
 /// `unformatted`, the `code-block-unformatted` error `tool` gave `block` in `doc`, with the fix
 /// that makes the block's body `output`, the formatter's stdout, when [`safe_fix`] allows it. When
-/// the block has `hidden` lines, `output` is first written back with their `# ` prefixes by
-/// [`rust::Hidden::rehide`]; when they can't be matched one-to-one, the error keeps no fix and a
-/// `code-block-fix-unsafe` warning at the first unmatched hidden line follows. When [`safe_fix`]
-/// refuses, the error keeps no fix and its `code-block-fix-unsafe` warning follows. The error
+/// [`safe_fix`] refuses, the error keeps no fix and its `code-block-fix-unsafe` warning follows. The error
 /// alone when the block's ranges don't lie inside `doc`.
 #[must_use]
 pub(crate) fn fixed(
@@ -272,7 +268,6 @@ pub(crate) fn fixed(
     doc: &FixDoc,
     output: &str,
     tool: &Tool,
-    hidden: Option<&rust::Hidden>,
 ) -> Vec<Finding> {
     let name = tool.name;
     let what = format!("`{name}`'s output");
@@ -280,23 +275,7 @@ pub(crate) fn fixed(
         .strip_suffix("\r\n")
         .or_else(|| output.strip_suffix('\n'))
         .unwrap_or(output);
-    let rehidden;
-    let body = match hidden.map(|hidden| hidden.rehide(output)) {
-        None => output,
-        Some(Ok(written)) => {
-            rehidden = written;
-            &rehidden
-        }
-        Some(Err(line)) => {
-            let at = rust::LineMap::of(block, doc.text())
-                .and_then(|map| map.doc_line(line).cloned())
-                .unwrap_or_else(|| block.fence.clone());
-            let warning =
-                refused(block, &Refusal::ChangesHiddenLines, &what, '`').with_location(at);
-            return vec![unformatted, warning];
-        }
-    };
-    match safe_fix(block, doc, body, &what) {
+    match safe_fix(block, doc, output, &what) {
         Guarded::Fix(fix) => {
             let help = format!(
                 "run `supdoc fix {} --yes` to apply `{name}`'s output",
@@ -360,8 +339,6 @@ enum Refusal {
     ChangesBlocks,
     /// The doc couldn't be parsed again within `parse-timeout` to check the fix.
     Unchecked,
-    /// The formatter changed, added, removed or reordered the block's hidden `# ` lines.
-    ChangesHiddenLines,
     /// A line that isn't part of the block, such as a `//` comment in a doc-comment run, lies
     /// between its body lines, and replacing the body would delete it.
     SkipsLines,
@@ -437,11 +414,6 @@ fn refused(block: &CodeBlock, refusal: &Refusal, what: &str, marker: char) -> Fi
         Refusal::SkipsLines => (
             "would delete a line inside the block that isn't part of it, such as a `//` comment",
             "move that line out of the block or make it a doc-comment line, or edit the block by hand"
-                .to_owned(),
-        ),
-        Refusal::ChangesHiddenLines => (
-            "would change its hidden `# ` lines",
-            "edit the block's hidden lines by hand to match the formatter, or mark the block `ignore(<why>)`"
                 .to_owned(),
         ),
     };
@@ -606,7 +578,7 @@ mod tests {
         let unformatted = finding(&verdict, tool, &block.fence, None)
             .expect("an unformatted block has a finding");
         let doc = FixDoc::new(Arc::from(text), Limits::PARSE_TIMEOUT);
-        fixed(unformatted, block, &doc, output, tool, None)
+        fixed(unformatted, block, &doc, output, tool)
     }
 
     /// `text` with the one fix in `findings` applied.

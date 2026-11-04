@@ -88,21 +88,15 @@ pub(crate) fn judge(tool: &Tool, result: Result<Ran, Failure>) -> Verdict {
     }
 }
 
-/// Where `diagnostic` is in the doc holding `block`, whose text is `text`: its checked-text line
-/// through `map`, then its column past the line's container prefix and the `removed` characters
-/// the checked text dropped from that line (a hidden line's `# `). A column past the line's end
-/// lands at its end. `None` when the line isn't one of the block's.
+/// Where `diagnostic` is in the doc holding `block`, whose text is `text`: its body line through
+/// `map`, then its column past the line's container prefix. A column past the line's end lands at
+/// its end. `None` when the line isn't one of the block's.
 #[must_use]
-pub(crate) fn place(
-    diagnostic: &Diagnostic,
-    map: &LineMap,
-    text: &str,
-    removed: impl Fn(usize) -> usize,
-) -> Option<Location> {
+pub(crate) fn place(diagnostic: &Diagnostic, map: &LineMap, text: &str) -> Option<Location> {
     let line = diagnostic.line.checked_sub(1)?;
     let start = map.doc_line(line)?;
     let content = text.get(start.range.clone())?;
-    let skip = removed(line) + diagnostic.column.saturating_sub(1);
+    let skip = diagnostic.column.saturating_sub(1);
     let (chars, bytes) = content
         .char_indices()
         .take(skip)
@@ -117,16 +111,15 @@ pub(crate) fn place(
 }
 
 /// The findings for `verdict`, from `tool` on `block` in `text`: one `code-block-lint` error per
-/// diagnostic, hidden lines included, at its place in the doc (the fence when it can't be
+/// diagnostic at its place in the doc (the fence when it can't be
 /// placed), naming its rule and `no_lint(<reason>)`, never with a fix; or the tool failure or
-/// timeout error at the fence, run under `timeout`. `removed` is as [`place`] takes it.
+/// timeout error at the fence, run under `timeout`.
 #[must_use]
 pub(crate) fn findings(
     verdict: &Verdict,
     tool: &Tool,
     block: &CodeBlock,
     text: &str,
-    removed: impl Fn(usize) -> usize,
     timeout: Option<Duration>,
 ) -> Vec<Finding> {
     match verdict {
@@ -141,7 +134,7 @@ pub(crate) fn findings(
                 .map(|diagnostic| {
                     let at = map
                         .as_ref()
-                        .and_then(|map| place(diagnostic, map, text, &removed))
+                        .and_then(|map| place(diagnostic, map, text))
                         .unwrap_or_else(|| block.fence.clone());
                     lint_finding(tool, diagnostic).with_location(at)
                 })
@@ -218,7 +211,7 @@ mod tests {
         let block = markdown_block(text);
         let map = LineMap::of(&block, text).expect("the block's lines should be in the doc");
 
-        let at = place(&diagnostic(2, 3), &map, text, |_| 0).expect("line 2 is the block's");
+        let at = place(&diagnostic(2, 3), &map, text).expect("line 2 is the block's");
 
         assert_eq!((at.line, at.column), (7, 5));
         assert_eq!(text.get(at.range.start..at.range.start + 4), Some("== N"));
@@ -234,34 +227,32 @@ mod tests {
         );
         let map = LineMap::of(&block, text).expect("the block's lines should be in the doc");
 
-        let at = place(&diagnostic(1, 3), &map, text, |_| 0).expect("line 1 is the block's");
+        let at = place(&diagnostic(1, 3), &map, text).expect("line 1 is the block's");
 
         assert_eq!((at.line, at.column), (4, 7));
     }
 
     #[test]
-    fn a_diagnostic_on_a_hidden_line_counts_past_its_marker() {
+    fn a_diagnostic_on_a_hash_line_lands_at_its_written_column() {
         let text = "```rust\n# let x = 1;\nlet y = x;\n```\n";
         let block = markdown_block(text);
-        let removed = |line: usize| if line == 0 { 2 } else { 0 };
 
         let found = findings(
             &Verdict::Diagnostics(vec![diagnostic(1, 5)]),
             ruff(),
             &block,
             text,
-            removed,
             None,
         );
 
         let [finding] = found.as_slice() else {
-            panic!("a hidden line's diagnostic should still count: {found:?}");
+            panic!("a `# ` line is ordinary code, so its diagnostic counts: {found:?}");
         };
         let at = finding
             .location
             .as_ref()
             .expect("the finding should be placed");
-        assert_eq!((at.line, at.column), (2, 7));
+        assert_eq!((at.line, at.column), (2, 5));
         assert!(finding.fix.is_none(), "a lint finding never carries a fix");
     }
 
@@ -275,7 +266,6 @@ mod tests {
             ruff(),
             &block,
             text,
-            |_| 0,
             None,
         );
 

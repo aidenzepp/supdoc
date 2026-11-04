@@ -167,8 +167,8 @@ the fence, or the doc, parsed again with the fix applied, no longer holds the sa
 A Rust snippet that needs surrounding code to make sense takes one of three explicit forms:
 
 1. **Show the real code.** If it's the project's own code, make it a `from(...)` block, so it can't drift.
-2. **Write the context into the block** with hidden `# ` lines (`# use std::time::Instant;`,
-   `# fn main() {` … `# }`), as rustdoc already supports.
+2. **Write the context into the block** as ordinary, visible code (`use std::time::Instant;`,
+   `fn main() {` … `}`). Every line is checked as written.
 3. **Keep it partial and say so**: `no_lint(needs crate context)`, or `ignore(placeholder)` for a block
    that doesn't parse on its own.
 
