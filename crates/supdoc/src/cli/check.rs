@@ -51,13 +51,14 @@ use super::{CliError, Context, Outcome};
 pub(crate) fn run(
     args: &CheckArgs,
     tools: &ToolEnv,
+    trust: &TrustEnv,
     context: &Context,
     output: &mut Output,
 ) -> Result<Outcome, CliError> {
     let config = load_config(context, output)?;
     let scope = scope(&args.paths, &config, context)?;
     let lock = read_lock(&config, &context.cwd)?;
-    let granted = granted_tier(config.root().as_path())?;
+    let granted = granted_tier(config.root().as_path(), trust)?;
     let languages = Languages::builtin().map_err(CliError::from)?;
     let (mut scan, untracked) = crate::scan::assemble::run_with_untracked(
         &config,
@@ -107,16 +108,16 @@ pub(crate) fn run(
 }
 
 /// The tier the operator granted the project at `root`, the config's directory:
-/// [`Tier::Project`] when `SUPDOC_TRUST` or the trust store trusts it, else [`Tier::Static`].
+/// [`Tier::Project`] when `env`'s `SUPDOC_TRUST` or its trust store trusts it, else
+/// [`Tier::Static`].
 ///
-/// Effect: reads `SUPDOC_TRUST`, `XDG_STATE_HOME` and `HOME`, and the trust store.
+/// Effect: reads the trust store and, for a linked worktree, the git files that locate it.
 ///
 /// # Errors
 ///
 /// Returns `cli-usage` (2) when `SUPDOC_TRUST` holds a value other than `1`, `0` or empty.
-pub(super) fn granted_tier(root: &Path) -> Result<Tier, CliError> {
-    let env = TrustEnv::from_vars(|name| std::env::var_os(name));
-    match trust::granted(root, &env) {
+pub(super) fn granted_tier(root: &Path, env: &TrustEnv) -> Result<Tier, CliError> {
+    match trust::granted(root, env) {
         Ok(true) => Ok(Tier::Project),
         Ok(false) => Ok(Tier::Static),
         Err(error) => Err(CliError::new(
@@ -576,10 +577,67 @@ mod tests {
         let result = run(
             check_args,
             &ToolEnv::default(),
+            &TrustEnv::default(),
             &session.context,
             &mut session.output,
         );
         session.finished(result)
+    }
+
+    /// A trust environment holding only the variables in `vars`.
+    fn trust_env(vars: &[(&str, &std::ffi::OsStr)]) -> TrustEnv {
+        TrustEnv::from_vars(|name| {
+            vars.iter()
+                .find(|(var, _)| *var == name)
+                .map(|(_, value)| value.to_os_string())
+        })
+    }
+
+    #[test]
+    fn granted_tier_is_static_with_nothing_set_and_project_under_supdoc_trust_1() {
+        let root = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+
+        let unset = granted_tier(root.path(), &trust_env(&[])).expect("no value is valid");
+        let trusted = granted_tier(root.path(), &trust_env(&[("SUPDOC_TRUST", "1".as_ref())]))
+            .expect("`1` is valid");
+
+        assert_eq!(unset, Tier::Static);
+        assert_eq!(trusted, Tier::Project);
+    }
+
+    #[test]
+    fn granted_tier_is_project_for_a_root_in_the_injected_trust_store() {
+        let root = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let state = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let real = fs::canonicalize(root.path()).expect("the root should resolve");
+        fs::create_dir(state.path().join("supdoc")).expect("the store dir should be creatable");
+        fs::write(
+            state.path().join("supdoc/trusted-roots"),
+            format!("{}\n", real.display()),
+        )
+        .expect("the store should be writable");
+
+        let env = trust_env(&[("XDG_STATE_HOME", state.path().as_os_str())]);
+
+        assert_eq!(
+            granted_tier(root.path(), &env).expect("the store should be read"),
+            Tier::Project
+        );
+    }
+
+    #[test]
+    fn a_bad_supdoc_trust_is_a_usage_error_naming_the_accepted_values() {
+        let root = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+
+        let error = granted_tier(root.path(), &trust_env(&[("SUPDOC_TRUST", "yes".as_ref())]))
+            .expect_err("`yes` is not an accepted value");
+
+        assert_eq!(error.code(), "cli-usage");
+        assert_eq!(error.exit_code(), 2);
+        assert!(
+            error.to_string().contains("`1`") && error.to_string().contains("`0`"),
+            "the message should name the accepted values: {error}"
+        );
     }
 
     #[test]
