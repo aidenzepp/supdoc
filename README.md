@@ -203,6 +203,9 @@ for a stale `from(...)` block, with a `code-block-fix-unsafe` warning when the n
 block early: it holds a control character other than a tab or a line ending, a line of it would close
 the fence, or the doc, parsed again with the fix applied, no longer holds the same fenced blocks.
 
+A Rust block that uses a name it doesn't define fails with `code-block-missing-name`, once per name at the
+line that first uses it; its other lint diagnostics are dropped, since they follow from the missing name.
+
 The language table selects tools and holds the language's own settings; each tool's options live in the
 tool's own table:
 

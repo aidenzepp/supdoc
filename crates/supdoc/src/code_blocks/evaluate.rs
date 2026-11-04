@@ -826,6 +826,7 @@ fn run_linter(
         &pending.block,
         pending.doc.text(),
         session.timeout,
+        false,
     );
     Some(Ok((verdict, findings)))
 }
@@ -919,6 +920,7 @@ fn run_clippy(
         &pending.block,
         pending.doc.text(),
         session.timeout,
+        false,
     );
     Ok((verdict, findings))
 }
