@@ -272,7 +272,7 @@ pub(crate) fn run(
         }
         Command::Namespace(NamespaceCommand::Rename(args)) => rename::run(args, context, output),
         Command::Schema(args) => schema::run(args, context, output),
-        Command::Trust(args) => trust::run(args, context, output),
+        Command::Trust(args) => trust::run(args, trust, context, output),
         Command::Completions(args) => completions::run(args, context, output),
         Command::Skill(SkillCommand::Install(args)) => {
             skill::run(args, skill_dirs, context, output)
