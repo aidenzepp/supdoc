@@ -29,6 +29,7 @@ jobs:
         # Pinned shfmt and ruff binaries, checked against ci/tools.sha256, and black with every
         # dependency hash-pinned in ci/requirements-black.txt. Those files name the sources.
         # shellcheck is pinned the same way, so the runner's own older one is never used.
+        # biome, tombi, yamlfmt, rumdl and Go are pinned the same way; yamllint like black.
         run: |
           set -euo pipefail
           tools="$RUNNER_TEMP/code-block-tools"
@@ -37,21 +38,45 @@ jobs:
           curl -fsSLO https://github.com/mvdan/sh/releases/download/v3.14.1/shfmt_v3.14.1_linux_amd64
           curl -fsSLO https://github.com/astral-sh/ruff/releases/download/0.17.3/ruff-x86_64-unknown-linux-gnu.tar.gz
           curl -fsSLO https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.gz
+          curl -fsSLo biome-linux-x64 'https://github.com/biomejs/biome/releases/download/%40biomejs/biome%402.6.5/biome-linux-x64'
+          curl -fsSLO https://github.com/tombi-toml/tombi/releases/download/v1.10.0/tombi-cli-1.10.0-x86_64-unknown-linux-musl.tar.gz
+          curl -fsSLO https://github.com/google/yamlfmt/releases/download/v0.21.0/yamlfmt_0.21.0_Linux_x86_64.tar.gz
+          curl -fsSLO https://github.com/rvben/rumdl/releases/download/v0.3.2/rumdl-v0.3.2-x86_64-unknown-linux-gnu.tar.gz
+          curl -fsSLO https://go.dev/dl/go1.27.3.linux-amd64.tar.gz
           grep -v '^#' "$GITHUB_WORKSPACE/ci/tools.sha256" | sha256sum --strict -c -
           install -m 0755 shfmt_v3.14.1_linux_amd64 "$tools/bin/shfmt"
           tar -xzf ruff-x86_64-unknown-linux-gnu.tar.gz
           install -m 0755 ruff-x86_64-unknown-linux-gnu/ruff "$tools/bin/ruff"
           tar -xzf shellcheck-v0.11.0.linux.x86_64.tar.gz
           install -m 0755 shellcheck-v0.11.0/shellcheck "$tools/bin/shellcheck"
+          install -m 0755 biome-linux-x64 "$tools/bin/biome"
+          tar -xzf tombi-cli-1.10.0-x86_64-unknown-linux-musl.tar.gz
+          install -m 0755 tombi-cli-1.10.0-x86_64-unknown-linux-musl/tombi "$tools/bin/tombi"
+          tar -xzf yamlfmt_0.21.0_Linux_x86_64.tar.gz yamlfmt
+          install -m 0755 yamlfmt "$tools/bin/yamlfmt"
+          tar -xzf rumdl-v0.3.2-x86_64-unknown-linux-gnu.tar.gz rumdl
+          install -m 0755 rumdl "$tools/bin/rumdl"
+          tar -xzf go1.27.3.linux-amd64.tar.gz -C "$tools"
+          python3 -m venv "$tools/yamllint"
+          "$tools/yamllint/bin/python" -m pip install --quiet --disable-pip-version-check \
+            --require-hashes --only-binary=:all: -r "$GITHUB_WORKSPACE/ci/requirements-yamllint.txt"
+          ln -s "$tools/yamllint/bin/yamllint" "$tools/bin/yamllint"
           python3 -m venv "$tools/black"
           "$tools/black/bin/python" -m pip install --quiet --disable-pip-version-check \
             --require-hashes --only-binary=:all: -r "$GITHUB_WORKSPACE/ci/requirements-black.txt"
           ln -s "$tools/black/bin/black" "$tools/bin/black"
           echo "$tools/bin" >> "$GITHUB_PATH"
+          echo "$tools/go/bin" >> "$GITHUB_PATH"
           "$tools/bin/shfmt" --version
           "$tools/bin/ruff" --version
           "$tools/bin/black" --version
           "$tools/bin/shellcheck" --version
+          "$tools/bin/biome" --version
+          "$tools/bin/tombi" --version
+          "$tools/bin/yamlfmt" -version
+          "$tools/bin/rumdl" --version
+          "$tools/bin/yamllint" --version
+          "$tools/go/bin/go" version
       - name: Test
         env:
           # A real-tool test whose tool is missing fails here instead of skipping.
