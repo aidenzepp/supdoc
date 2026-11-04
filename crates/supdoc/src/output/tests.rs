@@ -507,6 +507,26 @@ impl Write for FullDisk {
 }
 
 #[test]
+fn output_holds_its_writes_once_a_termination_signal_has_arrived() {
+    static SIGNALLED: std::sync::atomic::AtomicI32 =
+        std::sync::atomic::AtomicI32::new(signal_hook::consts::SIGTERM);
+    static QUIET: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+    let output = |flag| {
+        let (output, _stdout, _stderr) = captured(settings(OutputFormat::Text, Verbosity::Normal));
+        output.with_termination_flag(flag)
+    };
+
+    assert!(
+        !output(&QUIET).holds_writes(),
+        "with no signal, output should write"
+    );
+    assert!(
+        output(&SIGNALLED).holds_writes(),
+        "after SIGTERM, output should hold every write until the signal ends supdoc"
+    );
+}
+
+#[test]
 fn a_closed_stdout_drops_data_but_not_what_goes_to_stderr() {
     let stderr = Capture::default();
     let mut output = Output::new(

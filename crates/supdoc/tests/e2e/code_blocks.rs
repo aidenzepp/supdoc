@@ -912,69 +912,160 @@ fn still_alive(pid: &str) -> bool {
     true
 }
 
-#[test]
-fn sigterm_during_a_tool_run_kills_the_tool_and_ends_supdoc_by_sigterm() {
+/// How a `check` run that got SIGTERM while its tools ran ended.
+struct Terminated {
+    /// supdoc's own exit status.
+    status: std::process::ExitStatus,
+    /// Everything supdoc wrote to stdout.
+    stdout: String,
+    /// Everything supdoc wrote to stderr.
+    stderr: String,
+    /// The pid of every tool supdoc started, one per tool run.
+    tools: Vec<String>,
+}
+
+/// Runs `check` on [`project_with_shell_blocks`] with `blocks` shell blocks and an `shfmt` stub
+/// that records its pid and sleeps, sends supdoc SIGTERM once `running` tools have started, and
+/// waits for it to end.
+fn sigterm_while_tools_run(blocks: usize, running: usize) -> Terminated {
+    use std::fmt::Write as _;
     use std::os::unix::fs::PermissionsExt as _;
-    use std::os::unix::process::ExitStatusExt as _;
+    use std::time::{Duration, Instant};
     let project = project_with_shell_blocks();
+    // Each block distinct, so every one runs its own tool.
+    let mut doc = String::from("# Blocks\n");
+    for n in 0..blocks {
+        writeln!(doc, "\n```sh\necho {n}\n```").expect("writing to a String should not fail");
+    }
+    project.write("docs/blocks.md", &doc);
     let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
-    let pid_file = outside.path().join("pid");
-    let stub = outside.path().join("shfmt");
+    let pids = outside.path().join("pids");
+    std::fs::create_dir(&pids).expect("the pid directory should be creatable");
+    let bin = outside.path().join("bin");
+    std::fs::create_dir(&bin).expect("the stub directory should be creatable");
+    let stub = bin.join("shfmt");
     std::fs::write(
         &stub,
         format!(
-            "#!/bin/sh\necho $$ > '{}'\nexec /bin/sleep 30\n",
-            pid_file.display()
+            "#!/bin/sh\n: > '{}/'$$\nexec /bin/sleep 30\n",
+            pids.display()
         ),
     )
     .expect("the stub should be writable");
     std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
         .expect("the stub should be made executable");
-    let started = std::time::Instant::now();
+    let (stdout_path, stderr_path) = (outside.path().join("out"), outside.path().join("err"));
+    let started = Instant::now();
     let mut supdoc = std::process::Command::new(env!("CARGO_BIN_EXE_supdoc"))
         .args(["check", "--code-block-timeout", "60s"])
         .current_dir(project.path("."))
         .env_clear()
-        .env("PATH", outside.path())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .env("PATH", &bin)
+        .stdout(std::fs::File::create(&stdout_path).expect("the stdout file should be creatable"))
+        .stderr(std::fs::File::create(&stderr_path).expect("the stderr file should be creatable"))
         .spawn()
         .expect("the supdoc binary should start");
-
-    let tool = loop {
-        if let Some(pid) = std::fs::read_to_string(&pid_file)
-            .ok()
-            .filter(|text| text.ends_with('\n'))
-        {
-            break pid.trim().to_owned();
-        }
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(10),
-            "the stub tool never started"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
+    let started_tools = || {
+        std::fs::read_dir(&pids)
+            .expect("the pid directory should be readable")
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .collect::<Vec<_>>()
     };
+
+    while started_tools().len() < running {
+        if started.elapsed() > Duration::from_secs(10) {
+            drop(supdoc.kill());
+            panic!("only {} stub tools started", started_tools().len());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
     let sent = std::process::Command::new("/bin/kill")
         .args(["-TERM", &supdoc.id().to_string()])
         .status()
         .expect("/bin/kill should run");
+    assert!(sent.success(), "SIGTERM should be delivered");
     let status = loop {
         if let Some(status) = supdoc.try_wait().expect("the run should be waitable") {
             break status;
         }
-        if started.elapsed() > std::time::Duration::from_secs(10) {
+        if started.elapsed() > Duration::from_secs(20) {
             drop(supdoc.kill());
             panic!("supdoc did not exit after SIGTERM");
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(20));
     };
+    let read =
+        |path| std::fs::read_to_string(path).expect("the captured stream should be readable");
+    Terminated {
+        status,
+        stdout: read(&stdout_path),
+        stderr: read(&stderr_path),
+        tools: started_tools(),
+    }
+}
 
-    assert!(sent.success(), "SIGTERM should be delivered");
-    assert!(
-        status.signal() == Some(15) || status.code() == Some(143),
-        "supdoc should end by SIGTERM: {status:?}"
+/// The tools in `tools` that still run, each killed so none outlives the test.
+fn survivors(tools: &[String]) -> Vec<String> {
+    let alive: Vec<String> = tools
+        .iter()
+        .filter(|pid| still_alive(pid))
+        .cloned()
+        .collect();
+    for pid in &alive {
+        let _killed = std::process::Command::new("/bin/kill")
+            .args(["-KILL", pid])
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    alive
+}
+
+#[test]
+fn sigterm_during_a_tool_run_kills_the_tool_and_ends_supdoc_by_sigterm() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let run = sigterm_while_tools_run(2, 1);
+
+    assert_eq!(
+        run.status.signal(),
+        Some(15),
+        "supdoc should end by SIGTERM: {:?}",
+        run.status
     );
-    assert!(!still_alive(&tool), "the stub tool {tool} outlived supdoc");
+    assert_eq!(
+        (run.stdout.as_str(), run.stderr.as_str()),
+        ("", ""),
+        "supdoc should print nothing after SIGTERM"
+    );
+    assert_eq!(
+        survivors(&run.tools),
+        Vec::<String>::new(),
+        "no stub tool should outlive supdoc; started: {:?}",
+        run.tools
+    );
+}
+
+#[test]
+fn sigterm_leaves_no_tool_running_when_blocks_outnumber_workers() {
+    use std::os::unix::process::ExitStatusExt as _;
+    let workers = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(8);
+
+    let run = sigterm_while_tools_run(40, workers);
+
+    assert_eq!(
+        run.status.signal(),
+        Some(15),
+        "supdoc should end by SIGTERM: {:?}",
+        run.status
+    );
+    assert_eq!(
+        survivors(&run.tools),
+        Vec::<String>::new(),
+        "no stub tool, even one started after the signal, should outlive supdoc; started: {:?}",
+        run.tools
+    );
 }
 
 /// Runs `check --json` on [`project_with_shell_blocks`] with `config` as its config and an

@@ -5,13 +5,16 @@
 //!
 //! It also installs the one termination handler: on SIGINT, SIGTERM or SIGHUP every tool process
 //! group still registered as live is killed, and supdoc then ends as that signal's default action
-//! would have ended it.
+//! would have ended it. Once a signal has arrived, supdoc ends by that signal and no other way:
+//! the main thread waits for the re-raise instead of printing anything or returning a code.
 
 use std::ffi::OsStr;
 use std::io::{self, IsTerminal, Write};
 use std::path::{MAIN_SEPARATOR_STR, Path};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
 
 use crate::cli::args::{Cli, GlobalArgs};
 use crate::cli::parse::{Parsed, Printout, Stream, parse_from};
@@ -30,6 +33,12 @@ const DEFAULT_WIDTH: usize = 80;
 
 /// The process group ids of the tools running now, each registered by a [`LiveGroup`].
 static LIVE_GROUPS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// The termination signal that arrived, or 0 while none has. Set before any tool group is killed.
+pub(crate) static TERMINATING: AtomicI32 = AtomicI32::new(0);
+
+/// How long the main thread sleeps between checks while it waits for the signal thread's re-raise.
+const TERMINATION_POLL: Duration = Duration::from_millis(50);
 
 /// A tool's process group, registered as live while this value exists, so a termination signal
 /// kills it. Dropped once the tool is reaped.
@@ -96,19 +105,59 @@ fn handle_termination() {
         return;
     };
     drop(std::thread::spawn(move || {
-        for signal in signals.forever() {
-            kill_live_groups();
-            // Resets the signal to its default action and raises it, which ends the process.
-            let _ended = signal_hook::low_level::emulate_default_handler(signal);
-        }
+        // The first signal ends the process, so no later one is read.
+        let Some(signal) = signals.forever().next() else {
+            return;
+        };
+        // Set first, so the main thread can't see a killed tool and end before the re-raise.
+        TERMINATING.store(signal, Ordering::SeqCst);
+        kill_live_groups();
+        // Resets the signal to its default action and raises it, which ends the process. No
+        // fallback is needed: for SIGINT, SIGTERM and SIGHUP, signal-hook 0.4 raises the signal
+        // and aborts if raising fails, so this call never returns.
+        let _ended = signal_hook::low_level::emulate_default_handler(signal);
     }));
+}
+
+/// Whether `flag` records a termination signal, so the process must wait to be ended by it.
+pub(crate) fn ends_by_signal(flag: &AtomicI32) -> bool {
+    flag.load(Ordering::SeqCst) != 0
+}
+
+/// Blocks for good once `flag` records a termination signal, so the signal thread's re-raise ends
+/// the process; returns at once otherwise.
+///
+/// Effect: sleeps the calling thread while a signal is pending.
+pub(crate) fn await_termination(flag: &AtomicI32) {
+    if ends_by_signal(flag) {
+        wait_to_be_ended();
+    }
+}
+
+/// Blocks for good: a termination signal has arrived, and its re-raise on the signal thread ends
+/// the process.
+///
+/// Effect: sleeps the calling thread until the process ends.
+pub(crate) fn wait_to_be_ended() -> ! {
+    loop {
+        std::thread::sleep(TERMINATION_POLL);
+    }
 }
 
 /// Parses, runs and reports, and returns the process exit code.
 ///
-/// Builds the one [`Output`] of the run, and every command prints through it.
+/// After a termination signal it never returns: the signal ends the process.
 pub(crate) fn exit_code() -> u8 {
     handle_termination();
+    let code = parse_run_and_report();
+    await_termination(&TERMINATING);
+    code
+}
+
+/// Parses, runs and reports, and returns the exit code of the run.
+///
+/// Builds the one [`Output`] of the run, and every command prints through it.
+fn parse_run_and_report() -> u8 {
     let var = |name: &str| std::env::var_os(name);
     let cli = match parse_from(std::env::args_os(), |name| {
         var(name).and_then(|value| value.into_string().ok())
@@ -175,6 +224,8 @@ fn current_dir() -> Result<AbsolutePath, CliError> {
 /// A closed pipe does not change the exit code: the run's own code stands, so `--help` exits 0
 /// and a usage error still exits 2.
 fn print(printout: &Printout) -> u8 {
+    // Held like every `Output` write: nothing prints once a termination signal has arrived.
+    await_termination(&TERMINATING);
     let written = match printout.stream {
         Stream::Stdout => write_all(io::stdout(), &printout.text),
         Stream::Stderr => write_all(io::stderr(), &printout.text),
@@ -306,6 +357,22 @@ mod tests {
         );
         drop(second);
         assert!(!is_live(4_000_000_002));
+    }
+
+    #[test]
+    fn a_pending_termination_signal_makes_supdoc_wait_to_be_ended_by_it() {
+        let flag = AtomicI32::new(0);
+        assert!(
+            !ends_by_signal(&flag),
+            "with no signal the run should end with its own code"
+        );
+
+        flag.store(signal_hook::consts::SIGTERM, Ordering::SeqCst);
+
+        assert!(
+            ends_by_signal(&flag),
+            "after SIGTERM the run should wait for the signal to end it"
+        );
     }
 
     #[test]

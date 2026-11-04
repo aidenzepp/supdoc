@@ -1,6 +1,7 @@
 //! `Output`: the one value that writes to stdout and stderr.
 
 use std::io::{self, Write};
+use std::sync::atomic::AtomicI32;
 
 use crate::finding::Finding;
 use crate::output::format::{OutputFormat, TextContext, Verbosity};
@@ -11,6 +12,7 @@ use crate::output::paths::PathStyle;
 use crate::output::report::Report;
 use crate::output::{github, jsonl, text};
 use crate::path::AbsolutePath;
+use crate::process;
 
 /// What `main` decides about output before any command runs.
 #[derive(Debug, Clone)]
@@ -58,6 +60,9 @@ pub(crate) enum OutputError {
 /// A closed pipe, as in `supdoc list | head`, is not an error: the first write that meets one
 /// marks that stream closed, and later writes to it are dropped quietly. The other
 /// stream keeps working, and the run keeps its own exit code.
+///
+/// Once a termination signal has arrived, every write blocks until the signal ends the process,
+/// so a run killed mid-flight never prints a report built from killed tools.
 pub(crate) struct Output {
     /// How to write.
     settings: OutputSettings,
@@ -69,6 +74,8 @@ pub(crate) struct Output {
     stdout_closed: bool,
     /// Whether the reader of stderr hung up.
     stderr_closed: bool,
+    /// The flag a termination signal sets; while it is set, writes are held.
+    terminating: &'static AtomicI32,
 }
 
 impl std::fmt::Debug for Output {
@@ -95,7 +102,22 @@ impl Output {
             stderr,
             stdout_closed: false,
             stderr_closed: false,
+            terminating: &process::TERMINATING,
         }
+    }
+
+    /// The same output, holding its writes on `flag` instead of the process's termination flag.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn with_termination_flag(mut self, flag: &'static AtomicI32) -> Self {
+        self.terminating = flag;
+        self
+    }
+
+    /// Whether a write now would be held until a termination signal ends the process.
+    #[must_use]
+    pub(crate) fn holds_writes(&self) -> bool {
+        process::ends_by_signal(self.terminating)
     }
 
     /// Output on the process's own stdout and stderr, with ANSI codes stripped wherever
@@ -265,12 +287,19 @@ impl Output {
         self.write(Stream::Stderr, &bytes)
     }
 
-    /// Writes `bytes` to `stream`, turning a closed pipe into a closed stream.
+    /// Writes `bytes` to `stream`, turning a closed pipe into a closed stream. Once a termination
+    /// signal has arrived, blocks until it ends the process instead.
+    ///
+    /// Accepted limit: a write that passed the check before the signal landed completes, so its
+    /// bytes still print. Closing that gap would mean blocking the signals around every write.
     ///
     /// # Errors
     ///
     /// Fails if the write fails for any reason but a closed pipe.
     fn write(&mut self, stream: Stream, bytes: &[u8]) -> Result<(), OutputError> {
+        if self.holds_writes() {
+            process::await_termination(self.terminating);
+        }
         let (target, closed) = match stream {
             Stream::Stdout => (&mut self.stdout, &mut self.stdout_closed),
             Stream::Stderr => (&mut self.stderr, &mut self.stderr_closed),

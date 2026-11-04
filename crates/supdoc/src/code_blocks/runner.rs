@@ -16,7 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::tools::ToolEnv;
-use crate::process::LiveGroup;
+use crate::process::{self, LiveGroup, TERMINATING};
 
 /// The most bytes supdoc reads from each of a tool's stdout and stderr.
 const CAP: usize = 1024 * 1024;
@@ -73,6 +73,8 @@ pub(crate) enum Failure {
 ///
 /// [`Failure`] when the tool can't start, passes its timeout, or writes past the cap.
 pub(crate) fn run(call: &Call<'_>, env: &ToolEnv, root: &Path) -> Result<Ran, Failure> {
+    // No new tool once a termination signal has arrived.
+    process::await_termination(&TERMINATING);
     let deadline = call.timeout.map(|timeout| Instant::now() + timeout);
     let mut child = Command::new(call.program)
         .arg0(call.name)
@@ -89,6 +91,13 @@ pub(crate) fn run(call: &Call<'_>, env: &ToolEnv, root: &Path) -> Result<Ran, Fa
         .map_err(Failure::Spawn)?;
     // Held until this function returns, by which point every path has reaped the tool.
     let _live = LiveGroup::register(child.id());
+    // A signal may have landed between the check above and the spawn. The signal thread sets
+    // `TERMINATING` before it takes the live-group lock to copy the groups it kills, and
+    // `register` pushes under that lock before this load. So this group is either in the
+    // signal thread's copy, or this load sees the flag and the group is killed here.
+    if process::ends_by_signal(&TERMINATING) {
+        end_by_signal(child);
+    }
     if let Some(mut stdin) = child.stdin.take() {
         let bytes = call.stdin.to_vec();
         drop(thread::spawn(move || {
@@ -167,6 +176,17 @@ pub(crate) fn run(call: &Call<'_>, env: &ToolEnv, root: &Path) -> Result<Ran, Fa
         stdout: stdout.unwrap_or_default(),
         stderr: stderr.unwrap_or_default(),
     })
+}
+
+/// Kills `child`, a tool spawned as a termination signal landed, with its process group, then
+/// waits for the signal to end supdoc.
+///
+/// Effect: signals the tool's process group, reaps the tool and blocks for good.
+fn end_by_signal(mut child: Child) -> ! {
+    let _gone = child.kill();
+    kill_group(child.id());
+    let _reaped = child.wait();
+    process::wait_to_be_ended()
 }
 
 /// Kills `child` and, best effort, its whole process group, reaps it, and returns `failure`. The
