@@ -62,6 +62,13 @@ impl Report for TrustReport {
     }
 }
 
+/// The JSON Schema of `supdoc trust`'s `--json` output: the whole envelope, with `data` typed as
+/// [`TrustReport`].
+#[must_use]
+pub(crate) fn schema() -> schemars::Schema {
+    schemars::schema_for!(crate::output::json::Envelope<'static, TrustReport>)
+}
+
 /// Runs `supdoc trust`, listing the root, or with `--revoke` removing it.
 ///
 /// # Errors

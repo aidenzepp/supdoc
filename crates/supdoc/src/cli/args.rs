@@ -591,6 +591,8 @@ pub(crate) enum SchemaTarget {
     Init,
     /// `supdoc skill install`
     SkillInstall,
+    /// `supdoc trust`
+    Trust,
 }
 
 /// Arguments of `supdoc completions`.
