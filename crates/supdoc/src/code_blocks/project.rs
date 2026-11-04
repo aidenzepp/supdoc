@@ -44,6 +44,8 @@ pub(crate) enum Plan {
 pub(crate) enum Refused {
     /// The `Cargo.toml` itself leaves the root, isn't a regular file, or can't be read.
     Manifest(Refusal),
+    /// The `Cargo.toml` has both `[package]` and its legacy name `[project]`.
+    Ambiguous,
     /// The root package would be built as part of a workspace outside the root.
     Workspace(OutsideWorkspace),
 }
@@ -129,9 +131,12 @@ impl Plan {
 /// real path. A manifest that doesn't parse is a [`Plan::Package`], so cargo reports what is
 /// wrong with it.
 ///
-/// A root package with a lib and no `[workspace]` table is refused when it sets
-/// `package.workspace`, or when cargo could find a workspace above it: a `Cargo.toml` above the
-/// root's real path with a `workspace` key, or one that can't be read to tell.
+/// A root package (`[package]`, or the legacy `[project]` cargo still reads as it) with a lib and
+/// no `[workspace]` table is refused when it sets `package.workspace`, or when cargo could find
+/// a workspace above it: a `Cargo.toml` above the root's real path with a `workspace` key, or one
+/// that can't be read to tell. A manifest with both tables is refused. A root that doesn't parse
+/// is refused for a workspace above it too, so the refusal never depends on supdoc's TOML parser
+/// agreeing with cargo's.
 ///
 /// Effect: reads the manifest's metadata, resolves symlinks, reads at most 64 KiB of it, checks
 /// whether `src/lib.rs` is a file, and reads each `Cargo.toml` above the root the same way.
@@ -153,15 +158,22 @@ pub(crate) fn plan(root: &Path) -> Plan {
     if !manifest.starts_with(&real_root) {
         return refused(Refusal::Outside);
     }
+    let outside = |outside| Plan::Refused(Refused::Workspace(outside));
     let Ok(table) = text.parse::<toml::Table>() else {
-        return Plan::Package(manifest);
+        // Fails closed should cargo's parser accept what supdoc's doesn't.
+        return ancestor_workspace(&real_root).map_or(Plan::Package(manifest), outside);
     };
-    let Some(package) = table.get("package") else {
-        return if table.contains_key("workspace") {
-            Plan::Workspace(manifest)
-        } else {
-            Plan::Package(manifest)
-        };
+    // cargo still reads the legacy `[project]` as `[package]`.
+    let package = match (table.get("package"), table.get("project")) {
+        (Some(_), Some(_)) => return Plan::Refused(Refused::Ambiguous),
+        (Some(package), None) | (None, Some(package)) => package,
+        (None, None) => {
+            return if table.contains_key("workspace") {
+                Plan::Workspace(manifest)
+            } else {
+                Plan::Package(manifest)
+            };
+        }
     };
     if !has_lib(&table, root) {
         return Plan::None;
@@ -169,7 +181,7 @@ pub(crate) fn plan(root: &Path) -> Plan {
     if table.contains_key("workspace") {
         return Plan::Package(manifest);
     }
-    let outside = if package
+    let joins = if package
         .as_table()
         .is_some_and(|package| package.contains_key("workspace"))
     {
@@ -177,13 +189,12 @@ pub(crate) fn plan(root: &Path) -> Plan {
     } else {
         ancestor_workspace(&real_root)
     };
-    outside.map_or(Plan::Package(manifest), |outside| {
-        Plan::Refused(Refused::Workspace(outside))
-    })
+    joins.map_or(Plan::Package(manifest), outside)
 }
 
 /// Whether the root package in `table` has a lib a block can name: a `[lib]` table or a
-/// `src/lib.rs` file under `root`, whose `crate-type`, when given, includes `lib` or `rlib`.
+/// `src/lib.rs` file under `root`, whose `crate-type`, when given, includes one of
+/// [`LIB_KINDS`]: `lib`, `rlib` or `proc-macro`.
 ///
 /// Effect: checks whether `src/lib.rs` is a file.
 fn has_lib(table: &toml::Table, root: &Path) -> bool {
@@ -199,7 +210,7 @@ fn has_lib(table: &toml::Table, root: &Path) -> bool {
         types
             .iter()
             .filter_map(toml::Value::as_str)
-            .any(|kind| kind == "lib" || kind == "rlib")
+            .any(|kind| LIB_KINDS.contains(&kind))
     })
 }
 
@@ -1150,6 +1161,10 @@ mod tests {
             matches!(with_types("[\"lib\"]"), Plan::Package(_)),
             "a plain lib"
         );
+        assert!(
+            matches!(with_types("[\"proc-macro\"]"), Plan::Package(_)),
+            "a proc macro named by its crate type"
+        );
     }
 
     /// Writes `text` to `dir/Cargo.toml`, creating `dir`.
@@ -1254,10 +1269,96 @@ mod tests {
             .status()
             .expect("mkfifo should run");
         assert!(made.success(), "mkfifo should make the FIFO");
+        let (send, receive) = std::sync::mpsc::channel();
+        // A plan that opens the FIFO blocks forever; the thread is left behind, not joined.
+        let _planning = std::thread::spawn(move || send.send(plan(&root)));
+
+        let planned = receive
+            .recv_timeout(Duration::from_secs(5))
+            .expect("plan should return within 5 s rather than block opening the FIFO");
+
+        assert_eq!(
+            planned,
+            Plan::Refused(Refused::Workspace(OutsideWorkspace::Unreadable(
+                real_manifest(&ws)
+            )))
+        );
+    }
+
+    #[test]
+    fn an_oversized_or_unparsable_ancestor_is_refused_by_its_path() {
+        let (dir, root) = nested_package();
+        let ws = dir.path().join("ws");
+        let comment = format!("# {}\n", "x".repeat(70_000));
+        let refused = || {
+            Plan::Refused(Refused::Workspace(OutsideWorkspace::Unreadable(
+                real_manifest(&ws),
+            )))
+        };
+
+        manifest_at(&ws, &format!("[package]\nname = \"outer\"\n{comment}"));
+        assert_eq!(plan(&root), refused(), "over 64 KiB, with no workspace key");
+        manifest_at(&ws, "[package\n");
+        assert_eq!(plan(&root), refused(), "doesn't parse");
+    }
+
+    #[test]
+    fn a_legacy_project_table_is_read_as_a_package() {
+        let (dir, root) = nested_package();
+        let ws = dir.path().join("ws");
+        manifest_at(&ws, "[workspace]\n");
+
+        manifest_at(&root, "[project]\nname = \"p\"\n");
+        assert_eq!(
+            plan(&root),
+            Plan::Refused(Refused::Workspace(OutsideWorkspace::Ancestor(
+                real_manifest(&ws)
+            ))),
+            "under an ancestor workspace"
+        );
+        manifest_at(&root, "[project]\nname = \"p\"\nworkspace = \"..\"\n");
+        assert_eq!(
+            plan(&root),
+            Plan::Refused(Refused::Workspace(OutsideWorkspace::PackageKey)),
+            "with its own workspace key"
+        );
+        manifest_at(&root, "[project]\nname = \"p\"\n\n[workspace]\n");
+        assert_eq!(
+            plan(&root),
+            Plan::Package(real_manifest(&root)),
+            "with its own workspace table"
+        );
+        manifest_at(
+            &root,
+            "[project]\nname = \"p\"\n[lib]\ncrate-type = [\"cdylib\"]\n",
+        );
+        assert_eq!(plan(&root), Plan::None, "with a cdylib-only lib");
+        manifest_at(
+            &root,
+            "[project]\nname = \"p\"\n\n[package]\nname = \"p\"\n",
+        );
+        assert_eq!(
+            plan(&root),
+            Plan::Refused(Refused::Ambiguous),
+            "beside a package table"
+        );
+    }
+
+    #[test]
+    fn a_root_that_doesnt_parse_is_still_refused_under_an_ancestor_workspace() {
+        let (dir, root) = nested_package();
+        manifest_at(&root, "[package\n");
+        assert_eq!(
+            plan(&root),
+            Plan::Package(real_manifest(&root)),
+            "with no workspace above, cargo reports the error"
+        );
+        let ws = dir.path().join("ws");
+        manifest_at(&ws, "[workspace]\n");
 
         assert_eq!(
             plan(&root),
-            Plan::Refused(Refused::Workspace(OutsideWorkspace::Unreadable(
+            Plan::Refused(Refused::Workspace(OutsideWorkspace::Ancestor(
                 real_manifest(&ws)
             )))
         );
