@@ -56,7 +56,7 @@ fn dedent(text: &str, indent: &str) -> String {
 /// `block`'s body as written in `text`, without container prefixes, its lines joined by LF and
 /// with no final line ending. A line's CR before LF is dropped when `line_endings` is
 /// `normalize`. `None` when a line's range isn't inside `text`.
-fn body(block: &CodeBlock, text: &str, line_endings: LineEndings) -> Option<String> {
+pub(crate) fn body(block: &CodeBlock, text: &str, line_endings: LineEndings) -> Option<String> {
     let lines = block
         .body
         .iter()
