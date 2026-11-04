@@ -287,7 +287,11 @@ impl Output {
         self.write(Stream::Stderr, &bytes)
     }
 
-    /// Writes `bytes` to `stream`, turning a closed pipe into a closed stream.
+    /// Writes `bytes` to `stream`, turning a closed pipe into a closed stream. Once a termination
+    /// signal has arrived, blocks until it ends the process instead.
+    ///
+    /// Accepted limit: a write that passed the check before the signal landed completes, so its
+    /// bytes still print. Closing that gap would mean blocking the signals around every write.
     ///
     /// # Errors
     ///

@@ -114,8 +114,9 @@ fn handle_termination() {
         kill_live_groups();
         // Resets the signal to its default action and raises it, which ends the process.
         let _ended = signal_hook::low_level::emulate_default_handler(signal);
-        // Still running, so the re-raise failed: end with the shell's code for that signal
-        // rather than leave the main thread waiting for good.
+        // Defense only: for these signals signal-hook 0.4 raises the signal, aborts if raising
+        // fails, and never returns. Should a later version return, end with the shell's code for
+        // the signal rather than leave the main thread waiting for good.
         std::process::exit(128 + signal);
     }));
 }
@@ -130,7 +131,17 @@ pub(crate) fn ends_by_signal(flag: &AtomicI32) -> bool {
 ///
 /// Effect: sleeps the calling thread while a signal is pending.
 pub(crate) fn await_termination(flag: &AtomicI32) {
-    while ends_by_signal(flag) {
+    if ends_by_signal(flag) {
+        wait_to_be_ended();
+    }
+}
+
+/// Blocks for good: a termination signal has arrived, and its re-raise on the signal thread ends
+/// the process.
+///
+/// Effect: sleeps the calling thread until the process ends.
+pub(crate) fn wait_to_be_ended() -> ! {
+    loop {
         std::thread::sleep(TERMINATION_POLL);
     }
 }
@@ -215,6 +226,8 @@ fn current_dir() -> Result<AbsolutePath, CliError> {
 /// A closed pipe does not change the exit code: the run's own code stands, so `--help` exits 0
 /// and a usage error still exits 2.
 fn print(printout: &Printout) -> u8 {
+    // Held like every `Output` write: nothing prints once a termination signal has arrived.
+    await_termination(&TERMINATING);
     let written = match printout.stream {
         Stream::Stdout => write_all(io::stdout(), &printout.text),
         Stream::Stderr => write_all(io::stderr(), &printout.text),
