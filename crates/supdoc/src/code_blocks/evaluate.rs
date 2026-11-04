@@ -212,9 +212,10 @@ pub(crate) fn evaluate(
         }
         let state = state_of(block, outcome, |language| code_blocks.checks(language));
         let language = tag_of(block).map(str::to_owned);
-        let steps = Steps::of(block, &state, code_blocks);
+        let mut steps = Steps::of(block, &state, code_blocks);
         let checked = language.as_deref().and_then(Language::from_tag);
         let (tool, linter) = selected_tools(code_blocks, &steps, checked);
+        let linter = static_tier(linter, &mut steps);
         let pending = (state == BlockState::NotChecked(NotChecked::Pending))
             .then(|| {
                 let file = block.fence.file.as_str();
@@ -485,6 +486,30 @@ struct StepsRan {
 
 /// What a lint step gave: its verdict and findings, or why supdoc couldn't run it safely.
 type LintRan = Result<(lint::Verdict, Vec<Finding>), &'static str>;
+
+/// Why a Rust block's lint step doesn't run: clippy compiles the block, so it belongs to the
+/// project tier, which needs trust.
+const CLIPPY_NEEDS_TRUST: &str =
+    "clippy runs only in the project tier, which needs `supdoc trust` (phase 5)";
+
+/// Whether `linter` compiles the block it lints, so it may run only in the project tier, which
+/// needs trust. Without trust, which doesn't exist yet, it never runs: clippy, the Rust linter.
+/// The gate sits where the linter is chosen, before any scan, cache key or spawn.
+fn needs_trust(linter: &Tool) -> bool {
+    linter.language == Language::Rust && linter.step == Step::Lint
+}
+
+/// `linter` as the static tier allows it: `None` for one that [`needs_trust`], whose lint step
+/// in `steps` then doesn't run, with [`CLIPPY_NEEDS_TRUST`] as its reason.
+fn static_tier(linter: Option<&'static Tool>, steps: &mut Steps) -> Option<&'static Tool> {
+    if linter.is_some_and(needs_trust) {
+        steps.lint = StepState::Unrunnable {
+            reason: CLIPPY_NEEDS_TRUST,
+        };
+        return None;
+    }
+    linter
+}
 
 /// Why clippy didn't run on a block when [`runner::neutral_dir`] found no private working
 /// directory: its metadata would have nowhere private to go.
@@ -1258,7 +1283,23 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use super::{MAX_WORKERS, in_parallel};
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use super::{
+        BlockRecord, LintRan, MAX_WORKERS, Pending, RustSetup, Session, in_parallel, run_clippy,
+    };
+    use crate::cartridges::markdown::cartridge::cartridge as markdown;
+    use crate::code_blocks::block::blocks_in;
+    use crate::code_blocks::format::FixDoc;
+    use crate::code_blocks::lint::Verdict;
+    use crate::code_blocks::states::{BlockState, NotChecked, Steps};
+    use crate::code_blocks::tools::{Found, TOOLS, Tool, ToolEnv, find};
+    use crate::config::code_blocks::{Dialect, Language};
+    use crate::finding::Location;
+    use crate::path::AbsolutePath;
+    use crate::read::cartridge::SourceFile;
 
     #[test]
     fn in_parallel_keeps_the_items_order_when_later_items_finish_first() {
@@ -1303,5 +1344,211 @@ mod tests {
         let results = in_parallel(&[] as &[u8], |item| *item);
 
         assert!(results.is_empty(), "{results:?}");
+    }
+
+    /// The clippy row of the tool table.
+    fn clippy() -> &'static Tool {
+        TOOLS
+            .iter()
+            .find(|tool| tool.name == "clippy")
+            .expect("the tool table should list clippy")
+    }
+
+    /// The record of the one Rust block in `text`, a doc at `<root>/docs/a.md`, pending with
+    /// clippy as its linter.
+    fn rust_record(root: &Path, text: &str) -> BlockRecord {
+        let path = AbsolutePath::new(&root.join("docs/a.md"))
+            .expect("the fixture path should be absolute");
+        let file = SourceFile::parse(path, text.to_owned(), markdown())
+            .expect("tree-sitter should return a tree");
+        let blocks = blocks_in(&file, |range| {
+            let source = "docs/a.md"
+                .parse()
+                .expect("the fixture source should be valid");
+            Location::in_text(source, text, range)
+        });
+        let block = blocks.first().expect("the doc should hold one block");
+        let doc = Arc::new(FixDoc::new(
+            Arc::from(text),
+            "10s".parse().expect("the parse limit should be valid"),
+        ));
+        BlockRecord {
+            at: block.fence.clone(),
+            language: Some("rust".to_owned()),
+            state: BlockState::NotChecked(NotChecked::Pending),
+            steps: Steps::default(),
+            reason: None,
+            uses: Vec::new(),
+            index: 1,
+            tool: None,
+            linter: Some(clippy()),
+            dialect: Dialect::default(),
+            edition: None,
+            pending: Pending::of(block, &doc, Some(Language::Rust)),
+        }
+    }
+
+    /// [`run_clippy`] with `program` on the one block of `text` under `root`, its neutral
+    /// directory under `cache`, with the test process's `PATH`, `HOME` and rustup homes.
+    fn clippy_run(program: &Path, root: &Path, cache: &Path, text: &str) -> LintRan {
+        let record = rust_record(root, text);
+        let pending = record
+            .pending
+            .as_ref()
+            .expect("the block's body should be in its doc");
+        let env = ToolEnv::from_vars(|name| {
+            if name == "XDG_CACHE_HOME" {
+                Some(cache.as_os_str().to_owned())
+            } else {
+                std::env::var_os(name)
+            }
+        });
+        let session = Session {
+            env: &env,
+            root,
+            timeout: Some(Duration::from_secs(120)),
+            cache: None,
+        };
+        run_clippy(
+            clippy(),
+            program,
+            &record,
+            pending,
+            &session,
+            &RustSetup::read(root),
+        )
+    }
+
+    /// A temporary directory.
+    fn temporary() -> tempfile::TempDir {
+        tempfile::TempDir::new().expect("a temporary directory should be creatable")
+    }
+
+    #[test]
+    fn run_clippy_gives_the_block_alone_a_private_metadata_path_and_removes_it() {
+        let (root, cache, out) = (temporary(), temporary(), temporary());
+        std::fs::write(
+            root.path().join("Cargo.toml"),
+            "[package]\nname = \"p\"\nedition = \"2021\"\n\n[lints.clippy]\nptr_arg = \"deny\"\n\
+             pedantic = { level = \"warn\", priority = -1 }\ncargo = \"warn\"\n",
+        )
+        .expect("the manifest should be writable");
+        let records = out.path().display();
+        let stub = out.path().join("clippy-driver");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{records}/argv'\nenv > '{records}/env'\n\
+                 pwd -P > '{records}/cwd'\ncat > '{records}/stdin'\n\
+                 for arg in \"$@\"; do case \"$arg\" in --emit=metadata=*) \
+                 emit=\"${{arg#--emit=metadata=}}\"; echo meta > \"$emit\"; \
+                 echo \"$emit\" > '{records}/emit';; esac; done\n"
+            ),
+        )
+        .expect("the stub should be writable");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+            .expect("the stub should be made executable");
+        let record =
+            |name: &str| std::fs::read_to_string(out.path().join(name)).unwrap_or_default();
+
+        let ran = clippy_run(
+            &stub,
+            root.path(),
+            cache.path(),
+            "```rust\n# use std::fmt;\npub fn f() {}\n```\n",
+        );
+
+        assert!(matches!(ran, Ok((Verdict::Clean, _))), "{ran:?}");
+        let emit = record("emit");
+        let emit = Path::new(emit.trim());
+        assert_eq!(
+            record("argv"),
+            format!(
+                "--edition\n2021\n--crate-type\nlib\n--emit=metadata={}\n--error-format=json\n\
+                 -W\nclippy::pedantic\n-D\nclippy::ptr_arg\n-A\nunused\n-A\ndead_code\n\
+                 -A\nmissing_docs\n-A\nclippy::missing_docs_in_private_items\n-\n",
+                emit.display()
+            ),
+            "groups first, `clippy::cargo` left out, relaxations last"
+        );
+        assert_eq!(record("stdin"), "use std::fmt;\npub fn f() {}\n");
+        let cwd = PathBuf::from(record("cwd").trim());
+        assert!(cwd.ends_with("supdoc/code-blocks/cwd"), "{cwd:?}");
+        assert!(
+            !emit.starts_with(&cwd),
+            "{emit:?} is in the working directory"
+        );
+        assert!(
+            !emit.parent().is_some_and(Path::exists),
+            "the run's metadata directory should be gone: {emit:?}"
+        );
+        let env = record("env");
+        assert!(
+            env.lines().any(|line| line == "RUSTUP_AUTO_INSTALL=0"),
+            "{env}"
+        );
+        for unwanted in ["RUSTFLAGS=", "CLIPPY_ARGS=", "CLIPPY_CONF_DIR="] {
+            assert!(
+                !env.lines().any(|line| line.starts_with(unwanted)),
+                "{unwanted} reached clippy:\n{env}"
+            );
+        }
+    }
+
+    /// The real `clippy-driver` on `PATH`, or `None` with a note naming `test` when there is none.
+    fn real_clippy(test: &str) -> Option<PathBuf> {
+        let env = ToolEnv::from_vars(|name| std::env::var_os(name));
+        let root = temporary();
+        if let Found::OnPath(program) = find("clippy-driver", &env, root.path()) {
+            return Some(program);
+        }
+        let _ignored = std::io::Write::write_all(
+            &mut std::io::stderr(),
+            format!("SKIPPED {test}: clippy-driver is not on PATH\n").as_bytes(),
+        );
+        None
+    }
+
+    #[test]
+    fn run_clippy_with_the_real_clippy_places_a_vec_reference_at_its_doc_line() {
+        let Some(program) = real_clippy("run_clippy_with_the_real_clippy") else {
+            return;
+        };
+        let (root, cache) = (temporary(), temporary());
+        let run = |text: &str| clippy_run(&program, root.path(), cache.path(), text);
+
+        let flagged = run(
+            "# D\n\n```rust\npub fn total(v: &Vec<i32>) -> i32 {\n    v.iter().sum()\n}\n```\n",
+        )
+        .expect("clippy should run with a private directory");
+        let [finding] = flagged.1.as_slice() else {
+            panic!("one ptr_arg finding expected: {flagged:?}");
+        };
+        let at = finding
+            .location
+            .as_ref()
+            .expect("the finding should be placed");
+        assert_eq!((at.line, at.column), (4, 17), "{finding:?}");
+        assert!(finding.message.contains("clippy::ptr_arg"), "{finding:?}");
+
+        let expected = run(
+            "```rust\n# #[expect(clippy::ptr_arg, reason = \"a non-example\")]\n\
+             pub fn total(v: &Vec<i32>) -> i32 {\n    v.iter().sum()\n}\n```\n",
+        )
+        .expect("clippy should run");
+        assert_eq!(expected.0, Verdict::Clean, "{expected:?}");
+
+        let unresolved = run("```rust\npub fn f() -> i32 {\n    missing()\n}\n```\n")
+            .expect("clippy should run");
+        let lines: Vec<u32> = unresolved
+            .1
+            .iter()
+            .filter_map(|finding| finding.location.as_ref().map(|at| at.line))
+            .collect();
+        assert_eq!(
+            lines,
+            [3],
+            "an unresolved name is a lint finding: {unresolved:?}"
+        );
     }
 }

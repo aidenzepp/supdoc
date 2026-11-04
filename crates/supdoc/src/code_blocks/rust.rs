@@ -1009,14 +1009,13 @@ fn unlisted_attribute(tokens: &[Token<'_>]) -> Option<Found> {
 /// What [`before_compiling`] calls a block that may open with frontmatter.
 pub(crate) const FRONTMATTER: &str = "frontmatter";
 
-/// Whether `input`'s first line that isn't blank starts, after any indentation, with three or
-/// more `-`: rustc may read it as frontmatter, whose text the scan doesn't follow, so before
+/// Whether `input`, past the whitespace rustc skips ([`is_rust_whitespace`]), starts with `-`:
+/// rustc may read a leading `---` as frontmatter, whose text the scan doesn't follow, so before
 /// compiling such a block fails closed rather than modeling rustc's frontmatter rules.
 fn starts_with_frontmatter(input: &str) -> bool {
     input
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .is_some_and(|line| line.trim_start().starts_with("---"))
+        .trim_start_matches(is_rust_whitespace)
+        .starts_with('-')
 }
 
 /// One token of a Rust block, as far as the scan needs it.
@@ -2393,6 +2392,9 @@ mod tests {
             format!("---\n/*\n---\n{read} // */\n"),
             format!("---cargo\n\"\n---\n{read} // \"\n"),
             format!("\n  \n---\n\"\n---\n{read} // \"\n"),
+            format!("\u{B}---\n\"\n---\n{read} // \"\n"),
+            format!("\u{C}\n---\n\"\n---\n{read} // \"\n"),
+            format!("\u{85}---\n\"\n---\n{read} // \"\n"),
             "----\n[package]\n----\nfn main() {}\n".to_owned(),
         ] {
             assert_eq!(
