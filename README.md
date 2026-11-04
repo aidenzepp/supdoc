@@ -28,7 +28,7 @@ symbols too: `[setup](docs/guide.md#install)`.
 |---|---|
 | `supdoc check [PATH]...` | Checks links against `supdoc.lock`; exits 1 when one needs attention (CI gate) |
 | `supdoc update [PATH]...` | Records the current code's hashes in `supdoc.lock` |
-| `supdoc fix [PATH]...` | Repairs broken links whose fix is certain |
+| `supdoc fix [PATH]...` | Repairs broken links whose fix is certain, rewrites stale `from(...)` code blocks from their sources, and replaces unformatted code blocks with the formatter's output |
 | `supdoc list [TARGET]` | Lists links and their states, such as who documents `src/lib.rs#add` |
 | `supdoc resolve FILE [SYMBOL]` | Lists a file's symbols, or checks that one resolves |
 | `supdoc init` | Writes a starter `supdoc.config.toml` |
