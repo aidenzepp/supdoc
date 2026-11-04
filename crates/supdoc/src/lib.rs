@@ -136,8 +136,8 @@ pub(crate) mod scan {
     /// The ignore engine behind the walk.
     mod ignore;
 
-    /// Finding a directory's git exclude file.
-    mod git;
+    /// Finding a directory's git exclude file and a worktree's common git directory.
+    pub(crate) mod git;
 
     /// Judging explicitly named paths.
     mod explicit;
@@ -231,6 +231,16 @@ pub(crate) mod output;
 
 /// The command-line interface: arguments and commands.
 pub(crate) mod cli;
+
+/// The trust store: the checkouts the operator trusts to run code they control.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "`supdoc trust` (P5-02) and the tier gate (P5-04) call it"
+    )
+)]
+pub(crate) mod trust;
 
 /// The process boundary: reading the environment and turning a run into an exit code.
 mod process;
