@@ -1,6 +1,8 @@
 //! One state per block, what its format and lint steps did, and the counts `check` reports for
 //! them.
 
+use std::collections::BTreeMap;
+
 use annotate_snippets::renderer::{AnsiColor, Style};
 
 use crate::config::code_blocks::{CodeBlocks, Language, Mode};
@@ -413,7 +415,7 @@ fn tool_of<'a>(tag: Option<&str>, chosen: Option<&'a str>) -> &'a str {
 /// How many blocks are in each state, and how many steps were off, skipped or due but not run.
 /// `blocks` is the sum of the state counts; the step counts are apart from them, so a block whose
 /// format step is off and whose lint step passed counts in both `passed` and `format_off`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub(crate) struct CodeBlockCounts {
     /// Every block counted.
     pub(crate) blocks: usize,
@@ -440,12 +442,14 @@ pub(crate) struct CodeBlockCounts {
     pub(crate) lint_skipped: usize,
     /// Lint steps due on a checked block that didn't run, such as clippy, which needs trust.
     pub(crate) lint_not_run: usize,
-    /// Why the first uncounted format step didn't run, for the summary line.
+    /// How many format steps didn't run for each short reason, for the summary line. They sum to
+    /// `format_not_run`.
     #[serde(skip)]
-    pub(crate) format_not_run_reason: Option<&'static str>,
-    /// Why the first uncounted lint step didn't run, for the summary line.
+    pub(crate) format_not_run_reasons: BTreeMap<&'static str, usize>,
+    /// How many lint steps didn't run for each short reason, for the summary line. They sum to
+    /// `lint_not_run`.
     #[serde(skip)]
-    pub(crate) lint_not_run_reason: Option<&'static str>,
+    pub(crate) lint_not_run_reasons: BTreeMap<&'static str, usize>,
     /// Blocks in a language supdoc has no checker for.
     pub(crate) unknown_language: usize,
     /// Blocks whose selected tool isn't installed.
@@ -480,14 +484,14 @@ impl CodeBlockCounts {
                     &mut counts.format_off,
                     &mut counts.format_skipped,
                     &mut counts.format_not_run,
-                    &mut counts.format_not_run_reason,
+                    &mut counts.format_not_run_reasons,
                 ),
                 (
                     &steps.lint,
                     &mut counts.lint_off,
                     &mut counts.lint_skipped,
                     &mut counts.lint_not_run,
-                    &mut counts.lint_not_run_reason,
+                    &mut counts.lint_not_run_reasons,
                 ),
             ] {
                 match step {
@@ -495,15 +499,16 @@ impl CodeBlockCounts {
                     StepState::Skipped { .. } => *skipped += 1,
                     StepState::Unrunnable { reason } => {
                         *not_run += 1;
-                        let _first = why.get_or_insert(short_reason(reason));
+                        *why.entry(short_reason(reason)).or_default() += 1;
                     }
                     StepState::ToolRefused { inside_root, .. } => {
                         *not_run += 1;
-                        let _first = why.get_or_insert(if *inside_root {
+                        let reason = if *inside_root {
                             "tool inside the checkout"
                         } else {
                             "tool missing"
-                        });
+                        };
+                        *why.entry(reason).or_default() += 1;
                     }
                     StepState::Ran | StepState::NotRun => {}
                 }
@@ -522,6 +527,10 @@ impl CodeBlockCounts {
     }
 
     /// `Code blocks  1 failed · 2 not checked · 3 passed`: worst first, zero counts left out.
+    ///
+    /// Steps that didn't run get one count per reason, `57 lint not run (clippy needs trust) ·
+    /// 5 lint not run (tool missing)`, most first and then by reason, so the line is the same on
+    /// every run.
     ///
     /// No blocks at all says `0 passed`, so the line is never empty. Without `unicode` the counts
     /// are separated by `, ` instead of `·`.
@@ -545,17 +554,19 @@ impl CodeBlockCounts {
         let mut parts: Vec<String> = worst_first
             .into_iter()
             .filter(|(count, _, _)| *count > 0)
-            .map(|(count, label, tone)| {
-                let why = match label {
-                    "format not run" => self.format_not_run_reason,
-                    "lint not run" => self.lint_not_run_reason,
-                    _ => None,
+            .flat_map(|(count, label, tone)| {
+                let reasons = match label {
+                    "format not run" => by_count(&self.format_not_run_reasons),
+                    "lint not run" => by_count(&self.lint_not_run_reasons),
+                    _ => Vec::new(),
                 };
-                let text = why.map_or_else(
-                    || format!("{count} {label}"),
-                    |why| format!("{count} {label} ({why})"),
-                );
-                paint(color, tone, &text)
+                if reasons.is_empty() {
+                    return vec![paint(color, tone, &format!("{count} {label}"))];
+                }
+                reasons
+                    .into_iter()
+                    .map(|(why, count)| paint(color, tone, &format!("{count} {label} ({why})")))
+                    .collect()
             })
             .collect();
         if parts.is_empty() {
@@ -564,6 +575,15 @@ impl CodeBlockCounts {
         let separator = if unicode { " · " } else { ", " };
         format!("Code blocks  {}", parts.join(separator))
     }
+}
+
+/// `reasons` with their counts, most first, then by reason.
+fn by_count(reasons: &BTreeMap<&'static str, usize>) -> Vec<(&'static str, usize)> {
+    let mut sorted: Vec<_> = reasons.iter().map(|(why, count)| (*why, *count)).collect();
+    sorted.sort_by(|(a_why, a_count), (b_why, b_count)| {
+        b_count.cmp(a_count).then_with(|| a_why.cmp(b_why))
+    });
+    sorted
 }
 
 /// `reason`, a step's full reason for not running, as the summary line names it: "clippy needs
@@ -913,6 +933,42 @@ mod tests {
             counts.line(false, true),
             "Code blocks  1 failed · 1 not checked · 2 format off · 1 lint off · \
              1 lint not run (clippy needs trust) · 1 lint skipped · 2 passed"
+        );
+    }
+
+    #[test]
+    fn format_not_run_gets_one_count_per_reason_most_first_then_by_reason() {
+        let missing = Steps {
+            format: StepState::ToolRefused {
+                binary: "shfmt",
+                inside_root: false,
+            },
+            lint: StepState::Ran,
+        };
+        let inside = Steps {
+            format: StepState::ToolRefused {
+                binary: "shfmt",
+                inside_root: true,
+            },
+            lint: StepState::Ran,
+        };
+        let unrunnable = Steps {
+            format: StepState::Unrunnable {
+                reason: "no private directory",
+            },
+            lint: StepState::Ran,
+        };
+        let blocks = [&missing, &inside, &unrunnable, &missing, &unrunnable];
+
+        let counts =
+            CodeBlockCounts::tally(blocks.iter().map(|steps| (&BlockState::Passed, *steps)));
+
+        assert_eq!(counts.format_not_run, 5, "the total stays one number");
+        assert_eq!(
+            counts.line(false, false),
+            "Code blocks  2 format not run (no private directory), \
+             2 format not run (tool missing), 1 format not run (tool inside the checkout), \
+             5 passed"
         );
     }
 
