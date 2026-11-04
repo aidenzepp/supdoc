@@ -512,6 +512,9 @@ pub(crate) enum Found {
     Name(String),
     /// Before compiling: a `$` metavariable inside an attribute.
     MetavariableAttribute,
+    /// Before compiling: a macro call or definition off [`ALLOWED_MACROS`], named by the macro
+    /// (`macro_rules` for a definition, `as println` for a rename to an allowed name).
+    UnlistedMacro(String),
     /// Before compiling: an attribute whose path's first segment isn't in
     /// [`ALLOWED_ATTRIBUTES`], named by that segment (empty when it doesn't start with a name).
     Attribute(String),
@@ -535,11 +538,21 @@ impl Found {
                 "uses a `path` attribute, which reads a file at compile time".to_owned()
             }
             Self::Name(name) => format!(
-                "names `{name}` other than in a `{name}::` path, which could call `{name}!` under another name and read a file or environment variable at compile time"
+                "names `{name}` other than as a path segment before `::`, which could call `{name}!` under another name and read a file or environment variable at compile time"
             ),
             Self::MetavariableAttribute => {
                 "has a `$` metavariable in an attribute, which a macro could make a `path` attribute".to_owned()
             }
+            Self::UnlistedMacro(name) if name == "macro_rules" => {
+                "defines a macro with `macro_rules!`, which could build an attribute supdoc's scan never sees".to_owned()
+            }
+            Self::UnlistedMacro(name) if name.starts_with("as ") => format!(
+                "renames something `{}`, which could make an unlisted macro look like one supdoc allows",
+                name.trim_start_matches("as ")
+            ),
+            Self::UnlistedMacro(name) => format!(
+                "calls `{name}!`, which isn't on supdoc's list of macros that never read a file or build an attribute"
+            ),
             Self::Attribute(name) if name.is_empty() => {
                 "has an attribute whose path doesn't start with a name, which supdoc can't check for a compile-time read".to_owned()
             }
@@ -574,6 +587,9 @@ impl Found {
             Self::MetavariableAttribute => {
                 "build the attribute without a metavariable, or mark the block `ignore(<why>)`".to_owned()
             }
+            Self::UnlistedMacro(name) => format!(
+                "remove `{name}` from the block, or mark it `ignore(<why>)`"
+            ),
             Self::Attribute(name) if name.is_empty() => {
                 "name the attribute plainly, or mark the block `ignore(<why>)`".to_owned()
             }
@@ -639,7 +655,7 @@ fn scan(input: &str, compiles: bool) -> Option<Found> {
             "a `#!` first line that isn't an inner attribute",
         ));
     }
-    let mut lexer = Tokens::new(input);
+    let mut lexer = Tokens::new(input, compiles);
     let tokens: Vec<Token<'_>> = lexer.by_ref().collect();
     let at = |index: Option<usize>| {
         index
@@ -664,6 +680,9 @@ fn scan(input: &str, compiles: bool) -> Option<Found> {
                 if let Token::Ident(word) = before {
                     if COMPILE_TIME_READS.contains(&word) {
                         return Some(Found::Macro(word.to_owned()));
+                    }
+                    if compiles && let Some(found) = unlisted_macro(word, next) {
+                        return Some(found);
                     }
                     macro_next = Some(if word == "macro_rules" {
                         MacroKind::Definition
@@ -700,28 +719,17 @@ fn scan(input: &str, compiles: bool) -> Option<Found> {
             Token::Punct('=') if attribute > 0 && before == Token::Ident("path") => {
                 return Some(Found::PathAttribute);
             }
-            Token::Ident(word) if compiles && COMPILE_TIME_READS.contains(&word) => {
-                if next == Token::Punct('!') {
-                    return Some(Found::Macro(word.to_owned()));
+            Token::Ident(word) if compiles => {
+                let in_macro = nesting.in_macro > 0;
+                if let Some(found) = strict_word(word, next, after_next, attribute > 0, in_macro) {
+                    return Some(found);
                 }
-                if !(next == Token::Punct(':') && after_next == Token::Punct(':')) {
-                    return Some(Found::Name(word.to_owned()));
+                if opens_macro.is_some() && before == Token::Punct('!') {
+                    macro_next = opens_macro;
                 }
-            }
-            Token::Ident("path") if compiles && attribute > 0 => {
-                return Some(Found::PathAttribute);
             }
             Token::Punct('$') if compiles && attribute > 0 => {
                 return Some(Found::MetavariableAttribute);
-            }
-            Token::Ident("mod") if compiles => {
-                let name = match next {
-                    Token::Ident(name) => Some(name.to_owned()),
-                    _ => None,
-                };
-                if nesting.in_macro > 0 || name.is_none() || after_next != Token::Punct('{') {
-                    return Some(Found::OutlineModule(name));
-                }
             }
             Token::Ident(_) if opens_macro.is_some() && before == Token::Punct('!') => {
                 macro_next = opens_macro;
@@ -763,6 +771,102 @@ impl Nesting {
             }
             _ => {}
         }
+    }
+}
+
+/// The macros a block may call before it is compiled, by the last segment of the called path.
+///
+/// An allowlist, not a denylist: a macro can rearrange the tokens it is given, so a
+/// `macro_rules!` of the block's own could pair a `#` with a bracket group into an attribute the
+/// scan never saw as one, and a later Rust may add macros that read files. These standard macros
+/// format, assert, panic, build vectors or expand to constants, and never turn their input into
+/// an attribute or item. `concat` is safe because the read macros are refused by name wherever
+/// they appear. Any `macro_rules!` definition, and any other call, refuses the block.
+const ALLOWED_MACROS: [&str; 28] = [
+    "println",
+    "print",
+    "eprintln",
+    "eprint",
+    "format",
+    "format_args",
+    "write",
+    "writeln",
+    "vec",
+    "assert",
+    "assert_eq",
+    "assert_ne",
+    "debug_assert",
+    "debug_assert_eq",
+    "debug_assert_ne",
+    "panic",
+    "todo",
+    "unimplemented",
+    "unreachable",
+    "matches",
+    "dbg",
+    "stringify",
+    "line",
+    "column",
+    "file",
+    "module_path",
+    "cfg",
+    "concat",
+];
+
+/// The keywords that can stand before a `!` that negates: `if !(..)`, `return !x`.
+const KEYWORDS: [&str; 39] = [
+    "as", "async", "await", "box", "break", "const", "continue", "crate", "do", "dyn", "else",
+    "enum", "extern", "false", "fn", "for", "gen", "if", "impl", "in", "let", "loop", "match",
+    "mod", "move", "mut", "pub", "ref", "return", "self", "Self", "static", "struct", "super",
+    "trait", "true", "type", "unsafe", "use",
+];
+
+/// The refusal for `name!` followed by `next`, before compiling: any `macro_rules!`, and a call
+/// (`name!` then a delimiter) of a macro not in [`ALLOWED_MACROS`]. `None` for an allowed call
+/// and for a keyword's negating `!`.
+fn unlisted_macro(name: &str, next: Token<'_>) -> Option<Found> {
+    let call = matches!(next, Token::Punct('(' | '[' | '{'));
+    let refused = name == "macro_rules"
+        || (call && !KEYWORDS.contains(&name) && !ALLOWED_MACROS.contains(&name));
+    refused.then(|| Found::UnlistedMacro(name.to_owned()))
+}
+
+/// The refusal [`before_compiling`]'s rules give the identifier `word`, followed by `next` and
+/// `after_next`, inside an attribute when `in_attribute` and inside a macro's input or body when
+/// `in_macro`: a read macro's name not before `::`, the reserved `macro`, a rename to an allowed
+/// macro's name, `path` in an attribute, or a module not written inline outside any macro.
+fn strict_word(
+    word: &str,
+    next: Token<'_>,
+    after_next: Token<'_>,
+    in_attribute: bool,
+    in_macro: bool,
+) -> Option<Found> {
+    match word {
+        word if COMPILE_TIME_READS.contains(&word) => {
+            if next == Token::Punct('!') {
+                return Some(Found::Macro(word.to_owned()));
+            }
+            let path_segment = next == Token::Punct(':') && after_next == Token::Punct(':');
+            (!path_segment).then(|| Found::Name(word.to_owned()))
+        }
+        "macro" => Some(Found::UnlistedMacro("macro".to_owned())),
+        "as" => match next {
+            Token::Ident(name) if ALLOWED_MACROS.contains(&name) => {
+                Some(Found::UnlistedMacro(format!("as {name}")))
+            }
+            _ => None,
+        },
+        "path" if in_attribute => Some(Found::PathAttribute),
+        "mod" => {
+            let name = match next {
+                Token::Ident(name) => Some(name.to_owned()),
+                _ => None,
+            };
+            (in_macro || name.is_none() || after_next != Token::Punct('{'))
+                .then_some(Found::OutlineModule(name))
+        }
+        _ => None,
     }
 }
 
@@ -872,23 +976,60 @@ enum Token<'text> {
 }
 
 /// The tokens of a Rust block, skipping whitespace and comments. Each byte is read once.
+///
+/// Literals, comments and identifiers follow `rustc_lexer`'s rules (`lifetime_or_char`,
+/// `single_quoted_string`, `double_quoted_string`, `raw_double_quoted_string`, `block_comment`
+/// and `line_comment`), so a literal ends exactly where rustc ends it and no token hides inside
+/// one. Where the scan can't follow rustc (a non-ASCII identifier character beside a quote), it
+/// fails closed.
 struct Tokens<'text> {
     /// The block.
     text: &'text str,
     /// The byte offset of the next unread character.
     at: usize,
-    /// What the text ended inside, when it ended inside a comment or a literal.
+    /// What the text ended inside, when it ended inside a comment or a literal, or, when
+    /// `strict`, the first literal rustc would reject as malformed.
     unterminated: Option<Found>,
+    /// Whether the block is about to be compiled: a doc comment then reads as the `#[doc = ..]`
+    /// attribute rustc lowers it to, and a malformed literal fails the scan closed.
+    strict: bool,
+    /// Tokens already read and not yet returned, the next one last.
+    queued: Vec<Token<'text>>,
 }
 
 impl<'text> Tokens<'text> {
-    /// The tokens of `text`.
-    const fn new(text: &'text str) -> Self {
+    /// The tokens of `text`, `strict` when the block is about to be compiled.
+    const fn new(text: &'text str, strict: bool) -> Self {
         Self {
             text,
             at: 0,
             unterminated: None,
+            strict,
+            queued: Vec::new(),
         }
+    }
+
+    /// Records, when `strict`, that the text holds a literal rustc rejects as `what`.
+    fn malformed(&mut self, what: &'static str) {
+        if self.strict && self.unterminated.is_none() {
+            self.unterminated = Some(Found::Unscannable(what));
+        }
+    }
+
+    /// Queues the tokens of the `#[doc = ".."]` attribute rustc lowers a doc comment to, with
+    /// `!` after the `#` when `inner`, and returns its first.
+    fn doc_attribute(&mut self, inner: bool) -> Token<'text> {
+        self.queued.extend([
+            Token::Punct(']'),
+            Token::Other,
+            Token::Punct('='),
+            Token::Ident("doc"),
+            Token::Punct('['),
+        ]);
+        if inner {
+            self.queued.push(Token::Punct('!'));
+        }
+        Token::Punct('#')
     }
 
     /// Records that the text ended inside `what`.
@@ -987,14 +1128,32 @@ impl<'text> Iterator for Tokens<'text> {
     type Item = Token<'text>;
 
     fn next(&mut self) -> Option<Token<'text>> {
+        if let Some(token) = self.queued.pop() {
+            return Some(token);
+        }
         loop {
             self.bump_while(is_rust_whitespace);
             let rest = self.rest();
             let c = rest.chars().next()?;
             if rest.starts_with("//") {
+                // rustc_lexer `line_comment`: `///` (not `////`) is outer, `//!` inner.
+                let outer = rest.starts_with("///") && !rest.starts_with("////");
+                let inner = rest.starts_with("//!");
                 self.bump_while(|c| c != '\n');
+                if self.strict && (outer || inner) {
+                    return Some(self.doc_attribute(inner));
+                }
             } else if rest.starts_with("/*") {
+                // rustc_lexer `block_comment`: `/**` not followed by `*` or `/` is outer, `/*!`
+                // inner.
+                let outer = rest.starts_with("/**")
+                    && !rest.starts_with("/***")
+                    && !rest.starts_with("/**/");
+                let inner = rest.starts_with("/*!");
                 self.block_comment();
+                if self.strict && self.unterminated.is_none() && (outer || inner) {
+                    return Some(self.doc_attribute(inner));
+                }
             } else if c == '"' {
                 self.string();
                 return Some(Token::Other);
@@ -1012,30 +1171,79 @@ impl<'text> Iterator for Tokens<'text> {
 }
 
 impl<'text> Tokens<'text> {
-    /// Reads a character literal or a lifetime the cursor is on: `'\..'` and `'x'` are
-    /// literals, and `'` before an ASCII identifier is a lifetime or label. Anything else is an
-    /// unterminated character literal.
+    /// Reads a character literal or a lifetime the cursor is on, as `rustc_lexer`'s
+    /// `lifetime_or_char` does: `'` before `x'` is a character literal; `'` before an identifier
+    /// run is a lifetime or label unless a `'` follows the run, which makes it a (malformed)
+    /// character literal ending there; anything else is a character literal read by
+    /// [`char_literal`](Self::char_literal). A non-ASCII character where rustc's choice depends
+    /// on Unicode identifier classes fails the scan closed.
     fn quote(&mut self) {
         self.bump(1);
-        if self.peek(0) == Some('\\') {
-            self.bump(2);
-            self.bump_while(|c| c != '\'' && c != '\n');
-            if self.peek(0) == Some('\'') {
-                self.bump(1);
-            } else {
-                self.ended_inside("an unterminated character literal");
+        let (first, second) = (self.peek(0), self.peek(1));
+        let can_be_lifetime = second != Some('\'') && first.is_some_and(is_ident_char);
+        if !can_be_lifetime {
+            if first.is_some_and(|c| !c.is_ascii()) && second != Some('\'') {
+                self.ended_inside("a quote before a non-ASCII character");
+                return;
             }
-        } else if self.peek(1) == Some('\'') {
+            self.char_literal();
+            return;
+        }
+        if first == Some('r') && second == Some('#') && self.peek(2).is_some_and(is_ident_char) {
+            // A raw lifetime: `'r#name`.
             self.bump(2);
-        } else if self.peek(0).is_some_and(is_ident_char) {
-            self.bump_while(is_ident_char);
-        } else {
-            self.ended_inside("an unterminated character literal");
+        }
+        self.bump(1);
+        self.bump_while(is_ident_char);
+        match self.peek(0) {
+            Some(c) if !c.is_ascii() => {
+                self.ended_inside("a lifetime or character literal with a non-ASCII character");
+            }
+            Some('\'') => {
+                self.bump(1);
+                self.malformed("a character literal holding more than one character");
+            }
+            _ => {}
         }
     }
 
+    /// Reads a character or byte literal whose opening `'` the cursor is past, as `rustc_lexer`'s
+    /// `single_quoted_string` does: one character then `'`; otherwise up to the closing `'`, an
+    /// escape taking two characters, stopping unterminated at a `/`, at a newline not followed by
+    /// `'`, or at the end. A literal that isn't one character or one known escape is malformed.
+    fn char_literal(&mut self) {
+        if self.peek(1) == Some('\'') && self.peek(0) != Some('\\') {
+            if matches!(self.peek(0), Some('\n' | '\r' | '\t' | '\'')) {
+                self.malformed(
+                    "a character literal holding an unescaped control character or quote",
+                );
+            }
+            self.bump(2);
+            return;
+        }
+        let start = self.at;
+        loop {
+            match self.peek(0) {
+                Some('\'') => {
+                    let body = self.text.get(start..self.at).unwrap_or_default();
+                    self.bump(1);
+                    if !is_escape(body) {
+                        self.malformed("a character literal that isn't one character or escape");
+                    }
+                    return;
+                }
+                Some('/') | None => break,
+                Some('\n') if self.peek(1) != Some('\'') => break,
+                Some('\\') => self.bump(2),
+                Some(_) => self.bump(1),
+            }
+        }
+        self.ended_inside("an unterminated character literal");
+    }
+
     /// Reads an identifier, a raw identifier, a prefixed or raw string, or a number the cursor is
-    /// on.
+    /// on. A `r#`, `br#` or `cr#` that starts neither a raw string nor a raw identifier fails a
+    /// strict scan closed, as does a raw string with more than 255 `#`s, which rustc rejects.
     fn word(&mut self) -> Token<'text> {
         let start = self.at;
         self.bump_while(is_ident_char);
@@ -1046,6 +1254,9 @@ impl<'text> Tokens<'text> {
         let raw_prefix = matches!(word, "r" | "br" | "cr");
         let (hashes, quote) = self.hashes_then_quote();
         if raw_prefix && quote {
+            if hashes > 255 {
+                self.malformed("a raw string with more than 255 `#`s");
+            }
             self.raw_string(hashes);
             return Token::Other;
         }
@@ -1054,7 +1265,8 @@ impl<'text> Tokens<'text> {
             return Token::Other;
         }
         if matches!(word, "b") && self.peek(0) == Some('\'') {
-            self.quote();
+            self.bump(1);
+            self.char_literal();
             return Token::Other;
         }
         if word == "r" && hashes == 1 && self.peek(1).is_some_and(is_ident_char) {
@@ -1063,8 +1275,35 @@ impl<'text> Tokens<'text> {
             self.bump_while(is_ident_char);
             return Token::Ident(self.text.get(start..self.at).unwrap_or_default());
         }
+        if raw_prefix && hashes > 0 {
+            self.malformed("a `#` after a raw prefix that starts no raw string or identifier");
+        }
         Token::Ident(word)
     }
+}
+
+/// Whether `body`, a character literal's text between its quotes, is one escape rustc knows:
+/// `\n`, `\r`, `\t`, `\\`, `\0`, `\'`, `\"`, `\x` and two hex digits, or `\u{..}` with one to six
+/// hex digits.
+fn is_escape(body: &str) -> bool {
+    let Some(escape) = body.strip_prefix('\\') else {
+        return false;
+    };
+    if matches!(escape, "n" | "r" | "t" | "\\" | "0" | "'" | "\"") {
+        return true;
+    }
+    if let Some(hex) = escape.strip_prefix('x') {
+        return hex.len() == 2 && hex.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    escape
+        .strip_prefix("u{")
+        .and_then(|rest| rest.strip_suffix('}'))
+        .is_some_and(|hex| {
+            let digits = hex.chars().filter(|c| *c != '_').count();
+            (1..=6).contains(&digits)
+                && !hex.starts_with('_')
+                && hex.chars().all(|c| c.is_ascii_hexdigit() || c == '_')
+        })
 }
 
 /// Whether `c` can be part of an identifier or number, by the scan's ASCII-only rule: any other
@@ -1073,10 +1312,23 @@ const fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
-/// Whether rustc skips `c` as whitespace: [`char::is_whitespace`] plus the left-to-right and
-/// right-to-left marks, U+200E and U+200F.
-fn is_rust_whitespace(c: char) -> bool {
-    c.is_whitespace() || matches!(c, '\u{200E}' | '\u{200F}')
+/// Whether rustc skips `c` as whitespace: Unicode's `Pattern_White_Space`, as `rustc_lexer`'s
+/// `is_whitespace`, which takes in the left-to-right and right-to-left marks, U+200E and U+200F.
+/// Any other whitespace is a token of its own, as it is an error token to rustc.
+const fn is_rust_whitespace(c: char) -> bool {
+    matches!(
+        c,
+        '\t' | '\n'
+            | '\u{000B}'
+            | '\u{000C}'
+            | '\r'
+            | ' '
+            | '\u{0085}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{2028}'
+            | '\u{2029}'
+    )
 }
 
 /// rustfmt's syntax-error report: stderr opening with `error:` and, when it can place it, a
@@ -1097,9 +1349,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        EmitDir, Found, LineMap, MAX_SCAN_BYTES, Scan, attribute_edition, before_compiling,
-        clippy_args, clippy_conf_dir, compile_time_read, config_args, format_args, lint_verdict,
-        parse_error, scan, unhide,
+        EmitDir, Found, LineMap, MAX_SCAN_BYTES, Scan, Token, Tokens, attribute_edition,
+        before_compiling, clippy_args, clippy_conf_dir, compile_time_read, config_args,
+        format_args, lint_verdict, parse_error, scan, unhide,
     };
     use crate::cartridges::markdown::cartridge::cartridge;
     use crate::code_blocks::block::blocks_in;
@@ -1685,7 +1937,7 @@ mod tests {
                 name("option_env"),
             ),
             (
-                "macro_rules! m { ($i:ident) => { $i!(\"/etc/passwd\") }; }\nconst S: &str = m!(include_str);\n",
+                "const S: &str = concat!(include_str);\n",
                 name("include_str"),
             ),
             (
@@ -1693,11 +1945,11 @@ mod tests {
                 Scan::Read(Found::Macro("include_bytes".to_owned())),
             ),
             (
-                "macro_rules! m { ($p:literal) => { #[doc = $p] fn f() {} }; }\n",
+                "#[doc = $p] fn f() {}\n",
                 Scan::Read(Found::MetavariableAttribute),
             ),
             (
-                "macro_rules! m { ($($a:tt)*) => { #[$($a)*] mod x {} }; }\n",
+                "#[$($a)*] mod x {}\n",
                 Scan::Read(Found::MetavariableAttribute),
             ),
             (
@@ -1719,16 +1971,9 @@ mod tests {
                 "#[cfg(test)]\npub(crate) mod tests ;\n",
                 outline(Some("tests")),
             ),
+            ("mod $n;\n", outline(None)),
             (
-                "macro_rules! m { ($n:ident) => { mod $n; }; }\nm!(x);\n",
-                outline(None),
-            ),
-            (
-                "macro_rules! m { ($k:tt $n:ident $b:tt) => { $k $n; }; }\nm!(mod x {});\n",
-                outline(Some("x")),
-            ),
-            (
-                "macro_rules! m { () => { mod x {} }; }\n",
+                "fn f() { println!(\"{}\", { mod x {} 1 }); }\n",
                 outline(Some("x")),
             ),
         ] {
@@ -1801,15 +2046,10 @@ mod tests {
     fn before_compiling_a_hash_a_macro_could_pair_with_any_bracket_group_is_refused() {
         for (block, what) in [
             (
-                "macro_rules! m { ($h:tt $a:tt $b:tt) => { $h $b fn f() {} }; }\n\
-                 m!(#[allow(unused)] [debugger_visualizer(natvis_file = \"/etc/passwd\")]);\n",
+                "fn f() { println!(\"{:?}\", #[allow(unused)] [1]); }\n",
                 "a `#` inside a macro call's input",
             ),
-            (
-                "macro_rules! m { ($b:tt) => { # $b fn f() {} }; }\n\
-                 m!([debugger_visualizer(natvis_file = \"/etc/passwd\")]);\n",
-                "a `#` that doesn't start an attribute",
-            ),
+            ("# $b fn f() {}\n", "a `#` that doesn't start an attribute"),
         ] {
             assert_eq!(
                 before_compiling(block),
@@ -1822,12 +2062,162 @@ mod tests {
     #[test]
     fn before_compiling_macro_export_passes_and_an_unsafe_wrapper_is_refused() {
         assert_eq!(
-            before_compiling("#[macro_export]\nmacro_rules! m { () => {}; }\n"),
+            before_compiling("#[macro_export]\npub fn f() {}\n"),
             Scan::Clean
         );
         assert_eq!(
             before_compiling("#[unsafe(no_mangle)]\npub fn f() {}\n"),
             Scan::Read(Found::Attribute("unsafe".to_owned()))
         );
+    }
+
+    /// The kinds of `input`'s tokens, read strictly, and what the scan made of the text after.
+    fn kinds(input: &str) -> (Vec<Token<'_>>, Option<Found>) {
+        let mut lexer = Tokens::new(input, true);
+        let tokens = lexer.by_ref().collect();
+        (tokens, lexer.unterminated)
+    }
+
+    #[test]
+    fn lifetimes_and_character_literals_split_as_rustc_lexer_splits_them() {
+        let other = || vec![Token::Other];
+        for (input, tokens) in [
+            ("'a", other()),
+            ("'a'", other()),
+            ("'\\''", other()),
+            ("'\\\\'", other()),
+            ("b'x'", other()),
+            ("'static", other()),
+            ("'_", other()),
+            ("'r#fn", other()),
+            ("'a x", vec![Token::Other, Token::Ident("x")]),
+        ] {
+            assert_eq!(kinds(input), (tokens, None), "{input:?}");
+        }
+        assert_eq!(
+            kinds("'ab' x"),
+            (
+                vec![Token::Other, Token::Ident("x")],
+                Some(Found::Unscannable(
+                    "a character literal holding more than one character"
+                ))
+            ),
+            "`'ab'` is one malformed character literal, as rustc reads it"
+        );
+        for (input, what) in [
+            (
+                "'\\q'",
+                "a character literal that isn't one character or escape",
+            ),
+            ("'\\ /x'", "an unterminated character literal"),
+            (
+                "b'ab'",
+                "a character literal that isn't one character or escape",
+            ),
+            (
+                "'e\u{301}'",
+                "a lifetime or character literal with a non-ASCII character",
+            ),
+            ("'\u{e9}x", "a quote before a non-ASCII character"),
+            (
+                "br#x",
+                "a `#` after a raw prefix that starts no raw string or identifier",
+            ),
+        ] {
+            assert_eq!(kinds(input).1, Some(Found::Unscannable(what)), "{input:?}");
+        }
+        assert_eq!(
+            compile_time_read("const C: char = 'ab'; const D: &str = \"x\";\n"),
+            Scan::Clean,
+            "rustfmt's scan reads the same extents without refusing malformed literals"
+        );
+    }
+
+    #[test]
+    fn a_multi_character_literal_cant_hide_a_read_from_either_scan() {
+        let marker = "/outside/marker/marker.rs";
+        let probe_08 =
+            format!("pub const C: char = 'ab'\\; pub const D: u8 = include!(\"{marker}\"); //'\n");
+        let probe_10 = format!(
+            "pub const C: char = 'ab'\\; pub static D: &str = include_str!(\"{marker}\"); //'\n"
+        );
+        let combining = format!(
+            "pub const C: char = 'e\u{301}'\\; pub const D: u8 = include!(\"{marker}\"); //'\n"
+        );
+        for block in [&probe_08, &probe_10, &combining] {
+            assert!(
+                matches!(before_compiling(block), Scan::Read(_)),
+                "{block:?}"
+            );
+        }
+        assert_eq!(compile_time_read(&probe_08), read_of("include"));
+        assert_eq!(compile_time_read(&probe_10), read_of("include_str"));
+    }
+
+    #[test]
+    fn before_compiling_a_doc_comment_is_the_attribute_rustc_lowers_it_to() {
+        let path = "/outside/marker/x.py";
+        let probe_01 = format!(
+            "macro_rules! m {{ ($h:tt $d:tt $b:tt) => {{ $h $b pub fn f() {{}} }} }}\n\
+             m!(/// x\n[debugger_visualizer(gdb_script_file = \"{path}\")]);\n"
+        );
+        let in_a_call = format!(
+            "fn f() {{ println!(\"{{}}\", /// x\n[debugger_visualizer(gdb_script_file = \"{path}\")]); }}\n"
+        );
+
+        assert!(matches!(before_compiling(&probe_01), Scan::Read(_)));
+        assert_eq!(
+            before_compiling(&in_a_call),
+            Scan::Read(Found::Unscannable("a `#` inside a macro call's input"))
+        );
+        assert_eq!(
+            kinds("//! inner\n").0,
+            [
+                Token::Punct('#'),
+                Token::Punct('!'),
+                Token::Punct('['),
+                Token::Ident("doc"),
+                Token::Punct('='),
+                Token::Other,
+                Token::Punct(']'),
+            ]
+        );
+        for plain in ["//// x\n", "/**/", "/*** x */", "// x\n"] {
+            assert_eq!(kinds(plain).0, [], "{plain:?}");
+        }
+        assert_eq!(
+            before_compiling(
+                "//! Crate docs.\n/// Adds.\npub fn f() {}\n/** More. */\npub fn g() {}\n"
+            ),
+            Scan::Clean
+        );
+    }
+
+    #[test]
+    fn before_compiling_macros_off_the_allowlist_are_refused() {
+        let unlisted = |name: &str| Scan::Read(Found::UnlistedMacro(name.to_owned()));
+        for (block, refused) in [
+            (
+                "macro_rules! m { () => {}; }\nm!();\n",
+                unlisted("macro_rules"),
+            ),
+            ("fn f() { foo!(); }\n", unlisted("foo")),
+            ("fn f() { core::arch::asm!(\"nop\"); }\n", unlisted("asm")),
+            (
+                "use core::arch::global_asm as println;\n",
+                unlisted("as println"),
+            ),
+        ] {
+            assert_eq!(before_compiling(block), refused, "{block:?}");
+        }
+    }
+
+    #[test]
+    fn before_compiling_allowlisted_macros_and_negations_pass() {
+        let block = "fn main() {\n    let v = vec![1, 2];\n    println!(\"{v:?}\");\n    \
+                     assert_eq!(v.len(), 2);\n    if !(v.is_empty()) { std::println!(\"x\"); }\n    \
+                     let _ = 1 != 2 && !matches!(v.first(), None);\n}\n";
+
+        assert_eq!(before_compiling(block), Scan::Clean);
     }
 }
