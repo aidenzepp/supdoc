@@ -16,7 +16,37 @@
 #   sum:     the release publishes no checksum file; this is the asset digest GitHub publishes
 #            for it, https://api.github.com/repos/koalaman/shellcheck/releases/tags/v0.11.0 (assets[].digest)
 #
+# biome 2.6.5
+#   binary: https://github.com/biomejs/biome/releases/download/%40biomejs/biome%402.6.5/biome-linux-x64
+#   sum:    the release publishes no checksum file; this is the asset digest GitHub publishes
+#           for it, https://api.github.com/repos/biomejs/biome/releases/tags/@biomejs/biome@2.6.5 (assets[].digest)
+#
+# tombi v1.10.0 (the TOML tool; taplo publishes no checksum and is not used)
+#   tarball: https://github.com/tombi-toml/tombi/releases/download/v1.10.0/tombi-cli-1.10.0-x86_64-unknown-linux-musl.tar.gz
+#   sum:     the release publishes no checksum file; this is the asset digest GitHub publishes
+#            for it, https://api.github.com/repos/tombi-toml/tombi/releases/tags/v1.10.0 (assets[].digest)
+#
+# yamlfmt v0.21.0
+#   tarball: https://github.com/google/yamlfmt/releases/download/v0.21.0/yamlfmt_0.21.0_Linux_x86_64.tar.gz
+#   sum:     the Linux_x86_64 line of https://github.com/google/yamlfmt/releases/download/v0.21.0/checksums.txt
+#            (the same as GitHub's asset digest for it)
+#
+# rumdl v0.3.2
+#   tarball: https://github.com/rvben/rumdl/releases/download/v0.3.2/rumdl-v0.3.2-x86_64-unknown-linux-gnu.tar.gz
+#   sum:     https://github.com/rvben/rumdl/releases/download/v0.3.2/rumdl-v0.3.2-x86_64-unknown-linux-gnu.tar.gz.sha256
+#            (the same as GitHub's asset digest for it)
+#
+# Go 1.27.3 (gofmt and go vet; actions/setup-go does not verify toolchain checksums)
+#   tarball: https://go.dev/dl/go1.27.3.linux-amd64.tar.gz
+#   sum:     the sha256 for go1.27.3.linux-amd64.tar.gz in https://go.dev/dl/?mode=json
+#
+# yamllint is pinned with hashes in ci/requirements-yamllint.txt.
 # black is pinned with hashes in ci/requirements-black.txt.
 76e77641faa025814b77f153b29796b8e6fa2fca03e0c76a691608b86c7ea7bf  shfmt_v3.14.1_linux_amd64
 2b0890f5a55900af741f133918c2656919bbf18c2ab7741b4ca8403a90e647a9  ruff-x86_64-unknown-linux-gnu.tar.gz
 b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6  shellcheck-v0.11.0.linux.x86_64.tar.gz
+0653fd798e50565efac8b1958c9a2786fada55cc6c362b7da4f16efff8dd30d8  biome-linux-x64
+47c80f210c2abc54f9a4c433b768378a321a0c53fcb907cb2563fe16f277f402  tombi-cli-1.10.0-x86_64-unknown-linux-musl.tar.gz
+1f300d9257b232bb3b541d7fb1b0e6b3c121bcbab381c86cd38cb8722be8a566  yamlfmt_0.21.0_Linux_x86_64.tar.gz
+f527d1374765d826c1627ceab3d1f46e548268731a495b5b12a3af529b3d79e8  rumdl-v0.3.2-x86_64-unknown-linux-gnu.tar.gz
+65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40  go1.27.3.linux-amd64.tar.gz

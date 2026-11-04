@@ -216,6 +216,13 @@ pub(crate) mod code_blocks {
     /// Reading the Rust toolchain a project pins.
     mod toolchain;
 
+    /// Building the project crate clippy links a trusted block against.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "clippy calls the project build from P5-07H")
+    )]
+    mod project;
+
     /// The result cache.
     mod cache;
 
