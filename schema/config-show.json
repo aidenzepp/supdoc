@@ -228,6 +228,14 @@
           "$ref": "#/$defs/LimitJson",
           "description": "How large each ignore file may be."
         },
+        "max_key_path_size": {
+          "$ref": "#/$defs/LimitJson",
+          "description": "How many bytes of path text one data file's keys may hold in total."
+        },
+        "max_key_segments": {
+          "$ref": "#/$defs/LimitJson",
+          "description": "How many path segments one data file's keys may hold in total."
+        },
         "max_lock_size": {
           "$ref": "#/$defs/LimitJson",
           "description": "How large `supdoc.lock` may be."
@@ -243,7 +251,9 @@
         "code_block_build_timeout",
         "max_lock_size",
         "max_config_size",
-        "max_ignore_size"
+        "max_ignore_size",
+        "max_key_segments",
+        "max_key_path_size"
       ],
       "type": "object"
     },

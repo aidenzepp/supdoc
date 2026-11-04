@@ -346,6 +346,10 @@ pub(crate) struct LimitsJson {
     max_config_size: LimitJson,
     /// How large each ignore file may be.
     max_ignore_size: LimitJson,
+    /// How many path segments one data file's keys may hold in total.
+    max_key_segments: LimitJson,
+    /// How many bytes of path text one data file's keys may hold in total.
+    max_key_path_size: LimitJson,
 }
 
 impl LimitsJson {
@@ -358,11 +362,13 @@ impl LimitsJson {
             max_lock_size: LimitJson::new(root, &limits.max_lock_size),
             max_config_size: LimitJson::new(root, &limits.max_config_size),
             max_ignore_size: LimitJson::new(root, &limits.max_ignore_size),
+            max_key_segments: LimitJson::new(root, &limits.max_key_segments),
+            max_key_path_size: LimitJson::new(root, &limits.max_key_path_size),
         }
     }
 
     /// Each limit with its key, in the order text output shows them.
-    const fn rows(&self) -> [(&'static str, &LimitJson); 6] {
+    const fn rows(&self) -> [(&'static str, &LimitJson); 8] {
         [
             ("parse-timeout", &self.parse_timeout),
             ("code-block-timeout", &self.code_block_timeout),
@@ -370,6 +376,8 @@ impl LimitsJson {
             ("max-lock-size", &self.max_lock_size),
             ("max-config-size", &self.max_config_size),
             ("max-ignore-size", &self.max_ignore_size),
+            ("max-key-segments", &self.max_key_segments),
+            ("max-key-path-size", &self.max_key_path_size),
         ]
     }
 }
