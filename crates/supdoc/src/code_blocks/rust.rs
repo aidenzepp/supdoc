@@ -783,8 +783,9 @@ enum MacroKind {
 /// rustc only emits metadata (`#[debugger_visualizer(natvis_file = "..")]`, `#[path = ".."]`),
 /// and a later Rust may add more. Each of these only sets lint levels, conditions, derives,
 /// documentation or codegen hints. `doc` is safe: `#[doc = include_str!(..)]` is refused by the
-/// read-macro rule, and a `doc` with a literal reads nothing.
-const ALLOWED_ATTRIBUTES: [&str; 23] = [
+/// read-macro rule, and a `doc` with a literal reads nothing. `unsafe` is left out: its
+/// edition-2024 wrapper `#[unsafe(..)]` hides the name of the attribute inside it.
+const ALLOWED_ATTRIBUTES: [&str; 30] = [
     "allow",
     "warn",
     "deny",
@@ -808,6 +809,13 @@ const ALLOWED_ATTRIBUTES: [&str; 23] = [
     "rustfmt",
     "clippy",
     "diagnostic",
+    "macro_export",
+    "macro_use",
+    "no_mangle",
+    "export_name",
+    "global_allocator",
+    "no_std",
+    "no_implicit_prelude",
 ];
 
 /// The first attribute in `tokens`, the tokens after an attribute's `[`, whose path's first
@@ -1759,14 +1767,17 @@ mod tests {
                 "#![debugger_visualizer(gdb_script_file = \"/etc/passwd\")]\n",
                 unlisted("debugger_visualizer"),
             ),
-            ("#[no_mangle]\npub fn f() {}\n", unlisted("no_mangle")),
+            (
+                "#[link_section = \".x\"]\npub fn f() {}\n",
+                unlisted("link_section"),
+            ),
             (
                 "#![cfg_attr(all(), debugger_visualizer(natvis_file = \"/etc/passwd\"))]\n",
                 unlisted("debugger_visualizer"),
             ),
             (
-                "#[cfg_attr(all(), allow(unused), cfg_attr(all(), macro_export))]\nfn f() {}\n",
-                unlisted("macro_export"),
+                "#[cfg_attr(all(), allow(unused), cfg_attr(all(), link_section = \".x\"))]\nfn f() {}\n",
+                unlisted("link_section"),
             ),
             ("#[::core::prelude::v1::test]\nfn f() {}\n", unlisted("")),
         ] {
@@ -1806,5 +1817,17 @@ mod tests {
                 "{block:?}"
             );
         }
+    }
+
+    #[test]
+    fn before_compiling_macro_export_passes_and_an_unsafe_wrapper_is_refused() {
+        assert_eq!(
+            before_compiling("#[macro_export]\nmacro_rules! m { () => {}; }\n"),
+            Scan::Clean
+        );
+        assert_eq!(
+            before_compiling("#[unsafe(no_mangle)]\npub fn f() {}\n"),
+            Scan::Read(Found::Attribute("unsafe".to_owned()))
+        );
     }
 }
