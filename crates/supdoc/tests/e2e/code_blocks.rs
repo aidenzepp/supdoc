@@ -1072,3 +1072,91 @@ fn cache_a_config_appearing_in_the_docs_own_directory_runs_the_tool_again() {
 
     assert_eq!(runs(&outside), 4);
 }
+
+/// How many blocks the parallel tests write.
+const PARALLEL_BLOCKS: usize = 16;
+
+/// Runs `check --json` on a recorded `basic` project with the shell table on and
+/// [`PARALLEL_BLOCKS`] `sh` blocks in `docs/blocks.md`, with an `shfmt` stub running `script`
+/// as the only `PATH` entry, asserting it exits `exit`. Returns the report and how long the run
+/// took.
+fn check_many_with_shfmt(script: &str, exit: i32) -> (serde_json::Value, std::time::Duration) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let project = Project::fixture("basic");
+    project.record();
+    project.write(
+        "supdoc.config.toml",
+        "[features.code-blocks]\n[features.code-blocks.shell]\n",
+    );
+    let blocks = (1..=PARALLEL_BLOCKS)
+        .map(|index| format!("```sh\necho {index}\n```\n"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    project.write("docs/blocks.md", &format!("# Blocks\n\n{blocks}"));
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let path = outside.path().join("shfmt");
+    std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("the stub should be writable");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("the stub should be made executable");
+    let started = std::time::Instant::now();
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(exit)
+        .json();
+    (json, started.elapsed())
+}
+
+#[test]
+fn parallel_sixteen_blocks_with_a_300ms_formatter_finish_in_under_3s() {
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    if cores < 4 {
+        // Written to the process's stderr directly, which `cargo test` shows for a passing test.
+        let _ignored = std::io::Write::write_all(
+            &mut std::io::stderr(),
+            format!(
+                "SKIPPED parallel_sixteen_blocks: available_parallelism() is {cores}, below 4\n"
+            )
+            .as_bytes(),
+        );
+        return;
+    }
+
+    let (json, took) = check_many_with_shfmt("/bin/sleep 0.3\n/bin/cat", 0);
+
+    assert_eq!(
+        at(&json, "/data/summary/code_blocks/passed"),
+        PARALLEL_BLOCKS,
+        "{json}"
+    );
+    assert!(
+        took < std::time::Duration::from_secs(3),
+        "16 runs of 300ms took {took:?}, so they didn't run in parallel"
+    );
+}
+
+#[test]
+fn parallel_findings_come_out_in_document_order() {
+    // Earlier blocks sleep longer, so their runs finish last.
+    let script = "n=${2##*.md.}\nn=${n%.sh}\n/bin/sleep \"$(printf '0.%02d' $(( (17 - n) * 5 )))\"\necho \"bad $2\" >&2\nexit 1";
+
+    let (json, _took) = check_many_with_shfmt(script, 1);
+
+    let messages: Vec<String> = array_at(&json, "/findings")
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(messages.len(), PARALLEL_BLOCKS, "{json}");
+    for (position, message) in messages.iter().enumerate() {
+        let name = format!("docs/blocks.md.{}.sh", position + 1);
+        assert!(
+            message.contains("code-block-tool-failed") && message.contains(&name),
+            "finding {position} should be block {}'s tool failure: {message}",
+            position + 1
+        );
+    }
+    assert_eq!(
+        at(&json, "/data/summary/code_blocks/failed"),
+        PARALLEL_BLOCKS,
+        "{json}"
+    );
+}

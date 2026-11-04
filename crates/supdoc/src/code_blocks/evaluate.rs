@@ -3,9 +3,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
+use std::num::NonZeroUsize;
 use std::ops::Range;
-use std::path::Path;
+use std::panic::resume_unwind;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 use std::time::Duration;
 
 use crate::config::Config;
@@ -255,6 +259,9 @@ impl Evaluation {
     /// A block whose run is in the result cache (see [`cache`]) isn't run again; a run that
     /// passed or plainly failed is stored there, a tool failure or timeout never is.
     ///
+    /// The runs for distinct blocks go in parallel (see [`in_parallel`]), each under its own
+    /// timeout; findings and states come out as a serial run gives them, in block order.
+    ///
     /// Effect: reads file metadata along `PATH`, resolves symlinks, reads and writes the result
     /// cache, and runs each found formatter once per block not in it, killing it at the timeout.
     pub(crate) fn look_up_tools(&mut self, env: &ToolEnv, root: &Path) {
@@ -262,7 +269,9 @@ impl Evaluation {
         let mut looked_up: Vec<(&'static str, Found)> = Vec::new();
         let mut rust_setup: Option<RustSetup> = None;
         let mut toolchain_warned = false;
-        for record in &mut self.records {
+        let mut slots: Vec<Slot> = Vec::new();
+        let mut jobs: Vec<Job> = Vec::new();
+        for (position, record) in self.records.iter_mut().enumerate() {
             if record.state != BlockState::NotChecked(NotChecked::Pending) {
                 continue;
             }
@@ -275,8 +284,7 @@ impl Evaluation {
                 let refused = if let Toolchain::Refused { refusal, file } = rust.toolchain {
                     if !toolchain_warned {
                         toolchain_warned = true;
-                        self.findings
-                            .push(toolchain_warning(refusal, file, &record.at));
+                        slots.push(Slot::Found(toolchain_warning(refusal, file, &record.at)));
                     }
                     Some(NotChecked::ToolchainPath)
                 } else {
@@ -288,7 +296,7 @@ impl Evaluation {
                         Scan::Read(_) => Some(NotChecked::CompileTimeRead),
                         Scan::TooLarge => Some(NotChecked::TooLargeToScan),
                     };
-                    self.findings.extend(scan_warning(&scan, &record.at));
+                    slots.extend(scan_warning(&scan, &record.at).map(Slot::Found));
                     refused
                 };
                 if let Some(refused) = refused {
@@ -304,26 +312,20 @@ impl Evaluation {
                     found.clone()
                 } else {
                     let found = find(tool.binary, env, root);
-                    self.findings.extend(tool_warning(tool, &found, &record.at));
+                    slots.extend(tool_warning(tool, &found, &record.at).map(Slot::Found));
                     looked_up.push((tool.name, found.clone()));
                     found
                 };
             record.state = match found {
                 Found::OnPath(program) => {
-                    let session = Session {
-                        env,
-                        root,
-                        timeout: self.timeout,
-                        cache: cache.get_or_insert_with(|| Cache::open(env, root)).as_ref(),
-                    };
-                    let ran = run_formatter(tool, &program, record, &session, rust);
-                    let Some(state) = ran.map(|(verdict, findings)| {
-                        self.findings.extend(findings);
-                        verdict.state()
-                    }) else {
-                        continue;
-                    };
-                    state
+                    let _opened = cache.get_or_insert_with(|| Cache::open(env, root));
+                    slots.push(Slot::Run(jobs.len()));
+                    jobs.push(Job {
+                        record: position,
+                        tool,
+                        program,
+                    });
+                    continue;
                 }
                 Found::Missing => BlockState::ToolMissing,
                 Found::InsideRoot(_) => BlockState::NotChecked(NotChecked::ToolInsideRoot),
@@ -332,7 +334,23 @@ impl Evaluation {
                 .state
                 .reason(record.language.as_deref(), Some(tool.name));
         }
-        if let Some(Some(cache)) = cache {
+        let cache = cache.flatten();
+        let session = Session {
+            env,
+            root,
+            timeout: self.timeout,
+            cache: cache.as_ref(),
+        };
+        let records = &self.records;
+        let ran = in_parallel(&jobs, |job| {
+            let record = records.get(job.record)?;
+            let rust = rust_setup
+                .as_ref()
+                .filter(|_| job.tool.language == Language::Rust);
+            run_formatter(job.tool, &job.program, record, &session, rust)
+        });
+        self.settle(slots, &jobs, ran);
+        if let Some(cache) = cache {
             cache.prune();
         }
         if self.counts.is_some() {
@@ -341,6 +359,98 @@ impl Evaluation {
             ));
         }
     }
+}
+
+impl Evaluation {
+    /// Adds `slots`' findings in order, each [`Slot::Run`] taking its job's result from `ran`, which
+    /// holds one per job of `jobs` in order, and sets each run block's state and reason from its
+    /// verdict. A run with no result leaves its block pending.
+    fn settle(
+        &mut self,
+        slots: Vec<Slot>,
+        jobs: &[Job],
+        ran: Vec<Option<(format::Verdict, Vec<Finding>)>>,
+    ) {
+        let mut ran = ran.into_iter();
+        for slot in slots {
+            let (job, run) = match slot {
+                Slot::Found(finding) => {
+                    self.findings.push(finding);
+                    continue;
+                }
+                Slot::Run(job) => (jobs.get(job), ran.next().flatten()),
+            };
+            let (Some(job), Some((verdict, findings))) = (job, run) else {
+                continue;
+            };
+            self.findings.extend(findings);
+            if let Some(record) = self.records.get_mut(job.record) {
+                record.state = verdict.state();
+                record.reason = record
+                    .state
+                    .reason(record.language.as_deref(), Some(job.tool.name));
+            }
+        }
+    }
+}
+
+/// The most tool runs `check` keeps going at once, whatever the machine's parallelism, so a doc
+/// with thousands of blocks can't start thousands of processes.
+const MAX_WORKERS: usize = 8;
+
+/// One step of [`Evaluation::look_up_tools`]'s output, kept in block order while the runs go in
+/// parallel.
+enum Slot {
+    /// A finding known before any run.
+    Found(Finding),
+    /// The findings of the [`Job`] at this index.
+    Run(usize),
+}
+
+/// One formatter run on one pending block.
+struct Job {
+    /// The position of the block's record.
+    record: usize,
+    /// The formatter.
+    tool: &'static Tool,
+    /// Where it was found on `PATH`.
+    program: PathBuf,
+}
+
+/// `work` applied to each of `items`, the results in `items`' order. The items are shared among
+/// up to [`MAX_WORKERS`] scoped threads, no more than [`thread::available_parallelism`] allows,
+/// each taking the next unclaimed item until none is left. A worker's panic is resumed here.
+fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let workers = thread::available_parallelism()
+        .map_or(1, NonZeroUsize::get)
+        .min(MAX_WORKERS)
+        .min(items.len());
+    if workers <= 1 {
+        return items.iter().map(work).collect();
+    }
+    let next = AtomicUsize::new(0);
+    let mut done: Vec<(usize, R)> = thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut done = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(item) = items.get(index) else {
+                            return done;
+                        };
+                        done.push((index, work(item)));
+                    }
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().unwrap_or_else(|panic| resume_unwind(panic)))
+            .collect()
+    });
+    done.sort_unstable_by_key(|(index, _)| *index);
+    done.into_iter().map(|(_, result)| result).collect()
 }
 
 /// What every Rust tool call in a run shares, read once from the root.
@@ -793,4 +903,57 @@ fn value_location(info: &Info, range: Range<usize>) -> Option<Location> {
         line: info.location.line,
         column: info.location.column + u32::try_from(before).ok()?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use super::{MAX_WORKERS, in_parallel};
+
+    #[test]
+    fn in_parallel_keeps_the_items_order_when_later_items_finish_first() {
+        let items: Vec<u64> = (0..12).collect();
+
+        let results = in_parallel(&items, |item| {
+            std::thread::sleep(Duration::from_millis(5 * (12 - item)));
+            item * 10
+        });
+
+        let expected: Vec<u64> = items.iter().map(|item| item * 10).collect();
+        assert_eq!(results, expected);
+    }
+
+    #[test]
+    fn in_parallel_runs_no_more_than_max_workers_at_once() {
+        let items: Vec<usize> = (0..MAX_WORKERS * 4).collect();
+        let running = AtomicUsize::new(0);
+        let most = AtomicUsize::new(0);
+
+        let results = in_parallel(&items, |item| {
+            let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+            let _before = most.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(10));
+            let _before = running.fetch_sub(1, Ordering::SeqCst);
+            *item
+        });
+
+        assert_eq!(
+            results, items,
+            "every item should have one result, in order"
+        );
+        let most = most.load(Ordering::SeqCst);
+        assert!(
+            (1..=MAX_WORKERS).contains(&most),
+            "{most} runs went at once, past the cap of {MAX_WORKERS}"
+        );
+    }
+
+    #[test]
+    fn in_parallel_of_nothing_is_empty() {
+        let results = in_parallel(&[] as &[u8], |item| *item);
+
+        assert!(results.is_empty(), "{results:?}");
+    }
 }
