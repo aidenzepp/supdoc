@@ -1,6 +1,6 @@
 [package]
 name = "supdoc"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 description = "Track links from documentation to code and report when the linked code changes"
 license = "MIT"
