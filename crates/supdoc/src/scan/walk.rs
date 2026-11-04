@@ -105,17 +105,33 @@ impl UnreadDir {
     /// files, so no finding carries a machine-specific absolute path.
     pub(crate) fn finding(&self, root: &AbsolutePath) -> Finding {
         let shown = relative_to(root, &self.path);
-        Finding::new(
-            "scan-unreadable-dir",
-            Severity::Warning,
-            format!("skipped {shown}: {}", self.cause),
-        )
-        .with_help(format!(
+        self.warning(&shown).with_help(format!(
             "Links in that directory weren't checked. Run `chmod u+rx {dir}`, or add `exclude = \
              [{pattern:?}]` to {CONFIG_FILE_NAME}",
             dir = shell_quote(&shown),
             pattern = shown,
         ))
+    }
+
+    /// The `scan-unreadable-dir` warning for this directory when only code-blocks walks it:
+    /// linking's `exclude` already names it, so the help offers code-blocks' own `exclude`.
+    pub(crate) fn code_blocks_finding(&self, root: &AbsolutePath) -> Finding {
+        let shown = relative_to(root, &self.path);
+        self.warning(&shown).with_help(format!(
+            "Code blocks in that directory weren't checked. Run `chmod u+rx {dir}`, or add \
+             {pattern:?} to `[features.code-blocks] exclude` in {CONFIG_FILE_NAME}",
+            dir = shell_quote(&shown),
+            pattern = shown,
+        ))
+    }
+
+    /// The `scan-unreadable-dir` warning, with no help, naming the directory as `shown`.
+    fn warning(&self, shown: &str) -> Finding {
+        Finding::new(
+            "scan-unreadable-dir",
+            Severity::Warning,
+            format!("skipped {shown}: {}", self.cause),
+        )
     }
 }
 
@@ -863,6 +879,49 @@ mod tests {
         assert!(
             message.contains("not matched by `include`"),
             "message was: {message}"
+        );
+    }
+
+    #[test]
+    fn explicit_path_code_blocks_reads_draws_no_warning_though_linking_excludes_it() {
+        let project = Project::new();
+        project.write(
+            CONFIG_FILE_NAME,
+            "exclude = [\"skills\"]\n[features.code-blocks]\nexclude = []\n",
+        );
+        project.write("skills/a.md", "");
+
+        let walk = project.walk(&paths(&["skills/a.md"]));
+
+        assert!(walk.findings.is_empty(), "{:?}", walk.findings);
+        assert_eq!(walk.sources.len(), 1, "code-blocks should still read it");
+    }
+
+    #[test]
+    fn explicit_path_both_scopes_leave_out_names_both() {
+        let project = Project::new();
+        project.write(
+            CONFIG_FILE_NAME,
+            "exclude = [\"skills\"]\n[features.code-blocks]\nexclude = [\"skills\"]\n",
+        );
+        project.write("skills/a.md", "");
+
+        let walk = project.walk(&paths(&["skills/a.md"]));
+
+        assert_eq!(codes(&walk), ["scan-explicit-path-excluded"]);
+        let finding = walk.findings.first().expect("one warning was expected");
+        assert!(
+            finding.message.contains(
+                "excluded by `skills` in `exclude` in supdoc.config.toml, and by \
+                 `[features.code-blocks] exclude`"
+            ),
+            "message was: {}",
+            finding.message
+        );
+        let help = finding.help.as_deref().unwrap_or_default();
+        assert!(
+            help.contains("change `[features.code-blocks] exclude` to check its code blocks"),
+            "help was: {help}"
         );
     }
 
