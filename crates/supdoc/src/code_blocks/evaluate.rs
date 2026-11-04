@@ -13,7 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::config::Config;
-use crate::config::code_blocks::{Choice, CodeBlocks, Dialect, Edition, Language};
+use crate::config::code_blocks::{CodeBlocks, Dialect, Edition, Language};
 use crate::finding::{Finding, Location, Severity};
 use crate::hash::Hash;
 use crate::lock::model::Lockfile;
@@ -35,9 +35,7 @@ use super::rust::{self, Scan};
 use super::source::{self, SourceText, Unresolved};
 use super::states::{self, Excerpt, NotChecked, StepState, Steps, state_of, tag_of};
 use super::toolchain::{self, Refusal, Toolchain};
-use super::tools::{
-    Found, Invocation, Step, Tier, ToolCartridge, ToolEnv, find, formatter, linter, named,
-};
+use super::tools::{self, Found, Invocation, Step, Tier, ToolCartridge, ToolEnv, find};
 use super::uses::{self, UseState, Written};
 
 pub(crate) use super::states::{BlockState, CodeBlockCounts};
@@ -204,7 +202,7 @@ pub(crate) fn evaluate(
         let language = tag_of(block).map(str::to_owned);
         let mut steps = Steps::of(block, &state, code_blocks);
         let checked = language.as_deref().and_then(Language::from_tag);
-        let (tool, linter) = selected_tools(code_blocks, &mut steps, checked);
+        let (tool, linter) = selected_tools(code_blocks, &mut steps, checked, &state);
         let pending = (state == BlockState::NotChecked(NotChecked::Pending))
             .then(|| {
                 let file = block.fence.file.as_str();
@@ -323,10 +321,11 @@ impl Evaluation {
             }
             if let Some((state, tool)) = refused {
                 record.state = state;
-                record.reason =
-                    record
-                        .state
-                        .reason(&record.steps, record.language.as_deref(), Some(tool.name));
+                record.reason = record.state.reason(
+                    &record.steps,
+                    record.language.as_deref(),
+                    Some(tool.binary),
+                );
             }
         }
         let cache = cache.flatten();
@@ -880,15 +879,6 @@ fn tally(records: &[BlockRecord]) -> CodeBlockCounts {
     CodeBlockCounts::tally(records.iter().map(|record| (&record.state, &record.steps)))
 }
 
-/// The formatter `code_blocks` selects for `language`: the named one, or the default. `None` when
-/// the language has none.
-fn selected(code_blocks: &CodeBlocks, language: Language) -> Option<&'static ToolCartridge> {
-    match code_blocks.formatter(language) {
-        Some(Choice::Named(name)) => named(language, Step::Format, name),
-        Some(Choice::Off) | None => formatter(language),
-    }
-}
-
 /// Why `record`'s Rust block isn't run under `rust`, when it isn't: the root's toolchain file
 /// was refused (adding its one warning to `slots` unless `warned`), or the block reads at compile
 /// time or is too large to scan (adding that warning). When the block `compiles`, because
@@ -996,39 +986,37 @@ fn found_runs(
     (runs, refused)
 }
 
-/// The formatter and linter `code_blocks` selects for a block in `language` whose `steps` are
-/// due, each through the [`static_tier`] gate: each `None` when its step isn't due, the language
+/// The formatter and linter `code_blocks` selects for a block in `language`, in `state`, whose
+/// `steps` are due (none unless the block is pending), each through the [`static_tier`] gate: each `None` when its step isn't due, the language
 /// has none, or the gate turned its step in `steps` unrunnable.
 fn selected_tools(
     code_blocks: &CodeBlocks,
     steps: &mut Steps,
     language: Option<Language>,
+    state: &BlockState,
 ) -> (
     Option<&'static ToolCartridge>,
     Option<&'static ToolCartridge>,
 ) {
-    let language = |step: &StepState| (*step == StepState::NotRun).then_some(language).flatten();
-    let tool = language(&steps.format).and_then(|language| selected(code_blocks, language));
-    let linter = language(&steps.lint).and_then(|language| selected_linter(code_blocks, language));
+    let pending = *state == BlockState::NotChecked(NotChecked::Pending);
+    let language = |step: &StepState| {
+        (pending && *step == StepState::NotRun)
+            .then_some(language)
+            .flatten()
+    };
+    let tool = language(&steps.format)
+        .and_then(|language| tools::selected(code_blocks, language, Step::Format));
+    let linter = language(&steps.lint)
+        .and_then(|language| tools::selected(code_blocks, language, Step::Lint));
     (
         static_tier(tool, &mut steps.format),
         static_tier(linter, &mut steps.lint),
     )
 }
 
-/// The linter `code_blocks` selects for `language`: the named one, or the default. `None` when
-/// the language has none.
-fn selected_linter(code_blocks: &CodeBlocks, language: Language) -> Option<&'static ToolCartridge> {
-    match code_blocks.linter(language) {
-        Some(Choice::Named(name)) => named(language, Step::Lint, name),
-        Some(Choice::Off) | None => linter(language),
-    }
-}
-
 /// The one warning for `tool`'s binary, found as `found`, at `at`, the first block that needs it.
 /// `None` when it is on `PATH` outside the root.
 fn tool_warning(tool: &ToolCartridge, found: &Found, at: &Location) -> Option<Finding> {
-    let name = tool.name;
     let finding = match found {
         Found::OnPath(_) => return None,
         Found::Missing => Finding::new(
@@ -1044,7 +1032,8 @@ fn tool_warning(tool: &ToolCartridge, found: &Found, at: &Location) -> Option<Fi
             NOT_CHECKED,
             Severity::Warning,
             format!(
-                "`{name}` on PATH is `{}`, inside the checkout, so its blocks aren't checked",
+                "`{}` on PATH is `{}`, inside the checkout, so its blocks aren't checked",
+                tool.binary,
                 real.display()
             ),
         )

@@ -1,6 +1,7 @@
 //! `[features.code-blocks.rust]`: the table that turns checking Rust code blocks on.
 
-use super::{Choice, deserialize_choice};
+use super::{Language, Selection, ToolTable, deserialize_choice, deserialize_tool};
+use crate::code_blocks::tools::Step;
 
 /// The Rust formatters supdoc knows.
 const KNOWN: &[&str] = &["rustfmt"];
@@ -47,20 +48,26 @@ impl Edition {
 }
 
 /// The `[features.code-blocks.rust]` table, exactly as written. Its keys are `formatter`,
-/// `linter` and `edition`; any other key is refused as `config-parse`, and an empty table turns the language
+/// `linter` and `edition`, plus one options table per tool,; any other key is refused as `config-parse`, and an empty table turns the language
 /// on.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawRust {
-    /// `"rustfmt"` or `false`; unset takes the default.
+    /// `"rustfmt"`; unset takes the default.
     #[serde(default, deserialize_with = "formatter")]
-    pub(super) formatter: Option<Choice>,
-    /// `"clippy"` or `false`; unset takes the default.
+    pub(super) formatter: Option<String>,
+    /// `"clippy"`; unset takes the default.
     #[serde(default, deserialize_with = "linter")]
-    pub(super) linter: Option<Choice>,
+    pub(super) linter: Option<String>,
     /// `"2015"`, `"2018"`, `"2021"` or `"2024"`; unset reads the root's `Cargo.toml`.
     #[serde(default, deserialize_with = "edition")]
     pub(super) edition: Option<Edition>,
+    /// `[features.code-blocks.rust.rustfmt]`, when written.
+    #[serde(default, deserialize_with = "rustfmt")]
+    pub(super) rustfmt: Option<ToolTable>,
+    /// `[features.code-blocks.rust.clippy]`, when written.
+    #[serde(default, deserialize_with = "clippy")]
+    pub(super) clippy: Option<ToolTable>,
 }
 
 /// Reads `edition`: one of the four editions rustfmt takes, written as a string.
@@ -88,16 +95,49 @@ fn edition<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Edition>, D:
 ///
 /// # Errors
 ///
-/// The deserializer's error for any value but `"rustfmt"` or `false`.
-fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D::Error> {
-    deserialize_choice(d, "rust", "formatter", KNOWN)
+/// The deserializer's error for any value but `"rustfmt"`.
+fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    deserialize_choice(d, Language::Rust, Step::Format, KNOWN)
 }
 
 /// Reads `linter` against Rust's known tools.
 ///
 /// # Errors
 ///
-/// The deserializer's error for any value but `"clippy"` or `false`.
-fn linter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D::Error> {
-    deserialize_choice(d, "rust", "linter", LINTERS)
+/// The deserializer's error for any value but `"clippy"`.
+fn linter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    deserialize_choice(d, Language::Rust, Step::Lint, LINTERS)
+}
+
+/// Reads `[features.code-blocks.rust.rustfmt]` against its cartridge.
+///
+/// # Errors
+///
+/// The deserializer's error for a key or value the cartridge doesn't accept.
+fn rustfmt<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<ToolTable>, D::Error> {
+    deserialize_tool(d, "rustfmt")
+}
+
+/// Reads `[features.code-blocks.rust.clippy]` against its cartridge.
+///
+/// # Errors
+///
+/// The deserializer's error for a key or value the cartridge doesn't accept.
+fn clippy<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<ToolTable>, D::Error> {
+    deserialize_tool(d, "clippy")
+}
+
+impl RawRust {
+    /// What this table selects and the tool tables it writes.
+    pub(super) fn selection(&self) -> Selection<'_> {
+        Selection {
+            language: Language::Rust,
+            formatter: self.formatter.as_deref(),
+            linter: self.linter.as_deref(),
+            tools: [("rustfmt", self.rustfmt), ("clippy", self.clippy)]
+                .into_iter()
+                .filter_map(|(name, table)| Some((name, table?)))
+                .collect(),
+        }
+    }
 }

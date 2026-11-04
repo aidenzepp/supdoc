@@ -525,7 +525,8 @@ fn summary_counts_each_block_once_worst_first_after_the_links_line() {
     assert_eq!(
         lines.get(1).map(String::as_str),
         Some(
-            "Code blocks  1 failed, 1 tool missing, 1 unknown language, 2 not checked, 1 opted out"
+            "Code blocks  1 failed, 1 tool missing, 1 unknown language, 2 not checked, \
+             1 lint not run (clippy needs trust), 1 opted out"
         ),
         "the code-block line should follow the Links line:\n{}",
         run.stdout
@@ -699,8 +700,7 @@ fn a_rust_doc_fence_leading_with_an_attribute_counts_as_rust_not_unknown() {
 }
 
 /// The shell table with its linter off, so a format test sees only the formatter.
-const SHELL_FORMAT_ONLY: &str =
-    "[features.code-blocks]\n[features.code-blocks.shell]\nlinter = false\n";
+const SHELL_FORMAT_ONLY: &str = "[features.code-blocks]\n[features.code-blocks.shell]\n[features.code-blocks.shell.shellcheck]\nlint = \"off\"\n";
 
 /// A recorded `basic` project with the shell table on, its linter off, and two `sh` blocks in
 /// `docs/blocks.md`.
@@ -764,7 +764,7 @@ fn tool_inside_the_checkout_is_refused_and_its_blocks_not_checked() {
     );
     assert_eq!(
         at(&json, "/data/code_blocks/1/reason"),
-        "tool inside checkout",
+        "`shfmt` is inside the checkout",
         "{json}"
     );
 }
@@ -1088,11 +1088,11 @@ fn check_shell_with(config: &str, script: &str) -> serde_json::Value {
 }
 
 #[test]
-fn selection_formatter_false_counts_format_off_and_never_runs_the_tool() {
+fn selection_format_off_counts_format_off_and_never_runs_the_tool() {
     let project = project_with_shell_blocks();
     project.write(
         "supdoc.config.toml",
-        "[features.code-blocks]\n[features.code-blocks.shell]\nformatter = false\nlinter = false\n",
+        "[features.code-blocks]\n[features.code-blocks.shell]\n[features.code-blocks.shell.shfmt]\nformat = \"off\"\n[features.code-blocks.shell.shellcheck]\nlint = \"off\"\n",
     );
 
     let json = project.supdoc(&["check", "--json"]).assert_exit(0).json();
@@ -1125,18 +1125,22 @@ fn selection_no_format_counts_format_skipped_with_its_reason() {
     );
     assert_eq!(
         at(&json, "/data/code_blocks/0/reason"),
-        "hand aligned",
+        "hand aligned; `lint = \"off\"` in `[features.code-blocks.shell.shellcheck]`",
         "{json}"
     );
-    assert!(run.stdout.contains("(hand aligned)"), "{}", run.stdout);
+    assert!(
+        run.stdout.contains("(hand aligned; `lint = \"off\"` in"),
+        "both steps' reasons should show: {}",
+        run.stdout
+    );
 }
 
 #[test]
-fn lint_select_linter_false_counts_lint_off_beside_the_format_outcome() {
+fn lint_select_lint_off_counts_lint_off_beside_the_format_outcome() {
     let project = project_with_shell_blocks();
     project.write(
         "supdoc.config.toml",
-        "[features.code-blocks]\n[features.code-blocks.shell]\nlinter = false\n",
+        "[features.code-blocks]\n[features.code-blocks.shell]\n[features.code-blocks.shell.shellcheck]\nlint = \"off\"\n",
     );
     let outside = counting_shfmt();
 
@@ -1469,7 +1473,7 @@ fn shell_lint_with_the_real_shellcheck_passes_a_clean_block_and_fails_a_placehol
         return;
     };
     let (project, _outside) = project_with_shellcheck(
-        "formatter = false\n",
+        "[features.code-blocks.shell.shfmt]\nformat = \"off\"\n",
         "# Blocks\n\n```sh\necho \"hi\"\n```\n\n```sh\necho $1\n```\n\n```sh\ncp <src> <dst>\n```\n",
         "exit 0",
     );

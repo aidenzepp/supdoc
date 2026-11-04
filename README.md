@@ -164,6 +164,23 @@ for a stale `from(...)` block, with a `code-block-fix-unsafe` warning when the n
 block early: it holds a control character other than a tab or a line ending, a line of it would close
 the fence, or the doc, parsed again with the fix applied, no longer holds the same fenced blocks.
 
+The language table selects tools and holds the language's own settings; each tool's options live in the
+tool's own table:
+
+```toml
+[features.code-blocks.python]
+formatter = "black"      # default: ruff-format
+linter = "ruff"          # the only Python linter
+[features.code-blocks.python.ruff]
+lint = "off"             # "full" (the default) or "off"; a TOML comment is the place for why
+[features.code-blocks.rust]
+edition = "2021"         # Rust also takes `edition`; shell takes `dialect` ("bash", "posix", "mksh")
+```
+
+A table for a tool the language doesn't select, or a key or value its tool doesn't accept, is a config
+error. A step that's off counts as `format off` or `lint off` in the summary; a step that was due but
+didn't run, such as clippy's, which needs `supdoc trust`, counts as `lint not run` with its reason.
+
 A Rust snippet that needs surrounding code to make sense takes one of three explicit forms:
 
 1. **Show the real code.** If it's the project's own code, make it a `from(...)` block, so it can't drift.

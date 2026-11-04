@@ -3,11 +3,11 @@
 
 use annotate_snippets::renderer::{AnsiColor, Style};
 
-use crate::config::code_blocks::{Choice, CodeBlocks, Language};
+use crate::config::code_blocks::{CodeBlocks, Language, Mode};
 
 use super::block::CodeBlock;
 use super::info::reasoned;
-use super::tools::formatter;
+use super::tools::{self, Step, formatter};
 
 /// The one state a code block is in. A block takes the first that applies, in this order:
 ///
@@ -116,8 +116,13 @@ pub(crate) enum Excerpt {
 pub(crate) enum StepState {
     /// The step ran on the block.
     Ran,
-    /// The language's `formatter` or `linter` is `false`.
-    Off,
+    /// Its tool's table sets the step's mode to `"off"`.
+    Off {
+        /// That table, `[features.code-blocks.<language>.<tool>]`.
+        table: String,
+        /// The step's key in it, `format` or `lint`.
+        key: &'static str,
+    },
     /// The author marked the block `no_format(...)` or `no_lint(...)`.
     Skipped {
         /// The reason in the parentheses, if any.
@@ -140,18 +145,17 @@ impl StepState {
     pub(crate) const fn name(&self) -> &'static str {
         match self {
             Self::Ran => "ran",
-            Self::Off => "off",
+            Self::Off { .. } => "off",
             Self::Skipped { .. } => "skipped",
             Self::NotRun | Self::Unrunnable { .. } => "not_run",
         }
     }
 
-    /// Why the step didn't run on a block it is due on. `key` is its config key, `formatter` or
-    /// `linter`, and `step` its name, `format` or `lint`.
-    fn why(&self, key: &str, step: &str) -> Option<String> {
+    /// Why the step didn't run on a block it is due on. `step` is its name, `format` or `lint`.
+    fn why(&self, step: &str) -> Option<String> {
         match self {
             Self::Ran => None,
-            Self::Off => Some(format!("`{key} = false`")),
+            Self::Off { table, key } => Some(format!("`{key} = \"off\"` in `{table}`")),
             Self::Skipped { reason } => reason.clone(),
             Self::NotRun => Some(format!("its {step} step isn't built yet")),
             Self::Unrunnable { reason } => Some((*reason).to_owned()),
@@ -171,8 +175,9 @@ pub(crate) struct Steps {
 impl Steps {
     /// The steps due on `block`, in `state`, under `code_blocks`. Only a
     /// [`NotChecked::Pending`] block has steps: each is [`StepState::Skipped`] when the block
-    /// is marked `no_format(...)` or `no_lint(...)`, [`StepState::Off`] when its language's
-    /// `formatter` or `linter` is `false`, and otherwise due, [`StepState::NotRun`] until it runs.
+    /// is marked `no_format(...)` or `no_lint(...)`, [`StepState::Off`] when its selected tool's
+    /// table sets the step's mode to `"off"`, and otherwise due, [`StepState::NotRun`] until it
+    /// runs.
     /// Every other block's steps are [`StepState::NotRun`].
     #[must_use]
     pub(crate) fn of(block: &CodeBlock, state: &BlockState, code_blocks: &CodeBlocks) -> Self {
@@ -180,7 +185,7 @@ impl Steps {
             return Self::default();
         }
         let language = tag_of(block).and_then(Language::from_tag);
-        let step = |attribute: &str, choice: fn(&CodeBlocks, Language) -> Option<&Choice>| {
+        let step = |attribute: &str, step: Step| {
             let skipped = block.info.as_ref().and_then(|info| {
                 info.parsed()
                     .attributes
@@ -190,30 +195,39 @@ impl Steps {
             });
             if let Some(reason) = skipped {
                 StepState::Skipped { reason }
-            } else if language.and_then(|language| choice(code_blocks, language))
-                == Some(&Choice::Off)
+            } else if let Some((language, tool)) = language.and_then(|language| {
+                tools::selected(code_blocks, language, step).map(|tool| (language, tool))
+            }) && code_blocks.mode(language, tool.name) == Mode::Off
             {
-                StepState::Off
+                StepState::Off {
+                    table: format!("[features.code-blocks.{}.{}]", language.table(), tool.name),
+                    key: match step {
+                        Step::Format => "format",
+                        Step::Lint => "lint",
+                    },
+                }
             } else {
                 StepState::NotRun
             }
         };
         Self {
-            format: step("no_format", CodeBlocks::formatter),
-            lint: step("no_lint", CodeBlocks::linter),
+            format: step("no_format", Step::Format),
+            lint: step("no_lint", Step::Lint),
         }
     }
 
-    /// Why a block's steps didn't all run, for a block whose state gives no better reason: the
-    /// format step's reason when it is off or skipped, otherwise the lint step's once the format
-    /// step ran or was left out. `None` while the format step is still due.
+    /// Why a block's steps didn't all run, for a block whose state gives no better reason: each
+    /// step's reason when it is off, skipped or didn't run, format then lint, joined by `; `, so
+    /// one step's reason never hides the other's. `None` while the format step is still due.
     fn reason(&self) -> Option<String> {
-        match &self.format {
-            StepState::NotRun => None,
-            format => format
-                .why("formatter", "format")
-                .or_else(|| self.lint.why("linter", "lint")),
+        if self.format == StepState::NotRun {
+            return None;
         }
+        let reasons: Vec<String> = [self.format.why("format"), self.lint.why("lint")]
+            .into_iter()
+            .flatten()
+            .collect();
+        (!reasons.is_empty()).then(|| reasons.join("; "))
     }
 }
 
@@ -281,7 +295,8 @@ impl BlockState {
     /// Why the block is in this state, when it has a reason to give. A passed or pending block
     /// whose `steps` didn't all run gives theirs (see [`Steps`]). `tag` is the block's language
     /// tag and `tool` the name of the tool whose step decided it (the formatter, else the
-    /// linter), when one was.
+    /// linter), when one was; a tool refused before it ran, missing or inside the checkout, is
+    /// named by its binary, as its warning names it.
     #[must_use]
     pub(crate) fn reason(
         &self,
@@ -328,7 +343,9 @@ impl BlockState {
             Self::NotChecked(NotChecked::Pending) => {
                 Some("its format and lint steps aren't built yet".to_owned())
             }
-            Self::NotChecked(NotChecked::ToolInsideRoot) => Some("tool inside checkout".to_owned()),
+            Self::NotChecked(NotChecked::ToolInsideRoot) => {
+                Some(format!("`{}` is inside the checkout", tool_of(tag, tool)))
+            }
             Self::NotChecked(NotChecked::ToolchainPath) => Some("toolchain path".to_owned()),
             Self::NotChecked(NotChecked::CompileTimeRead) => Some("compile-time read".to_owned()),
             Self::NotChecked(NotChecked::TooLargeToScan) => Some("too large to scan".to_owned()),
@@ -351,9 +368,9 @@ fn tool_of<'a>(tag: Option<&str>, chosen: Option<&'a str>) -> &'a str {
     })
 }
 
-/// How many blocks are in each state, and how many steps were off or skipped. `blocks` is the
-/// sum of the state counts; the step counts are apart from them, so a block whose format step is
-/// off and whose lint step passed counts in both `passed` and `format_off`.
+/// How many blocks are in each state, and how many steps were off, skipped or due but not run.
+/// `blocks` is the sum of the state counts; the step counts are apart from them, so a block whose
+/// format step is off and whose lint step passed counts in both `passed` and `format_off`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub(crate) struct CodeBlockCounts {
     /// Every block counted.
@@ -368,14 +385,25 @@ pub(crate) struct CodeBlockCounts {
     pub(crate) opted_out: usize,
     /// Blocks nothing checked: text, a language turned off, or a step not built yet.
     pub(crate) not_checked: usize,
-    /// Format steps off: blocks whose language has `formatter = false`.
+    /// Format steps off: blocks whose formatter's table sets `format = "off"`.
     pub(crate) format_off: usize,
     /// Format steps skipped: blocks the author marked `no_format(...)`.
     pub(crate) format_skipped: usize,
-    /// Lint steps off: blocks whose language has `linter = false`.
+    /// Format steps due on a checked block that didn't run, such as a formatter supdoc couldn't
+    /// run safely.
+    pub(crate) format_not_run: usize,
+    /// Lint steps off: blocks whose linter's table sets `lint = "off"`.
     pub(crate) lint_off: usize,
     /// Lint steps skipped: blocks the author marked `no_lint(...)`.
     pub(crate) lint_skipped: usize,
+    /// Lint steps due on a checked block that didn't run, such as clippy, which needs trust.
+    pub(crate) lint_not_run: usize,
+    /// Why the first uncounted format step didn't run, for the summary line.
+    #[serde(skip)]
+    pub(crate) format_not_run_reason: Option<&'static str>,
+    /// Why the first uncounted lint step didn't run, for the summary line.
+    #[serde(skip)]
+    pub(crate) lint_not_run_reason: Option<&'static str>,
     /// Blocks in a language supdoc has no checker for.
     pub(crate) unknown_language: usize,
     /// Blocks whose selected tool isn't installed.
@@ -404,18 +432,30 @@ impl CodeBlockCounts {
         let mut counts = Self::default();
         for (state, steps) in blocks {
             counts.blocks += 1;
-            for (step, off, skipped) in [
+            for (step, off, skipped, not_run, why) in [
                 (
                     &steps.format,
                     &mut counts.format_off,
                     &mut counts.format_skipped,
+                    &mut counts.format_not_run,
+                    &mut counts.format_not_run_reason,
                 ),
-                (&steps.lint, &mut counts.lint_off, &mut counts.lint_skipped),
+                (
+                    &steps.lint,
+                    &mut counts.lint_off,
+                    &mut counts.lint_skipped,
+                    &mut counts.lint_not_run,
+                    &mut counts.lint_not_run_reason,
+                ),
             ] {
                 match step {
-                    StepState::Off => *off += 1,
+                    StepState::Off { .. } => *off += 1,
                     StepState::Skipped { .. } => *skipped += 1,
-                    StepState::Ran | StepState::NotRun | StepState::Unrunnable { .. } => {}
+                    StepState::Unrunnable { reason } => {
+                        *not_run += 1;
+                        let _first = why.get_or_insert(short_reason(reason));
+                    }
+                    StepState::Ran | StepState::NotRun => {}
                 }
             }
             *match state {
@@ -445,6 +485,8 @@ impl CodeBlockCounts {
             (self.not_checked, "not checked", Tone::Unchecked),
             (self.format_off, "format off", Tone::Unchecked),
             (self.lint_off, "lint off", Tone::Unchecked),
+            (self.format_not_run, "format not run", Tone::Unchecked),
+            (self.lint_not_run, "lint not run", Tone::Unchecked),
             (self.format_skipped, "format skipped", Tone::Plain),
             (self.lint_skipped, "lint skipped", Tone::Plain),
             (self.opted_out, "opted out", Tone::Plain),
@@ -453,13 +495,34 @@ impl CodeBlockCounts {
         let mut parts: Vec<String> = worst_first
             .into_iter()
             .filter(|(count, _, _)| *count > 0)
-            .map(|(count, label, tone)| paint(color, tone, &format!("{count} {label}")))
+            .map(|(count, label, tone)| {
+                let why = match label {
+                    "format not run" => self.format_not_run_reason,
+                    "lint not run" => self.lint_not_run_reason,
+                    _ => None,
+                };
+                let text = why.map_or_else(
+                    || format!("{count} {label}"),
+                    |why| format!("{count} {label} ({why})"),
+                );
+                paint(color, tone, &text)
+            })
             .collect();
         if parts.is_empty() {
             parts.push(paint(color, Tone::Good, "0 passed"));
         }
         let separator = if unicode { " · " } else { ", " };
         format!("Code blocks  {}", parts.join(separator))
+    }
+}
+
+/// `reason`, a step's full reason for not running, as the summary line names it: "clippy needs
+/// trust" for the project-tier gate, else the reason as written.
+fn short_reason(reason: &'static str) -> &'static str {
+    if reason.contains("supdoc trust") {
+        "clippy needs trust"
+    } else {
+        reason
     }
 }
 
@@ -666,9 +729,9 @@ mod tests {
     }
 
     #[test]
-    fn no_lint_skips_the_lint_step_with_its_reason_and_linter_false_turns_it_off() {
+    fn no_lint_skips_the_lint_step_with_its_reason_and_lint_off_turns_it_off() {
         let config =
-            "[features.code-blocks.shell]\n[features.code-blocks.python]\nlinter = false\n";
+            "[features.code-blocks.shell]\n[features.code-blocks.python.ruff]\nlint = \"off\"\n";
 
         let skipped = steps(config, "sh no_lint(needs a server)");
         let off = steps(config, "python");
@@ -683,13 +746,15 @@ mod tests {
                 },
             }
         );
-        assert_eq!(off.lint, StepState::Off);
+        assert_eq!(off.lint, step_off("python.ruff", "lint"));
+        assert_eq!(off.format, StepState::NotRun, "only the lint step is off");
         assert_eq!(due, Steps::default(), "a lint step left on is due");
     }
 
     #[test]
     fn only_a_pending_block_has_steps_off_or_skipped() {
-        let config = "[features.code-blocks.shell]\nformatter = false\nlinter = false\n";
+        let config = "[features.code-blocks.shell.shfmt]\nformat = \"off\"\n\
+                      [features.code-blocks.shell.shellcheck]\nlint = \"off\"\n";
 
         for info in ["sh ignore(slow) no_lint(why)", "text no_format(why)", "zsh"] {
             assert_eq!(steps(config, info), Steps::default(), "info `{info}`");
@@ -699,19 +764,26 @@ mod tests {
     #[test]
     fn steps_are_counted_apart_from_the_state_they_leave() {
         let format_off = Steps {
-            format: StepState::Off,
+            format: step_off("shell.shfmt", "format"),
             lint: StepState::Ran,
+        };
+        let lint_not_run = Steps {
+            format: StepState::Ran,
+            lint: StepState::Unrunnable {
+                reason: "clippy runs only in the project tier, which needs `supdoc trust` (phase 5)",
+            },
         };
         let lint_skipped = Steps {
             format: StepState::Ran,
             lint: StepState::Skipped { reason: None },
         };
         let both_off = Steps {
-            format: StepState::Off,
-            lint: StepState::Off,
+            format: step_off("shell.shfmt", "format"),
+            lint: step_off("shell.shellcheck", "lint"),
         };
         let blocks = [
             (BlockState::Passed, &format_off),
+            (BlockState::Passed, &lint_not_run),
             (BlockState::Failed(Failure::Unformatted), &lint_skipped),
             (BlockState::NotChecked(NotChecked::Pending), &both_off),
         ];
@@ -725,8 +797,9 @@ mod tests {
                 counts.failed,
                 counts.not_checked
             ),
-            (3, 1, 1, 1)
+            (4, 2, 1, 1)
         );
+        assert_eq!((counts.format_not_run, counts.lint_not_run), (0, 1));
         assert_eq!(
             (
                 counts.format_off,
@@ -738,7 +811,8 @@ mod tests {
         );
         assert_eq!(
             counts.line(false, true),
-            "Code blocks  1 failed · 1 not checked · 2 format off · 1 lint off · 1 lint skipped · 1 passed"
+            "Code blocks  1 failed · 1 not checked · 2 format off · 1 lint off · \
+             1 lint not run (clippy needs trust) · 1 lint skipped · 2 passed"
         );
     }
 
@@ -753,5 +827,30 @@ mod tests {
 
         assert!(reason.is_some(), "the lint step's reason should be given");
         assert_eq!(StepState::NotRun.name(), "not_run");
+    }
+
+    /// The state of a step its tool's table, `[features.code-blocks.<table>]`, turns off.
+    fn step_off(table: &str, key: &'static str) -> StepState {
+        StepState::Off {
+            table: format!("[features.code-blocks.{table}]"),
+            key,
+        }
+    }
+
+    #[test]
+    fn a_blocks_reason_keeps_each_steps_reason_when_neither_ran() {
+        let steps = Steps {
+            format: step_off("rust.rustfmt", "format"),
+            lint: StepState::Unrunnable {
+                reason: "clippy needs trust",
+            },
+        };
+
+        let reason = BlockState::NotChecked(NotChecked::Pending).reason(&steps, Some("rust"), None);
+
+        assert_eq!(
+            reason.as_deref(),
+            Some("`format = \"off\"` in `[features.code-blocks.rust.rustfmt]`; clippy needs trust")
+        );
     }
 }

@@ -849,7 +849,7 @@ mod helps {
             setup: |p| {
                 config_with(
                     p,
-                    "[features.code-blocks]\n[features.code-blocks.python]\nformatter = false\n",
+                    "[features.code-blocks]\n[features.code-blocks.python]\n[features.code-blocks.python.ruff-format]\nformat = \"off\"\n",
                 );
                 p.write("docs/blocks.md", "# B\n\n```py\nx == None\n```\n");
                 p.write(

@@ -86,7 +86,7 @@
       "type": "object"
     },
     "CodeBlockCounts": {
-      "description": "How many blocks are in each state, and how many steps were off or skipped. `blocks` is the\nsum of the state counts; the step counts are apart from them, so a block whose format step is\noff and whose lint step passed counts in both `passed` and `format_off`.",
+      "description": "How many blocks are in each state, and how many steps were off, skipped or due but not run.\n`blocks` is the sum of the state counts; the step counts are apart from them, so a block whose\nformat step is off and whose lint step passed counts in both `passed` and `format_off`.",
       "properties": {
         "blocks": {
           "description": "Every block counted.",
@@ -100,8 +100,14 @@
           "minimum": 0,
           "type": "integer"
         },
+        "format_not_run": {
+          "description": "Format steps due on a checked block that didn't run, such as a formatter supdoc couldn't\nrun safely.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
         "format_off": {
-          "description": "Format steps off: blocks whose language has `formatter = false`.",
+          "description": "Format steps off: blocks whose formatter's table sets `format = \"off\"`.",
           "format": "uint",
           "minimum": 0,
           "type": "integer"
@@ -112,8 +118,14 @@
           "minimum": 0,
           "type": "integer"
         },
+        "lint_not_run": {
+          "description": "Lint steps due on a checked block that didn't run, such as clippy, which needs trust.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
         "lint_off": {
-          "description": "Lint steps off: blocks whose language has `linter = false`.",
+          "description": "Lint steps off: blocks whose linter's table sets `lint = \"off\"`.",
           "format": "uint",
           "minimum": 0,
           "type": "integer"
@@ -170,8 +182,10 @@
         "not_checked",
         "format_off",
         "format_skipped",
+        "format_not_run",
         "lint_off",
         "lint_skipped",
+        "lint_not_run",
         "unknown_language",
         "tool_missing"
       ],

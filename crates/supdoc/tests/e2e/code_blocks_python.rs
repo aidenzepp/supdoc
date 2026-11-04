@@ -60,7 +60,10 @@ fn ruff_runs_with_no_cache_and_the_blocks_virtual_path_beside_the_doc() {
 
 #[test]
 fn black_when_selected_runs_quietly_and_names_itself_in_the_reason() {
-    let project = project_with_python_block("formatter = \"black\"\nlinter = false\n", "x=1");
+    let project = project_with_python_block(
+        "formatter = \"black\"\n[features.code-blocks.python.ruff]\nlint = \"off\"\n",
+        "x=1",
+    );
     let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
     stub(
         outside.path(),
@@ -185,7 +188,10 @@ fn lint_does_not_run_on_a_block_its_formatter_cannot_parse() {
 
 #[test]
 fn lint_with_the_formatter_off_still_runs() {
-    let project = project_with_python_block("formatter = false\n", "x = 1");
+    let project = project_with_python_block(
+        "[features.code-blocks.python.ruff-format]\nformat = \"off\"\n",
+        "x = 1",
+    );
     let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
     ruff_stub(outside.path(), "exit 0");
 
@@ -231,4 +237,27 @@ fn lint_with_the_real_ruff_reports_a_rule_the_project_selects() {
     assert_eq!(at(&passes, "/data/code_blocks/0/lint"), "ran", "{passes}");
     assert_eq!(finding_kinds(&fails), ["code-block-lint"], "{fails}");
     assert_eq!(at(&fails, "/findings/0/location/line"), 7, "{fails}");
+}
+
+#[test]
+fn ruff_format_and_ruff_missing_share_one_warning_naming_the_ruff_binary() {
+    let project = project_with_python_block("", "x = 1");
+    let empty = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", empty.path())])
+        .assert_exit(0)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-tool-missing"], "{json}");
+    assert_eq!(
+        at(&json, "/findings/0/message"),
+        "`ruff` isn't on PATH, so its blocks aren't checked",
+        "{json}"
+    );
+    assert_eq!(
+        at(&json, "/data/code_blocks/0/reason"),
+        "`ruff` isn't on PATH",
+        "{json}"
+    );
 }

@@ -7,7 +7,7 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-use crate::config::code_blocks::{Dialect, Edition, Language};
+use crate::config::code_blocks::{CodeBlocks, Dialect, Edition, Language};
 
 use super::format::ParseError;
 use super::lint;
@@ -133,13 +133,6 @@ pub(crate) struct ToolCartridge {
     /// its cached results' key.
     pub(crate) config_files: &'static [&'static str],
     /// The values its step's mode accepts, in config and in a block attribute.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "CB-33 and CB-34 validate the `lint` and `format` modes against it"
-        )
-    )]
     pub(crate) modes: &'static [&'static str],
     /// Its arguments for a block.
     argv: fn(&Invocation<'_>) -> Vec<OsString>,
@@ -274,18 +267,30 @@ pub(crate) fn formatter(language: Language) -> Option<&'static ToolCartridge> {
     default_for(language, Step::Format)
 }
 
-/// `language`'s default linter: its first lint cartridge, whatever its tier. The tier gate
-/// decides whether it runs.
+/// `language`'s first cartridge for `step`: its default for the step.
 #[must_use]
-pub(crate) fn linter(language: Language) -> Option<&'static ToolCartridge> {
-    default_for(language, Step::Lint)
-}
-
-/// `language`'s first cartridge for `step`.
-fn default_for(language: Language, step: Step) -> Option<&'static ToolCartridge> {
+pub(crate) fn default_for(language: Language, step: Step) -> Option<&'static ToolCartridge> {
     CARTRIDGES
         .iter()
         .find(|tool| tool.language == language && tool.step() == step)
+}
+
+/// The cartridge `code_blocks` selects for `language`'s `step`: the one its `formatter` or
+/// `linter` names, else the default. `None` when the language has none.
+#[must_use]
+pub(crate) fn selected(
+    code_blocks: &CodeBlocks,
+    language: Language,
+    step: Step,
+) -> Option<&'static ToolCartridge> {
+    let written = match step {
+        Step::Format => code_blocks.formatter(language),
+        Step::Lint => code_blocks.linter(language),
+    };
+    written.map_or_else(
+        || default_for(language, step),
+        |name| named(language, step, name),
+    )
 }
 
 /// The cartridge named `name` for `language`'s `step`, as config selects it.
