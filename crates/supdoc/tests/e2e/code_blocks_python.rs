@@ -3,7 +3,7 @@
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
-use crate::support::{Project, array_at, at};
+use crate::support::{Project, array_at, at, real_tool_dir};
 
 /// The codes of a `--json` check's loose findings, in order.
 fn finding_kinds(json: &serde_json::Value) -> Vec<String> {
@@ -86,16 +86,10 @@ fn black_when_selected_runs_quietly_and_names_itself_in_the_reason() {
 
 #[test]
 fn the_real_ruff_passes_a_formatted_block_and_fails_another() {
-    let Some(dir) = std::env::var_os("PATH")
-        .iter()
-        .flat_map(std::env::split_paths)
-        .find(|dir| dir.is_absolute() && dir.join("ruff").is_file())
-    else {
-        // Written to the process's stderr directly, which `cargo test` shows for a passing test.
-        let _ignored = std::io::Write::write_all(
-            &mut std::io::stderr(),
-            b"SKIPPED the_real_ruff_passes_a_formatted_block_and_fails_another: ruff is not on PATH\n",
-        );
+    let Some(dir) = real_tool_dir(
+        "ruff",
+        "the_real_ruff_passes_a_formatted_block_and_fails_another",
+    ) else {
         return;
     };
     let formatted = project_with_python_block("", "x = 1");
@@ -116,6 +110,40 @@ fn the_real_ruff_passes_a_formatted_block_and_fails_another() {
         "{passes}"
     );
     assert_eq!(finding_kinds(&fails), ["code-block-unformatted"], "{fails}");
+}
+
+#[test]
+fn the_real_black_passes_a_formatted_block_and_fails_another() {
+    let Some(dir) = real_tool_dir(
+        "black",
+        "the_real_black_passes_a_formatted_block_and_fails_another",
+    ) else {
+        return;
+    };
+    let config = "formatter = \"black\"\n[features.code-blocks.python.ruff]\nlint = \"off\"\n";
+    let formatted = project_with_python_block(config, "x = 1");
+    let unformatted = project_with_python_block(config, "x=1");
+
+    let passes = formatted
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", &dir)])
+        .assert_exit(0)
+        .json();
+    let fails = unformatted
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", &dir)])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(
+        at(&passes, "/data/summary/code_blocks/passed"),
+        1,
+        "{passes}"
+    );
+    assert_eq!(finding_kinds(&fails), ["code-block-unformatted"], "{fails}");
+    assert_eq!(
+        at(&fails, "/data/code_blocks/0/reason"),
+        "`black` would format it differently",
+        "{fails}"
+    );
 }
 
 /// A `ruff` stub that formats by echoing its input and lints by running `check`, a script that
@@ -207,16 +235,10 @@ fn lint_with_the_formatter_off_still_runs() {
 
 #[test]
 fn lint_with_the_real_ruff_reports_a_rule_the_project_selects() {
-    let Some(dir) = std::env::var_os("PATH")
-        .iter()
-        .flat_map(std::env::split_paths)
-        .find(|dir| dir.is_absolute() && dir.join("ruff").is_file())
-    else {
-        // Written to the process's stderr directly, which `cargo test` shows for a passing test.
-        let _ignored = std::io::Write::write_all(
-            &mut std::io::stderr(),
-            b"SKIPPED lint_with_the_real_ruff_reports_a_rule_the_project_selects: ruff is not on PATH\n",
-        );
+    let Some(dir) = real_tool_dir(
+        "ruff",
+        "lint_with_the_real_ruff_reports_a_rule_the_project_selects",
+    ) else {
         return;
     };
     let config = "[lint]\nselect = [\"E711\", \"F401\"]\n";

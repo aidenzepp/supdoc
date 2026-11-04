@@ -25,7 +25,34 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Install code-block tools
+        # Pinned shfmt and ruff binaries, checked against ci/tools.sha256, and black with every
+        # dependency hash-pinned in ci/requirements-black.txt. Those files name the sources.
+        # shellcheck is the runner's own.
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/code-block-tools"
+          mkdir -p "$tools/download" "$tools/bin"
+          cd "$tools/download"
+          curl -fsSLO https://github.com/mvdan/sh/releases/download/v3.14.1/shfmt_v3.14.1_linux_amd64
+          curl -fsSLO https://github.com/astral-sh/ruff/releases/download/0.17.3/ruff-x86_64-unknown-linux-gnu.tar.gz
+          grep -v '^#' "$GITHUB_WORKSPACE/ci/tools.sha256" | sha256sum --strict -c -
+          install -m 0755 shfmt_v3.14.1_linux_amd64 "$tools/bin/shfmt"
+          tar -xzf ruff-x86_64-unknown-linux-gnu.tar.gz
+          install -m 0755 ruff-x86_64-unknown-linux-gnu/ruff "$tools/bin/ruff"
+          python3 -m venv "$tools/black"
+          "$tools/black/bin/python" -m pip install --quiet --disable-pip-version-check \
+            --require-hashes --only-binary=:all: -r "$GITHUB_WORKSPACE/ci/requirements-black.txt"
+          ln -s "$tools/black/bin/black" "$tools/bin/black"
+          echo "$tools/bin" >> "$GITHUB_PATH"
+          "$tools/bin/shfmt" --version
+          "$tools/bin/ruff" --version
+          "$tools/bin/black" --version
+          shellcheck --version
       - name: Test
+        env:
+          # A real-tool test whose tool is missing fails here instead of skipping.
+          SUPDOC_REQUIRE_REAL_TOOLS: "1"
         run: cargo test --workspace
       - name: Package
         run: cargo package -p supdoc --locked

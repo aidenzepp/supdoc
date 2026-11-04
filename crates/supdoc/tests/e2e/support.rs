@@ -72,6 +72,31 @@ pub(crate) fn array_at<'a>(
         .unwrap_or_else(|| panic!("`{pointer}` should be an array: {value}"))
 }
 
+/// The absolute `PATH` directory holding the real `binary`, for the test named `test`, with a
+/// stderr note saying whether `test` runs it or skips.
+///
+/// `None` when `binary` is not on `PATH`, so a local run without the tool skips the test. With
+/// `SUPDOC_REQUIRE_REAL_TOOLS` set (CI sets it), a missing tool fails the test instead.
+pub(crate) fn real_tool_dir(binary: &str, test: &str) -> Option<PathBuf> {
+    let dir = std::env::var_os("PATH")
+        .iter()
+        .flat_map(std::env::split_paths)
+        .find(|dir| dir.is_absolute() && dir.join(binary).is_file());
+    let required =
+        std::env::var_os("SUPDOC_REQUIRE_REAL_TOOLS").is_some_and(|value| !value.is_empty());
+    assert!(
+        dir.is_some() || !required,
+        "{test} needs the real `{binary}` on PATH because SUPDOC_REQUIRE_REAL_TOOLS is set"
+    );
+    let note = match &dir {
+        Some(dir) => format!("REAL TOOL {test}: runs {binary} from {}\n", dir.display()),
+        None => format!("SKIPPED {test}: {binary} is not on PATH\n"),
+    };
+    // Written to the process's stderr directly, which `cargo test` shows for a passing test.
+    let _ignored = std::io::Write::write_all(&mut std::io::stderr(), note.as_bytes());
+    dir
+}
+
 /// A fixture from `tests/fixtures/` copied into its own temporary directory, so runs can write to it.
 pub(crate) struct Project {
     /// Keeps the directory alive until the project is dropped.
