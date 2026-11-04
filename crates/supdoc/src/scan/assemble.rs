@@ -1599,6 +1599,7 @@ mod tests {
             crate::cartridges::rust::ID,
             crate::cartridges::rust::EXTENSIONS,
             crate::cartridges::rust::grammar,
+            true,
             || crate::read::registry::compiled(BROKEN_RUST_QUERIES.as_ref()),
         );
 

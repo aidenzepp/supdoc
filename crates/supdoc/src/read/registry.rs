@@ -38,40 +38,48 @@ static INLINE_GRAMMAR: LazyLock<Result<(), LanguageError>> =
     LazyLock::new(|| Parser::new().set_language(&tree_sitter_md::INLINE_LANGUAGE.into()));
 
 /// Rust, compiled when the first `.rs` file is read.
-static RUST: LazyCartridge = LazyCartridge::new(rust::ID, rust::EXTENSIONS, rust::grammar, || {
-    compiled(rust::cartridge())
-});
+static RUST: LazyCartridge =
+    LazyCartridge::new(rust::ID, rust::EXTENSIONS, rust::grammar, true, || {
+        compiled(rust::cartridge())
+    });
 
 /// Bash, compiled when the first shell script is read.
-static BASH: LazyCartridge = LazyCartridge::new(bash::ID, bash::EXTENSIONS, bash::grammar, || {
-    compiled(bash::cartridge())
-});
+static BASH: LazyCartridge =
+    LazyCartridge::new(bash::ID, bash::EXTENSIONS, bash::grammar, true, || {
+        compiled(bash::cartridge())
+    });
 
 /// Go, compiled when the first `.go` file is read.
-static GO: LazyCartridge = LazyCartridge::new(go::ID, go::EXTENSIONS, go::grammar, || {
+static GO: LazyCartridge = LazyCartridge::new(go::ID, go::EXTENSIONS, go::grammar, true, || {
     compiled(go::cartridge())
 });
 
 /// JavaScript, compiled when the first JavaScript file is read.
-static JAVASCRIPT: LazyCartridge = LazyCartridge::new(js::ID, js::EXTENSIONS, js::grammar, || {
-    compiled(js::cartridge())
-});
+static JAVASCRIPT: LazyCartridge =
+    LazyCartridge::new(js::ID, js::EXTENSIONS, js::grammar, true, || {
+        compiled(js::cartridge())
+    });
 
 /// TypeScript, compiled when the first TypeScript file is read.
-static TYPESCRIPT: LazyCartridge = LazyCartridge::new(ts::ID, ts::EXTENSIONS, ts::grammar, || {
-    compiled(ts::cartridge())
-});
+static TYPESCRIPT: LazyCartridge =
+    LazyCartridge::new(ts::ID, ts::EXTENSIONS, ts::grammar, true, || {
+        compiled(ts::cartridge())
+    });
 
 /// TSX, compiled when the first `.tsx` file is read.
-static TSX: LazyCartridge = LazyCartridge::new(tsx::ID, tsx::EXTENSIONS, tsx::grammar, || {
-    compiled(tsx::cartridge())
-});
+static TSX: LazyCartridge =
+    LazyCartridge::new(tsx::ID, tsx::EXTENSIONS, tsx::grammar, true, || {
+        compiled(tsx::cartridge())
+    });
 
 /// Python, compiled when the first Python file is read.
-static PYTHON: LazyCartridge =
-    LazyCartridge::new(python::ID, python::EXTENSIONS, python::grammar, || {
-        compiled(python::cartridge())
-    });
+static PYTHON: LazyCartridge = LazyCartridge::new(
+    python::ID,
+    python::EXTENSIONS,
+    python::grammar,
+    true,
+    || compiled(python::cartridge()),
+);
 
 /// A parser for tree-sitter-md's inline grammar.
 ///
@@ -110,15 +118,20 @@ pub(crate) struct LazyCartridge {
     /// The cartridge it stands for. Compiles it on the first call and returns the same result
     /// after that.
     compiled: fn() -> Result<&'static dyn Cartridge, CartridgeLoadError>,
+    /// Whether files of this language are walked as link sources. A static property of the
+    /// language, set at registration, so asking never compiles anything.
+    reads_links: bool,
 }
 
 impl LazyCartridge {
     /// A cartridge named `id` for `extensions`, parsing with `grammar` and compiled by `compiled`.
+    /// `reads_links` is `false` for a language that is a link target only.
     #[must_use]
     pub(crate) const fn new(
         id: LanguageId,
         extensions: &'static [&'static str],
         grammar: fn() -> tree_sitter::Language,
+        reads_links: bool,
         compiled: fn() -> Result<&'static dyn Cartridge, CartridgeLoadError>,
     ) -> Self {
         Self {
@@ -126,6 +139,7 @@ impl LazyCartridge {
             extensions,
             grammar: LazyLock::new(grammar),
             compiled,
+            reads_links,
         }
     }
 
@@ -165,10 +179,8 @@ impl Cartridge for LazyCartridge {
         &self.grammar
     }
 
-    /// The wrapped cartridge's answer, which compiles it. A cartridge that fails to compile
-    /// reads links, so the walk reaches the file and the read reports the load error.
     fn reads_links(&self) -> bool {
-        (self.compiled)().map_or(true, Cartridge::reads_links)
+        self.reads_links
     }
 
     fn load(&self) -> Result<(), CartridgeLoadError> {
@@ -347,18 +359,29 @@ mod tests {
         grammar: std::sync::OnceLock::new(),
     };
 
+    /// Whether the test cartridge's compile closure ran.
+    static COMPILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
     #[test]
-    fn a_lazy_cartridge_forwards_reads_links_from_the_cartridge_it_wraps() {
+    fn a_target_only_lazy_cartridge_is_not_a_source_and_compiles_nothing_to_say_so() {
         let lazy = LazyCartridge::new(
             LanguageId::new("target-only"),
             &["tgt"],
             || tree_sitter_rust::LANGUAGE.into(),
-            || Ok(&TARGET_ONLY),
+            false,
+            || {
+                COMPILED.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(&TARGET_ONLY)
+            },
         );
 
         assert!(
             !lazy.reads_links(),
             "a lazily registered target-only cartridge should not be walked as a source"
+        );
+        assert!(
+            !COMPILED.load(std::sync::atomic::Ordering::SeqCst),
+            "asking reads_links must not compile the cartridge"
         );
     }
 
