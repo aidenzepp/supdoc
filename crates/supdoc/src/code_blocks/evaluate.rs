@@ -960,8 +960,8 @@ fn run_clippy(
 }
 
 /// `judge` applied to `run`, read from `session`'s cache when its key is there, otherwise run
-/// through `spawn` (which runs the call from the root with the session's env) under its timeout,
-/// and stored in the cache when `cacheable` allows the verdict.
+/// through `spawn` (which runs the call from the neutral directory with the session's env) under
+/// its timeout, and stored in the cache when `cacheable` allows the verdict.
 ///
 /// Effect: reads the cache, runs the tool through `spawn`, and writes the cache.
 fn cached_run<V>(
