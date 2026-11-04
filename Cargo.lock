@@ -1047,7 +1047,7 @@ dependencies = [
 
 [[package]]
 name = "supdoc"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "annotate-snippets",
  "anstream",
