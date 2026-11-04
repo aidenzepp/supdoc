@@ -102,6 +102,13 @@ impl Store {
     ///
     /// Fails when `root` can't be resolved, its real path holds a newline, or the store or its
     /// lock can't be read or written.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "`supdoc trust` (P5-02) calls it; drop this when it lands"
+        )
+    )]
     pub(crate) fn add(&self, root: &Path) -> io::Result<bool> {
         let real = root.canonicalize()?;
         if real.as_os_str().as_bytes().contains(&b'\n') {
@@ -130,6 +137,13 @@ impl Store {
     /// # Errors
     ///
     /// Fails when the store exists but can't be read, or it or its lock can't be written.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "`supdoc trust` (P5-02) calls it; drop this when it lands"
+        )
+    )]
     pub(crate) fn revoke(&self, root: &Path) -> io::Result<bool> {
         let real = root.canonicalize().ok();
         let names = |listed: &PathBuf| *listed == root || real.as_ref() == Some(listed);

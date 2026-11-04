@@ -52,6 +52,9 @@ const TOOL_MISSING: &str = "code-block-tool-missing";
 /// The code for blocks a hardening rule refused to check.
 const NOT_CHECKED: &str = "code-block-not-checked";
 
+/// The code for a step held because the operator hasn't granted the checkout trust.
+const NOT_TRUSTED: &str = "code-block-not-trusted";
+
 /// What judging the code blocks found.
 #[derive(Debug, Default)]
 pub(crate) struct Evaluation {
@@ -125,6 +128,11 @@ impl Pending {
 /// shows it, relative to the current directory. With them, each block's [`BlockState`], counted.
 /// Nothing when `config` leaves `[features.code-blocks]` off.
 ///
+/// Each due step's tool goes through the tier gate ([`tier_gate`]): `granted` is
+/// [`Tier::Project`] when the operator trusts the checkout, else [`Tier::Static`]. The first
+/// block with a step held for want of trust gets the run's one `code-block-not-trusted` warning,
+/// after the other findings.
+///
 /// Effect: reads every source file the blocks name, contained in the project root, and each doc
 /// holding a `from(...)` block.
 ///
@@ -139,6 +147,7 @@ pub(crate) fn evaluate(
     lock: &Lockfile,
     in_scope: impl Fn(&str) -> bool,
     paths: &PathStyle,
+    granted: Tier,
 ) -> Result<Evaluation, CartridgeLoadError> {
     let Some(code_blocks) = config.code_blocks() else {
         return Ok(Evaluation::default());
@@ -179,9 +188,7 @@ pub(crate) fn evaluate(
             outcome = sources.from_missing.then_some(Excerpt::SourceMissing);
             if let Some(parts) = sources.parts {
                 let file = block.fence.file.as_str();
-                if doc.as_ref().is_none_or(|(read, _)| *read != file) {
-                    doc = Some((file, read(file)));
-                }
+                reread(&mut doc, file, read);
                 let stale = doc
                     .as_ref()
                     .and_then(|(_, text)| text.as_ref())
@@ -203,13 +210,11 @@ pub(crate) fn evaluate(
         let language = tag_of(block).map(str::to_owned);
         let mut steps = Steps::of(block, &state, code_blocks);
         let checked = language.as_deref().and_then(Language::from_tag);
-        let (tool, linter) = selected_tools(code_blocks, &mut steps, checked, &state);
+        let (tool, linter) = selected_tools(code_blocks, &mut steps, checked, &state, granted);
         let pending = (state == BlockState::NotChecked(NotChecked::Pending))
             .then(|| {
                 let file = block.fence.file.as_str();
-                if doc.as_ref().is_none_or(|(read, _)| *read != file) {
-                    doc = Some((file, read(file)));
-                }
+                reread(&mut doc, file, read);
                 doc.as_ref()?
                     .1
                     .as_ref()
@@ -234,6 +239,7 @@ pub(crate) fn evaluate(
     let judged = |doc: &str| in_scope(doc) && !unresolved_uses.contains(doc);
     let command = |doc: &str| paths.command_word(doc);
     findings.extend(uses::judge(&written, lock.recorded_uses(), judged, command));
+    findings.extend(not_trusted(&records));
     Ok(Evaluation {
         findings,
         counts: Some(tally(&records)),
@@ -538,26 +544,76 @@ struct StepsRan {
 /// What a lint step gave: its verdict and findings, or why supdoc couldn't run it safely.
 type LintRan = Result<(lint::Verdict, Vec<Finding>), &'static str>;
 
-/// Why a step whose cartridge is above the static tier doesn't run: clippy compiles the block,
-/// so it belongs to the project tier, which needs trust.
-const CLIPPY_NEEDS_TRUST: &str =
-    "clippy runs only in the project tier, which needs `supdoc trust` (phase 5)";
+/// Why a step whose cartridge is above the effective tier doesn't run when the operator hasn't
+/// granted trust: clippy compiles the block, so it belongs to the project tier.
+pub(super) const CLIPPY_NEEDS_TRUST: &str =
+    "clippy runs only in the project tier, which needs `supdoc trust`";
 
-/// `tool` as the static tier allows it: `None` for a cartridge whose tier is above
-/// [`Tier::Static`], whose `step` then doesn't run, with [`CLIPPY_NEEDS_TRUST`] as its reason.
-/// Trust doesn't exist yet, so such a tool is never run. The gate sits where the tool is
-/// chosen, before any scan, cache key or spawn.
-fn static_tier(
+/// Why such a step doesn't run when the project itself lowered the tier.
+const TIER_LOWERED: &str = "`tier = \"static\"` in `[features.code-blocks]`";
+
+/// Why a project-tier step doesn't run even in a trusted checkout: clippy waits for the
+/// phase 5b re-audit of the scanner in front of it.
+const CLIPPY_AWAITS_AUDIT: &str = "clippy waits for its phase 5b audit";
+
+/// `tool` as the tiers allow it: `None` for a cartridge above the effective tier, the lower of
+/// `granted` (what the operator trusts the checkout with) and `ceiling` (the project's `tier`).
+/// Its `step` then doesn't run, with [`TIER_LOWERED`] as its reason when the ceiling holds it,
+/// else [`CLIPPY_NEEDS_TRUST`]. A project-tier cartridge the effective tier allows still doesn't
+/// run, with [`CLIPPY_AWAITS_AUDIT`], until phase 5b. The gate sits where the tool is chosen,
+/// before any scan, cache key or spawn.
+fn tier_gate(
     tool: Option<&'static ToolCartridge>,
     step: &mut StepState,
+    granted: Tier,
+    ceiling: Tier,
 ) -> Option<&'static ToolCartridge> {
-    if tool.is_some_and(|tool| tool.tier > Tier::Static) {
-        *step = StepState::Unrunnable {
-            reason: CLIPPY_NEEDS_TRUST,
-        };
-        return None;
+    let found = tool?;
+    let effective = granted.min(ceiling);
+    let reason = if found.tier > effective {
+        if found.tier > ceiling {
+            TIER_LOWERED
+        } else {
+            CLIPPY_NEEDS_TRUST
+        }
+    } else if found.tier > Tier::Static {
+        CLIPPY_AWAITS_AUDIT
+    } else {
+        return tool;
+    };
+    *step = StepState::Unrunnable { reason };
+    None
+}
+
+/// The run's one `code-block-not-trusted` warning, at the first of `records` with a step held
+/// because the operator hasn't granted trust. `None` when no step was held for that.
+fn not_trusted(records: &[BlockRecord]) -> Option<Finding> {
+    let at = &records
+        .iter()
+        .find(|record| record.steps.held_for_trust())?
+        .at;
+    let finding = Finding::new(
+        NOT_TRUSTED,
+        Severity::Warning,
+        "clippy didn't run on Rust blocks: it compiles them, and this checkout isn't trusted",
+    )
+    .with_help(
+        "run `supdoc trust` to trust this checkout, or set `SUPDOC_TRUST=1` for one run (as in \
+         CI); to stop asking, set `tier = \"static\"` in `[features.code-blocks]` or \
+         `lint = \"off\"` in `[features.code-blocks.rust.clippy]`",
+    );
+    Some(finding.with_location(at.clone()))
+}
+
+/// Points `doc` at `file`, read with `read`, unless it already holds it.
+fn reread<'doc>(
+    doc: &mut Option<(&'doc str, Option<Arc<FixDoc>>)>,
+    file: &'doc str,
+    read: impl Fn(&str) -> Option<Arc<FixDoc>>,
+) {
+    if doc.as_ref().is_none_or(|(held, _)| *held != file) {
+        *doc = Some((file, read(file)));
     }
-    tool
 }
 
 /// Why clippy didn't run on a block when [`runner::neutral_dir`] found no private working
@@ -1052,7 +1108,8 @@ fn found_runs(
 }
 
 /// The formatter and linter `code_blocks` selects for a block in `language`, in `state`, whose
-/// `steps` are due (none unless the block is pending), each through the [`static_tier`] gate:
+/// `steps` are due (none unless the block is pending), each through the [`tier_gate`] for
+/// `granted` and the config's `tier`:
 /// each `None` when its step isn't due, the language has none, or the gate turned its step in
 /// `steps` unrunnable.
 fn selected_tools(
@@ -1060,6 +1117,7 @@ fn selected_tools(
     steps: &mut Steps,
     language: Option<Language>,
     state: &BlockState,
+    granted: Tier,
 ) -> (
     Option<&'static ToolCartridge>,
     Option<&'static ToolCartridge>,
@@ -1075,8 +1133,8 @@ fn selected_tools(
     let linter = language(&steps.lint)
         .and_then(|language| tools::selected(code_blocks, language, Step::Lint));
     (
-        static_tier(tool, &mut steps.format),
-        static_tier(linter, &mut steps.lint),
+        tier_gate(tool, &mut steps.format, granted, code_blocks.tier()),
+        tier_gate(linter, &mut steps.lint, granted, code_blocks.tier()),
     )
 }
 

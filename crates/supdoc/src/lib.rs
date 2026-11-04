@@ -233,13 +233,6 @@ pub(crate) mod output;
 pub(crate) mod cli;
 
 /// The trust store: the checkouts the operator trusts to run code they control.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "`supdoc trust` (P5-02) and the tier gate (P5-04) call it"
-    )
-)]
 pub(crate) mod trust;
 
 /// The process boundary: reading the environment and turning a run into an exit code.

@@ -125,7 +125,8 @@ impl Planned {
     ///
     /// # Errors
     ///
-    /// Returns the config's, the lockfile's or the scan's own error, a `[PATH]` usage error, or
+    /// Returns the config's, the lockfile's or the scan's own error, a `[PATH]` usage error,
+    /// `cli-usage` (2) for a bad `SUPDOC_TRUST`, or
     /// `read-cartridge-load` (70) when a built-in cartridge doesn't load.
     fn scan(
         paths: &[std::path::PathBuf],
@@ -136,6 +137,7 @@ impl Planned {
         let config = load_config(context, output)?;
         let scope = scope(paths, &config, context)?;
         let lock = read_lock(&config, &context.cwd)?;
+        let granted = super::check::granted_tier(config.root().as_path())?;
         let mut scan = scan(&config, &scope, &context.global_excludes)?;
         let in_scope = |doc: &str| {
             doc.parse::<SourcePath>()
@@ -150,6 +152,7 @@ impl Planned {
             &lock,
             in_scope,
             &path_style,
+            granted,
         )
         .map_err(|error| CliError::from(&error))?;
         evaluation.look_up_tools(tools, config.root().as_path());

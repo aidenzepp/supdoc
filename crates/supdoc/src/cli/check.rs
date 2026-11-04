@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
+use std::path::Path;
 
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -14,8 +15,9 @@ use serde::Serialize;
 use crate::check::model::{LinkReport, Report as CheckModel};
 use crate::check::reconcile::{self, check_outcome, reconcile_in};
 use crate::code_blocks::evaluate::{BlockRecord, BlockState, CodeBlockCounts, evaluate};
-use crate::code_blocks::tools::ToolEnv;
+use crate::code_blocks::tools::{Tier, ToolEnv};
 use crate::code_blocks::uses::UseState;
+use crate::exit::ExitStatus;
 use crate::finding::{Finding, Location};
 use crate::link::destination::Untracked;
 use crate::link::{LinkKey, SourcePath};
@@ -26,8 +28,10 @@ use crate::output::{Output, PathStyle, RecordArray, Report, Summary, TextContext
 use crate::read::cartridge::Languages;
 use crate::scan::assemble::UntrackedLinks;
 use crate::state::LinkState;
+use crate::trust::{self, TrustEnv};
 
 use super::args::CheckArgs;
+use super::parse::USAGE_ERROR_CODE;
 use super::project::{load_config, read_lock, scope};
 use super::{CliError, Context, Outcome};
 
@@ -41,9 +45,9 @@ use super::{CliError, Context, Outcome};
 /// Returns the config's own error (78, or 74 when unreadable), `cli-path-missing`,
 /// `cli-path-outside-project` or `cli-path-invalid` for a bad `[PATH]` (2),
 /// `cli-path-unreadable` (74) for one that can't be looked up, the lockfile's own error (78 when
-/// invalid, 74 when unreadable), `scan-root-unreadable` (74),
-/// `read-cartridge-load` (70) when a built-in cartridge doesn't load, and `cli-output-failed`
-/// when the report cannot be written (74).
+/// invalid, 74 when unreadable), `scan-root-unreadable` (74), `cli-usage` (2) for a bad
+/// `SUPDOC_TRUST`, `read-cartridge-load` (70) when a built-in cartridge doesn't load, and
+/// `cli-output-failed` when the report cannot be written (74).
 pub(crate) fn run(
     args: &CheckArgs,
     tools: &ToolEnv,
@@ -53,6 +57,7 @@ pub(crate) fn run(
     let config = load_config(context, output)?;
     let scope = scope(&args.paths, &config, context)?;
     let lock = read_lock(&config, &context.cwd)?;
+    let granted = granted_tier(config.root().as_path())?;
     let languages = Languages::builtin().map_err(CliError::from)?;
     let (mut scan, untracked) = crate::scan::assemble::run_with_untracked(
         &config,
@@ -73,6 +78,7 @@ pub(crate) fn run(
         &lock,
         in_scope,
         &paths,
+        granted,
     )
     .map_err(|error| CliError::from(&error))?;
     evaluation.look_up_tools(tools, config.root().as_path());
@@ -98,6 +104,28 @@ pub(crate) fn run(
         .report(&report, outcome == Outcome::Clean)
         .map_err(|error| CliError::output_failed("the check report", &error))?;
     Ok(outcome)
+}
+
+/// The tier the operator granted the project at `root`, the config's directory:
+/// [`Tier::Project`] when `SUPDOC_TRUST` or the trust store trusts it, else [`Tier::Static`].
+///
+/// Effect: reads `SUPDOC_TRUST`, `XDG_STATE_HOME` and `HOME`, and the trust store.
+///
+/// # Errors
+///
+/// Returns `cli-usage` (2) when `SUPDOC_TRUST` holds a value other than `1`, `0` or empty.
+pub(super) fn granted_tier(root: &Path) -> Result<Tier, CliError> {
+    let env = TrustEnv::from_vars(|name| std::env::var_os(name));
+    match trust::granted(root, &env) {
+        Ok(true) => Ok(Tier::Project),
+        Ok(false) => Ok(Tier::Static),
+        Err(error) => Err(CliError::new(
+            USAGE_ERROR_CODE,
+            error.to_string(),
+            "unset `SUPDOC_TRUST`, or set it to `1` or `0`, then run supdoc again",
+            ExitStatus::Usage,
+        )),
+    }
 }
 
 /// The JSON Schema of `supdoc check`'s `--json` output: the whole envelope, with `data` typed as
