@@ -209,7 +209,7 @@ impl StepState {
 /// fragment".
 #[must_use]
 pub(crate) fn unsupported_reason(tool: &str, kind: Kind) -> String {
-    format!("{tool} can't check a {} fragment", kind.name())
+    format!("{tool} can't check {} fragment", kind.with_article())
 }
 
 /// The kind `block` declares with its first `fragment(<kind>)` attribute, if it writes one.

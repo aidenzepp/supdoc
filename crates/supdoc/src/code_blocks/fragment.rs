@@ -41,6 +41,18 @@ impl Kind {
         }
     }
 
+    /// The kind with its indefinite article: "a statements", "an expression".
+    #[must_use]
+    pub(crate) fn with_article(self) -> String {
+        let name = self.name();
+        let article = if name.starts_with(['a', 'e', 'i', 'o', 'u']) {
+            "an"
+        } else {
+            "a"
+        };
+        format!("{article} {name}")
+    }
+
     /// The kind written as `name`, `None` for any other text.
     #[must_use]
     pub(crate) fn from_name(name: &str) -> Option<Self> {
@@ -65,4 +77,17 @@ impl Kind {
 pub(crate) enum Support {
     /// The tool parses the kind as written.
     Native,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_kind_takes_the_article_its_spelling_needs() {
+        assert_eq!(Kind::Expression.with_article(), "an expression");
+        assert_eq!(Kind::Statements.with_article(), "a statements");
+        assert_eq!(Kind::Entries.with_article(), "an entries");
+        assert_eq!(Kind::Children.with_article(), "a children");
+    }
 }

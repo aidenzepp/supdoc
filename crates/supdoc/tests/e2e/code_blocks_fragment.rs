@@ -68,7 +68,7 @@ fn the_summary_line_counts_the_step_under_its_own_reason() {
         .clone();
 
     assert!(
-        output.contains("format not run (rustfmt can't check a expression fragment)"),
+        output.contains("format not run (rustfmt can't check an expression fragment)"),
         "{output}"
     );
 }
