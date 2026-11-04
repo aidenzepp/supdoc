@@ -13,7 +13,7 @@ use std::io::{self, IsTerminal, Write};
 use std::path::{MAIN_SEPARATOR_STR, Path};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError, RwLock, RwLockReadGuard};
 use std::time::Duration;
 
 use crate::cli::args::{Cli, GlobalArgs};
@@ -33,6 +33,11 @@ const DEFAULT_WIDTH: usize = 80;
 
 /// The process group ids of the tools running now, each registered by a [`LiveGroup`].
 static LIVE_GROUPS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// Held for reading by each tool spawn from its check of [`TERMINATING`] until its group is
+/// registered, and for writing by the signal thread while it copies [`LIVE_GROUPS`]. So the copy
+/// waits out every spawn in progress, and no tool can exist yet be missing from it.
+static SPAWNS: RwLock<()> = RwLock::new(());
 
 /// The termination signal that arrived, or 0 while none has. Set before any tool group is killed.
 pub(crate) static TERMINATING: AtomicI32 = AtomicI32::new(0);
@@ -66,6 +71,47 @@ impl Drop for LiveGroup {
     }
 }
 
+/// One tool spawn in progress, from the check of [`TERMINATING`] until its group is registered.
+///
+/// While it exists the signal thread can't copy the live groups. It is never held while waiting
+/// on a tool, writing output or sleeping, so the signal thread waits only for a spawn and a push.
+#[derive(Debug)]
+pub(crate) struct Spawning {
+    /// The read side of [`SPAWNS`], held only to keep the signal thread's copy waiting.
+    _guard: RwLockReadGuard<'static, ()>,
+}
+
+impl Spawning {
+    /// Starts a spawn, or blocks for good, holding nothing, if a termination signal has arrived.
+    ///
+    /// The signal thread sets [`TERMINATING`] before it takes [`SPAWNS`] to copy the live groups.
+    /// So a spawn that starts after the copy sees the flag here, and one that started before it
+    /// is registered before the copy is taken.
+    ///
+    /// Effect: sleeps the calling thread for good once a signal has arrived.
+    #[must_use]
+    pub(crate) fn begin() -> Self {
+        let guard = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
+        if ends_by_signal(&TERMINATING) {
+            // Released first: the signal thread takes `SPAWNS` before it can end the process.
+            drop(guard);
+            wait_to_be_ended();
+        }
+        Self { _guard: guard }
+    }
+}
+
+/// The live groups, copied once every spawn in progress has registered its group.
+///
+/// Effect: waits for each [`Spawning`] that exists to be dropped.
+fn live_groups_once_spawned() -> Vec<u32> {
+    let _spawns = SPAWNS.write().unwrap_or_else(PoisonError::into_inner);
+    LIVE_GROUPS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
 /// Whether `pgid` is registered as live.
 #[cfg(test)]
 fn is_live(pgid: u32) -> bool {
@@ -75,15 +121,12 @@ fn is_live(pgid: u32) -> bool {
         .contains(&pgid)
 }
 
-/// Best effort, sends `SIGKILL` to every live tool process group through `/bin/kill`.
+/// Best effort, sends `SIGKILL` to every live tool process group through `/bin/kill`, once every
+/// spawn in progress has registered its group.
 ///
 /// Effect: signals each registered process group.
 fn kill_live_groups() {
-    let live = LIVE_GROUPS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clone();
-    for pgid in live {
+    for pgid in live_groups_once_spawned() {
         let _group = Command::new("/bin/kill")
             .args(["-KILL", "--", &format!("-{pgid}")])
             .env_clear()
@@ -357,6 +400,35 @@ mod tests {
         );
         drop(second);
         assert!(!is_live(4_000_000_002));
+    }
+
+    #[test]
+    fn the_signal_side_copies_the_live_groups_only_after_a_spawn_in_progress_registers() {
+        // A fake spawn: no process, just a group id far above any `pid_max`.
+        let spawning = Spawning::begin();
+        let (sender, copies) = std::sync::mpsc::channel();
+        let signal_side = std::thread::spawn(move || {
+            let _sent = sender.send(live_groups_once_spawned());
+        });
+
+        assert!(
+            copies.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the live groups should not be copied while a spawn is in progress"
+        );
+        let live = LiveGroup::register(4_000_000_003);
+        drop(spawning);
+
+        let copy = copies
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the copy should run once the spawn ends");
+        assert!(
+            copy.contains(&4_000_000_003),
+            "the copy should hold the group the spawn registered, got {copy:?}"
+        );
+        signal_side
+            .join()
+            .expect("the copying thread should not panic");
+        drop(live);
     }
 
     #[test]
