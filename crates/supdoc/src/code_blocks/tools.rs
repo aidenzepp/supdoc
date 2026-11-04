@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use crate::config::code_blocks::{CodeBlocks, Dialect, Edition, Language};
 
 use super::format::ParseError;
+use super::fragment::{Kind, Support};
 use super::lint;
 use super::runner::{Failure, Ran};
 use super::{biome, python, rust, shell};
@@ -140,6 +141,8 @@ pub(crate) struct ToolCartridge {
     pub(crate) config_files: &'static [&'static str],
     /// The values its step's mode accepts, in config and in a block attribute.
     pub(crate) modes: &'static [&'static str],
+    /// The fragment kinds it checks, and how.
+    pub(crate) fragments: &'static [(Kind, Support)],
     /// Its arguments for a block.
     argv: fn(&Invocation<'_>) -> Vec<OsString>,
     /// How a run is read.
@@ -154,6 +157,12 @@ impl ToolCartridge {
             Reader::Format(_) => Step::Format,
             Reader::Lint(_) => Step::Lint,
         }
+    }
+
+    /// Whether it checks a fragment of `kind`.
+    #[must_use]
+    pub(crate) fn supports(&self, kind: Kind) -> bool {
+        self.fragments.iter().any(|(listed, _)| *listed == kind)
     }
 
     /// Its arguments for the block `invocation` describes.
@@ -196,6 +205,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 9] = [
         install: "rustup component add rustfmt",
         config_files: &["rustfmt.toml", ".rustfmt.toml"],
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: rustfmt_args,
         reader: Reader::Format(rust::parse_error),
     },
@@ -207,6 +217,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 9] = [
         install: "go install mvdan.cc/sh/v3/cmd/shfmt@latest",
         config_files: &[".editorconfig"],
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: shfmt_args,
         reader: Reader::Format(shell::parse_error),
     },
@@ -218,6 +229,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 9] = [
         install: "pipx install ruff",
         config_files: &["ruff.toml", ".ruff.toml", "pyproject.toml"],
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: ruff_format_args,
         reader: Reader::Format(python::ruff_parse_error),
     },
@@ -229,6 +241,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 9] = [
         install: "pipx install black",
         config_files: &["pyproject.toml"],
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: black_args,
         reader: Reader::Format(python::black_parse_error),
     },
@@ -240,6 +253,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 9] = [
         install: "pipx install ruff",
         config_files: &["ruff.toml", ".ruff.toml", "pyproject.toml"],
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: ruff_args,
         reader: Reader::Lint(python::lint_verdict),
     },
@@ -251,6 +265,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 9] = [
         install: "cabal install ShellCheck",
         config_files: &[".shellcheckrc"],
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: shellcheck_args,
         reader: Reader::Lint(shell::lint_verdict),
     },
@@ -262,6 +277,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 9] = [
         install: "rustup component add clippy",
         config_files: &["clippy.toml", ".clippy.toml", "Cargo.toml"],
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: clippy_args,
         reader: Reader::Lint(rust::lint_verdict),
     },
@@ -273,6 +289,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 9] = [
         install: "npm install --global @biomejs/biome",
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: biome_format_args,
         reader: Reader::Format(biome::parse_error),
     },
@@ -284,6 +301,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 9] = [
         install: "npm install --global @biomejs/biome",
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: biome_format_args,
         reader: Reader::Format(biome::parse_error),
     },
