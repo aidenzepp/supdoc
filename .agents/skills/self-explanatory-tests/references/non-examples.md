@@ -4,7 +4,7 @@ These patterns create green tests without trustworthy evidence or failures witho
 
 ## Opaque Failure Messages
 
-```rust
+```rust ignore(statements only: three opaque-failure lines from a test body)
 let config = load_fixture().expect("failed");
 let first = values.first().unwrap();
 assert!(output.status.success());
@@ -18,13 +18,13 @@ Problems:
 
 ## Repeating the Source Error
 
-```rust
+```rust ignore(one statement showing a panic that repeats the source error)
 let value = parse_fixture().unwrap_or_else(|error| panic!("{error}"));
 ```
 
 The panic repeats the source error without explaining why parsing should have succeeded. Prefer:
 
-```rust
+```rust ignore(one statement: the preferred expect for the panic shown above)
 let value = parse_fixture()
     .expect("the checked-in fixture should satisfy the current parser contract");
 ```
@@ -113,7 +113,7 @@ That does not prove the behavior is missing or broken. RED is valid only when th
 
 ## Hidden Machine State
 
-```rust
+```rust ignore(one statement showing a test that reads a machine-specific path)
 let config = std::fs::read_to_string("/Users/me/.config/app.toml")
     .expect("config should exist");
 ```
@@ -141,7 +141,7 @@ Follow the policy-change procedure in `AGENTS.md` if the rule is genuinely wrong
 
 ## Over-Abstracted Setup
 
-```rust
+```rust ignore(one statement showing setup hidden behind a helper)
 let context = standard_context();
 ```
 
