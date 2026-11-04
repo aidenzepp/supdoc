@@ -17,6 +17,7 @@ use crate::read::cartridge::Languages;
 use crate::read::error::CartridgeLoadError;
 
 use super::block::{CodeBlock, Info};
+use super::cache::{self, Cache};
 use super::excerpt;
 use super::format::{self, FixDoc};
 use super::info::{
@@ -251,10 +252,13 @@ impl Evaluation {
     /// [`format::safe_fix`] finds it could end the block early, which adds a
     /// `code-block-fix-unsafe` warning instead.
     ///
-    /// Effect: reads file metadata along `PATH`, resolves symlinks, and runs each found formatter
-    /// once per block, killing it at the timeout.
+    /// A block whose run is in the result cache (see [`cache`]) isn't run again; a run that
+    /// passed or plainly failed is stored there, a tool failure or timeout never is.
+    ///
+    /// Effect: reads file metadata along `PATH`, resolves symlinks, reads and writes the result
+    /// cache, and runs each found formatter once per block not in it, killing it at the timeout.
     pub(crate) fn look_up_tools(&mut self, env: &ToolEnv, root: &Path) {
-        let timeout = self.timeout;
+        let mut cache: Option<Option<Cache>> = None;
         let mut looked_up: Vec<(&'static str, Found)> = Vec::new();
         let mut rust_setup: Option<RustSetup> = None;
         let mut toolchain_warned = false;
@@ -306,7 +310,13 @@ impl Evaluation {
                 };
             record.state = match found {
                 Found::OnPath(program) => {
-                    let ran = run_formatter(tool, &program, record, env, root, timeout, rust);
+                    let session = Session {
+                        env,
+                        root,
+                        timeout: self.timeout,
+                        cache: cache.get_or_insert_with(|| Cache::open(env, root)).as_ref(),
+                    };
+                    let ran = run_formatter(tool, &program, record, &session, rust);
                     let Some(state) = ran.map(|(verdict, findings)| {
                         self.findings.extend(findings);
                         verdict.state()
@@ -321,6 +331,9 @@ impl Evaluation {
             record.reason = record
                 .state
                 .reason(record.language.as_deref(), Some(tool.name));
+        }
+        if let Some(Some(cache)) = cache {
+            cache.prune();
         }
         if self.counts.is_some() {
             self.counts = Some(CodeBlockCounts::tally(
@@ -354,23 +367,42 @@ impl RustSetup {
     }
 }
 
-/// Runs `tool`, found at `program`, on `record`'s block from `root` with `env`, under `timeout`,
+/// What every tool run in one `check` shares.
+#[derive(Debug)]
+struct Session<'run> {
+    /// The environment tools get.
+    env: &'run ToolEnv,
+    /// The project root.
+    root: &'run Path,
+    /// How long one run may take. `None` is no limit.
+    timeout: Option<Duration>,
+    /// The result cache, when there is one.
+    cache: Option<&'run Cache>,
+}
+
+/// Runs `tool`, found at `program`, on `record`'s block from `session`'s root with its env, under
+/// its timeout, or reads the run from its cache when the key is there,
 /// adding `rust`'s config arguments and toolchain variables for a Rust tool:
 /// its verdict and findings, an unformatted block's error carrying the fix to the formatter's
 /// output, or followed by a `code-block-fix-unsafe` warning when [`format::safe_fix`] finds that
 /// output could end the block early. `None` when the block's language has no format step yet or its input
-/// couldn't be read, so it stays pending.
+/// couldn't be read, so it stays pending. A run whose verdict [`format::Verdict::cacheable`]
+/// allows is stored in the cache.
 ///
-/// Effect: runs the tool, killing it at the timeout.
+/// Effect: reads the cache, runs the tool, killing it at the timeout, and writes the cache.
 fn run_formatter(
     tool: &Tool,
     program: &Path,
     record: &BlockRecord,
-    env: &ToolEnv,
-    root: &Path,
-    timeout: Option<Duration>,
+    session: &Session<'_>,
     rust: Option<&RustSetup>,
 ) -> Option<(format::Verdict, Vec<Finding>)> {
+    let Session {
+        env,
+        root,
+        timeout,
+        cache,
+    } = *session;
     let pending = record.pending.as_ref()?;
     let input = pending.input.as_str();
     let doc = root.join(record.at.file.as_str());
@@ -391,15 +423,39 @@ fn run_formatter(
         .map(|(name, value)| (*name, value.as_os_str()))
         .collect();
     let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
-    let call = Call {
-        program,
-        name: tool.binary,
-        args: &args,
-        extra: &extra,
-        stdin: input.as_bytes(),
-        timeout,
+    let key = cache.and_then(|_| {
+        let run = cache::Run {
+            tool,
+            program,
+            args: &args,
+            extra: &extra,
+            input,
+            doc: &doc,
+        };
+        Cache::key(&run, root)
+    });
+    let cached = cache.zip(key).and_then(|(cache, key)| cache.get(key));
+    let verdict = if let Some(ran) = cached {
+        format::judge(tool, input, Ok(ran))
+    } else {
+        let call = Call {
+            program,
+            name: tool.binary,
+            args: &args,
+            extra: &extra,
+            stdin: input.as_bytes(),
+            timeout,
+        };
+        let result = runner::run(&call, env, root);
+        let stored = result.as_ref().ok().cloned();
+        let verdict = format::judge(tool, input, result);
+        if let (Some(cache), Some(key), Some(ran)) = (cache, key, stored)
+            && verdict.cacheable()
+        {
+            cache.put(key, &ran);
+        }
+        verdict
     };
-    let verdict = format::judge(tool, input, runner::run(&call, env, root));
     let at = match &verdict {
         format::Verdict::ParseFailed {
             line: Some(line), ..

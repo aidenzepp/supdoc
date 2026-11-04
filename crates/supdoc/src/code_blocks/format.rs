@@ -99,6 +99,16 @@ fn parse_error(tool: &Tool, stderr: &str) -> Option<ParseError> {
 }
 
 impl Verdict {
+    /// Whether the run behind this verdict may be cached: a pass or a plain failure, never a
+    /// tool failure or a timeout.
+    #[must_use]
+    pub(crate) const fn cacheable(&self) -> bool {
+        matches!(
+            self,
+            Self::Formatted | Self::Unformatted(_) | Self::ParseFailed { .. }
+        )
+    }
+
     /// The state a block with this verdict is in.
     #[must_use]
     pub(crate) const fn state(&self) -> states::BlockState {

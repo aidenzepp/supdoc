@@ -44,9 +44,14 @@ impl ToolEnv {
 
     /// `PATH`, when it is set.
     fn path(&self) -> Option<&OsStr> {
+        self.var("PATH")
+    }
+
+    /// The passed variable `name`, when it is set.
+    pub(crate) fn var(&self, name: &str) -> Option<&OsStr> {
         self.vars
             .iter()
-            .find(|(name, _)| *name == "PATH")
+            .find(|(key, _)| *key == name)
             .map(|(_, value)| value.as_os_str())
     }
 }
@@ -80,6 +85,9 @@ pub(crate) struct Tool {
     pub(crate) tier: Tier,
     /// The command that installs it.
     pub(crate) install: &'static str,
+    /// The config files it reads, by name at the project root: each one's content is part of
+    /// its cached results' key.
+    pub(crate) config_files: &'static [&'static str],
 }
 
 /// The known tools. A language's first row for a step is its default for that step.
@@ -91,6 +99,7 @@ pub(crate) const TOOLS: [Tool; 4] = [
         binary: "rustfmt",
         tier: Tier::Static,
         install: "rustup component add rustfmt",
+        config_files: &["rustfmt.toml", ".rustfmt.toml"],
     },
     Tool {
         name: "shfmt",
@@ -99,6 +108,7 @@ pub(crate) const TOOLS: [Tool; 4] = [
         binary: "shfmt",
         tier: Tier::Static,
         install: "go install mvdan.cc/sh/v3/cmd/shfmt@latest",
+        config_files: &[".editorconfig"],
     },
     Tool {
         name: "ruff-format",
@@ -107,6 +117,7 @@ pub(crate) const TOOLS: [Tool; 4] = [
         binary: "ruff",
         tier: Tier::Static,
         install: "pipx install ruff",
+        config_files: &["ruff.toml", ".ruff.toml", "pyproject.toml"],
     },
     Tool {
         name: "black",
@@ -115,6 +126,7 @@ pub(crate) const TOOLS: [Tool; 4] = [
         binary: "black",
         tier: Tier::Static,
         install: "pipx install black",
+        config_files: &["pyproject.toml"],
     },
 ];
 

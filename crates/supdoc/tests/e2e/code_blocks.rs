@@ -984,3 +984,91 @@ fn selection_dialect_posix_reaches_shfmt_as_ln_posix() {
 
     assert!(json.to_string().contains("-ln posix"), "{json}");
 }
+
+/// An `shfmt` stub outside the checkout that appends a line to `runs.log` beside it each time it
+/// runs and prints its stdin: the directory holding both.
+fn counting_shfmt() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt as _;
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let log = outside.path().join("runs.log");
+    let path = outside.path().join("shfmt");
+    std::fs::write(
+        &path,
+        format!("#!/bin/sh\necho run >> '{}'\n/bin/cat\n", log.display()),
+    )
+    .expect("the stub should be writable");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("the stub should be made executable");
+    outside
+}
+
+/// How many times the [`counting_shfmt`] stub in `outside` has run.
+fn runs(outside: &tempfile::TempDir) -> usize {
+    std::fs::read_to_string(outside.path().join("runs.log")).map_or(0, |log| log.lines().count())
+}
+
+/// Runs `check --json` on `project` with the stub in `outside` as `PATH` and `cache` as
+/// `XDG_CACHE_HOME`, asserting it passes every block.
+fn check_cached(project: &Project, outside: &tempfile::TempDir, cache: &std::path::Path) {
+    let json = project
+        .supdoc_in_with(
+            ".",
+            &["check", "--json"],
+            &[("PATH", outside.path()), ("XDG_CACHE_HOME", cache)],
+        )
+        .assert_exit(0)
+        .json();
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 2, "{json}");
+}
+
+#[test]
+fn cache_a_second_unchanged_run_runs_no_formatter() {
+    let project = project_with_shell_blocks();
+    let outside = counting_shfmt();
+    let cache = outside.path().join("cache");
+
+    check_cached(&project, &outside, &cache);
+    let first = runs(&outside);
+    check_cached(&project, &outside, &cache);
+
+    assert_eq!((first, runs(&outside)), (2, 2));
+}
+
+#[test]
+fn cache_a_changed_block_runs_again_and_a_corrupt_entry_never_passes() {
+    let project = project_with_shell_blocks();
+    let outside = counting_shfmt();
+    let cache = outside.path().join("cache");
+    check_cached(&project, &outside, &cache);
+
+    project.write(
+        "docs/blocks.md",
+        "# Blocks\n\n```sh\necho hi\n```\n\n```sh\necho changed\n```\n",
+    );
+    check_cached(&project, &outside, &cache);
+    let after_change = runs(&outside);
+    for dir in std::fs::read_dir(cache.join("supdoc/code-blocks")).expect("the cache should exist")
+    {
+        let dir = dir.expect("the cache entry should list").path();
+        for entry in std::fs::read_dir(dir).expect("the root's cache should list") {
+            let entry = entry.expect("the cache entry should list").path();
+            std::fs::write(entry, "garbage").expect("the entry should be writable");
+        }
+    }
+    check_cached(&project, &outside, &cache);
+
+    assert_eq!((after_change, runs(&outside)), (3, 5));
+}
+
+#[test]
+fn cache_a_config_appearing_in_the_docs_own_directory_runs_the_tool_again() {
+    let project = project_with_shell_blocks();
+    let outside = counting_shfmt();
+    let cache = outside.path().join("cache");
+    check_cached(&project, &outside, &cache);
+
+    project.write("docs/.editorconfig", "[*.sh]\nindent_style = tab\n");
+    check_cached(&project, &outside, &cache);
+
+    assert_eq!(runs(&outside), 4);
+}
