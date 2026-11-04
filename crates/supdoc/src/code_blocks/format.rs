@@ -154,7 +154,9 @@ pub(crate) fn input(block: &CodeBlock, text: &str) -> Option<String> {
 
 /// Judges a formatter's `result` on `input`: equal output passes, other output is unformatted and
 /// kept, output that isn't UTF-8 and a non-zero exit are failures (the exit carrying the first
-/// lines of stderr, and a parse failure when `tool`'s stderr is its syntax-error report), and a timeout is a timeout.
+/// lines of stderr), and a timeout is a timeout. A non-zero exit is a parse failure only when
+/// `tool`'s stderr is its syntax-error report and places the error on a line; a report without a
+/// location, like any other non-zero exit, is a tool failure. Stderr after exit 0 is never judged.
 #[must_use]
 pub(crate) fn judge(tool: &Tool, input: &str, result: Result<Ran, Failure>) -> Verdict {
     match result {
@@ -166,7 +168,8 @@ pub(crate) fn judge(tool: &Tool, input: &str, result: Result<Ran, Failure>) -> V
         Ok(ran) => {
             let stderr = String::from_utf8_lossy(&ran.stderr);
             let lines: Vec<&str> = stderr.lines().take(STDERR_LINES).collect();
-            if let Some(error) = parse_error(tool, &stderr) {
+            let located = parse_error(tool, &stderr).filter(|error| error.line.is_some());
+            if let Some(error) = located {
                 return Verdict::ParseFailed {
                     detail: lines.join("\n"),
                     line: error.line,
@@ -625,6 +628,54 @@ mod tests {
         assert_eq!(
             judge(shfmt(), "x\n", ran),
             Verdict::ToolFailed("1\n2\n3\n4\n5".to_owned())
+        );
+    }
+
+    /// The Rust formatter.
+    fn rustfmt() -> &'static crate::code_blocks::tools::Tool {
+        formatter(Language::Rust).expect("Rust has a formatter")
+    }
+
+    /// A run that exited with `success` and wrote `stdout` and `stderr`.
+    fn exited(success: bool, stdout: &str, stderr: &str) -> Ran {
+        Ran {
+            success,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_rustfmt_error_without_a_stdin_location_is_tool_failed() {
+        let ran = Ok(exited(false, "", "error: couldn't read the config\n"));
+
+        assert_eq!(
+            judge(rustfmt(), "fn f() {}\n", ran),
+            Verdict::ToolFailed("error: couldn't read the config".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_rustfmt_error_at_a_stdin_location_is_a_parse_failure() {
+        let stderr = "error: expected one of `;`\n --> <stdin>:3:9\n";
+        let ran = Ok(exited(false, "", stderr));
+
+        assert_eq!(
+            judge(rustfmt(), "fn f() {\n\nlet x = 1\n}\n", ran),
+            Verdict::ParseFailed {
+                detail: "error: expected one of `;`\n --> <stdin>:3:9".to_owned(),
+                line: Some(2),
+            }
+        );
+    }
+
+    #[test]
+    fn exit_zero_with_changed_output_is_unformatted_whatever_stderr_says() {
+        let ran = Ok(exited(true, "fn f() {}\n", "error: x\n --> <stdin>:1:1\n"));
+
+        assert_eq!(
+            judge(rustfmt(), "fn  f() {}\n", ran),
+            Verdict::Unformatted("fn f() {}\n".to_owned())
         );
     }
 

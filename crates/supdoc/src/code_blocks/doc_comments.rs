@@ -64,7 +64,7 @@ impl Run {
 ///
 /// # Errors
 ///
-/// The [`ReadError`] of the first region whose Markdown, or its NUL-replaced re-parse, can't be
+/// The [`ReadError`] of the first run whose Markdown, or its NUL-replaced re-parse, can't be
 /// parsed: the file's blocks are then unknown, not none.
 pub(super) fn blocks(
     file: &SourceFile,
@@ -72,33 +72,16 @@ pub(super) fn blocks(
 ) -> Result<Vec<CodeBlock>, ReadError> {
     let regions = file.language().markdown_regions(file)?;
     let mut blocks = Vec::new();
-    for region in &regions {
-        blocks.extend(region_blocks(file, region, &locate)?);
+    for (run, markdown) in doc_runs(file.text(), &regions) {
+        let parsed = SourceFile::from_text(
+            file.path().clone(),
+            markdown,
+            markdown_cartridge(),
+            file.deadline(),
+        );
+        blocks.extend(blocks_of_run(&run, parsed, &locate)?);
     }
     Ok(blocks)
-}
-
-/// The blocks of `region` when it is a run of `///` or `//!` lines.
-///
-/// # Errors
-///
-/// The [`ReadError`] of a failed parse of the run's Markdown.
-fn region_blocks(
-    file: &SourceFile,
-    region: &MarkdownRegion,
-    locate: &impl Fn(Range<usize>) -> Option<Location>,
-) -> Result<Vec<CodeBlock>, ReadError> {
-    let text = file.text();
-    let Some((run, markdown)) = read_run(text, region) else {
-        return Ok(Vec::new());
-    };
-    let parsed = SourceFile::from_text(
-        file.path().clone(),
-        markdown,
-        markdown_cartridge(),
-        file.deadline(),
-    );
-    blocks_of_run(&run, parsed, locate)
 }
 
 /// The blocks of `run`, read from `parsed`, the parse of its Markdown text.
@@ -118,31 +101,123 @@ fn blocks_of_run(
         .collect())
 }
 
-/// `region` as a [`Run`] and its Markdown text, or `None` when it isn't a doc-comment run.
-fn read_run(text: &str, region: &MarkdownRegion) -> Option<(Run, String)> {
-    let mut lines = Vec::new();
-    let mut markdown = String::new();
-    for range in region.ranges() {
-        let marker = text.get(range.start_byte.checked_sub(3)?..range.start_byte)?;
-        let body = text.get(range.start_byte..range.end_byte)?;
+/// What one comment range is to a doc-comment run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Comment {
+    /// A `///` or `//!` line.
+    Doc {
+        /// Its marker.
+        marker: &'static str,
+        /// Where the marker starts.
+        start: usize,
+    },
+    /// A `//` or `////` line. Rustdoc skips it, so a run continues across it.
+    Plain {
+        /// Where its marker starts.
+        start: usize,
+    },
+    /// Anything else, such as a block comment: it ends a run.
+    Other,
+}
+
+/// What `range`, a comment body from a region, is to a doc-comment run.
+fn classify(text: &str, range: &tree_sitter::Range) -> Comment {
+    let at = range.start_byte;
+    let before = |len: usize| text.get(at.checked_sub(len)?..at);
+    let doc = DOC_MARKERS
+        .into_iter()
+        .find(|marker| before(3) == Some(*marker));
+    let body = text.get(at..range.end_byte).unwrap_or_default();
+    match doc {
         // `////` opens an ordinary comment.
-        if !DOC_MARKERS.contains(&marker) || (marker == "///" && body.starts_with('/')) {
-            return None;
-        }
-        let space = usize::from(body.starts_with(' '));
-        let begins = text
-            .get(..range.start_byte - 3)?
-            .rfind('\n')
-            .map_or(0, |at| at + 1);
-        let content = body.get(space..)?;
-        lines.push(Line {
-            synthetic: markdown.len(),
-            file: range.start_byte + space,
-            begins,
-        });
-        markdown.push_str(content);
+        Some("///") if body.starts_with('/') => Comment::Plain { start: at - 3 },
+        Some(marker) => Comment::Doc {
+            marker,
+            start: at - 3,
+        },
+        None if before(2) == Some("//") => Comment::Plain { start: at - 2 },
+        None => Comment::Other,
     }
-    Some((Run { lines }, markdown))
+}
+
+/// A doc-comment run being read: its marker, where its last line ends, its lines and Markdown.
+struct Open {
+    /// `///` or `//!`: a run never mixes them.
+    marker: &'static str,
+    /// Where the run's last line, doc or skipped, ends in the file.
+    end: usize,
+    /// The doc lines so far.
+    lines: Vec<Line>,
+    /// Their Markdown text.
+    markdown: String,
+}
+
+/// Every doc-comment run in `regions`, as a [`Run`] and its Markdown text, in file order.
+///
+/// A run is adjacent `///` lines, or adjacent `//!` lines. A `//` or `////` line inside it is
+/// skipped, as rustdoc skips it, and the run continues on the next line; a blank line, code, a
+/// block comment or the other doc marker ends it.
+fn doc_runs(text: &str, regions: &[MarkdownRegion]) -> Vec<(Run, String)> {
+    let mut runs = Vec::new();
+    let mut open: Option<Open> = None;
+    let mut close = |open: &mut Option<Open>| {
+        if let Some(done) = open.take() {
+            runs.push((Run { lines: done.lines }, done.markdown));
+        }
+    };
+    for range in regions.iter().flat_map(MarkdownRegion::ranges) {
+        let comment = classify(text, range);
+        let continues = |start: usize| {
+            open.as_ref().is_some_and(|open| {
+                text.get(open.end..start)
+                    .is_some_and(|gap| gap.chars().all(|c| c.is_whitespace() && c != '\n'))
+            })
+        };
+        match comment {
+            Comment::Doc { marker, start } => {
+                let joins = continues(start) && open.as_ref().is_some_and(|o| o.marker == marker);
+                if !joins {
+                    close(&mut open);
+                }
+                let Some((file, content)) = doc_line(text, range) else {
+                    close(&mut open);
+                    continue;
+                };
+                let run = open.get_or_insert_with(|| Open {
+                    marker,
+                    end: range.end_byte,
+                    lines: Vec::new(),
+                    markdown: String::new(),
+                });
+                run.lines.push(Line {
+                    synthetic: run.markdown.len(),
+                    file,
+                    begins: text
+                        .get(..start)
+                        .and_then(|head| head.rfind('\n'))
+                        .map_or(0, |at| at + 1),
+                });
+                run.markdown.push_str(content);
+                run.end = range.end_byte;
+            }
+            Comment::Plain { start } if continues(start) => {
+                if let Some(run) = open.as_mut() {
+                    run.end = range.end_byte;
+                }
+            }
+            Comment::Plain { .. } | Comment::Other => close(&mut open),
+        }
+    }
+    close(&mut open);
+    runs
+}
+
+/// Where the text of the doc line `range` begins in the file, after its marker and the one space
+/// after it, and that text.
+fn doc_line<'text>(text: &'text str, range: &tree_sitter::Range) -> Option<(usize, &'text str)> {
+    let body = text.get(range.start_byte..range.end_byte)?;
+    let space = usize::from(body.starts_with(' '));
+    Some((range.start_byte + space, body.get(space..)?))
 }
 
 /// `block`, found in the Markdown text, with its body lines placed in the file. Its fence and
@@ -273,6 +348,30 @@ mod tests {
             lines(text, &block),
             [("/// ", "a"), ("///", ""), ("/// ", "b")]
         );
+    }
+
+    #[test]
+    fn a_block_spanning_a_plain_comment_line_is_found_on_its_file_lines() {
+        let text = "/// ```rust\n/// a\n// not doc\n/// b\n/// ```\nfn f() {}\n";
+
+        let block = only(text);
+
+        assert_eq!(block.fence.line, 1, "the fence opens on line 1");
+        assert_eq!(
+            slice(text, &block.fence.range),
+            "```rust\n/// a\n// not doc\n/// b\n/// ```"
+        );
+        assert_eq!(lines(text, &block), [("/// ", "a"), ("/// ", "b")]);
+    }
+
+    #[test]
+    fn a_block_after_a_quadruple_slash_line_is_found_on_its_file_lines() {
+        let text = "/// Doc.\n//// not doc\n/// ```rust\n/// x\n/// ```\nfn f() {}\n";
+
+        let block = only(text);
+
+        assert_eq!(block.fence.line, 3, "the fence opens on line 3");
+        assert_eq!(lines(text, &block), [("/// ", "x")]);
     }
 
     #[test]
