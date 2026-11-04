@@ -552,15 +552,15 @@ pub(super) const CLIPPY_NEEDS_TRUST: &str =
 /// Why such a step doesn't run when the project itself lowered the tier.
 const TIER_LOWERED: &str = "`tier = \"static\"` in `[features.code-blocks]`";
 
-/// Why a project-tier step doesn't run even in a trusted checkout: clippy waits for the
-/// phase 5b re-audit of the scanner in front of it.
-const CLIPPY_AWAITS_AUDIT: &str = "clippy waits for its phase 5b audit";
+/// Why a project-tier step doesn't run even in a trusted checkout: clippy waits for a
+/// re-audit of the scanner in front of it.
+const CLIPPY_AWAITS_AUDIT: &str = "clippy doesn't run yet, even in a trusted project";
 
 /// `tool` as the tiers allow it: `None` for a cartridge above the effective tier, the lower of
 /// `granted` (what the operator trusts the checkout with) and `ceiling` (the project's `tier`).
 /// Its `step` then doesn't run, with [`TIER_LOWERED`] as its reason when the ceiling holds it,
 /// else [`CLIPPY_NEEDS_TRUST`]. A project-tier cartridge the effective tier allows still doesn't
-/// run, with [`CLIPPY_AWAITS_AUDIT`], until phase 5b. The gate sits where the tool is chosen,
+/// run, with [`CLIPPY_AWAITS_AUDIT`], until a later release. The gate sits where the tool is chosen,
 /// before any scan, cache key or spawn.
 fn tier_gate(
     tool: Option<&'static ToolCartridge>,

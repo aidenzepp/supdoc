@@ -72,7 +72,7 @@ pub(crate) enum Step {
 }
 
 /// What a tool loads, which decides whether it may run in a checkout supdoc doesn't trust. The
-/// tiers are ordered: a tool above [`Tier::Static`] never runs until trust exists (phase 5).
+/// tiers are ordered: a tool above [`Tier::Static`] never runs until trust exists (see `supdoc trust`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Tier {
     /// Reads only the block on stdin and plain-data config: runs in any checkout.
