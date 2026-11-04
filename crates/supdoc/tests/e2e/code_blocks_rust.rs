@@ -252,10 +252,34 @@ fn edition_config_outside_the_four_known_is_a_config_error() {
     );
     let stub = Stub::new();
 
-    let _failed = project
-        .supdoc_in_with(".", &["check", "--json"], &[("PATH", stub.dir.path())])
-        .assert_exit(78);
+    let run = project.supdoc_in_with(".", &["check", "--json"], &[("PATH", stub.dir.path())]);
+    let _checked = run.assert_exit(78);
+    let failed = &run.stderr;
 
+    assert!(
+        failed.contains("2030` isn't a Rust edition supdoc knows"),
+        "the error should name the unknown edition, got:\n{failed}"
+    );
+    assert_eq!(stub.record("runs"), "", "rustfmt should never run");
+}
+
+#[test]
+fn a_bare_number_edition_is_a_config_error_that_says_to_quote_it() {
+    let project = project_with_rust_doc("```rust\nfn main() {}\n```\n");
+    project.write(
+        "supdoc.config.toml",
+        "[features.code-blocks]\n[features.code-blocks.rust]\nedition = 2021\n",
+    );
+    let stub = Stub::new();
+
+    let run = project.supdoc_in_with(".", &["check", "--json"], &[("PATH", stub.dir.path())]);
+    let _checked = run.assert_exit(78);
+    let failed = &run.stderr;
+
+    assert!(
+        failed.contains("must be quoted"),
+        "the error should say to quote the edition, got:\n{failed}"
+    );
     assert_eq!(stub.record("runs"), "", "rustfmt should never run");
 }
 
