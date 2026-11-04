@@ -16,7 +16,7 @@ use crate::config::discover_config;
 use crate::exit::ExitStatus;
 use crate::output::{Output, Report, TextContext};
 use crate::path::AbsolutePath;
-use crate::trust::TrustEnv;
+use crate::trust::{AddError, TrustEnv};
 
 use super::args::TrustArgs;
 use super::project::{absolute, config_failure, load_config};
@@ -50,7 +50,9 @@ impl Report for TrustReport {
         "trust"
     }
 
-    /// One line: `trusted .`, `already trusted .`, `revoked .` or `was not trusted .`.
+    /// One line: `trusted .`, `already trusted .`, `revoked .` or `was not trusted .`, with the
+    /// root shown as `.` when it is the current directory and as its absolute path otherwise, so
+    /// the operator sees exactly which directory the store names.
     fn render_text(&self, context: &TextContext, out: &mut dyn Write) -> io::Result<()> {
         let said = match self.action {
             TrustAction::Trusted => "trusted",
@@ -58,7 +60,12 @@ impl Report for TrustReport {
             TrustAction::Revoked => "revoked",
             TrustAction::NotTrusted => "was not trusted",
         };
-        writeln!(out, "{said} {}", context.paths.text_absolute(&self.root))
+        let relative = context.paths.text_absolute(&self.root);
+        if relative == "." {
+            writeln!(out, "{said} .")
+        } else {
+            writeln!(out, "{said} {}", self.root.as_path().display())
+        }
     }
 }
 
@@ -79,7 +86,8 @@ pub(crate) fn schema() -> schemars::Schema {
 /// # Errors
 ///
 /// Returns `cli-trust-path` when a `PATH` to trust isn't an existing directory or its real path
-/// holds a newline, `cli-trust-no-config` when no `PATH` is given and no config is found (78),
+/// holds a newline, `cli-trust-broad-root` when the root to trust is `/`, `HOME` or a directory
+/// above `HOME` (2), `cli-trust-no-config` when no `PATH` is given and no config is found (78),
 /// `cli-trust-no-state` when neither `XDG_STATE_HOME` nor `HOME` is an absolute path (78),
 /// `cli-trust-store` when the store can't be read or written (74), the config error when `-c` or
 /// the config search fails, and `cli-output-failed` when the report cannot be written.
@@ -103,9 +111,10 @@ pub(crate) fn run(
             None => (TrustAction::NotTrusted, root.as_path().to_path_buf()),
         }
     } else {
-        let added = store
-            .add(root.as_path())
-            .map_err(|error| store_failed(&error))?;
+        let added = store.add(root.as_path()).map_err(|error| match error {
+            AddError::Broad(real) => broad_root(&real),
+            AddError::Io(error) => store_failed(&error),
+        })?;
         let action = if added {
             TrustAction::Trusted
         } else {
@@ -173,6 +182,21 @@ fn no_config() -> CliError {
         "no supdoc.config.toml was found, so there is no project root to trust",
         "Run `supdoc trust` in a project with a supdoc.config.toml, or name the directory as PATH",
         ExitStatus::Config,
+    )
+}
+
+/// The error when the root to trust, by its real path `real`, is too broad: `/`, `HOME` or a
+/// directory above it, so its trust would cover every directory under it with no config.
+fn broad_root(real: &Path) -> CliError {
+    CliError::new(
+        "cli-trust-broad-root",
+        format!(
+            "`{}` is too broad to trust: it is `/`, your home directory or a directory above it, \
+             so trust would cover every directory under it that has no supdoc.config.toml",
+            real.display()
+        ),
+        "Trust the project's own directory, or add a supdoc.config.toml there and run `supdoc trust` inside it",
+        ExitStatus::Usage,
     )
 }
 

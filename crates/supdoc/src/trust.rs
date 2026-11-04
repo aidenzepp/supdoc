@@ -2,10 +2,12 @@
 //!
 //! Trust is granted only from outside the checkout: by `SUPDOC_TRUST=1` for one process, or by
 //! the root's real path in `$XDG_STATE_HOME/supdoc/trusted-roots` (under `$HOME/.local/state` when
-//! `XDG_STATE_HOME` isn't an absolute path), one absolute path per line. A linked worktree of a
-//! listed repository inherits its trust when it sits at the same path in its work tree. No file in
-//! the checkout can grant trust: the only files read inside it are the `.git` file or directory
-//! that locates its git directories.
+//! `XDG_STATE_HOME` isn't an absolute path), one absolute path per line. `SUPDOC_TRUST=0` turns
+//! trust off for one process, whatever the store lists. A linked worktree of a listed repository
+//! inherits its trust when it sits at the same path in its work tree. `/`, `HOME` and the
+//! directories above `HOME` are too broad to trust: the store never lists them and ignores them
+//! when listed by hand. No file in the checkout can grant trust: the only files read inside it are
+//! the `.git` file or directory that locates its git directories.
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -55,6 +57,7 @@ impl TrustEnv {
             .or_else(|| absolute(&self.home).map(|home| home.join(".local").join("state")))?;
         Some(Store {
             file: base.join("supdoc").join("trusted-roots"),
+            home: absolute(&self.home),
         })
     }
 }
@@ -62,14 +65,28 @@ impl TrustEnv {
 /// `SUPDOC_TRUST` holds a value other than `1`, `0` or empty.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "`SUPDOC_TRUST` is `{}`, which supdoc doesn't accept: set it to `1` to trust this run, or to \
-     `0` or empty (or unset it) to leave trust to `supdoc trust`",
+    "`SUPDOC_TRUST` is `{}`, which supdoc doesn't accept: set it to `1` to trust this run, to `0` \
+     to turn trust off for this run, or leave it empty (or unset it) to leave trust to \
+     `supdoc trust`",
     .0.to_string_lossy()
 )]
 pub(crate) struct BadTrustValue(OsString);
 
-/// Whether `root` is trusted: `SUPDOC_TRUST` is `1`, or the trust store lists it ([`Store::trusts`]).
-/// A store that is missing, unreadable or can't be located trusts nothing.
+/// What the operator granted a root: trust, none, or none because `SUPDOC_TRUST=0` turned it off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Grant {
+    /// `SUPDOC_TRUST` is `1`, or it is unset or empty and the trust store trusts the root.
+    Trusted,
+    /// `SUPDOC_TRUST` is unset or empty and the trust store doesn't trust the root.
+    Untrusted,
+    /// `SUPDOC_TRUST` is `0`: trust is off for this run, whatever the store lists.
+    TurnedOff,
+}
+
+/// What `root` is granted: [`Grant::Trusted`] when `SUPDOC_TRUST` is `1`, or it is unset or empty
+/// and the trust store trusts it ([`Store::trusts`]); [`Grant::TurnedOff`] when `SUPDOC_TRUST` is
+/// `0`, whatever the store lists; else [`Grant::Untrusted`]. A store that is missing, unreadable
+/// or can't be located trusts nothing.
 ///
 /// Effect: reads the trust store and, for the worktree rule, the `.git` files and git directories
 /// of `root` and of each listed root.
@@ -77,12 +94,29 @@ pub(crate) struct BadTrustValue(OsString);
 /// # Errors
 ///
 /// Fails when `SUPDOC_TRUST` is set to anything but `1`, `0` or empty.
-pub(crate) fn granted(root: &Path, env: &TrustEnv) -> Result<bool, BadTrustValue> {
+pub(crate) fn granted(root: &Path, env: &TrustEnv) -> Result<Grant, BadTrustValue> {
     match env.trust.as_deref().map(OsStr::as_bytes) {
-        Some(b"1") => Ok(true),
-        None | Some(b"" | b"0") => Ok(env.store().is_some_and(|store| store.trusts(root))),
+        Some(b"1") => Ok(Grant::Trusted),
+        Some(b"0") => Ok(Grant::TurnedOff),
+        None | Some(b"") => Ok(if env.store().is_some_and(|store| store.trusts(root)) {
+            Grant::Trusted
+        } else {
+            Grant::Untrusted
+        }),
         Some(_) => Err(BadTrustValue(env.trust.clone().unwrap_or_default())),
     }
+}
+
+/// Why [`Store::add`] didn't list a root.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum AddError {
+    /// The root's real path is `/`, `HOME`'s real path or a directory above it: trusting it would
+    /// cover every directory under it that has no config of its own.
+    #[error("`{}` is too broad to trust", .0.display())]
+    Broad(PathBuf),
+    /// The root couldn't be resolved, or the store or its lock couldn't be read or written.
+    #[error(transparent)]
+    Io(#[from] io::Error),
 }
 
 /// The trust store file.
@@ -90,25 +124,33 @@ pub(crate) fn granted(root: &Path, env: &TrustEnv) -> Result<bool, BadTrustValue
 pub(crate) struct Store {
     /// The `trusted-roots` file.
     file: PathBuf,
+    /// `HOME`, when it is an absolute path: it and the directories above it are too broad to trust.
+    home: Option<PathBuf>,
 }
 
 impl Store {
     /// Lists `root`'s real path, unless it is already listed. Returns whether it was added.
     ///
-    /// Effect: resolves `root`, creates the store's directory mode 0700, and under the store's
-    /// lock ([`Store::lock`]) reads the store and, when adding, writes it atomically, mode 0600.
+    /// Effect: resolves `root` and `HOME`, creates the store's directory mode 0700, and under the
+    /// store's lock ([`Store::lock`]) reads the store and, when adding, writes it atomically, mode
+    /// 0600. A refused root touches nothing.
     ///
     /// # Errors
     ///
-    /// Fails when `root` can't be resolved, its real path holds a newline, or the store or its
-    /// lock can't be read or written.
-    pub(crate) fn add(&self, root: &Path) -> io::Result<bool> {
+    /// Returns [`AddError::Broad`] when `root`'s real path is too broad ([`Store::broad`]), and
+    /// [`AddError::Io`] when `root` can't be resolved, its real path holds a newline
+    /// ([`io::ErrorKind::InvalidInput`]), or the store or its lock can't be read or written.
+    pub(crate) fn add(&self, root: &Path) -> Result<bool, AddError> {
         let real = root.canonicalize()?;
         if real.as_os_str().as_bytes().contains(&b'\n') {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "the root's real path holds a newline, which the trust store can't list",
-            ));
+            )
+            .into());
+        }
+        if self.broad().contains(&real) {
+            return Err(AddError::Broad(real));
         }
         let _lock = self.lock()?;
         let mut roots = self.read()?;
@@ -185,21 +227,44 @@ impl Store {
         })
     }
 
+    /// The roots too broad to trust: `/`, and `HOME`'s real path with every directory above it.
+    /// Only `/` when `HOME` is unset, isn't absolute or doesn't resolve.
+    ///
+    /// Effect: resolves `HOME`.
+    fn broad(&self) -> Vec<PathBuf> {
+        let home = self
+            .home
+            .as_deref()
+            .and_then(|home| home.canonicalize().ok());
+        std::iter::once(PathBuf::from("/"))
+            .chain(
+                home.iter()
+                    .flat_map(|home| home.ancestors().map(Path::to_path_buf)),
+            )
+            .collect()
+    }
+
     /// Whether the store trusts `root`: its real path is listed, or it sits in a linked worktree
     /// ([`Place::linked`]) whose common git directory and path in its work tree equal a listed
     /// root's. A listed root counts for that only while it still resolves to itself: the store
     /// holds real paths, so one that resolves elsewhere has been replaced since it was listed. A
-    /// missing or unreadable store trusts nothing.
+    /// root too broad to trust ([`Store::broad`]) is never trusted by either rule, and a listed one
+    /// counts for nothing. A missing or unreadable store trusts nothing.
     ///
-    /// Effect: reads the store, resolves `root`, and reads the `.git` files and git directories of
-    /// `root` and of each listed root.
+    /// Effect: reads the store, resolves `root` and `HOME`, and reads the `.git` files and git
+    /// directories of `root` and of each listed root.
     fn trusts(&self, root: &Path) -> bool {
         let Ok(real) = root.canonicalize() else {
             return false;
         };
-        let Ok(roots) = self.read() else {
+        let broad = self.broad();
+        if broad.contains(&real) {
+            return false;
+        }
+        let Ok(mut roots) = self.read() else {
             return false;
         };
+        roots.retain(|listed| !broad.contains(listed));
         if roots.contains(&real) {
             return true;
         }
@@ -371,9 +436,14 @@ mod tests {
         fn env(&self, trust: Option<&str>) -> TrustEnv {
             TrustEnv {
                 state_home: Some(self.real().join("state").into()),
-                home: Some(self.real().join("home").into()),
+                home: Some(self.home().into()),
                 trust: trust.map(OsString::from),
             }
+        }
+
+        /// The `HOME` of [`Scratch::env`], which doesn't exist until a test makes it.
+        fn home(&self) -> PathBuf {
+            self.real().join("home")
         }
 
         /// The store of [`Scratch::env`].
@@ -424,7 +494,7 @@ mod tests {
         let root = scratch.mkdir("root");
         assert!(scratch.store().add(&root).expect("adding should work"));
 
-        assert_eq!(granted(&root, &scratch.env(None)), Ok(true));
+        assert_eq!(granted(&root, &scratch.env(None)), Ok(Grant::Trusted));
     }
 
     #[test]
@@ -434,7 +504,7 @@ mod tests {
         let other = scratch.mkdir("other");
         assert!(scratch.store().add(&listed).expect("adding should work"));
 
-        assert_eq!(granted(&other, &scratch.env(None)), Ok(false));
+        assert_eq!(granted(&other, &scratch.env(None)), Ok(Grant::Untrusted));
     }
 
     #[test]
@@ -448,7 +518,10 @@ mod tests {
                 .expect("adding should work")
         );
 
-        assert_eq!(granted(&worktree.join("sub"), &scratch.env(None)), Ok(true));
+        assert_eq!(
+            granted(&worktree.join("sub"), &scratch.env(None)),
+            Ok(Grant::Trusted)
+        );
     }
 
     #[test]
@@ -462,7 +535,7 @@ mod tests {
                 .expect("adding should work")
         );
 
-        assert_eq!(granted(&worktree, &scratch.env(None)), Ok(false));
+        assert_eq!(granted(&worktree, &scratch.env(None)), Ok(Grant::Untrusted));
     }
 
     #[test]
@@ -484,9 +557,15 @@ mod tests {
         )
         .expect("the forged .git file should be writable");
 
-        assert_eq!(granted(&worktree, &scratch.env(None)), Ok(true));
-        assert_eq!(granted(&forged_common, &scratch.env(None)), Ok(false));
-        assert_eq!(granted(&forged_worktree, &scratch.env(None)), Ok(false));
+        assert_eq!(granted(&worktree, &scratch.env(None)), Ok(Grant::Trusted));
+        assert_eq!(
+            granted(&forged_common, &scratch.env(None)),
+            Ok(Grant::Untrusted)
+        );
+        assert_eq!(
+            granted(&forged_worktree, &scratch.env(None)),
+            Ok(Grant::Untrusted)
+        );
     }
 
     #[test]
@@ -499,8 +578,8 @@ mod tests {
         symlink(worktree.join(".git"), forged.join(".git"))
             .expect("the symlink should be creatable");
 
-        assert_eq!(granted(&worktree, &scratch.env(None)), Ok(true));
-        assert_eq!(granted(&forged, &scratch.env(None)), Ok(false));
+        assert_eq!(granted(&worktree, &scratch.env(None)), Ok(Grant::Trusted));
+        assert_eq!(granted(&forged, &scratch.env(None)), Ok(Grant::Untrusted));
     }
 
     #[test]
@@ -518,7 +597,7 @@ mod tests {
         )
         .expect("commondir should be writable");
 
-        assert_eq!(granted(&forged, &scratch.env(None)), Ok(false));
+        assert_eq!(granted(&forged, &scratch.env(None)), Ok(Grant::Untrusted));
     }
 
     #[test]
@@ -537,7 +616,7 @@ mod tests {
             .expect("commondir should be writable");
         symlink(&forged, &listed).expect("the symlink should be creatable");
 
-        assert_eq!(granted(&forged, &scratch.env(None)), Ok(false));
+        assert_eq!(granted(&forged, &scratch.env(None)), Ok(Grant::Untrusted));
     }
 
     #[test]
@@ -571,7 +650,7 @@ mod tests {
         }
         assert_eq!(
             result,
-            Ok(Ok(false)),
+            Ok(Ok(Grant::Untrusted)),
             "granted() blocked on or misjudged a FIFO"
         );
     }
@@ -650,7 +729,7 @@ mod tests {
         let scratch = Scratch::new();
         let root = scratch.mkdir("root");
 
-        assert_eq!(granted(&root, &scratch.env(None)), Ok(false));
+        assert_eq!(granted(&root, &scratch.env(None)), Ok(Grant::Untrusted));
         assert!(!scratch.store().file.exists());
     }
 
@@ -674,7 +753,7 @@ mod tests {
         fs::write(&store.file, format!("{relative}\n\nroot\n"))
             .expect("the store should be writable");
 
-        assert_eq!(granted(&root, &scratch.env(None)), Ok(false));
+        assert_eq!(granted(&root, &scratch.env(None)), Ok(Grant::Untrusted));
         assert!(store.add(&other).expect("adding should work"));
         assert_eq!(
             fs::read_to_string(&store.file).expect("the store should be readable"),
@@ -701,7 +780,7 @@ mod tests {
             store.revoke(&listed).expect("revoking should work"),
             Some(listed.clone())
         );
-        assert_eq!(granted(&listed, &scratch.env(None)), Ok(false));
+        assert_eq!(granted(&listed, &scratch.env(None)), Ok(Grant::Untrusted));
     }
 
     #[test]
@@ -709,10 +788,123 @@ mod tests {
         let scratch = Scratch::new();
         let root = scratch.mkdir("root");
 
-        assert_eq!(granted(&root, &scratch.env(Some("1"))), Ok(true));
-        assert_eq!(granted(&root, &scratch.env(Some("0"))), Ok(false));
-        assert_eq!(granted(&root, &scratch.env(Some(""))), Ok(false));
-        assert_eq!(granted(&root, &scratch.env(None)), Ok(false));
+        assert_eq!(granted(&root, &scratch.env(Some("1"))), Ok(Grant::Trusted));
+        assert_eq!(
+            granted(&root, &scratch.env(Some("0"))),
+            Ok(Grant::TurnedOff)
+        );
+        assert_eq!(granted(&root, &scratch.env(Some(""))), Ok(Grant::Untrusted));
+        assert_eq!(granted(&root, &scratch.env(None)), Ok(Grant::Untrusted));
+    }
+
+    #[test]
+    fn supdoc_trust_0_overrides_a_listed_root_and_empty_or_unset_consult_the_store() {
+        let scratch = Scratch::new();
+        let root = scratch.mkdir("root");
+        assert!(scratch.store().add(&root).expect("adding should work"));
+
+        assert_eq!(
+            granted(&root, &scratch.env(Some("0"))),
+            Ok(Grant::TurnedOff)
+        );
+        assert_eq!(granted(&root, &scratch.env(Some(""))), Ok(Grant::Trusted));
+        assert_eq!(granted(&root, &scratch.env(None)), Ok(Grant::Trusted));
+        assert_eq!(granted(&root, &scratch.env(Some("1"))), Ok(Grant::Trusted));
+    }
+
+    #[test]
+    fn adding_home_an_ancestor_of_home_or_the_filesystem_root_is_refused() {
+        let scratch = Scratch::new();
+        let home = scratch.mkdir("home");
+        let store = scratch.store();
+
+        for broad in [home.clone(), scratch.real(), PathBuf::from("/")] {
+            let refused = store.add(&broad);
+            assert!(
+                matches!(&refused, Err(AddError::Broad(real)) if *real == broad),
+                "{} should be refused as too broad: {refused:?}",
+                broad.display()
+            );
+        }
+        assert!(
+            !store
+                .file
+                .parent()
+                .expect("the store should have a directory")
+                .exists(),
+            "a refused root should leave no store behind"
+        );
+        assert!(store.add(&home.join("..").join("home")).is_err());
+        assert!(
+            store
+                .add(&scratch.mkdir("home/project"))
+                .expect("adding should work")
+        );
+    }
+
+    #[test]
+    fn without_a_usable_home_only_the_filesystem_root_is_refused() {
+        let scratch = Scratch::new();
+        let unresolved = scratch.store();
+        let mut unset = scratch.store();
+        unset.home = None;
+
+        assert!(matches!(
+            unset.add(Path::new("/")),
+            Err(AddError::Broad(real)) if real == Path::new("/")
+        ));
+        assert_eq!(unset.broad(), [PathBuf::from("/")]);
+        assert_eq!(unresolved.broad(), [PathBuf::from("/")]);
+        assert!(unresolved.add(&scratch.real()).expect("adding should work"));
+    }
+
+    #[test]
+    fn a_home_that_is_a_linked_worktree_of_a_trusted_repo_is_not_trusted() {
+        let scratch = Scratch::new();
+        let (repo, worktree) = repo_with_worktree(&scratch);
+        assert!(scratch.store().add(&repo).expect("adding should work"));
+        let env = TrustEnv {
+            home: Some(worktree.clone().into()),
+            ..scratch.env(None)
+        };
+
+        assert_eq!(granted(&repo, &env), Ok(Grant::Trusted));
+        assert_eq!(
+            granted(&worktree, &env),
+            Ok(Grant::Untrusted),
+            "HOME should not inherit its repository's trust as a linked worktree"
+        );
+    }
+
+    #[test]
+    fn a_hand_listed_home_or_filesystem_root_grants_nothing() {
+        let scratch = Scratch::new();
+        let home = scratch.mkdir("home");
+        let project = scratch.mkdir("home/project");
+        let store = scratch.store();
+        fs::create_dir_all(
+            store
+                .file
+                .parent()
+                .expect("the store should have a directory"),
+        )
+        .expect("the store directory should be creatable");
+        fs::write(
+            &store.file,
+            format!("{}\n{}\n/\n", home.display(), scratch.real().display()),
+        )
+        .expect("the store should be writable");
+
+        assert_eq!(granted(&home, &scratch.env(None)), Ok(Grant::Untrusted));
+        assert_eq!(
+            granted(&scratch.real(), &scratch.env(None)),
+            Ok(Grant::Untrusted)
+        );
+        assert_eq!(
+            granted(Path::new("/"), &scratch.env(None)),
+            Ok(Grant::Untrusted)
+        );
+        assert_eq!(granted(&project, &scratch.env(None)), Ok(Grant::Untrusted));
     }
 
     #[test]
@@ -725,7 +917,8 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "`SUPDOC_TRUST` is `yes`, which supdoc doesn't accept: set it to `1` to trust this \
-             run, or to `0` or empty (or unset it) to leave trust to `supdoc trust`"
+             run, to `0` to turn trust off for this run, or leave it empty (or unset it) to leave \
+             trust to `supdoc trust`"
         );
     }
 
