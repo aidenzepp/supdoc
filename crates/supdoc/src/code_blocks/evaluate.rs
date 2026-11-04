@@ -966,7 +966,7 @@ fn rust_refusal(
     }
     let scan = record.pending.as_ref().map_or(Scan::Clean, |pending| {
         if compiles {
-            rust::before_compiling(&pending.input)
+            rust::before_compiling(&pending.input, rust.edition_of(record))
         } else {
             rust::compile_time_read(&pending.input)
         }
