@@ -18,10 +18,7 @@ fn sort_by_priority(tasks: &mut [Task]) {
 }
 
 // Impure and honest: external output is an explicit capability.
-fn write_receipt(
-    output: &mut impl Write,
-    receipt: &Receipt,
-) -> io::Result<()> {
+fn write_receipt(output: &mut impl Write, receipt: &Receipt) -> io::Result<()> {
     writeln!(output, "{receipt}")
 }
 
@@ -58,11 +55,7 @@ The environmental adapter owns obtaining time. The rule receives an ordinary con
 A generator that consumes randomness across many operations legitimately accepts an RNG:
 
 ```rust
-fn populate<R: Rng + ?Sized>(
-    world: &mut ParticleWorld,
-    count: usize,
-    rng: &mut R,
-) {
+fn populate<R: Rng + ?Sized>(world: &mut ParticleWorld, count: usize, rng: &mut R) {
     for _ in 0..count {
         world.push(Particle::new(random_velocity(rng)));
     }
@@ -124,10 +117,7 @@ fn cross(left: UnitVec3, right: UnitVec3) -> Vec3 {
     left.into_inner().cross(right.into_inner())
 }
 
-fn normalized_cross(
-    left: UnitVec3,
-    right: UnitVec3,
-) -> Result<UnitVec3, UnitVec3Error> {
+fn normalized_cross(left: UnitVec3, right: UnitVec3) -> Result<UnitVec3, UnitVec3Error> {
     UnitVec3::try_new(cross(left, right))
 }
 ```
@@ -174,10 +164,7 @@ If the rule were meaningful only inside `PortPool` and elements never crossed it
 ## Preserve the Transaction Boundary
 
 ```rust
-fn transfer(
-    mut transaction: Transaction<'_>,
-    command: Transfer,
-) -> Result<Receipt, TransferError> {
+fn transfer(mut transaction: Transaction<'_>, command: Transfer) -> Result<Receipt, TransferError> {
     let accounts = transaction.lock_accounts(command.from, command.to)?;
     let plan = plan_transfer(&accounts, &command)?;
 
@@ -205,7 +192,7 @@ The first operation only traverses values. The second honestly asks for contiguo
 
 ## Use a Cohesive Parameter Object
 
-```rust
+```rust ignore(the struct is followed by a top-level set_timer call, which only parses inside a fn)
 struct TimerOptions {
     id: TimerId,
     interval: Duration,
@@ -226,11 +213,7 @@ The fields describe one timer policy. Enums replace positional booleans and rule
 ## Keep Domain Intent at One Level
 
 ```rust
-fn is_asset_of_type(
-    &self,
-    name: &AssetName,
-    expected: AssetType,
-) -> bool {
+fn is_asset_of_type(&self, name: &AssetName, expected: AssetType) -> bool {
     self.types_by_name
         .get(name)
         .is_some_and(|asset_type| *asset_type == expected)
@@ -242,10 +225,7 @@ fn is_asset_of_type(
 ## Stream Results That Should Not Be Materialized
 
 ```rust
-fn write_permutations(
-    input: &str,
-    output: &mut impl Write,
-) -> io::Result<()> {
+fn write_permutations(input: &str, output: &mut impl Write) -> io::Result<()> {
     for permutation in permutations(input) {
         writeln!(output, "{permutation}")?;
     }

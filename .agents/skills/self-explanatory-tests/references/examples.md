@@ -25,8 +25,8 @@ mod tests {
             Account::new("second", true),
         ];
 
-        let selected = select_first_enabled(&accounts)
-            .expect("the fixture should contain an enabled account");
+        let selected =
+            select_first_enabled(&accounts).expect("the fixture should contain an enabled account");
 
         assert_eq!(selected.id(), "first");
     }
@@ -39,7 +39,7 @@ The test names the behavior, uses visible setup, asserts the observable result, 
 
 When the default assertion would hide the useful process output, include it:
 
-```rust
+```rust ignore(statements only: assertions from a CLI test body; command is built before this excerpt)
 let output = command
     .output()
     .expect("the compiled CLI should start successfully");
@@ -62,7 +62,7 @@ The failure explains the contract, observed status, and captured evidence. It do
 
 Keep the product error contract separate from the message that helps a developer repair a failed test:
 
-```rust
+```rust ignore(statements only: a test body checking the error code and message of parse_limit)
 let error = parse_limit("500")
     .expect_err("a limit above the documented maximum should be rejected");
 
@@ -87,10 +87,12 @@ Protect the violated behavior rather than the internal helper that caused it:
 ```rust
 #[test]
 fn rejects_an_end_before_the_start() {
-    let error = TimeWindow::new(20, 10)
-        .expect_err("an end before the start should be rejected");
+    let error = TimeWindow::new(20, 10).expect_err("an end before the start should be rejected");
 
-    assert_eq!(error, TimeWindowError::EndBeforeStart { start: 20, end: 10 });
+    assert_eq!(
+        error,
+        TimeWindowError::EndBeforeStart { start: 20, end: 10 }
+    );
 }
 ```
 
@@ -100,7 +102,7 @@ Before fixing the bug, run this test and confirm it fails because the invalid wi
 
 When many callers require the same precondition, move it into a type and test the enforcement boundary:
 
-```rust
+```rust ignore(statements only: a test body for the UnitVec3 constructor)
 let direction = UnitVec3::try_new(Vec3::new(3.0, 4.0, 0.0))
     .expect("the finite nonzero fixture should define a unit direction");
 
@@ -120,7 +122,7 @@ Also test non-finite input, very large and subnormal finite components, every op
 
 Prefer passing the needed value over inventing an interface:
 
-```rust
+```rust ignore(statements only: a test body for session expiry at the deadline)
 let status = session.status_at(deadline);
 
 assert_eq!(
@@ -142,7 +144,7 @@ This is stronger than injecting an HTTP client or application-wide service conta
 
 An interaction assertion is appropriate when the interaction is the promise:
 
-```rust
+```rust ignore(statements only: a test body for the charge count of retry_payment)
 let result = retry_payment(&gateway, payment.clone());
 
 assert_eq!(result, Ok(PaymentStatus::AlreadyCompleted));
@@ -175,8 +177,8 @@ use example::Config;
 
 #[test]
 fn public_api_reports_the_missing_required_field() {
-    let error = Config::parse("port = 8080")
-        .expect_err("configuration without a name should be rejected");
+    let error =
+        Config::parse("port = 8080").expect_err("configuration without a name should be rejected");
 
     assert_eq!(error.field(), "name");
     assert_eq!(error.reason(), "required");
@@ -189,7 +191,7 @@ Use integration tests for public or process-level contracts, not merely to place
 
 A builder should make important state explicit and reject incomplete fixtures early:
 
-```rust
+```rust ignore(statements only: one fixture-builder chain from a test body)
 let fixture = AccountFixture::new()
     .with_id("account-1")
     .enabled(true)
@@ -203,7 +205,7 @@ The builder removes hidden defaults from each test without hiding the scenario t
 
 For a repository contract, prefer a real temporary repository over a call-count mock:
 
-```rust
+```rust ignore(statements only: a test body using a temporary repository)
 let directory = tempfile::tempdir()
     .expect("creating an isolated repository directory should succeed");
 let repository = Repository::create(directory.path())

@@ -110,10 +110,7 @@ The permutation logic cannot be reused for a file, network stream, search, or te
 ### Bounded materialization when the complete result is the contract
 
 ```rust
-fn all_permutations(
-    input: &str,
-    result_limit: usize,
-) -> Result<Vec<String>, TooManyPermutations> {
+fn all_permutations(input: &str, result_limit: usize) -> Result<Vec<String>, TooManyPermutations> {
     let mut results = Vec::new();
 
     for permutation in PermutationState::new(input) {
@@ -147,10 +144,7 @@ fn permutations(input: &str) -> PermutationState<'_> {
     PermutationState::new(input)
 }
 
-fn write_permutations(
-    input: &str,
-    output: &mut impl Write,
-) -> io::Result<()> {
+fn write_permutations(input: &str, output: &mut impl Write) -> io::Result<()> {
     for permutation in permutations(input) {
         writeln!(output, "{permutation}")?;
     }
@@ -165,7 +159,7 @@ A callback is one explicit consumer-injection shape. In Rust, an iterator often 
 
 ### Non-example
 
-```rust
+```rust ignore(the impl is followed by a top-level populate call, which only parses inside a fn)
 impl ParticleWorld {
     fn populate(&mut self, count: usize) {
         let mut rng = rand::rng();
@@ -189,7 +183,7 @@ world.populate(42);
 
 ### Honest Rust version
 
-```rust
+```rust ignore(the impl is followed by the seeded call site, which only parses inside a fn returning Result)
 impl ParticleWorld {
     fn populate<R: Rng + ?Sized>(
         &mut self,
@@ -215,7 +209,7 @@ world.populate(42, &mut rng);
 
 Production selects an unpredictable seed at the boundary and exposes entropy acquisition failure. Tests, simulations, and bug reproductions select a known seed with a named portable algorithm:
 
-```rust
+```rust ignore(test body only: seeding, populate and the assertion belong to an unshown test fn)
 let mut rng = ChaCha12Rng::seed_from_u64(0x5EED);
 let mut world = ParticleWorld::default();
 
@@ -230,7 +224,7 @@ This is dependency injection without a DI framework or repository-specific RNG t
 
 ### Non-example
 
-```rust
+```rust ignore(one call-site expression showing positional primitives and Booleans)
 set_timer(None, "refresh", 5.0, true, false, true)?;
 ```
 
@@ -238,7 +232,7 @@ The call site does not identify the time unit or what any Boolean means.
 
 ### Better
 
-```rust
+```rust ignore(one call-site expression; set_timer and TimerOptions are defined elsewhere)
 set_timer(TimerOptions {
     context: None,
     id: TimerId::new("refresh")?,
@@ -295,7 +289,7 @@ Do not choose the weakest type merely because it compiles. Ask for `&[T]`, `Vec<
 
 ### Non-example
 
-```rust
+```rust ignore(call-site statements showing the initialize-before-run ordering hazard)
 let mut system = System::new();
 system.initialize()?;
 
@@ -345,7 +339,7 @@ fn update_shared_state() {
 
 ### Better
 
-```rust
+```rust ignore(the fn is followed by its call site, which only parses inside a fn returning Result)
 fn update_shared_state(
     state: &mut MutexGuard<'_, SharedState>,
 ) {
@@ -365,10 +359,7 @@ The guard proves that the lock remains held for the call. In many Rust designs, 
 ### Non-example
 
 ```rust
-fn reflect(
-    incident: Vec3,
-    normal: Vec3,
-) -> Result<Vec3, ReflectError> {
+fn reflect(incident: Vec3, normal: Vec3) -> Result<Vec3, ReflectError> {
     if !is_unit_length(normal) {
         return Err(ReflectError::NormalNotNormalized);
     }
@@ -473,11 +464,7 @@ struct AssetCatalog {
 }
 
 impl AssetCatalog {
-    fn insert(
-        &mut self,
-        name: AssetName,
-        asset_type: AssetType,
-    ) -> Option<AssetType> {
+    fn insert(&mut self, name: AssetName, asset_type: AssetType) -> Option<AssetType> {
         self.types_by_name.insert(name, asset_type)
     }
 
@@ -485,11 +472,7 @@ impl AssetCatalog {
         self.types_by_name.get(name).copied()
     }
 
-    fn is_asset_of_type(
-        &self,
-        name: &AssetName,
-        expected: AssetType,
-    ) -> bool {
+    fn is_asset_of_type(&self, name: &AssetName, expected: AssetType) -> bool {
         self.asset_type(name) == Some(expected)
     }
 }

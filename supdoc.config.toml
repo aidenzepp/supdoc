@@ -1,0 +1,7 @@
+include = [".agents/skills/**"]
+
+[features.code-blocks]
+
+[features.code-blocks.rust]
+
+[features.code-blocks.shell]
