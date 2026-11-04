@@ -289,7 +289,7 @@ fn removed_lint<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Opt
 ///
 /// # Errors
 ///
-/// The deserializer's error for any other value; `"run"` is named as arriving with phase 6.
+/// The deserializer's error for any other value; `"run"` is named as not supported yet.
 fn tier<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Tier>, D::Error> {
     use serde::Deserialize as _;
     use serde::de::Error;
@@ -301,7 +301,7 @@ fn tier<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Tier
         "static" => Ok(Some(Tier::Static)),
         "project" => Ok(Some(Tier::Project)),
         "run" => Err(D::Error::custom(format!(
-            "`tier = \"run\"` arrives with phase 6 of code-blocks; for now {accepted}"
+            "`tier = \"run\"` isn't supported yet; for now {accepted}"
         ))),
         other => Err(D::Error::custom(format!(
             "`{other}` isn't a tier supdoc knows; {accepted}"
@@ -1251,11 +1251,12 @@ mod tests {
     }
 
     #[test]
-    fn tier_run_is_refused_saying_it_arrives_with_phase_6() {
+    fn tier_run_is_refused_saying_running_is_not_supported_yet() {
         let message = refused_tier("\"run\"");
 
         assert!(
-            message.contains("phase 6") && message.contains("\"static\" or \"project\""),
+            message.contains("isn't supported yet")
+                && message.contains("\"static\" or \"project\""),
             "got {message}"
         );
     }

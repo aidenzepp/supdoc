@@ -203,7 +203,8 @@ edition = "2021"         # Rust also takes `edition`; shell takes `dialect` ("ba
 ```
 
 A table for a tool the language doesn't select, or a key or value its tool doesn't accept, is a config
-error. A step that's off counts as `format off` or `lint off` in the summary; a step that was due but
+error. A step a config table sets to `"off"` counts as `format off` or `lint off` in the summary, and one an
+author marks `format(off: ...)` or `lint(off: ...)` counts as `format skipped` or `lint skipped`; a step that was due but
 didn't run, such as clippy's, which is project tier, counts as `lint not run` with its reason.
 
 A Rust snippet that needs surrounding code to make sense takes one of three explicit forms:
