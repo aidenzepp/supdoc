@@ -1,43 +1,9 @@
-//! Python's format and lint steps.
-
-use std::ffi::OsString;
-use std::path::Path;
+//! The readers of Python's tools' output: ruff's JSON diagnostics, and ruff's and black's syntax
+//! errors.
 
 use super::format::{ParseError, first_line};
-use super::lint::Diagnostic;
-use super::tools::Tool;
-
-/// The rules `ruff check` leaves off for a block, which a snippet breaks for lack of context:
-/// undefined names, unused imports and unused variables.
-const RELAXED: &str = "F821,F401,F841";
-
-/// The `index`th block (1-based) of `doc`, the doc's absolute path, as a Python tool sees it:
-/// `<doc dir>/<doc file name>.<index>.py`, so the tool finds its config walking up from the doc's
-/// real directory.
-fn virtual_path(doc: &Path, index: usize) -> OsString {
-    let mut name = doc.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".{index}.py"));
-    doc.with_file_name(name).into_os_string()
-}
-
-/// `ruff check`'s arguments for the `index`th block (1-based) of `doc`, the doc's absolute path:
-/// the block on stdin under its virtual path (see [`virtual_path`]), JSON diagnostics, no cache,
-/// the snippet relaxations ignored, and never `--fix`. `None` for any other tool.
-#[must_use]
-pub(crate) fn lint_args(tool: &Tool, doc: &Path, index: usize) -> Option<Vec<OsString>> {
-    (tool.name == "ruff").then(|| {
-        vec![
-            OsString::from("check"),
-            OsString::from("--no-cache"),
-            OsString::from("--output-format=json"),
-            OsString::from("--stdin-filename"),
-            virtual_path(doc, index),
-            OsString::from("--ignore"),
-            OsString::from(RELAXED),
-            OsString::from("-"),
-        ]
-    })
-}
+use super::lint::{self, Diagnostic};
+use super::runner::{Failure, Ran};
 
 /// One entry of `ruff check --output-format=json`'s array.
 #[derive(serde::Deserialize)]
@@ -77,34 +43,29 @@ pub(crate) fn diagnostics(stdout: &[u8]) -> Option<Vec<Diagnostic>> {
     )
 }
 
-/// `ruff format` or `black`'s arguments for the `index`th block (1-based) of `doc`, the doc's
-/// absolute path, as chosen by `tool`: the block arrives on stdin under its virtual path (see
-/// [`virtual_path`]). Neither writes a file or, for ruff, a cache. `None` for any other tool.
+/// Judges a `ruff check` run as [`lint::judge`] does, reading its stdout as ruff's JSON array.
+/// `input` isn't needed: ruff counts columns in characters.
 #[must_use]
-pub(crate) fn format_args(tool: &Tool, doc: &Path, index: usize) -> Option<Vec<OsString>> {
-    let virtual_path = virtual_path(doc, index);
-    let mut args: Vec<OsString> = match tool.name {
-        "ruff-format" => vec!["format".into(), "--no-cache".into()],
-        "black" => vec!["--quiet".into()],
-        _ => return None,
-    };
-    args.extend([
-        OsString::from("--stdin-filename"),
-        virtual_path,
-        OsString::from("-"),
-    ]);
-    Some(args)
+pub(crate) fn lint_verdict(_input: &str, result: Result<Ran, Failure>) -> lint::Verdict {
+    lint::judge(result, diagnostics)
 }
 
-/// `tool`'s syntax-error report in `stderr`: ruff's "Failed to parse <path>:L:C: ..." or black's
-/// "Cannot parse: L:C: ...". `None` for any other stderr.
+/// `ruff format`'s syntax-error report in `stderr`: "Failed to parse <path>:L:C: ...". `None`
+/// for any other stderr.
 #[must_use]
-pub(crate) fn parse_error(tool: &Tool, stderr: &str) -> Option<ParseError> {
-    let marker = match tool.name {
-        "ruff-format" => "Failed to parse",
-        "black" => "Cannot parse",
-        _ => return None,
-    };
+pub(crate) fn ruff_parse_error(stderr: &str) -> Option<ParseError> {
+    parse_error_after("Failed to parse", stderr)
+}
+
+/// `black`'s syntax-error report in `stderr`: "Cannot parse: L:C: ...". `None` for any other
+/// stderr.
+#[must_use]
+pub(crate) fn black_parse_error(stderr: &str) -> Option<ParseError> {
+    parse_error_after("Cannot parse", stderr)
+}
+
+/// The syntax-error report in `stderr` that follows `marker`, at the first `L:C` on its line.
+fn parse_error_after(marker: &str, stderr: &str) -> Option<ParseError> {
     let (_, rest) = stderr.split_once(marker)?;
     Some(ParseError {
         line: first_line(rest.lines().next().unwrap_or_default()),
@@ -113,62 +74,14 @@ pub(crate) fn parse_error(tool: &Tool, stderr: &str) -> Option<ParseError> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
-    use super::{diagnostics, format_args, lint_args, parse_error};
+    use super::{black_parse_error, diagnostics, ruff_parse_error};
     use crate::code_blocks::format::ParseError;
     use crate::code_blocks::lint::Diagnostic;
-    use crate::code_blocks::tools::TOOLS;
-
-    fn args_of(name: &str, index: usize) -> Option<Vec<std::ffi::OsString>> {
-        let tool = TOOLS
-            .iter()
-            .find(|tool| tool.name == name)
-            .expect("the tool table should list the formatter");
-        format_args(tool, Path::new("/p/docs/a.md"), index)
-    }
-
-    #[test]
-    fn ruff_formats_stdin_under_the_blocks_virtual_path_without_a_cache() {
-        assert_eq!(
-            args_of("ruff-format", 2).expect("ruff-format has a format step"),
-            [
-                "format",
-                "--no-cache",
-                "--stdin-filename",
-                "/p/docs/a.md.2.py",
-                "-"
-            ]
-        );
-    }
-
-    #[test]
-    fn black_formats_stdin_quietly_under_the_blocks_virtual_path() {
-        assert_eq!(
-            args_of("black", 1).expect("black has a format step"),
-            ["--quiet", "--stdin-filename", "/p/docs/a.md.1.py", "-"]
-        );
-    }
-
-    #[test]
-    fn no_other_tool_gets_python_arguments() {
-        assert_eq!(args_of("shfmt", 1), None);
-    }
-
-    fn tool(name: &str) -> &'static crate::code_blocks::tools::Tool {
-        TOOLS
-            .iter()
-            .find(|tool| tool.name == name)
-            .expect("the tool table should list the formatter")
-    }
 
     #[test]
     fn ruffs_failed_to_parse_is_a_parse_error_at_its_line() {
         assert_eq!(
-            parse_error(
-                tool("ruff-format"),
-                "error: Failed to parse /p/a.md.1.py:4:7: Expected an expression\n"
-            ),
+            ruff_parse_error("error: Failed to parse /p/a.md.1.py:4:7: Expected an expression\n"),
             Some(ParseError { line: Some(3) })
         );
     }
@@ -176,42 +89,14 @@ mod tests {
     #[test]
     fn blacks_cannot_parse_is_a_parse_error_at_its_line() {
         assert_eq!(
-            parse_error(
-                tool("black"),
-                "error: cannot format /p/a.md.1.py: Cannot parse: 2:4: x = (\n"
-            ),
+            black_parse_error("error: cannot format /p/a.md.1.py: Cannot parse: 2:4: x = (\n"),
             Some(ParseError { line: Some(1) })
         );
     }
 
     #[test]
     fn other_stderr_is_not_a_parse_error() {
-        assert_eq!(parse_error(tool("black"), "error: boom\n"), None);
-    }
-
-    #[test]
-    fn ruff_checks_stdin_under_the_virtual_path_with_the_relaxations_and_no_fix() {
-        let args =
-            lint_args(tool("ruff"), Path::new("/p/docs/a.md"), 2).expect("ruff has a lint step");
-
-        assert_eq!(
-            args,
-            [
-                "check",
-                "--no-cache",
-                "--output-format=json",
-                "--stdin-filename",
-                "/p/docs/a.md.2.py",
-                "--ignore",
-                "F821,F401,F841",
-                "-"
-            ]
-        );
-        assert!(!args.iter().any(|arg| arg == "--fix"), "{args:?}");
-        assert_eq!(
-            lint_args(tool("ruff-format"), Path::new("/p/a.md"), 1),
-            None
-        );
+        assert_eq!(black_parse_error("error: boom\n"), None);
     }
 
     #[test]

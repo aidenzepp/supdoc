@@ -1,12 +1,18 @@
-//! The tools supdoc knows how to call on a block, the environment they get, and finding each
-//! one's binary on `PATH`.
+//! The tool cartridges supdoc knows how to call on a block, the environment they get, and
+//! finding each one's binary on `PATH`.
 //!
-//! A tool is chosen only by its name in [`TOOLS`]; no path or command ever comes from config.
+//! A tool is chosen only by its name in [`CARTRIDGES`]; no path or command ever comes from
+//! config.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-use crate::config::code_blocks::Language;
+use crate::config::code_blocks::{Dialect, Edition, Language};
+
+use super::format::ParseError;
+use super::lint;
+use super::runner::{Failure, Ran};
+use super::{python, rust, shell};
 
 /// The variables a tool gets from supdoc's own environment, and no others.
 const PASSED: [&str; 5] = [
@@ -65,22 +71,58 @@ pub(crate) enum Step {
     Lint,
 }
 
-/// What a tool loads, which decides whether it may run in a checkout supdoc doesn't trust.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What a tool loads, which decides whether it may run in a checkout supdoc doesn't trust. The
+/// tiers are ordered: a tool above [`Tier::Static`] never runs until trust exists (phase 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Tier {
     /// Reads only the block on stdin and plain-data config: runs in any checkout.
     Static,
+    /// Compiles the block, so it needs a trusted project.
+    Project,
 }
 
-/// One tool supdoc knows how to call safely.
+/// What a cartridge's argv is built from: the block's place in its doc and its language's
+/// settings.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Invocation<'run> {
+    /// The doc's absolute path.
+    pub(crate) doc: &'run Path,
+    /// The block's 1-based position among the blocks of its doc.
+    pub(crate) index: usize,
+    /// The Rust edition the block is read as.
+    pub(crate) edition: Edition,
+    /// The shell dialect the block is read as.
+    pub(crate) dialect: Dialect,
+    /// The flags the project contributes, each found inside the root: rustfmt's
+    /// `--config-path`, clippy's `[lints]` levels. Empty for every other tool.
+    pub(crate) project: &'run [OsString],
+    /// Where clippy writes the block's metadata. `None` names no path, which is how a cache key
+    /// names every run of the same block alike.
+    pub(crate) emit: Option<&'run Path>,
+}
+
+/// How a cartridge reads a finished run, which also says which step it does.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Reader {
+    /// A formatter: its syntax-error report in stderr, `None` for any other stderr. The format
+    /// step compares its stdout with the block (see [`super::format::judge`]).
+    Format(fn(&str) -> Option<ParseError>),
+    /// A linter: its verdict on a run over the checked text.
+    Lint(fn(&str, Result<Ran, Failure>) -> lint::Verdict),
+}
+
+/// One tool supdoc knows how to call safely: everything the pipeline needs to look it up, run it
+/// on a block and read the result.
+///
+/// A struct of fn pointers rather than a trait: the seven cartridges are constant data in one
+/// table, chosen by name, with no state of their own, so a trait would add a unit type and an
+/// `impl` per tool and `dyn` dispatch while giving nothing a fn pointer doesn't.
 #[derive(Debug)]
-pub(crate) struct Tool {
+pub(crate) struct ToolCartridge {
     /// The name config uses for it.
     pub(crate) name: &'static str,
     /// The language whose blocks it checks.
     pub(crate) language: Language,
-    /// The check it does.
-    pub(crate) step: Step,
     /// The binary looked up on `PATH`.
     pub(crate) binary: &'static str,
     /// What it loads.
@@ -90,93 +132,297 @@ pub(crate) struct Tool {
     /// The config files it reads, by name at the project root: each one's content is part of
     /// its cached results' key.
     pub(crate) config_files: &'static [&'static str],
+    /// The values its step's mode accepts, in config and in a block attribute.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "CB-33 and CB-34 validate the `lint` and `format` modes against it"
+        )
+    )]
+    pub(crate) modes: &'static [&'static str],
+    /// Its arguments for a block.
+    argv: fn(&Invocation<'_>) -> Vec<OsString>,
+    /// How a run is read.
+    reader: Reader,
 }
 
-/// The known tools. A language's first row for a step is its default for that step.
-pub(crate) const TOOLS: [Tool; 7] = [
-    Tool {
+impl ToolCartridge {
+    /// The check it does.
+    #[must_use]
+    pub(crate) const fn step(&self) -> Step {
+        match self.reader {
+            Reader::Format(_) => Step::Format,
+            Reader::Lint(_) => Step::Lint,
+        }
+    }
+
+    /// Its arguments for the block `invocation` describes.
+    #[must_use]
+    pub(crate) fn args(&self, invocation: &Invocation<'_>) -> Vec<OsString> {
+        (self.argv)(invocation)
+    }
+
+    /// Its syntax-error report in `stderr`. `None` for any other stderr, and always for a
+    /// linter.
+    #[must_use]
+    pub(crate) fn parse_error(&self, stderr: &str) -> Option<ParseError> {
+        match self.reader {
+            Reader::Format(read) => read(stderr),
+            Reader::Lint(_) => None,
+        }
+    }
+
+    /// Its lint verdict on `result`, a run over `input`. A formatter reports no diagnostics, so
+    /// it is judged on its exit alone.
+    #[must_use]
+    pub(crate) fn lint_verdict(&self, input: &str, result: Result<Ran, Failure>) -> lint::Verdict {
+        match self.reader {
+            Reader::Lint(read) => read(input, result),
+            Reader::Format(_) => lint::judge(result, |_| None),
+        }
+    }
+}
+
+/// The values every cartridge's mode accepts today.
+const FULL_OR_OFF: &[&str] = &["full", "off"];
+
+/// The known tools. A language's first cartridge for a step is its default for that step.
+pub(crate) static CARTRIDGES: [ToolCartridge; 7] = [
+    ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
-        step: Step::Format,
         binary: "rustfmt",
         tier: Tier::Static,
         install: "rustup component add rustfmt",
         config_files: &["rustfmt.toml", ".rustfmt.toml"],
+        modes: FULL_OR_OFF,
+        argv: rustfmt_args,
+        reader: Reader::Format(rust::parse_error),
     },
-    Tool {
+    ToolCartridge {
         name: "shfmt",
         language: Language::Shell,
-        step: Step::Format,
         binary: "shfmt",
         tier: Tier::Static,
         install: "go install mvdan.cc/sh/v3/cmd/shfmt@latest",
         config_files: &[".editorconfig"],
+        modes: FULL_OR_OFF,
+        argv: shfmt_args,
+        reader: Reader::Format(shell::parse_error),
     },
-    Tool {
+    ToolCartridge {
         name: "ruff-format",
         language: Language::Python,
-        step: Step::Format,
         binary: "ruff",
         tier: Tier::Static,
         install: "pipx install ruff",
         config_files: &["ruff.toml", ".ruff.toml", "pyproject.toml"],
+        modes: FULL_OR_OFF,
+        argv: ruff_format_args,
+        reader: Reader::Format(python::ruff_parse_error),
     },
-    Tool {
+    ToolCartridge {
         name: "black",
         language: Language::Python,
-        step: Step::Format,
         binary: "black",
         tier: Tier::Static,
         install: "pipx install black",
         config_files: &["pyproject.toml"],
+        modes: FULL_OR_OFF,
+        argv: black_args,
+        reader: Reader::Format(python::black_parse_error),
     },
-    Tool {
+    ToolCartridge {
         name: "ruff",
         language: Language::Python,
-        step: Step::Lint,
         binary: "ruff",
         tier: Tier::Static,
         install: "pipx install ruff",
         config_files: &["ruff.toml", ".ruff.toml", "pyproject.toml"],
+        modes: FULL_OR_OFF,
+        argv: ruff_args,
+        reader: Reader::Lint(python::lint_verdict),
     },
-    Tool {
+    ToolCartridge {
         name: "shellcheck",
         language: Language::Shell,
-        step: Step::Lint,
         binary: "shellcheck",
         tier: Tier::Static,
         install: "cabal install ShellCheck",
         config_files: &[".shellcheckrc"],
+        modes: FULL_OR_OFF,
+        argv: shellcheck_args,
+        reader: Reader::Lint(shell::lint_verdict),
     },
-    Tool {
+    ToolCartridge {
         name: "clippy",
         language: Language::Rust,
-        step: Step::Lint,
         binary: "clippy-driver",
-        tier: Tier::Static,
+        tier: Tier::Project,
         install: "rustup component add clippy",
         config_files: &["clippy.toml", ".clippy.toml", "Cargo.toml"],
+        modes: FULL_OR_OFF,
+        argv: clippy_args,
+        reader: Reader::Lint(rust::lint_verdict),
     },
 ];
 
-/// `language`'s default formatter: its first static format row. No trust exists yet, so only
-/// the static tier is chosen.
+/// `language`'s default formatter: its first format cartridge, whatever its tier.
 #[must_use]
-pub(crate) fn formatter(language: Language) -> Option<&'static Tool> {
+pub(crate) fn formatter(language: Language) -> Option<&'static ToolCartridge> {
     default_for(language, Step::Format)
 }
 
-/// `language`'s default linter: its first static lint row.
+/// `language`'s default linter: its first lint cartridge, whatever its tier. The tier gate
+/// decides whether it runs.
 #[must_use]
-pub(crate) fn linter(language: Language) -> Option<&'static Tool> {
+pub(crate) fn linter(language: Language) -> Option<&'static ToolCartridge> {
     default_for(language, Step::Lint)
 }
 
-/// `language`'s first static row for `step`.
-fn default_for(language: Language, step: Step) -> Option<&'static Tool> {
-    TOOLS
+/// `language`'s first cartridge for `step`.
+fn default_for(language: Language, step: Step) -> Option<&'static ToolCartridge> {
+    CARTRIDGES
         .iter()
-        .find(|tool| tool.language == language && tool.step == step && tool.tier == Tier::Static)
+        .find(|tool| tool.language == language && tool.step() == step)
+}
+
+/// The cartridge named `name` for `language`'s `step`, as config selects it.
+#[must_use]
+pub(crate) fn named(language: Language, step: Step, name: &str) -> Option<&'static ToolCartridge> {
+    CARTRIDGES
+        .iter()
+        .find(|tool| tool.language == language && tool.step() == step && tool.name == name)
+}
+
+/// The `index`th block (1-based) of `doc`, the doc's absolute path, as a tool sees it:
+/// `<doc dir>/<doc file name>.<index>.<extension>`, so the tool finds its config walking up from
+/// the doc's real directory while the block itself arrives on stdin.
+fn virtual_path(doc: &Path, index: usize, extension: &str) -> OsString {
+    let mut name = doc.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{index}.{extension}"));
+    doc.with_file_name(name).into_os_string()
+}
+
+/// `rustfmt`'s arguments: `--edition <year> --emit stdout`, then the project's `--config-path`.
+/// The block arrives on stdin as written; rustfmt takes no stdin file name, so the doc and the
+/// block's index don't appear.
+fn rustfmt_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    ["--edition", invocation.edition.year(), "--emit", "stdout"]
+        .into_iter()
+        .map(OsString::from)
+        .chain(invocation.project.iter().cloned())
+        .collect()
+}
+
+/// `shfmt`'s arguments: `--filename <doc>.<index>.sh` (see [`virtual_path`]), then `-ln
+/// <dialect>`.
+fn shfmt_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    vec![
+        OsString::from("--filename"),
+        virtual_path(invocation.doc, invocation.index, "sh"),
+        OsString::from("-ln"),
+        OsString::from(invocation.dialect.language_name()),
+    ]
+}
+
+/// `ruff format`'s arguments: the block on stdin under its virtual path, no cache.
+fn ruff_format_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    vec![
+        OsString::from("format"),
+        OsString::from("--no-cache"),
+        OsString::from("--stdin-filename"),
+        virtual_path(invocation.doc, invocation.index, "py"),
+        OsString::from("-"),
+    ]
+}
+
+/// `black`'s arguments: quiet, the block on stdin under its virtual path.
+fn black_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    vec![
+        OsString::from("--quiet"),
+        OsString::from("--stdin-filename"),
+        virtual_path(invocation.doc, invocation.index, "py"),
+        OsString::from("-"),
+    ]
+}
+
+/// The rules `ruff check` leaves off for a block, which a snippet breaks for lack of context:
+/// undefined names, unused imports and unused variables.
+const RUFF_RELAXED: &str = "F821,F401,F841";
+
+/// `ruff check`'s arguments: the block on stdin under its virtual path, JSON diagnostics, no
+/// cache, the snippet relaxations ignored, and never `--fix`.
+fn ruff_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    vec![
+        OsString::from("check"),
+        OsString::from("--no-cache"),
+        OsString::from("--output-format=json"),
+        OsString::from("--stdin-filename"),
+        virtual_path(invocation.doc, invocation.index, "py"),
+        OsString::from("--ignore"),
+        OsString::from(RUFF_RELAXED),
+        OsString::from("-"),
+    ]
+}
+
+/// The checks `shellcheck` leaves off for a block, which a snippet breaks for lack of context:
+/// a variable used but never assigned (SC2154), one assigned but never used (SC2034), and a
+/// sourced file it can't follow (SC1091).
+const SHELLCHECK_RELAXED: &str = "SC2154,SC2034,SC1091";
+
+/// `shellcheck`'s arguments: `-s <shell>` for the dialect (POSIX is `sh`, mksh is `ksh`), no rc
+/// file, json1 diagnostics, the snippet relaxations excluded, and the block on stdin. `-x` and
+/// `--external-sources` are never passed (see [`shell`]).
+fn shellcheck_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    let shell = match invocation.dialect {
+        Dialect::Bash => "bash",
+        Dialect::Posix => "sh",
+        Dialect::Mksh => "ksh",
+    };
+    vec![
+        OsString::from("-s"),
+        OsString::from(shell),
+        OsString::from("--norc"),
+        OsString::from("--format=json1"),
+        OsString::from(format!("--exclude={SHELLCHECK_RELAXED}")),
+        OsString::from("-"),
+    ]
+}
+
+/// The lints clippy leaves off for a block, which a snippet breaks for lack of context, as
+/// `-A` flags after the project's own so they win.
+const CLIPPY_RELAXED: [&str; 4] = [
+    "unused",
+    "dead_code",
+    "missing_docs",
+    "clippy::missing_docs_in_private_items",
+];
+
+/// `clippy-driver`'s arguments: `--edition <E> --crate-type lib --emit=metadata=<emit>
+/// --error-format=json`, the project's `lints` flags, the snippet relaxations, and `-` for the
+/// block on stdin. Nothing else from the project: no `--extern`, `-L` or `--cfg`.
+fn clippy_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    let mut metadata = OsString::from("--emit=metadata");
+    if let Some(emit) = invocation.emit {
+        metadata.push("=");
+        metadata.push(emit);
+    }
+    let mut args: Vec<OsString> = vec![
+        "--edition".into(),
+        invocation.edition.year().into(),
+        "--crate-type".into(),
+        "lib".into(),
+        metadata,
+        "--error-format=json".into(),
+    ];
+    args.extend(invocation.project.iter().cloned());
+    for lint in CLIPPY_RELAXED {
+        args.extend(["-A".into(), lint.into()]);
+    }
+    args.push("-".into());
+    args
 }
 
 /// Where a tool's binary was found.
@@ -278,7 +524,281 @@ mod tests {
     use std::os::unix::fs::{PermissionsExt as _, symlink};
     use std::path::Path;
 
-    use super::{Found, ToolEnv, find, search_dirs, under_same_file};
+    use super::{
+        CARTRIDGES, Found, Invocation, Step, Tier, ToolCartridge, ToolEnv, find, search_dirs,
+        under_same_file,
+    };
+    use crate::config::code_blocks::{Dialect, Edition, Language};
+
+    /// The cartridge named `name`.
+    fn cartridge(name: &str) -> &'static ToolCartridge {
+        CARTRIDGES
+            .iter()
+            .find(|tool| tool.name == name)
+            .unwrap_or_else(|| panic!("the cartridges should include {name}"))
+    }
+
+    /// `name`'s arguments for the `index`th block of `/p/docs/a.md`, a 2024 bash block, with
+    /// `project`'s flags and no metadata path.
+    fn args_of(name: &str, index: usize, project: &[OsString]) -> Vec<OsString> {
+        cartridge(name).args(&Invocation {
+            doc: Path::new("/p/docs/a.md"),
+            index,
+            edition: Edition::E2024,
+            dialect: Dialect::Bash,
+            project,
+            emit: None,
+        })
+    }
+
+    #[test]
+    fn each_cartridge_declares_its_language_step_binary_and_tier() {
+        let declared: Vec<_> = CARTRIDGES
+            .iter()
+            .map(|tool| {
+                (
+                    tool.name,
+                    tool.language,
+                    tool.step(),
+                    tool.binary,
+                    tool.tier,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            declared,
+            [
+                (
+                    "rustfmt",
+                    Language::Rust,
+                    Step::Format,
+                    "rustfmt",
+                    Tier::Static
+                ),
+                (
+                    "shfmt",
+                    Language::Shell,
+                    Step::Format,
+                    "shfmt",
+                    Tier::Static
+                ),
+                (
+                    "ruff-format",
+                    Language::Python,
+                    Step::Format,
+                    "ruff",
+                    Tier::Static
+                ),
+                (
+                    "black",
+                    Language::Python,
+                    Step::Format,
+                    "black",
+                    Tier::Static
+                ),
+                ("ruff", Language::Python, Step::Lint, "ruff", Tier::Static),
+                (
+                    "shellcheck",
+                    Language::Shell,
+                    Step::Lint,
+                    "shellcheck",
+                    Tier::Static
+                ),
+                (
+                    "clippy",
+                    Language::Rust,
+                    Step::Lint,
+                    "clippy-driver",
+                    Tier::Project
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_cartridge_accepts_full_and_off() {
+        for tool in &CARTRIDGES {
+            assert_eq!(tool.modes, ["full", "off"], "{}", tool.name);
+        }
+    }
+
+    #[test]
+    fn a_formatter_reads_a_parse_error_and_a_linter_none() {
+        let stderr = "error: expected one of `;`\n --> <stdin>:3:9\n";
+
+        assert!(cartridge("rustfmt").parse_error(stderr).is_some());
+        assert_eq!(cartridge("clippy").parse_error(stderr), None);
+    }
+
+    #[test]
+    fn rustfmt_reads_the_block_as_its_edition_then_the_projects_config_path() {
+        assert_eq!(
+            args_of(
+                "rustfmt",
+                1,
+                &["--config-path".into(), "/p/rustfmt.toml".into()]
+            ),
+            [
+                "--edition",
+                "2024",
+                "--emit",
+                "stdout",
+                "--config-path",
+                "/p/rustfmt.toml"
+            ]
+        );
+    }
+
+    #[test]
+    fn shfmt_names_the_block_by_its_index_then_its_dialect() {
+        let posix = cartridge("shfmt").args(&Invocation {
+            doc: Path::new("/p/docs/a.md"),
+            index: 3,
+            edition: Edition::E2024,
+            dialect: Dialect::Posix,
+            project: &[],
+            emit: None,
+        });
+
+        assert_eq!(posix, ["--filename", "/p/docs/a.md.3.sh", "-ln", "posix"]);
+    }
+
+    #[test]
+    fn ruff_formats_stdin_under_the_blocks_virtual_path_without_a_cache() {
+        assert_eq!(
+            args_of("ruff-format", 2, &[]),
+            [
+                "format",
+                "--no-cache",
+                "--stdin-filename",
+                "/p/docs/a.md.2.py",
+                "-"
+            ]
+        );
+    }
+
+    #[test]
+    fn black_formats_stdin_quietly_under_the_blocks_virtual_path() {
+        assert_eq!(
+            args_of("black", 1, &[]),
+            ["--quiet", "--stdin-filename", "/p/docs/a.md.1.py", "-"]
+        );
+    }
+
+    #[test]
+    fn ruff_checks_stdin_under_the_virtual_path_with_the_relaxations_and_no_fix() {
+        let args = args_of("ruff", 2, &[]);
+
+        assert_eq!(
+            args,
+            [
+                "check",
+                "--no-cache",
+                "--output-format=json",
+                "--stdin-filename",
+                "/p/docs/a.md.2.py",
+                "--ignore",
+                "F821,F401,F841",
+                "-"
+            ]
+        );
+        assert!(!args.iter().any(|arg| arg == "--fix"), "{args:?}");
+    }
+
+    #[test]
+    fn shellcheck_reads_stdin_in_json1_with_no_rc_and_the_relaxations() {
+        let args = args_of("shellcheck", 2, &[]);
+
+        assert_eq!(
+            args,
+            [
+                "-s",
+                "bash",
+                "--norc",
+                "--format=json1",
+                "--exclude=SC2154,SC2034,SC1091",
+                "-"
+            ]
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "-x" || arg == "--external-sources"),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn each_dialect_becomes_shellchecks_shell_flag() {
+        let shell = |dialect| {
+            cartridge("shellcheck")
+                .args(&Invocation {
+                    doc: Path::new("/p/a.md"),
+                    index: 1,
+                    edition: Edition::E2024,
+                    dialect,
+                    project: &[],
+                    emit: None,
+                })
+                .into_iter()
+                .take(2)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(shell(Dialect::Bash), ["-s", "bash"]);
+        assert_eq!(shell(Dialect::Posix), ["-s", "sh"]);
+        assert_eq!(shell(Dialect::Mksh), ["-s", "ksh"]);
+    }
+
+    #[test]
+    fn clippy_gets_the_block_on_stdin_with_its_edition_metadata_path_and_relaxations_last() {
+        let lints = ["-W".into(), "clippy::pedantic".into()];
+        let invocation = Invocation {
+            doc: Path::new("/p/docs/a.md"),
+            index: 1,
+            edition: Edition::E2021,
+            dialect: Dialect::Bash,
+            project: &lints,
+            emit: Some(Path::new("/c/emit/1-0/block.rmeta")),
+        };
+
+        let args = cartridge("clippy").args(&invocation);
+
+        assert_eq!(
+            args,
+            [
+                "--edition",
+                "2021",
+                "--crate-type",
+                "lib",
+                "--emit=metadata=/c/emit/1-0/block.rmeta",
+                "--error-format=json",
+                "-W",
+                "clippy::pedantic",
+                "-A",
+                "unused",
+                "-A",
+                "dead_code",
+                "-A",
+                "missing_docs",
+                "-A",
+                "clippy::missing_docs_in_private_items",
+                "-",
+            ]
+        );
+        for refused in ["--extern", "-L", "--cfg"] {
+            assert!(!args.iter().any(|arg| arg == refused), "{args:?}");
+        }
+        let key = cartridge("clippy").args(&Invocation {
+            emit: None,
+            ..invocation
+        });
+        assert!(
+            key.contains(&"--emit=metadata".into()),
+            "a cache key names no metadata path"
+        );
+    }
 
     /// Writes an executable `#!/bin/sh` stub named `name` in `dir`.
     fn stub(dir: &Path, name: &str) {

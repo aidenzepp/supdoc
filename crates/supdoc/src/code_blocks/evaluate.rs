@@ -32,11 +32,12 @@ use super::info::{
 use super::lint;
 use super::runner::{self, Call, Ran};
 use super::rust::{self, Scan};
-use super::shell;
 use super::source::{self, SourceText, Unresolved};
 use super::states::{self, Excerpt, NotChecked, StepState, Steps, state_of, tag_of};
 use super::toolchain::{self, Refusal, Toolchain};
-use super::tools::{Found, Step, TOOLS, Tool, ToolEnv, find, formatter, linter};
+use super::tools::{
+    Found, Invocation, Step, Tier, ToolCartridge, ToolEnv, find, formatter, linter, named,
+};
 use super::uses::{self, UseState, Written};
 
 pub(crate) use super::states::{BlockState, CodeBlockCounts};
@@ -84,9 +85,9 @@ pub(crate) struct BlockRecord {
     /// The block's 1-based position among the blocks of its doc.
     index: usize,
     /// The formatter the config selects for it, while the block is pending.
-    tool: Option<&'static Tool>,
+    tool: Option<&'static ToolCartridge>,
     /// The linter the config selects for it, while the block is pending and its lint step due.
-    linter: Option<&'static Tool>,
+    linter: Option<&'static ToolCartridge>,
     /// The shell dialect shfmt parses it as and shellcheck checks it as.
     dialect: Dialect,
     /// The edition its `edition20xx` attribute or the config's `edition` names, if either does.
@@ -203,8 +204,7 @@ pub(crate) fn evaluate(
         let language = tag_of(block).map(str::to_owned);
         let mut steps = Steps::of(block, &state, code_blocks);
         let checked = language.as_deref().and_then(Language::from_tag);
-        let (tool, linter) = selected_tools(code_blocks, &steps, checked);
-        let linter = static_tier(linter, &mut steps);
+        let (tool, linter) = selected_tools(code_blocks, &mut steps, checked);
         let pending = (state == BlockState::NotChecked(NotChecked::Pending))
             .then(|| {
                 let file = block.fence.file.as_str();
@@ -280,17 +280,14 @@ impl Evaluation {
             if record.state != BlockState::NotChecked(NotChecked::Pending) {
                 continue;
             }
-            let doc = root.join(record.at.file.as_str());
-            let linter = record
-                .linter
-                .filter(|tool| lint::args(tool, &doc, record.index).is_some());
+            let linter = record.linter;
             let Some(tool) = record.tool.or(linter) else {
                 continue;
             };
             let rust = (tool.language == Language::Rust)
                 .then(|| &*rust_setup.get_or_insert_with(|| RustSetup::read(root)));
             if let Some(rust) = rust {
-                let compiles = linter.is_some_and(|linter| linter.language == Language::Rust);
+                let compiles = linter.is_some_and(|linter| linter.tier == Tier::Project);
                 let refused =
                     rust_refusal(record, rust, compiles, &mut toolchain_warned, &mut slots);
                 if let Some((refused, named)) = refused {
@@ -459,7 +456,7 @@ struct Job {
 /// A tool found on `PATH` to run on a block.
 struct ToolRun {
     /// The tool.
-    tool: &'static Tool,
+    tool: &'static ToolCartridge,
     /// Where it was found on `PATH`.
     program: PathBuf,
 }
@@ -476,28 +473,26 @@ struct StepsRan {
 /// What a lint step gave: its verdict and findings, or why supdoc couldn't run it safely.
 type LintRan = Result<(lint::Verdict, Vec<Finding>), &'static str>;
 
-/// Why a Rust block's lint step doesn't run: clippy compiles the block, so it belongs to the
-/// project tier, which needs trust.
+/// Why a step whose cartridge is above the static tier doesn't run: clippy compiles the block,
+/// so it belongs to the project tier, which needs trust.
 const CLIPPY_NEEDS_TRUST: &str =
     "clippy runs only in the project tier, which needs `supdoc trust` (phase 5)";
 
-/// Whether `linter` compiles the block it lints, so it may run only in the project tier, which
-/// needs trust. Without trust, which doesn't exist yet, it never runs: clippy, the Rust linter.
-/// The gate sits where the linter is chosen, before any scan, cache key or spawn.
-fn needs_trust(linter: &Tool) -> bool {
-    linter.language == Language::Rust && linter.step == Step::Lint
-}
-
-/// `linter` as the static tier allows it: `None` for one that [`needs_trust`], whose lint step
-/// in `steps` then doesn't run, with [`CLIPPY_NEEDS_TRUST`] as its reason.
-fn static_tier(linter: Option<&'static Tool>, steps: &mut Steps) -> Option<&'static Tool> {
-    if linter.is_some_and(needs_trust) {
-        steps.lint = StepState::Unrunnable {
+/// `tool` as the static tier allows it: `None` for a cartridge whose tier is above
+/// [`Tier::Static`], whose `step` then doesn't run, with [`CLIPPY_NEEDS_TRUST`] as its reason.
+/// Trust doesn't exist yet, so such a tool is never run. The gate sits where the tool is
+/// chosen, before any scan, cache key or spawn.
+fn static_tier(
+    tool: Option<&'static ToolCartridge>,
+    step: &mut StepState,
+) -> Option<&'static ToolCartridge> {
+    if tool.is_some_and(|tool| tool.tier > Tier::Static) {
+        *step = StepState::Unrunnable {
             reason: CLIPPY_NEEDS_TRUST,
         };
         return None;
     }
-    linter
+    tool
 }
 
 /// Why clippy didn't run on a block when [`runner::neutral_dir`] found no private working
@@ -596,13 +591,13 @@ struct Session<'run> {
 /// adding `rust`'s config arguments and toolchain variables for a Rust tool:
 /// its verdict and findings, an unformatted block's error carrying the fix to the formatter's
 /// output, or followed by a `code-block-fix-unsafe` warning when [`format::safe_fix`] finds that
-/// output could end the block early. `None` when the block's language has no format step yet or its input
-/// couldn't be read, so it stays pending. A run whose verdict [`format::Verdict::cacheable`]
+/// output could end the block early. `None` when its input couldn't be read, so it stays
+/// pending. A run whose verdict [`format::Verdict::cacheable`]
 /// allows is stored in the cache.
 ///
 /// Effect: reads the cache, runs the tool, killing it at the timeout, and writes the cache.
 fn run_formatter(
-    tool: &Tool,
+    tool: &ToolCartridge,
     program: &Path,
     record: &BlockRecord,
     session: &Session<'_>,
@@ -616,13 +611,14 @@ fn run_formatter(
         .edition
         .or_else(|| rust.map(|rust| rust.edition))
         .unwrap_or(Edition::E2024);
-    let mut args = format::args(tool, &doc, record.index, edition)?;
-    if tool.language == Language::Shell {
-        args.extend(shell::dialect_args(record.dialect));
-    }
-    if let Some(rust) = rust {
-        args.extend(rust.config.iter().cloned());
-    }
+    let args = tool.args(&Invocation {
+        doc: &doc,
+        index: record.index,
+        edition,
+        dialect: record.dialect,
+        project: rust.map_or(&[], |rust| rust.config.as_slice()),
+        emit: None,
+    });
     let vars = rust.map(|rust| rust.toolchain.env()).unwrap_or_default();
     let extra: Vec<(&str, &OsStr)> = vars
         .iter()
@@ -664,29 +660,30 @@ fn run_formatter(
 
 /// Runs `tool`, a linter found at `program`, on `record`'s block as [`cached_run`] does: its
 /// verdict and findings, one `code-block-lint` error per diagnostic or the tool's failure. `None`
-/// when the block's language has no lint step yet or its input couldn't be read. A Rust block
+/// when its input couldn't be read. A Rust block
 /// goes to clippy through [`run_clippy`] with `rust`'s setup.
 ///
 /// Effect: reads the cache, runs the tool, killing it at the timeout, and writes the cache.
 fn run_linter(
-    tool: &Tool,
+    tool: &ToolCartridge,
     program: &Path,
     record: &BlockRecord,
     session: &Session<'_>,
     rust: Option<&RustSetup>,
 ) -> Option<LintRan> {
     let pending = record.pending.as_ref()?;
-    let doc = session.root.join(record.at.file.as_str());
-    let mut args = lint::args(tool, &doc, record.index)?;
     if let Some(rust) = rust {
         return Some(run_clippy(tool, program, record, pending, session, rust));
     }
-    if tool.language == Language::Shell {
-        args = shell::lint_dialect_args(record.dialect)
-            .into_iter()
-            .chain(args)
-            .collect();
-    }
+    let doc = session.root.join(record.at.file.as_str());
+    let args = tool.args(&Invocation {
+        doc: &doc,
+        index: record.index,
+        edition: record.edition.unwrap_or(Edition::E2024),
+        dialect: record.dialect,
+        project: &[],
+        emit: None,
+    });
     let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
     let run = cache::Run {
         tool,
@@ -700,11 +697,7 @@ fn run_linter(
         &run,
         session,
         |call| runner::run(call, session.env, session.root),
-        |result| match tool.language {
-            Language::Shell => shell::judge(tool, &pending.input, result),
-            Language::Python => lint::judge(tool, result),
-            Language::Rust => rust::lint_verdict(result),
-        },
+        |result| tool.lint_verdict(&pending.input, result),
         lint::Verdict::cacheable,
     );
     let findings = lint::findings(
@@ -718,8 +711,8 @@ fn run_linter(
 }
 
 /// Runs `tool`, clippy found at `program`, on `record`'s Rust block alone, read as `pending`, as [`run_linter`]
-/// does: `clippy-driver` with [`rust::clippy_args`] for the block's edition and `rust`'s project
-/// lints, `rust`'s toolchain variables and `CLIPPY_CONF_DIR`, and nothing else from the project.
+/// does: `clippy-driver` with its cartridge's arguments for the block's edition and `rust`'s
+/// project lints, `rust`'s toolchain variables and `CLIPPY_CONF_DIR`, and nothing else from the project.
 /// Its metadata goes to a fresh [`rust::EmitDir`], removed after the run whatever its outcome.
 ///
 /// # Errors
@@ -729,7 +722,7 @@ fn run_linter(
 /// Effect: reads the cache, creates and removes the emit directory, runs clippy, killing it at
 /// the timeout, and writes the cache.
 fn run_clippy(
-    tool: &Tool,
+    tool: &ToolCartridge,
     program: &Path,
     record: &BlockRecord,
     pending: &Pending,
@@ -742,7 +735,15 @@ fn run_clippy(
     }
     let doc = session.root.join(record.at.file.as_str());
     let edition = rust.edition_of(record);
-    let key_args = rust::clippy_args(edition, None, &rust.lints);
+    let invocation = Invocation {
+        doc: &doc,
+        index: record.index,
+        edition,
+        dialect: record.dialect,
+        project: &rust.lints,
+        emit: None,
+    };
+    let key_args = tool.args(&invocation);
     let key_args: Vec<&OsStr> = key_args.iter().map(OsString::as_os_str).collect();
     let mut vars = rust.toolchain.env();
     vars.extend(
@@ -768,7 +769,11 @@ fn run_clippy(
                 "supdoc couldn't create a private directory for its metadata",
             ))
         })?;
-        let args = rust::clippy_args(edition, Some(&emit.file()), &rust.lints);
+        let file = emit.file();
+        let args = tool.args(&Invocation {
+            emit: Some(&file),
+            ..invocation
+        });
         let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
         let result = runner::run(
             &Call {
@@ -785,7 +790,7 @@ fn run_clippy(
         &run,
         session,
         spawn,
-        rust::lint_verdict,
+        |result| tool.lint_verdict(&pending.input, result),
         lint::Verdict::cacheable,
     );
     let findings = lint::findings(
@@ -877,11 +882,9 @@ fn tally(records: &[BlockRecord]) -> CodeBlockCounts {
 
 /// The formatter `code_blocks` selects for `language`: the named one, or the default. `None` when
 /// the language has none.
-fn selected(code_blocks: &CodeBlocks, language: Language) -> Option<&'static Tool> {
+fn selected(code_blocks: &CodeBlocks, language: Language) -> Option<&'static ToolCartridge> {
     match code_blocks.formatter(language) {
-        Some(Choice::Named(name)) => TOOLS.iter().find(|tool| {
-            tool.language == language && tool.step == Step::Format && tool.name == name
-        }),
+        Some(Choice::Named(name)) => named(language, Step::Format, name),
         Some(Choice::Off) | None => formatter(language),
     }
 }
@@ -948,34 +951,38 @@ fn rust_refusal(
     }
 }
 
-/// Looks up each of `tools` on `env`'s `PATH` (once per tool, remembered in `looked_up`), adding
-/// to `slots` the warning for one not found outside `root`, at `at`. Each found tool's run, in
+/// Looks up each of `tools` on `env`'s `PATH` (once per binary, remembered in `looked_up`, so two
+/// tools sharing one binary, such as `ruff-format` and `ruff`, warn once), adding to `slots` the
+/// warning for one not found outside `root`, at `at`. Each found tool's run, in
 /// `tools`' order, and the state for the first one that wasn't, with that tool.
 ///
 /// Effect: reads file metadata along `PATH` and resolves symlinks.
 fn found_runs(
-    tools: [Option<&'static Tool>; 2],
+    tools: [Option<&'static ToolCartridge>; 2],
     looked_up: &mut Vec<(&'static str, Found)>,
     slots: &mut Vec<Slot>,
     env: &ToolEnv,
     root: &Path,
     at: &Location,
-) -> ([Option<ToolRun>; 2], Option<(BlockState, &'static Tool)>) {
+) -> (
+    [Option<ToolRun>; 2],
+    Option<(BlockState, &'static ToolCartridge)>,
+) {
     let mut runs = [None, None];
     let mut refused = None;
     for (run, tool) in runs.iter_mut().zip(tools) {
         let Some(tool) = tool else {
             continue;
         };
-        let found = if let Some((_, found)) = looked_up.iter().find(|(name, _)| *name == tool.name)
-        {
-            found.clone()
-        } else {
-            let found = find(tool.binary, env, root);
-            slots.extend(tool_warning(tool, &found, at).map(Slot::Found));
-            looked_up.push((tool.name, found.clone()));
-            found
-        };
+        let found =
+            if let Some((_, found)) = looked_up.iter().find(|(binary, _)| *binary == tool.binary) {
+                found.clone()
+            } else {
+                let found = find(tool.binary, env, root);
+                slots.extend(tool_warning(tool, &found, at).map(Slot::Found));
+                looked_up.push((tool.binary, found.clone()));
+                found
+            };
         let state = match found {
             Found::OnPath(program) => {
                 *run = Some(ToolRun { tool, program });
@@ -990,40 +997,47 @@ fn found_runs(
 }
 
 /// The formatter and linter `code_blocks` selects for a block in `language` whose `steps` are
-/// due: each `None` when its step isn't due or the language has none.
+/// due, each through the [`static_tier`] gate: each `None` when its step isn't due, the language
+/// has none, or the gate turned its step in `steps` unrunnable.
 fn selected_tools(
     code_blocks: &CodeBlocks,
-    steps: &Steps,
+    steps: &mut Steps,
     language: Option<Language>,
-) -> (Option<&'static Tool>, Option<&'static Tool>) {
+) -> (
+    Option<&'static ToolCartridge>,
+    Option<&'static ToolCartridge>,
+) {
     let language = |step: &StepState| (*step == StepState::NotRun).then_some(language).flatten();
+    let tool = language(&steps.format).and_then(|language| selected(code_blocks, language));
+    let linter = language(&steps.lint).and_then(|language| selected_linter(code_blocks, language));
     (
-        language(&steps.format).and_then(|language| selected(code_blocks, language)),
-        language(&steps.lint).and_then(|language| selected_linter(code_blocks, language)),
+        static_tier(tool, &mut steps.format),
+        static_tier(linter, &mut steps.lint),
     )
 }
 
 /// The linter `code_blocks` selects for `language`: the named one, or the default. `None` when
 /// the language has none.
-fn selected_linter(code_blocks: &CodeBlocks, language: Language) -> Option<&'static Tool> {
+fn selected_linter(code_blocks: &CodeBlocks, language: Language) -> Option<&'static ToolCartridge> {
     match code_blocks.linter(language) {
-        Some(Choice::Named(name)) => TOOLS
-            .iter()
-            .find(|tool| tool.language == language && tool.step == Step::Lint && tool.name == name),
+        Some(Choice::Named(name)) => named(language, Step::Lint, name),
         Some(Choice::Off) | None => linter(language),
     }
 }
 
-/// The one warning for `tool`, found as `found`, at `at`, the first block that needs it. `None`
-/// when it is on `PATH` outside the root.
-fn tool_warning(tool: &Tool, found: &Found, at: &Location) -> Option<Finding> {
+/// The one warning for `tool`'s binary, found as `found`, at `at`, the first block that needs it.
+/// `None` when it is on `PATH` outside the root.
+fn tool_warning(tool: &ToolCartridge, found: &Found, at: &Location) -> Option<Finding> {
     let name = tool.name;
     let finding = match found {
         Found::OnPath(_) => return None,
         Found::Missing => Finding::new(
             TOOL_MISSING,
             Severity::Warning,
-            format!("`{name}` isn't on PATH, so its blocks aren't checked"),
+            format!(
+                "`{}` isn't on PATH, so its blocks aren't checked",
+                tool.binary
+            ),
         )
         .with_help(format!("install it with `{}`", tool.install)),
         Found::InsideRoot(real) => Finding::new(
@@ -1275,7 +1289,7 @@ mod tests {
     use crate::code_blocks::format::FixDoc;
     use crate::code_blocks::lint::Verdict;
     use crate::code_blocks::states::{BlockState, NotChecked, Steps};
-    use crate::code_blocks::tools::{Found, TOOLS, Tool, ToolEnv, find};
+    use crate::code_blocks::tools::{CARTRIDGES, Found, ToolCartridge, ToolEnv, find};
     use crate::config::code_blocks::Dialect;
     use crate::finding::Location;
     use crate::path::AbsolutePath;
@@ -1326,12 +1340,12 @@ mod tests {
         assert!(results.is_empty(), "{results:?}");
     }
 
-    /// The clippy row of the tool table.
-    fn clippy() -> &'static Tool {
-        TOOLS
+    /// The clippy cartridge.
+    fn clippy() -> &'static ToolCartridge {
+        CARTRIDGES
             .iter()
             .find(|tool| tool.name == "clippy")
-            .expect("the tool table should list clippy")
+            .expect("the cartridges should include clippy")
     }
 
     /// The record of the one Rust block in `text`, a doc at `<root>/docs/a.md`, pending with
