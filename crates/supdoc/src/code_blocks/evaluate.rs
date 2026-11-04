@@ -430,6 +430,7 @@ fn run_formatter(
             args: &args,
             extra: &extra,
             input,
+            doc: &doc,
         };
         Cache::key(&run, root)
     });

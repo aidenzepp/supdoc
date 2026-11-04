@@ -65,6 +65,8 @@ pub(crate) struct Run<'run> {
     pub(crate) extra: &'run [(&'run str, &'run OsStr)],
     /// The checked text, after hidden-line handling.
     pub(crate) input: &'run str,
+    /// The doc's absolute path, the virtual path's directory the tool's config search starts from.
+    pub(crate) doc: &'run Path,
 }
 
 impl Cache {
@@ -105,11 +107,13 @@ impl Cache {
     }
 
     /// The key of `run`, from `root`: the checked text, the tool's name, its real path, size and
-    /// modification time (read, never run), its arguments and extra variables, the content of each
-    /// config file its row names at `root`, and [`RULES_VERSION`]. `None` when the tool's metadata
-    /// can't be read, so the run isn't cached.
+    /// modification time (read, never run), its arguments and extra variables, each config file
+    /// its row names along the tool's own search (see [`config_state`]), and [`RULES_VERSION`].
+    /// `None` when the tool's metadata or an in-root config file can't be read, so the run isn't
+    /// cached.
     ///
-    /// Effect: reads the tool's metadata and each config file at `root`.
+    /// Effect: reads the tool's metadata, each in-root config candidate, and the metadata of each
+    /// candidate above `root`.
     pub(crate) fn key(run: &Run<'_>, root: &Path) -> Option<Key> {
         let meta = fs::metadata(run.program).ok()?;
         let modified = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
@@ -130,12 +134,16 @@ impl Cache {
             field(name.as_bytes());
             field(value.as_encoded_bytes());
         }
-        for name in run.tool.config_files {
-            field(name.as_bytes());
-            match fs::read(root.join(name)) {
-                Ok(text) => field(&Sha256::digest(&text)),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => field(b"absent"),
-                Err(_) => return None,
+        let real_root = root.canonicalize().ok()?;
+        for dir in run.doc.parent().into_iter().flat_map(Path::ancestors) {
+            for name in run.tool.config_files {
+                let candidate = dir.join(name);
+                field(candidate.as_os_str().as_encoded_bytes());
+                field(&config_state(
+                    &candidate,
+                    dir.starts_with(root),
+                    &real_root,
+                )?);
             }
         }
         field(run.input.as_bytes());
@@ -199,6 +207,35 @@ impl Cache {
     fn entry(&self, key: Key) -> PathBuf {
         self.dir.join(key.0.to_string())
     }
+}
+
+/// What a config candidate adds to a key: `absent`, the sha256 of its content when it is
+/// `in_root` and its real path is inside `real_root`, else only its existence, size and
+/// modification time: a file outside the root is never read. `None` when an in-root file exists
+/// but can't be read.
+///
+/// Effect: reads `candidate`'s metadata, and its content when it is inside the root.
+fn config_state(candidate: &Path, in_root: bool, real_root: &Path) -> Option<Vec<u8>> {
+    let Ok(meta) = fs::metadata(candidate) else {
+        return Some(b"absent".to_vec());
+    };
+    let contained = in_root
+        && candidate
+            .canonicalize()
+            .is_ok_and(|real| real.starts_with(real_root));
+    if contained {
+        let text = fs::read(candidate).ok()?;
+        return Some(Sha256::digest(&text).to_vec());
+    }
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |time| time.as_nanos());
+    let mut state = b"outside".to_vec();
+    state.extend_from_slice(&meta.len().to_le_bytes());
+    state.extend_from_slice(&modified.to_le_bytes());
+    Some(state)
 }
 
 /// `path` with its longest existing ancestor resolved and the rest joined on. `None` when no
@@ -289,12 +326,14 @@ mod tests {
 
     /// The key of `shfmt` at `program` on `input` from `root`.
     fn key_of(program: &Path, input: &str, root: &Path) -> Key {
+        let doc = root.join("docs/a.md");
         let run = Run {
             tool: shfmt(),
             program,
             args: &[OsStr::new("--filename"), OsStr::new("a.sh")],
             extra: &[],
             input,
+            doc: &doc,
         };
         Cache::key(&run, root).expect("the program's metadata should be readable")
     }
@@ -384,6 +423,23 @@ mod tests {
             key_of(&program, "echo hi\n", dir.path()),
             "same inputs"
         );
+    }
+
+    #[test]
+    fn the_key_changes_when_a_config_appears_in_the_docs_directory_or_above_the_root() {
+        let dir = temp();
+        let root = dir.path().join("root");
+        fs::create_dir_all(root.join("docs")).expect("the docs directory should be creatable");
+        let program = program(dir.path());
+        let base = key_of(&program, "echo hi\n", &root);
+
+        fs::write(root.join("docs/.editorconfig"), "[*]\n").expect("config should be writable");
+        let nested = key_of(&program, "echo hi\n", &root);
+        fs::write(dir.path().join(".editorconfig"), "[*]\n").expect("config should be writable");
+        let above = key_of(&program, "echo hi\n", &root);
+
+        assert_ne!(base, nested, "a config in the doc's directory");
+        assert_ne!(nested, above, "a config above the root");
     }
 
     #[test]

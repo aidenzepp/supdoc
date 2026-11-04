@@ -1059,3 +1059,16 @@ fn cache_a_changed_block_runs_again_and_a_corrupt_entry_never_passes() {
 
     assert_eq!((after_change, runs(&outside)), (3, 5));
 }
+
+#[test]
+fn cache_a_config_appearing_in_the_docs_own_directory_runs_the_tool_again() {
+    let project = project_with_shell_blocks();
+    let outside = counting_shfmt();
+    let cache = outside.path().join("cache");
+    check_cached(&project, &outside, &cache);
+
+    project.write("docs/.editorconfig", "[*.sh]\nindent_style = tab\n");
+    check_cached(&project, &outside, &cache);
+
+    assert_eq!(runs(&outside), 4);
+}
