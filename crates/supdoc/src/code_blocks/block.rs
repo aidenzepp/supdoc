@@ -106,8 +106,9 @@ pub(crate) fn try_blocks_in(
 /// body's first prefixed line has (a list item's indent or a quote's `> `), trimmed on a blank
 /// line, and the body's line ending (LF or CRLF) is kept. `body` holds no final line ending.
 ///
-/// `None` when the block's ranges don't lie inside `text`, or its body is empty and its fence is
-/// never closed.
+/// `None` when the block's ranges don't lie inside `text`, its body is empty and its fence is
+/// never closed, or its body lines aren't [contiguous](has_contiguous_body): replacing them would
+/// delete the lines between them.
 #[must_use]
 pub(crate) fn replacement_for(
     block: &CodeBlock,
@@ -117,6 +118,9 @@ pub(crate) fn replacement_for(
     let Some((first, last)) = block.body.first().zip(block.body.last()) else {
         return empty_body_replacement(block, text, body);
     };
+    if !has_contiguous_body(block, text) {
+        return None;
+    }
     let prefix = block
         .body
         .iter()
@@ -137,6 +141,19 @@ pub(crate) fn replacement_for(
         replacement.push('\r');
     }
     Some((first.prefix.start..last.content.end, replacement))
+}
+
+/// Whether each of `block`'s body lines in `text` starts right after the previous one's line
+/// ending, with no other line of the file between them. A doc-comment block can skip a `//` or
+/// `////` line, which a replacement of its body would delete.
+#[must_use]
+pub(crate) fn has_contiguous_body(block: &CodeBlock, text: &str) -> bool {
+    block.body.windows(2).all(|pair| match pair {
+        [previous, next] => text
+            .get(previous.content.end..next.prefix.start)
+            .is_some_and(|gap| matches!(gap, "\n" | "\r\n")),
+        _ => true,
+    })
 }
 
 /// The insertion that fills `block`'s empty body with `body`, just after its opening fence's

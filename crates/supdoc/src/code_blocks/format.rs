@@ -13,7 +13,7 @@ use crate::limits::TimeLimit;
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Cartridge, Deadline, SourceFile};
 
-use super::block::{CodeBlock, replacement_for, try_blocks_in};
+use super::block::{CodeBlock, has_contiguous_body, replacement_for, try_blocks_in};
 use super::runner::{Failure, Ran};
 use super::states;
 use super::tools::Tool;
@@ -345,6 +345,9 @@ enum Refusal {
     Unchecked,
     /// The formatter changed, added, removed or reordered the block's hidden `# ` lines.
     ChangesHiddenLines,
+    /// A line that isn't part of the block, such as a `//` comment in a doc-comment run, lies
+    /// between its body lines, and replacing the body would delete it.
+    SkipsLines,
 }
 
 /// The fix that makes `block`'s body in `doc` read `body`, which holds no final line ending,
@@ -357,7 +360,8 @@ enum Refusal {
 /// character other than tab and LF (a CR only before LF); a line of it would close the fence (a
 /// cheap first pass); or the doc, parsed again with the fix applied the way its blocks were
 /// found, no longer holds the same fenced blocks, each opening with the same line and spanning
-/// the same text. Also when either parse fails.
+/// the same text. Also when either parse fails, and when a line that isn't part of the block lies
+/// between its body lines (a `//` line in a doc comment), which the fix would delete.
 #[must_use]
 pub(crate) fn safe_fix(block: &CodeBlock, doc: &FixDoc, body: &str, what: &str) -> Guarded {
     let text = doc.text();
@@ -370,6 +374,9 @@ pub(crate) fn safe_fix(block: &CodeBlock, doc: &FixDoc, body: &str, what: &str) 
     }
     if body.lines().any(|line| closes(line, marker, length)) {
         return refuse(Refusal::ClosesFence);
+    }
+    if !has_contiguous_body(block, text) {
+        return refuse(Refusal::SkipsLines);
     }
     let Some((range, replacement)) = replacement_for(block, text, body) else {
         return Guarded::Unplaced;
@@ -409,6 +416,11 @@ fn refused(block: &CodeBlock, refusal: &Refusal, what: &str, marker: char) -> Fi
         Refusal::Unchecked => (
             "couldn't be checked, because the doc didn't parse again within `parse-timeout`",
             "raise the limit with `--parse-timeout 30s`, or edit the block by hand".to_owned(),
+        ),
+        Refusal::SkipsLines => (
+            "would delete a line inside the block that isn't part of it, such as a `//` comment",
+            "move that line out of the block or make it a doc-comment line, or edit the block by hand"
+                .to_owned(),
         ),
         Refusal::ChangesHiddenLines => (
             "would change its hidden `# ` lines",

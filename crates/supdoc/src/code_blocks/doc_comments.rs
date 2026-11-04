@@ -365,6 +365,18 @@ mod tests {
     }
 
     #[test]
+    fn a_block_spanning_a_plain_comment_line_gets_no_replacement() {
+        let text = "/// ```rust\n/// a\n// keep me\n/// b\n/// ```\nfn f() {}\n";
+        let block = only(text);
+
+        assert_eq!(
+            replacement_for(&block, text, "x\ny"),
+            None,
+            "replacing the body would delete the `// keep me` line"
+        );
+    }
+
+    #[test]
     fn a_block_after_a_quadruple_slash_line_is_found_on_its_file_lines() {
         let text = "/// Doc.\n//// not doc\n/// ```rust\n/// x\n/// ```\nfn f() {}\n";
 
