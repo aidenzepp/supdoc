@@ -376,46 +376,19 @@ fn a_block_over_the_scan_cap_is_not_checked_with_one_warning() {
 }
 
 #[test]
-fn hidden_lines_in_a_formatted_block_pass_with_the_real_rustfmt() {
-    let Some(vars) = real_rustfmt("hidden_lines_in_a_formatted_block_pass") else {
+fn a_hash_line_reaches_the_real_rustfmt_as_written_and_fails_to_parse() {
+    let Some(vars) = real_rustfmt("a_hash_line_reaches_the_real_rustfmt_as_written") else {
         return;
     };
-    let project = project_with_rust_doc(
-        "# Blocks\n\n```rust\n# use std::fmt::Write as _;\n# fn main() {\n    # let x = 1;\n    let _y = x;\n# }\n```\n",
-    );
+    let project = project_with_rust_doc("# Blocks\n\n```rust\n# use x;\nfn main() {}\n```\n");
 
     let json = project
         .supdoc_in_with(".", &["check", "--json"], &borrowed(&vars))
-        .assert_exit(0)
+        .assert_exit(1)
         .json();
 
-    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
-}
-
-#[test]
-fn hidden_lines_keep_their_prefix_when_the_real_rustfmt_fixes_the_block() {
-    let Some(vars) = real_rustfmt("hidden_lines_keep_their_prefix") else {
-        return;
-    };
-    let project = project_with_rust_doc(
-        "# Blocks\n\n```rust\n# fn main() {\n    # let x = 1;\nlet y=x;\n# }\n```\n",
-    );
-    let vars = borrowed(&vars);
-
-    let _fix = project
-        .supdoc_in_with(".", &["fix", "--yes"], &vars)
-        .assert_exit(0);
-    let json = project
-        .supdoc_in_with(".", &["check", "--json"], &vars)
-        .assert_exit(0)
-        .json();
-
-    assert_eq!(
-        project.read("docs/blocks.md"),
-        "# Blocks\n\n```rust\n# fn main() {\n    # let x = 1;\n    let y = x;\n# }\n```\n",
-        "the fix should format the shown line and keep each hidden line's `# `"
-    );
-    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+    assert_eq!(finding_kinds(&json), ["code-block-parse"], "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/failed"), 1, "{json}");
 }
 
 #[test]

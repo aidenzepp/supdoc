@@ -102,26 +102,15 @@ struct Pending {
     block: CodeBlock,
     /// The doc it was found in, which its fix is checked against.
     doc: Arc<FixDoc>,
-    /// What a formatter reads for it: for a Rust block, its text with hidden lines' `# ` removed.
+    /// What its tools read: its body as written.
     input: String,
-    /// A Rust block's hidden lines, which its fix must keep.
-    hidden: Option<rust::Hidden>,
 }
 
 impl Pending {
-    /// `block`, found in `doc`, ready for its steps: read through [`rust::unhide`] when it is a
-    /// Rust block. `None` when its body isn't inside `doc`.
-    fn of(block: &CodeBlock, doc: &Arc<FixDoc>, language: Option<Language>) -> Option<Self> {
-        let input = format::input(block, doc.text())?;
-        let (input, hidden) = if language == Some(Language::Rust) {
-            let (checked, hidden) = rust::unhide(&input);
-            (checked, Some(hidden))
-        } else {
-            (input, None)
-        };
+    /// `block`, found in `doc`, ready for its steps. `None` when its body isn't inside `doc`.
+    fn of(block: &CodeBlock, doc: &Arc<FixDoc>) -> Option<Self> {
         Some(Self {
-            input,
-            hidden,
+            input: format::input(block, doc.text())?,
             block: block.clone(),
             doc: Arc::clone(doc),
         })
@@ -225,7 +214,7 @@ pub(crate) fn evaluate(
                 doc.as_ref()?
                     .1
                     .as_ref()
-                    .and_then(|text| Pending::of(block, text, checked))
+                    .and_then(|text| Pending::of(block, text))
             })
             .flatten();
         records.push(BlockRecord {
@@ -665,14 +654,9 @@ fn run_formatter(
     };
     let finding = format::finding(&verdict, tool, &at, timeout);
     let findings = match (&verdict, finding) {
-        (format::Verdict::Unformatted(output), Some(unformatted)) => format::fixed(
-            unformatted,
-            &pending.block,
-            &pending.doc,
-            output,
-            tool,
-            pending.hidden.as_ref(),
-        ),
+        (format::Verdict::Unformatted(output), Some(unformatted)) => {
+            format::fixed(unformatted, &pending.block, &pending.doc, output, tool)
+        }
         (_, finding) => finding.into_iter().collect(),
     };
     Some((verdict, findings))
@@ -728,7 +712,6 @@ fn run_linter(
         tool,
         &pending.block,
         pending.doc.text(),
-        |_| 0,
         session.timeout,
     );
     Some(Ok((verdict, findings)))
@@ -737,8 +720,7 @@ fn run_linter(
 /// Runs `tool`, clippy found at `program`, on `record`'s Rust block alone, read as `pending`, as [`run_linter`]
 /// does: `clippy-driver` with [`rust::clippy_args`] for the block's edition and `rust`'s project
 /// lints, `rust`'s toolchain variables and `CLIPPY_CONF_DIR`, and nothing else from the project.
-/// Its metadata goes to a fresh [`rust::EmitDir`], removed after the run whatever its outcome. A
-/// diagnostic on a hidden line lands past its `# `.
+/// Its metadata goes to a fresh [`rust::EmitDir`], removed after the run whatever its outcome.
 ///
 /// # Errors
 ///
@@ -806,13 +788,11 @@ fn run_clippy(
         rust::lint_verdict,
         lint::Verdict::cacheable,
     );
-    let hidden = pending.hidden.as_ref();
     let findings = lint::findings(
         &verdict,
         tool,
         &pending.block,
         pending.doc.text(),
-        |line| hidden.map_or(0, |hidden| hidden.removed(line)),
         session.timeout,
     );
     Ok((verdict, findings))
@@ -1296,7 +1276,7 @@ mod tests {
     use crate::code_blocks::lint::Verdict;
     use crate::code_blocks::states::{BlockState, NotChecked, Steps};
     use crate::code_blocks::tools::{Found, TOOLS, Tool, ToolEnv, find};
-    use crate::config::code_blocks::{Dialect, Language};
+    use crate::config::code_blocks::Dialect;
     use crate::finding::Location;
     use crate::path::AbsolutePath;
     use crate::read::cartridge::SourceFile;
@@ -1384,7 +1364,7 @@ mod tests {
             linter: Some(clippy()),
             dialect: Dialect::default(),
             edition: None,
-            pending: Pending::of(block, &doc, Some(Language::Rust)),
+            pending: Pending::of(block, &doc),
         }
     }
 
@@ -1471,7 +1451,11 @@ mod tests {
             ),
             "groups first, `clippy::cargo` left out, relaxations last"
         );
-        assert_eq!(record("stdin"), "use std::fmt;\npub fn f() {}\n");
+        assert_eq!(
+            record("stdin"),
+            "# use std::fmt;\npub fn f() {}\n",
+            "a `# ` line reaches clippy as written"
+        );
         let cwd = PathBuf::from(record("cwd").trim());
         assert!(cwd.ends_with("supdoc/code-blocks/cwd"), "{cwd:?}");
         assert!(
@@ -1532,7 +1516,7 @@ mod tests {
         assert!(finding.message.contains("clippy::ptr_arg"), "{finding:?}");
 
         let expected = run(
-            "```rust\n# #[expect(clippy::ptr_arg, reason = \"a non-example\")]\n\
+            "```rust\n#[expect(clippy::ptr_arg, reason = \"a non-example\")]\n\
              pub fn total(v: &Vec<i32>) -> i32 {\n    v.iter().sum()\n}\n```\n",
         )
         .expect("clippy should run");
