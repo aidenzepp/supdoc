@@ -28,9 +28,10 @@ use super::tools::{self, Step, ToolCartridge, formatter};
 /// `check` then looks up each pending language's tool: a tool not on `PATH` makes its blocks
 /// [`ToolMissing`](Self::ToolMissing), and one whose real path is inside the checkout makes them
 /// [`NotChecked::ToolInsideRoot`]. A Rust block is refused first when the root's toolchain file
-/// can't be used ([`NotChecked::ToolchainPath`]), the block reads a file or variable at compile
-/// time ([`NotChecked::CompileTimeRead`]), declares an outline module before its linter compiles
-/// it ([`NotChecked::OutlineModule`]), or it is too large to scan for one
+/// can't be used ([`NotChecked::ToolchainPath`]), rustup can't name the toolchain a root with
+/// no such file gets ([`NotChecked::ToolchainUnresolved`]), the block reads a file or variable
+/// at compile time ([`NotChecked::CompileTimeRead`]), declares an outline module before its
+/// linter compiles it ([`NotChecked::OutlineModule`]), or it is too large to scan for one
 /// ([`NotChecked::TooLargeToScan`]). A tool found outside the checkout runs on each block,
 /// which leaves it [`Passed`](Self::Passed) or [`Failed`](Self::Failed).
 ///
@@ -84,6 +85,9 @@ pub(crate) enum NotChecked {
     /// The root's `rust-toolchain(.toml)` names a path, an invalid channel, or lies outside the
     /// root, so no Rust tool runs.
     ToolchainPath,
+    /// The root pins no toolchain, and the `rustup` on `PATH` is inside the checkout, or couldn't
+    /// name the toolchain the root gets as a channel, so no Rust tool runs.
+    ToolchainUnresolved,
     /// The project's tool config extends another config, declares plugins, or can't be handed
     /// to the tool, so its blocks aren't given to it.
     ToolConfig,
@@ -409,6 +413,9 @@ impl BlockState {
                 Some(format!("`{}` is inside the checkout", tool_of(tag, tool)))
             }
             Self::NotChecked(NotChecked::ToolchainPath) => Some("toolchain path".to_owned()),
+            Self::NotChecked(NotChecked::ToolchainUnresolved) => {
+                Some("toolchain unresolved".to_owned())
+            }
             Self::NotChecked(NotChecked::ToolConfig) => Some("tool config".to_owned()),
             Self::NotChecked(NotChecked::CompileTimeRead) => Some("compile-time read".to_owned()),
             Self::NotChecked(NotChecked::TooLargeToScan) => Some("too large to scan".to_owned()),
@@ -1063,6 +1070,7 @@ mod tests {
             BlockState::NotChecked(NotChecked::NoStepRan),
             BlockState::NotChecked(NotChecked::InputUnreadable),
             BlockState::NotChecked(NotChecked::ToolInsideRoot),
+            BlockState::NotChecked(NotChecked::ToolchainUnresolved),
             BlockState::UnknownLanguage,
             BlockState::ToolMissing,
         ];

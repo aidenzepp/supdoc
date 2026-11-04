@@ -299,6 +299,7 @@ impl Evaluation {
         let mut rust_setup: Option<RustSetup> = None;
         let mut against: Option<Against> = None;
         let build_timeout = self.build_timeout;
+        let timeout = self.timeout;
         let mut biome_configs = BiomeConfigs::default();
         let mut toolchain_warned = false;
         let mut slots: Vec<Slot> = Vec::new();
@@ -312,7 +313,7 @@ impl Evaluation {
                 continue;
             };
             let rust = (tool.language == Language::Rust)
-                .then(|| &*rust_setup.get_or_insert_with(|| RustSetup::read(root)));
+                .then(|| &*rust_setup.get_or_insert_with(|| RustSetup::read(env, root, timeout)));
             if let Some(rust) = rust {
                 let compiles = linter.is_some_and(|linter| linter.tier == Tier::Project);
                 let refused =
@@ -1054,7 +1055,8 @@ fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> 
 /// What every Rust tool call in a run shares, read once from the root.
 #[derive(Debug)]
 struct RustSetup {
-    /// The toolchain the root's `rust-toolchain(.toml)` pins.
+    /// The toolchain the root's `rust-toolchain(.toml)` pins, else the one rustup names for the
+    /// root: one value for rustfmt, clippy-driver and the project build's cargo alike.
     toolchain: Toolchain,
     /// `--config-path` for an in-root `rustfmt.toml`, or nothing.
     config: Vec<OsString>,
@@ -1068,13 +1070,19 @@ struct RustSetup {
 
 impl RustSetup {
     /// Reads `root`'s toolchain file, `Cargo.toml` and finds its `rustfmt.toml` and clippy
-    /// config, each only inside `root`.
+    /// config, each only inside `root`. When the toolchain file pins no channel, asks the
+    /// `rustup` on `env`'s `PATH` which toolchain the root gets, under `timeout` (see
+    /// [`toolchain::active`]).
     ///
-    /// Effect: reads file metadata, resolves symlinks, and reads the toolchain file and
-    /// `Cargo.toml`.
-    fn read(root: &Path) -> Self {
+    /// Effect: reads file metadata, resolves symlinks, reads the toolchain file and
+    /// `Cargo.toml`, and runs `rustup` at most once, killing it at the timeout.
+    fn read(env: &ToolEnv, root: &Path, timeout: Option<Duration>) -> Self {
+        let toolchain = match toolchain::read(root) {
+            Toolchain::Default => toolchain::active(env, root, timeout),
+            pinned => pinned,
+        };
         Self {
-            toolchain: toolchain::read(root),
+            toolchain,
             config: rust::config_args(root),
             edition: toolchain::cargo_edition(root).unwrap_or(Edition::E2024),
             lints: toolchain::cargo_lints(root),
@@ -1425,7 +1433,8 @@ fn tally(records: &[BlockRecord]) -> CodeBlockCounts {
 }
 
 /// Why `record`'s Rust block isn't run under `rust`, when it isn't: the root's toolchain file
-/// was refused (adding its one warning to `slots` unless `warned`), or the block reads at compile
+/// was refused or rustup couldn't name the root's toolchain (adding its one warning to `slots`
+/// unless `warned`), or the block reads at compile
 /// time or is too large to scan (adding that warning). When the block `compiles`, because
 /// clippy will lint it, [`rust::before_compiling`]'s stricter rules apply, which also refuse an
 /// outline module and an attribute off the allowlist. With the state, a reason naming that
@@ -1443,6 +1452,13 @@ fn rust_refusal(
             slots.push(Slot::Found(toolchain_warning(refusal, file, &record.at)));
         }
         return Some((NotChecked::ToolchainPath, None));
+    }
+    if let Toolchain::Unresolved(unresolved) = rust.toolchain {
+        if !*warned {
+            *warned = true;
+            slots.push(Slot::Found(unresolved_warning(unresolved, &record.at)));
+        }
+        return Some((NotChecked::ToolchainUnresolved, None));
     }
     let scan = record.pending.as_ref().map_or(Scan::Clean, |pending| {
         if compiles {
@@ -1616,6 +1632,30 @@ fn toolchain_warning(refusal: Refusal, file: &str, at: &Location) -> Finding {
         NOT_CHECKED,
         Severity::Warning,
         format!("the project's `{file}` {why}, so its Rust blocks aren't checked"),
+    )
+    .with_help(help)
+    .with_location(at.clone())
+}
+
+/// The one `code-block-not-checked` warning, at `at`, for a root that pins no toolchain and whose
+/// toolchain rustup couldn't name for `unresolved`, which leaves every Rust block unchecked.
+fn unresolved_warning(unresolved: toolchain::Unresolved, at: &Location) -> Finding {
+    let (why, help) = match unresolved {
+        toolchain::Unresolved::InsideRoot => (
+            "the `rustup` on PATH is inside the checkout",
+            "put a `rustup` from outside the project first on PATH",
+        ),
+        toolchain::Unresolved::Unnamed => (
+            "`rustup show active-toolchain` didn't name a toolchain channel for it, as a \
+             `path` key or a custom toolchain in a directory above it would make it",
+            "add a `rust-toolchain.toml` to the project naming a channel such as `stable` or \
+             `1.85.0`, or remove the `path` toolchain or override above it",
+        ),
+    };
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        format!("the project pins no Rust toolchain and {why}, so its Rust blocks aren't checked"),
     )
     .with_help(help)
     .with_location(at.clone())
@@ -2038,7 +2078,7 @@ mod tests {
             &record,
             pending,
             &session,
-            &RustSetup::read(root),
+            &RustSetup::read(&env, root, Some(Duration::from_secs(120))),
         )
     }
 
@@ -2068,7 +2108,7 @@ mod tests {
         .expect("the manifest should be writable");
         let mut record = rust_record(root.path(), &format!("```rust\n{E2_PROBE}```\n"));
         record.edition = attribute;
-        let rust = RustSetup::read(root.path());
+        let rust = RustSetup::read(&ToolEnv::default(), root.path(), None);
         let refusal = rust_refusal(&record, &rust, true, &mut false, &mut Vec::new());
         let doc = root.path().join("docs/a.md");
         let args = clippy().args(&Invocation {
@@ -2334,7 +2374,9 @@ mod tests {
             script(
                 &linking.bin().join("cargo"),
                 &format!(
-                    "echo build >> '{records}/cargo-runs'\n{before}\n\
+                    "echo build >> '{records}/cargo-runs'\n\
+                     echo \"$RUSTUP_TOOLCHAIN|$RUSTUP_AUTO_INSTALL\" >> '{records}/cargo-toolchain'\n\
+                     {before}\n\
                      deps=\"$CARGO_TARGET_DIR/debug/deps\"\n/bin/mkdir -p \"$deps\"\n\
                      /bin/cat '{records}/rmeta' > \"$deps/libproj-1.rmeta\"\n\
                      printf '{{\"reason\":\"compiler-artifact\",\"manifest_path\":\"{manifest}\",\
@@ -2346,7 +2388,11 @@ mod tests {
             );
             script(
                 &linking.bin().join("clippy-driver"),
-                &format!("echo \"$*\" >> '{}/clippy-runs'\n", records.display()),
+                &format!(
+                    "echo \"$*\" >> '{records}/clippy-runs'\n\
+                     echo \"$RUSTUP_TOOLCHAIN|$RUSTUP_AUTO_INSTALL\" >> '{records}/clippy-toolchain'\n",
+                    records = records.display()
+                ),
             );
             linking
         }
@@ -2397,20 +2443,48 @@ mod tests {
         /// [`Evaluation::look_up_tools`] on two trusted Rust blocks, clippy their linter as if the
         /// T6 hold were lifted: the evaluation after it.
         fn look_up(&self) -> Evaluation {
-            let root = self.root();
-            let records = rust_records(
-                &root,
+            self.look_up_blocks(
                 "# D\n\n```rust\npub fn a() {}\n```\n\n```rust\npub fn b() {}\n```\n",
-            );
+                None,
+                Duration::from_secs(120),
+            )
+        }
+
+        /// [`Evaluation::look_up_tools`] on the Rust blocks of `doc`, clippy their linter as if the
+        /// T6 hold were lifted and `formatter` their formatter, the build under `build_timeout`.
+        fn look_up_blocks(
+            &self,
+            doc: &str,
+            formatter: Option<&'static ToolCartridge>,
+            build_timeout: Duration,
+        ) -> Evaluation {
+            let root = self.root();
+            let mut records = rust_records(&root, doc);
+            for record in &mut records {
+                record.tool = formatter;
+            }
             let mut evaluation = Evaluation {
                 findings: Vec::new(),
                 counts: None,
                 records,
                 timeout: Some(Duration::from_secs(120)),
-                build_timeout: Some(Duration::from_secs(120)),
+                build_timeout: Some(build_timeout),
             };
             evaluation.look_up_tools(&self.env(), &root);
             evaluation
+        }
+
+        /// A stub `rustup` beside the others that records each run and answers `printed` with
+        /// exit status `status`, as `rustup show active-toolchain` does.
+        fn rustup(&self, printed: &str, status: u8) {
+            script(
+                &self.bin().join("rustup"),
+                &format!(
+                    "echo \"$(pwd) $* $RUSTUP_AUTO_INSTALL\" >> '{}/rustup-runs'\n\
+                     /bin/cat <<'ANSWER'\n{printed}ANSWER\nexit {status}\n",
+                    self.records().display()
+                ),
+            );
         }
 
         /// The build's dependency directory, by real path.
@@ -2627,5 +2701,224 @@ mod tests {
                 "{warning:?}"
             );
         }
+    }
+
+    /// A rustup answer naming a channel for a parent's pin.
+    const PARENT_CHANNEL: &str =
+        "1.85.0-x86_64-unknown-linux-gnu (overridden by '/w/rust-toolchain.toml')\n";
+
+    #[test]
+    fn a_parent_channel_rustup_names_is_pinned_for_cargo_and_clippy_alike() {
+        let linking = Linking::new(Some(PROJ), "");
+        std::fs::write(
+            linking.dir.path().join("rust-toolchain.toml"),
+            "[toolchain]\nchannel = \"1.85.0\"\n",
+        )
+        .expect("the parent's toolchain file should be writable");
+        linking.rustup(PARENT_CHANNEL, 0);
+
+        let evaluation = linking.look_up();
+
+        let root = linking
+            .root()
+            .canonicalize()
+            .expect("the root should resolve");
+        assert_eq!(
+            linking.runs("rustup-runs"),
+            [format!("{} show active-toolchain 0", root.display())],
+            "rustup runs once, from the root, never installing"
+        );
+        let pinned = "1.85.0-x86_64-unknown-linux-gnu|0";
+        assert_eq!(linking.runs("cargo-toolchain"), [pinned]);
+        assert_eq!(linking.runs("clippy-toolchain"), [pinned, pinned]);
+        assert!(codes(&evaluation).is_empty(), "{:?}", evaluation.findings);
+    }
+
+    #[test]
+    fn a_parent_path_toolchain_never_runs_its_cargo_and_leaves_the_blocks_unchecked() {
+        let linking = Linking::new(Some(PROJ), "");
+        let evil = linking.dir.path().join("evil");
+        std::fs::create_dir_all(evil.join("bin")).expect("the path toolchain should be creatable");
+        script(
+            &evil.join("bin/cargo"),
+            &format!(
+                "echo build >> '{}/evil-cargo-runs'\n",
+                linking.records().display()
+            ),
+        );
+        std::fs::write(
+            linking.dir.path().join("rust-toolchain.toml"),
+            "[toolchain]\npath = \"evil\"\n",
+        )
+        .expect("the parent's toolchain file should be writable");
+        linking.rustup(
+            &format!(
+                "{} (overridden by '{}')\n",
+                evil.display(),
+                linking.dir.path().join("rust-toolchain.toml").display()
+            ),
+            0,
+        );
+
+        let evaluation = linking.look_up();
+
+        assert_eq!(codes(&evaluation), ["code-block-not-checked"]);
+        let warning = evaluation
+            .findings
+            .first()
+            .expect("the run's one warning should be reported");
+        assert!(
+            warning.message.contains("rustup show active-toolchain"),
+            "{warning:?}"
+        );
+        for record in &evaluation.records {
+            assert_eq!(
+                record.state,
+                BlockState::NotChecked(NotChecked::ToolchainUnresolved),
+                "{record:?}"
+            );
+            assert_eq!(record.reason.as_deref(), Some("toolchain unresolved"));
+        }
+        for stub in ["evil-cargo-runs", "cargo-runs", "clippy-runs"] {
+            assert_eq!(
+                linking.runs(stub),
+                [] as [String; 0],
+                "{stub} should stay empty"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failing_or_inside_rustup_leaves_the_blocks_unchecked_and_nothing_cached() {
+        let linking = Linking::new(Some(PROJ), "");
+        linking.rustup("stable-aarch64-apple-darwin (default)\n", 1);
+
+        let _first = linking.look_up();
+        let second = linking.look_up();
+
+        assert_eq!(linking.runs("rustup-runs").len(), 2, "once per run");
+        assert_eq!(codes(&second), ["code-block-not-checked"]);
+        for record in &second.records {
+            assert_eq!(
+                record.state,
+                BlockState::NotChecked(NotChecked::ToolchainUnresolved),
+                "{record:?}"
+            );
+        }
+        assert_eq!(linking.runs("cargo-runs"), [] as [String; 0]);
+        assert_eq!(linking.runs("clippy-runs"), [] as [String; 0]);
+
+        let inside = Linking::new(Some(PROJ), "");
+        let bin = inside.root().join("bin");
+        std::fs::create_dir_all(&bin).expect("the in-root bin should be creatable");
+        script(&bin.join("rustup"), "echo stable\n");
+        std::fs::rename(inside.bin().join("cargo"), bin.join("unused"))
+            .expect("the stub should be movable");
+        let env = ToolEnv::from_vars(|name| match name {
+            "PATH" => Some(bin.clone().into_os_string()),
+            _ => None,
+        });
+        let rust = RustSetup::read(&env, &inside.root(), None);
+        assert_eq!(
+            rust.toolchain,
+            crate::code_blocks::toolchain::Toolchain::Unresolved(
+                crate::code_blocks::toolchain::Unresolved::InsideRoot
+            )
+        );
+    }
+
+    #[test]
+    fn no_rustup_pins_nothing_and_the_resolved_channel_keys_the_cache() {
+        let linking = Linking::new(Some(PROJ), "");
+
+        let _unpinned = linking.look_up();
+        assert_eq!(linking.runs("cargo-toolchain"), ["|0"], "no rustup, no pin");
+        linking.rustup(PARENT_CHANNEL, 0);
+        let _pinned = linking.look_up();
+        let _cached = linking.look_up();
+
+        assert_eq!(
+            linking.runs("clippy-runs").len(),
+            4,
+            "a new channel should run both blocks again, and the same one reuse them"
+        );
+    }
+
+    #[test]
+    fn a_block_the_strict_scan_refuses_starts_no_project_build() {
+        let linking = Linking::new(Some(PROJ), "");
+
+        let evaluation = linking.look_up_blocks(
+            "# D\n\n```rust\nconst S: &str = include_str!(\"/etc/hosts\");\n```\n",
+            None,
+            Duration::from_secs(120),
+        );
+
+        assert_eq!(linking.runs("cargo-runs"), [] as [String; 0]);
+        assert_eq!(linking.runs("clippy-runs"), [] as [String; 0]);
+        assert_eq!(
+            evaluation.records.first().map(|record| &record.state),
+            Some(&BlockState::NotChecked(NotChecked::CompileTimeRead))
+        );
+    }
+
+    #[test]
+    fn a_timed_out_build_is_one_timeout_error_fails_each_block_and_caches_nothing() {
+        let linking = Linking::new(Some(PROJ), "/bin/sleep 5");
+        let doc = "# D\n\n```rust\npub fn a() {}\n```\n\n```rust\npub fn b() {}\n```\n";
+
+        let first = linking.look_up_blocks(doc, None, Duration::from_millis(200));
+        let _second = linking.look_up_blocks(doc, None, Duration::from_millis(200));
+
+        assert_eq!(codes(&first), ["code-block-tool-timeout"]);
+        for record in &first.records {
+            assert_eq!(
+                record.state,
+                BlockState::Failed(Failure::ToolTimeout),
+                "{record:?}"
+            );
+        }
+        assert_eq!(linking.runs("cargo-runs").len(), 2, "nothing is cached");
+        assert_eq!(linking.runs("clippy-runs"), [] as [String; 0]);
+    }
+
+    #[test]
+    fn a_refused_manifest_keeps_the_format_verdict_and_never_passes_the_lint_step() {
+        let linking = Linking::new(
+            Some("[package]\nname = \"proj\"\n\n[project]\nname = \"proj\"\n"),
+            "",
+        );
+        script(&linking.bin().join("rustfmt"), "/bin/cat\n");
+        let rustfmt = CARTRIDGES
+            .iter()
+            .find(|tool| tool.name == "rustfmt")
+            .expect("the cartridges should include rustfmt");
+
+        let evaluation = linking.look_up_blocks(
+            "# D\n\n```rust\npub fn a() {}\n```\n",
+            Some(rustfmt),
+            Duration::from_secs(120),
+        );
+
+        assert_eq!(codes(&evaluation), ["code-block-not-checked"]);
+        let record = evaluation
+            .records
+            .first()
+            .expect("the doc should hold one block");
+        assert_eq!(record.steps.format, StepState::Ran, "{record:?}");
+        assert_eq!(
+            record.steps.lint,
+            StepState::Unrunnable {
+                reason: MANIFEST_AMBIGUOUS
+            },
+            "{record:?}"
+        );
+        assert_eq!(
+            record.state,
+            BlockState::Passed,
+            "the format verdict decides it"
+        );
+        assert_eq!(linking.runs("cargo-runs"), [] as [String; 0]);
+        assert_eq!(linking.runs("clippy-runs"), [] as [String; 0]);
     }
 }
