@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use crate::hash::Hash;
 
 use super::runner::Ran;
-use super::tools::{Tool, ToolEnv};
+use super::tools::{ToolCartridge, ToolEnv};
 
 /// The version of the rules that decide what a tool reads for a block, such as wrapping. Raised
 /// whenever they change, so results judged under old rules are never reused.
@@ -56,7 +56,7 @@ pub(crate) struct Key(Hash);
 #[derive(Debug)]
 pub(crate) struct Run<'run> {
     /// The tool.
-    pub(crate) tool: &'run Tool,
+    pub(crate) tool: &'run ToolCartridge,
     /// The tool's real path.
     pub(crate) program: &'run Path,
     /// Its arguments.
@@ -302,7 +302,7 @@ mod tests {
     use std::ffi::OsString;
 
     use super::*;
-    use crate::code_blocks::tools::TOOLS;
+    use crate::code_blocks::tools::CARTRIDGES;
 
     /// A temporary directory for one test.
     fn temp() -> tempfile::TempDir {
@@ -310,8 +310,8 @@ mod tests {
     }
 
     /// The `shfmt` row.
-    fn shfmt() -> &'static Tool {
-        TOOLS
+    fn shfmt() -> &'static ToolCartridge {
+        CARTRIDGES
             .iter()
             .find(|tool| tool.name == "shfmt")
             .expect("shfmt should be a known tool")

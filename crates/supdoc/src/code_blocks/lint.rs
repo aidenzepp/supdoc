@@ -1,19 +1,15 @@
 //! The lint step: a linter's diagnostics on a block, each mapped from the checked text to its
 //! line and column in the doc.
 
-use std::ffi::OsString;
-use std::path::Path;
 use std::time::Duration;
 
-use crate::config::code_blocks::Language;
 use crate::finding::{Finding, Location, Severity};
 
 use super::block::CodeBlock;
 use super::format;
 use super::runner::{Failure, Ran};
 use super::rust::LineMap;
-use super::tools::Tool;
-use super::{python, rust, shell};
+use super::tools::ToolCartridge;
 
 /// The code for a linter's diagnostic on a block.
 const LINT: &str = "code-block-lint";
@@ -52,33 +48,18 @@ impl Verdict {
     }
 }
 
-/// `tool`'s lint arguments for the `index`th block (1-based) of `doc`, the doc's absolute path.
-/// `None` while `tool`'s language has no lint step yet.
+/// Judges a linter's `result`: exit 0 is clean, a non-zero exit whose stdout `diagnostics` reads
+/// as the tool's report of at least one diagnostic gives those diagnostics, and any other
+/// non-zero exit, output past the cap or a failed start is a tool failure; a timeout is a
+/// timeout.
 #[must_use]
-pub(crate) fn args(tool: &Tool, doc: &Path, index: usize) -> Option<Vec<OsString>> {
-    match tool.language {
-        Language::Python => python::lint_args(tool, doc, index),
-        Language::Shell => shell::lint_args(tool, doc, index),
-        Language::Rust => rust::lint_args(tool, doc, index),
-    }
-}
-
-/// `tool`'s diagnostics in a run's `stdout`. `None` when it isn't the tool's report.
-fn diagnostics(tool: &Tool, stdout: &[u8]) -> Option<Vec<Diagnostic>> {
-    match tool.language {
-        Language::Python => python::diagnostics(stdout),
-        Language::Shell | Language::Rust => None,
-    }
-}
-
-/// Judges a linter's `result`: exit 0 is clean, a non-zero exit whose stdout is the tool's
-/// report of at least one diagnostic gives those diagnostics, and any other non-zero exit, output
-/// past the cap or a failed start is a tool failure; a timeout is a timeout.
-#[must_use]
-pub(crate) fn judge(tool: &Tool, result: Result<Ran, Failure>) -> Verdict {
+pub(crate) fn judge(
+    result: Result<Ran, Failure>,
+    diagnostics: impl FnOnce(&[u8]) -> Option<Vec<Diagnostic>>,
+) -> Verdict {
     match result {
         Ok(ran) if ran.success => Verdict::Clean,
-        Ok(ran) => match diagnostics(tool, &ran.stdout) {
+        Ok(ran) => match diagnostics(&ran.stdout) {
             Some(found) if !found.is_empty() => Verdict::Diagnostics(found),
             _ => Verdict::Failed(format::Verdict::ToolFailed(format::exit_detail(
                 &ran.stderr,
@@ -117,7 +98,7 @@ pub(crate) fn place(diagnostic: &Diagnostic, map: &LineMap, text: &str) -> Optio
 #[must_use]
 pub(crate) fn findings(
     verdict: &Verdict,
-    tool: &Tool,
+    tool: &ToolCartridge,
     block: &CodeBlock,
     text: &str,
     timeout: Option<Duration>,
@@ -144,7 +125,7 @@ pub(crate) fn findings(
 }
 
 /// The `code-block-lint` error for `diagnostic` from `tool`, without a location.
-fn lint_finding(tool: &Tool, diagnostic: &Diagnostic) -> Finding {
+fn lint_finding(tool: &ToolCartridge, diagnostic: &Diagnostic) -> Finding {
     let Diagnostic { rule, message, .. } = diagnostic;
     Finding::new(
         LINT,
@@ -165,16 +146,16 @@ mod tests {
     use crate::cartridges::rust::cartridge as rust;
     use crate::code_blocks::block::{CodeBlock, blocks_in};
     use crate::code_blocks::rust::LineMap;
-    use crate::code_blocks::tools::{TOOLS, Tool};
+    use crate::code_blocks::tools::{CARTRIDGES, ToolCartridge};
     use crate::finding::Location;
     use crate::path::AbsolutePath;
     use crate::read::cartridge::{Cartridge, SourceFile};
 
-    fn ruff() -> &'static Tool {
-        TOOLS
+    fn ruff() -> &'static ToolCartridge {
+        CARTRIDGES
             .iter()
             .find(|tool| tool.name == "ruff")
-            .expect("the tool table should list ruff")
+            .expect("the cartridges should include ruff")
     }
 
     fn diagnostic(line: usize, column: usize) -> Diagnostic {

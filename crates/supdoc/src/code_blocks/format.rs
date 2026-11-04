@@ -1,13 +1,11 @@
 //! The format step: a formatter's output compared with the block.
 
-use std::ffi::OsString;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use crate::cartridges::{markdown, rust as rust_cartridge};
-use crate::config::code_blocks::{Edition, Language};
 use crate::finding::{Finding, Fix, LineIndex, Location, Severity};
 use crate::hash::LineEndings;
 use crate::limits::TimeLimit;
@@ -18,8 +16,7 @@ use super::block::{CodeBlock, has_contiguous_body, replacement_for, try_blocks_i
 use super::excerpt;
 use super::runner::{Failure, Ran};
 use super::states;
-use super::tools::Tool;
-use super::{python, rust, shell};
+use super::tools::ToolCartridge;
 
 /// The code for a block its formatter would change.
 const UNFORMATTED: &str = "code-block-unformatted";
@@ -88,17 +85,6 @@ pub(crate) fn first_line(text: &str) -> Option<usize> {
     None
 }
 
-/// Whether `stderr`, from `tool`, is its syntax-error report rather than another failure. The
-/// runner gives no exit status beyond success, so each tool is told by its message alone.
-#[must_use]
-fn parse_error(tool: &Tool, stderr: &str) -> Option<ParseError> {
-    match tool.language {
-        Language::Shell => shell::parse_error(stderr),
-        Language::Rust => rust::parse_error(stderr),
-        Language::Python => python::parse_error(tool, stderr),
-    }
-}
-
 impl Verdict {
     /// Whether the run behind this verdict may be cached: a pass or a plain failure, never a
     /// tool failure or a timeout.
@@ -123,22 +109,6 @@ impl Verdict {
     }
 }
 
-/// `tool`'s arguments for the `index`th block (1-based) of `doc`, the doc's absolute path.
-/// `None` while `language` has no format step, which leaves its blocks pending.
-#[must_use]
-pub(crate) fn args(
-    tool: &Tool,
-    doc: &Path,
-    index: usize,
-    edition: Edition,
-) -> Option<Vec<OsString>> {
-    match tool.language {
-        Language::Shell => Some(shell::format_args(doc, index)),
-        Language::Rust => Some(rust::format_args(edition)),
-        Language::Python => python::format_args(tool, doc, index),
-    }
-}
-
 /// What a formatter reads for `block`, found in `text`: its body without container prefixes, each
 /// line's CR dropped, every line ended by LF. Empty for an empty body. `None` when a line's range
 /// isn't inside `text`.
@@ -154,10 +124,11 @@ pub(crate) fn input(block: &CodeBlock, text: &str) -> Option<String> {
 /// Judges a formatter's `result` on `input`: equal output passes, other output is unformatted and
 /// kept, output that isn't UTF-8 and a non-zero exit are failures (the exit carrying the first
 /// lines of stderr), and a timeout is a timeout. A non-zero exit is a parse failure only when
-/// `tool`'s stderr is its syntax-error report and places the error on a line; a report without a
+/// `tool`'s stderr is its syntax-error report (see [`ToolCartridge::parse_error`]; the runner
+/// gives no exit status beyond success, so each tool is told by its message alone) and places the error on a line; a report without a
 /// location, like any other non-zero exit, is a tool failure. Stderr after exit 0 is never judged.
 #[must_use]
-pub(crate) fn judge(tool: &Tool, input: &str, result: Result<Ran, Failure>) -> Verdict {
+pub(crate) fn judge(tool: &ToolCartridge, input: &str, result: Result<Ran, Failure>) -> Verdict {
     match result {
         Ok(ran) if ran.success && ran.stdout == input.as_bytes() => Verdict::Formatted,
         Ok(ran) if ran.success => String::from_utf8(ran.stdout).map_or_else(
@@ -167,7 +138,9 @@ pub(crate) fn judge(tool: &Tool, input: &str, result: Result<Ran, Failure>) -> V
         Ok(ran) => {
             let stderr = String::from_utf8_lossy(&ran.stderr);
             let lines: Vec<&str> = stderr.lines().take(STDERR_LINES).collect();
-            let located = parse_error(tool, &stderr).filter(|error| error.line.is_some());
+            let located = tool
+                .parse_error(&stderr)
+                .filter(|error| error.line.is_some());
             if let Some(error) = located {
                 return Verdict::ParseFailed {
                     detail: lines.join("\n"),
@@ -210,7 +183,7 @@ pub(crate) fn failed(failure: Failure) -> Verdict {
 #[must_use]
 pub(crate) fn finding(
     verdict: &Verdict,
-    tool: &Tool,
+    tool: &ToolCartridge,
     at: &Location,
     timeout: Option<Duration>,
 ) -> Option<Finding> {
@@ -267,7 +240,7 @@ pub(crate) fn fixed(
     block: &CodeBlock,
     doc: &FixDoc,
     output: &str,
-    tool: &Tool,
+    tool: &ToolCartridge,
 ) -> Vec<Finding> {
     let name = tool.name;
     let what = format!("`{name}`'s output");
@@ -593,7 +566,7 @@ mod tests {
     }
 
     /// The shell formatter.
-    fn shfmt() -> &'static crate::code_blocks::tools::Tool {
+    fn shfmt() -> &'static crate::code_blocks::tools::ToolCartridge {
         formatter(Language::Shell).expect("shell has a formatter")
     }
 
@@ -633,7 +606,7 @@ mod tests {
     }
 
     /// The Rust formatter.
-    fn rustfmt() -> &'static crate::code_blocks::tools::Tool {
+    fn rustfmt() -> &'static crate::code_blocks::tools::ToolCartridge {
         formatter(Language::Rust).expect("Rust has a formatter")
     }
 

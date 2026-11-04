@@ -1,4 +1,5 @@
-//! Rust's format and lint steps.
+//! What Rust's tools need beyond their cartridges: the project's config and edition, the scans
+//! that refuse a block before it runs, and the readers of rustfmt's and clippy's output.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -32,17 +33,6 @@ pub(crate) fn attribute_edition(attributes: &[&str]) -> Option<Edition> {
         .find_map(|word| word.strip_prefix("edition").and_then(Edition::from_year))
 }
 
-/// `rustfmt`'s arguments for any block: `--edition <year> --emit stdout`. The block arrives on
-/// stdin as written, with no wrapping; rustfmt takes no stdin file name, so the doc and the
-/// block's index don't appear.
-#[must_use]
-pub(crate) fn format_args(edition: Edition) -> Vec<OsString> {
-    ["--edition", edition.year(), "--emit", "stdout"]
-        .into_iter()
-        .map(OsString::from)
-        .collect()
-}
-
 /// `--config-path <file>` for the first of `root`'s `.rustfmt.toml` and `rustfmt.toml` that
 /// exists, by its real path, when that is a regular file inside `root`'s real path. Empty
 /// otherwise: rustfmt then searches from its neutral working directory, never the checkout.
@@ -69,59 +59,6 @@ pub(crate) fn config_args(root: &Path) -> Vec<OsString> {
         }
         _ => Vec::new(),
     }
-}
-
-/// The lints clippy leaves off for a block, which a snippet breaks for lack of context, as
-/// `-A` flags after the project's own so they win.
-const RELAXED: [&str; 4] = [
-    "unused",
-    "dead_code",
-    "missing_docs",
-    "clippy::missing_docs_in_private_items",
-];
-
-/// The lint step's fixed arguments for `tool` on any block: none, since every clippy argument
-/// depends on the run (see [`clippy_args`]). `Some` only for clippy, which marks Rust's lint
-/// step as built.
-#[must_use]
-pub(crate) fn lint_args(
-    tool: &super::tools::Tool,
-    _doc: &Path,
-    _index: usize,
-) -> Option<Vec<OsString>> {
-    (tool.name == "clippy").then(Vec::new)
-}
-
-/// `clippy-driver`'s arguments for a block: `--edition <E> --crate-type lib
-/// --emit=metadata=<emit> --error-format=json`, the project's `lints` flags, the snippet
-/// relaxations, and `-` for the block on stdin. Nothing else from the project: no `--extern`, `-L`
-/// or `--cfg`. Without `emit`, the metadata flag has no path, which is how a cache key names
-/// every run of the same block alike.
-#[must_use]
-pub(crate) fn clippy_args(
-    edition: Edition,
-    emit: Option<&Path>,
-    lints: &[OsString],
-) -> Vec<OsString> {
-    let mut metadata = OsString::from("--emit=metadata");
-    if let Some(emit) = emit {
-        metadata.push("=");
-        metadata.push(emit);
-    }
-    let mut args: Vec<OsString> = vec![
-        "--edition".into(),
-        edition.year().into(),
-        "--crate-type".into(),
-        "lib".into(),
-        metadata,
-        "--error-format=json".into(),
-    ];
-    args.extend(lints.iter().cloned());
-    for lint in RELAXED {
-        args.extend(["-A".into(), lint.into()]);
-    }
-    args.push("-".into());
-    args
 }
 
 /// The clippy config names clippy reads from a directory, in its own order.
@@ -262,7 +199,7 @@ fn rustc_diagnostics(stderr: &[u8]) -> Vec<Diagnostic> {
 /// warnings); clean on exit 0 with none; a tool failure on a non-zero exit with none, output
 /// past the cap or a failed start; a timeout is a timeout.
 #[must_use]
-pub(crate) fn lint_verdict(result: Result<Ran, Failure>) -> lint::Verdict {
+pub(crate) fn lint_verdict(_input: &str, result: Result<Ran, Failure>) -> lint::Verdict {
     match result {
         Ok(ran) => {
             let found = rustc_diagnostics(&ran.stderr);
@@ -1249,8 +1186,8 @@ mod tests {
 
     use super::{
         EmitDir, FRONTMATTER, Found, LineMap, MAX_SCAN_BYTES, Scan, Token, Tokens,
-        attribute_edition, before_compiling, clippy_args, clippy_conf_dir, compile_time_read,
-        config_args, format_args, lint_verdict, parse_error, scan,
+        attribute_edition, before_compiling, clippy_conf_dir, compile_time_read, config_args,
+        lint_verdict, parse_error, scan,
     };
     use crate::cartridges::markdown::cartridge::cartridge;
     use crate::code_blocks::block::blocks_in;
@@ -1288,14 +1225,6 @@ mod tests {
             .collect();
         assert_eq!(lines, [(6, 3), (7, 3), (8, 3)]);
         assert_eq!(map.doc_line(3), None, "the block has three lines");
-    }
-
-    #[test]
-    fn rustfmt_reads_the_block_as_2024_and_prints_it() {
-        assert_eq!(
-            format_args(Edition::E2024),
-            ["--edition", "2024", "--emit", "stdout"]
-        );
     }
 
     #[test]
@@ -1492,47 +1421,6 @@ mod tests {
         assert_eq!(parse_error("warning: x\n"), None);
     }
 
-    #[test]
-    fn clippy_gets_the_block_on_stdin_with_its_edition_metadata_path_and_relaxations_last() {
-        let lints = ["-W".into(), "clippy::pedantic".into()];
-
-        let args = clippy_args(
-            Edition::E2021,
-            Some(std::path::Path::new("/c/emit/1-0/block.rmeta")),
-            &lints,
-        );
-
-        assert_eq!(
-            args,
-            [
-                "--edition",
-                "2021",
-                "--crate-type",
-                "lib",
-                "--emit=metadata=/c/emit/1-0/block.rmeta",
-                "--error-format=json",
-                "-W",
-                "clippy::pedantic",
-                "-A",
-                "unused",
-                "-A",
-                "dead_code",
-                "-A",
-                "missing_docs",
-                "-A",
-                "clippy::missing_docs_in_private_items",
-                "-",
-            ]
-        );
-        for refused in ["--extern", "-L", "--cfg"] {
-            assert!(!args.iter().any(|arg| arg == refused), "{args:?}");
-        }
-        assert!(
-            clippy_args(Edition::E2021, None, &lints).contains(&"--emit=metadata".into()),
-            "a cache key names no metadata path"
-        );
-    }
-
     /// A temporary root holding `Cargo.toml` with `text`.
     fn root_with_cargo_toml(text: &str) -> tempfile::TempDir {
         let root = tempfile::TempDir::new().expect("a temporary directory should be creatable");
@@ -1646,11 +1534,14 @@ mod tests {
         ]
         .concat();
 
-        let verdict = lint_verdict(Ok(Ran {
-            success: true,
-            stdout: Vec::new(),
-            stderr: stderr.into_bytes(),
-        }));
+        let verdict = lint_verdict(
+            "",
+            Ok(Ran {
+                success: true,
+                stdout: Vec::new(),
+                stderr: stderr.into_bytes(),
+            }),
+        );
 
         assert_eq!(
             verdict,
@@ -1672,11 +1563,14 @@ mod tests {
         );
         let summaries_only = rustc_line("warning", None, "");
         assert_eq!(
-            lint_verdict(Ok(Ran {
-                success: true,
-                stdout: Vec::new(),
-                stderr: summaries_only.into_bytes(),
-            })),
+            lint_verdict(
+                "",
+                Ok(Ran {
+                    success: true,
+                    stdout: Vec::new(),
+                    stderr: summaries_only.into_bytes(),
+                })
+            ),
             Verdict::Clean
         );
     }
