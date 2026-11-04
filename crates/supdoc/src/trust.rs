@@ -95,13 +95,13 @@ pub(crate) struct Store {
 impl Store {
     /// Lists `root`'s real path, unless it is already listed. Returns whether it was added.
     ///
-    /// Effect: resolves `root`, reads the store, and when adding writes it atomically, creating
-    /// its directory mode 0700 and the file mode 0600.
+    /// Effect: resolves `root`, creates the store's directory mode 0700, and under the store's
+    /// lock ([`Store::lock`]) reads the store and, when adding, writes it atomically, mode 0600.
     ///
     /// # Errors
     ///
-    /// Fails when `root` can't be resolved, its real path holds a newline, or the store can't be
-    /// read or written.
+    /// Fails when `root` can't be resolved, its real path holds a newline, or the store or its
+    /// lock can't be read or written.
     pub(crate) fn add(&self, root: &Path) -> io::Result<bool> {
         let real = root.canonicalize()?;
         if real.as_os_str().as_bytes().contains(&b'\n') {
@@ -110,6 +110,7 @@ impl Store {
                 "the root's real path holds a newline, which the trust store can't list",
             ));
         }
+        let _lock = self.lock()?;
         let mut roots = self.read()?;
         if roots.contains(&real) {
             return Ok(false);
@@ -119,19 +120,26 @@ impl Store {
         Ok(true)
     }
 
-    /// Removes `root` from the store: its real path, or the path itself when it no longer
-    /// resolves. Returns whether it was listed; when it wasn't, the store is left alone.
+    /// Removes `root` from the store: every entry that is the path as given or its real path, so
+    /// a listed path that has since become a symlink can still be revoked. Returns whether one
+    /// was listed; when none was, the store is left alone.
     ///
-    /// Effect: resolves `root`, reads the store, and when removing writes it atomically.
+    /// Effect: resolves `root`, reads the store, and when removing re-reads and writes it
+    /// atomically under the store's lock ([`Store::lock`]).
     ///
     /// # Errors
     ///
-    /// Fails when the store exists but can't be read, or can't be written.
+    /// Fails when the store exists but can't be read, or it or its lock can't be written.
     pub(crate) fn revoke(&self, root: &Path) -> io::Result<bool> {
-        let real = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let real = root.canonicalize().ok();
+        let names = |listed: &PathBuf| *listed == root || real.as_ref() == Some(listed);
+        if !self.read()?.iter().any(names) {
+            return Ok(false);
+        }
+        let _lock = self.lock()?;
         let mut roots = self.read()?;
         let before = roots.len();
-        roots.retain(|listed| *listed != real);
+        roots.retain(|listed| !names(listed));
         if roots.len() == before {
             return Ok(false);
         }
@@ -139,9 +147,50 @@ impl Store {
         Ok(true)
     }
 
+    /// Takes the store's exclusive lock, held until the returned file drops: `trusted-roots.lock`
+    /// beside the store, created mode 0600 in a directory created mode 0700. Every
+    /// read-modify-rename holds it, so concurrent `add` and `revoke` calls never lose an update.
+    ///
+    /// Effect: creates the store's directory and lock file, and blocks until the lock is free.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the directory or lock file can't be created or locked.
+    fn lock(&self) -> io::Result<fs::File> {
+        let dir = self.dir()?;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(dir.join("trusted-roots.lock"))?;
+        file.lock()?;
+        Ok(file)
+    }
+
+    /// The store's directory.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the store's path has no parent, which [`TrustEnv::store`] never builds.
+    fn dir(&self) -> io::Result<&Path> {
+        self.file.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the trust store has no directory",
+            )
+        })
+    }
+
     /// Whether the store trusts `root`: its real path is listed, or it sits in a linked worktree
     /// ([`Place::linked`]) whose common git directory and path in its work tree equal a listed
-    /// root's. A missing or unreadable store trusts nothing.
+    /// root's. A listed root counts for that only while it still resolves to itself: the store
+    /// holds real paths, so one that resolves elsewhere has been replaced since it was listed. A
+    /// missing or unreadable store trusts nothing.
     ///
     /// Effect: reads the store, resolves `root`, and reads the `.git` files and git directories of
     /// `root` and of each listed root.
@@ -159,11 +208,8 @@ impl Store {
             return false;
         };
         roots.iter().any(|listed| {
-            listed
-                .canonicalize()
-                .ok()
-                .and_then(|listed| Place::of(&listed))
-                .is_some_and(|listed| listed == place)
+            listed.canonicalize().is_ok_and(|real| real == *listed)
+                && Place::of(listed).is_some_and(|listed| listed == place)
         })
     }
 
@@ -189,25 +235,16 @@ impl Store {
     }
 
     /// Replaces the store with `roots`, one per line: a temporary file in the same directory,
-    /// created mode 0600, renamed over it. The directory is created mode 0700 when missing.
+    /// created mode 0600, renamed over it. The caller holds the lock, which made the directory.
     ///
-    /// Effect: creates the store's directory and writes, then renames, a temporary file there.
+    /// Effect: writes, then renames, a temporary file in the store's directory.
     ///
     /// # Errors
     ///
-    /// Fails when the directory can't be created or the file can't be written or renamed; the
-    /// temporary file is then removed and the store left as it was.
+    /// Fails when the file can't be written or renamed; the temporary file is then removed and
+    /// the store left as it was.
     fn write(&self, roots: &[PathBuf]) -> io::Result<()> {
-        let dir = self.file.parent().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "the trust store has no directory",
-            )
-        })?;
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)?;
+        let dir = self.dir()?;
         let temp = dir.join(format!(
             ".trusted-roots.{}.{}.tmp",
             std::process::id(),
@@ -265,17 +302,18 @@ impl Place {
     }
 
     /// The place of `real` when it sits in a linked worktree that git itself made: the top's
-    /// `.git` is a file naming a git directory in the common directory's `worktrees`, whose
+    /// `.git` is a regular file, not a symlink to one, naming a git directory in the common directory's `worktrees`, whose
     /// `gitdir` file names that `.git` file back. A `.git` file that merely names a trusted
     /// repository's git directory, as a forged checkout could, doesn't count, since only git
-    /// writes inside the trusted repository.
+    /// writes inside the trusted repository; nor does a `.git` symlink to a real worktree's
+    /// `.git` file, which names that worktree back.
     ///
     /// Effect: reads `.git` metadata up from `real`, the `.git` file, its git directory's
     /// `commondir` and `gitdir` files.
     fn linked(real: &Path) -> Option<Self> {
         let top = real.ancestors().find(|dir| holds_git(dir))?;
         let dot_git = top.join(".git");
-        if !fs::metadata(&dot_git).ok()?.is_file() {
+        if !fs::symlink_metadata(&dot_git).ok()?.is_file() {
             return None;
         }
         let line = first_line(&dot_git)?;
@@ -293,8 +331,11 @@ impl Place {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
     use std::process::Command;
+    use std::sync::{Barrier, mpsc};
+    use std::thread;
+    use std::time::Duration;
 
     use super::*;
 
@@ -447,6 +488,140 @@ mod tests {
         assert_eq!(granted(&worktree, &scratch.env(None)), Ok(true));
         assert_eq!(granted(&forged_common, &scratch.env(None)), Ok(false));
         assert_eq!(granted(&forged_worktree, &scratch.env(None)), Ok(false));
+    }
+
+    #[test]
+    fn a_dot_git_symlink_to_a_real_worktree_is_not_trusted() {
+        let scratch = Scratch::new();
+        let (repo, worktree) = repo_with_worktree(&scratch);
+        assert!(scratch.store().add(&repo).expect("adding should work"));
+        let forged = scratch.mkdir("forged");
+        fs::write(forged.join("build.rs"), "attacker code").expect("the file should be writable");
+        symlink(worktree.join(".git"), forged.join(".git"))
+            .expect("the symlink should be creatable");
+
+        assert_eq!(granted(&worktree, &scratch.env(None)), Ok(true));
+        assert_eq!(granted(&forged, &scratch.env(None)), Ok(false));
+    }
+
+    #[test]
+    fn a_self_consistent_forged_worktree_outside_the_common_worktrees_is_not_trusted() {
+        let scratch = Scratch::new();
+        let (repo, _) = repo_with_worktree(&scratch);
+        assert!(scratch.store().add(&repo).expect("adding should work"));
+        let forged = scratch.mkdir("forged");
+        fs::create_dir(forged.join("g")).expect("the forged git dir should be creatable");
+        fs::write(forged.join(".git"), "gitdir: g\n").expect("the .git file should be writable");
+        fs::write(forged.join("g/gitdir"), "../.git\n").expect("gitdir should be writable");
+        fs::write(
+            forged.join("g/commondir"),
+            format!("{}\n", repo.join(".git").display()),
+        )
+        .expect("commondir should be writable");
+
+        assert_eq!(granted(&forged, &scratch.env(None)), Ok(false));
+    }
+
+    #[test]
+    fn a_listed_root_replaced_by_a_symlink_grants_no_worktree_trust() {
+        let scratch = Scratch::new();
+        let listed = scratch.mkdir("listed");
+        assert!(scratch.store().add(&listed).expect("adding should work"));
+        fs::remove_dir(&listed).expect("the listed root should be removable");
+        let forged = scratch.mkdir("forged");
+        fs::create_dir_all(forged.join("x/worktrees/w")).expect("the layout should be creatable");
+        fs::write(forged.join(".git"), "gitdir: x/worktrees/w\n")
+            .expect("the .git file should be writable");
+        fs::write(forged.join("x/worktrees/w/gitdir"), "../../../.git\n")
+            .expect("gitdir should be writable");
+        fs::write(forged.join("x/worktrees/w/commondir"), "../..\n")
+            .expect("commondir should be writable");
+        symlink(&forged, &listed).expect("the symlink should be creatable");
+
+        assert_eq!(granted(&forged, &scratch.env(None)), Ok(false));
+    }
+
+    #[test]
+    fn a_fifo_at_a_forged_gitdir_is_refused_without_blocking() {
+        let scratch = Scratch::new();
+        let (repo, _) = repo_with_worktree(&scratch);
+        assert!(scratch.store().add(&repo).expect("adding should work"));
+        let forged = scratch.mkdir("forged");
+        fs::create_dir(forged.join("g")).expect("the forged git dir should be creatable");
+        fs::write(forged.join(".git"), "gitdir: g\n").expect("the .git file should be writable");
+        let fifo = forged.join("g/gitdir");
+        let made = Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo should be runnable");
+        assert!(made.success(), "mkfifo failed for {}", fifo.display());
+        let env = scratch.env(None);
+        let (sender, receiver) = mpsc::channel();
+        let judged = forged.clone();
+        let _detached = thread::spawn(move || drop(sender.send(granted(&judged, &env))));
+
+        let result = receiver.recv_timeout(Duration::from_secs(3));
+        if result.is_err() {
+            // Unblock the reader stuck in open, so the thread ends; no reader means no effect.
+            drop(
+                fs::OpenOptions::new()
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&fifo),
+            );
+        }
+        assert_eq!(
+            result,
+            Ok(Ok(false)),
+            "granted() blocked on or misjudged a FIFO"
+        );
+    }
+
+    #[test]
+    fn revoke_removes_a_listed_path_that_became_a_symlink() {
+        let scratch = Scratch::new();
+        let store = scratch.store();
+        let listed = scratch.mkdir("listed");
+        let other = scratch.mkdir("other");
+        assert!(store.add(&listed).expect("adding should work"));
+        fs::remove_dir(&listed).expect("the listed root should be removable");
+        symlink(&other, &listed).expect("the symlink should be creatable");
+
+        assert!(store.revoke(&listed).expect("revoking should work"));
+        assert_eq!(
+            fs::read_to_string(&store.file).expect("the store should be readable"),
+            ""
+        );
+    }
+
+    #[test]
+    fn parallel_adds_all_land() {
+        let scratch = Scratch::new();
+        let roots: Vec<PathBuf> = (0..8).map(|n| scratch.mkdir(&format!("root{n}"))).collect();
+        let barrier = Barrier::new(roots.len());
+
+        thread::scope(|scope| {
+            for root in &roots {
+                let store = scratch.store();
+                let barrier = &barrier;
+                let _joined_at_scope_end = scope.spawn(move || {
+                    let _leader = barrier.wait();
+                    assert!(store.add(root).expect("adding should work"));
+                });
+            }
+        });
+
+        let listed = scratch
+            .store()
+            .read()
+            .expect("the store should be readable");
+        for root in &roots {
+            assert!(
+                listed.contains(root),
+                "{} was lost from {listed:?}",
+                root.display()
+            );
+        }
     }
 
     #[test]
