@@ -320,9 +320,13 @@ pub(crate) fn run(
     let (command, ran, outcome) = if direction == Direction::Same {
         (Vec::new(), false, UpgradeOutcome::AlreadyCurrent)
     } else {
-        let words = install_argv(&target);
+        let words = install_argv(&target, &installed.cargo_home);
         if applied {
-            install(&words, &installed.cargo_home)?;
+            install(
+                &words,
+                &installed.cargo_home,
+                context.global.format().is_json(),
+            )?;
             (words, true, UpgradeOutcome::Installed)
         } else {
             (words, false, UpgradeOutcome::Previewed)
@@ -357,8 +361,10 @@ pub(crate) fn run(
 }
 
 /// The command that installs `target`: `=` pins the exact version, so cargo never picks a
-/// compatible newer one, and `--locked` keeps the grammars the queries were written for.
-fn install_argv(target: &ReleaseVersion) -> Vec<String> {
+/// compatible newer one, `--locked` keeps the grammars the queries were written for, `--root`
+/// installs into the cargo home that was checked, wherever `CARGO_INSTALL_ROOT` or cargo's
+/// `install.root` would send it, and `--color never` keeps cargo's text plain.
+fn install_argv(target: &ReleaseVersion, cargo_home: &Path) -> Vec<String> {
     [
         "cargo",
         "install",
@@ -367,6 +373,10 @@ fn install_argv(target: &ReleaseVersion) -> Vec<String> {
         "--version",
         &format!("={}", target.release()),
         "--force",
+        "--root",
+        &cargo_home.to_string_lossy(),
+        "--color",
+        "never",
     ]
     .map(str::to_owned)
     .to_vec()
@@ -439,7 +449,7 @@ fn installed_by_cargo(environment: &Environment) -> Result<CargoInstall, CliErro
     );
     let (Some(exe), Some(cargo_home)) = (&environment.exe, &environment.cargo_home) else {
         return Err(match &environment.exe {
-            Some(exe) => by_location(exe),
+            Some(exe) => known_location(exe).unwrap_or_else(no_cargo_home),
             None => cannot_tell(&seen),
         });
     };
@@ -465,6 +475,11 @@ fn installed_by_cargo(environment: &Environment) -> Result<CargoInstall, CliErro
 
 /// The refusal for a binary outside `$CARGO_HOME/bin`: Homebrew, a build, or unknown.
 fn by_location(exe: &Path) -> CliError {
+    known_location(exe).unwrap_or_else(|| cannot_tell(&exe.display().to_string()))
+}
+
+/// The refusal for a binary that is plainly a Homebrew install or a build from source, if it is.
+fn known_location(exe: &Path) -> Option<CliError> {
     let shown = exe.display().to_string();
     let homebrew = exe.components().any(|part| part.as_os_str() == "Cellar")
         || exe.starts_with("/opt/homebrew")
@@ -473,18 +488,29 @@ fn by_location(exe: &Path) -> CliError {
         .components()
         .any(|part| matches!(part, Component::Normal(name) if name == "target"));
     if homebrew {
-        not_cargo(
+        Some(not_cargo(
             format!("supdoc was installed by Homebrew ({shown}), not by cargo"),
             "Run `brew upgrade supdoc`",
-        )
+        ))
     } else if build {
-        not_cargo(
+        Some(not_cargo(
             format!("supdoc is a build from source ({shown}), not a cargo install"),
             "Pull and rebuild it, or install the release with `cargo install supdoc --locked`",
-        )
+        ))
     } else {
-        cannot_tell(&shown)
+        None
     }
+}
+
+/// The refusal when no absolute cargo home can be found, so cargo's install records cannot be read.
+fn no_cargo_home() -> CliError {
+    not_cargo(
+        "CARGO_HOME is not an absolute path (and HOME doesn't give one), so supdoc can't find \
+         cargo's install records"
+            .to_owned(),
+        "Set CARGO_HOME to an absolute path, such as `export CARGO_HOME=$HOME/.cargo`, then run \
+         `supdoc upgrade` again",
+    )
 }
 
 /// The refusal for a binary whose origin supdoc cannot establish.
@@ -529,18 +555,14 @@ fn recorded_version(record: &str, seen: &str) -> Result<ReleaseVersion, CliError
         .into_iter()
         .flatten()
         .filter_map(|(key, install)| {
-            let mut words = key.split_whitespace();
-            let (name, version, source) = (words.next()?, words.next()?, words.next()?);
+            let (name, rest) = key.split_once(' ')?;
+            let (version, source) = rest.split_once(' ')?;
+            let source = source.strip_prefix('(')?.strip_suffix(')')?;
             let installs_binary = install
                 .get("bins")
                 .and_then(serde_json::Value::as_array)
                 .is_some_and(|bins| bins.iter().any(|bin| bin.as_str() == Some(PACKAGE)));
-            (name == PACKAGE && installs_binary).then(|| {
-                (
-                    version.to_owned(),
-                    source.trim_matches(['(', ')']).to_owned(),
-                )
-            })
+            (name == PACKAGE && installs_binary).then(|| (version.to_owned(), source.to_owned()))
         });
     let (Some((version, source)), None) = (entries.next(), entries.next()) else {
         return Err(cannot_tell_with(
@@ -553,7 +575,10 @@ fn recorded_version(record: &str, seen: &str) -> Result<ReleaseVersion, CliError
         .any(|known| source.trim_end_matches('/') == *known);
     if !from_crates_io {
         return Err(not_cargo(
-            format!("supdoc was installed by cargo from {source}, not from crates.io"),
+            format!(
+                "supdoc was installed by cargo from {}, not from crates.io",
+                shell_quote(&source)
+            ),
             "Reinstall it the same way, or install the release with `cargo install supdoc --locked`",
         ));
     }
@@ -584,9 +609,11 @@ fn recorded_version(record: &str, seen: &str) -> Result<ReleaseVersion, CliError
 /// Returns `cli-upgrade-no-cargo` when cargo cannot start, `cli-upgrade-cargo-failed` when it
 /// fails, and `cli-upgrade-latest-unknown` when its output has no `supdoc = "<version>"` line.
 fn latest(cargo_home: &Path) -> Result<ReleaseVersion, CliError> {
-    let argv: Vec<String> = ["cargo", "search", PACKAGE, "--limit", "1"]
-        .map(str::to_owned)
-        .to_vec();
+    let argv: Vec<String> = [
+        "cargo", "search", PACKAGE, "--limit", "1", "--color", "never",
+    ]
+    .map(str::to_owned)
+    .to_vec();
     let result = cargo(&argv)
         .current_dir(cargo_home)
         .stdin(Stdio::null())
@@ -639,28 +666,41 @@ fn cargo(argv: &[String]) -> Command {
 ///
 /// Returns `cli-upgrade-no-cargo` when cargo cannot start and `cli-upgrade-cargo-failed` when it
 /// exits with a failure.
-fn install(argv: &[String], cargo_home: &Path) -> Result<(), CliError> {
+fn install(argv: &[String], cargo_home: &Path, json: bool) -> Result<(), CliError> {
     let mut child = cargo(argv)
         .current_dir(cargo_home)
         .stdin(Stdio::null())
+        .stdout(if json {
+            Stdio::piped()
+        } else {
+            Stdio::inherit()
+        })
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| no_cargo(&error))?;
     let mut shown = Vec::new();
-    if let Some(mut stderr) = child.stderr.take() {
-        let mut chunk = [0_u8; 4096];
-        loop {
-            let read = match stderr.read(&mut chunk) {
-                Ok(0) | Err(_) => break,
-                Ok(read) => read,
-            };
-            let bytes = chunk.get(..read).unwrap_or_default();
-            shown.extend_from_slice(bytes);
-            let mut out = io::stderr();
-            // Cargo's progress is best effort: a closed stderr must not stop the install.
-            let _written = out.write_all(bytes).and_then(|()| out.flush());
+    std::thread::scope(|scope| {
+        // Under JSON, standard output holds the one report, so cargo's goes to standard error.
+        let _forwarder = child.stdout.take().map(|mut stdout| {
+            scope.spawn(move || {
+                let _copied = io::copy(&mut stdout, &mut io::stderr());
+            })
+        });
+        if let Some(mut stderr) = child.stderr.take() {
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let read = match stderr.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => read,
+                };
+                let bytes = chunk.get(..read).unwrap_or_default();
+                shown.extend_from_slice(bytes);
+                let mut out = io::stderr();
+                // Cargo's progress is best effort: a closed stderr must not stop the install.
+                let _written = out.write_all(bytes).and_then(|()| out.flush());
+            }
         }
-    }
+    });
     let status = child.wait().map_err(|error| no_cargo(&error))?;
     if status.success() {
         Ok(())
@@ -767,8 +807,23 @@ mod tests {
     #[test]
     fn the_install_argv_pins_the_exact_version_locked_and_forced() {
         assert_eq!(
-            shell_line(&install_argv(&version("0.3.2+b"))),
-            "cargo install supdoc --locked --version =0.3.2 --force"
+            shell_line(&install_argv(
+                &version("0.3.2+b"),
+                Path::new("/home/u/.cargo")
+            )),
+            "cargo install supdoc --locked --version =0.3.2 --force --root /home/u/.cargo --color never"
+        );
+    }
+
+    #[test]
+    fn a_source_with_spaces_is_named_whole_and_quoted() {
+        let record = r#"{"installs":{"supdoc 0.3.1 (path+file:///Users/x/my dir/supdoc)":{"bins":["supdoc"]}}}"#;
+        let error = recorded_version(record, "/x").expect_err("a path install should be refused");
+        assert!(
+            error
+                .message()
+                .contains("'path+file:///Users/x/my dir/supdoc'"),
+            "{error}"
         );
     }
 

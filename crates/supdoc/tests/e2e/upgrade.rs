@@ -80,15 +80,27 @@ impl Fixture {
     /// answers `search` with `search_result` as the latest version, and runs `install_body` for
     /// `install`.
     fn fake_cargo(&self, search_result: &str, install_body: &str) {
+        self.custom_cargo(&format!(
+            "case \"$1\" in\n\
+             search) echo 'supdoc = \"{search_result}\"    # Track links' ;;\n\
+             install) {install_body} ;;\n\
+             esac\n"
+        ));
+    }
+
+    /// Installs a fake `cargo` that logs each call to `cargo.log`, records whether its standard
+    /// input was `eof` or `data` to `stdin.log`, then runs `body`.
+    fn custom_cargo(&self, body: &str) {
         let log = self.path("cargo.log");
+        let stdin_log = self.path("stdin.log");
         let script = format!(
             "#!/bin/sh\n\
              echo \"$1: cwd=$(pwd -P) argv=$*\" >> '{log}'\n\
-             case \"$1\" in\n\
-             search) echo 'supdoc = \"{search_result}\"    # Track links' ;;\n\
-             install) {install_body} ;;\n\
-             esac\n",
-            log = log.display()
+             if read -r _line; then state=data; else state=eof; fi\n\
+             echo \"$1: $state\" >> '{stdin_log}'\n\
+             {body}",
+            log = log.display(),
+            stdin_log = stdin_log.display()
         );
         self.write("fakebin/cargo", &script);
         std::fs::set_permissions(
@@ -96,6 +108,20 @@ impl Fixture {
             std::fs::Permissions::from_mode(0o755),
         )
         .expect("the fake cargo should be executable");
+    }
+
+    /// What each fake cargo call saw on its standard input, one `<subcommand>: eof|data` per call.
+    fn stdin_states(&self) -> Vec<String> {
+        std::fs::read_to_string(self.path("stdin.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The cargo home as supdoc is given it, which is what `--root` names.
+    fn cargo_home_given(&self) -> PathBuf {
+        self.path("cargo-home")
     }
 
     /// What the fake cargo logged, one line per call.
@@ -109,6 +135,14 @@ impl Fixture {
 
     /// Runs `supdoc args` using the binary at `relative` with the fake cargo first on `PATH`.
     fn run_at(&self, relative: &str, args: &[&str]) -> Run {
+        self.run_env_at(relative, args, &[])
+    }
+
+    /// [`Self::run_at`] with `vars` set after the defaults, so they override `CARGO_HOME` and the
+    /// rest. Standard input holds a line of data, so a cargo that inherited it would read it.
+    fn run_env_at(&self, relative: &str, args: &[&str], vars: &[(&str, &str)]) -> Run {
+        self.write("stdin.txt", "data\n");
+        let stdin = std::fs::File::open(self.path("stdin.txt")).expect("stdin.txt should open");
         let output = Command::new(self.path(relative))
             .args(args)
             .current_dir(self.path("work"))
@@ -116,7 +150,8 @@ impl Fixture {
             .env("PATH", self.path("fakebin"))
             .env("CARGO_HOME", self.path("cargo-home"))
             .env("HOME", self.path("home"))
-            .stdin(Stdio::null())
+            .envs(vars.iter().copied())
+            .stdin(Stdio::from(stdin))
             .output()
             .expect("the supdoc binary should start");
         Run {
@@ -157,7 +192,8 @@ fn preview_prints_current_target_and_the_exact_command_and_does_not_run_cargo_in
     );
     assert!(
         run.stdout.contains(&format!(
-            "command  cargo install supdoc --locked --version ={NEWER} --force"
+            "command  cargo install supdoc --locked --version ={NEWER} --force --root {} --color never",
+            fixture.cargo_home_given().display()
         )),
         "{}",
         run.stdout
@@ -185,8 +221,9 @@ fn yes_runs_exactly_cargo_install_locked_exact_version_force_from_cargo_home() {
     assert_eq!(
         fixture.cargo_calls(),
         vec![format!(
-            "install: cwd={} argv=install supdoc --locked --version ={NEWER} --force",
-            fixture.cargo_home().display()
+            "install: cwd={} argv=install supdoc --locked --version ={NEWER} --force --root {} --color never",
+            fixture.cargo_home().display(),
+            fixture.cargo_home_given().display()
         )]
     );
 }
@@ -239,7 +276,7 @@ fn no_version_reads_the_cargo_search_output() {
     assert_eq!(
         fixture.cargo_calls(),
         vec![format!(
-            "search: cwd={} argv=search supdoc --limit 1",
+            "search: cwd={} argv=search supdoc --limit 1 --color never",
             fixture.cargo_home().display()
         )],
         "only the search runs in a preview"
@@ -476,7 +513,11 @@ fn json_reports_the_versions_the_command_and_whether_it_ran() {
             "--locked",
             "--version",
             format!("={NEWER}"),
-            "--force"
+            "--force",
+            "--root",
+            fixture.cargo_home_given().to_string_lossy(),
+            "--color",
+            "never"
         ])
     );
     assert_eq!(data["ran"], false);
@@ -496,4 +537,101 @@ fn json_reports_the_versions_the_command_and_whether_it_ran() {
     assert_eq!(data["direction"], "same");
     assert_eq!(data["command"], serde_json::json!([]));
     assert_eq!(data["outcome"], "already-current");
+}
+
+#[test]
+fn a_relative_cargo_home_is_refused_naming_cargo_home_not_telling_to_reinstall() {
+    let fixture = Fixture::installed("0.0.0");
+
+    let run = fixture.run_env_at(
+        "cargo-home/bin/supdoc",
+        &["upgrade", NEWER, "--yes"],
+        &[("CARGO_HOME", "../cargo-home")],
+    );
+
+    let _ = run.assert_exit(78);
+    assert!(
+        run.stderr.contains("CARGO_HOME is not an absolute path"),
+        "{}",
+        run.stderr
+    );
+    assert!(!run.stderr.contains("Reinstall"), "{}", run.stderr);
+    assert_eq!(fixture.cargo_calls(), Vec::<String>::new());
+}
+
+#[test]
+fn supdoc_yes_in_the_environment_applies_like_yes() {
+    let fixture = Fixture::installed("0.0.0");
+
+    let run = fixture.run_env_at(
+        "cargo-home/bin/supdoc",
+        &["upgrade", NEWER],
+        &[("SUPDOC_YES", "1")],
+    );
+
+    let _ = run.assert_exit(0);
+    assert_eq!(
+        fixture.cargo_calls().len(),
+        1,
+        "SUPDOC_YES=1 should install"
+    );
+}
+
+#[test]
+fn colored_cargo_output_is_not_a_problem_because_both_calls_say_color_never() {
+    let fixture = Fixture::installed("0.0.0");
+    fixture.custom_cargo(
+        "case \" $* \" in *\" --color never \"*) c=''; r='' ;; *) c=$(printf '\\033[1m'); r=$(printf '\\033[0m') ;; esac\n\
+         case \"$1\" in\n\
+         search) echo \"${c}supdoc${r} = \\\"99.1.0\\\"\" ;;\n\
+         install) echo \"error: could not find \\`${c}supdoc${r}\\` in registry\" >&2; exit 101 ;;\n\
+         esac\n",
+    );
+
+    let latest = fixture.run(&["upgrade"]);
+    let _ = latest.assert_exit(0);
+    assert!(
+        latest.stdout.contains("target   99.1.0"),
+        "{}",
+        latest.stdout
+    );
+
+    let missing = fixture.run(&["upgrade", NEWER, "--yes"]);
+    let _ = missing.assert_exit(1);
+    assert!(
+        missing.stderr.contains("does not exist on crates.io"),
+        "{}",
+        missing.stderr
+    );
+}
+
+#[test]
+fn cargo_gets_closed_standard_input_for_the_search_and_the_install() {
+    let fixture = Fixture::installed("99.1.0");
+
+    let run = fixture.run(&["upgrade", "--yes"]);
+
+    let _ = run.assert_exit(0);
+    assert_eq!(
+        fixture.stdin_states(),
+        vec!["search: eof".to_owned(), "install: eof".to_owned()],
+        "supdoc was given open input with data; cargo must not see it"
+    );
+}
+
+#[test]
+fn json_with_yes_keeps_standard_output_to_one_document_and_sends_cargos_to_standard_error() {
+    let fixture = Fixture::installed("0.0.0");
+    fixture.fake_cargo("0.0.0", "echo 'cargo-said-this-on-stdout'");
+
+    let run = fixture.run(&["upgrade", NEWER, "--yes", "--json"]);
+
+    let _ = run.assert_exit(0);
+    let report = run.json();
+    assert_eq!(super::support::at(&report, "/data/outcome"), "installed");
+    assert!(
+        run.stderr.contains("cargo-said-this-on-stdout"),
+        "cargo's stdout should arrive on stderr: {}",
+        run.stderr
+    );
 }
