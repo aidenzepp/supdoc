@@ -1473,14 +1473,15 @@ mod tests {
 
     use super::{
         BlockRecord, LintRan, MAX_WORKERS, Pending, RustSetup, Session, in_parallel, run_clippy,
+        rust_refusal,
     };
     use crate::cartridges::markdown::cartridge::cartridge as markdown;
     use crate::code_blocks::block::blocks_in;
     use crate::code_blocks::format::FixDoc;
     use crate::code_blocks::lint::Verdict;
     use crate::code_blocks::states::{BlockState, NotChecked, Steps};
-    use crate::code_blocks::tools::{CARTRIDGES, Found, ToolCartridge, ToolEnv, find};
-    use crate::config::code_blocks::Dialect;
+    use crate::code_blocks::tools::{CARTRIDGES, Found, Invocation, ToolCartridge, ToolEnv, find};
+    use crate::config::code_blocks::{Dialect, Edition};
     use crate::finding::Location;
     use crate::path::AbsolutePath;
     use crate::read::cartridge::SourceFile;
@@ -1606,6 +1607,83 @@ mod tests {
     /// A temporary directory.
     fn temporary() -> tempfile::TempDir {
         tempfile::TempDir::new().expect("a temporary directory should be creatable")
+    }
+
+    /// The probe `e2_rawcstr_2018_leak.rs`, its marker path a fixed non-existent one: before
+    /// edition 2021 `cr#"` is `cr`, `#` and a string, which hides an `include!` from a scan that
+    /// reads it as a raw C string.
+    const E2_PROBE: &str = "pub const A: &str = stringify!(cr#\" \");\n\
+                            include!(\"/nonexistent/supdoc-probe/secret.rs\"); // \"#;\n";
+
+    /// The probe's record with `edition` as its attribute's, under a project at
+    /// `project_edition`: the scan's verdict for it with clippy as its linter, and the
+    /// `--edition` pair in the argv `run_clippy` builds for it.
+    fn scan_and_argv(
+        attribute: Option<Edition>,
+        project_edition: &str,
+    ) -> (Option<(NotChecked, Option<String>)>, Vec<String>) {
+        let root = temporary();
+        std::fs::write(
+            root.path().join("Cargo.toml"),
+            format!("[package]\nname = \"p\"\nedition = \"{project_edition}\"\n"),
+        )
+        .expect("the manifest should be writable");
+        let mut record = rust_record(root.path(), &format!("```rust\n{E2_PROBE}```\n"));
+        record.edition = attribute;
+        let rust = RustSetup::read(root.path());
+        let refusal = rust_refusal(&record, &rust, true, &mut false, &mut Vec::new());
+        let doc = root.path().join("docs/a.md");
+        let args = clippy().args(&Invocation {
+            doc: &doc,
+            index: record.index,
+            edition: rust.edition_of(&record),
+            dialect: record.dialect,
+            project: &rust.lints,
+            emit: None,
+        });
+        let args = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        (refusal, args)
+    }
+
+    /// Asserts that the probe is refused as a compile-time read and clippy gets `--edition 2018`.
+    fn assert_read_as_2018(attribute: Option<Edition>, project_edition: &str) {
+        let (refusal, args) = scan_and_argv(attribute, project_edition);
+
+        assert!(
+            matches!(refusal, Some((NotChecked::CompileTimeRead, _))),
+            "{refusal:?}"
+        );
+        assert!(
+            args.windows(2).any(|pair| pair == ["--edition", "2018"]),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn the_scan_reads_a_block_as_its_attribute_edition_like_clippy() {
+        assert_read_as_2018(Some(Edition::E2018), "2024");
+    }
+
+    #[test]
+    fn the_scan_reads_a_block_as_the_project_edition_like_clippy() {
+        assert_read_as_2018(None, "2018");
+    }
+
+    #[test]
+    fn a_2021_block_of_the_probe_is_not_refused_the_2018_way_and_gets_2021() {
+        let (refusal, args) = scan_and_argv(Some(Edition::E2021), "2018");
+
+        assert!(
+            !matches!(refusal, Some((NotChecked::CompileTimeRead, _))),
+            "{refusal:?}"
+        );
+        assert!(
+            args.windows(2).any(|pair| pair == ["--edition", "2021"]),
+            "{args:?}"
+        );
     }
 
     #[test]
