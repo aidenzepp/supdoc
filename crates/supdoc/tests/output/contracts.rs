@@ -845,6 +845,24 @@ mod helps {
             needs_permissions: false,
         },
         HelpCase {
+            kind: "code-block-lint",
+            setup: |p| {
+                config_with(
+                    p,
+                    "[features.code-blocks]\n[features.code-blocks.python]\nformatter = false\n",
+                );
+                p.write("docs/blocks.md", "# B\n\n```py\nx == None\n```\n");
+                p.write(
+                    "tools/ruff",
+                    "#!/bin/sh\necho '[{\"code\":\"E711\",\"message\":\"Comparison to None\",\
+                     \"location\":{\"row\":1,\"column\":3}}]'\nexit 1\n",
+                );
+            },
+            args: &["check"],
+            via: Via::OutsideTools,
+            needs_permissions: false,
+        },
+        HelpCase {
             kind: "code-block-fix-unsafe",
             setup: |p| shfmt_runs(p, "printf 'echo hi\\n```\\n'"),
             args: &["check"],

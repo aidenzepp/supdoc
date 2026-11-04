@@ -92,6 +92,8 @@ pub(crate) enum Failure {
     ParseFailed,
     /// Its tool passed the `[limits] code-block-timeout` limit.
     ToolTimeout,
+    /// Its linter reported diagnostics on it.
+    Lint,
 }
 
 /// What a block's `from(...)` values came to.
@@ -267,7 +269,8 @@ impl BlockState {
 
     /// Why the block is in this state, when it has a reason to give. A passed or pending block
     /// whose `steps` didn't all run gives theirs (see [`Steps`]). `tag` is the block's language
-    /// tag and `tool` the name of the formatter chosen for it, when one was.
+    /// tag and `tool` the name of the tool whose step decided it (the formatter, else the
+    /// linter), when one was.
     #[must_use]
     pub(crate) fn reason(
         &self,
@@ -295,6 +298,9 @@ impl BlockState {
             }
             Self::Failed(Failure::ToolTimeout) => {
                 Some(format!("`{}` passed the time limit", tool_of(tag, tool)))
+            }
+            Self::Failed(Failure::Lint) => {
+                Some(format!("`{}` reported lint findings", tool_of(tag, tool)))
             }
             Self::Stale => Some("the block differs from its source".to_owned()),
             Self::OptedOut { reason } => reason.clone(),

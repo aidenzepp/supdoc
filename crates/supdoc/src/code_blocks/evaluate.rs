@@ -29,13 +29,14 @@ use super::info::{
     KNOWN_ATTRIBUTES, SourceKind, is_known_attribute, parenthesized_spelling, reasoned,
     source_attributes,
 };
-use super::runner::{self, Call};
+use super::lint;
+use super::runner::{self, Call, Ran};
 use super::rust::{self, Scan};
 use super::shell;
 use super::source::{self, SourceText, Unresolved};
-use super::states::{Excerpt, NotChecked, StepState, Steps, state_of, tag_of};
+use super::states::{self, Excerpt, NotChecked, StepState, Steps, state_of, tag_of};
 use super::toolchain::{self, Refusal, Toolchain};
-use super::tools::{Found, Step, TOOLS, Tool, ToolEnv, find, formatter};
+use super::tools::{Found, Step, TOOLS, Tool, ToolEnv, find, formatter, linter};
 use super::uses::{self, UseState, Written};
 
 pub(crate) use super::states::{BlockState, CodeBlockCounts};
@@ -84,6 +85,8 @@ pub(crate) struct BlockRecord {
     index: usize,
     /// The formatter the config selects for it, while the block is pending.
     tool: Option<&'static Tool>,
+    /// The linter the config selects for it, while the block is pending and its lint step due.
+    linter: Option<&'static Tool>,
     /// The shell dialect shfmt parses it as.
     dialect: Dialect,
     /// The edition its `edition20xx` attribute or the config's `edition` names, if either does.
@@ -106,11 +109,11 @@ struct Pending {
 }
 
 impl Pending {
-    /// `block`, found in `doc`, ready for the format step: read through [`rust::unhide`] when
-    /// `tool` is a Rust tool. `None` when its body isn't inside `doc`.
-    fn of(block: &CodeBlock, doc: &Arc<FixDoc>, tool: Option<&Tool>) -> Option<Self> {
+    /// `block`, found in `doc`, ready for its steps: read through [`rust::unhide`] when it is a
+    /// Rust block. `None` when its body isn't inside `doc`.
+    fn of(block: &CodeBlock, doc: &Arc<FixDoc>, language: Option<Language>) -> Option<Self> {
         let input = format::input(block, doc.text())?;
-        let (input, hidden) = if tool.is_some_and(|tool| tool.language == Language::Rust) {
+        let (input, hidden) = if language == Some(Language::Rust) {
             let (checked, hidden) = rust::unhide(&input);
             (checked, Some(hidden))
         } else {
@@ -210,10 +213,8 @@ pub(crate) fn evaluate(
         let state = state_of(block, outcome, |language| code_blocks.checks(language));
         let language = tag_of(block).map(str::to_owned);
         let steps = Steps::of(block, &state, code_blocks);
-        let tool = (steps.format == StepState::NotRun)
-            .then(|| language.as_deref().and_then(Language::from_tag))
-            .flatten()
-            .and_then(|language| selected(code_blocks, language));
+        let checked = language.as_deref().and_then(Language::from_tag);
+        let (tool, linter) = selected_tools(code_blocks, &steps, checked);
         let pending = (state == BlockState::NotChecked(NotChecked::Pending))
             .then(|| {
                 let file = block.fence.file.as_str();
@@ -223,13 +224,14 @@ pub(crate) fn evaluate(
                 doc.as_ref()?
                     .1
                     .as_ref()
-                    .and_then(|text| Pending::of(block, text, tool))
+                    .and_then(|text| Pending::of(block, text, checked))
             })
             .flatten();
         records.push(BlockRecord {
             at: block.fence.clone(),
             reason: state.reason(&steps, language.as_deref(), tool.map(|tool| tool.name)),
             tool,
+            linter,
             dialect: code_blocks.dialect(),
             edition: block_edition(block).or_else(|| code_blocks.edition()),
             language,
@@ -252,16 +254,22 @@ pub(crate) fn evaluate(
 }
 
 impl Evaluation {
-    /// Looks up the formatter of each pending block's language on `env`'s `PATH`, once per tool.
-    /// A tool not found makes its blocks [`BlockState::ToolMissing`] with one
-    /// `code-block-tool-missing` warning naming its install command; one whose real path is
-    /// inside `root` makes them not checked with one `code-block-not-checked` warning. A tool
-    /// found elsewhere runs, hardened, on each block of a language with a format step, which
-    /// passes it or fails it with one `code-block-unformatted`, `code-block-tool-failed` or
-    /// `code-block-tool-timeout` error; a language without a format step stays pending. An
-    /// unformatted block's error carries the fix to the formatter's output, unless
-    /// [`format::safe_fix`] finds it could end the block early, which adds a
-    /// `code-block-fix-unsafe` warning instead.
+    /// Looks up the formatter and the linter of each pending block's language on `env`'s
+    /// `PATH`, once per tool; a linter counts only once its language has a lint step. A tool
+    /// not found adds one `code-block-tool-missing` warning naming its install command; one
+    /// whose real path is inside `root` adds one `code-block-not-checked` warning. When neither
+    /// of a block's tools was found outside `root`, the first refusal decides it:
+    /// [`BlockState::ToolMissing`] or not checked.
+    ///
+    /// A found formatter runs, hardened, on each block of a language with a format step, which
+    /// passes it or fails it with one `code-block-unformatted`, `code-block-parse`,
+    /// `code-block-tool-failed` or `code-block-tool-timeout` error. An unformatted block's error
+    /// carries the fix to the formatter's output, unless [`format::safe_fix`] finds it could end
+    /// the block early, which adds a `code-block-fix-unsafe` warning instead. A found linter then
+    /// runs on the block as written, whatever the format verdict, except on a block the
+    /// formatter couldn't parse: each diagnostic is one `code-block-lint` error (see [`lint`]).
+    /// A block's format findings come before its lint findings, and its state is the outcome
+    /// over the steps that ran.
     ///
     /// A block whose run is in the result cache (see [`cache`]) isn't run again; a run that
     /// passed or plainly failed is stored there, a tool failure or timeout never is.
@@ -270,7 +278,7 @@ impl Evaluation {
     /// timeout; findings and states come out as a serial run gives them, in block order.
     ///
     /// Effect: reads file metadata along `PATH`, resolves symlinks, reads and writes the result
-    /// cache, and runs each found formatter once per block not in it, killing it at the timeout.
+    /// cache, and runs each found tool once per block not in it, killing it at the timeout.
     pub(crate) fn look_up_tools(&mut self, env: &ToolEnv, root: &Path) {
         let mut cache: Option<Option<Cache>> = None;
         let mut looked_up: Vec<(&'static str, Found)> = Vec::new();
@@ -282,30 +290,17 @@ impl Evaluation {
             if record.state != BlockState::NotChecked(NotChecked::Pending) {
                 continue;
             }
-            let Some(tool) = record.tool else {
+            let doc = root.join(record.at.file.as_str());
+            let linter = record
+                .linter
+                .filter(|tool| lint::args(tool, &doc, record.index).is_some());
+            let Some(tool) = record.tool.or(linter) else {
                 continue;
             };
             let rust = (tool.language == Language::Rust)
                 .then(|| &*rust_setup.get_or_insert_with(|| RustSetup::read(root)));
             if let Some(rust) = rust {
-                let refused = if let Toolchain::Refused { refusal, file } = rust.toolchain {
-                    if !toolchain_warned {
-                        toolchain_warned = true;
-                        slots.push(Slot::Found(toolchain_warning(refusal, file, &record.at)));
-                    }
-                    Some(NotChecked::ToolchainPath)
-                } else {
-                    let scan = record.pending.as_ref().map_or(Scan::Clean, |pending| {
-                        rust::compile_time_read(&pending.input)
-                    });
-                    let refused = match &scan {
-                        Scan::Clean => None,
-                        Scan::Read(_) => Some(NotChecked::CompileTimeRead),
-                        Scan::TooLarge => Some(NotChecked::TooLargeToScan),
-                    };
-                    slots.extend(scan_warning(&scan, &record.at).map(Slot::Found));
-                    refused
-                };
+                let refused = rust_refusal(record, rust, &mut toolchain_warned, &mut slots);
                 if let Some(refused) = refused {
                     record.state = BlockState::NotChecked(refused);
                     record.reason = record.state.reason(
@@ -316,33 +311,32 @@ impl Evaluation {
                     continue;
                 }
             }
-            let found =
-                if let Some((_, found)) = looked_up.iter().find(|(name, _)| *name == tool.name) {
-                    found.clone()
-                } else {
-                    let found = find(tool.binary, env, root);
-                    slots.extend(tool_warning(tool, &found, &record.at).map(Slot::Found));
-                    looked_up.push((tool.name, found.clone()));
-                    found
-                };
-            record.state = match found {
-                Found::OnPath(program) => {
-                    let _opened = cache.get_or_insert_with(|| Cache::open(env, root));
-                    slots.push(Slot::Run(jobs.len()));
-                    jobs.push(Job {
-                        record: position,
-                        tool,
-                        program,
-                    });
-                    continue;
-                }
-                Found::Missing => BlockState::ToolMissing,
-                Found::InsideRoot(_) => BlockState::NotChecked(NotChecked::ToolInsideRoot),
-            };
-            record.reason =
-                record
-                    .state
-                    .reason(&record.steps, record.language.as_deref(), Some(tool.name));
+            let (runs, refused) = found_runs(
+                [record.tool, linter],
+                &mut looked_up,
+                &mut slots,
+                env,
+                root,
+                &record.at,
+            );
+            let [format, lint] = runs;
+            if format.is_some() || lint.is_some() {
+                let _opened = cache.get_or_insert_with(|| Cache::open(env, root));
+                slots.push(Slot::Run(jobs.len()));
+                jobs.push(Job {
+                    record: position,
+                    format,
+                    lint,
+                });
+                continue;
+            }
+            if let Some((state, tool)) = refused {
+                record.state = state;
+                record.reason =
+                    record
+                        .state
+                        .reason(&record.steps, record.language.as_deref(), Some(tool.name));
+            }
         }
         let cache = cache.flatten();
         let session = Session {
@@ -354,10 +348,19 @@ impl Evaluation {
         let records = &self.records;
         let ran = in_parallel(&jobs, |job| {
             let record = records.get(job.record)?;
-            let rust = rust_setup
+            let format = job.format.as_ref().and_then(|run| {
+                let rust = rust_setup
+                    .as_ref()
+                    .filter(|_| run.tool.language == Language::Rust);
+                run_formatter(run.tool, &run.program, record, &session, rust)
+            });
+            let parses = !matches!(format, Some((format::Verdict::ParseFailed { .. }, _)));
+            let lint = job
+                .lint
                 .as_ref()
-                .filter(|_| job.tool.language == Language::Rust);
-            run_formatter(job.tool, &job.program, record, &session, rust)
+                .filter(|_| parses)
+                .and_then(|run| run_linter(run.tool, &run.program, record, &session));
+            Some(StepsRan { format, lint })
         });
         self.settle(slots, &jobs, ran);
         if let Some(cache) = cache {
@@ -371,14 +374,11 @@ impl Evaluation {
 
 impl Evaluation {
     /// Adds `slots`' findings in order, each [`Slot::Run`] taking its job's result from `ran`, which
-    /// holds one per job of `jobs` in order, and sets each run block's state and reason from its
-    /// verdict. A run with no result leaves its block pending.
-    fn settle(
-        &mut self,
-        slots: Vec<Slot>,
-        jobs: &[Job],
-        ran: Vec<Option<(format::Verdict, Vec<Finding>)>>,
-    ) {
+    /// holds one per job of `jobs` in order: a block's format findings, then its lint findings.
+    /// Each run block's state is the outcome over the steps that ran, the first failure (format
+    /// before lint) deciding it and naming its tool in the reason. A run with no result, or whose
+    /// steps both didn't run, leaves its block pending.
+    fn settle(&mut self, slots: Vec<Slot>, jobs: &[Job], ran: Vec<Option<StepsRan>>) {
         let mut ran = ran.into_iter();
         for slot in slots {
             let (job, run) = match slot {
@@ -388,20 +388,44 @@ impl Evaluation {
                 }
                 Slot::Run(job) => (jobs.get(job), ran.next().flatten()),
             };
-            let (Some(job), Some((verdict, findings))) = (job, run) else {
+            let (Some(job), Some(StepsRan { format, lint })) = (job, run) else {
                 continue;
             };
-            self.findings.extend(findings);
-            if let Some(record) = self.records.get_mut(job.record) {
-                record.state = verdict.state();
+            let Some(record) = self.records.get_mut(job.record) else {
+                continue;
+            };
+            let mut outcomes = Vec::new();
+            if let (Some((verdict, findings)), Some(run)) = (format, job.format.as_ref()) {
+                self.findings.extend(findings);
                 record.steps.format = StepState::Ran;
-                record.reason = record.state.reason(
-                    &record.steps,
-                    record.language.as_deref(),
-                    Some(job.tool.name),
-                );
+                outcomes.push((verdict.state(), run.tool));
+            }
+            if let (Some((verdict, findings)), Some(run)) = (lint, job.lint.as_ref()) {
+                self.findings.extend(findings);
+                record.steps.lint = StepState::Ran;
+                outcomes.push((lint_state(&verdict), run.tool));
+            }
+            let decided = outcomes
+                .iter()
+                .find(|(state, _)| matches!(state, BlockState::Failed(_)))
+                .or_else(|| outcomes.first());
+            if let Some((state, tool)) = decided {
+                record.state = state.clone();
+                record.reason =
+                    record
+                        .state
+                        .reason(&record.steps, record.language.as_deref(), Some(tool.name));
             }
         }
+    }
+}
+
+/// The state a lint verdict alone puts a block in.
+fn lint_state(verdict: &lint::Verdict) -> BlockState {
+    match verdict {
+        lint::Verdict::Clean => BlockState::Passed,
+        lint::Verdict::Diagnostics(_) => BlockState::Failed(states::Failure::Lint),
+        lint::Verdict::Failed(failed) => failed.state(),
     }
 }
 
@@ -418,14 +442,32 @@ enum Slot {
     Run(usize),
 }
 
-/// One formatter run on one pending block.
+/// The steps run on one pending block: its formatter, then its linter unless the formatter
+/// found that the block doesn't parse.
 struct Job {
     /// The position of the block's record.
     record: usize,
-    /// The formatter.
+    /// The formatter, when one runs.
+    format: Option<ToolRun>,
+    /// The linter, when one runs.
+    lint: Option<ToolRun>,
+}
+
+/// A tool found on `PATH` to run on a block.
+struct ToolRun {
+    /// The tool.
     tool: &'static Tool,
     /// Where it was found on `PATH`.
     program: PathBuf,
+}
+
+/// What a [`Job`]'s steps gave: each step's verdict and findings, `None` for a step that didn't
+/// run.
+struct StepsRan {
+    /// The format step's.
+    format: Option<(format::Verdict, Vec<Finding>)>,
+    /// The lint step's.
+    lint: Option<(lint::Verdict, Vec<Finding>)>,
 }
 
 /// `work` applied to each of `items`, the results in `items`' order. The items are shared among
@@ -518,12 +560,7 @@ fn run_formatter(
     session: &Session<'_>,
     rust: Option<&RustSetup>,
 ) -> Option<(format::Verdict, Vec<Finding>)> {
-    let Session {
-        env,
-        root,
-        timeout,
-        cache,
-    } = *session;
+    let Session { root, timeout, .. } = *session;
     let pending = record.pending.as_ref()?;
     let input = pending.input.as_str();
     let doc = root.join(record.at.file.as_str());
@@ -544,39 +581,20 @@ fn run_formatter(
         .map(|(name, value)| (*name, value.as_os_str()))
         .collect();
     let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
-    let key = cache.and_then(|_| {
-        let run = cache::Run {
-            tool,
-            program,
-            args: &args,
-            extra: &extra,
-            input,
-            doc: &doc,
-        };
-        Cache::key(&run, root)
-    });
-    let cached = cache.zip(key).and_then(|(cache, key)| cache.get(key));
-    let verdict = if let Some(ran) = cached {
-        format::judge(tool, input, Ok(ran))
-    } else {
-        let call = Call {
-            program,
-            name: tool.binary,
-            args: &args,
-            extra: &extra,
-            stdin: input.as_bytes(),
-            timeout,
-        };
-        let result = runner::run(&call, env, root);
-        let stored = result.as_ref().ok().cloned();
-        let verdict = format::judge(tool, input, result);
-        if let (Some(cache), Some(key), Some(ran)) = (cache, key, stored)
-            && verdict.cacheable()
-        {
-            cache.put(key, &ran);
-        }
-        verdict
+    let run = cache::Run {
+        tool,
+        program,
+        args: &args,
+        extra: &extra,
+        input,
+        doc: &doc,
     };
+    let verdict = cached_run(
+        &run,
+        session,
+        |result| format::judge(tool, input, result),
+        format::Verdict::cacheable,
+    );
     let at = match &verdict {
         format::Verdict::ParseFailed {
             line: Some(line), ..
@@ -598,6 +616,86 @@ fn run_formatter(
         (_, finding) => finding.into_iter().collect(),
     };
     Some((verdict, findings))
+}
+
+/// Runs `tool`, a linter found at `program`, on `record`'s block as [`cached_run`] does: its
+/// verdict and findings, one `code-block-lint` error per diagnostic or the tool's failure. `None`
+/// when the block's language has no lint step yet or its input couldn't be read.
+///
+/// Effect: reads the cache, runs the tool, killing it at the timeout, and writes the cache.
+fn run_linter(
+    tool: &Tool,
+    program: &Path,
+    record: &BlockRecord,
+    session: &Session<'_>,
+) -> Option<(lint::Verdict, Vec<Finding>)> {
+    let pending = record.pending.as_ref()?;
+    let doc = session.root.join(record.at.file.as_str());
+    let args = lint::args(tool, &doc, record.index)?;
+    let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
+    let run = cache::Run {
+        tool,
+        program,
+        args: &args,
+        extra: &[],
+        input: &pending.input,
+        doc: &doc,
+    };
+    let verdict = cached_run(
+        &run,
+        session,
+        |result| lint::judge(tool, result),
+        lint::Verdict::cacheable,
+    );
+    let findings = lint::findings(
+        &verdict,
+        tool,
+        &pending.block,
+        pending.doc.text(),
+        |_| 0,
+        session.timeout,
+    );
+    Some((verdict, findings))
+}
+
+/// `judge` applied to `run`, read from `session`'s cache when its key is there, otherwise run
+/// from the root with the session's env under its timeout, and stored in the cache when
+/// `cacheable` allows the verdict.
+///
+/// Effect: reads the cache, runs the tool, killing it at the timeout, and writes the cache.
+fn cached_run<V>(
+    run: &cache::Run<'_>,
+    session: &Session<'_>,
+    judge: impl FnOnce(Result<Ran, runner::Failure>) -> V,
+    cacheable: impl FnOnce(&V) -> bool,
+) -> V {
+    let Session {
+        env,
+        root,
+        timeout,
+        cache,
+    } = *session;
+    let key = cache.and_then(|_| Cache::key(run, root));
+    if let Some(ran) = cache.zip(key).and_then(|(cache, key)| cache.get(key)) {
+        return judge(Ok(ran));
+    }
+    let call = Call {
+        program: run.program,
+        name: run.tool.binary,
+        args: run.args,
+        extra: run.extra,
+        stdin: run.input.as_bytes(),
+        timeout,
+    };
+    let result = runner::run(&call, env, root);
+    let stored = result.as_ref().ok().cloned();
+    let verdict = judge(result);
+    if let (Some(cache), Some(key), Some(ran)) = (cache, key, stored)
+        && cacheable(&verdict)
+    {
+        cache.put(key, &ran);
+    }
+    verdict
 }
 
 /// Each resolved `uses(...)` value of `doc_name` with its state against `recorded`, then each
@@ -644,6 +742,99 @@ fn selected(code_blocks: &CodeBlocks, language: Language) -> Option<&'static Too
             tool.language == language && tool.step == Step::Format && tool.name == name
         }),
         Some(Choice::Off) | None => formatter(language),
+    }
+}
+
+/// Why `record`'s Rust block isn't run under `rust`, when it isn't: the root's toolchain file
+/// was refused (adding its one warning to `slots` unless `warned`), or the block reads at compile
+/// time or is too large to scan (adding that warning).
+fn rust_refusal(
+    record: &BlockRecord,
+    rust: &RustSetup,
+    warned: &mut bool,
+    slots: &mut Vec<Slot>,
+) -> Option<NotChecked> {
+    if let Toolchain::Refused { refusal, file } = rust.toolchain {
+        if !*warned {
+            *warned = true;
+            slots.push(Slot::Found(toolchain_warning(refusal, file, &record.at)));
+        }
+        return Some(NotChecked::ToolchainPath);
+    }
+    let scan = record.pending.as_ref().map_or(Scan::Clean, |pending| {
+        rust::compile_time_read(&pending.input)
+    });
+    slots.extend(scan_warning(&scan, &record.at).map(Slot::Found));
+    match scan {
+        Scan::Clean => None,
+        Scan::Read(_) => Some(NotChecked::CompileTimeRead),
+        Scan::TooLarge => Some(NotChecked::TooLargeToScan),
+    }
+}
+
+/// Looks up each of `tools` on `env`'s `PATH` (once per tool, remembered in `looked_up`), adding
+/// to `slots` the warning for one not found outside `root`, at `at`. Each found tool's run, in
+/// `tools`' order, and the state for the first one that wasn't, with that tool.
+///
+/// Effect: reads file metadata along `PATH` and resolves symlinks.
+fn found_runs(
+    tools: [Option<&'static Tool>; 2],
+    looked_up: &mut Vec<(&'static str, Found)>,
+    slots: &mut Vec<Slot>,
+    env: &ToolEnv,
+    root: &Path,
+    at: &Location,
+) -> ([Option<ToolRun>; 2], Option<(BlockState, &'static Tool)>) {
+    let mut runs = [None, None];
+    let mut refused = None;
+    for (run, tool) in runs.iter_mut().zip(tools) {
+        let Some(tool) = tool else {
+            continue;
+        };
+        let found = if let Some((_, found)) = looked_up.iter().find(|(name, _)| *name == tool.name)
+        {
+            found.clone()
+        } else {
+            let found = find(tool.binary, env, root);
+            slots.extend(tool_warning(tool, &found, at).map(Slot::Found));
+            looked_up.push((tool.name, found.clone()));
+            found
+        };
+        let state = match found {
+            Found::OnPath(program) => {
+                *run = Some(ToolRun { tool, program });
+                continue;
+            }
+            Found::Missing => BlockState::ToolMissing,
+            Found::InsideRoot(_) => BlockState::NotChecked(NotChecked::ToolInsideRoot),
+        };
+        let _first = refused.get_or_insert((state, tool));
+    }
+    (runs, refused)
+}
+
+/// The formatter and linter `code_blocks` selects for a block in `language` whose `steps` are
+/// due: each `None` when its step isn't due or the language has none.
+fn selected_tools(
+    code_blocks: &CodeBlocks,
+    steps: &Steps,
+    language: Option<Language>,
+) -> (Option<&'static Tool>, Option<&'static Tool>) {
+    let language = |step: &StepState| (*step == StepState::NotRun).then_some(language).flatten();
+    (
+        language(&steps.format).and_then(|language| selected(code_blocks, language)),
+        language(&steps.lint).and_then(|language| selected_linter(code_blocks, language)),
+    )
+}
+
+/// The linter `code_blocks` selects for `language`: the named one, or the default. `None` when
+/// the language has none.
+fn selected_linter(code_blocks: &CodeBlocks, language: Language) -> Option<&'static Tool> {
+    match code_blocks.linter(language) {
+        Some(Choice::Named(name)) => TOOLS
+            .iter()
+            .find(|tool| tool.language == language && tool.step == Step::Lint && tool.name == name),
+        Some(Choice::Off) | None => linter(language),
     }
 }
 
