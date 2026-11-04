@@ -16,7 +16,7 @@ fn finding_kinds(json: &serde_json::Value) -> Vec<String> {
 /// A recorded `basic` project with the Rust table on, its linter off so only rustfmt runs, and
 /// `doc` at `docs/blocks.md`.
 fn project_with_rust_doc(doc: &str) -> Project {
-    project_with_rust_config("linter = false\n", doc)
+    project_with_rust_config("[features.code-blocks.rust.clippy]\nlint = \"off\"\n", doc)
 }
 
 /// A recorded `basic` project whose Rust table holds `rust`, with `doc` at `docs/blocks.md`.
@@ -399,7 +399,7 @@ fn fix_never_deletes_a_plain_comment_line_inside_a_doc_comment_block() {
     project.record();
     project.write(
         "supdoc.config.toml",
-        "[features.code-blocks]\n[features.code-blocks.rust]\nlinter = false\n",
+        "[features.code-blocks]\n[features.code-blocks.rust]\n[features.code-blocks.rust.clippy]\nlint = \"off\"\n",
     );
     project.write("src/blocks.rs", source);
     let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
@@ -492,7 +492,7 @@ fn clippy_never_runs_in_the_static_tier_while_rustfmt_still_does() {
 #[test]
 fn clippy_never_runs_with_the_formatter_off_either() {
     let project = project_with_rust_config(
-        "formatter = false\n",
+        "[features.code-blocks.rust.rustfmt]\nformat = \"off\"\n",
         "# Blocks\n\n```rust\npub fn f() -> i32 {\n    missing()\n}\n```\n",
     );
     let stubs = rust_stubs();

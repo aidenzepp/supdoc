@@ -88,7 +88,7 @@ fn project_with_shfmt(outside: &Path, script: &str) -> Project {
     let project = project_with(UNFORMATTED_DOC);
     project.write(
         "supdoc.config.toml",
-        "[features.code-blocks]\n[features.code-blocks.shell]\nlinter = false\n",
+        "[features.code-blocks]\n[features.code-blocks.shell]\n[features.code-blocks.shell.shellcheck]\nlint = \"off\"\n",
     );
     let stub = outside.join("shfmt");
     std::fs::write(&stub, format!("#!/bin/sh\n{script}\n")).expect("the stub should be writable");

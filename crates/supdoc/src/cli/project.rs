@@ -107,6 +107,7 @@ fn config_span(error: &ConfigError) -> Option<(&AbsolutePath, Range<usize>)> {
         | ConfigError::ExtendsDirectory { file, span, .. }
         | ConfigError::ExtendsNotConfig { file, span, .. }
         | ConfigError::NamespaceOutsideRoot { file, span, .. } => Some((file, span.clone())),
+        ConfigError::ToolNotSelected { table } => Some((&table.file, table.span.clone())),
         ConfigError::ExtendsLoop { chain, span } => chain
             .len()
             .checked_sub(2)

@@ -4,6 +4,7 @@ use std::fmt;
 use std::io::ErrorKind;
 use std::ops::Range;
 
+use super::code_blocks::Unselected;
 use crate::exit::ExitStatus;
 use crate::lock::error::shell_quote;
 use crate::namespace::NamespaceName;
@@ -121,6 +122,14 @@ pub(crate) enum ConfigError {
         escape: NamespaceEscape,
     },
 
+    /// A `[features.code-blocks.<language>.<tool>]` table sets options for a tool the merged
+    /// `extends` chain doesn't select for its language. It shares `config-parse`'s code: like
+    /// an unknown key, it is a key the config can't use, only judged across the chain.
+    ToolNotSelected {
+        /// The table, the file that wrote it, and the tool selected instead.
+        table: Unselected,
+    },
+
     /// A chain of `extends` comes back to a file it already visited.
     ExtendsLoop {
         /// The files in the loop, in order. The last is the first again.
@@ -150,7 +159,7 @@ impl ConfigError {
             Self::NotFound { .. } => "config-not-found",
             Self::Read { .. } => "config-read",
             Self::TooLarge { .. } => "config-too-large",
-            Self::Parse { .. } => "config-parse",
+            Self::Parse { .. } | Self::ToolNotSelected { .. } => "config-parse",
             Self::ExtendsMissing { .. } => "config-extends-missing",
             Self::ExtendsDirectory { .. } => "config-extends-directory",
             Self::ExtendsLoop { .. } => "config-extends-loop",
@@ -180,6 +189,17 @@ impl ConfigError {
                 size_text(*limit)
             ),
             Self::Parse { path, error } => format!("{}: {}", show(path), error.message()),
+            Self::ToolNotSelected { table } => format!(
+                "{}: `[features.code-blocks.{}.{}]` sets options for `{}`, but the {} {} the \
+                 config chain selects is `{}`",
+                show(&table.file),
+                table.language,
+                table.tool,
+                table.tool,
+                table.language,
+                table.key,
+                table.selected.unwrap_or("none"),
+            ),
             Self::ExtendsMissing {
                 file,
                 extends,
@@ -288,6 +308,14 @@ impl ConfigError {
                 ))
             }
             Self::Parse { error, .. } => parse_help(error.message()),
+            Self::ToolNotSelected { table } => Some(format!(
+                "Select it with `{key} = \"{tool}\"` in `[features.code-blocks.{language}]`, or \
+                 move the options to `[features.code-blocks.{language}.{selected}]`",
+                key = table.key,
+                tool = table.tool,
+                language = table.language,
+                selected = table.selected.unwrap_or("<tool>"),
+            )),
             Self::ExtendsMissing { resolved, .. } => {
                 let resolved = shell_quote(&show(resolved));
                 Some(format!(
@@ -348,6 +376,7 @@ impl ConfigError {
             Self::NotFound { .. }
             | Self::TooLarge { .. }
             | Self::Parse { .. }
+            | Self::ToolNotSelected { .. }
             | Self::ExtendsMissing { .. }
             | Self::ExtendsDirectory { .. }
             | Self::ExtendsLoop { .. }
@@ -406,6 +435,8 @@ fn parse_help(message: &str) -> Option<String> {
              `--max-config-size 1MiB` instead"
                 .to_owned(),
         )
+    } else if let Some(help) = removed_key_help(message) {
+        Some(help)
     } else if let Some(help) = limit_help(message) {
         Some(help)
     } else if message.starts_with("unknown field") {
@@ -459,6 +490,23 @@ fn parse_help(message: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// The help for a removed code-blocks key (`formatter = false`, `linter = false` or
+/// `[features.code-blocks] lint`), naming the tool table and the `format` or `lint` key its
+/// message gives as the replacement. `None` for any other message.
+fn removed_key_help(message: &str) -> Option<String> {
+    if !message.contains("` is removed") {
+        return None;
+    }
+    let replacement = message
+        .split('`')
+        .find(|part| part.starts_with("[features.code-blocks.") && part.contains("] "))?;
+    let (table, key) = replacement.split_once("] ")?;
+    Some(format!(
+        "Delete the removed key. To turn the step off, write `{key}` in the tool's own table, \
+         `{table}]`"
+    ))
 }
 
 /// The help for a `[limits]` value that isn't `0` or a number with a unit, from the message
