@@ -653,3 +653,199 @@ fn clippy_never_runs_with_the_formatter_off_either() {
     assert_eq!(finding_kinds(&json), ["code-block-not-trusted"], "{json}");
     assert_eq!(at(&json, "/data/code_blocks/0/lint"), "not_run", "{json}");
 }
+
+/// The config that turns the Rust formatter off, so only the linter has a say.
+const FORMAT_OFF: &str = "[features.code-blocks.rust.rustfmt]\nformat = \"off\"\n";
+
+/// Asserts block 0's lint step was held for the audit, whatever else its reason says.
+fn assert_awaits_audit(json: &serde_json::Value) {
+    assert_eq!(at(json, "/data/code_blocks/0/lint"), "not_run", "{json}");
+    assert!(
+        at(json, "/data/code_blocks/0/reason")
+            .as_str()
+            .is_some_and(|reason| reason.ends_with(AWAITS_AUDIT)),
+        "{json}"
+    );
+}
+
+/// A trusted check of `doc` with the Rust formatter off and the real `clippy-driver`, asserting
+/// it exits 0 with the lint step held for the audit. `None`, skipped with a note naming `test`,
+/// when `clippy-driver` is not on `PATH`.
+fn held_real_clippy_check(test: &str, doc: &str) -> Option<serde_json::Value> {
+    let vars = real_rust_tool("clippy-driver", test)?;
+    let mut vars = borrowed(&vars);
+    vars.push(("SUPDOC_TRUST", Path::new("1")));
+    let project = project_with_rust_config(FORMAT_OFF, doc);
+    let json = project
+        .supdoc_in_with(".", &["check", "--json", "-v"], &vars)
+        .assert_exit(0)
+        .json();
+    assert_awaits_audit(&json);
+    assert_eq!(finding_kinds(&json), Vec::<String>::new(), "{json}");
+    Some(json)
+}
+
+#[test]
+fn clippy_reports_a_vec_reference_parameter_as_a_lint_error_at_its_doc_line() {
+    let Some(_json) = held_real_clippy_check(
+        "clippy_reports_a_vec_reference_parameter",
+        "# Blocks\n\n```rust\npub fn total(v: &Vec<i32>) -> i32 {\n    v.iter().sum()\n}\n```\n",
+    ) else {
+        return;
+    };
+    // After the lift (P5-07K1), swap in, with exit 1 and `SUPDOC_TRUST=1`:
+    //
+    //     assert_eq!(finding_kinds(&json), ["code-block-lint"], "{json}");
+    //     assert_eq!(at(&json, "/findings/0/location/line"), 4, "{json}");
+    //     assert_eq!(at(&json, "/findings/0/location/column"), 17, "{json}");
+    //     let message = at(&json, "/findings/0/message");
+    //     assert!(
+    //         message
+    //             .as_str()
+    //             .is_some_and(|text| text.contains("clippy::ptr_arg")),
+    //         "{json}"
+    //     );
+    //     assert_eq!(at(&json, "/data/code_blocks/0/lint"), "ran", "{json}");
+}
+
+#[test]
+fn clippy_passes_a_block_whose_visible_line_expects_the_lint() {
+    let Some(_json) = held_real_clippy_check(
+        "clippy_passes_a_block_whose_visible_line_expects_the_lint",
+        "# Blocks\n\n```rust\n#[expect(clippy::ptr_arg, reason = \"a non-example\")]\n\
+         pub fn total(v: &Vec<i32>) -> i32 {\n    v.iter().sum()\n}\n```\n",
+    ) else {
+        return;
+    };
+    // After the lift (P5-07K1), swap in, with exit 0 and `SUPDOC_TRUST=1`. The `#[expect]` line
+    // is visible code now (round 3 §4), not a `# ` hidden line:
+    //
+    //     assert_eq!(finding_kinds(&json), Vec::<String>::new(), "{json}");
+    //     assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+    //     assert_eq!(at(&json, "/data/code_blocks/0/lint"), "ran", "{json}");
+}
+
+#[test]
+fn clippy_reports_an_unresolved_name_as_a_missing_name() {
+    let Some(_json) = held_real_clippy_check(
+        "clippy_reports_an_unresolved_name",
+        "# Blocks\n\n```rust\npub fn f() -> i32 {\n    missing()\n}\n```\n",
+    ) else {
+        return;
+    };
+    // After the lift (P5-07K1), swap in, with exit 1 and `SUPDOC_TRUST=1` (round 3 §2):
+    //
+    //     assert_eq!(finding_kinds(&json), ["code-block-missing-name"], "{json}");
+    //     assert_eq!(at(&json, "/findings/0/location/line"), 5, "{json}");
+}
+
+#[test]
+fn clippy_gets_only_the_block_a_private_metadata_path_and_no_project_flags() {
+    let project = project_with_rust_config(FORMAT_OFF, "# Blocks\n\n```rust\npub fn f() {}\n```\n");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"p\"\nedition = \"2021\"\n\n[lints.clippy]\nptr_arg = \"deny\"\n\
+         pedantic = { level = \"warn\", priority = -1 }\ncargo = \"warn\"\n",
+    );
+    let stubs = rust_stubs();
+
+    let json = check_with_stubs(
+        &project,
+        &stubs,
+        &["check", "--json", "-v"],
+        &[
+            ("SUPDOC_TRUST", Path::new("1")),
+            ("RUSTFLAGS", Path::new("--cfg=leak")),
+            ("CLIPPY_ARGS", Path::new("--cfg=leak")),
+        ],
+        0,
+    )
+    .json();
+
+    assert_awaits_audit(&json);
+    // After the lift (P5-07K1), the stub records its argv, env, cwd and `--emit=metadata=` path
+    // (as `d77bfd21f^` did) and these hold. A root with no `Cargo.toml` `[package]` gains no
+    // argv; this root has one named `p`, so its argv also carries the project-build `--extern`
+    // and `-L` of P5-07H:
+    //
+    //     assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+    //     assert_eq!(
+    //         argv,
+    //         format!(
+    //             "--edition\n2021\n--crate-type\nlib\n--emit=metadata={emit}\n--error-format=json\n\
+    //              -W\nclippy::pedantic\n-D\nclippy::ptr_arg\n-A\nunused\n-A\ndead_code\n-A\nmissing_docs\n\
+    //              -A\nclippy::missing_docs_in_private_items\n-\n"
+    //         ),
+    //         "groups first, `clippy::cargo` left out, relaxations last"
+    //     );
+    //     assert!(cwd.ends_with("supdoc/code-blocks/cwd"), "{cwd:?}");
+    //     assert!(!Path::new(emit).starts_with(&cwd), "metadata must not land in the cwd: {emit}");
+    //     assert!(!Path::new(emit).exists(), "the metadata should be deleted after the run: {emit}");
+    //     assert!(
+    //         !Path::new(emit).parent().is_some_and(Path::exists),
+    //         "the run's metadata directory should be deleted too: {emit}"
+    //     );
+    //     for leaked in ["RUSTFLAGS", "CLIPPY_ARGS", "CLIPPY_CONF_DIR"] {
+    //         assert!(
+    //             !env.lines().any(|line| line.starts_with(&format!("{leaked}="))),
+    //             "{leaked} must not reach clippy:\n{env}"
+    //         );
+    //     }
+    //     assert!(env.lines().any(|line| line == "RUSTUP_AUTO_INSTALL=0"), "{env}");
+}
+
+#[test]
+fn clippy_is_not_run_without_a_private_working_directory() {
+    let project = project_with_rust_config(FORMAT_OFF, "# Blocks\n\n```rust\npub fn f() {}\n```\n");
+    let stubs = rust_stubs();
+    let home = project.path("home");
+
+    let json = check_with_stubs(
+        &project,
+        &stubs,
+        &["check", "--json", "-v"],
+        &[("SUPDOC_TRUST", Path::new("1")), ("HOME", &home)],
+        0,
+    )
+    .json();
+
+    assert_awaits_audit(&json);
+    // After the lift (P5-07K1), swap in (`HOME` unusable, so no private working directory):
+    //
+    //     assert_eq!(at(&json, "/data/code_blocks/0/state"), "not_checked", "{json}");
+    //     assert_eq!(at(&json, "/data/code_blocks/0/lint"), "not_run", "{json}");
+    //     let reason = at(&json, "/data/code_blocks/0/reason");
+    //     assert!(
+    //         reason.as_str().is_some_and(|reason| reason.contains("private working directory")),
+    //         "{json}"
+    //     );
+}
+
+#[test]
+fn clippy_never_compiles_a_block_with_an_attribute_off_the_allowlist() {
+    let project = project_with_rust_config(
+        FORMAT_OFF,
+        "# Blocks\n\n```rust\n#![debugger_visualizer(natvis_file = \"/etc/passwd\")]\n```\n",
+    );
+    let stubs = rust_stubs();
+
+    let json = check_with_stubs(
+        &project,
+        &stubs,
+        &["check", "--json", "-v"],
+        &[("SUPDOC_TRUST", Path::new("1"))],
+        0,
+    )
+    .json();
+
+    assert_awaits_audit(&json);
+    // After the lift (P5-07K1), swap in (the strict scan refuses the block before clippy can see
+    // it, trusted or not, design §3; the stub's run record stays empty):
+    //
+    //     assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+    //     assert_eq!(
+    //         at(&json, "/data/code_blocks/0/reason"),
+    //         "compile-time read: `debugger_visualizer` attribute",
+    //         "{json}"
+    //     );
+}
