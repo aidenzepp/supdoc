@@ -5,7 +5,8 @@
 //! (init, update, check), `containment`, `resolve`, `paths`, `ignore`, `namespaces` and `languages`
 //! (what links resolve to), `list` and `list_containment` (the `list` command), `limits`
 //! (the size, timeout and similar limits), and `code_blocks`, `code_blocks_fix`,
-//! `code_blocks_python` and `code_blocks_rust` (checking the code blocks in docs).
+//! `code_blocks_python` and `code_blocks_rust` (checking the code blocks in docs), and `trust` (the
+//! trust store `supdoc trust` writes).
 //!
 //! The suite began as a port of docref's integration tests (`docref/tests/integration.rs`), adjusted
 //! to supdoc's decisions:
@@ -109,3 +110,5 @@ mod namespaces;
 mod paths;
 #[cfg(test)]
 mod resolve;
+#[cfg(test)]
+mod trust;
