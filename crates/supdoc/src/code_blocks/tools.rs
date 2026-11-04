@@ -61,6 +61,8 @@ impl ToolEnv {
 pub(crate) enum Step {
     /// Rewrites the block into its formatted form.
     Format,
+    /// Reports diagnostics on the block, never rewriting it.
+    Lint,
 }
 
 /// What a tool loads, which decides whether it may run in a checkout supdoc doesn't trust.
@@ -91,7 +93,7 @@ pub(crate) struct Tool {
 }
 
 /// The known tools. A language's first row for a step is its default for that step.
-pub(crate) const TOOLS: [Tool; 4] = [
+pub(crate) const TOOLS: [Tool; 7] = [
     Tool {
         name: "rustfmt",
         language: Language::Rust,
@@ -128,15 +130,53 @@ pub(crate) const TOOLS: [Tool; 4] = [
         install: "pipx install black",
         config_files: &["pyproject.toml"],
     },
+    Tool {
+        name: "ruff",
+        language: Language::Python,
+        step: Step::Lint,
+        binary: "ruff",
+        tier: Tier::Static,
+        install: "pipx install ruff",
+        config_files: &["ruff.toml", ".ruff.toml", "pyproject.toml"],
+    },
+    Tool {
+        name: "shellcheck",
+        language: Language::Shell,
+        step: Step::Lint,
+        binary: "shellcheck",
+        tier: Tier::Static,
+        install: "cabal install ShellCheck",
+        config_files: &[".shellcheckrc"],
+    },
+    Tool {
+        name: "clippy",
+        language: Language::Rust,
+        step: Step::Lint,
+        binary: "clippy-driver",
+        tier: Tier::Static,
+        install: "rustup component add clippy",
+        config_files: &["clippy.toml", ".clippy.toml", "Cargo.toml"],
+    },
 ];
 
 /// `language`'s default formatter: its first static format row. No trust exists yet, so only
 /// the static tier is chosen.
 #[must_use]
 pub(crate) fn formatter(language: Language) -> Option<&'static Tool> {
-    TOOLS.iter().find(|tool| {
-        tool.language == language && tool.step == Step::Format && tool.tier == Tier::Static
-    })
+    default_for(language, Step::Format)
+}
+
+/// `language`'s default linter: its first static lint row.
+#[must_use]
+pub(crate) fn linter(language: Language) -> Option<&'static Tool> {
+    default_for(language, Step::Lint)
+}
+
+/// `language`'s first static row for `step`.
+fn default_for(language: Language, step: Step) -> Option<&'static Tool> {
+    TOOLS
+        .iter()
+        .find(|tool| tool.language == language && tool.step == step && tool.tier == Tier::Static)
 }
 
 /// Where a tool's binary was found.

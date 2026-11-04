@@ -6,6 +6,17 @@ use std::path::Path;
 use super::format::{ParseError, first_line};
 use crate::config::code_blocks::Dialect;
 
+/// The lint step's arguments for `tool` on the `index`th block of `doc`: `None` until shell's
+/// lint step is built, which leaves the step not run.
+#[must_use]
+pub(crate) const fn lint_args(
+    _tool: &super::tools::Tool,
+    _doc: &Path,
+    _index: usize,
+) -> Option<Vec<OsString>> {
+    None
+}
+
 /// `shfmt`'s `-ln <dialect>` arguments.
 #[must_use]
 pub(crate) fn dialect_args(dialect: Dialect) -> [OsString; 2] {

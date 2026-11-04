@@ -175,17 +175,34 @@ pub(crate) fn judge(tool: &Tool, input: &str, result: Result<Ran, Failure>) -> V
                     line: error.line,
                 };
             }
-            Verdict::ToolFailed(if lines.is_empty() {
-                "it exited unsuccessfully and printed nothing to stderr".to_owned()
-            } else {
-                lines.join("\n")
-            })
+            Verdict::ToolFailed(exit_detail(&ran.stderr))
         }
-        Err(Failure::TimedOut) => Verdict::TimedOut,
-        Err(Failure::OverCap(stream)) => {
+        Err(failure) => failed(failure),
+    }
+}
+
+/// What a tool's non-zero exit says, from its `stderr`: the first lines, or that it printed
+/// nothing.
+#[must_use]
+pub(crate) fn exit_detail(stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    let lines: Vec<&str> = stderr.lines().take(STDERR_LINES).collect();
+    if lines.is_empty() {
+        "it exited unsuccessfully and printed nothing to stderr".to_owned()
+    } else {
+        lines.join("\n")
+    }
+}
+
+/// The verdict on a run that reached no exit: a timeout, or a tool failure saying how it failed.
+#[must_use]
+pub(crate) fn failed(failure: Failure) -> Verdict {
+    match failure {
+        Failure::TimedOut => Verdict::TimedOut,
+        Failure::OverCap(stream) => {
             Verdict::ToolFailed(format!("it wrote more than 1 MiB to {stream}"))
         }
-        Err(Failure::Spawn(error)) => Verdict::ToolFailed(format!("it couldn't start: {error}")),
+        Failure::Spawn(error) => Verdict::ToolFailed(format!("it couldn't start: {error}")),
     }
 }
 

@@ -68,6 +68,17 @@ pub(crate) fn config_args(root: &Path) -> Vec<OsString> {
     }
 }
 
+/// The lint step's arguments for `tool` on the `index`th block of `doc`: `None` until rust's
+/// lint step is built, which leaves the step not run.
+#[must_use]
+pub(crate) const fn lint_args(
+    _tool: &super::tools::Tool,
+    _doc: &Path,
+    _index: usize,
+) -> Option<Vec<OsString>> {
+    None
+}
+
 /// What a Rust block's tools don't see as written: its hidden lines and its `##`-escaped lines.
 /// No line is added or removed, so the checked text's lines are the block's lines.
 #[derive(Debug, Clone, PartialEq, Eq)]
