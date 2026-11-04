@@ -88,6 +88,104 @@ pub(crate) fn cargo_edition(root: &Path) -> Option<Edition> {
     edition_in(&text)
 }
 
+/// The lint groups among the names a `Cargo.toml` `[lints]` table may set, which go first so a
+/// single lint's level overrides its group's. `clippy::cargo` is left out of the flags entirely.
+const LINT_GROUPS: [&str; 22] = [
+    "warnings",
+    "unused",
+    "nonstandard_style",
+    "future_incompatible",
+    "let_underscore",
+    "keyword_idents",
+    "refining_impl_trait",
+    "deprecated_safe",
+    "rust_2018_idioms",
+    "rust_2018_compatibility",
+    "rust_2021_compatibility",
+    "rust_2024_compatibility",
+    "clippy::all",
+    "clippy::correctness",
+    "clippy::suspicious",
+    "clippy::style",
+    "clippy::complexity",
+    "clippy::perf",
+    "clippy::pedantic",
+    "clippy::restriction",
+    "clippy::nursery",
+    "clippy::cargo",
+];
+
+/// The root `Cargo.toml`'s lint levels as rustc flags (`-W clippy::pedantic`): its
+/// `[workspace.lints]`, else its `[lints]`, for the `rust` and `clippy` tools only. Read only
+/// through an in-root real path, as [`cargo_edition`] reads it. Ordered by `priority`, then groups
+/// before single lints, then by name; `clippy::cargo`, which judges a manifest no block has, is
+/// left out. Empty when there is no such file or table.
+///
+/// Effect: resolves symlinks and reads the file.
+#[must_use]
+pub(crate) fn cargo_lints(root: &Path) -> Vec<OsString> {
+    read_inside(&root.join("Cargo.toml"), root)
+        .map(|text| lints_in(&text))
+        .unwrap_or_default()
+}
+
+/// The lint flags `text`, a `Cargo.toml`, sets, by [`cargo_lints`]' rules.
+fn lints_in(text: &str) -> Vec<OsString> {
+    let Ok(table) = text.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    let Some(lints) = table
+        .get("workspace")
+        .and_then(|workspace| workspace.get("lints"))
+        .or_else(|| table.get("lints"))
+        .and_then(toml::Value::as_table)
+    else {
+        return Vec::new();
+    };
+    let mut found: Vec<(i64, bool, String, &'static str)> = Vec::new();
+    for (tool, entries) in lints {
+        let prefix = match tool.as_str() {
+            "rust" => "",
+            "clippy" => "clippy::",
+            _ => continue,
+        };
+        for (name, value) in entries.as_table().into_iter().flatten() {
+            let (level, priority) = match value {
+                toml::Value::String(level) => (level.as_str(), 0),
+                toml::Value::Table(entry) => (
+                    entry
+                        .get("level")
+                        .and_then(toml::Value::as_str)
+                        .unwrap_or_default(),
+                    entry
+                        .get("priority")
+                        .and_then(toml::Value::as_integer)
+                        .unwrap_or(0),
+                ),
+                _ => continue,
+            };
+            let flag = match level {
+                "forbid" => "-F",
+                "deny" => "-D",
+                "warn" => "-W",
+                "allow" => "-A",
+                _ => continue,
+            };
+            let lint = format!("{prefix}{name}");
+            if lint == "clippy::cargo" {
+                continue;
+            }
+            let single = !LINT_GROUPS.contains(&lint.as_str());
+            found.push((priority, single, lint, flag));
+        }
+    }
+    found.sort();
+    found
+        .into_iter()
+        .flat_map(|(_, _, lint, flag)| [OsString::from(flag), OsString::from(lint)])
+        .collect()
+}
+
 /// The edition `text`, a `Cargo.toml`, names: its workspace package's, then its package's.
 fn edition_in(text: &str) -> Option<Edition> {
     let table = text.parse::<toml::Table>().ok()?;

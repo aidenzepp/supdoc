@@ -13,13 +13,19 @@ fn finding_kinds(json: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-/// A recorded `basic` project with the Rust table on and `doc` at `docs/blocks.md`.
+/// A recorded `basic` project with the Rust table on, its linter off so only rustfmt runs, and
+/// `doc` at `docs/blocks.md`.
 fn project_with_rust_doc(doc: &str) -> Project {
+    project_with_rust_config("linter = false\n", doc)
+}
+
+/// A recorded `basic` project whose Rust table holds `rust`, with `doc` at `docs/blocks.md`.
+fn project_with_rust_config(rust: &str, doc: &str) -> Project {
     let project = Project::fixture("basic");
     project.record();
     project.write(
         "supdoc.config.toml",
-        "[features.code-blocks]\n[features.code-blocks.rust]\n",
+        &format!("[features.code-blocks]\n[features.code-blocks.rust]\n{rust}"),
     );
     project.write("docs/blocks.md", doc);
     project
@@ -283,23 +289,28 @@ fn a_bare_number_edition_is_a_config_error_that_says_to_quote_it() {
     assert_eq!(stub.record("runs"), "", "rustfmt should never run");
 }
 
-/// The absolute `PATH` directory holding `rustfmt`, when one does.
-fn rustfmt_dir() -> Option<PathBuf> {
+/// The absolute `PATH` directory holding `binary`, when one does.
+fn tool_dir(binary: &str) -> Option<PathBuf> {
     std::env::var_os("PATH")
         .iter()
         .flat_map(std::env::split_paths)
-        .find(|dir| dir.is_absolute() && dir.join("rustfmt").is_file())
+        .find(|dir| dir.is_absolute() && dir.join(binary).is_file())
 }
 
-/// The variables that run the real `rustfmt`: `PATH` holding only its directory, and the real
-/// user's rustup and cargo homes, through which the rustup proxy finds its toolchains. `None`,
-/// with a note on stderr naming `test`, when `rustfmt` is not on `PATH`.
+/// The variables that run the real `rustfmt`, as [`real_rust_tool`] gives them.
 fn real_rustfmt(test: &str) -> Option<Vec<(&'static str, PathBuf)>> {
-    let Some(dir) = rustfmt_dir() else {
+    real_rust_tool("rustfmt", test)
+}
+
+/// The variables that run the real `binary`, a Rust tool: `PATH` holding only its directory, and
+/// the real user's rustup and cargo homes, through which the rustup proxy finds its toolchains.
+/// `None`, with a note on stderr naming `test`, when `binary` is not on `PATH`.
+fn real_rust_tool(binary: &str, test: &str) -> Option<Vec<(&'static str, PathBuf)>> {
+    let Some(dir) = tool_dir(binary) else {
         // Written to the process's stderr directly, which `cargo test` shows for a passing test.
         let _ignored = std::io::Write::write_all(
             &mut std::io::stderr(),
-            format!("SKIPPED {test}: rustfmt is not on PATH\n").as_bytes(),
+            format!("SKIPPED {test}: {binary} is not on PATH\n").as_bytes(),
         );
         return None;
     };
@@ -415,7 +426,7 @@ fn fix_never_deletes_a_plain_comment_line_inside_a_doc_comment_block() {
     project.record();
     project.write(
         "supdoc.config.toml",
-        "[features.code-blocks]\n[features.code-blocks.rust]\n",
+        "[features.code-blocks]\n[features.code-blocks.rust]\nlinter = false\n",
     );
     project.write("src/blocks.rs", source);
     let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
@@ -447,4 +458,79 @@ fn fix_never_deletes_a_plain_comment_line_inside_a_doc_comment_block() {
         ["code-block-unformatted", "code-block-fix-unsafe"],
         "{json}"
     );
+}
+
+/// A directory outside the checkout holding stub `rustfmt` and `clippy-driver`, each appending
+/// one line per run to its own record and `rustfmt` printing its stdin.
+fn rust_stubs() -> tempfile::TempDir {
+    let dir = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    for (name, tail) in [("rustfmt", "exec /bin/cat\n"), ("clippy-driver", "")] {
+        let script = format!(
+            "#!/bin/sh\necho run >> '{}/{name}-runs'\n{tail}",
+            dir.path().display()
+        );
+        let stub = dir.path().join(name);
+        std::fs::write(&stub, script).expect("the stub should be writable");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+            .expect("the stub should be made executable");
+    }
+    dir
+}
+
+/// The text of the record `name` in `dir`, empty when it was never written.
+fn stub_record(dir: &Path, name: &str) -> String {
+    std::fs::read_to_string(dir.join(name)).unwrap_or_default()
+}
+
+#[test]
+fn clippy_never_runs_in_the_static_tier_while_rustfmt_still_does() {
+    let project = project_with_rust_config(
+        "",
+        "# Blocks\n\n```rust\npub fn total(v: &Vec<i32>) -> i32 {\n    v.iter().sum()\n}\n```\n",
+    );
+    let stubs = rust_stubs();
+
+    let json = project
+        .supdoc_in_with(
+            ".",
+            &["check", "--json", "-v"],
+            &[("PATH", stubs.path()), ("SUPDOC_TRUST", Path::new("1"))],
+        )
+        .assert_exit(0)
+        .json();
+
+    assert_eq!(
+        stub_record(stubs.path(), "clippy-driver-runs"),
+        "",
+        "no clippy-driver process may start without trust, whatever the environment says"
+    );
+    assert_eq!(stub_record(stubs.path(), "rustfmt-runs"), "run\n");
+    assert_eq!(finding_kinds(&json), Vec::<String>::new(), "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/state"), "passed", "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/format"), "ran", "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/lint"), "not_run", "{json}");
+    assert_eq!(
+        at(&json, "/data/code_blocks/0/reason"),
+        "clippy runs only in the project tier, which needs `supdoc trust` (phase 5)",
+        "{json}"
+    );
+}
+
+#[test]
+fn clippy_never_runs_with_the_formatter_off_either() {
+    let project = project_with_rust_config(
+        "formatter = false\n",
+        "# Blocks\n\n```rust\npub fn f() -> i32 {\n    missing()\n}\n```\n",
+    );
+    let stubs = rust_stubs();
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json", "-v"], &[("PATH", stubs.path())])
+        .assert_exit(0)
+        .json();
+
+    assert_eq!(stub_record(stubs.path(), "clippy-driver-runs"), "");
+    assert_eq!(stub_record(stubs.path(), "rustfmt-runs"), "");
+    assert_eq!(finding_kinds(&json), Vec::<String>::new(), "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/lint"), "not_run", "{json}");
 }
