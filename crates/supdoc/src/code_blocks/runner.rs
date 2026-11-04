@@ -16,7 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::tools::ToolEnv;
-use crate::process::{self, LiveGroup, TERMINATING};
+use crate::process::{self, LiveGroup, Spawning, TERMINATING};
 
 /// The most bytes supdoc reads from each of a tool's stdout and stderr.
 const CAP: usize = 1024 * 1024;
@@ -73,8 +73,9 @@ pub(crate) enum Failure {
 ///
 /// [`Failure`] when the tool can't start, passes its timeout, or writes past the cap.
 pub(crate) fn run(call: &Call<'_>, env: &ToolEnv, root: &Path) -> Result<Ran, Failure> {
-    // No new tool once a termination signal has arrived.
-    process::await_termination(&TERMINATING);
+    // No new tool once a termination signal has arrived, and until the group is registered the
+    // signal thread can't copy the live groups, so it can't miss this tool.
+    let spawning = Spawning::begin();
     let deadline = call.timeout.map(|timeout| Instant::now() + timeout);
     let mut child = Command::new(call.program)
         .arg0(call.name)
@@ -91,10 +92,11 @@ pub(crate) fn run(call: &Call<'_>, env: &ToolEnv, root: &Path) -> Result<Ran, Fa
         .map_err(Failure::Spawn)?;
     // Held until this function returns, by which point every path has reaped the tool.
     let _live = LiveGroup::register(child.id());
-    // A signal may have landed between the check above and the spawn. The signal thread sets
-    // `TERMINATING` before it takes the live-group lock to copy the groups it kills, and
-    // `register` pushes under that lock before this load. So this group is either in the
-    // signal thread's copy, or this load sees the flag and the group is killed here.
+    // Released before any wait on the tool, so the signal thread never waits on one.
+    drop(spawning);
+    // A signal may have landed after the check above. Its thread sets `TERMINATING`, then waits
+    // for this spawn to end before it copies the groups it kills. So this group is in its copy,
+    // and this load may also see the flag, in which case the group is killed here as well.
     if process::ends_by_signal(&TERMINATING) {
         end_by_signal(child);
     }
