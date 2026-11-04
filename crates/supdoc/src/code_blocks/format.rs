@@ -9,11 +9,13 @@ use std::time::Duration;
 use crate::cartridges::{markdown, rust as rust_cartridge};
 use crate::config::code_blocks::{Edition, Language};
 use crate::finding::{Finding, Fix, LineIndex, Location, Severity};
+use crate::hash::LineEndings;
 use crate::limits::TimeLimit;
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Cartridge, Deadline, SourceFile};
 
 use super::block::{CodeBlock, has_contiguous_body, replacement_for, try_blocks_in};
+use super::excerpt;
 use super::runner::{Failure, Ran};
 use super::states;
 use super::tools::Tool;
@@ -143,10 +145,8 @@ pub(crate) fn args(
 /// isn't inside `text`.
 #[must_use]
 pub(crate) fn input(block: &CodeBlock, text: &str) -> Option<String> {
-    let mut input = String::new();
-    for line in &block.body {
-        let content = text.get(line.content.clone())?;
-        input.push_str(content.strip_suffix('\r').unwrap_or(content));
+    let mut input = excerpt::body(block, text, LineEndings::Normalize)?;
+    if !block.body.is_empty() {
         input.push('\n');
     }
     Some(input)
