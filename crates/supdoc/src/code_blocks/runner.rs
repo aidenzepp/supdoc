@@ -1,10 +1,10 @@
-//! The hardened spawn of a tool on one block: stdin, a neutral working directory, a timeout and
-//! an output cap.
+//! The hardened spawn of a tool on one block: stdin, a working directory, a timeout and an
+//! output cap.
 //!
 //! A tool is spawned by the absolute path its lookup returned, never through a shell, `cargo`,
 //! `python -m` or `npx`. Its environment holds only [`ToolEnv`]'s variables and the call's own
-//! extras. It runs in its own process group, in an empty supdoc-owned directory, and the block
-//! reaches it on stdin only.
+//! extras. It runs in its own process group, in an empty supdoc-owned directory unless its call
+//! asks for the project root, and the block reaches it on stdin only.
 
 use std::ffi::OsStr;
 use std::io::{Read, Write as _};
@@ -18,13 +18,31 @@ use std::time::{Duration, Instant};
 use super::tools::ToolEnv;
 use crate::process::{self, LiveGroup, Spawning, TERMINATING};
 
-/// The most bytes supdoc reads from each of a tool's stdout and stderr.
-const CAP: usize = 1024 * 1024;
+/// The most bytes supdoc reads from each of a tool's stdout and stderr, unless its call sets its
+/// own cap.
+pub(crate) const CAP: usize = 1024 * 1024;
 
 /// How often a tool whose streams have closed is polled for its exit.
 const POLL: Duration = Duration::from_millis(5);
 
-/// One tool call: the binary, its arguments and extra variables, and the block it reads.
+/// Where a tool call runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Cwd {
+    /// The empty supdoc-owned directory [`neutral_dir`] picks, outside the root.
+    Neutral,
+    /// The project root's real path.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the project build for clippy (P5-07F) is its first caller"
+        )
+    )]
+    Root,
+}
+
+/// One tool call: the binary, its arguments and extra variables, the block it reads, where it
+/// runs and how much it may print.
 #[derive(Debug)]
 pub(crate) struct Call<'call> {
     /// The binary's absolute real path, as the lookup returned it.
@@ -40,6 +58,10 @@ pub(crate) struct Call<'call> {
     pub(crate) stdin: &'call [u8],
     /// How long the tool may run. `None` is no limit.
     pub(crate) timeout: Option<Duration>,
+    /// The directory the tool runs in.
+    pub(crate) cwd: Cwd,
+    /// The most bytes read from each of stdout and stderr; [`CAP`] for a tool on a block.
+    pub(crate) cap: usize,
 }
 
 /// What a tool that ran to its exit printed.
@@ -60,19 +82,22 @@ pub(crate) enum Failure {
     Spawn(std::io::Error),
     /// It passed its timeout and was killed.
     TimedOut,
-    /// It wrote more than 1 MiB to the named stream and was killed.
+    /// It wrote more than its cap to the named stream and was killed.
     OverCap(&'static str),
 }
 
-/// Runs `call` with `env`'s variables, from [`neutral_dir`] judged against `root`.
+/// Runs `call` with `env`'s variables, from [`neutral_dir`] judged against `root` or from
+/// `root`'s real path, as its [`Cwd`] says.
 ///
-/// Effect: spawns the tool and kills its process group once it exits, passes its timeout or
-/// writes past the cap.
+/// Effect: resolves or creates the working directory, spawns the tool and kills its process
+/// group once it exits, passes its timeout or writes past its cap.
 ///
 /// # Errors
 ///
-/// [`Failure`] when the tool can't start, passes its timeout, or writes past the cap.
+/// [`Failure`] when the root doesn't resolve or the tool can't start, passes its timeout, or
+/// writes past its cap.
 pub(crate) fn run(call: &Call<'_>, env: &ToolEnv, root: &Path) -> Result<Ran, Failure> {
+    let cwd = working_dir(call.cwd, env, root)?;
     // No new tool once a termination signal has arrived, and until the group is registered the
     // signal thread can't copy the live groups, so it can't miss this tool.
     let spawning = Spawning::begin();
@@ -83,7 +108,7 @@ pub(crate) fn run(call: &Call<'_>, env: &ToolEnv, root: &Path) -> Result<Ran, Fa
         .env_clear()
         .envs(env.vars())
         .envs(call.extra.iter().copied())
-        .current_dir(neutral_dir(env, root))
+        .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -107,6 +132,7 @@ pub(crate) fn run(call: &Call<'_>, env: &ToolEnv, root: &Path) -> Result<Ran, Fa
             let _closed = stdin.write_all(&bytes);
         }));
     }
+    let cap = call.cap;
     let (sender, reads) = mpsc::channel();
     let streams: [(&'static str, Option<Box<dyn Read + Send>>); 2] = [
         (
@@ -129,7 +155,7 @@ pub(crate) fn run(call: &Call<'_>, env: &ToolEnv, root: &Path) -> Result<Ran, Fa
         drop(thread::spawn(move || {
             let mut bytes = Vec::new();
             if let Some(stream) = stream {
-                let limit = u64::try_from(CAP).unwrap_or(u64::MAX).saturating_add(1);
+                let limit = u64::try_from(cap).unwrap_or(u64::MAX).saturating_add(1);
                 let _partial = stream.take(limit).read_to_end(&mut bytes);
             }
             let _gone = sender.send((name, bytes));
@@ -150,7 +176,7 @@ pub(crate) fn run(call: &Call<'_>, env: &ToolEnv, root: &Path) -> Result<Ran, Fa
             Err(true) => return Err(kill(child, Failure::TimedOut)),
             Err(false) => break,
         };
-        if bytes.len() > CAP {
+        if bytes.len() > cap {
             return Err(kill(child, Failure::OverCap(name)));
         }
         if name == "stdout" {
@@ -178,6 +204,21 @@ pub(crate) fn run(call: &Call<'_>, env: &ToolEnv, root: &Path) -> Result<Ran, Fa
         stdout: stdout.unwrap_or_default(),
         stderr: stderr.unwrap_or_default(),
     })
+}
+
+/// The directory a call with `cwd` runs in: [`neutral_dir`] judged against `root`, or `root`'s
+/// real path.
+///
+/// Effect: creates the neutral directory, or resolves `root`.
+///
+/// # Errors
+///
+/// [`Failure::Spawn`] when `cwd` is [`Cwd::Root`] and `root` doesn't resolve.
+fn working_dir(cwd: Cwd, env: &ToolEnv, root: &Path) -> Result<PathBuf, Failure> {
+    match cwd {
+        Cwd::Neutral => Ok(neutral_dir(env, root)),
+        Cwd::Root => root.canonicalize().map_err(Failure::Spawn),
+    }
 }
 
 /// Kills `child`, a tool spawned as a termination signal landed, with its process group, then
@@ -282,7 +323,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
-    use super::{CAP, Call, Failure, Ran, neutral_dir, run};
+    use super::{CAP, Call, Cwd, Failure, Ran, neutral_dir, run};
     use crate::code_blocks::tools::ToolEnv;
 
     /// A fresh directory holding a `root` project, a `home` and a `bin` with the stub `script`.
@@ -330,15 +371,28 @@ mod tests {
     /// How many times [`run_stub`] spawns a stub that Linux reports busy.
     const BUSY_ATTEMPTS: u32 = 5;
 
-    /// Runs the fixture's stub on `stdin` with `extra` and `timeout`.
-    ///
-    /// On Linux a stub just written can fail to spawn with `ETXTBSY` while another test's fork
-    /// still holds the write descriptor, so a busy spawn is retried a few times, 20 ms apart.
+    /// Runs the fixture's stub on `stdin` with `extra` and `timeout`, from the neutral directory
+    /// with the default cap.
     fn run_stub(
         fixture: &Fixture,
         stdin: &[u8],
         extra: &[(&str, &OsStr)],
         timeout: Option<Duration>,
+    ) -> Result<Ran, Failure> {
+        run_stub_with(fixture, stdin, extra, timeout, Cwd::Neutral, CAP)
+    }
+
+    /// Runs the fixture's stub on `stdin` with `extra`, `timeout`, `cwd` and `cap`.
+    ///
+    /// On Linux a stub just written can fail to spawn with `ETXTBSY` while another test's fork
+    /// still holds the write descriptor, so a busy spawn is retried a few times, 20 ms apart.
+    fn run_stub_with(
+        fixture: &Fixture,
+        stdin: &[u8],
+        extra: &[(&str, &OsStr)],
+        timeout: Option<Duration>,
+        cwd: Cwd,
+        cap: usize,
     ) -> Result<Ran, Failure> {
         let call = Call {
             program: &fixture.stub,
@@ -347,6 +401,8 @@ mod tests {
             extra,
             stdin,
             timeout,
+            cwd,
+            cap,
         };
         let mut attempt = 1;
         loop {
@@ -424,6 +480,28 @@ mod tests {
     }
 
     #[test]
+    fn a_root_call_runs_from_the_roots_real_path() {
+        let fixture = fixture("pwd -P");
+
+        let ran = run_stub_with(
+            &fixture,
+            b"",
+            &[],
+            Some(Duration::from_secs(5)),
+            Cwd::Root,
+            CAP,
+        )
+        .expect("pwd should run");
+        let cwd = PathBuf::from(String::from_utf8_lossy(&ran.stdout).trim());
+        let root = fixture
+            .root
+            .canonicalize()
+            .expect("the root should resolve");
+
+        assert_eq!(cwd, root);
+    }
+
+    #[test]
     fn a_home_inside_the_root_falls_back_to_slash_and_creates_nothing() {
         let fixture = fixture("true");
         let home = fixture.root.join("home");
@@ -444,6 +522,8 @@ mod tests {
             extra: &[],
             stdin: b"echo \"$0\"\n",
             timeout: Some(Duration::from_secs(5)),
+            cwd: Cwd::Neutral,
+            cap: CAP,
         };
 
         let ran = run(&call, &fixture.env, &fixture.root).expect("sh should run");
@@ -471,6 +551,45 @@ mod tests {
             .expect("output at the cap should pass");
 
         assert_eq!(ran.stdout.len(), CAP);
+    }
+
+    /// The small cap the call-cap tests set, well under [`CAP`].
+    const SMALL_CAP: usize = 2 * 1024;
+
+    #[test]
+    fn output_past_a_calls_own_cap_is_a_failure() {
+        let fixture = fixture(&format!("head -c {} /dev/zero >&2", SMALL_CAP + 1));
+
+        let result = run_stub_with(
+            &fixture,
+            b"",
+            &[],
+            Some(Duration::from_secs(5)),
+            Cwd::Neutral,
+            SMALL_CAP,
+        );
+
+        assert!(
+            matches!(result, Err(Failure::OverCap("stderr"))),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn output_at_a_calls_own_cap_is_kept_whole() {
+        let fixture = fixture(&format!("head -c {SMALL_CAP} /dev/zero"));
+
+        let ran = run_stub_with(
+            &fixture,
+            b"",
+            &[],
+            Some(Duration::from_secs(5)),
+            Cwd::Neutral,
+            SMALL_CAP,
+        )
+        .expect("output at the call's cap should pass");
+
+        assert_eq!(ran.stdout.len(), SMALL_CAP);
     }
 
     /// Whether `/bin/kill -0` still reaches `target`, a pid or a negated process group, within
