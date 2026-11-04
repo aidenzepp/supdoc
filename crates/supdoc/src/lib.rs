@@ -220,6 +220,9 @@ pub(crate) mod code_blocks {
     /// Python's format and lint steps.
     mod python;
 
+    /// TypeScript and JavaScript's format step, run by biome.
+    mod biome;
+
     /// Reading the Rust toolchain a project pins.
     mod toolchain;
 
