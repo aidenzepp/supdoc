@@ -232,8 +232,8 @@ impl Store {
     /// ([`Place::linked`]) whose common git directory and path in its work tree equal a listed
     /// root's. A listed root counts for that only while it still resolves to itself: the store
     /// holds real paths, so one that resolves elsewhere has been replaced since it was listed. A
-    /// listed root too broad to trust ([`Store::broad`]) counts for nothing. A missing or
-    /// unreadable store trusts nothing.
+    /// root too broad to trust ([`Store::broad`]) is never trusted by either rule, and a listed one
+    /// counts for nothing. A missing or unreadable store trusts nothing.
     ///
     /// Effect: reads the store, resolves `root` and `HOME`, and reads the `.git` files and git
     /// directories of `root` and of each listed root.
@@ -241,10 +241,13 @@ impl Store {
         let Ok(real) = root.canonicalize() else {
             return false;
         };
+        let broad = self.broad();
+        if broad.contains(&real) {
+            return false;
+        }
         let Ok(mut roots) = self.read() else {
             return false;
         };
-        let broad = self.broad();
         roots.retain(|listed| !broad.contains(listed));
         if roots.contains(&real) {
             return true;
@@ -822,6 +825,24 @@ mod tests {
         assert_eq!(unset.broad(), [PathBuf::from("/")]);
         assert_eq!(unresolved.broad(), [PathBuf::from("/")]);
         assert!(unresolved.add(&scratch.real()).expect("adding should work"));
+    }
+
+    #[test]
+    fn a_home_that_is_a_linked_worktree_of_a_trusted_repo_is_not_trusted() {
+        let scratch = Scratch::new();
+        let (repo, worktree) = repo_with_worktree(&scratch);
+        assert!(scratch.store().add(&repo).expect("adding should work"));
+        let env = TrustEnv {
+            home: Some(worktree.clone().into()),
+            ..scratch.env(None)
+        };
+
+        assert_eq!(granted(&repo, &env), Ok(true));
+        assert_eq!(
+            granted(&worktree, &env),
+            Ok(false),
+            "HOME should not inherit its repository's trust as a linked worktree"
+        );
     }
 
     #[test]
