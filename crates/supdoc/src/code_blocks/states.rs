@@ -20,7 +20,7 @@ use super::tools::{self, Step, ToolCartridge, formatter};
 /// 2. `ignore(...)`: [`OptedOut`](Self::OptedOut), with its reason when it gives one.
 /// 3. No tag, or `text`, `console` or `output`: [`NotChecked`] for [`NotChecked::Text`]. A fence
 ///    with no tag in a Rust doc comment is Rust, as rustdoc reads it.
-/// 4. A Rust, shell or Python tag whose `[features.code-blocks.<language>]` table is absent:
+/// 4. A tag of a language whose `[features.code-blocks.<language>]` table is absent:
 ///    [`NotChecked::LanguageOff`].
 /// 5. A tag of a configured language: [`NotChecked::Pending`] until its tool runs.
 /// 6. Any other tag: [`UnknownLanguage`](Self::UnknownLanguage).
@@ -84,6 +84,9 @@ pub(crate) enum NotChecked {
     /// The root's `rust-toolchain(.toml)` names a path, an invalid channel, or lies outside the
     /// root, so no Rust tool runs.
     ToolchainPath,
+    /// The project's tool config extends another config, declares plugins or commands, or can't
+    /// be handed to the tool, so its blocks aren't given to it.
+    ToolConfig,
     /// The Rust block reads a file or an environment variable at compile time.
     CompileTimeRead,
     /// The Rust block is too large for the compile-time-read scan.
@@ -392,12 +395,9 @@ impl BlockState {
             Self::OptedOut { reason } => reason.clone(),
             Self::NotChecked(NotChecked::Text) => Some("the block is text, not code".to_owned()),
             Self::NotChecked(NotChecked::LanguageOff) => {
-                let table = match tag.and_then(Language::from_tag) {
-                    Some(Language::Rust) => "rust",
-                    Some(Language::Shell) => "shell",
-                    Some(Language::Python) => "python",
-                    None => "language",
-                };
+                let table = tag
+                    .and_then(Language::from_tag)
+                    .map_or("language", Language::table);
                 Some(format!("no `[features.code-blocks.{table}]` table"))
             }
             Self::NotChecked(NotChecked::NoStepRan) => Some("none of its steps ran".to_owned()),
@@ -408,6 +408,7 @@ impl BlockState {
                 Some(format!("`{}` is inside the checkout", tool_of(tag, tool)))
             }
             Self::NotChecked(NotChecked::ToolchainPath) => Some("toolchain path".to_owned()),
+            Self::NotChecked(NotChecked::ToolConfig) => Some("tool config".to_owned()),
             Self::NotChecked(NotChecked::CompileTimeRead) => Some("compile-time read".to_owned()),
             Self::NotChecked(NotChecked::TooLargeToScan) => Some("too large to scan".to_owned()),
             Self::NotChecked(NotChecked::OutlineModule) => Some("outline module".to_owned()),

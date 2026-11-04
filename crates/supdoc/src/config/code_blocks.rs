@@ -8,12 +8,13 @@
 //! defaults to the top-level key of the same name, and setting one never changes which files
 //! linking reads.
 //!
-//! A language is on exactly when its table, `[features.code-blocks.rust]`, `.shell` or
-//! `.python`, is written in some file of the chain; an empty table turns it on. The language
+//! A language is on exactly when its table, `[features.code-blocks.rust]`, `.shell`, `.python`
+//! or `.markdown`, is written in some file of the chain; an empty table turns it on. The language
 //! table selects tools (`formatter`, `linter`) and holds the language's own settings; each
 //! tool's options, its step's mode, live in the tool's own table,
 //! `[features.code-blocks.<language>.<tool>]`, validated by its cartridge.
 
+mod markdown;
 mod python;
 mod rust;
 mod shell;
@@ -23,6 +24,7 @@ use std::ops::Range;
 
 use crate::path::AbsolutePath;
 
+use self::markdown::RawMarkdown;
 use self::python::RawPython;
 pub(crate) use self::rust::Edition;
 use self::rust::RawRust;
@@ -39,6 +41,8 @@ pub(crate) enum Language {
     Shell,
     /// Python: tagged `python`, `py` or `python3`.
     Python,
+    /// Markdown: tagged `md` or `markdown`.
+    Markdown,
 }
 
 impl Language {
@@ -49,17 +53,19 @@ impl Language {
             "rust" | "rs" => Some(Self::Rust),
             "sh" | "bash" | "shell" => Some(Self::Shell),
             "python" | "py" | "python3" => Some(Self::Python),
+            "md" | "markdown" => Some(Self::Markdown),
             _ => None,
         }
     }
 
-    /// The name of its table: `rust`, `shell` or `python`.
+    /// The name of its table: `rust`, `shell`, `python` or `markdown`.
     #[must_use]
     pub(crate) const fn table(self) -> &'static str {
         match self {
             Self::Rust => "rust",
             Self::Shell => "shell",
             Self::Python => "python",
+            Self::Markdown => "markdown",
         }
     }
 }
@@ -260,7 +266,7 @@ pub(crate) struct Unselected {
     pub(crate) file: AbsolutePath,
     /// Where the table is in `file`.
     pub(crate) span: Range<usize>,
-    /// The language's table name: `rust`, `shell` or `python`.
+    /// The language's table name, such as `rust` or `markdown`.
     pub(crate) language: &'static str,
     /// The tool the table is for.
     pub(crate) tool: &'static str,
@@ -394,6 +400,8 @@ struct Languages {
     shell: Table,
     /// `[features.code-blocks.python]`.
     python: Table,
+    /// `[features.code-blocks.markdown]`.
+    markdown: Table,
     /// The nearest shell `dialect` written.
     dialect: Option<Dialect>,
     /// The nearest Rust `edition` written.
@@ -426,6 +434,8 @@ pub(crate) struct RawCodeBlocks {
     shell: Option<RawShell>,
     /// `[features.code-blocks.python]`, when written.
     python: Option<RawPython>,
+    /// `[features.code-blocks.markdown]`, when written.
+    markdown: Option<RawMarkdown>,
 }
 
 /// The table's keys merged across the chain, before the top-level defaults fill the gaps.
@@ -446,7 +456,7 @@ impl Written {
     ///
     /// # Errors
     ///
-    /// The first tool table, Rust then shell then Python, whose tool the merged chain doesn't
+    /// The first tool table, Rust, shell, Python then Markdown, whose tool the merged chain doesn't
     /// select.
     pub(super) fn resolve(
         self,
@@ -458,7 +468,8 @@ impl Written {
             .rust
             .unselected(Language::Rust)
             .or_else(|| languages.shell.unselected(Language::Shell))
-            .or_else(|| languages.python.unselected(Language::Python));
+            .or_else(|| languages.python.unselected(Language::Python))
+            .or_else(|| languages.markdown.unselected(Language::Markdown));
         if let Some(unselected) = unselected {
             return Err(unselected);
         }
@@ -539,6 +550,7 @@ impl CodeBlocks {
             Language::Rust => &self.languages.rust,
             Language::Shell => &self.languages.shell,
             Language::Python => &self.languages.python,
+            Language::Markdown => &self.languages.markdown,
         }
     }
 
@@ -575,6 +587,7 @@ pub(super) fn merge(
         rust,
         shell,
         python,
+        markdown,
         ..
     }) = raw
     else {
@@ -607,6 +620,10 @@ pub(super) fn merge(
                 .languages
                 .python
                 .behind(python.as_ref().map(RawPython::selection), file),
+            markdown: nearer
+                .languages
+                .markdown
+                .behind(markdown.as_ref().map(RawMarkdown::selection), file),
         },
     })
 }

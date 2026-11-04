@@ -213,6 +213,9 @@ pub(crate) mod code_blocks {
     /// Python's format and lint steps.
     mod python;
 
+    /// Markdown's format and lint steps, run by rumdl.
+    mod rumdl;
+
     /// Reading the Rust toolchain a project pins.
     mod toolchain;
 

@@ -12,7 +12,7 @@ use crate::config::code_blocks::{CodeBlocks, Dialect, Edition, Language};
 use super::format::ParseError;
 use super::lint;
 use super::runner::{Failure, Ran};
-use super::{python, rust, shell};
+use super::{python, rumdl, rust, shell};
 
 /// The variables a tool gets from supdoc's own environment, and no others.
 const PASSED: [&str; 5] = [
@@ -94,7 +94,8 @@ pub(crate) struct Invocation<'run> {
     /// The shell dialect the block is read as.
     pub(crate) dialect: Dialect,
     /// The flags the project contributes, each found inside the root: rustfmt's
-    /// `--config-path`, clippy's `[lints]` levels. Empty for every other tool.
+    /// `--config-path`, rumdl's `--config` or `--no-config`, clippy's `[lints]` levels. Empty for
+    /// every other tool.
     pub(crate) project: &'run [OsString],
     /// Where clippy writes the block's metadata. `None` names no path, which is how a cache key
     /// names every run of the same block alike.
@@ -181,7 +182,7 @@ impl ToolCartridge {
 const FULL_OR_OFF: &[&str] = &["full", "off"];
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 7] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 9] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -259,6 +260,38 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 7] = [
         argv: clippy_args,
         reader: Reader::Lint(rust::lint_verdict),
     },
+    ToolCartridge {
+        name: "rumdl-format",
+        language: Language::Markdown,
+        binary: "rumdl",
+        tier: Tier::Static,
+        install: "pipx install rumdl",
+        config_files: RUMDL_CONFIGS,
+        modes: FULL_OR_OFF,
+        argv: rumdl_format_args,
+        reader: Reader::Format(rumdl::parse_error),
+    },
+    ToolCartridge {
+        name: "rumdl",
+        language: Language::Markdown,
+        binary: "rumdl",
+        tier: Tier::Static,
+        install: "pipx install rumdl",
+        config_files: RUMDL_CONFIGS,
+        modes: FULL_OR_OFF,
+        argv: rumdl_args,
+        reader: Reader::Lint(rumdl::lint_verdict),
+    },
+];
+
+/// The files rumdl's results depend on: its config names (see [`rumdl::CONFIG_FILES`]) and the
+/// `.editorconfig` it reads line lengths from.
+const RUMDL_CONFIGS: &[&str] = &[
+    ".rumdl.toml",
+    "rumdl.toml",
+    ".config/rumdl.toml",
+    "pyproject.toml",
+    ".editorconfig",
 ];
 
 /// `language`'s default formatter: its first format cartridge, whatever its tier.
@@ -394,6 +427,44 @@ fn shellcheck_args(invocation: &Invocation<'_>) -> Vec<OsString> {
         OsString::from(format!("--exclude={SHELLCHECK_RELAXED}")),
         OsString::from("-"),
     ]
+}
+
+/// The rules rumdl leaves off for a block: MD041, which wants a file to open with a heading.
+/// Line length (MD013) is left to the project's config.
+const RUMDL_RELAXED: &str = "--extend-disable=MD041";
+
+/// `rumdl fmt`'s arguments: no cache, the snippet relaxation, the project's `--config` or
+/// `--no-config`, then the block on stdin under its virtual path.
+fn rumdl_format_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    [OsString::from("fmt"), OsString::from("--no-cache")]
+        .into_iter()
+        .chain([OsString::from(RUMDL_RELAXED)])
+        .chain(invocation.project.iter().cloned())
+        .chain([
+            OsString::from("--stdin-filename"),
+            virtual_path(invocation.doc, invocation.index, "md"),
+            OsString::from("-"),
+        ])
+        .collect()
+}
+
+/// `rumdl check`'s arguments: no cache, JSON diagnostics, the snippet relaxation, the project's
+/// `--config` or `--no-config`, then the block on stdin under its virtual path. Never `--fix`.
+fn rumdl_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    [
+        OsString::from("check"),
+        OsString::from("--no-cache"),
+        OsString::from("--output-format=json"),
+        OsString::from(RUMDL_RELAXED),
+    ]
+    .into_iter()
+    .chain(invocation.project.iter().cloned())
+    .chain([
+        OsString::from("--stdin"),
+        OsString::from("--stdin-filename"),
+        virtual_path(invocation.doc, invocation.index, "md"),
+    ])
+    .collect()
 }
 
 /// The lints clippy leaves off for a block, which a snippet breaks for lack of context, as
@@ -617,6 +688,20 @@ mod tests {
                     "clippy-driver",
                     Tier::Project
                 ),
+                (
+                    "rumdl-format",
+                    Language::Markdown,
+                    Step::Format,
+                    "rumdl",
+                    Tier::Static
+                ),
+                (
+                    "rumdl",
+                    Language::Markdown,
+                    Step::Lint,
+                    "rumdl",
+                    Tier::Static
+                ),
             ]
         );
     }
@@ -667,6 +752,49 @@ mod tests {
         });
 
         assert_eq!(posix, ["--filename", "/p/docs/a.md.3.sh", "-ln", "posix"]);
+    }
+
+    #[test]
+    fn rumdl_reads_stdin_under_the_virtual_path_with_the_project_config_and_md041_off() {
+        let project = [OsString::from("--no-config")];
+
+        assert_eq!(
+            args_of("rumdl-format", 2, &project),
+            [
+                "fmt",
+                "--no-cache",
+                "--extend-disable=MD041",
+                "--no-config",
+                "--stdin-filename",
+                "/p/docs/a.md.2.md",
+                "-"
+            ]
+        );
+        assert_eq!(
+            args_of("rumdl", 2, &project),
+            [
+                "check",
+                "--no-cache",
+                "--output-format=json",
+                "--extend-disable=MD041",
+                "--no-config",
+                "--stdin",
+                "--stdin-filename",
+                "/p/docs/a.md.2.md"
+            ]
+        );
+    }
+
+    #[test]
+    fn rumdls_cached_results_are_keyed_on_every_config_it_can_be_given() {
+        let keyed = cartridge("rumdl").config_files;
+
+        assert!(
+            crate::code_blocks::rumdl::CONFIG_FILES
+                .iter()
+                .all(|name| keyed.contains(name)),
+            "{keyed:?}"
+        );
     }
 
     #[test]
