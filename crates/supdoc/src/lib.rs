@@ -181,6 +181,9 @@ pub(crate) mod code_blocks {
     /// A block's info string: its language and attributes.
     pub(crate) mod info;
 
+    /// The fragment kinds a block declares, and how a tool supports one.
+    pub(crate) mod fragment;
+
     /// A code block, and finding the blocks in a file by its language.
     pub(crate) mod block;
 

@@ -6,6 +6,7 @@
 
 use std::ops::Range;
 
+use super::fragment::Kind;
 use super::tools::Step;
 
 /// The words of one info string, borrowed from its text.
@@ -66,6 +67,7 @@ pub(crate) fn is_known_attribute(attribute: &str) -> bool {
     }
     reasoned(attribute).is_some()
         || step_attribute(attribute).is_some()
+        || fragment_kind(attribute).is_some()
         || matches!(
             attribute,
             "edition2015"
@@ -77,6 +79,21 @@ pub(crate) fn is_known_attribute(attribute: &str) -> bool {
                 | "compile_fail"
                 | "should_panic"
         )
+}
+
+/// The kind `attribute` declares when it is `fragment(<kind>)` with one of the six kinds.
+/// `None` for any other word, including a bare `fragment`, an empty `fragment()` and an unknown
+/// kind.
+#[must_use]
+pub(crate) fn fragment_kind(attribute: &str) -> Option<Kind> {
+    let argument = attribute.strip_prefix("fragment(")?.strip_suffix(')')?;
+    Kind::from_name(argument.trim())
+}
+
+/// Whether `attribute` is spelled as a `fragment` attribute, well formed or not.
+#[must_use]
+pub(crate) fn is_fragment_word(attribute: &str) -> bool {
+    attribute == "fragment" || attribute.starts_with("fragment(")
 }
 
 /// Whether `word`, first in a Rust doc comment's info string, is an attribute rather than a
@@ -313,7 +330,7 @@ pub(crate) fn replacement_for_removed(attribute: &str) -> Option<&'static str> {
 /// The attributes supdoc knows, as a help names them.
 pub(crate) const KNOWN_ATTRIBUTES: &str = "`ignore(reason)`, `lint(full)`, \
     `lint(off: reason)`, `format(full)`, `format(off: reason)`, `from(PATH#SYMBOL)`, \
-    `uses(PATH#SYMBOL)`, `edition2015` to `edition2024`, `run`, `no_run`, `compile_fail` and \
+    `uses(PATH#SYMBOL)`, `fragment(KIND)`, `edition2015` to `edition2024`, `run`, `no_run`, `compile_fail` and \
     `should_panic`";
 
 /// The non-empty pieces of `text` between characters that `separates`, skipping separators inside
@@ -349,6 +366,40 @@ fn word_ranges(text: &str, separates: fn(char) -> bool) -> Vec<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_of_the_six_kinds_is_a_known_fragment_attribute() {
+        for kind in Kind::ALL {
+            let attribute = format!("fragment({})", kind.name());
+
+            assert_eq!(fragment_kind(&attribute), Some(kind), "{attribute}");
+            assert!(is_known_attribute(&attribute), "{attribute}");
+        }
+    }
+
+    #[test]
+    fn a_bare_empty_or_unknown_fragment_is_a_fragment_word_but_not_known() {
+        for attribute in [
+            "fragment",
+            "fragment()",
+            "fragment( )",
+            "fragment(body)",
+            "fragment(statements",
+        ] {
+            assert_eq!(fragment_kind(attribute), None, "{attribute}");
+            assert!(is_fragment_word(attribute), "{attribute}");
+            assert!(!is_known_attribute(attribute), "{attribute}");
+        }
+        assert!(!is_fragment_word("fragments(statements)"));
+    }
+
+    #[test]
+    fn a_rust_doc_fence_leading_with_a_fragment_has_no_language() {
+        let info = InfoString::parse_in("fragment(statements) no_run", true);
+
+        assert_eq!(info.language, "");
+        assert_eq!(info.attributes, ["fragment(statements)", "no_run"]);
+    }
 
     #[test]
     fn space_separated_attributes_follow_the_language() {

@@ -27,15 +27,19 @@ use super::block::{CodeBlock, Info};
 use super::cache::{self, Cache};
 use super::excerpt;
 use super::format::{self, FixDoc};
+use super::fragment::Kind;
 use super::info::{
-    KNOWN_ATTRIBUTES, SourceKind, StepValue, is_known_attribute, parenthesized_spelling, reasoned,
-    replacement_for_removed, source_attributes, step_attribute,
+    KNOWN_ATTRIBUTES, SourceKind, StepValue, fragment_kind, is_fragment_word, is_known_attribute,
+    parenthesized_spelling, reasoned, replacement_for_removed, source_attributes, step_attribute,
 };
 use super::lint;
 use super::runner::{self, Call, Ran};
 use super::rust::{self, Scan};
 use super::source::{self, SourceText, Unresolved};
-use super::states::{self, Excerpt, NotChecked, StepState, Steps, state_of, tag_of};
+use super::states::{
+    self, Excerpt, NotChecked, StepState, Steps, block_fragment, state_of, tag_of,
+    unsupported_reason,
+};
 use super::toolchain::{self, Refusal, Toolchain};
 use super::tools::{self, Found, Invocation, Step, Tier, ToolCartridge, ToolEnv, find};
 use super::uses::{self, UseState, Written};
@@ -44,6 +48,8 @@ pub(crate) use super::states::{BlockState, CodeBlockCounts};
 
 /// The code for an info-string attribute supdoc doesn't know.
 const UNKNOWN_ATTRIBUTE: &str = "code-block-unknown-attribute";
+/// The code of the warning for a fragment kind the step's tool doesn't check.
+const FRAGMENT_UNSUPPORTED: &str = "code-block-fragment-unsupported";
 
 /// The code for an `ignore`, `lint(off)` or `format(off)` written without a reason.
 const MISSING_REASON: &str = "code-block-missing-reason";
@@ -85,6 +91,8 @@ pub(crate) struct BlockRecord {
     pub(crate) state: BlockState,
     /// What its format and lint steps did.
     pub(crate) steps: Steps,
+    /// The kind its `fragment(<kind>)` attribute declares, if it writes one.
+    pub(crate) fragment: Option<Kind>,
     /// Why it is in that state, when there is a reason.
     pub(crate) reason: Option<String>,
     /// Each `uses(...)` target the block writes, with its state.
@@ -182,9 +190,7 @@ pub(crate) fn evaluate(
         let mut outcome = None;
         let mut block_uses = Vec::new();
         if let Some(info) = block.info.as_ref() {
-            findings.extend(unknown_attributes(info));
-            findings.extend(step_values(block, info, code_blocks));
-            findings.extend(missing_reasons(info));
+            findings.extend(attribute_findings(block, info, code_blocks));
             let sources = sources(config, languages, info)?;
             findings.extend(sources.missing);
             block_uses.extend(use_states(
@@ -219,6 +225,7 @@ pub(crate) fn evaluate(
         let state = state_of(block, outcome, |language| code_blocks.checks(language));
         let language = tag_of(block).map(str::to_owned);
         let mut steps = Steps::of(block, &state, code_blocks);
+        findings.extend(fragment_unsupported(block, &steps));
         let checked = language.as_deref().and_then(Language::from_tag);
         let (tool, linter) = selected_tools(code_blocks, &mut steps, checked, &state, granted);
         let pending = (state == BlockState::NotChecked(NotChecked::Pending))
@@ -242,6 +249,7 @@ pub(crate) fn evaluate(
             language,
             state,
             steps,
+            fragment: block_fragment(block),
             uses: block_uses,
             index,
             pending,
@@ -1415,6 +1423,15 @@ struct Sources {
     from_missing: bool,
 }
 
+/// The warnings about the attributes written in `info`: unknown ones, step values no tool
+/// accepts and missing reasons.
+fn attribute_findings(block: &CodeBlock, info: &Info, code_blocks: &CodeBlocks) -> Vec<Finding> {
+    let mut found = unknown_attributes(info);
+    found.extend(step_values(block, info, code_blocks));
+    found.extend(missing_reasons(info));
+    found
+}
+
 /// One `code-block-unknown-attribute` warning at `info` for a language word holding commas, and
 /// one for each attribute outside the closed list.
 fn unknown_attributes(info: &Info) -> Vec<Finding> {
@@ -1456,13 +1473,82 @@ fn unknown_attributes(info: &Info) -> Vec<Finding> {
                     (None, Some(replacement)) => {
                         format!("`{attribute}` was removed: write `{replacement}` instead")
                     }
+                    (None, None) if is_fragment_word(attribute) => {
+                        format!("write `fragment(<kind>)` with one of {}", Kind::listed())
+                    }
                     (None, None) => {
                         format!("remove `{attribute}` or correct it to one of {KNOWN_ATTRIBUTES}")
                     }
                 },
             )
         });
-    comma.into_iter().chain(unknown).collect()
+    let repeated = parsed
+        .attributes
+        .iter()
+        .filter(|attribute| fragment_kind(attribute).is_some())
+        .skip(1)
+        .map(|attribute| {
+            Finding::new(
+                UNKNOWN_ATTRIBUTE,
+                Severity::Warning,
+                format!(
+                    "the `{}` block's attribute `{attribute}` repeats its first `fragment(...)`",
+                    parsed.language
+                ),
+            )
+            .with_location(info.location.clone())
+            .with_help(format!(
+                "keep one `fragment(<kind>)`, naming one of {}",
+                Kind::listed()
+            ))
+        });
+    comma.into_iter().chain(unknown).chain(repeated).collect()
+}
+
+/// One `code-block-fragment-unsupported` warning at `info` for each of `steps` that didn't run
+/// because its tool doesn't check the block's fragment kind, naming the tools of `language`
+/// that do and how to turn the step off.
+fn fragment_unsupported(block: &CodeBlock, steps: &Steps) -> Vec<Finding> {
+    let Some(info) = block.info.as_ref() else {
+        return Vec::new();
+    };
+    let language = tag_of(block).and_then(Language::from_tag);
+    [(Step::Format, &steps.format), (Step::Lint, &steps.lint)]
+        .into_iter()
+        .filter_map(|(step, state)| {
+            let StepState::Unsupported { tool, kind } = state else {
+                return None;
+            };
+            let checking: Vec<String> = tools::CARTRIDGES
+                .iter()
+                .filter(|other| Some(other.language) == language && other.supports(*kind))
+                .map(|other| format!("`{}`", other.name))
+                .collect();
+            let key = step.key();
+            let off = format!("write `{key}(off: <why>)` to skip this step");
+            let help = if checking.is_empty() {
+                format!("no tool checks a `{}` fragment here: {off}", kind.name())
+            } else {
+                format!(
+                    "{} check a `{}` fragment: select one, or {off}",
+                    checking.join(", "),
+                    kind.name()
+                )
+            };
+            Some(
+                Finding::new(
+                    FRAGMENT_UNSUPPORTED,
+                    Severity::Warning,
+                    format!(
+                        "the {key} step didn't run: {}",
+                        unsupported_reason(tool, *kind)
+                    ),
+                )
+                .with_location(info.location.clone())
+                .with_help(help),
+            )
+        })
+        .collect()
 }
 
 /// One `code-block-unknown-attribute` warning at `info` for each `lint(...)` or `format(...)`
@@ -1726,6 +1812,7 @@ mod tests {
             language: Some("rust".to_owned()),
             state: BlockState::NotChecked(NotChecked::Pending),
             steps: Steps::default(),
+            fragment: None,
             reason: None,
             uses: Vec::new(),
             index: 1,
