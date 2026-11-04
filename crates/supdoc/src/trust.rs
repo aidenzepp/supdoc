@@ -72,9 +72,21 @@ impl TrustEnv {
 )]
 pub(crate) struct BadTrustValue(OsString);
 
-/// Whether `root` is trusted: `SUPDOC_TRUST` is `1`, or it is unset or empty and the trust store
-/// lists it ([`Store::trusts`]). `SUPDOC_TRUST=0` trusts nothing, whatever the store lists. A
-/// store that is missing, unreadable or can't be located trusts nothing.
+/// What the operator granted a root: trust, none, or none because `SUPDOC_TRUST=0` turned it off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Grant {
+    /// `SUPDOC_TRUST` is `1`, or it is unset or empty and the trust store trusts the root.
+    Trusted,
+    /// `SUPDOC_TRUST` is unset or empty and the trust store doesn't trust the root.
+    Untrusted,
+    /// `SUPDOC_TRUST` is `0`: trust is off for this run, whatever the store lists.
+    TurnedOff,
+}
+
+/// What `root` is granted: [`Grant::Trusted`] when `SUPDOC_TRUST` is `1`, or it is unset or empty
+/// and the trust store trusts it ([`Store::trusts`]); [`Grant::TurnedOff`] when `SUPDOC_TRUST` is
+/// `0`, whatever the store lists; else [`Grant::Untrusted`]. A store that is missing, unreadable
+/// or can't be located trusts nothing.
 ///
 /// Effect: reads the trust store and, for the worktree rule, the `.git` files and git directories
 /// of `root` and of each listed root.
@@ -82,11 +94,15 @@ pub(crate) struct BadTrustValue(OsString);
 /// # Errors
 ///
 /// Fails when `SUPDOC_TRUST` is set to anything but `1`, `0` or empty.
-pub(crate) fn granted(root: &Path, env: &TrustEnv) -> Result<bool, BadTrustValue> {
+pub(crate) fn granted(root: &Path, env: &TrustEnv) -> Result<Grant, BadTrustValue> {
     match env.trust.as_deref().map(OsStr::as_bytes) {
-        Some(b"1") => Ok(true),
-        Some(b"0") => Ok(false),
-        None | Some(b"") => Ok(env.store().is_some_and(|store| store.trusts(root))),
+        Some(b"1") => Ok(Grant::Trusted),
+        Some(b"0") => Ok(Grant::TurnedOff),
+        None | Some(b"") => Ok(if env.store().is_some_and(|store| store.trusts(root)) {
+            Grant::Trusted
+        } else {
+            Grant::Untrusted
+        }),
         Some(_) => Err(BadTrustValue(env.trust.clone().unwrap_or_default())),
     }
 }
@@ -478,7 +494,7 @@ mod tests {
         let root = scratch.mkdir("root");
         assert!(scratch.store().add(&root).expect("adding should work"));
 
-        assert_eq!(granted(&root, &scratch.env(None)), Ok(true));
+        assert_eq!(granted(&root, &scratch.env(None)), Ok(Grant::Trusted));
     }
 
     #[test]
@@ -488,7 +504,7 @@ mod tests {
         let other = scratch.mkdir("other");
         assert!(scratch.store().add(&listed).expect("adding should work"));
 
-        assert_eq!(granted(&other, &scratch.env(None)), Ok(false));
+        assert_eq!(granted(&other, &scratch.env(None)), Ok(Grant::Untrusted));
     }
 
     #[test]
@@ -502,7 +518,10 @@ mod tests {
                 .expect("adding should work")
         );
 
-        assert_eq!(granted(&worktree.join("sub"), &scratch.env(None)), Ok(true));
+        assert_eq!(
+            granted(&worktree.join("sub"), &scratch.env(None)),
+            Ok(Grant::Trusted)
+        );
     }
 
     #[test]
@@ -516,7 +535,7 @@ mod tests {
                 .expect("adding should work")
         );
 
-        assert_eq!(granted(&worktree, &scratch.env(None)), Ok(false));
+        assert_eq!(granted(&worktree, &scratch.env(None)), Ok(Grant::Untrusted));
     }
 
     #[test]
@@ -538,9 +557,15 @@ mod tests {
         )
         .expect("the forged .git file should be writable");
 
-        assert_eq!(granted(&worktree, &scratch.env(None)), Ok(true));
-        assert_eq!(granted(&forged_common, &scratch.env(None)), Ok(false));
-        assert_eq!(granted(&forged_worktree, &scratch.env(None)), Ok(false));
+        assert_eq!(granted(&worktree, &scratch.env(None)), Ok(Grant::Trusted));
+        assert_eq!(
+            granted(&forged_common, &scratch.env(None)),
+            Ok(Grant::Untrusted)
+        );
+        assert_eq!(
+            granted(&forged_worktree, &scratch.env(None)),
+            Ok(Grant::Untrusted)
+        );
     }
 
     #[test]
@@ -553,8 +578,8 @@ mod tests {
         symlink(worktree.join(".git"), forged.join(".git"))
             .expect("the symlink should be creatable");
 
-        assert_eq!(granted(&worktree, &scratch.env(None)), Ok(true));
-        assert_eq!(granted(&forged, &scratch.env(None)), Ok(false));
+        assert_eq!(granted(&worktree, &scratch.env(None)), Ok(Grant::Trusted));
+        assert_eq!(granted(&forged, &scratch.env(None)), Ok(Grant::Untrusted));
     }
 
     #[test]
@@ -572,7 +597,7 @@ mod tests {
         )
         .expect("commondir should be writable");
 
-        assert_eq!(granted(&forged, &scratch.env(None)), Ok(false));
+        assert_eq!(granted(&forged, &scratch.env(None)), Ok(Grant::Untrusted));
     }
 
     #[test]
@@ -591,7 +616,7 @@ mod tests {
             .expect("commondir should be writable");
         symlink(&forged, &listed).expect("the symlink should be creatable");
 
-        assert_eq!(granted(&forged, &scratch.env(None)), Ok(false));
+        assert_eq!(granted(&forged, &scratch.env(None)), Ok(Grant::Untrusted));
     }
 
     #[test]
@@ -625,7 +650,7 @@ mod tests {
         }
         assert_eq!(
             result,
-            Ok(Ok(false)),
+            Ok(Ok(Grant::Untrusted)),
             "granted() blocked on or misjudged a FIFO"
         );
     }
@@ -704,7 +729,7 @@ mod tests {
         let scratch = Scratch::new();
         let root = scratch.mkdir("root");
 
-        assert_eq!(granted(&root, &scratch.env(None)), Ok(false));
+        assert_eq!(granted(&root, &scratch.env(None)), Ok(Grant::Untrusted));
         assert!(!scratch.store().file.exists());
     }
 
@@ -728,7 +753,7 @@ mod tests {
         fs::write(&store.file, format!("{relative}\n\nroot\n"))
             .expect("the store should be writable");
 
-        assert_eq!(granted(&root, &scratch.env(None)), Ok(false));
+        assert_eq!(granted(&root, &scratch.env(None)), Ok(Grant::Untrusted));
         assert!(store.add(&other).expect("adding should work"));
         assert_eq!(
             fs::read_to_string(&store.file).expect("the store should be readable"),
@@ -755,7 +780,7 @@ mod tests {
             store.revoke(&listed).expect("revoking should work"),
             Some(listed.clone())
         );
-        assert_eq!(granted(&listed, &scratch.env(None)), Ok(false));
+        assert_eq!(granted(&listed, &scratch.env(None)), Ok(Grant::Untrusted));
     }
 
     #[test]
@@ -763,10 +788,13 @@ mod tests {
         let scratch = Scratch::new();
         let root = scratch.mkdir("root");
 
-        assert_eq!(granted(&root, &scratch.env(Some("1"))), Ok(true));
-        assert_eq!(granted(&root, &scratch.env(Some("0"))), Ok(false));
-        assert_eq!(granted(&root, &scratch.env(Some(""))), Ok(false));
-        assert_eq!(granted(&root, &scratch.env(None)), Ok(false));
+        assert_eq!(granted(&root, &scratch.env(Some("1"))), Ok(Grant::Trusted));
+        assert_eq!(
+            granted(&root, &scratch.env(Some("0"))),
+            Ok(Grant::TurnedOff)
+        );
+        assert_eq!(granted(&root, &scratch.env(Some(""))), Ok(Grant::Untrusted));
+        assert_eq!(granted(&root, &scratch.env(None)), Ok(Grant::Untrusted));
     }
 
     #[test]
@@ -775,10 +803,13 @@ mod tests {
         let root = scratch.mkdir("root");
         assert!(scratch.store().add(&root).expect("adding should work"));
 
-        assert_eq!(granted(&root, &scratch.env(Some("0"))), Ok(false));
-        assert_eq!(granted(&root, &scratch.env(Some(""))), Ok(true));
-        assert_eq!(granted(&root, &scratch.env(None)), Ok(true));
-        assert_eq!(granted(&root, &scratch.env(Some("1"))), Ok(true));
+        assert_eq!(
+            granted(&root, &scratch.env(Some("0"))),
+            Ok(Grant::TurnedOff)
+        );
+        assert_eq!(granted(&root, &scratch.env(Some(""))), Ok(Grant::Trusted));
+        assert_eq!(granted(&root, &scratch.env(None)), Ok(Grant::Trusted));
+        assert_eq!(granted(&root, &scratch.env(Some("1"))), Ok(Grant::Trusted));
     }
 
     #[test]
@@ -837,10 +868,10 @@ mod tests {
             ..scratch.env(None)
         };
 
-        assert_eq!(granted(&repo, &env), Ok(true));
+        assert_eq!(granted(&repo, &env), Ok(Grant::Trusted));
         assert_eq!(
             granted(&worktree, &env),
-            Ok(false),
+            Ok(Grant::Untrusted),
             "HOME should not inherit its repository's trust as a linked worktree"
         );
     }
@@ -864,10 +895,16 @@ mod tests {
         )
         .expect("the store should be writable");
 
-        assert_eq!(granted(&home, &scratch.env(None)), Ok(false));
-        assert_eq!(granted(&scratch.real(), &scratch.env(None)), Ok(false));
-        assert_eq!(granted(Path::new("/"), &scratch.env(None)), Ok(false));
-        assert_eq!(granted(&project, &scratch.env(None)), Ok(false));
+        assert_eq!(granted(&home, &scratch.env(None)), Ok(Grant::Untrusted));
+        assert_eq!(
+            granted(&scratch.real(), &scratch.env(None)),
+            Ok(Grant::Untrusted)
+        );
+        assert_eq!(
+            granted(Path::new("/"), &scratch.env(None)),
+            Ok(Grant::Untrusted)
+        );
+        assert_eq!(granted(&project, &scratch.env(None)), Ok(Grant::Untrusted));
     }
 
     #[test]

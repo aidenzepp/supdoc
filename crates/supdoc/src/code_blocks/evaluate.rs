@@ -20,6 +20,7 @@ use crate::lock::model::Lockfile;
 use crate::output::paths::PathStyle;
 use crate::read::cartridge::Languages;
 use crate::read::error::CartridgeLoadError;
+use crate::trust::Grant;
 
 use super::block::{CodeBlock, Info};
 use super::cache::{self, Cache};
@@ -128,8 +129,8 @@ impl Pending {
 /// shows it, relative to the current directory. With them, each block's [`BlockState`], counted.
 /// Nothing when `config` leaves `[features.code-blocks]` off.
 ///
-/// Each due step's tool goes through the tier gate ([`tier_gate`]): `granted` is
-/// [`Tier::Project`] when the operator trusts the checkout, else [`Tier::Static`]. The first
+/// Each due step's tool goes through the tier gate ([`tier_gate`]): `granted` is what the
+/// operator granted the checkout, the project tier only when it is [`Grant::Trusted`]. The first
 /// block with a step held for want of trust gets the run's one `code-block-not-trusted` warning,
 /// after the other findings.
 ///
@@ -147,7 +148,7 @@ pub(crate) fn evaluate(
     lock: &Lockfile,
     in_scope: impl Fn(&str) -> bool,
     paths: &PathStyle,
-    granted: Tier,
+    granted: Grant,
 ) -> Result<Evaluation, CartridgeLoadError> {
     let Some(code_blocks) = config.code_blocks() else {
         return Ok(Evaluation::default());
@@ -549,6 +550,10 @@ type LintRan = Result<(lint::Verdict, Vec<Finding>), &'static str>;
 pub(super) const CLIPPY_NEEDS_TRUST: &str =
     "clippy runs only in the project tier, which needs `supdoc trust`";
 
+/// Why such a step doesn't run when `SUPDOC_TRUST=0` turned trust off for the run.
+pub(super) const CLIPPY_TRUST_OFF: &str =
+    "clippy runs only in the project tier, and `SUPDOC_TRUST=0` turns trust off for this run";
+
 /// Why such a step doesn't run when the project itself lowered the tier.
 const TIER_LOWERED: &str = "`tier = \"static\"` in `[features.code-blocks]`";
 
@@ -557,22 +562,30 @@ const TIER_LOWERED: &str = "`tier = \"static\"` in `[features.code-blocks]`";
 const CLIPPY_AWAITS_AUDIT: &str = "clippy doesn't run yet, even in a trusted project";
 
 /// `tool` as the tiers allow it: `None` for a cartridge above the effective tier, the lower of
-/// `granted` (what the operator trusts the checkout with) and `ceiling` (the project's `tier`).
-/// Its `step` then doesn't run, with [`TIER_LOWERED`] as its reason when the ceiling holds it,
-/// else [`CLIPPY_NEEDS_TRUST`]. A project-tier cartridge the effective tier allows still doesn't
+/// the tier `granted` allows (the project tier only for [`Grant::Trusted`]) and `ceiling` (the
+/// project's `tier`). Its `step` then doesn't run, with [`TIER_LOWERED`] as its reason when the
+/// ceiling holds it, [`CLIPPY_TRUST_OFF`] when `SUPDOC_TRUST=0` turned trust off, else
+/// [`CLIPPY_NEEDS_TRUST`]. A project-tier cartridge the effective tier allows still doesn't
 /// run, with [`CLIPPY_AWAITS_AUDIT`], until a later release. The gate sits where the tool is chosen,
 /// before any scan, cache key or spawn.
 fn tier_gate(
     tool: Option<&'static ToolCartridge>,
     step: &mut StepState,
-    granted: Tier,
+    granted: Grant,
     ceiling: Tier,
 ) -> Option<&'static ToolCartridge> {
     let found = tool?;
-    let effective = granted.min(ceiling);
+    let allowed = if granted == Grant::Trusted {
+        Tier::Project
+    } else {
+        Tier::Static
+    };
+    let effective = allowed.min(ceiling);
     let reason = if found.tier > effective {
         if found.tier > ceiling {
             TIER_LOWERED
+        } else if granted == Grant::TurnedOff {
+            CLIPPY_TRUST_OFF
         } else {
             CLIPPY_NEEDS_TRUST
         }
@@ -586,22 +599,37 @@ fn tier_gate(
 }
 
 /// The run's one `code-block-not-trusted` warning, at the first of `records` with a step held
-/// because the operator hasn't granted trust. `None` when no step was held for that.
+/// because the operator hasn't granted trust. When `SUPDOC_TRUST=0` turned trust off, it says so
+/// and how to undo that, since `supdoc trust` can't help then. `None` when no step was held for
+/// want of trust.
 fn not_trusted(records: &[BlockRecord]) -> Option<Finding> {
-    let at = &records
+    let (at, reason) = records
         .iter()
-        .find(|record| record.steps.held_for_trust())?
-        .at;
-    let finding = Finding::new(
-        NOT_TRUSTED,
-        Severity::Warning,
-        "clippy didn't run on Rust blocks: it compiles them, and this checkout isn't trusted",
-    )
-    .with_help(
-        "run `supdoc trust` to trust this checkout, or set `SUPDOC_TRUST=1` for one run (as in \
-         CI); to stop asking, set `tier = \"static\"` in `[features.code-blocks]` or \
-         `lint = \"off\"` in `[features.code-blocks.rust.clippy]`",
-    );
+        .find_map(|record| Some((&record.at, record.steps.held_for_trust()?)))?;
+    let finding = if reason == CLIPPY_TRUST_OFF {
+        Finding::new(
+            NOT_TRUSTED,
+            Severity::Warning,
+            "clippy didn't run on Rust blocks: it compiles them, and `SUPDOC_TRUST=0` turns \
+             trust off for this run",
+        )
+        .with_help(
+            "unset `SUPDOC_TRUST` to let `supdoc trust` decide, or set it to `1` to trust this \
+             run; to stop asking, set `tier = \"static\"` in `[features.code-blocks]` or \
+             `lint = \"off\"` in `[features.code-blocks.rust.clippy]`",
+        )
+    } else {
+        Finding::new(
+            NOT_TRUSTED,
+            Severity::Warning,
+            "clippy didn't run on Rust blocks: it compiles them, and this checkout isn't trusted",
+        )
+        .with_help(
+            "run `supdoc trust` to trust this checkout, or set `SUPDOC_TRUST=1` for one run (as \
+             in CI); to stop asking, set `tier = \"static\"` in `[features.code-blocks]` or \
+             `lint = \"off\"` in `[features.code-blocks.rust.clippy]`",
+        )
+    };
     Some(finding.with_location(at.clone()))
 }
 
@@ -1117,7 +1145,7 @@ fn selected_tools(
     steps: &mut Steps,
     language: Option<Language>,
     state: &BlockState,
-    granted: Tier,
+    granted: Grant,
 ) -> (
     Option<&'static ToolCartridge>,
     Option<&'static ToolCartridge>,

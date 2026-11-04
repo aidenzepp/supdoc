@@ -15,7 +15,7 @@ use serde::Serialize;
 use crate::check::model::{LinkReport, Report as CheckModel};
 use crate::check::reconcile::{self, check_outcome, reconcile_in};
 use crate::code_blocks::evaluate::{BlockRecord, BlockState, CodeBlockCounts, evaluate};
-use crate::code_blocks::tools::{Tier, ToolEnv};
+use crate::code_blocks::tools::ToolEnv;
 use crate::code_blocks::uses::UseState;
 use crate::exit::ExitStatus;
 use crate::finding::{Finding, Location};
@@ -28,7 +28,7 @@ use crate::output::{Output, PathStyle, RecordArray, Report, Summary, TextContext
 use crate::read::cartridge::Languages;
 use crate::scan::assemble::UntrackedLinks;
 use crate::state::LinkState;
-use crate::trust::{self, TrustEnv};
+use crate::trust::{self, Grant, TrustEnv};
 
 use super::args::CheckArgs;
 use super::parse::USAGE_ERROR_CODE;
@@ -107,26 +107,25 @@ pub(crate) fn run(
     Ok(outcome)
 }
 
-/// The tier the operator granted the project at `root`, the config's directory:
-/// [`Tier::Project`] when `env`'s `SUPDOC_TRUST` or its trust store trusts it, else
-/// [`Tier::Static`].
+/// What the operator granted the project at `root`, the config's directory ([`trust::granted`]):
+/// [`Grant::Trusted`] when `env`'s `SUPDOC_TRUST` or its trust store trusts it,
+/// [`Grant::TurnedOff`] under `SUPDOC_TRUST=0`, else [`Grant::Untrusted`]. Only
+/// [`Grant::Trusted`] lets project-tier tools load.
 ///
 /// Effect: reads the trust store and, for a linked worktree, the git files that locate it.
 ///
 /// # Errors
 ///
 /// Returns `cli-usage` (2) when `SUPDOC_TRUST` holds a value other than `1`, `0` or empty.
-pub(super) fn granted_tier(root: &Path, env: &TrustEnv) -> Result<Tier, CliError> {
-    match trust::granted(root, env) {
-        Ok(true) => Ok(Tier::Project),
-        Ok(false) => Ok(Tier::Static),
-        Err(error) => Err(CliError::new(
+pub(super) fn granted_tier(root: &Path, env: &TrustEnv) -> Result<Grant, CliError> {
+    trust::granted(root, env).map_err(|error| {
+        CliError::new(
             USAGE_ERROR_CODE,
             error.to_string(),
             "unset `SUPDOC_TRUST`, or set it to `1` or `0`, then run supdoc again",
             ExitStatus::Usage,
-        )),
-    }
+        )
+    })
 }
 
 /// The JSON Schema of `supdoc check`'s `--json` output: the whole envelope, with `data` typed as
@@ -594,15 +593,18 @@ mod tests {
     }
 
     #[test]
-    fn granted_tier_is_static_with_nothing_set_and_project_under_supdoc_trust_1() {
+    fn granted_tier_is_untrusted_with_nothing_set_trusted_under_1_and_off_under_0() {
         let root = tempfile::TempDir::new().expect("a temporary directory should be creatable");
 
         let unset = granted_tier(root.path(), &trust_env(&[])).expect("no value is valid");
         let trusted = granted_tier(root.path(), &trust_env(&[("SUPDOC_TRUST", "1".as_ref())]))
             .expect("`1` is valid");
+        let off = granted_tier(root.path(), &trust_env(&[("SUPDOC_TRUST", "0".as_ref())]))
+            .expect("`0` is valid");
 
-        assert_eq!(unset, Tier::Static);
-        assert_eq!(trusted, Tier::Project);
+        assert_eq!(unset, Grant::Untrusted);
+        assert_eq!(trusted, Grant::Trusted);
+        assert_eq!(off, Grant::TurnedOff);
     }
 
     #[test]
@@ -621,7 +623,7 @@ mod tests {
 
         assert_eq!(
             granted_tier(root.path(), &env).expect("the store should be read"),
-            Tier::Project
+            Grant::Trusted
         );
     }
 

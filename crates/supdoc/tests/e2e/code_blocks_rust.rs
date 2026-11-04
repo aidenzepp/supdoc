@@ -447,6 +447,10 @@ const CLIPPY_BAIT: &str = "# Blocks\n\n```rust\npub fn total(v: &Vec<i32>) -> i3
 /// The reason a block gives when clippy was held because the checkout isn't trusted.
 const NEEDS_TRUST: &str = "clippy runs only in the project tier, which needs `supdoc trust`";
 
+/// The reason a block gives when clippy was held because `SUPDOC_TRUST=0` turned trust off.
+const TRUST_OFF: &str =
+    "clippy runs only in the project tier, and `SUPDOC_TRUST=0` turns trust off for this run";
+
 /// The reason a block gives when clippy was held in a trusted checkout.
 const AWAITS_AUDIT: &str = "clippy doesn't run yet, even in a trusted project";
 
@@ -587,7 +591,7 @@ fn a_root_in_the_trust_store_is_trusted_like_supdoc_trust_1() {
 }
 
 #[test]
-fn supdoc_trust_0_turns_off_a_listed_roots_trust_and_holds_clippy_with_the_warning() {
+fn supdoc_trust_0_turns_off_a_listed_roots_trust_and_says_so_in_the_reason_and_warning() {
     let project = clippy_project("");
     let stubs = rust_stubs();
     let state = tempfile::TempDir::new().expect("a temporary directory should be creatable");
@@ -617,8 +621,38 @@ fn supdoc_trust_0_turns_off_a_listed_roots_trust_and_holds_clippy_with_the_warni
     assert_eq!(finding_kinds(&json), ["code-block-not-trusted"], "{json}");
     for block in ["/data/code_blocks/0", "/data/code_blocks/1"] {
         assert_eq!(at(&json, &format!("{block}/lint")), "not_run", "{json}");
-        assert_eq!(at(&json, &format!("{block}/reason")), NEEDS_TRUST, "{json}");
+        assert_eq!(at(&json, &format!("{block}/reason")), TRUST_OFF, "{json}");
     }
+    let message = at(&json, "/findings/0/message")
+        .as_str()
+        .expect("the warning should carry a message");
+    let help = at(&json, "/findings/0/help")
+        .as_str()
+        .expect("the warning should carry help");
+    assert!(
+        message.contains("`SUPDOC_TRUST=0` turns trust off for this run"),
+        "the warning should name SUPDOC_TRUST=0 as the cause: {message}"
+    );
+    assert!(
+        help.contains("unset `SUPDOC_TRUST`") && !help.contains("run `supdoc trust`"),
+        "the help should say to unset SUPDOC_TRUST, not to run `supdoc trust`: {help}"
+    );
+    let text = check_with_stubs(
+        &project,
+        &stubs,
+        &["check"],
+        &[
+            ("XDG_STATE_HOME", state.path()),
+            ("SUPDOC_TRUST", Path::new("0")),
+        ],
+        0,
+    );
+    assert!(
+        text.stdout
+            .contains("2 lint not run (`SUPDOC_TRUST=0` turned trust off)"),
+        "the summary should count both held steps under the off reason: {}",
+        text.stdout
+    );
 }
 
 #[test]
