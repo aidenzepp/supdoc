@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::hash::LineEndings;
-use crate::limits::{SizeLimit, TimeLimit};
+use crate::limits::{CountLimit, SizeLimit, TimeLimit};
 use crate::namespace::NamespaceName;
 use crate::path::RelativePath;
 
@@ -47,6 +47,10 @@ pub(crate) struct RawLimits {
     pub(crate) max_lock_size: Option<SizeLimit>,
     /// `None` inherits the parent's setting.
     pub(crate) max_ignore_size: Option<SizeLimit>,
+    /// `None` inherits the parent's setting.
+    pub(crate) max_key_segments: Option<CountLimit>,
+    /// `None` inherits the parent's setting.
+    pub(crate) max_key_path_size: Option<SizeLimit>,
 }
 
 /// The `[features]` table: one sub-table per area, named in kebab-case.

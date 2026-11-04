@@ -16,5 +16,7 @@ code-block-build-timeout 10m  (default)
 max-lock-size   16MiB  (default)
 max-config-size 256KiB  (default)
 max-ignore-size 256KiB  (default)
+max-key-segments 200000  (default)
+max-key-path-size 32MiB  (default)
 namespace  core -> src  (supdoc.config.toml)
 --- stderr
