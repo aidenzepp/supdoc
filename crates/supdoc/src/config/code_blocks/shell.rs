@@ -96,12 +96,11 @@ impl RawShell {
     /// What this table selects and the tool tables it writes.
     pub(super) fn selection(&self) -> Selection<'_> {
         Selection {
-            language: Language::Shell,
             formatter: self.formatter.as_deref(),
             linter: self.linter.as_deref(),
-            tools: [("shfmt", self.shfmt), ("shellcheck", self.shellcheck)]
+            tools: [("shfmt", &self.shfmt), ("shellcheck", &self.shellcheck)]
                 .into_iter()
-                .filter_map(|(name, table)| Some((name, table?)))
+                .filter_map(|(name, table)| Some((name, table.as_ref()?)))
                 .collect(),
         }
     }

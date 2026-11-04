@@ -18,7 +18,9 @@ mod python;
 mod rust;
 mod shell;
 
-use crate::code_blocks::tools::{self, CARTRIDGES, Step, ToolCartridge};
+use crate::code_blocks::tools::{self, CARTRIDGES, Step};
+use std::ops::Range;
+
 use crate::path::AbsolutePath;
 
 use self::python::RawPython;
@@ -166,10 +168,12 @@ fn deserialize_choice<'de, D: serde::Deserializer<'de>>(
 }
 
 /// The options written in one tool's table, `[features.code-blocks.<language>.<tool>]`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct ToolTable {
     /// Its step's mode, when written.
     mode: Option<Mode>,
+    /// Where the table is, in the file that wrote it.
+    span: Range<usize>,
 }
 
 /// Reads the table of the cartridge named `name`: its only key is its step's mode, `format` or
@@ -183,127 +187,87 @@ fn deserialize_tool<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
     name: &'static str,
 ) -> Result<Option<ToolTable>, D::Error> {
-    use std::fmt;
-
-    use serde::de::{Error, MapAccess, Visitor};
-
-    struct Reader(&'static ToolCartridge);
-    impl<'de> Visitor<'de> for Reader {
-        type Value = ToolTable;
-
-        fn expecting(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(out, "the `{}` options table", self.0.name)
-        }
-
-        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<ToolTable, A::Error> {
-            let tool = self.0;
-            let key = mode_key(tool.step());
-            let accepted = || {
-                format!(
-                    "`{}` accepts only `{key}`, set to {}",
-                    tool.name,
-                    tool.modes
-                        .iter()
-                        .map(|mode| format!("\"{mode}\""))
-                        .collect::<Vec<_>>()
-                        .join(" or ")
-                )
-            };
-            let mut table = ToolTable::default();
-            while let Some(written) = map.next_key::<String>()? {
-                if written != key {
-                    return Err(A::Error::custom(format!(
-                        "`{written}` isn't an option of `{}`; {}",
-                        tool.name,
-                        accepted()
-                    )));
-                }
-                let value: String = map.next_value().map_err(|_| {
-                    A::Error::custom(format!("`{key}` must be a string; {}", accepted()))
-                })?;
-                if !tool.modes.contains(&value.as_str()) {
-                    return Err(A::Error::custom(format!(
-                        "`{key} = \"{value}\"` isn't a mode of `{}`; {}",
-                        tool.name,
-                        accepted()
-                    )));
-                }
-                table.mode = Some(if value == "off" {
-                    Mode::Off
-                } else {
-                    Mode::Full
-                });
-            }
-            Ok(table)
-        }
-    }
+    use serde::Deserialize as _;
+    use serde::de::Error;
 
     let tool = CARTRIDGES
         .iter()
         .find(|tool| tool.name == name)
         .ok_or_else(|| D::Error::custom(format!("no cartridge is named `{name}`")))?;
-    deserializer.deserialize_map(Reader(tool)).map(Some)
+    let written = toml::Spanned::<toml::Table>::deserialize(deserializer)?;
+    let key = mode_key(tool.step());
+    let accepted = || {
+        format!(
+            "`{}` accepts only `{key}`, set to {}",
+            tool.name,
+            tool.modes
+                .iter()
+                .map(|mode| format!("\"{mode}\""))
+                .collect::<Vec<_>>()
+                .join(" or ")
+        )
+    };
+    let mut table = ToolTable {
+        mode: None,
+        span: written.span(),
+    };
+    for (option, value) in written.get_ref() {
+        if option != key {
+            return Err(D::Error::custom(format!(
+                "`{option}` isn't an option of `{}`; {}",
+                tool.name,
+                accepted()
+            )));
+        }
+        let Some(value) = value.as_str() else {
+            return Err(D::Error::custom(format!(
+                "`{key}` must be a string; {}",
+                accepted()
+            )));
+        };
+        if !tool.modes.contains(&value) {
+            return Err(D::Error::custom(format!(
+                "`{key} = \"{value}\"` isn't a mode of `{}`; {}",
+                tool.name,
+                accepted()
+            )));
+        }
+        table.mode = Some(if value == "off" {
+            Mode::Off
+        } else {
+            Mode::Full
+        });
+    }
+    Ok(Some(table))
 }
 
 /// What one language table wrote: its `formatter`, its `linter`, and each tool table written,
 /// by the tool's name.
 pub(super) struct Selection<'raw> {
-    /// The language.
-    language: Language,
     /// `formatter`, when written.
-    formatter: Option<&'raw str>,
+    pub(super) formatter: Option<&'raw str>,
     /// `linter`, when written.
-    linter: Option<&'raw str>,
+    pub(super) linter: Option<&'raw str>,
     /// Each tool table written.
-    tools: Vec<(&'static str, ToolTable)>,
+    pub(super) tools: Vec<(&'static str, &'raw ToolTable)>,
 }
 
-impl Selection<'_> {
-    /// Refuses a table written for a tool this file doesn't select: the named `formatter` or
-    /// `linter`, or the language's default when the file doesn't name one.
-    ///
-    /// # Errors
-    ///
-    /// The deserializer's error naming the table and the selected tool.
-    fn check<E: serde::de::Error>(&self) -> Result<(), E> {
-        for (name, _) in &self.tools {
-            let Some(tool) = CARTRIDGES.iter().find(|tool| tool.name == *name) else {
-                continue;
-            };
-            let (key, written) = match tool.step() {
-                Step::Format => ("formatter", self.formatter),
-                Step::Lint => ("linter", self.linter),
-            };
-            let selected = written
-                .or_else(|| tools::default_for(self.language, tool.step()).map(|tool| tool.name));
-            if selected != Some(*name) {
-                let language = self.language.table();
-                return Err(E::custom(format!(
-                    "`[features.code-blocks.{language}.{name}]` sets options for a tool {language} \
-                     doesn't select: its {key} is `{}`. Select it with `{key} = \"{name}\"`, or \
-                     write the options in `[features.code-blocks.{language}.{}]`",
-                    selected.unwrap_or("none"),
-                    selected.unwrap_or("<tool>"),
-                )));
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Reads one language table with `read`, then refuses a tool table its selection doesn't
-/// select (see [`Selection::check`]).
-///
-/// # Errors
-///
-/// The deserializer's error from `read`, or from the check.
-fn checked<'de, D: serde::Deserializer<'de>, T: serde::Deserialize<'de>>(
-    deserializer: D,
-    selection: fn(&T) -> Selection<'_>,
-) -> Result<Option<T>, D::Error> {
-    let table = T::deserialize(deserializer)?;
-    selection(&table).check()?;
-    Ok(Some(table))
+/// A tool table the merged chain doesn't select its tool for: the language's merged `formatter`
+/// or `linter` names another tool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Unselected {
+    /// The file that wrote the table.
+    pub(crate) file: AbsolutePath,
+    /// Where the table is in `file`.
+    pub(crate) span: Range<usize>,
+    /// The language's table name: `rust`, `shell` or `python`.
+    pub(crate) language: &'static str,
+    /// The tool the table is for.
+    pub(crate) tool: &'static str,
+    /// The selecting key, `formatter` or `linter`.
+    pub(crate) key: &'static str,
+    /// The tool the chain selects instead, when the language has one.
+    pub(crate) selected: Option<&'static str>,
 }
 
 /// Refuses the removed `[features.code-blocks] lint` key, naming where a linter's mode lives now.
@@ -341,29 +305,59 @@ struct Table {
     linter: Option<String>,
     /// The nearest mode written for each tool, by the tool's name.
     modes: Vec<(&'static str, Mode)>,
+    /// Every tool table written in any layer, nearest first: the tool's name, the file that
+    /// wrote it and where.
+    tables: Vec<(&'static str, AbsolutePath, Range<usize>)>,
 }
 
 impl Table {
     /// This table with a farther layer's keys behind it: the nearer value of each key wins.
-    /// `selection` is that layer's language table, when it writes one.
-    fn behind(self, selection: Option<Selection<'_>>) -> Self {
+    /// `selection` is that layer's language table, written in `file`, when it writes one.
+    fn behind(self, selection: Option<Selection<'_>>, file: &AbsolutePath) -> Self {
         let Some(selection) = selection else {
             return self;
         };
         let mut modes = self.modes;
+        let mut tables = self.tables;
         for (name, table) in selection.tools {
             if let Some(mode) = table.mode
                 && !modes.iter().any(|(nearer, _)| *nearer == name)
             {
                 modes.push((name, mode));
             }
+            tables.push((name, file.clone(), table.span.clone()));
         }
         Self {
             written: true,
             formatter: self.formatter.or(selection.formatter.map(str::to_owned)),
             linter: self.linter.or(selection.linter.map(str::to_owned)),
             modes,
+            tables,
         }
+    }
+
+    /// The first tool table, nearest first, whose tool `language`'s merged `formatter` or
+    /// `linter` (or its default) doesn't select.
+    fn unselected(&self, language: Language) -> Option<Unselected> {
+        self.tables.iter().find_map(|(name, file, span)| {
+            let tool = CARTRIDGES.iter().find(|tool| tool.name == *name)?;
+            let (key, written) = match tool.step() {
+                Step::Format => ("formatter", self.formatter.as_deref()),
+                Step::Lint => ("linter", self.linter.as_deref()),
+            };
+            let selected = written.map_or_else(
+                || tools::default_for(language, tool.step()),
+                |written| tools::named(language, tool.step(), written),
+            );
+            (selected.map(|tool| tool.name) != Some(tool.name)).then(|| Unselected {
+                file: file.clone(),
+                span: span.clone(),
+                language: language.table(),
+                tool: tool.name,
+                key,
+                selected: selected.map(|tool| tool.name),
+            })
+        })
     }
 }
 
@@ -400,41 +394,11 @@ pub(crate) struct RawCodeBlocks {
     )]
     lint: Option<()>,
     /// `[features.code-blocks.rust]`, when written.
-    #[serde(default, deserialize_with = "rust_table")]
     rust: Option<RawRust>,
     /// `[features.code-blocks.shell]`, when written.
-    #[serde(default, deserialize_with = "shell_table")]
     shell: Option<RawShell>,
     /// `[features.code-blocks.python]`, when written.
-    #[serde(default, deserialize_with = "python_table")]
     python: Option<RawPython>,
-}
-
-/// Reads `[features.code-blocks.rust]` and checks its tool tables against its selection.
-///
-/// # Errors
-///
-/// The deserializer's error for a bad key or value, or a table of a tool not selected.
-fn rust_table<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<RawRust>, D::Error> {
-    checked(d, RawRust::selection)
-}
-
-/// Reads `[features.code-blocks.shell]` and checks its tool tables against its selection.
-///
-/// # Errors
-///
-/// The deserializer's error for a bad key or value, or a table of a tool not selected.
-fn shell_table<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<RawShell>, D::Error> {
-    checked(d, RawShell::selection)
-}
-
-/// Reads `[features.code-blocks.python]` and checks its tool tables against its selection.
-///
-/// # Errors
-///
-/// The deserializer's error for a bad key or value, or a table of a tool not selected.
-fn python_table<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<RawPython>, D::Error> {
-    checked(d, RawPython::selection)
 }
 
 /// The table's keys merged across the chain, before the top-level defaults fill the gaps.
@@ -450,17 +414,30 @@ pub(super) struct Written {
 
 impl Written {
     /// The resolved settings, each unset key taken from the top-level `include` or `exclude`.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// The first tool table, Rust then shell then Python, whose tool the merged chain doesn't
+    /// select.
     pub(super) fn resolve(
         self,
         include: &AnchoredPatterns,
         exclude: Option<&AnchoredPatterns>,
-    ) -> CodeBlocks {
-        CodeBlocks {
+    ) -> Result<CodeBlocks, Unselected> {
+        let languages = &self.languages;
+        let unselected = languages
+            .rust
+            .unselected(Language::Rust)
+            .or_else(|| languages.shell.unselected(Language::Shell))
+            .or_else(|| languages.python.unselected(Language::Python));
+        if let Some(unselected) = unselected {
+            return Err(unselected);
+        }
+        Ok(CodeBlocks {
             include: self.include.unwrap_or_else(|| include.clone()),
             exclude: self.exclude.or_else(|| exclude.cloned()),
             languages: self.languages,
-        }
+        })
     }
 }
 
@@ -577,7 +554,7 @@ pub(super) fn merge(
             rust: nearer
                 .languages
                 .rust
-                .behind(rust.as_ref().map(RawRust::selection)),
+                .behind(rust.as_ref().map(RawRust::selection), file),
             dialect: nearer
                 .languages
                 .dialect
@@ -585,11 +562,11 @@ pub(super) fn merge(
             shell: nearer
                 .languages
                 .shell
-                .behind(shell.as_ref().map(RawShell::selection)),
+                .behind(shell.as_ref().map(RawShell::selection), file),
             python: nearer
                 .languages
                 .python
-                .behind(python.as_ref().map(RawPython::selection)),
+                .behind(python.as_ref().map(RawPython::selection), file),
         },
     })
 }
@@ -1026,12 +1003,62 @@ mod tests {
         );
 
         assert!(
-            unselected.contains("`[features.code-blocks.python.black]`")
-                && unselected.contains("formatter is `ruff-format`")
-                && unselected.contains("`formatter = \"black\"`"),
+            unselected.contains("[features.code-blocks.python.black]"),
             "got {unselected}"
         );
-        assert!(other.contains("formatter is `black`"), "got {other}");
+        assert!(
+            other.contains("[features.code-blocks.python.ruff-format]"),
+            "got {other}"
+        );
+    }
+
+    #[test]
+    fn a_child_may_set_options_for_the_tool_its_parent_selects() {
+        let dir = tree(&[
+            (
+                "supdoc.config.toml",
+                "[features.code-blocks.python]\nformatter = \"black\"\n",
+            ),
+            (
+                "apps/web/supdoc.config.toml",
+                "extends = \"../../supdoc.config.toml\"\n\
+                 [features.code-blocks.python.black]\nformat = \"off\"\n",
+            ),
+        ]);
+
+        let config = Config::load(&at(&dir, "apps/web"))
+            .expect("the parent's selection should admit the child's table");
+        let code_blocks = config.code_blocks().expect("the table is written");
+
+        assert_eq!(code_blocks.mode(Language::Python, "black"), Mode::Off);
+    }
+
+    #[test]
+    fn a_child_that_selects_another_tool_cannot_keep_options_for_the_parents() {
+        let dir = tree(&[
+            (
+                "supdoc.config.toml",
+                "[features.code-blocks.python]\nformatter = \"black\"\n",
+            ),
+            (
+                "apps/web/supdoc.config.toml",
+                "extends = \"../../supdoc.config.toml\"\n\
+                 [features.code-blocks.python]\nformatter = \"ruff-format\"\n\
+                 [features.code-blocks.python.black]\nformat = \"off\"\n",
+            ),
+        ]);
+
+        let error = Config::load(&at(&dir, "apps/web"))
+            .expect_err("the merged selection doesn't select black");
+
+        assert_eq!(error.code(), "config-parse", "got {error:?}");
+        assert_eq!(error.status(), ExitStatus::Config);
+        let message = error.to_string();
+        assert!(
+            message.contains("apps/web/supdoc.config.toml")
+                && message.contains("[features.code-blocks.python.black]"),
+            "the message should name the child's file and the table: {message}"
+        );
     }
 
     #[test]
@@ -1056,32 +1083,43 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_removed_false_selectors_and_shared_lint_key_name_their_replacement() {
-        let formatter = refused("rust", "formatter = false");
-        let linter = refused("python", "linter = false");
-        let dir = tree(&[(
-            "supdoc.config.toml",
-            "[features.code-blocks]\nlint = \"all\"\n",
-        )]);
-        let shared = Config::load_file(&at(&dir, "supdoc.config.toml"))
-            .expect_err("the shared `lint` key should be refused");
+    /// The error from loading a config file holding `text`.
+    fn load_error(text: &str) -> crate::config::ConfigError {
+        let dir = tree(&[("supdoc.config.toml", text)]);
+        Config::load_file(&at(&dir, "supdoc.config.toml"))
+            .expect_err("the config should be refused")
+    }
 
-        assert!(
-            formatter.contains("`[features.code-blocks.rust.rustfmt] format = \"off\"`"),
-            "got {formatter}"
-        );
-        assert!(
-            linter.contains("`[features.code-blocks.python.ruff] lint = \"off\"`"),
-            "got {linter}"
-        );
-        assert_eq!(shared.code(), "config-parse", "got {shared:?}");
-        assert!(
-            shared
-                .to_string()
-                .contains("`[features.code-blocks] lint` is removed"),
-            "got {shared}"
-        );
+    #[test]
+    fn the_removed_keys_are_parse_errors_whose_help_names_the_tool_table() {
+        let cases = [
+            (
+                "[features.code-blocks.rust]\nformatter = false\n",
+                "[features.code-blocks.rust.rustfmt]",
+                "format = \"off\"",
+            ),
+            (
+                "[features.code-blocks.python]\nlinter = false\n",
+                "[features.code-blocks.python.ruff]",
+                "lint = \"off\"",
+            ),
+            (
+                "[features.code-blocks]\nlint = \"all\"\n",
+                "[features.code-blocks.python.ruff]",
+                "lint = \"off\"",
+            ),
+        ];
+        for (text, table, key) in cases {
+            let error = load_error(text);
+            let help = error.help().unwrap_or_default();
+
+            assert_eq!(error.code(), "config-parse", "`{text}`: {error:?}");
+            assert_eq!(error.status(), ExitStatus::Config, "`{text}`");
+            assert!(
+                help.contains(table) && help.contains(key),
+                "`{text}`: the help should name {table} and {key}: {help}"
+            );
+        }
     }
 
     #[test]

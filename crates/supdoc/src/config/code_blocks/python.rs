@@ -81,16 +81,15 @@ impl RawPython {
     /// What this table selects and the tool tables it writes.
     pub(super) fn selection(&self) -> Selection<'_> {
         Selection {
-            language: Language::Python,
             formatter: self.formatter.as_deref(),
             linter: self.linter.as_deref(),
             tools: [
-                ("ruff-format", self.ruff_format),
-                ("black", self.black),
-                ("ruff", self.ruff),
+                ("ruff-format", &self.ruff_format),
+                ("black", &self.black),
+                ("ruff", &self.ruff),
             ]
             .into_iter()
-            .filter_map(|(name, table)| Some((name, table?)))
+            .filter_map(|(name, table)| Some((name, table.as_ref()?)))
             .collect(),
         }
     }

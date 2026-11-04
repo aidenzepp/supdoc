@@ -131,12 +131,11 @@ impl RawRust {
     /// What this table selects and the tool tables it writes.
     pub(super) fn selection(&self) -> Selection<'_> {
         Selection {
-            language: Language::Rust,
             formatter: self.formatter.as_deref(),
             linter: self.linter.as_deref(),
-            tools: [("rustfmt", self.rustfmt), ("clippy", self.clippy)]
+            tools: [("rustfmt", &self.rustfmt), ("clippy", &self.clippy)]
                 .into_iter()
-                .filter_map(|(name, table)| Some((name, table?)))
+                .filter_map(|(name, table)| Some((name, table.as_ref()?)))
                 .collect(),
         }
     }
