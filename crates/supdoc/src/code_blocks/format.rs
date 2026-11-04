@@ -13,7 +13,7 @@ use crate::limits::TimeLimit;
 use crate::path::AbsolutePath;
 use crate::read::cartridge::{Cartridge, Deadline, SourceFile};
 
-use super::block::{CodeBlock, replacement_for, try_blocks_in};
+use super::block::{CodeBlock, has_contiguous_body, replacement_for, try_blocks_in};
 use super::runner::{Failure, Ran};
 use super::states;
 use super::tools::Tool;
@@ -154,7 +154,9 @@ pub(crate) fn input(block: &CodeBlock, text: &str) -> Option<String> {
 
 /// Judges a formatter's `result` on `input`: equal output passes, other output is unformatted and
 /// kept, output that isn't UTF-8 and a non-zero exit are failures (the exit carrying the first
-/// lines of stderr, and a parse failure when `tool`'s stderr is its syntax-error report), and a timeout is a timeout.
+/// lines of stderr), and a timeout is a timeout. A non-zero exit is a parse failure only when
+/// `tool`'s stderr is its syntax-error report and places the error on a line; a report without a
+/// location, like any other non-zero exit, is a tool failure. Stderr after exit 0 is never judged.
 #[must_use]
 pub(crate) fn judge(tool: &Tool, input: &str, result: Result<Ran, Failure>) -> Verdict {
     match result {
@@ -166,7 +168,8 @@ pub(crate) fn judge(tool: &Tool, input: &str, result: Result<Ran, Failure>) -> V
         Ok(ran) => {
             let stderr = String::from_utf8_lossy(&ran.stderr);
             let lines: Vec<&str> = stderr.lines().take(STDERR_LINES).collect();
-            if let Some(error) = parse_error(tool, &stderr) {
+            let located = parse_error(tool, &stderr).filter(|error| error.line.is_some());
+            if let Some(error) = located {
                 return Verdict::ParseFailed {
                     detail: lines.join("\n"),
                     line: error.line,
@@ -342,6 +345,9 @@ enum Refusal {
     Unchecked,
     /// The formatter changed, added, removed or reordered the block's hidden `# ` lines.
     ChangesHiddenLines,
+    /// A line that isn't part of the block, such as a `//` comment in a doc-comment run, lies
+    /// between its body lines, and replacing the body would delete it.
+    SkipsLines,
 }
 
 /// The fix that makes `block`'s body in `doc` read `body`, which holds no final line ending,
@@ -354,7 +360,8 @@ enum Refusal {
 /// character other than tab and LF (a CR only before LF); a line of it would close the fence (a
 /// cheap first pass); or the doc, parsed again with the fix applied the way its blocks were
 /// found, no longer holds the same fenced blocks, each opening with the same line and spanning
-/// the same text. Also when either parse fails.
+/// the same text. Also when either parse fails, and when a line that isn't part of the block lies
+/// between its body lines (a `//` line in a doc comment), which the fix would delete.
 #[must_use]
 pub(crate) fn safe_fix(block: &CodeBlock, doc: &FixDoc, body: &str, what: &str) -> Guarded {
     let text = doc.text();
@@ -367,6 +374,9 @@ pub(crate) fn safe_fix(block: &CodeBlock, doc: &FixDoc, body: &str, what: &str) 
     }
     if body.lines().any(|line| closes(line, marker, length)) {
         return refuse(Refusal::ClosesFence);
+    }
+    if !has_contiguous_body(block, text) {
+        return refuse(Refusal::SkipsLines);
     }
     let Some((range, replacement)) = replacement_for(block, text, body) else {
         return Guarded::Unplaced;
@@ -406,6 +416,11 @@ fn refused(block: &CodeBlock, refusal: &Refusal, what: &str, marker: char) -> Fi
         Refusal::Unchecked => (
             "couldn't be checked, because the doc didn't parse again within `parse-timeout`",
             "raise the limit with `--parse-timeout 30s`, or edit the block by hand".to_owned(),
+        ),
+        Refusal::SkipsLines => (
+            "would delete a line inside the block that isn't part of it, such as a `//` comment",
+            "move that line out of the block or make it a doc-comment line, or edit the block by hand"
+                .to_owned(),
         ),
         Refusal::ChangesHiddenLines => (
             "would change its hidden `# ` lines",
@@ -625,6 +640,54 @@ mod tests {
         assert_eq!(
             judge(shfmt(), "x\n", ran),
             Verdict::ToolFailed("1\n2\n3\n4\n5".to_owned())
+        );
+    }
+
+    /// The Rust formatter.
+    fn rustfmt() -> &'static crate::code_blocks::tools::Tool {
+        formatter(Language::Rust).expect("Rust has a formatter")
+    }
+
+    /// A run that exited with `success` and wrote `stdout` and `stderr`.
+    fn exited(success: bool, stdout: &str, stderr: &str) -> Ran {
+        Ran {
+            success,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_rustfmt_error_without_a_stdin_location_is_tool_failed() {
+        let ran = Ok(exited(false, "", "error: couldn't read the config\n"));
+
+        assert_eq!(
+            judge(rustfmt(), "fn f() {}\n", ran),
+            Verdict::ToolFailed("error: couldn't read the config".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_rustfmt_error_at_a_stdin_location_is_a_parse_failure() {
+        let stderr = "error: expected one of `;`\n --> <stdin>:3:9\n";
+        let ran = Ok(exited(false, "", stderr));
+
+        assert_eq!(
+            judge(rustfmt(), "fn f() {\n\nlet x = 1\n}\n", ran),
+            Verdict::ParseFailed {
+                detail: "error: expected one of `;`\n --> <stdin>:3:9".to_owned(),
+                line: Some(2),
+            }
+        );
+    }
+
+    #[test]
+    fn exit_zero_with_changed_output_is_unformatted_whatever_stderr_says() {
+        let ran = Ok(exited(true, "fn f() {}\n", "error: x\n --> <stdin>:1:1\n"));
+
+        assert_eq!(
+            judge(rustfmt(), "fn  f() {}\n", ran),
+            Verdict::Unformatted("fn f() {}\n".to_owned())
         );
     }
 

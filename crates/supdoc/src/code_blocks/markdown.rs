@@ -42,17 +42,37 @@ pub(super) fn try_blocks(
     blocks_from_parse(text, cleaned, &locate)
 }
 
+/// The step a timeout of the parse with each NUL replaced names, so its `read-timeout` says which
+/// parse ran out of `parse-timeout`.
+const REPARSE: &str = "the re-parse after NUL replacement";
+
 /// The blocks of `text` read from `cleaned`, the parse of `text` with each NUL replaced.
 ///
 /// # Errors
 ///
-/// The [`ReadError`] `cleaned` failed with.
+/// The [`ReadError`] `cleaned` failed with; a timeout names [`REPARSE`] as its step.
 fn blocks_from_parse(
     text: &str,
     cleaned: Result<SourceFile, ReadError>,
     locate: &impl Fn(Range<usize>) -> Option<Location>,
 ) -> Result<Vec<CodeBlock>, ReadError> {
-    Ok(blocks_of_tree(text, cleaned?.tree(), locate))
+    let cleaned = cleaned.map_err(|error| match error {
+        ReadError::Timeout {
+            path,
+            limit,
+            offset,
+            size,
+            ..
+        } => ReadError::Timeout {
+            path,
+            limit,
+            step: REPARSE,
+            offset,
+            size,
+        },
+        other => other,
+    })?;
+    Ok(blocks_of_tree(text, cleaned.tree(), locate))
 }
 
 /// Every fenced code block in `tree`, parsed from `text` or a copy with the same offsets, in file
@@ -171,6 +191,7 @@ mod tests {
     use crate::cartridges::markdown::cartridge::cartridge;
     use crate::code_blocks::block::blocks_in;
     use crate::path::AbsolutePath;
+    use crate::read::error::ReadRole;
 
     /// The blocks of `text` parsed as `/repo/docs/guide.md`.
     fn blocks_of(text: &str) -> Vec<CodeBlock> {
@@ -334,6 +355,33 @@ mod tests {
         assert!(
             matches!(result, Err(ReadError::Timeout { .. })),
             "{result:?}"
+        );
+    }
+
+    #[test]
+    fn a_timed_out_replaced_parse_names_the_re_parse_and_parse_timeout() {
+        let text = "```sh\necho \0\n```\n";
+        let path = AbsolutePath::new(Path::new("/repo/docs/guide.md"))
+            .expect("the fixture path should be absolute");
+        let failed = Err(ReadError::Timeout {
+            path,
+            limit: "10s".parse().expect("10s is a valid limit"),
+            step: "the parse",
+            offset: 3,
+            size: text.len(),
+        });
+
+        let error = blocks_from_parse(text, failed, &|_| None)
+            .expect_err("a timed-out re-parse should be an error");
+        let help = error.help(ReadRole::ScannedSource, "docs/guide.md");
+
+        assert!(
+            help.starts_with("The re-parse after NUL replacement stopped at byte 3 of"),
+            "the help should name the re-parse: {help}"
+        );
+        assert!(
+            help.contains("`parse-timeout`"),
+            "the help should suggest raising `parse-timeout`: {help}"
         );
     }
 }

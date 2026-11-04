@@ -67,7 +67,9 @@ fn edition<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Edition>, D:
     use serde::de::Error;
 
     let year = String::deserialize(d).map_err(|_| {
-        D::Error::custom("`edition` must be a string: \"2015\", \"2018\", \"2021\" or \"2024\"")
+        D::Error::custom(
+            "`edition` must be quoted, as a string: write \"2015\", \"2018\", \"2021\" or \"2024\"",
+        )
     })?;
     Edition::from_year(&year).map(Some).ok_or_else(|| {
         D::Error::custom(format!(
