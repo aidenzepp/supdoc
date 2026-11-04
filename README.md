@@ -37,6 +37,7 @@ symbols too: `[setup](docs/guide.md#install)`.
 | `supdoc schema [COMMAND]` | Prints the JSON Schema of a command's `--json` output |
 | `supdoc completions SHELL` | Prints a shell completion script |
 | `supdoc skill install` | Installs supdoc's agent skill |
+| `supdoc trust [PATH]`, `supdoc trust --revoke [PATH]` | Trusts a checkout to run its code blocks' tools, or stops trusting it |
 
 `update`, `fix`, `namespace rename` and `skill install` preview their changes unless given `--yes`.
 `init` writes immediately; use `--dry-run` to preview it. Every command accepts `--json` and `--jsonl`

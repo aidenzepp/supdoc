@@ -274,6 +274,9 @@ pub(crate) enum Command {
     /// Install a newer or older supdoc with cargo (writes; previews unless --yes; to accept code changes, see `update`)
     #[command(after_help = UPGRADE_EXAMPLES)]
     Upgrade(UpgradeArgs),
+    /// Trust a checkout to run its code blocks' tools, or revoke it (writes your state directory)
+    #[command(after_help = TRUST_EXAMPLES)]
+    Trust(TrustArgs),
 }
 
 /// Whether a write command applies its changes.
@@ -594,6 +597,8 @@ pub(crate) enum SchemaTarget {
     SkillInstall,
     /// `supdoc upgrade`
     Upgrade,
+    /// `supdoc trust`
+    Trust,
 }
 
 /// Arguments of `supdoc upgrade`.
@@ -613,6 +618,29 @@ pub(crate) struct CompletionsArgs {
     /// The shell to generate completions for
     #[arg(value_enum, value_name = "SHELL")]
     pub(crate) shell: clap_complete::Shell,
+}
+
+/// Shown after `supdoc trust --help`.
+const TRUST_EXAMPLES: &str = "\
+Examples:
+  # Trust the current project
+  supdoc trust
+
+  # Trust another checkout
+  supdoc trust ../other-project
+
+  # Stop trusting the current project
+  supdoc trust --revoke";
+
+/// Arguments of `supdoc trust`.
+#[derive(Debug, Args)]
+pub(crate) struct TrustArgs {
+    /// The project directory [default: the project root]
+    #[arg(value_name = "PATH")]
+    pub(crate) path: Option<PathBuf>,
+    /// Stop trusting the root instead of trusting it
+    #[arg(long, env = "SUPDOC_REVOKE", value_parser = FalseyValueParser::new())]
+    pub(crate) revoke: bool,
 }
 
 /// `supdoc skill ...`.

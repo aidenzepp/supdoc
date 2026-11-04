@@ -76,11 +76,11 @@ pub(super) fn git_exclude(dir: &Path, limit: SizeLimit) -> ExcludeFile {
 /// one. With no `commondir` file, as in a submodule or a `--separate-git-dir` repository, the
 /// named git directory is itself the shared one, as in git. Each relative path counts from where
 /// git reads it, `dir` and the worktree's git directory. `None` when `dot_git` is unreadable or has
-/// no `gitdir: ` line, or a `commondir` file is there but unreadable or empty, so no exclude file
-/// applies.
+/// no `gitdir: ` line, or a `commondir` file is there but unreadable, empty or not a regular file,
+/// so no exclude file applies.
 ///
 /// Effect: reads `dot_git` and the `commondir` file.
-pub(super) fn common_dir(dir: &Path, dot_git: &Path) -> Option<PathBuf> {
+pub(crate) fn common_dir(dir: &Path, dot_git: &Path) -> Option<PathBuf> {
     let line = first_line(dot_git)?;
     let git_dir = dir.join(line.strip_prefix("gitdir: ")?);
     let commondir = git_dir.join("commondir");
@@ -92,10 +92,15 @@ pub(super) fn common_dir(dir: &Path, dot_git: &Path) -> Option<PathBuf> {
     Some(git_dir.join(common))
 }
 
-/// The first line of `file`, without its line ending, or `None` when it can't be read.
+/// The first line of `file`, without its line ending, or `None` when it can't be read or isn't a
+/// regular file once symlinks are followed, so a FIFO or device there is never opened and can't
+/// block the read.
 ///
-/// Effect: reads `file`.
-pub(super) fn first_line(file: &Path) -> Option<String> {
+/// Effect: reads `file`'s metadata and, for a regular file, `file`.
+pub(crate) fn first_line(file: &Path) -> Option<String> {
+    if !fs::metadata(file).ok()?.is_file() {
+        return None;
+    }
     let file = fs::File::open(file).ok()?;
     io::BufReader::new(file).lines().next()?.ok()
 }

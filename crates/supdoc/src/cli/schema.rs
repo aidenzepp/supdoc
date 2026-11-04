@@ -18,8 +18,8 @@ use crate::output::{Output, OutputError, Report, TextContext};
 
 use super::args::{SchemaArgs, SchemaTarget};
 use super::{
-    CliError, Context, Outcome, check, config, fix, init, list, rename, resolve, skill, update,
-    upgrade,
+    CliError, Context, Outcome, check, config, fix, init, list, rename, resolve, skill, trust,
+    update, upgrade,
 };
 
 /// The JSON Schema document the run prints. Under `--json` it is the envelope's `data` itself.
@@ -150,6 +150,7 @@ fn schema_of(target: SchemaTarget) -> schemars::Schema {
         SchemaTarget::Init => init::schema(),
         SchemaTarget::SkillInstall => skill::schema(),
         SchemaTarget::Upgrade => upgrade::schema(),
+        SchemaTarget::Trust => trust::schema(),
     }
 }
 
