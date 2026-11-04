@@ -447,8 +447,8 @@ const CLIPPY_BAIT: &str = "# Blocks\n\n```rust\npub fn total(v: &Vec<i32>) -> i3
 /// The reason a block gives when clippy was held because the checkout isn't trusted.
 const NEEDS_TRUST: &str = "clippy runs only in the project tier, which needs `supdoc trust`";
 
-/// The reason a block gives when clippy was held in a trusted checkout until phase 5b.
-const AWAITS_AUDIT: &str = "clippy waits for its phase 5b audit";
+/// The reason a block gives when clippy was held in a trusted checkout.
+const AWAITS_AUDIT: &str = "clippy doesn't run yet, even in a trusted project";
 
 /// Runs `supdoc args` on `project` with `stubs` as the only `PATH` entry and `vars` besides,
 /// asserting it exits `exit` and that clippy never started.
