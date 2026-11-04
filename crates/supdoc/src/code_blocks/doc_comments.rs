@@ -1,22 +1,23 @@
-//! Code blocks in Rust doc comments: the `///` and `//!` containers.
+//! The doc-comment container core: code blocks in the comments of a language.
 //!
-//! Each run of adjacent doc-comment lines is one Markdown document: the lines without their
-//! marker and the one space after it. That text is parsed with the Markdown block grammar, and
-//! every offset it reports is mapped back to the file, so a block's prefix is the line's
-//! indentation, its marker and its space. `//`, `/* */` and `/** */` comments are not containers.
+//! A language's run builder turns each run of doc-comment lines into Markdown text and a
+//! [`Run`], the per-line map back to the file. The core parses that text with the Markdown block
+//! grammar and maps every offset it reports to the file, so a block's prefix is the line's
+//! indentation and marker. A container never rewrites a line's bytes after its prefix.
+
+mod rust;
 
 use std::ops::Range;
 
 use crate::cartridges::markdown::cartridge::cartridge as markdown_cartridge;
 use crate::finding::Location;
-use crate::read::cartridge::{MarkdownRegion, SourceFile};
+use crate::read::cartridge::SourceFile;
 use crate::read::error::ReadError;
 
 use super::block::{BodyLine, CodeBlock};
 use super::markdown;
 
-/// The markers of a doc comment.
-const DOC_MARKERS: [&str; 2] = ["///", "//!"];
+pub(super) use rust::blocks;
 
 /// One line of a doc comment's Markdown text, and where it came from.
 struct Line {
@@ -60,19 +61,19 @@ impl Run {
     }
 }
 
-/// Every code block in the doc comments of `file`, a Rust file, in file order.
+/// The blocks of every run in `runs`, each a [`Run`] and its Markdown text, in order.
 ///
 /// # Errors
 ///
 /// The [`ReadError`] of the first run whose Markdown, or its NUL-replaced re-parse, can't be
 /// parsed: the file's blocks are then unknown, not none.
-pub(super) fn blocks(
+fn blocks_of_runs(
     file: &SourceFile,
+    runs: Vec<(Run, String)>,
     locate: impl Fn(Range<usize>) -> Option<Location>,
 ) -> Result<Vec<CodeBlock>, ReadError> {
-    let regions = file.language().markdown_regions(file)?;
     let mut blocks = Vec::new();
-    for (run, markdown) in doc_runs(file.text(), &regions) {
+    for (run, markdown) in runs {
         let parsed = SourceFile::from_text(
             file.path().clone(),
             markdown,
@@ -99,125 +100,6 @@ fn blocks_of_run(
         .into_iter()
         .filter_map(|block| to_file(run, block))
         .collect())
-}
-
-/// What one comment range is to a doc-comment run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Comment {
-    /// A `///` or `//!` line.
-    Doc {
-        /// Its marker.
-        marker: &'static str,
-        /// Where the marker starts.
-        start: usize,
-    },
-    /// A `//` or `////` line. Rustdoc skips it, so a run continues across it.
-    Plain {
-        /// Where its marker starts.
-        start: usize,
-    },
-    /// Anything else, such as a block comment: it ends a run.
-    Other,
-}
-
-/// What `range`, a comment body from a region, is to a doc-comment run.
-fn classify(text: &str, range: &tree_sitter::Range) -> Comment {
-    let at = range.start_byte;
-    let before = |len: usize| text.get(at.checked_sub(len)?..at);
-    let doc = DOC_MARKERS
-        .into_iter()
-        .find(|marker| before(3) == Some(*marker));
-    let body = text.get(at..range.end_byte).unwrap_or_default();
-    match doc {
-        // `////` opens an ordinary comment.
-        Some("///") if body.starts_with('/') => Comment::Plain { start: at - 3 },
-        Some(marker) => Comment::Doc {
-            marker,
-            start: at - 3,
-        },
-        None if before(2) == Some("//") => Comment::Plain { start: at - 2 },
-        None => Comment::Other,
-    }
-}
-
-/// A doc-comment run being read: its marker, where its last line ends, its lines and Markdown.
-struct Open {
-    /// `///` or `//!`: a run never mixes them.
-    marker: &'static str,
-    /// Where the run's last line, doc or skipped, ends in the file.
-    end: usize,
-    /// The doc lines so far.
-    lines: Vec<Line>,
-    /// Their Markdown text.
-    markdown: String,
-}
-
-/// Every doc-comment run in `regions`, as a [`Run`] and its Markdown text, in file order.
-///
-/// A run is adjacent `///` lines, or adjacent `//!` lines. A `//` or `////` line inside it is
-/// skipped, as rustdoc skips it, and the run continues on the next line; a blank line, code, a
-/// block comment or the other doc marker ends it.
-fn doc_runs(text: &str, regions: &[MarkdownRegion]) -> Vec<(Run, String)> {
-    let mut runs = Vec::new();
-    let mut open: Option<Open> = None;
-    let mut close = |open: &mut Option<Open>| {
-        if let Some(done) = open.take() {
-            runs.push((Run { lines: done.lines }, done.markdown));
-        }
-    };
-    for range in regions.iter().flat_map(MarkdownRegion::ranges) {
-        let comment = classify(text, range);
-        let continues = |start: usize| {
-            open.as_ref().is_some_and(|open| {
-                text.get(open.end..start)
-                    .is_some_and(|gap| gap.chars().all(|c| c.is_whitespace() && c != '\n'))
-            })
-        };
-        match comment {
-            Comment::Doc { marker, start } => {
-                let joins = continues(start) && open.as_ref().is_some_and(|o| o.marker == marker);
-                if !joins {
-                    close(&mut open);
-                }
-                let Some((file, content)) = doc_line(text, range) else {
-                    close(&mut open);
-                    continue;
-                };
-                let run = open.get_or_insert_with(|| Open {
-                    marker,
-                    end: range.end_byte,
-                    lines: Vec::new(),
-                    markdown: String::new(),
-                });
-                run.lines.push(Line {
-                    synthetic: run.markdown.len(),
-                    file,
-                    begins: text
-                        .get(..start)
-                        .and_then(|head| head.rfind('\n'))
-                        .map_or(0, |at| at + 1),
-                });
-                run.markdown.push_str(content);
-                run.end = range.end_byte;
-            }
-            Comment::Plain { start } if continues(start) => {
-                if let Some(run) = open.as_mut() {
-                    run.end = range.end_byte;
-                }
-            }
-            Comment::Plain { .. } | Comment::Other => close(&mut open),
-        }
-    }
-    close(&mut open);
-    runs
-}
-
-/// Where the text of the doc line `range` begins in the file, after its marker and the one space
-/// after it, and that text.
-fn doc_line<'text>(text: &'text str, range: &tree_sitter::Range) -> Option<(usize, &'text str)> {
-    let body = text.get(range.start_byte..range.end_byte)?;
-    let space = usize::from(body.starts_with(' '));
-    Some((range.start_byte + space, body.get(space..)?))
 }
 
 /// `block`, found in the Markdown text, with its body lines placed in the file. Its fence and
