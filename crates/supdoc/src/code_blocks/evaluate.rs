@@ -218,7 +218,7 @@ pub(crate) fn evaluate(
             .flatten();
         records.push(BlockRecord {
             at: block.fence.clone(),
-            reason: state.reason(&steps, language.as_deref(), tool.map(|tool| tool.name)),
+            reason: first_reason(&state, &steps, language.as_deref(), tool),
             tool,
             linter,
             dialect: code_blocks.dialect(),
@@ -311,6 +311,8 @@ impl Evaluation {
             );
             let [format, lint] = runs;
             if format.is_some() || lint.is_some() {
+                let ran = [format.is_some(), lint.is_some()];
+                refuse_unfound(&mut record.steps, [record.tool, linter], ran, &looked_up);
                 let _opened = cache.get_or_insert_with(|| Cache::open(env, root));
                 slots.push(Slot::Run(jobs.len()));
                 jobs.push(Job {
@@ -355,6 +357,7 @@ impl Evaluation {
             Some(StepsRan { format, lint })
         });
         self.settle(slots, &jobs, ran);
+        self.settle_pending();
         if let Some(cache) = cache {
             cache.prune();
         }
@@ -369,7 +372,7 @@ impl Evaluation {
     /// holds one per job of `jobs` in order: a block's format findings, then its lint findings.
     /// Each run block's state is the outcome over the steps that ran, the first failure (format
     /// before lint) deciding it and naming its tool in the reason. A run with no result, or whose
-    /// steps both didn't run, leaves its block pending.
+    /// steps both didn't run, leaves its block to [`Self::settle_pending`].
     fn settle(&mut self, slots: Vec<Slot>, jobs: &[Job], ran: Vec<Option<StepsRan>>) {
         let mut ran = ran.into_iter();
         for slot in slots {
@@ -413,10 +416,72 @@ impl Evaluation {
                     record
                         .state
                         .reason(&record.steps, record.language.as_deref(), Some(tool.name));
-            } else if let StepState::Unrunnable { reason } = record.steps.lint {
-                record.reason = Some(reason.to_owned());
             }
         }
+    }
+
+    /// Settles each block still pending once its runs are in, so no block reaches output
+    /// pending: one with a tool selected whose text couldn't be read from its doc is
+    /// [`NotChecked::InputUnreadable`]; any other, none of whose steps ran, is
+    /// [`NotChecked::NoStepRan`], with its steps' reasons.
+    fn settle_pending(&mut self) {
+        for record in &mut self.records {
+            if record.state != BlockState::NotChecked(NotChecked::Pending) {
+                continue;
+            }
+            let tool = record.tool.or(record.linter);
+            let unreadable = tool.is_some() && record.pending.is_none();
+            record.state = BlockState::NotChecked(if unreadable {
+                NotChecked::InputUnreadable
+            } else {
+                NotChecked::NoStepRan
+            });
+            record.reason = record.state.reason(
+                &record.steps,
+                record.language.as_deref(),
+                tool.map(|tool| tool.name),
+            );
+        }
+    }
+}
+
+/// `state`'s reason as [`evaluate`] first records it, for `steps` and the formatter `tool`.
+/// `None` while the block is pending: [`Evaluation::settle_pending`] gives it one.
+fn first_reason(
+    state: &BlockState,
+    steps: &Steps,
+    language: Option<&str>,
+    tool: Option<&ToolCartridge>,
+) -> Option<String> {
+    (*state != BlockState::NotChecked(NotChecked::Pending))
+        .then(|| state.reason(steps, language, tool.map(|tool| tool.name)))
+        .flatten()
+}
+
+/// Marks each of `steps`, format then lint, whose tool in `tools` is selected but didn't run
+/// (per `ran`) as [`StepState::ToolRefused`], missing or inside the checkout by what `looked_up`
+/// found for its binary.
+fn refuse_unfound(
+    steps: &mut Steps,
+    tools: [Option<&'static ToolCartridge>; 2],
+    ran: [bool; 2],
+    looked_up: &[(&'static str, Found)],
+) {
+    for ((step, tool), ran) in [&mut steps.format, &mut steps.lint]
+        .into_iter()
+        .zip(tools)
+        .zip(ran)
+    {
+        let Some(tool) = tool.filter(|_| !ran) else {
+            continue;
+        };
+        let inside_root = looked_up
+            .iter()
+            .any(|(binary, found)| *binary == tool.binary && matches!(found, Found::InsideRoot(_)));
+        *step = StepState::ToolRefused {
+            binary: tool.binary,
+            inside_root,
+        };
     }
 }
 
@@ -1483,6 +1548,44 @@ mod tests {
     /// A temporary directory.
     fn temporary() -> tempfile::TempDir {
         tempfile::TempDir::new().expect("a temporary directory should be creatable")
+    }
+
+    #[test]
+    fn a_block_whose_text_could_not_be_read_settles_unreadable_not_pending_or_passed() {
+        let (root, bin) = (temporary(), temporary());
+        let shfmt = bin.path().join("shfmt");
+        std::fs::write(&shfmt, "#!/bin/sh\n/bin/cat\n").expect("the stub should be writable");
+        std::fs::set_permissions(&shfmt, std::fs::Permissions::from_mode(0o755))
+            .expect("the stub should be made executable");
+        let mut record = rust_record(root.path(), "# A\n\n```sh\necho hi\n```\n");
+        record.language = Some("sh".to_owned());
+        record.tool = CARTRIDGES.iter().find(|tool| tool.name == "shfmt");
+        record.linter = None;
+        record.pending = None;
+        let mut evaluation = super::Evaluation {
+            findings: Vec::new(),
+            counts: None,
+            records: vec![record],
+            timeout: None,
+        };
+        let env =
+            ToolEnv::from_vars(|name| (name == "PATH").then(|| bin.path().as_os_str().to_owned()));
+
+        evaluation.look_up_tools(&env, root.path());
+
+        let record = evaluation
+            .records
+            .first()
+            .expect("the record should remain");
+        assert_eq!(
+            record.state,
+            BlockState::NotChecked(NotChecked::InputUnreadable),
+            "{record:?}"
+        );
+        assert_eq!(
+            record.reason.as_deref(),
+            Some("supdoc couldn't read the block's text from its doc")
+        );
     }
 
     #[test]
