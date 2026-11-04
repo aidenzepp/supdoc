@@ -26,7 +26,8 @@ use super::tools::formatter;
 /// [`ToolMissing`](Self::ToolMissing), and one whose real path is inside the checkout makes them
 /// [`NotChecked::ToolInsideRoot`]. A Rust block is refused first when the root's toolchain file
 /// can't be used ([`NotChecked::ToolchainPath`]), the block reads a file or variable at compile
-/// time ([`NotChecked::CompileTimeRead`]), or it is too large to scan for one
+/// time ([`NotChecked::CompileTimeRead`]), declares an outline module before its linter compiles
+/// it ([`NotChecked::OutlineModule`]), or it is too large to scan for one
 /// ([`NotChecked::TooLargeToScan`]). A tool found outside the checkout runs on each block,
 /// which leaves it [`Passed`](Self::Passed) or [`Failed`](Self::Failed).
 ///
@@ -77,6 +78,9 @@ pub(crate) enum NotChecked {
     CompileTimeRead,
     /// The Rust block is too large for the compile-time-read scan.
     TooLargeToScan,
+    /// The Rust block declares an outline module (`mod name;`), which rustc would read from a
+    /// file outside the block when its linter compiled it.
+    OutlineModule,
 }
 
 /// Why a block failed.
@@ -122,6 +126,12 @@ pub(crate) enum StepState {
     /// The step didn't run: it isn't due on the block, isn't built yet, or its tool didn't run.
     #[default]
     NotRun,
+    /// The step was due but supdoc couldn't run it safely, for the reason held. Named `not_run`
+    /// in JSON, like [`NotRun`](Self::NotRun).
+    Unrunnable {
+        /// Why, as a block's reason: "no private working directory for clippy".
+        reason: &'static str,
+    },
 }
 
 impl StepState {
@@ -132,7 +142,7 @@ impl StepState {
             Self::Ran => "ran",
             Self::Off => "off",
             Self::Skipped { .. } => "skipped",
-            Self::NotRun => "not_run",
+            Self::NotRun | Self::Unrunnable { .. } => "not_run",
         }
     }
 
@@ -144,6 +154,7 @@ impl StepState {
             Self::Off => Some(format!("`{key} = false`")),
             Self::Skipped { reason } => reason.clone(),
             Self::NotRun => Some(format!("its {step} step isn't built yet")),
+            Self::Unrunnable { reason } => Some((*reason).to_owned()),
         }
     }
 }
@@ -321,6 +332,7 @@ impl BlockState {
             Self::NotChecked(NotChecked::ToolchainPath) => Some("toolchain path".to_owned()),
             Self::NotChecked(NotChecked::CompileTimeRead) => Some("compile-time read".to_owned()),
             Self::NotChecked(NotChecked::TooLargeToScan) => Some("too large to scan".to_owned()),
+            Self::NotChecked(NotChecked::OutlineModule) => Some("outline module".to_owned()),
             Self::UnknownLanguage => {
                 Some(format!("supdoc has no checker for `{}`", tag.unwrap_or("")))
             }
@@ -403,7 +415,7 @@ impl CodeBlockCounts {
                 match step {
                     StepState::Off => *off += 1,
                     StepState::Skipped { .. } => *skipped += 1,
-                    StepState::Ran | StepState::NotRun => {}
+                    StepState::Ran | StepState::NotRun | StepState::Unrunnable { .. } => {}
                 }
             }
             *match state {

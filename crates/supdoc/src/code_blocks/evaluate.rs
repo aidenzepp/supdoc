@@ -300,7 +300,9 @@ impl Evaluation {
             let rust = (tool.language == Language::Rust)
                 .then(|| &*rust_setup.get_or_insert_with(|| RustSetup::read(root)));
             if let Some(rust) = rust {
-                let refused = rust_refusal(record, rust, &mut toolchain_warned, &mut slots);
+                let compiles = linter.is_some_and(|linter| linter.language == Language::Rust);
+                let refused =
+                    rust_refusal(record, rust, compiles, &mut toolchain_warned, &mut slots);
                 if let Some(refused) = refused {
                     record.state = BlockState::NotChecked(refused);
                     record.reason = record.state.reason(
@@ -355,11 +357,12 @@ impl Evaluation {
                 run_formatter(run.tool, &run.program, record, &session, rust)
             });
             let parses = !matches!(format, Some((format::Verdict::ParseFailed { .. }, _)));
-            let lint = job
-                .lint
-                .as_ref()
-                .filter(|_| parses)
-                .and_then(|run| run_linter(run.tool, &run.program, record, &session));
+            let lint = job.lint.as_ref().filter(|_| parses).and_then(|run| {
+                let rust = rust_setup
+                    .as_ref()
+                    .filter(|_| run.tool.language == Language::Rust);
+                run_linter(run.tool, &run.program, record, &session, rust)
+            });
             Some(StepsRan { format, lint })
         });
         self.settle(slots, &jobs, ran);
@@ -400,10 +403,16 @@ impl Evaluation {
                 record.steps.format = StepState::Ran;
                 outcomes.push((verdict.state(), run.tool));
             }
-            if let (Some((verdict, findings)), Some(run)) = (lint, job.lint.as_ref()) {
-                self.findings.extend(findings);
-                record.steps.lint = StepState::Ran;
-                outcomes.push((lint_state(&verdict), run.tool));
+            match (lint, job.lint.as_ref()) {
+                (Some(Ok((verdict, findings))), Some(run)) => {
+                    self.findings.extend(findings);
+                    record.steps.lint = StepState::Ran;
+                    outcomes.push((lint_state(&verdict), run.tool));
+                }
+                (Some(Err(reason)), Some(_)) => {
+                    record.steps.lint = StepState::Unrunnable { reason };
+                }
+                _ => {}
             }
             let decided = outcomes
                 .iter()
@@ -415,6 +424,8 @@ impl Evaluation {
                     record
                         .state
                         .reason(&record.steps, record.language.as_deref(), Some(tool.name));
+            } else if let StepState::Unrunnable { reason } = record.steps.lint {
+                record.reason = Some(reason.to_owned());
             }
         }
     }
@@ -466,9 +477,17 @@ struct ToolRun {
 struct StepsRan {
     /// The format step's.
     format: Option<(format::Verdict, Vec<Finding>)>,
-    /// The lint step's.
-    lint: Option<(lint::Verdict, Vec<Finding>)>,
+    /// The lint step's, or why it couldn't run.
+    lint: Option<LintRan>,
 }
+
+/// What a lint step gave: its verdict and findings, or why supdoc couldn't run it safely.
+type LintRan = Result<(lint::Verdict, Vec<Finding>), &'static str>;
+
+/// Why clippy didn't run on a block when [`runner::neutral_dir`] found no private working
+/// directory: its metadata would have nowhere private to go.
+const NO_PRIVATE_DIR: &str =
+    "clippy needs a private working directory under `XDG_CACHE_HOME` or `HOME`, and there is none";
 
 /// `work` applied to each of `items`, the results in `items`' order. The items are shared among
 /// up to [`MAX_WORKERS`] scoped threads, no more than [`thread::available_parallelism`] allows,
@@ -515,18 +534,31 @@ struct RustSetup {
     config: Vec<OsString>,
     /// The edition for a block that names none: the root `Cargo.toml`'s, else 2024.
     edition: Edition,
+    /// The root `Cargo.toml`'s lint levels as clippy flags.
+    lints: Vec<OsString>,
+    /// `CLIPPY_CONF_DIR` for an in-root clippy config, or nothing.
+    clippy_conf: Option<OsString>,
 }
 
 impl RustSetup {
-    /// Reads `root`'s toolchain file and finds its `rustfmt.toml`, each only inside `root`.
+    /// Reads `root`'s toolchain file, `Cargo.toml` and finds its `rustfmt.toml` and clippy
+    /// config, each only inside `root`.
     ///
-    /// Effect: reads file metadata, resolves symlinks, and reads the toolchain file.
+    /// Effect: reads file metadata, resolves symlinks, and reads the toolchain file and
+    /// `Cargo.toml`.
     fn read(root: &Path) -> Self {
         Self {
             toolchain: toolchain::read(root),
             config: rust::config_args(root),
             edition: toolchain::cargo_edition(root).unwrap_or(Edition::E2024),
+            lints: toolchain::cargo_lints(root),
+            clippy_conf: rust::clippy_conf_dir(root),
         }
+    }
+
+    /// The edition for `record`'s block: its own attribute's, else the project's.
+    fn edition_of(&self, record: &BlockRecord) -> Edition {
+        record.edition.unwrap_or(self.edition)
     }
 }
 
@@ -592,6 +624,7 @@ fn run_formatter(
     let verdict = cached_run(
         &run,
         session,
+        |call| runner::run(call, session.env, session.root),
         |result| format::judge(tool, input, result),
         format::Verdict::cacheable,
     );
@@ -620,7 +653,8 @@ fn run_formatter(
 
 /// Runs `tool`, a linter found at `program`, on `record`'s block as [`cached_run`] does: its
 /// verdict and findings, one `code-block-lint` error per diagnostic or the tool's failure. `None`
-/// when the block's language has no lint step yet or its input couldn't be read.
+/// when the block's language has no lint step yet or its input couldn't be read. A Rust block
+/// goes to clippy through [`run_clippy`] with `rust`'s setup.
 ///
 /// Effect: reads the cache, runs the tool, killing it at the timeout, and writes the cache.
 fn run_linter(
@@ -628,10 +662,14 @@ fn run_linter(
     program: &Path,
     record: &BlockRecord,
     session: &Session<'_>,
-) -> Option<(lint::Verdict, Vec<Finding>)> {
+    rust: Option<&RustSetup>,
+) -> Option<LintRan> {
     let pending = record.pending.as_ref()?;
     let doc = session.root.join(record.at.file.as_str());
     let args = lint::args(tool, &doc, record.index)?;
+    if let Some(rust) = rust {
+        return Some(run_clippy(tool, program, record, pending, session, rust));
+    }
     let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
     let run = cache::Run {
         tool,
@@ -644,6 +682,7 @@ fn run_linter(
     let verdict = cached_run(
         &run,
         session,
+        |call| runner::run(call, session.env, session.root),
         |result| lint::judge(tool, result),
         lint::Verdict::cacheable,
     );
@@ -655,25 +694,110 @@ fn run_linter(
         |_| 0,
         session.timeout,
     );
-    Some((verdict, findings))
+    Some(Ok((verdict, findings)))
+}
+
+/// Runs `tool`, clippy found at `program`, on `record`'s Rust block alone, read as `pending`, as [`run_linter`]
+/// does: `clippy-driver` with [`rust::clippy_args`] for the block's edition and `rust`'s project
+/// lints, `rust`'s toolchain variables and `CLIPPY_CONF_DIR`, and nothing else from the project.
+/// Its metadata goes to a fresh [`rust::EmitDir`], removed after the run whatever its outcome. A
+/// diagnostic on a hidden line lands past its `# `.
+///
+/// # Errors
+///
+/// [`NO_PRIVATE_DIR`] when [`runner::neutral_dir`] falls back to `/`, so clippy isn't run.
+///
+/// Effect: reads the cache, creates and removes the emit directory, runs clippy, killing it at
+/// the timeout, and writes the cache.
+fn run_clippy(
+    tool: &Tool,
+    program: &Path,
+    record: &BlockRecord,
+    pending: &Pending,
+    session: &Session<'_>,
+    rust: &RustSetup,
+) -> LintRan {
+    let neutral = runner::neutral_dir(session.env, session.root);
+    if neutral == Path::new("/") {
+        return Err(NO_PRIVATE_DIR);
+    }
+    let doc = session.root.join(record.at.file.as_str());
+    let edition = rust.edition_of(record);
+    let key_args = rust::clippy_args(edition, None, &rust.lints);
+    let key_args: Vec<&OsStr> = key_args.iter().map(OsString::as_os_str).collect();
+    let mut vars = rust.toolchain.env();
+    vars.extend(
+        rust.clippy_conf
+            .iter()
+            .map(|dir| ("CLIPPY_CONF_DIR", dir.clone())),
+    );
+    let extra: Vec<(&str, &OsStr)> = vars
+        .iter()
+        .map(|(name, value)| (*name, value.as_os_str()))
+        .collect();
+    let run = cache::Run {
+        tool,
+        program,
+        args: &key_args,
+        extra: &extra,
+        input: &pending.input,
+        doc: &doc,
+    };
+    let spawn = |call: &Call<'_>| {
+        let emit = rust::EmitDir::create(&neutral).ok_or_else(|| {
+            runner::Failure::Spawn(std::io::Error::other(
+                "supdoc couldn't create a private directory for its metadata",
+            ))
+        })?;
+        let args = rust::clippy_args(edition, Some(&emit.file()), &rust.lints);
+        let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
+        let result = runner::run(
+            &Call {
+                args: &args,
+                ..*call
+            },
+            session.env,
+            session.root,
+        );
+        drop(emit);
+        result
+    };
+    let verdict = cached_run(
+        &run,
+        session,
+        spawn,
+        rust::lint_verdict,
+        lint::Verdict::cacheable,
+    );
+    let hidden = pending.hidden.as_ref();
+    let findings = lint::findings(
+        &verdict,
+        tool,
+        &pending.block,
+        pending.doc.text(),
+        |line| hidden.map_or(0, |hidden| hidden.removed(line)),
+        session.timeout,
+    );
+    Ok((verdict, findings))
 }
 
 /// `judge` applied to `run`, read from `session`'s cache when its key is there, otherwise run
-/// from the root with the session's env under its timeout, and stored in the cache when
-/// `cacheable` allows the verdict.
+/// through `spawn` (which runs the call from the root with the session's env) under its timeout,
+/// and stored in the cache when `cacheable` allows the verdict.
 ///
-/// Effect: reads the cache, runs the tool, killing it at the timeout, and writes the cache.
+/// Effect: reads the cache, runs the tool through `spawn`, and writes the cache.
 fn cached_run<V>(
     run: &cache::Run<'_>,
     session: &Session<'_>,
+    spawn: impl FnOnce(&Call<'_>) -> Result<Ran, runner::Failure>,
     judge: impl FnOnce(Result<Ran, runner::Failure>) -> V,
     cacheable: impl FnOnce(&V) -> bool,
 ) -> V {
     let Session {
-        env,
         root,
         timeout,
         cache,
+        ..
     } = *session;
     let key = cache.and_then(|_| Cache::key(run, root));
     if let Some(ran) = cache.zip(key).and_then(|(cache, key)| cache.get(key)) {
@@ -687,7 +811,7 @@ fn cached_run<V>(
         stdin: run.input.as_bytes(),
         timeout,
     };
-    let result = runner::run(&call, env, root);
+    let result = spawn(&call);
     let stored = result.as_ref().ok().cloned();
     let verdict = judge(result);
     if let (Some(cache), Some(key), Some(ran)) = (cache, key, stored)
@@ -747,10 +871,13 @@ fn selected(code_blocks: &CodeBlocks, language: Language) -> Option<&'static Too
 
 /// Why `record`'s Rust block isn't run under `rust`, when it isn't: the root's toolchain file
 /// was refused (adding its one warning to `slots` unless `warned`), or the block reads at compile
-/// time or is too large to scan (adding that warning).
+/// time or is too large to scan (adding that warning). When the block `compiles`, because
+/// clippy will lint it, [`rust::before_compiling`]'s stricter rules apply, which also refuse an
+/// outline module.
 fn rust_refusal(
     record: &BlockRecord,
     rust: &RustSetup,
+    compiles: bool,
     warned: &mut bool,
     slots: &mut Vec<Slot>,
 ) -> Option<NotChecked> {
@@ -762,11 +889,16 @@ fn rust_refusal(
         return Some(NotChecked::ToolchainPath);
     }
     let scan = record.pending.as_ref().map_or(Scan::Clean, |pending| {
-        rust::compile_time_read(&pending.input)
+        if compiles {
+            rust::before_compiling(&pending.input)
+        } else {
+            rust::compile_time_read(&pending.input)
+        }
     });
     slots.extend(scan_warning(&scan, &record.at).map(Slot::Found));
     match scan {
         Scan::Clean => None,
+        Scan::Read(rust::Found::OutlineModule(_)) => Some(NotChecked::OutlineModule),
         Scan::Read(_) => Some(NotChecked::CompileTimeRead),
         Scan::TooLarge => Some(NotChecked::TooLargeToScan),
     }

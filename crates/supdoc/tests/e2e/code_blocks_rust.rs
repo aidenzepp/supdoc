@@ -13,13 +13,19 @@ fn finding_kinds(json: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-/// A recorded `basic` project with the Rust table on and `doc` at `docs/blocks.md`.
+/// A recorded `basic` project with the Rust table on, its linter off so only rustfmt runs, and
+/// `doc` at `docs/blocks.md`.
 fn project_with_rust_doc(doc: &str) -> Project {
+    project_with_rust_config("linter = false\n", doc)
+}
+
+/// A recorded `basic` project whose Rust table holds `rust`, with `doc` at `docs/blocks.md`.
+fn project_with_rust_config(rust: &str, doc: &str) -> Project {
     let project = Project::fixture("basic");
     project.record();
     project.write(
         "supdoc.config.toml",
-        "[features.code-blocks]\n[features.code-blocks.rust]\n",
+        &format!("[features.code-blocks]\n[features.code-blocks.rust]\n{rust}"),
     );
     project.write("docs/blocks.md", doc);
     project
@@ -283,23 +289,28 @@ fn a_bare_number_edition_is_a_config_error_that_says_to_quote_it() {
     assert_eq!(stub.record("runs"), "", "rustfmt should never run");
 }
 
-/// The absolute `PATH` directory holding `rustfmt`, when one does.
-fn rustfmt_dir() -> Option<PathBuf> {
+/// The absolute `PATH` directory holding `binary`, when one does.
+fn tool_dir(binary: &str) -> Option<PathBuf> {
     std::env::var_os("PATH")
         .iter()
         .flat_map(std::env::split_paths)
-        .find(|dir| dir.is_absolute() && dir.join("rustfmt").is_file())
+        .find(|dir| dir.is_absolute() && dir.join(binary).is_file())
 }
 
-/// The variables that run the real `rustfmt`: `PATH` holding only its directory, and the real
-/// user's rustup and cargo homes, through which the rustup proxy finds its toolchains. `None`,
-/// with a note on stderr naming `test`, when `rustfmt` is not on `PATH`.
+/// The variables that run the real `rustfmt`, as [`real_rust_tool`] gives them.
 fn real_rustfmt(test: &str) -> Option<Vec<(&'static str, PathBuf)>> {
-    let Some(dir) = rustfmt_dir() else {
+    real_rust_tool("rustfmt", test)
+}
+
+/// The variables that run the real `binary`, a Rust tool: `PATH` holding only its directory, and
+/// the real user's rustup and cargo homes, through which the rustup proxy finds its toolchains.
+/// `None`, with a note on stderr naming `test`, when `binary` is not on `PATH`.
+fn real_rust_tool(binary: &str, test: &str) -> Option<Vec<(&'static str, PathBuf)>> {
+    let Some(dir) = tool_dir(binary) else {
         // Written to the process's stderr directly, which `cargo test` shows for a passing test.
         let _ignored = std::io::Write::write_all(
             &mut std::io::stderr(),
-            format!("SKIPPED {test}: rustfmt is not on PATH\n").as_bytes(),
+            format!("SKIPPED {test}: {binary} is not on PATH\n").as_bytes(),
         );
         return None;
     };
@@ -415,7 +426,7 @@ fn fix_never_deletes_a_plain_comment_line_inside_a_doc_comment_block() {
     project.record();
     project.write(
         "supdoc.config.toml",
-        "[features.code-blocks]\n[features.code-blocks.rust]\n",
+        "[features.code-blocks]\n[features.code-blocks.rust]\nlinter = false\n",
     );
     project.write("src/blocks.rs", source);
     let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
@@ -445,6 +456,194 @@ fn fix_never_deletes_a_plain_comment_line_inside_a_doc_comment_block() {
     assert_eq!(
         finding_kinds(&json),
         ["code-block-unformatted", "code-block-fix-unsafe"],
+        "{json}"
+    );
+}
+
+/// A real `clippy-driver` check of `doc` with the Rust formatter off, asserting it exits `exit`.
+/// `None`, skipped with a note naming `test`, when `clippy-driver` is not on `PATH`.
+fn real_clippy_check(test: &str, doc: &str, exit: i32) -> Option<serde_json::Value> {
+    let vars = real_rust_tool("clippy-driver", test)?;
+    let project = project_with_rust_config("formatter = false\n", doc);
+    Some(
+        project
+            .supdoc_in_with(".", &["check", "--json"], &borrowed(&vars))
+            .assert_exit(exit)
+            .json(),
+    )
+}
+
+#[test]
+fn clippy_reports_a_vec_reference_parameter_as_a_lint_error_at_its_doc_line() {
+    let Some(json) = real_clippy_check(
+        "clippy_reports_a_vec_reference_parameter",
+        "# Blocks\n\n```rust\npub fn total(v: &Vec<i32>) -> i32 {\n    v.iter().sum()\n}\n```\n",
+        1,
+    ) else {
+        return;
+    };
+
+    assert_eq!(finding_kinds(&json), ["code-block-lint"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 4, "{json}");
+    assert_eq!(at(&json, "/findings/0/location/column"), 17, "{json}");
+    let message = at(&json, "/findings/0/message");
+    assert!(
+        message
+            .as_str()
+            .is_some_and(|text| text.contains("clippy::ptr_arg")),
+        "{json}"
+    );
+    assert_eq!(at(&json, "/data/code_blocks/0/lint"), "ran", "{json}");
+}
+
+#[test]
+fn clippy_passes_a_block_whose_hidden_line_expects_the_lint() {
+    let Some(json) = real_clippy_check(
+        "clippy_passes_a_block_whose_hidden_line_expects_the_lint",
+        "# Blocks\n\n```rust\n# #[expect(clippy::ptr_arg, reason = \"a non-example\")]\n\
+         pub fn total(v: &Vec<i32>) -> i32 {\n    v.iter().sum()\n}\n```\n",
+        0,
+    ) else {
+        return;
+    };
+
+    assert_eq!(finding_kinds(&json), Vec::<String>::new(), "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+}
+
+#[test]
+fn clippy_reports_an_unresolved_name_as_a_lint_error() {
+    let Some(json) = real_clippy_check(
+        "clippy_reports_an_unresolved_name",
+        "# Blocks\n\n```rust\npub fn f() -> i32 {\n    missing()\n}\n```\n",
+        1,
+    ) else {
+        return;
+    };
+
+    assert_eq!(finding_kinds(&json), ["code-block-lint"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 5, "{json}");
+}
+
+#[test]
+fn clippy_gets_only_the_block_a_private_metadata_path_and_no_project_flags() {
+    let project = project_with_rust_config(
+        "formatter = false\n",
+        "# Blocks\n\n```rust\npub fn f() {}\n```\n",
+    );
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"p\"\nedition = \"2021\"\n\n[lints.clippy]\nptr_arg = \"deny\"\n\
+         pedantic = { level = \"warn\", priority = -1 }\ncargo = \"warn\"\n",
+    );
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let out = outside.path().display();
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{out}/argv'\n/usr/bin/env > '{out}/env'\n\
+         for arg in \"$@\"; do case \"$arg\" in --emit=metadata=*) \
+         emit=\"${{arg#--emit=metadata=}}\"; echo meta > \"$emit\"; echo \"$emit\" > '{out}/emit';; esac; done\n\
+         pwd -P > '{out}/cwd'\n/bin/cat > /dev/null\n"
+    );
+    let stub = outside.path().join("clippy-driver");
+    std::fs::write(&stub, script).expect("the stub should be writable");
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+        .expect("the stub should be made executable");
+    let record =
+        |name: &str| std::fs::read_to_string(outside.path().join(name)).unwrap_or_default();
+
+    let json = project
+        .supdoc_in_with(
+            ".",
+            &["check", "--json"],
+            &[
+                ("PATH", outside.path()),
+                ("RUSTFLAGS", Path::new("--cfg=leak")),
+                ("CLIPPY_ARGS", Path::new("--cfg=leak")),
+            ],
+        )
+        .assert_exit(0)
+        .json();
+
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+    let argv = record("argv");
+    let emit = record("emit");
+    let emit = emit.trim();
+    assert_eq!(
+        argv,
+        format!(
+            "--edition\n2021\n--crate-type\nlib\n--emit=metadata={emit}\n--error-format=json\n\
+             -W\nclippy::pedantic\n-D\nclippy::ptr_arg\n-A\nunused\n-A\ndead_code\n-A\nmissing_docs\n\
+             -A\nclippy::missing_docs_in_private_items\n-\n"
+        ),
+        "groups first, `clippy::cargo` left out, relaxations last"
+    );
+    let cwd = PathBuf::from(record("cwd").trim());
+    assert!(cwd.ends_with("supdoc/code-blocks/cwd"), "{cwd:?}");
+    assert!(
+        !Path::new(emit).starts_with(&cwd),
+        "the metadata must not land in the working directory: {emit}"
+    );
+    assert!(
+        !Path::new(emit).exists(),
+        "the metadata should be deleted after the run: {emit}"
+    );
+    assert!(
+        !Path::new(emit).parent().is_some_and(Path::exists),
+        "the run's metadata directory should be deleted too: {emit}"
+    );
+    let env = record("env");
+    for leaked in ["RUSTFLAGS", "CLIPPY_ARGS", "CLIPPY_CONF_DIR"] {
+        assert!(
+            !env.lines()
+                .any(|line| line.starts_with(&format!("{leaked}="))),
+            "{leaked} must not reach clippy:\n{env}"
+        );
+    }
+    assert!(
+        env.lines().any(|line| line == "RUSTUP_AUTO_INSTALL=0"),
+        "{env}"
+    );
+}
+
+#[test]
+fn clippy_is_not_run_without_a_private_working_directory() {
+    let project = project_with_rust_config(
+        "formatter = false\n",
+        "# Blocks\n\n```rust\npub fn f() {}\n```\n",
+    );
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let runs = outside.path().join("runs");
+    let stub = outside.path().join("clippy-driver");
+    std::fs::write(
+        &stub,
+        format!("#!/bin/sh\necho run >> '{}'\n", runs.display()),
+    )
+    .expect("the stub should be writable");
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+        .expect("the stub should be made executable");
+    let home = project.path("home");
+
+    let json = project
+        .supdoc_in_with(
+            ".",
+            &["check", "--json"],
+            &[("PATH", outside.path()), ("HOME", &home)],
+        )
+        .assert_exit(0)
+        .json();
+
+    assert!(!runs.exists(), "clippy should never run from `/`");
+    assert_eq!(
+        at(&json, "/data/code_blocks/0/state"),
+        "not_checked",
+        "{json}"
+    );
+    assert_eq!(at(&json, "/data/code_blocks/0/lint"), "not_run", "{json}");
+    let reason = at(&json, "/data/code_blocks/0/reason");
+    assert!(
+        reason
+            .as_str()
+            .is_some_and(|reason| reason.contains("private working directory")),
         "{json}"
     );
 }

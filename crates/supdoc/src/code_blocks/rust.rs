@@ -1,13 +1,16 @@
 //! Rust's format and lint steps.
 
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::config::code_blocks::Edition;
 use crate::finding::{IndexedText, Location};
 
 use super::block::CodeBlock;
-use super::format::{ParseError, first_line};
+use super::format::{self, ParseError, first_line};
+use super::lint::{self, Diagnostic};
+use super::runner::{Failure, Ran};
 
 /// The macros that read a file or an environment variable at compile time.
 const COMPILE_TIME_READS: [&str; 5] = [
@@ -68,15 +71,213 @@ pub(crate) fn config_args(root: &Path) -> Vec<OsString> {
     }
 }
 
-/// The lint step's arguments for `tool` on the `index`th block of `doc`: `None` until rust's
-/// lint step is built, which leaves the step not run.
+/// The lints clippy leaves off for a block, which a snippet breaks for lack of context, as
+/// `-A` flags after the project's own so they win.
+const RELAXED: [&str; 4] = [
+    "unused",
+    "dead_code",
+    "missing_docs",
+    "clippy::missing_docs_in_private_items",
+];
+
+/// The lint step's fixed arguments for `tool` on any block: none, since every clippy argument
+/// depends on the run (see [`clippy_args`]). `Some` only for clippy, which marks Rust's lint
+/// step as built.
 #[must_use]
-pub(crate) const fn lint_args(
-    _tool: &super::tools::Tool,
+pub(crate) fn lint_args(
+    tool: &super::tools::Tool,
     _doc: &Path,
     _index: usize,
 ) -> Option<Vec<OsString>> {
-    None
+    (tool.name == "clippy").then(Vec::new)
+}
+
+/// `clippy-driver`'s arguments for a block: `--edition <E> --crate-type lib
+/// --emit=metadata=<emit> --error-format=json`, the project's `lints` flags, the snippet
+/// relaxations, and `-` for the block on stdin. Nothing else from the project: no `--extern`, `-L`
+/// or `--cfg`. Without `emit`, the metadata flag has no path, which is how a cache key names
+/// every run of the same block alike.
+#[must_use]
+pub(crate) fn clippy_args(
+    edition: Edition,
+    emit: Option<&Path>,
+    lints: &[OsString],
+) -> Vec<OsString> {
+    let mut metadata = OsString::from("--emit=metadata");
+    if let Some(emit) = emit {
+        metadata.push("=");
+        metadata.push(emit);
+    }
+    let mut args: Vec<OsString> = vec![
+        "--edition".into(),
+        edition.year().into(),
+        "--crate-type".into(),
+        "lib".into(),
+        metadata,
+        "--error-format=json".into(),
+    ];
+    args.extend(lints.iter().cloned());
+    for lint in RELAXED {
+        args.extend(["-A".into(), lint.into()]);
+    }
+    args.push("-".into());
+    args
+}
+
+/// The clippy config names clippy reads from a directory, in its own order.
+const CLIPPY_FILES: [&str; 2] = [".clippy.toml", "clippy.toml"];
+
+/// The value for `CLIPPY_CONF_DIR`: `root`'s real path, when it holds a `.clippy.toml` or
+/// `clippy.toml` and each of those that exists is a regular file whose real path is inside
+/// `root`'s. `None` otherwise, so clippy never follows a link out of the checkout.
+///
+/// Effect: reads file metadata and resolves symlinks.
+#[must_use]
+pub(crate) fn clippy_conf_dir(root: &Path) -> Option<OsString> {
+    let real_root = root.canonicalize().ok()?;
+    let present: Vec<_> = CLIPPY_FILES
+        .iter()
+        .map(|name| root.join(name))
+        .filter(|path| std::fs::symlink_metadata(path).is_ok())
+        .collect();
+    let inside = |path: &PathBuf| {
+        path.canonicalize().is_ok_and(|real| {
+            real.starts_with(&real_root) && std::fs::metadata(&real).is_ok_and(|m| m.is_file())
+        })
+    };
+    (!present.is_empty() && present.iter().all(inside)).then(|| real_root.into_os_string())
+}
+
+/// One clippy run's directory for its metadata, beside the neutral working directory so that
+/// stays empty, made fresh and removed with everything in it when dropped: on success, failure,
+/// timeout and unwinding alike.
+#[derive(Debug)]
+pub(crate) struct EmitDir {
+    /// The directory, owned by this run alone.
+    path: PathBuf,
+}
+
+/// How many [`EmitDir`]s this process has tried to create, which makes each name unique.
+static EMITS: AtomicUsize = AtomicUsize::new(0);
+
+impl EmitDir {
+    /// A new directory `emit/<pid>-<n>` beside `neutral`, the tool's working directory, created
+    /// mode 0700 inside a 0700 `emit` directory. `None` when `neutral` doesn't resolve or the
+    /// directory can't be created.
+    ///
+    /// Effect: creates directories.
+    #[must_use]
+    pub(crate) fn create(neutral: &Path) -> Option<Self> {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+        let parent = neutral.canonicalize().ok()?.parent()?.join("emit");
+        let _created = std::fs::DirBuilder::new().mode(0o700).create(&parent);
+        let meta = std::fs::symlink_metadata(&parent).ok()?;
+        if !meta.is_dir() || meta.permissions().mode().trailing_zeros() < 6 {
+            return None;
+        }
+        (0..16).find_map(|_| {
+            let count = EMITS.fetch_add(1, Ordering::Relaxed);
+            let path = parent.join(format!("{}-{count}", std::process::id()));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&path)
+                .ok()
+                .map(|()| Self { path })
+        })
+    }
+
+    /// The metadata file clippy writes in this directory.
+    #[must_use]
+    pub(crate) fn file(&self) -> PathBuf {
+        self.path.join("block.rmeta")
+    }
+}
+
+impl Drop for EmitDir {
+    fn drop(&mut self) {
+        let _removed = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// One diagnostic of `clippy-driver --error-format=json`.
+#[derive(serde::Deserialize)]
+struct RustcDiagnostic {
+    /// What it says.
+    message: String,
+    /// Its code: a lint name such as `clippy::ptr_arg`, or an error code such as `E0425`.
+    code: Option<RustcCode>,
+    /// `error`, `warning`, `note`, `help` or `failure-note`.
+    level: String,
+    /// Where it points.
+    spans: Vec<RustcSpan>,
+}
+
+/// A diagnostic's code.
+#[derive(serde::Deserialize)]
+struct RustcCode {
+    /// The code itself.
+    code: String,
+}
+
+/// One span of a diagnostic, its line and column 1-based in characters.
+#[derive(serde::Deserialize)]
+struct RustcSpan {
+    /// The file it is in: `<anon>` for the block on stdin.
+    file_name: String,
+    /// Whether it is the diagnostic's main span.
+    is_primary: bool,
+    /// Its first line.
+    line_start: usize,
+    /// Its first column.
+    column_start: usize,
+}
+
+/// The diagnostics in `clippy-driver --error-format=json`'s `stderr`: each JSON line at level
+/// `error` or `warning`, at its primary span in the block, or at line 0 (the fence) when it has
+/// none there. The summaries rustc closes with, which have neither a code nor a span, are left
+/// out, as is any line that isn't a diagnostic.
+fn rustc_diagnostics(stderr: &[u8]) -> Vec<Diagnostic> {
+    stderr
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice::<RustcDiagnostic>(line).ok())
+        .filter(|found| matches!(found.level.as_str(), "error" | "warning"))
+        .filter(|found| found.code.is_some() || !found.spans.is_empty())
+        .map(|found| {
+            let (line, column) = found
+                .spans
+                .iter()
+                .find(|span| span.is_primary && span.file_name == "<anon>")
+                .map_or((0, 0), |span| (span.line_start, span.column_start));
+            Diagnostic {
+                line,
+                column,
+                rule: found.code.map_or(found.level, |code| code.code),
+                message: found.message,
+            }
+        })
+        .collect()
+}
+
+/// Judges a clippy run: its diagnostics on stderr, whatever its exit (clippy exits 0 on
+/// warnings); clean on exit 0 with none; a tool failure on a non-zero exit with none, output
+/// past the cap or a failed start; a timeout is a timeout.
+#[must_use]
+pub(crate) fn lint_verdict(result: Result<Ran, Failure>) -> lint::Verdict {
+    match result {
+        Ok(ran) => {
+            let found = rustc_diagnostics(&ran.stderr);
+            if !found.is_empty() {
+                lint::Verdict::Diagnostics(found)
+            } else if ran.success {
+                lint::Verdict::Clean
+            } else {
+                lint::Verdict::Failed(format::Verdict::ToolFailed(format::exit_detail(
+                    &ran.stderr,
+                )))
+            }
+        }
+        Err(failure) => lint::Verdict::Failed(format::failed(failure)),
+    }
 }
 
 /// What a Rust block's tools don't see as written: its hidden lines and its `##`-escaped lines.
@@ -88,6 +289,9 @@ pub(crate) struct Hidden {
     /// Each `##`-escaped line: its checked text without leading whitespace, and how many shown
     /// lines with that same text come before it.
     escaped: Vec<(String, usize)>,
+    /// Each line the checked text shortened, hidden or escaped: its 0-based line and how many
+    /// characters after its indentation the checked text dropped.
+    shifts: Vec<(usize, usize)>,
 }
 
 /// One hidden line of a Rust block.
@@ -115,6 +319,7 @@ pub(crate) fn unhide(input: &str) -> (String, Hidden) {
     let mut hidden = Hidden {
         lines: Vec::new(),
         escaped: Vec::new(),
+        shifts: Vec::new(),
     };
     let mut seen = Seen::default();
     for (at, line) in input.split_terminator('\n').enumerate() {
@@ -123,6 +328,7 @@ pub(crate) fn unhide(input: &str) -> (String, Hidden) {
         if let Some(escaped) = rest.strip_prefix('#').filter(|_| rest.starts_with("##")) {
             let occurrence = seen.count(escaped);
             hidden.escaped.push((escaped.to_owned(), occurrence));
+            hidden.shifts.push((at, 1));
             checked.push_str(indent);
             checked.push_str(escaped);
         } else if let Some(text) = (rest == "#").then_some("").or(rest.strip_prefix("# ")) {
@@ -131,6 +337,12 @@ pub(crate) fn unhide(input: &str) -> (String, Hidden) {
             } else {
                 format!("{indent}{text}")
             };
+            let dropped = if text.is_empty() {
+                rest.chars().count()
+            } else {
+                2
+            };
+            hidden.shifts.push((at, dropped));
             checked.push_str(&text);
             hidden.lines.push(HiddenLine {
                 at,
@@ -160,6 +372,17 @@ impl Seen {
 }
 
 impl Hidden {
+    /// How many characters the checked text dropped from its `line`th line (0-based), after its
+    /// indentation: 2 for a hidden line's `# `, 1 for an escaped line's first `#`, 0 for any
+    /// other line. A diagnostic on that line lands this far right in the doc.
+    #[must_use]
+    pub(crate) fn removed(&self, line: usize) -> usize {
+        self.shifts
+            .iter()
+            .find(|(at, _)| *at == line)
+            .map_or(0, |(_, dropped)| *dropped)
+    }
+
     /// `output`, a formatter's output for the checked text with no final line ending, written
     /// back as the block. Each hidden line goes back exactly as the author wrote it. A shown line
     /// gets its `#` escape back after its indentation when it is the same occurrence of the same
@@ -282,8 +505,16 @@ pub(crate) enum Scan {
 pub(crate) enum Found {
     /// A call of this macro, named without its `!`: `include_str`.
     Macro(String),
-    /// An attribute with `path =` in it.
+    /// An attribute with `path =` in it, or, before compiling, `path` anywhere in it.
     PathAttribute,
+    /// Before compiling: one of the compile-time-read macros' names, not as a path segment
+    /// followed by `::`, such as `include_str` in `use std::include_str as inc;`.
+    Name(String),
+    /// Before compiling: a `$` metavariable inside an attribute.
+    MetavariableAttribute,
+    /// Before compiling: a module not written inline outside any macro, with its name when the
+    /// word after `mod` is one: `x` in `mod x;`.
+    OutlineModule(Option<String>),
     /// Something the scan can't read past, which could hide a read, described as "an
     /// unterminated block comment".
     Unscannable(&'static str),
@@ -299,6 +530,18 @@ impl Found {
             ),
             Self::PathAttribute => {
                 "uses a `path` attribute, which reads a file at compile time".to_owned()
+            }
+            Self::Name(name) => format!(
+                "names `{name}` other than in a `{name}::` path, which could call `{name}!` under another name and read a file or environment variable at compile time"
+            ),
+            Self::MetavariableAttribute => {
+                "has a `$` metavariable in an attribute, which a macro could make a `path` attribute".to_owned()
+            }
+            Self::OutlineModule(Some(name)) => format!(
+                "declares the outline module `{name}`, which rustc would read from a file outside the block"
+            ),
+            Self::OutlineModule(None) => {
+                "declares a module that a macro could make an outline module, which rustc would read from a file outside the block".to_owned()
             }
             Self::Unscannable(what) => {
                 format!("has {what}, which could hide a compile-time read from supdoc's scan")
@@ -316,6 +559,15 @@ impl Found {
             Self::PathAttribute => {
                 "remove the `path` attribute from the block, or mark it `ignore(<why>)`".to_owned()
             }
+            Self::Name(name) => format!(
+                "write `{name}` only as a path such as `std::{name}::..`, or mark the block `ignore(<why>)`"
+            ),
+            Self::MetavariableAttribute => {
+                "build the attribute without a metavariable, or mark the block `ignore(<why>)`".to_owned()
+            }
+            Self::OutlineModule(_) => {
+                "write the module inline as `mod name { .. }` outside any macro, or mark the block `ignore(<why>)`".to_owned()
+            }
             Self::Unscannable(_) => {
                 "close it so the block is valid Rust, or mark the block `ignore(<why>)`".to_owned()
             }
@@ -329,37 +581,78 @@ impl Found {
 /// `#![path = ..]`, `#[cfg_attr(.., path = ..)]`). [`Scan::TooLarge`] past [`MAX_SCAN_BYTES`].
 ///
 /// One linear pass: [`Tokens`] skips comments and string and character literals once each, and
-/// each token is judged from the one or two before it. The scan fails closed: an unterminated
+/// each token is judged from the two before and after it. The scan fails closed: an unterminated
 /// block comment, string or character literal, or a first line starting `#!` but not `#![`, is
 /// [`Found::Unscannable`]. Identifiers are ASCII, so any other character ends a word, which can
 /// only add matches.
+///
+/// This is enough for a tool that doesn't expand macros, such as rustfmt. Before a block is
+/// compiled, [`before_compiling`] applies stricter rules.
 #[must_use]
 pub(crate) fn compile_time_read(input: &str) -> Scan {
+    scan_capped(input, false)
+}
+
+/// [`compile_time_read`] with the rules for a block about to be compiled, which renames and
+/// macros can't get past. Besides its findings, a block is refused when:
+///
+/// - `include`, `include_str`, `include_bytes`, `env` or `option_env` appears as an identifier
+///   anywhere except as a path segment followed by `::` (`std::env::var`), so `use
+///   std::include_str as inc;` and a `macro_rules!` handed the name are refused;
+/// - a `$` metavariable or the word `path` appears anywhere in an attribute;
+/// - a module isn't written inline (`mod name { .. }`) outside any macro: rustc reads an outline
+///   `mod name;` from a file beside its working directory, and a macro can turn an inline module
+///   into one.
+#[must_use]
+pub(crate) fn before_compiling(input: &str) -> Scan {
+    scan_capped(input, true)
+}
+
+/// [`scan`] of `input` under [`MAX_SCAN_BYTES`], `compiles` choosing [`before_compiling`]'s rules.
+fn scan_capped(input: &str, compiles: bool) -> Scan {
     if input.len() > MAX_SCAN_BYTES {
         return Scan::TooLarge;
     }
-    scan(input).map_or(Scan::Clean, Scan::Read)
+    scan(input, compiles).map_or(Scan::Clean, Scan::Read)
 }
 
-/// The first compile-time read in `input`, by [`compile_time_read`]'s rules, without the size cap.
-fn scan(input: &str) -> Option<Found> {
+/// The first compile-time read in `input`, by [`compile_time_read`]'s rules, and by
+/// [`before_compiling`]'s too when `compiles` holds, without the size cap.
+fn scan(input: &str, compiles: bool) -> Option<Found> {
     if input.starts_with("#!") && !input.starts_with("#![") {
         return Some(Found::Unscannable(
             "a `#!` first line that isn't an inner attribute",
         ));
     }
-    let mut before = Token::Other;
-    let mut before_that = Token::Other;
+    let mut lexer = Tokens::new(input);
+    let tokens: Vec<Token<'_>> = lexer.by_ref().collect();
+    let at = |index: Option<usize>| {
+        index
+            .and_then(|index| tokens.get(index))
+            .copied()
+            .unwrap_or(Token::Other)
+    };
     // The bracket depth inside the attribute being read, or 0 outside one.
     let mut attribute = 0_usize;
-    let mut tokens = Tokens::new(input);
-    for token in tokens.by_ref() {
+    // Each open delimiter, marked when it opened a macro's input or a `macro_rules!` body.
+    let mut open: Vec<bool> = Vec::new();
+    // How many of `open` are marked.
+    let mut in_macro = 0_usize;
+    // Whether the next delimiter opens a macro's input: a `name!` or `macro_rules! name` ended.
+    let mut macro_next = false;
+    for (index, &token) in tokens.iter().enumerate() {
+        let before = at(index.checked_sub(1));
+        let before_that = at(index.checked_sub(2));
+        let next = at(index.checked_add(1));
+        let after_next = at(index.checked_add(2));
+        let opens_macro = std::mem::take(&mut macro_next);
         match token {
             Token::Punct('!') => {
-                if let Token::Ident(word) = before
-                    && COMPILE_TIME_READS.contains(&word)
-                {
-                    return Some(Found::Macro(word.to_owned()));
+                if let Token::Ident(word) = before {
+                    if COMPILE_TIME_READS.contains(&word) {
+                        return Some(Found::Macro(word.to_owned()));
+                    }
+                    macro_next = true;
                 }
             }
             Token::Punct('[') if attribute > 0 => attribute += 1,
@@ -374,12 +667,45 @@ fn scan(input: &str) -> Option<Found> {
             Token::Punct('=') if attribute > 0 && before == Token::Ident("path") => {
                 return Some(Found::PathAttribute);
             }
+            Token::Ident(word) if compiles && COMPILE_TIME_READS.contains(&word) => {
+                if next == Token::Punct('!') {
+                    return Some(Found::Macro(word.to_owned()));
+                }
+                if !(next == Token::Punct(':') && after_next == Token::Punct(':')) {
+                    return Some(Found::Name(word.to_owned()));
+                }
+            }
+            Token::Ident("path") if compiles && attribute > 0 => {
+                return Some(Found::PathAttribute);
+            }
+            Token::Punct('$') if compiles && attribute > 0 => {
+                return Some(Found::MetavariableAttribute);
+            }
+            Token::Ident("mod") if compiles => {
+                let name = match next {
+                    Token::Ident(name) => Some(name.to_owned()),
+                    _ => None,
+                };
+                if in_macro > 0 || name.is_none() || after_next != Token::Punct('{') {
+                    return Some(Found::OutlineModule(name));
+                }
+            }
+            Token::Ident(_) if opens_macro && before == Token::Punct('!') => macro_next = true,
             _ => {}
         }
-        before_that = before;
-        before = token;
+        match token {
+            Token::Punct('(' | '[' | '{') => {
+                open.push(opens_macro);
+                in_macro += usize::from(opens_macro);
+            }
+            Token::Punct(')' | ']' | '}') => {
+                let closes_macro = open.pop() == Some(true);
+                in_macro = in_macro.saturating_sub(usize::from(closes_macro));
+            }
+            _ => {}
+        }
     }
-    tokens.unterminated
+    lexer.unterminated
 }
 
 /// One token of a Rust block, as far as the scan needs it.
@@ -619,12 +945,16 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        Found, LineMap, MAX_SCAN_BYTES, Scan, attribute_edition, compile_time_read, config_args,
-        format_args, parse_error, scan, unhide,
+        EmitDir, Found, LineMap, MAX_SCAN_BYTES, Scan, attribute_edition, before_compiling,
+        clippy_args, clippy_conf_dir, compile_time_read, config_args, format_args, lint_verdict,
+        parse_error, scan, unhide,
     };
     use crate::cartridges::markdown::cartridge::cartridge;
     use crate::code_blocks::block::blocks_in;
     use crate::code_blocks::format::ParseError;
+    use crate::code_blocks::lint::{Diagnostic, Verdict};
+    use crate::code_blocks::runner::Ran;
+    use crate::code_blocks::toolchain::cargo_lints;
     use crate::config::code_blocks::Edition;
     use crate::finding::Location;
     use crate::path::AbsolutePath;
@@ -899,7 +1229,7 @@ mod tests {
             ("100k raw strings", "r#\"\"".repeat(100_000)),
         ] {
             let started = Instant::now();
-            let _found = scan(&block);
+            let _found = scan(&block, true);
             let took = started.elapsed();
 
             assert!(took < limit, "{name} took {took:?}, over {limit:?}");
@@ -957,5 +1287,319 @@ mod tests {
     #[test]
     fn stderr_not_opening_with_error_is_not_a_parse_error() {
         assert_eq!(parse_error("warning: x\n"), None);
+    }
+
+    #[test]
+    fn clippy_gets_the_block_on_stdin_with_its_edition_metadata_path_and_relaxations_last() {
+        let lints = ["-W".into(), "clippy::pedantic".into()];
+
+        let args = clippy_args(
+            Edition::E2021,
+            Some(std::path::Path::new("/c/emit/1-0/block.rmeta")),
+            &lints,
+        );
+
+        assert_eq!(
+            args,
+            [
+                "--edition",
+                "2021",
+                "--crate-type",
+                "lib",
+                "--emit=metadata=/c/emit/1-0/block.rmeta",
+                "--error-format=json",
+                "-W",
+                "clippy::pedantic",
+                "-A",
+                "unused",
+                "-A",
+                "dead_code",
+                "-A",
+                "missing_docs",
+                "-A",
+                "clippy::missing_docs_in_private_items",
+                "-",
+            ]
+        );
+        for refused in ["--extern", "-L", "--cfg"] {
+            assert!(!args.iter().any(|arg| arg == refused), "{args:?}");
+        }
+        assert!(
+            clippy_args(Edition::E2021, None, &lints).contains(&"--emit=metadata".into()),
+            "a cache key names no metadata path"
+        );
+    }
+
+    /// A temporary root holding `Cargo.toml` with `text`.
+    fn root_with_cargo_toml(text: &str) -> tempfile::TempDir {
+        let root = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        std::fs::write(root.path().join("Cargo.toml"), text)
+            .expect("the manifest should be writable");
+        root
+    }
+
+    #[test]
+    fn project_lints_go_groups_first_by_priority_without_clippy_cargo() {
+        let root = root_with_cargo_toml(
+            "[workspace.lints.rust]\nunsafe_code = \"forbid\"\nunused = \"warn\"\n\
+             [workspace.lints.clippy]\nptr_arg = \"deny\"\n\
+             pedantic = { level = \"warn\", priority = -1 }\n\
+             cargo = { level = \"warn\", priority = -1 }\n\
+             [workspace.lints.rustdoc]\nbroken_intra_doc_links = \"deny\"\n",
+        );
+
+        let flags: Vec<String> = cargo_lints(root.path())
+            .iter()
+            .map(|flag| flag.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(
+            flags,
+            [
+                "-W",
+                "clippy::pedantic",
+                "-W",
+                "unused",
+                "-D",
+                "clippy::ptr_arg",
+                "-F",
+                "unsafe_code"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_cargo_toml_linked_outside_the_root_gives_no_lints() {
+        let outside = root_with_cargo_toml("[lints.clippy]\nptr_arg = \"deny\"\n");
+        let root = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        std::os::unix::fs::symlink(
+            outside.path().join("Cargo.toml"),
+            root.path().join("Cargo.toml"),
+        )
+        .expect("the link should be creatable");
+
+        assert_eq!(cargo_lints(root.path()), Vec::<std::ffi::OsString>::new());
+    }
+
+    #[test]
+    fn clippy_conf_dir_is_the_root_only_for_in_root_clippy_configs() {
+        let root = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        assert_eq!(clippy_conf_dir(root.path()), None, "no clippy config");
+
+        std::fs::write(root.path().join("clippy.toml"), "msrv = \"1.80\"\n")
+            .expect("the config should be writable");
+        let real = root.path().canonicalize().expect("the root should resolve");
+        assert_eq!(clippy_conf_dir(root.path()), Some(real.into_os_string()));
+
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        std::fs::write(outside.path().join("clippy.toml"), "")
+            .expect("the config should be writable");
+        std::os::unix::fs::symlink(
+            outside.path().join("clippy.toml"),
+            root.path().join(".clippy.toml"),
+        )
+        .expect("the link should be creatable");
+        assert_eq!(
+            clippy_conf_dir(root.path()),
+            None,
+            "a `.clippy.toml` linked outside wins clippy's lookup, so none is passed"
+        );
+    }
+
+    /// One `clippy-driver --error-format=json` line.
+    fn rustc_line(level: &str, code: Option<&str>, spans: &str) -> String {
+        let code = code.map_or("null".to_owned(), |code| {
+            format!("{{\"code\":\"{code}\",\"explanation\":null}}")
+        });
+        format!(
+            "{{\"$message_type\":\"diagnostic\",\"message\":\"m\",\"code\":{code},\"level\":\"{level}\",\"spans\":[{spans}],\"children\":[],\"rendered\":\"r\"}}\n"
+        )
+    }
+
+    /// A span in `file` at `line` and `column`.
+    fn span(file: &str, primary: bool, line: usize, column: usize) -> String {
+        format!(
+            "{{\"file_name\":\"{file}\",\"byte_start\":0,\"byte_end\":1,\"line_start\":{line},\"line_end\":{line},\"column_start\":{column},\"column_end\":{column},\"is_primary\":{primary},\"text\":[],\"label\":null,\"suggested_replacement\":null,\"suggestion_applicability\":null,\"expansion\":null}}"
+        )
+    }
+
+    #[test]
+    fn clippy_diagnostics_take_their_primary_block_span_and_summaries_are_left_out() {
+        let stderr = [
+            rustc_line(
+                "warning",
+                Some("clippy::ptr_arg"),
+                &format!(
+                    "{},{}",
+                    span("<anon>", false, 9, 9),
+                    span("<anon>", true, 2, 13)
+                ),
+            ),
+            rustc_line("error", Some("E0425"), &span("/rustc/lib.rs", true, 7, 1)),
+            rustc_line("warning", None, ""),
+            rustc_line("error", None, ""),
+            rustc_line("note", Some("x"), &span("<anon>", true, 1, 1)),
+            "not json\n".to_owned(),
+        ]
+        .concat();
+
+        let verdict = lint_verdict(Ok(Ran {
+            success: true,
+            stdout: Vec::new(),
+            stderr: stderr.into_bytes(),
+        }));
+
+        assert_eq!(
+            verdict,
+            Verdict::Diagnostics(vec![
+                Diagnostic {
+                    line: 2,
+                    column: 13,
+                    rule: "clippy::ptr_arg".to_owned(),
+                    message: "m".to_owned(),
+                },
+                Diagnostic {
+                    line: 0,
+                    column: 0,
+                    rule: "E0425".to_owned(),
+                    message: "m".to_owned(),
+                },
+            ]),
+            "a warning counts though clippy exits 0; a span outside the block goes to the fence"
+        );
+        let summaries_only = rustc_line("warning", None, "");
+        assert_eq!(
+            lint_verdict(Ok(Ran {
+                success: true,
+                stdout: Vec::new(),
+                stderr: summaries_only.into_bytes(),
+            })),
+            Verdict::Clean
+        );
+    }
+
+    #[test]
+    fn a_diagnostic_on_a_hidden_line_shifts_past_its_marker() {
+        let (_, hidden) = unhide("# use std::fmt;\n    # let x = 1;\n## escaped\nlet y = 2;\n#\n");
+
+        let removed: Vec<usize> = (0..5).map(|line| hidden.removed(line)).collect();
+
+        assert_eq!(removed, [2, 2, 1, 0, 1]);
+    }
+
+    #[test]
+    fn the_emit_dir_is_beside_the_working_directory_and_gone_after_the_run() {
+        let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let neutral = cache.path().join("cwd");
+        std::fs::create_dir(&neutral).expect("the cwd should be creatable");
+
+        let (first, second) = (
+            EmitDir::create(&neutral).expect("the emit dir should be creatable"),
+            EmitDir::create(&neutral).expect("a second run gets its own"),
+        );
+        let file = first.file();
+        std::fs::write(&file, "meta").expect("the metadata should be writable");
+        let dir = file.parent().expect("the file is in the dir").to_path_buf();
+
+        assert_ne!(
+            first.file(),
+            second.file(),
+            "parallel runs never share a path"
+        );
+        assert!(!dir.starts_with(&neutral), "{dir:?} is inside the cwd");
+        drop(first);
+        assert!(!dir.exists(), "{dir:?} should be removed with its metadata");
+        assert_eq!(
+            std::fs::read_dir(&neutral)
+                .expect("the cwd should be readable")
+                .count(),
+            0,
+            "the cwd stays empty"
+        );
+    }
+
+    #[test]
+    fn before_compiling_renames_macro_names_and_metavariable_attributes_are_refused() {
+        let name = |word: &str| Scan::Read(Found::Name(word.to_owned()));
+        for (block, refused) in [
+            (
+                "use std::include_str as inc;\nconst S: &str = inc!(\"/etc/passwd\");\n",
+                name("include_str"),
+            ),
+            ("use std::env;\n", name("env")),
+            ("use std::{env as e};\n", name("env")),
+            (
+                "use core::prelude::v1::option_env as o;\n",
+                name("option_env"),
+            ),
+            (
+                "macro_rules! m { ($i:ident) => { $i!(\"/etc/passwd\") }; }\nconst S: &str = m!(include_str);\n",
+                name("include_str"),
+            ),
+            (
+                "const S: &str = r#include_bytes!(\"x\");\n",
+                Scan::Read(Found::Macro("include_bytes".to_owned())),
+            ),
+            (
+                "macro_rules! m { ($p:literal) => { #[doc = $p] fn f() {} }; }\n",
+                Scan::Read(Found::MetavariableAttribute),
+            ),
+            (
+                "macro_rules! m { ($($a:tt)*) => { #[$($a)*] mod x {} }; }\n",
+                Scan::Read(Found::MetavariableAttribute),
+            ),
+            (
+                "#[cfg_attr(all(), path)]\nmod x {}\n",
+                Scan::Read(Found::PathAttribute),
+            ),
+        ] {
+            assert_eq!(before_compiling(block), refused, "{block:?}");
+        }
+    }
+
+    #[test]
+    fn before_compiling_outline_modules_are_refused_however_they_are_written() {
+        let outline =
+            |name: Option<&str>| Scan::Read(Found::OutlineModule(name.map(str::to_owned)));
+        for (block, refused) in [
+            ("mod helpers;\n", outline(Some("helpers"))),
+            (
+                "#[cfg(test)]\npub(crate) mod tests ;\n",
+                outline(Some("tests")),
+            ),
+            (
+                "macro_rules! m { ($n:ident) => { mod $n; }; }\nm!(x);\n",
+                outline(None),
+            ),
+            (
+                "macro_rules! m { ($k:tt $n:ident $b:tt) => { $k $n; }; }\nm!(mod x {});\n",
+                outline(Some("x")),
+            ),
+            (
+                "macro_rules! m { () => { mod x {} }; }\n",
+                outline(Some("x")),
+            ),
+        ] {
+            assert_eq!(before_compiling(block), refused, "{block:?}");
+        }
+        assert_eq!(
+            compile_time_read("mod helpers;\nuse std::env;\n"),
+            Scan::Clean,
+            "rustfmt expands nothing, so its scan keeps the old rules"
+        );
+    }
+
+    #[test]
+    fn before_compiling_passes_ordinary_blocks() {
+        for block in [
+            "fn main() { let _ = std::env::args(); }\n",
+            "fn f() -> Option<String> { std::env::var(\"A\").ok() }\n",
+            "mod inline {\n    pub fn f() {}\n}\nfn main() { inline::f(); println!(\"{}\", 1); }\n",
+            "#[derive(Debug)]\nstruct S { path: String }\n",
+            "fn environment() -> bool { true != false }\n",
+            "# #[expect(clippy::ptr_arg, reason = \"x\")]\npub fn f(v: &Vec<i32>) {}\n",
+        ] {
+            assert_eq!(before_compiling(block), Scan::Clean, "{block:?}");
+        }
     }
 }
