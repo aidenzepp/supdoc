@@ -915,6 +915,17 @@ fn rust_refusal(
             NotChecked::OutlineModule,
             name.map(|name| format!("outline module `{name}`")),
         )),
+        Scan::Read(rust::Found::Character(c)) => Some((
+            NotChecked::CompileTimeRead,
+            Some(format!(
+                "compile-time read: character {}",
+                rust::code_point(c)
+            )),
+        )),
+        Scan::Read(rust::Found::QualifiedMacro(name)) => Some((
+            NotChecked::CompileTimeRead,
+            Some(format!("compile-time read: path-qualified `{name}` macro")),
+        )),
         Scan::Read(rust::Found::UnlistedMacro(name)) => Some((
             NotChecked::CompileTimeRead,
             Some(format!("compile-time read: `{name}` macro")),

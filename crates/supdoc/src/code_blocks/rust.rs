@@ -512,6 +512,13 @@ pub(crate) enum Found {
     Name(String),
     /// Before compiling: a `$` metavariable inside an attribute.
     MetavariableAttribute,
+    /// Before compiling: a character outside a literal or comment that isn't Rust syntax: any
+    /// non-ASCII character, an ASCII control character or DEL other than whitespace, a backtick
+    /// or a backslash.
+    Character(char),
+    /// Before compiling: a macro called through a path (`::core::println!`, `x::println!`),
+    /// named by the macro.
+    QualifiedMacro(String),
     /// Before compiling: a macro call or definition off [`ALLOWED_MACROS`], named by the macro
     /// (`macro_rules` for a definition, `as println` for a rename to an allowed name).
     UnlistedMacro(String),
@@ -524,6 +531,12 @@ pub(crate) enum Found {
     /// Something the scan can't read past, which could hide a read, described as "an
     /// unterminated block comment".
     Unscannable(&'static str),
+}
+
+/// `c` as `U+XXXX`.
+#[must_use]
+pub(crate) fn code_point(c: char) -> String {
+    format!("U+{:04X}", u32::from(c))
 }
 
 impl Found {
@@ -552,6 +565,13 @@ impl Found {
             ),
             Self::UnlistedMacro(name) => format!(
                 "calls `{name}!`, which isn't on supdoc's list of macros that never read a file or build an attribute"
+            ),
+            Self::Character(c) => format!(
+                "has the character {} outside a literal or comment, which rustc may read as syntax supdoc's scan doesn't see",
+                code_point(*c)
+            ),
+            Self::QualifiedMacro(name) => format!(
+                "calls `{name}!` through a path, and only an unqualified call is known to reach the standard macro"
             ),
             Self::Attribute(name) if name.is_empty() => {
                 "has an attribute whose path doesn't start with a name, which supdoc can't check for a compile-time read".to_owned()
@@ -589,6 +609,13 @@ impl Found {
             }
             Self::UnlistedMacro(name) => format!(
                 "remove `{name}` from the block, or mark it `ignore(<why>)`"
+            ),
+            Self::Character(c) => format!(
+                "remove {} from the code, or keep it inside a string or comment, or mark the block `ignore(<why>)`",
+                code_point(*c)
+            ),
+            Self::QualifiedMacro(name) => format!(
+                "call it as plain `{name}!`, or mark the block `ignore(<why>)`"
             ),
             Self::Attribute(name) if name.is_empty() => {
                 "name the attribute plainly, or mark the block `ignore(<why>)`".to_owned()
@@ -657,11 +684,11 @@ fn scan(input: &str, compiles: bool) -> Option<Found> {
     }
     let mut lexer = Tokens::new(input, compiles);
     let tokens: Vec<Token<'_>> = lexer.by_ref().collect();
+    // Each token, a raw identifier read as the identifier it names.
     let at = |index: Option<usize>| {
         index
             .and_then(|index| tokens.get(index))
-            .copied()
-            .unwrap_or(Token::Other)
+            .map_or(Token::Other, |token| token.plain())
     };
     // The bracket depth inside the attribute being read, or 0 outside one.
     let mut attribute = 0_usize;
@@ -669,7 +696,8 @@ fn scan(input: &str, compiles: bool) -> Option<Found> {
     // The macro whose input or body the next delimiter opens: a `name!` or `macro_rules! name`
     // just ended.
     let mut macro_next: Option<MacroKind> = None;
-    for (index, &token) in tokens.iter().enumerate() {
+    for index in 0..tokens.len() {
+        let token = at(Some(index));
         let before = at(index.checked_sub(1));
         let before_that = at(index.checked_sub(2));
         let next = at(index.checked_add(1));
@@ -681,8 +709,16 @@ fn scan(input: &str, compiles: bool) -> Option<Found> {
                     if COMPILE_TIME_READS.contains(&word) {
                         return Some(Found::Macro(word.to_owned()));
                     }
-                    if compiles && let Some(found) = unlisted_macro(word, next) {
-                        return Some(found);
+                    if compiles {
+                        let raw = index
+                            .checked_sub(1)
+                            .and_then(|before| tokens.get(before))
+                            .is_some_and(|token| matches!(token, Token::RawIdent(_)));
+                        let qualified = before_that == Token::Punct(':')
+                            && at(index.checked_sub(3)) == Token::Punct(':');
+                        if let Some(found) = unlisted_macro(word, raw, qualified, next) {
+                            return Some(found);
+                        }
                     }
                     macro_next = Some(if word == "macro_rules" {
                         MacroKind::Definition
@@ -821,14 +857,17 @@ const KEYWORDS: [&str; 39] = [
     "trait", "true", "type", "unsafe", "use",
 ];
 
-/// The refusal for `name!` followed by `next`, before compiling: any `macro_rules!`, and a call
-/// (`name!` then a delimiter) of a macro not in [`ALLOWED_MACROS`]. `None` for an allowed call
-/// and for a keyword's negating `!`.
-fn unlisted_macro(name: &str, next: Token<'_>) -> Option<Found> {
+/// The refusal for `name!` followed by `next`, before compiling: any `macro_rules!`; a call
+/// (`name!` then a delimiter) of a macro not in [`ALLOWED_MACROS`]; and a call through a path
+/// (`qualified`: `::` before `name`). `None` for an unqualified allowed call and for a keyword's
+/// negating `!`. A `raw` identifier (`r#if`) is never a keyword.
+fn unlisted_macro(name: &str, raw: bool, qualified: bool, next: Token<'_>) -> Option<Found> {
     let call = matches!(next, Token::Punct('(' | '[' | '{'));
-    let refused = name == "macro_rules"
-        || (call && !KEYWORDS.contains(&name) && !ALLOWED_MACROS.contains(&name));
-    refused.then(|| Found::UnlistedMacro(name.to_owned()))
+    let negation = !raw && KEYWORDS.contains(&name);
+    if name == "macro_rules" || (call && !negation && !ALLOWED_MACROS.contains(&name)) {
+        return Some(Found::UnlistedMacro(name.to_owned()));
+    }
+    (call && !negation && qualified).then(|| Found::QualifiedMacro(name.to_owned()))
 }
 
 /// The refusal [`before_compiling`]'s rules give the identifier `word`, followed by `next` and
@@ -967,12 +1006,24 @@ fn unlisted_attribute(tokens: &[Token<'_>]) -> Option<Found> {
 /// One token of a Rust block, as far as the scan needs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Token<'text> {
-    /// An identifier or keyword, without a raw `r#` prefix.
+    /// An identifier or keyword.
     Ident(&'text str),
+    /// A raw identifier, `r#name`, held without its `r#`: never a keyword.
+    RawIdent(&'text str),
     /// One punctuation character.
     Punct(char),
     /// A literal, a lifetime, or anything else the scan doesn't judge.
     Other,
+}
+
+impl Token<'_> {
+    /// The token, with a raw identifier as the plain identifier it names.
+    const fn plain(self) -> Self {
+        match self {
+            Self::RawIdent(name) => Self::Ident(name),
+            token => token,
+        }
+    }
 }
 
 /// The tokens of a Rust block, skipping whitespace and comments. Each byte is read once.
@@ -1162,6 +1213,9 @@ impl<'text> Iterator for Tokens<'text> {
                 return Some(Token::Other);
             } else if is_ident_char(c) {
                 return Some(self.word());
+            } else if self.strict && !is_rust_syntax(c) {
+                self.at = self.text.len();
+                self.unterminated = Some(Found::Character(c));
             } else {
                 self.bump(1);
                 return Some(Token::Punct(c));
@@ -1273,7 +1327,7 @@ impl<'text> Tokens<'text> {
             self.bump(1);
             let start = self.at;
             self.bump_while(is_ident_char);
-            return Token::Ident(self.text.get(start..self.at).unwrap_or_default());
+            return Token::RawIdent(self.text.get(start..self.at).unwrap_or_default());
         }
         if raw_prefix && hashes > 0 {
             self.malformed("a `#` after a raw prefix that starts no raw string or identifier");
@@ -1310,6 +1364,14 @@ fn is_escape(body: &str) -> bool {
 /// character ends a word, which can only split words and so only add matches.
 const fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Whether `c`, outside a literal or comment and not whitespace, is a character Rust's syntax
+/// uses: an ASCII letter, digit or punctuation mark other than a backtick or backslash. Before
+/// compiling, any other character fails the scan closed: rustc may read a non-ASCII one as a
+/// confusable `#`, `!` or bracket the scan never saw, and it rejects the rest.
+const fn is_rust_syntax(c: char) -> bool {
+    c.is_ascii_graphic() && !matches!(c, '`' | '\\')
 }
 
 /// Whether rustc skips `c` as whitespace: Unicode's `Pattern_White_Space`, as `rustc_lexer`'s
@@ -2215,9 +2277,94 @@ mod tests {
     #[test]
     fn before_compiling_allowlisted_macros_and_negations_pass() {
         let block = "fn main() {\n    let v = vec![1, 2];\n    println!(\"{v:?}\");\n    \
-                     assert_eq!(v.len(), 2);\n    if !(v.is_empty()) { std::println!(\"x\"); }\n    \
+                     assert_eq!(v.len(), 2);\n    if !(v.is_empty()) { println!(\"x\"); }\n    \
                      let _ = 1 != 2 && !matches!(v.first(), None);\n}\n";
 
         assert_eq!(before_compiling(block), Scan::Clean);
+    }
+
+    #[test]
+    fn before_compiling_a_character_that_isnt_rust_syntax_is_refused_by_its_code_point() {
+        for (block, c) in [
+            (
+                "\u{FF03}[debugger_visualizer(gdb_script_file = \"/etc/x.py\")] mod m {}\n",
+                '\u{FF03}',
+            ),
+            ("fn f() { foo\u{FF01}(); }\n", '\u{FF01}'),
+            ("fn f() {\u{A0}}\n", '\u{A0}'),
+            ("fn f() { `x` }\n", '`'),
+            ("fn f() { \\ }\n", '\\'),
+            ("fn f() {\u{7}}\n", '\u{7}'),
+            ("fn f() {\u{7F}}\n", '\u{7F}'),
+            ("fn caf\u{E9}() {}\n", '\u{E9}'),
+        ] {
+            assert_eq!(
+                before_compiling(block),
+                Scan::Read(Found::Character(c)),
+                "{block:?}"
+            );
+        }
+        assert!(
+            Found::Character('\u{FF03}').why().contains("U+FF03"),
+            "the reason names the code point"
+        );
+        assert_eq!(
+            compile_time_read("fn caf\u{E9}() {}\n"),
+            Scan::Clean,
+            "rustfmt compiles nothing, so its scan allows any character"
+        );
+    }
+
+    #[test]
+    fn before_compiling_non_ascii_text_in_a_string_or_comment_passes() {
+        for block in [
+            "const S: &str = \"caf\u{E9} \u{FF03}[x] `y` \\\\\";\n",
+            "// caf\u{E9} \u{FF03}[debugger_visualizer]\n/* `x` \u{A0} */\nfn f() {}\n",
+            "/// Caf\u{E9}.\npub fn f() {}\n",
+            "const C: char = '\u{E9}';\n",
+        ] {
+            assert_eq!(before_compiling(block), Scan::Clean, "{block:?}");
+        }
+    }
+
+    #[test]
+    fn before_compiling_a_raw_identifier_is_never_a_negating_keyword() {
+        for (block, name) in [
+            ("fn f() { r#if!(x); }\n", "if"),
+            ("fn f() { r#match!(x); }\n", "match"),
+        ] {
+            assert_eq!(
+                before_compiling(block),
+                Scan::Read(Found::UnlistedMacro(name.to_owned())),
+                "{block:?}"
+            );
+        }
+        assert_eq!(
+            before_compiling("fn f(x: bool) -> bool { if !(x) { return !x; } x }\n"),
+            Scan::Clean
+        );
+    }
+
+    #[test]
+    fn before_compiling_a_path_qualified_macro_call_is_refused() {
+        for block in [
+            "fn f() { ::core::println!(\"x\"); }\n",
+            "fn f() { std::println!(\"x\"); }\n",
+            "fn f() { crate::x::println!(\"x\"); }\n",
+            "fn f() { std :: vec![1]; }\n",
+        ] {
+            assert!(
+                matches!(
+                    before_compiling(block),
+                    Scan::Read(Found::QualifiedMacro(_))
+                ),
+                "{block:?}: {:?}",
+                before_compiling(block)
+            );
+        }
+        assert_eq!(
+            before_compiling("fn f() { println!(\"x\"); let _ = std::env::args(); }\n"),
+            Scan::Clean
+        );
     }
 }
