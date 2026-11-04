@@ -1,7 +1,7 @@
 //! The readers of shell's tools' output: shfmt's syntax errors and shellcheck's json1 report.
 //!
-//! The lint step (see [`super::tools`]) runs `shellcheck -s <dialect> --norc --format=json1 --exclude=<relaxed> -` on
-//! the block on stdin. `--norc` keeps any `.shellcheckrc` (a user's `~/.shellcheckrc`, or one in
+//! The lint step (see [`super::tools`]) runs
+//! `shellcheck -s <dialect> --norc --format=json1 --exclude=<relaxed> -` on the block on stdin. `--norc` keeps any `.shellcheckrc` (a user's `~/.shellcheckrc`, or one in
 //! a directory above where the tool runs) from changing results per machine or turning on
 //! `external-sources`, so a sourced file is never read; `-x` and `--external-sources` are never
 //! passed. The project's own `.shellcheckrc` is not honored either: the block arrives on stdin,

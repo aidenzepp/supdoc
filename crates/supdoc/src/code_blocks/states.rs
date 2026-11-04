@@ -565,16 +565,14 @@ mod tests {
     use crate::config::Config;
     use crate::config::code_blocks::{CodeBlocks, Language};
     use crate::finding::Location;
-    use crate::link::SourcePath;
     use crate::path::AbsolutePath;
 
     /// A block in `file` with `info` as its info string, or none.
     fn block(file: &str, info: Option<&str>) -> CodeBlock {
-        let file: SourcePath = file
-            .parse()
-            .expect("the fixture path should be a source path");
         let location = Location {
-            file,
+            file: file
+                .parse()
+                .expect("the fixture path should be a source path"),
             range: 0..1,
             line: 1,
             column: 1,
