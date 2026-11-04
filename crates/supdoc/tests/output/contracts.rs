@@ -1727,15 +1727,34 @@ mod helps {
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755))
                 .expect("the fake cargo should be executable");
         }
-        std::process::Command::new(&installed)
+        let mut command = std::process::Command::new(&installed);
+        let _builder = command
             .args(args)
             .current_dir(project.path())
             .env_clear()
             .env("HOME", project.path().join("home"))
             .env("PATH", project.path().join("bin"))
             .env("CARGO_HOME", &cargo_home)
-            .stdin(Stdio::null())
-            .output()
+            .stdin(Stdio::null());
+        retry_busy(|| command.output())
+    }
+
+    /// Runs `spawn`, retrying up to 5 times, 20 ms apart, while it fails with `ETXTBSY`. On Linux a
+    /// binary just copied can refuse to start while another test's fork still holds the write
+    /// descriptor; any other result is returned at once.
+    fn retry_busy<T>(mut spawn: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+        let mut attempt = 1;
+        loop {
+            match spawn() {
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 5 =>
+                {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                result => return result,
+            }
+        }
     }
 
     /// Runs `case` with `--json` and returns the arguments shown, every `(kind, help)` it printed and
