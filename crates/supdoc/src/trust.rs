@@ -122,7 +122,7 @@ impl Store {
 
     /// Removes `root` from the store: every entry that is the path as given or its real path, so
     /// a listed path that has since become a symlink can still be revoked. Returns whether one
-    /// was listed; when none was, the store is left alone.
+    /// was listed, with the first entry removed; when none was, the store is left alone.
     ///
     /// Effect: resolves `root`, reads the store, and when removing re-reads and writes it
     /// atomically under the store's lock ([`Store::lock`]).
@@ -130,21 +130,20 @@ impl Store {
     /// # Errors
     ///
     /// Fails when the store exists but can't be read, or it or its lock can't be written.
-    pub(crate) fn revoke(&self, root: &Path) -> io::Result<bool> {
+    pub(crate) fn revoke(&self, root: &Path) -> io::Result<Option<PathBuf>> {
         let real = root.canonicalize().ok();
         let names = |listed: &PathBuf| *listed == root || real.as_ref() == Some(listed);
         if !self.read()?.iter().any(names) {
-            return Ok(false);
+            return Ok(None);
         }
         let _lock = self.lock()?;
         let mut roots = self.read()?;
-        let before = roots.len();
+        let Some(removed) = roots.iter().find(|listed| names(listed)).cloned() else {
+            return Ok(None);
+        };
         roots.retain(|listed| !names(listed));
-        if roots.len() == before {
-            return Ok(false);
-        }
         self.write(&roots)?;
-        Ok(true)
+        Ok(Some(removed))
     }
 
     /// Takes the store's exclusive lock, held until the returned file drops: `trusted-roots.lock`
@@ -587,7 +586,10 @@ mod tests {
         fs::remove_dir(&listed).expect("the listed root should be removable");
         symlink(&other, &listed).expect("the symlink should be creatable");
 
-        assert!(store.revoke(&listed).expect("revoking should work"));
+        assert_eq!(
+            store.revoke(&listed).expect("revoking should work"),
+            Some(listed.clone())
+        );
         assert_eq!(
             fs::read_to_string(&store.file).expect("the store should be readable"),
             ""
@@ -690,12 +692,15 @@ mod tests {
         fs::write(&store.file, format!("{}\nrelative\n", listed.display()))
             .expect("the store should be writable");
 
-        assert!(!store.revoke(&unlisted).expect("revoking should work"));
+        assert_eq!(store.revoke(&unlisted).expect("revoking should work"), None);
         assert_eq!(
             fs::read_to_string(&store.file).expect("the store should be readable"),
             format!("{}\nrelative\n", listed.display())
         );
-        assert!(store.revoke(&listed).expect("revoking should work"));
+        assert_eq!(
+            store.revoke(&listed).expect("revoking should work"),
+            Some(listed.clone())
+        );
         assert_eq!(granted(&listed, &scratch.env(None)), Ok(false));
     }
 

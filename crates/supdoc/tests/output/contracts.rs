@@ -451,6 +451,8 @@ mod helps {
         OutsideTools,
         /// With `PATH` set to the project's `bin` directory.
         ProjectPath,
+        /// With `XDG_STATE_HOME` set to a file in the project, so no state directory can be made.
+        StateHomeIsFile,
     }
 
     /// One way to make `supdoc` print a message with a given code, and the help it carries, if any.
@@ -1465,6 +1467,14 @@ mod helps {
         case("cli-target-invalid", |_| {}, &["list", "src/lib.rs#a..b"]),
         case("cli-init-exists", |_| {}, &["init"]),
         case("cli-trust-path", |_| {}, &["trust", "nowhere"]),
+        case(
+            "cli-trust-path",
+            |p| {
+                std::fs::create_dir(p.path().join("a\nb"))
+                    .expect("the directory with a newline in its name should be creatable");
+            },
+            &["trust", "a\nb"],
+        ),
         HelpCase {
             kind: "cli-trust-no-state",
             setup: |_| {},
@@ -1472,13 +1482,20 @@ mod helps {
             via: Via::EmptyHome,
             needs_permissions: false,
         },
+        HelpCase {
+            kind: "cli-trust-store",
+            setup: |p| p.write("state-file", "not a directory"),
+            args: &["trust"],
+            via: Via::StateHomeIsFile,
+            needs_permissions: false,
+        },
         case(
-            "cli-trust-store",
+            "cli-trust-no-config",
             |p| {
-                std::fs::create_dir(p.path().join("a\nb"))
-                    .expect("the directory with a newline in its name should be creatable");
+                std::fs::remove_file(p.path().join("supdoc.config.toml"))
+                    .expect("the config should be removable");
             },
-            &["trust", "a\nb"],
+            &["trust"],
         ),
         restricted_case(
             "cli-init-write",
@@ -1670,6 +1687,14 @@ mod helps {
                 // closed stdout (EBADF) as a successful write, so that can't stand in for it.
                 shell(&project, "trap '' XFSZ; ulimit -f 0", &args)
                     .stdout(sink)
+                    .output()
+            }
+            Via::StateHomeIsFile => {
+                let file = project.path().join("state-file");
+                let file = file.to_str().expect("the temp path should be UTF-8");
+                project
+                    .command(&args, &[("XDG_STATE_HOME", file)])
+                    .stdin(Stdio::null())
                     .output()
             }
             Via::Subdirectory => shell(&project, "mkdir sub && cd sub", &args).output(),

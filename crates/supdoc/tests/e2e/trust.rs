@@ -33,6 +33,13 @@ impl State {
     }
 }
 
+/// The `basic` fixture with an empty `supdoc.config.toml`, so the project root is known.
+fn project() -> Project {
+    let project = Project::fixture("basic");
+    project.write("supdoc.config.toml", "");
+    project
+}
+
 /// The real path of `path`.
 fn real(path: &Path) -> String {
     path.canonicalize()
@@ -62,7 +69,7 @@ fn git(dir: &Path, args: &[&str]) {
 
 #[test]
 fn trusting_then_revoking_the_root_round_trips() {
-    let project = Project::fixture("basic");
+    let project = project();
     let state = State::new();
     let vars = [("XDG_STATE_HOME", state.path())];
     let root = real(&project.path("."));
@@ -97,8 +104,7 @@ fn trusting_then_revoking_the_root_round_trips() {
 
 #[test]
 fn the_default_root_is_the_project_root_seen_from_a_subdirectory() {
-    let project = Project::fixture("basic");
-    project.write("supdoc.config.toml", "");
+    let project = project();
     std::fs::create_dir_all(project.path("sub/deep"))
         .expect("the subdirectory should be creatable");
     let state = State::new();
@@ -116,7 +122,7 @@ fn the_default_root_is_the_project_root_seen_from_a_subdirectory() {
 
 #[test]
 fn an_explicit_path_is_listed_by_its_real_path() {
-    let project = Project::fixture("basic");
+    let project = project();
     std::fs::create_dir_all(project.path("sub")).expect("the subdirectory should be creatable");
     let state = State::new();
     let vars = [("XDG_STATE_HOME", state.path())];
@@ -133,7 +139,7 @@ fn an_explicit_path_is_listed_by_its_real_path() {
 
 #[test]
 fn an_explicit_path_that_is_not_a_directory_is_a_usage_error() {
-    let project = Project::fixture("basic");
+    let project = project();
     let state = State::new();
     let vars = [("XDG_STATE_HOME", state.path())];
 
@@ -151,8 +157,7 @@ fn an_explicit_path_that_is_not_a_directory_is_a_usage_error() {
 
 #[test]
 fn trusting_from_a_linked_worktree_records_the_worktrees_own_root() {
-    let project = Project::fixture("basic");
-    project.write("supdoc.config.toml", "");
+    let project = project();
     git(&project.path("."), &["init", "--quiet"]);
     git(&project.path("."), &["add", "."]);
     git(&project.path("."), &["commit", "--quiet", "-m", "fixture"]);
@@ -171,26 +176,150 @@ fn trusting_from_a_linked_worktree_records_the_worktrees_own_root() {
 }
 
 #[test]
-fn without_a_config_the_root_is_the_top_of_the_work_tree() {
+fn without_a_config_trust_refuses_and_lists_nothing() {
     let project = Project::fixture("basic");
-    git(&project.path("."), &["init", "--quiet"]);
-    std::fs::create_dir_all(project.path("sub")).expect("the subdirectory should be creatable");
     let state = State::new();
     let vars = [("XDG_STATE_HOME", state.path())];
 
-    let run = project.supdoc_in_with("sub", &["trust"], &vars);
+    let run = project.supdoc_in_with(".", &["trust"], &vars);
+
+    let _ = run.assert_exit(78);
+    assert!(
+        run.stderr.contains("cli-trust-no-config") && state.roots().is_empty(),
+        "no config should mean no root: {} {:?}",
+        run.stderr,
+        state.roots()
+    );
+}
+
+#[test]
+fn a_deleted_root_can_be_revoked() {
+    let project = project();
+    std::fs::create_dir_all(project.path("gone")).expect("the directory should be creatable");
+    let state = State::new();
+    let vars = [("XDG_STATE_HOME", state.path())];
+    let _ = project
+        .supdoc_in_with(".", &["trust", "gone"], &vars)
+        .assert_exit(0);
+    std::fs::remove_dir(project.path("gone")).expect("the directory should be removable");
+
+    let run = project.supdoc_in_with(".", &["trust", "--revoke", "gone"], &vars);
+
+    let _ = run.assert_exit(0);
+    assert_eq!(
+        (run.stdout.as_str(), state.roots()),
+        ("revoked gone\n", Vec::<String>::new()),
+        "a deleted root should be revocable by the path as typed"
+    );
+}
+
+#[test]
+fn revoking_a_root_that_became_a_symlink_prints_the_listed_entry() {
+    let project = project();
+    std::fs::create_dir_all(project.path("old")).expect("the directory should be creatable");
+    std::fs::create_dir_all(project.path("target")).expect("the directory should be creatable");
+    let state = State::new();
+    let vars = [("XDG_STATE_HOME", state.path())];
+    let _ = project
+        .supdoc_in_with(".", &["trust", "old"], &vars)
+        .assert_exit(0);
+    std::fs::remove_dir(project.path("old")).expect("the directory should be removable");
+    std::os::unix::fs::symlink(project.path("target"), project.path("old"))
+        .expect("the symlink should be creatable");
+
+    let run = project.supdoc_in_with(".", &["trust", "--revoke", "old"], &vars);
+
+    let _ = run.assert_exit(0);
+    assert_eq!(
+        (run.stdout.as_str(), state.roots()),
+        ("revoked old\n", Vec::<String>::new()),
+        "the line should name the entry removed, not the symlink's target"
+    );
+}
+
+#[test]
+fn a_symlinked_path_records_the_real_path() {
+    let project = project();
+    std::fs::create_dir_all(project.path("real")).expect("the directory should be creatable");
+    std::os::unix::fs::symlink(project.path("real"), project.path("link"))
+        .expect("the symlink should be creatable");
+    let state = State::new();
+    let vars = [("XDG_STATE_HOME", state.path())];
+
+    let run = project.supdoc_in_with(".", &["trust", "link"], &vars);
 
     let _ = run.assert_exit(0);
     assert_eq!(
         state.roots(),
-        vec![real(&project.path("."))],
-        "with no config the work tree's top should be the root"
+        vec![real(&project.path("real"))],
+        "the store should list the symlink's target"
+    );
+}
+
+#[test]
+fn a_config_flag_that_check_refuses_is_refused_by_trust() {
+    let project = project();
+    let state = State::new();
+    let vars = [("XDG_STATE_HOME", state.path())];
+    for config in [".", "missing.toml"] {
+        let checked = project.supdoc_in_with(".", &["-c", config, "check"], &vars);
+        let trusted = project.supdoc_in_with(".", &["-c", config, "trust"], &vars);
+        assert_ne!(checked.code, Some(0), "check -c {config} should be refused");
+        assert_eq!(
+            trusted.code, checked.code,
+            "trust -c {config} should exit as check does: {}",
+            trusted.stderr
+        );
+    }
+    assert_eq!(
+        state.roots(),
+        Vec::<String>::new(),
+        "nothing should be listed"
+    );
+}
+
+#[test]
+fn a_path_with_a_newline_is_a_usage_error() {
+    let project = project();
+    std::fs::create_dir_all(project.path("a\nb")).expect("the directory should be creatable");
+    let state = State::new();
+    let vars = [("XDG_STATE_HOME", state.path())];
+
+    let run = project.supdoc_in_with(".", &["trust", "a\nb"], &vars);
+
+    let _ = run.assert_exit(2);
+    assert!(run.stderr.contains("cli-trust-path"), "{}", run.stderr);
+}
+
+#[test]
+fn supdoc_revoke_turns_trust_into_revoke_and_says_so() {
+    let project = project();
+    let state = State::new();
+    let vars = [("XDG_STATE_HOME", state.path())];
+    let _ = project
+        .supdoc_in_with(".", &["trust"], &vars)
+        .assert_exit(0);
+
+    let run = project.supdoc_in_with(
+        ".",
+        &["trust"],
+        &[
+            ("XDG_STATE_HOME", state.path()),
+            ("SUPDOC_REVOKE", Path::new("1")),
+        ],
+    );
+
+    let _ = run.assert_exit(0);
+    assert_eq!(
+        (run.stdout.as_str(), state.roots()),
+        ("revoked .\n", Vec::<String>::new()),
+        "SUPDOC_REVOKE=1 should revoke and say `revoked`"
     );
 }
 
 #[test]
 fn the_supdoc_trust_variable_is_not_consulted() {
-    let project = Project::fixture("basic");
+    let project = project();
     let state = State::new();
 
     // A value `check` would refuse as a usage error does not stop `trust`, and `1` is not what
@@ -223,7 +352,7 @@ fn the_supdoc_trust_variable_is_not_consulted() {
 
 #[test]
 fn no_state_directory_is_a_config_error() {
-    let project = Project::fixture("basic");
+    let project = project();
 
     let run = project.supdoc_in_with(".", &["trust"], &[("HOME", Path::new(""))]);
 
