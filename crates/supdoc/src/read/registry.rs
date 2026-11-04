@@ -165,6 +165,12 @@ impl Cartridge for LazyCartridge {
         &self.grammar
     }
 
+    /// The wrapped cartridge's answer, which compiles it. A cartridge that fails to compile
+    /// reads links, so the walk reaches the file and the read reports the load error.
+    fn reads_links(&self) -> bool {
+        (self.compiled)().map_or(true, Cartridge::reads_links)
+    }
+
     fn load(&self) -> Result<(), CartridgeLoadError> {
         (self.compiled)().map(|_cartridge| ())
     }
@@ -300,6 +306,69 @@ mod tests {
                 marks,
                 "{id}'s injections.scm marks no region as {MARKDOWN_INLINE}"
             );
+        }
+    }
+
+    /// A cartridge that is a link target only.
+    #[derive(Debug)]
+    struct TargetOnly {
+        /// The grammar, created on first use.
+        grammar: std::sync::OnceLock<tree_sitter::Language>,
+    }
+
+    impl Cartridge for TargetOnly {
+        fn id(&self) -> LanguageId {
+            LanguageId::new("target-only")
+        }
+
+        fn extensions(&self) -> &'static [&'static str] {
+            &["tgt"]
+        }
+
+        fn grammar(&self) -> &tree_sitter::Language {
+            self.grammar
+                .get_or_init(|| tree_sitter_rust::LANGUAGE.into())
+        }
+
+        fn reads_links(&self) -> bool {
+            false
+        }
+
+        fn symbols(&self, _file: &SourceFile) -> Result<SymbolTable, ReadError> {
+            Ok(SymbolTable::default())
+        }
+
+        fn markdown_regions(&self, _file: &SourceFile) -> Result<Vec<MarkdownRegion>, ReadError> {
+            Ok(Vec::new())
+        }
+    }
+
+    static TARGET_ONLY: TargetOnly = TargetOnly {
+        grammar: std::sync::OnceLock::new(),
+    };
+
+    #[test]
+    fn a_lazy_cartridge_forwards_reads_links_from_the_cartridge_it_wraps() {
+        let lazy = LazyCartridge::new(
+            LanguageId::new("target-only"),
+            &["tgt"],
+            || tree_sitter_rust::LANGUAGE.into(),
+            || Ok(&TARGET_ONLY),
+        );
+
+        assert!(
+            !lazy.reads_links(),
+            "a lazily registered target-only cartridge should not be walked as a source"
+        );
+    }
+
+    #[test]
+    fn builtin_cartridges_all_read_links() {
+        for cartridge in Languages::builtin()
+            .expect("the built-in cartridges should load")
+            .iter()
+        {
+            assert!(cartridge.reads_links(), "{} is target-only", cartridge.id());
         }
     }
 
