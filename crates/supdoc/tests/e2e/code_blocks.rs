@@ -3,7 +3,7 @@
 
 use std::os::unix::fs::symlink;
 
-use crate::support::{Project, array_at, at};
+use crate::support::{Project, array_at, at, real_tool_dir};
 
 /// The codes of a `--json` check's loose findings, in order.
 fn finding_kinds(json: &serde_json::Value) -> Vec<String> {
@@ -855,16 +855,10 @@ fn check_with_shfmt(script: &str, args: &[&str], exit: i32) -> serde_json::Value
 
 #[test]
 fn shell_format_with_the_real_shfmt_passes_formatted_blocks_and_fails_others() {
-    let Some(dir) = std::env::var_os("PATH")
-        .iter()
-        .flat_map(std::env::split_paths)
-        .find(|dir| dir.is_absolute() && dir.join("shfmt").is_file())
-    else {
-        // Written to the process's stderr directly, which `cargo test` shows for a passing test.
-        let _ignored = std::io::Write::write_all(
-            &mut std::io::stderr(),
-            b"SKIPPED shell_format_with_the_real_shfmt: shfmt is not on PATH\n",
-        );
+    let Some(dir) = real_tool_dir(
+        "shfmt",
+        "shell_format_with_the_real_shfmt_passes_formatted_blocks_and_fails_others",
+    ) else {
         return;
     };
     let project = project_with_shell_blocks();
@@ -1620,16 +1614,10 @@ fn shell_lint_a_non_zero_exit_without_comments_is_a_tool_failure() {
 
 #[test]
 fn shell_lint_with_the_real_shellcheck_passes_a_clean_block_and_fails_a_placeholder() {
-    let Some(dir) = std::env::var_os("PATH")
-        .iter()
-        .flat_map(std::env::split_paths)
-        .find(|dir| dir.is_absolute() && dir.join("shellcheck").is_file())
-    else {
-        // Written to the process's stderr directly, which `cargo test` shows for a passing test.
-        let _ignored = std::io::Write::write_all(
-            &mut std::io::stderr(),
-            b"SKIPPED shell_lint_with_the_real_shellcheck: shellcheck is not on PATH\n",
-        );
+    let Some(dir) = real_tool_dir(
+        "shellcheck",
+        "shell_lint_with_the_real_shellcheck_passes_a_clean_block_and_fails_a_placeholder",
+    ) else {
         return;
     };
     let (project, _outside) = project_with_shellcheck(

@@ -1,0 +1,16 @@
+# Code-block tools CI installs before `cargo test`, checked with `sha256sum --strict -c` (comment
+# lines stripped first). A mismatch fails the job. Each sum is the project's published one,
+# cross-checked against a local download on 2026-11-04.
+#
+# shfmt v3.14.1
+#   binary: https://github.com/mvdan/sh/releases/download/v3.14.1/shfmt_v3.14.1_linux_amd64
+#   sum:    the release publishes no checksum file; this is the asset digest GitHub publishes
+#           for it, https://api.github.com/repos/mvdan/sh/releases/tags/v3.14.1 (assets[].digest)
+# ruff 0.17.3
+#   tarball: https://github.com/astral-sh/ruff/releases/download/0.17.3/ruff-x86_64-unknown-linux-gnu.tar.gz
+#   sum:     https://github.com/astral-sh/ruff/releases/download/0.17.3/ruff-x86_64-unknown-linux-gnu.tar.gz.sha256
+#            (the same as GitHub's asset digest for it)
+#
+# black is pinned with hashes in ci/requirements-black.txt.
+76e77641faa025814b77f153b29796b8e6fa2fca03e0c76a691608b86c7ea7bf  shfmt_v3.14.1_linux_amd64
+2b0890f5a55900af741f133918c2656919bbf18c2ab7741b4ca8403a90e647a9  ruff-x86_64-unknown-linux-gnu.tar.gz

@@ -3,7 +3,7 @@
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
-use crate::support::{Project, array_at, at};
+use crate::support::{Project, array_at, at, real_tool_dir};
 
 /// The codes of a `--json` check's loose findings, in order.
 fn finding_kinds(json: &serde_json::Value) -> Vec<String> {
@@ -289,14 +289,6 @@ fn a_bare_number_edition_is_a_config_error_that_says_to_quote_it() {
     assert_eq!(stub.record("runs"), "", "rustfmt should never run");
 }
 
-/// The absolute `PATH` directory holding `binary`, when one does.
-fn tool_dir(binary: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH")
-        .iter()
-        .flat_map(std::env::split_paths)
-        .find(|dir| dir.is_absolute() && dir.join(binary).is_file())
-}
-
 /// The variables that run the real `rustfmt`, as [`real_rust_tool`] gives them.
 fn real_rustfmt(test: &str) -> Option<Vec<(&'static str, PathBuf)>> {
     real_rust_tool("rustfmt", test)
@@ -304,16 +296,9 @@ fn real_rustfmt(test: &str) -> Option<Vec<(&'static str, PathBuf)>> {
 
 /// The variables that run the real `binary`, a Rust tool: `PATH` holding only its directory, and
 /// the real user's rustup and cargo homes, through which the rustup proxy finds its toolchains.
-/// `None`, with a note on stderr naming `test`, when `binary` is not on `PATH`.
+/// `None` when `binary` is not on `PATH`, as [`real_tool_dir`] decides it.
 fn real_rust_tool(binary: &str, test: &str) -> Option<Vec<(&'static str, PathBuf)>> {
-    let Some(dir) = tool_dir(binary) else {
-        // Written to the process's stderr directly, which `cargo test` shows for a passing test.
-        let _ignored = std::io::Write::write_all(
-            &mut std::io::stderr(),
-            format!("SKIPPED {test}: {binary} is not on PATH\n").as_bytes(),
-        );
-        return None;
-    };
+    let dir = real_tool_dir(binary, test)?;
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let rustup_home = std::env::var_os("RUSTUP_HOME")
         .map(PathBuf::from)
