@@ -8,28 +8,33 @@
 //! defaults to the top-level key of the same name, and setting one never changes which files
 //! linking reads.
 //!
-//! A language is on exactly when its table, `[features.code-blocks.rust]`, `.shell`, `.python`
-//! or `.markdown`, is written in some file of the chain; an empty table turns it on. The language
+//! A language is on exactly when its table, `[features.code-blocks.rust]`, `.shell`, `.python`,
+//! `.typescript`, `.javascript` or `.markdown`, is written in some file of the chain; an empty
+//! table turns it on. The language
 //! table selects tools (`formatter`, `linter`) and holds the language's own settings; each
 //! tool's options, its step's mode, live in the tool's own table,
 //! `[features.code-blocks.<language>.<tool>]`, validated by its cartridge.
 
+mod javascript;
 mod markdown;
 mod python;
 mod rust;
 mod shell;
+mod typescript;
 
 use crate::code_blocks::tools::{self, CARTRIDGES, Step, Tier};
 use std::ops::Range;
 
 use crate::path::AbsolutePath;
 
+use self::javascript::RawJavaScript;
 use self::markdown::RawMarkdown;
 use self::python::RawPython;
 pub(crate) use self::rust::Edition;
 use self::rust::RawRust;
 pub(crate) use self::shell::Dialect;
 use self::shell::RawShell;
+use self::typescript::RawTypeScript;
 use super::pattern::{AnchoredPatterns, PatternList};
 
 /// A language supdoc has a `[features.code-blocks]` table for.
@@ -43,6 +48,10 @@ pub(crate) enum Language {
     Python,
     /// Markdown: tagged `md` or `markdown`.
     Markdown,
+    /// TypeScript: tagged `ts`, `typescript`, `mts`, `cts` or `tsx`.
+    TypeScript,
+    /// JavaScript: tagged `js`, `javascript`, `mjs`, `cjs` or `jsx`.
+    JavaScript,
 }
 
 impl Language {
@@ -54,11 +63,13 @@ impl Language {
             "sh" | "bash" | "shell" => Some(Self::Shell),
             "python" | "py" | "python3" => Some(Self::Python),
             "md" | "markdown" => Some(Self::Markdown),
+            "ts" | "typescript" | "mts" | "cts" | "tsx" => Some(Self::TypeScript),
+            "js" | "javascript" | "mjs" | "cjs" | "jsx" => Some(Self::JavaScript),
             _ => None,
         }
     }
 
-    /// The name of its table: `rust`, `shell`, `python` or `markdown`.
+    /// The name of its table: `rust`, `shell`, `python`, `typescript`, `javascript` or `markdown`.
     #[must_use]
     pub(crate) const fn table(self) -> &'static str {
         match self {
@@ -66,6 +77,8 @@ impl Language {
             Self::Shell => "shell",
             Self::Python => "python",
             Self::Markdown => "markdown",
+            Self::TypeScript => "typescript",
+            Self::JavaScript => "javascript",
         }
     }
 }
@@ -266,7 +279,7 @@ pub(crate) struct Unselected {
     pub(crate) file: AbsolutePath,
     /// Where the table is in `file`.
     pub(crate) span: Range<usize>,
-    /// The language's table name, such as `rust` or `markdown`.
+    /// The language's table name, such as `rust` or `typescript`.
     pub(crate) language: &'static str,
     /// The tool the table is for.
     pub(crate) tool: &'static str,
@@ -402,6 +415,10 @@ struct Languages {
     python: Table,
     /// `[features.code-blocks.markdown]`.
     markdown: Table,
+    /// `[features.code-blocks.typescript]`.
+    typescript: Table,
+    /// `[features.code-blocks.javascript]`.
+    javascript: Table,
     /// The nearest shell `dialect` written.
     dialect: Option<Dialect>,
     /// The nearest Rust `edition` written.
@@ -436,6 +453,10 @@ pub(crate) struct RawCodeBlocks {
     python: Option<RawPython>,
     /// `[features.code-blocks.markdown]`, when written.
     markdown: Option<RawMarkdown>,
+    /// `[features.code-blocks.typescript]`, when written.
+    typescript: Option<RawTypeScript>,
+    /// `[features.code-blocks.javascript]`, when written.
+    javascript: Option<RawJavaScript>,
 }
 
 /// The table's keys merged across the chain, before the top-level defaults fill the gaps.
@@ -456,8 +477,8 @@ impl Written {
     ///
     /// # Errors
     ///
-    /// The first tool table, Rust, shell, Python then Markdown, whose tool the merged chain doesn't
-    /// select.
+    /// The first tool table, Rust, shell, Python, TypeScript, JavaScript then Markdown, whose tool
+    /// the merged chain doesn't select.
     pub(super) fn resolve(
         self,
         include: &AnchoredPatterns,
@@ -469,6 +490,8 @@ impl Written {
             .unselected(Language::Rust)
             .or_else(|| languages.shell.unselected(Language::Shell))
             .or_else(|| languages.python.unselected(Language::Python))
+            .or_else(|| languages.typescript.unselected(Language::TypeScript))
+            .or_else(|| languages.javascript.unselected(Language::JavaScript))
             .or_else(|| languages.markdown.unselected(Language::Markdown));
         if let Some(unselected) = unselected {
             return Err(unselected);
@@ -551,6 +574,8 @@ impl CodeBlocks {
             Language::Shell => &self.languages.shell,
             Language::Python => &self.languages.python,
             Language::Markdown => &self.languages.markdown,
+            Language::TypeScript => &self.languages.typescript,
+            Language::JavaScript => &self.languages.javascript,
         }
     }
 
@@ -588,6 +613,8 @@ pub(super) fn merge(
         shell,
         python,
         markdown,
+        typescript,
+        javascript,
         ..
     }) = raw
     else {
@@ -624,6 +651,14 @@ pub(super) fn merge(
                 .languages
                 .markdown
                 .behind(markdown.as_ref().map(RawMarkdown::selection), file),
+            typescript: nearer
+                .languages
+                .typescript
+                .behind(typescript.as_ref().map(RawTypeScript::selection), file),
+            javascript: nearer
+                .languages
+                .javascript
+                .behind(javascript.as_ref().map(RawJavaScript::selection), file),
         },
     })
 }

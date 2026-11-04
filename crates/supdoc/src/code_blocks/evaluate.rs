@@ -22,6 +22,7 @@ use crate::read::cartridge::Languages;
 use crate::read::error::CartridgeLoadError;
 use crate::trust::Grant;
 
+use super::biome;
 use super::block::{CodeBlock, Info};
 use super::cache::{self, Cache};
 use super::excerpt;
@@ -99,22 +100,11 @@ pub(crate) struct BlockRecord {
     dialect: Dialect,
     /// The edition its `edition20xx` attribute or the config's `edition` names, if either does.
     edition: Option<Edition>,
-    /// The project flags a non-Rust tool gets for it: rumdl's `--config` or `--no-config`.
-    /// Empty until the tools are looked up.
-    project: ToolProject,
+    /// The config and virtual path biome is given for it. `None` until the tools are looked up, and for
+    /// any other tool.
+    given: Option<biome::Given>,
     /// What the format step needs, kept while the block is pending.
     pending: Option<Pending>,
-}
-
-/// What a non-Rust tool is given from the project for a block, found when the tools are looked
-/// up.
-#[derive(Debug, Clone, Default)]
-struct ToolProject {
-    /// The flags: rumdl's `--config` or `--no-config`.
-    flags: Vec<OsString>,
-    /// Where rumdl is told the doc is when the project's config was moved, see
-    /// [`rumdl::Project::doc_as_seen`].
-    seen_at: Option<PathBuf>,
 }
 
 /// A pending block as the format step reads and fixes it.
@@ -249,7 +239,7 @@ pub(crate) fn evaluate(
             linter,
             dialect: code_blocks.dialect(),
             edition: block_edition(block).or_else(|| code_blocks.edition()),
-            project: ToolProject::default(),
+            given: None,
             language,
             state,
             steps,
@@ -301,7 +291,8 @@ impl Evaluation {
         let mut cache: Option<Option<Cache>> = None;
         let mut looked_up: Vec<(&'static str, Found)> = Vec::new();
         let mut rust_setup: Option<RustSetup> = None;
-        let mut configs = RumdlConfigs::default();
+        let mut biome_configs = BiomeConfigs::default();
+        let mut rumdl_configs = RumdlConfigs::default();
         let mut toolchain_warned = false;
         let mut slots: Vec<Slot> = Vec::new();
         let mut jobs: Vec<Job> = Vec::new();
@@ -331,7 +322,16 @@ impl Evaluation {
                     continue;
                 }
             }
-            if configs.give(record, tool, (env, root), &mut slots).is_err() {
+            if biome_configs
+                .give(record, tool, (env, root), &mut slots)
+                .is_err()
+            {
+                continue;
+            }
+            if rumdl_configs
+                .give(record, tool, (env, root), &mut slots)
+                .is_err()
+            {
                 continue;
             }
             let (runs, refused) = found_runs(
@@ -372,24 +372,32 @@ impl Evaluation {
             cache: cache.as_ref(),
         };
         let records = &self.records;
+        let rust_for = |tool: &ToolCartridge| {
+            rust_setup
+                .as_ref()
+                .filter(|_| tool.language == Language::Rust)
+        };
         let ran = in_parallel(&jobs, |job| {
             let record = records.get(job.record)?;
             let format = job.format.as_ref().and_then(|run| {
-                let rust = rust_setup
-                    .as_ref()
-                    .filter(|_| run.tool.language == Language::Rust);
+                let rust = rust_for(run.tool);
                 run_formatter(run.tool, &run.program, record, &session, rust)
             });
             let parses = !matches!(format, Some((format::Verdict::ParseFailed { .. }, _)));
             let lint = job.lint.as_ref().filter(|_| parses).and_then(|run| {
-                let rust = rust_setup
-                    .as_ref()
-                    .filter(|_| run.tool.language == Language::Rust);
+                let rust = rust_for(run.tool);
                 run_linter(run.tool, &run.program, record, &session, rust)
             });
             Some(StepsRan { format, lint })
         });
         self.settle(slots, &jobs, ran);
+        self.conclude(cache);
+    }
+
+    /// Settles the blocks still pending, prunes `cache` and recounts the states.
+    ///
+    /// Effect: prunes the result cache.
+    fn conclude(&mut self, cache: Option<Cache>) {
         self.settle_pending();
         if let Some(cache) = cache {
             cache.prune();
@@ -670,6 +678,97 @@ fn reread<'doc>(
     }
 }
 
+/// The biome config flags found for each doc directory, and the refusals already warned about.
+#[derive(Debug, Default)]
+struct BiomeConfigs {
+    /// Each doc directory's result, in the order they were asked for.
+    found: Vec<(PathBuf, Result<biome::Given, biome::Refusal>)>,
+    /// The refusals a warning has been added for.
+    warned: Vec<biome::Refusal>,
+}
+
+impl BiomeConfigs {
+    /// Gives `record`, a TypeScript or JavaScript block, the flags biome gets for its doc,
+    /// found once per directory. A refusal settles the block as not checked, with its one
+    /// warning per refusal added to `slots`.
+    ///
+    /// Effect: reads the config and may create supdoc's private directory.
+    ///
+    /// # Errors
+    ///
+    /// The refusal that left the block not checked.
+    fn give(
+        &mut self,
+        record: &mut BlockRecord,
+        tool: &ToolCartridge,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> Result<(), biome::Refusal> {
+        if !matches!(tool.language, Language::TypeScript | Language::JavaScript) {
+            return Ok(());
+        }
+        let doc = root.join(record.at.file.as_str());
+        let dir = doc.parent().unwrap_or(root).to_path_buf();
+        let found = if let Some((_, found)) = self.found.iter().find(|(known, _)| *known == dir) {
+            found.clone()
+        } else {
+            let found = biome::project_args(env, root, &doc);
+            self.found.push((dir, found.clone()));
+            found
+        };
+        match found {
+            Ok(project) => {
+                record.given = Some(project);
+                Ok(())
+            }
+            Err(refusal) => {
+                let (reason, warning) = biome_refusal(&refusal, &record.at);
+                if self.first_warning(&refusal) {
+                    slots.push(Slot::Found(warning));
+                }
+                record.state = BlockState::NotChecked(NotChecked::ToolConfig);
+                record.reason = Some(reason);
+                Err(refusal)
+            }
+        }
+    }
+
+    /// Whether `refusal` hasn't been warned about yet, remembering that it now has.
+    fn first_warning(&mut self, refusal: &biome::Refusal) -> bool {
+        let new = !self.warned.contains(refusal);
+        if new {
+            self.warned.push(refusal.clone());
+        }
+        new
+    }
+}
+
+/// The state reason and the `code-block-not-checked` warning, at `at`, for a block biome isn't
+/// given because of `refusal`.
+fn biome_refusal(refusal: &biome::Refusal, at: &Location) -> (String, Finding) {
+    let (reason, message, help) = match refusal {
+        biome::Refusal::Config { file, why, help } => (
+            format!("biome config `{file}` {why}"),
+            format!(
+                "the project's `{file}` {why}, so its TypeScript and JavaScript blocks aren't checked"
+            ),
+            format!("in `{file}`: {help}"),
+        ),
+        biome::Refusal::NoPrivateDir => (
+            BIOME_NO_PRIVATE_DIR.to_owned(),
+            format!("{BIOME_NO_PRIVATE_DIR}, so its blocks aren't checked"),
+            "set `XDG_CACHE_HOME` or `HOME` to a directory outside the project".to_owned(),
+        ),
+    };
+    let finding = Finding::new(NOT_CHECKED, Severity::Warning, message)
+        .with_help(help)
+        .with_location(at.clone());
+    (reason, finding)
+}
+
+/// Why biome didn't run when supdoc had no private directory to keep the config it gives biome in.
+const BIOME_NO_PRIVATE_DIR: &str = "biome needs a private directory under `XDG_CACHE_HOME` or `HOME` for the config supdoc gives it, and there is none";
+
 /// The rumdl config flags found for each doc directory, and the refusals already warned about.
 #[derive(Debug, Default)]
 struct RumdlConfigs {
@@ -710,10 +809,11 @@ impl RumdlConfigs {
         };
         match found {
             Ok(project) => {
-                record.project = ToolProject {
-                    seen_at: Some(project.doc_as_seen(&doc)),
+                record.given = Some(biome::Given {
+                    mirror: Some(project.doc_as_seen(&doc)),
                     flags: project.flags,
-                };
+                    names: None,
+                });
                 Ok(())
             }
             Err(refusal) => {
@@ -871,12 +971,16 @@ fn run_formatter(
         .edition
         .or_else(|| rust.map(|rust| rust.edition))
         .unwrap_or(Edition::E2024);
+    let given = record.given.as_ref();
     let args = tool.args(&Invocation {
-        doc: record.project.seen_at.as_deref().unwrap_or(&doc),
+        doc: given
+            .and_then(|given| given.mirror.as_deref())
+            .unwrap_or(&doc),
         index: record.index,
+        tag: record.language.as_deref().unwrap_or_default(),
         edition,
         dialect: record.dialect,
-        project: rust.map_or(record.project.flags.as_slice(), |rust| {
+        project: rust.map_or(given.map_or(&[], |given| given.flags.as_slice()), |rust| {
             rust.config.as_slice()
         }),
         emit: None,
@@ -899,7 +1003,13 @@ fn run_formatter(
         &run,
         session,
         |call| runner::run(call, session.env, session.root),
-        |result| format::judge(tool, input, result),
+        |result| {
+            let named = result.map(|ran| Ran {
+                stderr: given.map_or_else(|| ran.stderr.clone(), |given| given.named(&ran.stderr)),
+                ..ran
+            });
+            format::judge(tool, input, named)
+        },
         format::Verdict::cacheable,
     );
     let at = match &verdict {
@@ -938,12 +1048,16 @@ fn run_linter(
         return Some(run_clippy(tool, program, record, pending, session, rust));
     }
     let doc = session.root.join(record.at.file.as_str());
+    let given = record.given.as_ref();
     let args = tool.args(&Invocation {
-        doc: record.project.seen_at.as_deref().unwrap_or(&doc),
+        doc: given
+            .and_then(|given| given.mirror.as_deref())
+            .unwrap_or(&doc),
         index: record.index,
+        tag: record.language.as_deref().unwrap_or_default(),
         edition: record.edition.unwrap_or(Edition::E2024),
         dialect: record.dialect,
-        project: record.project.flags.as_slice(),
+        project: given.map_or(&[], |given| given.flags.as_slice()),
         emit: None,
     });
     let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
@@ -1001,6 +1115,7 @@ fn run_clippy(
     let invocation = Invocation {
         doc: &doc,
         index: record.index,
+        tag: record.language.as_deref().unwrap_or_default(),
         edition,
         dialect: record.dialect,
         project: &rust.lints,
@@ -1035,6 +1150,7 @@ fn run_clippy(
         let file = emit.file();
         let args = tool.args(&Invocation {
             emit: Some(&file),
+            tag: "",
             ..invocation
         });
         let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
@@ -1618,8 +1734,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        BlockRecord, LintRan, MAX_WORKERS, Pending, RustSetup, Session, ToolProject, in_parallel,
-        run_clippy, rust_refusal,
+        BlockRecord, LintRan, MAX_WORKERS, Pending, RustSetup, Session, in_parallel, run_clippy,
+        rust_refusal,
     };
     use crate::cartridges::markdown::cartridge::cartridge as markdown;
     use crate::code_blocks::block::blocks_in;
@@ -1715,7 +1831,7 @@ mod tests {
             linter: Some(clippy()),
             dialect: Dialect::default(),
             edition: None,
-            project: ToolProject::default(),
+            given: None,
             pending: Pending::of(block, &doc),
         }
     }
@@ -1782,6 +1898,7 @@ mod tests {
         let doc = root.path().join("docs/a.md");
         let args = clippy().args(&Invocation {
             doc: &doc,
+            tag: "",
             index: record.index,
             edition: rust.edition_of(&record),
             dialect: record.dialect,

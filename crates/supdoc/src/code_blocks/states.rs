@@ -395,9 +395,10 @@ impl BlockState {
             Self::OptedOut { reason } => reason.clone(),
             Self::NotChecked(NotChecked::Text) => Some("the block is text, not code".to_owned()),
             Self::NotChecked(NotChecked::LanguageOff) => {
-                let table = tag
-                    .and_then(Language::from_tag)
-                    .map_or("language", Language::table);
+                let table = match tag.and_then(Language::from_tag) {
+                    Some(language) => language.table(),
+                    None => "language",
+                };
                 Some(format!("no `[features.code-blocks.{table}]` table"))
             }
             Self::NotChecked(NotChecked::NoStepRan) => Some("none of its steps ran".to_owned()),
