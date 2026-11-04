@@ -698,14 +698,16 @@ fn a_rust_doc_fence_leading_with_an_attribute_counts_as_rust_not_unknown() {
     );
 }
 
-/// A recorded `basic` project with the shell table on and two `sh` blocks in `docs/blocks.md`.
+/// The shell table with its linter off, so a format test sees only the formatter.
+const SHELL_FORMAT_ONLY: &str =
+    "[features.code-blocks]\n[features.code-blocks.shell]\nlinter = false\n";
+
+/// A recorded `basic` project with the shell table on, its linter off, and two `sh` blocks in
+/// `docs/blocks.md`.
 fn project_with_shell_blocks() -> Project {
     let project = Project::fixture("basic");
     project.record();
-    project.write(
-        "supdoc.config.toml",
-        "[features.code-blocks]\n[features.code-blocks.shell]\n",
-    );
+    project.write("supdoc.config.toml", SHELL_FORMAT_ONLY);
     project.write(
         "docs/blocks.md",
         "# Blocks\n\n```sh\necho hi\n```\n\n```sh\necho bye\n```\n",
@@ -1090,7 +1092,7 @@ fn selection_formatter_false_counts_format_off_and_never_runs_the_tool() {
     let project = project_with_shell_blocks();
     project.write(
         "supdoc.config.toml",
-        "[features.code-blocks]\n[features.code-blocks.shell]\nformatter = false\n",
+        "[features.code-blocks]\n[features.code-blocks.shell]\nformatter = false\nlinter = false\n",
     );
 
     let json = project.supdoc(&["check", "--json"]).assert_exit(0).json();
@@ -1153,6 +1155,10 @@ fn lint_select_linter_false_counts_lint_off_beside_the_format_outcome() {
 #[test]
 fn lint_select_no_lint_counts_lint_skipped_with_its_reason() {
     let project = project_with_shell_blocks();
+    project.write(
+        "supdoc.config.toml",
+        "[features.code-blocks]\n[features.code-blocks.shell]\n",
+    );
     project.write(
         "docs/blocks.md",
         "# Blocks\n\n```sh no_lint(needs a server)\necho hi\n```\n\n```sh\necho bye\n```\n",
@@ -1304,7 +1310,7 @@ fn cache_a_config_appearing_in_the_docs_own_directory_runs_the_tool_again() {
 /// How many blocks the parallel tests write.
 const PARALLEL_BLOCKS: usize = 16;
 
-/// Runs `check --json` on a recorded `basic` project with the shell table on and
+/// Runs `check --json` on a recorded `basic` project with the shell table on, its linter off, and
 /// [`PARALLEL_BLOCKS`] `sh` blocks in `docs/blocks.md`, with an `shfmt` stub running `script`
 /// as the only `PATH` entry, asserting it exits `exit`. Returns the report and how long the run
 /// took.
@@ -1312,10 +1318,7 @@ fn check_many_with_shfmt(script: &str, exit: i32) -> (serde_json::Value, std::ti
     use std::os::unix::fs::PermissionsExt as _;
     let project = Project::fixture("basic");
     project.record();
-    project.write(
-        "supdoc.config.toml",
-        "[features.code-blocks]\n[features.code-blocks.shell]\n",
-    );
+    project.write("supdoc.config.toml", SHELL_FORMAT_ONLY);
     let blocks = (1..=PARALLEL_BLOCKS)
         .map(|index| format!("```sh\necho {index}\n```\n"))
         .collect::<Vec<_>>()
@@ -1387,4 +1390,96 @@ fn parallel_findings_come_out_in_document_order() {
         PARALLEL_BLOCKS,
         "{json}"
     );
+}
+
+/// A recorded `basic` project with the shell table (and `config` after it) and `docs/blocks.md`
+/// holding `doc`, plus an outside directory holding a `shellcheck` stub running `script` and an
+/// `shfmt` that prints its stdin.
+fn project_with_shellcheck(config: &str, doc: &str, script: &str) -> (Project, tempfile::TempDir) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let project = Project::fixture("basic");
+    project.record();
+    project.write(
+        "supdoc.config.toml",
+        &format!("[features.code-blocks]\n[features.code-blocks.shell]\n{config}"),
+    );
+    project.write("docs/blocks.md", doc);
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    for (name, body) in [("shellcheck", script), ("shfmt", "/bin/cat")] {
+        let path = outside.path().join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("the stub should be writable");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("the stub should be made executable");
+    }
+    (project, outside)
+}
+
+#[test]
+fn shell_lint_runs_shellcheck_with_its_dialect_and_no_rc_and_places_each_diagnostic() {
+    let (project, outside) = project_with_shellcheck(
+        "dialect = \"posix\"\n",
+        "# Blocks\n\n```sh\nif true; then\n\techo $x\nfi\n```\n",
+        "[ \"$*\" = '-s sh --norc --format=json1 --exclude=SC2154,SC2034,SC1091 -' ] || { echo \"argv: $*\" >&2; exit 3; }\n\
+         /bin/cat > /dev/null\n\
+         echo '{\"comments\":[{\"file\":\"-\",\"line\":2,\"endLine\":2,\"column\":14,\"endColumn\":16,\"level\":\"info\",\"code\":2086,\"message\":\"Double quote to prevent globbing and word splitting.\",\"fix\":null}]}'\n\
+         exit 1",
+    );
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-lint"], "{json}");
+    // The tab before `echo` spans shellcheck's columns 1-8, so its column 14 is the 7th character.
+    assert_eq!(at(&json, "/findings/0/location/line"), 5, "{json}");
+    assert_eq!(at(&json, "/findings/0/location/column"), 7, "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/state"), "failed", "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/lint"), "ran", "{json}");
+}
+
+#[test]
+fn shell_lint_a_non_zero_exit_without_comments_is_a_tool_failure() {
+    let (project, outside) = project_with_shellcheck(
+        "",
+        "# Blocks\n\n```sh\necho hi\n```\n",
+        "echo 'shellcheck: internal error' >&2\nexit 2",
+    );
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-tool-failed"], "{json}");
+}
+
+#[test]
+fn shell_lint_with_the_real_shellcheck_passes_a_clean_block_and_fails_a_placeholder() {
+    let Some(dir) = std::env::var_os("PATH")
+        .iter()
+        .flat_map(std::env::split_paths)
+        .find(|dir| dir.is_absolute() && dir.join("shellcheck").is_file())
+    else {
+        // Written to the process's stderr directly, which `cargo test` shows for a passing test.
+        let _ignored = std::io::Write::write_all(
+            &mut std::io::stderr(),
+            b"SKIPPED shell_lint_with_the_real_shellcheck: shellcheck is not on PATH\n",
+        );
+        return;
+    };
+    let (project, _outside) = project_with_shellcheck(
+        "formatter = false\n",
+        "# Blocks\n\n```sh\necho \"hi\"\n```\n\n```sh\necho $1\n```\n\n```sh\ncp <src> <dst>\n```\n",
+        "exit 0",
+    );
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", &dir)])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(at(&json, "/data/code_blocks/0/state"), "passed", "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/1/state"), "failed", "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/2/state"), "failed", "{json}");
 }
