@@ -112,6 +112,13 @@ pub(crate) mod cartridges {
     /// Bash.
     pub(crate) mod bash;
 
+    /// The key-path symbol model the JSON, YAML and TOML cartridges share.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the data cartridges call it from P5-L09")
+    )]
+    pub(crate) mod data;
+
     /// Markdown.
     pub(crate) mod markdown {
         /// The Markdown cartridge.
@@ -212,6 +219,9 @@ pub(crate) mod code_blocks {
 
     /// Python's format and lint steps.
     mod python;
+
+    /// TypeScript and JavaScript's format step, run by biome.
+    mod biome;
 
     /// Reading the Rust toolchain a project pins.
     mod toolchain;

@@ -12,7 +12,7 @@ use crate::config::code_blocks::{CodeBlocks, Dialect, Edition, Language};
 use super::format::ParseError;
 use super::lint;
 use super::runner::{Failure, Ran};
-use super::{python, rust, shell};
+use super::{biome, python, rust, shell};
 
 /// The variables a tool gets from supdoc's own environment, and no others.
 const PASSED: [&str; 5] = [
@@ -89,11 +89,13 @@ pub(crate) struct Invocation<'run> {
     pub(crate) doc: &'run Path,
     /// The block's 1-based position among the blocks of its doc.
     pub(crate) index: usize,
+    /// The block's language tag, which picks biome's virtual file extension.
+    pub(crate) tag: &'run str,
     /// The Rust edition the block is read as.
     pub(crate) edition: Edition,
     /// The shell dialect the block is read as.
     pub(crate) dialect: Dialect,
-    /// The flags the project contributes, each found inside the root: rustfmt's
+    /// The flags the project contributes, each found inside the root: rustfmt's and biome's
     /// `--config-path`, clippy's `[lints]` levels. Empty for every other tool.
     pub(crate) project: &'run [OsString],
     /// Where clippy writes the block's metadata. `None` names no path, which is how a cache key
@@ -185,7 +187,7 @@ impl ToolCartridge {
 const FULL_OR_OFF: &[&str] = &["full", "off"];
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 7] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 9] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -263,7 +265,32 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 7] = [
         argv: clippy_args,
         reader: Reader::Lint(rust::lint_verdict),
     },
+    ToolCartridge {
+        name: "biome-format",
+        language: Language::TypeScript,
+        binary: "biome",
+        tier: Tier::Static,
+        install: "npm install --global @biomejs/biome",
+        config_files: BIOME_CONFIGS,
+        modes: FULL_OR_OFF,
+        argv: biome_format_args,
+        reader: Reader::Format(biome::parse_error),
+    },
+    ToolCartridge {
+        name: "biome-format",
+        language: Language::JavaScript,
+        binary: "biome",
+        tier: Tier::Static,
+        install: "npm install --global @biomejs/biome",
+        config_files: BIOME_CONFIGS,
+        modes: FULL_OR_OFF,
+        argv: biome_format_args,
+        reader: Reader::Format(biome::parse_error),
+    },
 ];
+
+/// The config files biome reads, which its cached results are keyed on.
+const BIOME_CONFIGS: &[&str] = &["biome.json", "biome.jsonc", ".biome.json", ".biome.jsonc"];
 
 /// `language`'s default formatter: its first format cartridge, whatever its tier.
 #[must_use]
@@ -398,6 +425,23 @@ fn shellcheck_args(invocation: &Invocation<'_>) -> Vec<OsString> {
         OsString::from(format!("--exclude={SHELLCHECK_RELAXED}")),
         OsString::from("-"),
     ]
+}
+
+/// `biome format`'s arguments: the block on stdin under its virtual path, whose extension the
+/// block's tag picks (see [`biome::extension`]), no colors, then the project's `--config-path`.
+fn biome_format_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    let mut stdin_path = OsString::from("--stdin-file-path=");
+    stdin_path.push(virtual_path(
+        invocation.doc,
+        invocation.index,
+        biome::extension(invocation.tag),
+    ));
+    ["format", "--colors=off"]
+        .into_iter()
+        .map(OsString::from)
+        .chain([stdin_path])
+        .chain(invocation.project.iter().cloned())
+        .collect()
 }
 
 /// The lints clippy leaves off for a block, which a snippet breaks for lack of context, as
@@ -554,6 +598,7 @@ mod tests {
     fn args_of(name: &str, index: usize, project: &[OsString]) -> Vec<OsString> {
         cartridge(name).args(&Invocation {
             doc: Path::new("/p/docs/a.md"),
+            tag: "",
             index,
             edition: Edition::E2024,
             dialect: Dialect::Bash,
@@ -624,6 +669,20 @@ mod tests {
                     "clippy-driver",
                     Tier::Project
                 ),
+                (
+                    "biome-format",
+                    Language::TypeScript,
+                    Step::Format,
+                    "biome",
+                    Tier::Static
+                ),
+                (
+                    "biome-format",
+                    Language::JavaScript,
+                    Step::Format,
+                    "biome",
+                    Tier::Static
+                ),
             ]
         );
     }
@@ -666,6 +725,7 @@ mod tests {
     fn shfmt_names_the_block_by_its_index_then_its_dialect() {
         let posix = cartridge("shfmt").args(&Invocation {
             doc: Path::new("/p/docs/a.md"),
+            tag: "",
             index: 3,
             edition: Edition::E2024,
             dialect: Dialect::Posix,
@@ -748,6 +808,7 @@ mod tests {
             cartridge("shellcheck")
                 .args(&Invocation {
                     doc: Path::new("/p/a.md"),
+                    tag: "",
                     index: 1,
                     edition: Edition::E2024,
                     dialect,
@@ -770,6 +831,7 @@ mod tests {
         let lints = ["-W".into(), "clippy::pedantic".into()];
         let invocation = Invocation {
             doc: Path::new("/p/docs/a.md"),
+            tag: "",
             index: 1,
             edition: Edition::E2021,
             dialect: Dialect::Bash,
@@ -807,6 +869,7 @@ mod tests {
         }
         let key = cartridge("clippy").args(&Invocation {
             emit: None,
+            tag: "",
             ..invocation
         });
         assert!(
@@ -832,6 +895,7 @@ mod tests {
             dialect: Dialect::Bash,
             project: &lints,
             emit: None,
+            tag: "",
             externs: &externs,
         });
 
