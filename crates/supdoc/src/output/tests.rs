@@ -243,6 +243,21 @@ fn text_paths_are_relative_to_cwd() {
 }
 
 #[test]
+fn command_words_are_cwd_relative_and_shell_quoted() {
+    let style = PathStyle::new(
+        absolute("/repo/apps/web/src"),
+        absolute("/repo/apps/web"),
+        None,
+    );
+
+    assert_eq!(style.command_word("docs/guide.md"), "../docs/guide.md");
+    assert_eq!(
+        style.command_word("docs/my guide.md"),
+        "'../docs/my guide.md'"
+    );
+}
+
+#[test]
 fn json_paths_are_relative_to_the_project_root() {
     assert_eq!(PathStyle::json(&source("docs/guide.md")), "docs/guide.md");
 }
