@@ -77,7 +77,8 @@ Threat model, for a checkout you don't trust:
   commands.
 - **Checking code blocks.** With a `[features.code-blocks]` table, `supdoc check` and `supdoc fix` check the
   code blocks in your docs with your project's own tools. supdoc runs only tools from its own table that read
-  the block and plain config files: rustfmt, shfmt, ruff, black, shellcheck, and clippy on a block on its own.
+  the block and plain config files: rustfmt, shfmt, ruff, black and shellcheck. clippy is built but runs
+  only once `supdoc trust` exists; until then a Rust block's lint step counts as not run.
   Each block goes to the tool on standard input, so the tool opens no other source file. supdoc ignores a
   `rust-toolchain.toml` that names a path, never downloads a toolchain, never uses a tool installed inside
   the checkout, and skips Rust blocks that read files or environment variables at compile time
