@@ -38,7 +38,47 @@ use super::project::{
     LockForUpdate, command_line, load_config, lock_failure, lock_path, read_lock_for_update, scope,
     settings_mismatch,
 };
+use super::upgrade::ReleaseVersion;
 use super::{CliError, Context, Outcome};
+use crate::exit::ExitStatus;
+
+/// The code of the error for a `[PATHS]` argument that is a version and names no path.
+const CODE_VERSION_ARGUMENT: &str = "cli-update-version-argument";
+
+/// Refuses a `[PATHS]` argument that reads as a version and names nothing on disk, since the
+/// person most likely meant `supdoc upgrade <version>`.
+///
+/// # Errors
+///
+/// Returns `cli-update-version-argument` (2) naming the `supdoc upgrade` command to run.
+fn refuse_version_argument(
+    paths: &[std::path::PathBuf],
+    context: &Context,
+) -> Result<(), CliError> {
+    for typed in paths {
+        let Some(text) = typed.to_str() else { continue };
+        if text.parse::<ReleaseVersion>().is_err() {
+            continue;
+        }
+        if super::project::absolute(&context.cwd, typed)
+            .as_path()
+            .symlink_metadata()
+            .is_ok()
+        {
+            continue;
+        }
+        return Err(CliError::new(
+            CODE_VERSION_ARGUMENT,
+            format!("`{text}` is a version, and no such path exists"),
+            format!(
+                "`supdoc update` accepts code changes into supdoc.lock. To install supdoc {text}, \
+                 run `supdoc upgrade {text}`"
+            ),
+            ExitStatus::Usage,
+        ));
+    }
+    Ok(())
+}
 
 /// The closing note when the plan is empty.
 const NOTHING_NOTE: &str = "Nothing to update.";
@@ -63,6 +103,7 @@ pub(crate) fn run(
     context: &Context,
     output: &mut Output,
 ) -> Result<Outcome, CliError> {
+    refuse_version_argument(&args.paths, context)?;
     let config = load_config(context, output)?;
     let scope = scope(&args.paths, &config, context)?;
     let LockForUpdate {

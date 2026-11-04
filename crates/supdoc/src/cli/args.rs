@@ -241,7 +241,7 @@ pub(crate) enum Command {
     /// Check links against supdoc.lock (read-only)
     #[command(after_help = CHECK_EXAMPLES)]
     Check(CheckArgs),
-    /// Accept changes into supdoc.lock (writes; previews unless --yes)
+    /// Accept code changes into supdoc.lock (writes; previews unless --yes; to install a newer supdoc, see `upgrade`)
     #[command(after_help = UPDATE_EXAMPLES)]
     Update(UpdateArgs),
     /// Repair broken links in docs and comments (writes; previews unless --yes)
