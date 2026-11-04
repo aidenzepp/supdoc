@@ -587,6 +587,41 @@ fn a_root_in_the_trust_store_is_trusted_like_supdoc_trust_1() {
 }
 
 #[test]
+fn supdoc_trust_0_turns_off_a_listed_roots_trust_and_holds_clippy_with_the_warning() {
+    let project = clippy_project("");
+    let stubs = rust_stubs();
+    let state = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let root = project
+        .path(".")
+        .canonicalize()
+        .expect("the project root should resolve");
+    std::fs::create_dir(state.path().join("supdoc")).expect("the store dir should be creatable");
+    std::fs::write(
+        state.path().join("supdoc/trusted-roots"),
+        format!("{}\n", root.display()),
+    )
+    .expect("the store should be writable");
+
+    let json = check_with_stubs(
+        &project,
+        &stubs,
+        &["check", "--json", "-v"],
+        &[
+            ("XDG_STATE_HOME", state.path()),
+            ("SUPDOC_TRUST", Path::new("0")),
+        ],
+        0,
+    )
+    .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-not-trusted"], "{json}");
+    for block in ["/data/code_blocks/0", "/data/code_blocks/1"] {
+        assert_eq!(at(&json, &format!("{block}/lint")), "not_run", "{json}");
+        assert_eq!(at(&json, &format!("{block}/reason")), NEEDS_TRUST, "{json}");
+    }
+}
+
+#[test]
 fn tier_static_holds_clippy_with_its_own_reason_and_no_warning() {
     let project = Project::fixture("basic");
     project.record();
@@ -627,7 +662,9 @@ fn a_bad_supdoc_trust_is_a_usage_error_before_any_block_is_checked() {
     let _checked = run.assert_exit(2);
 
     assert!(
-        run.stderr.contains("`SUPDOC_TRUST` is `yes`") && run.stderr.contains("`1`"),
+        run.stderr.contains("`SUPDOC_TRUST` is `yes`")
+            && run.stderr.contains("`1`")
+            && run.stderr.contains("`0` to turn trust off"),
         "the error should name the value and the accepted ones: {}",
         run.stderr
     );
