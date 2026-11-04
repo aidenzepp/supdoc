@@ -99,6 +99,10 @@ pub(crate) struct Invocation<'run> {
     /// Where clippy writes the block's metadata. `None` names no path, which is how a cache key
     /// names every run of the same block alike.
     pub(crate) emit: Option<&'run Path>,
+    /// What clippy links the block against: the project build's `--extern` and `-L` flags,
+    /// placed right after `--error-format=json`. Empty when the block compiles alone, and for
+    /// every other tool.
+    pub(crate) externs: &'run [OsString],
 }
 
 /// How a cartridge reads a finished run, which also says which step it does.
@@ -406,8 +410,9 @@ const CLIPPY_RELAXED: [&str; 4] = [
 ];
 
 /// `clippy-driver`'s arguments: `--edition <E> --crate-type lib --emit=metadata=<emit>
-/// --error-format=json`, the project's `lints` flags, the snippet relaxations, and `-` for the
-/// block on stdin. Nothing else from the project: no `--extern`, `-L` or `--cfg`.
+/// --error-format=json`, the project build's `--extern` and `-L` flags when the block is linked
+/// against it, the project's `lints` flags, the snippet relaxations, and `-` for the block on
+/// stdin. Nothing else from the project: no `--cfg`.
 fn clippy_args(invocation: &Invocation<'_>) -> Vec<OsString> {
     let mut metadata = OsString::from("--emit=metadata");
     if let Some(emit) = invocation.emit {
@@ -422,6 +427,7 @@ fn clippy_args(invocation: &Invocation<'_>) -> Vec<OsString> {
         metadata,
         "--error-format=json".into(),
     ];
+    args.extend(invocation.externs.iter().cloned());
     args.extend(invocation.project.iter().cloned());
     for lint in CLIPPY_RELAXED {
         args.extend(["-A".into(), lint.into()]);
@@ -553,6 +559,7 @@ mod tests {
             dialect: Dialect::Bash,
             project,
             emit: None,
+            externs: &[],
         })
     }
 
@@ -664,6 +671,7 @@ mod tests {
             dialect: Dialect::Posix,
             project: &[],
             emit: None,
+            externs: &[],
         });
 
         assert_eq!(posix, ["--filename", "/p/docs/a.md.3.sh", "-ln", "posix"]);
@@ -745,6 +753,7 @@ mod tests {
                     dialect,
                     project: &[],
                     emit: None,
+                    externs: &[],
                 })
                 .into_iter()
                 .take(2)
@@ -766,6 +775,7 @@ mod tests {
             dialect: Dialect::Bash,
             project: &lints,
             emit: Some(Path::new("/c/emit/1-0/block.rmeta")),
+            externs: &[],
         };
 
         let args = cartridge("clippy").args(&invocation);
@@ -803,6 +813,49 @@ mod tests {
             key.contains(&"--emit=metadata".into()),
             "a cache key names no metadata path"
         );
+    }
+
+    #[test]
+    fn clippy_gets_the_project_builds_externs_after_the_error_format_and_before_the_lints() {
+        let lints = ["-W".into(), "clippy::pedantic".into()];
+        let externs = [
+            "--extern".into(),
+            "proj=/t/debug/deps/libproj-1.rmeta".into(),
+            "-L".into(),
+            "dependency=/t/debug/deps".into(),
+        ];
+
+        let args = cartridge("clippy").args(&Invocation {
+            doc: Path::new("/p/docs/a.md"),
+            index: 1,
+            edition: Edition::E2021,
+            dialect: Dialect::Bash,
+            project: &lints,
+            emit: None,
+            externs: &externs,
+        });
+
+        let at = args
+            .iter()
+            .position(|arg| arg == "--error-format=json")
+            .expect("clippy should get its error format");
+        assert_eq!(
+            args.get(at + 1..at + 7),
+            Some(
+                [
+                    "--extern",
+                    "proj=/t/debug/deps/libproj-1.rmeta",
+                    "-L",
+                    "dependency=/t/debug/deps",
+                    "-W",
+                    "clippy::pedantic",
+                ]
+                .map(OsString::from)
+                .as_slice()
+            ),
+            "{args:?}"
+        );
+        assert_eq!(args.last(), Some(&OsString::from("-")), "{args:?}");
     }
 
     /// Writes an executable `#!/bin/sh` stub named `name` in `dir`.

@@ -418,11 +418,15 @@ fn fix_never_deletes_a_plain_comment_line_inside_a_doc_comment_block() {
     );
 }
 
-/// A directory outside the checkout holding stub `rustfmt` and `clippy-driver`, each appending
-/// one line per run to its own record and `rustfmt` printing its stdin.
+/// A directory outside the checkout holding stub `rustfmt`, `clippy-driver` and `cargo`, each
+/// appending one line per run to its own record and `rustfmt` printing its stdin.
 fn rust_stubs() -> tempfile::TempDir {
     let dir = tempfile::TempDir::new().expect("a temporary directory should be creatable");
-    for (name, tail) in [("rustfmt", "exec /bin/cat\n"), ("clippy-driver", "")] {
+    for (name, tail) in [
+        ("rustfmt", "exec /bin/cat\n"),
+        ("clippy-driver", ""),
+        ("cargo", ""),
+    ] {
         let script = format!(
             "#!/bin/sh\necho run >> '{}/{name}-runs'\n{tail}",
             dir.path().display()
@@ -455,7 +459,7 @@ const TRUST_OFF: &str =
 const AWAITS_AUDIT: &str = "clippy doesn't run yet, even in a trusted project";
 
 /// Runs `supdoc args` on `project` with `stubs` as the only `PATH` entry and `vars` besides,
-/// asserting it exits `exit` and that clippy never started.
+/// asserting it exits `exit` and that neither clippy nor cargo ever started.
 fn check_with_stubs(
     project: &Project,
     stubs: &tempfile::TempDir,
@@ -471,6 +475,12 @@ fn check_with_stubs(
         stub_record(stubs.path(), "clippy-driver-runs"),
         "",
         "no clippy-driver process may start: {}",
+        run.stdout
+    );
+    assert_eq!(
+        stub_record(stubs.path(), "cargo-runs"),
+        "",
+        "no cargo process may start: {}",
         run.stdout
     );
     run
