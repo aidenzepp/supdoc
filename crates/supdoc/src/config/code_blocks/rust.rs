@@ -1,9 +1,12 @@
 //! `[features.code-blocks.rust]`: the table that turns checking Rust code blocks on.
 
-use super::{Formatter, deserialize_formatter};
+use super::{Choice, deserialize_choice};
 
 /// The Rust formatters supdoc knows.
 const KNOWN: &[&str] = &["rustfmt"];
+
+/// The Rust linters supdoc knows.
+const LINTERS: &[&str] = &["clippy"];
 
 /// A Rust edition rustfmt accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,15 +46,18 @@ impl Edition {
     }
 }
 
-/// The `[features.code-blocks.rust]` table, exactly as written. Its keys are `formatter` and
-/// `edition`; any other key is refused as `config-parse`, and an empty table turns the language
+/// The `[features.code-blocks.rust]` table, exactly as written. Its keys are `formatter`,
+/// `linter` and `edition`; any other key is refused as `config-parse`, and an empty table turns the language
 /// on.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawRust {
     /// `"rustfmt"` or `false`; unset takes the default.
     #[serde(default, deserialize_with = "formatter")]
-    pub(super) formatter: Option<Formatter>,
+    pub(super) formatter: Option<Choice>,
+    /// `"clippy"` or `false`; unset takes the default.
+    #[serde(default, deserialize_with = "linter")]
+    pub(super) linter: Option<Choice>,
     /// `"2015"`, `"2018"`, `"2021"` or `"2024"`; unset reads the root's `Cargo.toml`.
     #[serde(default, deserialize_with = "edition")]
     pub(super) edition: Option<Edition>,
@@ -83,6 +89,15 @@ fn edition<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Edition>, D:
 /// # Errors
 ///
 /// The deserializer's error for any value but `"rustfmt"` or `false`.
-fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Formatter>, D::Error> {
-    deserialize_formatter(d, "rust", KNOWN)
+fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D::Error> {
+    deserialize_choice(d, "rust", "formatter", KNOWN)
+}
+
+/// Reads `linter` against Rust's known tools.
+///
+/// # Errors
+///
+/// The deserializer's error for any value but `"clippy"` or `false`.
+fn linter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D::Error> {
+    deserialize_choice(d, "rust", "linter", LINTERS)
 }

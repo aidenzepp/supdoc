@@ -86,7 +86,7 @@
       "type": "object"
     },
     "CodeBlockCounts": {
-      "description": "How many blocks are in each state. `blocks` is the sum of the others.",
+      "description": "How many blocks are in each state, and how many steps were off or skipped. `blocks` is the\nsum of the state counts; the step counts are apart from them, so a block whose format step is\noff and whose lint step passed counts in both `passed` and `format_off`.",
       "properties": {
         "blocks": {
           "description": "Every block counted.",
@@ -101,25 +101,25 @@
           "type": "integer"
         },
         "format_off": {
-          "description": "Blocks whose language has `formatter = false`.",
+          "description": "Format steps off: blocks whose language has `formatter = false`.",
           "format": "uint",
           "minimum": 0,
           "type": "integer"
         },
         "format_skipped": {
-          "description": "Blocks the author marked `no_format(...)`.",
+          "description": "Format steps skipped: blocks the author marked `no_format(...)`.",
           "format": "uint",
           "minimum": 0,
           "type": "integer"
         },
         "lint_off": {
-          "description": "Blocks whose language has `linter = false`.",
+          "description": "Lint steps off: blocks whose language has `linter = false`.",
           "format": "uint",
           "minimum": 0,
           "type": "integer"
         },
         "lint_skipped": {
-          "description": "Blocks the author marked `no_lint(...)`.",
+          "description": "Lint steps skipped: blocks the author marked `no_lint(...)`.",
           "format": "uint",
           "minimum": 0,
           "type": "integer"
@@ -190,6 +190,10 @@
           "$ref": "#/$defs/SourcePath",
           "description": "The doc or source file, relative to the project root."
         },
+        "format": {
+          "description": "What the format step did: `ran`, `off`, `skipped` or `not_run`.",
+          "type": "string"
+        },
         "language": {
           "description": "The language tag the block is read as. Left out for an untagged block outside Rust docs.",
           "type": [
@@ -203,6 +207,10 @@
           "minimum": 0,
           "type": "integer"
         },
+        "lint": {
+          "description": "What the lint step did: `ran`, `off`, `skipped` or `not_run`.",
+          "type": "string"
+        },
         "reason": {
           "description": "Why the block is in that state, when it has a reason.",
           "type": [
@@ -211,7 +219,7 @@
           ]
         },
         "state": {
-          "description": "`passed`, `failed`, `stale`, `opted_out`, `not_checked`, `unknown_language` or\n`tool_missing`.",
+          "description": "`passed`, `failed`, `stale`, `opted_out`, `not_checked`, `unknown_language` or\n`tool_missing`: `failed` when a step that ran failed, `passed` when the steps that ran all\npassed.",
           "type": "string"
         },
         "uses": {
@@ -227,6 +235,8 @@
         "line",
         "column",
         "state",
+        "format",
+        "lint",
         "uses"
       ],
       "type": "object"

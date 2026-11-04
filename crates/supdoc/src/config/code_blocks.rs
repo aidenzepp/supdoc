@@ -48,67 +48,73 @@ impl Language {
     }
 }
 
-/// A language's `formatter` key, validated against the formatters known for that language.
+/// A language's `formatter` or `linter` key, validated against the tools known for that language
+/// and step.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Formatter {
-    /// `formatter = false`: the format step is off for the language.
+pub(crate) enum Choice {
+    /// `false`: the step is off for the language.
     Off,
-    /// `formatter = "<name>"`: one of the language's known formatters.
+    /// `"<name>"`: one of the language's known tools for the step.
     Named(String),
 }
 
-/// Reads a `formatter` value: a name from `known`, or `false`. A `{ command = [...] }` table is
-/// refused until custom commands have a trust model.
+/// Reads a `formatter` or `linter` value, named by `key`: a name from `known`, or `false`. A
+/// `{ command = [...] }` table is refused until custom commands have a trust model.
 ///
 /// # Errors
 ///
 /// The deserializer's error when the value is `true`, a table, an unknown name or any other type.
-fn deserialize_formatter<'de, D: serde::Deserializer<'de>>(
+fn deserialize_choice<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
     language: &'static str,
+    key: &'static str,
     known: &'static [&'static str],
-) -> Result<Option<Formatter>, D::Error> {
+) -> Result<Option<Choice>, D::Error> {
     use std::fmt;
 
     use serde::de::{Error, MapAccess, Visitor};
 
     struct Reader {
         language: &'static str,
+        key: &'static str,
         known: &'static [&'static str],
     }
     impl<'de> Visitor<'de> for Reader {
-        type Value = Formatter;
+        type Value = Choice;
 
         fn expecting(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(out, "a {} formatter name or `false`", self.language)
+            write!(out, "a {} {} name or `false`", self.language, self.key)
         }
 
-        fn visit_bool<E: Error>(self, value: bool) -> Result<Formatter, E> {
+        fn visit_bool<E: Error>(self, value: bool) -> Result<Choice, E> {
             if value {
                 Err(E::custom(format!(
-                    "`formatter = true` names no tool; write one of {} or `false`",
+                    "`{} = true` names no tool; write one of {} or `false`",
+                    self.key,
                     tool_list(self.known)
                 )))
             } else {
-                Ok(Formatter::Off)
+                Ok(Choice::Off)
             }
         }
 
-        fn visit_str<E: Error>(self, value: &str) -> Result<Formatter, E> {
+        fn visit_str<E: Error>(self, value: &str) -> Result<Choice, E> {
             if self.known.contains(&value) {
-                Ok(Formatter::Named(value.to_owned()))
+                Ok(Choice::Named(value.to_owned()))
             } else {
                 Err(E::custom(format!(
-                    "`{value}` isn't a known {} formatter; the known tools are {}",
+                    "`{value}` isn't a known {} {}; the known tools are {}",
                     self.language,
+                    self.key,
                     tool_list(self.known)
                 )))
             }
         }
 
-        fn visit_map<A: MapAccess<'de>>(self, _map: A) -> Result<Formatter, A::Error> {
+        fn visit_map<A: MapAccess<'de>>(self, _map: A) -> Result<Choice, A::Error> {
             Err(A::Error::custom(format!(
-                "a custom formatter command needs trust and arrives in a later release; the known {} tools are {}",
+                "a custom {} command needs trust and arrives in a later release; the known {} tools are {}",
+                self.key,
                 self.language,
                 tool_list(self.known)
             )))
@@ -116,7 +122,11 @@ fn deserialize_formatter<'de, D: serde::Deserializer<'de>>(
     }
 
     deserializer
-        .deserialize_any(Reader { language, known })
+        .deserialize_any(Reader {
+            language,
+            key,
+            known,
+        })
         .map(Some)
 }
 
@@ -135,15 +145,21 @@ struct Table {
     /// The language's table is written.
     written: bool,
     /// The nearest `formatter` written.
-    formatter: Option<Formatter>,
+    formatter: Option<Choice>,
+    /// The nearest `linter` written.
+    linter: Option<Choice>,
 }
 
 impl Table {
-    /// This table with `raw`'s keys behind it: the nearer value of each key wins.
-    fn behind(self, written: bool, formatter: Option<Formatter>) -> Self {
+    /// This table with a farther layer's keys behind it: the nearer value of each key wins.
+    /// `steps` is that layer's `formatter` and `linter`, when it writes the table.
+    fn behind(self, steps: Option<(Option<Choice>, Option<Choice>)>) -> Self {
+        let written = steps.is_some();
+        let (formatter, linter) = steps.unwrap_or_default();
         Self {
             written: self.written || written,
             formatter: self.formatter.or(formatter),
+            linter: self.linter.or(linter),
         }
     }
 }
@@ -228,8 +244,14 @@ impl CodeBlocks {
 
     /// `language`'s `formatter` key: `None` selects its default formatter.
     #[must_use]
-    pub(crate) const fn formatter(&self, language: Language) -> Option<&Formatter> {
+    pub(crate) const fn formatter(&self, language: Language) -> Option<&Choice> {
         self.table(language).formatter.as_ref()
+    }
+
+    /// `language`'s `linter` key: `None` selects its default linter.
+    #[must_use]
+    pub(crate) const fn linter(&self, language: Language) -> Option<&Choice> {
+        self.table(language).linter.as_ref()
     }
 
     /// The Rust `edition` key, when written.
@@ -301,7 +323,7 @@ pub(super) fn merge(
             rust: nearer
                 .languages
                 .rust
-                .behind(rust.is_some(), rust.and_then(|raw| raw.formatter)),
+                .behind(rust.map(|raw| (raw.formatter, raw.linter))),
             dialect: nearer
                 .languages
                 .dialect
@@ -309,11 +331,11 @@ pub(super) fn merge(
             shell: nearer
                 .languages
                 .shell
-                .behind(shell.is_some(), shell.and_then(|raw| raw.formatter)),
+                .behind(shell.map(|raw| (raw.formatter, raw.linter))),
             python: nearer
                 .languages
                 .python
-                .behind(python.is_some(), python.and_then(|raw| raw.formatter)),
+                .behind(python.map(|raw| (raw.formatter, raw.linter))),
         },
     })
 }
@@ -324,7 +346,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{Dialect, Edition, Formatter, Language};
+    use super::{Choice, Dialect, Edition, Language};
     use crate::config::Config;
     use crate::exit::ExitStatus;
     use crate::path::AbsolutePath;
@@ -593,9 +615,9 @@ mod tests {
 
         assert_eq!(
             code_blocks.formatter(Language::Python),
-            Some(&Formatter::Named("black".to_owned()))
+            Some(&Choice::Named("black".to_owned()))
         );
-        assert_eq!(code_blocks.formatter(Language::Rust), Some(&Formatter::Off));
+        assert_eq!(code_blocks.formatter(Language::Rust), Some(&Choice::Off));
     }
 
     #[test]
@@ -617,6 +639,87 @@ mod tests {
         let message = refused("shell", "formatter = { command = [\"shfmt\"] }");
 
         assert!(message.contains("needs trust"), "got {message}");
+    }
+
+    #[test]
+    fn each_language_selects_its_known_linter_or_false() {
+        let dir = tree(&[(
+            "supdoc.config.toml",
+            "[features.code-blocks.rust]\nlinter = \"clippy\"\n\
+             [features.code-blocks.shell]\nlinter = \"shellcheck\"\n\
+             [features.code-blocks.python]\nlinter = false\n",
+        )]);
+
+        let config = Config::load(&at(&dir, ".")).expect("the fixture config should load");
+        let code_blocks = config.code_blocks().expect("the table is written");
+
+        assert_eq!(
+            code_blocks.linter(Language::Rust),
+            Some(&Choice::Named("clippy".to_owned()))
+        );
+        assert_eq!(
+            code_blocks.linter(Language::Shell),
+            Some(&Choice::Named("shellcheck".to_owned()))
+        );
+        assert_eq!(code_blocks.linter(Language::Python), Some(&Choice::Off));
+    }
+
+    #[test]
+    fn an_unset_linter_takes_the_default_and_the_child_overrides_the_parent() {
+        let dir = tree(&[
+            (
+                "supdoc.config.toml",
+                "[features.code-blocks.python]\nlinter = false\n",
+            ),
+            (
+                "apps/web/supdoc.config.toml",
+                "extends = \"../../supdoc.config.toml\"\n[features.code-blocks.python]\nlinter = \"ruff\"\n",
+            ),
+            (
+                "apps/api/supdoc.config.toml",
+                "[features.code-blocks.python]\n",
+            ),
+        ]);
+
+        let child = Config::load(&at(&dir, "apps/web")).expect("the child config should load");
+        let unset = Config::load(&at(&dir, "apps/api")).expect("the unset config should load");
+
+        assert_eq!(
+            child
+                .code_blocks()
+                .and_then(|blocks| blocks.linter(Language::Python)),
+            Some(&Choice::Named("ruff".to_owned())),
+            "the child's linter should win"
+        );
+        assert_eq!(
+            unset
+                .code_blocks()
+                .and_then(|blocks| blocks.linter(Language::Python)),
+            None,
+            "an unset linter should take the default"
+        );
+    }
+
+    #[test]
+    fn an_unknown_linter_name_is_refused_naming_the_known_tools() {
+        let message = refused("python", "linter = \"pylint\"");
+
+        assert!(message.contains("`ruff`"), "got {message}");
+    }
+
+    #[test]
+    fn a_linter_from_another_language_is_refused() {
+        let message = refused("shell", "linter = \"clippy\"");
+
+        assert!(message.contains("`shellcheck`"), "got {message}");
+    }
+
+    #[test]
+    fn a_custom_linter_command_table_or_true_is_refused() {
+        let command = refused("rust", "linter = { command = [\"clippy\"] }");
+        let _true = refused("rust", "linter = true");
+
+        assert!(command.contains("needs trust"), "got {command}");
     }
 
     #[test]

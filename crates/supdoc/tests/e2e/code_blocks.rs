@@ -1130,6 +1130,80 @@ fn selection_no_format_counts_format_skipped_with_its_reason() {
 }
 
 #[test]
+fn lint_select_linter_false_counts_lint_off_beside_the_format_outcome() {
+    let project = project_with_shell_blocks();
+    project.write(
+        "supdoc.config.toml",
+        "[features.code-blocks]\n[features.code-blocks.shell]\nlinter = false\n",
+    );
+    let outside = counting_shfmt();
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json", "-v"], &[("PATH", outside.path())])
+        .assert_exit(0)
+        .json();
+
+    assert_eq!(at(&json, "/data/summary/code_blocks/lint_off"), 2, "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 2, "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/state"), "passed", "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/format"), "ran", "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/lint"), "off", "{json}");
+}
+
+#[test]
+fn lint_select_no_lint_counts_lint_skipped_with_its_reason() {
+    let project = project_with_shell_blocks();
+    project.write(
+        "docs/blocks.md",
+        "# Blocks\n\n```sh no_lint(needs a server)\necho hi\n```\n\n```sh\necho bye\n```\n",
+    );
+    let outside = counting_shfmt();
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json", "-v"], &[("PATH", outside.path())])
+        .assert_exit(0)
+        .json();
+
+    assert_eq!(
+        at(&json, "/data/summary/code_blocks/lint_skipped"),
+        1,
+        "{json}"
+    );
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 2, "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/lint"), "skipped", "{json}");
+    assert_eq!(
+        at(&json, "/data/code_blocks/0/reason"),
+        "needs a server",
+        "{json}"
+    );
+    assert_eq!(at(&json, "/data/code_blocks/1/lint"), "not_run", "{json}");
+}
+
+#[test]
+fn lint_select_an_unknown_linter_or_a_command_table_exits_78() {
+    for line in [
+        "[features.code-blocks.python]\nlinter = \"pylint\"",
+        "[features.code-blocks.rust]\nlinter = \"shellcheck\"",
+        "[features.code-blocks.shell]\nlinter = { command = [\"shellcheck\"] }",
+    ] {
+        let project = project_with_shell_blocks();
+        project.write(
+            "supdoc.config.toml",
+            &format!("[features.code-blocks]\n{line}\n"),
+        );
+
+        let run = project.supdoc(&["check", "--json"]);
+        let _checked = run.assert_exit(78);
+
+        assert!(
+            run.stderr.contains("\"config-parse\""),
+            "`{line}`: {}",
+            run.stderr
+        );
+    }
+}
+
+#[test]
 fn selection_dialect_posix_reaches_shfmt_as_ln_posix() {
     let json = check_shell_with(
         "[features.code-blocks]\n[features.code-blocks.shell]\ndialect = \"posix\"\n",
