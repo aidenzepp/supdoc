@@ -407,11 +407,14 @@ impl Found {
 /// compiled, [`before_compiling`] applies stricter rules.
 #[must_use]
 pub(crate) fn compile_time_read(input: &str) -> Scan {
-    scan_capped(input, false)
+    scan_capped(input, None)
 }
 
-/// [`compile_time_read`] with the rules for a block about to be compiled, which renames and
-/// macros can't get past. Besides its findings, a block is refused when:
+/// [`compile_time_read`] with the rules for a block about to be compiled as `edition`, which
+/// renames and macros can't get past. The block is read with the token boundaries and keywords
+/// rustc gives `edition`: before 2021, `c"` and `cr#"` start no literal, so `cr#".."#` is `cr`,
+/// `#` and an ordinary string; `async`, `await` and `dyn` are identifiers in 2015, and `gen`
+/// before 2024. Besides its findings, a block is refused when:
 ///
 /// - `include`, `include_str`, `include_bytes`, `env` or `option_env` appears as an identifier
 ///   anywhere except as a path segment followed by `::` (`std::env::var`), so `use
@@ -421,12 +424,13 @@ pub(crate) fn compile_time_read(input: &str) -> Scan {
 ///   `mod name;` from a file beside its working directory, and a macro can turn an inline module
 ///   into one.
 #[must_use]
-pub(crate) fn before_compiling(input: &str) -> Scan {
-    scan_capped(input, true)
+pub(crate) fn before_compiling(input: &str, edition: Edition) -> Scan {
+    scan_capped(input, Some(edition))
 }
 
-/// [`scan`] of `input` under [`MAX_SCAN_BYTES`], `compiles` choosing [`before_compiling`]'s rules.
-fn scan_capped(input: &str, compiles: bool) -> Scan {
+/// [`scan`] of `input` under [`MAX_SCAN_BYTES`], a `compiles` edition choosing
+/// [`before_compiling`]'s rules.
+fn scan_capped(input: &str, compiles: Option<Edition>) -> Scan {
     if input.len() > MAX_SCAN_BYTES {
         return Scan::TooLarge;
     }
@@ -434,8 +438,11 @@ fn scan_capped(input: &str, compiles: bool) -> Scan {
 }
 
 /// The first compile-time read in `input`, by [`compile_time_read`]'s rules, and by
-/// [`before_compiling`]'s too when `compiles` holds, without the size cap.
-fn scan(input: &str, compiles: bool) -> Option<Found> {
+/// [`before_compiling`]'s for the edition `compiles` names, when it names one, without the size
+/// cap. [`compile_time_read`] lexes as the newest edition does.
+fn scan(input: &str, compiles: Option<Edition>) -> Option<Found> {
+    let edition = compiles.unwrap_or(Edition::E2024);
+    let compiles = compiles.is_some();
     if input.starts_with("#!") && !input.starts_with("#![") {
         return Some(Found::Unscannable(
             "a `#!` first line that isn't an inner attribute",
@@ -444,7 +451,7 @@ fn scan(input: &str, compiles: bool) -> Option<Found> {
     if compiles && starts_with_frontmatter(input) {
         return Some(Found::Unscannable(FRONTMATTER));
     }
-    let mut lexer = Tokens::new(input, compiles);
+    let mut lexer = Tokens::new(input, compiles, edition);
     let tokens: Vec<Token<'_>> = lexer.by_ref().collect();
     // Each token, a raw identifier read as the identifier it names.
     let at = |index: Option<usize>| {
@@ -478,7 +485,7 @@ fn scan(input: &str, compiles: bool) -> Option<Found> {
                             .is_some_and(|token| matches!(token, Token::RawIdent(_)));
                         let qualified = before_that == Token::Punct(':')
                             && at(index.checked_sub(3)) == Token::Punct(':');
-                        if let Some(found) = unlisted_macro(word, raw, qualified, next) {
+                        if let Some(found) = unlisted_macro(word, raw, qualified, next, edition) {
                             return Some(found);
                         }
                     }
@@ -611,7 +618,8 @@ const ALLOWED_MACROS: [&str; 28] = [
     "concat",
 ];
 
-/// The keywords that can stand before a `!` that negates: `if !(..)`, `return !x`.
+/// The keywords that can stand before a `!` that negates: `if !(..)`, `return !x`. Some are
+/// keywords only from an edition on; [`is_keyword`] says which.
 const KEYWORDS: [&str; 39] = [
     "as", "async", "await", "box", "break", "const", "continue", "crate", "do", "dyn", "else",
     "enum", "extern", "false", "fn", "for", "gen", "if", "impl", "in", "let", "loop", "match",
@@ -619,13 +627,31 @@ const KEYWORDS: [&str; 39] = [
     "trait", "true", "type", "unsafe", "use",
 ];
 
-/// The refusal for `name!` followed by `next`, before compiling: any `macro_rules!`; a call
-/// (`name!` then a delimiter) of a macro not in [`ALLOWED_MACROS`]; and a call through a path
-/// (`qualified`: `::` before `name`). `None` for an unqualified allowed call and for a keyword's
-/// negating `!`. A `raw` identifier (`r#if`) is never a keyword.
-fn unlisted_macro(name: &str, raw: bool, qualified: bool, next: Token<'_>) -> Option<Found> {
+/// Whether `name` is one of the [`KEYWORDS`] in `edition`: `async`, `await` and `dyn` are
+/// identifiers in 2015, and `gen` is one before 2024.
+fn is_keyword(name: &str, edition: Edition) -> bool {
+    let identifier = match name {
+        "async" | "await" | "dyn" => edition == Edition::E2015,
+        "gen" => edition != Edition::E2024,
+        _ => false,
+    };
+    !identifier && KEYWORDS.contains(&name)
+}
+
+/// The refusal for `name!` followed by `next`, before compiling as `edition`: any
+/// `macro_rules!`; a call (`name!` then a delimiter) of a macro not in [`ALLOWED_MACROS`]; and a
+/// call through a path (`qualified`: `::` before `name`). `None` for an unqualified allowed call
+/// and for a keyword's negating `!`. A `raw` identifier (`r#if`) is never a keyword, nor is a
+/// word `edition` doesn't reserve.
+fn unlisted_macro(
+    name: &str,
+    raw: bool,
+    qualified: bool,
+    next: Token<'_>,
+    edition: Edition,
+) -> Option<Found> {
     let call = matches!(next, Token::Punct('(' | '[' | '{'));
-    let negation = !raw && KEYWORDS.contains(&name);
+    let negation = !raw && is_keyword(name, edition);
     if name == "macro_rules" || (call && !negation && !ALLOWED_MACROS.contains(&name)) {
         return Some(Found::UnlistedMacro(name.to_owned()));
     }
@@ -820,17 +846,21 @@ struct Tokens<'text> {
     strict: bool,
     /// Tokens already read and not yet returned, the next one last.
     queued: Vec<Token<'text>>,
+    /// Whether `c` and `cr` are literal prefixes, as they are from edition 2021 on. Before it,
+    /// rustc reads `cr#".."#` as `cr`, `#` and an ordinary string.
+    c_strings: bool,
 }
 
 impl<'text> Tokens<'text> {
-    /// The tokens of `text`, `strict` when the block is about to be compiled.
-    const fn new(text: &'text str, strict: bool) -> Self {
+    /// The tokens of `text` in `edition`, `strict` when the block is about to be compiled.
+    fn new(text: &'text str, strict: bool, edition: Edition) -> Self {
         Self {
             text,
             at: 0,
             unterminated: None,
             strict,
             queued: Vec::new(),
+            c_strings: matches!(edition, Edition::E2021 | Edition::E2024),
         }
     }
 
@@ -1070,8 +1100,9 @@ impl<'text> Tokens<'text> {
     }
 
     /// Reads an identifier, a raw identifier, a prefixed or raw string, or a number the cursor is
-    /// on. A `r#`, `br#` or `cr#` that starts neither a raw string nor a raw identifier fails a
-    /// strict scan closed, as does a raw string with more than 255 `#`s, which rustc rejects.
+    /// on. A `r#`, `br#` or (from edition 2021) `cr#` that starts neither a raw string nor a raw
+    /// identifier fails a strict scan closed, as does a raw string with more than 255 `#`s, which
+    /// rustc rejects. Before edition 2021, `c` and `cr` are identifiers like any other.
     fn word(&mut self) -> Token<'text> {
         let start = self.at;
         self.bump_while(is_ident_char);
@@ -1079,7 +1110,7 @@ impl<'text> Tokens<'text> {
         if word.starts_with(|c: char| c.is_ascii_digit()) {
             return Token::Other;
         }
-        let raw_prefix = matches!(word, "r" | "br" | "cr");
+        let raw_prefix = matches!(word, "r" | "br") || (self.c_strings && word == "cr");
         let (hashes, quote) = self.hashes_then_quote();
         if raw_prefix && quote {
             if hashes > 255 {
@@ -1088,7 +1119,8 @@ impl<'text> Tokens<'text> {
             self.raw_string(hashes);
             return Token::Other;
         }
-        if matches!(word, "b" | "c") && self.peek(0) == Some('"') {
+        let string_prefix = word == "b" || (self.c_strings && word == "c");
+        if string_prefix && self.peek(0) == Some('"') {
             self.string();
             return Token::Other;
         }
@@ -1361,7 +1393,7 @@ mod tests {
             ("100k raw strings", "r#\"\"".repeat(100_000)),
         ] {
             let started = Instant::now();
-            let _found = scan(&block, true);
+            let _found = scan(&block, Some(Edition::E2024));
             let took = started.elapsed();
 
             assert!(took < limit, "{name} took {took:?}, over {limit:?}");
@@ -1641,7 +1673,11 @@ mod tests {
                 Scan::Read(Found::PathAttribute),
             ),
         ] {
-            assert_eq!(before_compiling(block), refused, "{block:?}");
+            assert_eq!(
+                before_compiling(block, Edition::E2024),
+                refused,
+                "{block:?}"
+            );
         }
     }
 
@@ -1661,7 +1697,11 @@ mod tests {
                 outline(Some("x")),
             ),
         ] {
-            assert_eq!(before_compiling(block), refused, "{block:?}");
+            assert_eq!(
+                before_compiling(block, Edition::E2024),
+                refused,
+                "{block:?}"
+            );
         }
         assert_eq!(
             compile_time_read("mod helpers;\nuse std::env;\n"),
@@ -1680,7 +1720,11 @@ mod tests {
             "fn environment() -> bool { true != false }\n",
             "#[expect(clippy::ptr_arg, reason = \"x\")]\npub fn f(v: &Vec<i32>) {}\n",
         ] {
-            assert_eq!(before_compiling(block), Scan::Clean, "{block:?}");
+            assert_eq!(
+                before_compiling(block, Edition::E2024),
+                Scan::Clean,
+                "{block:?}"
+            );
         }
     }
 
@@ -1710,7 +1754,11 @@ mod tests {
             ),
             ("#[::core::prelude::v1::test]\nfn f() {}\n", unlisted("")),
         ] {
-            assert_eq!(before_compiling(block), refused, "{block:?}");
+            assert_eq!(
+                before_compiling(block, Edition::E2024),
+                refused,
+                "{block:?}"
+            );
         }
     }
 
@@ -1723,7 +1771,7 @@ mod tests {
                      #[rustfmt::skip]\n#[inline]\n#[track_caller]\npub fn f() {}\n\
                      #[diagnostic::on_unimplemented(message = \"x\")]\npub trait T {}\n";
 
-        assert_eq!(before_compiling(block), Scan::Clean);
+        assert_eq!(before_compiling(block, Edition::E2024), Scan::Clean);
     }
 
     #[test]
@@ -1736,7 +1784,7 @@ mod tests {
             ("# $b fn f() {}\n", "a `#` that doesn't start an attribute"),
         ] {
             assert_eq!(
-                before_compiling(block),
+                before_compiling(block, Edition::E2024),
                 Scan::Read(Found::Unscannable(what)),
                 "{block:?}"
             );
@@ -1746,18 +1794,18 @@ mod tests {
     #[test]
     fn before_compiling_macro_export_passes_and_an_unsafe_wrapper_is_refused() {
         assert_eq!(
-            before_compiling("#[macro_export]\npub fn f() {}\n"),
+            before_compiling("#[macro_export]\npub fn f() {}\n", Edition::E2024),
             Scan::Clean
         );
         assert_eq!(
-            before_compiling("#[unsafe(no_mangle)]\npub fn f() {}\n"),
+            before_compiling("#[unsafe(no_mangle)]\npub fn f() {}\n", Edition::E2024),
             Scan::Read(Found::Attribute("unsafe".to_owned()))
         );
     }
 
     /// The kinds of `input`'s tokens, read strictly, and what the scan made of the text after.
     fn kinds(input: &str) -> (Vec<Token<'_>>, Option<Found>) {
-        let mut lexer = Tokens::new(input, true);
+        let mut lexer = Tokens::new(input, true, Edition::E2024);
         let tokens = lexer.by_ref().collect();
         (tokens, lexer.unterminated)
     }
@@ -1830,7 +1878,7 @@ mod tests {
         );
         for block in [&probe_08, &probe_10, &combining] {
             assert!(
-                matches!(before_compiling(block), Scan::Read(_)),
+                matches!(before_compiling(block, Edition::E2024), Scan::Read(_)),
                 "{block:?}"
             );
         }
@@ -1849,9 +1897,12 @@ mod tests {
             "fn f() {{ println!(\"{{}}\", /// x\n[debugger_visualizer(gdb_script_file = \"{path}\")]); }}\n"
         );
 
-        assert!(matches!(before_compiling(&probe_01), Scan::Read(_)));
+        assert!(matches!(
+            before_compiling(&probe_01, Edition::E2024),
+            Scan::Read(_)
+        ));
         assert_eq!(
-            before_compiling(&in_a_call),
+            before_compiling(&in_a_call, Edition::E2024),
             Scan::Read(Found::Unscannable("a `#` inside a macro call's input"))
         );
         assert_eq!(
@@ -1871,7 +1922,8 @@ mod tests {
         }
         assert_eq!(
             before_compiling(
-                "//! Crate docs.\n/// Adds.\npub fn f() {}\n/** More. */\npub fn g() {}\n"
+                "//! Crate docs.\n/// Adds.\npub fn f() {}\n/** More. */\npub fn g() {}\n",
+                Edition::E2024
             ),
             Scan::Clean
         );
@@ -1892,7 +1944,11 @@ mod tests {
                 unlisted("as println"),
             ),
         ] {
-            assert_eq!(before_compiling(block), refused, "{block:?}");
+            assert_eq!(
+                before_compiling(block, Edition::E2024),
+                refused,
+                "{block:?}"
+            );
         }
     }
 
@@ -1902,7 +1958,7 @@ mod tests {
                      assert_eq!(v.len(), 2);\n    if !(v.is_empty()) { println!(\"x\"); }\n    \
                      let _ = 1 != 2 && !matches!(v.first(), None);\n}\n";
 
-        assert_eq!(before_compiling(block), Scan::Clean);
+        assert_eq!(before_compiling(block, Edition::E2024), Scan::Clean);
     }
 
     #[test]
@@ -1921,7 +1977,7 @@ mod tests {
             ("fn caf\u{E9}() {}\n", '\u{E9}'),
         ] {
             assert_eq!(
-                before_compiling(block),
+                before_compiling(block, Edition::E2024),
                 Scan::Read(Found::Character(c)),
                 "{block:?}"
             );
@@ -1945,7 +2001,11 @@ mod tests {
             "/// Caf\u{E9}.\npub fn f() {}\n",
             "const C: char = '\u{E9}';\n",
         ] {
-            assert_eq!(before_compiling(block), Scan::Clean, "{block:?}");
+            assert_eq!(
+                before_compiling(block, Edition::E2024),
+                Scan::Clean,
+                "{block:?}"
+            );
         }
     }
 
@@ -1956,13 +2016,16 @@ mod tests {
             ("fn f() { r#match!(x); }\n", "match"),
         ] {
             assert_eq!(
-                before_compiling(block),
+                before_compiling(block, Edition::E2024),
                 Scan::Read(Found::UnlistedMacro(name.to_owned())),
                 "{block:?}"
             );
         }
         assert_eq!(
-            before_compiling("fn f(x: bool) -> bool { if !(x) { return !x; } x }\n"),
+            before_compiling(
+                "fn f(x: bool) -> bool { if !(x) { return !x; } x }\n",
+                Edition::E2024
+            ),
             Scan::Clean
         );
     }
@@ -1977,15 +2040,18 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    before_compiling(block),
+                    before_compiling(block, Edition::E2024),
                     Scan::Read(Found::QualifiedMacro(_))
                 ),
                 "{block:?}: {:?}",
-                before_compiling(block)
+                before_compiling(block, Edition::E2024)
             );
         }
         assert_eq!(
-            before_compiling("fn f() { println!(\"x\"); let _ = std::env::args(); }\n"),
+            before_compiling(
+                "fn f() { println!(\"x\"); let _ = std::env::args(); }\n",
+                Edition::E2024
+            ),
             Scan::Clean
         );
     }
@@ -2005,15 +2071,149 @@ mod tests {
             "----\n[package]\n----\nfn main() {}\n".to_owned(),
         ] {
             assert_eq!(
-                before_compiling(&block),
+                before_compiling(&block, Edition::E2024),
                 Scan::Read(Found::Unscannable(FRONTMATTER)),
                 "{block:?}"
             );
         }
         assert_eq!(
-            before_compiling("fn main() {}\nconst S: &str = \"\n---\n\";\n"),
+            before_compiling(
+                "fn main() {}\nconst S: &str = \"\n---\n\";\n",
+                Edition::E2024
+            ),
             Scan::Clean,
             "a `---` after the first line isn't frontmatter"
         );
+    }
+
+    /// Asserts that `block` is refused under each of `editions`, as the `#` that rustc reads
+    /// after the identifier `cr` before edition 2021.
+    fn assert_hash_in_call_refused(block: &str, editions: &[Edition]) {
+        for &edition in editions {
+            assert_eq!(
+                before_compiling(block, edition),
+                Scan::Read(Found::Unscannable("a `#` inside a macro call's input")),
+                "{edition:?}: {block:?}"
+            );
+        }
+    }
+
+    /// The editions in which `c` and `cr` are identifiers rather than literal prefixes.
+    const BEFORE_C_STRINGS: [Edition; 2] = [Edition::E2015, Edition::E2018];
+
+    #[test]
+    fn before_compiling_probe_e1_cr_before_2021_hides_no_include_str() {
+        assert_hash_in_call_refused(
+            "pub const A: &str = stringify!(cr#\" \");\n\
+             pub const B: &str = include_str!(\"/outside/nope/e1.txt\"); // \"#;\n",
+            &BEFORE_C_STRINGS,
+        );
+    }
+
+    #[test]
+    fn before_compiling_probe_e2_cr_before_2021_hides_no_include() {
+        assert_hash_in_call_refused(
+            "pub const A: &str = stringify!(cr#\" \");\n\
+             include!(\"/outside/secret.rs\"); // \"#;\n",
+            &BEFORE_C_STRINGS,
+        );
+    }
+
+    #[test]
+    fn before_compiling_probe_e3_cr_before_2021_hides_no_env() {
+        assert_hash_in_call_refused(
+            "pub const A: &str = stringify!(cr#\" \");\n\
+             pub const B: &str = env!(\"HOME\"); // \"#;\n",
+            &BEFORE_C_STRINGS,
+        );
+    }
+
+    #[test]
+    fn before_compiling_probe_e4_cr_with_two_hashes_before_2021_hides_no_include_str() {
+        assert_hash_in_call_refused(
+            "pub const A: &str = stringify!(cr##\" \"#);\n\
+             pub const B: &str = include_str!(\"/outside/nope/e4.txt\"); // \"##;\n",
+            &BEFORE_C_STRINGS,
+        );
+    }
+
+    #[test]
+    fn before_compiling_probe_e5_cr_before_2021_hides_no_path_module() {
+        assert_hash_in_call_refused(
+            "pub fn f() { println!(\"{}\", stringify!(cr#\" \")); }\n\
+             #[path = \"/outside/secret.rs\"] mod x; // \"#\n",
+            &BEFORE_C_STRINGS,
+        );
+    }
+
+    #[test]
+    fn before_compiling_c_is_an_identifier_before_2021_and_a_prefix_from_it() {
+        let c_string = "pub const S: &core::ffi::CStr = c\"plain\";\n";
+        let raw_c_string = "pub const S: &core::ffi::CStr = cr#\"a \"quoted\" word\"#;\n";
+        for edition in [Edition::E2021, Edition::E2024] {
+            assert_eq!(
+                before_compiling(c_string, edition),
+                Scan::Clean,
+                "{edition:?}"
+            );
+            assert_eq!(
+                before_compiling(raw_c_string, edition),
+                Scan::Clean,
+                "{edition:?}"
+            );
+        }
+        for edition in BEFORE_C_STRINGS {
+            assert_eq!(
+                before_compiling(c_string, edition),
+                Scan::Clean,
+                "{edition:?}"
+            );
+            assert_eq!(
+                before_compiling(raw_c_string, edition),
+                Scan::Read(Found::Unscannable("a `#` that doesn't start an attribute")),
+                "{edition:?}: `cr` then `#`"
+            );
+        }
+        for edition in [
+            Edition::E2015,
+            Edition::E2018,
+            Edition::E2021,
+            Edition::E2024,
+        ] {
+            assert_eq!(
+                before_compiling("pub const R: &[u8] = br#\"a \"b\"\"#;\n", edition),
+                Scan::Clean,
+                "{edition:?}: `br` is a prefix in every edition"
+            );
+        }
+    }
+
+    /// Asserts that calling the macro renamed to `name` is refused under each of `editions`,
+    /// in which `name` is an identifier and its `!` negates nothing.
+    fn assert_renamed_call_refused(name: &str, editions: &[Edition]) {
+        let block = format!("use std::thread_local as {name};\n{name}!{{ static X: u8 = 1; }}\n");
+        for &edition in editions {
+            assert_eq!(
+                before_compiling(&block, edition),
+                Scan::Read(Found::UnlistedMacro(name.to_owned())),
+                "{edition:?}: {block:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn before_compiling_probe_g1_gen_is_a_macro_name_before_2024() {
+        assert_renamed_call_refused("gen", &[Edition::E2015, Edition::E2018, Edition::E2021]);
+    }
+
+    #[test]
+    fn before_compiling_probe_g2_dyn_is_a_macro_name_in_2015() {
+        assert_renamed_call_refused("dyn", &[Edition::E2015]);
+    }
+
+    #[test]
+    fn before_compiling_probe_g3_async_is_a_macro_name_in_2015() {
+        assert_renamed_call_refused("async", &[Edition::E2015]);
+        assert_renamed_call_refused("await", &[Edition::E2015]);
     }
 }
