@@ -80,6 +80,24 @@ pub(crate) enum ReadError {
         size: usize,
     },
 
+    /// The keys of a data file hold more path segments than `max-key-segments` allows, so no
+    /// symbol table was built (SEC-1).
+    TooManyKeys {
+        /// The file being read.
+        path: AbsolutePath,
+        /// The ceiling in effect.
+        limit: u64,
+    },
+
+    /// The keys of a data file hold more bytes of path text than `max-key-path-size` allows, so
+    /// no symbol table was built (SEC-1).
+    KeyPathsTooLarge {
+        /// The file being read.
+        path: AbsolutePath,
+        /// The ceiling in effect, in bytes.
+        limit: u64,
+    },
+
     /// The cartridge for the file's language doesn't load: a supdoc bug that fails the whole run
     /// with exit code 70, never a finding about the file.
     CartridgeLoad {
@@ -107,6 +125,24 @@ const TIMEOUT_KNOBS: &str = "Raise the per-read limit with `parse-timeout` under
      `supdoc.config.toml`, `SUPDOC_PARSE_TIMEOUT` or `--parse-timeout` (such as `30s`, or `0` for \
      no limit)";
 
+/// The code of [`ReadError::TooManyKeys`], the `max-key-segments` ceiling.
+pub(crate) const CODE_TOO_MANY_KEYS: &str = "read-too-many-keys";
+
+/// The code of [`ReadError::KeyPathsTooLarge`], the `max-key-path-size` ceiling.
+pub(crate) const CODE_KEY_PATHS_TOO_LARGE: &str = "read-key-paths-too-large";
+
+/// How to raise the key-path segment ceiling: its key, variable and flag, and the value that
+/// lifts it.
+const SEGMENT_KNOBS: &str = "Raise the limit with `max-key-segments` under `[limits]` in \
+     `supdoc.config.toml`, `SUPDOC_MAX_KEY_SEGMENTS` or `--max-key-segments` (such as `500000`, \
+     or `0` for no limit)";
+
+/// How to raise the key-path text ceiling: its key, variable and flag, and the value that lifts
+/// it.
+const KEY_PATH_SIZE_KNOBS: &str = "Raise the limit with `max-key-path-size` under `[limits]` in \
+     `supdoc.config.toml`, `SUPDOC_MAX_KEY_PATH_SIZE` or `--max-key-path-size` (such as `64MiB`, \
+     or `0` for no limit)";
+
 /// What to do about a read the filesystem refused with `kind`: only a permission error is fixed
 /// by `chmod`.
 fn io_help(kind: std::io::ErrorKind) -> String {
@@ -124,6 +160,16 @@ fn io_help(kind: std::io::ErrorKind) -> String {
         _ => "Check the file, any symlink loop on its path and the filesystem it is on (`ls -l` \
               on each part of the path), then run supdoc again"
             .to_owned(),
+    }
+}
+
+/// The clause that offers `exclude` to a file being scanned as a link source, and nothing to any
+/// other role.
+const fn exclude_advice(role: ReadRole) -> &'static str {
+    if matches!(role, ReadRole::ScannedSource) {
+        ", or add the file to `exclude` in `supdoc.config.toml`"
+    } else {
+        ""
     }
 }
 
@@ -193,6 +239,8 @@ impl ReadError {
             Self::TooLarge { .. } => "read-too-large",
             Self::UnsupportedLanguage { .. } => "read-unsupported-language",
             Self::Timeout { .. } => CODE_TIMEOUT,
+            Self::TooManyKeys { .. } => CODE_TOO_MANY_KEYS,
+            Self::KeyPathsTooLarge { .. } => CODE_KEY_PATHS_TOO_LARGE,
             Self::CartridgeLoad { .. } => CartridgeLoadError::code(),
             Self::Internal { .. } => "read-internal",
         }
@@ -209,6 +257,8 @@ impl ReadError {
             | Self::TooLarge { path, .. }
             | Self::UnsupportedLanguage { path, .. }
             | Self::Timeout { path, .. }
+            | Self::TooManyKeys { path, .. }
+            | Self::KeyPathsTooLarge { path, .. }
             | Self::CartridgeLoad { path, .. }
             | Self::Internal { path, .. } => path,
         }
@@ -236,6 +286,13 @@ impl ReadError {
             Self::Timeout { limit, .. } => {
                 format!("reading {shown} took longer than the {limit} per-read parse timeout")
             }
+            Self::TooManyKeys { limit, .. } => format!(
+                "{shown} has more than {limit} key-path segments, the `max-key-segments` limit"
+            ),
+            Self::KeyPathsTooLarge { limit, .. } => format!(
+                "the key paths of {shown} are more than {limit} bytes of text, the \
+                 `max-key-path-size` limit"
+            ),
             Self::CartridgeLoad { error, .. } => error.to_string(),
             Self::Internal { reason, .. } => {
                 format!("{reason} for {shown} (supdoc bug)")
@@ -295,6 +352,12 @@ impl ReadError {
                     "{} stopped at byte {offset} of {size}. {TIMEOUT_KNOBS}{exclude}",
                     capitalized(step)
                 )
+            }
+            (Self::TooManyKeys { .. }, role) => {
+                format!("{SEGMENT_KNOBS}{}", exclude_advice(role))
+            }
+            (Self::KeyPathsTooLarge { .. }, role) => {
+                format!("{KEY_PATH_SIZE_KNOBS}{}", exclude_advice(role))
             }
             (Self::NotAFile { .. }, ReadRole::Target) => format!(
                 "Point the link at a regular file; `{shown}` is a directory, FIFO, socket or device"
@@ -574,6 +637,49 @@ mod tests {
             error.help(),
             "write one of the full paths: `Foo.new`, `Bar.new`"
         );
+    }
+
+    #[test]
+    fn the_key_path_errors_name_their_flag_variable_and_key_and_offer_exclude_to_a_scan() {
+        let path = absolute("/repo/data.json");
+        let keys = ReadError::TooManyKeys {
+            path: path.clone(),
+            limit: 200_000,
+        };
+        let size = ReadError::KeyPathsTooLarge {
+            path,
+            limit: 33_554_432,
+        };
+
+        assert_eq!(keys.code(), "read-too-many-keys");
+        assert_eq!(size.code(), "read-key-paths-too-large");
+        assert!(keys.to_string().contains("200000"), "{keys}");
+        for (error, knobs) in [
+            (
+                &keys,
+                [
+                    "max-key-segments",
+                    "SUPDOC_MAX_KEY_SEGMENTS",
+                    "--max-key-segments",
+                ],
+            ),
+            (
+                &size,
+                [
+                    "max-key-path-size",
+                    "SUPDOC_MAX_KEY_PATH_SIZE",
+                    "--max-key-path-size",
+                ],
+            ),
+        ] {
+            let help = error.help(ReadRole::Target, "data.json");
+            for knob in knobs {
+                assert!(help.contains(knob), "{knob} missing from {help:?}");
+            }
+            assert!(!help.contains("exclude"), "{help:?}");
+            let scanned = error.help(ReadRole::ScannedSource, "data.json");
+            assert!(scanned.contains("`exclude`"), "{scanned:?}");
+        }
     }
 
     #[test]

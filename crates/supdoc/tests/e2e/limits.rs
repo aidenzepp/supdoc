@@ -137,6 +137,60 @@ fn code_block_build_timeout_takes_flag_then_variable_then_config_then_default() 
 }
 
 #[test]
+fn the_key_path_limits_take_flag_then_variable_then_config_then_default() {
+    let project = Project::fixture("basic");
+    let show = |args: &[&str], env: &[(&str, &Path)]| {
+        project.supdoc_in_with(".", args, env).assert_exit(0).json()
+    };
+    let base = ["config", "show", "--json"];
+    let env = [
+        ("SUPDOC_MAX_KEY_SEGMENTS", Path::new("500")),
+        ("SUPDOC_MAX_KEY_PATH_SIZE", Path::new("2MiB")),
+    ];
+
+    let json = show(&base, &[]);
+    assert_eq!(at(&json, "/data/limits/max_key_segments/value"), "200000");
+    assert_eq!(at(&json, "/data/limits/max_key_path_size/value"), "32MiB");
+    assert_eq!(at(&json, "/data/limits/max_key_segments/source"), "default");
+
+    project.write(
+        "supdoc.config.toml",
+        "[limits]\nmax-key-segments = 1000\nmax-key-path-size = \"4MiB\"\n",
+    );
+    let json = show(&base, &[]);
+    assert_eq!(at(&json, "/data/limits/max_key_segments/value"), "1000");
+    assert_eq!(at(&json, "/data/limits/max_key_segments/source"), "config");
+    assert_eq!(at(&json, "/data/limits/max_key_path_size/value"), "4MiB");
+    assert_eq!(
+        at(&json, "/data/limits/max_key_path_size/from"),
+        "supdoc.config.toml"
+    );
+
+    let json = show(&base, &env);
+    assert_eq!(at(&json, "/data/limits/max_key_segments/value"), "500");
+    assert_eq!(at(&json, "/data/limits/max_key_segments/source"), "env");
+    assert_eq!(at(&json, "/data/limits/max_key_path_size/value"), "2MiB");
+    assert_eq!(at(&json, "/data/limits/max_key_path_size/source"), "env");
+
+    let json = show(
+        &[
+            "config",
+            "show",
+            "--json",
+            "--max-key-segments",
+            "0",
+            "--max-key-path-size",
+            "9KiB",
+        ],
+        &env,
+    );
+    assert_eq!(at(&json, "/data/limits/max_key_segments/value"), "0");
+    assert_eq!(at(&json, "/data/limits/max_key_segments/source"), "flag");
+    assert_eq!(at(&json, "/data/limits/max_key_path_size/value"), "9KiB");
+    assert_eq!(at(&json, "/data/limits/max_key_path_size/source"), "flag");
+}
+
+#[test]
 fn a_flag_after_the_subcommand_still_counts_as_a_flag() {
     let project = Project::fixture("basic");
     project.write("supdoc.config.toml", "[limits]\nmax-lock-size = \"1MiB\"\n");

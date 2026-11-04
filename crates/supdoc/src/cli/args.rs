@@ -17,7 +17,7 @@ use super::examples::{
     SKILL_INSTALL_EXAMPLES, TOP_EXAMPLES, UPDATE_EXAMPLES,
 };
 use super::upgrade::{ReleaseVersion, UPGRADE_EXAMPLES};
-use crate::limits::{CommandLineLimits, Given, Limits, SizeLimit, TimeLimit};
+use crate::limits::{CommandLineLimits, CountLimit, Given, Limits, SizeLimit, TimeLimit};
 use crate::link::SymbolPath;
 use crate::namespace::NamespaceName;
 use crate::output::OutputFormat;
@@ -105,7 +105,7 @@ pub(crate) struct GlobalArgs {
     pub(crate) limits: LimitFlags,
 }
 
-/// The `--parse-timeout`, `--code-block-timeout`, `--code-block-build-timeout`, `--max-lock-size`, `--max-config-size` and `--max-ignore-size` flags.
+/// The `--parse-timeout`, `--code-block-timeout`, `--code-block-build-timeout`, `--max-lock-size`, `--max-config-size`, `--max-ignore-size`, `--max-key-segments` and `--max-key-path-size` flags.
 ///
 /// Written by hand rather than derived, so each value keeps whether its flag or its `SUPDOC_*`
 /// variable gave it, which `config show` reports.
@@ -113,7 +113,7 @@ pub(crate) struct GlobalArgs {
 pub(crate) struct LimitFlags(pub CommandLineLimits);
 
 /// The clap id, flag, variable, value name, help and default of each limit flag.
-const LIMIT_FLAGS: [(&str, &str, &str, &str); 6] = [
+const LIMIT_FLAGS: [(&str, &str, &str, &str); 8] = [
     (
         "parse-timeout",
         "SUPDOC_PARSE_TIMEOUT",
@@ -150,11 +150,23 @@ const LIMIT_FLAGS: [(&str, &str, &str, &str); 6] = [
         "SIZE",
         "Refuse an ignore file larger than this, such as 256KiB; 0 for no limit",
     ),
+    (
+        "max-key-segments",
+        "SUPDOC_MAX_KEY_SEGMENTS",
+        "COUNT",
+        "Refuse a data file whose keys hold more path segments than this, such as 200000; 0 for no limit",
+    ),
+    (
+        "max-key-path-size",
+        "SUPDOC_MAX_KEY_PATH_SIZE",
+        "SIZE",
+        "Refuse a data file whose key paths hold more text than this, such as 32MiB; 0 for no limit",
+    ),
 ];
 
 impl LimitFlags {
     /// The default each flag's help shows, in [`LIMIT_FLAGS`] order.
-    fn defaults() -> [String; 6] {
+    fn defaults() -> [String; 8] {
         [
             Limits::PARSE_TIMEOUT.to_string(),
             Limits::CODE_BLOCK_TIMEOUT.to_string(),
@@ -162,6 +174,8 @@ impl LimitFlags {
             Limits::MAX_LOCK_SIZE.to_string(),
             Limits::MAX_CONFIG_SIZE.to_string(),
             Limits::MAX_IGNORE_SIZE.to_string(),
+            Limits::MAX_KEY_SEGMENTS.to_string(),
+            Limits::MAX_KEY_PATH_SIZE.to_string(),
         ]
     }
 }
@@ -185,6 +199,8 @@ impl clap::FromArgMatches for LimitFlags {
             max_lock_size: given(matches, "max-lock-size"),
             max_config_size: given(matches, "max-config-size"),
             max_ignore_size: given(matches, "max-ignore-size"),
+            max_key_segments: given(matches, "max-key-segments"),
+            max_key_path_size: given(matches, "max-key-path-size"),
         }))
     }
 
@@ -206,10 +222,10 @@ impl Args for LimitFlags {
                     .value_name(value_name)
                     .help(format!("{help} [default: {default}]"))
                     .help_heading("Limits");
-                command.arg(if value_name == "DURATION" {
-                    arg.value_parser(TimeLimit::from_str)
-                } else {
-                    arg.value_parser(SizeLimit::from_str)
+                command.arg(match value_name {
+                    "DURATION" => arg.value_parser(TimeLimit::from_str),
+                    "COUNT" => arg.value_parser(CountLimit::from_str),
+                    _ => arg.value_parser(SizeLimit::from_str),
                 })
             },
         )
