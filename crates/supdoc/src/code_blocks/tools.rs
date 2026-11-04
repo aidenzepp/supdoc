@@ -478,6 +478,21 @@ fn biome_format_args(invocation: &Invocation<'_>) -> Vec<OsString> {
 /// beside it, which the block's text is not. Line length (MD013) is left to the project's config.
 const RUMDL_RELAXED: &str = "--extend-disable=MD041,MD051,MD057";
 
+/// The name rumdl is told its stdin has: a doc that is itself Markdown gives its own path, so a
+/// per-file entry naming the doc matches its blocks; any other doc, such as a Rust source file,
+/// gives `<doc>.<n>.md` (see [`virtual_path`]).
+fn rumdl_stdin_name(invocation: &Invocation<'_>) -> OsString {
+    if invocation
+        .doc
+        .extension()
+        .is_some_and(|extension| extension == "md")
+    {
+        invocation.doc.as_os_str().to_owned()
+    } else {
+        virtual_path(invocation.doc, invocation.index, "md")
+    }
+}
+
 /// `rumdl fmt`'s arguments: no cache, no `exclude` (a project's would skip the block and pass it),
 /// the snippet relaxation, the project's `--config` or `--no-config`, then the block on stdin under its virtual path.
 fn rumdl_format_args(invocation: &Invocation<'_>) -> Vec<OsString> {
@@ -491,7 +506,7 @@ fn rumdl_format_args(invocation: &Invocation<'_>) -> Vec<OsString> {
     .chain(invocation.project.iter().cloned())
     .chain([
         OsString::from("--stdin-filename"),
-        virtual_path(invocation.doc, invocation.index, "md"),
+        rumdl_stdin_name(invocation),
         OsString::from("-"),
     ])
     .collect()
@@ -512,7 +527,7 @@ fn rumdl_args(invocation: &Invocation<'_>) -> Vec<OsString> {
     .chain([
         OsString::from("--stdin"),
         OsString::from("--stdin-filename"),
-        virtual_path(invocation.doc, invocation.index, "md"),
+        rumdl_stdin_name(invocation),
     ])
     .collect()
 }
@@ -833,7 +848,7 @@ mod tests {
                 "--extend-disable=MD041,MD051,MD057",
                 "--no-config",
                 "--stdin-filename",
-                "/p/docs/a.md.2.md",
+                "/p/docs/a.md",
                 "-"
             ]
         );
@@ -848,9 +863,30 @@ mod tests {
                 "--no-config",
                 "--stdin",
                 "--stdin-filename",
-                "/p/docs/a.md.2.md"
+                "/p/docs/a.md"
             ]
         );
+    }
+
+    #[test]
+    fn rumdl_is_told_a_markdown_doc_by_its_own_path_and_any_other_doc_by_a_virtual_one() {
+        let name_for = |doc: &str| {
+            cartridge("rumdl-format")
+                .args(&Invocation {
+                    doc: Path::new(doc),
+                    tag: "",
+                    index: 3,
+                    edition: Edition::E2024,
+                    dialect: Dialect::Bash,
+                    project: &[],
+                    emit: None,
+                })
+                .get(5)
+                .cloned()
+        };
+
+        assert_eq!(name_for("/p/docs/a.md"), Some("/p/docs/a.md".into()));
+        assert_eq!(name_for("/p/src/lib.rs"), Some("/p/src/lib.rs.3.md".into()));
     }
 
     #[test]

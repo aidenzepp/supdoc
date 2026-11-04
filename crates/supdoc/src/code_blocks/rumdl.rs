@@ -101,31 +101,83 @@ pub(crate) enum Refusal {
     NoPrivateDir,
 }
 
+/// The rules supdoc leaves off for a block, by code and by name, each written as
+/// [`plain_rule`] writes a rule's name.
+const RELAXED_RULES: [&str; 7] = [
+    "md041",
+    "firstlineheading",
+    "firstlineh1",
+    "md051",
+    "linkfragments",
+    "md057",
+    "existingrelativelinks",
+];
+
+/// `rule` lowercase with no `-` or `_`, so every spelling of a rule's name compares alike.
+fn plain_rule(rule: &str) -> String {
+    rule.chars()
+        .filter(|c| !matches!(c, '-' | '_'))
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
 /// What rumdl is given for the blocks of one doc directory: its flags, and where the project's
 /// config now lives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Project {
     /// `--config=<private file>`, or `--no-config` when the project has no config.
     pub(crate) flags: Vec<OsString>,
-    /// The directory the project's config was in, and the private directory holding its copy:
-    /// `None` when there is no config.
+    /// The directory the project's config resolves its relative patterns against (see
+    /// [`pattern_root`]), and the private directory holding its copy: `None` when there is no
+    /// config.
     moved: Option<(PathBuf, PathBuf)>,
+    /// Whether the project enables rules, all of which supdoc leaves off for a block: no rule
+    /// would check it.
+    pub(crate) no_rule_left: bool,
 }
 
 impl Project {
-    /// Where rumdl is told `doc` is: its position under the config's directory, kept under the
-    /// private copy's directory, so patterns the config writes relative to its own directory,
-    /// such as `[per-file-ignores]`, still match. `doc` itself when there is no config. The
-    /// file need not exist.
+    /// Where rumdl is told `doc` is: its position under the root its config resolves patterns
+    /// against, kept under the private copy's directory, so patterns the config writes, such as
+    /// `[per-file-ignores]`, match as they do in the project. `doc` itself when there is no
+    /// config. The file need not exist.
     #[must_use]
     pub(crate) fn doc_as_seen(&self, doc: &Path) -> PathBuf {
         match &self.moved {
-            Some((from, to)) => doc
-                .strip_prefix(from)
-                .map_or_else(|_| doc.to_path_buf(), |relative| to.join(relative)),
+            Some((from, to)) => to.join(
+                doc.strip_prefix(from)
+                    .unwrap_or_else(|_| Path::new(doc.file_name().unwrap_or_default())),
+            ),
             None => doc.to_path_buf(),
         }
     }
+}
+
+/// The directory rumdl 0.3.2 resolves the relative patterns of the config at `config`
+/// (`[per-file-ignores]`, `[per-file-flavor]`) against, as observed with the real binary on a
+/// doc `docs/a.md` (a pattern with a `/` is anchored at this root; run in the project, from its
+/// root or from `docs`, with the config found by discovery):
+///
+/// - the nearest directory at or above the config's directory that holds a `.git` (a directory
+///   or a file), so for a config at the project root (`.rumdl.toml`), a nested `docs/rumdl.toml`,
+///   `.config/rumdl.toml` and a `pyproject.toml` alike it is the project's git root, and for a
+///   supdoc root below the git root (`repo/sub/.rumdl.toml`, `.git` in `repo`) it is `repo`;
+/// - with no `.git` above it: the config's directory (`docs/rumdl.toml` gives `docs`, the root
+///   config and `pyproject.toml` give the project root), except that `.config/rumdl.toml` gives
+///   the directory that holds `.config`.
+fn pattern_root(config: &Path) -> Option<PathBuf> {
+    let dir = config.parent()?;
+    let git = dir
+        .ancestors()
+        .find(|ancestor| fs::symlink_metadata(ancestor.join(".git")).is_ok());
+    let is_dot_config = dir.file_name().is_some_and(|name| name == ".config");
+    git.map(Path::to_path_buf).or_else(|| {
+        if is_dot_config {
+            dir.parent().map(Path::to_path_buf)
+        } else {
+            Some(dir.to_path_buf())
+        }
+    })
 }
 
 /// The [`Project`] rumdl is given for `doc`: the project's config, found walking up from `doc`'s
@@ -157,13 +209,15 @@ pub(crate) fn project_args(env: &ToolEnv, root: &Path, doc: &Path) -> Result<Pro
             flag.push(private.join("rumdl.toml"));
             return Ok(Project {
                 flags: vec![flag],
-                moved: candidate.parent().map(|dir| (dir.to_path_buf(), private)),
+                no_rule_left: only_relaxed_rules(&table),
+                moved: pattern_root(&candidate).map(|dir| (dir, private)),
             });
         }
     }
     Ok(Project {
         flags: vec![OsString::from("--no-config")],
         moved: None,
+        no_rule_left: false,
     })
 }
 
@@ -204,11 +258,24 @@ fn checked(root: &Path, found: &Path) -> Result<Option<toml::Table>, Refusal> {
     let is_pyproject = found
         .file_name()
         .is_some_and(|name| name == "pyproject.toml");
-    let read = read_table(root, found);
-    let table = match read {
+    let table = match read_table(root, found) {
         Ok(table) => table,
+        Err(ReadError::Oversized(real)) if is_pyproject => {
+            return match mentions_tool_rumdl(&real) {
+                Some(false) => Ok(None),
+                Some(true) => Err(refuse(
+                    "is over 256 KiB and mentions `tool.rumdl`, which supdoc doesn't read in a file that large",
+                )),
+                None => Err(refuse(
+                    "is over 16 MiB, too large to scan for a `[tool.rumdl]` table",
+                )),
+            };
+        }
         Err(_) if is_pyproject => return Ok(None),
-        Err(why) => return Err(refuse(why)),
+        Err(ReadError::Oversized(_)) => {
+            return Err(refuse("isn't a regular file of at most 256 KiB"));
+        }
+        Err(ReadError::Other(why)) => return Err(refuse(why)),
     };
     let rumdl = if is_pyproject {
         match table
@@ -229,31 +296,92 @@ fn checked(root: &Path, found: &Path) -> Result<Option<toml::Table>, Refusal> {
     }
 }
 
+/// Whether the config enables rules by name, and every one of them is a rule supdoc leaves off
+/// for a block, so no rule would check it. A config that enables nothing by name (it enables all
+/// the default rules, or by its own choice none) is not that.
+fn only_relaxed_rules(table: &toml::Table) -> bool {
+    let key_is = |key: &str, name: &str| key.to_ascii_lowercase().replace('_', "-") == name;
+    let names = |name: &str| -> Vec<String> {
+        let global = table
+            .iter()
+            .filter(|(key, _)| key_is(key, "global"))
+            .filter_map(|(_, value)| value.as_table());
+        std::iter::once(table)
+            .chain(global)
+            .flat_map(|scope| scope.iter().filter(|(key, _)| key_is(key, name)))
+            .filter_map(|(_, value)| value.as_array())
+            .flatten()
+            .filter_map(toml::Value::as_str)
+            .map(plain_rule)
+            .collect()
+    };
+    let enabled = names("enable");
+    !enabled.is_empty()
+        && enabled
+            .iter()
+            .chain(&names("extend-enable"))
+            .all(|rule| RELAXED_RULES.contains(&rule.as_str()))
+}
+
+/// Why a config file couldn't be read as a table.
+enum ReadError {
+    /// It is a regular file over 256 KiB, at the real path held.
+    Oversized(PathBuf),
+    /// Anything else, as a reason.
+    Other(&'static str),
+}
+
 /// The TOML table in the file at `found`, which must resolve inside `root`.
 ///
 /// # Errors
 ///
 /// What is wrong with the file.
-fn read_table(root: &Path, found: &Path) -> Result<toml::Table, &'static str> {
-    let real_root = root.canonicalize().map_err(|_| "couldn't be resolved")?;
-    let real = found.canonicalize().map_err(|_| "couldn't be resolved")?;
+fn read_table(root: &Path, found: &Path) -> Result<toml::Table, ReadError> {
+    let other = ReadError::Other;
+    let real_root = root
+        .canonicalize()
+        .map_err(|_| other("couldn't be resolved"))?;
+    let real = found
+        .canonicalize()
+        .map_err(|_| other("couldn't be resolved"))?;
     if !real.starts_with(&real_root) {
-        return Err("is a link that resolves outside the project");
+        return Err(other("is a link that resolves outside the project"));
     }
-    let meta = fs::metadata(&real).map_err(|_| "couldn't be read")?;
-    if !meta.is_file() || meta.len() > MAX_CONFIG {
-        return Err("isn't a regular file of at most 256 KiB");
+    let meta = fs::metadata(&real).map_err(|_| other("couldn't be read"))?;
+    if !meta.is_file() {
+        return Err(other("isn't a regular file of at most 256 KiB"));
     }
-    let text = fs::read_to_string(&real).map_err(|_| "couldn't be read as UTF-8")?;
+    if meta.len() > MAX_CONFIG {
+        return Err(ReadError::Oversized(real));
+    }
+    let text = fs::read_to_string(&real).map_err(|_| other("couldn't be read as UTF-8"))?;
     text.parse::<toml::Table>()
-        .map_err(|_| "doesn't parse as TOML")
+        .map_err(|_| other("doesn't parse as TOML"))
+}
+
+/// The most bytes of a too-large `pyproject.toml` supdoc scans for `tool.rumdl`.
+const MAX_SCAN: u64 = 16 * 1024 * 1024;
+
+/// Whether the file at `real` mentions `tool.rumdl`. `None` when it is over 16 MiB or can't be
+/// read, which is as unknown as it gets.
+fn mentions_tool_rumdl(real: &Path) -> Option<bool> {
+    use std::io::Read as _;
+    let file = fs::File::open(real).ok()?;
+    if file.metadata().ok()?.len() > MAX_SCAN {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    let _read = file.take(MAX_SCAN).read_to_end(&mut bytes).ok()?;
+    Some(String::from_utf8_lossy(&bytes).contains("tool.rumdl"))
 }
 
 /// Writes `table` as TOML into `rumdl.toml` in a private directory named by the hash of what is
 /// written, under supdoc's `rumdl-config` directory, and returns that directory. It holds an
 /// empty `.git` directory too, which makes it the project root rumdl resolves a config's
 /// relative patterns against, wherever supdoc's cache directory is. A file already there with
-/// the same content is kept; anything else at the name is replaced.
+/// the same content is kept; anything else at the name is replaced by writing a temporary file in
+/// the directory and renaming it into place, so concurrent runs never see half a file or lose a
+/// race to create it.
 ///
 /// Effect: creates the directories mode 0700 and the file mode 0600, and may replace a stale file.
 ///
@@ -267,6 +395,7 @@ fn private_config(
 ) -> Result<PathBuf, Option<&'static str>> {
     use std::io::Write as _;
     use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     let neutral = runner::neutral_dir(env, root);
     if neutral == Path::new("/") {
@@ -295,14 +424,23 @@ fn private_config(
         .filter(fs::Metadata::is_file)
         .and_then(|_| fs::read_to_string(&file).ok());
     if current.as_deref() != Some(text.as_str()) {
-        let _stale = fs::remove_file(&file);
-        let mut created = fs::OpenOptions::new()
+        static WRITERS: AtomicUsize = AtomicUsize::new(0);
+        let temp = dir.join(format!(
+            ".rumdl.toml.{}.{}.tmp",
+            std::process::id(),
+            WRITERS.fetch_add(1, Ordering::Relaxed)
+        ));
+        let written = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(&file)
-            .map_err(|_| None)?;
-        created.write_all(text.as_bytes()).map_err(|_| None)?;
+            .open(&temp)
+            .and_then(|mut out| out.write_all(text.as_bytes()))
+            .and_then(|()| fs::rename(&temp, &file));
+        if written.is_err() {
+            let _own = fs::remove_file(&temp);
+            return Err(None);
+        }
     }
     Ok(dir)
 }
@@ -335,7 +473,9 @@ fn nested(value: &toml::Value) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Project, Refusal, diagnostics, project_args, unsafe_part};
+    use super::{
+        Project, Refusal, diagnostics, only_relaxed_rules, pattern_root, project_args, unsafe_part,
+    };
     use crate::code_blocks::lint::Diagnostic;
     use crate::code_blocks::tools::ToolEnv;
     use std::ffi::OsString;
@@ -487,6 +627,159 @@ mod tests {
         assert!(
             matches!(refused, Err(Refusal::Config { .. })),
             "got {refused:?}"
+        );
+    }
+
+    #[test]
+    fn patterns_resolve_against_the_root_rumdl_itself_uses() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let at = |relative: &str| root.path().join(relative);
+        for dir in [
+            "repo/sub/docs",
+            "plain/docs",
+            "plain/.config",
+            "dotgit/.config",
+        ] {
+            fs::create_dir_all(at(dir)).expect("the fixture dirs");
+        }
+        fs::create_dir_all(at("repo/.git")).expect("a git dir");
+        fs::create_dir_all(at("dotgit/.config")).expect("the fixture dirs");
+        fs::write(at("dotgit/.git"), "gitdir: x\n").expect("a git file");
+
+        let roots = [
+            "repo/sub/.rumdl.toml",
+            "repo/sub/docs/rumdl.toml",
+            "plain/.rumdl.toml",
+            "plain/docs/rumdl.toml",
+            "plain/.config/rumdl.toml",
+            "dotgit/.config/rumdl.toml",
+        ]
+        .map(|config| pattern_root(&at(config)));
+
+        assert_eq!(
+            roots,
+            [
+                Some(at("repo")),
+                Some(at("repo")),
+                Some(at("plain")),
+                Some(at("plain/docs")),
+                Some(at("plain")),
+                Some(at("dotgit")),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_private_copy_keeps_the_configs_key_order() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let text = "[per-file-flavor]\n\"z/**\" = \"standard\"\n\"**\" = \"mkdocs\"\n\"a/**\" = \"standard\"\n";
+        fs::write(root.path().join(".rumdl.toml"), text).expect("config");
+
+        let project = project_args(
+            &env_in(cache.path()),
+            root.path(),
+            &root.path().join("a.md"),
+        )
+        .expect("the config is safe");
+
+        assert_eq!(
+            fs::read_to_string(config_path(&project)).expect("the private file should be readable"),
+            text
+        );
+    }
+
+    #[test]
+    fn the_private_directory_pins_its_own_project_root_with_a_git_marker() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        fs::write(root.path().join(".rumdl.toml"), "[global]\n").expect("config");
+
+        let project = project_args(
+            &env_in(cache.path()),
+            root.path(),
+            &root.path().join("a.md"),
+        )
+        .expect("the config is safe");
+
+        let dir = config_path(&project)
+            .parent()
+            .expect("the file is in a directory")
+            .to_path_buf();
+        assert!(dir.join(".git").is_dir(), "{dir:?} has no .git marker");
+    }
+
+    #[test]
+    fn concurrent_first_runs_all_get_the_config() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        fs::write(
+            root.path().join(".rumdl.toml"),
+            "[global]\nline-length = 20\n",
+        )
+        .expect("config");
+        let env = env_in(cache.path());
+        let doc = root.path().join("a.md");
+
+        let results: Vec<_> = std::thread::scope(|scope| {
+            let runs: Vec<_> = (0..16)
+                .map(|_| scope.spawn(|| project_args(&env, root.path(), &doc)))
+                .collect();
+            runs.into_iter()
+                .map(|run| run.join().expect("a writer should not panic"))
+                .collect()
+        });
+
+        assert!(
+            results.iter().all(Result::is_ok),
+            "some writers were refused: {results:?}"
+        );
+    }
+
+    #[test]
+    fn a_config_enabling_only_rules_supdoc_relaxes_leaves_no_rule() {
+        let left = |config: &str| {
+            only_relaxed_rules(&config.parse().expect("the fixture config should be TOML"))
+        };
+
+        assert!(left("[global]\nenable = [\"MD041\"]\n"));
+        assert!(left(
+            "enable = [\"first-line-heading\", \"MD051\", \"existing_relative_links\"]\n"
+        ));
+        assert!(!left("[global]\nenable = [\"MD041\", \"MD013\"]\n"));
+        assert!(!left(
+            "[global]\nenable = [\"MD041\"]\nextend-enable = [\"MD009\"]\n"
+        ));
+        assert!(!left("[global]\nenable = []\n"));
+        assert!(!left("[global]\ndisable = [\"all\"]\n"));
+        assert!(!left("[global]\nline-length = 20\n"));
+    }
+
+    #[test]
+    fn a_big_pyproject_is_refused_only_when_it_mentions_tool_rumdl() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let env = env_in(cache.path());
+        let doc = root.path().join("a.md");
+        let pyproject = root.path().join("pyproject.toml");
+        let filler = "x".repeat(300 * 1024);
+
+        fs::write(
+            &pyproject,
+            format!("#{filler}\n[tool.rumdl.global]\nline-length = 20\n"),
+        )
+        .expect("pyproject");
+        let mentions = project_args(&env, root.path(), &doc);
+        fs::write(&pyproject, format!("#{filler}\n[tool.ruff]\n")).expect("pyproject");
+        let silent = project_args(&env, root.path(), &doc);
+
+        assert!(
+            matches!(mentions, Err(Refusal::Config { why, .. }) if why.contains("256 KiB")),
+            "got {mentions:?}"
+        );
+        assert_eq!(
+            silent.expect("a big pyproject without it is skipped").flags,
+            [OsString::from("--no-config")]
         );
     }
 
