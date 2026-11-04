@@ -93,7 +93,7 @@ pub(crate) fn place(diagnostic: &Diagnostic, map: &LineMap, text: &str) -> Optio
 
 /// The findings for `verdict`, from `tool` on `block` in `text`: one `code-block-lint` error per
 /// diagnostic at its place in the doc (the fence when it can't be
-/// placed), naming its rule and `no_lint(<reason>)`, never with a fix; or the tool failure or
+/// placed), naming its rule and `lint(off: <reason>)`, never with a fix; or the tool failure or
 /// timeout error at the fence, run under `timeout`.
 #[must_use]
 pub(crate) fn findings(
@@ -133,7 +133,7 @@ fn lint_finding(tool: &ToolCartridge, diagnostic: &Diagnostic) -> Finding {
         format!("`{}` reports `{rule}`: {message}", tool.name),
     )
     .with_help(format!(
-        "fix the code `{rule}` flags, or mark the block `no_lint(<reason>)` to skip its lint step"
+        "fix the code `{rule}` flags, or mark the block `lint(off: <reason>)` to skip its lint step"
     ))
 }
 
@@ -238,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn a_lint_finding_names_its_rule_and_no_lint() {
+    fn a_lint_finding_names_its_rule_and_lint_off() {
         let text = "```py\nx == None\n```\n";
         let block = markdown_block(text);
 
@@ -255,7 +255,7 @@ mod tests {
             .and_then(|finding| finding.help.as_deref())
             .unwrap_or_default();
         assert!(
-            help.contains("`E711`") && help.contains("no_lint(<reason>)"),
+            help.contains("`E711`") && help.contains("lint(off: <reason>)"),
             "{help}"
         );
     }

@@ -6,6 +6,8 @@
 
 use std::ops::Range;
 
+use super::tools::Step;
+
 /// The words of one info string, borrowed from its text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InfoString<'text> {
@@ -52,16 +54,18 @@ impl<'text> InfoString<'text> {
     }
 }
 
-/// Whether `attribute` is one supdoc knows: `ignore`, `no_format` and `no_lint` with or without a
-/// reason, `from(...)` and `uses(...)`, an edition, or one of the bare run attributes.
+/// Whether `attribute` is one supdoc knows: `ignore` with or without a reason, `lint(...)` and
+/// `format(...)` with any value, `from(...)` and `uses(...)`, an edition, or one of the bare run
+/// attributes.
 ///
-/// Whether a reason or an excerpt destination is well formed is judged elsewhere.
+/// Whether a reason, a step's value or an excerpt destination is well formed is judged elsewhere.
 #[must_use]
 pub(crate) fn is_known_attribute(attribute: &str) -> bool {
     if is_path_attribute(attribute) {
         return true;
     }
     reasoned(attribute).is_some()
+        || step_attribute(attribute).is_some()
         || matches!(
             attribute,
             "edition2015"
@@ -174,34 +178,143 @@ pub(crate) fn source_attributes(text: &str, rust_doc: bool) -> Vec<SourceAttribu
         .collect()
 }
 
-/// An `ignore`, `no_format` or `no_lint` attribute, split into its name and the reason it gives.
+/// An `ignore` attribute, split into its name and the reason it gives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Reasoned<'text> {
-    /// `ignore`, `no_format` or `no_lint`.
+    /// `ignore`.
     pub(crate) name: &'text str,
     /// The trimmed text between the parentheses. `None` when the attribute is bare or its
     /// parentheses are empty or blank.
     pub(crate) reason: Option<&'text str>,
 }
 
-/// Splits `attribute` when it is a well-formed `ignore`, `no_format` or `no_lint`, with or
-/// without a parenthesized reason. `None` for any other word, including an unclosed parenthesis.
+/// Splits `attribute` when it is a well-formed `ignore`, with or without a parenthesized reason.
+/// `None` for any other word, including an unclosed parenthesis.
 #[must_use]
 pub(crate) fn reasoned(attribute: &str) -> Option<Reasoned<'_>> {
     let (name, rest) = match attribute.split_once('(') {
         Some((name, rest)) => (name, Some(rest.strip_suffix(')')?)),
         None => (attribute, None),
     };
-    matches!(name, "ignore" | "no_format" | "no_lint").then(|| Reasoned {
+    (name == "ignore").then(|| Reasoned {
         name,
         reason: rest.map(str::trim).filter(|reason| !reason.is_empty()),
     })
 }
 
+/// A `lint(...)` or `format(...)` attribute: the step it sets for its block, and the value
+/// written for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StepAttribute<'text> {
+    /// The step it sets.
+    pub(crate) step: Step,
+    /// What it sets the step to.
+    pub(crate) value: StepValue<'text>,
+}
+
+/// The value inside a `lint(...)` or `format(...)`, before the selected tool's cartridge
+/// validates it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StepValue<'text> {
+    /// `full`: the step runs on the block, whatever its tool's table says.
+    Full,
+    /// `off: <reason>`: the step doesn't run on the block. `reason` is the trimmed text after
+    /// `off:`, `None` when it is missing or blank, or when `off` is bare.
+    Off {
+        /// Why the author turned the step off.
+        reason: Option<&'text str>,
+    },
+    /// Anything else, trimmed: a value no cartridge accepts.
+    Other(&'text str),
+}
+
+impl StepValue<'_> {
+    /// The mode it names, as a cartridge's `modes` lists it. `None` for [`Other`](Self::Other).
+    #[must_use]
+    pub(crate) const fn mode(&self) -> Option<&'static str> {
+        match self {
+            Self::Full => Some("full"),
+            Self::Off { .. } => Some("off"),
+            Self::Other(_) => None,
+        }
+    }
+}
+
+impl Step {
+    /// The step's attribute name, and its key in a tool's table.
+    #[must_use]
+    pub(crate) const fn key(self) -> &'static str {
+        match self {
+            Self::Format => "format",
+            Self::Lint => "lint",
+        }
+    }
+}
+
+/// Splits `attribute` when it is `lint(...)` or `format(...)` whose first parenthesis closes at
+/// its end. The value runs to that matching parenthesis, so a reason may hold spaces, commas and
+/// balanced parentheses. `None` for any other word, including a bare `lint` or `format`.
+#[must_use]
+pub(crate) fn step_attribute(attribute: &str) -> Option<StepAttribute<'_>> {
+    let (step, inner) = [Step::Lint, Step::Format].into_iter().find_map(|step| {
+        let inner = attribute.strip_prefix(step.key())?.strip_prefix('(')?;
+        Some((step, closed_at_end(inner)?))
+    })?;
+    let value = inner.trim();
+    let value = match value.split_once(':') {
+        Some((mode, reason)) if mode.trim() == "off" => {
+            let reason = reason.trim();
+            StepValue::Off {
+                reason: (!reason.is_empty()).then_some(reason),
+            }
+        }
+        _ if value == "off" => StepValue::Off { reason: None },
+        _ if value == "full" => StepValue::Full,
+        _ => StepValue::Other(value),
+    };
+    Some(StepAttribute { step, value })
+}
+
+/// The text of `rest`, which follows an opening parenthesis, up to the parenthesis that matches
+/// it, when that is `rest`'s last character. `None` when it closes earlier or never.
+fn closed_at_end(rest: &str) -> Option<&str> {
+    let mut depth = 1_usize;
+    for (offset, c) in rest.char_indices() {
+        match c {
+            '(' => depth = depth.saturating_add(1),
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return rest
+                        .get(..offset)
+                        .filter(|_| offset.saturating_add(1) == rest.len());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The attribute that replaced a removed one: `lint(off: <why>)` for `no_lint` and
+/// `format(off: <why>)` for `no_format`, with or without parentheses. `None` for any other word.
+#[must_use]
+pub(crate) fn replacement_for_removed(attribute: &str) -> Option<&'static str> {
+    let name = attribute
+        .split_once('(')
+        .map_or(attribute, |(name, _)| name);
+    match name {
+        "no_lint" => Some("lint(off: <why>)"),
+        "no_format" => Some("format(off: <why>)"),
+        _ => None,
+    }
+}
+
 /// The attributes supdoc knows, as a help names them.
-pub(crate) const KNOWN_ATTRIBUTES: &str = "`ignore(reason)`, `no_format(reason)`, \
-    `no_lint(reason)`, `from(PATH#SYMBOL)`, `uses(PATH#SYMBOL)`, `edition2015` to `edition2024`, \
-    `run`, `no_run`, `compile_fail` and `should_panic`";
+pub(crate) const KNOWN_ATTRIBUTES: &str = "`ignore(reason)`, `lint(full)`, \
+    `lint(off: reason)`, `format(full)`, `format(off: reason)`, `from(PATH#SYMBOL)`, \
+    `uses(PATH#SYMBOL)`, `edition2015` to `edition2024`, `run`, `no_run`, `compile_fail` and \
+    `should_panic`";
 
 /// The non-empty pieces of `text` between characters that `separates`, skipping separators inside
 /// parentheses.
@@ -275,11 +388,15 @@ mod tests {
             "edition2021",
             "from(a.rs#f)",
         ] {
-            let text = format!("{first} no_lint");
+            let text = format!("{first} lint(full)");
             let info = InfoString::parse_in(&text, true);
 
             assert_eq!(info.language, "", "first word `{first}`");
-            assert_eq!(info.attributes, [first, "no_lint"], "first word `{first}`");
+            assert_eq!(
+                info.attributes,
+                [first, "lint(full)"],
+                "first word `{first}`"
+            );
         }
         let uses = source_attributes("uses(a.rs#f) no_run", true);
         assert_eq!(
@@ -303,8 +420,10 @@ mod tests {
         let known = [
             "ignore",
             "ignore(slow)",
-            "no_format(generated)",
-            "no_lint",
+            "lint(full)",
+            "lint(off: needs a server)",
+            "format(off)",
+            "lint(partial)",
             "from(../src/lib.rs#add)",
             "uses(/src/lib.rs#Limits.resolve)",
             "edition2024",
@@ -315,6 +434,11 @@ mod tests {
         ];
         let unknown = [
             "lint",
+            "format",
+            "no_lint",
+            "no_format(generated)",
+            "lint(off: open",
+            "lint(full)(x)",
             "edition2030",
             "no_run(why)",
             "ignore(open",
@@ -360,14 +484,14 @@ mod tests {
 
     #[test]
     fn a_reason_may_hold_commas() {
-        let found = reasoned("no_format(generated, then pasted)");
+        let found = reasoned("ignore(generated, then pasted)");
 
         assert_eq!(found.and_then(|r| r.reason), Some("generated, then pasted"));
     }
 
     #[test]
     fn a_reason_is_trimmed() {
-        let found = reasoned("no_lint(  slow  )");
+        let found = reasoned("ignore(  slow  )");
 
         assert_eq!(found.and_then(|r| r.reason), Some("slow"));
     }
@@ -383,26 +507,84 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_name_carries_no_reason_for_each_attribute() {
-        for name in ["ignore", "no_format", "no_lint"] {
-            let found = reasoned(name);
+    fn a_bare_ignore_carries_no_reason() {
+        assert_eq!(
+            reasoned("ignore"),
+            Some(Reasoned {
+                name: "ignore",
+                reason: None
+            })
+        );
+    }
 
+    #[test]
+    fn an_unclosed_parenthesis_is_not_a_reasoned_attribute() {
+        for name in ["ignore", "lint", "format"] {
+            let attribute = format!("{name}(open");
+
+            assert_eq!(reasoned(&attribute), None, "{attribute}");
+            assert_eq!(step_attribute(&attribute), None, "{attribute}");
+            assert!(!is_known_attribute(&attribute), "{attribute}");
+        }
+    }
+
+    #[test]
+    fn a_step_attribute_names_its_step_and_value() {
+        let cases = [
+            ("lint(full)", Step::Lint, StepValue::Full),
+            ("format( full )", Step::Format, StepValue::Full),
+            ("lint(off)", Step::Lint, StepValue::Off { reason: None }),
+            (
+                "format(off:   )",
+                Step::Format,
+                StepValue::Off { reason: None },
+            ),
+            ("lint(partial)", Step::Lint, StepValue::Other("partial")),
+            (
+                "format(full: why)",
+                Step::Format,
+                StepValue::Other("full: why"),
+            ),
+        ];
+
+        for (attribute, step, value) in cases {
             assert_eq!(
-                found,
-                Some(Reasoned { name, reason: None }),
-                "bare {name} should parse without a reason"
+                step_attribute(attribute),
+                Some(StepAttribute { step, value }),
+                "{attribute}"
             );
         }
     }
 
     #[test]
-    fn an_unclosed_parenthesis_is_not_a_reasoned_attribute() {
-        for name in ["ignore", "no_format", "no_lint"] {
-            let attribute = format!("{name}(open");
+    fn an_off_reason_runs_to_the_matching_paren_with_spaces_and_commas() {
+        let info = InfoString::parse("sh lint(off: needs a server, and (a) db) format(full)");
 
-            assert_eq!(reasoned(&attribute), None, "{attribute}");
-            assert!(!is_known_attribute(&attribute), "{attribute}");
-        }
+        assert_eq!(
+            info.attributes,
+            ["lint(off: needs a server, and (a) db)", "format(full)"]
+        );
+        assert_eq!(
+            info.attributes
+                .first()
+                .and_then(|first| step_attribute(first)),
+            Some(StepAttribute {
+                step: Step::Lint,
+                value: StepValue::Off {
+                    reason: Some("needs a server, and (a) db")
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn a_removed_attribute_names_its_replacement() {
+        assert_eq!(replacement_for_removed("no_lint"), Some("lint(off: <why>)"));
+        assert_eq!(
+            replacement_for_removed("no_format(generated)"),
+            Some("format(off: <why>)")
+        );
+        assert_eq!(replacement_for_removed("hidden"), None);
     }
 
     #[test]

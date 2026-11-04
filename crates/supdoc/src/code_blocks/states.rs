@@ -6,8 +6,8 @@ use annotate_snippets::renderer::{AnsiColor, Style};
 use crate::config::code_blocks::{CodeBlocks, Language, Mode};
 
 use super::block::CodeBlock;
-use super::info::reasoned;
-use super::tools::{self, Step, formatter};
+use super::info::{StepValue, reasoned, step_attribute};
+use super::tools::{self, Step, ToolCartridge, formatter};
 
 /// The one state a code block is in. A block takes the first that applies, in this order:
 ///
@@ -123,7 +123,7 @@ pub(crate) enum StepState {
         /// The step's key in it, `format` or `lint`.
         key: &'static str,
     },
-    /// The author marked the block `no_format(...)` or `no_lint(...)`.
+    /// The author marked the block `format(off: ...)` or `lint(off: ...)`.
     Skipped {
         /// The reason in the parentheses, if any.
         reason: Option<String>,
@@ -174,10 +174,12 @@ pub(crate) struct Steps {
 
 impl Steps {
     /// The steps due on `block`, in `state`, under `code_blocks`. Only a
-    /// [`NotChecked::Pending`] block has steps: each is [`StepState::Skipped`] when the block
-    /// is marked `no_format(...)` or `no_lint(...)`, [`StepState::Off`] when its selected tool's
-    /// table sets the step's mode to `"off"`, and otherwise due, [`StepState::NotRun`] until it
-    /// runs.
+    /// [`NotChecked::Pending`] block has steps. A block attribute the selected tool's cartridge
+    /// accepts beats its table, for that block only: each step is [`StepState::Skipped`] when
+    /// the block is marked `format(off: ...)` or `lint(off: ...)`, due when it is marked
+    /// `format(full)` or `lint(full)`, else [`StepState::Off`] when the tool's table sets the
+    /// step's mode to `"off"`, and otherwise due. A due step is [`StepState::NotRun`] until it
+    /// runs; a step with no selected tool is [`StepState::NotRun`] too.
     /// Every other block's steps are [`StepState::NotRun`].
     #[must_use]
     pub(crate) fn of(block: &CodeBlock, state: &BlockState, code_blocks: &CodeBlocks) -> Self {
@@ -185,34 +187,27 @@ impl Steps {
             return Self::default();
         }
         let language = tag_of(block).and_then(Language::from_tag);
-        let step = |attribute: &str, step: Step| {
-            let skipped = block.info.as_ref().and_then(|info| {
-                info.parsed()
-                    .attributes
-                    .iter()
-                    .find_map(|written| reasoned(written).filter(|found| found.name == attribute))
-                    .map(|found| found.reason.map(str::to_owned))
-            });
-            if let Some(reason) = skipped {
-                StepState::Skipped { reason }
-            } else if let Some((language, tool)) = language.and_then(|language| {
+        let step = |step: Step| {
+            let Some((language, tool)) = language.and_then(|language| {
                 tools::selected(code_blocks, language, step).map(|tool| (language, tool))
-            }) && code_blocks.mode(language, tool.name) == Mode::Off
-            {
-                StepState::Off {
+            }) else {
+                return StepState::NotRun;
+            };
+            let table_off = code_blocks.mode(language, tool.name) == Mode::Off;
+            match block_setting(block, step, tool) {
+                Some(StepValue::Off { reason }) => StepState::Skipped {
+                    reason: reason.map(str::to_owned),
+                },
+                Some(StepValue::Other(_)) | None if table_off => StepState::Off {
                     table: format!("[features.code-blocks.{}.{}]", language.table(), tool.name),
-                    key: match step {
-                        Step::Format => "format",
-                        Step::Lint => "lint",
-                    },
-                }
-            } else {
-                StepState::NotRun
+                    key: step.key(),
+                },
+                Some(StepValue::Full | StepValue::Other(_)) | None => StepState::NotRun,
             }
         };
         Self {
-            format: step("no_format", Step::Format),
-            lint: step("no_lint", Step::Lint),
+            format: step(Step::Format),
+            lint: step(Step::Lint),
         }
     }
 
@@ -275,6 +270,27 @@ pub(crate) fn tag_of(block: &CodeBlock) -> Option<&str> {
         .map(|info| info.parsed().language)
         .filter(|tag| !tag.is_empty())
         .or_else(|| block.default_language())
+}
+
+/// The value `block` sets `step` to with a `lint(...)` or `format(...)` attribute, the first one
+/// written, when `tool`'s cartridge accepts it. `None` when the block has no such attribute or
+/// the cartridge refuses its value, which then warns `code-block-unknown-attribute`.
+#[must_use]
+pub(crate) fn block_setting<'block>(
+    block: &'block CodeBlock,
+    step: Step,
+    tool: &ToolCartridge,
+) -> Option<StepValue<'block>> {
+    block
+        .info
+        .as_ref()?
+        .parsed()
+        .attributes
+        .into_iter()
+        .filter_map(step_attribute)
+        .find(|found| found.step == step)
+        .map(|found| found.value)
+        .filter(|value| value.mode().is_some_and(|mode| tool.modes.contains(&mode)))
 }
 
 impl BlockState {
@@ -387,14 +403,14 @@ pub(crate) struct CodeBlockCounts {
     pub(crate) not_checked: usize,
     /// Format steps off: blocks whose formatter's table sets `format = "off"`.
     pub(crate) format_off: usize,
-    /// Format steps skipped: blocks the author marked `no_format(...)`.
+    /// Format steps skipped: blocks the author marked `format(off: ...)`.
     pub(crate) format_skipped: usize,
     /// Format steps due on a checked block that didn't run, such as a formatter supdoc couldn't
     /// run safely.
     pub(crate) format_not_run: usize,
     /// Lint steps off: blocks whose linter's table sets `lint = "off"`.
     pub(crate) lint_off: usize,
-    /// Lint steps skipped: blocks the author marked `no_lint(...)`.
+    /// Lint steps skipped: blocks the author marked `lint(off: ...)`.
     pub(crate) lint_skipped: usize,
     /// Lint steps due on a checked block that didn't run, such as clippy, which needs trust.
     pub(crate) lint_not_run: usize,
@@ -729,11 +745,12 @@ mod tests {
     }
 
     #[test]
-    fn no_lint_skips_the_lint_step_with_its_reason_and_lint_off_turns_it_off() {
+    fn lint_off_skips_the_lint_step_with_its_reason_and_a_table_off_turns_it_off() {
         let config =
             "[features.code-blocks.shell]\n[features.code-blocks.python.ruff]\nlint = \"off\"\n";
 
-        let skipped = steps(config, "sh no_lint(needs a server)");
+        let skipped = steps(config, "sh lint(off: needs a server, (and a db))");
+        let bare = steps(config, "sh lint(off)");
         let off = steps(config, "python");
         let due = steps(config, "sh");
 
@@ -742,13 +759,60 @@ mod tests {
             Steps {
                 format: StepState::NotRun,
                 lint: StepState::Skipped {
-                    reason: Some("needs a server".to_owned())
+                    reason: Some("needs a server, (and a db)".to_owned())
                 },
             }
         );
+        assert_eq!(bare.lint, StepState::Skipped { reason: None });
         assert_eq!(off.lint, step_off("python.ruff", "lint"));
         assert_eq!(off.format, StepState::NotRun, "only the lint step is off");
         assert_eq!(due, Steps::default(), "a lint step left on is due");
+    }
+
+    #[test]
+    fn a_block_attribute_beats_its_tools_table_for_that_block_only() {
+        let config = "[features.code-blocks.shell.shfmt]\nformat = \"off\"\n\
+                      [features.code-blocks.python.ruff]\nlint = \"off\"\n";
+
+        let format_full = steps(config, "sh format(full)");
+        let lint_full = steps(config, "python lint(full)");
+        let format_off = steps(config, "python format(off: generated)");
+        let neighbour = steps(config, "sh");
+
+        assert_eq!(
+            format_full.format,
+            StepState::NotRun,
+            "format(full) makes the step due"
+        );
+        assert_eq!(
+            lint_full.lint,
+            StepState::NotRun,
+            "lint(full) makes the step due"
+        );
+        assert_eq!(
+            format_off.format,
+            StepState::Skipped {
+                reason: Some("generated".to_owned())
+            }
+        );
+        assert_eq!(
+            neighbour.format,
+            step_off("shell.shfmt", "format"),
+            "another block keeps the table's mode"
+        );
+    }
+
+    #[test]
+    fn a_value_the_cartridge_refuses_leaves_the_tables_mode() {
+        let config = "[features.code-blocks.python.ruff]\nlint = \"off\"\n";
+
+        for info in ["python lint(partial)", "python lint(on)", "python lint()"] {
+            assert_eq!(
+                steps(config, info).lint,
+                step_off("python.ruff", "lint"),
+                "info `{info}`"
+            );
+        }
     }
 
     #[test]
@@ -756,7 +820,11 @@ mod tests {
         let config = "[features.code-blocks.shell.shfmt]\nformat = \"off\"\n\
                       [features.code-blocks.shell.shellcheck]\nlint = \"off\"\n";
 
-        for info in ["sh ignore(slow) no_lint(why)", "text no_format(why)", "zsh"] {
+        for info in [
+            "sh ignore(slow) lint(off: why)",
+            "text format(off: why)",
+            "zsh",
+        ] {
             assert_eq!(steps(config, info), Steps::default(), "info `{info}`");
         }
     }

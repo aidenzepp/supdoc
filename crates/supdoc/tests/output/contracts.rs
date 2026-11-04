@@ -921,10 +921,51 @@ mod helps {
             &["check"],
         ),
         case(
-            "code-block-ignore-reason",
+            "code-block-missing-reason",
             |p| {
                 config_with(p, "[features.code-blocks]\n");
                 p.write("docs/blocks.md", "# B\n\n```sh ignore\necho hi\n```\n");
+            },
+            &["check"],
+        ),
+        case(
+            "code-block-missing-reason",
+            |p| {
+                config_with(p, "[features.code-blocks]\n");
+                p.write("docs/blocks.md", "# B\n\n```sh lint(off)\necho hi\n```\n");
+            },
+            &["check"],
+        ),
+        case(
+            "code-block-unknown-attribute",
+            |p| {
+                config_with(p, "[features.code-blocks]\n");
+                p.write(
+                    "docs/blocks.md",
+                    "# B\n\n```sh no_lint(slow)\necho hi\n```\n",
+                );
+            },
+            &["check"],
+        ),
+        case(
+            "code-block-unknown-attribute",
+            |p| {
+                config_with(p, "[features.code-blocks]\n");
+                p.write(
+                    "docs/blocks.md",
+                    "# B\n\n```sh lint(partial)\necho hi\n```\n",
+                );
+            },
+            &["check"],
+        ),
+        case(
+            "code-block-unknown-attribute",
+            |p| {
+                config_with(p, "[features.code-blocks]\n");
+                p.write(
+                    "docs/blocks.md",
+                    "# B\n\n```toml format(full)\na = 1\n```\n",
+                );
             },
             &["check"],
         ),
