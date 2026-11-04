@@ -137,7 +137,7 @@
           "type": "integer"
         },
         "not_checked": {
-          "description": "Blocks nothing checked: text, a language turned off, or a step not built yet.",
+          "description": "Blocks nothing checked: text, a language turned off, or no step that ran.",
           "format": "uint",
           "minimum": 0,
           "type": "integer"

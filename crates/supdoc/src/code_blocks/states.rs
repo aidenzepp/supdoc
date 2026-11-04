@@ -34,7 +34,9 @@ use super::tools::{self, Step, ToolCartridge, formatter};
 /// A block's [`Steps`] record what its format and lint steps did. Once a step runs, the state is
 /// the outcome over the steps that ran: [`Failed`](Self::Failed) when any failed, otherwise
 /// [`Passed`](Self::Passed). A step that is off or skipped leaves the state alone, so a block
-/// whose every step is off or skipped stays [`NotChecked::Pending`].
+/// none of whose steps ran is [`NotChecked::NoStepRan`], and one whose text couldn't be read for
+/// its tools is [`NotChecked::InputUnreadable`]. [`NotChecked::Pending`] is internal: `check`
+/// settles every pending block before output.
 ///
 /// Only what the author wrote and the config decide a state: supdoc never guesses a block into a
 /// skip state. `uses(...)` findings leave the state alone.
@@ -66,9 +68,14 @@ pub(crate) enum NotChecked {
     Text,
     /// The block's language has no table under `[features.code-blocks]`.
     LanguageOff,
-    /// The block's language is on, but none of its steps ran: each is off, skipped or not built
-    /// yet.
+    /// The block's language is on and its tools haven't been looked up yet. Internal only: every
+    /// pending block is settled before output, and [`BlockState::reason`] asserts it was.
     Pending,
+    /// The block's language is on, but none of its steps ran: each is off, skipped, refused or
+    /// couldn't run.
+    NoStepRan,
+    /// The block's text couldn't be read from its doc for its tools.
+    InputUnreadable,
     /// The tool's binary on `PATH` is inside the checkout, so the checkout chose it.
     ToolInsideRoot,
     /// The root's `rust-toolchain(.toml)` names a path, an invalid channel, or lies outside the
@@ -128,9 +135,17 @@ pub(crate) enum StepState {
         /// The reason in the parentheses, if any.
         reason: Option<String>,
     },
-    /// The step didn't run: it isn't due on the block, isn't built yet, or its tool didn't run.
+    /// The step didn't run: it isn't due on the block, or no tool is selected for it.
     #[default]
     NotRun,
+    /// The step was due, but its tool was refused before it ran: missing from `PATH`, or found
+    /// inside the checkout. Named `not_run` in JSON.
+    ToolRefused {
+        /// The tool's binary, as its warning names it.
+        binary: &'static str,
+        /// Whether the binary on `PATH` is inside the checkout, rather than missing.
+        inside_root: bool,
+    },
     /// The step was due but supdoc couldn't run it safely, for the reason held. Named `not_run`
     /// in JSON, like [`NotRun`](Self::NotRun).
     Unrunnable {
@@ -147,17 +162,25 @@ impl StepState {
             Self::Ran => "ran",
             Self::Off { .. } => "off",
             Self::Skipped { .. } => "skipped",
-            Self::NotRun | Self::Unrunnable { .. } => "not_run",
+            Self::NotRun | Self::ToolRefused { .. } | Self::Unrunnable { .. } => "not_run",
         }
     }
 
-    /// Why the step didn't run on a block it is due on. `step` is its name, `format` or `lint`.
-    fn why(&self, step: &str) -> Option<String> {
+    /// Why the step didn't run on a block it is due on, as the block's reason gives it. `None`
+    /// when it ran or wasn't due.
+    fn why(&self) -> Option<String> {
         match self {
-            Self::Ran => None,
+            Self::Ran | Self::NotRun => None,
             Self::Off { table, key } => Some(format!("`{key} = \"off\"` in `{table}`")),
             Self::Skipped { reason } => reason.clone(),
-            Self::NotRun => Some(format!("its {step} step isn't built yet")),
+            Self::ToolRefused {
+                binary,
+                inside_root: false,
+            } => Some(format!("`{binary}` isn't on PATH")),
+            Self::ToolRefused {
+                binary,
+                inside_root: true,
+            } => Some(format!("`{binary}` is inside the checkout")),
             Self::Unrunnable { reason } => Some((*reason).to_owned()),
         }
     }
@@ -212,13 +235,10 @@ impl Steps {
     }
 
     /// Why a block's steps didn't all run, for a block whose state gives no better reason: each
-    /// step's reason when it is off, skipped or didn't run, format then lint, joined by `; `, so
-    /// one step's reason never hides the other's. `None` while the format step is still due.
+    /// step's reason when it is off, skipped, refused or couldn't run, format then lint, joined by
+    /// `; `, so one step's reason never hides the other's. `None` when every due step ran.
     fn reason(&self) -> Option<String> {
-        if self.format == StepState::NotRun {
-            return None;
-        }
-        let reasons: Vec<String> = [self.format.why("format"), self.lint.why("lint")]
+        let reasons: Vec<String> = [self.format.why(), self.lint.why()]
             .into_iter()
             .flatten()
             .collect();
@@ -308,8 +328,8 @@ impl BlockState {
         }
     }
 
-    /// Why the block is in this state, when it has a reason to give. A passed or pending block
-    /// whose `steps` didn't all run gives theirs (see [`Steps`]). `tag` is the block's language
+    /// Why the block is in this state, when it has a reason to give. A passed block, or one none
+    /// of whose steps ran, whose `steps` didn't all run gives theirs (see [`Steps`]). `tag` is the block's language
     /// tag and `tool` the name of the tool whose step decided it (the formatter, else the
     /// linter), when one was; a tool refused before it ran, missing or inside the checkout, is
     /// named by its binary, as its warning names it.
@@ -320,13 +340,18 @@ impl BlockState {
         tag: Option<&str>,
         tool: Option<&str>,
     ) -> Option<String> {
-        if matches!(self, Self::Passed | Self::NotChecked(NotChecked::Pending))
+        debug_assert_ne!(
+            *self,
+            Self::NotChecked(NotChecked::Pending),
+            "a pending block must be settled before its reason is given"
+        );
+        if matches!(self, Self::Passed | Self::NotChecked(NotChecked::NoStepRan))
             && let Some(reason) = steps.reason()
         {
             return Some(reason);
         }
         match self {
-            Self::Passed => None,
+            Self::Passed | Self::NotChecked(NotChecked::Pending) => None,
             Self::Failed(Failure::SourceMissing) => {
                 Some("an excerpt's source is missing".to_owned())
             }
@@ -356,8 +381,9 @@ impl BlockState {
                 };
                 Some(format!("no `[features.code-blocks.{table}]` table"))
             }
-            Self::NotChecked(NotChecked::Pending) => {
-                Some("its format and lint steps aren't built yet".to_owned())
+            Self::NotChecked(NotChecked::NoStepRan) => Some("none of its steps ran".to_owned()),
+            Self::NotChecked(NotChecked::InputUnreadable) => {
+                Some("supdoc couldn't read the block's text from its doc".to_owned())
             }
             Self::NotChecked(NotChecked::ToolInsideRoot) => {
                 Some(format!("`{}` is inside the checkout", tool_of(tag, tool)))
@@ -399,7 +425,7 @@ pub(crate) struct CodeBlockCounts {
     pub(crate) stale: usize,
     /// Blocks the author marked `ignore(...)`.
     pub(crate) opted_out: usize,
-    /// Blocks nothing checked: text, a language turned off, or a step not built yet.
+    /// Blocks nothing checked: text, a language turned off, or no step that ran.
     pub(crate) not_checked: usize,
     /// Format steps off: blocks whose formatter's table sets `format = "off"`.
     pub(crate) format_off: usize,
@@ -470,6 +496,14 @@ impl CodeBlockCounts {
                     StepState::Unrunnable { reason } => {
                         *not_run += 1;
                         let _first = why.get_or_insert(short_reason(reason));
+                    }
+                    StepState::ToolRefused { inside_root, .. } => {
+                        *not_run += 1;
+                        let _first = why.get_or_insert(if *inside_root {
+                            "tool inside the checkout"
+                        } else {
+                            "tool missing"
+                        });
                     }
                     StepState::Ran | StepState::NotRun => {}
                 }
@@ -851,7 +885,7 @@ mod tests {
             (BlockState::Passed, &format_off),
             (BlockState::Passed, &lint_not_run),
             (BlockState::Failed(Failure::Unformatted), &lint_skipped),
-            (BlockState::NotChecked(NotChecked::Pending), &both_off),
+            (BlockState::NotChecked(NotChecked::NoStepRan), &both_off),
         ];
 
         let counts = CodeBlockCounts::tally(blocks.iter().map(|(state, steps)| (state, *steps)));
@@ -883,7 +917,41 @@ mod tests {
     }
 
     #[test]
-    fn a_passed_block_whose_lint_is_due_reports_it_not_run() {
+    fn a_passed_block_whose_linter_is_missing_names_its_binary() {
+        let steps = Steps {
+            format: StepState::Ran,
+            lint: StepState::ToolRefused {
+                binary: "shellcheck",
+                inside_root: false,
+            },
+        };
+
+        let reason = BlockState::Passed.reason(&steps, Some("sh"), Some("shfmt"));
+
+        assert_eq!(reason.as_deref(), Some("`shellcheck` isn't on PATH"));
+        assert_eq!(steps.lint.name(), "not_run");
+    }
+
+    #[test]
+    fn a_passed_block_whose_linter_is_inside_the_checkout_says_so() {
+        let steps = Steps {
+            format: StepState::Ran,
+            lint: StepState::ToolRefused {
+                binary: "shellcheck",
+                inside_root: true,
+            },
+        };
+
+        let reason = BlockState::Passed.reason(&steps, Some("sh"), Some("shfmt"));
+
+        assert_eq!(
+            reason.as_deref(),
+            Some("`shellcheck` is inside the checkout")
+        );
+    }
+
+    #[test]
+    fn a_step_that_was_not_due_gives_no_reason() {
         let steps = Steps {
             format: StepState::Ran,
             lint: StepState::NotRun,
@@ -891,8 +959,45 @@ mod tests {
 
         let reason = BlockState::Passed.reason(&steps, Some("sh"), Some("shfmt"));
 
-        assert!(reason.is_some(), "the lint step's reason should be given");
-        assert_eq!(StepState::NotRun.name(), "not_run");
+        assert_eq!(
+            reason, None,
+            "a passed block with no lint step is just passed"
+        );
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "a pending block must be settled before its reason is given")]
+    fn a_pending_block_never_reaches_output() {
+        let _reason =
+            BlockState::NotChecked(NotChecked::Pending).reason(&Steps::default(), Some("sh"), None);
+    }
+
+    #[test]
+    fn every_settled_state_gives_an_output_reason_and_none_is_transitional() {
+        let steps = Steps::default();
+        let settled = [
+            BlockState::Failed(Failure::SourceMissing),
+            BlockState::Stale,
+            BlockState::NotChecked(NotChecked::Text),
+            BlockState::NotChecked(NotChecked::LanguageOff),
+            BlockState::NotChecked(NotChecked::NoStepRan),
+            BlockState::NotChecked(NotChecked::InputUnreadable),
+            BlockState::NotChecked(NotChecked::ToolInsideRoot),
+            BlockState::UnknownLanguage,
+            BlockState::ToolMissing,
+        ];
+
+        for state in settled {
+            let reason = state.reason(&steps, Some("sh"), Some("shfmt"));
+
+            assert!(
+                reason
+                    .as_deref()
+                    .is_some_and(|reason| !reason.contains(" yet")),
+                "{state:?} gave {reason:?}"
+            );
+        }
     }
 
     /// The state of a step its tool's table, `[features.code-blocks.<table>]`, turns off.
@@ -912,7 +1017,8 @@ mod tests {
             },
         };
 
-        let reason = BlockState::NotChecked(NotChecked::Pending).reason(&steps, Some("rust"), None);
+        let reason =
+            BlockState::NotChecked(NotChecked::NoStepRan).reason(&steps, Some("rust"), None);
 
         assert_eq!(
             reason.as_deref(),

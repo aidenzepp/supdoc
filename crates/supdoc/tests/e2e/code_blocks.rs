@@ -883,6 +883,73 @@ fn shell_format_with_the_real_shfmt_passes_formatted_blocks_and_fails_others() {
     assert_eq!(at(&json, "/data/summary/code_blocks/failed"), 1, "{json}");
 }
 
+/// Runs `check --json` on a recorded `basic` project with the shell table on, its linter
+/// selected, and one `sh` block. `PATH` holds a passing `shfmt` stub outside the checkout, then,
+/// when `linter_inside` holds, a `shellcheck` stub inside it; otherwise no `shellcheck` at all.
+fn check_with_shfmt_and_no_usable_linter(linter_inside: bool) -> serde_json::Value {
+    use std::os::unix::fs::PermissionsExt as _;
+    let project = Project::fixture("basic");
+    project.record();
+    project.write(
+        "supdoc.config.toml",
+        "[features.code-blocks]\n[features.code-blocks.shell]\n",
+    );
+    project.write("docs/blocks.md", "# Blocks\n\n```sh\necho hi\n```\n");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let shfmt = outside.path().join("shfmt");
+    std::fs::write(&shfmt, "#!/bin/sh\n/bin/cat\n").expect("the stub should be writable");
+    std::fs::set_permissions(&shfmt, std::fs::Permissions::from_mode(0o755))
+        .expect("the stub should be made executable");
+    let mut dirs = vec![outside.path().to_path_buf()];
+    if linter_inside {
+        let bin = project.path("bin");
+        stub(&bin, "shellcheck");
+        dirs.push(bin);
+    }
+    let path = std::env::join_paths(dirs).expect("the stub directories should join into a PATH");
+    project
+        .supdoc_in_with(
+            ".",
+            &["check", "--json", "-v"],
+            &[("PATH", std::path::Path::new(&path))],
+        )
+        .assert_exit(0)
+        .json()
+}
+
+#[test]
+fn a_formatted_block_whose_linter_is_missing_names_the_linter_binary() {
+    let json = check_with_shfmt_and_no_usable_linter(false);
+
+    assert_eq!(finding_kinds(&json), ["code-block-tool-missing"], "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/state"), "passed", "{json}");
+    assert_eq!(
+        at(&json, "/data/code_blocks/0/reason"),
+        "`shellcheck` isn't on PATH",
+        "{json}"
+    );
+    assert_eq!(
+        at(&json, "/data/summary/code_blocks/lint_not_run"),
+        1,
+        "{json}"
+    );
+    assert!(!json.to_string().contains("built yet"), "{json}");
+}
+
+#[test]
+fn a_formatted_block_whose_linter_is_inside_the_checkout_says_so() {
+    let json = check_with_shfmt_and_no_usable_linter(true);
+
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/state"), "passed", "{json}");
+    assert_eq!(
+        at(&json, "/data/code_blocks/0/reason"),
+        "`shellcheck` is inside the checkout",
+        "{json}"
+    );
+    assert!(!json.to_string().contains("built yet"), "{json}");
+}
+
 #[test]
 fn shell_format_equal_output_passes_every_block() {
     let json = check_with_shfmt("/bin/cat", &[], 0);
