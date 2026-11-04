@@ -1,1 +1,487 @@
-//! The result cache for tool runs. Built in a later unit.
+//! The result cache for tool runs: a formatter's exit, stdout and capped stderr for one block,
+//! kept outside the checkout so an unchanged block isn't run again.
+//!
+//! Entries live in `$XDG_CACHE_HOME/supdoc/code-blocks/<sha256 of the real root>/`, or under
+//! `$HOME/.cache` when `XDG_CACHE_HOME` isn't an absolute path. A missing, unreadable, corrupt or
+//! partial entry is a miss, never a pass.
+
+use std::ffi::OsStr;
+use std::fs;
+use std::io::Write as _;
+use std::os::unix::fs::DirBuilderExt as _;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::UNIX_EPOCH;
+
+use sha2::{Digest, Sha256};
+
+use crate::hash::Hash;
+
+use super::runner::Ran;
+use super::tools::{Tool, ToolEnv};
+
+/// The version of the rules that decide what a tool reads for a block: hidden-line handling and
+/// wrapping. Raised whenever they change, so results judged under old rules are never reused.
+const RULES_VERSION: u32 = 1;
+
+/// The first bytes of every entry, naming its format.
+const MAGIC: &[u8] = b"supdoc code-block cache 1\n";
+
+/// How many bytes of a tool's stderr an entry keeps.
+const STDERR_CAP: usize = 64 * 1024;
+
+/// The largest entry read back: the runner's 1 MiB output cap, the stderr cap and the framing.
+const MAX_ENTRY: u64 = 1024 * 1024 + 64 * 1024 + 4096;
+
+/// How many entries one root's cache keeps; the oldest beyond it are removed.
+const MAX_ENTRIES: usize = 4096;
+
+/// Tells concurrent writers' temporary files apart within one process.
+static WRITES: AtomicU64 = AtomicU64::new(0);
+
+/// One root's cache directory.
+#[derive(Debug)]
+pub(crate) struct Cache {
+    /// The directory holding the root's entries.
+    dir: PathBuf,
+    /// How many entries it keeps.
+    limit: usize,
+}
+
+/// The key of one tool run: a sha256 over everything that decides its result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Key(Hash);
+
+/// What decides one tool run's result, hashed into its [`Key`].
+#[derive(Debug)]
+pub(crate) struct Run<'run> {
+    /// The tool.
+    pub(crate) tool: &'run Tool,
+    /// The tool's real path.
+    pub(crate) program: &'run Path,
+    /// Its arguments.
+    pub(crate) args: &'run [&'run OsStr],
+    /// The variables it gets beyond the passed environment, such as the pinned toolchain.
+    pub(crate) extra: &'run [(&'run str, &'run OsStr)],
+    /// The checked text, after hidden-line handling.
+    pub(crate) input: &'run str,
+}
+
+impl Cache {
+    /// The cache for `root`, under `env`'s `XDG_CACHE_HOME`, else its `HOME`'s `.cache`, with its
+    /// directory created mode 0700. `None` when neither is an absolute path, when the directory
+    /// would be inside `root`, or when it can't be created: then nothing is cached.
+    ///
+    /// Effect: resolves `root` and the cache base, and creates the cache directory.
+    pub(crate) fn open(env: &ToolEnv, root: &Path) -> Option<Self> {
+        let absolute = |name| {
+            env.var(name)
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+        };
+        let base = absolute("XDG_CACHE_HOME")
+            .or_else(|| absolute("HOME").map(|home| home.join(".cache")))?;
+        let real_root = root.canonicalize().ok()?;
+        let real_base = resolved(&base)?;
+        if real_base.starts_with(&real_root) {
+            return None;
+        }
+        let name = Hash::digest(real_root.as_os_str().as_encoded_bytes()).to_string();
+        let dir = real_base.join("supdoc").join("code-blocks").join(name);
+        Self::at(dir, MAX_ENTRIES)
+    }
+
+    /// The cache in `dir`, created mode 0700, keeping `limit` entries. `None` when `dir` can't be
+    /// created.
+    ///
+    /// Effect: creates `dir` and its missing parents.
+    fn at(dir: PathBuf, limit: usize) -> Option<Self> {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .ok()?;
+        Some(Self { dir, limit })
+    }
+
+    /// The key of `run`, from `root`: the checked text, the tool's name, its real path, size and
+    /// modification time (read, never run), its arguments and extra variables, the content of each
+    /// config file its row names at `root`, and [`RULES_VERSION`]. `None` when the tool's metadata
+    /// can't be read, so the run isn't cached.
+    ///
+    /// Effect: reads the tool's metadata and each config file at `root`.
+    pub(crate) fn key(run: &Run<'_>, root: &Path) -> Option<Key> {
+        let meta = fs::metadata(run.program).ok()?;
+        let modified = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+        let mut hasher = Sha256::new();
+        let mut field = |bytes: &[u8]| {
+            hasher.update((bytes.len() as u64).to_le_bytes());
+            hasher.update(bytes);
+        };
+        field(&RULES_VERSION.to_le_bytes());
+        field(run.tool.name.as_bytes());
+        field(run.program.as_os_str().as_encoded_bytes());
+        field(&meta.len().to_le_bytes());
+        field(&modified.as_nanos().to_le_bytes());
+        for arg in run.args {
+            field(arg.as_encoded_bytes());
+        }
+        for (name, value) in run.extra {
+            field(name.as_bytes());
+            field(value.as_encoded_bytes());
+        }
+        for name in run.tool.config_files {
+            field(name.as_bytes());
+            match fs::read(root.join(name)) {
+                Ok(text) => field(&Sha256::digest(&text)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => field(b"absent"),
+                Err(_) => return None,
+            }
+        }
+        field(run.input.as_bytes());
+        Some(Key(Hash::from_bytes(hasher.finalize().into())))
+    }
+
+    /// The run stored under `key`. `None` when there is no entry or it can't be read, is cut
+    /// short, is corrupt or belongs to another key.
+    ///
+    /// Effect: reads the entry.
+    pub(crate) fn get(&self, key: Key) -> Option<Ran> {
+        let path = self.entry(key);
+        if fs::metadata(&path).ok()?.len() > MAX_ENTRY {
+            return None;
+        }
+        decode(&fs::read(path).ok()?, key)
+    }
+
+    /// Stores `ran` under `key`, its stderr capped, through a temporary file renamed into place.
+    /// A failed write leaves no entry and is otherwise ignored.
+    ///
+    /// Effect: writes and renames a file in the cache directory.
+    pub(crate) fn put(&self, key: Key, ran: &Ran) {
+        let count = WRITES.fetch_add(1, Ordering::Relaxed);
+        let temporary = self
+            .dir
+            .join(format!(".tmp-{}-{count}", std::process::id()));
+        let written = fs::File::create(&temporary)
+            .and_then(|mut file| file.write_all(&encode(key, ran)))
+            .and_then(|()| fs::rename(&temporary, self.entry(key)));
+        if written.is_err() {
+            let _gone = fs::remove_file(&temporary);
+        }
+    }
+
+    /// Removes the oldest entries beyond the limit, by modification time. Failures are ignored.
+    ///
+    /// Effect: lists the cache directory and removes files from it.
+    pub(crate) fn prune(&self) {
+        let Ok(entries) = fs::read_dir(&self.dir) else {
+            return;
+        };
+        let mut files: Vec<_> = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let meta = entry.metadata().ok()?;
+                meta.is_file()
+                    .then(|| (meta.modified().unwrap_or(UNIX_EPOCH), entry.path()))
+            })
+            .collect();
+        let Some(excess) = files.len().checked_sub(self.limit) else {
+            return;
+        };
+        files.sort();
+        for (_, path) in files.into_iter().take(excess) {
+            let _gone = fs::remove_file(path);
+        }
+    }
+
+    /// The path of `key`'s entry.
+    fn entry(&self, key: Key) -> PathBuf {
+        self.dir.join(key.0.to_string())
+    }
+}
+
+/// `path` with its longest existing ancestor resolved and the rest joined on. `None` when no
+/// ancestor resolves.
+///
+/// Effect: reads metadata and resolves symlinks along `path`.
+fn resolved(path: &Path) -> Option<PathBuf> {
+    let mut rest = Vec::new();
+    let mut existing = path;
+    loop {
+        if let Ok(real) = existing.canonicalize() {
+            return Some(rest.iter().rev().fold(real, |real, part| real.join(part)));
+        }
+        rest.push(existing.file_name()?);
+        existing = existing.parent()?;
+    }
+}
+
+/// `ran`'s entry under `key`: the magic, the key, the exit, both stream lengths, the streams,
+/// then a sha256 of all of it.
+fn encode(key: Key, ran: &Ran) -> Vec<u8> {
+    let stderr = ran.stderr.get(..STDERR_CAP).unwrap_or(&ran.stderr);
+    let mut bytes =
+        Vec::with_capacity(MAGIC.len() + 32 + 17 + ran.stdout.len() + stderr.len() + 32);
+    bytes.extend_from_slice(MAGIC);
+    bytes.extend_from_slice(&key.0.to_string().into_bytes());
+    bytes.push(u8::from(ran.success));
+    bytes.extend_from_slice(&(ran.stdout.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(&(stderr.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(&ran.stdout);
+    bytes.extend_from_slice(stderr);
+    let sum = Sha256::digest(&bytes);
+    bytes.extend_from_slice(&sum);
+    bytes
+}
+
+/// The run in `bytes`, an entry stored under `key`. `None` unless every part is present, the
+/// lengths account for every byte and the trailing sha256 matches.
+fn decode(bytes: &[u8], key: Key) -> Option<Ran> {
+    let (body, sum) = bytes.split_at_checked(bytes.len().checked_sub(32)?)?;
+    if Sha256::digest(body).as_slice() != sum {
+        return None;
+    }
+    let rest = body.strip_prefix(MAGIC)?;
+    let rest = rest.strip_prefix(key.0.to_string().as_bytes())?;
+    let (&success, rest) = rest.split_first()?;
+    let (stdout_len, rest) = rest.split_first_chunk::<8>()?;
+    let (stderr_len, rest) = rest.split_first_chunk::<8>()?;
+    let stdout_len = usize::try_from(u64::from_le_bytes(*stdout_len)).ok()?;
+    let stderr_len = usize::try_from(u64::from_le_bytes(*stderr_len)).ok()?;
+    let (stdout, stderr) = rest.split_at_checked(stdout_len)?;
+    if stderr.len() != stderr_len || success > 1 {
+        return None;
+    }
+    Some(Ran {
+        success: success == 1,
+        stdout: stdout.to_vec(),
+        stderr: stderr.to_vec(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+
+    use super::*;
+    use crate::code_blocks::tools::TOOLS;
+
+    /// A temporary directory for one test.
+    fn temp() -> tempfile::TempDir {
+        tempfile::TempDir::new().expect("a temporary directory should be creatable")
+    }
+
+    /// The `shfmt` row.
+    fn shfmt() -> &'static Tool {
+        TOOLS
+            .iter()
+            .find(|tool| tool.name == "shfmt")
+            .expect("shfmt should be a known tool")
+    }
+
+    /// A program file in `dir` to key runs by.
+    fn program(dir: &Path) -> PathBuf {
+        let path = dir.join("shfmt");
+        fs::write(&path, "#!/bin/sh\n").expect("the program should be writable");
+        path
+    }
+
+    /// The key of `shfmt` at `program` on `input` from `root`.
+    fn key_of(program: &Path, input: &str, root: &Path) -> Key {
+        let run = Run {
+            tool: shfmt(),
+            program,
+            args: &[OsStr::new("--filename"), OsStr::new("a.sh")],
+            extra: &[],
+            input,
+        };
+        Cache::key(&run, root).expect("the program's metadata should be readable")
+    }
+
+    /// A finished run.
+    fn ran() -> Ran {
+        Ran {
+            success: true,
+            stdout: b"echo hi\n".to_vec(),
+            stderr: b"note\n".to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_stored_run_reads_back_unchanged() {
+        let dir = temp();
+        let cache = Cache::at(dir.path().join("cache"), 10).expect("the cache should open");
+        let key = key_of(&program(dir.path()), "echo hi\n", dir.path());
+
+        cache.put(key, &ran());
+
+        assert_eq!(cache.get(key), Some(ran()));
+    }
+
+    #[test]
+    fn a_missing_entry_is_a_miss() {
+        let dir = temp();
+        let cache = Cache::at(dir.path().join("cache"), 10).expect("the cache should open");
+        let key = key_of(&program(dir.path()), "echo hi\n", dir.path());
+
+        assert_eq!(cache.get(key), None);
+    }
+
+    #[test]
+    fn a_corrupt_or_cut_short_entry_is_a_miss() {
+        let dir = temp();
+        let cache = Cache::at(dir.path().join("cache"), 10).expect("the cache should open");
+        let key = key_of(&program(dir.path()), "echo hi\n", dir.path());
+        cache.put(key, &ran());
+        let path = cache.entry(key);
+        let whole = fs::read(&path).expect("the entry should be readable");
+
+        let mut flipped = whole.clone();
+        if let Some(byte) = flipped.get_mut(MAGIC.len() + 70) {
+            *byte ^= 1;
+        }
+        fs::write(&path, &flipped).expect("the entry should be writable");
+        let corrupt = cache.get(key);
+        fs::write(&path, whole.get(..whole.len() - 1).unwrap_or_default())
+            .expect("the entry should be writable");
+        let short = cache.get(key);
+
+        assert_eq!((corrupt, short), (None, None));
+    }
+
+    #[test]
+    fn an_entry_under_another_key_is_a_miss() {
+        let dir = temp();
+        let cache = Cache::at(dir.path().join("cache"), 10).expect("the cache should open");
+        let program = program(dir.path());
+        let first = key_of(&program, "echo hi\n", dir.path());
+        let second = key_of(&program, "echo bye\n", dir.path());
+        cache.put(first, &ran());
+
+        fs::rename(cache.entry(first), cache.entry(second)).expect("the entry should move");
+
+        assert_eq!(cache.get(second), None);
+    }
+
+    #[test]
+    fn the_key_changes_with_the_text_the_config_and_the_tool() {
+        let dir = temp();
+        let program = program(dir.path());
+        let base = key_of(&program, "echo hi\n", dir.path());
+
+        let text = key_of(&program, "echo bye\n", dir.path());
+        fs::write(dir.path().join(".editorconfig"), "[*]\n").expect("config should be writable");
+        let config = key_of(&program, "echo hi\n", dir.path());
+        fs::write(&program, "#!/bin/sh\nexit 0\n").expect("the program should be writable");
+        let tool = key_of(&program, "echo hi\n", dir.path());
+
+        assert_ne!(base, text, "the text");
+        assert_ne!(base, config, "the config file");
+        assert_ne!(config, tool, "the tool's binary");
+        assert_eq!(
+            tool,
+            key_of(&program, "echo hi\n", dir.path()),
+            "same inputs"
+        );
+    }
+
+    #[test]
+    fn stderr_is_capped_when_stored() {
+        let dir = temp();
+        let cache = Cache::at(dir.path().join("cache"), 10).expect("the cache should open");
+        let key = key_of(&program(dir.path()), "x\n", dir.path());
+        let loud = Ran {
+            success: false,
+            stdout: Vec::new(),
+            stderr: vec![b'e'; STDERR_CAP + 10],
+        };
+
+        cache.put(key, &loud);
+
+        let stored = cache.get(key).expect("the entry should read back");
+        assert_eq!(stored.stderr.len(), STDERR_CAP);
+    }
+
+    #[test]
+    fn prune_removes_the_oldest_entries_beyond_the_limit() {
+        let dir = temp();
+        let cache = Cache::at(dir.path().join("cache"), 2).expect("the cache should open");
+        let program = program(dir.path());
+        let keys: Vec<Key> = ["a\n", "b\n", "c\n"]
+            .into_iter()
+            .map(|input| key_of(&program, input, dir.path()))
+            .collect();
+        for (age, key) in keys.iter().enumerate() {
+            cache.put(*key, &ran());
+            let file = fs::File::options()
+                .write(true)
+                .open(cache.entry(*key))
+                .expect("the entry should open");
+            let at = UNIX_EPOCH + std::time::Duration::from_secs(1_000 + age as u64);
+            file.set_modified(at).expect("the time should be settable");
+        }
+
+        cache.prune();
+
+        let kept: Vec<bool> = keys.iter().map(|key| cache.get(*key).is_some()).collect();
+        assert_eq!(kept, [false, true, true]);
+    }
+
+    #[test]
+    fn open_uses_xdg_then_home_and_creates_the_directory_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = temp();
+        let root = dir.path().join("root");
+        fs::create_dir(&root).expect("the root should be creatable");
+        let xdg = dir.path().join("xdg");
+        let home = dir.path().join("home");
+        let env = |vars: Vec<(&'static str, OsString)>| {
+            ToolEnv::from_vars(|name| {
+                vars.iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.clone())
+            })
+        };
+
+        let both = Cache::open(
+            &env(vec![
+                ("XDG_CACHE_HOME", xdg.clone().into()),
+                ("HOME", home.clone().into()),
+            ]),
+            &root,
+        )
+        .expect("the XDG cache should open");
+        let relative = Cache::open(
+            &env(vec![
+                ("XDG_CACHE_HOME", "relative".into()),
+                ("HOME", home.clone().into()),
+            ]),
+            &root,
+        )
+        .expect("the home cache should open");
+        let neither = Cache::open(&env(vec![]), &root);
+        let inside = Cache::open(&env(vec![("HOME", root.clone().into())]), &root);
+
+        let real = dir
+            .path()
+            .canonicalize()
+            .expect("the temp dir should resolve");
+        assert!(
+            both.dir.starts_with(real.join("xdg/supdoc/code-blocks")),
+            "{both:?}"
+        );
+        assert!(
+            relative
+                .dir
+                .starts_with(real.join("home/.cache/supdoc/code-blocks")),
+            "{relative:?}"
+        );
+        assert!(neither.is_none() && inside.is_none());
+        let mode = fs::metadata(&both.dir)
+            .expect("the cache directory should exist")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
+}
