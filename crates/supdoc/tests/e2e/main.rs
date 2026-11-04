@@ -109,3 +109,5 @@ mod namespaces;
 mod paths;
 #[cfg(test)]
 mod resolve;
+#[cfg(test)]
+mod upgrade;
