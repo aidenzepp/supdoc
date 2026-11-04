@@ -192,7 +192,124 @@ fn biome_is_given_the_validated_config_as_strict_json_never_the_projects_bytes()
 }
 
 #[test]
-fn a_config_with_plugins_hidden_by_a_bare_cr_comment_never_reaches_biome_with_them() {
+fn the_audited_exploit_a_cr_ended_comment_before_plugins_never_reaches_biome() {
+    for name in ["biome.jsonc", ".biome.jsonc"] {
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let record = outside.path().join("seen.json");
+        stub_biome(
+            outside.path(),
+            &format!(
+                "/bin/cp \"${{4#--config-path=}}\" '{}'; /bin/cat",
+                record.display()
+            ),
+        );
+        let project = ts_project("const a = 1;");
+        project.write(
+            name,
+            "{\"formatter\":{} // x\r, \"plugins\": [\"./p.js\"]\n}",
+        );
+
+        let json = project
+            .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+            .json();
+
+        let seen = std::fs::read_to_string(&record).unwrap_or_default();
+        assert!(
+            !seen.contains("plugins") && !seen.contains("p.js"),
+            "{name}: biome was given {seen}: {json}"
+        );
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-not-checked"],
+            "{name}: {json}"
+        );
+    }
+}
+
+#[test]
+fn a_dir_scoped_override_applies_to_a_block_in_that_dir_and_not_outside_it() {
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let seen = outside.path().join("path.txt");
+    stub_biome(
+        outside.path(),
+        &format!(
+            "echo \"${{3#--stdin-file-path=}}\" > '{}'; /bin/cat",
+            seen.display()
+        ),
+    );
+    let project = ts_project("const a = 1;");
+    project.write(
+        "biome.json",
+        "{\"overrides\":[{\"includes\":[\"docs/**\"],\"formatter\":{\"indentWidth\":8}}]}",
+    );
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(0)
+        .json();
+
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+    let path = std::fs::read_to_string(&seen).expect("the stub recorded the path");
+    let (private, relative) = path
+        .trim()
+        .split_once("/biome-config/")
+        .expect("the virtual path is under the private config dir");
+    assert!(private.contains("supdoc/code-blocks"), "{path}");
+    assert!(relative.ends_with("/docs/blocks.md.1.ts"), "{path}");
+    assert!(
+        !relative.contains(".tmp"),
+        "the project's own path leaked: {path}"
+    );
+}
+
+#[test]
+fn the_real_biome_applies_a_dir_scoped_override_only_inside_that_dir() {
+    let Some(dir) = real_tool_dir(
+        "biome",
+        "the_real_biome_applies_a_dir_scoped_override_only_inside_that_dir",
+    ) else {
+        return;
+    };
+    let project = project_with_block(
+        "[features.code-blocks.typescript]\n",
+        "ts",
+        "function f() {\n        return 1;\n}",
+    );
+    project.write(
+        "biome.json",
+        "{\"overrides\":[{\"includes\":[\"docs/**\"],\"formatter\":{\"indentStyle\":\"space\",\"indentWidth\":8}}]}",
+    );
+    project.write(
+        "other/blocks.md",
+        "# O\n\n```ts\nfunction f() {\n        return 1;\n}\n```\n",
+    );
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json", "-v"], &[("PATH", &dir)])
+        .assert_exit(1)
+        .json();
+
+    let states: Vec<_> = array_at(&json, "/data/code_blocks")
+        .iter()
+        .map(|block| {
+            (
+                block["file"].as_str().unwrap_or_default().to_owned(),
+                block["state"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect();
+    assert!(
+        states.contains(&("docs/blocks.md".to_owned(), "passed".to_owned())),
+        "{json}"
+    );
+    assert!(
+        states.contains(&("other/blocks.md".to_owned(), "failed".to_owned())),
+        "{json}"
+    );
+}
+
+#[test]
+fn a_relative_tailwind_stylesheet_is_given_to_biome_absolute_and_an_outside_one_is_not_checked() {
     let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
     let record = outside.path().join("seen.json");
     stub_biome(
@@ -202,20 +319,72 @@ fn a_config_with_plugins_hidden_by_a_bare_cr_comment_never_reaches_biome_with_th
             record.display()
         ),
     );
-    let project = ts_project("const a = 1;");
-    project.write(
-        "biome.jsonc",
-        "{\"formatter\":{} // x, \"plugins\": [\"./p.js\"]\r}",
+    let inside = ts_project("const a = 1;");
+    inside.write(
+        "biome.json",
+        "{\"tailwind\":{\"stylesheet\":\"./docs/app.css\"}}",
     );
+    inside.write("docs/app.css", "");
+    let escaping = ts_project("const a = 1;");
+    escaping.write(
+        "biome.json",
+        "{\"tailwind\":{\"stylesheet\":\"../app.css\"}}",
+    );
+
+    let passed = inside
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(0)
+        .json();
+    let refused = escaping
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(0)
+        .json();
+
+    assert_eq!(
+        at(&passed, "/data/summary/code_blocks/passed"),
+        1,
+        "{passed}"
+    );
+    let seen = std::fs::read_to_string(&record).expect("the stub recorded the config");
+    assert!(
+        seen.contains("/docs/app.css\"") && !seen.contains("./docs"),
+        "{seen}"
+    );
+    assert_eq!(
+        finding_kinds(&refused),
+        ["code-block-not-checked"],
+        "{refused}"
+    );
+    assert!(
+        at(&refused, "/findings/0/message")
+            .as_str()
+            .is_some_and(|m| m.contains("tailwind.stylesheet")),
+        "{refused}"
+    );
+}
+
+#[test]
+fn a_config_error_biome_reports_names_the_projects_config_file() {
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    stub_biome(
+        outside.path(),
+        "echo \"${4#--config-path=}:1:2 configuration ━━━━\" >&2\nexit 1",
+    );
+    let project = ts_project("const a = 1;");
+    project.write("biome.json", "{}");
 
     let json = project
         .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(1)
         .json();
 
-    let seen = std::fs::read_to_string(&record).unwrap_or_default();
+    let message = at(&json, "/findings/0/message")
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
     assert!(
-        !seen.contains("plugins") && !seen.contains("p.js"),
-        "biome was given {seen}: {json}"
+        message.contains("biome.json:1:2") && !message.contains("biome-config"),
+        "{message}"
     );
 }
 

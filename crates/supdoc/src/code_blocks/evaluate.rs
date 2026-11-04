@@ -99,9 +99,9 @@ pub(crate) struct BlockRecord {
     dialect: Dialect,
     /// The edition its `edition20xx` attribute or the config's `edition` names, if either does.
     edition: Option<Edition>,
-    /// The project flags a non-Rust tool gets for it: biome's `--config-path`. Empty until the
-    /// tools are looked up.
-    project: Vec<OsString>,
+    /// The config and virtual path biome is given for it. `None` until the tools are looked up, and for
+    /// any other tool.
+    given: Option<biome::Given>,
     /// What the format step needs, kept while the block is pending.
     pending: Option<Pending>,
 }
@@ -238,7 +238,7 @@ pub(crate) fn evaluate(
             linter,
             dialect: code_blocks.dialect(),
             edition: block_edition(block).or_else(|| code_blocks.edition()),
-            project: Vec::new(),
+            given: None,
             language,
             state,
             steps,
@@ -674,7 +674,7 @@ fn reread<'doc>(
 #[derive(Debug, Default)]
 struct BiomeConfigs {
     /// Each doc directory's result, in the order they were asked for.
-    found: Vec<(PathBuf, Result<Vec<OsString>, biome::Refusal>)>,
+    found: Vec<(PathBuf, Result<biome::Given, biome::Refusal>)>,
     /// The refusals a warning has been added for.
     warned: Vec<biome::Refusal>,
 }
@@ -710,7 +710,7 @@ impl BiomeConfigs {
         };
         match found {
             Ok(project) => {
-                record.project = project;
+                record.given = Some(project);
                 Ok(())
             }
             Err(refusal) => {
@@ -758,8 +758,8 @@ fn biome_refusal(refusal: &biome::Refusal, at: &Location) -> (String, Finding) {
     (reason, finding)
 }
 
-/// Why biome didn't run when supdoc had no private directory to keep its empty config in.
-const BIOME_NO_PRIVATE_DIR: &str = "biome needs a private directory under `XDG_CACHE_HOME` or `HOME` for its empty config, and there is none";
+/// Why biome didn't run when supdoc had no private directory to keep the config it gives biome in.
+const BIOME_NO_PRIVATE_DIR: &str = "biome needs a private directory under `XDG_CACHE_HOME` or `HOME` for the config supdoc gives it, and there is none";
 
 /// Why clippy didn't run on a block when [`runner::neutral_dir`] found no private working
 /// directory: its metadata would have nowhere private to go.
@@ -876,13 +876,18 @@ fn run_formatter(
         .edition
         .or_else(|| rust.map(|rust| rust.edition))
         .unwrap_or(Edition::E2024);
+    let given = record.given.as_ref();
     let args = tool.args(&Invocation {
-        doc: &doc,
+        doc: given
+            .and_then(|given| given.mirror.as_deref())
+            .unwrap_or(&doc),
         index: record.index,
         tag: record.language.as_deref().unwrap_or_default(),
         edition,
         dialect: record.dialect,
-        project: rust.map_or(record.project.as_slice(), |rust| rust.config.as_slice()),
+        project: rust.map_or(given.map_or(&[], |given| given.flags.as_slice()), |rust| {
+            rust.config.as_slice()
+        }),
         emit: None,
     });
     let vars = rust.map(|rust| rust.toolchain.env()).unwrap_or_default();
@@ -903,7 +908,13 @@ fn run_formatter(
         &run,
         session,
         |call| runner::run(call, session.env, session.root),
-        |result| format::judge(tool, input, result),
+        |result| {
+            let named = result.map(|ran| Ran {
+                stderr: given.map_or_else(|| ran.stderr.clone(), |given| given.named(&ran.stderr)),
+                ..ran
+            });
+            format::judge(tool, input, named)
+        },
         format::Verdict::cacheable,
     );
     let at = match &verdict {
@@ -1722,7 +1733,7 @@ mod tests {
             linter: Some(clippy()),
             dialect: Dialect::default(),
             edition: None,
-            project: Vec::new(),
+            given: None,
             pending: Pending::of(block, &doc),
         }
     }
