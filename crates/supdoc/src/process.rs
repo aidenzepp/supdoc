@@ -228,10 +228,12 @@ fn parse_run_and_report() -> u8 {
             global_excludes,
         };
         let tools = crate::code_blocks::tools::ToolEnv::from_vars(var);
+        let trust = crate::trust::TrustEnv::from_vars(var);
         run(
             &command,
             &SkillDirs::from_vars(var),
             &tools,
+            &trust,
             &context,
             &mut output,
         )

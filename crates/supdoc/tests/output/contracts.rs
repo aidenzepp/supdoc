@@ -883,6 +883,14 @@ mod helps {
             needs_permissions: false,
         },
         case(
+            "code-block-not-trusted",
+            |p| {
+                config_with(p, "[features.code-blocks]\n[features.code-blocks.rust]\n");
+                p.write("docs/blocks.md", "# B\n\n```rust\nfn main() {}\n```\n");
+            },
+            &["check"],
+        ),
+        case(
             "code-block-tool-missing",
             |p| {
                 config_with(p, "[features.code-blocks]\n[features.code-blocks.shell]\n");
