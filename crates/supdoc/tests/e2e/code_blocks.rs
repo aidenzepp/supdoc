@@ -1405,6 +1405,48 @@ fn lint_select_an_unknown_linter_or_a_command_table_exits_78() {
 }
 
 #[test]
+fn tier_run_or_an_unknown_tier_exits_78_naming_the_accepted_values() {
+    for (value, expected) in [
+        ("\"run\"", "phase 6"),
+        ("\"trusted\"", "isn't a tier supdoc knows"),
+    ] {
+        let project = project_with_shell_blocks();
+        project.write(
+            "supdoc.config.toml",
+            &format!("[features.code-blocks]\ntier = {value}\n"),
+        );
+
+        let run = project.supdoc(&["check", "--json"]);
+        let _checked = run.assert_exit(78);
+
+        assert!(
+            run.stderr.contains("\"config-parse\"") && run.stderr.contains(expected),
+            "tier = {value}: {}",
+            run.stderr
+        );
+    }
+}
+
+#[test]
+fn tier_project_and_static_load_without_changing_the_check() {
+    for value in ["\"project\"", "\"static\""] {
+        let project = project_with_shell_blocks();
+        project.write(
+            "supdoc.config.toml",
+            &format!("[features.code-blocks]\ntier = {value}\n"),
+        );
+
+        let run = project.supdoc(&["check", "--json"]);
+
+        assert!(
+            run.code != Some(78),
+            "tier = {value} should load: {}",
+            run.stderr
+        );
+    }
+}
+
+#[test]
 fn selection_dialect_posix_reaches_shfmt_as_ln_posix() {
     let json = check_shell_with(
         "[features.code-blocks]\n[features.code-blocks.shell]\ndialect = \"posix\"\n",

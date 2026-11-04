@@ -18,7 +18,7 @@ mod python;
 mod rust;
 mod shell;
 
-use crate::code_blocks::tools::{self, CARTRIDGES, Step};
+use crate::code_blocks::tools::{self, CARTRIDGES, Step, Tier};
 use std::ops::Range;
 
 use crate::path::AbsolutePath;
@@ -285,6 +285,30 @@ fn removed_lint<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Opt
     ))
 }
 
+/// Reads `tier`: `"static"` or `"project"`, written as a string.
+///
+/// # Errors
+///
+/// The deserializer's error for any other value; `"run"` is named as arriving with phase 6.
+fn tier<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Tier>, D::Error> {
+    use serde::Deserialize as _;
+    use serde::de::Error;
+
+    let accepted = "write \"static\" or \"project\"";
+    let word = String::deserialize(deserializer)
+        .map_err(|_| D::Error::custom(format!("`tier` must be quoted, as a string: {accepted}")))?;
+    match word.as_str() {
+        "static" => Ok(Some(Tier::Static)),
+        "project" => Ok(Some(Tier::Project)),
+        "run" => Err(D::Error::custom(format!(
+            "`tier = \"run\"` arrives with phase 6 of code-blocks; for now {accepted}"
+        ))),
+        other => Err(D::Error::custom(format!(
+            "`{other}` isn't a tier supdoc knows; {accepted}"
+        ))),
+    }
+}
+
 /// `known` as backticked names joined by `, `.
 fn tool_list(known: &[&str]) -> String {
     known
@@ -393,6 +417,9 @@ pub(crate) struct RawCodeBlocks {
         reason = "a removed key kept only so writing it is refused with its replacement"
     )]
     lint: Option<()>,
+    /// The most this project allows its code-block tools to load: `"static"` or `"project"`.
+    #[serde(default, deserialize_with = "tier")]
+    tier: Option<Tier>,
     /// `[features.code-blocks.rust]`, when written.
     rust: Option<RawRust>,
     /// `[features.code-blocks.shell]`, when written.
@@ -408,6 +435,8 @@ pub(super) struct Written {
     include: Option<AnchoredPatterns>,
     /// The nearest `exclude` written inside the table, anchored at the file that wrote it.
     exclude: Option<AnchoredPatterns>,
+    /// The nearest `tier` written.
+    tier: Option<Tier>,
     /// The language tables written in any layer.
     languages: Languages,
 }
@@ -436,6 +465,7 @@ impl Written {
         Ok(CodeBlocks {
             include: self.include.unwrap_or_else(|| include.clone()),
             exclude: self.exclude.or_else(|| exclude.cloned()),
+            tier: self.tier.unwrap_or(Tier::Project),
             languages: self.languages,
         })
     }
@@ -448,6 +478,8 @@ pub(crate) struct CodeBlocks {
     include: AnchoredPatterns,
     /// Files removed from `include`, if any.
     exclude: Option<AnchoredPatterns>,
+    /// The most tools may load: the nearest `tier` written, else [`Tier::Project`].
+    tier: Tier,
     /// The language tables written.
     languages: Languages,
 }
@@ -457,6 +489,19 @@ impl CodeBlocks {
     #[must_use]
     pub(crate) const fn checks(&self, language: Language) -> bool {
         self.table(language).written
+    }
+
+    /// The `tier` ceiling the project set, [`Tier::Project`] when it set none.
+    #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "P5-04 reads the tier when it resolves the effective tier"
+        )
+    )]
+    pub(crate) const fn tier(&self) -> Tier {
+        self.tier
     }
 
     /// `language`'s `formatter` key: `None` selects its default formatter.
@@ -533,6 +578,7 @@ pub(super) fn merge(
     let Some(RawCodeBlocks {
         include,
         exclude,
+        tier,
         rust,
         shell,
         python,
@@ -546,6 +592,7 @@ pub(super) fn merge(
     Some(Written {
         include: nearer.include.or_else(|| include.map(anchor)),
         exclude: nearer.exclude.or_else(|| exclude.map(anchor)),
+        tier: nearer.tier.or(tier),
         languages: Languages {
             edition: nearer
                 .languages
@@ -577,7 +624,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{Dialect, Edition, Language, Mode};
+    use super::{Dialect, Edition, Language, Mode, Tier};
     use crate::config::Config;
     use crate::exit::ExitStatus;
     use crate::path::AbsolutePath;
@@ -1150,5 +1197,98 @@ mod tests {
             Mode::Off,
             "the parent's mode for another tool should hold"
         );
+    }
+
+    /// The `tier` the config in `files` resolves for `apps/web`, or the root when absent.
+    fn tier_of(files: &[(&str, &str)], at_dir: &str) -> Tier {
+        let dir = tree(files);
+        let config = Config::load(&at(&dir, at_dir)).expect("the fixture config should load");
+        config.code_blocks().expect("the table is written").tier()
+    }
+
+    #[test]
+    fn tier_defaults_to_project() {
+        let tier = tier_of(&[("supdoc.config.toml", "[features.code-blocks]\n")], ".");
+
+        assert_eq!(tier, Tier::Project);
+    }
+
+    #[test]
+    fn each_tier_value_is_read() {
+        for (word, expected) in [("static", Tier::Static), ("project", Tier::Project)] {
+            let text = format!("[features.code-blocks]\ntier = \"{word}\"\n");
+
+            assert_eq!(
+                tier_of(&[("supdoc.config.toml", &text)], "."),
+                expected,
+                "tier = \"{word}\""
+            );
+        }
+    }
+
+    #[test]
+    fn a_child_tier_overrides_the_parent_and_a_silent_child_inherits_it() {
+        let parent = "[features.code-blocks]\ntier = \"static\"\n";
+        let loud =
+            "extends = \"../../supdoc.config.toml\"\n[features.code-blocks]\ntier = \"project\"\n";
+        let silent = "extends = \"../../supdoc.config.toml\"\n[features.code-blocks]\n";
+
+        assert_eq!(
+            tier_of(
+                &[
+                    ("supdoc.config.toml", parent),
+                    ("apps/web/supdoc.config.toml", loud)
+                ],
+                "apps/web"
+            ),
+            Tier::Project,
+            "the child's tier should win"
+        );
+        assert_eq!(
+            tier_of(
+                &[
+                    ("supdoc.config.toml", parent),
+                    ("apps/web/supdoc.config.toml", silent)
+                ],
+                "apps/web"
+            ),
+            Tier::Static,
+            "the parent's tier should hold"
+        );
+    }
+
+    #[test]
+    fn tier_run_is_refused_saying_it_arrives_with_phase_6() {
+        let message = refused_tier("\"run\"");
+
+        assert!(
+            message.contains("phase 6") && message.contains("\"static\" or \"project\""),
+            "got {message}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_or_non_string_tier_is_refused_naming_the_accepted_values() {
+        for value in ["\"trusted\"", "3", "true"] {
+            let message = refused_tier(value);
+
+            assert!(
+                message.contains("\"static\" or \"project\""),
+                "tier = {value}: got {message}"
+            );
+        }
+    }
+
+    /// The error from loading `tier = <value>`.
+    fn refused_tier(value: &str) -> String {
+        let dir = tree(&[(
+            "supdoc.config.toml",
+            &format!("[features.code-blocks]\ntier = {value}\n"),
+        )]);
+        let error = Config::load_file(&at(&dir, "supdoc.config.toml"))
+            .expect_err("the value should be refused");
+        assert_eq!(error.code(), "config-parse", "got {error:?}");
+        assert_eq!(error.status(), ExitStatus::Config);
+        error.to_string()
     }
 }
