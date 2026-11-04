@@ -208,7 +208,7 @@ fn edition_in(text: &str) -> Option<Edition> {
 /// can't be resolved, opened or read, isn't a regular file, isn't UTF-8, or is too long.
 ///
 /// Effect: resolves symlinks and reads the file.
-fn read_inside(file: &Path, root: &Path) -> Result<String, Refusal> {
+pub(super) fn read_inside(file: &Path, root: &Path) -> Result<String, Refusal> {
     let unreadable = |_| Refusal::Unreadable;
     let real_root = root.canonicalize().map_err(unreadable)?;
     let real = file.canonicalize().map_err(unreadable)?;
