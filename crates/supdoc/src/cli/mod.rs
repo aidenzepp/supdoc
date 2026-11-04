@@ -50,6 +50,8 @@ pub(crate) mod schema;
 
 /// `supdoc trust`.
 pub(crate) mod trust;
+/// `supdoc upgrade`.
+pub(crate) mod upgrade;
 
 /// Test doubles the unit tests of this module share.
 #[cfg(test)]
@@ -276,5 +278,6 @@ pub(crate) fn run(
         Command::Skill(SkillCommand::Install(args)) => {
             skill::run(args, skill_dirs, context, output)
         }
+        Command::Upgrade(args) => upgrade::run(args, context, output),
     }
 }

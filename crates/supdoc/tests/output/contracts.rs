@@ -451,6 +451,10 @@ mod helps {
         OutsideTools,
         /// With `PATH` set to the project's `bin` directory.
         ProjectPath,
+        /// As a copy of the binary installed in a cargo home inside the project, whose record
+        /// says cargo installed it from crates.io, with `PATH` set to the project's `bin`
+        /// directory, where a setup may have put a fake `cargo`.
+        CargoInstalled,
         /// With `XDG_STATE_HOME` set to a file in the project, so no state directory can be made.
         StateHomeIsFile,
     }
@@ -1574,6 +1578,33 @@ mod helps {
             |p| p.write(".agents/skills/supdoc/SKILL.md", "different"),
             &["skill", "install"],
         ),
+        case("cli-upgrade-not-cargo", |_| {}, &["upgrade", "99.0.0"]),
+        HelpCase {
+            kind: "cli-upgrade-cargo-failed",
+            setup: |p| {
+                p.write(
+                    "bin/cargo",
+                    "#!/bin/sh\necho 'error: linker failed' >&2\nexit 101\n",
+                );
+            },
+            args: &["upgrade", "99.0.0", "--yes"],
+            via: Via::CargoInstalled,
+            needs_permissions: false,
+        },
+        HelpCase {
+            kind: "cli-upgrade-no-cargo",
+            setup: |_| {},
+            args: &["upgrade", "99.0.0", "--yes"],
+            via: Via::CargoInstalled,
+            needs_permissions: false,
+        },
+        HelpCase {
+            kind: "cli-upgrade-latest-unknown",
+            setup: |p| p.write("bin/cargo", "#!/bin/sh\necho 'no crates found'\n"),
+            args: &["upgrade"],
+            via: Via::CargoInstalled,
+            needs_permissions: false,
+        },
         HelpCase {
             kind: "cli-skill-no-home",
             setup: |_| {},
@@ -1659,6 +1690,46 @@ mod helps {
         command
     }
 
+    /// Runs `args` with a copy of the binary installed in a cargo home inside `project`, whose
+    /// record says cargo installed it from crates.io, and `PATH` set to the project's `bin`
+    /// directory, where the setup may have put a fake `cargo`.
+    fn run_in_cargo_home(
+        project: &Project,
+        args: &[&str],
+    ) -> std::io::Result<std::process::Output> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let cargo_home = project.path().join("cargo-home");
+        let installed = cargo_home.join("bin/supdoc");
+        std::fs::create_dir_all(cargo_home.join("bin"))
+            .expect("the cargo home should be creatable");
+        std::fs::create_dir_all(project.path().join("bin"))
+            .expect("the PATH directory should be creatable");
+        let _bytes = std::fs::copy(env!("CARGO_BIN_EXE_supdoc"), &installed)
+            .expect("the binary should copy");
+        std::fs::write(
+            cargo_home.join(".crates2.json"),
+            format!(
+                r#"{{"installs":{{"supdoc {} (registry+https://github.com/rust-lang/crates.io-index)":{{"bins":["supdoc"]}}}}}}"#,
+                env!("CARGO_PKG_VERSION")
+            ),
+        )
+        .expect("the install record should be writable");
+        let fake = project.path().join("bin/cargo");
+        if fake.exists() {
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755))
+                .expect("the fake cargo should be executable");
+        }
+        std::process::Command::new(&installed)
+            .args(args)
+            .current_dir(project.path())
+            .env_clear()
+            .env("HOME", project.path().join("home"))
+            .env("PATH", project.path().join("bin"))
+            .env("CARGO_HOME", &cargo_home)
+            .stdin(Stdio::null())
+            .output()
+    }
+
     /// Runs `case` with `--json` and returns the arguments shown, every `(kind, help)` it printed and
     /// its stderr.
     fn run_help_case(case: &HelpCase) -> (String, Vec<(String, Option<String>)>, String) {
@@ -1733,6 +1804,7 @@ mod helps {
             Via::RemovedCwd => {
                 shell(&project, "mkdir gone && cd gone && rmdir ../gone", &args).output()
             }
+            Via::CargoInstalled => run_in_cargo_home(&project, &args),
         }
         .expect("the supdoc binary should start");
         unlock(project.path());
