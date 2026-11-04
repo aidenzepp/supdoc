@@ -79,7 +79,7 @@ fn the_block_goes_to_rumdl_on_stdin_under_its_virtual_path_with_no_config() {
     rumdl_stub(
         outside.path(),
         "case \"$*\" in\n\
-         \"--no-cache --output-format=json --extend-disable=MD041 --no-config --stdin --stdin-filename \"*/docs/blocks.md.1.md) echo '[]'; exit 0;;\n\
+         \"--no-cache --no-exclude --output-format=json --extend-disable=MD041,MD051,MD057 --no-config --stdin --stdin-filename \"*/docs/blocks.md.1.md) echo '[]'; exit 0;;\n\
          esac\nexit 3",
     );
 
@@ -103,7 +103,7 @@ fn an_unformatted_block_is_reported_with_rumdl_named() {
         outside.path(),
         "rumdl",
         "case \"$*\" in\n\
-         \"fmt --no-cache --extend-disable=MD041 --no-config --stdin-filename \"*\"/docs/blocks.md.1.md -\") /bin/cat > /dev/null; printf '* a\\n\\n* b\\n';;\n\
+         \"fmt --no-cache --no-exclude --extend-disable=MD041,MD051,MD057 --no-config --stdin-filename \"*\"/docs/blocks.md.1.md -\") /bin/cat > /dev/null; printf '* a\\n\\n* b\\n';;\n\
          *) exit 3;;\nesac",
     );
 
@@ -140,15 +140,19 @@ fn lint_diagnostics_from_rumdl_are_lint_errors_at_their_doc_line_and_column() {
 }
 
 #[test]
-fn the_nearest_project_config_is_passed_explicitly() {
+fn rumdl_gets_the_validated_config_in_a_private_file_not_the_projects_bytes() {
     let project = project_with_block("", "text");
-    project.write("docs/rumdl.toml", "[global]\nline-length = 20\n");
+    project.write(
+        "docs/rumdl.toml",
+        "# the project's comment\n[global]\nline-length = 20\n",
+    );
     let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
     rumdl_stub(
         outside.path(),
-        "case \"$*\" in\n\
-         *\" --config=\"*/docs/rumdl.toml\" --stdin \"*) echo '[]'; exit 0;;\n\
-         esac\nexit 3",
+        "for arg in \"$@\"; do case \"$arg\" in --config=*) cfg=\"${arg#--config=}\";; esac; done\n\
+         case \"$cfg\" in */docs/rumdl.toml|'') exit 4;; esac\n\
+         [ \"$(/bin/cat \"$cfg\")\" = \"$(printf '[global]\\nline-length = 20')\" ] || exit 5\n\
+         echo '[]'",
     );
 
     let json = project
@@ -216,5 +220,93 @@ fn the_real_rumdl_passes_a_clean_block_and_fails_a_dirty_one() {
     assert!(
         finding_kinds(&fails).contains(&"code-block-unformatted".to_owned()),
         "{fails}"
+    );
+}
+
+#[test]
+fn the_real_rumdl_still_checks_a_block_the_projects_exclude_would_skip() {
+    let Some(dir) = real_tool_dir(
+        "rumdl",
+        "the_real_rumdl_still_checks_a_block_the_projects_exclude_would_skip",
+    ) else {
+        return;
+    };
+    let project = project_with_block("", "## Sub\n\n\n\ntext   ");
+    project.write(".rumdl.toml", "[global]\nexclude = [\"*.md\"]\n");
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", &dir)])
+        .assert_exit(1)
+        .json();
+
+    assert!(
+        finding_kinds(&json).contains(&"code-block-unformatted".to_owned()),
+        "{json}"
+    );
+}
+
+#[test]
+fn the_real_rumdl_ignores_whether_a_links_target_exists() {
+    let Some(dir) = real_tool_dir(
+        "rumdl",
+        "the_real_rumdl_ignores_whether_a_links_target_exists",
+    ) else {
+        return;
+    };
+    let project = project_with_block("", "## Sub\n\nsee [guide](zz.md) and [part](#nope)");
+    let path = [("PATH", dir.as_path())];
+
+    let missing = project
+        .supdoc_in_with(".", &["check", "--json"], &path)
+        .assert_exit(0)
+        .json();
+    project.write("docs/zz.md", "# Zz\n");
+    let present = project
+        .supdoc_in_with(".", &["check", "--json"], &path)
+        .assert_exit(0)
+        .json();
+
+    assert_eq!(
+        at(&missing, "/data/summary/code_blocks/passed"),
+        1,
+        "{missing}"
+    );
+    assert_eq!(
+        at(&present, "/data/summary/code_blocks/passed"),
+        1,
+        "{present}"
+    );
+}
+
+#[test]
+fn the_real_rumdl_applies_per_file_ignores_by_the_docs_place_under_the_configs_directory() {
+    let Some(dir) = real_tool_dir(
+        "rumdl",
+        "the_real_rumdl_applies_per_file_ignores_by_the_docs_place_under_the_configs_directory",
+    ) else {
+        return;
+    };
+    let long = "## Sub\n\nthis line is longer than twenty characters";
+    let project = project_with_block("", long);
+    project.write(
+        ".rumdl.toml",
+        "[per-file-ignores]\n\"docs/*.md\" = [\"MD013\"]\n\n[MD013]\nline-length = 20\n",
+    );
+    project.write(
+        "other/blocks.md",
+        &format!("# Blocks\n\n```markdown\n{long}\n```\n"),
+    );
+    let path = [("PATH", dir.as_path())];
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &path)
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-lint"], "{json}");
+    assert_eq!(
+        at(&json, "/findings/0/location/file"),
+        "other/blocks.md",
+        "{json}"
     );
 }

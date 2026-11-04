@@ -429,31 +429,37 @@ fn shellcheck_args(invocation: &Invocation<'_>) -> Vec<OsString> {
     ]
 }
 
-/// The rules rumdl leaves off for a block: MD041, which wants a file to open with a heading.
-/// Line length (MD013) is left to the project's config.
-const RUMDL_RELAXED: &str = "--extend-disable=MD041";
+/// The rules rumdl leaves off for a block: MD041, which wants a file to open with a heading, and
+/// MD051 and MD057, which check a block's links against the doc's real directory and the files
+/// beside it, which the block's text is not. Line length (MD013) is left to the project's config.
+const RUMDL_RELAXED: &str = "--extend-disable=MD041,MD051,MD057";
 
-/// `rumdl fmt`'s arguments: no cache, the snippet relaxation, the project's `--config` or
-/// `--no-config`, then the block on stdin under its virtual path.
+/// `rumdl fmt`'s arguments: no cache, no `exclude` (a project's would skip the block and pass it),
+/// the snippet relaxation, the project's `--config` or `--no-config`, then the block on stdin under its virtual path.
 fn rumdl_format_args(invocation: &Invocation<'_>) -> Vec<OsString> {
-    [OsString::from("fmt"), OsString::from("--no-cache")]
-        .into_iter()
-        .chain([OsString::from(RUMDL_RELAXED)])
-        .chain(invocation.project.iter().cloned())
-        .chain([
-            OsString::from("--stdin-filename"),
-            virtual_path(invocation.doc, invocation.index, "md"),
-            OsString::from("-"),
-        ])
-        .collect()
+    [
+        OsString::from("fmt"),
+        OsString::from("--no-cache"),
+        OsString::from("--no-exclude"),
+    ]
+    .into_iter()
+    .chain([OsString::from(RUMDL_RELAXED)])
+    .chain(invocation.project.iter().cloned())
+    .chain([
+        OsString::from("--stdin-filename"),
+        virtual_path(invocation.doc, invocation.index, "md"),
+        OsString::from("-"),
+    ])
+    .collect()
 }
 
-/// `rumdl check`'s arguments: no cache, JSON diagnostics, the snippet relaxation, the project's
+/// `rumdl check`'s arguments: no cache, no `exclude`, JSON diagnostics, the snippet relaxation, the project's
 /// `--config` or `--no-config`, then the block on stdin under its virtual path. Never `--fix`.
 fn rumdl_args(invocation: &Invocation<'_>) -> Vec<OsString> {
     [
         OsString::from("check"),
         OsString::from("--no-cache"),
+        OsString::from("--no-exclude"),
         OsString::from("--output-format=json"),
         OsString::from(RUMDL_RELAXED),
     ]
@@ -763,7 +769,8 @@ mod tests {
             [
                 "fmt",
                 "--no-cache",
-                "--extend-disable=MD041",
+                "--no-exclude",
+                "--extend-disable=MD041,MD051,MD057",
                 "--no-config",
                 "--stdin-filename",
                 "/p/docs/a.md.2.md",
@@ -775,8 +782,9 @@ mod tests {
             [
                 "check",
                 "--no-cache",
+                "--no-exclude",
                 "--output-format=json",
-                "--extend-disable=MD041",
+                "--extend-disable=MD041,MD051,MD057",
                 "--no-config",
                 "--stdin",
                 "--stdin-filename",

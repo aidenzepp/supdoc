@@ -101,9 +101,20 @@ pub(crate) struct BlockRecord {
     edition: Option<Edition>,
     /// The project flags a non-Rust tool gets for it: rumdl's `--config` or `--no-config`.
     /// Empty until the tools are looked up.
-    project: Vec<OsString>,
+    project: ToolProject,
     /// What the format step needs, kept while the block is pending.
     pending: Option<Pending>,
+}
+
+/// What a non-Rust tool is given from the project for a block, found when the tools are looked
+/// up.
+#[derive(Debug, Clone, Default)]
+struct ToolProject {
+    /// The flags: rumdl's `--config` or `--no-config`.
+    flags: Vec<OsString>,
+    /// Where rumdl is told the doc is when the project's config was moved, see
+    /// [`rumdl::Project::doc_as_seen`].
+    seen_at: Option<PathBuf>,
 }
 
 /// A pending block as the format step reads and fixes it.
@@ -238,7 +249,7 @@ pub(crate) fn evaluate(
             linter,
             dialect: code_blocks.dialect(),
             edition: block_edition(block).or_else(|| code_blocks.edition()),
-            project: Vec::new(),
+            project: ToolProject::default(),
             language,
             state,
             steps,
@@ -290,7 +301,7 @@ impl Evaluation {
         let mut cache: Option<Option<Cache>> = None;
         let mut looked_up: Vec<(&'static str, Found)> = Vec::new();
         let mut rust_setup: Option<RustSetup> = None;
-        let mut rumdl_configs = RumdlConfigs::default();
+        let mut configs = RumdlConfigs::default();
         let mut toolchain_warned = false;
         let mut slots: Vec<Slot> = Vec::new();
         let mut jobs: Vec<Job> = Vec::new();
@@ -320,7 +331,7 @@ impl Evaluation {
                     continue;
                 }
             }
-            if rumdl_configs.give(record, tool, root, &mut slots).is_err() {
+            if configs.give(record, tool, (env, root), &mut slots).is_err() {
                 continue;
             }
             let (runs, refused) = found_runs(
@@ -663,7 +674,7 @@ fn reread<'doc>(
 #[derive(Debug, Default)]
 struct RumdlConfigs {
     /// Each doc directory's result, in the order they were asked for.
-    found: Vec<(PathBuf, Result<Vec<OsString>, rumdl::Refusal>)>,
+    found: Vec<(PathBuf, Result<rumdl::Project, rumdl::Refusal>)>,
     /// The refusals a warning has been added for.
     warned: Vec<rumdl::Refusal>,
 }
@@ -673,7 +684,7 @@ impl RumdlConfigs {
     /// directory. A refusal settles the block as not checked, with its one warning per refusal
     /// added to `slots`.
     ///
-    /// Effect: reads the config.
+    /// Effect: reads the config and may create supdoc's private directory and file for it.
     ///
     /// # Errors
     ///
@@ -682,7 +693,7 @@ impl RumdlConfigs {
         &mut self,
         record: &mut BlockRecord,
         tool: &ToolCartridge,
-        root: &Path,
+        (env, root): (&ToolEnv, &Path),
         slots: &mut Vec<Slot>,
     ) -> Result<(), rumdl::Refusal> {
         if tool.language != Language::Markdown {
@@ -693,13 +704,16 @@ impl RumdlConfigs {
         let found = if let Some((_, found)) = self.found.iter().find(|(known, _)| *known == dir) {
             found.clone()
         } else {
-            let found = rumdl::project_args(root, &doc);
+            let found = rumdl::project_args(env, root, &doc);
             self.found.push((dir, found.clone()));
             found
         };
         match found {
             Ok(project) => {
-                record.project = project;
+                record.project = ToolProject {
+                    seen_at: Some(project.doc_as_seen(&doc)),
+                    flags: project.flags,
+                };
                 Ok(())
             }
             Err(refusal) => {
@@ -719,18 +733,28 @@ impl RumdlConfigs {
 /// The state reason and the `code-block-not-checked` warning, at `at`, for a block rumdl isn't
 /// given because of `refusal`.
 fn rumdl_refusal(refusal: &rumdl::Refusal, at: &Location) -> (String, Finding) {
-    let rumdl::Refusal { file, why } = refusal;
-    let finding = Finding::new(
-        NOT_CHECKED,
-        Severity::Warning,
-        format!("the project's `{file}` {why}, so its Markdown blocks aren't checked"),
-    )
-    .with_help(format!(
-        "remove the `code-block-tools`, `command` and `extends` from `{file}`, or mark the blocks `ignore(<why>)`"
-    ))
-    .with_location(at.clone());
-    (format!("rumdl config `{file}` {why}"), finding)
+    let (reason, message, help) = match refusal {
+        rumdl::Refusal::Config { file, why } => (
+            format!("rumdl config `{file}` {why}"),
+            format!("the project's `{file}` {why}, so its Markdown blocks aren't checked"),
+            format!(
+                "remove the `code-block-tools`, `command` and `extends` from `{file}`, or mark the blocks `ignore(<why>)`"
+            ),
+        ),
+        rumdl::Refusal::NoPrivateDir => (
+            RUMDL_NO_PRIVATE_DIR.to_owned(),
+            format!("{RUMDL_NO_PRIVATE_DIR}, so its blocks aren't checked"),
+            "set `XDG_CACHE_HOME` or `HOME` to a directory outside the project".to_owned(),
+        ),
+    };
+    let finding = Finding::new(NOT_CHECKED, Severity::Warning, message)
+        .with_help(help)
+        .with_location(at.clone());
+    (reason, finding)
 }
+
+/// Why rumdl didn't run when supdoc had no private directory to keep its config in.
+const RUMDL_NO_PRIVATE_DIR: &str = "rumdl needs a private directory under `XDG_CACHE_HOME` or `HOME` for its config, and there is none";
 
 /// Why clippy didn't run on a block when [`runner::neutral_dir`] found no private working
 /// directory: its metadata would have nowhere private to go.
@@ -848,11 +872,13 @@ fn run_formatter(
         .or_else(|| rust.map(|rust| rust.edition))
         .unwrap_or(Edition::E2024);
     let args = tool.args(&Invocation {
-        doc: &doc,
+        doc: record.project.seen_at.as_deref().unwrap_or(&doc),
         index: record.index,
         edition,
         dialect: record.dialect,
-        project: rust.map_or(record.project.as_slice(), |rust| rust.config.as_slice()),
+        project: rust.map_or(record.project.flags.as_slice(), |rust| {
+            rust.config.as_slice()
+        }),
         emit: None,
     });
     let vars = rust.map(|rust| rust.toolchain.env()).unwrap_or_default();
@@ -913,11 +939,11 @@ fn run_linter(
     }
     let doc = session.root.join(record.at.file.as_str());
     let args = tool.args(&Invocation {
-        doc: &doc,
+        doc: record.project.seen_at.as_deref().unwrap_or(&doc),
         index: record.index,
         edition: record.edition.unwrap_or(Edition::E2024),
         dialect: record.dialect,
-        project: record.project.as_slice(),
+        project: record.project.flags.as_slice(),
         emit: None,
     });
     let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
@@ -1592,8 +1618,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        BlockRecord, LintRan, MAX_WORKERS, Pending, RustSetup, Session, in_parallel, run_clippy,
-        rust_refusal,
+        BlockRecord, LintRan, MAX_WORKERS, Pending, RustSetup, Session, ToolProject, in_parallel,
+        run_clippy, rust_refusal,
     };
     use crate::cartridges::markdown::cartridge::cartridge as markdown;
     use crate::code_blocks::block::blocks_in;
@@ -1689,7 +1715,7 @@ mod tests {
             linter: Some(clippy()),
             dialect: Dialect::default(),
             edition: None,
-            project: Vec::new(),
+            project: ToolProject::default(),
             pending: Pending::of(block, &doc),
         }
     }
