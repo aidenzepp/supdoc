@@ -1461,6 +1461,7 @@ mod helps {
         case("cli-usage", |_| {}, &["check", "--no-such-flag"]),
         case("cli-path-missing", |_| {}, &["check", "docs/nope.md"]),
         case("cli-path-missing", |_| {}, &["resolve", "nope.rs"]),
+        case("cli-update-version-argument", |_| {}, &["update", "0.3.1"]),
         case(
             "cli-resolve-fragment",
             |_| {},

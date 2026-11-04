@@ -113,4 +113,6 @@ mod resolve;
 #[cfg(test)]
 mod trust;
 #[cfg(test)]
+mod update_version;
+#[cfg(test)]
 mod upgrade;
