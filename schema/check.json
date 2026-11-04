@@ -113,7 +113,7 @@
           "type": "integer"
         },
         "format_skipped": {
-          "description": "Format steps skipped: blocks the author marked `no_format(...)`.",
+          "description": "Format steps skipped: blocks the author marked `format(off: ...)`.",
           "format": "uint",
           "minimum": 0,
           "type": "integer"
@@ -131,7 +131,7 @@
           "type": "integer"
         },
         "lint_skipped": {
-          "description": "Lint steps skipped: blocks the author marked `no_lint(...)`.",
+          "description": "Lint steps skipped: blocks the author marked `lint(off: ...)`.",
           "format": "uint",
           "minimum": 0,
           "type": "integer"

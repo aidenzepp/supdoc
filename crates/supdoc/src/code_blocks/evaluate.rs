@@ -26,8 +26,8 @@ use super::cache::{self, Cache};
 use super::excerpt;
 use super::format::{self, FixDoc};
 use super::info::{
-    KNOWN_ATTRIBUTES, SourceKind, is_known_attribute, parenthesized_spelling, reasoned,
-    source_attributes,
+    KNOWN_ATTRIBUTES, SourceKind, StepValue, is_known_attribute, parenthesized_spelling, reasoned,
+    replacement_for_removed, source_attributes, step_attribute,
 };
 use super::lint;
 use super::runner::{self, Call, Ran};
@@ -43,8 +43,8 @@ pub(crate) use super::states::{BlockState, CodeBlockCounts};
 /// The code for an info-string attribute supdoc doesn't know.
 const UNKNOWN_ATTRIBUTE: &str = "code-block-unknown-attribute";
 
-/// The code for an `ignore`, `no_format` or `no_lint` written without a reason.
-const IGNORE_REASON: &str = "code-block-ignore-reason";
+/// The code for an `ignore`, `lint(off)` or `format(off)` written without a reason.
+const MISSING_REASON: &str = "code-block-missing-reason";
 
 /// The code for a selected tool that isn't on `PATH`.
 const TOOL_MISSING: &str = "code-block-tool-missing";
@@ -164,6 +164,7 @@ pub(crate) fn evaluate(
         let mut block_uses = Vec::new();
         if let Some(info) = block.info.as_ref() {
             findings.extend(unknown_attributes(info));
+            findings.extend(step_values(block, info, code_blocks));
             findings.extend(missing_reasons(info));
             let sources = sources(config, languages, info)?;
             findings.extend(sources.missing);
@@ -1159,32 +1160,109 @@ fn unknown_attributes(info: &Info) -> Vec<Finding> {
                 ),
             )
             .with_location(info.location.clone())
-            .with_help(match parenthesized_spelling(attribute) {
-                Some(spelling) => format!("write `{attribute}` as `{spelling}`"),
-                None => format!("remove `{attribute}` or correct it to one of {KNOWN_ATTRIBUTES}"),
-            })
+            .with_help(
+                match (
+                    parenthesized_spelling(attribute),
+                    replacement_for_removed(attribute),
+                ) {
+                    (Some(spelling), _) => format!("write `{attribute}` as `{spelling}`"),
+                    (None, Some(replacement)) => {
+                        format!("`{attribute}` was removed: write `{replacement}` instead")
+                    }
+                    (None, None) => {
+                        format!("remove `{attribute}` or correct it to one of {KNOWN_ATTRIBUTES}")
+                    }
+                },
+            )
         });
     comma.into_iter().chain(unknown).collect()
 }
 
-/// One `code-block-ignore-reason` warning at `info` for each `ignore`, `no_format` or `no_lint`
-/// without a reason. The attribute still takes effect.
-fn missing_reasons(info: &Info) -> Vec<Finding> {
+/// One `code-block-unknown-attribute` warning at `info` for each `lint(...)` or `format(...)`
+/// that `block`'s language has no tool for under `code_blocks`, and for each whose value the
+/// selected tool's cartridge doesn't accept, naming the values it does.
+fn step_values(block: &CodeBlock, info: &Info, code_blocks: &CodeBlocks) -> Vec<Finding> {
     let parsed = info.parsed();
+    let language = tag_of(block).and_then(Language::from_tag);
     parsed
         .attributes
         .iter()
-        .filter_map(|attribute| reasoned(attribute))
-        .filter(|found| found.reason.is_none())
-        .map(|found| {
-            let name = found.name;
-            Finding::new(
-                IGNORE_REASON,
-                Severity::Warning,
-                format!("the `{}` block's `{name}` doesn't say why", parsed.language),
+        .filter_map(|written| step_attribute(written).map(|found| (*written, found)))
+        .filter_map(|(written, found)| {
+            let step = found.step.key();
+            let tool =
+                language.and_then(|language| tools::selected(code_blocks, language, found.step));
+            let help = match tool {
+                None => format!(
+                    "remove `{written}`: supdoc has no {step} tool for `{}` blocks",
+                    tag_of(block).unwrap_or(parsed.language)
+                ),
+                Some(tool)
+                    if found
+                        .value
+                        .mode()
+                        .is_some_and(|mode| tool.modes.contains(&mode)) =>
+                {
+                    return None;
+                }
+                Some(tool) => format!(
+                    "write one of {} for {}",
+                    tool.modes
+                        .iter()
+                        .map(|mode| match *mode {
+                            "off" => format!("`{step}(off: <why>)`"),
+                            mode => format!("`{step}({mode})`"),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    tool.name
+                ),
+            };
+            Some(
+                Finding::new(
+                    UNKNOWN_ATTRIBUTE,
+                    Severity::Warning,
+                    format!(
+                        "the `{}` block's attribute `{written}` isn't one supdoc knows",
+                        parsed.language
+                    ),
+                )
+                .with_location(info.location.clone())
+                .with_help(help),
             )
-            .with_location(info.location.clone())
-            .with_help(format!("write it as `{name}(<why>)`"))
+        })
+        .collect()
+}
+
+/// One `code-block-missing-reason` warning at `info` for each `ignore`, `lint(off)` or
+/// `format(off)` without a reason. The attribute still takes effect.
+fn missing_reasons(info: &Info) -> Vec<Finding> {
+    let parsed = info.parsed();
+    let warn = |written: &str, fixed: String| {
+        Finding::new(
+            MISSING_REASON,
+            Severity::Warning,
+            format!(
+                "the `{}` block's `{written}` doesn't say why",
+                parsed.language
+            ),
+        )
+        .with_location(info.location.clone())
+        .with_help(format!("write it as `{fixed}`"))
+    };
+    parsed
+        .attributes
+        .iter()
+        .filter_map(|attribute| {
+            if let Some(found) = reasoned(attribute) {
+                return found
+                    .reason
+                    .is_none()
+                    .then(|| warn(attribute, format!("{}(<why>)", found.name)));
+            }
+            let found = step_attribute(attribute)?;
+            matches!(found.value, StepValue::Off { reason: None })
+                .then(|| warn(attribute, format!("{}(off: <why>)", found.step.key())))
         })
         .collect()
 }

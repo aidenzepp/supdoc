@@ -90,25 +90,91 @@ fn ignore_without_a_reason_warns_and_fails_only_under_deny_warnings() {
 
     assert_eq!(
         finding_kinds(&warned),
-        ["code-block-ignore-reason"],
+        ["code-block-missing-reason"],
         "{warned}"
     );
 }
 
 #[test]
 fn ignore_with_blank_parentheses_warns_and_with_a_reason_does_not() {
-    let blank = project_with_block("no_lint(  )");
-    let reasoned = project_with_block("no_lint(slow, needs a server)");
+    for (attribute, reasoned_attribute) in [
+        ("ignore(  )", "ignore(slow, needs a server)"),
+        ("lint(off:  )", "lint(off: slow, needs (a) server)"),
+        ("lint(off)", "format(off: hand aligned)"),
+    ] {
+        let blank = project_with_block(attribute);
+        let reasoned = project_with_block(reasoned_attribute);
 
-    let blank_json = blank.supdoc(&["check", "--json"]).assert_exit(0).json();
-    let reasoned_json = reasoned.supdoc(&["check", "--json"]).assert_exit(0).json();
+        let blank_json = blank.supdoc(&["check", "--json"]).assert_exit(0).json();
+        let reasoned_json = reasoned.supdoc(&["check", "--json"]).assert_exit(0).json();
+
+        assert_eq!(
+            finding_kinds(&blank_json),
+            ["code-block-missing-reason"],
+            "{attribute}: {blank_json}"
+        );
+        assert!(
+            finding_kinds(&reasoned_json).is_empty(),
+            "{reasoned_attribute}: {reasoned_json}"
+        );
+    }
+}
+
+#[test]
+fn a_removed_or_refused_step_attribute_is_an_unknown_attribute() {
+    for attribute in ["no_lint(slow)", "no_format", "lint(partial)", "format(on)"] {
+        let project = project_with_block(attribute);
+
+        let json = project.supdoc(&["check", "--json"]).assert_exit(0).json();
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-unknown-attribute"],
+            "{attribute}: {json}"
+        );
+    }
+}
+
+#[test]
+fn a_step_attribute_on_a_block_with_no_tool_for_the_step_is_an_unknown_attribute() {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write("supdoc.config.toml", "[features.code-blocks]\n");
+    project.write(
+        "docs/blocks.md",
+        "# Blocks\n\n```toml lint(full)\na = 1\n```\n\n```text format(off: prose)\nplain\n```\n",
+    );
+
+    let json = project.supdoc(&["check", "--json"]).assert_exit(0).json();
 
     assert_eq!(
-        finding_kinds(&blank_json),
-        ["code-block-ignore-reason"],
-        "{blank_json}"
+        finding_kinds(&json),
+        [
+            "code-block-unknown-attribute",
+            "code-block-unknown-attribute"
+        ],
+        "{json}"
     );
-    assert!(finding_kinds(&reasoned_json).is_empty(), "{reasoned_json}");
+}
+
+#[test]
+fn lint_full_on_a_rust_block_still_leaves_clippy_to_the_project_tier() {
+    let project = project_with_rust_block(
+        "format(off: hand aligned) lint(full)",
+        "[features.code-blocks.rust]\n",
+    );
+
+    let json = project.supdoc(&["check", "--json"]).json();
+
+    assert_eq!(at(&json, "/data/code_blocks/0/format"), "skipped", "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/lint"), "not_run", "{json}");
+    let reason = at(&json, "/data/code_blocks/0/reason");
+    assert!(
+        reason
+            .as_str()
+            .is_some_and(|reason| reason.contains("supdoc trust")),
+        "the tier gate's reason should show: {json}"
+    );
 }
 
 /// A recorded `basic` project with the feature on and a `rust` block in `docs/blocks.md`
@@ -1108,11 +1174,38 @@ fn selection_format_off_counts_format_off_and_never_runs_the_tool() {
 }
 
 #[test]
-fn selection_no_format_counts_format_skipped_with_its_reason() {
+fn selection_format_full_runs_the_step_a_table_turned_off_on_that_block_only() {
+    let project = project_with_shell_blocks();
+    project.write(
+        "supdoc.config.toml",
+        "[features.code-blocks]\n[features.code-blocks.shell]\n[features.code-blocks.shell.shfmt]\nformat = \"off\"\n[features.code-blocks.shell.shellcheck]\nlint = \"off\"\n",
+    );
+    project.write(
+        "docs/blocks.md",
+        "# Blocks\n\n```sh format(full)\necho hi\n```\n\n```sh\necho bye\n```\n",
+    );
+    let outside = counting_shfmt();
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json", "-v"], &[("PATH", outside.path())])
+        .assert_exit(0)
+        .json();
+
+    assert_eq!(
+        runs(&outside),
+        1,
+        "shfmt should run on the marked block only"
+    );
+    assert_eq!(at(&json, "/data/code_blocks/0/format"), "ran", "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/1/format"), "off", "{json}");
+}
+
+#[test]
+fn selection_format_off_counts_format_skipped_with_its_reason() {
     let project = project_with_shell_blocks();
     project.write(
         "docs/blocks.md",
-        "# Blocks\n\n```sh no_format(hand aligned)\necho   hi\n```\n",
+        "# Blocks\n\n```sh format(off: hand aligned)\necho   hi\n```\n",
     );
 
     let json = project.supdoc(&["check", "--json"]).assert_exit(0).json();
@@ -1157,7 +1250,7 @@ fn lint_select_lint_off_counts_lint_off_beside_the_format_outcome() {
 }
 
 #[test]
-fn lint_select_no_lint_counts_lint_skipped_with_its_reason() {
+fn lint_select_lint_off_attribute_counts_lint_skipped_with_its_reason() {
     let project = project_with_shell_blocks();
     project.write(
         "supdoc.config.toml",
@@ -1165,7 +1258,7 @@ fn lint_select_no_lint_counts_lint_skipped_with_its_reason() {
     );
     project.write(
         "docs/blocks.md",
-        "# Blocks\n\n```sh no_lint(needs a server)\necho hi\n```\n\n```sh\necho bye\n```\n",
+        "# Blocks\n\n```sh lint(off: needs a server)\necho hi\n```\n\n```sh\necho bye\n```\n",
     );
     let outside = counting_shfmt();
 

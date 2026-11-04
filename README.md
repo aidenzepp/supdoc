@@ -152,10 +152,15 @@ attributes either (` ```rust,ignore ` is one unknown word); supdoc warns and nam
 supdoc checks what is written and never skips a block on its own. To exclude a block, mark it and say why:
 
 - `ignore(reason)`: check nothing in this block. rustdoc reads it as its own `ignore` too.
-- `no_format(reason)` and `no_lint(reason)`: skip only formatting or only linting. supdoc doesn't lint
-  blocks yet, so for now `no_lint` records the intent.
+- `format(off: reason)` and `lint(off: reason)`: skip only formatting or only linting. The reason runs
+  to the matching `)`, so it may hold spaces and commas.
+- `format(full)` and `lint(full)`: run the step on this block even though its tool's table turns it off.
+  A Rust block's lint still needs `supdoc trust`.
 
-A marker without a reason still takes effect, with a `code-block-ignore-reason` warning.
+A block attribute beats the tool's table for that block only. The selected tool accepts `full` and `off`;
+any other value, or a step attribute on a block whose language has no tool for that step, warns
+`code-block-unknown-attribute`. An `ignore` or `off` without a reason still takes effect, with a
+`code-block-missing-reason` warning.
 
 A language table turns on its formatter: with `[features.code-blocks.shell]`, shell blocks go through
 `shfmt`, found on `PATH`. A block the formatter would change fails with `code-block-unformatted`, and
@@ -186,7 +191,7 @@ A Rust snippet that needs surrounding code to make sense takes one of three expl
 1. **Show the real code.** If it's the project's own code, make it a `from(...)` block, so it can't drift.
 2. **Write the context into the block** as ordinary, visible code (`use std::time::Instant;`,
    `fn main() {` … `}`). Every line is checked as written.
-3. **Keep it partial and say so**: `no_lint(needs crate context)`, or `ignore(placeholder)` for a block
+3. **Keep it partial and say so**: `lint(off: needs crate context)`, or `ignore(placeholder)` for a block
    that doesn't parse on its own.
 
 Most renderers hide the attributes: GitHub, markdown-it, Docusaurus, mdBook and TypeDoc show only the

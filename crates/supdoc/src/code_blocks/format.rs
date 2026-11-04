@@ -212,7 +212,7 @@ pub(crate) fn finding(
             format!("`{name}` couldn't parse the block: {detail}"),
         )
         .with_help(format!(
-            "fix the code, or mark the block `ignore(<why>)` or `no_format(<why>)`; \
+            "fix the code, or mark the block `ignore(<why>)` or `format(off: <why>)`; \
              `{name}` doesn't run on a block it can't parse"
         )),
         Verdict::TimedOut => Finding::new(
