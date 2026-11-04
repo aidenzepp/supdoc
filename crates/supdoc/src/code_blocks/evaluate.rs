@@ -16,7 +16,10 @@ use crate::config::Config;
 use crate::config::code_blocks::{CodeBlocks, Dialect, Edition, Formatter, Language};
 use crate::finding::{Finding, Location, Severity};
 use crate::hash::Hash;
+use crate::link::SourcePath;
+use crate::lock::error::shell_quote;
 use crate::lock::model::Lockfile;
+use crate::output::paths::PathStyle;
 use crate::read::cartridge::Languages;
 use crate::read::error::CartridgeLoadError;
 
@@ -127,7 +130,8 @@ impl Pending {
 /// differs from its parts, followed by a `code-block-fix-unsafe` warning when
 /// [`format::safe_fix`] refuses its fix. Then the `uses(...)` findings against `lock`'s `[code-blocks]`
 /// section, judging a doc's recorded targets obsolete only when `in_scope` holds for it and none
-/// of its `uses(...)` values fails to resolve. With them, each block's [`BlockState`], counted.
+/// of its `uses(...)` values fails to resolve. Their help commands name each doc as `paths`
+/// shows it, relative to the current directory. With them, each block's [`BlockState`], counted.
 /// Nothing when `config` leaves `[features.code-blocks]` off.
 ///
 /// Effect: reads every source file the blocks name, contained in the project root, and each doc
@@ -143,6 +147,7 @@ pub(crate) fn evaluate(
     blocks: &[CodeBlock],
     lock: &Lockfile,
     in_scope: impl Fn(&str) -> bool,
+    paths: &PathStyle,
 ) -> Result<Evaluation, CartridgeLoadError> {
     let Some(code_blocks) = config.code_blocks() else {
         return Ok(Evaluation::default());
@@ -221,7 +226,8 @@ pub(crate) fn evaluate(
             .flatten();
         records.push(BlockRecord {
             at: block.fence.clone(),
-            reason: skip_reason.or_else(|| state.reason(language.as_deref(), None)),
+            reason: skip_reason
+                .or_else(|| state.reason(language.as_deref(), tool.map(|tool| tool.name))),
             tool,
             dialect: code_blocks.dialect(),
             edition: block_edition(block).or_else(|| code_blocks.edition()),
@@ -233,9 +239,9 @@ pub(crate) fn evaluate(
         });
         states.push(state);
     }
-    findings.extend(uses::judge(&written, lock.recorded_uses(), |doc| {
-        in_scope(doc) && !unresolved_uses.contains(doc)
-    }));
+    let judged = |doc: &str| in_scope(doc) && !unresolved_uses.contains(doc);
+    let command = |doc: &str| command_path(paths, doc);
+    findings.extend(uses::judge(&written, lock.recorded_uses(), judged, command));
     Ok(Evaluation {
         findings,
         counts: Some(CodeBlockCounts::tally(&states)),
@@ -892,9 +898,18 @@ fn sources(
     })
 }
 
+/// `doc` as a help command names it: relative to the current directory as `paths` shows it, and
+/// quoted for the shell.
+fn command_path(paths: &PathStyle, doc: &str) -> String {
+    let doc = doc
+        .parse::<SourcePath>()
+        .map_or_else(|_| doc.to_owned(), |doc| paths.text(&doc));
+    shell_quote(&doc)
+}
+
 /// Where `range`, a byte range of `info`'s text, lies in the doc. An info string is one line, so
 /// the value shares its line.
-fn value_location(info: &Info, range: Range<usize>) -> Option<Location> {
+pub(super) fn value_location(info: &Info, range: Range<usize>) -> Option<Location> {
     let before = info.text.get(..range.start)?.chars().count();
     let start = info.location.range.start + range.start;
     Some(Location {

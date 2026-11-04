@@ -11,6 +11,7 @@ use crate::read::cartridge::Languages;
 use crate::read::error::CartridgeLoadError;
 
 use super::block::CodeBlock;
+use super::evaluate::value_location;
 use super::info::{SourceKind, source_attributes};
 use super::source::{self, Unresolved};
 
@@ -67,7 +68,7 @@ pub(crate) struct Current {
     pub(crate) written: Vec<Written>,
     /// The docs with a value that doesn't resolve. Their stale records are kept.
     pub(crate) unresolved: BTreeSet<String>,
-    /// One `code-block-source-missing` error for each value that doesn't resolve.
+    /// One `code-block-source-missing` error at each value that doesn't resolve.
     pub(crate) missing: Vec<Finding>,
 }
 
@@ -102,7 +103,9 @@ pub(crate) fn current<'block>(
                 Err(Unresolved::CartridgeLoad(error)) => return Err(error),
                 Err(Unresolved::Missing(missing)) => {
                     let _ = current.unresolved.insert(doc.to_owned());
-                    current.missing.push(missing.finding(info.location.clone()));
+                    let at = value_location(info, attribute.range)
+                        .unwrap_or_else(|| info.location.clone());
+                    current.missing.push(missing.finding(at));
                 }
             }
         }
@@ -114,10 +117,12 @@ pub(crate) fn current<'block>(
 /// a `code-block-uses-changed` error for each value whose hash differs from its doc's record, a
 /// `code-block-uses-new` error for each with no record, and a `code-block-uses-obsolete` warning
 /// for each record its doc no longer writes, when `judged` says that doc's records may be judged.
+/// Each help's `supdoc update` command names the doc as `command_path` writes it.
 pub(crate) fn judge<'lock>(
     written: &[Written],
     recorded: impl IntoIterator<Item = (&'lock str, String, Hash)>,
     judged: impl Fn(&str) -> bool,
+    command_path: impl Fn(&str) -> String,
 ) -> Vec<Finding> {
     let recorded: BTreeMap<(&str, String), Hash> = recorded
         .into_iter()
@@ -152,7 +157,7 @@ pub(crate) fn judge<'lock>(
         findings.extend(finding.map(|finding| {
             finding
                 .with_location(value.at.clone())
-                .with_help(review_help(&value.target, doc))
+                .with_help(review_help(&value.target, &command_path(doc)))
         }));
     }
     for (doc, target) in recorded.keys() {
@@ -167,13 +172,13 @@ pub(crate) fn judge<'lock>(
                     "{LOCK_FILE_NAME} records `uses({target})` for {doc}, which no longer writes it"
                 ),
             )
-            .with_help(format!("run `supdoc update {doc} --yes`")),
+            .with_help(format!("run `supdoc update {} --yes`", command_path(doc))),
         );
     }
     findings
 }
 
-/// What to do about a changed or new `target` in `doc`.
+/// What to do about a changed or new `target` in `doc`, as a command names it.
 fn review_help(target: &str, doc: &str) -> String {
     format!("review the block against `{target}`, then run `supdoc update {doc} --yes`")
 }
@@ -209,6 +214,7 @@ mod tests {
             &[written("docs/a.md", TARGET, b"v1")],
             [("docs/a.md", TARGET.to_owned(), Hash::digest(b"v1"))],
             |_| true,
+            str::to_owned,
         );
 
         assert!(findings.is_empty(), "{findings:?}");
@@ -220,6 +226,7 @@ mod tests {
             &[written("docs/a.md", TARGET, b"v2")],
             [("docs/a.md", TARGET.to_owned(), Hash::digest(b"v1"))],
             |_| true,
+            str::to_owned,
         );
 
         assert_eq!(codes(&findings), [CHANGED]);
@@ -235,6 +242,7 @@ mod tests {
             &[written("docs/a.md", TARGET, b"v1")],
             [("docs/b.md", TARGET.to_owned(), Hash::digest(b"v1"))],
             |doc| doc == "docs/a.md",
+            str::to_owned,
         );
 
         assert_eq!(codes(&findings), [NEW]);
@@ -247,7 +255,7 @@ mod tests {
             ("docs/out.md", TARGET.to_owned(), Hash::digest(b"v1")),
         ];
 
-        let findings = judge(&[], recorded, |doc| doc == "docs/a.md");
+        let findings = judge(&[], recorded, |doc| doc == "docs/a.md", str::to_owned);
 
         assert_eq!(codes(&findings), [OBSOLETE]);
         assert_eq!(

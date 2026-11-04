@@ -64,12 +64,19 @@ pub(crate) fn run(
         doc.parse::<SourcePath>()
             .is_ok_and(|doc| scope.contains(&doc) && !scan.is_unread(&doc))
     };
-    let mut evaluation = evaluate(&config, languages, &scan.code_blocks, &lock, in_scope)
-        .map_err(|error| CliError::from(&error))?;
+    let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
+    let mut evaluation = evaluate(
+        &config,
+        languages,
+        &scan.code_blocks,
+        &lock,
+        in_scope,
+        &paths,
+    )
+    .map_err(|error| CliError::from(&error))?;
     evaluation.look_up_tools(tools, config.root().as_path());
     scan.findings.extend(evaluation.findings);
 
-    let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
     let model = reconcile_in(&scan, &lock, &scope, &paths);
     let outcome = match check_outcome(&model, args.deny_warnings) {
         reconcile::Outcome::Clean => Outcome::Clean,

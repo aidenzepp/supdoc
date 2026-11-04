@@ -142,8 +142,16 @@ impl Planned {
                 .is_ok_and(|doc| scope.contains(&doc) && !scan.is_unread(&doc))
         };
         let languages = Languages::builtin().map_err(CliError::from)?;
-        let mut evaluation = evaluate(&config, languages, &scan.code_blocks, &lock, in_scope)
-            .map_err(|error| CliError::from(&error))?;
+        let path_style = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
+        let mut evaluation = evaluate(
+            &config,
+            languages,
+            &scan.code_blocks,
+            &lock,
+            in_scope,
+            &path_style,
+        )
+        .map_err(|error| CliError::from(&error))?;
         evaluation.look_up_tools(tools, config.root().as_path());
         scan.findings.extend(evaluation.findings);
         let stale = scan
@@ -170,10 +178,9 @@ impl Planned {
             .collect();
         let check_command = command_line(context, "check", &typed, &[]);
         let fix_command = command_line(context, "fix", &typed, &[]);
-        let paths = PathStyle::new(context.cwd.clone(), config.root().clone(), None);
         Ok(Self {
             plan: plan_fixes(&scan),
-            paths,
+            paths: path_style,
             config,
             excludes: context.global_excludes.clone(),
             lock,
