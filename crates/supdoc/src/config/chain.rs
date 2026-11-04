@@ -402,6 +402,16 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Result<Config, Co
                 raw_limits.max_ignore_size,
                 &file,
             );
+            nearest(
+                &mut limits.max_key_segments,
+                raw_limits.max_key_segments,
+                &file,
+            );
+            nearest(
+                &mut limits.max_key_path_size,
+                raw_limits.max_key_path_size,
+                &file,
+            );
         }
         files.push(file);
     }

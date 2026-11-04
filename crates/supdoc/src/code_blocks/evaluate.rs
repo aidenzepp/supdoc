@@ -33,6 +33,7 @@ use super::info::{
     parenthesized_spelling, reasoned, replacement_for_removed, source_attributes, step_attribute,
 };
 use super::lint;
+use super::project::{self, BuildFailed, Plan, Refused};
 use super::runner::{self, Call, Ran};
 use super::rust::{self, Scan};
 use super::source::{self, SourceText, Unresolved};
@@ -75,8 +76,7 @@ pub(crate) struct Evaluation {
     /// How long one tool run may take, from `[limits] code-block-timeout`. `None` is no limit.
     timeout: Option<Duration>,
     /// How long building the project may take, from `[limits] code-block-build-timeout`. `None`
-    /// is no limit. Nothing reads it yet.
-    #[expect(dead_code, reason = "the project build reads it in P5-07H")]
+    /// is no limit.
     build_timeout: Option<Duration>,
 }
 
@@ -289,15 +289,24 @@ impl Evaluation {
     /// A block whose run is in the result cache (see [`cache`]) isn't run again; a run that
     /// passed or plainly failed is stored there, a tool failure or timeout never is.
     ///
+    /// Before the first project-tier linter (clippy) runs on a block that passed the strict scan,
+    /// the root's own `Cargo.toml` is planned and, when it names a lib, built once for the run
+    /// (see [`link_against`]); every later block links against that build. A refused manifest,
+    /// no cargo outside the root or no private build directory leaves those blocks' lint steps
+    /// unrun; a failed build adds one error and fails each block that needed it.
+    ///
     /// The runs for distinct blocks go in parallel (see [`in_parallel`]), each under its own
     /// timeout; findings and states come out as a serial run gives them, in block order.
     ///
     /// Effect: reads file metadata along `PATH`, resolves symlinks, reads and writes the result
-    /// cache, and runs each found tool once per block not in it, killing it at the timeout.
+    /// cache, builds the project with cargo when clippy needs it, and runs each found tool once
+    /// per block not in it, killing it at the timeout.
     pub(crate) fn look_up_tools(&mut self, env: &ToolEnv, root: &Path) {
         let mut cache: Option<Option<Cache>> = None;
         let mut looked_up: Vec<(&'static str, Found)> = Vec::new();
         let mut rust_setup: Option<RustSetup> = None;
+        let mut against: Option<Against> = None;
+        let build_timeout = self.build_timeout;
         let mut biome_configs = BiomeConfigs::default();
         let mut toolchain_warned = false;
         let mut slots: Vec<Slot> = Vec::new();
@@ -342,16 +351,31 @@ impl Evaluation {
                 root,
                 &record.at,
             );
-            let [format, lint] = runs;
+            let [format, mut lint] = runs;
             if format.is_some() || lint.is_some() {
                 let ran = [format.is_some(), lint.is_some()];
                 refuse_unfound(&mut record.steps, [record.tool, linter], ran, &looked_up);
+                let compiles = lint
+                    .as_ref()
+                    .is_some_and(|run| run.tool.tier == Tier::Project);
+                let unbuilt = rust.filter(|_| compiles).and_then(|rust| {
+                    against
+                        .get_or_insert_with(|| {
+                            link_against(env, root, rust, build_timeout, &record.at, &mut slots)
+                        })
+                        .gate(&mut record.steps, &mut lint)
+                });
+                if format.is_none() && lint.is_none() && unbuilt.is_none() {
+                    // Settled with its steps' reasons by `settle_pending`.
+                    continue;
+                }
                 let _opened = cache.get_or_insert_with(|| Cache::open(env, root));
                 slots.push(Slot::Run(jobs.len()));
                 jobs.push(Job {
                     record: position,
                     format,
                     lint,
+                    unbuilt,
                 });
                 continue;
             }
@@ -370,26 +394,9 @@ impl Evaluation {
             root,
             timeout: self.timeout,
             cache: cache.as_ref(),
+            linked: Against::linked(against.as_ref()),
         };
-        let records = &self.records;
-        let rust_for = |tool: &ToolCartridge| {
-            rust_setup
-                .as_ref()
-                .filter(|_| tool.language == Language::Rust)
-        };
-        let ran = in_parallel(&jobs, |job| {
-            let record = records.get(job.record)?;
-            let format = job.format.as_ref().and_then(|run| {
-                let rust = rust_for(run.tool);
-                run_formatter(run.tool, &run.program, record, &session, rust)
-            });
-            let parses = !matches!(format, Some((format::Verdict::ParseFailed { .. }, _)));
-            let lint = job.lint.as_ref().filter(|_| parses).and_then(|run| {
-                let rust = rust_for(run.tool);
-                run_linter(run.tool, &run.program, record, &session, rust)
-            });
-            Some(StepsRan { format, lint })
-        });
+        let ran = run_jobs(&jobs, &self.records, &session, rust_setup.as_ref());
         self.settle(slots, &jobs, ran);
         self.conclude(cache);
     }
@@ -412,8 +419,10 @@ impl Evaluation {
     /// Adds `slots`' findings in order, each [`Slot::Run`] taking its job's result from `ran`, which
     /// holds one per job of `jobs` in order: a block's format findings, then its lint findings.
     /// Each run block's state is the outcome over the steps that ran, the first failure (format
-    /// before lint) deciding it and naming its tool in the reason. A run with no result, or whose
-    /// steps both didn't run, leaves its block to [`Self::settle_pending`].
+    /// before lint) deciding it and naming its tool in the reason. A job whose lint step needed a
+    /// project build that failed has its lint step unrun and fails with [`PROJECT_UNBUILT`] as
+    /// its reason. A run with no result, or whose steps both didn't run, leaves its block to
+    /// [`Self::settle_pending`].
     fn settle(&mut self, slots: Vec<Slot>, jobs: &[Job], ran: Vec<Option<StepsRan>>) {
         let mut ran = ran.into_iter();
         for slot in slots {
@@ -430,22 +439,29 @@ impl Evaluation {
             let Some(record) = self.records.get_mut(job.record) else {
                 continue;
             };
-            let mut outcomes = Vec::new();
+            // Each outcome with the tool that decided it, `None` for the project build.
+            let mut outcomes: Vec<(BlockState, Option<&ToolCartridge>)> = Vec::new();
             if let (Some((verdict, findings)), Some(run)) = (format, job.format.as_ref()) {
                 self.findings.extend(findings);
                 record.steps.format = StepState::Ran;
-                outcomes.push((verdict.state(), run.tool));
+                outcomes.push((verdict.state(), Some(run.tool)));
             }
             match (lint, job.lint.as_ref()) {
                 (Some(Ok((verdict, findings))), Some(run)) => {
                     self.findings.extend(findings);
                     record.steps.lint = StepState::Ran;
-                    outcomes.push((lint_state(&verdict), run.tool));
+                    outcomes.push((lint_state(&verdict), Some(run.tool)));
                 }
                 (Some(Err(reason)), Some(_)) => {
                     record.steps.lint = StepState::Unrunnable { reason };
                 }
                 _ => {}
+            }
+            if let Some(failure) = job.unbuilt {
+                record.steps.lint = StepState::Unrunnable {
+                    reason: PROJECT_UNBUILT,
+                };
+                outcomes.push((BlockState::Failed(failure), None));
             }
             let decided = outcomes
                 .iter()
@@ -453,10 +469,14 @@ impl Evaluation {
                 .or_else(|| outcomes.first());
             if let Some((state, tool)) = decided {
                 record.state = state.clone();
-                record.reason =
-                    record
-                        .state
-                        .reason(&record.steps, record.language.as_deref(), Some(tool.name));
+                record.reason = match tool {
+                    Some(tool) => record.state.reason(
+                        &record.steps,
+                        record.language.as_deref(),
+                        Some(tool.name),
+                    ),
+                    None => Some(PROJECT_UNBUILT.to_owned()),
+                };
             }
         }
     }
@@ -484,6 +504,32 @@ impl Evaluation {
             );
         }
     }
+}
+
+/// Runs each of `jobs` on its block in `records` with `session`, in parallel (see
+/// [`in_parallel`]): its formatter, then its linter unless the formatter found the block doesn't
+/// parse, each Rust tool with `rust`'s setup. One result per job, in order.
+///
+/// Effect: reads and writes the result cache and runs the tools, killing each at its timeout.
+fn run_jobs(
+    jobs: &[Job],
+    records: &[BlockRecord],
+    session: &Session<'_>,
+    rust: Option<&RustSetup>,
+) -> Vec<Option<StepsRan>> {
+    in_parallel(jobs, |job| {
+        let record = records.get(job.record)?;
+        let format = job.format.as_ref().and_then(|run| {
+            let rust = rust.filter(|_| run.tool.language == Language::Rust);
+            run_formatter(run.tool, &run.program, record, session, rust)
+        });
+        let parses = !matches!(format, Some((format::Verdict::ParseFailed { .. }, _)));
+        let lint = job.lint.as_ref().filter(|_| parses).and_then(|run| {
+            let rust = rust.filter(|_| run.tool.language == Language::Rust);
+            run_linter(run.tool, &run.program, record, session, rust)
+        });
+        Some(StepsRan { format, lint })
+    })
 }
 
 /// `state`'s reason as [`evaluate`] first records it, for `steps` and the formatter `tool`.
@@ -557,6 +603,8 @@ struct Job {
     format: Option<ToolRun>,
     /// The linter, when one runs.
     lint: Option<ToolRun>,
+    /// How the block fails when its linter needed the project build and the build failed.
+    unbuilt: Option<states::Failure>,
 }
 
 /// A tool found on `PATH` to run on a block.
@@ -774,6 +822,207 @@ const BIOME_NO_PRIVATE_DIR: &str = "biome needs a private directory under `XDG_C
 const NO_PRIVATE_DIR: &str =
     "clippy needs a private working directory under `XDG_CACHE_HOME` or `HOME`, and there is none";
 
+/// Why clippy didn't run on a block when [`project::target_dir`] found no private directory to
+/// build the project in.
+const NO_PRIVATE_BUILD_DIR: &str =
+    "clippy needs a private build directory under `XDG_CACHE_HOME` or `HOME`, and there is none";
+
+/// Why clippy didn't run on a block when the root's `Cargo.toml` resolves outside the root.
+const MANIFEST_OUTSIDE: &str = "`Cargo.toml` links outside the checkout";
+
+/// Why clippy didn't run on a block when the root's `Cargo.toml` isn't a file supdoc reads.
+const MANIFEST_UNREADABLE: &str = "`Cargo.toml` isn't a regular file supdoc can read";
+
+/// Why clippy didn't run on a block when the root's `Cargo.toml` has both package tables.
+const MANIFEST_AMBIGUOUS: &str = "`Cargo.toml` has both `[package]` and `[project]`";
+
+/// Why clippy didn't run on a block when the root package would build in an outside workspace.
+const OUTSIDE_WORKSPACE: &str =
+    "`Cargo.toml` would build in a cargo workspace outside the trusted directory";
+
+/// Why a block whose clippy needed the project build failed when that build failed.
+const PROJECT_UNBUILT: &str = "the project didn't build";
+
+/// What clippy links each trusted Rust block against, settled once per run by
+/// [`link_against`].
+#[derive(Debug)]
+enum Against {
+    /// The block alone: the root has no `Cargo.toml`, or no lib a block can name.
+    Alone,
+    /// The project build.
+    Built {
+        /// Its `--extern` flags, one per project lib, then `-L dependency=<deps>`.
+        flags: Vec<OsString>,
+        /// Its fingerprint, which names it in the result cache.
+        fingerprint: [u8; 32],
+    },
+    /// supdoc won't build the project, for the reason held, so clippy doesn't run.
+    Unrunnable(&'static str),
+    /// cargo is missing from `PATH`, or inside the checkout.
+    CargoRefused {
+        /// Whether cargo on `PATH` is inside the checkout, rather than missing.
+        inside_root: bool,
+    },
+    /// The project didn't build: how each block that needed it fails.
+    Unbuilt(states::Failure),
+}
+
+impl Against {
+    /// Applies this to a block whose linter is `lint`, with `steps`: drops the lint run, marking
+    /// the lint step unrunnable or its tool refused, unless clippy can link the block. `Some` with
+    /// how the block fails when the project didn't build.
+    fn gate(&self, steps: &mut Steps, lint: &mut Option<ToolRun>) -> Option<states::Failure> {
+        let unbuilt = match self {
+            Self::Alone | Self::Built { .. } => return None,
+            Self::Unrunnable(reason) => {
+                steps.lint = StepState::Unrunnable { reason };
+                None
+            }
+            Self::CargoRefused { inside_root } => {
+                steps.lint = StepState::ToolRefused {
+                    binary: "cargo",
+                    inside_root: *inside_root,
+                };
+                None
+            }
+            // `settle` marks the lint step and gives the block its reason.
+            Self::Unbuilt(failure) => Some(*failure),
+        };
+        *lint = None;
+        unbuilt
+    }
+
+    /// What clippy links each block against under `against`: the build's flags and
+    /// fingerprint, or nothing.
+    fn linked(against: Option<&Self>) -> Linked<'_> {
+        match against {
+            Some(Self::Built { flags, fingerprint }) => Linked {
+                flags,
+                fingerprint: Some(fingerprint),
+            },
+            _ => Linked::default(),
+        }
+    }
+}
+
+/// What clippy links a block against: the project build's flags and fingerprint, empty and
+/// `None` when it compiles alone.
+#[derive(Debug, Clone, Copy, Default)]
+struct Linked<'run> {
+    /// The `--extern` and `-L` flags.
+    flags: &'run [OsString],
+    /// The build's fingerprint.
+    fingerprint: Option<&'run [u8; 32]>,
+}
+
+/// What clippy links `root`'s blocks against, decided at `at`, the first block that needs it,
+/// with `rust`'s toolchain: [`Against::Alone`] when the root's `Cargo.toml` plans nothing, else
+/// the project built once with cargo under `timeout`. A refused manifest adds one
+/// `code-block-not-checked` warning naming why; cargo not found outside `root` adds its
+/// `code-block-tool-missing` or `code-block-not-checked` warning; a failed build adds its one
+/// error (see [`format::build_finding`]). Each goes to `slots` before the block's own findings.
+///
+/// Effect: reads the root's `Cargo.toml` and those above it, looks cargo up on `PATH`, creates
+/// the build directory, and runs `cargo check`, which runs the project's build scripts and proc
+/// macros, killing it at the timeout.
+fn link_against(
+    env: &ToolEnv,
+    root: &Path,
+    rust: &RustSetup,
+    timeout: Option<Duration>,
+    at: &Location,
+    slots: &mut Vec<Slot>,
+) -> Against {
+    let plan = project::plan(root);
+    let Some(project) = plan.project() else {
+        return match &plan {
+            Plan::Refused(refused) => {
+                let (reason, warning) = refused_build(refused, at);
+                slots.push(Slot::Found(warning));
+                Against::Unrunnable(reason)
+            }
+            Plan::None | Plan::Package(_) | Plan::Workspace(_) => Against::Alone,
+        };
+    };
+    let found = find("cargo", env, root);
+    slots.extend(tool_warning("cargo", "install Rust with rustup", &found, at).map(Slot::Found));
+    let cargo = match found {
+        Found::OnPath(cargo) => cargo,
+        Found::Missing => return Against::CargoRefused { inside_root: false },
+        Found::InsideRoot(_) => return Against::CargoRefused { inside_root: true },
+    };
+    let Some(target) = project::target_dir(env, root) else {
+        return Against::Unrunnable(NO_PRIVATE_BUILD_DIR);
+    };
+    let toolchain = rust.toolchain.env();
+    let builder = project::Builder {
+        cargo: &cargo,
+        env,
+        toolchain: &toolchain,
+        target: &target,
+        root,
+        timeout,
+    };
+    match project::build(project, &builder) {
+        Ok(build) => {
+            let mut flags = Vec::new();
+            for (name, file) in &build.externs {
+                let mut named = OsString::from(name);
+                named.push("=");
+                named.push(file);
+                flags.extend([OsString::from("--extern"), named]);
+            }
+            let mut deps = OsString::from("dependency=");
+            deps.push(&build.deps);
+            flags.extend([OsString::from("-L"), deps]);
+            Against::Built {
+                flags,
+                fingerprint: build.fingerprint,
+            }
+        }
+        Err(failed) => {
+            slots.push(Slot::Found(format::build_finding(&failed, at, timeout)));
+            Against::Unbuilt(match failed {
+                BuildFailed::ToolFailed(_) => states::Failure::ToolFailed,
+                BuildFailed::TimedOut => states::Failure::ToolTimeout,
+            })
+        }
+    }
+}
+
+/// The lint step's reason for `refused`, and the run's one `code-block-not-checked` warning, at
+/// `at`, saying why the project isn't built and what to change.
+fn refused_build(refused: &Refused, at: &Location) -> (&'static str, Finding) {
+    let (reason, why, help) = match refused {
+        Refused::Manifest(Refusal::Outside) => (
+            MANIFEST_OUTSIDE,
+            "the project's `Cargo.toml` is a link that resolves outside the project".to_owned(),
+            "replace `Cargo.toml` with a regular file inside the project",
+        ),
+        Refused::Manifest(_) => (
+            MANIFEST_UNREADABLE,
+            "the project's `Cargo.toml` couldn't be read as a regular UTF-8 file of at most 64 KiB"
+                .to_owned(),
+            "make `Cargo.toml` a readable UTF-8 text file of at most 64 KiB",
+        ),
+        Refused::Ambiguous => (
+            MANIFEST_AMBIGUOUS,
+            "the project's `Cargo.toml` has both `[package]` and its legacy name `[project]`"
+                .to_owned(),
+            "keep one of `[package]` and `[project]` in `Cargo.toml`",
+        ),
+        Refused::Workspace(outside) => (OUTSIDE_WORKSPACE, outside.reason(), outside.help()),
+    };
+    let warning = Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        format!("{why}, so clippy doesn't lint the project's Rust blocks"),
+    )
+    .with_help(help)
+    .with_location(at.clone());
+    (reason, warning)
+}
+
 /// `work` applied to each of `items`, the results in `items`' order. The items are shared among
 /// up to [`MAX_WORKERS`] scoped threads, no more than [`thread::available_parallelism`] allows,
 /// each taking the next unclaimed item until none is left. A worker's panic is resumed here.
@@ -858,6 +1107,8 @@ struct Session<'run> {
     timeout: Option<Duration>,
     /// The result cache, when there is one.
     cache: Option<&'run Cache>,
+    /// What clippy links each block against.
+    linked: Linked<'run>,
 }
 
 /// Runs `tool`, found at `program`, on `record`'s block from `session`'s root with its env, under
@@ -897,6 +1148,7 @@ fn run_formatter(
             rust.config.as_slice()
         }),
         emit: None,
+        externs: &[],
     });
     let vars = rust.map(|rust| rust.toolchain.env()).unwrap_or_default();
     let extra: Vec<(&str, &OsStr)> = vars
@@ -911,6 +1163,7 @@ fn run_formatter(
         extra: &extra,
         input,
         doc: &doc,
+        project: None,
     };
     let verdict = cached_run(
         &run,
@@ -969,6 +1222,7 @@ fn run_linter(
         dialect: record.dialect,
         project: &[],
         emit: None,
+        externs: &[],
     });
     let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
     let run = cache::Run {
@@ -978,6 +1232,7 @@ fn run_linter(
         extra: &[],
         input: &pending.input,
         doc: &doc,
+        project: None,
     };
     let verdict = cached_run(
         &run,
@@ -997,10 +1252,13 @@ fn run_linter(
     Some(Ok((verdict, findings)))
 }
 
-/// Runs `tool`, clippy found at `program`, on `record`'s Rust block alone, read as `pending`, as
-/// [`run_linter`] does: `clippy-driver` with its cartridge's arguments for the block's edition
-/// and `rust`'s project lints, `rust`'s toolchain variables and `CLIPPY_CONF_DIR`, and nothing
-/// else from the project. Its metadata goes to a fresh [`rust::EmitDir`], removed after the run whatever its outcome.
+/// Runs `tool`, clippy found at `program`, on `record`'s Rust block, read as `pending`, as
+/// [`run_linter`] does: `clippy-driver` with its cartridge's arguments for the block's edition,
+/// the session's project build flags (none when the block compiles alone) and `rust`'s project
+/// lints, `rust`'s toolchain variables and `CLIPPY_CONF_DIR`, and nothing else from the project.
+/// The build's fingerprint is part of the cache key, and a missing name's finding says whether
+/// the project's crate was passed. Its metadata goes to a fresh [`rust::EmitDir`], removed after
+/// the run whatever its outcome.
 ///
 /// # Errors
 ///
@@ -1030,6 +1288,7 @@ fn run_clippy(
         dialect: record.dialect,
         project: &rust.lints,
         emit: None,
+        externs: session.linked.flags,
     };
     let key_args = tool.args(&invocation);
     let key_args: Vec<&OsStr> = key_args.iter().map(OsString::as_os_str).collect();
@@ -1050,6 +1309,7 @@ fn run_clippy(
         extra: &extra,
         input: &pending.input,
         doc: &doc,
+        project: session.linked.fingerprint,
     };
     let spawn = |call: &Call<'_>| {
         let emit = rust::EmitDir::create(&neutral).ok_or_else(|| {
@@ -1088,7 +1348,7 @@ fn run_clippy(
         &pending.block,
         pending.doc.text(),
         session.timeout,
-        false,
+        !session.linked.flags.is_empty(),
     );
     Ok((verdict, findings))
 }
@@ -1262,7 +1522,8 @@ fn found_runs(
                 found.clone()
             } else {
                 let found = find(tool.binary, env, root);
-                slots.extend(tool_warning(tool, &found, at).map(Slot::Found));
+                let install = format!("install it with `{}`", tool.install);
+                slots.extend(tool_warning(tool.binary, &install, &found, at).map(Slot::Found));
                 looked_up.push((tool.binary, found.clone()));
                 found
             };
@@ -1310,32 +1571,27 @@ fn selected_tools(
     )
 }
 
-/// The one warning for `tool`'s binary, found as `found`, at `at`, the first block that needs it.
-/// `None` when it is on `PATH` outside the root.
-fn tool_warning(tool: &ToolCartridge, found: &Found, at: &Location) -> Option<Finding> {
+/// The one warning for `binary`, found as `found`, at `at`, the first block that needs it, a
+/// missing one's help saying how to `install` it. `None` when it is on `PATH` outside the root.
+fn tool_warning(binary: &str, install: &str, found: &Found, at: &Location) -> Option<Finding> {
     let finding = match found {
         Found::OnPath(_) => return None,
         Found::Missing => Finding::new(
             TOOL_MISSING,
             Severity::Warning,
-            format!(
-                "`{}` isn't on PATH, so its blocks aren't checked",
-                tool.binary
-            ),
+            format!("`{binary}` isn't on PATH, so its blocks aren't checked"),
         )
-        .with_help(format!("install it with `{}`", tool.install)),
+        .with_help(install.to_owned()),
         Found::InsideRoot(real) => Finding::new(
             NOT_CHECKED,
             Severity::Warning,
             format!(
-                "`{}` on PATH is `{}`, inside the checkout, so its blocks aren't checked",
-                tool.binary,
+                "`{binary}` on PATH is `{}`, inside the checkout, so its blocks aren't checked",
                 real.display()
             ),
         )
         .with_help(format!(
-            "put a `{}` from outside the project first on PATH",
-            tool.binary
+            "put a `{binary}` from outside the project first on PATH"
         )),
     };
     Some(finding.with_location(at.clone()))
@@ -1722,14 +1978,18 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        BlockRecord, LintRan, MAX_WORKERS, Pending, RustSetup, Session, in_parallel, run_clippy,
-        rust_refusal,
+        BlockRecord, Evaluation, Linked, LintRan, MANIFEST_AMBIGUOUS, MANIFEST_OUTSIDE,
+        MANIFEST_UNREADABLE, MAX_WORKERS, OUTSIDE_WORKSPACE, PROJECT_UNBUILT, Pending, RustSetup,
+        Session, in_parallel, refused_build, run_clippy, rust_refusal,
     };
     use crate::cartridges::markdown::cartridge::cartridge as markdown;
     use crate::code_blocks::block::blocks_in;
     use crate::code_blocks::format::FixDoc;
     use crate::code_blocks::lint::Verdict;
+    use crate::code_blocks::project::{OutsideWorkspace, Refused};
     use crate::code_blocks::states::{BlockState, NotChecked, Steps};
+    use crate::code_blocks::states::{Failure, StepState};
+    use crate::code_blocks::toolchain::Refusal;
     use crate::code_blocks::tools::{CARTRIDGES, Found, Invocation, ToolCartridge, ToolEnv, find};
     use crate::config::code_blocks::{Dialect, Edition};
     use crate::finding::Location;
@@ -1792,6 +2052,15 @@ mod tests {
     /// The record of the one Rust block in `text`, a doc at `<root>/docs/a.md`, pending with
     /// clippy as its linter.
     fn rust_record(root: &Path, text: &str) -> BlockRecord {
+        rust_records(root, text)
+            .into_iter()
+            .next()
+            .expect("the doc should hold one block")
+    }
+
+    /// The records of each Rust block in `text`, a doc at `<root>/docs/a.md`, pending with clippy
+    /// as their linter.
+    fn rust_records(root: &Path, text: &str) -> Vec<BlockRecord> {
         let path = AbsolutePath::new(&root.join("docs/a.md"))
             .expect("the fixture path should be absolute");
         let file = SourceFile::parse(path, text.to_owned(), markdown())
@@ -1802,27 +2071,30 @@ mod tests {
                 .expect("the fixture source should be valid");
             Location::in_text(source, text, range)
         });
-        let block = blocks.first().expect("the doc should hold one block");
         let doc = Arc::new(FixDoc::new(
             Arc::from(text),
             "10s".parse().expect("the parse limit should be valid"),
         ));
-        BlockRecord {
-            at: block.fence.clone(),
-            language: Some("rust".to_owned()),
-            state: BlockState::NotChecked(NotChecked::Pending),
-            steps: Steps::default(),
-            fragment: None,
-            reason: None,
-            uses: Vec::new(),
-            index: 1,
-            tool: None,
-            linter: Some(clippy()),
-            dialect: Dialect::default(),
-            edition: None,
-            given: None,
-            pending: Pending::of(block, &doc),
-        }
+        blocks
+            .iter()
+            .enumerate()
+            .map(|(position, block)| BlockRecord {
+                at: block.fence.clone(),
+                language: Some("rust".to_owned()),
+                state: BlockState::NotChecked(NotChecked::Pending),
+                steps: Steps::default(),
+                fragment: None,
+                reason: None,
+                uses: Vec::new(),
+                index: position + 1,
+                tool: None,
+                linter: Some(clippy()),
+                dialect: Dialect::default(),
+                edition: None,
+                given: None,
+                pending: Pending::of(block, &doc),
+            })
+            .collect()
     }
 
     /// [`run_clippy`] with `program` on the one block of `text` under `root`, its neutral
@@ -1845,6 +2117,7 @@ mod tests {
             root,
             timeout: Some(Duration::from_secs(120)),
             cache: None,
+            linked: Linked::default(),
         };
         run_clippy(
             clippy(),
@@ -1893,6 +2166,7 @@ mod tests {
             dialect: record.dialect,
             project: &rust.lints,
             emit: None,
+            externs: &[],
         });
         let args = args
             .iter()
@@ -2108,5 +2382,337 @@ mod tests {
             [3],
             "an unresolved name is a lint finding: {unresolved:?}"
         );
+    }
+
+    /// Writes an executable `sh` script at `path` running `body`.
+    fn script(path: &Path, body: &str) {
+        std::fs::write(path, format!("#!/bin/sh\n{body}")).expect("the stub should be writable");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("the stub should be made executable");
+    }
+
+    /// A project root with a stub `cargo` and `clippy-driver` beside it, each recording its runs.
+    struct Linking {
+        /// Holds the root, the stubs, their records and the cache.
+        dir: tempfile::TempDir,
+    }
+
+    impl Linking {
+        /// A root whose `Cargo.toml` is `manifest` (none when `None`) with a `src/lib.rs`, and
+        /// stubs where cargo, after `before`, writes `rmeta`'s bytes as the `proj` lib's rmeta
+        /// and prints its artifact line, and clippy-driver records its argv and passes.
+        fn new(manifest: Option<&str>, before: &str) -> Self {
+            let linking = Self { dir: temporary() };
+            let root = linking.root();
+            for dir in [root.join("src"), linking.bin(), linking.records()] {
+                std::fs::create_dir_all(dir).expect("the fixture directories should be creatable");
+            }
+            std::fs::write(root.join("src/lib.rs"), "").expect("the lib should be writable");
+            if let Some(manifest) = manifest {
+                std::fs::write(root.join("Cargo.toml"), manifest)
+                    .expect("the manifest should be writable");
+            }
+            linking.set_rmeta("rmeta");
+            let records = linking.records();
+            let real_manifest = root
+                .canonicalize()
+                .expect("the root should resolve")
+                .join("Cargo.toml");
+            script(
+                &linking.bin().join("cargo"),
+                &format!(
+                    "echo build >> '{records}/cargo-runs'\n{before}\n\
+                     deps=\"$CARGO_TARGET_DIR/debug/deps\"\n/bin/mkdir -p \"$deps\"\n\
+                     /bin/cat '{records}/rmeta' > \"$deps/libproj-1.rmeta\"\n\
+                     printf '{{\"reason\":\"compiler-artifact\",\"manifest_path\":\"{manifest}\",\
+                     \"target\":{{\"name\":\"proj\",\"kind\":[\"lib\"]}},\
+                     \"filenames\":[\"%s\"]}}\\n' \"$deps/libproj-1.rmeta\"\n",
+                    records = records.display(),
+                    manifest = real_manifest.display(),
+                ),
+            );
+            script(
+                &linking.bin().join("clippy-driver"),
+                &format!("echo \"$*\" >> '{}/clippy-runs'\n", records.display()),
+            );
+            linking
+        }
+
+        /// The project root.
+        fn root(&self) -> PathBuf {
+            self.dir.path().join("root")
+        }
+
+        /// The directory the stubs are in, the only `PATH` entry.
+        fn bin(&self) -> PathBuf {
+            self.dir.path().join("bin")
+        }
+
+        /// The directory the stubs record into.
+        fn records(&self) -> PathBuf {
+            self.dir.path().join("records")
+        }
+
+        /// Makes the stub cargo write `bytes` as the lib's rmeta from its next run.
+        fn set_rmeta(&self, bytes: &str) {
+            std::fs::write(self.records().join("rmeta"), bytes)
+                .expect("the rmeta bytes should be writable");
+        }
+
+        /// The lines the stub `name` recorded, one per run.
+        fn runs(&self, name: &str) -> Vec<String> {
+            std::fs::read_to_string(self.records().join(name))
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        }
+
+        /// The environment the tools get: the stubs alone on `PATH`, and a cache in the fixture.
+        fn env(&self) -> ToolEnv {
+            let bin = self.bin().into_os_string();
+            let cache = self.dir.path().join("cache").into_os_string();
+            let home = self.dir.path().join("home").into_os_string();
+            ToolEnv::from_vars(|name| match name {
+                "PATH" => Some(bin.clone()),
+                "XDG_CACHE_HOME" => Some(cache.clone()),
+                "HOME" => Some(home.clone()),
+                _ => None,
+            })
+        }
+
+        /// [`Evaluation::look_up_tools`] on two trusted Rust blocks, clippy their linter as if the
+        /// T6 hold were lifted: the evaluation after it.
+        fn look_up(&self) -> Evaluation {
+            let root = self.root();
+            let records = rust_records(
+                &root,
+                "# D\n\n```rust\npub fn a() {}\n```\n\n```rust\npub fn b() {}\n```\n",
+            );
+            let mut evaluation = Evaluation {
+                findings: Vec::new(),
+                counts: None,
+                records,
+                timeout: Some(Duration::from_secs(120)),
+                build_timeout: Some(Duration::from_secs(120)),
+            };
+            evaluation.look_up_tools(&self.env(), &root);
+            evaluation
+        }
+
+        /// The build's dependency directory, by real path.
+        fn deps(&self) -> PathBuf {
+            crate::code_blocks::project::target_dir(&self.env(), &self.root())
+                .expect("the target dir should be usable")
+                .path()
+                .join("debug/deps")
+                .canonicalize()
+                .expect("the stub's deps dir should resolve")
+        }
+    }
+
+    /// The finding codes of `evaluation`, in order.
+    fn codes(evaluation: &Evaluation) -> Vec<&str> {
+        evaluation
+            .findings
+            .iter()
+            .map(|finding| finding.code)
+            .collect()
+    }
+
+    /// A root package with a lib, built on its own.
+    const PROJ: &str = "[package]\nname = \"proj\"\n\n[workspace]\n";
+
+    #[test]
+    fn trusted_blocks_link_against_one_project_build_with_its_externs_before_the_lints() {
+        let linking = Linking::new(Some(PROJ), "");
+
+        let evaluation = linking.look_up();
+
+        assert_eq!(linking.runs("cargo-runs"), ["build"], "one build per run");
+        let deps = linking.deps();
+        let linked = format!(
+            "--error-format=json --extern proj={} -L dependency={} -A unused",
+            deps.join("libproj-1.rmeta").display(),
+            deps.display()
+        );
+        let clippy = linking.runs("clippy-runs");
+        assert_eq!(clippy.len(), 2, "{clippy:?}");
+        for argv in &clippy {
+            assert!(argv.contains(&linked), "{argv}\nshould hold {linked}");
+        }
+        assert!(codes(&evaluation).is_empty(), "{:?}", evaluation.findings);
+        for record in &evaluation.records {
+            assert_eq!(record.state, BlockState::Passed, "{record:?}");
+        }
+    }
+
+    #[test]
+    fn a_changed_project_artifact_changes_the_cache_key() {
+        let linking = Linking::new(Some(PROJ), "");
+
+        let _first = linking.look_up();
+        let _cached = linking.look_up();
+        let cached = linking.runs("clippy-runs").len();
+        linking.set_rmeta("rmeta, rebuilt");
+        let _rebuilt = linking.look_up();
+
+        assert_eq!(
+            cached, 2,
+            "an unchanged build should reuse both blocks' runs"
+        );
+        assert_eq!(linking.runs("cargo-runs").len(), 3, "one build per run");
+        assert_eq!(
+            linking.runs("clippy-runs").len(),
+            4,
+            "a changed artifact should run both blocks again"
+        );
+    }
+
+    #[test]
+    fn a_failing_project_build_is_one_tool_failed_error_and_fails_each_block() {
+        let linking = Linking::new(Some(PROJ), "echo 'error: lib.rs: boom' >&2\nexit 101");
+
+        let evaluation = linking.look_up();
+
+        assert_eq!(codes(&evaluation), ["code-block-tool-failed"]);
+        let failed = evaluation
+            .findings
+            .first()
+            .expect("the build failure should be reported");
+        assert!(failed.message.contains("`cargo check`"), "{failed:?}");
+        assert!(failed.message.contains("boom"), "{failed:?}");
+        assert_eq!(evaluation.records.len(), 2);
+        for record in &evaluation.records {
+            assert_eq!(
+                record.state,
+                BlockState::Failed(Failure::ToolFailed),
+                "{record:?}"
+            );
+            assert_eq!(record.reason.as_deref(), Some(PROJECT_UNBUILT));
+            assert_eq!(
+                record.steps.lint,
+                StepState::Unrunnable {
+                    reason: PROJECT_UNBUILT
+                }
+            );
+        }
+        assert_eq!(linking.runs("cargo-runs"), ["build"]);
+        assert!(linking.runs("clippy-runs").is_empty(), "clippy never runs");
+    }
+
+    #[test]
+    fn with_no_cargo_toml_a_block_compiles_alone_and_cargo_never_runs() {
+        let linking = Linking::new(None, "");
+
+        let evaluation = linking.look_up();
+
+        assert_eq!(linking.runs("cargo-runs"), [] as [String; 0]);
+        let clippy = linking.runs("clippy-runs");
+        assert_eq!(clippy.len(), 2, "{clippy:?}");
+        for argv in &clippy {
+            assert!(
+                argv.contains("--error-format=json -A unused"),
+                "today's argv exactly: {argv}"
+            );
+            assert!(
+                !argv.contains("--extern") && !argv.contains("-L "),
+                "{argv}"
+            );
+        }
+        assert!(codes(&evaluation).is_empty(), "{:?}", evaluation.findings);
+    }
+
+    #[test]
+    fn a_refused_manifest_leaves_clippy_unrun_with_one_warning() {
+        let linking = Linking::new(
+            Some("[package]\nname = \"proj\"\n\n[project]\nname = \"proj\"\n"),
+            "",
+        );
+
+        let evaluation = linking.look_up();
+
+        assert_eq!(codes(&evaluation), ["code-block-not-checked"]);
+        for record in &evaluation.records {
+            assert_eq!(
+                record.steps.lint,
+                StepState::Unrunnable {
+                    reason: MANIFEST_AMBIGUOUS
+                },
+                "{record:?}"
+            );
+            assert_ne!(record.state, BlockState::Passed, "{record:?}");
+            assert_eq!(record.reason.as_deref(), Some(MANIFEST_AMBIGUOUS));
+        }
+        assert_eq!(linking.runs("cargo-runs"), [] as [String; 0]);
+        assert_eq!(linking.runs("clippy-runs"), [] as [String; 0]);
+    }
+
+    #[test]
+    fn a_missing_cargo_refuses_the_lint_step_with_one_warning() {
+        let linking = Linking::new(Some(PROJ), "");
+        std::fs::remove_file(linking.bin().join("cargo")).expect("the stub should be removable");
+
+        let evaluation = linking.look_up();
+
+        assert_eq!(codes(&evaluation), ["code-block-tool-missing"]);
+        let missing = evaluation
+            .findings
+            .first()
+            .expect("cargo's warning should be reported");
+        assert!(missing.message.contains("`cargo`"), "{missing:?}");
+        for record in &evaluation.records {
+            assert_eq!(
+                record.steps.lint,
+                StepState::ToolRefused {
+                    binary: "cargo",
+                    inside_root: false
+                },
+                "{record:?}"
+            );
+        }
+        assert_eq!(linking.runs("clippy-runs"), [] as [String; 0]);
+    }
+
+    #[test]
+    fn each_refused_manifest_has_its_own_reason_and_a_warning_with_help() {
+        let at = rust_record(Path::new("/p"), "```rust\npub fn f() {}\n```\n").at;
+        let outside = PathBuf::from("/w/Cargo.toml");
+        let cases = [
+            (
+                Refused::Manifest(Refusal::Outside),
+                MANIFEST_OUTSIDE,
+                "outside the project",
+            ),
+            (
+                Refused::Manifest(Refusal::Unreadable),
+                MANIFEST_UNREADABLE,
+                "64 KiB",
+            ),
+            (Refused::Ambiguous, MANIFEST_AMBIGUOUS, "`[project]`"),
+            (
+                Refused::Workspace(OutsideWorkspace::Ancestor(outside)),
+                OUTSIDE_WORKSPACE,
+                "/w/Cargo.toml",
+            ),
+        ];
+
+        for (refused, expected, named) in cases {
+            let (reason, warning) = refused_build(&refused, &at);
+
+            assert_eq!(reason, expected, "{refused:?}");
+            assert_eq!(warning.code, "code-block-not-checked", "{refused:?}");
+            assert!(warning.message.contains(named), "{warning:?}");
+            assert!(
+                warning
+                    .message
+                    .ends_with("so clippy doesn't lint the project's Rust blocks"),
+                "{warning:?}"
+            );
+            assert!(
+                warning.help.as_deref().is_some_and(|help| !help.is_empty()),
+                "{warning:?}"
+            );
+        }
     }
 }

@@ -77,7 +77,7 @@ pub(crate) fn read(root: &Path) -> Toolchain {
 }
 
 /// The edition the root's `Cargo.toml` names: `[workspace.package] edition`, then `[package]
-/// edition`. Read only through an in-root real path, as a regular file of at most 64 KiB, and
+/// edition` (or its legacy name `[project]`'s). Read only through an in-root real path, as a regular file of at most 64 KiB, and
 /// never executed. `None` when there is no such file, it can't be read or parsed, or no edition
 /// in it is one of `2015`, `2018`, `2021` or `2024`.
 ///
@@ -186,7 +186,8 @@ fn lints_in(text: &str) -> Vec<OsString> {
         .collect()
 }
 
-/// The edition `text`, a `Cargo.toml`, names: its workspace package's, then its package's.
+/// The edition `text`, a `Cargo.toml`, names: its workspace package's, then its package's, read
+/// from `[package]` or the legacy `[project]` cargo still reads as it.
 fn edition_in(text: &str) -> Option<Edition> {
     let table = text.parse::<toml::Table>().ok()?;
     let named = |section: Option<&toml::Value>| {
@@ -197,6 +198,7 @@ fn edition_in(text: &str) -> Option<Edition> {
     };
     named(table.get("workspace").and_then(|w| w.get("package")))
         .or_else(|| named(table.get("package")))
+        .or_else(|| named(table.get("project")))
 }
 
 /// The text of `file` when its real path is a regular UTF-8 file under `root`'s real path and
@@ -453,6 +455,14 @@ mod tests {
         );
         assert_eq!(
             edition_in("[package]\nname = \"x\"\nedition = \"2018\"\n"),
+            Some(Edition::E2018)
+        );
+    }
+
+    #[test]
+    fn a_legacy_project_table_names_the_edition_like_a_package() {
+        assert_eq!(
+            edition_in("[project]\nname = \"x\"\nedition = \"2018\"\n"),
             Some(Edition::E2018)
         );
     }

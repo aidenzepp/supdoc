@@ -19,8 +19,10 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
+use crate::limits::Limits;
 use crate::link::{SymbolPath, SymbolSegment};
-use crate::read::cartridge::{Deadline, Stopped, Symbol, SymbolTable};
+use crate::read::cartridge::{Deadline, SourceFile, Stopped, Symbol, SymbolTable};
+use crate::read::error::ReadError;
 
 /// The default ceiling on the bytes of path text one data file's symbol table may hold: 32 MiB.
 pub(crate) const DEFAULT_KEY_PATH_BYTES: usize = 32 * 1024 * 1024;
@@ -33,6 +35,22 @@ pub(crate) struct KeyPathBudget {
     /// The most bytes of path text, as displayed with its `.` separators, all symbols together
     /// may hold.
     pub(crate) bytes: usize,
+}
+
+impl KeyPathBudget {
+    /// The ceilings `limits` sets; a ceiling of `0` (no limit) is as large as a count can be.
+    #[must_use]
+    pub(crate) fn from_limits(limits: &Limits) -> Self {
+        let count = |ceiling: Option<u64>| {
+            ceiling.map_or(usize::MAX, |value| {
+                usize::try_from(value).unwrap_or(usize::MAX)
+            })
+        };
+        Self {
+            segments: count(limits.max_key_segments.value.get()),
+            bytes: count(limits.max_key_path_size.value.get()),
+        }
+    }
 }
 
 /// One escaped path segment and its length in bytes, so charging it costs O(1).
@@ -92,6 +110,26 @@ pub(crate) enum KeyPathError {
         /// The byte budget the build was given.
         limit: usize,
     },
+}
+
+impl KeyPathError {
+    /// This error as the [`ReadError`] for reading `file`: a timeout names the symbol it stopped
+    /// at, a budget names the ceiling and so how to raise it.
+    #[must_use]
+    pub(crate) fn read_error(self, file: &SourceFile) -> ReadError {
+        let path = file.path().clone();
+        match self {
+            Self::Timeout(stopped) => file.timed_out("the key walk", stopped),
+            Self::TooManySegments { limit } => ReadError::TooManyKeys {
+                path,
+                limit: u64::try_from(limit).unwrap_or(u64::MAX),
+            },
+            Self::TooManyBytes { limit } => ReadError::KeyPathsTooLarge {
+                path,
+                limit: u64::try_from(limit).unwrap_or(u64::MAX),
+            },
+        }
+    }
 }
 
 /// What one node of a data file is, as [`KeyPaths::walk`] sees it.
@@ -415,9 +453,11 @@ mod tests {
         DEFAULT_KEY_PATH_BYTES, Element, KeyName, KeyPathBudget, KeyPathError, KeyPaths, Member,
         Shape, key_name,
     };
-    use crate::limits::Limits;
+    use crate::limits::{CommandLineLimits, ConfigLimits, Given, Limits};
     use crate::link::SymbolPath;
-    use crate::read::cartridge::{Deadline, SymbolTable};
+    use crate::path::AbsolutePath;
+    use crate::read::cartridge::{Deadline, Languages, SourceFile, Stopped, SymbolTable};
+    use crate::read::error::{ReadError, ReadRole};
 
     thread_local! {
         /// Symbols the builder charged on this thread, made or queued.
@@ -829,6 +869,134 @@ mod tests {
             CHARGED.get(),
             100,
             "the walk should stop charging at the first member over the budget"
+        );
+    }
+
+    /// The most bytes of path text and no segment limit: only the byte budget can fail.
+    const fn bytes(bytes: usize) -> KeyPathBudget {
+        KeyPathBudget {
+            segments: usize::MAX,
+            bytes,
+        }
+    }
+
+    #[test]
+    fn the_byte_budget_counts_each_path_with_its_dots_and_fails_one_byte_over() {
+        // Keys `a`, `a.a` and `a.a.a` are 1 + 3 + 5 = 9 bytes of path text as displayed, the
+        // `.` separators included. Dropping the separator charge makes it 6; `>=` for `>`
+        // refuses an exact fit.
+        let nested = |budget| {
+            KeyPaths::build(budget, deadline(), |paths| paths.walk(None, &0, chain(3)))
+                .map(|table| paths(&table))
+        };
+
+        assert_eq!(
+            nested(bytes(9)),
+            Ok(vec!["a".to_owned(), "a.a".to_owned(), "a.a.a".to_owned()]),
+            "9 bytes of path text should fit a budget of 9",
+        );
+        assert_eq!(
+            nested(bytes(8)),
+            Err(KeyPathError::TooManyBytes { limit: 8 }),
+            "9 bytes of path text should not fit a budget of 8",
+        );
+    }
+
+    #[test]
+    fn a_nested_path_charges_its_separator_at_the_exact_byte_boundary() {
+        // `a` is 1 byte and `a.b` is 3: 4 in all.
+        let doc = Doc::Map(vec![(Some("a"), Doc::Map(vec![(Some("b"), Doc::Scalar)]))]);
+
+        assert!(
+            walk(&doc, bytes(4)).is_ok(),
+            "4 bytes should fit a budget of 4"
+        );
+        assert_eq!(
+            walk(&doc, bytes(3)),
+            Err(KeyPathError::TooManyBytes { limit: 3 }),
+            "the `.` of `a.b` is text, so 3 bytes cannot hold `a` and `a.b`",
+        );
+    }
+
+    #[test]
+    fn the_budget_is_what_the_limits_in_effect_say_and_zero_lifts_it() {
+        let given = |segments: &str, size: &str| {
+            Limits::resolve(
+                &CommandLineLimits {
+                    max_key_segments: Some(Given {
+                        value: segments.parse().expect("segments should be a count"),
+                        from_env: false,
+                    }),
+                    max_key_path_size: Some(Given {
+                        value: size.parse().expect("size should be a size"),
+                        from_env: false,
+                    }),
+                    ..CommandLineLimits::default()
+                },
+                &ConfigLimits::default(),
+            )
+        };
+        let defaults = Limits::resolve(&CommandLineLimits::default(), &ConfigLimits::default());
+
+        assert_eq!(
+            KeyPathBudget::from_limits(&defaults),
+            KeyPathBudget {
+                segments: 200_000,
+                bytes: DEFAULT_KEY_PATH_BYTES,
+            },
+        );
+        assert_eq!(
+            KeyPathBudget::from_limits(&given("7", "9KiB")),
+            KeyPathBudget {
+                segments: 7,
+                bytes: 9 * 1024,
+            },
+        );
+        assert_eq!(
+            KeyPathBudget::from_limits(&given("0", "0")),
+            KeyPathBudget {
+                segments: usize::MAX,
+                bytes: usize::MAX,
+            },
+        );
+    }
+
+    #[test]
+    fn each_budget_failure_becomes_its_own_read_error_naming_its_knobs() {
+        let path = AbsolutePath::new(std::path::Path::new("/repo/data.json"))
+            .expect("the fixture path should be absolute");
+        let language = Languages::builtin()
+            .expect("the built-in cartridges should load")
+            .for_path(std::path::Path::new("lib.rs"))
+            .expect("the built-in registry should read `.rs`");
+        let file = SourceFile::from_text(path, "fn a() {}\n".to_owned(), language, deadline())
+            .expect("the fixture should parse");
+
+        let segments = KeyPathError::TooManySegments { limit: 200_000 }.read_error(&file);
+        let text = KeyPathError::TooManyBytes { limit: 4096 }.read_error(&file);
+        let timeout = KeyPathError::Timeout(Stopped { offset: 3 }).read_error(&file);
+
+        assert_eq!(segments.code(), "read-too-many-keys");
+        let help = segments.help(ReadRole::Target, "data.json");
+        for knob in [
+            "max-key-segments",
+            "SUPDOC_MAX_KEY_SEGMENTS",
+            "--max-key-segments",
+        ] {
+            assert!(help.contains(knob), "{knob} missing from {help:?}");
+        }
+        assert_eq!(text.code(), "read-key-paths-too-large");
+        let help = text.help(ReadRole::Target, "data.json");
+        for knob in [
+            "max-key-path-size",
+            "SUPDOC_MAX_KEY_PATH_SIZE",
+            "--max-key-path-size",
+        ] {
+            assert!(help.contains(knob), "{knob} missing from {help:?}");
+        }
+        assert!(
+            matches!(timeout, ReadError::Timeout { offset: 3, .. }),
+            "{timeout:?}"
         );
     }
 }

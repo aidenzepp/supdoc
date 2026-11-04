@@ -535,6 +535,16 @@ mod helps {
             why: "needs a clippy run, which `check` holds until the trust lift; unit-tested in \
                   code_blocks::lint",
         },
+        Unreachable {
+            kind: "read-too-many-keys",
+            why: "needs a data cartridge to read a file, which arrives with P5-L09; unit-tested in \
+                  cartridges::data and read::error",
+        },
+        Unreachable {
+            kind: "read-key-paths-too-large",
+            why: "needs a data cartridge to read a file, which arrives with P5-L09; unit-tested in \
+                  cartridges::data and read::error",
+        },
     ];
 
     /// A code that prints no help on purpose, and why.
