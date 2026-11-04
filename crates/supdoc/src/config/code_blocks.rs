@@ -324,7 +324,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{Dialect, Formatter, Language};
+    use super::{Dialect, Edition, Formatter, Language};
     use crate::config::Config;
     use crate::exit::ExitStatus;
     use crate::path::AbsolutePath;
@@ -480,6 +480,40 @@ mod tests {
         let code_blocks = config.code_blocks().expect("the table is written");
 
         assert!(code_blocks.checks(Language::Shell));
+    }
+
+    #[test]
+    fn the_child_edition_overrides_the_parent_and_the_parent_holds_when_the_child_is_silent() {
+        let dir = tree(&[
+            (
+                "supdoc.config.toml",
+                "[features.code-blocks.rust]\nedition = \"2018\"\n",
+            ),
+            (
+                "apps/web/supdoc.config.toml",
+                "extends = \"../../supdoc.config.toml\"\n[features.code-blocks.rust]\nedition = \"2021\"\n",
+            ),
+            (
+                "apps/api/supdoc.config.toml",
+                "extends = \"../../supdoc.config.toml\"\n[features.code-blocks]\n",
+            ),
+        ]);
+
+        let overridden = Config::load(&at(&dir, "apps/web")).expect("the child config should load");
+        let inherited = Config::load(&at(&dir, "apps/api")).expect("the silent child should load");
+
+        assert_eq!(
+            overridden
+                .code_blocks()
+                .and_then(super::CodeBlocks::edition),
+            Some(Edition::from_year("2021").expect("2021 is an edition")),
+            "the child's edition should win"
+        );
+        assert_eq!(
+            inherited.code_blocks().and_then(super::CodeBlocks::edition),
+            Some(Edition::from_year("2018").expect("2018 is an edition")),
+            "the parent's edition should hold"
+        );
     }
 
     #[test]
