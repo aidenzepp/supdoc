@@ -14,6 +14,31 @@ use super::tools::ToolCartridge;
 /// The code for a linter's diagnostic on a block.
 const LINT: &str = "code-block-lint";
 
+/// The code for a name a block uses but neither it nor the project's crate defines.
+const MISSING_NAME: &str = "code-block-missing-name";
+
+/// The rustc error codes that say a name isn't defined: an unresolved type, trait, struct,
+/// function, import, path, crate or pattern name.
+const MISSING_NAME_CODES: [&str; 9] = [
+    "E0405", "E0412", "E0422", "E0425", "E0432", "E0433", "E0463", "E0531", "E0532",
+];
+
+/// The name `diagnostic` says is missing: the first backticked span of rustc's message. `None`
+/// when `diagnostic` isn't a missing-name error. A message with no backticks names itself.
+#[must_use]
+pub(crate) fn missing_name(diagnostic: &Diagnostic) -> Option<&str> {
+    if !MISSING_NAME_CODES.contains(&diagnostic.rule.as_str()) {
+        return None;
+    }
+    let message = diagnostic.message.as_str();
+    Some(
+        message
+            .split_once('`')
+            .and_then(|(_, rest)| rest.split_once('`'))
+            .map_or(message, |(name, _)| name),
+    )
+}
+
 /// One diagnostic a linter reported, in checked-text coordinates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Diagnostic {
@@ -94,7 +119,9 @@ pub(crate) fn place(diagnostic: &Diagnostic, map: &LineMap, text: &str) -> Optio
 /// The findings for `verdict`, from `tool` on `block` in `text`: one `code-block-lint` error per
 /// diagnostic at its place in the doc (the fence when it can't be
 /// placed), naming its rule and `lint(off: <reason>)`, never with a fix; or the tool failure or
-/// timeout error at the fence, run under `timeout`.
+/// timeout error at the fence, run under `timeout`. A diagnostic that [`missing_name`] reads is a
+/// `code-block-missing-name` error instead, whose message says whether the project's crate was
+/// passed to the tool (`externs`).
 #[must_use]
 pub(crate) fn findings(
     verdict: &Verdict,
@@ -102,6 +129,7 @@ pub(crate) fn findings(
     block: &CodeBlock,
     text: &str,
     timeout: Option<Duration>,
+    externs: bool,
 ) -> Vec<Finding> {
     match verdict {
         Verdict::Clean => Vec::new(),
@@ -117,11 +145,34 @@ pub(crate) fn findings(
                         .as_ref()
                         .and_then(|map| place(diagnostic, map, text))
                         .unwrap_or_else(|| block.fence.clone());
-                    lint_finding(tool, diagnostic).with_location(at)
+                    missing_name(diagnostic)
+                        .map_or_else(
+                            || lint_finding(tool, diagnostic),
+                            |name| missing_name_finding(name, externs),
+                        )
+                        .with_location(at)
                 })
                 .collect()
         }
     }
+}
+
+/// The `code-block-missing-name` error for `name`, without a location.
+fn missing_name_finding(name: &str, externs: bool) -> Finding {
+    let whence = if externs {
+        "this block or the project's crate"
+    } else {
+        "this block"
+    };
+    Finding::new(
+        MISSING_NAME,
+        Severity::Error,
+        format!("`{name}` isn't defined in {whence}"),
+    )
+    .with_help(format!(
+        "define or import `{name}` in the block, show the real code with `from(<path>#<symbol>)`, \
+         or mark the block `lint(off: <reason>)`"
+    ))
 }
 
 /// The `code-block-lint` error for `diagnostic` from `tool`, without a location.
@@ -224,6 +275,7 @@ mod tests {
             &block,
             text,
             None,
+            false,
         );
 
         let [finding] = found.as_slice() else {
@@ -248,6 +300,7 @@ mod tests {
             &block,
             text,
             None,
+            false,
         );
 
         let help = found
@@ -258,5 +311,64 @@ mod tests {
             help.contains("`E711`") && help.contains("lint(off: <reason>)"),
             "{help}"
         );
+    }
+
+    #[test]
+    fn a_missing_name_is_one_finding_with_the_externs_wording_and_help() {
+        let text = "```rust\nlet a = 1;\nnope();\n```\n";
+        let block = markdown_block(text);
+        let missing = Diagnostic {
+            line: 2,
+            column: 1,
+            rule: "E0425".to_owned(),
+            message: "cannot find function `nope` in this scope".to_owned(),
+        };
+        let verdict = Verdict::Diagnostics(vec![missing]);
+
+        let without = findings(&verdict, ruff(), &block, text, None, false);
+        let with = findings(&verdict, ruff(), &block, text, None, true);
+
+        let [finding] = without.as_slice() else {
+            panic!("one missing name is one finding: {without:?}");
+        };
+        assert_eq!(finding.code, "code-block-missing-name");
+        assert_eq!(finding.message, "`nope` isn't defined in this block");
+        let at = finding
+            .location
+            .as_ref()
+            .expect("the finding should be placed");
+        assert_eq!(at.line, 3);
+        let help = finding.help.as_deref().unwrap_or_default();
+        assert!(
+            help.contains("from(<path>#<symbol>)") && help.contains("lint(off: <reason>)"),
+            "{help}"
+        );
+        assert_eq!(
+            with.first().map(|finding| finding.message.as_str()),
+            Some("`nope` isn't defined in this block or the project's crate")
+        );
+    }
+
+    #[test]
+    fn a_non_missing_name_error_stays_a_lint_finding() {
+        let text = "```rust\nx\n```\n";
+        let block = markdown_block(text);
+        let other = Diagnostic {
+            line: 1,
+            column: 1,
+            rule: "E0308".to_owned(),
+            message: "mismatched types".to_owned(),
+        };
+
+        let found = findings(
+            &Verdict::Diagnostics(vec![other]),
+            ruff(),
+            &block,
+            text,
+            None,
+            true,
+        );
+
+        assert_eq!(found.first().map(|f| f.code), Some("code-block-lint"));
     }
 }

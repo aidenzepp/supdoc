@@ -525,10 +525,17 @@ mod helps {
     }
 
     /// Codes with no binary scenario and no public constructor; their helps are checked by review.
-    const UNREACHABLE: &[Unreachable] = &[Unreachable {
-        kind: "cli-schema-serialize",
-        why: "a built-in JSON Schema must fail to serialize, which is a supdoc bug",
-    }];
+    const UNREACHABLE: &[Unreachable] = &[
+        Unreachable {
+            kind: "cli-schema-serialize",
+            why: "a built-in JSON Schema must fail to serialize, which is a supdoc bug",
+        },
+        Unreachable {
+            kind: "code-block-missing-name",
+            why: "needs a clippy run, which `check` holds until the trust lift; unit-tested in \
+                  code_blocks::lint",
+        },
+    ];
 
     /// A code that prints no help on purpose, and why.
     struct Helpless {
