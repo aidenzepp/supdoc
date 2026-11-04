@@ -1407,7 +1407,7 @@ fn lint_select_an_unknown_linter_or_a_command_table_exits_78() {
 #[test]
 fn tier_run_or_an_unknown_tier_exits_78_naming_the_accepted_values() {
     for (value, expected) in [
-        ("\"run\"", "phase 6"),
+        ("\"run\"", "isn't supported yet"),
         ("\"trusted\"", "isn't a tier supdoc knows"),
     ] {
         let project = project_with_shell_blocks();

@@ -2,13 +2,36 @@
 //! with a fake `cargo` first on `PATH` that records its argument vector and working directory.
 //! No test reaches the network.
 
+use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use tempfile::TempDir;
 
 use super::support::Run;
+
+/// How many times a spawn is tried when the copied binary is busy.
+const BUSY_ATTEMPTS: u32 = 5;
+
+/// Runs `spawn`, retrying while it fails with `ETXTBSY`. On Linux a binary just copied can refuse to
+/// start while another test's fork still holds the write descriptor, so a busy spawn is retried a
+/// few times, 20 ms apart; any other result is returned at once.
+fn retry_busy<T>(mut spawn: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut attempt = 1;
+    loop {
+        match spawn() {
+            Err(error)
+                if error.kind() == ErrorKind::ExecutableFileBusy && attempt < BUSY_ATTEMPTS =>
+            {
+                attempt += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
+}
 
 /// The version of the binary under test, which a copy reports as the one running.
 const RUNNING: &str = env!("CARGO_PKG_VERSION");
@@ -143,7 +166,8 @@ impl Fixture {
     fn run_env_at(&self, relative: &str, args: &[&str], vars: &[(&str, &str)]) -> Run {
         self.write("stdin.txt", "data\n");
         let stdin = std::fs::File::open(self.path("stdin.txt")).expect("stdin.txt should open");
-        let output = Command::new(self.path(relative))
+        let mut command = Command::new(self.path(relative));
+        let _builder = command
             .args(args)
             .current_dir(self.path("work"))
             .env_clear()
@@ -151,9 +175,8 @@ impl Fixture {
             .env("CARGO_HOME", self.path("cargo-home"))
             .env("HOME", self.path("home"))
             .envs(vars.iter().copied())
-            .stdin(Stdio::from(stdin))
-            .output()
-            .expect("the supdoc binary should start");
+            .stdin(Stdio::from(stdin));
+        let output = retry_busy(|| command.output()).expect("the supdoc binary should start");
         Run {
             args: args.join(" "),
             stdout: String::from_utf8(output.stdout).expect("stdout should be UTF-8"),
@@ -647,7 +670,8 @@ fn a_closed_standard_error_does_not_stop_the_install_under_json() {
          : > '{}' ;; esac\n",
         fixture.path("finished").display()
     ));
-    let mut child = Command::new(fixture.path("cargo-home/bin/supdoc"))
+    let mut command = Command::new(fixture.path("cargo-home/bin/supdoc"));
+    let _builder = command
         .args(["upgrade", NEWER, "--yes", "--json"])
         .current_dir(fixture.path("work"))
         .env_clear()
@@ -659,9 +683,8 @@ fn a_closed_standard_error_does_not_stop_the_install_under_json() {
         .env("HOME", fixture.path("home"))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("the supdoc binary should start");
+        .stderr(Stdio::piped());
+    let mut child = retry_busy(|| command.spawn()).expect("the supdoc binary should start");
     let mut stderr = child.stderr.take().expect("stderr should be piped");
     let mut first = [0_u8; 1];
     stderr

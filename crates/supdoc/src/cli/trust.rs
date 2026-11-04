@@ -69,7 +69,8 @@ pub(crate) fn schema() -> schemars::Schema {
     schemars::schema_for!(crate::output::json::Envelope<'static, TrustReport>)
 }
 
-/// Runs `supdoc trust`, listing the root, or with `--revoke` removing it.
+/// Runs `supdoc trust`, listing the root in `trust`'s store, or with `--revoke` removing it.
+/// `SUPDOC_TRUST` is never consulted.
 ///
 /// With no `PATH` the root is the directory of the config `check` would load (`-c` is validated as
 /// `check` validates it). `--revoke PATH` takes the path as typed, made absolute by text, so a
@@ -84,6 +85,7 @@ pub(crate) fn schema() -> schemars::Schema {
 /// the config search fails, and `cli-output-failed` when the report cannot be written.
 pub(crate) fn run(
     args: &TrustArgs,
+    trust: &TrustEnv,
     context: &Context,
     output: &mut Output,
 ) -> Result<Outcome, CliError> {
@@ -91,9 +93,7 @@ pub(crate) fn run(
         Some(path) => explicit_root(path, args.revoke, context)?,
         None => project_root(context, output)?,
     };
-    let store = TrustEnv::from_vars(|name| std::env::var_os(name))
-        .store()
-        .ok_or_else(no_state)?;
+    let store = trust.store().ok_or_else(no_state)?;
     let (action, shown) = if args.revoke {
         match store
             .revoke(root.as_path())

@@ -440,38 +440,199 @@ fn stub_record(dir: &Path, name: &str) -> String {
     std::fs::read_to_string(dir.join(name)).unwrap_or_default()
 }
 
-#[test]
-fn clippy_never_runs_in_the_static_tier_while_rustfmt_still_does() {
-    let project = project_with_rust_config(
-        "",
-        "# Blocks\n\n```rust\npub fn total(v: &Vec<i32>) -> i32 {\n    v.iter().sum()\n}\n```\n",
-    );
-    let stubs = rust_stubs();
+/// Two Rust blocks clippy would flag, the first at line 3.
+const CLIPPY_BAIT: &str = "# Blocks\n\n```rust\npub fn total(v: &Vec<i32>) -> i32 {\n    v.iter().sum()\n}\n```\n\n\
+                           ```rust\npub fn first(v: &Vec<i32>) -> i32 {\n    v[0]\n}\n```\n";
 
-    let json = project
-        .supdoc_in_with(
-            ".",
-            &["check", "--json", "-v"],
-            &[("PATH", stubs.path()), ("SUPDOC_TRUST", Path::new("1"))],
-        )
-        .assert_exit(0)
-        .json();
+/// The reason a block gives when clippy was held because the checkout isn't trusted.
+const NEEDS_TRUST: &str = "clippy runs only in the project tier, which needs `supdoc trust`";
 
+/// The reason a block gives when clippy was held in a trusted checkout.
+const AWAITS_AUDIT: &str = "clippy doesn't run yet, even in a trusted project";
+
+/// Runs `supdoc args` on `project` with `stubs` as the only `PATH` entry and `vars` besides,
+/// asserting it exits `exit` and that clippy never started.
+fn check_with_stubs(
+    project: &Project,
+    stubs: &tempfile::TempDir,
+    args: &[&str],
+    vars: &[(&str, &Path)],
+    exit: i32,
+) -> crate::support::Run {
+    let mut all = vec![("PATH", stubs.path())];
+    all.extend_from_slice(vars);
+    let run = project.supdoc_in_with(".", args, &all);
+    let _checked = run.assert_exit(exit);
     assert_eq!(
         stub_record(stubs.path(), "clippy-driver-runs"),
         "",
-        "no clippy-driver process may start without trust, whatever the environment says"
+        "no clippy-driver process may start: {}",
+        run.stdout
     );
-    assert_eq!(stub_record(stubs.path(), "rustfmt-runs"), "run\n");
+    run
+}
+
+/// A project whose config holds `config` after its Rust table, with [`CLIPPY_BAIT`] as its doc.
+fn clippy_project(config: &str) -> Project {
+    project_with_rust_config(config, CLIPPY_BAIT)
+}
+
+#[test]
+fn clippy_in_an_untrusted_checkout_is_held_with_one_warning_at_the_first_block() {
+    let project = clippy_project("");
+    let stubs = rust_stubs();
+
+    let run = check_with_stubs(&project, &stubs, &["check", "--json", "-v"], &[], 0);
+    let json = run.json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-not-trusted"], "{json}");
+    assert_eq!(at(&json, "/findings/0/severity"), "warning", "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 3, "{json}");
+    let help = at(&json, "/findings/0/help")
+        .as_str()
+        .expect("the warning should carry help");
+    for named in [
+        "supdoc trust",
+        "SUPDOC_TRUST=1",
+        "tier = \"static\"",
+        "lint = \"off\"",
+    ] {
+        assert!(help.contains(named), "the help should name {named}: {help}");
+    }
+    for block in ["/data/code_blocks/0", "/data/code_blocks/1"] {
+        assert_eq!(at(&json, &format!("{block}/state")), "passed", "{json}");
+        assert_eq!(at(&json, &format!("{block}/lint")), "not_run", "{json}");
+        assert_eq!(at(&json, &format!("{block}/reason")), NEEDS_TRUST, "{json}");
+    }
+
+    let text = check_with_stubs(&project, &stubs, &["check"], &[], 0);
+    assert!(
+        text.stdout.contains("2 lint not run (clippy needs trust)"),
+        "the summary should count both held steps under one reason: {}",
+        text.stdout
+    );
+}
+
+#[test]
+fn an_untrusted_checkout_fails_under_deny_warnings() {
+    let project = clippy_project("");
+    let stubs = rust_stubs();
+
+    let json = check_with_stubs(
+        &project,
+        &stubs,
+        &["check", "--json", "--deny-warnings"],
+        &[],
+        1,
+    )
+    .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-not-trusted"], "{json}");
+}
+
+#[test]
+fn supdoc_trust_1_holds_clippy_for_its_audit_without_a_warning() {
+    let project = clippy_project("");
+    let stubs = rust_stubs();
+
+    let json = check_with_stubs(
+        &project,
+        &stubs,
+        &["check", "--json", "-v"],
+        &[("SUPDOC_TRUST", Path::new("1"))],
+        0,
+    )
+    .json();
+
     assert_eq!(finding_kinds(&json), Vec::<String>::new(), "{json}");
-    assert_eq!(at(&json, "/data/code_blocks/0/state"), "passed", "{json}");
-    assert_eq!(at(&json, "/data/code_blocks/0/format"), "ran", "{json}");
     assert_eq!(at(&json, "/data/code_blocks/0/lint"), "not_run", "{json}");
     assert_eq!(
         at(&json, "/data/code_blocks/0/reason"),
-        "clippy runs only in the project tier, which needs `supdoc trust` (phase 5)",
+        AWAITS_AUDIT,
         "{json}"
     );
+}
+
+#[test]
+fn a_root_in_the_trust_store_is_trusted_like_supdoc_trust_1() {
+    let project = clippy_project("");
+    let stubs = rust_stubs();
+    let state = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let root = project
+        .path(".")
+        .canonicalize()
+        .expect("the project root should resolve");
+    std::fs::create_dir(state.path().join("supdoc")).expect("the store dir should be creatable");
+    std::fs::write(
+        state.path().join("supdoc/trusted-roots"),
+        format!("{}\n", root.display()),
+    )
+    .expect("the store should be writable");
+
+    let json = check_with_stubs(
+        &project,
+        &stubs,
+        &["check", "--json", "-v"],
+        &[("XDG_STATE_HOME", state.path())],
+        0,
+    )
+    .json();
+
+    assert_eq!(finding_kinds(&json), Vec::<String>::new(), "{json}");
+    assert_eq!(
+        at(&json, "/data/code_blocks/0/reason"),
+        AWAITS_AUDIT,
+        "{json}"
+    );
+}
+
+#[test]
+fn tier_static_holds_clippy_with_its_own_reason_and_no_warning() {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write(
+        "supdoc.config.toml",
+        "[features.code-blocks]\ntier = \"static\"\n[features.code-blocks.rust]\n",
+    );
+    project.write("docs/blocks.md", CLIPPY_BAIT);
+    let stubs = rust_stubs();
+
+    let json = check_with_stubs(&project, &stubs, &["check", "--json", "-v"], &[], 0).json();
+
+    assert_eq!(finding_kinds(&json), Vec::<String>::new(), "{json}");
+    assert_eq!(
+        at(&json, "/data/code_blocks/0/reason"),
+        "`tier = \"static\"` in `[features.code-blocks]`",
+        "{json}"
+    );
+    let text = check_with_stubs(&project, &stubs, &["check"], &[], 0);
+    assert!(
+        text.stdout
+            .contains("2 lint not run (`tier = \"static\"` in `[features.code-blocks]`)"),
+        "{}",
+        text.stdout
+    );
+}
+
+#[test]
+fn a_bad_supdoc_trust_is_a_usage_error_before_any_block_is_checked() {
+    let project = clippy_project("");
+    let stubs = rust_stubs();
+
+    let run = project.supdoc_in_with(
+        ".",
+        &["check"],
+        &[("PATH", stubs.path()), ("SUPDOC_TRUST", Path::new("yes"))],
+    );
+    let _checked = run.assert_exit(2);
+
+    assert!(
+        run.stderr.contains("`SUPDOC_TRUST` is `yes`") && run.stderr.contains("`1`"),
+        "the error should name the value and the accepted ones: {}",
+        run.stderr
+    );
+    assert_eq!(stub_record(stubs.path(), "rustfmt-runs"), "");
+    assert_eq!(stub_record(stubs.path(), "clippy-driver-runs"), "");
 }
 
 #[test]
@@ -489,6 +650,6 @@ fn clippy_never_runs_with_the_formatter_off_either() {
 
     assert_eq!(stub_record(stubs.path(), "clippy-driver-runs"), "");
     assert_eq!(stub_record(stubs.path(), "rustfmt-runs"), "");
-    assert_eq!(finding_kinds(&json), Vec::<String>::new(), "{json}");
+    assert_eq!(finding_kinds(&json), ["code-block-not-trusted"], "{json}");
     assert_eq!(at(&json, "/data/code_blocks/0/lint"), "not_run", "{json}");
 }

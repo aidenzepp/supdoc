@@ -37,6 +37,7 @@ use crate::read::error::CODE_TIMEOUT;
 use crate::scan::model::{Scan, Scope, TargetState};
 use crate::scan::walk::GlobalExcludes;
 use crate::state::LinkState;
+use crate::trust::TrustEnv;
 
 use super::args::{FixArgs, WriteMode};
 use super::project::{command_line, load_config, lock_path, read_lock, scope};
@@ -66,15 +67,16 @@ const CODE_UNFORMATTED: &str = "code-block-unformatted";
 /// Returns the config's own error (78, or 74 when unreadable), `cli-path-missing`,
 /// `cli-path-outside-project` or `cli-path-invalid` for a bad `[PATH]` (2), `cli-path-unreadable` (74) for one that can't be looked up, the lockfile's own
 /// error (78 when invalid, 74 when it can't be read or written), the scan's own error (74),
-/// `fix-write-failed` when a source file could not be written (74), and `cli-output-failed` when the
+/// `cli-usage` (2) for a bad `SUPDOC_TRUST`, `fix-write-failed` when a source file could not be written (74), and `cli-output-failed` when the
 /// report cannot be written (74).
 pub(crate) fn run(
     args: &FixArgs,
     tools: &ToolEnv,
+    trust: &TrustEnv,
     context: &Context,
     output: &mut Output,
 ) -> Result<Outcome, CliError> {
-    let planned = Planned::scan(&args.paths, tools, context, output)?;
+    let planned = Planned::scan(&args.paths, tools, trust, context, output)?;
     planned.finish(
         args.confirm.mode(),
         args.confirm.dry_run,
@@ -120,22 +122,25 @@ struct Planned {
 
 impl Planned {
     /// Loads the config and the lockfile, scans `paths`, judges the code blocks as `check` does,
-    /// running each formatter found on `tools`' `PATH`, and plans every certain fix: broken
-    /// links, stale `from(...)` blocks and formatter output alike.
+    /// running each formatter found on `tools`' `PATH` as `trust` allows, and plans every
+    /// certain fix: broken links, stale `from(...)` blocks and formatter output alike.
     ///
     /// # Errors
     ///
-    /// Returns the config's, the lockfile's or the scan's own error, a `[PATH]` usage error, or
+    /// Returns the config's, the lockfile's or the scan's own error, a `[PATH]` usage error,
+    /// `cli-usage` (2) for a bad `SUPDOC_TRUST`, or
     /// `read-cartridge-load` (70) when a built-in cartridge doesn't load.
     fn scan(
         paths: &[std::path::PathBuf],
         tools: &ToolEnv,
+        trust: &TrustEnv,
         context: &Context,
         output: &mut Output,
     ) -> Result<Self, CliError> {
         let config = load_config(context, output)?;
         let scope = scope(paths, &config, context)?;
         let lock = read_lock(&config, &context.cwd)?;
+        let granted = super::check::granted_tier(config.root().as_path(), trust)?;
         let mut scan = scan(&config, &scope, &context.global_excludes)?;
         let in_scope = |doc: &str| {
             doc.parse::<SourcePath>()
@@ -150,6 +155,7 @@ impl Planned {
             &lock,
             in_scope,
             &path_style,
+            granted,
         )
         .map_err(|error| CliError::from(&error))?;
         evaluation.look_up_tools(tools, config.root().as_path());
@@ -1007,6 +1013,7 @@ mod tests {
                 &session.cli.command,
                 &crate::cli::skill::SkillDirs::from_vars(|_| None),
                 &crate::code_blocks::tools::ToolEnv::default(),
+                &TrustEnv::default(),
                 &session.context,
                 &mut session.output,
             );
@@ -1342,6 +1349,7 @@ mod tests {
         let planned = Planned::scan(
             &paths,
             &ToolEnv::default(),
+            &TrustEnv::default(),
             &session.context,
             &mut session.output,
         )
@@ -1416,6 +1424,7 @@ mod tests {
         let planned = Planned::scan(
             &paths,
             &ToolEnv::default(),
+            &TrustEnv::default(),
             &session.context,
             &mut session.output,
         )

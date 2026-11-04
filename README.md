@@ -91,14 +91,32 @@ Threat model, for a checkout you don't trust:
 - **Network.** `supdoc upgrade` is supdoc's only network access: it runs `cargo`, which talks to crates.io.
   No other command touches the network, and no command checks for updates on its own.
 - **Checking code blocks.** With a `[features.code-blocks]` table, `supdoc check` and `supdoc fix` check the
-  code blocks in your docs with your project's own tools. supdoc runs only tools from its own table that read
-  the block and plain config files: rustfmt, shfmt, ruff, black and shellcheck. clippy is built but runs
-  only once `supdoc trust` exists; until then a Rust block's lint step counts as not run.
-  Each block goes to the tool on standard input, so the tool opens no other source file. supdoc ignores a
-  `rust-toolchain.toml` that names a path, never downloads a toolchain, never uses a tool installed inside
-  the checkout, and skips Rust blocks that read files or environment variables at compile time
-  (`include_str!`, `env!` and the like). Each tool still reads its own config files, which can sit outside
-  the project, and its errors can quote them.
+  code blocks in your docs with your project's own tools. What runs depends on whether you trust the checkout:
+  - **Any checkout (the default):** supdoc runs only tools from its own table that read the block and plain
+    config files: rustfmt, shfmt, ruff, black and shellcheck. Each block goes to the tool on standard input,
+    so the tool opens no other source file. supdoc ignores a `rust-toolchain.toml` that names a path, never
+    downloads a toolchain, never uses a tool installed inside the checkout, and skips Rust blocks that read
+    files or environment variables at compile time (`include_str!`, `env!` and the like). Each tool still
+    reads its own config files, which can sit outside the project, and its errors can quote them.
+  - **A checkout you trust:** tools that compile or load code from the checkout belong to the project tier.
+    clippy is the only one today, and it doesn't run yet even in a trusted checkout: it waits for a later
+    audit of the scanner in front of it, and its step counts as `lint not run`. supdoc trusts a checkout only
+    from outside it: run `supdoc trust` once (it records the directory of the config; `supdoc trust --revoke`
+    undoes it, and a linked worktree of a trusted repository at the same path inside its work tree is
+    trusted too), or set `SUPDOC_TRUST=1` for one run, as in a CI workflow. No file in the checkout can turn
+    trust on. `tier = "static"` in `[features.code-blocks]` can only turn it off: it holds every step to
+    the default list even in a trusted checkout, with no warning. `tier = "run"` is a config error until
+    running examples exists.
+  - A step held back because the checkout isn't trusted is counted `not run` with its reason, never as
+    passed, and the run gets one `code-block-not-trusted` warning (exit 0; a failure under
+    `--deny-warnings`) that names `supdoc trust`, `SUPDOC_TRUST=1` and the opt-outs.
+  - supdoc doesn't check who owns a trusted directory or the trust store
+    (`$XDG_STATE_HOME/supdoc/trusted-roots`, else `~/.local/state/supdoc/trusted-roots`). Anyone who can
+    write that file can grant trust.
+  - Trust follows the directory, not its contents: if you trust a checkout and then switch it to a branch
+    you don't trust, the next check runs that branch's code once clippy is enabled. Never set
+    `SUPDOC_TRUST` in a `pull_request_target` workflow, or in any job that has secrets and checks out a
+    pull request's code.
 
 ### Differences from git
 
@@ -171,7 +189,7 @@ supdoc checks what is written and never skips a block on its own. To exclude a b
 - `format(off: reason)` and `lint(off: reason)`: skip only formatting or only linting. The reason runs
   to the matching `)`, so it may hold spaces and commas.
 - `format(full)` and `lint(full)`: run the step on this block even though its tool's table turns it off.
-  A Rust block's lint still needs `supdoc trust`.
+  A Rust block's lint doesn't run yet: clippy needs `supdoc trust` and a later audit.
 
 A block attribute beats the tool's table for that block only. The selected tool accepts `full` and `off`;
 any other value, or a step attribute on a block whose language has no tool for that step, warns
@@ -199,8 +217,9 @@ edition = "2021"         # Rust also takes `edition`; shell takes `dialect` ("ba
 ```
 
 A table for a tool the language doesn't select, or a key or value its tool doesn't accept, is a config
-error. A step that's off counts as `format off` or `lint off` in the summary; a step that was due but
-didn't run, such as clippy's, which needs `supdoc trust`, counts as `lint not run` with its reason.
+error. A step a config table sets to `"off"` counts as `format off` or `lint off` in the summary, and one an
+author marks `format(off: ...)` or `lint(off: ...)` counts as `format skipped` or `lint skipped`; a step that was due but
+didn't run, such as clippy's, which is project tier, counts as `lint not run` with its reason.
 
 A Rust snippet that needs surrounding code to make sense takes one of three explicit forms:
 
