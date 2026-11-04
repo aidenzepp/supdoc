@@ -66,6 +66,10 @@ pub(crate) struct Evaluation {
     pub(crate) records: Vec<BlockRecord>,
     /// How long one tool run may take, from `[limits] code-block-timeout`. `None` is no limit.
     timeout: Option<Duration>,
+    /// How long building the project may take, from `[limits] code-block-build-timeout`. `None`
+    /// is no limit. Nothing reads it yet.
+    #[expect(dead_code, reason = "the project build reads it in P5-07H")]
+    build_timeout: Option<Duration>,
 }
 
 /// What `check` knows about one block.
@@ -154,9 +158,10 @@ pub(crate) fn evaluate(
     };
     let mut findings = Vec::new();
     let mut doc: Option<(&str, Option<Arc<FixDoc>>)> = None;
-    let parse_timeout = config.limits_in_effect().parse_timeout.value;
+    let limits = config.limits_in_effect();
     let read = |file: &str| {
-        read_doc(config, file).map(|text| Arc::new(FixDoc::new(Arc::from(text), parse_timeout)))
+        read_doc(config, file)
+            .map(|text| Arc::new(FixDoc::new(Arc::from(text), limits.parse_timeout.value)))
     };
     let mut written = Vec::new();
     let mut unresolved_uses = BTreeSet::new();
@@ -244,7 +249,8 @@ pub(crate) fn evaluate(
         findings,
         counts: Some(tally(&records)),
         records,
-        timeout: config.limits_in_effect().code_block_timeout.value.get(),
+        timeout: limits.code_block_timeout.value.get(),
+        build_timeout: limits.code_block_build_timeout.value.get(),
     })
 }
 
@@ -1707,6 +1713,7 @@ mod tests {
             counts: None,
             records: vec![record],
             timeout: None,
+            build_timeout: None,
         };
         let env =
             ToolEnv::from_vars(|name| (name == "PATH").then(|| bin.path().as_os_str().to_owned()));

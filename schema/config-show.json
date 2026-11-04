@@ -212,6 +212,10 @@
     "LimitsJson": {
       "description": "The `[limits]` ceilings in effect, each with where it came from.",
       "properties": {
+        "code_block_build_timeout": {
+          "$ref": "#/$defs/LimitJson",
+          "description": "How long building the project for a lint may take."
+        },
         "code_block_timeout": {
           "$ref": "#/$defs/LimitJson",
           "description": "How long one code block may run."
@@ -236,6 +240,7 @@
       "required": [
         "parse_timeout",
         "code_block_timeout",
+        "code_block_build_timeout",
         "max_lock_size",
         "max_config_size",
         "max_ignore_size"

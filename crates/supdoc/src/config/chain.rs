@@ -391,6 +391,11 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Result<Config, Co
                 raw_limits.code_block_timeout,
                 &file,
             );
+            nearest(
+                &mut limits.code_block_build_timeout,
+                raw_limits.code_block_build_timeout,
+                &file,
+            );
             nearest(&mut limits.max_lock_size, raw_limits.max_lock_size, &file);
             nearest(
                 &mut limits.max_ignore_size,
