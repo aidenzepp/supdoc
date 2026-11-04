@@ -283,3 +283,62 @@ fn ruff_format_and_ruff_missing_share_one_warning_naming_the_ruff_binary() {
         "{json}"
     );
 }
+
+/// A recorded `basic` project with a `py` docstring block in `src/blocks.py`, and a directory
+/// holding a stub `ruff` that formats every block to `x = 1`.
+fn docstring_project(source: &str) -> (Project, tempfile::TempDir) {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write(
+        "supdoc.config.toml",
+        "[features.code-blocks]\n[features.code-blocks.python]\n[features.code-blocks.python.ruff]\nlint = \"off\"\n",
+    );
+    project.write("src/blocks.py", source);
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    stub(outside.path(), "ruff", "/bin/cat > /dev/null\necho 'x = 1'");
+    (project, outside)
+}
+
+#[test]
+fn docstring_block_is_checked_at_its_file_line() {
+    let source = "class C:\n    def f(self):\n        \"\"\"F.\n\n        ```python\n        x=1\n        ```\n        \"\"\"\n";
+    let (project, outside) = docstring_project(source);
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-unformatted"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 5, "{json}");
+}
+
+#[test]
+fn docstring_fix_keeps_the_docstrings_indentation() {
+    let source = "class C:\n    def f(self):\n        \"\"\"F.\n\n        ```python\n        x=1\n        ```\n        \"\"\"\n";
+    let (project, outside) = docstring_project(source);
+    let path = [("PATH", outside.path())];
+
+    let _fix = project
+        .supdoc_in_with(".", &["fix", "--yes"], &path)
+        .assert_exit(0);
+
+    assert_eq!(
+        project.read("src/blocks.py"),
+        source.replace("x=1", "x = 1"),
+        "the fix should rewrite the block's line and keep its 8-space indent"
+    );
+}
+
+#[test]
+fn docstring_doctest_session_and_literal_block_are_not_checked() {
+    let source = "def f():\n    \"\"\"F::\n\n        x=1\n\n    >>> x=1\n    \"\"\"\n";
+    let (project, outside) = docstring_project(source);
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(0)
+        .json();
+
+    assert!(finding_kinds(&json).is_empty(), "{json}");
+}

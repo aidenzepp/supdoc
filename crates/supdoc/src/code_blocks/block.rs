@@ -73,7 +73,7 @@ fn is_rust_file(file: &str) -> bool {
 
 /// Every code block in `file`, in file order, located by `locate`, which turns a byte range of
 /// the file into a [`Location`]. Markdown files hold blocks, and so do the `///` and `//!` doc
-/// comments of Rust files.
+/// comments of Rust files and the docstrings of Python files.
 #[cfg(test)]
 #[must_use]
 pub(crate) fn blocks_in(
@@ -97,6 +97,7 @@ pub(crate) fn try_blocks_in(
     match file.language().id().as_str() {
         "markdown" => markdown::try_blocks(file, locate),
         "rust" => doc_comments::blocks(file, locate),
+        "python" => doc_comments::python_blocks(file, locate),
         _ => Ok(Vec::new()),
     }
 }
