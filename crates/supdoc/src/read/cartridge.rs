@@ -45,6 +45,14 @@ pub(crate) trait Cartridge: Send + Sync + fmt::Debug {
         Ok(())
     }
 
+    /// Whether files of this language are walked as link sources.
+    ///
+    /// `false` makes the language a link target only: its files still resolve as destinations
+    /// and expose symbols, but the walk never reads them for links or code blocks.
+    fn reads_links(&self) -> bool {
+        true
+    }
+
     /// The symbols `file` exposes. Query-driven cartridges run `tags.scm`.
     ///
     /// # Errors

@@ -352,7 +352,10 @@ fn as_source(
     if !wants.links && !wants.code_blocks {
         return None;
     }
-    let _cartridge = languages.for_path(path.as_path())?;
+    let cartridge = languages.for_path(path.as_path())?;
+    if !cartridge.reads_links() {
+        return None;
+    }
     let relative_path = path.strip_prefix(config.root())?;
     let relative = match SourcePath::from_relative(relative_path) {
         Ok(relative) => relative,
@@ -415,10 +418,13 @@ mod tests {
     )]
 
     use std::process::Command;
+    use std::sync::OnceLock;
 
     use tempfile::TempDir;
 
     use super::*;
+    use crate::read::cartridge::{Cartridge, LanguageId, MarkdownRegion, SourceFile, SymbolTable};
+    use crate::read::error::ReadError;
     use std::fs;
     use std::path::Path;
 
@@ -2100,6 +2106,74 @@ mod tests {
         assert_eq!(
             project.sources(&Scope::All),
             ["docs/final.md", "skills/final.md"]
+        );
+    }
+
+    /// A cartridge over `.tgt` files that is a link target only.
+    #[derive(Debug)]
+    struct TargetOnly {
+        /// The grammar, created on first use.
+        grammar: OnceLock<tree_sitter::Language>,
+    }
+
+    impl Cartridge for TargetOnly {
+        fn id(&self) -> LanguageId {
+            LanguageId::new("target-only")
+        }
+
+        fn extensions(&self) -> &'static [&'static str] {
+            &["tgt"]
+        }
+
+        fn grammar(&self) -> &tree_sitter::Language {
+            self.grammar
+                .get_or_init(|| tree_sitter_rust::LANGUAGE.into())
+        }
+
+        fn reads_links(&self) -> bool {
+            false
+        }
+
+        fn symbols(&self, _file: &SourceFile) -> Result<SymbolTable, ReadError> {
+            Ok(SymbolTable::default())
+        }
+
+        fn markdown_regions(&self, _file: &SourceFile) -> Result<Vec<MarkdownRegion>, ReadError> {
+            Ok(Vec::new())
+        }
+    }
+
+    static TARGET_ONLY: TargetOnly = TargetOnly {
+        grammar: OnceLock::new(),
+    };
+
+    #[test]
+    fn a_target_only_cartridge_file_is_not_a_source_but_still_resolves_as_a_target() {
+        let project = Project::new();
+        project.write("a.md", "");
+        project.write("data.tgt", "");
+        let languages = Languages::new(vec![
+            Languages::builtin()
+                .expect("the built-in cartridges should load")
+                .for_path(Path::new("a.md"))
+                .expect("markdown should be built in"),
+            &TARGET_ONLY,
+        ]);
+        let config_path = AbsolutePath::new(&project.dir.path().join(CONFIG_FILE_NAME))
+            .expect("the temporary directory should be absolute");
+        let config = Config::load_file(&config_path).expect("the fixture config should be valid");
+
+        let walked = walk(&config, &languages, &Scope::All, &GlobalExcludes::none());
+
+        let sources: Vec<String> = walked
+            .sources
+            .iter()
+            .map(|source| project.relative(&source.path))
+            .collect();
+        assert_eq!(sources, ["a.md"], "only the markdown file is a source");
+        assert!(
+            languages.for_path(Path::new("data.tgt")).is_some(),
+            "the target-only file should still resolve as a link target"
         );
     }
 }
