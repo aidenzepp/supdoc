@@ -16,8 +16,6 @@ use crate::config::Config;
 use crate::config::code_blocks::{CodeBlocks, Dialect, Edition, Formatter, Language};
 use crate::finding::{Finding, Location, Severity};
 use crate::hash::Hash;
-use crate::link::SourcePath;
-use crate::lock::error::shell_quote;
 use crate::lock::model::Lockfile;
 use crate::output::paths::PathStyle;
 use crate::read::cartridge::Languages;
@@ -240,7 +238,7 @@ pub(crate) fn evaluate(
         states.push(state);
     }
     let judged = |doc: &str| in_scope(doc) && !unresolved_uses.contains(doc);
-    let command = |doc: &str| command_path(paths, doc);
+    let command = |doc: &str| paths.command_word(doc);
     findings.extend(uses::judge(&written, lock.recorded_uses(), judged, command));
     Ok(Evaluation {
         findings,
@@ -896,15 +894,6 @@ fn sources(
         unresolved: unresolved_uses,
         from_missing: part_missing,
     })
-}
-
-/// `doc` as a help command names it: relative to the current directory as `paths` shows it, and
-/// quoted for the shell.
-fn command_path(paths: &PathStyle, doc: &str) -> String {
-    let doc = doc
-        .parse::<SourcePath>()
-        .map_or_else(|_| doc.to_owned(), |doc| paths.text(&doc));
-    shell_quote(&doc)
 }
 
 /// Where `range`, a byte range of `info`'s text, lies in the doc. An info string is one line, so

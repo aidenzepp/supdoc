@@ -3,6 +3,7 @@
 use std::path::{Component, Path};
 
 use crate::link::SourcePath;
+use crate::lock::error::shell_quote;
 use crate::path::AbsolutePath;
 
 /// Turns project-relative paths into the form each consumer can use directly.
@@ -72,6 +73,17 @@ impl PathStyle {
     #[must_use]
     pub(crate) fn json(source: &SourcePath) -> String {
         source.as_str().to_owned()
+    }
+
+    /// `root_relative` as a help command names it: relative to the current directory as
+    /// [`PathStyle::text`] shows it, and quoted for the shell. A value that is not a source path
+    /// is quoted as written.
+    #[must_use]
+    pub(crate) fn command_word(&self, root_relative: &str) -> String {
+        let shown = root_relative
+            .parse::<SourcePath>()
+            .map_or_else(|_| root_relative.to_owned(), |source| self.text(&source));
+        shell_quote(&shown)
     }
 
     /// The absolute location of a project-relative source file.
