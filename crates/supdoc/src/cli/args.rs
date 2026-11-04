@@ -270,6 +270,9 @@ pub(crate) enum Command {
     /// Install supdoc's agent skill
     #[command(subcommand, after_help = SKILL_EXAMPLES)]
     Skill(SkillCommand),
+    /// Trust a checkout to run its code blocks' tools, or revoke it (writes your state directory)
+    #[command(after_help = TRUST_EXAMPLES)]
+    Trust(TrustArgs),
 }
 
 /// Whether a write command applies its changes.
@@ -596,6 +599,29 @@ pub(crate) struct CompletionsArgs {
     /// The shell to generate completions for
     #[arg(value_enum, value_name = "SHELL")]
     pub(crate) shell: clap_complete::Shell,
+}
+
+/// Shown after `supdoc trust --help`.
+const TRUST_EXAMPLES: &str = "\
+Examples:
+  # Trust the current project
+  supdoc trust
+
+  # Trust another checkout
+  supdoc trust ../other-project
+
+  # Stop trusting the current project
+  supdoc trust --revoke";
+
+/// Arguments of `supdoc trust`.
+#[derive(Debug, Args)]
+pub(crate) struct TrustArgs {
+    /// The project directory [default: the project root]
+    #[arg(value_name = "PATH")]
+    pub(crate) path: Option<PathBuf>,
+    /// Stop trusting the root instead of trusting it
+    #[arg(long, env = "SUPDOC_REVOKE", value_parser = FalseyValueParser::new())]
+    pub(crate) revoke: bool,
 }
 
 /// `supdoc skill ...`.

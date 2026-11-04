@@ -1464,6 +1464,22 @@ mod helps {
         case("cli-path-invalid", |_| {}, &["resolve", "src"]),
         case("cli-target-invalid", |_| {}, &["list", "src/lib.rs#a..b"]),
         case("cli-init-exists", |_| {}, &["init"]),
+        case("cli-trust-path", |_| {}, &["trust", "nowhere"]),
+        HelpCase {
+            kind: "cli-trust-no-state",
+            setup: |_| {},
+            args: &["trust"],
+            via: Via::EmptyHome,
+            needs_permissions: false,
+        },
+        case(
+            "cli-trust-store",
+            |p| {
+                std::fs::create_dir(p.path().join("a\nb"))
+                    .expect("the directory with a newline in its name should be creatable");
+            },
+            &["trust", "a\nb"],
+        ),
         restricted_case(
             "cli-init-write",
             |p| {
