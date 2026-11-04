@@ -952,6 +952,8 @@ fn cached_run<V>(
         extra: run.extra,
         stdin: run.input.as_bytes(),
         timeout,
+        cwd: runner::Cwd::Neutral,
+        cap: runner::CAP,
     };
     let result = spawn(&call);
     let stored = result.as_ref().ok().cloned();
