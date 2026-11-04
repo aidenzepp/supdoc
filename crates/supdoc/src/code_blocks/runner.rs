@@ -31,13 +31,6 @@ pub(crate) enum Cwd {
     /// The empty supdoc-owned directory [`neutral_dir`] picks, outside the root.
     Neutral,
     /// The project root's real path.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the project build for clippy (P5-07F) calls it, and has no caller until P5-07H"
-        )
-    )]
     Root,
 }
 

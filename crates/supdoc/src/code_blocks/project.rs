@@ -28,12 +28,13 @@ pub(crate) const BUILD_CAP: usize = 16 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Plan {
     /// No `Cargo.toml`, or a root package with no lib a block can name (none, or one whose crate
-    /// types include neither `lib` nor `rlib`): the block compiles alone.
+    /// types include none of `lib`, `rlib` and `proc-macro`): the block compiles alone.
     None,
     /// The `Cargo.toml` can't be used, or would build the root as part of an outside workspace:
     /// nothing is built.
     Refused(Refused),
-    /// A root `[package]` with a lib target: that lib, by the manifest's real path.
+    /// A root `[package]`, or the legacy `[project]` cargo still reads as it, with a lib target:
+    /// that lib, by the manifest's real path.
     Package(PathBuf),
     /// A virtual workspace: every member's lib, by the manifest's real path.
     Workspace(PathBuf),

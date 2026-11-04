@@ -14,6 +14,7 @@ use crate::read::cartridge::{Cartridge, Deadline, SourceFile};
 
 use super::block::{CodeBlock, has_contiguous_body, replacement_for, try_blocks_in};
 use super::excerpt;
+use super::project::BuildFailed;
 use super::runner::{Failure, Ran};
 use super::states;
 use super::tools::ToolCartridge;
@@ -248,6 +249,40 @@ pub(crate) fn finding(
         ),
     };
     Some(finding.with_location(at.clone()))
+}
+
+/// The run's one error, at `at`, for a project build that `failed` under `timeout`: a
+/// `code-block-tool-failed` quoting cargo's detail, or a `code-block-tool-timeout`. Every block
+/// that needed the build fails with it, so this is reported once rather than per block.
+#[must_use]
+pub(crate) fn build_finding(
+    failed: &BuildFailed,
+    at: &Location,
+    timeout: Option<Duration>,
+) -> Finding {
+    let off = "`lint = \"off\"` in `[features.code-blocks.rust.clippy]`";
+    let finding = match failed {
+        BuildFailed::ToolFailed(detail) => Finding::new(
+            TOOL_FAILED,
+            Severity::Error,
+            format!("`cargo check` failed building the project for clippy: {detail}"),
+        )
+        .with_help(format!(
+            "run `cargo check` in the project and fix the build, or set {off}"
+        )),
+        BuildFailed::TimedOut => Finding::new(
+            TOOL_TIMEOUT,
+            Severity::Error,
+            format!(
+                "`cargo check` ran longer than {} building the project for clippy",
+                timeout.map_or_else(|| "its limit".to_owned(), |limit| format!("{limit:?}"))
+            ),
+        )
+        .with_help(format!(
+            "raise the limit with `--code-block-build-timeout 30m`, or set {off}"
+        )),
+    };
+    finding.with_location(at.clone())
 }
 
 /// `unformatted`, the `code-block-unformatted` error `tool` gave `block` in `doc`, with the fix
