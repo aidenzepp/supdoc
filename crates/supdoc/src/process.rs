@@ -6,7 +6,7 @@
 //! It also installs the one termination handler: on SIGINT, SIGTERM or SIGHUP every tool process
 //! group still registered as live is killed, and supdoc then ends as that signal's default action
 //! would have ended it. Once a signal has arrived, supdoc ends by that signal and no other way:
-//! the main thread waits for the re-raise instead of printing a fatal error or returning a code.
+//! the main thread waits for the re-raise instead of printing anything or returning a code.
 
 use std::ffi::OsStr;
 use std::io::{self, IsTerminal, Write};
@@ -35,7 +35,7 @@ const DEFAULT_WIDTH: usize = 80;
 static LIVE_GROUPS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
 /// The termination signal that arrived, or 0 while none has. Set before any tool group is killed.
-static TERMINATING: AtomicI32 = AtomicI32::new(0);
+pub(crate) static TERMINATING: AtomicI32 = AtomicI32::new(0);
 
 /// How long the main thread sleeps between checks while it waits for the signal thread's re-raise.
 const TERMINATION_POLL: Duration = Duration::from_millis(50);
@@ -105,27 +105,32 @@ fn handle_termination() {
         return;
     };
     drop(std::thread::spawn(move || {
-        for signal in signals.forever() {
-            // Set first, so the main thread can't see a killed tool and end before the re-raise.
-            TERMINATING.store(signal, Ordering::SeqCst);
-            kill_live_groups();
-            // Resets the signal to its default action and raises it, which ends the process.
-            let _ended = signal_hook::low_level::emulate_default_handler(signal);
-        }
+        // The first signal ends the process, so no later one is read.
+        let Some(signal) = signals.forever().next() else {
+            return;
+        };
+        // Set first, so the main thread can't see a killed tool and end before the re-raise.
+        TERMINATING.store(signal, Ordering::SeqCst);
+        kill_live_groups();
+        // Resets the signal to its default action and raises it, which ends the process.
+        let _ended = signal_hook::low_level::emulate_default_handler(signal);
+        // Still running, so the re-raise failed: end with the shell's code for that signal
+        // rather than leave the main thread waiting for good.
+        std::process::exit(128 + signal);
     }));
 }
 
 /// Whether `flag` records a termination signal, so the process must wait to be ended by it.
-fn ends_by_signal(flag: &AtomicI32) -> bool {
+pub(crate) fn ends_by_signal(flag: &AtomicI32) -> bool {
     flag.load(Ordering::SeqCst) != 0
 }
 
-/// Blocks for good once a termination signal has arrived, so the signal thread's re-raise ends the
-/// process; returns at once otherwise.
+/// Blocks for good once `flag` records a termination signal, so the signal thread's re-raise ends
+/// the process; returns at once otherwise.
 ///
 /// Effect: sleeps the calling thread while a signal is pending.
-fn await_termination() {
-    while ends_by_signal(&TERMINATING) {
+pub(crate) fn await_termination(flag: &AtomicI32) {
+    while ends_by_signal(flag) {
         std::thread::sleep(TERMINATION_POLL);
     }
 }
@@ -136,7 +141,7 @@ fn await_termination() {
 pub(crate) fn exit_code() -> u8 {
     handle_termination();
     let code = parse_run_and_report();
-    await_termination();
+    await_termination(&TERMINATING);
     code
 }
 
@@ -182,10 +187,7 @@ fn parse_run_and_report() -> u8 {
 
     match result {
         Ok(outcome) => outcome.exit_code(),
-        Err(error) => {
-            await_termination();
-            report(&mut output, &error)
-        }
+        Err(error) => report(&mut output, &error),
     }
 }
 
