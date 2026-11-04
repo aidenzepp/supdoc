@@ -87,7 +87,7 @@ pub(crate) struct BlockRecord {
     tool: Option<&'static Tool>,
     /// The linter the config selects for it, while the block is pending and its lint step due.
     linter: Option<&'static Tool>,
-    /// The shell dialect shfmt parses it as.
+    /// The shell dialect shfmt parses it as and shellcheck checks it as.
     dialect: Dialect,
     /// The edition its `edition20xx` attribute or the config's `edition` names, if either does.
     edition: Option<Edition>,
@@ -666,9 +666,15 @@ fn run_linter(
 ) -> Option<LintRan> {
     let pending = record.pending.as_ref()?;
     let doc = session.root.join(record.at.file.as_str());
-    let args = lint::args(tool, &doc, record.index)?;
+    let mut args = lint::args(tool, &doc, record.index)?;
     if let Some(rust) = rust {
         return Some(run_clippy(tool, program, record, pending, session, rust));
+    }
+    if tool.language == Language::Shell {
+        args = shell::lint_dialect_args(record.dialect)
+            .into_iter()
+            .chain(args)
+            .collect();
     }
     let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
     let run = cache::Run {
@@ -683,7 +689,11 @@ fn run_linter(
         &run,
         session,
         |call| runner::run(call, session.env, session.root),
-        |result| lint::judge(tool, result),
+        |result| match tool.language {
+            Language::Shell => shell::judge(tool, &pending.input, result),
+            Language::Python => lint::judge(tool, result),
+            Language::Rust => rust::lint_verdict(result),
+        },
         lint::Verdict::cacheable,
     );
     let findings = lint::findings(
