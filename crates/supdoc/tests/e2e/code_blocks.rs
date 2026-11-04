@@ -912,6 +912,43 @@ fn check_with_shfmt_and_no_usable_linter(linter_inside: bool) -> serde_json::Val
 }
 
 #[test]
+fn summary_names_each_not_run_reason_with_its_own_count() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let project = Project::fixture("basic");
+    project.record();
+    project.write(
+        "supdoc.config.toml",
+        "[features.code-blocks]\n[features.code-blocks.rust]\n[features.code-blocks.shell]\n",
+    );
+    project.write(
+        "docs/blocks.md",
+        "# Blocks\n\n```rust\nfn main() {}\n```\n\n```rust\nfn other() {}\n```\n\n\
+         ```sh\necho hi\n```\n",
+    );
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    for formatter in ["shfmt", "rustfmt"] {
+        let stub = outside.path().join(formatter);
+        std::fs::write(&stub, "#!/bin/sh\n/bin/cat\n").expect("the stub should be writable");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+            .expect("the stub should be made executable");
+    }
+
+    let run = project.supdoc_in_with(".", &["check"], &[("PATH", outside.path())]);
+    let _passed = run.assert_exit(0);
+
+    let lines = summary_lines(&run.stdout);
+    assert_eq!(
+        lines.get(1).map(String::as_str),
+        Some(
+            "Code blocks  2 lint not run (clippy needs trust), \
+             1 lint not run (tool missing), 3 passed"
+        ),
+        "each not-run reason should get its own count, most first:\n{}",
+        run.stdout
+    );
+}
+
+#[test]
 fn a_formatted_block_whose_linter_is_missing_names_the_linter_binary() {
     let json = check_with_shfmt_and_no_usable_linter(false);
 

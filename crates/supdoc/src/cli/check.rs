@@ -257,9 +257,11 @@ impl CheckReport {
         Self {
             counts: CheckSummary {
                 links: self.summary,
-                code_blocks: counts,
+                code_blocks: counts.clone(),
             },
-            code_blocks: counts.map(|_| shown.iter().map(CodeBlockJson::from).collect()),
+            code_blocks: counts
+                .as_ref()
+                .map(|_| shown.iter().map(CodeBlockJson::from).collect()),
             code_block_counts: counts,
             shown_blocks: shown,
             ..self
