@@ -374,7 +374,7 @@ fn install_argv(target: &ReleaseVersion, cargo_home: &Path) -> Vec<String> {
         &format!("={}", target.release()),
         "--force",
         "--root",
-        &cargo_home.to_string_lossy(),
+        cargo_home.to_str().unwrap_or_default(),
         "--color",
         "never",
     ]
@@ -387,8 +387,52 @@ fn install_argv(target: &ReleaseVersion, cargo_home: &Path) -> Vec<String> {
 struct Environment {
     /// This binary's path with symlinks resolved, when it can be found.
     exe: Option<PathBuf>,
-    /// The cargo home: `CARGO_HOME` when absolute, else `$HOME/.cargo`.
-    cargo_home: Option<PathBuf>,
+    /// The cargo home: `CARGO_HOME` when absolute, else `$HOME/.cargo`, or why there is none.
+    cargo_home: Result<PathBuf, CargoHomeProblem>,
+}
+
+/// Why no usable cargo home was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CargoHomeProblem {
+    /// `CARGO_HOME` is set to a relative path.
+    RelativeSet,
+    /// `CARGO_HOME` is unset or empty, and `HOME` is not an absolute path.
+    Unset,
+    /// The cargo home is not valid UTF-8, so it cannot be shown or passed to cargo faithfully.
+    NotUtf8,
+}
+
+/// The cargo home that `CARGO_HOME` and `HOME` name, or why they name none.
+///
+/// An unset or empty `CARGO_HOME` falls back to `$HOME/.cargo`. A relative `CARGO_HOME` or `HOME`
+/// is no cargo home, since cargo would read it from wherever supdoc happens to run.
+fn cargo_home_from(
+    cargo_home: Option<OsString>,
+    home: Option<OsString>,
+) -> Result<PathBuf, CargoHomeProblem> {
+    let found = match cargo_home.filter(|value| !value.is_empty()) {
+        Some(value) => {
+            let path = PathBuf::from(value);
+            if path.is_absolute() {
+                path
+            } else {
+                return Err(CargoHomeProblem::RelativeSet);
+            }
+        }
+        None => {
+            let home = home
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .ok_or(CargoHomeProblem::Unset)?;
+            home.join(".cargo")
+        }
+    };
+    if found.to_str().is_some() {
+        Ok(found)
+    } else {
+        Err(CargoHomeProblem::NotUtf8)
+    }
 }
 
 impl Environment {
@@ -401,24 +445,14 @@ impl Environment {
         )
     }
 
-    /// The environment for an executable path and the two variables.
-    ///
-    /// An unset or empty `CARGO_HOME` falls back to `$HOME/.cargo`; a relative one, or a relative
-    /// `HOME`, leaves no cargo home, since cargo would read it from wherever supdoc happens to run.
+    /// The environment for an executable path and the two variables, as [`cargo_home_from`] reads
+    /// them.
     fn from_parts(
         exe: Option<PathBuf>,
         cargo_home: Option<OsString>,
         home: Option<OsString>,
     ) -> Self {
-        let absolute =
-            |value: OsString| Some(PathBuf::from(value)).filter(|path| path.is_absolute());
-        let cargo_home = match cargo_home.filter(|value| !value.is_empty()) {
-            Some(value) => absolute(value),
-            None => home
-                .filter(|value| !value.is_empty())
-                .and_then(absolute)
-                .map(|home| home.join(".cargo")),
-        };
+        let cargo_home = cargo_home_from(cargo_home, home);
         Self {
             exe: exe.and_then(|exe| fs::canonicalize(exe).ok()),
             cargo_home,
@@ -447,10 +481,12 @@ fn installed_by_cargo(environment: &Environment) -> Result<CargoInstall, CliErro
         || "an unknown location".to_owned(),
         |exe| exe.display().to_string(),
     );
-    let (Some(exe), Some(cargo_home)) = (&environment.exe, &environment.cargo_home) else {
-        return Err(match &environment.exe {
-            Some(exe) => known_location(exe).unwrap_or_else(no_cargo_home),
-            None => cannot_tell(&seen),
+    let (Some(exe), Ok(cargo_home)) = (&environment.exe, &environment.cargo_home) else {
+        return Err(match (&environment.exe, &environment.cargo_home) {
+            (Some(exe), Err(problem)) => {
+                known_location(exe).unwrap_or_else(|| no_cargo_home(*problem))
+            }
+            _ => cannot_tell(&seen),
         });
     };
     let expected = fs::canonicalize(cargo_home.join("bin").join(PACKAGE)).ok();
@@ -502,15 +538,29 @@ fn known_location(exe: &Path) -> Option<CliError> {
     }
 }
 
-/// The refusal when no absolute cargo home can be found, so cargo's install records cannot be read.
-fn no_cargo_home() -> CliError {
-    not_cargo(
-        "CARGO_HOME is not an absolute path (and HOME doesn't give one), so supdoc can't find \
-         cargo's install records"
-            .to_owned(),
-        "Set CARGO_HOME to an absolute path, such as `export CARGO_HOME=$HOME/.cargo`, then run \
-         `supdoc upgrade` again",
-    )
+/// The refusal when no usable cargo home can be found, so cargo's install records cannot be read.
+fn no_cargo_home(problem: CargoHomeProblem) -> CliError {
+    let (message, help) = match problem {
+        CargoHomeProblem::RelativeSet => (
+            "CARGO_HOME is set but is not an absolute path, so supdoc can't find cargo's install \
+             records",
+            "Set CARGO_HOME to an absolute path, such as `export CARGO_HOME=$HOME/.cargo`, then \
+             run `supdoc upgrade` again",
+        ),
+        CargoHomeProblem::Unset => (
+            "CARGO_HOME is not set and HOME is not an absolute path, so supdoc can't find \
+             cargo's install records",
+            "Set CARGO_HOME to an absolute path, such as `export CARGO_HOME=$HOME/.cargo`, then \
+             run `supdoc upgrade` again",
+        ),
+        CargoHomeProblem::NotUtf8 => (
+            "CARGO_HOME (or the HOME it comes from) is not valid UTF-8, so supdoc can't pass it \
+             to cargo",
+            "Move cargo's home to a UTF-8 path and set CARGO_HOME to it, such as `export \
+             CARGO_HOME=$HOME/.cargo`, then run `supdoc upgrade` again",
+        ),
+    };
+    not_cargo(message.to_owned(), help)
 }
 
 /// The refusal for a binary whose origin supdoc cannot establish.
@@ -683,7 +733,14 @@ fn install(argv: &[String], cargo_home: &Path, json: bool) -> Result<(), CliErro
         // Under JSON, standard output holds the one report, so cargo's goes to standard error.
         let _forwarder = child.stdout.take().map(|mut stdout| {
             scope.spawn(move || {
-                let _copied = io::copy(&mut stdout, &mut io::stderr());
+                let mut chunk = [0_u8; 4096];
+                // Keep reading after a write error, so cargo is never left with a closed pipe.
+                while let Ok(read @ 1..) = stdout.read(&mut chunk) {
+                    let mut out = io::stderr();
+                    let _written = out
+                        .write_all(chunk.get(..read).unwrap_or_default())
+                        .and_then(|()| out.flush());
+                }
             })
         });
         if let Some(mut stderr) = child.stderr.take() {
@@ -812,6 +869,43 @@ mod tests {
                 Path::new("/home/u/.cargo")
             )),
             "cargo install supdoc --locked --version =0.3.2 --force --root /home/u/.cargo --color never"
+        );
+    }
+
+    #[test]
+    fn the_cargo_home_decision_names_why_none_is_usable() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let os = OsString::from;
+        assert_eq!(
+            cargo_home_from(Some(os("/c")), None),
+            Ok(PathBuf::from("/c"))
+        );
+        assert_eq!(
+            cargo_home_from(None, Some(os("/h"))),
+            Ok(PathBuf::from("/h/.cargo"))
+        );
+        assert_eq!(
+            cargo_home_from(Some(os("rel")), Some(os("/h"))),
+            Err(CargoHomeProblem::RelativeSet)
+        );
+        assert_eq!(
+            cargo_home_from(Some(os("")), Some(os("rel"))),
+            Err(CargoHomeProblem::Unset)
+        );
+        assert_eq!(cargo_home_from(None, None), Err(CargoHomeProblem::Unset));
+        let latin1 = OsString::from_vec(b"/home/caf\xe9".to_vec());
+        assert_eq!(
+            cargo_home_from(Some(latin1.clone()), None),
+            Err(CargoHomeProblem::NotUtf8)
+        );
+        assert_eq!(
+            cargo_home_from(None, Some(latin1)),
+            Err(CargoHomeProblem::NotUtf8)
+        );
+        assert!(
+            no_cargo_home(CargoHomeProblem::NotUtf8)
+                .message()
+                .contains("CARGO_HOME")
         );
     }
 

@@ -551,7 +551,8 @@ fn a_relative_cargo_home_is_refused_naming_cargo_home_not_telling_to_reinstall()
 
     let _ = run.assert_exit(78);
     assert!(
-        run.stderr.contains("CARGO_HOME is not an absolute path"),
+        run.stderr
+            .contains("CARGO_HOME is set but is not an absolute path"),
         "{}",
         run.stderr
     );
@@ -633,5 +634,51 @@ fn json_with_yes_keeps_standard_output_to_one_document_and_sends_cargos_to_stand
         run.stderr.contains("cargo-said-this-on-stdout"),
         "cargo's stdout should arrive on stderr: {}",
         run.stderr
+    );
+}
+
+#[test]
+fn a_closed_standard_error_does_not_stop_the_install_under_json() {
+    use std::io::Read as _;
+    let fixture = Fixture::installed("0.0.0");
+    fixture.custom_cargo(&format!(
+        "case \"$1\" in install)\n\
+         echo A >&2; sleep 0.5; echo OUT-1; sleep 0.5; echo OUT-2\n\
+         : > '{}' ;; esac\n",
+        fixture.path("finished").display()
+    ));
+    let mut child = Command::new(fixture.path("cargo-home/bin/supdoc"))
+        .args(["upgrade", NEWER, "--yes", "--json"])
+        .current_dir(fixture.path("work"))
+        .env_clear()
+        .env(
+            "PATH",
+            format!("{}:/bin:/usr/bin", fixture.path("fakebin").display()),
+        )
+        .env("CARGO_HOME", fixture.path("cargo-home"))
+        .env("HOME", fixture.path("home"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the supdoc binary should start");
+    let mut stderr = child.stderr.take().expect("stderr should be piped");
+    let mut first = [0_u8; 1];
+    stderr
+        .read_exact(&mut first)
+        .expect("cargo's first stderr byte should arrive");
+    drop(stderr);
+
+    let output = child.wait_with_output().expect("supdoc should finish");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the install should complete; stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        fixture.path("finished").exists(),
+        "cargo should have run to its end instead of dying on a closed pipe"
     );
 }
