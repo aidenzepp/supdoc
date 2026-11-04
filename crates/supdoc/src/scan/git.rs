@@ -80,7 +80,7 @@ pub(super) fn git_exclude(dir: &Path, limit: SizeLimit) -> ExcludeFile {
 /// applies.
 ///
 /// Effect: reads `dot_git` and the `commondir` file.
-pub(super) fn common_dir(dir: &Path, dot_git: &Path) -> Option<PathBuf> {
+pub(crate) fn common_dir(dir: &Path, dot_git: &Path) -> Option<PathBuf> {
     let line = first_line(dot_git)?;
     let git_dir = dir.join(line.strip_prefix("gitdir: ")?);
     let commondir = git_dir.join("commondir");
@@ -95,7 +95,7 @@ pub(super) fn common_dir(dir: &Path, dot_git: &Path) -> Option<PathBuf> {
 /// The first line of `file`, without its line ending, or `None` when it can't be read.
 ///
 /// Effect: reads `file`.
-pub(super) fn first_line(file: &Path) -> Option<String> {
+pub(crate) fn first_line(file: &Path) -> Option<String> {
     let file = fs::File::open(file).ok()?;
     io::BufReader::new(file).lines().next()?.ok()
 }
