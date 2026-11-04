@@ -75,19 +75,24 @@ pub(super) fn explicit_path_warning(
     if let Some(rule) = ignored_by {
         return Some(ignored(listed, &rule));
     }
-    let excluded_by = config.excluded_by(&path);
+    let code_blocks = CodeBlocksScope::of(config, &path, kind.is_dir());
+    let excluded_by = config
+        .excluded_by(&path)
+        .filter(|_| code_blocks != CodeBlocksScope::Reads);
     if let Some(pattern) = excluded_by.filter(|_| is_source_file || kind.is_dir()) {
         return Some(excluded(
             listed,
             Some(pattern),
             &defined_in(root, config.exclude_definition()),
+            code_blocks,
         ));
     }
-    if is_source_file && !config.scans(&path) {
+    if is_source_file && !config.scans(&path) && code_blocks != CodeBlocksScope::Reads {
         return Some(excluded(
             listed,
             None,
             &defined_in(root, config.include_definition()),
+            code_blocks,
         ));
     }
     // The walk never enters a symlinked directory, so nothing under one is walked and no rule
@@ -236,30 +241,74 @@ pub(super) fn defined_in(root: &AbsolutePath, definition: Option<PatternDefiniti
     )
 }
 
+/// Whether code-blocks reads an explicitly named path, judged by its own `include` and `exclude`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum CodeBlocksScope {
+    /// `[features.code-blocks]` is off.
+    Off,
+    /// Code-blocks reads the path, so linking's scope alone never leaves it unread.
+    Reads,
+    /// Code-blocks leaves the path out by this key of `[features.code-blocks]`.
+    LeavesOut(&'static str),
+}
+
+impl CodeBlocksScope {
+    /// Where `path`, a directory when `is_dir`, stands in code-blocks' scope. The walk enters any
+    /// directory code-blocks' `exclude` doesn't name, so only `exclude` leaves a directory out.
+    fn of(config: &Config, path: &AbsolutePath, is_dir: bool) -> Self {
+        let Some(code_blocks) = config.code_blocks() else {
+            return Self::Off;
+        };
+        if code_blocks.excludes(path) {
+            Self::LeavesOut("exclude")
+        } else if is_dir || code_blocks.scans(path) {
+            Self::Reads
+        } else {
+            Self::LeavesOut("include")
+        }
+    }
+}
+
 /// The finding for an explicit path that the config excludes, naming the `exclude` pattern when
-/// one matched and otherwise blaming `include`, each in the config `file` that set it.
-pub(super) fn excluded(listed: &SourcePath, pattern: Option<&str>, file: &str) -> Finding {
+/// one matched and otherwise blaming `include`, each in the config `file` that set it. When
+/// code-blocks is on, it leaves the path out too, and `code_blocks` names its key as well.
+pub(super) fn excluded(
+    listed: &SourcePath,
+    pattern: Option<&str>,
+    file: &str,
+    code_blocks: CodeBlocksScope,
+) -> Finding {
     let listed = listed.as_str();
+    let (also, to_check) = match code_blocks {
+        CodeBlocksScope::LeavesOut(key) => (
+            format!(", and by `[features.code-blocks] {key}`"),
+            format!(
+                "to check its links, change `[features.code-blocks] {key}` to check its code \
+                 blocks,"
+            ),
+        ),
+        CodeBlocksScope::Off | CodeBlocksScope::Reads => (String::new(), "to check it,".to_owned()),
+    };
     match pattern {
         Some(pattern) => Finding::new(
             "scan-explicit-path-excluded",
             Severity::Warning,
             format!(
-                "{listed} was named on the command line but is excluded by `{pattern}` in `exclude` in {file}",
+                "{listed} was named on the command line but is excluded by `{pattern}` in `exclude` in {file}{also}",
             ),
         )
         .with_help(format!(
-            "Remove `{pattern}` from `exclude` in {file} to check it, or stop passing it"
+            "Remove `{pattern}` from `exclude` in {file} {to_check} or stop passing it"
         )),
         None => Finding::new(
             "scan-explicit-path-excluded",
             Severity::Warning,
             format!(
-                "{listed} was named on the command line but is not matched by `include` in {file}",
+                "{listed} was named on the command line but is not matched by `include` in {file}{also}",
             ),
         )
         .with_help(format!(
-            "Add `{listed}` to `include` in {file} to check it, or stop passing it"
+            "Add `{listed}` to `include` in {file} {to_check} or stop passing it"
         )),
     }
 }

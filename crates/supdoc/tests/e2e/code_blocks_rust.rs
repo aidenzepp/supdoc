@@ -252,10 +252,34 @@ fn edition_config_outside_the_four_known_is_a_config_error() {
     );
     let stub = Stub::new();
 
-    let _failed = project
-        .supdoc_in_with(".", &["check", "--json"], &[("PATH", stub.dir.path())])
-        .assert_exit(78);
+    let run = project.supdoc_in_with(".", &["check", "--json"], &[("PATH", stub.dir.path())]);
+    let _checked = run.assert_exit(78);
+    let failed = &run.stderr;
 
+    assert!(
+        failed.contains("2030` isn't a Rust edition supdoc knows"),
+        "the error should name the unknown edition, got:\n{failed}"
+    );
+    assert_eq!(stub.record("runs"), "", "rustfmt should never run");
+}
+
+#[test]
+fn a_bare_number_edition_is_a_config_error_that_says_to_quote_it() {
+    let project = project_with_rust_doc("```rust\nfn main() {}\n```\n");
+    project.write(
+        "supdoc.config.toml",
+        "[features.code-blocks]\n[features.code-blocks.rust]\nedition = 2021\n",
+    );
+    let stub = Stub::new();
+
+    let run = project.supdoc_in_with(".", &["check", "--json"], &[("PATH", stub.dir.path())]);
+    let _checked = run.assert_exit(78);
+    let failed = &run.stderr;
+
+    assert!(
+        failed.contains("must be quoted"),
+        "the error should say to quote the edition, got:\n{failed}"
+    );
     assert_eq!(stub.record("runs"), "", "rustfmt should never run");
 }
 
@@ -381,4 +405,46 @@ fn hidden_lines_keep_their_prefix_when_the_real_rustfmt_fixes_the_block() {
         "the fix should format the shown line and keep each hidden line's `# `"
     );
     assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+}
+
+#[test]
+fn fix_never_deletes_a_plain_comment_line_inside_a_doc_comment_block() {
+    let source =
+        "/// ```rust\n/// fn  f() {}\n// keep me\n/// fn  g() {}\n/// ```\npub fn f() {}\n";
+    let project = Project::fixture("basic");
+    project.record();
+    project.write(
+        "supdoc.config.toml",
+        "[features.code-blocks]\n[features.code-blocks.rust]\n",
+    );
+    project.write("src/blocks.rs", source);
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let stub = outside.path().join("rustfmt");
+    std::fs::write(
+        &stub,
+        "#!/bin/sh\n/bin/cat > /dev/null\nprintf 'fn f() {}\\nfn g() {}\\n'\n",
+    )
+    .expect("the stub should be writable");
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+        .expect("the stub should be made executable");
+    let path = [("PATH", outside.path())];
+
+    let _fix = project
+        .supdoc_in_with(".", &["fix", "--yes"], &path)
+        .assert_exit(0);
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &path)
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(
+        project.read("src/blocks.rs"),
+        source,
+        "the fix should leave the file byte-identical"
+    );
+    assert_eq!(
+        finding_kinds(&json),
+        ["code-block-unformatted", "code-block-fix-unsafe"],
+        "{json}"
+    );
 }

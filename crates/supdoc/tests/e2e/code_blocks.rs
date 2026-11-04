@@ -431,6 +431,69 @@ fn update_does_not_record_a_use_that_does_not_resolve() {
     );
 }
 
+#[test]
+fn uses_help_names_the_doc_from_where_check_ran() {
+    let project = project_with_use();
+
+    let from_root = project.supdoc(&["check"]);
+    let from_docs = project.supdoc_in("docs", &["check"]);
+    let _failed = from_root.assert_exit(1);
+    let _failed = from_docs.assert_exit(1);
+
+    assert!(
+        from_root
+            .stdout
+            .contains("run `supdoc update docs/blocks.md --yes`"),
+        "stdout: {}",
+        from_root.stdout
+    );
+    assert!(
+        from_docs
+            .stdout
+            .contains("run `supdoc update blocks.md --yes`"),
+        "stdout: {}",
+        from_docs.stdout
+    );
+}
+
+#[test]
+fn update_points_source_missing_at_the_uses_value() {
+    let project = project_with_use();
+    project.replace("docs/blocks.md", "Counter.bump", "Counter.missing");
+
+    let run = project.supdoc(&["update", "--yes"]);
+    let _recorded = run.assert_exit(0);
+
+    assert!(
+        run.stdout.contains("docs/blocks.md:3:14"),
+        "the finding should point at the value after `rust uses(`:\n{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn a_python_block_names_the_chosen_formatter_when_it_is_missing() {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write(
+        "supdoc.config.toml",
+        "[features.code-blocks]\n[features.code-blocks.python]\nformatter = \"black\"\n",
+    );
+    project.write("docs/blocks.md", "# Blocks\n\n```py\nx = 1\n```\n");
+    let empty = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", empty.path())])
+        .assert_exit(0)
+        .json();
+
+    assert_eq!(
+        at(&json, "/data/code_blocks/0/reason"),
+        "`black` isn't on PATH",
+        "{json}"
+    );
+}
+
 /// The text check's lines from `Links` on, with `·` separators written as `, `.
 fn summary_lines(stdout: &str) -> Vec<String> {
     stdout

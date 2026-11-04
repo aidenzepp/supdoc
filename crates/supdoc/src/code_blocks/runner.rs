@@ -275,6 +275,7 @@ fn usable(dir: &Path, root: &Path) -> bool {
 mod tests {
     use std::ffi::{OsStr, OsString};
     use std::fs;
+    use std::io::ErrorKind;
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
@@ -324,7 +325,13 @@ mod tests {
         }
     }
 
+    /// How many times [`run_stub`] spawns a stub that Linux reports busy.
+    const BUSY_ATTEMPTS: u32 = 5;
+
     /// Runs the fixture's stub on `stdin` with `extra` and `timeout`.
+    ///
+    /// On Linux a stub just written can fail to spawn with `ETXTBSY` while another test's fork
+    /// still holds the write descriptor, so a busy spawn is retried a few times, 20 ms apart.
     fn run_stub(
         fixture: &Fixture,
         stdin: &[u8],
@@ -339,7 +346,18 @@ mod tests {
             stdin,
             timeout,
         };
-        run(&call, &fixture.env, &fixture.root)
+        let mut attempt = 1;
+        loop {
+            match run(&call, &fixture.env, &fixture.root) {
+                Err(Failure::Spawn(error))
+                    if error.kind() == ErrorKind::ExecutableFileBusy && attempt < BUSY_ATTEMPTS =>
+                {
+                    attempt += 1;
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                result => return result,
+            }
+        }
     }
 
     #[test]

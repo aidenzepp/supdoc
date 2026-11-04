@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 use crate::code_blocks::block::{CodeBlock, try_blocks_in};
-use crate::config::Config;
+use crate::config::{CONFIG_FILE_NAME, Config};
 use crate::exit::ExitStatus;
 use crate::finding::{Finding, Fix, LineIndex, Location, Severity, Snippet};
 use crate::hash::HashSettings;
@@ -208,7 +208,11 @@ fn assemble(
         &front.sources,
         |walked, file, raws| source_links(config, languages, walked, file, raws, &mut found),
         |walked, error| {
-            findings.push(unreadable_source(&walked.source, &error));
+            findings.push(unreadable_source(
+                &walked.source,
+                &error,
+                walked.wants.links,
+            ));
             // A file only code-blocks reads stays out of linking's unread sources, so its locked
             // links are judged exactly as without code-blocks.
             if walked.wants.links {
@@ -221,7 +225,7 @@ fn assemble(
         front
             .code_blocks_unread_dirs
             .iter()
-            .map(|dir| dir.finding(root)),
+            .map(|dir| dir.code_blocks_finding(root)),
     );
 
     // The root itself was read and walked above, so every unread directory lies beneath it.
@@ -637,11 +641,11 @@ fn link_finding(
     }
 }
 
-/// The warning for a walked source that couldn't be read. Its links weren't checked, and its lock
-/// entries are kept.
+/// The warning for a walked source that couldn't be read. What it read for wasn't checked: its
+/// links when linking wants it (`for_links`), else its code blocks. Its lock entries are kept.
 ///
 /// It points at the start of the file, since no text was read to point into.
-fn unreadable_source(source: &SourcePath, error: &ReadError) -> Finding {
+fn unreadable_source(source: &SourcePath, error: &ReadError, for_links: bool) -> Finding {
     let start = Location {
         file: source.clone(),
         range: 0..0,
@@ -655,12 +659,24 @@ fn unreadable_source(source: &SourcePath, error: &ReadError) -> Finding {
     } else {
         Severity::Warning
     };
+    let shown = source.to_string();
+    let help = if for_links {
+        format!(
+            "Links in {source} weren't checked. {}",
+            error.help(ReadRole::ScannedSource, &shown)
+        )
+    } else {
+        // Linking's `exclude` already leaves this file out, so only code-blocks' own `exclude`
+        // skips it. The renamed-source advice is the scanned-source advice without `exclude`.
+        format!(
+            "Code blocks in {source} weren't checked. {}, or add it to \
+             `[features.code-blocks] exclude` in `{CONFIG_FILE_NAME}`",
+            error.help(ReadRole::RenamedSource, &shown)
+        )
+    };
     Finding::new(error.code(), severity, error.message_naming(source))
         .with_location(start)
-        .with_help(format!(
-            "Links in {source} weren't checked. {}",
-            error.help(ReadRole::ScannedSource, &source.to_string())
-        ))
+        .with_help(help)
 }
 
 #[cfg(test)]
@@ -1234,10 +1250,14 @@ mod tests {
             scan.unread_sources
         );
         assert!(
-            scan.findings
-                .iter()
-                .any(|finding| finding.code == "scan-unreadable-dir"),
-            "the unreadable directory should still be reported: {:?}",
+            scan.findings.iter().any(|finding| {
+                finding.code == "scan-unreadable-dir"
+                    && finding.help.as_deref().is_some_and(|help| {
+                        help.starts_with("Code blocks in that directory weren't checked")
+                            && help.contains("`[features.code-blocks] exclude`")
+                    })
+            }),
+            "the unreadable directory should be reported for code blocks: {:?}",
             scan.findings
         );
         let report = reconcile_at_root(&scan, &lock, &Scope::All);
@@ -1264,6 +1284,25 @@ mod tests {
         assert!(scan.unread_sources.is_empty(), "{:?}", scan.unread_sources);
         let codes: Vec<&str> = scan.findings.iter().map(|finding| finding.code).collect();
         assert_eq!(codes, ["read-not-utf8"]);
+    }
+
+    #[test]
+    fn an_unreadable_file_only_code_blocks_reads_is_worded_for_code_blocks() {
+        let project = Project::with_config(CODE_BLOCKS_WIDER);
+        project.write_bytes("skills/bad.md", b"not UTF-8 \xff\n");
+
+        let scan = project.scan();
+
+        let help = scan
+            .findings
+            .first()
+            .and_then(|finding| finding.help.as_deref())
+            .expect("the unreadable file should get a warning with help");
+        assert_eq!(
+            help,
+            "Code blocks in skills/bad.md weren't checked. Save the file as UTF-8, or add it to \
+             `[features.code-blocks] exclude` in `supdoc.config.toml`"
+        );
     }
 
     #[test]
