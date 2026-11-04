@@ -115,8 +115,17 @@ Threat model, for a checkout you don't trust:
     write that file can grant trust.
   - Trust follows the directory, not its contents: if you trust a checkout and then switch it to a branch
     you don't trust, the next check runs that branch's code once clippy is enabled. Never set
-    `SUPDOC_TRUST` in a `pull_request_target` workflow, or in any job that has secrets and checks out a
-    pull request's code.
+    `SUPDOC_TRUST` in a `pull_request_target` or `workflow_run` workflow, or in any job that has secrets and
+    checks out a pull request's code.
+  - A linked worktree of a trusted repository inherits trust whatever branch it has checked out, so a
+    worktree made to review an untrusted pull request is trusted. Run that review with `SUPDOC_TRUST=0`,
+    which turns trust off for one run whatever the store lists.
+  - Remove worktrees with `git worktree remove`, or run `git worktree prune` after deleting one by hand: a
+    deleted worktree's record stays until then, and a later directory at that path can inherit trust.
+  - On a persistent or self-hosted CI runner, `supdoc trust` on a checkout path the runner reuses trusts
+    every later job there. Never run it on such a runner, and set `SUPDOC_TRUST=0` in pull request jobs.
+    Set `SUPDOC_TRUST` per job: a repository- or organization-level variable reaches every workflow.
+  - `supdoc trust` refuses `$HOME` and its ancestors (and `/`): name the project directory instead.
 
 ### Differences from git
 
