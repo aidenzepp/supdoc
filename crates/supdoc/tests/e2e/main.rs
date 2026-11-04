@@ -112,3 +112,5 @@ mod paths;
 mod resolve;
 #[cfg(test)]
 mod trust;
+#[cfg(test)]
+mod upgrade;

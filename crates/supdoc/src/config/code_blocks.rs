@@ -493,13 +493,6 @@ impl CodeBlocks {
 
     /// The `tier` ceiling the project set, [`Tier::Project`] when it set none.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "P5-04 reads the tier when it resolves the effective tier"
-        )
-    )]
     pub(crate) const fn tier(&self) -> Tier {
         self.tier
     }

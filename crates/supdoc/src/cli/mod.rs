@@ -50,6 +50,8 @@ pub(crate) mod schema;
 
 /// `supdoc trust`.
 pub(crate) mod trust;
+/// `supdoc upgrade`.
+pub(crate) mod upgrade;
 
 /// Test doubles the unit tests of this module share.
 #[cfg(test)]
@@ -255,13 +257,14 @@ pub(crate) fn run(
     command: &Command,
     skill_dirs: &skill::SkillDirs,
     tools: &crate::code_blocks::tools::ToolEnv,
+    trust: &crate::trust::TrustEnv,
     context: &Context,
     output: &mut Output,
 ) -> Result<Outcome, CliError> {
     match command {
-        Command::Check(args) => check::run(args, tools, context, output),
+        Command::Check(args) => check::run(args, tools, trust, context, output),
         Command::Update(args) => update::run(args, context, output),
-        Command::Fix(args) => fix::run(args, tools, context, output),
+        Command::Fix(args) => fix::run(args, tools, trust, context, output),
         Command::List(args) => list::run(args, context, output),
         Command::Resolve(args) => resolve::run(args, context, output),
         Command::Init(args) => init::run(args, context, output),
@@ -271,10 +274,11 @@ pub(crate) fn run(
         }
         Command::Namespace(NamespaceCommand::Rename(args)) => rename::run(args, context, output),
         Command::Schema(args) => schema::run(args, context, output),
-        Command::Trust(args) => trust::run(args, context, output),
+        Command::Trust(args) => trust::run(args, trust, context, output),
         Command::Completions(args) => completions::run(args, context, output),
         Command::Skill(SkillCommand::Install(args)) => {
             skill::run(args, skill_dirs, context, output)
         }
+        Command::Upgrade(args) => upgrade::run(args, context, output),
     }
 }

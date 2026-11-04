@@ -8,6 +8,7 @@ use annotate_snippets::renderer::{AnsiColor, Style};
 use crate::config::code_blocks::{CodeBlocks, Language, Mode};
 
 use super::block::CodeBlock;
+use super::evaluate::CLIPPY_NEEDS_TRUST;
 use super::info::{StepValue, reasoned, step_attribute};
 use super::tools::{self, Step, ToolCartridge, formatter};
 
@@ -198,6 +199,16 @@ pub(crate) struct Steps {
 }
 
 impl Steps {
+    /// Whether a step was held because the operator hasn't granted the checkout trust.
+    pub(crate) fn held_for_trust(&self) -> bool {
+        [&self.format, &self.lint].into_iter().any(|step| {
+            *step
+                == StepState::Unrunnable {
+                    reason: CLIPPY_NEEDS_TRUST,
+                }
+        })
+    }
+
     /// The steps due on `block`, in `state`, under `code_blocks`. Only a
     /// [`NotChecked::Pending`] block has steps. A block attribute the selected tool's cartridge
     /// accepts beats its table, for that block only: each step is [`StepState::Skipped`] when
@@ -587,9 +598,9 @@ fn by_count(reasons: &BTreeMap<&'static str, usize>) -> Vec<(&'static str, usize
 }
 
 /// `reason`, a step's full reason for not running, as the summary line names it: "clippy needs
-/// trust" for the project-tier gate, else the reason as written.
+/// trust" for a step held for want of trust, else the reason as written.
 fn short_reason(reason: &'static str) -> &'static str {
-    if reason.contains("supdoc trust") {
+    if reason == CLIPPY_NEEDS_TRUST {
         "clippy needs trust"
     } else {
         reason
@@ -613,7 +624,8 @@ fn paint(color: bool, tone: Tone, text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        BlockState, CodeBlockCounts, Excerpt, Failure, NotChecked, StepState, Steps, state_of,
+        BlockState, CLIPPY_NEEDS_TRUST, CodeBlockCounts, Excerpt, Failure, NotChecked, StepState,
+        Steps, state_of,
     };
     use crate::code_blocks::block::{CodeBlock, Info};
     use crate::config::Config;
@@ -890,7 +902,7 @@ mod tests {
         let lint_not_run = Steps {
             format: StepState::Ran,
             lint: StepState::Unrunnable {
-                reason: "clippy runs only in the project tier, which needs `supdoc trust` (phase 5)",
+                reason: CLIPPY_NEEDS_TRUST,
             },
         };
         let lint_skipped = Steps {

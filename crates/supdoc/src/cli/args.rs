@@ -16,6 +16,7 @@ use super::examples::{
     NAMESPACE_RENAME_EXAMPLES, RESOLVE_EXAMPLES, SCHEMA_EXAMPLES, SKILL_EXAMPLES,
     SKILL_INSTALL_EXAMPLES, TOP_EXAMPLES, UPDATE_EXAMPLES,
 };
+use super::upgrade::{ReleaseVersion, UPGRADE_EXAMPLES};
 use crate::limits::{CommandLineLimits, Given, Limits, SizeLimit, TimeLimit};
 use crate::link::SymbolPath;
 use crate::namespace::NamespaceName;
@@ -32,7 +33,7 @@ use crate::state::LinkState;
 /// and fails when a documented target changed, so someone rereads the docs. `supdoc update`
 /// records the new hashes once the docs are confirmed accurate.
 ///
-/// Reads never write. `update`, `fix`, `namespace rename` and `skill install` preview unless given `--yes`; `init` writes
+/// Reads never write. `update`, `fix`, `namespace rename`, `skill install` and `upgrade` preview unless given `--yes`; `init` writes
 /// immediately (`--dry-run` previews it). With `--json` every
 /// result, and every error, is a JSON document. Exit codes: 0 clean, 1 failing or refused,
 /// 2 usage error, 70 supdoc bug, 74 I/O error, 78 config or lockfile error.
@@ -270,6 +271,9 @@ pub(crate) enum Command {
     /// Install supdoc's agent skill
     #[command(subcommand, after_help = SKILL_EXAMPLES)]
     Skill(SkillCommand),
+    /// Install a newer or older supdoc with cargo (writes; previews unless --yes; to accept code changes, see `update`)
+    #[command(after_help = UPGRADE_EXAMPLES)]
+    Upgrade(UpgradeArgs),
     /// Trust a checkout to run its code blocks' tools, or revoke it (writes your state directory)
     #[command(after_help = TRUST_EXAMPLES)]
     Trust(TrustArgs),
@@ -591,8 +595,21 @@ pub(crate) enum SchemaTarget {
     Init,
     /// `supdoc skill install`
     SkillInstall,
+    /// `supdoc upgrade`
+    Upgrade,
     /// `supdoc trust`
     Trust,
+}
+
+/// Arguments of `supdoc upgrade`.
+#[derive(Debug, Args)]
+pub(crate) struct UpgradeArgs {
+    /// The version to install, such as `0.3.1`; an older one downgrades [default: the latest]
+    #[arg(value_name = "VERSION")]
+    pub(crate) release: Option<ReleaseVersion>,
+    /// Preview or apply.
+    #[command(flatten)]
+    pub(crate) confirm: Confirm,
 }
 
 /// Arguments of `supdoc completions`.
