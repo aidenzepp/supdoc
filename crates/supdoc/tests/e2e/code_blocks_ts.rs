@@ -165,47 +165,101 @@ fn a_language_without_its_table_is_not_checked() {
 }
 
 #[test]
-fn the_projects_biome_config_is_passed_and_one_with_plugins_makes_the_block_not_checked() {
+fn biome_is_given_the_validated_config_as_strict_json_never_the_projects_bytes() {
     let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let record = outside.path().join("seen.json");
     stub_biome(
         outside.path(),
-        "case \"$4\" in --config-path=*/docs/biome.json) /bin/cat;; *) exit 5;; esac",
+        &format!(
+            "case \"$4\" in --config-path=*) /bin/cp \"${{4#--config-path=}}\" '{}'; /bin/cat;; *) exit 5;; esac",
+            record.display()
+        ),
     );
-    let plain = ts_project("const a = 1;");
-    plain.write(
+    let project = ts_project("const a = 1;");
+    project.write(
         "docs/biome.json",
-        "{ \"formatter\": { \"indentWidth\": 4 } }",
+        "{ // note\n \"formatter\": { \"indentWidth\": 4, }, }",
     );
-    let plugged = ts_project("const a = 1;");
-    plugged.write(
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(0)
+        .json();
+
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+    let seen = std::fs::read_to_string(&record).expect("the stub recorded the config");
+    assert_eq!(seen, "{\"formatter\":{\"indentWidth\":4}}");
+}
+
+#[test]
+fn a_config_with_plugins_hidden_by_a_bare_cr_comment_never_reaches_biome_with_them() {
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let record = outside.path().join("seen.json");
+    stub_biome(
+        outside.path(),
+        &format!(
+            "/bin/cp \"${{4#--config-path=}}\" '{}'; /bin/cat",
+            record.display()
+        ),
+    );
+    let project = ts_project("const a = 1;");
+    project.write(
+        "biome.jsonc",
+        "{\"formatter\":{} // x, \"plugins\": [\"./p.js\"]\r}",
+    );
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .json();
+
+    let seen = std::fs::read_to_string(&record).unwrap_or_default();
+    assert!(
+        !seen.contains("plugins") && !seen.contains("p.js"),
+        "biome was given {seen}: {json}"
+    );
+}
+
+#[test]
+fn a_config_with_plugins_makes_the_block_not_checked_with_its_own_help() {
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    stub_biome(outside.path(), "exit 9");
+    let project = ts_project("const a = 1;");
+    project.write(
         "biome.jsonc",
         "{ // load one\n \"plugins\": [\"./x.grit\"] }",
     );
 
-    let passed = plain
-        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
-        .assert_exit(0)
-        .json();
-    let refused = plugged
+    let json = project
         .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
         .assert_exit(0)
         .json();
 
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
     assert_eq!(
-        at(&passed, "/data/summary/code_blocks/passed"),
-        1,
-        "{passed}"
+        at(&json, "/findings/0/help")
+            .as_str()
+            .map(|h| h.contains("remove `plugins`")),
+        Some(true),
+        "{json}"
     );
-    assert_eq!(
-        finding_kinds(&refused),
-        ["code-block-not-checked"],
-        "{refused}"
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 0, "{json}");
+}
+
+#[test]
+fn a_config_biome_rejects_is_a_tool_failure_never_a_block_parse_error() {
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    stub_biome(
+        outside.path(),
+        "echo \"${4#--config-path=}:2:3 parse ━━━━\" >&2\necho '  × bad' >&2\nexit 1",
     );
-    assert_eq!(
-        at(&refused, "/data/summary/code_blocks/passed"),
-        0,
-        "{refused}"
-    );
+    let project = ts_project("const a = 1;");
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-tool-failed"], "{json}");
 }
 
 #[test]

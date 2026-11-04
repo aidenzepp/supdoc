@@ -739,14 +739,12 @@ impl BiomeConfigs {
 /// given because of `refusal`.
 fn biome_refusal(refusal: &biome::Refusal, at: &Location) -> (String, Finding) {
     let (reason, message, help) = match refusal {
-        biome::Refusal::Config { file, why } => (
+        biome::Refusal::Config { file, why, help } => (
             format!("biome config `{file}` {why}"),
             format!(
                 "the project's `{file}` {why}, so its TypeScript and JavaScript blocks aren't checked"
             ),
-            format!(
-                "remove the `extends` and `plugins` from `{file}`, or mark the blocks `ignore(<why>)`"
-            ),
+            format!("in `{file}`: {help}"),
         ),
         biome::Refusal::NoPrivateDir => (
             BIOME_NO_PRIVATE_DIR.to_owned(),
