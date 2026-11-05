@@ -1834,6 +1834,7 @@ fn run_formatter(
     let extra: Vec<(&str, &OsStr)> = vars
         .iter()
         .map(|(name, value)| (*name, value.as_os_str()))
+        .chain(tool.vars())
         .collect();
     let held = framed
         .as_ref()
@@ -1962,11 +1963,12 @@ fn run_linter(
     let frame = Frame::of(tool, record.fragment);
     let input = lint::checked(frame, &pending.input);
     let input = input.as_ref();
+    let extra = tool.vars();
     let run = cache::Run {
         tool,
         program,
         args: &args,
-        extra: &[],
+        extra: &extra,
         input,
         doc: &doc,
         project: None,
