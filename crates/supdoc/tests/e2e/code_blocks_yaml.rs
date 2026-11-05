@@ -490,3 +490,72 @@ fn the_real_yamlfmts_dropped_yaml_directive_is_never_a_fix() {
         "{json}"
     );
 }
+
+#[test]
+fn a_formatter_rewrite_from_a_block_list_to_a_flow_list_is_a_fix() {
+    let project = project_with_block("a:\n  - x\n  - y");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    yamlfmt_stub(
+        outside.path(),
+        "/bin/cat > /dev/null; printf 'a: [x, y]\\n'",
+    );
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-unformatted"], "{json}");
+    assert_eq!(
+        at(&json, "/findings/0/fix/replacement").as_str(),
+        Some("a: [x, y]"),
+        "{json}"
+    );
+}
+
+#[test]
+fn a_reindent_of_a_keep_scalar_that_ends_the_block_is_a_fix() {
+    let project = project_with_block("k:   |+\n    a");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    yamlfmt_stub(
+        outside.path(),
+        "/bin/cat > /dev/null; printf 'k: |+\\n  a\\n'",
+    );
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-unformatted"], "{json}");
+    assert_eq!(
+        at(&json, "/findings/0/fix/replacement").as_str(),
+        Some("k: |+\n  a"),
+        "{json}"
+    );
+}
+
+#[test]
+fn the_real_yamlfmts_force_array_style_and_keep_scalar_reindent_are_fixes() {
+    let Some(dir) = real_tool_dir(
+        "yamlfmt",
+        "the_real_yamlfmts_force_array_style_and_keep_scalar_reindent_are_fixes",
+    ) else {
+        return;
+    };
+    let arrays = project_with_block("a: [x, y]");
+    arrays.write(".yamlfmt", "formatter:\n  force_array_style: block\n");
+    let keep = project_with_block("k:   |+\n    a");
+
+    // yamlfmt drops a `+` that keeps no blank line: the same value.
+    for (project, fixed) in [(&arrays, "a:\n  - x\n  - y"), (&keep, "k: |\n  a")] {
+        let json = real_run(project, &dir, &[], 1);
+
+        assert_eq!(finding_kinds(&json), ["code-block-unformatted"], "{json}");
+        assert_eq!(
+            at(&json, "/findings/0/fix/replacement").as_str(),
+            Some(fixed),
+            "{json}"
+        );
+    }
+}

@@ -534,9 +534,10 @@ fn private_config(env: &ToolEnv, root: &Path, text: &str) -> Option<PathBuf> {
     Some(file)
 }
 
-/// The most mappings and sequences a block's YAML may nest for [`same_structure`] to compare it,
-/// the YAML cartridge's own bound on nesting. Flow collections (`[[[...]]]`) pass the cartridge's
-/// guards at any depth, so the walk counts them itself.
+/// The most levels of mappings and sequences, block and flow alike, a block's YAML may nest for
+/// [`same_structure`] to compare it: past it the fix is refused. The YAML cartridge's guard bounds
+/// the column a block structure reaches, not how deep flow collections (`[[[...]]]`) nest, so the
+/// comparison counts levels itself.
 const MAX_NESTING: usize = 100;
 
 /// Whether `before` and `after` parse, each within `limit`, to the same YAML structure: the same
@@ -548,7 +549,10 @@ const MAX_NESTING: usize = 100;
 /// applied.
 #[must_use]
 pub(crate) fn same_structure(before: &str, after: &str, limit: TimeLimit) -> bool {
-    match (shape(before, limit), shape(after, limit)) {
+    match (
+        shape(before, limit, MAX_NESTING),
+        shape(after, limit, MAX_NESTING),
+    ) {
         (Some(before), Some(after)) => before == after,
         _ => false,
     }
@@ -564,12 +568,12 @@ enum Work<'tree> {
 }
 
 /// The structure of `text` as [`same_structure`] compares it. `None` when it doesn't parse
-/// cleanly within `limit`, nests more than [`MAX_NESTING`] collections, or the walk passes the
+/// cleanly within `limit`, nests more than `max_nesting` collections, or the walk passes the
 /// parse's deadline.
 ///
 /// The walk keeps its own stack, so hostile nesting fails closed instead of overflowing the
 /// thread's.
-fn shape(text: &str, limit: TimeLimit) -> Option<String> {
+fn shape(text: &str, limit: TimeLimit, max_nesting: usize) -> Option<String> {
     // The path only names the text in a parse error, which this check discards.
     let path = AbsolutePath::new(Path::new("/block.yaml"))?;
     let parsed = SourceFile::from_text(
@@ -593,7 +597,7 @@ fn shape(text: &str, limit: TimeLimit) -> Option<String> {
         match work {
             Work::Text(close) => out.push_str(close),
             Work::Node(node, depth) => {
-                let pushed = write_node(node, depth, text, &mut out)?;
+                let pushed = write_node(node, depth, max_nesting, text, &mut out)?;
                 stack.extend(pushed.into_iter().rev());
             }
         }
@@ -603,10 +607,11 @@ fn shape(text: &str, limit: TimeLimit) -> Option<String> {
 
 /// Writes the part of `node`'s structure that comes before its children to `out`, and returns
 /// the work that follows, in order: its children and the text between and after them. `None`
-/// when `node` is a collection past [`MAX_NESTING`].
+/// when `node` is a collection past `max_nesting`.
 fn write_node<'tree>(
     node: Node<'tree>,
     depth: usize,
+    max_nesting: usize,
     text: &str,
     out: &mut String,
 ) -> Option<Vec<Work<'tree>>> {
@@ -622,7 +627,7 @@ fn write_node<'tree>(
         "block_mapping" | "flow_mapping" | "block_sequence" | "flow_sequence"
     );
     let inner = depth + usize::from(nests);
-    if inner > MAX_NESTING {
+    if inner > max_nesting {
         return None;
     }
     let mut then = Vec::new();
@@ -652,7 +657,8 @@ fn write_node<'tree>(
             let _infallible = write!(out, "q{}:{folded};", folded.len());
         }
         "block_scalar" => {
-            let body = block_body(source, text.get(node.end_byte()..).unwrap_or_default());
+            let after = text.get(node.end_byte()..).unwrap_or_default();
+            let body = block_body(source, after, collection_column(node));
             let _infallible = write!(out, "b{}:{body};", body.len());
         }
         "anchor" | "alias" | "tag" => {
@@ -689,7 +695,6 @@ fn write_node<'tree>(
             let (open, close) = match kind {
                 "block_mapping" => ("{", "}"),
                 "block_sequence" | "flow_sequence" => ("[", "]"),
-                "block_sequence_item" => ("-", ";"),
                 "document" => ("<", ">"),
                 _ => ("", ""),
             };
@@ -738,31 +743,72 @@ fn fold(source: &str) -> String {
     folded
 }
 
-/// A block scalar's text, `source`, with its header line kept and the indent its content lines
-/// share removed, so a re-indented block scalar reads the same. Trailing blank lines are part of
-/// a keep (`+`) scalar's value, so for one the blank lines in `after`, the text that follows the
-/// node, are counted in too; any other scalar's are dropped.
-fn block_body(source: &str, after: &str) -> String {
+/// The column of the innermost block mapping or sequence holding `node`, the indent a block
+/// scalar's indentation indicator counts from. `None` at the top level.
+fn collection_column(node: Node<'_>) -> Option<usize> {
+    let mut parent = node.parent();
+    while let Some(holder) = parent {
+        if matches!(holder.kind(), "block_mapping" | "block_sequence") {
+            return Some(holder.start_position().column);
+        }
+        parent = holder.parent();
+    }
+    None
+}
+
+/// A block scalar as [`same_structure`] compares it: its style (`|` or `>`), its content lines
+/// with their indentation removed as YAML removes it, then how many line breaks end its value,
+/// which is all its chomping (`+`, `-` or neither) decides.
+/// With an indentation indicator (`|2`) that is exactly the indicated indent, counted from
+/// `holder`, the column of the collection holding the scalar (as go-yaml counts it: the
+/// indicator alone at the top level), so the spaces past it stay part of the value and a
+/// renumbered indicator that keeps the value compares equal. Without one it is the indent the
+/// content lines share. Trailing blank lines are part of a keep (`+`) scalar's value, so for one
+/// the blank lines in `after`, the text that follows the node, are counted in too; any other
+/// scalar's are dropped.
+fn block_body(source: &str, after: &str, holder: Option<usize>) -> String {
     let mut lines = source.split('\n');
-    let header = lines.next().unwrap_or_default().trim_end();
+    let header = lines.next().unwrap_or_default();
+    let indicators: String = header
+        .chars()
+        .take_while(|c| !c.is_whitespace() && *c != '#')
+        .collect();
+    let style: String = indicators
+        .chars()
+        .filter(|c| matches!(c, '|' | '>'))
+        .collect();
+    let keep = indicators.contains('+');
+    let strip_chomp = indicators.contains('-');
+    let explicit = indicators
+        .chars()
+        .find_map(|c| c.to_digit(10))
+        .and_then(|digit| usize::try_from(digit).ok());
     let body: Vec<&str> = lines.map(|line| line.trim_end_matches('\r')).collect();
-    let shared = body
-        .iter()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| line.len() - line.trim_start_matches(' ').len())
-        .min()
-        .unwrap_or(0);
-    let mut out = header.to_owned();
+    let strip = explicit.map_or_else(
+        || {
+            body.iter()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| line.len() - line.trim_start_matches(' ').len())
+                .min()
+                .unwrap_or(0)
+        },
+        |indicator| holder.map_or(indicator, |column| column + indicator),
+    );
+    let mut out = style.clone();
     for line in body {
         out.push('\n');
         out.push_str(
-            line.get(shared..)
+            line.get(strip..)
                 .unwrap_or_else(|| line.trim_start_matches(' ')),
         );
     }
     let mut out = out.trim_end().to_owned();
-    if header.contains('+') {
-        let kept = source
+    let has_content = out.len() > style.len();
+    // The line breaks that end the value: none when stripped, one when clipped, and for a keep
+    // scalar one plus each trailing blank line, so `|+` with no blank line after it reads as `|`.
+    let mut breaks = usize::from(has_content && !strip_chomp);
+    if keep {
+        breaks += source
             .split('\n')
             .rev()
             .take_while(|line| line.trim().is_empty())
@@ -773,8 +819,8 @@ fn block_body(source: &str, after: &str) -> String {
                 .skip(1)
                 .take_while(|line| line.trim().is_empty())
                 .count();
-        let _infallible = write!(out, "+{kept}");
     }
+    let _infallible = write!(out, "/{breaks}");
     out
 }
 
@@ -796,7 +842,7 @@ pub(crate) fn holds_no_yaml(input: &str) -> bool {
 mod tests {
     use super::{
         CONFIG_FILES, MAX_NESTING, Refusal, holds_no_yaml, parse_error, project_args, read_config,
-        same_structure,
+        same_structure, shape,
     };
     use crate::code_blocks::format::ParseError;
     use crate::code_blocks::tools::ToolEnv;
@@ -1071,5 +1117,58 @@ mod tests {
         assert!(!holds_no_yaml("--- a\n"));
         assert!(!holds_no_yaml("# c\n---\n"));
         assert!(!holds_no_yaml("a: 1\n"));
+    }
+
+    #[test]
+    fn the_walk_keeps_its_own_stack_so_unbounded_nesting_never_overflows_a_small_one() {
+        // No bound, 100,000 levels, and a thread stack far too small for a recursive walk of
+        // them: the walk must finish on the heap.
+        let deep = nested(100_000, false);
+        let walked = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || shape(&deep, limit(), usize::MAX).is_some())
+            .expect("the walking thread should start")
+            .join()
+            .expect("the walk should finish without overflowing its stack");
+        assert!(walked, "the unbounded walk should compare the deep text");
+    }
+
+    #[test]
+    fn block_and_flow_sequences_of_the_same_items_are_the_same_structure() {
+        assert!(same_structure("a: [x, y]\n", "a:\n  - x\n  - y\n", limit()));
+        assert!(same_structure("a:\n  - x\n  - y\n", "a: [x, y]\n", limit()));
+        assert!(same_structure("- [a, b]\n- c\n", "[[a, b], c]\n", limit()));
+        assert!(!same_structure("a: [x, y]\n", "a:\n  - x\n", limit()));
+    }
+
+    #[test]
+    fn an_indentation_indicator_strips_exactly_its_indent() {
+        assert!(!same_structure(
+            "a:\n    b: |2\n        x\n",
+            "a:\n  b: |2\n    x\n",
+            limit()
+        ));
+        assert!(same_structure(
+            "a:\n    b: |2\n        x\n",
+            "a:\n  b: |4\n        x\n",
+            limit()
+        ));
+        assert!(same_structure("- |1\n   x\n", "- |2\n    x\n", limit()));
+        assert!(!same_structure("- |1\n   x\n", "- |1\n  x\n", limit()));
+    }
+
+    #[test]
+    fn a_keep_scalar_that_ends_the_text_compares_by_its_value() {
+        assert!(same_structure("k:   |+\n    a\n", "k: |+\n  a\n", limit()));
+        assert!(same_structure("k:   |+\n    a\n", "k: |\n  a\n", limit()));
+        assert!(same_structure(
+            "k: |+\n  a\nj: 1\n",
+            "k: |\n  a\nj: 1\n",
+            limit()
+        ));
+        assert!(!same_structure("k: |+\n  a\n\n", "k: |\n  a\n", limit()));
+        assert!(!same_structure("k: |-\n  a\n", "k: |\n  a\n", limit()));
+        assert!(!same_structure("k: >\n  a\n", "k: |\n  a\n", limit()));
+        assert!(!same_structure("k: |+\n  a\n\n", "k: |+\n  a\n", limit()));
     }
 }

@@ -522,8 +522,15 @@ pub(crate) fn fixed(
         let Some((marker, _)) = fence_of(block, doc.text()) else {
             return vec![unformatted];
         };
+        // Both sides as `input` reads a body: the fix writes `output` as the body's lines, each
+        // ended by a line break, so its last line ends in one too.
+        let after = if output.is_empty() {
+            String::new()
+        } else {
+            format!("{output}\n")
+        };
         let keeps = input(block, doc.text())
-            .is_some_and(|before| yaml::same_structure(&before, output, doc.limit));
+            .is_some_and(|before| yaml::same_structure(&before, &after, doc.limit));
         if !keeps {
             let unsafe_fix = refused(block, &Refusal::ChangesYaml, &what, marker);
             return vec![unformatted, unsafe_fix];
