@@ -140,7 +140,7 @@ pub(crate) fn run(
     // `--yes` would, and no copy is written unless both can be.
     for ((owner, path), boundary) in destinations.iter().zip(&boundaries) {
         admit_copy(boundary, path)
-            .map_err(|escape| copy_outside(&place(owner), &base, path, &escape, context))?;
+            .map_err(|escape| copy_outside(&place(owner), &base, path, &escape, context, &[]))?;
     }
     let owners = destinations.each_ref().map(|(owner, _path)| owner.clone());
     let changes: Vec<SkillChange> = destinations
@@ -153,6 +153,9 @@ pub(crate) fn run(
         .collect();
 
     if applied {
+        // A path can still change between the check and a write, so a refusal names the copies
+        // already written.
+        let mut written: Vec<String> = Vec::new();
         for ((change, boundary), owner) in changes
             .iter()
             .zip(&boundaries)
@@ -161,14 +164,20 @@ pub(crate) fn run(
         {
             install_file(boundary, &change.path, SKILL.as_bytes()).map_err(
                 |error| match error {
-                    NotInstalled::Outside(escape) => {
-                        copy_outside(&place(owner), &base, &change.path, &escape, context)
-                    }
+                    NotInstalled::Outside(escape) => copy_outside(
+                        &place(owner),
+                        &base,
+                        &change.path,
+                        &escape,
+                        context,
+                        &written,
+                    ),
                     NotInstalled::Io(error) => {
-                        write_failed(change, args.global, &context.cwd, &error)
+                        write_failed(change, args.global, &context.cwd, &error, &written)
                     }
                 },
             )?;
+            written.push(change.shown.clone());
         }
     }
 
@@ -536,14 +545,17 @@ impl Place {
 /// The `cli-skill-outside-root` refusal for the copy at `target`, which `place`'s boundary
 /// refused with `escape`. A `SKILL.md` that is itself a symlink leading out is named with where it
 /// leads and help to remove the link. Anything else passed the checks before it and changed
-/// since, so it says that.
+/// since, so it says that. `written` names the copies already written, so the help says nothing
+/// was written only when that is true.
 fn copy_outside(
     place: &Place,
     base: &AbsolutePath,
     target: &AbsolutePath,
     escape: &Escape,
     context: &Context,
+    written: &[String],
 ) -> CliError {
+    let so_far = already_written(written);
     let shown = relative_or_absolute(base, target);
     let inside = place.shown();
     let flags: &[&str] = if place.global {
@@ -563,12 +575,12 @@ fn copy_outside(
             };
             let leads = real.as_deref().map_or_else(
                 || "somewhere that can't be worked out".to_owned(),
-                |real| real.display().to_string(),
+                |real| visible(&real.display().to_string()),
             );
             (
                 format!("{shown} is a symlink to {leads}, outside {inside}"),
                 format!(
-                    "Nothing was written. supdoc installs the skill only as a real file inside \
+                    "{so_far} supdoc installs the skill only as a real file inside \
                      {inside}. Run `rm {typed}` (this removes only the link, not the file it \
                      points to), then `{rerun}`"
                 ),
@@ -579,7 +591,7 @@ fn copy_outside(
                 "{shown} now leads outside {inside}: a path on the way changed after supdoc \
                  checked it"
             ),
-            format!("Check what changed on the way to {shown}, then run `{rerun}` again"),
+            format!("{so_far} Check what changed on the way to {shown}, then run `{rerun}` again"),
         ),
     };
     CliError::new("cli-skill-outside-root", message, help, ExitStatus::Failed)
@@ -629,8 +641,8 @@ fn outside_root(
             format!(
                 "{shown} would be written to {}, outside the project root: {shown_link} is a \
                  symlink to {}",
-                landing.display(),
-                real.display()
+                visible(&landing.display().to_string()),
+                visible(&real.display().to_string())
             )
         }
         None => format!(
@@ -687,6 +699,7 @@ fn write_failed(
     global: bool,
     cwd: &AbsolutePath,
     error: &io::Error,
+    written: &[String],
 ) -> CliError {
     let directory = change.path.parent().unwrap_or_else(|| change.path.clone());
     let shown_directory = if global {
@@ -697,9 +710,25 @@ fn write_failed(
     CliError::new(
         "cli-skill-write",
         format!("cannot write {}: {}", change.shown, cause(error)),
-        format!("Check that you can create and write files in `{shown_directory}`"),
+        if written.is_empty() {
+            format!("Check that you can create and write files in `{shown_directory}`")
+        } else {
+            format!(
+                "{} Check that you can create and write files in `{shown_directory}`",
+                already_written(written)
+            )
+        },
         ExitStatus::Io,
     )
+}
+
+/// The opening of a refusal's help: that nothing was written, or which copies already were.
+fn already_written(written: &[String]) -> String {
+    if written.is_empty() {
+        "Nothing was written.".to_owned()
+    } else {
+        format!("Already written: {}.", written.join(", "))
+    }
 }
 
 #[cfg(test)]
@@ -1440,6 +1469,73 @@ mod tests {
             contents(&world.project_file("shared/agents/skills/supdoc/SKILL.md")).as_deref(),
             Some(SKILL),
             "the skill should be written through an in-project symlink"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refusal_after_one_copy_was_written_names_it_and_escapes_the_link_target() {
+        let world = World::new();
+        let elsewhere = tempfile::tempdir().expect("an outside temp directory should be created");
+        let victim = elsewhere.path().join("SKILL\u{1b}[31m.md");
+        fs::write(&victim, "outside\n").expect("the outside file should be written");
+        symlink(&victim, &world.project_file(PROJECT_CLAUDE_SKILL));
+        let base =
+            AbsolutePath::new(world.project.path()).expect("a temp directory should be absolute");
+        let link = beneath(&base, PROJECT_CLAUDE_SKILL);
+        let escape = Boundary::resolve(&base)
+            .admit(&link)
+            .expect_err("a SKILL.md symlinked out should be refused");
+        let session = Session::new(base.clone(), &["skill", "install", "--yes"]);
+        let place = Place {
+            owner: base.clone(),
+            global: false,
+        };
+        let written = [AGENTS_SKILL.to_owned()];
+        let already = format!("Already written: {AGENTS_SKILL}.");
+
+        let leaf = copy_outside(&place, &base, &link, &escape, &session.context, &written);
+        let race = copy_outside(
+            &place,
+            &base,
+            &beneath(&base, AGENTS_SKILL),
+            &Escape::Real { real: None },
+            &session.context,
+            &written,
+        );
+        let failed = write_failed(
+            &SkillChange {
+                action: SkillAction::Create,
+                path: link.clone(),
+                shown: PROJECT_CLAUDE_SKILL.to_owned(),
+            },
+            false,
+            &base,
+            &io::Error::from(io::ErrorKind::PermissionDenied),
+            &written,
+        );
+
+        for error in [&leaf, &race, &failed] {
+            assert!(
+                error.help().starts_with(&already) && !error.help().contains("Nothing was written"),
+                "the help should name the copy already written: {}",
+                error.help()
+            );
+        }
+        assert_eq!(
+            (leaf.code(), race.code()),
+            ("cli-skill-outside-root", "cli-skill-outside-root")
+        );
+        assert!(
+            leaf.message().contains("SKILL\\u{1b}[31m.md") && !leaf.message().contains('\u{1b}'),
+            "the link target should be printed with its control characters escaped: {:?}",
+            leaf.message()
+        );
+        assert!(
+            race.message()
+                .contains("now leads outside the project root"),
+            "{}",
+            race.message()
         );
     }
 
