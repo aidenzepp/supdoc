@@ -19,6 +19,8 @@ use super::project::BuildFailed;
 use super::runner::{Failure, Ran};
 use super::states;
 use super::tools::{Step, ToolCartridge};
+use super::yaml;
+use crate::config::code_blocks::Language;
 
 /// The code for a block its formatter would change.
 const UNFORMATTED: &str = "code-block-unformatted";
@@ -603,7 +605,9 @@ pub(crate) fn build_finding(
 /// `unformatted`, the `code-block-unformatted` error `tool` gave `block` in `doc`, with the fix
 /// that makes the block's body `output`, the formatter's stdout, when [`safe_fix`] allows it.
 /// When [`safe_fix`] refuses, the error keeps no fix and its `code-block-fix-unsafe` warning
-/// follows. The error alone when the block's ranges don't lie inside `doc`.
+/// follows. The error alone when the block's ranges don't lie inside `doc`. A YAML block's fix is
+/// refused the same way unless `output` parses to the same YAML structure as the block (see
+/// [`yaml::same_structure`]): yamlfmt rewrites YAML it reads as something else.
 #[must_use]
 pub(crate) fn fixed(
     unformatted: Finding,
@@ -618,6 +622,24 @@ pub(crate) fn fixed(
         .strip_suffix("\r\n")
         .or_else(|| output.strip_suffix('\n'))
         .unwrap_or(output);
+    if tool.language == Language::Yaml {
+        let Some((marker, _)) = fence_of(block, doc.text()) else {
+            return vec![unformatted];
+        };
+        // Both sides as `input` reads a body: the fix writes `output` as the body's lines, each
+        // ended by a line break, so its last line ends in one too.
+        let after = if output.is_empty() {
+            String::new()
+        } else {
+            format!("{output}\n")
+        };
+        let keeps = input(block, doc.text())
+            .is_some_and(|before| yaml::same_structure(&before, &after, doc.limit));
+        if !keeps {
+            let unsafe_fix = refused(block, &Refusal::ChangesYaml, &what, marker);
+            return vec![unformatted, unsafe_fix];
+        }
+    }
     match safe_fix(block, doc, output, &what) {
         Guarded::Fix(fix) => {
             let help = format!(
@@ -685,6 +707,8 @@ enum Refusal {
     /// A line that isn't part of the block, such as a `//` comment in a doc-comment run, lies
     /// between its body lines, and replacing the body would delete it.
     SkipsLines,
+    /// The YAML the fix writes doesn't parse to the same structure as the block's.
+    ChangesYaml,
 }
 
 /// The fix that makes `block`'s body in `doc` read `body`, which holds no final line ending,
@@ -758,6 +782,10 @@ fn refused(block: &CodeBlock, refusal: &Refusal, what: &str, marker: char) -> Fi
             "would delete a line inside the block that isn't part of it, such as a `//` comment",
             "move that line out of the block or make it a doc-comment line, or edit the block by hand"
                 .to_owned(),
+        ),
+        Refusal::ChangesYaml => (
+            "says something else in YAML, not only lays it out differently",
+            "edit the block by hand, or mark it `format(off: <why>)`".to_owned(),
         ),
     };
     Finding::new(

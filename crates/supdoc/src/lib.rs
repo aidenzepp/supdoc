@@ -234,6 +234,8 @@ pub(crate) mod code_blocks {
     mod rumdl;
     /// TOML's format and lint steps, run by tombi.
     mod tombi;
+    /// YAML's format step, run by yamlfmt.
+    mod yaml;
 
     /// Go's format step, run by gofmt.
     mod go;
