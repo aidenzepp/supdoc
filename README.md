@@ -155,24 +155,6 @@ Threat model, for a checkout you don't trust:
     Set `SUPDOC_TRUST` per job: a repository- or organization-level variable reaches every workflow.
   - `supdoc trust` refuses `$HOME` and its ancestors (and `/`): name the project directory instead.
 
-supdoc refuses to read a doc or linked file larger than 16 MiB (`read-too-large`). Parsing a file can take a
-few hundred times its size in memory, so a hostile file at that size could cost several GB. Change the cap with
-`[limits] max-file-size`, `--max-file-size` or `SUPDOC_MAX_FILE_SIZE`; `0` removes it.
-
-Worst-case peak memory, measured on release builds with hostile shapes (deep nesting, wide arrays):
-
-| Language | Peak per MiB of file | Measured |
-| --- | --- | --- |
-| YAML, one line | about 740 MiB | 2,959 MiB for a 4 MiB file |
-| YAML, many lines | about 315 MiB | 1,315 MiB for a 4 MiB file |
-| JavaScript, TypeScript | about 390 MiB | 1,561 MiB for 4 MiB, 6,228 MiB for 16 MiB |
-| JSON | about 235 MiB | 3,758 MiB for a 16 MiB file |
-| TOML | about 185 MiB | 2,983 MiB for a 16 MiB file |
-
-Ordinary files cost far less. Languages not listed weren't measured. The parse timeout doesn't bound memory.
-If supdoc reads files from untrusted contributors, lower `max-file-size` (for example to `1MiB`) with the flag
-or env variable in that job.
-
 ### Differences from git
 
 supdoc reads ignore files as git does, with these known exceptions:

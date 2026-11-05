@@ -400,9 +400,8 @@ impl Limits {
     /// times its size in memory.
     ///
     /// Changing it also changes the `--max-file-size` help example ("such as 16MiB") in
-    /// `cli/args.rs`, the `max-file-size` row of the `config show` golden
-    /// (`tests/output/snapshots/output__goldens__config_show.snap`) and the 16 MiB figure in the
-    /// README's Configuration section.
+    /// `cli/args.rs` and the `max-file-size` row of the `config show` golden
+    /// (`tests/output/snapshots/output__goldens__config_show.snap`).
     pub(crate) const MAX_FILE_SIZE: SizeLimit = SizeLimit(Some(16 * MIB));
     /// The default lock size ceiling: 16 MiB.
     pub(crate) const MAX_LOCK_SIZE: SizeLimit = SizeLimit(Some(16 * MIB));

@@ -170,6 +170,19 @@ const LIMIT_FLAGS: [(&str, &str, &str, &str); 9] = [
     ),
 ];
 
+/// What `--help` adds under `--max-file-size`: the measured worst-case memory of parsing a file,
+/// from release builds on hostile shapes (HR-PARSE rulings), so a job that reads untrusted files
+/// knows to lower the cap.
+const MAX_FILE_SIZE_MEMORY: &str = "Worst-case peak memory per MiB of file, measured on release \
+builds with hostile shapes (deep nesting, wide arrays):
+- YAML: about 740 MiB on one line, 315 MiB across lines
+- JavaScript, TypeScript: about 390 MiB
+- JSON: about 235 MiB
+- TOML: about 185 MiB
+Ordinary files cost far less, and languages not listed weren't measured. The parse timeout doesn't \
+bound memory. If supdoc reads files from untrusted contributors, lower this (for example to 1MiB) \
+with the flag or SUPDOC_MAX_FILE_SIZE in that job.";
+
 impl LimitFlags {
     /// The default each flag's help shows, in [`LIMIT_FLAGS`] order.
     fn defaults() -> [String; 9] {
@@ -223,13 +236,19 @@ impl Args for LimitFlags {
         LIMIT_FLAGS.into_iter().zip(Self::defaults()).fold(
             command,
             |command, ((id, env, value_name, help), default)| {
+                let help = format!("{help} [default: {default}]");
                 let arg = clap::Arg::new(id)
                     .long(id)
                     .global(true)
                     .env(env)
                     .value_name(value_name)
-                    .help(format!("{help} [default: {default}]"))
+                    .help(help.clone())
                     .help_heading("Limits");
+                let arg = if id == "max-file-size" {
+                    arg.long_help(format!("{help}\n\n{MAX_FILE_SIZE_MEMORY}"))
+                } else {
+                    arg
+                };
                 command.arg(match value_name {
                     "DURATION" => arg.value_parser(TimeLimit::from_str),
                     "COUNT" => arg.value_parser(CountLimit::from_str),

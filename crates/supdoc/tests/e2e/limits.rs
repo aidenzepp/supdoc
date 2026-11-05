@@ -915,3 +915,31 @@ fn a_code_block_source_is_read_under_the_flag_s_file_size_limit() {
         "the flag's limit should bound the source's read: {over:?}"
     );
 }
+
+#[test]
+fn max_file_size_long_help_gives_the_measured_memory_cost_and_short_help_does_not() {
+    let project = Project::fixture("basic");
+
+    let long = project.supdoc(&["check", "--help"]);
+    let short = project.supdoc(&["check", "-h"]);
+
+    let _ = long.assert_exit(0);
+    for line in [
+        "- YAML: about 740 MiB on one line, 315 MiB across lines",
+        "- JavaScript, TypeScript: about 390 MiB",
+        "- JSON: about 235 MiB",
+        "- TOML: about 185 MiB",
+    ] {
+        assert!(
+            long.stdout.contains(line),
+            "`--help` should list {line:?}:\n{}",
+            long.stdout
+        );
+    }
+    let _ = short.assert_exit(0);
+    assert!(
+        short.stdout.contains("--max-file-size") && !short.stdout.contains("about 235 MiB"),
+        "`-h` keeps the one-line help:\n{}",
+        short.stdout
+    );
+}
