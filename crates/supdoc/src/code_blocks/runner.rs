@@ -16,6 +16,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::tools::ToolEnv;
+use crate::config::confine::{self, Boundary};
+use crate::path::AbsolutePath;
 use crate::process::{self, LiveGroup, Spawning, TERMINATING};
 
 /// The most bytes supdoc reads from each of a tool's stdout and stderr, unless its call sets its
@@ -314,9 +316,9 @@ pub(crate) fn neutral_dir(env: &ToolEnv, root: &Path) -> PathBuf {
     candidates
         .into_iter()
         .flatten()
-        .map(|cache| cache.join("supdoc/code-blocks/cwd"))
-        .find(|dir| usable(dir, root))
-        .unwrap_or_else(|| PathBuf::from("/"))
+        .map(|cache| (cache.join("supdoc/code-blocks/cwd"), cache))
+        .find(|(dir, cache)| usable(cache, dir, root))
+        .map_or_else(|| PathBuf::from("/"), |(dir, _)| dir)
 }
 
 /// Whether `path` has a `..` component.
@@ -325,13 +327,12 @@ fn holds_parent(path: &Path) -> bool {
         .any(|component| component == std::path::Component::ParentDir)
 }
 
-/// Whether `dir`, created mode 0700 when missing, is an empty directory only its owner reaches,
-/// outside `root`. Nothing is created unless the deepest existing ancestor of `dir` is outside
-/// `root`.
+/// Whether `dir`, created mode 0700 with its missing parents admitted beneath `cache`, is an empty
+/// directory only its owner reaches, outside `root`. Nothing is created unless the deepest
+/// existing ancestor of `dir` is outside `root`.
 ///
 /// Effect: reads metadata along `dir`, then creates the directory and reads its entries.
-fn usable(dir: &Path, root: &Path) -> bool {
-    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+fn usable(cache: &Path, dir: &Path, root: &Path) -> bool {
     let Ok(real_root) = root.canonicalize() else {
         return false;
     };
@@ -341,20 +342,58 @@ fn usable(dir: &Path, root: &Path) -> bool {
     if existing.is_none_or(|existing| existing.starts_with(&real_root)) {
         return false;
     }
-    let _created = std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir);
-    let Ok(meta) = std::fs::symlink_metadata(dir) else {
+    let (Some(cache), Some(given)) = (exact(cache), exact(dir)) else {
         return false;
     };
+    if create_private(&Boundary::resolve(&cache), &given).is_none() {
+        return false;
+    }
     let Ok(real) = dir.canonicalize() else {
         return false;
     };
-    meta.is_dir()
-        && meta.permissions().mode().trailing_zeros() >= 6
-        && !real.starts_with(&real_root)
+    !real.starts_with(&real_root)
         && std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_none())
+}
+
+/// `path` as an [`AbsolutePath`] when normalizing doesn't move it: it is absolute and holds no
+/// `..`, so a boundary built from it names the place that was checked. `None` otherwise.
+#[must_use]
+pub(crate) fn exact(path: &Path) -> Option<AbsolutePath> {
+    AbsolutePath::new(path).filter(|exact| exact.as_path() == path)
+}
+
+/// `dir` as a boundary, once it is created mode 0700 with its missing parents, admitted beneath
+/// `parent`, and found to be a directory (not a link) only its owner reaches. `None` when it isn't
+/// admitted, can't be created, or isn't such a directory.
+///
+/// Effect: creates the directory and reads its metadata.
+#[must_use]
+pub(crate) fn create_private(parent: &Boundary, dir: &AbsolutePath) -> Option<Boundary> {
+    use std::os::unix::fs::PermissionsExt as _;
+    confine::create_dir_all(&parent.admit(dir).ok()?, 0o700).ok()?;
+    let meta = std::fs::symlink_metadata(dir.as_path()).ok()?;
+    (meta.is_dir() && meta.permissions().mode().trailing_zeros() >= 6)
+        .then(|| Boundary::resolve(dir))
+}
+
+/// Writes `text` to `file`, admitted beneath the private directory `dir`, mode 0600, unless it is
+/// already a file holding exactly that. Anything else at the name is replaced through a temporary
+/// file beside it renamed into place, so concurrent runs never see half a file. `None` when it
+/// isn't admitted or can't be written.
+///
+/// Effect: may create a temporary file and replace `file`.
+#[must_use]
+pub(crate) fn write_private(dir: &Boundary, file: &AbsolutePath, text: &str) -> Option<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let current = std::fs::symlink_metadata(file.as_path())
+        .ok()
+        .filter(std::fs::Metadata::is_file)
+        .and_then(|_| std::fs::read_to_string(file.as_path()).ok());
+    if current.as_deref() == Some(text) {
+        return Some(());
+    }
+    let mode = std::fs::Permissions::from_mode(0o600);
+    confine::write_atomically(&dir.admit(file).ok()?, text.as_bytes(), Some(&mode)).ok()
 }
 
 #[cfg(test)]
@@ -366,8 +405,12 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
-    use super::{CAP, Call, Cwd, Failure, Ran, neutral_dir, private_dir, run};
+    use super::{
+        CAP, Call, Cwd, Failure, Ran, create_private, exact, neutral_dir, private_dir, run,
+        write_private,
+    };
     use crate::code_blocks::tools::ToolEnv;
+    use crate::config::confine::Boundary;
 
     /// A fresh directory holding a `root` project, a `home` and a `bin` with the stub `script`.
     struct Fixture {
@@ -878,5 +921,48 @@ mod tests {
 
         assert!(!ran.success);
         assert_eq!(ran.stderr, b"bad\n");
+    }
+
+    #[test]
+    fn a_cache_directory_swapped_for_a_link_out_gives_no_neutral_directory_and_creates_nothing_there()
+     {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let outside = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        std::os::unix::fs::symlink(outside.path(), cache.path().join("supdoc"))
+            .expect("the planted link");
+        let path = cache.path().to_path_buf();
+        let env =
+            ToolEnv::from_vars(|name| (name == "XDG_CACHE_HOME").then(|| path.clone().into()));
+
+        let neutral = neutral_dir(&env, root.path());
+
+        assert_eq!(neutral, PathBuf::from("/"));
+        let left: Vec<_> = fs::read_dir(outside.path())
+            .expect("the outside dir should be listable")
+            .collect();
+        assert!(
+            left.is_empty(),
+            "nothing should be created outside: {left:?}"
+        );
+    }
+
+    #[test]
+    fn a_private_file_planted_as_a_link_out_is_not_written_and_what_it_leads_to_is_untouched() {
+        let dir = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let outside = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let cache = exact(dir.path()).expect("a temp dir is a plain absolute path");
+        let private = exact(&dir.path().join("private")).expect("a plain child");
+        let own = create_private(&Boundary::resolve(&cache), &private)
+            .expect("the private directory should be creatable");
+        let pointee = outside.path().join("kept");
+        fs::write(&pointee, "kept").expect("the outside file");
+        let file = private.as_path().join("config.toml");
+        std::os::unix::fs::symlink(&pointee, &file).expect("the planted link");
+
+        let written = write_private(&own, &exact(&file).expect("a plain child"), "replaced");
+
+        assert_eq!(written, None);
+        assert_eq!(fs::read_to_string(&pointee).ok().as_deref(), Some("kept"));
     }
 }

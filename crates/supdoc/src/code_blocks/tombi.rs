@@ -27,7 +27,9 @@ use super::format::{self, ParseError};
 use super::lint::{self, Diagnostic};
 use super::runner::{self, Failure, Ran};
 use super::tools::{Step, ToolEnv};
+use crate::config::confine::Boundary;
 use crate::hash::Hash;
+use crate::path::AbsolutePath;
 
 /// The config names tombi looks for in a directory, in its own order. `pyproject.toml` counts
 /// only when it has a `[tool.tombi]` table.
@@ -597,82 +599,37 @@ fn private_config(
     root: &Path,
     table: &toml::Table,
 ) -> Result<PathBuf, Option<&'static str>> {
-    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
-
     let neutral = runner::neutral_dir(env, root);
     if neutral == Path::new("/") {
         return Err(None);
     }
     let text = toml::to_string(table).map_err(|_| Some("couldn't be written again as TOML"))?;
-    let parent = neutral.parent().ok_or(None)?.join("tombi-config");
-    let home = parent.join(Hash::digest(text.as_bytes()).to_string());
-    let private = |path: &Path| {
-        fs::symlink_metadata(path)
-            .is_ok_and(|meta| meta.is_dir() && meta.permissions().mode().trailing_zeros() >= 6)
-    };
-    for path in [&parent, &home, &home.join("tombi")] {
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(path)
-            .map_err(|_| None)?;
-        if !private(path) {
-            return Err(None);
-        }
-    }
-    for (file, content) in [
-        (parent.join(".tombi.toml"), ""),
-        (home.join(".tombi.toml"), text.as_str()),
-        (home.join("tombi/config.toml"), text.as_str()),
+    let cache = runner::exact(neutral.parent().ok_or(None)?).ok_or(None)?;
+    let child = |dir: &AbsolutePath, name: &str| AbsolutePath::new(&dir.as_path().join(name));
+    let parent = child(&cache, "tombi-config").ok_or(None)?;
+    let home = child(&parent, &Hash::digest(text.as_bytes()).to_string()).ok_or(None)?;
+    let xdg = child(&home, "tombi").ok_or(None)?;
+    let parent_boundary =
+        runner::create_private(&Boundary::resolve(&cache), &parent).ok_or(None)?;
+    let home_boundary = runner::create_private(&parent_boundary, &home).ok_or(None)?;
+    let xdg_boundary = runner::create_private(&home_boundary, &xdg).ok_or(None)?;
+    for (dir, file, content) in [
+        (&parent_boundary, child(&parent, ".tombi.toml"), ""),
+        (&home_boundary, child(&home, ".tombi.toml"), text.as_str()),
+        (&xdg_boundary, child(&xdg, "config.toml"), text.as_str()),
     ] {
-        write_private(&file, content).ok_or(None)?;
+        runner::write_private(dir, &file.ok_or(None)?, content).ok_or(None)?;
     }
     // Its real path: tombi resolves the working directory's, and matches override patterns
     // against the doc only when the doc's path, which can't be resolved, starts with it.
-    home.canonicalize().map_err(|_| None)
-}
-
-/// Writes `content` to `file`, mode 0600, unless it already holds exactly that: through a
-/// temporary file in the same directory renamed into place. `None` when it can't.
-///
-/// Effect: may create the temporary file and replace `file`.
-fn write_private(file: &Path, content: &str) -> Option<()> {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static WRITERS: AtomicUsize = AtomicUsize::new(0);
-    let current = fs::symlink_metadata(file)
-        .ok()
-        .filter(fs::Metadata::is_file)
-        .and_then(|_| fs::read_to_string(file).ok());
-    if current.as_deref() == Some(content) {
-        return Some(());
-    }
-    let temp = file.with_file_name(format!(
-        ".tombi.{}.{}.tmp",
-        std::process::id(),
-        WRITERS.fetch_add(1, Ordering::Relaxed)
-    ));
-    let written = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temp)
-        .and_then(|mut out| out.write_all(content.as_bytes()))
-        .and_then(|()| fs::rename(&temp, file));
-    if written.is_err() {
-        let _own = fs::remove_file(&temp);
-        return None;
-    }
-    Some(())
+    home.as_path().canonicalize().map_err(|_| None)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         Project, Refusal, Skip, diagnostics, has_directive, linted_nothing, names_schema,
-        parse_error, pattern_root, project, skip, verified,
+        parse_error, pattern_root, private_config, project, skip, verified,
     };
     use crate::code_blocks::format::ParseError;
     use crate::code_blocks::lint::Diagnostic;
@@ -1052,5 +1009,35 @@ mod tests {
         let refused = project(&ToolEnv::default(), root.path(), &root.path().join("a.md"));
 
         assert_eq!(refused, Err(Refusal::NoPrivateDir));
+    }
+
+    #[test]
+    fn a_config_directory_swapped_for_a_link_out_gets_no_private_copy_and_creates_nothing_there() {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let outside = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        fs::set_permissions(outside.path(), fs::Permissions::from_mode(0o700))
+            .expect("the mode should be settable");
+        let code_blocks = cache.path().join("supdoc/code-blocks");
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&code_blocks)
+            .expect("supdoc's cache directory");
+        std::os::unix::fs::symlink(outside.path(), code_blocks.join("tombi-config"))
+            .expect("the planted link");
+        let env = env_in(cache.path());
+
+        let written = private_config(&env, root.path(), &toml::Table::new());
+
+        assert!(written == Err(None), "got {written:?}");
+        let left: Vec<_> = fs::read_dir(outside.path())
+            .expect("the outside dir should be listable")
+            .collect();
+        assert!(
+            left.is_empty(),
+            "nothing should be created outside: {left:?}"
+        );
     }
 }

@@ -54,6 +54,7 @@ use super::lint::{self, Diagnostic};
 use super::runner::{self, Failure, Ran};
 use super::tools::ToolEnv;
 use crate::cartridges::yaml as yaml_cartridge;
+use crate::config::confine::Boundary;
 use crate::hash::Hash;
 use crate::limits::TimeLimit;
 use crate::path::AbsolutePath;
@@ -500,13 +501,14 @@ fn checked(setting: &Setting) -> Result<String, String> {
 
 /// Writes yamlfmt's config `text` into `.yamlfmt` in a private directory (see [`private_file`]).
 fn private_config(env: &ToolEnv, root: &Path, text: &str) -> Option<PathBuf> {
-    private_file(env, root, ("yamlfmt-config", ".yamlfmt"), text)
+    private_file(env, root, ("yamlfmt-config", ".yamlfmt"), text).map(|(_, file)| file)
 }
 
 /// Writes `text` into the file `name` in a private directory named by the hash of `text`, under
-/// supdoc's directory `kind`, and returns the file's path. A file already there with the same
-/// content is kept; anything else at the name is replaced by writing a temporary file in the
-/// directory and renaming it into place, so concurrent runs never see half a file.
+/// supdoc's directory `kind`, and returns that directory as a boundary with the file's path. A
+/// file already there with the same content is kept; anything else at the name is replaced by
+/// writing a temporary file in the directory and renaming it into place, so concurrent runs never
+/// see half a file. Each directory and the file are admitted beneath the directory they go in.
 ///
 /// Effect: creates the directories mode 0700 and the file mode 0600, and may replace a stale file.
 ///
@@ -516,56 +518,23 @@ fn private_file(
     root: &Path,
     (kind, name): (&str, &str),
     text: &str,
-) -> Option<PathBuf> {
-    use std::io::Write as _;
-    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
+) -> Option<(Boundary, PathBuf)> {
     let neutral = runner::neutral_dir(env, root);
     if neutral == Path::new("/") {
         return None;
     }
-    let parent = neutral.parent()?.join(kind);
-    let dir = parent.join(Hash::digest(text.as_bytes()).to_string());
-    let private = |path: &Path| {
-        fs::symlink_metadata(path)
-            .is_ok_and(|meta| meta.is_dir() && meta.permissions().mode().trailing_zeros() >= 6)
-    };
-    for path in [&parent, &dir] {
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(path)
-            .ok()?;
-        if !private(path) {
-            return None;
-        }
-    }
-    let file = dir.join(name);
-    let current = fs::symlink_metadata(&file)
-        .ok()
-        .filter(fs::Metadata::is_file)
-        .and_then(|_| fs::read_to_string(&file).ok());
-    if current.as_deref() != Some(text) {
-        static WRITERS: AtomicUsize = AtomicUsize::new(0);
-        let temp = dir.join(format!(
-            "{name}.{}.{}.tmp",
-            std::process::id(),
-            WRITERS.fetch_add(1, Ordering::Relaxed)
-        ));
-        let written = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temp)
-            .and_then(|mut out| out.write_all(text.as_bytes()))
-            .and_then(|()| fs::rename(&temp, &file));
-        if written.is_err() {
-            let _own = fs::remove_file(&temp);
-            return None;
-        }
-    }
-    Some(file)
+    let cache = runner::exact(neutral.parent()?)?;
+    let parent = AbsolutePath::new(&cache.as_path().join(kind))?;
+    let dir = AbsolutePath::new(
+        &parent
+            .as_path()
+            .join(Hash::digest(text.as_bytes()).to_string()),
+    )?;
+    let file = AbsolutePath::new(&dir.as_path().join(name))?;
+    let parent_boundary = runner::create_private(&Boundary::resolve(&cache), &parent)?;
+    let own = runner::create_private(&parent_boundary, &dir)?;
+    runner::write_private(&own, &file, text)?;
+    Some((own, file.as_path().to_path_buf()))
 }
 
 /// The most levels of mappings and sequences, block and flow alike, a block's YAML may nest for
@@ -993,11 +962,10 @@ pub(crate) fn lint_args(env: &ToolEnv, root: &Path, doc: &Path) -> Result<Lint, 
             String::new(),
         ),
     };
-    let private = private_file(env, root, ("yamllint-config", "config.yaml"), &text.text)
+    let (dir, private) = private_file(env, root, ("yamllint-config", "config.yaml"), &text.text)
         .ok_or(Refusal::NoPrivateDir)?;
-    let cwd = private
-        .parent()
-        .and_then(|dir| empty_private_dir(&dir.join("cwd")))
+    let cwd = AbsolutePath::new(&dir.dir().join("cwd"))
+        .and_then(|cwd| empty_private_dir(&dir, &cwd))
         .ok_or(Refusal::NoPrivateDir)?;
     Ok(Lint {
         flags: vec![OsString::from("-c"), private.into_os_string()],
@@ -1008,22 +976,14 @@ pub(crate) fn lint_args(env: &ToolEnv, root: &Path, doc: &Path) -> Result<Lint, 
     })
 }
 
-/// `dir`, created mode 0700 when missing, when it is a directory only its owner reaches and holds
-/// nothing. `None` otherwise.
+/// `dir`, created mode 0700 when missing and admitted beneath `parent`, when it is a directory
+/// only its owner reaches and holds nothing. `None` otherwise.
 ///
 /// Effect: may create the directory.
-fn empty_private_dir(dir: &Path) -> Option<PathBuf> {
-    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
-
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
-        .ok()?;
-    let meta = fs::symlink_metadata(dir).ok()?;
-    let private = meta.is_dir() && meta.permissions().mode().trailing_zeros() >= 6;
-    let empty = fs::read_dir(dir).ok()?.next().is_none();
-    (private && empty).then(|| dir.to_path_buf())
+fn empty_private_dir(parent: &Boundary, dir: &AbsolutePath) -> Option<PathBuf> {
+    let _dir = runner::create_private(parent, dir)?;
+    let empty = fs::read_dir(dir.as_path()).ok()?.next().is_none();
+    empty.then(|| dir.as_path().to_path_buf())
 }
 
 /// The config yamllint would read for `doc` were it run in `doc`'s directory: the first of
@@ -1776,8 +1736,8 @@ mod tests {
     use super::{
         CONFIG_FILES, LINT_CONFIG_FILES, LINT_RULES, MAX_NESTING, Refusal, forbidden_char,
         holds_no_yaml, internal_error, lint_args, lint_config, lint_diagnostics, lint_verdict,
-        locale_failed, parse_error, project_args, read_config, rejected_config, same_structure,
-        shape, switches_lint_off,
+        locale_failed, parse_error, private_config, project_args, read_config, rejected_config,
+        same_structure, shape, switches_lint_off,
     };
     use crate::code_blocks::format::{self, ParseError};
     use crate::code_blocks::lint::{self, Diagnostic};
@@ -2620,5 +2580,35 @@ mod tests {
             b"invalid config: rule \"truthy\": should be either \"enable\", \"disable\" or a dict\n"
         ));
         assert!(!rejected_config(b"Traceback (most recent call last):\n"));
+    }
+
+    #[test]
+    fn a_config_directory_swapped_for_a_link_out_gets_no_private_copy_and_creates_nothing_there() {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let outside = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        fs::set_permissions(outside.path(), fs::Permissions::from_mode(0o700))
+            .expect("the mode should be settable");
+        let code_blocks = cache.path().join("supdoc/code-blocks");
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&code_blocks)
+            .expect("supdoc's cache directory");
+        std::os::unix::fs::symlink(outside.path(), code_blocks.join("yamlfmt-config"))
+            .expect("the planted link");
+        let env = env_in(cache.path());
+
+        let written = private_config(&env, root.path(), "formatter:\n  type: basic\n");
+
+        assert!(written.is_none(), "got {written:?}");
+        let left: Vec<_> = fs::read_dir(outside.path())
+            .expect("the outside dir should be listable")
+            .collect();
+        assert!(
+            left.is_empty(),
+            "nothing should be created outside: {left:?}"
+        );
     }
 }

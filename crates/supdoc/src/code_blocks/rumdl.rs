@@ -17,7 +17,9 @@ use super::format::ParseError;
 use super::lint::{self, Diagnostic};
 use super::runner::{self, Failure, Ran};
 use super::tools::ToolEnv;
+use crate::config::confine::Boundary;
 use crate::hash::Hash;
+use crate::path::AbsolutePath;
 
 /// The config names rumdl looks for in a directory, in its own order. `pyproject.toml` counts
 /// only when it has a `[tool.rumdl]` table.
@@ -363,56 +365,23 @@ fn private_config(
     root: &Path,
     table: &toml::Table,
 ) -> Result<PathBuf, Option<&'static str>> {
-    use std::io::Write as _;
-    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     let neutral = runner::neutral_dir(env, root);
     if neutral == Path::new("/") {
         return Err(None);
     }
     let text = toml::to_string(table).map_err(|_| Some("couldn't be written again as TOML"))?;
-    let parent = neutral.parent().ok_or(None)?.join("rumdl-config");
-    let dir = parent.join(Hash::digest(text.as_bytes()).to_string());
-    let private = |path: &Path| {
-        fs::symlink_metadata(path)
-            .is_ok_and(|meta| meta.is_dir() && meta.permissions().mode().trailing_zeros() >= 6)
-    };
-    for path in [&parent, &dir, &dir.join(".git")] {
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(path)
-            .map_err(|_| None)?;
-        if !private(path) {
-            return Err(None);
-        }
-    }
-    let file = dir.join("rumdl.toml");
-    let current = fs::symlink_metadata(&file)
-        .ok()
-        .filter(fs::Metadata::is_file)
-        .and_then(|_| fs::read_to_string(&file).ok());
-    if current.as_deref() != Some(text.as_str()) {
-        static WRITERS: AtomicUsize = AtomicUsize::new(0);
-        let temp = dir.join(format!(
-            ".rumdl.toml.{}.{}.tmp",
-            std::process::id(),
-            WRITERS.fetch_add(1, Ordering::Relaxed)
-        ));
-        let written = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temp)
-            .and_then(|mut out| out.write_all(text.as_bytes()))
-            .and_then(|()| fs::rename(&temp, &file));
-        if written.is_err() {
-            let _own = fs::remove_file(&temp);
-            return Err(None);
-        }
-    }
-    Ok(dir)
+    let cache = runner::exact(neutral.parent().ok_or(None)?).ok_or(None)?;
+    let child = |dir: &AbsolutePath, name: &str| AbsolutePath::new(&dir.as_path().join(name));
+    let parent = child(&cache, "rumdl-config").ok_or(None)?;
+    let dir = child(&parent, &Hash::digest(text.as_bytes()).to_string()).ok_or(None)?;
+    let git = child(&dir, ".git").ok_or(None)?;
+    let file = child(&dir, "rumdl.toml").ok_or(None)?;
+    let parent_boundary =
+        runner::create_private(&Boundary::resolve(&cache), &parent).ok_or(None)?;
+    let own = runner::create_private(&parent_boundary, &dir).ok_or(None)?;
+    let _git = runner::create_private(&own, &git).ok_or(None)?;
+    runner::write_private(&own, &file, &text).ok_or(None)?;
+    Ok(dir.as_path().to_path_buf())
 }
 
 /// What in the config `table` rumdl mustn't be given, `None` when nothing. Keys are compared as
@@ -444,7 +413,8 @@ fn nested(value: &toml::Value) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Project, Refusal, candidates, diagnostics, pattern_root, project_args, unsafe_part,
+        Project, Refusal, candidates, diagnostics, pattern_root, private_config, project_args,
+        unsafe_part,
     };
     use crate::code_blocks::lint::Diagnostic;
     use crate::code_blocks::tools::ToolEnv;
@@ -784,5 +754,35 @@ mod tests {
         let refused = project_args(&ToolEnv::default(), root.path(), &root.path().join("a.md"));
 
         assert_eq!(refused, Err(Refusal::NoPrivateDir));
+    }
+
+    #[test]
+    fn a_config_directory_swapped_for_a_link_out_gets_no_private_copy_and_creates_nothing_there() {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let outside = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        fs::set_permissions(outside.path(), fs::Permissions::from_mode(0o700))
+            .expect("the mode should be settable");
+        let code_blocks = cache.path().join("supdoc/code-blocks");
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&code_blocks)
+            .expect("supdoc's cache directory");
+        std::os::unix::fs::symlink(outside.path(), code_blocks.join("rumdl-config"))
+            .expect("the planted link");
+        let env = env_in(cache.path());
+
+        let written = private_config(&env, root.path(), &toml::Table::new());
+
+        assert!(written == Err(None), "got {written:?}");
+        let left: Vec<_> = fs::read_dir(outside.path())
+            .expect("the outside dir should be listable")
+            .collect();
+        assert!(
+            left.is_empty(),
+            "nothing should be created outside: {left:?}"
+        );
     }
 }
