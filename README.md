@@ -67,9 +67,9 @@ Commit `supdoc.config.toml` and `supdoc.lock`, and run `supdoc check` in CI.
 
 | Command | Writes | Does |
 | --- | --- | --- |
-| `check [PATH]...` | no | Checks links and code blocks; exits 1 when one needs attention |
+| `check [PATH]...` | its cache | Checks links and code blocks; exits 1 when one needs attention |
 | `update [PATH]...` | `supdoc.lock` | Records the current code's hashes |
-| `fix [PATH]...` | docs | Repairs links whose fix is certain, and stale or unformatted code blocks |
+| `fix [PATH]...` | docs, comments, its cache | Repairs links whose fix is certain, and stale or unformatted code blocks |
 | `list [TARGET]` | no | Lists links and their states, such as who documents `src/lib.rs#add` |
 | `resolve FILE [SYMBOL]` | no | Lists a file's symbols, or checks that one resolves |
 | `init` | config | Writes a starter `supdoc.config.toml`; refuses to overwrite |
@@ -79,12 +79,14 @@ Commit `supdoc.config.toml` and `supdoc.lock`, and run `supdoc check` in CI.
 | `completions SHELL` | no | Prints a shell completion script |
 | `skill install` | skill files | Installs supdoc's agent skill |
 | `upgrade [VERSION]` | the binary | Installs a newer or older supdoc with cargo |
-| `trust [PATH]` | state directory | Trusts a checkout to run its code blocks' build tools; `--revoke` undoes it |
+| `trust [PATH]` | the trust store | Trusts a checkout to run its code blocks' build tools; `--revoke` undoes it |
 
 `update`, `fix`, `namespace rename`, `skill install` and `upgrade` preview unless given `--yes`. `init`
 writes at once, and `--dry-run` previews it. Every command accepts `--json` and `--jsonl`. Exit codes: 0
 clean, 1 failing or refused, 2 usage error, 70 supdoc bug, 74 I/O error, 78 config or lockfile error.
-Each command's `--help` is the reference for its flags.
+Each command's `--help` is the reference for its flags. No command writes in the project beyond what the
+table names. With code blocks on, `check` and `fix` keep a result cache, and a trusted build its output,
+under `~/.cache/supdoc` (or `$XDG_CACHE_HOME/supdoc`).
 
 ## Configuration
 
@@ -114,26 +116,31 @@ supdoc works without a config. `supdoc init` writes this, with every key comment
 ```
 
 supdoc searches for the config from the current directory up to the top of the git work tree, and `-c`
-names one instead. `supdoc.lock` sits beside it. supdoc skips the files your `.gitignore` and `.ignore`
-files skip.
+names one instead. `supdoc.lock` sits beside it. supdoc reads the files your `.gitignore`, `.ignore` and git
+exclude files leave, with a few differences from git that `supdoc check --help` lists.
 
 A `[features.code-blocks]` table, even an empty one, turns on code-block checking. A block marked
-`from(PATH#SYMBOL)` must stay a copy of that symbol, and `supdoc fix --yes` copies the current text in. A
-block marked `uses(PATH#SYMBOL)` is tracked like a link. A language's table, such as
+`from(PATH#SYMBOL)` must stay a copy of that symbol. A block marked `uses(PATH#SYMBOL)` is tracked like a link. A language's table, such as
 `[features.code-blocks.rust]`, turns on that language's formatter and linter. `supdoc check --help` lists
 every attribute and how to opt a block out.
 
 ## Safety
 
-- Outside the project root, supdoc reads only its config chain, ignore files, and the git config that
-  names the global excludes file. It never reads, hashes or quotes a linked file outside the root.
+- Outside the project root, supdoc reads only its own inputs: its config chain, ignore files, the git
+  config that names the global excludes file, a linked worktree's `.git` and `commondir`, the trust
+  store, its result cache, and, for `upgrade`, cargo's `.crates2.json`. It never reads, hashes or quotes
+  a linked file outside the root, and never quotes an ignore rule or git config line from there.
 - `supdoc upgrade` is the only command that uses the network. Nothing checks for updates on its own.
 - Code-block tools come from supdoc's own list, never from a path in the config or a binary in the
   checkout. By default they read only the block and plain config files.
+- A `rust-toolchain.toml` that names a path is ignored, and supdoc never downloads a toolchain.
+- A Rust block that reads a file or an environment variable at compile time (`include_str!`, `env!`)
+  isn't checked.
 - Linting Rust blocks with clippy builds your project and runs its build scripts and proc macros, so it
   happens only in a checkout you trust. `supdoc trust` records trust, and `SUPDOC_TRUST=1` grants it
   for one run. No file in the checkout can grant it. supdoc doesn't check who owns the trust store, so
-  anyone who can write it can grant trust.
+  anyone who can write it can grant trust. A step held for trust gets one `code-block-not-trusted`
+  warning per run: exit 0, but a failure under `--deny-warnings`.
 - Never set `SUPDOC_TRUST` in a CI job that has secrets and checks out a pull request's code. Don't run
   supdoc on an untrusted pull request after writing secrets into the checkout. `supdoc trust --help`
   covers worktrees and CI runners.
