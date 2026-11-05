@@ -1,6 +1,7 @@
 //! The contracts only the running binary can show: what touches the disk, what reaches each
 //! stream, color and glyphs, a closed pipe, and `ok` against the exit code.
 
+use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader};
 use std::process::Stdio;
 
@@ -418,6 +419,242 @@ fn completions_and_schema_work_with_a_broken_config() {
     }
 }
 
+/// One line of supdoc's production source, as [`production_lines`] found it.
+struct SourceLine {
+    /// The file, relative to `crates/supdoc`, such as `src/check/fix.rs`.
+    file: String,
+    /// The 1-based line number.
+    number: usize,
+    /// The line's text.
+    text: String,
+}
+
+/// Every `.rs` file in `crates/supdoc/src`, with its text.
+fn source_files() -> Vec<(std::path::PathBuf, String)> {
+    let mut files = Vec::new();
+    let mut pending = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("a source directory should be readable") {
+            let path = entry.expect("a source entry should be readable").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                let text = std::fs::read_to_string(&path).expect("a source file should be UTF-8");
+                files.push((path, text));
+            }
+        }
+    }
+    files
+}
+
+/// The files that `#[cfg(test)] mod name;` declares, such as `src/cli/testing.rs`: test code that
+/// lives in a file of its own.
+fn test_only_files(files: &[(std::path::PathBuf, String)]) -> BTreeSet<std::path::PathBuf> {
+    let mut test_only = BTreeSet::new();
+    for (path, text) in files {
+        let stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("");
+        let parent = path
+            .parent()
+            .expect("a source file should have a directory");
+        let children = if ["mod", "lib", "main"].contains(&stem) {
+            parent.to_path_buf()
+        } else {
+            parent.join(stem)
+        };
+        let lines: Vec<&str> = text.lines().map(str::trim).collect();
+        for pair in lines.windows(2) {
+            let [attribute, declaration] = pair else {
+                continue;
+            };
+            let name = declaration
+                .rsplit_once("mod ")
+                .and_then(|(_, rest)| rest.strip_suffix(';'));
+            if let (true, Some(name)) = (*attribute == "#[cfg(test)]", name) {
+                let _new = test_only.insert(children.join(format!("{name}.rs")));
+                let _new = test_only.insert(children.join(name).join("mod.rs"));
+            }
+        }
+    }
+    test_only
+}
+
+/// Every production line in `crates/supdoc/src`: each line of a `.rs` file other than
+/// `tests.rs`, `fixtures.rs` and the files [`test_only_files`] finds, before the
+/// `#[cfg(test)] mod tests {` that ends a file, that is not a comment.
+fn production_lines() -> Vec<SourceLine> {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let files = source_files();
+    let test_only = test_only_files(&files);
+    let mut found = Vec::new();
+    for (path, text) in &files {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if name == "tests.rs" || name == "fixtures.rs" || test_only.contains(path) {
+            continue;
+        }
+        let file = path
+            .strip_prefix(manifest)
+            .expect("a source file should lie beneath the manifest dir")
+            .display()
+            .to_string();
+        let lines: Vec<&str> = text.lines().collect();
+        let production = lines
+            .iter()
+            .enumerate()
+            .take_while(|(index, line)| {
+                let opens_test_module = line.trim_start().starts_with("mod tests {")
+                    && index
+                        .checked_sub(1)
+                        .and_then(|previous| lines.get(previous))
+                        .is_some_and(|previous| previous.trim() == "#[cfg(test)]");
+                !opens_test_module
+            })
+            .filter(|(_, line)| !line.trim_start().starts_with("//"));
+        found.extend(production.map(|(index, line)| SourceLine {
+            file: file.clone(),
+            number: index + 1,
+            text: (*line).to_owned(),
+        }));
+    }
+    found
+}
+
+/// Whether `line` calls `call` where it starts a path or method, not inside a longer name:
+/// `fs::write(` matches `std::fs::write(` but `LintFile::create(` is not `File::create(`.
+fn calls(line: &str, call: &str) -> bool {
+    line.match_indices(call).any(|(at, _)| {
+        call.starts_with('.')
+            || line
+                .get(..at)
+                .and_then(|before| before.chars().next_back())
+                .is_none_or(|previous| !(previous.is_alphanumeric() || previous == '_'))
+    })
+}
+
+/// Whether `line` joins a path onto a `.as_str()` argument, such as `root.join(file.as_str())`:
+/// a raw join of text read from a file, which I1 routes through `crate::path`'s typed joins.
+fn joins_raw_text(line: &str) -> bool {
+    line.match_indices(".join(").any(|(at, open)| {
+        let Some(rest) = line.get(at + open.len()..) else {
+            return false;
+        };
+        let mut depth = 1_usize;
+        let close = rest.char_indices().find_map(|(index, c)| {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            (depth == 0).then_some(index)
+        });
+        close
+            .and_then(|close| rest.get(..close))
+            .is_some_and(|argument| argument.trim_end().ends_with(".as_str()"))
+    })
+}
+
+/// The `std::fs` calls (and `OpenOptions` flags) that write, rename, delete, create or change a
+/// path. I2 allows them only in `config/confine.rs`, behind `Boundary::admit`.
+const FS_MUTATORS: &[&str] = &[
+    "fs::write(",
+    "fs::rename(",
+    "fs::remove_file(",
+    "fs::remove_dir(",
+    "fs::remove_dir_all(",
+    "fs::create_dir(",
+    "fs::create_dir_all(",
+    "fs::hard_link(",
+    "fs::copy(",
+    "fs::set_permissions(",
+    "fs::soft_link(",
+    "fs::symlink(",
+    "File::create(",
+    "File::create_new(",
+    "DirBuilder::new(",
+    ".write(true)",
+    ".append(true)",
+    ".truncate(true)",
+    ".create(true)",
+    ".create_new(true)",
+];
+
+/// Whether `line` calls one of [`FS_MUTATORS`].
+fn mutates(line: &str) -> bool {
+    FS_MUTATORS.iter().any(|call| calls(line, call))
+}
+
+/// The one file allowed to call a [`FS_MUTATORS`] entry.
+const CONFINE: &str = "src/config/confine.rs";
+
+/// Every production line `matches`, as `file:line: text`.
+fn offending_lines(matches: impl Fn(&SourceLine) -> bool) -> Vec<String> {
+    production_lines()
+        .iter()
+        .filter(|line| matches(line))
+        .map(|line| format!("{}:{}: {}", line.file, line.number, line.text.trim()))
+        .collect()
+}
+
+#[test]
+fn production_code_never_joins_a_path_onto_raw_text() {
+    let offending = offending_lines(|line| joins_raw_text(&line.text));
+
+    assert!(
+        offending.is_empty(),
+        "these lines join a path onto `.as_str()` text; build the path with `crate::path`'s typed \
+         joins (`Beneath`, `FixedPath`, `join_within`) instead:\n{}",
+        offending.join("\n")
+    );
+}
+
+#[test]
+fn only_confine_calls_a_std_fs_mutator() {
+    let offending = offending_lines(|line| line.file != CONFINE && mutates(&line.text));
+
+    assert!(
+        offending.is_empty(),
+        "these lines write, rename, delete or create a path outside {CONFINE}; admit the path \
+         with `Boundary::admit` and call the write primitive that takes the `Admitted` token:\n{}",
+        offending.join("\n")
+    );
+}
+
+#[test]
+fn the_raw_join_scan_sees_through_nested_calls() {
+    assert!(joins_raw_text("let path = root.join(file.as_str());"));
+    assert!(joins_raw_text("open(root.join(entry.path.as_str()))?"));
+    assert!(!joins_raw_text(
+        "let path = root.join(FixedPath::new(\"a\").as_path());"
+    ));
+    assert!(!joins_raw_text(
+        "let text = parts.join(\", \"); name.as_str()"
+    ));
+    assert!(!joins_raw_text("root.join(name.as_str().trim())"));
+}
+
+#[test]
+fn the_mutator_scan_sees_each_kind_of_write() {
+    assert!(mutates("let _ = std::fs::remove_file(&path);"));
+    assert!(mutates("fs::rename(&from, &to)?;"));
+    assert!(mutates("fs::create_dir_all(&dir)?;"));
+    assert!(mutates("    .create_new(true)"));
+    assert!(!mutates("let text = fs::read_to_string(&path)?;"));
+    assert!(!mutates("fs::OpenOptions::new().read(true)"));
+}
+
+#[test]
+fn the_mutator_scan_skips_longer_names() {
+    assert!(calls("std::fs::write(&path, text)?;", "fs::write("));
+    assert!(calls("File::create(&path)", "File::create("));
+    assert!(!calls("biome::LintFile::create(&neutral)", "File::create("));
+    assert!(!calls("tokio_fs::write(&path)", "fs::write("));
+}
+
 /// Every help names a fix. Unix only, since some codes are reached through file
 /// permissions, `sh` and a file-size limit.
 #[cfg(unix)]
@@ -678,48 +915,15 @@ mod helps {
         }
     }
 
-    /// Every code in supdoc's production source: each `"area-name"` string literal outside
-    /// `tests.rs`, `fixtures.rs`, comments and the `#[cfg(test)] mod tests {` that ends a file.
+    /// Every code in supdoc's production source: each `"area-name"` string literal on a line
+    /// [`super::production_lines`] returns.
     fn source_codes() -> BTreeSet<String> {
-        let mut codes = BTreeSet::new();
-        let mut pending = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
-        while let Some(dir) = pending.pop() {
-            for entry in std::fs::read_dir(&dir).expect("a source directory should be readable") {
-                let path = entry.expect("a source entry should be readable").path();
-                let name = path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("");
-                if path.is_dir() {
-                    pending.push(path);
-                } else if path.extension().is_some_and(|extension| extension == "rs")
-                    && name != "tests.rs"
-                    && name != "fixtures.rs"
-                {
-                    let text =
-                        std::fs::read_to_string(&path).expect("a source file should be UTF-8");
-                    let lines: Vec<&str> = text.lines().collect();
-                    let production = lines
-                        .iter()
-                        .enumerate()
-                        .take_while(|(index, line)| {
-                            let opens_test_module = line.trim_start().starts_with("mod tests {")
-                                && index
-                                    .checked_sub(1)
-                                    .and_then(|previous| lines.get(previous))
-                                    .is_some_and(|previous| previous.trim() == "#[cfg(test)]");
-                            !opens_test_module
-                        })
-                        .map(|(_, line)| *line)
-                        .filter(|line| !line.trim_start().starts_with("//"));
-                    for line in production {
-                        let literals = line.split('"').skip(1).step_by(2);
-                        codes.extend(literals.filter(|text| is_code(text)).map(str::to_owned));
-                    }
-                }
-            }
-        }
-        codes
+        super::production_lines()
+            .iter()
+            .flat_map(|line| line.text.split('"').skip(1).step_by(2))
+            .filter(|text| is_code(text))
+            .map(str::to_owned)
+            .collect()
     }
 
     /// Config keys that look like codes but are not: supdoc's `[limits]` keys and yamllint's

@@ -146,6 +146,7 @@ formatter and linter. `supdoc check --help` lists every tool, attribute and how 
   eslint load the project's config and plugins, and each is found in the project's `.venv/bin` or
   `node_modules/.bin` before `PATH`. Custom formatter and linter commands written in the config, or in
   a config it extends, run only in a checkout you trust, as pylint and clippy do.
+- A checkout's `[limits]` can only lower supdoc's ceilings unless you trust it.
 - `supdoc trust` records trust, and `SUPDOC_TRUST=1` grants it for one run. No file in the checkout
   can grant it. supdoc doesn't check who owns the trust store, so anyone who can write it can grant
   trust. What trust would have run is named in one `code-block-not-trusted` warning per run: exit 0,
