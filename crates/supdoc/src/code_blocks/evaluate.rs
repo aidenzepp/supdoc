@@ -26,6 +26,7 @@ use crate::trust::Grant;
 use super::biome;
 use super::block::{CodeBlock, Info};
 use super::cache::{self, Cache};
+use super::custom;
 use super::excerpt;
 use super::format::{self, FixDoc};
 use super::fragment::{Frame, Kind};
@@ -47,7 +48,9 @@ use super::states::{
 };
 use super::tombi;
 use super::toolchain::{self, Refusal, Toolchain};
-use super::tools::{self, Found, Held, Invocation, Step, Tier, Tool, ToolCartridge, ToolEnv, find};
+use super::tools::{
+    self, CustomTool, Found, Invocation, Step, Tier, Tool, ToolCartridge, ToolEnv, find,
+};
 use super::uses::{self, UseState, Written};
 use super::yaml;
 
@@ -62,7 +65,7 @@ const FRAGMENT_UNSUPPORTED: &str = "code-block-fragment-unsupported";
 const MISSING_REASON: &str = "code-block-missing-reason";
 
 /// The code for a selected tool that isn't on `PATH`.
-const TOOL_MISSING: &str = "code-block-tool-missing";
+pub(super) const TOOL_MISSING: &str = "code-block-tool-missing";
 
 /// The code for blocks a hardening rule refused to check.
 const NOT_CHECKED: &str = "code-block-not-checked";
@@ -263,7 +266,9 @@ pub(crate) fn evaluate(
     let judged = |doc: &str| in_scope(doc) && !unresolved_uses.contains(doc);
     let command = |doc: &str| paths.command_word(doc);
     findings.extend(uses::judge(&written, lock.recorded_uses(), judged, command));
-    findings.extend(not_trusted(&records));
+    findings.extend(not_trusted(&records, |record, step| {
+        custom_named(code_blocks, record, step)
+    }));
     Ok(Evaluation {
         findings,
         counts: Some(tally(&records)),
@@ -327,7 +332,7 @@ impl Evaluation {
             let Some(tool) = record.tool.clone().or_else(|| linter.clone()) else {
                 continue;
             };
-            let rust = (tool.is("rustfmt") || tool.is("clippy"))
+            let rust = runs_rust([record.tool.as_ref(), linter.as_ref()])
                 .then(|| &*rust_setup.get_or_insert_with(|| RustSetup::read(env, root, timeout)));
             if let Some(rust) = rust {
                 let compiles = linter.as_ref().is_some_and(|linter| linter.is("clippy"));
@@ -336,16 +341,14 @@ impl Evaluation {
                 if let Some((refused, named)) = refused {
                     record.state = BlockState::NotChecked(refused);
                     record.reason = named.or_else(|| {
-                        record.state.reason(
-                            &record.steps,
-                            record.language.as_deref(),
-                            Some(tool.name()),
-                        )
+                        record
+                            .state
+                            .reason(&record.steps, record.language.as_deref(), Some(&tool))
                     });
                     continue;
                 }
             }
-            if !configs.give(record, &tool, (env, root), &mut slots) {
+            if !configs.give(record, (env, root), &mut slots) {
                 continue;
             }
             // Giving a TOML block its config can take a step off it (see `TombiConfigs::give`).
@@ -391,11 +394,10 @@ impl Evaluation {
             }
             if let Some((state, tool)) = refused {
                 record.state = state;
-                record.reason = record.state.reason(
-                    &record.steps,
-                    record.language.as_deref(),
-                    Some(tool.binary()),
-                );
+                record.reason =
+                    record
+                        .state
+                        .reason(&record.steps, record.language.as_deref(), Some(&tool));
             }
         }
         let cache = cache.flatten();
@@ -511,11 +513,11 @@ impl Evaluation {
                 record.reason = match tool {
                     // supdoc refused the block itself: the reason names no tool.
                     Some(_) if refused && linted => Some(YAML_CONTROL_REFUSED.to_owned()),
-                    Some(tool) => record.state.reason(
-                        &record.steps,
-                        record.language.as_deref(),
-                        Some(tool.name()),
-                    ),
+                    Some(tool) => {
+                        record
+                            .state
+                            .reason(&record.steps, record.language.as_deref(), Some(tool))
+                    }
                     None => Some(PROJECT_UNBUILT.to_owned()),
                 };
             }
@@ -538,13 +540,20 @@ impl Evaluation {
             } else {
                 NotChecked::NoStepRan
             });
-            record.reason = record.state.reason(
-                &record.steps,
-                record.language.as_deref(),
-                tool.map(Tool::name),
-            );
+            record.reason = record
+                .state
+                .reason(&record.steps, record.language.as_deref(), tool);
         }
     }
+}
+
+/// Whether either of `tools`, a block's formatter and linter, is rustfmt or clippy, which run
+/// with the root's toolchain setup. A custom command never is.
+fn runs_rust(tools: [Option<&Tool>; 2]) -> bool {
+    tools
+        .into_iter()
+        .flatten()
+        .any(|tool| tool.is("rustfmt") || tool.is("clippy"))
 }
 
 /// Runs each of `jobs` on its block in `records` with `session`, in parallel (see
@@ -560,18 +569,18 @@ fn run_jobs(
 ) -> Vec<Option<StepsRan>> {
     in_parallel(jobs, |job| {
         let record = records.get(job.record)?;
-        let format = job.format.as_ref().and_then(|run| {
-            let Some(tool) = run.tool.cartridge() else {
-                return Some(Err(CUSTOM_NOT_WIRED.into()));
-            };
-            let rust = rust.filter(|_| run.tool.is("rustfmt"));
-            let frame = Frame::of(tool, record.fragment);
-            run_formatter(tool, &run.program, record, frame, session, rust)
+        let format = job.format.as_ref().and_then(|run| match &run.tool {
+            Tool::Custom(custom) => run_custom_formatter(custom, &run.program, record, session),
+            Tool::Cartridge(tool) => {
+                let rust = rust.filter(|_| run.tool.is("rustfmt"));
+                let frame = Frame::of(tool, record.fragment);
+                run_formatter(tool, &run.program, record, frame, session, rust)
+            }
         });
         let parses = parses(format.as_ref());
         let lint = job.lint.as_ref().filter(|_| parses).and_then(|run| {
             let Some(tool) = run.tool.cartridge() else {
-                return Some(Err(CUSTOM_NOT_WIRED.into()));
+                return Some(Err(CUSTOM_LINTER_NOT_WIRED.into()));
             };
             if switched_off(tool, record) {
                 return Some(Err(PYLINT_SWITCHED_OFF.into()));
@@ -592,7 +601,7 @@ fn first_reason(
     tool: Option<&Tool>,
 ) -> Option<String> {
     (*state != BlockState::NotChecked(NotChecked::Pending))
-        .then(|| state.reason(steps, language, tool.map(Tool::name)))
+        .then(|| state.reason(steps, language, tool))
         .flatten()
 }
 
@@ -619,7 +628,11 @@ fn refuse_unfound(
                 && matches!(known.found, Found::InsideRoot(_))
         });
         *step = StepState::ToolRefused {
-            binary: tool.binary().to_owned(),
+            why: if inside_root {
+                tool.inside_root()
+            } else {
+                tool.missing()
+            },
             inside_root,
         };
     }
@@ -952,9 +965,9 @@ fn parses(format: Option<&FormatRan>) -> bool {
     )
 }
 
-/// Why a custom command's step doesn't run yet: config refuses one before any block is read, so
-/// no run reaches this.
-const CUSTOM_NOT_WIRED: &str = "custom commands are not wired to run yet";
+/// Why a custom linter's step doesn't run yet: config refuses one before any block is read, so no
+/// run reaches this.
+const CUSTOM_LINTER_NOT_WIRED: &str = "custom linter commands are not wired to run yet";
 
 /// Why such a step doesn't run when the project itself lowered the tier.
 const TIER_LOWERED: &str = "`tier = \"static\"` in `[features.code-blocks]`";
@@ -994,38 +1007,62 @@ fn tier_gate(
 
 /// The run's one `code-block-not-trusted` warning, at the first of `records` with a step held
 /// because the operator hasn't granted trust. It names every held tool in the order first seen
-/// (see [`trust_warning`]). `None` when no step was held for want of trust.
-fn not_trusted(records: &[BlockRecord]) -> Option<Finding> {
+/// (see [`trust_words`]); a held custom command by its program, as `named` names the custom
+/// command a record's step selects (see [`custom_named`]). `None` when no step was held for want
+/// of trust.
+fn not_trusted(
+    records: &[BlockRecord],
+    named: impl Fn(&BlockRecord, Step) -> Option<String>,
+) -> Option<Finding> {
     let mut at = None;
-    let mut held: Vec<&'static Held> = Vec::new();
+    let mut didnt_run: Vec<String> = Vec::new();
+    let mut off: Vec<&'static str> = Vec::new();
     let mut turned_off = false;
     for record in records {
-        for hold in record.steps.held_for_trust() {
+        for (step, hold) in record.steps.held_for_trust() {
             at = at.or(Some(&record.at));
             turned_off |= hold.turned_off;
-            if !held.contains(&hold.held) {
-                held.push(hold.held);
+            let words = match named(record, step) {
+                Some(named) => format!("{named} didn't run: the checkout chose it"),
+                None => hold.held.didnt_run.to_owned(),
+            };
+            if !didnt_run.contains(&words) {
+                didnt_run.push(words);
+            }
+            if !off.contains(&hold.held.off) {
+                off.push(hold.held.off);
             }
         }
     }
-    Some(trust_warning(&held, turned_off).with_location(at?.clone()))
+    Some(trust_words(&didnt_run, &off, turned_off).with_location(at?.clone()))
+}
+
+/// The custom command `code_blocks` selects for `record`'s `step`, as messages name it (see
+/// [`custom::named`]). `None` when the step's tool is a cartridge, or there is none.
+fn custom_named(code_blocks: &CodeBlocks, record: &BlockRecord, step: Step) -> Option<String> {
+    let language = record.language.as_deref().and_then(Language::from_tag)?;
+    match tools::selected(code_blocks, language, step)? {
+        Tool::Custom(custom) => Some(custom::named(&custom)),
+        Tool::Cartridge(_) => None,
+    }
 }
 
 /// The `code-block-not-trusted` warning for the tools `held` back, in order, each saying what
-/// didn't run and why. When `turned_off`, it says `SUPDOC_TRUST=0` held them and how to undo
-/// that, since `supdoc trust` can't help then. Its help ends with the settings that stop asking:
-/// `tier = "static"`, or each held tool's own off setting.
-fn trust_warning(held: &[&Held], turned_off: bool) -> Finding {
-    let didnt_run = held
-        .iter()
-        .map(|held| held.didnt_run)
-        .collect::<Vec<_>>()
-        .join("; ");
-    let off = held
-        .iter()
-        .map(|held| held.off)
-        .collect::<Vec<_>>()
-        .join(" and ");
+/// didn't run and why (see [`trust_words`]).
+#[cfg(test)]
+fn trust_warning(held: &[&tools::Held], turned_off: bool) -> Finding {
+    let didnt_run: Vec<String> = held.iter().map(|held| held.didnt_run.to_owned()).collect();
+    let off: Vec<&str> = held.iter().map(|held| held.off).collect();
+    trust_words(&didnt_run, &off, turned_off)
+}
+
+/// The `code-block-not-trusted` warning saying what didn't run and why, each of `didnt_run` in
+/// order. When `turned_off`, it says `SUPDOC_TRUST=0` held them and how to undo that, since
+/// `supdoc trust` can't help then. Its help ends with the settings that stop asking:
+/// `tier = "static"`, or each of `off`, the held tools' own off settings.
+fn trust_words(didnt_run: &[String], off: &[&str], turned_off: bool) -> Finding {
+    let didnt_run = didnt_run.join("; ");
+    let off = off.join(" and ");
     let stop_asking =
         format!("to stop asking, set `tier = \"static\"` in `[features.code-blocks]` or {off}");
     if turned_off {
@@ -1096,20 +1133,23 @@ struct ToolConfigs {
 }
 
 impl ToolConfigs {
-    /// Gives `record` the config its tool gets, as [`BiomeConfigs::give`],
+    /// Gives `record` the config its tools get, as [`BiomeConfigs::give`],
     /// [`RumdlConfigs::give`], [`TombiConfigs::give`], [`YamlfmtConfigs::give`] and
-    /// [`YamllintConfigs::give`] do. Whether the block goes on to its tools: not when it or its
-    /// config was refused.
+    /// [`YamllintConfigs::give`] do, whichever of its formatter and linter runs the tool, so a
+    /// custom formatter beside a cartridge linter leaves the linter its config. Whether the block
+    /// goes on to its tools: not when it or its config was refused.
     fn give(
         &mut self,
         record: &mut BlockRecord,
-        tool: &Tool,
         place: (&ToolEnv, &Path),
         slots: &mut Vec<Slot>,
     ) -> bool {
-        self.biome.give(record, tool, place, slots).is_ok()
-            && self.rumdl.give(record, tool, place, slots).is_ok()
-            && self.tombi.give(record, tool, place, slots)
+        let tools = [record.tool.clone(), record.linter.clone()];
+        let running = |binary: &str| tools.iter().flatten().find(|tool| tool.runs(binary));
+        running("biome").is_none_or(|tool| self.biome.give(record, tool, place, slots).is_ok())
+            && running("rumdl")
+                .is_none_or(|tool| self.rumdl.give(record, tool, place, slots).is_ok())
+            && running("tombi").is_none_or(|tool| self.tombi.give(record, tool, place, slots))
             && self.yamlfmt.give(record, place, slots).is_ok()
             && self.yamllint.give(record, place, slots)
     }
@@ -1337,7 +1377,7 @@ impl TombiConfigs {
             record.reason =
                 record
                     .state
-                    .reason(&record.steps, record.language.as_deref(), Some(tool.name()));
+                    .reason(&record.steps, record.language.as_deref(), Some(tool));
             return false;
         }
         if !refuse_directive(record, slots) {
@@ -1914,7 +1954,12 @@ impl Against {
             }
             Self::CargoRefused { inside_root } => {
                 steps.lint = StepState::ToolRefused {
-                    binary: "cargo".to_owned(),
+                    why: if *inside_root {
+                        "`cargo` is inside the checkout"
+                    } else {
+                        "`cargo` isn't on PATH"
+                    }
+                    .to_owned(),
                     inside_root: *inside_root,
                 };
                 None
@@ -2655,6 +2700,64 @@ fn run_formatter(
         (format::Verdict::Unformatted(output), Some(unformatted)) => {
             format::fixed(unformatted, &pending.block, &pending.doc, output, tool)
         }
+        (_, finding) => finding.into_iter().collect(),
+    };
+    Some(Ok((verdict, findings)))
+}
+
+/// Runs `tool`, a custom formatter found at `program`, on `record`'s block from `session`'s root
+/// (see [`custom`]), never through the cache: its verdict and findings, an unformatted block's
+/// error carrying the fix to its output when [`format::safe_fix`] allows it. A formatter that
+/// printed nothing for the block didn't format it, so the step didn't run. `None` when the
+/// block's input couldn't be read, so it stays pending.
+///
+/// Effect: runs the command, killing it at the timeout.
+fn run_custom_formatter(
+    tool: &CustomTool,
+    program: &Path,
+    record: &BlockRecord,
+    session: &Session<'_>,
+) -> Option<FormatRan> {
+    let pending = record.pending.as_ref()?;
+    let tag = record.language.as_deref().unwrap_or_default();
+    let path = custom::virtual_path(
+        record.at.file.as_str(),
+        record.index,
+        custom::extension(tool.language(), tag),
+    );
+    let args = custom::args(tool.command().arguments(), &path);
+    let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
+    let extra: Vec<(&str, &OsStr)> = custom::VARS
+        .iter()
+        .map(|(name, value)| (*name, OsStr::new(*value)))
+        .collect();
+    let call = Call {
+        program,
+        name: tool.command().program(),
+        args: &args,
+        extra: &extra,
+        stdin: pending.input.as_bytes(),
+        timeout: session.timeout,
+        cwd: runner::Cwd::Root,
+        cap: runner::CAP,
+    };
+    let verdict = custom::judge(
+        &pending.input,
+        runner::run(&call, session.env, session.root),
+    );
+    if verdict == format::Verdict::PrintedNothing {
+        return Some(Err(format::PRINTED_NOTHING.into()));
+    }
+    let finding = custom::finding(&verdict, tool, &record.at, session.timeout);
+    let findings = match (&verdict, finding) {
+        (format::Verdict::Unformatted(output), Some(unformatted)) => format::fixed_as(
+            unformatted,
+            &pending.block,
+            &pending.doc,
+            output,
+            &custom::named(tool),
+            false,
+        ),
         (_, finding) => finding.into_iter().collect(),
     };
     Some(Ok((verdict, findings)))
@@ -3530,7 +3633,10 @@ fn found_runs(
             .find(|known| known.binary == binary && known.bins == bins)
             .map(|known| known.found.clone());
         let found = known.unwrap_or_else(|| {
-            let found = tools::find_in(binary, bins, env, root);
+            let found = match &tool {
+                Tool::Custom(custom) => custom::find(custom.command().program(), env, root),
+                Tool::Cartridge(_) => tools::find_in(binary, bins, env, root),
+            };
             looked_up.push(Lookup {
                 binary: binary.to_owned(),
                 bins,
@@ -3555,16 +3661,22 @@ fn found_runs(
             .iter()
             .any(|known| known.binary == binary && known.warned)
         {
-            let install = match tool.cartridge() {
-                Some(cartridge) if !bins.is_empty() => format!(
-                    "install it with `{}`, or into the project's {}",
-                    cartridge.install,
-                    bins.join(" or ")
-                ),
-                Some(cartridge) => format!("install it with `{}`", cartridge.install),
-                None => format!("put `{binary}` on PATH"),
+            let warning = match &tool {
+                Tool::Custom(custom) => Some(custom::missing(TOOL_MISSING, custom, at)),
+                Tool::Cartridge(cartridge) => {
+                    let install = if bins.is_empty() {
+                        format!("install it with `{}`", cartridge.install)
+                    } else {
+                        format!(
+                            "install it with `{}`, or into the project's {}",
+                            cartridge.install,
+                            bins.join(" or ")
+                        )
+                    };
+                    tool_warning(binary, (&install, bins), &found, at)
+                }
             };
-            slots.extend(tool_warning(binary, (&install, bins), &found, at).map(Slot::Found));
+            slots.extend(warning.map(Slot::Found));
             looked_up
                 .iter_mut()
                 .filter(|known| known.binary == binary && known.bins == bins)
@@ -3967,7 +4079,7 @@ fn step_values(block: &CodeBlock, info: &Info, code_blocks: &CodeBlocks) -> Vec<
                         })
                         .collect::<Vec<_>>()
                         .join(", "),
-                    tool.name()
+                    tool.label()
                 ),
             };
             Some(
@@ -4239,7 +4351,7 @@ mod tests {
             .map(|record| record.at.clone())
             .expect("the doc holds three blocks");
 
-        let warning = not_trusted(&records).expect("two steps were held for trust");
+        let warning = not_trusted(&records, |_, _| None).expect("two steps were held for trust");
 
         assert_eq!(
             (warning.location, warning.message),
@@ -4990,7 +5102,7 @@ mod tests {
             assert_eq!(
                 record.steps.lint,
                 StepState::ToolRefused {
-                    binary: "cargo".to_owned(),
+                    why: "`cargo` isn't on PATH".to_owned(),
                     inside_root: false
                 },
                 "{record:?}"

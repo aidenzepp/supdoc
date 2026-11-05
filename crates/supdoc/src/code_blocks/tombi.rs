@@ -140,7 +140,7 @@ pub(crate) fn linted_nothing(ran: &Ran) -> bool {
 /// other stderr.
 #[must_use]
 pub(crate) fn parse_error(stderr: &str) -> Option<ParseError> {
-    let plain = strip_ansi(stderr);
+    let plain = format::strip_ansi(stderr);
     let mut lines = plain.lines();
     let _error = lines.find(|line| line.trim_start().starts_with("Error:"))?;
     let place = lines.next()?.trim().strip_prefix("at ")?;
@@ -153,27 +153,6 @@ pub(crate) fn parse_error(stderr: &str) -> Option<ParseError> {
     (extension == "toml" && index.parse::<usize>().is_ok()).then_some(ParseError {
         line: line.checked_sub(1),
     })
-}
-
-/// `text` without its ANSI escape sequences (`ESC [ … <letter>`), which tombi writes even to a
-/// pipe.
-fn strip_ansi(text: &str) -> String {
-    let mut plain = String::with_capacity(text.len());
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' {
-            if chars.next() == Some('[') {
-                for c in chars.by_ref() {
-                    if c.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-        } else {
-            plain.push(c);
-        }
-    }
-    plain
 }
 
 /// Whether `block` holds a `#:schema` comment directive, which makes tombi read the file it names:
@@ -280,7 +259,7 @@ pub(crate) enum Skip {
 #[must_use]
 pub(crate) fn skip(step: Step, stderr: &[u8]) -> Option<Skip> {
     const CONFIG: &str = "failed to parse config file";
-    let plain = strip_ansi(&String::from_utf8_lossy(stderr));
+    let plain = format::strip_ansi(&String::from_utf8_lossy(stderr));
     let cut = |line: &str, words: &str| {
         line.find(words)
             .and_then(|at| line.get(..at + words.len()))
