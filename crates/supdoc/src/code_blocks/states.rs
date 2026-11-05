@@ -8,10 +8,9 @@ use annotate_snippets::renderer::{AnsiColor, Style};
 use crate::config::code_blocks::{CodeBlocks, Language, Mode};
 
 use super::block::CodeBlock;
-use super::evaluate::{CLIPPY_NEEDS_TRUST, CLIPPY_TRUST_OFF};
 use super::fragment::Kind;
 use super::info::{StepValue, fragment_kind, reasoned, step_attribute};
-use super::tools::{self, Step, ToolCartridge, formatter};
+use super::tools::{self, Hold, Step, ToolCartridge, formatter};
 
 /// The one state a code block is in. A block takes the first that applies, in this order:
 ///
@@ -242,18 +241,14 @@ pub(crate) struct Steps {
 }
 
 impl Steps {
-    /// The reason a step was held because the operator hasn't granted the checkout trust:
-    /// [`CLIPPY_NEEDS_TRUST`], or [`CLIPPY_TRUST_OFF`] when `SUPDOC_TRUST=0` turned it off.
-    /// `None` when no step was held for that.
-    pub(crate) fn held_for_trust(&self) -> Option<&'static str> {
+    /// Each step held because the operator hasn't granted the checkout trust, format first: its
+    /// reason is a project-tier tool's [`needs_trust`](tools::Held::needs_trust), or its
+    /// [`trust_off`](tools::Held::trust_off) when `SUPDOC_TRUST=0` turned trust off.
+    pub(crate) fn held_for_trust(&self) -> impl Iterator<Item = Hold> {
         [&self.format, &self.lint]
             .into_iter()
-            .find_map(|step| match step {
-                StepState::Unrunnable { reason }
-                    if [CLIPPY_NEEDS_TRUST, CLIPPY_TRUST_OFF].contains(reason) =>
-                {
-                    Some(*reason)
-                }
+            .filter_map(|step| match step {
+                StepState::Unrunnable { reason } => tools::hold(reason),
                 _ => None,
             })
     }
@@ -668,16 +663,16 @@ fn by_count(reasons: &BTreeMap<String, usize>) -> Vec<(&str, usize)> {
     sorted
 }
 
-/// `reason`, a step's full reason for not running, as the summary line names it: "clippy needs
-/// trust" for a step held for want of trust, "`SUPDOC_TRUST=0` turned trust off" when the
-/// variable held it, else the reason as written.
+/// `reason`, a step's full reason for not running, as the summary line names it: the held tool's
+/// [`short`](tools::Held::short) reason, "clippy needs trust", for a step held for want of trust,
+/// "`SUPDOC_TRUST=0` turned trust off" when the variable held it, else the reason as written.
 fn short_reason(reason: &'static str) -> &'static str {
-    if reason == CLIPPY_NEEDS_TRUST {
-        "clippy needs trust"
-    } else if reason == CLIPPY_TRUST_OFF {
-        "`SUPDOC_TRUST=0` turned trust off"
-    } else {
-        reason
+    match tools::hold(reason) {
+        Some(Hold {
+            turned_off: true, ..
+        }) => "`SUPDOC_TRUST=0` turned trust off",
+        Some(Hold { held, .. }) => held.short,
+        None => reason,
     }
 }
 
@@ -698,14 +693,64 @@ fn paint(color: bool, tone: Tone, text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        BlockState, CLIPPY_NEEDS_TRUST, CodeBlockCounts, Excerpt, Failure, NotChecked, StepState,
-        Steps, state_of,
+        BlockState, CodeBlockCounts, Excerpt, Failure, NotChecked, StepState, Steps, state_of,
     };
     use crate::code_blocks::block::{CodeBlock, Info};
+    use crate::code_blocks::tools::{CARTRIDGES, Held, Hold, ToolCartridge};
     use crate::config::Config;
     use crate::config::code_blocks::{CodeBlocks, Language};
     use crate::finding::Location;
     use crate::path::AbsolutePath;
+
+    /// clippy's trust words, the reasons its lint step gives when trust holds it back.
+    fn clippy_held() -> &'static Held {
+        CARTRIDGES
+            .iter()
+            .find(|tool| tool.name == "clippy")
+            .and_then(ToolCartridge::held)
+            .expect("clippy is a project-tier cartridge")
+    }
+
+    #[test]
+    fn each_step_held_for_trust_leads_back_to_its_tool_format_first() {
+        let held = clippy_held();
+        let steps = Steps {
+            format: StepState::Unrunnable {
+                reason: held.trust_off,
+            },
+            lint: StepState::Unrunnable {
+                reason: held.needs_trust,
+            },
+        };
+        let other = Steps {
+            format: StepState::Unrunnable {
+                reason: "no private working directory for clippy",
+            },
+            lint: StepState::Ran,
+        };
+
+        assert_eq!(
+            (
+                steps.held_for_trust().collect::<Vec<_>>(),
+                other.held_for_trust().count()
+            ),
+            (
+                vec![
+                    Hold {
+                        held,
+                        turned_off: true
+                    },
+                    Hold {
+                        held,
+                        turned_off: false
+                    }
+                ],
+                0
+            ),
+            "a trust reason should name its tool and whether `SUPDOC_TRUST=0` held it; any other \
+             reason isn't a hold"
+        );
+    }
 
     /// A block in `file` with `info` as its info string, or none.
     fn block(file: &str, info: Option<&str>) -> CodeBlock {
@@ -976,7 +1021,7 @@ mod tests {
         let lint_not_run = Steps {
             format: StepState::Ran,
             lint: StepState::Unrunnable {
-                reason: CLIPPY_NEEDS_TRUST,
+                reason: clippy_held().needs_trust,
             },
         };
         let lint_skipped = Steps {
