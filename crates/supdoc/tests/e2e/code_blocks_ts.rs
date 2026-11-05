@@ -1808,3 +1808,64 @@ fn frame_format_a_block_that_isnt_its_kind_is_one_parse_error_at_the_attributes(
         "{json}"
     );
 }
+
+/// A recorded `basic` project with a `typescript` table and `source` at `src/blocks.ts`, and a
+/// directory holding a stub `biome` whose lint passes and whose format turns every block into
+/// `const a = 1;`.
+fn jsdoc_project(source: &str) -> (Project, tempfile::TempDir) {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write(
+        "supdoc.config.toml",
+        "[features.code-blocks]\n[features.code-blocks.typescript]\n",
+    );
+    project.write("src/blocks.ts", source);
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    stub_biome(outside.path(), "/bin/cat >/dev/null\necho 'const a = 1;'");
+    (project, outside)
+}
+
+/// A `/** */` comment on a method holding one unformatted `ts` block.
+const JSDOC_SOURCE: &str = "export class C {\n  /**\n   * Adds.\n   *\n   * ```ts\n   * const   a = 1\n   * ```\n   */\n  add() {}\n}\n";
+
+#[test]
+fn jsdoc_block_is_checked_at_its_file_line() {
+    let (project, outside) = jsdoc_project(JSDOC_SOURCE);
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-unformatted"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 5, "{json}");
+}
+
+#[test]
+fn jsdoc_fix_keeps_the_gutter() {
+    let (project, outside) = jsdoc_project(JSDOC_SOURCE);
+    let path = [("PATH", outside.path())];
+
+    let _fix = project
+        .supdoc_in_with(".", &["fix", "--yes"], &path)
+        .assert_exit(0);
+
+    assert_eq!(
+        project.read("src/blocks.ts"),
+        JSDOC_SOURCE.replace("const   a = 1", "const a = 1;"),
+        "the fix should rewrite the block's line behind its `   * ` gutter"
+    );
+}
+
+#[test]
+fn jsdoc_block_and_line_comments_are_not_checked() {
+    let source = "/* ```ts\nconst   a = 1\n``` */\n// ```ts\n// const   a = 1\n// ```\nexport const b = 2;\n";
+    let (project, outside) = jsdoc_project(source);
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(0)
+        .json();
+
+    assert!(finding_kinds(&json).is_empty(), "{json}");
+}
