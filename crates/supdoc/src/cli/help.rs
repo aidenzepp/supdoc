@@ -152,8 +152,9 @@ that calls super() isn't a member it can hold.
 clippy compiles a framed block as a library in a trusted checkout, linked against the project's \
 crate like any Rust block. A ? in a statements block is a true error, since the frame returns \
 nothing; a members block's methods belong to a unit struct, so a field read on self fails, and \
-clippy's messages name that struct Self. A project that denies unreachable_pub gets it on a \
-members block's pub fn, since the frame's struct is private.
+clippy's messages name that struct Self. Every frame is private, so a project that denies \
+unreachable_pub gets it on any pub item a framed block declares: a members block's pub fn, or a \
+pub fn or struct inside a statements or expression block.
 
 A project that turns on rules about the frame's own code, such as biome's opt-in nursery rules \
 wanting an explicit type or a function expression, gets their findings at the block's \

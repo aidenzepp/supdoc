@@ -1598,3 +1598,76 @@ fn frame_lint_real_clippy_reports_each_framed_block_at_its_own_line_without_fram
     );
     assert_no_clippy_frame_text(&json);
 }
+
+#[test]
+fn frame_lint_real_clippy_keeps_author_names_that_hold_or_match_another_frames_name() {
+    let doc = "# Probe\n\n\
+               ```rust fragment(statements)\nlet n = supdoc_fragment_total + 1;\n```\n\n\
+               ```rust fragment(statements)\nlet c = SupdocFragmentConfig::new();\n```\n\n\
+               ```rust fragment(expression)\nSupdocFragment\n```\n";
+    let Some(json) = trusted_probe_check(
+        "frame_lint_real_clippy_keeps_author_names",
+        PROBE_LIB,
+        doc,
+        None,
+        1,
+    ) else {
+        return;
+    };
+
+    assert_eq!(
+        kinds_and_lines(&json),
+        [
+            ("code-block-missing-name".to_owned(), 4),
+            ("code-block-missing-name".to_owned(), 8),
+            ("code-block-missing-name".to_owned(), 12),
+        ],
+        "{json}"
+    );
+    let named: Vec<(String, String)> = array_at(&json, "/findings")
+        .iter()
+        .map(|finding| {
+            (
+                finding["message"].as_str().unwrap_or_default().to_owned(),
+                finding["help"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect();
+    for ((message, help), name) in named.iter().zip([
+        "`supdoc_fragment_total`",
+        "`SupdocFragmentConfig`",
+        "`SupdocFragment`",
+    ]) {
+        assert!(
+            message.starts_with(name) && help.contains(name),
+            "only the frame in use's own name is rewritten, and only as a whole name: \
+             {message} / {help}"
+        );
+    }
+}
+
+#[test]
+fn frame_lint_real_clippy_reports_a_syntax_error_alone_over_the_names_rustc_recovers_into() {
+    let doc = "# Probe\n\n```rust fragment(statements)\nlet x = 1\nmissing(x);\n```\n";
+    let Some(json) = trusted_probe_check(
+        "frame_lint_real_clippy_reports_a_syntax_error_alone",
+        PROBE_LIB,
+        doc,
+        None,
+        1,
+    ) else {
+        return;
+    };
+
+    assert_eq!(
+        kinds_and_lines(&json),
+        [("code-block-parse".to_owned(), 4)],
+        "{json}"
+    );
+    assert_eq!(
+        messages_of(&json, "code-block-parse"),
+        ["`clippy` couldn't parse the block as `statements`"],
+        "{json}"
+    );
+    assert_no_clippy_frame_text(&json);
+}
