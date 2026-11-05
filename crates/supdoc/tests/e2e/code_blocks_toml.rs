@@ -43,8 +43,14 @@ fn stub_tombi(dir: &Path, script: &str) {
 /// private config to `$XDG_CONFIG_HOME/seen` for the test to read, then has `tombi format`
 /// run `format` and `tombi lint` run `lint`.
 fn stub_for(format: &str, lint: &str) -> String {
+    stub_at("tombi 1.10.0 (stub)", format, lint)
+}
+
+/// [`stub_for`], with `tombi --version` printing `version`.
+fn stub_at(version: &str, format: &str, lint: &str) -> String {
     format!(
-        "case \" $* \" in *' --offline '*) ;; *) exit 5;; esac\n\
+        "[ \"$1\" = --version ] && {{ echo '{version}'; exit 0; }}\n\
+         case \" $* \" in *' --offline '*) ;; *) exit 5;; esac\n\
          for arg in \"$@\"; do last=\"$name\"; name=\"$arg\"; done\n\
          case \"$last\" in */docs/blocks.md.1.toml) ;; *) exit 5;; esac\n\
          [ -f \"$XDG_CONFIG_HOME/tombi/config.toml\" ] && [ -f .tombi.toml ] || exit 5\n\
@@ -673,4 +679,70 @@ fn toml_a_rule_level_tombi_comment_in_the_block_is_honoured() {
 
     assert!(finding_kinds(&json).is_empty(), "{json}");
     assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+}
+
+#[test]
+fn toml_only_a_verified_tombi_version_runs_its_steps() {
+    for (version, runs) in [
+        ("tombi 1.10.3 (x)", true),
+        ("tombi 1.11.0 (x)", false),
+        ("tombi 2.0.0", false),
+        ("garbage", false),
+    ] {
+        let project = toml_project("a = 1");
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        stub_tombi(outside.path(), &stub_at(version, "/bin/cat", LINT_CLEAN));
+
+        let json = project
+            .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+            .assert_exit(0)
+            .json();
+
+        if runs {
+            assert_eq!(
+                at(&json, "/data/summary/code_blocks/passed"),
+                1,
+                "{version}: {json}"
+            );
+            assert!(finding_kinds(&json).is_empty(), "{version}: {json}");
+        } else {
+            assert_unrun(
+                &json,
+                "isn't a version supdoc's checks are verified against",
+                version,
+            );
+            assert!(
+                at(&json, "/findings/0/help")
+                    .as_str()
+                    .is_some_and(|help| help.contains("pipx install 'tombi==1.10.*'")),
+                "{version}: {json}"
+            );
+        }
+    }
+}
+
+#[test]
+fn toml_an_unverified_tombi_warns_once_per_run() {
+    let project = toml_project("a = 1");
+    project.write(
+        "docs/more.md",
+        "# More\n\n```toml\nb = 2\n```\n\n```toml\nc = 3\n```\n",
+    );
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    stub_tombi(
+        outside.path(),
+        &stub_at("tombi 1.11.0 (x)", "/bin/cat", LINT_CLEAN),
+    );
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(0)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+    assert_eq!(
+        at(&json, "/data/summary/code_blocks/not_checked"),
+        3,
+        "{json}"
+    );
 }

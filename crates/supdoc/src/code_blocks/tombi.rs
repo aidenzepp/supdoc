@@ -193,6 +193,74 @@ pub(crate) fn has_directive(block: &str) -> bool {
     block.contains("#:tombi")
 }
 
+/// The tombi versions, as `<major>.<minor>`, supdoc's checks are verified against: what it reads
+/// from tombi's stderr is tombi's own wording, which another version may change, turning a skip
+/// into a silent pass. A minor is added only after the TOML e2e suite passes against it.
+pub(crate) const VERIFIED: [&str; 1] = ["1.10"];
+
+/// The version `tombi --version` printed in `stdout` (`tombi <major>.<minor>.<patch> ...`) when
+/// it is one supdoc is verified against (see [`VERIFIED`]).
+///
+/// # Errors
+///
+/// How to name the version to the user: the version it printed, or, when its output isn't a
+/// version, that.
+pub(crate) fn verified(stdout: &[u8]) -> Result<String, String> {
+    let text = String::from_utf8_lossy(stdout);
+    let mut words = text.lines().next().unwrap_or_default().split_whitespace();
+    let version = (words.next() == Some("tombi"))
+        .then(|| words.next())
+        .flatten()
+        .filter(|version| {
+            let parts: Vec<&str> = version.split('.').collect();
+            parts.len() == 3
+                && parts
+                    .iter()
+                    .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .ok_or_else(|| UNREADABLE.to_owned())?;
+    let minor = version.rsplit_once('.').map_or(version, |(minor, _)| minor);
+    if VERIFIED.contains(&minor) {
+        Ok(version.to_owned())
+    } else {
+        Err(version.to_owned())
+    }
+}
+
+/// How a tombi whose version can't be read is named.
+const UNREADABLE: &str = "(whose version supdoc couldn't read)";
+
+/// [`verified`] on what `program`, a tombi binary, prints for `--version`, run as any tool is
+/// (see [`runner::run`]) under `timeout`.
+///
+/// Effect: runs the binary.
+///
+/// # Errors
+///
+/// How to name the version to the user, as [`verified`] gives it; a run that failed or exited
+/// unsuccessfully couldn't be read.
+pub(crate) fn version_of(
+    program: &Path,
+    env: &ToolEnv,
+    root: &Path,
+    timeout: Option<std::time::Duration>,
+) -> Result<String, String> {
+    let call = runner::Call {
+        program,
+        name: "tombi",
+        args: &[std::ffi::OsStr::new("--version")],
+        extra: &[],
+        stdin: b"",
+        timeout,
+        cwd: runner::Cwd::Neutral,
+        cap: runner::CAP,
+    };
+    match runner::run(&call, env, root) {
+        Ok(ran) if ran.success => verified(&ran.stdout),
+        _ => Err(UNREADABLE.to_owned()),
+    }
+}
+
 /// What tombi's stderr for one step's run says it didn't do, colour stripped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Skip {
@@ -625,7 +693,7 @@ fn write_private(file: &Path, content: &str) -> Option<()> {
 mod tests {
     use super::{
         Project, Refusal, Skip, diagnostics, has_directive, linted_nothing, names_schema,
-        parse_error, pattern_root, project, skip,
+        parse_error, pattern_root, project, skip, verified,
     };
     use crate::code_blocks::format::ParseError;
     use crate::code_blocks::lint::Diagnostic;
@@ -736,6 +804,26 @@ mod tests {
             }
         }
         assert_eq!(skip(Step::Lint, b"1 file linted successfully\n"), None);
+    }
+
+    #[test]
+    fn only_a_verified_tombi_minor_passes_the_version_gate() {
+        assert_eq!(
+            verified(b"tombi 1.10.0 (aarch64-apple-darwin)\n"),
+            Ok("1.10.0".to_owned())
+        );
+        assert_eq!(verified(b"tombi 1.10.3\n"), Ok("1.10.3".to_owned()));
+        assert_eq!(verified(b"tombi 1.11.0 (x)\n"), Err("1.11.0".to_owned()));
+        assert_eq!(verified(b"tombi 2.10.0\n"), Err("2.10.0".to_owned()));
+        for garbage in [
+            &b"garbage\n"[..],
+            b"tombi\n",
+            b"tombi 1.10\n",
+            b"tombi 1.10.x\n",
+            b"",
+        ] {
+            assert!(verified(garbage).is_err(), "{garbage:?}");
+        }
     }
 
     #[test]

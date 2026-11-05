@@ -307,6 +307,7 @@ impl Evaluation {
         let build_timeout = self.build_timeout;
         let timeout = self.timeout;
         let mut configs = ToolConfigs::default();
+        configs.tombi.timeout = timeout;
         let mut toolchain_warned = false;
         let mut slots: Vec<Slot> = Vec::new();
         let mut jobs: Vec<Job> = Vec::new();
@@ -1103,6 +1104,11 @@ struct TombiConfigs {
     found: Vec<(PathBuf, Result<tombi::Project, tombi::Refusal>)>,
     /// The refusals a warning has been added for.
     warned: Vec<tombi::Refusal>,
+    /// How long `tombi --version` may run: the run's tool timeout.
+    timeout: Option<Duration>,
+    /// The tombi version once read (see [`tombi::version_of`]), and whether its warning has been
+    /// given. `None` until a block needs it.
+    version: Option<(Result<String, String>, bool)>,
 }
 
 impl TombiConfigs {
@@ -1157,7 +1163,7 @@ impl TombiConfigs {
                     names: Some(project.names()),
                 });
                 record.tombi = Some(project);
-                true
+                self.verified(record, (env, root), slots)
             }
             Err(refusal) => {
                 let (reason, warning) = tombi_refusal(&refusal, &record.at);
@@ -1213,6 +1219,65 @@ fn refuse_directive(record: &mut BlockRecord, slots: &mut Vec<Slot>) -> bool {
 /// Why a TOML block's steps didn't run when it holds a `#:tombi` directive.
 const TOMBI_DIRECTIVE: &str =
     "the block holds a `#:tombi` directive, which supdoc doesn't give to tombi";
+
+impl TombiConfigs {
+    /// Whether the tombi on `PATH` is a version supdoc is verified against (see
+    /// [`tombi::VERIFIED`]), read once per run. When it isn't, or can't be read, neither of
+    /// `record`'s steps runs, each with [`TOMBI_UNVERIFIED`] as its reason, and the run's one
+    /// warning goes to `slots`. A tombi that isn't on `PATH`, or is inside the checkout, is left
+    /// to the usual lookup.
+    ///
+    /// Effect: runs `tombi --version` the first time.
+    fn verified(
+        &mut self,
+        record: &mut BlockRecord,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> bool {
+        let Found::OnPath(program) = find("tombi", env, root) else {
+            return true;
+        };
+        let timeout = self.timeout;
+        let (version, warned) = self
+            .version
+            .get_or_insert_with(|| (tombi::version_of(&program, env, root, timeout), false));
+        let Err(shown) = version else {
+            return true;
+        };
+        if !*warned {
+            *warned = true;
+            slots.push(Slot::Found(
+                Finding::new(
+                    NOT_CHECKED,
+                    Severity::Warning,
+                    format!(
+                        "tombi {shown} isn't a version supdoc's checks are verified against ({}); \
+                         its TOML blocks' steps didn't run",
+                        tombi::VERIFIED.join(", ")
+                    ),
+                )
+                .with_help(format!(
+                    "install a verified tombi: `{}`",
+                    tools::TOMBI_INSTALL
+                ))
+                .with_location(record.at.clone()),
+            ));
+        }
+        let unrun = StepState::Unrunnable {
+            reason: TOMBI_UNVERIFIED,
+        };
+        if record.tool.take().is_some() {
+            record.steps.format = unrun.clone();
+        }
+        if record.linter.take().is_some() {
+            record.steps.lint = unrun;
+        }
+        false
+    }
+}
+
+/// Why a TOML block's steps didn't run when the tombi on `PATH` isn't a verified version.
+const TOMBI_UNVERIFIED: &str = "the tombi on `PATH` isn't a version supdoc is verified against";
 
 /// The `code-block-not-checked` warning, at `at`, for a TOML block holding a `#:schema`
 /// directive.

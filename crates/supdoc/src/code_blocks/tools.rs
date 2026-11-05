@@ -213,6 +213,10 @@ impl ToolCartridge {
     }
 }
 
+/// The command that installs a tombi supdoc's checks are verified against (see
+/// [`tombi::VERIFIED`]).
+pub(crate) const TOMBI_INSTALL: &str = "pipx install 'tombi==1.10.*'";
+
 /// The values every cartridge's mode accepts today.
 const FULL_OR_OFF: &[&str] = &["full", "off"];
 
@@ -552,7 +556,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         language: Language::Toml,
         binary: "tombi",
         tier: Tier::Static,
-        install: "pipx install tombi",
+        install: TOMBI_INSTALL,
         // tombi reads only supdoc's private copy, named by its hash in the args and env.
         config_files: &[],
         modes: FULL_OR_OFF,
@@ -566,7 +570,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         language: Language::Toml,
         binary: "tombi",
         tier: Tier::Static,
-        install: "pipx install tombi",
+        install: TOMBI_INSTALL,
         // tombi reads only supdoc's private copy, named by its hash in the args and env.
         config_files: &[],
         modes: FULL_OR_OFF,
