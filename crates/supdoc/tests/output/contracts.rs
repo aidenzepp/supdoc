@@ -1195,6 +1195,22 @@ mod helps {
             &["--max-key-segments", "2", "check"],
         ),
         case(
+            "read-too-many-lines",
+            |p| {
+                p.write("big.yaml", &"k: 1\n".repeat(32_769));
+                p.write("docs/guide.md", "[x](../big.yaml#k)\n");
+            },
+            &["check"],
+        ),
+        case(
+            "read-too-deep",
+            |p| {
+                p.write("evil.yaml", &format!("{}x\n", "- ".repeat(300)));
+                p.write("docs/guide.md", "[x](../evil.yaml#0)\n");
+            },
+            &["check"],
+        ),
+        case(
             "read-key-paths-too-large",
             |p| {
                 p.write("Cargo.toml", "[package]\nversion = \"1\"\n");

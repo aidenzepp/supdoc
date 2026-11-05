@@ -858,17 +858,18 @@ fn list_resolves_a_symbol_only_in_a_target_under_the_resolved_cap() {
     let over = project.supdoc(&["--max-file-size", FILE_CAP, "list", "src/big.rs#nope"]);
     let raised = project.supdoc(&["--max-file-size", "8KiB", "list", "src/big.rs#nope"]);
 
-    // Over the cap the file isn't read, so the symbol is matched as text and finds no link.
-    let _ = over.assert_exit(0);
+    // Over the cap the file isn't read, and `list` says so rather than matching the symbol as text.
+    let _ = over.assert_exit(1);
     assert!(
-        over.stderr.contains("No links to src/big.rs#nope"),
-        "a target over the cap should fall back to matching text:\n{}",
+        over.stderr.contains("read-too-large"),
+        "a target over the cap should be refused with read-too-large:\n{}",
         all_output(&over)
     );
     // Under a raised cap the file is read and the missing symbol is refused.
     let _ = raised.assert_exit(1);
     assert!(
-        !all_output(&raised).contains("No links to"),
+        !all_output(&raised).contains("read-too-large")
+            && !all_output(&raised).contains("No links to"),
         "a target under the raised cap should be read and its symbol looked up:\n{}",
         all_output(&raised)
     );

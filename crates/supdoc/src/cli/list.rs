@@ -381,8 +381,10 @@ impl Wanted {
     ///
     /// # Errors
     ///
-    /// `read-timeout`, `read-too-many-keys` or `read-key-paths-too-large` (1) when reading the
-    /// file to resolve the symbol outlasts `parse-timeout` or its key paths are over a ceiling.
+    /// `read-timeout`, `read-too-large`, `read-too-many-lines`, `read-too-deep`,
+    /// `read-too-many-keys` or `read-key-paths-too-large` (1) when reading the file to resolve
+    /// the symbol outlasts `parse-timeout`, the file is over a ceiling, or the parser can't read
+    /// it.
     fn new(target: &LinkRef, config: &Config) -> Result<Self, CliError> {
         let place = Place::of(&target.target, config.root(), config);
         let symbol = match (&target.symbol, &place) {
@@ -398,10 +400,11 @@ impl Wanted {
     ///
     /// # Errors
     ///
-    /// `read-timeout` (1) when reading the file outlasts `parse-timeout`, and `read-too-many-keys`
-    /// or `read-key-paths-too-large` (1) when its key paths are over `max-key-segments` or
-    /// `max-key-path-size`: the run never falls back to matching text for a file it stopped
-    /// reading.
+    /// `read-timeout` (1) when reading the file outlasts `parse-timeout`; `read-too-large` (1)
+    /// when it is over `max-file-size`; `read-too-many-lines` or `read-too-deep` (1) when it is a
+    /// YAML file the parser can't read; and `read-too-many-keys` or `read-key-paths-too-large`
+    /// (1) when its key paths are over `max-key-segments` or `max-key-path-size`. The run never
+    /// falls back to matching text for a file it refused or stopped reading.
     fn resolve_symbol(
         typed: &SymbolPath,
         path: &AbsolutePath,
@@ -423,6 +426,9 @@ impl Wanted {
             Ok(read) => read,
             Err(
                 error @ (ReadError::Timeout { .. }
+                | ReadError::TooLarge { .. }
+                | ReadError::TooManyLines { .. }
+                | ReadError::TooDeep { .. }
                 | ReadError::TooManyKeys { .. }
                 | ReadError::KeyPathsTooLarge { .. }),
             ) => {
