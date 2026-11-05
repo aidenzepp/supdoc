@@ -148,6 +148,26 @@ impl SourceFile {
     /// Parses `text` with `language`'s grammar, giving up when `deadline` passes. Pure apart from
     /// reading the clock: the text is already in memory.
     ///
+    /// For text that is never a data file's symbols, such as a Markdown run or a fence: its key
+    /// paths, if any were built, would be under the default ceilings. A file read from disk takes
+    /// the run's ceilings through [`SourceFile::from_text_under`].
+    ///
+    /// # Errors
+    ///
+    /// As [`SourceFile::from_text_under`].
+    pub(crate) fn from_text(
+        path: AbsolutePath,
+        text: String,
+        language: &'static dyn Cartridge,
+        deadline: Deadline,
+    ) -> Result<Self, ReadError> {
+        Self::from_text_under(path, text, language, deadline, KeyPathBudget::defaults())
+    }
+
+    /// Parses `text` with `language`'s grammar, giving up when `deadline` passes, for a data
+    /// cartridge to build its key paths under `key_paths`. Pure apart from reading the clock: the
+    /// text is already in memory.
+    ///
     /// # Errors
     ///
     /// - [`ReadError::CartridgeLoad`] when `language`'s built-in queries don't compile, which is
@@ -155,11 +175,12 @@ impl SourceFile {
     /// - [`ReadError::Timeout`] when `deadline` passes during the parse.
     /// - [`ReadError::Internal`] when the grammar can't be loaded into a parser or tree-sitter
     ///   returns no tree for another reason, which is a supdoc bug.
-    pub(crate) fn from_text(
+    pub(crate) fn from_text_under(
         path: AbsolutePath,
         text: String,
         language: &'static dyn Cartridge,
         deadline: Deadline,
+        key_paths: KeyPathBudget,
     ) -> Result<Self, ReadError> {
         if let Err(error) = language.load() {
             return Err(ReadError::CartridgeLoad { path, error });
@@ -179,7 +200,7 @@ impl SourceFile {
                 tree,
                 language,
                 deadline,
-                key_paths: KeyPathBudget::defaults(),
+                key_paths,
             }),
             Ok(None) => Err(internal(&path, "tree-sitter returned no tree")),
             Err(stopped) => Err(ReadError::Timeout {
@@ -211,19 +232,11 @@ impl SourceFile {
         self.deadline
     }
 
-    /// The ceilings a data cartridge builds this file's key paths under: the defaults unless
-    /// [`SourceFile::with_key_paths`] set others.
+    /// The ceilings a data cartridge builds this file's key paths under: the run's
+    /// `max-key-segments` and `max-key-path-size` for a file read from disk.
     #[must_use]
     pub(crate) const fn key_paths(&self) -> KeyPathBudget {
         self.key_paths
-    }
-
-    /// This file with its key paths built under `budget`, the run's `max-key-segments` and
-    /// `max-key-path-size`.
-    #[must_use]
-    pub(crate) const fn with_key_paths(mut self, budget: KeyPathBudget) -> Self {
-        self.key_paths = budget;
-        self
     }
 
     /// This file under `deadline` instead, so a test can stop a query after a parse that ran.

@@ -117,3 +117,44 @@ fn list_with_an_unlinked_target_prints_nothing_and_says_so_on_stderr() {
         run.stderr
     );
 }
+
+/// A recorded `basic` project with `big.toml`, a `[t]` table of 200,001 keys (one more segment
+/// than the default `max-key-segments` allows), and a guide linking `big.toml#t.k5`. The link is
+/// recorded with the limit raised.
+fn project_with_a_big_toml() -> Project {
+    let project = Project::fixture("basic");
+    let keys = (0..200_001).map(|key| format!("k{key} = 1\n"));
+    let big: String = std::iter::once("[t]\n".to_owned()).chain(keys).collect();
+    project.write("big.toml", &big);
+    project.write("docs/big.md", "The [fifth key](../big.toml#t.k5).\n");
+    let _ = project
+        .supdoc(&["--max-key-segments", "0", "update", "--yes"])
+        .assert_exit(0);
+    project
+}
+
+#[test]
+fn list_resolves_a_shorthand_under_the_raised_key_segment_limit() {
+    let project = project_with_a_big_toml();
+
+    assert_eq!(
+        listed(&project, &["--max-key-segments", "0", "big.toml#k5"]),
+        links(&["passed docs/big.md -> big.toml#t.k5"]),
+    );
+}
+
+#[test]
+fn list_reports_the_key_segment_limit_instead_of_matching_the_typed_text() {
+    let project = project_with_a_big_toml();
+
+    let run = project.supdoc(&["--json", "list", "big.toml#k5"]);
+
+    let _ = run.assert_exit(1);
+    let error: serde_json::Value = serde_json::from_str(&run.stderr).unwrap_or_else(|error| {
+        panic!(
+            "list should print one JSON error on stderr ({error}):\n{}",
+            run.stderr
+        )
+    });
+    assert_eq!(at(&error, "/kind"), "read-too-many-keys", "{}", run.stderr);
+}

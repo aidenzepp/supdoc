@@ -427,13 +427,32 @@ impl KeyPaths {
         })
     }
 
-    /// Checks the build may go on, at the symbol starting at byte `offset`.
+    /// Checks the build may go on at byte `offset`, and that a path of `segments` segments could
+    /// ever be made, so a cartridge can refuse a node before it allocates anything for its
+    /// parts. A path is charged its full length when its last segment is made, so one longer
+    /// than the whole segment budget never fits. Charges nothing.
+    ///
+    /// # Errors
+    ///
+    /// As [`KeyPaths::ensure_live`], then [`KeyPathError::TooManySegments`] when `segments` is
+    /// over the segment budget.
+    pub(crate) fn reaches(&mut self, offset: usize, segments: usize) -> Result<(), KeyPathError> {
+        self.ensure_live(offset)?;
+        if segments > self.budget.segments {
+            let limit = self.budget.segments;
+            return Err(self.fail(KeyPathError::TooManySegments { limit }));
+        }
+        Ok(())
+    }
+
+    /// Checks the build may go on, at the node starting at byte `offset`, so a loop over nodes
+    /// that name nothing still stops at the deadline.
     ///
     /// # Errors
     ///
     /// The earlier error if a call already failed, else [`KeyPathError::Timeout`] at `offset`
     /// once the deadline has passed.
-    fn ensure_live(&mut self, offset: usize) -> Result<(), KeyPathError> {
+    pub(crate) fn ensure_live(&mut self, offset: usize) -> Result<(), KeyPathError> {
         if let Some(error) = self.failed {
             return Err(error);
         }

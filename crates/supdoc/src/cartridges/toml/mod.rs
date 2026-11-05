@@ -13,13 +13,17 @@
 //!
 //! TOML files are link targets only: the cartridge returns no Markdown regions and the walk never
 //! reads them as sources. The walk keeps its own stack and charges every symbol to the file's
-//! key-path budget and deadline, so hostile nesting fails closed (SEC-1).
+//! key-path budget and deadline, so hostile nesting fails closed (SEC-1). It steps through each
+//! container's children with a cursor rather than collecting them, holding a frame only for a
+//! container whose own symbol it already charged, and it refuses a dotted key with more parts
+//! than the segment budget before listing them, so memory beyond the parse grows with the budget,
+//! not with the file.
 
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::LazyLock;
 
-use tree_sitter::Node;
+use tree_sitter::{Node, TreeCursor};
 
 use crate::cartridges::data::{KeyId, KeyName, KeyPathError, KeyPaths, index_name, key_name};
 use crate::read::cartridge::{Cartridge, LanguageId, MarkdownRegion, SourceFile, SymbolTable};
@@ -98,24 +102,71 @@ impl Cartridge for Toml {
     }
 }
 
-/// One step of walking a body of pairs, waiting on the walk's stack.
-enum Step<'tree> {
-    /// A key/value pair under `parent` (`None` at the document root).
-    Pair {
-        /// The symbol the pair's keys go under.
-        parent: Option<KeyId>,
-        /// The `pair` node.
-        node: Node<'tree>,
+/// What a container's children are.
+#[derive(Debug, Clone, Copy)]
+enum Children {
+    /// A body of pairs: a table, an inline table or the document root.
+    Pairs,
+    /// An array's elements.
+    Elements {
+        /// The 0-based index the next element is named by.
+        next: usize,
     },
-    /// The array element at `index` under `parent`.
-    Element {
-        /// The array's symbol.
-        parent: KeyId,
-        /// Its 0-based index.
-        index: usize,
-        /// The value node.
-        node: Node<'tree>,
-    },
+}
+
+/// A container the walk is going through, waiting on the walk's stack.
+struct Frame<'tree> {
+    /// The symbol its children go under (`None` for the document root's pairs).
+    parent: Option<KeyId>,
+    /// At the container until its first child is taken, then at the last child taken.
+    cursor: TreeCursor<'tree>,
+    /// Whether the cursor has gone down into the container's children.
+    entered: bool,
+    /// What its children are.
+    children: Children,
+}
+
+impl<'tree> Frame<'tree> {
+    /// A frame about to go through `container`'s children under `parent`.
+    fn new(parent: Option<KeyId>, container: Node<'tree>, children: Children) -> Self {
+        Self {
+            parent,
+            cursor: container.walk(),
+            entered: false,
+            children,
+        }
+    }
+
+    /// The next child after the last one taken that names something here: a `pair` in a body of
+    /// pairs, a value in an array. `None` once there are none. The cursor moves one sibling at a
+    /// time, so nothing is allocated, and every child passed over is checked against the
+    /// deadline.
+    ///
+    /// # Errors
+    ///
+    /// As [`KeyPaths::ensure_live`].
+    fn next(&mut self, paths: &mut KeyPaths) -> Result<Option<Node<'tree>>, KeyPathError> {
+        loop {
+            let moved = if self.entered {
+                self.cursor.goto_next_sibling()
+            } else {
+                self.entered = true;
+                self.cursor.goto_first_child()
+            };
+            if !moved {
+                return Ok(None);
+            }
+            let child = self.cursor.node();
+            paths.ensure_live(child.start_byte())?;
+            let wanted = match self.children {
+                Children::Pairs => child.kind() == "pair",
+                Children::Elements { .. } => VALUE_KINDS.contains(&child.kind()),
+            };
+            if child.is_named() && wanted {
+                return Ok(Some(child));
+            }
+        }
+    }
 }
 
 /// One file's walk: its text, the builder, and the arrays of tables met so far.
@@ -138,6 +189,7 @@ impl<'tree> Walk<'tree, '_> {
         self.pairs(None, root)?;
         let mut cursor = root.walk();
         for child in root.named_children(&mut cursor) {
+            self.paths.ensure_live(child.start_byte())?;
             match child.kind() {
                 "table" => self.table(child, false)?,
                 "table_array_element" => self.table(child, true)?,
@@ -154,7 +206,10 @@ impl<'tree> Walk<'tree, '_> {
     ///
     /// As [`Walk::document`].
     fn table(&mut self, node: Node<'tree>, array: bool) -> Result<(), KeyPathError> {
-        let Some(names) = first_key(node).and_then(|key| self.key_names(key)) else {
+        let Some(key) = first_key(node) else {
+            return Ok(());
+        };
+        let Some(names) = self.key_names(key)? else {
             return Ok(());
         };
         let Some((last, outer)) = names.split_last() else {
@@ -205,37 +260,43 @@ impl<'tree> Walk<'tree, '_> {
         }
     }
 
-    /// Makes a symbol for every pair directly in `container` under `parent`, then for everything
-    /// under their values: inline tables' pairs and arrays' elements, depth first in file order.
+    /// Makes a symbol for every pair in `container` under `parent`, and for everything under
+    /// their values: inline tables' pairs and arrays' elements, depth first in file order.
     ///
-    /// The walk keeps its own stack, so any nesting depth is safe.
+    /// The walk keeps its own stack, so any nesting depth is safe. A frame goes on it only for a
+    /// value whose symbol was just made, so the stack never outgrows the budget, and children are
+    /// taken one at a time rather than collected.
     ///
     /// # Errors
     ///
     /// As [`Walk::document`].
     fn pairs(&mut self, parent: Option<KeyId>, container: Node<'tree>) -> Result<(), KeyPathError> {
-        let mut steps = Vec::new();
-        push_pairs(&mut steps, parent, container);
-        while let Some(step) = steps.pop() {
-            let (id, value) = match step {
-                Step::Pair { parent, node } => match self.pair(parent, node)? {
-                    Some(made) => made,
-                    None => continue,
-                },
-                Step::Element {
-                    parent,
-                    index,
-                    node,
-                } => {
-                    let Some(name) = index_name(index) else {
-                        continue;
-                    };
-                    (self.paths.key(Some(parent), name, node.byte_range())?, node)
+        let mut frames = vec![Frame::new(parent, container, Children::Pairs)];
+        while let Some(frame) = frames.last_mut() {
+            let Some(child) = frame.next(self.paths)? else {
+                let _done = frames.pop();
+                continue;
+            };
+            let made = match &mut frame.children {
+                Children::Pairs => self.pair(frame.parent, child)?,
+                Children::Elements { next } => {
+                    let index = *next;
+                    *next = index.saturating_add(1);
+                    match index_name(index) {
+                        Some(name) => Some((
+                            self.paths.key(frame.parent, name, child.byte_range())?,
+                            child,
+                        )),
+                        None => None,
+                    }
                 }
             };
+            let Some((id, value)) = made else {
+                continue;
+            };
             match value.kind() {
-                "inline_table" => push_pairs(&mut steps, Some(id), value),
-                "array" => push_elements(&mut steps, id, value),
+                "inline_table" => frames.push(Frame::new(Some(id), value, Children::Pairs)),
+                "array" => frames.push(Frame::new(Some(id), value, Children::Elements { next: 0 })),
                 _ => {}
             }
         }
@@ -260,7 +321,7 @@ impl<'tree> Walk<'tree, '_> {
         let Some(value) = value_after(node, key) else {
             return Ok(None);
         };
-        let Some(names) = self.key_names(key) else {
+        let Some(names) = self.key_names(key)? else {
             return Ok(None);
         };
         let Some((last, outer)) = names.split_last() else {
@@ -275,30 +336,36 @@ impl<'tree> Walk<'tree, '_> {
         Ok(Some((id, value)))
     }
 
-    /// The segments a bare, quoted or dotted key names, outermost first. `None` when any part is
-    /// empty or not a key, so nothing under it is named.
-    fn key_names(&self, key: Node<'tree>) -> Option<Vec<KeyName>> {
+    /// The segments a bare, quoted or dotted key names, outermost first. `Ok(None)` when any
+    /// part is empty or not a key, so nothing under it is named.
+    ///
+    /// # Errors
+    ///
+    /// As [`KeyPaths::reaches`]: each part is checked against the deadline and the segment
+    /// budget before it is listed, so a key with more parts than a path can hold is refused
+    /// before its list grows past the budget.
+    fn key_names(&mut self, key: Node<'tree>) -> Result<Option<Vec<KeyName>>, KeyPathError> {
         // A dotted key nests to the left: `a.b.c` is `(a.b).c`. Unwind it without recursion.
         let mut parts = Vec::new();
         let mut node = key;
-        while node.kind() == "dotted_key" {
-            let mut cursor = node.walk();
-            let keys: Vec<Node<'tree>> = node
-                .named_children(&mut cursor)
-                .filter(|child| is_key(*child))
-                .collect();
-            let [left, right] = keys.as_slice() else {
-                return None;
+        loop {
+            self.paths
+                .reaches(node.start_byte(), parts.len().saturating_add(1))?;
+            if node.kind() != "dotted_key" {
+                break;
+            }
+            let Some((left, right)) = halves(node) else {
+                return Ok(None);
             };
-            parts.push(*right);
-            node = *left;
+            parts.push(right);
+            node = left;
         }
         parts.push(node);
-        parts
+        Ok(parts
             .iter()
             .rev()
             .map(|part| self.key_text(*part).as_deref().and_then(key_name))
-            .collect()
+            .collect())
     }
 
     /// The key a bare or quoted key node spells, decoded from its quoting.
@@ -312,40 +379,14 @@ impl<'tree> Walk<'tree, '_> {
     }
 }
 
-/// Puts every `pair` directly in `container` on `steps` under `parent`, so they pop in file order.
-fn push_pairs<'tree>(steps: &mut Vec<Step<'tree>>, parent: Option<KeyId>, container: Node<'tree>) {
-    let mut cursor = container.walk();
-    let pairs: Vec<Node<'tree>> = container
+/// The two keys of a dotted key, `(left, right)`; `None` unless it has exactly two.
+fn halves(dotted: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    let mut cursor = dotted.walk();
+    let mut keys = dotted
         .named_children(&mut cursor)
-        .filter(|child| child.kind() == "pair")
-        .collect();
-    steps.extend(
-        pairs
-            .into_iter()
-            .rev()
-            .map(|node| Step::Pair { parent, node }),
-    );
-}
-
-/// Puts every element of `array` on `steps` under `parent`, numbered from 0, so they pop in file
-/// order.
-fn push_elements<'tree>(steps: &mut Vec<Step<'tree>>, parent: KeyId, array: Node<'tree>) {
-    let mut cursor = array.walk();
-    let elements: Vec<Node<'tree>> = array
-        .named_children(&mut cursor)
-        .filter(|child| VALUE_KINDS.contains(&child.kind()))
-        .collect();
-    steps.extend(
-        elements
-            .into_iter()
-            .enumerate()
-            .rev()
-            .map(|(index, node)| Step::Element {
-                parent,
-                index,
-                node,
-            }),
-    );
+        .filter(|child| is_key(*child));
+    let halves = (keys.next()?, keys.next()?);
+    keys.next().is_none().then_some(halves)
 }
 
 /// Whether `node` is a key: bare, quoted or dotted.
@@ -417,8 +458,9 @@ mod tests {
 
     use super::{cartridge, unquote};
     use crate::cartridges::data::KeyPathBudget;
+    use crate::limits::Limits;
     use crate::path::AbsolutePath;
-    use crate::read::cartridge::{Cartridge, Languages, SourceFile, Symbol, SymbolTable};
+    use crate::read::cartridge::{Cartridge, Deadline, Languages, SourceFile, Symbol, SymbolTable};
     use crate::read::error::ReadError;
 
     /// A Cargo manifest with every kind of key and table the cartridge names.
@@ -452,10 +494,21 @@ name = "second"
 "#;
 
     fn parse(text: &str) -> SourceFile {
+        parse_under(text, KeyPathBudget::defaults())
+    }
+
+    /// `text` parsed as `/repo/Cargo.toml`, its key paths to be built under `budget`.
+    fn parse_under(text: &str, budget: KeyPathBudget) -> SourceFile {
         let path = AbsolutePath::new(Path::new("/repo/Cargo.toml"))
             .expect("the fixture path should be absolute");
-        SourceFile::parse(path, text.to_owned(), cartridge())
-            .expect("tree-sitter should return a tree")
+        SourceFile::from_text_under(
+            path,
+            text.to_owned(),
+            cartridge(),
+            Deadline::start(Limits::PARSE_TIMEOUT),
+            budget,
+        )
+        .expect("tree-sitter should return a tree")
     }
 
     fn symbols(file: &SourceFile) -> SymbolTable {
@@ -731,10 +784,13 @@ name = "second"
 
     #[test]
     fn the_file_s_budget_bounds_its_key_paths() {
-        let file = parse(MANIFEST).with_key_paths(KeyPathBudget {
-            segments: 3,
-            bytes: usize::MAX,
-        });
+        let file = parse_under(
+            MANIFEST,
+            KeyPathBudget {
+                segments: 3,
+                bytes: usize::MAX,
+            },
+        );
 
         let error = file
             .language()
@@ -769,7 +825,8 @@ name = "second"
         let error = SourceFile::read(
             path,
             Languages::builtin().expect("the built-in cartridges should load"),
-            crate::limits::Limits::PARSE_TIMEOUT,
+            Limits::PARSE_TIMEOUT,
+            KeyPathBudget::defaults(),
         )
         .expect_err("a file with an invalid UTF-8 byte should be rejected");
 
