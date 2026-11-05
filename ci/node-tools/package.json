@@ -1,0 +1,10 @@
+{
+  "name": "supdoc-ci-node-tools",
+  "private": true,
+  "description": "prettier and eslint for supdoc's CI code-block checks. CI runs `npm ci --ignore-scripts` here; npm checks each package against its package-lock.json integrity hash.",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "eslint": "10.14.0",
+    "prettier": "3.9.10"
+  }
+}
