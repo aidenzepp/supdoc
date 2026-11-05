@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::code_blocks::{CodeBlocks, Dialect, Edition, Language};
 
-use super::format::ParseError;
+use super::format::{ParseError, Positions};
 use super::fragment::{Kind, Support};
 use super::lint;
 use super::runner::{Failure, Ran};
@@ -161,9 +161,9 @@ pub(crate) struct ToolCartridge {
     holds: fn(&str, Kind) -> bool,
     /// The variables it gets beyond [`ToolEnv`]'s, each set to the value held.
     vars: &'static [(&'static str, &'static str)],
-    /// Whether the positions in its syntax-error report are the block's own when it reads `input`:
-    /// gofmt reports a fragment's in a wrapper of its own.
-    places: fn(&str) -> bool,
+    /// How far the positions in its syntax-error report on `input` are the block's own: gofmt
+    /// reports a fragment's in a wrapper of its own.
+    positions: fn(&str) -> Positions,
     /// Its arguments for a block.
     argv: fn(&Invocation<'_>) -> Vec<OsString>,
     /// How a run is read.
@@ -201,11 +201,11 @@ impl ToolCartridge {
             .collect()
     }
 
-    /// Whether the positions in its syntax-error report on `input` are the block's own, so the
-    /// report's line can place the error in the doc.
+    /// How far the positions in its syntax-error report on `input` are the block's own, which
+    /// decides how the report places the error in the doc.
     #[must_use]
-    pub(crate) fn places(&self, input: &str) -> bool {
-        (self.places)(input)
+    pub(crate) fn positions(&self, input: &str) -> Positions {
+        (self.positions)(input)
     }
 
     /// Its syntax-error report in `stderr`. `None` for any other stderr, and always for a
@@ -356,10 +356,10 @@ const fn framed(before: &'static str, after: &'static str) -> Support {
     }
 }
 
-/// Whether a tool's syntax-error positions on `input` are the block's own: always, for a tool
+/// How far a tool's syntax-error positions on `input` are the block's own: wholly, for a tool
 /// that reads the block as written.
-const fn every_input(_input: &str) -> bool {
-    true
+const fn own_positions(_input: &str) -> Positions {
+    Positions::Own
 }
 
 /// gofmt's kinds: it tries the block as a file, then as a declaration list, then as a statement
@@ -398,7 +398,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 16] = [
         fragments: RUSTFMT_FRAGMENTS,
         holds: every_tag,
         vars: &[],
-        places: every_input,
+        positions: own_positions,
         argv: rustfmt_args,
         reader: Reader::Format(rust::parse_error),
     },
@@ -413,7 +413,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 16] = [
         fragments: SHELL_FRAGMENTS,
         holds: every_tag,
         vars: &[],
-        places: every_input,
+        positions: own_positions,
         argv: shfmt_args,
         reader: Reader::Format(shell::parse_error),
     },
@@ -428,7 +428,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 16] = [
         fragments: PYTHON_FORMAT_FRAGMENTS,
         holds: every_tag,
         vars: &[],
-        places: every_input,
+        positions: own_positions,
         argv: ruff_format_args,
         reader: Reader::Format(python::ruff_parse_error),
     },
@@ -443,7 +443,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 16] = [
         fragments: PYTHON_FORMAT_FRAGMENTS,
         holds: every_tag,
         vars: &[],
-        places: every_input,
+        positions: own_positions,
         argv: black_args,
         reader: Reader::Format(python::black_parse_error),
     },
@@ -458,7 +458,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 16] = [
         fragments: RUFF_FRAGMENTS,
         holds: every_tag,
         vars: &[],
-        places: every_input,
+        positions: own_positions,
         argv: ruff_args,
         reader: Reader::Lint(python::lint_verdict),
     },
@@ -473,7 +473,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 16] = [
         fragments: SHELL_FRAGMENTS,
         holds: every_tag,
         vars: &[],
-        places: every_input,
+        positions: own_positions,
         argv: shellcheck_args,
         reader: Reader::Lint(shell::lint_verdict),
     },
@@ -488,7 +488,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 16] = [
         fragments: &[],
         holds: every_tag,
         vars: &[],
-        places: every_input,
+        positions: own_positions,
         argv: clippy_args,
         reader: Reader::Lint(rust::lint_verdict),
     },
@@ -503,7 +503,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 16] = [
         fragments: &[],
         holds: biome::holds,
         vars: &[],
-        places: every_input,
+        positions: own_positions,
         argv: biome_format_args,
         reader: Reader::Format(biome::parse_error),
     },
@@ -518,7 +518,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 16] = [
         fragments: &[],
         holds: biome::holds,
         vars: &[],
-        places: every_input,
+        positions: own_positions,
         argv: biome_format_args,
         reader: Reader::Format(biome::parse_error),
     },
@@ -533,7 +533,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 16] = [
         fragments: &[],
         holds: every_tag,
         vars: &[],
-        places: every_input,
+        positions: own_positions,
         argv: biome_format_args,
         reader: Reader::Format(biome::parse_error),
     },
@@ -548,7 +548,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 16] = [
         fragments: BIOME_LINT_TS_FRAGMENTS,
         holds: biome::holds,
         vars: &[],
-        places: every_input,
+        positions: own_positions,
         argv: biome_lint_args,
         reader: Reader::Lint(biome::lint_verdict),
     },
@@ -563,7 +563,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 16] = [
         fragments: BIOME_LINT_FRAGMENTS,
         holds: biome::holds,
         vars: &[],
-        places: every_input,
+        positions: own_positions,
         argv: biome_lint_args,
         reader: Reader::Lint(biome::lint_verdict),
     },
@@ -578,7 +578,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 16] = [
         fragments: &[],
         holds: every_tag,
         vars: &[],
-        places: every_input,
+        positions: own_positions,
         argv: biome_lint_args,
         reader: Reader::Lint(biome::lint_verdict),
     },
@@ -593,7 +593,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 16] = [
         fragments: &[],
         holds: every_tag,
         vars: &[],
-        places: every_input,
+        positions: own_positions,
         argv: rumdl_format_args,
         reader: Reader::Format(rumdl::parse_error),
     },
@@ -608,7 +608,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 16] = [
         fragments: &[],
         holds: every_tag,
         vars: &[],
-        places: every_input,
+        positions: own_positions,
         argv: rumdl_args,
         reader: Reader::Lint(rumdl::lint_verdict),
     },
@@ -623,7 +623,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 16] = [
         fragments: GO_FRAGMENTS,
         holds: every_tag,
         vars: go::VARS,
-        places: go::is_file,
+        positions: go::positions,
         argv: gofmt_args,
         reader: Reader::Format(go::parse_error),
     },

@@ -428,7 +428,7 @@ impl Evaluation {
         let mut linted_nothing_warned = false;
         let mut indent_unknown_warned = false;
         let mut reshaped_warned = false;
-        let mut formatted_nothing_warned = false;
+        let mut printed_nothing_warned = false;
         for slot in slots {
             let (job, run) = match slot {
                 Slot::Found(finding) => {
@@ -460,9 +460,9 @@ impl Evaluation {
                         reshaped_warned = true;
                         self.findings.push(frame_reshaped(&record.at));
                     }
-                    if reason == FORMATTED_NOTHING && !formatted_nothing_warned {
-                        formatted_nothing_warned = true;
-                        self.findings.push(formatted_nothing(&record.at));
+                    if reason == format::PRINTED_NOTHING && !printed_nothing_warned {
+                        printed_nothing_warned = true;
+                        self.findings.push(printed_nothing(&record.at));
                     }
                     record.steps.format = StepState::Unrunnable { reason };
                 }
@@ -643,24 +643,18 @@ pub(super) const FRAME_RESHAPED: &str =
 pub(super) const FRAME_INDENT_UNKNOWN: &str =
     "supdoc couldn't read the formatter's indent from the project's config";
 
-/// Why a format step counts as not run when its formatter exited cleanly but printed nothing, or
-/// only whitespace, for a block that holds code: the run says nothing about the block, so it is
-/// neither a pass nor a fix.
-pub(super) const FORMATTED_NOTHING: &str =
-    "the formatter printed nothing for a block that holds code";
-
-/// The run's one `code-block-not-checked` warning, at `at`, the first block whose format step
-/// didn't run because its formatter printed nothing.
-fn formatted_nothing(at: &Location) -> Finding {
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose formatter
+/// exited 0 and printed nothing for it, so its format step didn't run.
+fn printed_nothing(at: &Location) -> Finding {
     Finding::new(
         NOT_CHECKED,
         Severity::Warning,
-        "the formatter exited cleanly but printed nothing for this block, so its format step \
-         didn't run, and no block whose formatter printed nothing passes or is fixed",
+        "the formatter printed nothing for this block, so its format step didn't run: the \
+         project's formatter config may switch formatting off for it",
     )
     .with_help(
-        "check that the formatter on PATH works on standard input, or mark the block \
-         `format(off: <reason>)`",
+        "find the setting in the formatter's config that switches formatting off for the doc's \
+         blocks, or mark the blocks `format(off: <reason>)`",
     )
     .with_location(at.clone())
 }
@@ -1757,10 +1751,8 @@ fn run_formatter(
         },
         format::Verdict::cacheable,
     );
-    if matches!(&verdict, format::Verdict::Unformatted(output) if output.trim().is_empty())
-        && !pending.input.trim().is_empty()
-    {
-        return Some(Err(FORMATTED_NOTHING));
+    if verdict == format::Verdict::PrintedNothing {
+        return Some(Err(format::PRINTED_NOTHING));
     }
     let at = match &verdict {
         format::Verdict::NotKind(_) | format::Verdict::FrameReformatted(_) => pending

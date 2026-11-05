@@ -5,11 +5,14 @@
 //! name, so no file of the project or the user reaches it, wherever it runs.
 //!
 //! gofmt tries its input as a file, then as a declaration list behind `package p;`, then as a
-//! statement list inside `package p; func _() {` … `}`. Its error positions are the block's own
-//! only in the first case: for a fragment they count the wrapper's text, so such an error sits at
-//! the block's fence line with gofmt's message and no position.
+//! statement list inside `package p; func _() {` … `}`. Each wrapper opens on the block's first
+//! line, so a fragment's error lines are the block's own while a column on line 1 counts the
+//! wrapper too, and the statement wrapper's closing lines sit past the block's end: a fragment's
+//! error is placed by its line alone, and one past the block is the wrapper's. A `//line` or
+//! `/*line` directive in the block renames every position gofmt reports, so such a block's error
+//! sits at its fence.
 
-use super::format::{ParseError, first_line};
+use super::format::{ParseError, Positions, first_line};
 
 /// The variables gofmt gets beyond the tool environment: `GOTOOLCHAIN=local`, so a `go` front
 /// end never downloads a toolchain to run it.
@@ -26,14 +29,21 @@ pub(crate) fn parse_error(stderr: &str) -> Option<ParseError> {
         .then_some(ParseError { line: Some(line) })
 }
 
-/// Whether gofmt reads `input` as a whole file, so its error positions are the block's own: the
-/// first token past comments is `package`, and no `//line` or `/*line` directive renames the
-/// positions it reports.
+/// How far gofmt's error positions on `input` are the block's own: renamed by a `//line` or
+/// `/*line` directive, wholly for a file, and by line alone for a fragment.
 #[must_use]
-pub(crate) fn is_file(input: &str) -> bool {
+pub(crate) fn positions(input: &str) -> Positions {
     if input.contains("//line ") || input.contains("/*line ") {
-        return false;
+        Positions::Renamed
+    } else if is_file(input) {
+        Positions::Own
+    } else {
+        Positions::Lines
     }
+}
+
+/// Whether gofmt reads `input` as a whole file: the first token past comments is `package`.
+fn is_file(input: &str) -> bool {
     let mut rest = input;
     loop {
         rest = rest.trim_start();
@@ -51,8 +61,8 @@ pub(crate) fn is_file(input: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_file, parse_error};
-    use crate::code_blocks::format::ParseError;
+    use super::{is_file, parse_error, positions};
+    use crate::code_blocks::format::{ParseError, Positions};
 
     #[test]
     fn a_standard_input_position_is_a_parse_error_at_that_line() {
@@ -79,12 +89,19 @@ mod tests {
     }
 
     #[test]
-    fn a_fragment_or_a_renamed_position_is_not_a_file() {
+    fn a_line_directive_renames_positions_and_a_fragment_keeps_its_lines() {
+        assert_eq!(positions("package p\n"), Positions::Own);
+        assert_eq!(positions("x := 1\n"), Positions::Lines);
+        assert_eq!(positions("package p\n//line a.go:9\n"), Positions::Renamed);
+        assert_eq!(positions("x := 1 /*line :4*/\n"), Positions::Renamed);
+    }
+
+    #[test]
+    fn a_fragment_is_not_a_file() {
         assert!(!is_file("x := 1\nfmt.Println(x)\n"));
         assert!(!is_file("func f() {}\n"));
         assert!(!is_file("packages := 1\n"));
         assert!(!is_file("// package p\nx := 1\n"));
-        assert!(!is_file("package p\n//line other.go:10\nfunc f() {\n"));
         assert!(!is_file(""));
     }
 }

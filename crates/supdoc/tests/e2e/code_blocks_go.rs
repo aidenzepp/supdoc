@@ -111,7 +111,7 @@ fn a_whole_files_syntax_error_sits_at_its_doc_line() {
 }
 
 #[test]
-fn a_fragments_syntax_error_sits_at_the_fence_with_no_position() {
+fn a_fragments_syntax_error_sits_at_its_doc_line_without_the_wrappers_end() {
     let project = project_with_block("go", "x := <name>");
     let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
     gofmt_stub(
@@ -124,15 +124,20 @@ fn a_fragments_syntax_error_sits_at_the_fence_with_no_position() {
     let json = check(&project, outside.path(), 1);
 
     assert_eq!(finding_kinds(&json), ["code-block-parse"], "{json}");
-    assert_eq!(at(&json, "/findings/0/location/line"), 3, "{json}");
-    let message = at(&json, "/findings/0/message")
-        .as_str()
-        .expect("the message should be a string");
+    assert_eq!(at(&json, "/findings/0/location/line"), 4, "{json}");
+    let message = message_of(&json);
     assert!(message.contains("expected operand, found '<'"), "{json}");
     assert!(
-        !message.contains("1:27") && !message.contains("4:2"),
-        "a fragment's message should drop gofmt's wrapper positions: {json}"
+        !message.contains("1:27") && !message.contains("expected ';'"),
+        "a fragment's message should drop gofmt's wrapper column and the wrapper's end: {json}"
     );
+}
+
+/// The first finding's message.
+fn message_of(json: &serde_json::Value) -> &str {
+    at(json, "/findings/0/message")
+        .as_str()
+        .expect("the message should be a string")
 }
 
 #[test]
@@ -196,36 +201,138 @@ fn the_real_gofmt_passes_a_formatted_file_and_fails_unformatted_statements() {
 }
 
 #[test]
-fn the_real_gofmts_syntax_errors_sit_at_the_doc_line_or_the_fence() {
-    let Some(dir) = real_gofmt("the_real_gofmts_syntax_errors_sit_at_the_doc_line_or_the_fence")
+fn the_real_gofmts_syntax_errors_sit_at_their_doc_line_for_a_file_and_each_fragment_kind() {
+    let Some(dir) = real_gofmt(
+        "the_real_gofmts_syntax_errors_sit_at_their_doc_line_for_a_file_and_each_fragment_kind",
+    ) else {
+        return;
+    };
+    // (info string, body, doc line, text gofmt's wrapper end adds that must not show)
+    let cases = [
+        ("go", "package p\n\nfunc f() {\n\tx := <\n}", 7, None),
+        (
+            "go fragment(statements)",
+            "a := 1\nb := 2\nc := <",
+            6,
+            Some("expected ';'"),
+        ),
+        (
+            "go fragment(expression)",
+            "fmt.Println(<)",
+            4,
+            Some("missing ','"),
+        ),
+        (
+            "go fragment(declarations)",
+            "func f() {}\nfunc g( {}",
+            5,
+            None,
+        ),
+    ];
+
+    for (info, body, line, wrapper) in cases {
+        let json = check(&project_with_block(info, body), &dir, 1);
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-parse"],
+            "`{info}`: {json}"
+        );
+        assert_eq!(
+            at(&json, "/findings/0/location/line"),
+            line,
+            "`{info}`: {json}"
+        );
+        let message = message_of(&json);
+        assert!(message.contains("expected"), "`{info}`: {json}");
+        if let Some(wrapper) = wrapper {
+            assert!(!message.contains(wrapper), "`{info}`: {json}");
+        }
+    }
+}
+
+#[test]
+fn the_real_gofmts_error_after_a_line_directive_is_a_parse_error_at_the_fence() {
+    let Some(dir) =
+        real_gofmt("the_real_gofmts_error_after_a_line_directive_is_a_parse_error_at_the_fence")
     else {
         return;
     };
-    let file = project_with_block("go", "package p\n\nfunc f() {\n\tx := <\n}");
-    let fragment = project_with_block("go", "x := <name>");
 
-    let in_file = check(&file, &dir, 1);
-    let in_fragment = check(&fragment, &dir, 1);
+    for directive in ["//line foo.go:10", "//line :10"] {
+        let project = project_with_block("go", &format!("x := 1\n{directive}\ny := ("));
 
-    assert_eq!(finding_kinds(&in_file), ["code-block-parse"], "{in_file}");
-    assert_eq!(at(&in_file, "/findings/0/location/line"), 7, "{in_file}");
-    assert_eq!(
-        finding_kinds(&in_fragment),
-        ["code-block-parse"],
-        "{in_fragment}"
-    );
-    assert_eq!(
-        at(&in_fragment, "/findings/0/location/line"),
-        3,
-        "{in_fragment}"
-    );
-    let message = at(&in_fragment, "/findings/0/message")
-        .as_str()
-        .expect("the message should be a string");
-    assert!(
-        message.contains("expected operand") && !message.contains("1:27"),
-        "{in_fragment}"
-    );
+        let json = check(&project, &dir, 1);
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-parse"],
+            "`{directive}`: {json}"
+        );
+        assert_eq!(
+            at(&json, "/findings/0/location/line"),
+            3,
+            "`{directive}`: {json}"
+        );
+        let message = message_of(&json);
+        assert!(
+            message.contains("expected operand") && !message.contains("13:"),
+            "`{directive}`: the renamed position should be dropped: {json}"
+        );
+    }
+}
+
+/// A recorded `basic` project with the go table and `doc` as `docs/blocks.md`.
+fn project_with_doc(doc: &str) -> Project {
+    let project = project_with_block("go", "");
+    project.write("docs/blocks.md", doc);
+    project
+}
+
+#[test]
+fn the_real_gofmt_passes_and_fixes_an_expression_and_declarations_touching_only_their_lines() {
+    let Some(dir) = real_gofmt(
+        "the_real_gofmt_passes_and_fixes_an_expression_and_declarations_touching_only_their_lines",
+    ) else {
+        return;
+    };
+    let doc = |kind: &str, body: &str| {
+        format!("# Blocks\n\nBefore.\n\n```go fragment({kind})\n{body}\n```\n\nAfter.\n")
+    };
+    // (kind, unformatted body, formatted body)
+    let cases = [
+        ("expression", "fmt.Println( x )", "fmt.Println(x)"),
+        (
+            "declarations",
+            "func f(){}\n\nvar  x = 1",
+            "func f() {}\n\nvar x = 1",
+        ),
+    ];
+
+    for (kind, unformatted, formatted) in cases {
+        let passes = check(&project_with_doc(&doc(kind, formatted)), &dir, 0);
+        let failing = project_with_doc(&doc(kind, unformatted));
+        let fails = check(&failing, &dir, 1);
+
+        assert_eq!(
+            at(&passes, "/data/summary/code_blocks/passed"),
+            1,
+            "`{kind}`: {passes}"
+        );
+        assert_eq!(
+            finding_kinds(&fails),
+            ["code-block-unformatted"],
+            "`{kind}`: {fails}"
+        );
+        let _ = failing
+            .supdoc_in_with(".", &["fix", "--yes"], &[("PATH", &dir)])
+            .assert_exit(0);
+        assert_eq!(
+            failing.read("docs/blocks.md"),
+            doc(kind, formatted),
+            "`{kind}`: the fix should rewrite only the block's own lines"
+        );
+    }
 }
 
 #[test]
