@@ -71,6 +71,7 @@ top-level keys, and never change which files links are read from. A language's t
   javascript    formatter biome-format, linter biome-lint
   json          formatter biome-format, linter biome-lint; tag a block with comments jsonc
   markdown      formatter rumdl-format, linter rumdl
+  go            formatter gofmt, no linter yet; tag a block go or golang
 
 Each tool's options live in its own table, such as [features.code-blocks.python.ruff] with \
 lint = \"off\". A table for a tool the language doesn't select is a config error.
@@ -121,8 +122,9 @@ frame line and a fix never writes one. A block the tool can't parse inside its f
 code-block-parse \"couldn't parse the block as KIND\" and nothing else, never with the tool's \
 own message. In a block that parsed, a finding on a frame line is reported at the block's \
 attributes, and no rule is left off. A block that closes \
-the frame itself (a lone } then more code) is linted as written; rustfmt's format step reports \
-it as not its kind. The frames, each block standing where the ... is:
+the frame itself (a lone } then more code) is linted as written; rustfmt's format step fails \
+it code-block-tool-failed \"reformatted the fragment's frame\", with no fix. The frames, each \
+block standing where the ... is:
 
   rustfmt       statements    fn supdoc_fragment() { ... }
   rustfmt       expression    fn supdoc_fragment() { ... }

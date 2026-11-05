@@ -1687,6 +1687,43 @@ fn frame_format_children_with_no_element_pass_as_written() {
 }
 
 #[test]
+fn frame_format_a_one_line_children_block_with_a_trailing_blank_line_is_fixed() {
+    let Some(dir) = real_tool_dir(
+        "biome",
+        "frame_format_a_one_line_children_block_with_a_trailing_blank_line_is_fixed",
+    ) else {
+        return;
+    };
+
+    assert_biome_frames(&dir, None, ("tsx", "children"), "{label}\n", "{label}\n\n");
+}
+
+#[test]
+fn frame_format_whitespace_at_a_one_line_childrens_edge_fails_closed_without_a_fix() {
+    let test = "frame_format_whitespace_at_a_one_line_childrens_edge_fails_closed_without_a_fix";
+    for body in ["Hello{\" \"}\n", "{\" \"}\n"] {
+        let Some(json) = format_frame_check(test, None, ("tsx", "children", body), 1) else {
+            return;
+        };
+        assert_eq!(
+            kinds_and_lines(&json),
+            [("code-block-tool-failed".to_owned(), 5)],
+            "{body:?}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/findings/0/message"),
+            "supdoc couldn't compare `biome-format`'s output with this children block: \
+             `biome-format` printed it on one line with whitespace at its edge",
+            "{body:?}: {json}"
+        );
+        assert!(
+            json.pointer("/findings/0/fix").is_none(),
+            "{body:?}: no fix: {json}"
+        );
+    }
+}
+
+#[test]
 fn frame_format_a_syntax_error_in_each_kind_is_one_parse_error_in_supdocs_words() {
     let test = "frame_format_a_syntax_error_in_each_kind_is_one_parse_error_in_supdocs_words";
     for (tag, kind, body, line) in [

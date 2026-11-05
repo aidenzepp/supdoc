@@ -233,6 +233,9 @@ pub(crate) mod code_blocks {
     /// Markdown's format and lint steps, run by rumdl.
     mod rumdl;
 
+    /// Go's format step, run by gofmt.
+    mod go;
+
     /// Reading the Rust toolchain a project pins.
     mod toolchain;
 

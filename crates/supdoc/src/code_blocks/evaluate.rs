@@ -429,6 +429,7 @@ impl Evaluation {
         let mut indent_unknown_warned = false;
         let mut width_unknown_warned = false;
         let mut reshaped_warned = false;
+        let mut printed_nothing_warned = false;
         for slot in slots {
             let (job, run) = match slot {
                 Slot::Found(finding) => {
@@ -463,6 +464,10 @@ impl Evaluation {
                     if reason == FRAME_RESHAPED && !reshaped_warned {
                         reshaped_warned = true;
                         self.findings.push(frame_reshaped(&record.at));
+                    }
+                    if reason == format::PRINTED_NOTHING && !printed_nothing_warned {
+                        printed_nothing_warned = true;
+                        self.findings.push(printed_nothing(&record.at));
                     }
                     record.steps.format = StepState::Unrunnable { reason };
                 }
@@ -665,6 +670,22 @@ pub(super) const FRAME_INDENT_UNKNOWN: &str =
 /// hold the block to the project's width.
 pub(super) const FRAME_WIDTH_UNKNOWN: &str =
     "supdoc couldn't use the line width biome's config sets";
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose formatter
+/// exited 0 and printed nothing for it, so its format step didn't run.
+fn printed_nothing(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "the formatter printed nothing for this block, so its format step didn't run: the \
+         project's formatter config may switch formatting off for it",
+    )
+    .with_help(
+        "find the setting in the formatter's config that switches formatting off for the doc's \
+         blocks, or mark the blocks `format(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
 
 /// The run's one `code-block-not-checked` warning, at `at`, the first block whose biome lint
 /// step didn't run because biome checked no file.
@@ -1794,6 +1815,7 @@ fn run_formatter(
     let extra: Vec<(&str, &OsStr)> = vars
         .iter()
         .map(|(name, value)| (*name, value.as_os_str()))
+        .chain(tool.vars())
         .collect();
     let held = framed
         .as_ref()
@@ -1824,13 +1846,16 @@ fn run_formatter(
         },
         format::Verdict::cacheable,
     );
+    if verdict == format::Verdict::PrintedNothing {
+        return Some(Err(format::PRINTED_NOTHING));
+    }
     let at = match &verdict {
         format::Verdict::NotKind {
             line: Some(line), ..
         } => body_place(*line, pending).unwrap_or_else(|| info_place(record, pending)),
-        format::Verdict::NotKind { line: None, .. } | format::Verdict::FrameReformatted(_) => {
-            info_place(record, pending)
-        }
+        format::Verdict::NotKind { line: None, .. }
+        | format::Verdict::FrameReformatted(_)
+        | format::Verdict::Uncompared(_) => info_place(record, pending),
         _ => parse_place(&verdict, pending).unwrap_or_else(|| record.at.clone()),
     };
     let finding = format::finding(&verdict, tool, &at, timeout)
@@ -1931,11 +1956,12 @@ fn run_linter(
     let frame = Frame::of(tool, record.fragment);
     let input = lint::checked(frame, &pending.input);
     let input = input.as_ref();
+    let extra = tool.vars();
     let run = cache::Run {
         tool,
         program,
         args: &args,
-        extra: &[],
+        extra: &extra,
         input,
         doc: &doc,
         project: None,
