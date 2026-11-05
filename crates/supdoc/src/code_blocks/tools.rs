@@ -23,7 +23,7 @@ use super::format::{ParseError, Positions};
 use super::fragment::{Kind, Support};
 use super::lint;
 use super::runner::{Cwd, Failure, Ran};
-use super::{biome, go, prettier, pylint, python, rumdl, rust, shell, tombi, yaml};
+use super::{biome, eslint, go, prettier, pylint, python, rumdl, rust, shell, tombi, yaml};
 
 /// The variables a tool gets from supdoc's own environment, and no others.
 const PASSED: [&str; 5] = [
@@ -875,7 +875,7 @@ fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'sta
 }
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 27] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 29] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -1391,6 +1391,68 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 27] = [
         argv: prettier_markdown_args,
         reader: Reader::Format(prettier::parse_error),
     },
+    ToolCartridge {
+        name: "eslint",
+        language: Language::TypeScript,
+        binary: "eslint",
+        loads: Loads::Project {
+            held: Held {
+                // Each language's reasons are its own, so a held step leads back to its row.
+                needs_trust: "eslint runs on TypeScript blocks only in the project tier, which needs \
+                              `supdoc trust`",
+                trust_off: "eslint runs on TypeScript blocks only in the project tier, and \
+                            `SUPDOC_TRUST=0` turns trust off for this run",
+                short: "eslint needs trust",
+                didnt_run: "eslint didn't run on TypeScript blocks: its config and plugins are the \
+                            project's code",
+                off: "`lint = \"off\"` in `[features.code-blocks.typescript.eslint]`",
+            },
+            // It reads the project's config and loads its plugins as its command line would.
+            cwd: Cwd::Root,
+            bins: &["node_modules/.bin"],
+        },
+        install: "npm install --global eslint@10.14.0",
+        // Never cached (see [`ToolCartridge::cacheable`]), so no config file keys its results.
+        config_files: &[],
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        holds: every_tag,
+        vars: &[],
+        positions: own_positions,
+        argv: eslint_args,
+        reader: Reader::Lint(eslint::lint_verdict),
+    },
+    ToolCartridge {
+        name: "eslint",
+        language: Language::JavaScript,
+        binary: "eslint",
+        loads: Loads::Project {
+            held: Held {
+                // Each language's reasons are its own, so a held step leads back to its row.
+                needs_trust: "eslint runs on JavaScript blocks only in the project tier, which needs \
+                              `supdoc trust`",
+                trust_off: "eslint runs on JavaScript blocks only in the project tier, and \
+                            `SUPDOC_TRUST=0` turns trust off for this run",
+                short: "eslint needs trust",
+                didnt_run: "eslint didn't run on JavaScript blocks: its config and plugins are the \
+                            project's code",
+                off: "`lint = \"off\"` in `[features.code-blocks.javascript.eslint]`",
+            },
+            // It reads the project's config and loads its plugins as its command line would.
+            cwd: Cwd::Root,
+            bins: &["node_modules/.bin"],
+        },
+        install: "npm install --global eslint@10.14.0",
+        // Never cached (see [`ToolCartridge::cacheable`]), so no config file keys its results.
+        config_files: &[],
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        holds: every_tag,
+        vars: &[],
+        positions: own_positions,
+        argv: eslint_args,
+        reader: Reader::Lint(eslint::lint_verdict),
+    },
 ];
 
 /// The files rumdl's results depend on: its config names (see [`rumdl::CONFIG_FILES`]) and the
@@ -1580,6 +1642,23 @@ fn prettier_with(invocation: &Invocation<'_>, extension: &str, parser: &str) -> 
         OsString::from(format!("--parser={parser}")),
         OsString::from("--stdin-filepath"),
         virtual_path(invocation.doc, invocation.index, extension),
+    ]
+}
+
+/// eslint's arguments: the block on stdin under its virtual path, its extension from the tag as
+/// biome's (see [`biome::extension`]), so the project's config objects match it by their
+/// `files`, and the `json` report (see [`eslint`]).
+fn eslint_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    vec![
+        OsString::from("--stdin"),
+        OsString::from("--stdin-filename"),
+        virtual_path(
+            invocation.doc,
+            invocation.index,
+            biome::extension(invocation.tag),
+        ),
+        OsString::from("--format"),
+        OsString::from("json"),
     ]
 }
 
@@ -2035,6 +2114,8 @@ mod tests {
                 "prettier Json Format prettier Project",
                 "prettier Yaml Format prettier Project",
                 "prettier Markdown Format prettier Project",
+                "eslint TypeScript Lint eslint Project",
+                "eslint JavaScript Lint eslint Project",
             ]
         );
     }
@@ -2165,6 +2246,34 @@ mod tests {
                     path
                 ]
                 .map(OsString::from),
+                "{tag}"
+            );
+        }
+    }
+
+    #[test]
+    fn eslint_reads_the_block_from_stdin_under_its_virtual_path_and_reports_json() {
+        for (tag, path) in [
+            ("ts", "/p/docs/a.md.3.ts"),
+            ("tsx", "/p/docs/a.md.3.tsx"),
+            ("javascript", "/p/docs/a.md.3.js"),
+            ("cjs", "/p/docs/a.md.3.cjs"),
+        ] {
+            let args = cartridge("eslint").args(&Invocation {
+                doc: Path::new("/p/docs/a.md"),
+                tag,
+                index: 3,
+                edition: Edition::E2024,
+                dialect: Dialect::Bash,
+                project: &[],
+                emit: None,
+                externs: &[],
+                fragment: None,
+            });
+
+            assert_eq!(
+                args,
+                ["--stdin", "--stdin-filename", path, "--format", "json"].map(OsString::from),
                 "{tag}"
             );
         }
@@ -2633,11 +2742,12 @@ mod tests {
     }
 
     #[test]
-    fn only_pylint_and_prettier_search_a_bin_dir_and_run_from_the_root_so_are_never_cached() {
+    fn only_pylint_prettier_and_eslint_search_a_bin_dir_and_run_from_the_root_so_are_never_cached()
+    {
         for tool in &CARTRIDGES {
             let (bins, cwd): (&[&str], _) = match tool.name {
                 "pylint" => (&[".venv/bin"], Cwd::Root),
-                "prettier" => (&["node_modules/.bin"], Cwd::Root),
+                "prettier" | "eslint" => (&["node_modules/.bin"], Cwd::Root),
                 _ => (&[], Cwd::Neutral),
             };
             assert_eq!(tool.bins(), bins, "{}", tool.name);

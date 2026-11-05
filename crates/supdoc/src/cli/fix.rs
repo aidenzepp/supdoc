@@ -401,7 +401,7 @@ impl Planned {
     /// Phase one: rewrites the source files, then moves the lock entries of rewritten links and
     /// writes the lockfile if any moved.
     fn write(&self, root: &AbsolutePath, rerun: &str) -> Written {
-        let FixResult { applied, skipped } = apply_fixes(&self.plan, root, rerun);
+        let FixResult { applied, skipped } = apply_fixes(&self.plan, self.config.boundary(), rerun);
         let mut lock = self.lock.clone();
         let mut moved = move_lock_entries(
             &mut lock,
@@ -409,7 +409,7 @@ impl Planned {
         );
         let mut lock_failure = None;
         if lock != self.lock
-            && let Err(error) = lock.write(&lock_path(root))
+            && let Err(error) = lock.write(&lock_path(root), self.config.boundary())
         {
             // The write is atomic, so the lockfile on disk is still the one that was read.
             lock = self.lock.clone();
@@ -694,6 +694,14 @@ fn lock_unwritten(
     let rerun = command_line(context, "fix", paths, &["--yes"]);
     let update = command_line(context, "update", fixed, &["--yes"]);
     let names: Vec<&str> = files.iter().map(|file| file.as_str()).collect();
+    // A lockfile refused as outside the root passed the read's check, so a path on the way
+    // changed during the run: that is what to put right, not its permissions.
+    let first = if matches!(error, LockError::OutsideRoot { .. }) {
+        "It now leads outside the project root because a path on the way changed after supdoc \
+         checked it. Once that path is restored"
+    } else {
+        "Make it writable"
+    };
     CliError::new(
         CODE_LOCK_WRITE_FAILED,
         format!(
@@ -702,10 +710,9 @@ fn lock_unwritten(
             error.message_from(root)
         ),
         format!(
-            "supdoc.lock is unchanged and still holds the old links' history. \
-             Make it writable, then either restore those files and run `{rerun}` again \
-             to carry the history over, or run `{update}` on them to lock the fixed \
-             links afresh without it"
+            "supdoc.lock is unchanged and still holds the old links' history. {first}, then \
+             either restore those files and run `{rerun}` again to carry the history over, or \
+             run `{update}` on them to lock the fixed links afresh without it"
         ),
         ExitStatus::Io,
     )
@@ -873,6 +880,7 @@ mod tests {
     use super::*;
     use crate::cli::args::Command;
     use crate::cli::testing::{Run, Session, at};
+    use crate::config::confine::Boundary;
     use crate::limits::Limits;
     use crate::lock::model::LOCK_FILE_NAME;
 
@@ -884,6 +892,47 @@ mod tests {
 
     /// The code the guide points at.
     const LIB: &str = "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n";
+
+    #[test]
+    fn a_lock_refused_as_outside_the_root_after_fixing_gets_path_changed_help_not_permissions() {
+        let root = AbsolutePath::new(Path::new("/project")).expect("the root should be absolute");
+        let session = Session::new(root.clone(), &["fix", "--yes"]);
+        let source: SourcePath = "docs/guide.md"
+            .parse()
+            .expect("the fixture source should be valid");
+        let error = LockError::OutsideRoot {
+            path: AbsolutePath::new(Path::new("/project/supdoc.lock"))
+                .expect("the lockfile path should be absolute"),
+            after_check: true,
+        };
+
+        let unwritten = lock_unwritten(
+            &error,
+            &root,
+            &BTreeSet::from([&source]),
+            &session.context,
+            &[],
+            &["docs/guide.md".to_owned()],
+        );
+
+        assert_eq!(unwritten.code(), CODE_LOCK_WRITE_FAILED);
+        assert!(
+            unwritten
+                .message()
+                .contains("now leads outside the project root"),
+            "{}",
+            unwritten.message()
+        );
+        let help = unwritten.help();
+        assert!(
+            !help.contains("writable") && help.contains("a path on the way changed"),
+            "the help should name the path change, not permissions: {help}"
+        );
+        assert!(
+            help.starts_with("supdoc.lock is unchanged") && help.contains("supdoc update"),
+            "the help should keep the restore and update choices: {help}"
+        );
+    }
 
     /// The arguments of the `fix` command `session` parsed.
     fn fix_args(session: &Session) -> &FixArgs {
@@ -972,7 +1021,9 @@ mod tests {
         fn write_lock(&self, lock: &Lockfile) {
             let path = AbsolutePath::new(&self.path(LOCK_FILE_NAME))
                 .expect("the lockfile path should be absolute");
-            lock.write(&path)
+            let root =
+                AbsolutePath::new(&self.path("")).expect("the project root should be absolute");
+            lock.write(&path, &Boundary::resolve(&root))
                 .expect("the fixture lockfile should be written");
         }
 

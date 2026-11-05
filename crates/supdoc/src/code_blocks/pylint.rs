@@ -50,6 +50,11 @@ const ATOMIC_KEYWORDS: [&str; 2] = ["skip-file", "disable-all"];
 /// The verdict on a run pylint failed in without reporting a message: a fatal or usage error.
 const FAILED_SILENTLY: &str = "pylint exited with a fatal or usage error and reported no message";
 
+/// The verdict on a run whose stdout isn't pylint's `json2` report.
+const NOT_REPORT: &str = "its output wasn't its json2 report, so supdoc can't read what it found; \
+                          something else printed to stdout, such as a `print` in a pylint plugin \
+                          the project loads";
+
 /// pylint's `--output-format=json2` report.
 #[derive(serde::Deserialize)]
 struct Report {
@@ -185,8 +190,9 @@ pub(crate) fn linted_nothing(stdout: &[u8]) -> bool {
 /// exit code to read those bits from). Otherwise a `syntax-error` is a parse failure at its line,
 /// as a formatter's is; a report with no diagnostics left is clean whatever the exit, since
 /// pylint exits non-zero for the virtual module's name alone; a report with diagnostics gives
-/// them; anything else is judged as [`lint::judge`] judges output it can't read. pylint checks
-/// no fragments, so no run is framed.
+/// them. stdout that isn't the report, and a report holding a `fatal` message, are tool failures
+/// whatever the exit (a project's `exit-zero` makes pylint exit 0 even then), quoting pylint's
+/// stderr for a failed run that printed some. pylint checks no fragments, so no run is framed.
 #[must_use]
 pub(crate) fn judge(
     result: Result<Ran, Failure>,
@@ -198,17 +204,25 @@ pub(crate) fn judge(
         Err(failure) => return lint::judge(Err(failure), |_| None),
     };
     let Some(report) = report(&ran.stdout) else {
-        return lint::judge(Ok(ran), |_| None);
+        let detail = if ran.success || ran.stderr.iter().all(u8::is_ascii_whitespace) {
+            NOT_REPORT.to_owned()
+        } else {
+            format::exit_detail(&ran.stderr)
+        };
+        return lint::Verdict::Failed(format::Verdict::ToolFailed(detail));
     };
     if report.messages.is_empty() && !ran.success {
         return lint::Verdict::Failed(format::Verdict::ToolFailed(FAILED_SILENTLY.to_owned()));
     }
-    if report
+    if let Some(fatal) = report
         .messages
         .iter()
-        .any(|message| message.kind == "fatal")
+        .find(|message| message.kind == "fatal")
     {
-        return lint::judge(Ok(ran), |_| None);
+        return lint::Verdict::Failed(format::Verdict::ToolFailed(format!(
+            "pylint reported a fatal error: {}",
+            fatal.message
+        )));
     }
     let mut found = Vec::new();
     for entry in report.messages {
@@ -340,8 +354,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        Block, ConfigNote, FAILED_SILENTLY, config_warning, judge, lint_verdict, linted_nothing,
-        switches_lint_off,
+        Block, ConfigNote, FAILED_SILENTLY, NOT_REPORT, config_warning, judge, lint_verdict,
+        linted_nothing, switches_lint_off,
     };
     use crate::code_blocks::format;
     use crate::code_blocks::lint::{Diagnostic, Verdict};
@@ -682,6 +696,64 @@ mod tests {
         let found = diagnostics(&stdout).expect("the report should be read");
 
         assert_eq!(found.first().map(|found| found.column), Some(usize::MAX));
+    }
+
+    #[test]
+    fn stdout_that_isnt_the_report_fails_whatever_the_exit() {
+        let report = String::from_utf8(report(
+            &message(
+                "warning",
+                "unused-argument",
+                "W0613",
+                "Unused argument 'a'",
+                (1, 6),
+            ),
+            3,
+        ))
+        .expect("the report is UTF-8");
+        for stdout in [
+            format!("plugin loaded\n{report}"),
+            "not json".to_owned(),
+            "{}".to_owned(),
+            r#"{"messages": []}"#.to_owned(),
+            format!("{}{}", "[".repeat(100_000), "]".repeat(100_000)),
+        ] {
+            for code in [0, 4] {
+                assert_eq!(
+                    lint_verdict("", false, Ok(ran(code, stdout.clone().into_bytes()))),
+                    Verdict::Failed(format::Verdict::ToolFailed(NOT_REPORT.to_owned())),
+                    "exit {code}: {}",
+                    stdout.get(..40).unwrap_or(&stdout)
+                );
+            }
+        }
+        let failed = Ran {
+            success: false,
+            stdout: Vec::new(),
+            stderr: b"usage: pylint [options]".to_vec(),
+        };
+        assert_eq!(
+            lint_verdict("", false, Ok(failed)),
+            Verdict::Failed(format::Verdict::ToolFailed(
+                "usage: pylint [options]".to_owned()
+            )),
+            "a failed run's stderr is quoted"
+        );
+    }
+
+    #[test]
+    fn a_fatal_message_fails_even_when_pylint_exits_zero() {
+        let fatal = report(
+            &message("fatal", "astroid-error", "F0002", "astroid crashed", (1, 0)),
+            3,
+        );
+
+        assert_eq!(
+            lint_verdict("", false, Ok(ran(0, fatal))),
+            Verdict::Failed(format::Verdict::ToolFailed(
+                "pylint reported a fatal error: astroid crashed".to_owned()
+            ))
+        );
     }
 
     #[test]
