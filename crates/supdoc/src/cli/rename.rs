@@ -20,13 +20,13 @@ use std::path::Path;
 use schemars::JsonSchema;
 use serde::Serialize;
 
+use crate::config::confine::{Boundary, write_atomically};
 use crate::config::{Config, config_size_limit, read_config_text};
 use crate::exit::ExitStatus;
 use crate::finding::{Finding, IndexedText, Location};
 use crate::limits::SizeLimit;
 use crate::link::{LinkKey, RawLink, SourcePath, Target};
 use crate::lock::error::LockError;
-use crate::lock::io::write_atomically;
 use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
 use crate::namespace::NamespaceName;
 use crate::output::json::{Envelope, LocationJson};
@@ -131,6 +131,9 @@ struct Plan {
     apply_command: String,
     /// The project root, where `supdoc.lock` sits.
     root: AbsolutePath,
+    /// The project root as a write boundary: every file is admitted against it before it is
+    /// written.
+    boundary: Boundary,
     /// The `max-lock-size` in effect, for reading the lockfile again before writing.
     max_lock_size: SizeLimit,
     /// The key to rename in the nearest config.
@@ -196,6 +199,7 @@ impl Plan {
             new: new.clone(),
             apply_command: rename_command(args, context, &["--yes"]),
             root: config.root().clone(),
+            boundary: config.boundary().clone(),
             max_lock_size: config.limits_in_effect().max_lock_size.value,
             config: config_edit,
             parent,
@@ -219,15 +223,14 @@ impl Plan {
             let renamed =
                 replace_ranges(&source.text, source.prefixes(&self.old), self.new.as_str())
                     .ok_or_else(|| self.file_changed(source.source.as_str()))?;
-            replace_file(source.file.as_path(), renamed.as_bytes()).map_err(|error| {
-                self.write_failed(source.source.as_str(), &cause(&error), &written)
-            })?;
+            replace_file(&self.boundary, &source.file, renamed.as_bytes())
+                .map_err(|reason| self.write_failed(source.source.as_str(), &reason, &written))?;
             written.push(source.source.to_string());
         }
         if !self.lock.moved.is_empty() {
             self.lock
                 .next()
-                .write(&lock_path(&self.root))
+                .write(&lock_path(&self.root), &self.boundary)
                 .map_err(|error| {
                     let reason = match &error {
                         LockError::Write { error, .. } => cause(error),
@@ -243,8 +246,8 @@ impl Plan {
             self.new.as_str(),
         )
         .ok_or_else(|| self.file_changed(&self.config.shown))?;
-        replace_file(self.config.file.as_path(), renamed.as_bytes())
-            .map_err(|error| self.write_failed(&self.config.shown, &cause(&error), &written))
+        replace_file(&self.boundary, &self.config.file, renamed.as_bytes())
+            .map_err(|reason| self.write_failed(&self.config.shown, &reason, &written))
     }
 
     /// Refuses the rename when any file it will write is no longer exactly as read.
@@ -677,15 +680,22 @@ fn holds(file: &AbsolutePath, text: &str) -> bool {
         && fs::read(file.as_path()).is_ok_and(|bytes| bytes == text.as_bytes())
 }
 
-/// Writes `bytes` over `target` atomically, keeping `target`'s permissions.
+/// Writes `bytes` over `target` atomically, keeping `target`'s permissions, once `boundary`
+/// admits it.
 ///
 /// # Errors
 ///
-/// Fails if `target` can't be inspected, or the replacement can't be written; `target` is then
-/// unchanged.
-fn replace_file(target: &Path, bytes: &[u8]) -> io::Result<()> {
-    let permissions = fs::metadata(target)?.permissions();
-    write_atomically(target, bytes, Some(&permissions))
+/// Returns the reason, for `cli-rename-write`, when `target` can't be inspected, a symlinked
+/// directory on the way leads out of `boundary`, or the replacement can't be written; `target`
+/// is then unchanged.
+fn replace_file(boundary: &Boundary, target: &AbsolutePath, bytes: &[u8]) -> Result<(), String> {
+    let permissions = fs::metadata(target.as_path())
+        .map_err(|error| cause(&error))?
+        .permissions();
+    let admitted = boundary.admit_resolved(target).map_err(|_escape| {
+        "a symlinked directory on the way leads out of the project root".to_owned()
+    })?;
+    write_atomically(&admitted, bytes, Some(&permissions)).map_err(|error| cause(&error))
 }
 
 /// The `cli-rename-file-changed` error (1) for `file`, shown relative to the project root, which
@@ -1504,6 +1514,51 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn namespace_rename_refuses_a_source_under_a_directory_symlinked_out_of_the_root() {
+        let project = project();
+        project.record_all();
+        let plan = project.plan("auth", "identity");
+        let outside = tempfile::tempdir().expect("an outside directory should be created");
+        let moved = outside.path().join("docs");
+        fs::rename(project.dir.path().join("docs"), &moved)
+            .expect("the docs directory should be movable");
+        std::os::unix::fs::symlink(&moved, project.dir.path().join("docs"))
+            .expect("the fixture symlink should be created");
+        let before = project.files();
+
+        let error = plan
+            .apply()
+            .expect_err("a source a symlink leads out of the root should not be written");
+
+        assert_eq!((error.code(), error.exit_code()), ("cli-rename-write", 74));
+        assert!(
+            error.message().starts_with("cannot write docs/guide.md: "),
+            "{}",
+            error.message()
+        );
+        assert!(
+            error.help().starts_with("Nothing was written."),
+            "nothing outside is named as written: {}",
+            error.help()
+        );
+        assert_eq!(
+            fs::read_to_string(moved.join("guide.md"))
+                .expect("the outside guide should be readable"),
+            GUIDE,
+            "the outside file is untouched"
+        );
+        assert_eq!(
+            fs::read_dir(&moved)
+                .expect("the outside directory should be listable")
+                .count(),
+            1,
+            "no temporary file is left outside"
+        );
+        assert_eq!(project.files(), before, "nothing in the root is written");
+    }
+
     #[test]
     fn namespace_rename_refuses_when_the_lockfile_changed_after_scan() {
         let project = project();
@@ -1511,7 +1566,7 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
         let plan = project.plan("auth", "identity");
         let mut lock = project.lockfile();
         lock.retain(|_key, _hash| false);
-        lock.write(&lock_path(&project.root()))
+        lock.write(&lock_path(&project.root()), project.config().boundary())
             .expect("the edited lockfile should be written");
         let before = project.files();
 

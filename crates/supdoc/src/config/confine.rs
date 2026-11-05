@@ -23,10 +23,12 @@
 //! and the call; it doesn't close it.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write as _};
 use std::marker::PhantomData;
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::path::AbsolutePath;
 
@@ -106,10 +108,6 @@ pub(crate) struct Admitted<'b> {
 
 /// Why [`Boundary::admit`] refused a path, so each caller can keep its own error code and message.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "write sites admit through it from PH02")
-)]
 pub(crate) enum Escape {
     /// The path isn't beneath the boundary as written: it climbs out with `..` or names an
     /// absolute path elsewhere.
@@ -159,10 +157,6 @@ impl Boundary {
     ///
     /// [`Escape::Lexical`] when `target` isn't beneath the boundary as given. [`Escape::Real`] when
     /// it is, but its real location lies outside the boundary's or can't be worked out.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "write sites admit through it from PH02")
-    )]
     pub(crate) fn admit(&self, target: &AbsolutePath) -> Result<Admitted<'_>, Escape> {
         if target.strip_prefix(&self.given).is_none() {
             return Err(Escape::Lexical);
@@ -175,39 +169,115 @@ impl Boundary {
             real => Err(Escape::Real { real }),
         }
     }
+
+    /// [`Boundary::admit`] for `real`, a file whose symlinks were already followed, such as the
+    /// real lockfile or config an in-root symlink leads to. When `real` is named beneath the
+    /// boundary's real location rather than as given, the same file is admitted named beneath
+    /// the boundary as given, so a root reached through a symlink still admits its own files.
+    ///
+    /// Effect: reads file metadata and symlinks along `real`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Boundary::admit`]; [`Escape::Real`] naming `real` when it lies beneath neither.
+    pub(crate) fn admit_resolved(&self, real: &AbsolutePath) -> Result<Admitted<'_>, Escape> {
+        if real.strip_prefix(&self.given).is_some() {
+            return self.admit(real);
+        }
+        let named = real
+            .as_path()
+            .strip_prefix(&self.real)
+            .ok()
+            .and_then(|beneath| AbsolutePath::new(&self.given.as_path().join(beneath)))
+            .ok_or_else(|| Escape::Real {
+                real: Some(real.as_path().to_path_buf()),
+            })?;
+        self.admit(&named)
+    }
 }
 
 impl Admitted<'_> {
     /// The admitted path, for messages and reads.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "write sites admit through it from PH02")
-    )]
     pub(crate) fn as_path(&self) -> &Path {
         &self.path
     }
 }
 
-/// Writes `bytes` to a new file beside `target` and renames it into place, as
-/// [`crate::lock::io::write_atomically`] does. The temporary file shares `target`'s admitted
-/// parent.
+/// How many fresh names to try before giving up on creating a temporary file.
+const TEMP_ATTEMPTS: u32 = 8;
+
+/// A scratch name next to `target`, so the final rename stays on one filesystem. The name mixes
+/// the process id, a process-wide counter, the clock, and the attempt number so it cannot be
+/// guessed and pre-planted.
+fn temp_path_beside(target: &Path, attempt: u32) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.subsec_nanos());
+    let mut name = target.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(
+        ".{}.{}.{nanos:x}.{attempt}.tmp",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed),
+    ));
+    target.with_file_name(name)
+}
+
+/// Creates a new file at the first free candidate path. `create_new` refuses an existing path
+/// and never follows a symlink, so a pre-placed file or link is skipped, not written through.
+///
+/// # Errors
+///
+/// Fails on any error other than `AlreadyExists`, or when every attempt finds its path taken.
+fn create_exclusive_temp(
+    mut candidate: impl FnMut(u32) -> PathBuf,
+) -> io::Result<(fs::File, PathBuf)> {
+    for attempt in 0..TEMP_ATTEMPTS {
+        let temp = candidate(attempt);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+        {
+            Ok(file) => return Ok((file, temp)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!("no unused temporary file name found after {TEMP_ATTEMPTS} attempts"),
+    ))
+}
+
+/// Writes `bytes` to a new file beside `target` and renames it into place, so an interrupted
+/// run never leaves half a file. With `permissions`, the new file gets them before the rename;
+/// without, it keeps the default for a new file. The temporary file is created exclusively, so a
+/// planted path or symlink is never written through, and it shares `target`'s admitted parent.
 ///
 /// Effect: creates, writes and renames a file beside `target`.
 ///
 /// # Errors
 ///
-/// Fails when the temporary file can't be created, written or renamed onto `target`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "write sites admit through it from PH02")
-)]
+/// Fails if the temporary file cannot be created, written or renamed; `target` is then unchanged.
 pub(crate) fn write_atomically(
     target: &Admitted<'_>,
     bytes: &[u8],
     permissions: Option<&fs::Permissions>,
 ) -> io::Result<()> {
-    crate::lock::io::write_atomically(&target.path, bytes, permissions)
+    let target = target.path.as_path();
+    let (mut file, temp) = create_exclusive_temp(|attempt| temp_path_beside(target, attempt))?;
+    let written = file
+        .write_all(bytes)
+        .and_then(|()| permissions.map_or(Ok(()), |kept| file.set_permissions(kept.clone())))
+        .and_then(|()| file.sync_all());
+    drop(file);
+    let finished = written.and_then(|()| fs::rename(&temp, target));
+    if finished.is_err() {
+        drop(fs::remove_file(&temp));
+    }
+    finished
 }
 
 /// Creates `dir` and any missing parents, each new one with `mode`.
@@ -217,10 +287,6 @@ pub(crate) fn write_atomically(
 /// # Errors
 ///
 /// Fails when a directory can't be created, or `dir` exists and isn't a directory.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "private dirs are created through it from PH05")
-)]
 pub(crate) fn create_dir_all(dir: &Admitted<'_>, mode: u32) -> io::Result<()> {
     fs::DirBuilder::new()
         .recursive(true)
@@ -726,5 +792,58 @@ mod tests {
 
         assert_eq!(fixture.names("root"), names(&["real"]));
         assert_eq!(fixture.names("root/real"), names(&["kept"]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preplaced_file_or_symlink_at_a_candidate_name_is_never_written_through() {
+        let dir = tempfile::tempdir().expect("a temp directory should be creatable");
+        let victim = dir.path().join("victim");
+        fs::write(&victim, "precious").expect("the victim should be writable");
+        let planted_file = dir.path().join("planted-file");
+        fs::write(&planted_file, "planted").expect("the planted file should be writable");
+        let planted_link = dir.path().join("planted-link");
+        std::os::unix::fs::symlink(&victim, &planted_link)
+            .expect("the symlink should be creatable");
+        let free = dir.path().join("free");
+        let candidates = [planted_file.clone(), planted_link.clone(), free.clone()];
+
+        let mut candidates = candidates.into_iter();
+        let (mut file, chosen) = create_exclusive_temp(|_| {
+            candidates
+                .next()
+                .expect("the free candidate should be reached before candidates run out")
+        })
+        .expect("the free candidate should be used after the taken ones are refused");
+        file.write_all(b"new")
+            .expect("the new file should be writable");
+
+        assert_eq!(chosen, free);
+        assert_eq!(
+            fs::read_to_string(&victim).expect("the victim should be readable"),
+            "precious",
+            "the symlink target must not be written through"
+        );
+        assert_eq!(
+            fs::read_to_string(&planted_file).expect("the planted file should be readable"),
+            "planted",
+            "the pre-existing file must not be overwritten"
+        );
+    }
+
+    #[test]
+    fn exhausted_candidates_fail_instead_of_overwriting() {
+        let dir = tempfile::tempdir().expect("a temp directory should be creatable");
+        let taken = dir.path().join("taken");
+        fs::write(&taken, "planted").expect("the planted file should be writable");
+
+        let error = create_exclusive_temp(|_| taken.clone())
+            .expect_err("every attempt finds the path taken");
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            fs::read_to_string(&taken).expect("the planted file should be readable"),
+            "planted"
+        );
     }
 }

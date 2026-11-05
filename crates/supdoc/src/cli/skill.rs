@@ -16,12 +16,11 @@ use std::path::Path;
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::config::confine::real_location;
+use crate::config::confine::{self, Boundary, real_location, write_atomically};
 use crate::config::{ConfigError, discover_config};
 use crate::exit::ExitStatus;
 use crate::finding::{Finding, Severity};
 use crate::lock::error::shell_quote;
-use crate::lock::io::write_atomically;
 use crate::output::json::Envelope;
 use crate::output::paths::{relative_or_absolute, relative_to};
 use crate::output::text::{render_finding, visible};
@@ -122,14 +121,17 @@ pub(crate) fn run(
         project_root(context, output)?
     };
     let destinations = destinations(args.global, &base, dirs)?;
+    let boundaries = destinations
+        .each_ref()
+        .map(|(owner, _path)| Boundary::resolve(owner));
     if !args.global {
-        for path in &destinations {
-            contain(&base, path, context)?;
+        for ((_owner, path), boundary) in destinations.iter().zip(&boundaries) {
+            contain(boundary, &base, path, context)?;
         }
     }
     let changes: Vec<SkillChange> = destinations
         .into_iter()
-        .map(|path| SkillChange {
+        .map(|(_owner, path)| SkillChange {
             action: inspect(&path),
             shown: relative_or_absolute(&base, &path),
             path,
@@ -137,8 +139,12 @@ pub(crate) fn run(
         .collect();
 
     if applied {
-        for change in changes.iter().filter(|change| change.action.writes()) {
-            install_file(change.path.as_path(), SKILL.as_bytes())
+        for (change, boundary) in changes
+            .iter()
+            .zip(&boundaries)
+            .filter(|(change, _boundary)| change.action.writes())
+        {
+            install_file(boundary, &change.path, SKILL.as_bytes())
                 .map_err(|error| write_failed(change, args.global, &context.cwd, &error))?;
         }
     }
@@ -176,7 +182,10 @@ pub(crate) fn schema() -> schemars::Schema {
     schemars::schema_for!(Envelope<'static, SkillInstallReport>)
 }
 
-/// The two files the skill goes to: the shared agents copy, then Claude Code's.
+/// The two files the skill goes to, each with the directory it is admitted against: the shared
+/// agents copy, then Claude Code's. A project copy belongs beneath the project root. A `--global`
+/// copy belongs in its own directory wherever the links under `HOME` or Claude Code's directory
+/// lead, as the operator set them up.
 ///
 /// # Errors
 ///
@@ -186,11 +195,11 @@ fn destinations(
     global: bool,
     root: &AbsolutePath,
     dirs: &SkillDirs,
-) -> Result<[AbsolutePath; 2], CliError> {
+) -> Result<[(AbsolutePath, AbsolutePath); 2], CliError> {
     if !global {
         return Ok([
-            beneath(root, AGENTS_SKILL),
-            beneath(root, PROJECT_CLAUDE_SKILL),
+            (root.clone(), beneath(root, AGENTS_SKILL)),
+            (root.clone(), beneath(root, PROJECT_CLAUDE_SKILL)),
         ]);
     }
     let home = dirs.home.as_ref().ok_or_else(no_home)?;
@@ -199,9 +208,11 @@ fn destinations(
         ClaudeConfigDir::Absolute(dir) => dir.clone(),
         ClaudeConfigDir::Relative(value) => return Err(relative_claude_dir(value)),
     };
+    let in_own_directory =
+        |file: AbsolutePath| (file.parent().unwrap_or_else(|| file.clone()), file);
     Ok([
-        beneath(home, AGENTS_SKILL),
-        beneath(&claude_dir, CLAUDE_DIR_SKILL),
+        in_own_directory(beneath(home, AGENTS_SKILL)),
+        in_own_directory(beneath(&claude_dir, CLAUDE_DIR_SKILL)),
     ])
 }
 
@@ -265,12 +276,11 @@ fn beneath(base: &AbsolutePath, relative: &str) -> AbsolutePath {
     base.join_path(Path::new(relative))
 }
 
-/// Refuses `target` when a directory between `root` and it leads outside `root` once symlinks
-/// are followed, so a project install never writes outside the project. A symlink that
-/// leads elsewhere inside `root` is followed. A dangling one counts where it points, and one whose
-/// real location can't be worked out counts as outside, as [`Config::contains`] decides for reads.
-///
-/// [`Config::contains`]: crate::config::Config::contains
+/// Refuses `target` when a directory between `root` and it leads outside `boundary`, the
+/// project root, once symlinks are followed, so a project install never writes outside the
+/// project. A symlink that leads elsewhere inside the root is followed. A dangling one counts
+/// where it points, and one whose real location can't be worked out counts as outside, as
+/// [`Boundary::contains`] decides for reads.
 ///
 /// Effect: reads file metadata and symlinks along the directories beneath `root` on the way to
 /// `target`.
@@ -279,18 +289,22 @@ fn beneath(base: &AbsolutePath, relative: &str) -> AbsolutePath {
 ///
 /// Returns `cli-skill-outside-root` naming the first directory that leads out, in the help
 /// relative to the current directory so its commands run as written.
-fn contain(root: &AbsolutePath, target: &AbsolutePath, context: &Context) -> Result<(), CliError> {
+fn contain(
+    boundary: &Boundary,
+    root: &AbsolutePath,
+    target: &AbsolutePath,
+    context: &Context,
+) -> Result<(), CliError> {
     // Every project destination is beneath the root, so there is always a directory chain.
     let Some(directories) = target.strip_prefix(root).and_then(Path::parent) else {
         return Ok(());
     };
-    let real_root = real_location(root.as_path()).unwrap_or_else(|| root.as_path().to_path_buf());
     let mut dir = root.as_path().to_path_buf();
     for component in directories.components() {
         dir.push(component);
-        match real_location(&dir) {
-            Some(real) if real.starts_with(&real_root) => {}
-            real => return Err(outside_root(root, target, &dir, real.as_deref(), context)),
+        if !boundary.contains(&dir) {
+            let real = real_location(&dir);
+            return Err(outside_root(root, target, &dir, real.as_deref(), context));
         }
     }
     Ok(())
@@ -420,23 +434,28 @@ impl SkillAction {
 }
 
 /// Writes `bytes` to `target`, creating its directories, through the shared temp-and-rename
-/// writer. An existing regular file keeps its permissions; a symlink is replaced, never written
-/// through. Directories are created or followed as they are: a project install has already
-/// refused any that lead out of the project ([`contain`]).
+/// writer, each admitted against `boundary`, the directory the copy belongs beneath, immediately
+/// before it is made. An existing regular file keeps its permissions; a symlink is replaced,
+/// never written through. A project install has already refused any directory that leads out of
+/// the project ([`contain`]).
 ///
 /// # Errors
 ///
-/// Fails if a directory cannot be created or the file cannot be written; `target` is then
-/// unchanged.
-fn install_file(target: &Path, bytes: &[u8]) -> io::Result<()> {
+/// Fails if `boundary` refuses a directory or the file, a directory cannot be created, or the
+/// file cannot be written; `target` is then unchanged.
+fn install_file(boundary: &Boundary, target: &AbsolutePath, bytes: &[u8]) -> io::Result<()> {
+    let escaped = |_escape| {
+        io::Error::other("a symlinked directory on the way leads out of where the skill belongs")
+    };
     if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)?;
+        confine::create_dir_all(&boundary.admit(&parent).map_err(escaped)?, 0o777)?;
     }
-    let permissions = fs::symlink_metadata(target)
+    let admitted = boundary.admit(target).map_err(escaped)?;
+    let permissions = fs::symlink_metadata(admitted.as_path())
         .ok()
         .filter(fs::Metadata::is_file)
         .map(|metadata| metadata.permissions());
-    write_atomically(target, bytes, permissions.as_ref())
+    write_atomically(&admitted, bytes, permissions.as_ref())
 }
 
 /// The warning for a different `SKILL.md` a preview would replace.

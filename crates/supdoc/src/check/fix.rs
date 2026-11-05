@@ -13,9 +13,9 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use crate::check::moves::Move;
+use crate::config::confine::{Boundary, Escape, write_atomically};
 use crate::finding::{Finding, Fix, Location, Severity};
 use crate::link::{LinkKey, SourcePath, SymbolPath, Target, TargetPath};
-use crate::lock::io::write_atomically;
 use crate::lock::model::Lockfile;
 use crate::path::AbsolutePath;
 use crate::scan::model::{Scan, TargetState};
@@ -319,7 +319,8 @@ fn rewritten_key(key: &LinkKey, code: &str, replacement: &str) -> Option<LinkKey
 
 /// Verifies each file against the scan, then rewrites it atomically with its edits applied last
 /// first, so earlier offsets stay valid. `root` is the project root that source paths are
-/// relative to.
+/// relative to, and every file is admitted against it immediately before it is written, so a
+/// file a symlinked directory leads out of the root is skipped, never written.
 ///
 /// A file is rewritten whole or not at all: if any of its edits no longer finds the bytes it was
 /// planned against, nothing in that file is touched. Other files are unaffected.
@@ -333,11 +334,12 @@ pub(crate) fn apply_fixes(plan: &FixPlan, root: &AbsolutePath, rerun: &str) -> F
         by_file.entry(&planned.fix.file).or_default().push(planned);
     }
 
+    let boundary = Boundary::resolve(root);
     let mut result = FixResult::default();
     let mut unwritten = Vec::new();
     for (file, planned) in by_file {
         let path = root.as_path().join(file.as_str());
-        match rewrite_file(&path, &planned) {
+        match rewrite_file(&boundary, &path, &planned) {
             Ok(()) => result
                 .applied
                 .extend(planned.iter().map(|planned| AppliedFix {
@@ -380,8 +382,25 @@ enum Unwritable {
     },
     /// The source is neither a regular file nor a symlink.
     NotRegular,
+    /// A symlinked directory on the way to the source leads out of the project root.
+    OutsideRoot {
+        /// Where the source really lies, if that can be found.
+        real: Option<PathBuf>,
+    },
     /// The operating system refused the read or the write.
     Io(io::Error),
+}
+
+impl Unwritable {
+    /// The cause for a source [`Boundary::admit`] refused.
+    fn outside_root(escape: Escape) -> Self {
+        Self::OutsideRoot {
+            real: match escape {
+                Escape::Lexical => None,
+                Escape::Real { real } => real,
+            },
+        }
+    }
 }
 
 impl From<io::Error> for Skip {
@@ -395,13 +414,15 @@ impl From<io::Error> for Skip {
     }
 }
 
-/// Reads `path`, checks every edit's expectation, applies them last first and writes the result.
+/// Reads `path`, checks every edit's expectation, applies them last first and writes the result,
+/// once `boundary` admits `path`.
 ///
 /// # Errors
 ///
 /// [`Skip::Changed`] if any edit's expected bytes are gone; [`Skip::Unwritable`] if the file is
-/// not a regular file or cannot be read or written. A file that vanished is `Changed`. The file is unchanged in both cases.
-fn rewrite_file(path: &Path, planned: &[&PlannedFix]) -> Result<(), Skip> {
+/// not a regular file, lies outside `boundary`, or cannot be read or written. A file that
+/// vanished is `Changed`. The file is unchanged in both cases.
+fn rewrite_file(boundary: &Boundary, path: &Path, planned: &[&PlannedFix]) -> Result<(), Skip> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_file() {
         return Err(Skip::Unwritable(if metadata.is_symlink() {
@@ -430,7 +451,11 @@ fn rewrite_file(path: &Path, planned: &[&PlannedFix]) -> Result<(), Skip> {
             .splice(range, planned.fix.replacement.bytes())
             .collect();
     }
-    write_atomically(path, &bytes, Some(&metadata.permissions()))?;
+    let admitted = AbsolutePath::new(path)
+        .ok_or(Escape::Lexical)
+        .and_then(|target| boundary.admit(&target))
+        .map_err(|escape| Skip::Unwritable(Unwritable::outside_root(escape)))?;
+    write_atomically(&admitted, &bytes, Some(&metadata.permissions()))?;
     Ok(())
 }
 
@@ -474,6 +499,18 @@ fn write_failed(
                 "it is a symlink".to_owned(),
                 format!(
                     "supdoc never rewrites a symlinked file. Apply the fix to {real} by hand, then run `{rerun}` again{others}"
+                ),
+            )
+        }
+        Unwritable::OutsideRoot { real } => {
+            let real = real.as_deref().map_or_else(
+                || "a place it can't follow".to_owned(),
+                |real| format!("`{}`", real.display()),
+            );
+            (
+                "a symlinked directory on the way leads out of the project root".to_owned(),
+                format!(
+                    "supdoc never writes outside the project root, and the file really lies at {real}. Apply the fix by hand{others}"
                 ),
             )
         }
@@ -1018,6 +1055,44 @@ mod tests {
             "the help should say supdoc never rewrites a symlink and name the real file, got {help:?}"
         );
         assert_eq!(project.read("real.md"), DOC);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_source_under_a_directory_symlinked_out_of_the_root_is_skipped_and_left_alone() {
+        let project = Project::with(&[]);
+        let outside = tempfile::tempdir().expect("an outside directory should be creatable");
+        let victim = outside.path().join("guide.md");
+        fs::write(&victim, DOC).expect("the outside doc should be writable");
+        std::os::unix::fs::symlink(outside.path(), project.dir.path().join("docs"))
+            .expect("the fixture symlink should be creatable");
+        let plan = plan_fixes(&scan_of([broken("docs/guide.md", DOC, "ad", "add")]));
+
+        let result = apply_fixes(&plan, &project.root(), "supdoc fix --yes");
+
+        assert_eq!(result.applied, vec![]);
+        let [skipped] = result.skipped.as_slice() else {
+            panic!(
+                "expected exactly one skipped finding, got {:?}",
+                result.skipped
+            );
+        };
+        assert_eq!(
+            (skipped.kind, skipped.finding.code),
+            (SkippedKind::WriteFailed, CODE_WRITE_FAILED)
+        );
+        assert_eq!(
+            fs::read(&victim).expect("the outside doc should be readable"),
+            DOC.as_bytes(),
+            "the outside file should be byte-identical"
+        );
+        assert_eq!(
+            fs::read_dir(outside.path())
+                .expect("the outside dir should be listable")
+                .count(),
+            1,
+            "no temporary file should be left outside"
+        );
     }
 
     #[test]

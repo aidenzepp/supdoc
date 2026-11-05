@@ -409,7 +409,7 @@ impl Planned {
         );
         let mut lock_failure = None;
         if lock != self.lock
-            && let Err(error) = lock.write(&lock_path(root))
+            && let Err(error) = lock.write(&lock_path(root), self.config.boundary())
         {
             // The write is atomic, so the lockfile on disk is still the one that was read.
             lock = self.lock.clone();
@@ -873,6 +873,7 @@ mod tests {
     use super::*;
     use crate::cli::args::Command;
     use crate::cli::testing::{Run, Session, at};
+    use crate::config::confine::Boundary;
     use crate::limits::Limits;
     use crate::lock::model::LOCK_FILE_NAME;
 
@@ -972,7 +973,9 @@ mod tests {
         fn write_lock(&self, lock: &Lockfile) {
             let path = AbsolutePath::new(&self.path(LOCK_FILE_NAME))
                 .expect("the lockfile path should be absolute");
-            lock.write(&path)
+            let root =
+                AbsolutePath::new(&self.path("")).expect("the project root should be absolute");
+            lock.write(&path, &Boundary::resolve(&root))
                 .expect("the fixture lockfile should be written");
         }
 
