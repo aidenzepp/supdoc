@@ -339,7 +339,7 @@ pub(crate) fn apply_fixes(plan: &FixPlan, boundary: &Boundary, rerun: &str) -> F
     let mut result = FixResult::default();
     let mut unwritten = Vec::new();
     for (file, planned) in by_file {
-        let path = root.as_path().join(file.as_str());
+        let path = root.join(file.as_str());
         match rewrite_file(boundary, &path, &planned) {
             Ok(()) => result
                 .applied
@@ -358,7 +358,7 @@ pub(crate) fn apply_fixes(plan: &FixPlan, boundary: &Boundary, rerun: &str) -> F
     for (file, cause) in unwritten {
         result.skipped.push(Skipped {
             kind: SkippedKind::WriteFailed,
-            finding: write_failed(file, &cause, root.as_path(), rerun, others_applied),
+            finding: write_failed(file, &cause, root, rerun, others_applied),
         });
     }
     result
