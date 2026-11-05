@@ -620,3 +620,111 @@ fn pylint_untrusted_is_lint_not_run_naming_trust() {
         "{json}"
     );
 }
+
+/// A pylint project with two clean blocks in `docs/blocks.md`.
+fn two_block_pylint_project() -> Project {
+    let project = project_with_python_block(PYLINT, "X = 1");
+    project.write(
+        "docs/blocks.md",
+        "# Blocks\n\n```py\nX = 1\n```\n\n```py\nY = 2\n```\n",
+    );
+    project
+}
+
+/// Asserts `json` holds exactly one finding, the run's warning about the project's `.pylintrc`
+/// naming `E0015`, and that both blocks passed.
+fn assert_one_config_warning(json: &serde_json::Value) {
+    assert_eq!(finding_kinds(json), ["code-block-not-checked"], "{json}");
+    let message = at(json, "/findings/0/message");
+    assert!(
+        message
+            .as_str()
+            .is_some_and(|message| message.contains("`E0015` in `.pylintrc`")),
+        "{json}"
+    );
+    assert_eq!(at(json, "/data/summary/code_blocks/passed"), 2, "{json}");
+}
+
+#[test]
+fn pylint_messages_about_the_projects_rcfile_are_one_warning_never_block_findings() {
+    let project = two_block_pylint_project();
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    pylint_stub(
+        outside.path(),
+        "printf '{\"messages\": [{\"type\": \"error\", \"symbol\": \"unrecognized-option\", \
+         \"message\": \"Unrecognized option found: bogus-option\", \"messageId\": \"E0015\", \
+         \"module\": \"x\", \"obj\": \"\", \"line\": 1, \"column\": 0, \"endLine\": null, \
+         \"path\": \".pylintrc\", \"absolutePath\": \"'\"$(pwd -P)\"'/.pylintrc\"}], \
+         \"statistics\": {\"modulesLinted\": 1}}'\nexit 2",
+    );
+
+    let json = trusted_pylint_check(&project, outside.path(), cache.path(), 0);
+
+    assert_eq!(pylint_runs(outside.path()).len(), 2, "{json}");
+    assert_one_config_warning(&json);
+}
+
+#[test]
+fn pylint_real_rcfile_with_an_unknown_option_is_one_warning_across_two_blocks() {
+    let Some(dir) = real_tool_dir(
+        "pylint",
+        "pylint_real_rcfile_with_an_unknown_option_is_one_warning_across_two_blocks",
+    ) else {
+        return;
+    };
+    let project = two_block_pylint_project();
+    project.write(".pylintrc", "[MAIN]\nbogus-option = 1\n");
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+
+    let json = trusted_pylint_check(&project, &dir, cache.path(), 0);
+
+    assert_one_config_warning(&json);
+}
+
+#[test]
+fn pylint_exiting_fatal_or_usage_with_no_message_is_a_tool_failure() {
+    for code in [1, 32] {
+        let project = project_with_python_block(PYLINT, "X = 1");
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        pylint_stub(
+            outside.path(),
+            &format!("printf {}\nexit {code}", empty_report(1)),
+        );
+
+        let json = trusted_pylint_check(&project, outside.path(), cache.path(), 1);
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-tool-failed"],
+            "exit {code}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/code_blocks/0/state"),
+            "failed",
+            "exit {code}: {json}"
+        );
+    }
+}
+
+#[test]
+fn pylint_missing_names_the_venv_bin_dir_it_searched() {
+    let project = project_with_python_block(PYLINT, "X = 1");
+    let empty = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+
+    let json = trusted_pylint_check(&project, empty.path(), cache.path(), 0);
+
+    assert_eq!(finding_kinds(&json), ["code-block-tool-missing"], "{json}");
+    assert_eq!(
+        at(&json, "/findings/0/message"),
+        "`pylint` isn't in .venv/bin or on PATH, so its blocks aren't checked",
+        "{json}"
+    );
+    let help = at(&json, "/findings/0/help");
+    assert!(
+        help.as_str().is_some_and(|help| help.contains(".venv/bin")),
+        "{json}"
+    );
+}

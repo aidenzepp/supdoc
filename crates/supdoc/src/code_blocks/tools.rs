@@ -1159,7 +1159,7 @@ pub(crate) fn named(language: Language, step: Step, name: &str) -> Option<&'stat
 /// The `index`th block (1-based) of `doc`, the doc's absolute path, as a tool sees it:
 /// `<doc dir>/<doc file name>.<index>.<extension>`, so the tool finds its config walking up from
 /// the doc's real directory while the block itself arrives on stdin.
-fn virtual_path(doc: &Path, index: usize, extension: &str) -> OsString {
+pub(crate) fn virtual_path(doc: &Path, index: usize, extension: &str) -> OsString {
     let mut name = doc.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".{index}.{extension}"));
     doc.with_file_name(name).into_os_string()

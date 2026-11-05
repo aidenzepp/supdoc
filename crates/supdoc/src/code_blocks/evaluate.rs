@@ -469,7 +469,11 @@ impl Evaluation {
             let mut refused = false;
             match (lint, job.lint.as_ref()) {
                 (Some(Ok((verdict, findings))), Some(run)) => {
-                    self.findings.extend(findings);
+                    self.findings.extend(
+                        findings
+                            .into_iter()
+                            .filter_map(|found| warnings.once(found)),
+                    );
                     refused = matches!(
                         verdict,
                         lint::Verdict::Failed(format::Verdict::Refused { .. })
@@ -881,9 +885,25 @@ struct NotRun {
 struct NotRunWarnings {
     /// The reasons a warning has been given for.
     given: Vec<&'static str>,
+    /// The messages of the `code-block-not-checked` warnings lint steps have given.
+    said: Vec<String>,
 }
 
 impl NotRunWarnings {
+    /// `found`, a lint step's finding, unless it is a `code-block-not-checked` warning whose
+    /// message the run has already given, such as pylint's about the project's config, which
+    /// every block's run repeats.
+    fn once(&mut self, found: Finding) -> Option<Finding> {
+        if found.code != NOT_CHECKED {
+            return Some(found);
+        }
+        if self.said.contains(&found.message) {
+            return None;
+        }
+        self.said.push(found.message.clone());
+        Some(found)
+    }
+
     /// The warning for `not_run`, at `at`, the first time its reason comes up in the run. `None`
     /// after that, and for a reason that has no warning of its own.
     fn first(&mut self, not_run: &NotRun, at: &Location) -> Option<Finding> {
@@ -1958,7 +1978,9 @@ fn link_against(
         };
     };
     let found = find("cargo", env, root);
-    slots.extend(tool_warning("cargo", "install Rust with rustup", &found, at).map(Slot::Found));
+    slots.extend(
+        tool_warning("cargo", ("install Rust with rustup", &[]), &found, at).map(Slot::Found),
+    );
     let cargo = match found {
         Found::OnPath(cargo) => cargo,
         Found::Missing => return Against::CargoRefused { inside_root: false },
@@ -2737,6 +2759,9 @@ fn run_linter(
     };
     let args = tool.args(&invocation);
     let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
+    let block =
+        (tool.name == PYLINT).then(|| tools::virtual_path(invocation.doc, record.index, "py"));
+    let mut notes = Vec::new();
     let frame = Frame::of(tool, record.fragment);
     let input = lint::checked(frame, &pending.input);
     let input = input.as_ref();
@@ -2776,7 +2801,17 @@ fn run_linter(
             Ok(ran) if let Some(reason) = said_nothing(tool, biome.is_some(), input, &ran) => {
                 Err(reason.into())
             }
-            result => Ok(tool.lint_verdict(input, frame.is_some(), result)),
+            result => Ok(match &block {
+                Some(path) => pylint::judge(
+                    result,
+                    Some(pylint::Block {
+                        path: Path::new(path),
+                        root: session.root,
+                    }),
+                    &mut notes,
+                ),
+                None => tool.lint_verdict(input, frame.is_some(), result),
+            }),
         }
     };
     let verdict = if let Some(forbidden) = forbidden_by_yaml(tool, input) {
@@ -2796,26 +2831,38 @@ fn run_linter(
         frame,
     };
     let findings = lint::findings(&verdict, &read, session.timeout, false);
-    let findings = match &verdict {
-        lint::Verdict::Failed(failed) => {
-            let at = frame
-                .is_none()
-                .then(|| parse_place(failed, pending))
-                .flatten();
-            findings
-                .into_iter()
-                .map(|finding| {
-                    let finding = jsonc_hint(finding, failed, record, &pending.input);
-                    match &at {
-                        Some(at) => finding.with_location(at.clone()),
-                        None => finding,
-                    }
-                })
-                .collect()
-        }
-        _ => findings,
-    };
+    let mut findings = placed(findings, &verdict, record, pending, frame);
+    findings.extend(pylint::config_warning(&notes, &record.at));
     Some(Ok((verdict, findings)))
+}
+
+/// `findings` for `verdict` on `record`'s block, which `frame` framed: a failure's at the doc
+/// line its parse error names, when it names one in an unframed block, each with its JSONC hint
+/// (see [`jsonc_hint`]); any other verdict's as they are.
+fn placed(
+    findings: Vec<Finding>,
+    verdict: &lint::Verdict,
+    record: &BlockRecord,
+    pending: &Pending,
+    frame: Option<Frame>,
+) -> Vec<Finding> {
+    let lint::Verdict::Failed(failed) = verdict else {
+        return findings;
+    };
+    let at = frame
+        .is_none()
+        .then(|| parse_place(failed, pending))
+        .flatten();
+    findings
+        .into_iter()
+        .map(|finding| {
+            let finding = jsonc_hint(finding, failed, record, &pending.input);
+            match &at {
+                Some(at) => finding.with_location(at.clone()),
+                None => finding,
+            }
+        })
+        .collect()
 }
 
 /// The flags `record`'s project gives `tool`: yamllint's `-c <private copy>` for yamllint, the
@@ -3506,10 +3553,15 @@ fn found_runs(
             .any(|known| known.binary == binary && known.warned)
         {
             let install = match tool.cartridge() {
+                Some(cartridge) if !bins.is_empty() => format!(
+                    "install it with `{}`, or into the project's {}",
+                    cartridge.install,
+                    bins.join(" or ")
+                ),
                 Some(cartridge) => format!("install it with `{}`", cartridge.install),
                 None => format!("put `{binary}` on PATH"),
             };
-            slots.extend(tool_warning(binary, &install, &found, at).map(Slot::Found));
+            slots.extend(tool_warning(binary, (&install, bins), &found, at).map(Slot::Found));
             looked_up
                 .iter_mut()
                 .filter(|known| known.binary == binary && known.bins == bins)
@@ -3548,15 +3600,34 @@ fn selected_tools(
     )
 }
 
+/// Where a binary was looked for: `on PATH`, after each of the root's `bins` when it has any, as
+/// `in .venv/bin or on PATH`.
+fn searched(bins: &[&str]) -> String {
+    match bins.split_last() {
+        None => "on PATH".to_owned(),
+        Some((last, [])) => format!("in {last} or on PATH"),
+        Some((last, rest)) => format!("in {}, {last} or on PATH", rest.join(", ")),
+    }
+}
+
 /// The one warning for `binary`, found as `found`, at `at`, the first block that needs it, a
-/// missing one's help saying how to `install` it. `None` when it is on `PATH` outside the root.
-fn tool_warning(binary: &str, install: &str, found: &Found, at: &Location) -> Option<Finding> {
+/// missing one's help saying how to `install` it, its message naming the root's `bins` searched
+/// before `PATH`. `None` when it is on `PATH` outside the root.
+fn tool_warning(
+    binary: &str,
+    (install, bins): (&str, &[&str]),
+    found: &Found,
+    at: &Location,
+) -> Option<Finding> {
     let finding = match found {
         Found::OnPath(_) => return None,
         Found::Missing => Finding::new(
             TOOL_MISSING,
             Severity::Warning,
-            format!("`{binary}` isn't on PATH, so its blocks aren't checked"),
+            format!(
+                "`{binary}` isn't {}, so its blocks aren't checked",
+                searched(bins)
+            ),
         )
         .with_help(install.to_owned()),
         Found::InsideRoot(real) => Finding::new(
