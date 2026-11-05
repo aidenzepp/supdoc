@@ -122,8 +122,9 @@ frame line and a fix never writes one. A block the tool can't parse inside its f
 code-block-parse \"couldn't parse the block as KIND\" and nothing else, never with the tool's \
 own message. In a block that parsed, a finding on a frame line is reported at the block's \
 attributes, and no rule is left off. A block that closes \
-the frame itself (a lone } then more code) is linted as written; rustfmt's format step reports \
-it as not its kind. The frames, each block standing where the ... is:
+the frame itself (a lone } then more code) is linted as written; rustfmt's format step fails \
+it code-block-tool-failed \"reformatted the fragment's frame\", with no fix. The frames, each \
+block standing where the ... is:
 
   rustfmt       statements    fn supdoc_fragment() { ... }
   rustfmt       expression    fn supdoc_fragment() { ... }
@@ -133,6 +134,11 @@ it as not its kind. The frames, each block standing where the ... is:
   biome-lint    children      const supdocFragment$ = <div> ... </div>;   (tsx and jsx blocks only)
   biome-lint    members       abstract class SupdocFragment$ { supdocFrame$() { return this; } ... }   (TypeScript blocks)
   biome-lint    members       class SupdocFragment$ { supdocFrame$() { return this; } ... }   (JavaScript blocks)
+  biome-format  statements    async function supdocFragment$() { await Promise.resolve(); ... }
+  biome-format  entries       const supdocFragment$ = { ... };
+  biome-format  children      const supdocFragment$ = <div> ... </div>;   (tsx and jsx blocks only)
+  biome-format  members       abstract class SupdocFragment$ { supdocFrame$() { return this; } ... }   (TypeScript blocks)
+  biome-format  members       class SupdocFragment$ { supdocFrame$() { return this; } ... }   (JavaScript blocks)
 
 A statements block's leading \"use strict\" or \"use server\" isn't read as a directive, since \
 the frame's first line stands before it. A members frame has no base class, so a constructor \
@@ -147,6 +153,11 @@ derives from max_width held to the project's, so it lays out the block as the pr
 rustfmt would. A nightly rustfmt whose config sets brace_style, fn_single_line or \
 blank_lines_lower_bound away from its default would reshape the frame, so those blocks' format \
 step doesn't run, with a code-block-not-checked warning.
+
+biome formats a framed block with its lineWidth raised by the indent the frame adds (two indents \
+in a children block, which biome wraps in parentheses), so it wraps the block where the \
+project's own biome would. A config whose overrides set indentStyle, indentWidth or lineWidth \
+leaves those blocks' format step not run, with a code-block-not-checked warning.
 
 The summary counts each step: a step its tool's table sets to \"off\" is `format off` or `lint \
 off`; one a block marks off is `format skipped` or `lint skipped`; one that was due but didn't \
