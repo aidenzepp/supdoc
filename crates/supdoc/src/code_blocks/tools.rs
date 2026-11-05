@@ -1513,8 +1513,8 @@ mod tests {
             .iter()
             .flat_map(|tool| {
                 tool.fragments.iter().filter_map(move |(kind, support)| {
-                    let (before, after) = support.frame()?;
-                    Some((tool, *kind, format!("{before} ... {after}")))
+                    let frame = support.frame(*kind)?;
+                    Some((tool, *kind, format!("{} ... {}", frame.before, frame.after)))
                 })
             })
             .collect();
