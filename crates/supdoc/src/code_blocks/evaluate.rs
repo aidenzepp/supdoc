@@ -46,6 +46,7 @@ use super::states::{
 use super::toolchain::{self, Refusal, Toolchain};
 use super::tools::{self, Found, Invocation, Step, Tier, ToolCartridge, ToolEnv, find};
 use super::uses::{self, UseState, Written};
+use super::yaml;
 
 pub(crate) use super::states::{BlockState, CodeBlockCounts};
 
@@ -427,6 +428,7 @@ impl Evaluation {
         let mut ran = ran.into_iter();
         let mut linted_nothing_warned = false;
         let mut indent_unknown_warned = false;
+        let mut printed_nothing_warned = false;
         let mut reshaped_warned = false;
         for slot in slots {
             let (job, run) = match slot {
@@ -454,6 +456,10 @@ impl Evaluation {
                     if reason == FRAME_INDENT_UNKNOWN && !indent_unknown_warned {
                         indent_unknown_warned = true;
                         self.findings.push(indent_unknown(&record.at));
+                    }
+                    if reason == format::PRINTED_NOTHING && !printed_nothing_warned {
+                        printed_nothing_warned = true;
+                        self.findings.push(printed_nothing(&record.at));
                     }
                     if reason == FRAME_RESHAPED && !reshaped_warned {
                         reshaped_warned = true;
@@ -637,6 +643,22 @@ pub(super) const FRAME_RESHAPED: &str =
 /// formatter uses, so it couldn't tell the block's lines from the frame's indent.
 pub(super) const FRAME_INDENT_UNKNOWN: &str =
     "supdoc couldn't read the formatter's indent from the project's config";
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose formatter
+/// exited 0 and printed nothing for it, so its format step didn't run.
+fn printed_nothing(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "the formatter printed nothing for this block, so its format step didn't run: the \
+         project's formatter config may switch formatting off for it",
+    )
+    .with_help(
+        "find the setting in the formatter's config that switches formatting off for the doc's \
+         blocks, or mark the blocks `format(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
 
 /// The run's one `code-block-not-checked` warning, at `at`, the first block whose biome lint
 /// step didn't run because biome checked no file.
@@ -822,11 +844,13 @@ struct ToolConfigs {
     biome: BiomeConfigs,
     /// rumdl's.
     rumdl: RumdlConfigs,
+    /// yamlfmt's.
+    yamlfmt: YamlfmtConfigs,
 }
 
 impl ToolConfigs {
-    /// Gives `record` the config its tool gets, as [`BiomeConfigs::give`] and
-    /// [`RumdlConfigs::give`] do. Whether the block goes on to its tools: not when its config was
+    /// Gives `record` the config its tool gets, as [`BiomeConfigs::give`],
+    /// [`RumdlConfigs::give`] and [`YamlfmtConfigs::give`] do. Whether the block goes on to its tools: not when its config was
     /// refused.
     fn give(
         &mut self,
@@ -837,6 +861,7 @@ impl ToolConfigs {
     ) -> bool {
         self.biome.give(record, tool, place, slots).is_ok()
             && self.rumdl.give(record, tool, place, slots).is_ok()
+            && self.yamlfmt.give(record, tool, place, slots).is_ok()
     }
 }
 
@@ -1022,6 +1047,94 @@ fn rumdl_refusal(refusal: &rumdl::Refusal, at: &Location) -> (String, Finding) {
 
 /// Why rumdl didn't run when supdoc had no private directory to keep its config in.
 const RUMDL_NO_PRIVATE_DIR: &str = "rumdl needs a private directory under `XDG_CACHE_HOME` or `HOME` for its config, and there is none";
+
+/// The yamlfmt config flags found for each doc directory, and the refusals already warned about.
+#[derive(Debug, Default)]
+struct YamlfmtConfigs {
+    /// Each doc directory's result, in the order they were asked for.
+    found: Vec<(PathBuf, Result<Vec<OsString>, yaml::Refusal>)>,
+    /// The refusals a warning has been added for.
+    warned: Vec<yaml::Refusal>,
+}
+
+impl YamlfmtConfigs {
+    /// Gives `record`, a YAML block, the `-conf` flag yamlfmt gets for its doc, found once per
+    /// directory. A refusal settles the block as not checked, with its one warning per refusal
+    /// added to `slots`.
+    ///
+    /// Effect: reads the config and may create supdoc's private directory and file for it.
+    ///
+    /// # Errors
+    ///
+    /// The refusal that left the block not checked.
+    fn give(
+        &mut self,
+        record: &mut BlockRecord,
+        tool: &ToolCartridge,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> Result<(), yaml::Refusal> {
+        if tool.language != Language::Yaml {
+            return Ok(());
+        }
+        let doc = root.join(record.at.file.as_str());
+        let dir = doc.parent().unwrap_or(root).to_path_buf();
+        let found = if let Some((_, found)) = self.found.iter().find(|(known, _)| *known == dir) {
+            found.clone()
+        } else {
+            let found = yaml::project_args(env, root, &doc);
+            self.found.push((dir, found.clone()));
+            found
+        };
+        match found {
+            Ok(flags) => {
+                record.given = Some(biome::Given {
+                    mirror: None,
+                    flags,
+                    config: None,
+                    names: None,
+                });
+                Ok(())
+            }
+            Err(refusal) => {
+                let (reason, warning) = yamlfmt_refusal(&refusal, &record.at);
+                if !self.warned.contains(&refusal) {
+                    self.warned.push(refusal.clone());
+                    slots.push(Slot::Found(warning));
+                }
+                record.state = BlockState::NotChecked(NotChecked::ToolConfig);
+                record.reason = Some(reason);
+                Err(refusal)
+            }
+        }
+    }
+}
+
+/// The state reason and the `code-block-not-checked` warning, at `at`, for a block yamlfmt isn't
+/// given because of `refusal`.
+fn yamlfmt_refusal(refusal: &yaml::Refusal, at: &Location) -> (String, Finding) {
+    let (reason, message, help) = match refusal {
+        yaml::Refusal::Config { file, why } => (
+            format!("yamlfmt config `{file}` {why}"),
+            format!("the project's `{file}` {why}, so its YAML blocks aren't checked"),
+            format!(
+                "keep only `line_ending` and a `formatter` block of yamlfmt 0.21.0's settings in `{file}`, one config per directory, or mark the blocks `ignore(<why>)`"
+            ),
+        ),
+        yaml::Refusal::NoPrivateDir => (
+            YAMLFMT_NO_PRIVATE_DIR.to_owned(),
+            format!("{YAMLFMT_NO_PRIVATE_DIR}, so its blocks aren't checked"),
+            "set `XDG_CACHE_HOME` or `HOME` to a directory outside the project".to_owned(),
+        ),
+    };
+    let finding = Finding::new(NOT_CHECKED, Severity::Warning, message)
+        .with_help(help)
+        .with_location(at.clone());
+    (reason, finding)
+}
+
+/// Why yamlfmt didn't run when supdoc had no private directory to keep its config in.
+const YAMLFMT_NO_PRIVATE_DIR: &str = "yamlfmt needs a private directory under `XDG_CACHE_HOME` or `HOME` for its config, and there is none";
 
 /// Why clippy didn't run on a block when [`runner::neutral_dir`] found no private working
 /// directory: its metadata would have nowhere private to go.
@@ -1729,6 +1842,9 @@ fn run_formatter(
         },
         format::Verdict::cacheable,
     );
+    if verdict == format::Verdict::PrintedNothing {
+        return Some(Err(format::PRINTED_NOTHING));
+    }
     let at = match &verdict {
         format::Verdict::NotKind(_) | format::Verdict::FrameReformatted(_) => pending
             .block

@@ -19,6 +19,8 @@ use super::project::BuildFailed;
 use super::runner::{Failure, Ran};
 use super::states;
 use super::tools::{Step, ToolCartridge};
+use super::yaml;
+use crate::config::code_blocks::Language;
 
 /// The code for a block its formatter would change.
 const UNFORMATTED: &str = "code-block-unformatted";
@@ -65,7 +67,21 @@ pub(crate) enum Verdict {
     /// The formatter's output around a block of this kind doesn't keep the frame it is expected
     /// to print back, or the block's lines inside it lack the frame's indent.
     FrameReformatted(Kind),
+    /// The formatter exited 0 and printed nothing, or only whitespace, for a block that isn't
+    /// blank: it didn't format the block (its config can switch formatting off), so the step
+    /// didn't run. Never a failure and never a fix, which would empty the block.
+    PrintedNothing,
 }
+
+/// Whether a formatter's `output` is nothing, or only whitespace: no formatting of a block that
+/// isn't blank.
+fn blank(output: &[u8]) -> bool {
+    output.iter().all(u8::is_ascii_whitespace)
+}
+
+/// Why a block's format step didn't run when its formatter exited 0 and printed nothing for it.
+pub(crate) const PRINTED_NOTHING: &str =
+    "the formatter printed nothing for the block, so it didn't format it";
 
 /// Judges a formatter's `result` on a block whose body as written is `input`, run inside
 /// `frame` with each non-empty line led by `indent` (see [`Frame::wrap_indented`]). Output that
@@ -75,7 +91,8 @@ pub(crate) enum Verdict {
 /// is [`Verdict::FrameReformatted`], never a guess. A blank block passes when the output is the
 /// frame alone ([`Frame::alone`]). A syntax error is shifted past the frame's leading lines; one
 /// on a frame line is [`Verdict::NotKind`]. A failure's detail is in the block's coordinates and
-/// shows no line of the frame.
+/// shows no line of the frame. Exit 0 with nothing printed for a block that isn't blank is
+/// [`Verdict::PrintedNothing`].
 #[must_use]
 pub(crate) fn judge_framed(
     tool: &ToolCartridge,
@@ -86,6 +103,9 @@ pub(crate) fn judge_framed(
 ) -> Verdict {
     let lines = input.lines().count();
     match result {
+        Ok(ran) if ran.success && blank(&ran.stdout) && !input.trim().is_empty() => {
+            Verdict::PrintedNothing
+        }
         Ok(ran) if ran.success => match String::from_utf8(ran.stdout) {
             Err(_) => Verdict::ToolFailed("it printed output that isn't UTF-8".to_owned()),
             Ok(output) if input.trim().is_empty() && frame.alone(&output) => Verdict::Formatted,
@@ -180,6 +200,7 @@ impl Verdict {
                 states::BlockState::Failed(states::Failure::ParseFailed)
             }
             Self::TimedOut => states::BlockState::Failed(states::Failure::ToolTimeout),
+            Self::PrintedNothing => states::BlockState::NotChecked(states::NotChecked::NoStepRan),
         }
     }
 }
@@ -202,11 +223,15 @@ pub(crate) fn input(block: &CodeBlock, text: &str) -> Option<String> {
 /// `tool`'s stderr is its syntax-error report (see [`ToolCartridge::parse_error`]; the runner
 /// gives no exit status beyond success, so each tool is told by its message alone) and places
 /// the error on a line; a report without a location, like any other non-zero exit, is a tool
-/// failure. Stderr after exit 0 is never judged.
+/// failure. Stderr after exit 0 is never judged. Exit 0 with nothing printed for a block that
+/// isn't blank is [`Verdict::PrintedNothing`]: the formatter didn't format it.
 #[must_use]
 pub(crate) fn judge(tool: &ToolCartridge, input: &str, result: Result<Ran, Failure>) -> Verdict {
     match result {
         Ok(ran) if ran.success && ran.stdout == input.as_bytes() => Verdict::Formatted,
+        Ok(ran) if ran.success && blank(&ran.stdout) && !input.trim().is_empty() => {
+            Verdict::PrintedNothing
+        }
         Ok(ran) if ran.success => String::from_utf8(ran.stdout).map_or_else(
             |_| Verdict::ToolFailed("it printed output that isn't UTF-8".to_owned()),
             Verdict::Unformatted,
@@ -284,7 +309,7 @@ pub(crate) fn finding(
 ) -> Option<Finding> {
     let name = tool.name;
     let finding = match verdict {
-        Verdict::Formatted => return None,
+        Verdict::Formatted | Verdict::PrintedNothing => return None,
         Verdict::Unformatted(_) => Finding::new(
             UNFORMATTED,
             Severity::Error,
@@ -388,7 +413,9 @@ pub(crate) fn build_finding(
 /// `unformatted`, the `code-block-unformatted` error `tool` gave `block` in `doc`, with the fix
 /// that makes the block's body `output`, the formatter's stdout, when [`safe_fix`] allows it.
 /// When [`safe_fix`] refuses, the error keeps no fix and its `code-block-fix-unsafe` warning
-/// follows. The error alone when the block's ranges don't lie inside `doc`.
+/// follows. The error alone when the block's ranges don't lie inside `doc`. A YAML block's fix is
+/// refused the same way unless `output` parses to the same YAML structure as the block (see
+/// [`yaml::same_structure`]): yamlfmt rewrites YAML it reads as something else.
 #[must_use]
 pub(crate) fn fixed(
     unformatted: Finding,
@@ -403,6 +430,17 @@ pub(crate) fn fixed(
         .strip_suffix("\r\n")
         .or_else(|| output.strip_suffix('\n'))
         .unwrap_or(output);
+    if tool.language == Language::Yaml {
+        let Some((marker, _)) = fence_of(block, doc.text()) else {
+            return vec![unformatted];
+        };
+        let keeps = input(block, doc.text())
+            .is_some_and(|before| yaml::same_structure(&before, output, doc.limit));
+        if !keeps {
+            let unsafe_fix = refused(block, &Refusal::ChangesYaml, &what, marker);
+            return vec![unformatted, unsafe_fix];
+        }
+    }
     match safe_fix(block, doc, output, &what) {
         Guarded::Fix(fix) => {
             let help = format!(
@@ -470,6 +508,8 @@ enum Refusal {
     /// A line that isn't part of the block, such as a `//` comment in a doc-comment run, lies
     /// between its body lines, and replacing the body would delete it.
     SkipsLines,
+    /// The YAML the fix writes doesn't parse to the same structure as the block's.
+    ChangesYaml,
 }
 
 /// The fix that makes `block`'s body in `doc` read `body`, which holds no final line ending,
@@ -543,6 +583,10 @@ fn refused(block: &CodeBlock, refusal: &Refusal, what: &str, marker: char) -> Fi
             "would delete a line inside the block that isn't part of it, such as a `//` comment",
             "move that line out of the block or make it a doc-comment line, or edit the block by hand"
                 .to_owned(),
+        ),
+        Refusal::ChangesYaml => (
+            "says something else in YAML, not only lays it out differently",
+            "edit the block by hand, or mark it `format(off: <why>)`".to_owned(),
         ),
     };
     Finding::new(
