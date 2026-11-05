@@ -115,19 +115,6 @@ pub(crate) struct BlockRecord {
     pending: Option<Pending>,
 }
 
-impl BlockRecord {
-    /// Settles each step still due as not run for `reason`, and selects no tool for it.
-    fn hold_steps(&mut self, reason: &'static str) {
-        for step in [&mut self.steps.format, &mut self.steps.lint] {
-            if *step == StepState::NotRun {
-                *step = StepState::Unrunnable { reason };
-            }
-        }
-        self.tool = None;
-        self.linter = None;
-    }
-}
-
 /// A pending block as the format step reads and fixes it.
 #[derive(Debug, Clone)]
 struct Pending {
@@ -750,7 +737,7 @@ struct ToolConfigs {
 impl ToolConfigs {
     /// Gives `record` the config its tool gets, as [`BiomeConfigs::give`] and
     /// [`RumdlConfigs::give`] do. Whether the block goes on to its tools: not when its config was
-    /// refused, or when no rule is left to check it.
+    /// refused.
     fn give(
         &mut self,
         record: &mut BlockRecord,
@@ -758,10 +745,8 @@ impl ToolConfigs {
         place: (&ToolEnv, &Path),
         slots: &mut Vec<Slot>,
     ) -> bool {
-        if self.biome.give(record, tool, place, slots).is_err() {
-            return false;
-        }
-        matches!(self.rumdl.give(record, tool, place, slots), Ok(Gave::Given))
+        self.biome.give(record, tool, place, slots).is_ok()
+            && self.rumdl.give(record, tool, place, slots).is_ok()
     }
 }
 
@@ -881,9 +866,9 @@ impl RumdlConfigs {
         tool: &ToolCartridge,
         (env, root): (&ToolEnv, &Path),
         slots: &mut Vec<Slot>,
-    ) -> Result<Gave, rumdl::Refusal> {
+    ) -> Result<(), rumdl::Refusal> {
         if tool.language != Language::Markdown {
-            return Ok(Gave::Given);
+            return Ok(());
         }
         let doc = root.join(record.at.file.as_str());
         let dir = doc.parent().unwrap_or(root).to_path_buf();
@@ -896,16 +881,12 @@ impl RumdlConfigs {
         };
         match found {
             Ok(project) => {
-                if project.no_rule_left {
-                    record.hold_steps(RUMDL_NO_RULE_LEFT);
-                    return Ok(Gave::Held);
-                }
                 record.given = Some(biome::Given {
                     mirror: Some(project.doc_as_seen(&doc)),
                     flags: project.flags,
                     names: None,
                 });
-                Ok(Gave::Given)
+                Ok(())
             }
             Err(refusal) => {
                 let (reason, warning) = rumdl_refusal(&refusal, &record.at);
@@ -920,19 +901,6 @@ impl RumdlConfigs {
         }
     }
 }
-
-/// What [`RumdlConfigs::give`] did for a block.
-enum Gave {
-    /// The block is ready for its tools.
-    Given,
-    /// Its steps were settled as not run, so no tool is run on it.
-    Held,
-}
-
-/// Why rumdl isn't run on a block whose project config enables only rules supdoc leaves off for
-/// code blocks: nothing would check it, which is not the same as passing it.
-const RUMDL_NO_RULE_LEFT: &str =
-    "the project's rumdl config enables only rules supdoc turns off for code blocks";
 
 /// The state reason and the `code-block-not-checked` warning, at `at`, for a block rumdl isn't
 /// given because of `refusal`.
