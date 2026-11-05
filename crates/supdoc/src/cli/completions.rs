@@ -126,6 +126,7 @@ mod tests {
                 global: cli.global,
                 cwd,
                 global_excludes: GlobalExcludes::none(),
+                trust: crate::trust::TrustEnv::default(),
             },
         )
     }

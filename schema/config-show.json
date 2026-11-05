@@ -159,6 +159,24 @@
       ],
       "type": "object"
     },
+    "HeldBackJson": {
+      "description": "A config value that would raise a ceiling, held back because the checkout isn't trusted.",
+      "properties": {
+        "from": {
+          "description": "The config file that sets it, relative to the project root.",
+          "type": "string"
+        },
+        "value": {
+          "description": "The value it sets, with its unit; `0` for no limit.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "value"
+      ],
+      "type": "object"
+    },
     "LimitJson": {
       "description": "One limit and where it came from.",
       "properties": {
@@ -168,6 +186,17 @@
             "string",
             "null"
           ]
+        },
+        "held_back": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HeldBackJson"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The config's raise of this ceiling, held back because the checkout isn't trusted, so the\ndefault applies. Absent otherwise."
         },
         "source": {
           "$ref": "#/$defs/LimitSource",

@@ -18,7 +18,7 @@ use std::path::Path;
 use self::code_blocks::CodeBlocks;
 use self::confine::Boundary;
 use crate::hash::{HashSettings, LineEndings};
-use crate::limits::{CommandLineLimits, ConfigLimits, Limits, SizeLimit};
+use crate::limits::{CommandLineLimits, ConfigLimits, Limits, Raises, SizeLimit};
 use crate::namespace::NamespaceName;
 use crate::path::AbsolutePath;
 
@@ -124,7 +124,8 @@ impl Config {
     }
 
     /// [`Config::load`] with the ceilings `given` on the command line in effect, including
-    /// `max-config-size` while each config file is read.
+    /// `max-config-size` while each config file is read. A config raise of a ceiling is held back
+    /// until [`Config::with_command_line`] honors it for a trusted root.
     ///
     /// Reads the filesystem.
     ///
@@ -138,7 +139,7 @@ impl Config {
     ) -> Result<Self, ConfigError> {
         match chain::discover(start)? {
             Some(file) => Self::load_file_under(&file, given),
-            None => Ok(Self::defaults(start).with_command_line(given)),
+            None => Ok(Self::defaults(start).with_command_line(given, Raises::Held)),
         }
     }
 
@@ -156,7 +157,8 @@ impl Config {
     }
 
     /// [`Config::load_file`] with the ceilings `given` on the command line in effect, including
-    /// `max-config-size` while each config file is read.
+    /// `max-config-size` while each config file is read. A config raise of a ceiling is held back,
+    /// as in [`Config::load_under`].
     ///
     /// Reads the filesystem.
     ///
@@ -169,7 +171,7 @@ impl Config {
         given: &CommandLineLimits,
     ) -> Result<Self, ConfigError> {
         let layers = chain::read_chain(file, config_size_limit(given))?;
-        Ok(chain::merge(chain::directory_of(file), layers)?.with_command_line(given))
+        Ok(chain::merge(chain::directory_of(file), layers)?.with_command_line(given, Raises::Held))
     }
 
     /// The config used when no file is found: scan everything beneath `root`.
@@ -304,10 +306,11 @@ impl Config {
     }
 
     /// This config with the ceilings `given` on the command line put in effect over its own, by
-    /// flag beats variable beats config beats default.
+    /// flag beats variable beats config beats default. A config value above its default takes
+    /// effect only when `raises` is [`Raises::Honored`], which is the root's trust to grant.
     #[must_use]
-    pub(crate) fn with_command_line(mut self, given: &CommandLineLimits) -> Self {
-        self.in_effect = Limits::resolve(given, &self.limits);
+    pub(crate) fn with_command_line(mut self, given: &CommandLineLimits, raises: Raises) -> Self {
+        self.in_effect = Limits::resolve_with(given, &self.limits, raises);
         self
     }
 

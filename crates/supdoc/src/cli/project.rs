@@ -13,6 +13,7 @@ use crate::config::{Config, ConfigError, config_size_limit, read_config_text};
 use crate::exit::ExitStatus;
 use crate::finding::{Location, Snippet};
 use crate::hash::HashSettings;
+use crate::limits::Raises;
 use crate::link::SourcePath;
 use crate::lock::error::{LockError, SettingsMismatch, shell_quote};
 use crate::lock::model::Lockfile;
@@ -21,20 +22,44 @@ use crate::output::Output;
 use crate::output::paths::relative_to;
 use crate::path::{AbsolutePath, fixed};
 use crate::scan::model::Scope;
+use crate::trust::Grant;
 
 use super::args::OperatorPath;
+use super::check::granted_tier;
 use super::{CliError, Context, ErrorSite, cause};
 
 /// The config `--config` names, or the one found by searching upward from the current directory,
 /// with the `[limits]` flags and variables put in effect over its own, so every reader the
 /// command runs takes its ceiling from [`Config::limits_in_effect`].
 ///
+/// A config value that raises a ceiling above its default takes effect only when the operator
+/// trusts the root ([`granted_tier`], as `check` asks it). Trust is asked only when the config
+/// raises a ceiling, so a config with no raise never reads the trust store.
+///
 /// On success, `output` reports paths against the config's root from then on.
 ///
 /// # Errors
 ///
-/// Returns the config's own error, with its code, help and exit code.
+/// Returns the config's own error, with its code, help and exit code, and `cli-usage` (2) for a
+/// bad `SUPDOC_TRUST` when the config raises a ceiling.
 pub(crate) fn load_config(context: &Context, output: &mut Output) -> Result<Config, CliError> {
+    let config = load_config_held(context, output)?;
+    if !config.limits_in_effect().holds_back() {
+        return Ok(config);
+    }
+    match granted_tier(config.root().as_path(), &context.trust)? {
+        Grant::Trusted => Ok(config.with_command_line(&context.global.limits.0, Raises::Honored)),
+        Grant::Untrusted | Grant::TurnedOff | Grant::Unread(_) => Ok(config),
+    }
+}
+
+/// [`load_config`] without asking trust: every config raise of a ceiling stays held back. For a
+/// command that only needs the root and never reads with the ceilings, such as `supdoc trust`.
+///
+/// # Errors
+///
+/// Returns the config's own error, with its code, help and exit code.
+pub(crate) fn load_config_held(context: &Context, output: &mut Output) -> Result<Config, CliError> {
     let given = &context.global.limits.0;
     let loaded = match &context.global.config {
         Some(file) => {
@@ -499,6 +524,7 @@ mod tests {
             global: cli.global,
             cwd,
             global_excludes: GlobalExcludes::none(),
+            trust: crate::trust::TrustEnv::default(),
         };
         load_config(&context, &mut output)
     }
@@ -663,6 +689,7 @@ mod tests {
             global: cli.global,
             cwd,
             global_excludes: GlobalExcludes::none(),
+            trust: crate::trust::TrustEnv::default(),
         };
         let paths: Vec<OperatorPath<'_>> =
             paths.iter().map(|path| OperatorPath::typed(path)).collect();

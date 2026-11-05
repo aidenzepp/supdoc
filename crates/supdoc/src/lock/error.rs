@@ -286,17 +286,18 @@ impl LockError {
             ),
             Self::TooLarge { grew: true, .. } => format!(
                 "Something wrote {} while supdoc read it. Run the same command again once nothing \
-                 is writing it. If it really holds that many links, raise `max-lock-size` under \
-                 `[limits]` in `supdoc.config.toml`, `SUPDOC_MAX_LOCK_SIZE` or `--max-lock-size` \
-                 (such as `64MiB`, or `0` for no limit)",
+                 is writing it. If it really holds that many links, raise the limit with \
+                 `--max-lock-size` or `SUPDOC_MAX_LOCK_SIZE` (such as `64MiB`, or `0` for no \
+                 limit). `max-lock-size` under `[limits]` in `supdoc.config.toml` raises it only \
+                 in a checkout you trust (`supdoc trust`)",
                 shown()
             ),
             Self::TooLarge { size, .. } => format!(
                 "supdoc refuses a lockfile this large before reading it. If {} really holds that \
-                 many links, raise the limit above {size} bytes with `max-lock-size` under \
-                 `[limits]` in `supdoc.config.toml`, `SUPDOC_MAX_LOCK_SIZE` or `--max-lock-size` \
-                 (such as `64MiB`, or `0` for no limit). Otherwise restore it with `git checkout \
-                 -- {0}`",
+                 many links, raise the limit above {size} bytes with `--max-lock-size` or \
+                 `SUPDOC_MAX_LOCK_SIZE` (such as `64MiB`, or `0` for no limit); `max-lock-size` \
+                 under `[limits]` in `supdoc.config.toml` raises it only in a checkout you trust \
+                 (`supdoc trust`). Otherwise restore it with `git checkout -- {0}`",
                 shown()
             ),
             Self::Parse { error, .. } => error.help().to_owned(),

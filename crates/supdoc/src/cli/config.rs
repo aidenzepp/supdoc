@@ -184,7 +184,14 @@ impl Report for ConfigShowReport {
                 Source::Config(file) => {
                     format!("(from {})", visible(&context.paths.text_absolute(file)))
                 }
-                Source::Default => "(default)".to_owned(),
+                Source::Default => match &limit.held_back {
+                    Some(held_back) => format!(
+                        "(default; {} sets {}, which applies only in a trusted checkout)",
+                        visible(&context.paths.text_absolute(&held_back.file)),
+                        visible(&held_back.value)
+                    ),
+                    None => "(default)".to_owned(),
+                },
             };
             writeln!(out, "{key:<15} {}  {origin}", limit.value)?;
         }
@@ -409,9 +416,25 @@ pub(crate) struct LimitJson {
     source: LimitSource,
     /// The config file that set it, relative to the project root, when `source` is `config`.
     from: Option<String>,
+    /// The config's raise of this ceiling, held back because the checkout isn't trusted, so the
+    /// default applies. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    held_back: Option<HeldBackJson>,
     /// Where it came from, for text output.
     #[serde(skip)]
     origin: Source,
+}
+
+/// A config value that would raise a ceiling, held back because the checkout isn't trusted.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct HeldBackJson {
+    /// The config file that sets it, relative to the project root.
+    from: String,
+    /// The value it sets, with its unit; `0` for no limit.
+    value: String,
+    /// The config file that sets it, for text output.
+    #[serde(skip)]
+    file: AbsolutePath,
 }
 
 impl LimitJson {
@@ -427,6 +450,11 @@ impl LimitJson {
             value: setting.value.to_string(),
             source,
             from,
+            held_back: setting.held_back.as_ref().map(|held| HeldBackJson {
+                from: relative_to(root, &held.file),
+                value: held.value.to_string(),
+                file: held.file.clone(),
+            }),
             origin: setting.source.clone(),
         }
     }
