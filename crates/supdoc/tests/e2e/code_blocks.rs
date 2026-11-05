@@ -142,7 +142,7 @@ fn a_step_attribute_on_a_block_with_no_tool_for_the_step_is_an_unknown_attribute
     project.write("supdoc.config.toml", "[features.code-blocks]\n");
     project.write(
         "docs/blocks.md",
-        "# Blocks\n\n```toml lint(full)\na = 1\n```\n\n```text format(off: prose)\nplain\n```\n",
+        "# Blocks\n\n```ini lint(full)\na = 1\n```\n\n```text format(off: prose)\nplain\n```\n",
     );
 
     let json = project.supdoc(&["check", "--json"]).assert_exit(0).json();
@@ -581,7 +581,7 @@ fn summary_counts_each_block_once_worst_first_after_the_links_line() {
         "docs/blocks.md",
         "# Blocks\n\n```rust from(../src/lib.rs#gone)\nfn gone() {}\n```\n\n\
          ```rust\nfn main() {}\n```\n\n```sh\necho hi\n```\n\n```text\nplain\n```\n\n\
-         ```toml\na = 1\n```\n\n```py ignore(needs a server)\nprint()\n```\n",
+         ```ini\na = 1\n```\n\n```py ignore(needs a server)\nprint()\n```\n",
     );
 
     let run = project.supdoc(&["check"]);
@@ -624,7 +624,7 @@ fn project_with_mixed_blocks() -> Project {
     project.write(
         "docs/blocks.md",
         "# Blocks\n\n```rust from(../src/lib.rs#gone)\nfn gone() {}\n```\n\n\
-         ```toml\na = 1\n```\n\n```toml\nb = 2\n```\n\n\
+         ```ini\na = 1\n```\n\n```ini\nb = 2\n```\n\n\
          ```py ignore(needs a server)\nprint()\n```\n\n```text\nplain\n```\n",
     );
     project
@@ -730,7 +730,7 @@ fn verbose_text_lists_unknown_languages_with_counts_and_reasons() {
     let _failed = run.assert_exit(1);
 
     for line in [
-        "unknown language  toml: 2",
+        "unknown language  ini: 2",
         "opted out  docs/blocks.md:15 (needs a server)",
     ] {
         assert!(

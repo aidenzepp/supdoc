@@ -61,12 +61,22 @@ pub(crate) enum Verdict {
     },
     /// The formatter passed its timeout.
     TimedOut,
-    /// The formatter reported a syntax error on a line of the frame around a block of this kind:
-    /// the block isn't that kind.
-    NotKind(Kind),
+    /// The formatter reported a syntax error in a block it reads inside a frame: the block isn't
+    /// `kind`. Its message is supdoc's, never the tool's, which can name what the frame expected.
+    NotKind {
+        /// The kind the block declares.
+        kind: Kind,
+        /// The block body line (0-based) the error is on; `None` for a frame line, or a report
+        /// that named no line.
+        line: Option<usize>,
+    },
     /// The formatter's output around a block of this kind doesn't keep the frame it is expected
     /// to print back, or the block's lines inside it lack the frame's indent.
     FrameReformatted(Kind),
+    /// The formatter printed a block of this kind on the frame's own line with whitespace at the
+    /// frame's edge (biome turns a `{" "}` there into a space), which supdoc can't compare with
+    /// the block's lines: the step fails with no fix rather than guess.
+    Uncompared(Kind),
     /// The formatter exited 0 and printed nothing, or only whitespace, for a block that isn't
     /// blank: it didn't format the block (its config can switch formatting off), so the step
     /// didn't run. Never a failure and never a fix, which would empty the block. A framed run
@@ -90,15 +100,19 @@ pub(crate) const PRINTED_NOTHING: &str =
     "the formatter printed nothing for the block, so it didn't format it";
 
 /// Judges a formatter's `result` on a block whose body as written is `input`, run inside
-/// `frame` with each non-empty line led by `indent` (see [`Frame::wrap_indented`]). Output that
-/// begins with the frame's `out_before`, ends with its `out_after` and leads every non-empty line
-/// between them with `indent` is read for those lines, `indent` removed, and they are compared
-/// with `input` as [`judge`] compares a whole block's output; output that doesn't keep the frame
-/// is [`Verdict::FrameReformatted`], never a guess. A blank block passes when the output is the
-/// frame alone ([`Frame::alone`]). A syntax error is shifted past the frame's leading lines; one
-/// on a frame line is [`Verdict::NotKind`]. A failure's detail is in the block's coordinates and
-/// shows no line of the frame. Exit 0 with nothing printed, or the frame alone, for a block that
-/// isn't blank is [`Verdict::PrintedNothing`].
+/// `frame` with each non-empty line led by [`depth`] units of `indent` (see
+/// [`Frame::wrap_indented`]). Output that begins with the frame's `out_before`, ends with its
+/// `out_after` and leads every non-empty line between them with those units is read for those
+/// lines, the units removed, and they are compared with `input` as [`judge`] compares a whole
+/// block's output. Since every unit removed is one supdoc added, a line the formatter copies
+/// verbatim (a template literal's or a block comment's continuation) comes back exact. Output
+/// that is `before`, the block's content and `after` on one line, as biome prints a children
+/// block with no element in it, is read for that content ([`collapsed`]). Other output is
+/// [`Verdict::FrameReformatted`], never a guess. A blank block passes when the output is the
+/// frame alone ([`Frame::alone`]). A syntax error anywhere is [`Verdict::NotKind`], at the block
+/// line it names when that is one of the block's. A tool failure's detail is in the block's
+/// coordinates and shows no line of the frame. Exit 0 with nothing printed, or the frame alone,
+/// for a block that isn't blank is [`Verdict::PrintedNothing`].
 #[must_use]
 pub(crate) fn judge_framed(
     tool: &ToolCartridge,
@@ -108,34 +122,109 @@ pub(crate) fn judge_framed(
     result: Result<Ran, Failure>,
 ) -> Verdict {
     let lines = input.lines().count();
+    let lead = indent.repeat(depth(frame));
     match result {
         Ok(ran) if ran.success && printed_blank(&ran.stdout) && !blank(input) => {
             Verdict::PrintedNothing
         }
         Ok(ran) if ran.success => match String::from_utf8(ran.stdout) {
             Err(_) => Verdict::ToolFailed("it printed output that isn't UTF-8".to_owned()),
-            Ok(output) if blank(input) && frame.alone(&output) => Verdict::Formatted,
-            Ok(output) => match frame.inner(&output, indent) {
-                None => Verdict::FrameReformatted(frame.kind),
-                Some(inner) if inner == input => Verdict::Formatted,
-                Some(inner) if blank(&inner) => Verdict::PrintedNothing,
-                Some(inner) => Verdict::Unformatted(inner),
-            },
+            Ok(output) => {
+                let blank_block = blank(input);
+                match collapsed(frame, &output) {
+                    Some("") if blank_block => return Verdict::Formatted,
+                    Some("") => return Verdict::FrameReformatted(frame.kind),
+                    Some(content) if content.trim() != content => {
+                        return Verdict::Uncompared(frame.kind);
+                    }
+                    Some(content) => {
+                        let content = format!("{content}\n");
+                        return if content == input {
+                            Verdict::Formatted
+                        } else {
+                            Verdict::Unformatted(content)
+                        };
+                    }
+                    None => {}
+                }
+                let output = canonical(frame, &output, indent);
+                if blank_block && frame.alone(&output) {
+                    return Verdict::Formatted;
+                }
+                match frame.inner(&output, &lead) {
+                    None => Verdict::FrameReformatted(frame.kind),
+                    Some(inner) if inner == input => Verdict::Formatted,
+                    Some(inner) if blank(&inner) => Verdict::PrintedNothing,
+                    Some(inner) => Verdict::Unformatted(inner),
+                }
+            }
         },
         result => match judge(tool, input, result) {
-            Verdict::ParseFailed {
-                detail,
-                line: Some(line),
-            } => line
-                .checked_sub(frame.lead())
-                .filter(|line| *line < lines)
-                .map_or(Verdict::NotKind(frame.kind), |line| Verdict::ParseFailed {
-                    detail: frame.hidden(&detail, lines, indent),
-                    line: Some(line),
-                }),
-            failed => hidden(frame, &failed, lines, indent),
+            Verdict::ParseFailed { line, .. } => Verdict::NotKind {
+                kind: frame.kind,
+                line: line
+                    .and_then(|line| line.checked_sub(frame.lead()))
+                    .filter(|line| *line < lines),
+            },
+            failed => hidden(frame, &failed, lines, &lead),
         },
     }
+}
+
+/// How many indent units a formatter puts before the block's lines inside `frame`: one more
+/// than the first line of its `out_after` starts with, each a tab there. One for a frame that
+/// closes at the left margin; two for biome's children frame, whose block sits inside a `<div>`
+/// that biome indents inside parentheses. supdoc leads each of the block's lines with as many,
+/// so a line the formatter copies verbatim sits as deep as the lines it lays out.
+#[must_use]
+pub(crate) fn depth(frame: Frame) -> usize {
+    let closing = frame.out_after.lines().next().unwrap_or_default();
+    1 + closing.len() - closing.trim_start_matches('\t').len()
+}
+
+/// `output`, a formatter's stdout for a block run inside `frame`, in the form [`Frame::inner`]
+/// reads: each frame line's leading `indent` units written as the tabs `frame` writes them with.
+/// The block's lines are left as they are. Output too short to hold the frame's lines is returned
+/// as it is, for [`Frame::alone`] and [`Frame::inner`] to judge.
+fn canonical(frame: Frame, output: &str, indent: &str) -> String {
+    let lines: Vec<&str> = output.lines().collect();
+    let head = frame.out_before.lines().count();
+    let tail = frame.out_after.lines().count();
+    if lines.len() < head + tail || indent.is_empty() {
+        return output.to_owned();
+    }
+    let mut canonical = String::with_capacity(output.len());
+    for (at, line) in lines.iter().enumerate() {
+        let mut rest = *line;
+        if at < head || at >= lines.len() - tail {
+            while let Some(after) = rest.strip_prefix(indent) {
+                canonical.push('\t');
+                rest = after;
+            }
+        }
+        canonical.push_str(rest);
+        canonical.push('\n');
+    }
+    canonical
+}
+
+/// The block's content in `output` when a formatter printed `frame`'s one-line `before`, that
+/// content and its one-line `after` all on one line, as biome prints a `<div>` holding no element
+/// (nothing, text, or one `{expression}`). Only for a frame the formatter otherwise lays out
+/// other than as written (its `out_before` isn't its `before`), where that line is its other
+/// layout of the frame; for a frame printed back as written, such a line is the frame reshaped.
+/// `None` for any other output, and for a frame whose `before` or `after` takes more than one
+/// line.
+fn collapsed(frame: Frame, output: &str) -> Option<&str> {
+    let mut lines = output.lines();
+    let (line, None) = (lines.next()?, lines.next()) else {
+        return None;
+    };
+    if frame.before.contains('\n') || frame.after.contains('\n') || frame.out_before == frame.before
+    {
+        return None;
+    }
+    line.strip_prefix(frame.before)?.strip_suffix(frame.after)
 }
 
 /// `failed`, a verdict on a block of `lines` lines run inside `frame`, each non-empty line led
@@ -201,8 +290,9 @@ impl Verdict {
             Self::Formatted
                 | Self::Unformatted(_)
                 | Self::ParseFailed { .. }
-                | Self::NotKind(_)
+                | Self::NotKind { .. }
                 | Self::FrameReformatted(_)
+                | Self::Uncompared(_)
         )
     }
 
@@ -212,10 +302,10 @@ impl Verdict {
         match self {
             Self::Formatted => states::BlockState::Passed,
             Self::Unformatted(_) => states::BlockState::Failed(states::Failure::Unformatted),
-            Self::ToolFailed(_) | Self::FrameReformatted(_) => {
+            Self::ToolFailed(_) | Self::FrameReformatted(_) | Self::Uncompared(_) => {
                 states::BlockState::Failed(states::Failure::ToolFailed)
             }
-            Self::ParseFailed { .. } | Self::NotKind(_) => {
+            Self::ParseFailed { .. } | Self::NotKind { .. } => {
                 states::BlockState::Failed(states::Failure::ParseFailed)
             }
             Self::TimedOut => states::BlockState::Failed(states::Failure::ToolTimeout),
@@ -440,7 +530,7 @@ pub(crate) fn finding(
         .with_help(
             "raise the limit with `--code-block-timeout 30s`, or mark the block `ignore(<why>)`",
         ),
-        Verdict::NotKind(kind) => Finding::new(
+        Verdict::NotKind { kind, .. } => Finding::new(
             PARSE,
             Severity::Error,
             format!("`{name}` couldn't parse the block as `{}`", kind.name()),
@@ -450,6 +540,20 @@ pub(crate) fn finding(
              block and drop `fragment(...)`, or mark the block `format(off: <reason>)`",
             kind.with_article()
         )),
+        Verdict::Uncompared(kind) => Finding::new(
+            TOOL_FAILED,
+            Severity::Error,
+            format!(
+                "supdoc couldn't compare `{name}`'s output with this {} block: `{name}` printed it \
+                 on one line with whitespace at its edge",
+                kind.name()
+            ),
+        )
+        .with_help(
+            "write the whitespace at the block's start or end another way, write the lines around \
+             the code in the block and drop `fragment(...)`, or mark the block \
+             `format(off: <reason>)`",
+        ),
         Verdict::FrameReformatted(kind) => Finding::new(
             TOOL_FAILED,
             Severity::Error,
@@ -1361,7 +1465,7 @@ mod tests {
     }
 
     #[test]
-    fn frame_format_a_parse_error_shifts_past_the_frame_and_one_on_it_is_not_the_kind() {
+    fn frame_format_a_parse_error_anywhere_is_not_the_kind_at_the_block_line_it_names() {
         let inside = "error: expected `;`\n --> <stdin>:3:9\n  |\n1 | fn main() {\n";
         let on_frame = "error: unexpected closing delimiter\n --> <stdin>:4:1\n";
         let body = "let x = 1;\nlet y = 2\n";
@@ -1374,11 +1478,12 @@ mod tests {
                 body,
                 Ok(exited(false, "", inside))
             ),
-            Verdict::ParseFailed {
-                detail: "error: expected `;`\n --> <stdin>:2:5\n  |\n<the frame supdoc adds>"
-                    .to_owned(),
+            Verdict::NotKind {
+                kind: Kind::Statements,
                 line: Some(1),
-            }
+            },
+            "a syntax error on a block line is the block not being its kind, at that line, \
+             never the tool's message"
         );
         assert_eq!(
             judge_framed(
@@ -1388,7 +1493,10 @@ mod tests {
                 body,
                 Ok(exited(false, "", on_frame))
             ),
-            Verdict::NotKind(Kind::Statements)
+            Verdict::NotKind {
+                kind: Kind::Statements,
+                line: None
+            }
         );
         assert_eq!(
             judge_framed(
@@ -1414,7 +1522,10 @@ mod tests {
         )
         .fence;
         let findings = [
-            Verdict::NotKind(Kind::Statements),
+            Verdict::NotKind {
+                kind: Kind::Statements,
+                line: Some(0),
+            },
             Verdict::FrameReformatted(Kind::Statements),
         ]
         .map(|verdict| finding(&verdict, rustfmt(), &at, None).expect("a failure has a finding"));
@@ -1588,8 +1699,89 @@ mod tests {
         }
     }
 
+    /// biome format's children frame, for a TypeScript block.
+    fn children() -> Frame {
+        let biome = formatter(Language::TypeScript).expect("TypeScript has a formatter");
+        Frame::of(biome, Some(Kind::Children)).expect("biome format frames children")
+    }
+
     #[test]
-    fn frame_format_a_parse_detail_names_the_blocks_own_line_and_column() {
+    fn frame_format_a_verbatim_line_in_a_children_block_comes_back_exact() {
+        let input = "<p>{`line one\n\tline two`}</p>\n";
+        let biome = formatter(Language::TypeScript).expect("TypeScript has a formatter");
+
+        assert_eq!(
+            children().wrap_indented(input, &"\t".repeat(super::depth(children()))),
+            "const supdocFragment$ = <div>\n\t\t<p>{`line one\n\t\t\tline two`}</p>\n</div>;\n",
+            "the block goes in as deep as biome lays it out"
+        );
+        assert_eq!(
+            judge_framed(
+                biome,
+                children(),
+                "\t",
+                input,
+                Ok(printed(
+                    "const supdocFragment$ = (\n\t<div>\n\t\t<p>{`line one\n\t\t\tline two`}</p>\n\t</div>\n);\n"
+                ))
+            ),
+            Verdict::Formatted,
+            "the template's continuation keeps the author's tab"
+        );
+    }
+
+    #[test]
+    fn frame_format_a_children_block_printed_on_the_frames_line_is_read_from_it() {
+        let biome = formatter(Language::TypeScript).expect("TypeScript has a formatter");
+        let judged = |input: &str, output: &str| {
+            judge_framed(biome, children(), "\t", input, Ok(printed(output)))
+        };
+
+        for input in ["", "\n", "\n\n"] {
+            assert_eq!(
+                judged(input, "const supdocFragment$ = <div></div>;\n"),
+                Verdict::Formatted,
+                "blank block {input:?}"
+            );
+        }
+        assert_eq!(
+            judged("{label}\n", "const supdocFragment$ = <div>{label}</div>;\n"),
+            Verdict::Formatted
+        );
+        assert_eq!(
+            judged(
+                "Hello  world\n",
+                "const supdocFragment$ = <div>Hello world</div>;\n"
+            ),
+            Verdict::Unformatted("Hello world\n".to_owned())
+        );
+        assert_eq!(
+            judged(
+                "{label}\n\n",
+                "const supdocFragment$ = <div>{label}</div>;\n"
+            ),
+            Verdict::Unformatted("{label}\n".to_owned()),
+            "biome's content and one LF are compared with the block exactly"
+        );
+        assert_eq!(
+            judged("{label}\n", "const supdocFragment$ = <div></div>;\n"),
+            Verdict::FrameReformatted(Kind::Children),
+            "a block with content is never the frame alone"
+        );
+        for output in [
+            "const supdocFragment$ = <div>Hello </div>;\n",
+            "const supdocFragment$ = <div> </div>;\n",
+        ] {
+            assert_eq!(
+                judged("Hello{\" \"}\n", output),
+                Verdict::Uncompared(Kind::Children),
+                "whitespace at the frame's edge can't be compared: {output:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn frame_format_a_parse_error_on_a_block_line_is_not_the_kind_at_that_line() {
         let stderr = "error: expected `;`, found keyword `let`\n --> <stdin>:2:14\n  |\n\
                       2 |     let x = 1\n  |              ^ help: add `;` here\n";
 
@@ -1603,10 +1795,8 @@ mod tests {
 
         assert_eq!(
             verdict,
-            Verdict::ParseFailed {
-                detail: "error: expected `;`, found keyword `let`\n --> <stdin>:1:10\n  |\n\
-                         1 | let x = 1\n  |          ^ help: add `;` here"
-                    .to_owned(),
+            Verdict::NotKind {
+                kind: Kind::Statements,
                 line: Some(0),
             }
         );

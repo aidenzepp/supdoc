@@ -143,8 +143,9 @@ pub(crate) const FRAME_LINE: &str = "<the frame supdoc adds>";
 
 /// The fixed lines a tool sees around a block that declares a kind it reads only inside a frame
 /// (see [`Support::Framed`]), and the lines a formatter is expected to print back. The linter
-/// sees the block as written; the formatter sees each of its lines indented by one unit, so the
-/// lines it copies verbatim come back exact once that unit is removed.
+/// sees the block as written; the formatter sees each of its lines indented by as many units as
+/// it nests the block in the frame ([`super::format::depth`]: one, or two in biome's children
+/// frame), so the lines it copies verbatim come back exact once those units are removed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Frame {
     /// The kind the block declares.
@@ -177,7 +178,8 @@ impl Frame {
     }
 
     /// The text a formatter reads for a block whose `input` is its body as written: as
-    /// [`Self::wrap`], with each non-empty line of the body led by `indent`.
+    /// [`Self::wrap`], with each non-empty line of the body led by `indent`, which the format
+    /// step makes the frame's depth in indent units ([`super::format::depth`]).
     #[must_use]
     pub(crate) fn wrap_indented(self, input: &str, indent: &str) -> String {
         let mut text = String::with_capacity(

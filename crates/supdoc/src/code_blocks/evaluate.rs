@@ -43,6 +43,7 @@ use super::states::{
     self, Excerpt, NotChecked, StepState, Steps, block_fragment, state_of, tag_of,
     unsupported_reason,
 };
+use super::tombi;
 use super::toolchain::{self, Refusal, Toolchain};
 use super::tools::{self, Found, Invocation, Step, Tier, ToolCartridge, ToolEnv, find};
 use super::uses::{self, UseState, Written};
@@ -113,6 +114,9 @@ pub(crate) struct BlockRecord {
     /// The config and virtual path biome is given for it. `None` until the tools are looked up, and for
     /// any other tool.
     given: Option<biome::Given>,
+    /// What tombi is given for it: the private directory it runs in, holding its config. `None`
+    /// for every other tool.
+    tombi: Option<tombi::Project>,
     /// What the format step needs, kept while the block is pending.
     pending: Option<Pending>,
 }
@@ -231,16 +235,7 @@ pub(crate) fn evaluate(
         findings.extend(fragment_unsupported(block, &steps));
         let checked = language.as_deref().and_then(Language::from_tag);
         let (tool, linter) = selected_tools(code_blocks, &mut steps, checked, &state, granted);
-        let pending = (state == BlockState::NotChecked(NotChecked::Pending))
-            .then(|| {
-                let file = block.fence.file.as_str();
-                reread(&mut doc, file, read);
-                doc.as_ref()?
-                    .1
-                    .as_ref()
-                    .and_then(|text| Pending::of(block, text))
-            })
-            .flatten();
+        let pending = pending_of(&state, block, &mut doc, read);
         records.push(BlockRecord {
             at: block.fence.clone(),
             reason: first_reason(&state, &steps, language.as_deref(), tool),
@@ -249,6 +244,7 @@ pub(crate) fn evaluate(
             dialect: code_blocks.dialect(),
             edition: block_edition(block).or_else(|| code_blocks.edition()),
             given: None,
+            tombi: None,
             language,
             state,
             steps,
@@ -312,6 +308,7 @@ impl Evaluation {
         let build_timeout = self.build_timeout;
         let timeout = self.timeout;
         let mut configs = ToolConfigs::default();
+        configs.tombi.timeout = timeout;
         let mut toolchain_warned = false;
         let mut slots: Vec<Slot> = Vec::new();
         let mut jobs: Vec<Job> = Vec::new();
@@ -344,6 +341,8 @@ impl Evaluation {
             if !configs.give(record, tool, (env, root), &mut slots) {
                 continue;
             }
+            // Giving a TOML block its config can take a step off it (see `TombiConfigs::give`).
+            let linter = record.linter;
             let (runs, refused) = found_runs(
                 [record.tool, linter],
                 &mut looked_up,
@@ -426,11 +425,7 @@ impl Evaluation {
     /// [`Self::settle_pending`].
     fn settle(&mut self, slots: Vec<Slot>, jobs: &[Job], ran: Vec<Option<StepsRan>>) {
         let mut ran = ran.into_iter();
-        let mut linted_nothing_warned = false;
-        let mut indent_unknown_warned = false;
-        let mut printed_nothing_warned = false;
-        let mut yaml_empty_warned = false;
-        let mut reshaped_warned = false;
+        let mut warnings = NotRunWarnings::default();
         for slot in slots {
             let (job, run) = match slot {
                 Slot::Found(finding) => {
@@ -453,24 +448,11 @@ impl Evaluation {
                     record.steps.format = StepState::Ran;
                     outcomes.push((verdict.state(), Some(run.tool)));
                 }
-                (Some(Err(reason)), Some(_)) => {
-                    if reason == FRAME_INDENT_UNKNOWN && !indent_unknown_warned {
-                        indent_unknown_warned = true;
-                        self.findings.push(indent_unknown(&record.at));
-                    }
-                    if reason == format::PRINTED_NOTHING && !printed_nothing_warned {
-                        printed_nothing_warned = true;
-                        self.findings.push(printed_nothing(&record.at));
-                    }
-                    if reason == YAML_EMPTY && !yaml_empty_warned {
-                        yaml_empty_warned = true;
-                        self.findings.push(yaml_empty(&record.at));
-                    }
-                    if reason == FRAME_RESHAPED && !reshaped_warned {
-                        reshaped_warned = true;
-                        self.findings.push(frame_reshaped(&record.at));
-                    }
-                    record.steps.format = StepState::Unrunnable { reason };
+                (Some(Err(not_run)), Some(_)) => {
+                    self.findings.extend(warnings.first(&not_run, &record.at));
+                    record.steps.format = StepState::Unrunnable {
+                        reason: not_run.reason,
+                    };
                 }
                 _ => {}
             }
@@ -480,12 +462,11 @@ impl Evaluation {
                     record.steps.lint = StepState::Ran;
                     outcomes.push((lint_state(&verdict), Some(run.tool)));
                 }
-                (Some(Err(reason)), Some(_)) => {
-                    if reason == BIOME_LINTED_NOTHING && !linted_nothing_warned {
-                        linted_nothing_warned = true;
-                        self.findings.push(linted_nothing(&record.at));
-                    }
-                    record.steps.lint = StepState::Unrunnable { reason };
+                (Some(Err(not_run)), Some(_)) => {
+                    self.findings.extend(warnings.first(&not_run, &record.at));
+                    record.steps.lint = StepState::Unrunnable {
+                        reason: not_run.reason,
+                    };
                 }
                 _ => {}
             }
@@ -623,6 +604,23 @@ fn indent_unknown(at: &Location) -> Finding {
 }
 
 /// The run's one `code-block-not-checked` warning, at `at`, the first framed block whose format
+/// step didn't run because supdoc couldn't use the line width biome's config gives it.
+fn width_unknown(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "supdoc couldn't use the line width biome formats with: the project's config sets \
+         `lineWidth` in an override, or to a width biome wouldn't take once raised by the \
+         fragment's indent, so the format step didn't run on blocks biome reads inside a frame",
+    )
+    .with_help(
+        "set biome's `lineWidth` outside `overrides`, at most 320 less the indent a frame adds, \
+         or mark the blocks `format(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first framed block whose format
 /// step didn't run because the project's rustfmt config reshapes the frame.
 fn frame_reshaped(at: &Location) -> Finding {
     Finding::new(
@@ -665,6 +663,12 @@ fn yaml_empty(at: &Location) -> Finding {
     .with_help("write the YAML the block stands for, or mark the block `format(off: <reason>)`")
     .with_location(at.clone())
 }
+
+/// The reason a framed block's format step didn't run: biome's config sets `lineWidth` in an
+/// override, or to a width it wouldn't take once raised by the frame's indent, so supdoc couldn't
+/// hold the block to the project's width.
+pub(super) const FRAME_WIDTH_UNKNOWN: &str =
+    "supdoc couldn't use the line width biome's config sets";
 
 /// The run's one `code-block-not-checked` warning, at `at`, the first block whose formatter
 /// exited 0 and printed nothing for it, so its format step didn't run.
@@ -751,10 +755,58 @@ struct StepsRan {
 }
 
 /// What a lint step gave: its verdict and findings, or why supdoc couldn't run it safely.
-type LintRan = Result<(lint::Verdict, Vec<Finding>), &'static str>;
+type LintRan = Result<(lint::Verdict, Vec<Finding>), NotRun>;
 
 /// What a format step gave: its verdict and findings, or why supdoc couldn't run it.
-type FormatRan = Result<(format::Verdict, Vec<Finding>), &'static str>;
+type FormatRan = Result<(format::Verdict, Vec<Finding>), NotRun>;
+
+/// Why a step didn't run: its state's reason, and what the tool said about it, when the run's
+/// warning quotes that.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NotRun {
+    /// The step's reason.
+    reason: &'static str,
+    /// The tool's own words on it, for the run's warning.
+    said: Option<String>,
+}
+
+/// The run's warnings for steps that didn't run, each given once, at the first block its reason
+/// comes up for.
+#[derive(Debug, Default)]
+struct NotRunWarnings {
+    /// The reasons a warning has been given for.
+    given: Vec<&'static str>,
+}
+
+impl NotRunWarnings {
+    /// The warning for `not_run`, at `at`, the first time its reason comes up in the run. `None`
+    /// after that, and for a reason that has no warning of its own.
+    fn first(&mut self, not_run: &NotRun, at: &Location) -> Option<Finding> {
+        if self.given.contains(&not_run.reason) {
+            return None;
+        }
+        let said = not_run.said.as_deref();
+        let warning = match not_run.reason {
+            TOMBI_CONFIG_SKIPPED => config_skipped(at, said),
+            TOMBI_STEP_SKIPPED => step_skipped(at, said),
+            FRAME_INDENT_UNKNOWN => indent_unknown(at),
+            FRAME_WIDTH_UNKNOWN => width_unknown(at),
+            format::PRINTED_NOTHING => printed_nothing(at),
+            YAML_EMPTY => yaml_empty(at),
+            FRAME_RESHAPED => frame_reshaped(at),
+            BIOME_LINTED_NOTHING => linted_nothing(at),
+            _ => return None,
+        };
+        self.given.push(not_run.reason);
+        Some(warning)
+    }
+}
+
+impl From<&'static str> for NotRun {
+    fn from(reason: &'static str) -> Self {
+        Self { reason, said: None }
+    }
+}
 
 /// Whether a format step that gave `format` let the block parse, so its lint step may run: not
 /// when the formatter couldn't parse it, nor when a frame line showed it isn't its kind.
@@ -762,7 +814,7 @@ fn parses(format: Option<&FormatRan>) -> bool {
     !matches!(
         format,
         Some(Ok((
-            format::Verdict::ParseFailed { .. } | format::Verdict::NotKind(_),
+            format::Verdict::ParseFailed { .. } | format::Verdict::NotKind { .. },
             _
         )))
     )
@@ -848,6 +900,24 @@ fn not_trusted(records: &[BlockRecord]) -> Option<Finding> {
     Some(finding.with_location(at.clone()))
 }
 
+/// What the format step needs for `block`, its doc read through `doc` with `read`: `None` unless
+/// `state` is pending, or when the doc can't be read.
+fn pending_of<'doc>(
+    state: &BlockState,
+    block: &'doc CodeBlock,
+    doc: &mut Option<(&'doc str, Option<Arc<FixDoc>>)>,
+    read: impl Fn(&str) -> Option<Arc<FixDoc>>,
+) -> Option<Pending> {
+    if *state != BlockState::NotChecked(NotChecked::Pending) {
+        return None;
+    }
+    reread(doc, block.fence.file.as_str(), read);
+    doc.as_ref()?
+        .1
+        .as_ref()
+        .and_then(|text| Pending::of(block, text))
+}
+
 /// Points `doc` at `file`, read with `read`, unless it already holds it.
 fn reread<'doc>(
     doc: &mut Option<(&'doc str, Option<Arc<FixDoc>>)>,
@@ -866,14 +936,16 @@ struct ToolConfigs {
     biome: BiomeConfigs,
     /// rumdl's.
     rumdl: RumdlConfigs,
+    /// tombi's.
+    tombi: TombiConfigs,
     /// yamlfmt's.
     yamlfmt: YamlfmtConfigs,
 }
 
 impl ToolConfigs {
     /// Gives `record` the config its tool gets, as [`BiomeConfigs::give`],
-    /// [`RumdlConfigs::give`] and [`YamlfmtConfigs::give`] do. Whether the block goes on to its tools: not when its config was
-    /// refused.
+    /// [`RumdlConfigs::give`], [`TombiConfigs::give`] and [`YamlfmtConfigs::give`] do. Whether
+    /// the block goes on to its tools: not when it or its config was refused.
     fn give(
         &mut self,
         record: &mut BlockRecord,
@@ -883,6 +955,7 @@ impl ToolConfigs {
     ) -> bool {
         self.biome.give(record, tool, place, slots).is_ok()
             && self.rumdl.give(record, tool, place, slots).is_ok()
+            && self.tombi.give(record, tool, place, slots)
             && self.yamlfmt.give(record, tool, place, slots).is_ok()
     }
 }
@@ -1069,6 +1142,225 @@ fn rumdl_refusal(refusal: &rumdl::Refusal, at: &Location) -> (String, Finding) {
 
 /// Why rumdl didn't run when supdoc had no private directory to keep its config in.
 const RUMDL_NO_PRIVATE_DIR: &str = "rumdl needs a private directory under `XDG_CACHE_HOME` or `HOME` for its config, and there is none";
+
+/// The tombi config found for each doc directory, and the refusals already warned about.
+#[derive(Debug, Default)]
+struct TombiConfigs {
+    /// Each doc directory's result, in the order they were asked for.
+    found: Vec<(PathBuf, Result<tombi::Project, tombi::Refusal>)>,
+    /// The refusals a warning has been added for.
+    warned: Vec<tombi::Refusal>,
+    /// How long `tombi --version` may run: the run's tool timeout.
+    timeout: Option<Duration>,
+    /// The tombi version once read (see [`tombi::version_of`]), and whether its warning has been
+    /// given. `None` until a block needs it.
+    version: Option<(Result<String, String>, bool)>,
+}
+
+impl TombiConfigs {
+    /// Gives `record`, a TOML block, the config tombi gets for its doc, found once per directory,
+    /// and the place its doc is mirrored to. A block holding a `#:schema` directive is never given
+    /// to tombi (see [`tombi::names_schema`]): it is settled as not checked with a
+    /// `code-block-not-checked` warning. A refused config settles the block as not checked too,
+    /// with its one warning per refusal added to `slots`. Whether the block goes on to its tools.
+    ///
+    /// Effect: reads the config and may create supdoc's private directory and file for it.
+    fn give(
+        &mut self,
+        record: &mut BlockRecord,
+        tool: &ToolCartridge,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> bool {
+        if tool.language != Language::Toml {
+            return true;
+        }
+        let names_schema = record
+            .pending
+            .as_ref()
+            .is_some_and(|pending| tombi::names_schema(&pending.input));
+        if names_schema {
+            slots.push(Slot::Found(schema_warning(&record.at)));
+            record.state = BlockState::NotChecked(NotChecked::SchemaFile);
+            record.reason =
+                record
+                    .state
+                    .reason(&record.steps, record.language.as_deref(), Some(tool.name));
+            return false;
+        }
+        if !refuse_directive(record, slots) {
+            return false;
+        }
+        let doc = root.join(record.at.file.as_str());
+        let dir = doc.parent().unwrap_or(root).to_path_buf();
+        let found = if let Some((_, found)) = self.found.iter().find(|(known, _)| *known == dir) {
+            found.clone()
+        } else {
+            let found = tombi::project(env, root, &doc);
+            self.found.push((dir, found.clone()));
+            found
+        };
+        match found {
+            Ok(project) => {
+                record.given = Some(biome::Given {
+                    mirror: Some(project.doc_as_seen(&doc)),
+                    flags: Vec::new(),
+                    config: None,
+                    names: Some(project.names()),
+                });
+                record.tombi = Some(project);
+                self.verified(record, (env, root), slots)
+            }
+            Err(refusal) => {
+                let (reason, warning) = tombi_refusal(&refusal, &record.at);
+                if !self.warned.contains(&refusal) {
+                    self.warned.push(refusal);
+                    slots.push(Slot::Found(warning));
+                }
+                record.state = BlockState::NotChecked(NotChecked::ToolConfig);
+                record.reason = Some(reason);
+                false
+            }
+        }
+    }
+}
+
+/// Takes both steps off `record`'s TOML block when it holds a `#:tombi` directive (see
+/// [`tombi::has_directive`]): neither runs, each with [`TOMBI_DIRECTIVE`] as its reason, and one
+/// `code-block-not-checked` warning for the block goes to `slots`. Whether the block goes on to
+/// its tools: not when it holds one.
+fn refuse_directive(record: &mut BlockRecord, slots: &mut Vec<Slot>) -> bool {
+    let holds = record
+        .pending
+        .as_ref()
+        .is_some_and(|pending| tombi::has_directive(&pending.input));
+    if !holds {
+        return true;
+    }
+    let unrun = StepState::Unrunnable {
+        reason: TOMBI_DIRECTIVE,
+    };
+    if record.tool.take().is_some() {
+        record.steps.format = unrun.clone();
+    }
+    if record.linter.take().is_some() {
+        record.steps.lint = unrun;
+    }
+    slots.push(Slot::Found(
+        Finding::new(
+            NOT_CHECKED,
+            Severity::Warning,
+            "the block holds a `#:tombi` directive, which supdoc doesn't give to tombi, so its \
+             steps didn't run",
+        )
+        .with_help(
+            "remove the `#:tombi` directive: switch a step off with `format(off: <why>)` or \
+             `lint(off: <why>)`, and set `toml-version` in the project's tombi config",
+        )
+        .with_location(record.at.clone()),
+    ));
+    false
+}
+
+/// Why a TOML block's steps didn't run when it holds a `#:tombi` directive.
+const TOMBI_DIRECTIVE: &str =
+    "the block holds a `#:tombi` directive, which supdoc doesn't give to tombi";
+
+impl TombiConfigs {
+    /// Whether the tombi on `PATH` is a version supdoc is verified against (see
+    /// [`tombi::VERIFIED`]), read once per run. When it isn't, or can't be read, neither of
+    /// `record`'s steps runs, each with [`TOMBI_UNVERIFIED`] as its reason, and the run's one
+    /// warning goes to `slots`. A tombi that isn't on `PATH`, or is inside the checkout, is left
+    /// to the usual lookup.
+    ///
+    /// Effect: runs `tombi --version` the first time.
+    fn verified(
+        &mut self,
+        record: &mut BlockRecord,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> bool {
+        let Found::OnPath(program) = find("tombi", env, root) else {
+            return true;
+        };
+        let timeout = self.timeout;
+        let (version, warned) = self
+            .version
+            .get_or_insert_with(|| (tombi::version_of(&program, env, root, timeout), false));
+        let Err(shown) = version else {
+            return true;
+        };
+        if !*warned {
+            *warned = true;
+            slots.push(Slot::Found(
+                Finding::new(
+                    NOT_CHECKED,
+                    Severity::Warning,
+                    format!(
+                        "tombi {shown} isn't a version supdoc's checks are verified against ({}); \
+                         its TOML blocks' steps didn't run",
+                        tombi::VERIFIED.join(", ")
+                    ),
+                )
+                .with_help(format!(
+                    "install a verified tombi: `{}`",
+                    tools::TOMBI_INSTALL
+                ))
+                .with_location(record.at.clone()),
+            ));
+        }
+        let unrun = StepState::Unrunnable {
+            reason: TOMBI_UNVERIFIED,
+        };
+        if record.tool.take().is_some() {
+            record.steps.format = unrun.clone();
+        }
+        if record.linter.take().is_some() {
+            record.steps.lint = unrun;
+        }
+        false
+    }
+}
+
+/// Why a TOML block's steps didn't run when the tombi on `PATH` isn't a verified version.
+const TOMBI_UNVERIFIED: &str = "the tombi on `PATH` isn't a version supdoc is verified against";
+
+/// The `code-block-not-checked` warning, at `at`, for a TOML block holding a `#:schema`
+/// directive.
+fn schema_warning(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "the block names a schema file with `#:schema`, which tombi would read wherever it is, so \
+         it isn't checked",
+    )
+    .with_help("remove the `#:schema` line from the block, or mark it `ignore(<why>)`")
+    .with_location(at.clone())
+}
+
+/// The state reason and the `code-block-not-checked` warning, at `at`, for a block tombi isn't
+/// given because of `refusal`.
+fn tombi_refusal(refusal: &tombi::Refusal, at: &Location) -> (String, Finding) {
+    let (reason, message, help) = match refusal {
+        tombi::Refusal::Config { file, why, help } => (
+            format!("tombi config `{file}` {why}"),
+            format!("the project's `{file}` {why}, so its TOML blocks aren't checked"),
+            format!("in `{file}`: {help}, or mark the blocks `ignore(<why>)`"),
+        ),
+        tombi::Refusal::NoPrivateDir => (
+            TOMBI_NO_PRIVATE_DIR.to_owned(),
+            format!("{TOMBI_NO_PRIVATE_DIR}, so its blocks aren't checked"),
+            "set `XDG_CACHE_HOME` or `HOME` to a directory outside the project".to_owned(),
+        ),
+    };
+    let finding = Finding::new(NOT_CHECKED, Severity::Warning, message)
+        .with_help(help)
+        .with_location(at.clone());
+    (reason, finding)
+}
+
+/// Why tombi didn't run when supdoc had no private directory to keep its config in.
+const TOMBI_NO_PRIVATE_DIR: &str = "tombi needs a private directory under `XDG_CACHE_HOME` or `HOME` for its config, and there is none";
 
 /// The yamlfmt config flags found for each doc directory, and the refusals already warned about.
 #[derive(Debug, Default)]
@@ -1630,59 +1922,118 @@ fn scaled(share: u16, scale: f32) -> usize {
     usize::from(low)
 }
 
-/// The indent unit biome uses for a `language` block under `given`'s config: its language
-/// section's `formatter.indentStyle` and `indentWidth`, else the top-level `formatter`'s, else
-/// biome's defaults (a tab; two spaces when the style is `space`). No config is biome's defaults.
-/// `None` when the config can't be read or parsed, has an override that sets an indent (which
-/// would give some paths another one), or holds a value biome wouldn't take.
+/// The indent and line width biome formats a block with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BiomeLayout {
+    /// The indent unit: a tab, or `indentWidth` spaces.
+    indent: String,
+    /// The columns one indent unit takes: `indentWidth`, which is also a tab's width.
+    columns: usize,
+    /// `lineWidth`: the widest a line may be.
+    line_width: usize,
+}
+
+impl BiomeLayout {
+    /// biome's arguments for a block that sits `depth` indent units inside a frame: its line
+    /// width raised by those units' columns, so the frame's indent never moves where biome wraps
+    /// the block's lines.
+    ///
+    /// # Errors
+    ///
+    /// [`FRAME_WIDTH_UNKNOWN`] when that width is above the most biome takes.
+    fn framed_args(&self, depth: usize) -> Result<Vec<OsString>, &'static str> {
+        let width = self
+            .columns
+            .checked_mul(depth)
+            .and_then(|extra| self.line_width.checked_add(extra))
+            .filter(|width| *width <= BIOME_MAX_LINE_WIDTH)
+            .ok_or(FRAME_WIDTH_UNKNOWN)?;
+        Ok(vec![OsString::from(format!(
+            "--javascript-formatter-line-width={width}"
+        ))])
+    }
+}
+
+/// The widest `lineWidth` biome takes.
+const BIOME_MAX_LINE_WIDTH: usize = 320;
+
+/// The indent and line width biome uses for a `language` block under `given`'s config: its
+/// language section's `formatter.indentStyle`, `indentWidth` and `lineWidth`, else the top-level
+/// `formatter`'s, else biome's defaults (a tab two columns wide, two spaces when the style is
+/// `space`, and 80 columns). No config is biome's defaults.
+///
+/// # Errors
+///
+/// [`FRAME_INDENT_UNKNOWN`] when the config can't be read or parsed, has an override that sets
+/// the indent (which would give some paths another one), or holds an indent biome wouldn't take;
+/// [`FRAME_WIDTH_UNKNOWN`] when an override sets `lineWidth`, or the width is one biome
+/// wouldn't take.
 ///
 /// Effect: reads the private config file.
-fn biome_indent(language: Language, given: Option<&biome::Given>) -> Option<String> {
+fn biome_layout(
+    language: Language,
+    given: Option<&biome::Given>,
+) -> Result<BiomeLayout, &'static str> {
     let section = match language {
         Language::TypeScript | Language::JavaScript => "javascript",
-        _ => return None,
+        _ => return Err(FRAME_INDENT_UNKNOWN),
     };
-    let Some(path) = given.and_then(|given| given.config.as_ref()) else {
-        return Some("\t".to_owned());
+    let config: serde_json::Value = match given.and_then(|given| given.config.as_ref()) {
+        None => serde_json::Value::Null,
+        Some(path) => std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .ok_or(FRAME_INDENT_UNKNOWN)?,
     };
-    let config: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-    let indent_keys = ["indentStyle", "indentWidth"];
-    let sets_indent = |override_: &serde_json::Value| {
-        ["formatter", section].iter().any(|table| {
-            indent_keys.iter().any(|key| {
-                let at = if *table == "formatter" {
-                    format!("/formatter/{key}")
-                } else {
-                    format!("/{table}/formatter/{key}")
-                };
-                override_.pointer(&at).is_some()
+    let overrides = match config.get("overrides") {
+        None => &[][..],
+        Some(serde_json::Value::Array(overrides)) => overrides.as_slice(),
+        Some(_) => return Err(FRAME_INDENT_UNKNOWN),
+    };
+    let overridden = |keys: &[&str]| {
+        overrides.iter().any(|override_| {
+            ["formatter", section].iter().any(|table| {
+                keys.iter().any(|key| {
+                    let at = if *table == "formatter" {
+                        format!("/formatter/{key}")
+                    } else {
+                        format!("/{table}/formatter/{key}")
+                    };
+                    override_.pointer(&at).is_some()
+                })
             })
         })
     };
-    match config.get("overrides") {
-        None => {}
-        Some(serde_json::Value::Array(overrides)) => {
-            if overrides.iter().any(sets_indent) {
-                return None;
-            }
-        }
-        Some(_) => return None,
+    if overridden(&["indentStyle", "indentWidth"]) {
+        return Err(FRAME_INDENT_UNKNOWN);
+    }
+    if overridden(&["lineWidth"]) {
+        return Err(FRAME_WIDTH_UNKNOWN);
     }
     let setting = |key: &str| {
         config
             .pointer(&format!("/{section}/formatter/{key}"))
             .or_else(|| config.pointer(&format!("/formatter/{key}")))
     };
-    match setting("indentStyle").map_or(Some("tab"), serde_json::Value::as_str)? {
-        "tab" => Some("\t".to_owned()),
-        "space" => {
-            let width = setting("indentWidth").map_or(Some(2), serde_json::Value::as_u64)?;
-            let width = usize::try_from(width).ok().filter(|width| *width > 0)?;
-            Some(" ".repeat(width))
-        }
-        _ => None,
-    }
+    let number = |key: &str, default: u64| {
+        let value = setting(key).map_or(Some(default), serde_json::Value::as_u64)?;
+        usize::try_from(value).ok().filter(|value| *value > 0)
+    };
+    let columns = number("indentWidth", 2).ok_or(FRAME_INDENT_UNKNOWN)?;
+    let line_width = number("lineWidth", 80)
+        .filter(|width| *width <= BIOME_MAX_LINE_WIDTH)
+        .ok_or(FRAME_WIDTH_UNKNOWN)?;
+    let style = setting("indentStyle").map_or(Some("tab"), serde_json::Value::as_str);
+    let indent = match style.ok_or(FRAME_INDENT_UNKNOWN)? {
+        "tab" => "\t".to_owned(),
+        "space" => " ".repeat(columns),
+        _ => return Err(FRAME_INDENT_UNKNOWN),
+    };
+    Ok(BiomeLayout {
+        indent,
+        columns,
+        line_width,
+    })
 }
 
 /// How a formatter runs on a block inside a frame.
@@ -1719,10 +2070,12 @@ impl Framing {
     }
 }
 
-/// How `tool` formats a block inside a frame, read from the project's config for it (`rust`'s
-/// for rustfmt, `given`'s for biome). [`FRAME_INDENT_UNKNOWN`] for a formatter whose indent
-/// supdoc can't read, and when the config can't be read for it; [`FRAME_RESHAPED`] when
-/// rustfmt's config reshapes the frame.
+/// How `tool` formats a block inside `frame`, read from the project's config for it (`rust`'s
+/// for rustfmt, `given`'s for biome), each tool's line width raised by the indent the frame puts
+/// before the block. [`FRAME_INDENT_UNKNOWN`] for a formatter whose indent supdoc can't read,
+/// and when the config can't be read for it; [`FRAME_WIDTH_UNKNOWN`] for biome's line width set
+/// by an override or one it wouldn't take; [`FRAME_RESHAPED`] when rustfmt's config reshapes the
+/// frame.
 ///
 /// # Errors
 ///
@@ -1731,6 +2084,7 @@ impl Framing {
 /// Effect: reads biome's private config file.
 fn framing(
     tool: &ToolCartridge,
+    frame: Frame,
     rust: Option<&RustSetup>,
     given: Option<&biome::Given>,
 ) -> Result<Framing, &'static str> {
@@ -1744,13 +2098,14 @@ fn framing(
                 widened: layout.tab_spaces,
             }),
         },
-        "biome" => biome_indent(tool.language, given)
-            .map(|indent| Framing {
-                indent,
-                args: Vec::new(),
+        "biome" => {
+            let layout = biome_layout(tool.language, given)?;
+            Ok(Framing {
+                args: layout.framed_args(format::depth(frame))?,
+                indent: layout.indent,
                 widened: 0,
             })
-            .ok_or(FRAME_INDENT_UNKNOWN),
+        }
         _ => Err(FRAME_INDENT_UNKNOWN),
     }
 }
@@ -1799,16 +2154,20 @@ fn run_formatter(
     let given = record.given.as_ref();
     let framed = match frame {
         None => None,
-        Some(frame) => match framing(tool, rust, given) {
+        Some(frame) => match framing(tool, frame, rust, given) {
             Ok(framing) => Some((frame, framing)),
-            Err(reason) => return Some(Err(reason)),
+            Err(reason) => return Some(Err(reason.into())),
         },
     };
-    let checked = framed
-        .as_ref()
-        .map_or(Cow::Borrowed(pending.input.as_str()), |(frame, framing)| {
-            Cow::Owned(frame.wrap_indented(&pending.input, &framing.indent))
-        });
+    let checked =
+        framed
+            .as_ref()
+            .map_or(Cow::Borrowed(pending.input.as_str()), |(frame, framing)| {
+                Cow::Owned(frame.wrap_indented(
+                    &pending.input,
+                    &framing.indent.repeat(format::depth(*frame)),
+                ))
+            });
     let input = checked.as_ref();
     let doc = root.join(record.at.file.as_str());
     let edition = record
@@ -1831,8 +2190,10 @@ fn run_formatter(
         fragment: record.fragment,
     });
     let vars = rust.map(|rust| rust.toolchain.env()).unwrap_or_default();
+    let tombi_vars = record.tombi.as_ref().map(tombi::Project::vars);
     let extra: Vec<(&str, &OsStr)> = vars
         .iter()
+        .chain(tombi_vars.iter().flatten())
         .map(|(name, value)| (*name, value.as_os_str()))
         .chain(tool.vars())
         .collect();
@@ -1849,36 +2210,36 @@ fn run_formatter(
         doc: &doc,
         project: None,
     };
-    let verdict = cached_run(
+    let judged = cached_run(
         &run,
         session,
-        |call| runner::run(call, session.env, session.root),
+        |call| run_in_place(call, record, session),
         |result| {
+            if let Some(not_run) = config_skipped_by(record, tool, &result) {
+                return Err(not_run);
+            }
             let named = result.map(|ran| Ran {
                 stderr: given.map_or_else(|| ran.stderr.clone(), |given| given.named(&ran.stderr)),
                 ..ran
             });
-            match &framed {
+            Ok(match &framed {
                 Some((frame, framing)) => framing.judge(tool, *frame, &pending.input, named),
                 None => format::judge(tool, input, named),
-            }
+            })
         },
-        format::Verdict::cacheable,
+        |judged| judged.as_ref().is_ok_and(format::Verdict::cacheable),
     );
-    if verdict == format::Verdict::PrintedNothing {
-        if tool.language == Language::Yaml && yaml::holds_no_yaml(&pending.input) {
-            return Some(Err(YAML_EMPTY));
+    let verdict = match judged {
+        Ok(format::Verdict::PrintedNothing) => {
+            if tool.language == Language::Yaml && yaml::holds_no_yaml(&pending.input) {
+                return Some(Err(YAML_EMPTY.into()));
+            }
+            return Some(Err(format::PRINTED_NOTHING.into()));
         }
-        return Some(Err(format::PRINTED_NOTHING));
-    }
-    let at = match &verdict {
-        format::Verdict::NotKind(_) | format::Verdict::FrameReformatted(_) => pending
-            .block
-            .info
-            .as_ref()
-            .map_or_else(|| record.at.clone(), |info| info.location.clone()),
-        _ => parse_place(&verdict, pending).unwrap_or_else(|| record.at.clone()),
+        Ok(verdict) => verdict,
+        Err(not_run) => return Some(Err(not_run)),
     };
+    let at = verdict_place(&verdict, record, pending);
     let finding = format::finding(&verdict, tool, &at, timeout)
         .map(|finding| jsonc_hint(finding, &verdict, record, &pending.input));
     let findings = match (&verdict, finding) {
@@ -1890,6 +2251,21 @@ fn run_formatter(
     Some(Ok((verdict, findings)))
 }
 
+/// Where a format step's `verdict` on `record`'s block is reported: a frame-level failure at
+/// the block's info string, a line the verdict names at its doc line, and anything else at the
+/// block's opening fence.
+fn verdict_place(verdict: &format::Verdict, record: &BlockRecord, pending: &Pending) -> Location {
+    match verdict {
+        format::Verdict::NotKind {
+            line: Some(line), ..
+        } => body_place(*line, pending).unwrap_or_else(|| info_place(record, pending)),
+        format::Verdict::NotKind { line: None, .. }
+        | format::Verdict::FrameReformatted(_)
+        | format::Verdict::Uncompared(_) => info_place(record, pending),
+        _ => parse_place(verdict, pending).unwrap_or_else(|| record.at.clone()),
+    }
+}
+
 /// The doc line a parse failure names in `pending`'s block. `None` for any other verdict, or a
 /// line that isn't the block's.
 fn parse_place(verdict: &format::Verdict, pending: &Pending) -> Option<Location> {
@@ -1899,8 +2275,22 @@ fn parse_place(verdict: &format::Verdict, pending: &Pending) -> Option<Location>
     else {
         return None;
     };
+    body_place(*line, pending)
+}
+
+/// The doc location of `pending`'s block body line `line` (0-based), when it has one.
+fn body_place(line: usize, pending: &Pending) -> Option<Location> {
     rust::LineMap::of(&pending.block, pending.doc.text())
-        .and_then(|map| map.doc_line(*line).cloned())
+        .and_then(|map| map.doc_line(line).cloned())
+}
+
+/// Where a finding about `record`'s block as a whole goes: its info string, else the block.
+fn info_place(record: &BlockRecord, pending: &Pending) -> Location {
+    pending
+        .block
+        .info
+        .as_ref()
+        .map_or_else(|| record.at.clone(), |info| info.location.clone())
 }
 
 /// `finding`, with help that names the `jsonc` tag when `verdict` is a parse failure of
@@ -1963,7 +2353,13 @@ fn run_linter(
     let frame = Frame::of(tool, record.fragment);
     let input = lint::checked(frame, &pending.input);
     let input = input.as_ref();
-    let extra = tool.vars();
+    let tombi_vars = record.tombi.as_ref().map(tombi::Project::vars);
+    let extra: Vec<(&str, &OsStr)> = tombi_vars
+        .iter()
+        .flatten()
+        .map(|(name, value)| (*name, value.as_os_str()))
+        .chain(tool.vars())
+        .collect();
     let run = cache::Run {
         tool,
         program,
@@ -1976,19 +2372,28 @@ fn run_linter(
     let biome = given.filter(|_| tool.name == BIOME_LINT);
     let spawn = |call: &Call<'_>| match biome {
         Some(given) => biome_lint(tool, call, &invocation, given, input, session),
-        None => runner::run(call, session.env, session.root),
+        None => run_in_place(call, record, session),
     };
-    let judge = |result: Result<Ran, runner::Failure>| match result {
-        Ok(ran) if biome.is_some() && biome::linted_nothing(&ran.stdout) => {
-            Err(BIOME_LINTED_NOTHING)
+    let named = given.filter(|_| record.tombi.is_some());
+    let judge = |result: Result<Ran, runner::Failure>| {
+        if let Some(not_run) = config_skipped_by(record, tool, &result) {
+            return Err(not_run);
         }
-        result => Ok(tool.lint_verdict(input, frame.is_some(), result)),
+        match named_by(named, result) {
+            Ok(ran) if biome.is_some() && biome::linted_nothing(&ran.stdout) => {
+                Err(BIOME_LINTED_NOTHING.into())
+            }
+            Ok(ran) if tool.name == TOMBI_LINT && tombi::linted_nothing(&ran) => {
+                Err(TOMBI_LINTED_NOTHING.into())
+            }
+            result => Ok(tool.lint_verdict(input, frame.is_some(), result)),
+        }
     };
     let verdict = match cached_run(&run, session, spawn, judge, |judged| {
         judged.as_ref().is_ok_and(lint::Verdict::cacheable)
     }) {
         Ok(verdict) => verdict,
-        Err(reason) => return Some(Err(reason)),
+        Err(not_run) => return Some(Err(not_run)),
     };
     let read = lint::Read {
         tool,
@@ -2026,6 +2431,12 @@ const BIOME_LINT: &str = "biome-lint";
 /// in the project's config still left the block out, so the run says nothing about it.
 pub(super) const BIOME_LINTED_NOTHING: &str =
     "biome lint checked no file: the project's biome config leaves the block out";
+
+/// The name of tombi's lint cartridge.
+const TOMBI_LINT: &str = "tombi-lint";
+
+/// Why tombi lint's step didn't run on a block when tombi didn't report linting it.
+const TOMBI_LINTED_NOTHING: &str = "tombi lint didn't report checking the block";
 
 /// Runs `call`, `tool` being biome lint, on the block `invocation` describes, written with
 /// `given`'s config to a fresh [`biome::LintFile`] beside the neutral directory, since biome
@@ -2101,7 +2512,7 @@ fn run_clippy(
 ) -> LintRan {
     let neutral = runner::neutral_dir(session.env, session.root);
     if neutral == Path::new("/") {
-        return Err(NO_PRIVATE_DIR);
+        return Err(NO_PRIVATE_DIR.into());
     }
     let doc = session.root.join(record.at.file.as_str());
     let edition = rust.edition_of(record);
@@ -2184,6 +2595,114 @@ fn run_clippy(
         !session.linked.flags.is_empty(),
     );
     Ok((verdict, findings))
+}
+
+/// Why `tool`'s step on `record`'s block didn't really run, from tombi's run `result` at any exit
+/// status: tombi said it couldn't load a config (so it ran on rules the project didn't set), or
+/// that it skipped the step (see [`tombi::skip`]). The reason quotes what it said, without the
+/// path. `None` for any other run, and for a block tombi isn't given.
+fn config_skipped_by(
+    record: &BlockRecord,
+    tool: &ToolCartridge,
+    result: &Result<Ran, runner::Failure>,
+) -> Option<NotRun> {
+    let _given = record.tombi.as_ref()?;
+    let ran = result.as_ref().ok()?;
+    Some(match tombi::skip(tool.step(), &ran.stderr)? {
+        tombi::Skip::Config(said) => NotRun {
+            reason: TOMBI_CONFIG_SKIPPED,
+            said: Some(said),
+        },
+        tombi::Skip::Step(said) => NotRun {
+            reason: TOMBI_STEP_SKIPPED,
+            said: Some(said),
+        },
+    })
+}
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose tombi step
+/// tombi said it skipped, quoting what it `said`.
+fn step_skipped(at: &Location, said: Option<&str>) -> Finding {
+    let said = said.map_or_else(String::new, |said| format!(" (it said: {said} ...)"));
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        format!("tombi skipped a step of the block{said}, so that step didn't run"),
+    )
+    .with_help(
+        "remove what makes tombi skip the block, or mark the block `format(off: <why>)` or \
+         `lint(off: <why>)`",
+    )
+    .with_location(at.clone())
+}
+
+/// Why a TOML block's step didn't run when tombi said it skipped it.
+const TOMBI_STEP_SKIPPED: &str = "tombi skipped the step";
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first block tombi didn't run with
+/// the project's config, quoting what tombi `said`.
+fn config_skipped(at: &Location, said: Option<&str>) -> Finding {
+    let said = said.map_or_else(String::new, |said| format!(": {said}"));
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        format!(
+            "tombi couldn't load the project's config{said}, so its TOML blocks' steps didn't run"
+        ),
+    )
+    .with_help(
+        "run `tombi lint` in the project to see what in its config tombi rejects, and fix it, or \
+         mark the blocks `ignore(<why>)`",
+    )
+    .with_location(at.clone())
+}
+
+/// Why a TOML block's steps didn't run when tombi couldn't load the copy of the project's config.
+const TOMBI_CONFIG_SKIPPED: &str = "tombi couldn't load the project's config";
+
+/// Runs `call` for `record`'s block with `session`'s env: from the private directory tombi is
+/// given when the block has one (see [`runner::Cwd::Private`]), otherwise from where `call` says.
+///
+/// Effect: runs the tool.
+///
+/// # Errors
+///
+/// [`runner::Failure`] as [`runner::run`] gives it.
+fn run_in_place(
+    call: &Call<'_>,
+    record: &BlockRecord,
+    session: &Session<'_>,
+) -> Result<Ran, runner::Failure> {
+    match &record.tombi {
+        Some(project) => runner::run(
+            &Call {
+                cwd: runner::Cwd::Private(&project.config_home),
+                ..*call
+            },
+            session.env,
+            session.root,
+        ),
+        None => runner::run(call, session.env, session.root),
+    }
+}
+
+/// `result` with each private path in its stderr named as `given` says (see
+/// [`biome::Given::named`]); `result` as it is without `given`.
+///
+/// # Errors
+///
+/// `result`'s own failure, unchanged.
+fn named_by(
+    given: Option<&biome::Given>,
+    result: Result<Ran, runner::Failure>,
+) -> Result<Ran, runner::Failure> {
+    match given {
+        Some(given) => result.map(|ran| Ran {
+            stderr: given.named(&ran.stderr),
+            ..ran
+        }),
+        None => result,
+    }
 }
 
 /// `judge` applied to `run`, read from `session`'s cache when its key is there, otherwise run
@@ -3017,6 +3536,7 @@ mod tests {
                 dialect: Dialect::default(),
                 edition: None,
                 given: None,
+                tombi: None,
                 pending: Pending::of(block, &doc),
             })
             .collect()
@@ -3989,8 +4509,9 @@ mod tests {
         use std::time::Duration;
 
         use super::super::{
-            Evaluation, FRAME_INDENT_UNKNOWN, FRAME_RESHAPED, FormatRan, Job, RustSetup,
-            RustfmtLayout, Session, Slot, StepsRan, ToolRun, biome_indent, parses, run_formatter,
+            Evaluation, FRAME_INDENT_UNKNOWN, FRAME_RESHAPED, FRAME_WIDTH_UNKNOWN, FormatRan, Job,
+            RustSetup, RustfmtLayout, Session, Slot, StepsRan, ToolRun, biome_layout, parses,
+            run_formatter,
         };
         use super::{rust_record, rust_records, temporary};
         use crate::code_blocks::biome::Given;
@@ -4088,7 +4609,7 @@ mod tests {
 
         /// The verdict and findings of a run that ran.
         fn ran(run: FormatRan) -> (Verdict, Vec<Finding>) {
-            run.unwrap_or_else(|reason| panic!("the format step should run: {reason}"))
+            run.unwrap_or_else(|not_run| panic!("the format step should run: {not_run:?}"))
         }
 
         #[test]
@@ -4127,7 +4648,13 @@ mod tests {
             let (not_kind, not_kind_findings) = ran(format_run(&on_frame, root.path(), &text));
 
             assert_eq!(lost, Verdict::FrameReformatted(Kind::Statements));
-            assert_eq!(not_kind, Verdict::NotKind(Kind::Statements));
+            assert_eq!(
+                not_kind,
+                Verdict::NotKind {
+                    kind: Kind::Statements,
+                    line: None
+                }
+            );
             for finding in lost_findings.iter().chain(&not_kind_findings) {
                 let at = finding
                     .location
@@ -4144,14 +4671,17 @@ mod tests {
         #[test]
         fn frame_format_a_block_that_isnt_its_kind_holds_back_its_lint_step() {
             assert!(!parses(Some(&Ok((
-                Verdict::NotKind(Kind::Statements),
+                Verdict::NotKind {
+                    kind: Kind::Statements,
+                    line: Some(0)
+                },
                 Vec::new()
             )))));
             assert!(parses(Some(&Ok((
                 Verdict::FrameReformatted(Kind::Statements),
                 Vec::new()
             )))));
-            assert!(parses(Some(&Err(FRAME_INDENT_UNKNOWN))));
+            assert!(parses(Some(&Err(FRAME_INDENT_UNKNOWN.into()))));
         }
 
         #[test]
@@ -4163,7 +4693,7 @@ mod tests {
 
             let run = format_run(&stub, root.path(), &doc("let x = 1;\n"));
 
-            assert_eq!(run, Err(FRAME_INDENT_UNKNOWN));
+            assert_eq!(run, Err(FRAME_INDENT_UNKNOWN.into()));
         }
 
         /// The `--config` value framed rustfmt runs with under the rustfmt config `toml`.
@@ -4332,7 +4862,7 @@ mod tests {
 
             let run = format_run(&stub, root.path(), &doc("let x = 1;\n"));
 
-            assert_eq!(run, Err(FRAME_RESHAPED), "the stub never runs");
+            assert_eq!(run, Err(FRAME_RESHAPED.into()), "the stub never runs");
             let text = doc("let x = 1;\n") + &doc("let y = 2;\n");
             let rustfmt = formatter(Language::Rust).expect("Rust has a formatter");
             let mut evaluation = Evaluation {
@@ -4352,7 +4882,7 @@ mod tests {
                 .collect();
             let unrun = || {
                 Some(StepsRan {
-                    format: Some(Err(FRAME_RESHAPED)),
+                    format: Some(Err(FRAME_RESHAPED.into())),
                     lint: None,
                 })
             };
@@ -4400,11 +4930,14 @@ mod tests {
                     names: None,
                 }
             };
-            let indent = |config: &str| biome_indent(Language::TypeScript, Some(&given(config)));
+            let layout = |config: &str| biome_layout(Language::TypeScript, Some(&given(config)));
+            let indent = |config: &str| layout(config).ok().map(|layout| layout.indent);
 
             assert_eq!(
-                biome_indent(Language::TypeScript, None).as_deref(),
-                Some("\t")
+                biome_layout(Language::TypeScript, None)
+                    .ok()
+                    .map(|layout| layout.indent),
+                Some("\t".to_owned())
             );
             assert_eq!(indent("{}").as_deref(), Some("\t"));
             assert_eq!(
@@ -4435,6 +4968,66 @@ mod tests {
                 None
             );
             assert_eq!(indent(r#"{"formatter":{"indentStyle":"wide"}}"#), None);
+            assert_eq!(
+                layout(r#"{"overrides":[{"javascript":{"formatter":{"lineWidth":40}}}]}"#),
+                Err(FRAME_WIDTH_UNKNOWN),
+                "an override that sets a line width would wrap some paths elsewhere"
+            );
+            assert_eq!(
+                layout(r#"{"overrides":[{"formatter":{"indentWidth":3}}]}"#),
+                Err(FRAME_INDENT_UNKNOWN)
+            );
+        }
+
+        #[test]
+        fn frame_format_biome_widens_its_line_by_the_frames_indent() {
+            let dir = temporary();
+            let args = |config: &str, depth: usize| {
+                let path = dir.path().join("biome.json");
+                std::fs::write(&path, config).expect("the config should be writable");
+                let given = Given {
+                    flags: Vec::new(),
+                    config: Some(path),
+                    mirror: None,
+                    names: None,
+                };
+                biome_layout(Language::TypeScript, Some(&given))
+                    .and_then(|layout| layout.framed_args(depth))
+                    .ok()
+                    .map(|args| {
+                        args.iter()
+                            .map(|arg| arg.to_string_lossy().into_owned())
+                            .collect::<String>()
+                    })
+            };
+            let width = |value: usize| Some(format!("--javascript-formatter-line-width={value}"));
+
+            assert_eq!(
+                args("{}", 1),
+                width(82),
+                "a tab is two columns wide by default"
+            );
+            assert_eq!(args("{}", 2), width(84));
+            assert_eq!(
+                args(
+                    r#"{"formatter":{"indentStyle":"space","indentWidth":4}}"#,
+                    1
+                ),
+                width(84)
+            );
+            assert_eq!(
+                args(
+                    r#"{"formatter":{"lineWidth":100},"javascript":{"formatter":{"lineWidth":60}}}"#,
+                    1
+                ),
+                width(62),
+                "the language section's width wins"
+            );
+            assert_eq!(
+                args(r#"{"formatter":{"lineWidth":320}}"#, 1),
+                None,
+                "a width biome wouldn't take leaves the step not run"
+            );
         }
 
         #[test]
@@ -4506,7 +5099,7 @@ mod tests {
                 .collect();
             let unrun = || {
                 Some(StepsRan {
-                    format: Some(Err(FRAME_INDENT_UNKNOWN)),
+                    format: Some(Err(FRAME_INDENT_UNKNOWN.into())),
                     lint: None,
                 })
             };
@@ -4560,8 +5153,8 @@ mod tests {
         }
 
         #[test]
-        fn frame_format_real_rustfmt_parse_detail_names_the_blocks_position() {
-            let test = "frame_format_real_rustfmt_parse_detail_names_the_blocks_position";
+        fn frame_format_real_rustfmt_parse_error_is_not_the_kind_at_the_blocks_line() {
+            let test = "frame_format_real_rustfmt_parse_error_is_not_the_kind_at_the_blocks_line";
             let Some(rustfmt) = real_rustfmt(test) else {
                 return;
             };
@@ -4573,15 +5166,26 @@ mod tests {
                 &doc("let x = 1\nlet y = 2;\n"),
             ));
 
-            let Verdict::ParseFailed { detail, line } = verdict else {
-                panic!("a missing `;` is a parse failure: {findings:?}");
-            };
-            assert_eq!(line, Some(0));
-            assert!(
-                detail.contains("<stdin>:1:10") && detail.contains("1 | let x = 1"),
-                "{detail}"
+            assert_eq!(
+                verdict,
+                Verdict::NotKind {
+                    kind: Kind::Statements,
+                    line: Some(0)
+                },
+                "{findings:?}"
             );
-            assert!(!detail.contains("supdoc_fragment"), "{detail}");
+            let [finding] = findings.as_slice() else {
+                panic!("one finding: {findings:?}");
+            };
+            assert_eq!(
+                finding.message, "`rustfmt` couldn't parse the block as `statements`",
+                "never rustfmt's own message"
+            );
+            assert_eq!(
+                finding.location.as_ref().map(|at| at.line),
+                Some(4),
+                "at the block line rustfmt named: {finding:?}"
+            );
         }
     }
 }

@@ -18,7 +18,7 @@ use super::format::{ParseError, Positions};
 use super::fragment::{Kind, Support};
 use super::lint;
 use super::runner::{Failure, Ran};
-use super::{biome, go, python, rumdl, rust, shell, yaml};
+use super::{biome, go, python, rumdl, rust, shell, tombi, yaml};
 
 /// The variables a tool gets from supdoc's own environment, and no others.
 const PASSED: [&str; 5] = [
@@ -234,6 +234,10 @@ impl ToolCartridge {
     }
 }
 
+/// The command that installs a tombi supdoc's checks are verified against (see
+/// [`tombi::VERIFIED`]).
+pub(crate) const TOMBI_INSTALL: &str = "pipx install 'tombi==1.10.*'";
+
 /// The values every cartridge's mode accepts today.
 const FULL_OR_OFF: &[&str] = &["full", "off"];
 
@@ -294,59 +298,119 @@ const RUFF_FRAGMENTS: &[(Kind, Support)] = &[
 /// biome lint prints no code, so the output lines are the input's. A JavaScript block reads
 /// these; a TypeScript block reads [`BIOME_LINT_TS_FRAGMENTS`].
 const BIOME_LINT_FRAGMENTS: &[(Kind, Support)] = &[
-    BIOME_LINT_STATEMENTS,
-    BIOME_LINT_EXPRESSION,
-    BIOME_LINT_ENTRIES,
-    BIOME_LINT_CHILDREN,
-    (
-        Kind::Members,
-        framed(
-            "class SupdocFragment$ { supdocFrame$() { return this; }",
-            "}",
-        ),
-    ),
+    (Kind::Statements, framed(BIOME_STATEMENTS, "}")),
+    (Kind::Expression, framed("(", ")")),
+    (Kind::Entries, framed(BIOME_ENTRIES, "};")),
+    (Kind::Children, framed(BIOME_CHILDREN, "</div>;")),
+    (Kind::Members, framed(BIOME_MEMBERS, "}")),
 ];
 
 /// [`BIOME_LINT_FRAGMENTS`] for a TypeScript block, whose members frame is an `abstract`
 /// class so an abstract member reads as written. JavaScript has no abstract class, so a
 /// JavaScript block keeps the plain one.
 const BIOME_LINT_TS_FRAGMENTS: &[(Kind, Support)] = &[
-    BIOME_LINT_STATEMENTS,
-    BIOME_LINT_EXPRESSION,
-    BIOME_LINT_ENTRIES,
-    BIOME_LINT_CHILDREN,
+    (Kind::Statements, framed(BIOME_STATEMENTS, "}")),
+    (Kind::Expression, framed("(", ")")),
+    (Kind::Entries, framed(BIOME_ENTRIES, "};")),
+    (Kind::Children, framed(BIOME_CHILDREN, "</div>;")),
+    (Kind::Members, framed(BIOME_TS_MEMBERS, "}")),
+];
+
+/// biome format's kinds, each read inside biome lint's frame for it, so a block is formatted in
+/// exactly the code it is linted in. biome prints each frame back in its own layout, a tab
+/// standing for one indent unit: the statements frame's `await` and the members frame's method
+/// each on lines of their own, and a children frame's multi-line `<div>` in parentheses, which
+/// puts the block one unit deeper than the closing `</div>` (see [`super::format::depth`]). An
+/// expression isn't listed: biome joins a short parenthesized one onto the frame's lines. A
+/// JavaScript block reads these; a TypeScript block reads [`BIOME_FORMAT_TS_FRAGMENTS`].
+const BIOME_FORMAT_FRAGMENTS: &[(Kind, Support)] = &[
+    BIOME_FORMAT_STATEMENTS,
+    BIOME_FORMAT_ENTRIES,
+    BIOME_FORMAT_CHILDREN,
     (
         Kind::Members,
-        framed(
-            "abstract class SupdocFragment$ { supdocFrame$() { return this; }",
+        printed(
+            BIOME_MEMBERS,
+            "}",
+            "class SupdocFragment$ {\n\tsupdocFrame$() {\n\t\treturn this;\n\t}",
             "}",
         ),
     ),
 ];
 
-/// biome lint's statements frame, in both languages.
-const BIOME_LINT_STATEMENTS: (Kind, Support) = (
+/// [`BIOME_FORMAT_FRAGMENTS`] for a TypeScript block, with biome lint's `abstract` members frame.
+const BIOME_FORMAT_TS_FRAGMENTS: &[(Kind, Support)] = &[
+    BIOME_FORMAT_STATEMENTS,
+    BIOME_FORMAT_ENTRIES,
+    BIOME_FORMAT_CHILDREN,
+    (
+        Kind::Members,
+        printed(
+            BIOME_TS_MEMBERS,
+            "}",
+            "abstract class SupdocFragment$ {\n\tsupdocFrame$() {\n\t\treturn this;\n\t}",
+            "}",
+        ),
+    ),
+];
+
+/// biome format's statements frame, in both languages.
+const BIOME_FORMAT_STATEMENTS: (Kind, Support) = (
     Kind::Statements,
-    framed(
-        "async function supdocFragment$() { await Promise.resolve();",
+    printed(
+        BIOME_STATEMENTS,
+        "}",
+        "async function supdocFragment$() {\n\tawait Promise.resolve();",
         "}",
     ),
 );
 
-/// biome lint's expression frame, in both languages.
-const BIOME_LINT_EXPRESSION: (Kind, Support) = (Kind::Expression, framed("(", ")"));
+/// biome format's entries frame, in both languages: printed back as written.
+const BIOME_FORMAT_ENTRIES: (Kind, Support) = (Kind::Entries, framed(BIOME_ENTRIES, "};"));
 
-/// biome lint's entries frame, in both languages.
-const BIOME_LINT_ENTRIES: (Kind, Support) =
-    (Kind::Entries, framed("const supdocFragment$ = {", "};"));
-
-/// biome lint's children frame, in both languages.
-const BIOME_LINT_CHILDREN: (Kind, Support) = (
+/// biome format's children frame, in both languages.
+const BIOME_FORMAT_CHILDREN: (Kind, Support) = (
     Kind::Children,
-    framed("const supdocFragment$ = <div>", "</div>;"),
+    printed(
+        BIOME_CHILDREN,
+        "</div>;",
+        "const supdocFragment$ = (\n\t<div>",
+        "\t</div>\n);",
+    ),
 );
 
-/// A frame of `before` and `after` that a linter reads, which prints nothing back.
+/// The line biome's statements frame opens with.
+const BIOME_STATEMENTS: &str = "async function supdocFragment$() { await Promise.resolve();";
+
+/// The line biome's entries frame opens with.
+const BIOME_ENTRIES: &str = "const supdocFragment$ = {";
+
+/// The line biome's children frame opens with.
+const BIOME_CHILDREN: &str = "const supdocFragment$ = <div>";
+
+/// The line biome's members frame opens with in a JavaScript block.
+const BIOME_MEMBERS: &str = "class SupdocFragment$ { supdocFrame$() { return this; }";
+
+/// The line biome's members frame opens with in a TypeScript block.
+const BIOME_TS_MEMBERS: &str = "abstract class SupdocFragment$ { supdocFrame$() { return this; }";
+
+/// A frame of `before` and `after` that a formatter prints back as `out_before` and
+/// `out_after`, a tab in them standing for one indent unit.
+const fn printed(
+    before: &'static str,
+    after: &'static str,
+    out_before: &'static str,
+    out_after: &'static str,
+) -> Support {
+    Support::Framed {
+        before,
+        after,
+        out_before,
+        out_after,
+    }
+}
+
+/// A frame of `before` and `after` that a linter reads, or a formatter prints back as written.
 const fn framed(before: &'static str, after: &'static str) -> Support {
     Support::Framed {
         before,
@@ -386,7 +450,7 @@ fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'sta
 }
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 19] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -500,7 +564,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         install: "npm install --global @biomejs/biome",
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
-        fragments: &[],
+        fragments: BIOME_FORMAT_TS_FRAGMENTS,
         holds: biome::holds,
         vars: &[],
         positions: own_positions,
@@ -515,7 +579,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         install: "npm install --global @biomejs/biome",
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
-        fragments: &[],
+        fragments: BIOME_FORMAT_FRAGMENTS,
         holds: biome::holds,
         vars: &[],
         positions: own_positions,
@@ -611,6 +675,38 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         positions: own_positions,
         argv: rumdl_args,
         reader: Reader::Lint(rumdl::lint_verdict),
+    },
+    ToolCartridge {
+        name: "tombi-format",
+        language: Language::Toml,
+        binary: "tombi",
+        tier: Tier::Static,
+        install: TOMBI_INSTALL,
+        // tombi reads only supdoc's private copy, named by its hash in the args and env.
+        config_files: &[],
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        holds: every_tag,
+        vars: &[],
+        positions: own_positions,
+        argv: tombi_format_args,
+        reader: Reader::Format(tombi::parse_error),
+    },
+    ToolCartridge {
+        name: "tombi-lint",
+        language: Language::Toml,
+        binary: "tombi",
+        tier: Tier::Static,
+        install: TOMBI_INSTALL,
+        // tombi reads only supdoc's private copy, named by its hash in the args and env.
+        config_files: &[],
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        holds: every_tag,
+        vars: &[],
+        positions: own_positions,
+        argv: tombi_lint_args,
+        reader: Reader::Lint(tombi::lint_verdict),
     },
     ToolCartridge {
         name: "yamlfmt",
@@ -933,6 +1029,37 @@ fn yamlfmt_args(invocation: &Invocation<'_>) -> Vec<OsString> {
         .collect()
 }
 
+/// `tombi format`'s arguments: offline, so no schema is fetched, quiet, then the block on stdin
+/// under its virtual path. tombi gets its config through `XDG_CONFIG_HOME` (see [`tombi`]), not
+/// a flag.
+fn tombi_format_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    vec![
+        OsString::from("format"),
+        OsString::from("--offline"),
+        OsString::from("--quiet"),
+        OsString::from("--stdin-filename"),
+        virtual_path(invocation.doc, invocation.index, "toml"),
+        OsString::from("-"),
+    ]
+}
+
+/// `tombi lint`'s arguments: offline, JSON diagnostics on stdout (its summary stays on stderr,
+/// which tells a run that linted nothing, see [`tombi::linted_nothing`]), then the block on stdin
+/// under its virtual path.
+fn tombi_lint_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    vec![
+        OsString::from("lint"),
+        OsString::from("--offline"),
+        OsString::from("--diagnostics-format"),
+        OsString::from("json"),
+        OsString::from("--diagnostics-file"),
+        OsString::from("/dev/stdout"),
+        OsString::from("--stdin-filename"),
+        virtual_path(invocation.doc, invocation.index, "toml"),
+        OsString::from("-"),
+    ]
+}
+
 /// The lints clippy leaves off for a block, which a snippet breaks for lack of context, as
 /// `-A` flags after the project's own so they win.
 const CLIPPY_RELAXED: [&str; 4] = [
@@ -1071,7 +1198,7 @@ mod tests {
     use super::{
         CARTRIDGES, Found, Invocation, ToolCartridge, ToolEnv, find, search_dirs, under_same_file,
     };
-    use crate::code_blocks::fragment::Kind;
+    use crate::code_blocks::fragment::{Frame, Kind};
     use crate::config::code_blocks::{Dialect, Edition, Language};
 
     /// The cartridge named `name`.
@@ -1132,6 +1259,8 @@ mod tests {
                 "biome-lint Json Lint biome Static",
                 "rumdl-format Markdown Format rumdl Static",
                 "rumdl Markdown Lint rumdl Static",
+                "tombi-format Toml Format tombi Static",
+                "tombi-lint Toml Lint tombi Static",
                 "yamlfmt Yaml Format yamlfmt Static",
                 "gofmt Go Format gofmt Static",
             ]
@@ -1733,6 +1862,44 @@ mod tests {
                 "`check --help` lists a frame no tool reads: {}",
                 row.line
             );
+        }
+    }
+
+    #[test]
+    fn biome_format_reads_each_kind_in_biome_lints_frame_for_it() {
+        for language in [Language::TypeScript, Language::JavaScript] {
+            let of = |name: &str| {
+                CARTRIDGES
+                    .iter()
+                    .find(|tool| tool.name == name && tool.language == language)
+                    .expect("the cartridges should include biome for TypeScript and JavaScript")
+            };
+            let (format, lint) = (of("biome-format"), of("biome-lint"));
+            let kinds: Vec<Kind> = format.fragments.iter().map(|(kind, _)| *kind).collect();
+
+            assert_eq!(
+                kinds,
+                [
+                    Kind::Statements,
+                    Kind::Entries,
+                    Kind::Children,
+                    Kind::Members
+                ],
+                "{}",
+                language.table()
+            );
+            for kind in kinds {
+                let pair = |tool: &ToolCartridge| {
+                    Frame::of(tool, Some(kind)).map(|frame| (frame.before, frame.after))
+                };
+                assert_eq!(
+                    pair(format),
+                    pair(lint),
+                    "{} {}",
+                    language.table(),
+                    kind.name()
+                );
+            }
         }
     }
 
