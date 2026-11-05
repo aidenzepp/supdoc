@@ -333,8 +333,8 @@ pub(crate) fn finding(
             format!("`{name}` couldn't parse the block as `{}`", kind.name()),
         )
         .with_help(format!(
-            "fix the code so it reads as {} fragment, name the kind it is in `fragment(<kind>)`, \
-             or mark the block `format(off: <reason>)`",
+            "fix the code so it reads as {} fragment, write the lines around the code in the \
+             block and drop `fragment(...)`, or mark the block `format(off: <reason>)`",
             kind.with_article()
         )),
         Verdict::FrameReformatted(kind) => Finding::new(
@@ -343,8 +343,8 @@ pub(crate) fn finding(
             format!("`{name}` reformatted the fragment's frame"),
         )
         .with_help(format!(
-            "check that the block is {} fragment, name the kind it is in `fragment(<kind>)`, \
-             or mark the block `format(off: <reason>)`",
+            "check that the block is {} fragment, write the lines around the code in the block \
+             and drop `fragment(...)`, or mark the block `format(off: <reason>)`",
             kind.with_article()
         )),
     };
@@ -1186,10 +1186,23 @@ mod tests {
                 ),
             ]
         );
+        assert_eq!(
+            findings
+                .each_ref()
+                .map(|finding| finding.help.as_deref().unwrap_or_default()),
+            [
+                "fix the code so it reads as a statements fragment, write the lines around the \
+                 code in the block and drop `fragment(...)`, or mark the block \
+                 `format(off: <reason>)`",
+                "check that the block is a statements fragment, write the lines around the code \
+                 in the block and drop `fragment(...)`, or mark the block \
+                 `format(off: <reason>)`",
+            ]
+        );
         for finding in &findings {
             let help = finding.help.as_deref().unwrap_or_default();
             assert!(
-                !finding.message.contains("fn main") && !help.contains("fn main"),
+                !finding.message.contains("supdoc_fragment") && !help.contains("supdoc_fragment"),
                 "{finding:?} should hold no frame line"
             );
         }

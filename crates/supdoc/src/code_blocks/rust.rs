@@ -1228,6 +1228,88 @@ const fn is_rust_whitespace(c: char) -> bool {
     )
 }
 
+/// The pieces of rustfmt's overflow error around its maximum and found widths, which reads
+/// ``exceeded maximum width (maximum: N (see `max_width` option), found: M)``.
+const OVERFLOW: (&str, &str, &str) = (
+    "exceeded maximum width (maximum: ",
+    " (see `max_width` option), found: ",
+    ")",
+);
+
+/// `stderr`, rustfmt's report on a block it read inside a frame with its `max_width` grown by
+/// `widened` columns, in the project's terms. An overflow error's maximum and found widths are
+/// each `widened` less. A report location, which rustfmt writes `<stdin>:L:L:C` (its file and
+/// line, then the line and column), is written `<stdin>:L:C`, the form [`Frame::hidden`]
+/// renumbers; under an overflow error its column is moved back by `widened` less `hidden`, the
+/// columns [`Frame::hidden`] then moves it back by, so it lands `widened` columns back.
+/// `stderr` as it is when it isn't UTF-8.
+///
+/// [`Frame::hidden`]: super::fragment::Frame::hidden
+#[must_use]
+pub(crate) fn unwidened(stderr: &[u8], widened: usize, hidden: usize) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(stderr) else {
+        return stderr.to_vec();
+    };
+    let mut overflow = false;
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let (body, end) = line
+            .strip_suffix('\n')
+            .map_or((line, ""), |body| (body, "\n"));
+        if line.starts_with("error") {
+            overflow = body.contains(OVERFLOW.0);
+        }
+        let restated = overflow_widths(body, widened)
+            .or_else(|| {
+                let back = if overflow {
+                    widened.saturating_sub(hidden)
+                } else {
+                    0
+                };
+                report_location(body, back)
+            })
+            .unwrap_or_else(|| body.to_owned());
+        out.push_str(&restated);
+        out.push_str(end);
+    }
+    out.into_bytes()
+}
+
+/// `line`, an overflow error, with its maximum and found widths each `widened` less. `None`
+/// for any other line.
+fn overflow_widths(line: &str, widened: usize) -> Option<String> {
+    let (head, rest) = line.split_once(OVERFLOW.0)?;
+    let (maximum, rest) = rest.split_once(OVERFLOW.1)?;
+    let (found, tail) = rest.split_once(OVERFLOW.2)?;
+    let maximum = maximum.parse::<usize>().ok()?.saturating_sub(widened);
+    let found = found.parse::<usize>().ok()?.saturating_sub(widened);
+    Some(format!(
+        "{head}{}{maximum}{}{found}{}{tail}",
+        OVERFLOW.0, OVERFLOW.1, OVERFLOW.2
+    ))
+}
+
+/// `line`, rustfmt's ` --> <stdin>:L:L:C` report location, as ` --> <stdin>:L:C` with its column
+/// moved back by `back`, never before column 1. `None` for any other line.
+fn report_location(line: &str, back: usize) -> Option<String> {
+    let (head, numbers) = line.split_once("<stdin>:")?;
+    if !head.trim_end().ends_with("-->") {
+        return None;
+    }
+    let mut parts = numbers.split(':');
+    let (Some(file_line), Some(line_again), Some(column), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    let line_number = file_line.parse::<usize>().ok()?;
+    if line_again.parse::<usize>().ok()? != line_number {
+        return None;
+    }
+    let column = column.parse::<usize>().ok()?.saturating_sub(back).max(1);
+    Some(format!("{head}<stdin>:{line_number}:{column}"))
+}
+
 /// rustfmt's syntax-error report: stderr opening with `error:` and, when it can place it, a
 /// `--> <stdin>:L:C` line. `None` for any other stderr.
 #[must_use]
@@ -1248,7 +1330,7 @@ mod tests {
     use super::{
         EmitDir, FRONTMATTER, Found, LineMap, MAX_SCAN_BYTES, Scan, Token, Tokens,
         attribute_edition, before_compiling, clippy_conf_dir, compile_time_read, config_args,
-        lint_verdict, parse_error, scan,
+        lint_verdict, parse_error, scan, unwidened,
     };
     use crate::cartridges::markdown::cartridge::cartridge;
     use crate::code_blocks::block::blocks_in;
@@ -2340,5 +2422,62 @@ mod tests {
     fn before_compiling_probe_g3_async_is_a_macro_name_in_2015() {
         assert_renamed_call_refused("async", &[Edition::E2015]);
         assert_renamed_call_refused("await", &[Edition::E2015]);
+    }
+
+    /// rustfmt's report on a line of a framed block passing a `max_width` grown from 100 to 104,
+    /// as a nightly rustfmt with `error_on_line_overflow` prints it.
+    const OVERFLOW_REPORT: &str = "\
+error[internal]: line formatted, but exceeded maximum width (maximum: 104 (see `max_width` option), found: 133)
+ --> <stdin>:2:2:105
+  |
+2 |     let v = xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.yyyyyyyyyy;
+  |                                                                                                         ^^^^^^^^^^
+  |
+
+warning: rustfmt has failed to format. See previous 1 errors.
+";
+
+    #[test]
+    fn a_framed_overflow_report_shows_the_projects_width_and_the_blocks_column() {
+        let rustfmt =
+            crate::code_blocks::tools::formatter(crate::config::code_blocks::Language::Rust)
+                .expect("Rust has a formatter");
+        let frame = crate::code_blocks::fragment::Frame::of(
+            rustfmt,
+            Some(crate::code_blocks::fragment::Kind::Statements),
+        )
+        .expect("rustfmt reads statements inside a frame");
+
+        let restated = String::from_utf8(unwidened(OVERFLOW_REPORT.as_bytes(), 4, 4))
+            .expect("the restated report should stay UTF-8");
+        let shown = frame.hidden(&restated, 1, "    ");
+
+        assert!(
+            restated.contains("(maximum: 100 (see `max_width` option), found: 129)"),
+            "{restated}"
+        );
+        assert!(restated.contains(" --> <stdin>:2:105\n"), "{restated}");
+        assert!(shown.contains(" --> <stdin>:1:101\n"), "{shown}");
+        assert!(shown.contains("1 | let v = x"), "{shown}");
+        assert!(!shown.contains("104") && !shown.contains("133"), "{shown}");
+    }
+
+    #[test]
+    fn only_an_overflow_reports_column_moves_past_the_wider_width() {
+        let tabbed = String::from_utf8(unwidened(OVERFLOW_REPORT.as_bytes(), 4, 1))
+            .expect("the restated report should stay UTF-8");
+        let trailing = "error[internal]: left behind trailing whitespace\n --> <stdin>:3:3:9\n";
+        let other = String::from_utf8(unwidened(trailing.as_bytes(), 4, 4))
+            .expect("the restated report should stay UTF-8");
+
+        assert!(tabbed.contains(" --> <stdin>:2:102\n"), "{tabbed}");
+        assert_eq!(
+            other,
+            "error[internal]: left behind trailing whitespace\n --> <stdin>:3:9\n"
+        );
+        assert_eq!(
+            unwidened(b"\xff --> <stdin>:2:2:105", 4, 4),
+            b"\xff --> <stdin>:2:2:105"
+        );
     }
 }

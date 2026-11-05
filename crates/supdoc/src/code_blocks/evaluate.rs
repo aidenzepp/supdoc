@@ -427,6 +427,7 @@ impl Evaluation {
         let mut ran = ran.into_iter();
         let mut linted_nothing_warned = false;
         let mut indent_unknown_warned = false;
+        let mut reshaped_warned = false;
         for slot in slots {
             let (job, run) = match slot {
                 Slot::Found(finding) => {
@@ -453,6 +454,10 @@ impl Evaluation {
                     if reason == FRAME_INDENT_UNKNOWN && !indent_unknown_warned {
                         indent_unknown_warned = true;
                         self.findings.push(indent_unknown(&record.at));
+                    }
+                    if reason == FRAME_RESHAPED && !reshaped_warned {
+                        reshaped_warned = true;
+                        self.findings.push(frame_reshaped(&record.at));
                     }
                     record.steps.format = StepState::Unrunnable { reason };
                 }
@@ -599,12 +604,34 @@ fn indent_unknown(at: &Location) -> Finding {
          format step didn't run on blocks it reads inside a frame",
     )
     .with_help(
-        "set the indent plainly in the formatter's config (rustfmt's `hard_tabs` and \
-         `tab_spaces`; biome's `indentStyle` and `indentWidth`, outside `overrides`), or mark \
+        "set the indent plainly in the formatter's config (rustfmt's `hard_tabs`, `tab_spaces` \
+         and `max_width`; biome's `indentStyle` and `indentWidth`, outside `overrides`), or mark \
          the blocks `format(off: <reason>)`",
     )
     .with_location(at.clone())
 }
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first framed block whose format
+/// step didn't run because the project's rustfmt config reshapes the frame.
+fn frame_reshaped(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "the project's rustfmt settings reshape the frame supdoc puts around a fragment, so the \
+         format step didn't run on blocks rustfmt reads inside a frame",
+    )
+    .with_help(
+        "leave `brace_style`, `fn_single_line` and `blank_lines_lower_bound` at their defaults in \
+         rustfmt's config, or mark the blocks `format(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
+/// The reason a framed block's format step didn't run: the project's rustfmt config sets an
+/// option that reshapes the frame's own lines ([`FRAME_SHAPING`]), so rustfmt wouldn't print it
+/// back.
+pub(super) const FRAME_RESHAPED: &str =
+    "the project's rustfmt settings reshape the fragment's frame";
 
 /// The reason a framed block's format step didn't run: supdoc couldn't read the indent its
 /// formatter uses, so it couldn't tell the block's lines from the frame's indent.
@@ -1252,8 +1279,9 @@ struct RustSetup {
     lints: Vec<OsString>,
     /// `CLIPPY_CONF_DIR` for an in-root clippy config, or nothing.
     clippy_conf: Option<OsString>,
-    /// The indent rustfmt's config gives it: `None` when the config can't be read for it.
-    indent: Option<RustfmtIndent>,
+    /// The indent and width rustfmt's config gives it: `None` when the config can't be read for
+    /// them.
+    layout: Option<RustfmtLayout>,
 }
 
 impl RustSetup {
@@ -1270,9 +1298,10 @@ impl RustSetup {
             pinned => pinned,
         };
         let config = rust::config_args(root);
+        let layout = RustfmtLayout::read(&config).map(|layout| layout.under(&toolchain));
         Self {
             toolchain,
-            indent: RustfmtIndent::read(&config),
+            layout,
             config,
             edition: toolchain::cargo_edition(root).unwrap_or(Edition::E2024),
             lints: toolchain::cargo_lints(root),
@@ -1286,49 +1315,124 @@ impl RustSetup {
     }
 }
 
-/// The indent settings rustfmt formats with.
+/// The width heuristics rustfmt derives from `max_width`, each with its share of a 100-column
+/// line, as rustfmt's `WidthHeuristics::scaled` lists them.
+const WIDTH_HEURISTICS: [(&str, u16); 8] = [
+    ("fn_call_width", 60),
+    ("attr_fn_like_width", 70),
+    ("struct_lit_width", 18),
+    ("struct_variant_width", 35),
+    ("array_width", 60),
+    ("chain_width", 60),
+    ("single_line_if_else_max_width", 50),
+    ("single_line_let_else_max_width", 50),
+];
+
+/// rustfmt's options that reshape a function's own braces or the lines at the start of its
+/// body, so the frame around a block wouldn't come back as written, each with the value that
+/// leaves the frame alone. Each is unstable: only a nightly rustfmt applies it.
+const FRAME_SHAPING: [(&str, &str); 3] = [
+    ("brace_style", "\"SameLineWhere\""),
+    ("fn_single_line", "false"),
+    ("blank_lines_lower_bound", "0"),
+];
+
+/// The indent and width settings rustfmt formats with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RustfmtIndent {
+struct RustfmtLayout {
     /// `hard_tabs`: indent with a tab.
     hard_tabs: bool,
     /// `tab_spaces`: the spaces in one indent, and a tab's width under `hard_tabs`.
     tab_spaces: usize,
+    /// `max_width`: the widest a line may be.
+    max_width: usize,
+    /// The value rustfmt gives each of [`WIDTH_HEURISTICS`] for `max_width`: the config's own
+    /// (never above `max_width`), else the one `use_small_heuristics` derives. `None` for one
+    /// `use_small_heuristics = "Off"` sets to a value no width changes.
+    heuristics: [Option<usize>; 8],
+    /// Whether the config sets one of [`FRAME_SHAPING`] to another value, and the toolchain
+    /// may apply it.
+    reshapes_frame: bool,
 }
 
-impl RustfmtIndent {
-    /// rustfmt's own defaults.
-    const DEFAULT: Self = Self {
-        hard_tabs: false,
-        tab_spaces: 4,
-    };
-
+impl RustfmtLayout {
     /// The settings `config`, rustfmt's `--config-path` arguments, give it: its defaults with no
-    /// config. `None` when the config file can't be read or parsed, or either key holds a value
-    /// rustfmt wouldn't take.
+    /// config. `None` when the config file can't be read or parsed, or any of the keys holds a
+    /// value rustfmt wouldn't take.
     ///
     /// Effect: reads the config file.
     fn read(config: &[OsString]) -> Option<Self> {
-        let Some(path) = config
+        let table = match config
             .iter()
             .skip_while(|arg| *arg != "--config-path")
             .nth(1)
-        else {
-            return Some(Self::DEFAULT);
+        {
+            None => toml::Table::new(),
+            Some(path) => std::fs::read_to_string(path).ok()?.parse().ok()?,
         };
-        let table: toml::Table = std::fs::read_to_string(path).ok()?.parse().ok()?;
+        Self::of(&table)
+    }
+
+    /// The settings `table`, a rustfmt config, gives rustfmt. `None` when one of the keys holds
+    /// a value rustfmt wouldn't take.
+    fn of(table: &toml::Table) -> Option<Self> {
         let hard_tabs = table
             .get("hard_tabs")
             .map_or(Some(false), toml::Value::as_bool)?;
-        let tab_spaces = match table.get("tab_spaces") {
-            None => Self::DEFAULT.tab_spaces,
-            Some(value) => usize::try_from(value.as_integer()?)
-                .ok()
-                .filter(|width| *width > 0)?,
+        let number = |key: &str| {
+            table
+                .get(key)
+                .map(|value| usize::try_from(value.as_integer()?).ok())
         };
+        let width = |key: &str, default: usize| match number(key) {
+            None => Some(default),
+            Some(width) => width.filter(|width| *width > 0),
+        };
+        let tab_spaces = width("tab_spaces", 4)?;
+        let max_width = width("max_width", 100)?;
+        let derived = match table.get("use_small_heuristics") {
+            None => "Default",
+            Some(value) => value.as_str()?,
+        };
+        let scale = scale(max_width)?;
+        let mut heuristics = [None; 8];
+        for (slot, (key, share)) in heuristics.iter_mut().zip(WIDTH_HEURISTICS) {
+            *slot = match (number(key), derived) {
+                (Some(set), _) => Some(set?.min(max_width)),
+                (None, "Default") => Some(scaled(share, scale)),
+                (None, "Max") => Some(max_width),
+                (None, "Off") => None,
+                (None, _) => return None,
+            };
+        }
+        let reshapes_frame = FRAME_SHAPING.iter().any(|(key, plain)| {
+            table
+                .get(*key)
+                .is_some_and(|value| value.to_string() != *plain)
+        });
         Some(Self {
             hard_tabs,
             tab_spaces,
+            max_width,
+            heuristics,
+            reshapes_frame,
         })
+    }
+
+    /// These settings, run by `toolchain`'s rustfmt: one from a stable or beta channel ignores
+    /// the unstable options, so they reshape nothing.
+    fn under(self, toolchain: &Toolchain) -> Self {
+        let stable = matches!(
+            toolchain,
+            Toolchain::Channel(name)
+                if name.starts_with("stable")
+                    || name.starts_with("beta")
+                    || name.starts_with(|c: char| c.is_ascii_digit())
+        );
+        Self {
+            reshapes_frame: self.reshapes_frame && !stable,
+            ..self
+        }
     }
 
     /// The indent unit: a tab under `hard_tabs`, else `tab_spaces` spaces.
@@ -1340,17 +1444,55 @@ impl RustfmtIndent {
         }
     }
 
-    /// The arguments that make rustfmt use these settings whatever config it finds on its own,
-    /// such as one above its working directory or in the user's home.
-    fn args(self) -> [OsString; 2] {
-        [
-            OsString::from("--config"),
-            OsString::from(format!(
-                "hard_tabs={},tab_spaces={}",
-                self.hard_tabs, self.tab_spaces
-            )),
-        ]
+    /// The arguments that make rustfmt use these settings, on a block whose every line it reads
+    /// led by one indent unit, whatever config it finds on its own, such as one above its working
+    /// directory or in the user's home: `max_width` grows by the unit's width (a tab's is
+    /// `tab_spaces`), so a block line fits exactly when it fits the project's width as written,
+    /// and each width heuristic is held to the value the project's own `max_width` gives it, so
+    /// the wider frame changes no other width rustfmt decides by.
+    fn framed_args(self) -> [OsString; 2] {
+        let pinned: String = WIDTH_HEURISTICS
+            .iter()
+            .zip(self.heuristics)
+            .filter_map(|((key, _), value)| value.map(|value| format!(",{key}={value}")))
+            .collect();
+        let config = format!(
+            "hard_tabs={},tab_spaces={},max_width={}{pinned}",
+            self.hard_tabs,
+            self.tab_spaces,
+            self.max_width.saturating_add(self.tab_spaces)
+        );
+        [OsString::from("--config"), OsString::from(config)]
     }
+}
+
+/// The factor rustfmt scales its default width heuristics by for `max_width`, computed as its
+/// `WidthHeuristics::scaled` does, in `f32`: 1 up to 100 columns, else the width over 100
+/// rounded to the nearest tenth. `None` for a width past `u16::MAX`.
+fn scale(max_width: usize) -> Option<f32> {
+    let width = f32::from(u16::try_from(max_width).ok()?);
+    Some(if max_width > 100 {
+        (width / 100.0 * 10.0).round() / 10.0
+    } else {
+        1.0
+    })
+}
+
+/// A width heuristic whose share of a 100-column line is `share`, scaled by `scale` and rounded
+/// as rustfmt rounds it.
+fn scaled(share: u16, scale: f32) -> usize {
+    let value = (f32::from(share) * scale).round();
+    // The whole number `value` is, found without a lossy cast: the largest `u16` not above it.
+    let (mut low, mut high) = (0_u16, u16::MAX);
+    while low < high {
+        let mid = low + (high - low).div_ceil(2);
+        if f32::from(mid) <= value {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    usize::from(low)
 }
 
 /// The indent unit biome uses for a `language` block under `given`'s config: its language
@@ -1408,23 +1550,73 @@ fn biome_indent(language: Language, given: Option<&biome::Given>) -> Option<Stri
     }
 }
 
-/// The indent unit `tool` puts before each line of a block it formats inside a frame, read
-/// from the project's config for it (`rust`'s for rustfmt, `given`'s for biome), with the
-/// arguments that hold the tool to it. `None` for a formatter whose indent supdoc can't read,
-/// and when the config can't be read for it.
+/// How a formatter runs on a block inside a frame.
+#[derive(Debug)]
+struct Framing {
+    /// The indent unit before each line of the block.
+    indent: String,
+    /// The arguments that hold the tool to the project's layout.
+    args: Vec<OsString>,
+    /// The columns the tool's line width grew by to make room for `indent`.
+    widened: usize,
+}
+
+impl Framing {
+    /// [`format::judge_framed`] on `result`, `tool`'s run on the block whose body is `input`
+    /// inside `frame`, with rustfmt's widths restated in the project's terms
+    /// ([`rust::unwidened`]).
+    fn judge(
+        &self,
+        tool: &ToolCartridge,
+        frame: Frame,
+        input: &str,
+        result: Result<Ran, runner::Failure>,
+    ) -> format::Verdict {
+        let result = result.map(|ran| Ran {
+            stderr: if self.widened == 0 {
+                ran.stderr.clone()
+            } else {
+                rust::unwidened(&ran.stderr, self.widened, self.indent.chars().count())
+            },
+            ..ran
+        });
+        format::judge_framed(tool, frame, &self.indent, input, result)
+    }
+}
+
+/// How `tool` formats a block inside a frame, read from the project's config for it (`rust`'s
+/// for rustfmt, `given`'s for biome). [`FRAME_INDENT_UNKNOWN`] for a formatter whose indent
+/// supdoc can't read, and when the config can't be read for it; [`FRAME_RESHAPED`] when
+/// rustfmt's config reshapes the frame.
+///
+/// # Errors
+///
+/// The reason the format step can't run on the block inside its frame, as above.
 ///
 /// Effect: reads biome's private config file.
-fn indent_unit(
+fn framing(
     tool: &ToolCartridge,
     rust: Option<&RustSetup>,
     given: Option<&biome::Given>,
-) -> Option<(String, Vec<OsString>)> {
+) -> Result<Framing, &'static str> {
     match tool.binary {
-        "rustfmt" => rust?
-            .indent
-            .map(|indent| (indent.unit(), indent.args().to_vec())),
-        "biome" => biome_indent(tool.language, given).map(|unit| (unit, Vec::new())),
-        _ => None,
+        "rustfmt" => match rust.and_then(|rust| rust.layout) {
+            None => Err(FRAME_INDENT_UNKNOWN),
+            Some(layout) if layout.reshapes_frame => Err(FRAME_RESHAPED),
+            Some(layout) => Ok(Framing {
+                indent: layout.unit(),
+                args: layout.framed_args().to_vec(),
+                widened: layout.tab_spaces,
+            }),
+        },
+        "biome" => biome_indent(tool.language, given)
+            .map(|indent| Framing {
+                indent,
+                args: Vec::new(),
+                widened: 0,
+            })
+            .ok_or(FRAME_INDENT_UNKNOWN),
+        _ => Err(FRAME_INDENT_UNKNOWN),
     }
 }
 
@@ -1452,10 +1644,11 @@ struct Session<'run> {
 /// [`format::Verdict::cacheable`] allows is stored in the cache.
 ///
 /// A block `tool` reads only inside `frame` (its [`Frame::of`]) is formatted inside it, each
-/// line indented by the unit the project's config gives the formatter ([`indent_unit`]), and
+/// line indented by the unit the project's config gives the formatter ([`framing`]), and
 /// judged by [`format::judge_framed`], so its fix holds only the author's lines; a frame-level
-/// failure is reported at the block's info string. When that unit can't be read, the step
-/// doesn't run, with [`FRAME_INDENT_UNKNOWN`] as its reason.
+/// failure is reported at the block's info string, and rustfmt's widths in the project's terms
+/// ([`rust::unwidened`]). When that unit can't be read, or rustfmt's config reshapes the frame,
+/// the step doesn't run, with [`framing`]'s reason.
 ///
 /// Effect: reads the cache, runs the tool, killing it at the timeout, and writes the cache.
 fn run_formatter(
@@ -1471,15 +1664,16 @@ fn run_formatter(
     let given = record.given.as_ref();
     let framed = match frame {
         None => None,
-        Some(frame) => match indent_unit(tool, rust, given) {
-            Some((indent, held)) => Some((frame, indent, held)),
-            None => return Some(Err(FRAME_INDENT_UNKNOWN)),
+        Some(frame) => match framing(tool, rust, given) {
+            Ok(framing) => Some((frame, framing)),
+            Err(reason) => return Some(Err(reason)),
         },
     };
-    let checked = framed.as_ref().map_or(
-        Cow::Borrowed(pending.input.as_str()),
-        |(frame, indent, _)| Cow::Owned(frame.wrap_indented(&pending.input, indent)),
-    );
+    let checked = framed
+        .as_ref()
+        .map_or(Cow::Borrowed(pending.input.as_str()), |(frame, framing)| {
+            Cow::Owned(frame.wrap_indented(&pending.input, &framing.indent))
+        });
     let input = checked.as_ref();
     let doc = root.join(record.at.file.as_str());
     let edition = record
@@ -1508,7 +1702,7 @@ fn run_formatter(
         .collect();
     let held = framed
         .as_ref()
-        .map_or(&[][..], |(_, _, held)| held.as_slice());
+        .map_or(&[][..], |(_, framing)| framing.args.as_slice());
     let args: Vec<&OsStr> = args.iter().chain(held).map(OsString::as_os_str).collect();
     let run = cache::Run {
         tool,
@@ -1529,9 +1723,7 @@ fn run_formatter(
                 ..ran
             });
             match &framed {
-                Some((frame, indent, _)) => {
-                    format::judge_framed(tool, *frame, indent, &pending.input, named)
-                }
+                Some((frame, framing)) => framing.judge(tool, *frame, &pending.input, named),
                 None => format::judge(tool, input, named),
             }
         },
@@ -3654,25 +3846,18 @@ mod tests {
         use std::time::Duration;
 
         use super::super::{
-            Evaluation, FRAME_INDENT_UNKNOWN, FormatRan, Job, RustSetup, Session, Slot, StepsRan,
-            ToolRun, biome_indent, parses, run_formatter,
+            Evaluation, FRAME_INDENT_UNKNOWN, FRAME_RESHAPED, FormatRan, Job, RustSetup,
+            RustfmtLayout, Session, Slot, StepsRan, ToolRun, biome_indent, parses, run_formatter,
         };
         use super::{rust_record, rust_records, temporary};
         use crate::code_blocks::biome::Given;
         use crate::code_blocks::format::Verdict;
-        use crate::code_blocks::fragment::{Kind, Support};
+        use crate::code_blocks::fragment::{Frame, Kind};
         use crate::code_blocks::states::StepState;
+        use crate::code_blocks::toolchain::Toolchain;
         use crate::code_blocks::tools::{ToolEnv, formatter};
         use crate::config::code_blocks::Language;
         use crate::finding::Finding;
-
-        /// rustfmt's statements frame, as fragments-design §2.6 lists it for P5-FR10.
-        const STATEMENTS: Support = Support::Framed {
-            before: "fn main() {",
-            after: "}",
-            out_before: "fn main() {",
-            out_after: "}",
-        };
 
         /// A doc whose one Rust block declares `fragment(statements)` and holds `body`.
         fn doc(body: &str) -> String {
@@ -3709,7 +3894,8 @@ mod tests {
             };
             let rust = RustSetup::read(&env, root, Some(Duration::from_secs(120)));
             let rustfmt = formatter(Language::Rust).expect("Rust has a formatter");
-            let frame = STATEMENTS.frame(Kind::Statements);
+            let frame = Frame::of(rustfmt, Some(Kind::Statements));
+            assert!(frame.is_some(), "rustfmt reads statements inside a frame");
             run_formatter(rustfmt, program, &record, frame, &session, Some(&rust))
                 .expect("the block's body should be in its doc")
         }
@@ -3835,6 +4021,227 @@ mod tests {
             let run = format_run(&stub, root.path(), &doc("let x = 1;\n"));
 
             assert_eq!(run, Err(FRAME_INDENT_UNKNOWN));
+        }
+
+        /// The `--config` value framed rustfmt runs with under the rustfmt config `toml`.
+        fn framed_config(toml: &str) -> Option<String> {
+            let table: toml::Table = toml.parse().expect("the test config should parse");
+            RustfmtLayout::of(&table).map(|layout| {
+                layout
+                    .framed_args()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .join(" ")
+            })
+        }
+
+        #[test]
+        fn frame_format_pins_each_width_heuristic_to_the_projects_own_value() {
+            let at = |widths: [usize; 8]| {
+                format!(
+                    ",fn_call_width={},attr_fn_like_width={},struct_lit_width={},\
+                     struct_variant_width={},array_width={},chain_width={},\
+                     single_line_if_else_max_width={},single_line_let_else_max_width={}",
+                    widths[0],
+                    widths[1],
+                    widths[2],
+                    widths[3],
+                    widths[4],
+                    widths[5],
+                    widths[6],
+                    widths[7]
+                )
+            };
+            let default = at([60, 70, 18, 35, 60, 60, 50, 50]);
+            for (config, expected) in [
+                (
+                    "",
+                    format!("--config hard_tabs=false,tab_spaces=4,max_width=104{default}"),
+                ),
+                (
+                    "max_width = 102\n",
+                    format!("--config hard_tabs=false,tab_spaces=4,max_width=106{default}"),
+                ),
+                (
+                    "tab_spaces = 8\n",
+                    format!("--config hard_tabs=false,tab_spaces=8,max_width=108{default}"),
+                ),
+                (
+                    "max_width = 40\n",
+                    format!("--config hard_tabs=false,tab_spaces=4,max_width=44{default}"),
+                ),
+                (
+                    "max_width = 120\n",
+                    format!(
+                        "--config hard_tabs=false,tab_spaces=4,max_width=124{}",
+                        at([72, 84, 22, 42, 72, 72, 60, 60])
+                    ),
+                ),
+                (
+                    "max_width = 115\n",
+                    format!(
+                        "--config hard_tabs=false,tab_spaces=4,max_width=119{}",
+                        at([72, 84, 22, 42, 72, 72, 60, 60])
+                    ),
+                ),
+                (
+                    "max_width = 105\n",
+                    format!(
+                        "--config hard_tabs=false,tab_spaces=4,max_width=109{}",
+                        at([66, 77, 20, 39, 66, 66, 55, 55])
+                    ),
+                ),
+                (
+                    "max_width = 110\n",
+                    format!(
+                        "--config hard_tabs=false,tab_spaces=4,max_width=114{}",
+                        at([66, 77, 20, 39, 66, 66, 55, 55])
+                    ),
+                ),
+                (
+                    "max_width = 90\nuse_small_heuristics = \"Max\"\n",
+                    format!(
+                        "--config hard_tabs=false,tab_spaces=4,max_width=94{}",
+                        at([90; 8])
+                    ),
+                ),
+                (
+                    "use_small_heuristics = \"Off\"\nchain_width = 30\n",
+                    "--config hard_tabs=false,tab_spaces=4,max_width=104,chain_width=30".to_owned(),
+                ),
+                (
+                    "max_width = 80\nfn_call_width = 90\n",
+                    format!(
+                        "--config hard_tabs=false,tab_spaces=4,max_width=84,fn_call_width=80{}",
+                        at([0, 70, 18, 35, 60, 60, 50, 50])
+                            .split_once(",attr")
+                            .map(|(_, rest)| format!(",attr{rest}"))
+                            .unwrap_or_default()
+                    ),
+                ),
+            ] {
+                assert_eq!(framed_config(config), Some(expected), "{config:?}");
+            }
+            for unreadable in [
+                "use_small_heuristics = \"Wide\"\n",
+                "use_small_heuristics = 1\n",
+                "fn_call_width = \"wide\"\n",
+                "max_width = 70000\n",
+            ] {
+                assert_eq!(framed_config(unreadable), None, "{unreadable:?}");
+            }
+        }
+
+        #[test]
+        fn frame_format_a_frame_shaping_option_reshapes_only_under_a_nightly_rustfmt() {
+            let layout = |toml: &str| {
+                let table: toml::Table = toml.parse().expect("the test config should parse");
+                RustfmtLayout::of(&table).expect("the test config should be readable")
+            };
+            let channel = |name: &str| Toolchain::Channel(name.to_owned());
+            for shaping in [
+                "brace_style = \"AlwaysNextLine\"\n",
+                "brace_style = \"PreferSameLine\"\n",
+                "fn_single_line = true\n",
+                "blank_lines_lower_bound = 1\n",
+            ] {
+                assert!(layout(shaping).reshapes_frame, "{shaping:?}");
+                for nightly in ["nightly", "nightly-2026-08-15"] {
+                    assert!(
+                        layout(shaping).under(&channel(nightly)).reshapes_frame,
+                        "{shaping:?} under {nightly}"
+                    );
+                }
+                for stable in ["stable", "beta", "1.93", "1.93.0"] {
+                    assert!(
+                        !layout(shaping).under(&channel(stable)).reshapes_frame,
+                        "{shaping:?} under {stable}"
+                    );
+                }
+            }
+            for plain in [
+                "",
+                "brace_style = \"SameLineWhere\"\n",
+                "fn_single_line = false\n",
+                "blank_lines_lower_bound = 0\n",
+                "control_brace_style = \"AlwaysNextLine\"\n",
+            ] {
+                assert!(
+                    !layout(plain).under(&channel("nightly")).reshapes_frame,
+                    "{plain:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn frame_format_a_nightly_frame_shaping_config_leaves_the_step_not_run_and_warns_once() {
+            let root = temporary();
+            std::fs::write(
+                root.path().join("rustfmt.toml"),
+                "brace_style = \"AlwaysNextLine\"\n",
+            )
+            .expect("the config should be writable");
+            std::fs::write(
+                root.path().join("rust-toolchain.toml"),
+                "[toolchain]\nchannel = \"nightly\"\n",
+            )
+            .expect("the toolchain file should be writable");
+            let stub = stub(root.path(), "exit 9");
+
+            let run = format_run(&stub, root.path(), &doc("let x = 1;\n"));
+
+            assert_eq!(run, Err(FRAME_RESHAPED), "the stub never runs");
+            let text = doc("let x = 1;\n") + &doc("let y = 2;\n");
+            let rustfmt = formatter(Language::Rust).expect("Rust has a formatter");
+            let mut evaluation = Evaluation {
+                records: rust_records(root.path(), &text),
+                ..Evaluation::default()
+            };
+            let jobs: Vec<Job> = (0..2)
+                .map(|record| Job {
+                    record,
+                    format: Some(ToolRun {
+                        tool: rustfmt,
+                        program: PathBuf::from("/bin/rustfmt"),
+                    }),
+                    lint: None,
+                    unbuilt: None,
+                })
+                .collect();
+            let unrun = || {
+                Some(StepsRan {
+                    format: Some(Err(FRAME_RESHAPED)),
+                    lint: None,
+                })
+            };
+
+            evaluation.settle(
+                vec![Slot::Run(0), Slot::Run(1)],
+                &jobs,
+                vec![unrun(), unrun()],
+            );
+
+            let warnings: Vec<_> = evaluation
+                .findings
+                .iter()
+                .map(|finding| (finding.code, finding.message.as_str()))
+                .collect();
+            assert_eq!(
+                warnings,
+                [(
+                    "code-block-not-checked",
+                    "the project's rustfmt settings reshape the frame supdoc puts around a \
+                     fragment, so the format step didn't run on blocks rustfmt reads inside a \
+                     frame"
+                )]
+            );
+            for record in &evaluation.records {
+                assert_eq!(
+                    record.steps.format,
+                    StepState::Unrunnable {
+                        reason: FRAME_RESHAPED
+                    }
+                );
+            }
         }
 
         #[test]
@@ -4031,7 +4438,7 @@ mod tests {
                 detail.contains("<stdin>:1:10") && detail.contains("1 | let x = 1"),
                 "{detail}"
             );
-            assert!(!detail.contains("fn main"), "{detail}");
+            assert!(!detail.contains("supdoc_fragment"), "{detail}");
         }
     }
 }

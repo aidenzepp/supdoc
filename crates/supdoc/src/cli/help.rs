@@ -121,9 +121,11 @@ frame line and a fix never writes one. A block the tool can't parse inside its f
 code-block-parse \"couldn't parse the block as KIND\" and nothing else, never with the tool's \
 own message. In a block that parsed, a finding on a frame line is reported at the block's \
 attributes, and no rule is left off. A block that closes \
-the frame itself (a lone } then more code) is checked as written. The frames, each block \
-standing where the ... is:
+the frame itself (a lone } then more code) is linted as written; rustfmt's format step reports \
+it as not its kind. The frames, each block standing where the ... is:
 
+  rustfmt       statements    fn supdoc_fragment() { ... }
+  rustfmt       expression    fn supdoc_fragment() { ... }
   biome-lint    statements    async function supdocFragment$() { await Promise.resolve(); ... }
   biome-lint    expression    ( ... )
   biome-lint    entries       const supdocFragment$ = { ... };
@@ -138,6 +140,12 @@ that calls super() isn't a member it can hold.
 A project that turns on rules about the frame's own code, such as biome's opt-in nursery rules \
 wanting an explicit type or a function expression, gets their findings at the block's \
 attributes; switch the step off for such a block with lint(off: reason).
+
+rustfmt formats a framed block with its max_width raised by one indent and every width it \
+derives from max_width held to the project's, so it lays out the block as the project's own \
+rustfmt would. A nightly rustfmt whose config sets brace_style, fn_single_line or \
+blank_lines_lower_bound away from its default would reshape the frame, so those blocks' format \
+step doesn't run, with a code-block-not-checked warning.
 
 The summary counts each step: a step its tool's table sets to \"off\" is `format off` or `lint \
 off`; one a block marks off is `format skipped` or `lint skipped`; one that was due but didn't \
