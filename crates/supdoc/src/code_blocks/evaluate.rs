@@ -36,6 +36,7 @@ use super::info::{
     parenthesized_spelling, reasoned, replacement_for_removed, source_attributes, step_attribute,
 };
 use super::lint;
+use super::prettier;
 use super::project::{self, BuildFailed, Plan, Refused};
 use super::pylint;
 use super::rumdl;
@@ -321,6 +322,7 @@ impl Evaluation {
         let mut configs = ToolConfigs::default();
         configs.tombi.timeout = timeout;
         configs.yamllint.timeout = timeout;
+        configs.prettier.timeout = timeout;
         let mut toolchain_warned = false;
         let mut slots: Vec<Slot> = Vec::new();
         let mut jobs: Vec<Job> = Vec::new();
@@ -571,6 +573,9 @@ fn run_jobs(
         let record = records.get(job.record)?;
         let format = job.format.as_ref().and_then(|run| match &run.tool {
             Tool::Custom(custom) => run_custom_formatter(custom, &run.program, record, session),
+            Tool::Cartridge(tool) if format_switched_off(tool, record) => {
+                Some(Err(PRETTIER_SWITCHED_OFF.into()))
+            }
             Tool::Cartridge(tool) => {
                 let rust = rust.filter(|_| run.tool.is("rustfmt"));
                 let frame = Frame::of(tool, record.fragment);
@@ -776,6 +781,22 @@ fn pylint_switched_off(at: &Location) -> Finding {
     .with_location(at.clone())
 }
 
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose prettier step
+/// didn't run because it holds `prettier-ignore` (see [`prettier::switches_format_off`]).
+fn prettier_switched_off(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "the block holds `prettier-ignore`, which leaves part of it as written, so supdoc can't \
+         confirm prettier formats the block, and its format step didn't run",
+    )
+    .with_help(
+        "drop the `prettier-ignore` comment, or mark the block `format(off: <reason>)` to leave \
+         it unformatted",
+    )
+    .with_location(at.clone())
+}
+
 /// The run's one `code-block-not-checked` warning, at `at`, the first Go block whose `go vet`
 /// step didn't run because it imports a package outside the standard library.
 fn vet_offline(at: &Location) -> Finding {
@@ -941,6 +962,7 @@ impl NotRunWarnings {
             FRAME_RESHAPED => frame_reshaped(at),
             BIOME_LINTED_NOTHING => linted_nothing(at),
             PYLINT_SWITCHED_OFF => pylint_switched_off(at),
+            PRETTIER_SWITCHED_OFF => prettier_switched_off(at),
             YAMLLINT_REJECTED => yamllint_rejected(at, said),
             YAMLLINT_LOCALE => yamllint_locale(at, said),
             go::VET_OFFLINE => vet_offline(at),
@@ -1132,6 +1154,8 @@ struct ToolConfigs {
     yamlfmt: YamlfmtConfigs,
     /// yamllint's.
     yamllint: YamllintConfigs,
+    /// prettier's version.
+    prettier: PrettierVersion,
 }
 
 impl ToolConfigs {
@@ -1154,8 +1178,112 @@ impl ToolConfigs {
             && running("tombi").is_none_or(|tool| self.tombi.give(record, tool, place, slots))
             && self.yamlfmt.give(record, place, slots).is_ok()
             && self.yamllint.give(record, place, slots)
+            && self.prettier.verified(record, place, slots)
     }
 }
+
+/// The version of the prettier a run's blocks use, read once.
+#[derive(Debug, Default)]
+struct PrettierVersion {
+    /// How long `prettier --version` may run: the run's tool timeout.
+    timeout: Option<Duration>,
+    /// The version once read (see [`prettier::version_of`]), and whether its warning has been
+    /// given. `None` until a block needs it.
+    version: Option<(Result<String, prettier::Unverified>, bool)>,
+}
+
+impl PrettierVersion {
+    /// Whether the prettier `record`'s format step would run is [`prettier::FLOOR`] or later,
+    /// read once per run from where its steps run. When it isn't, or can't be read, the step
+    /// doesn't run, with [`PRETTIER_OLDER`] or [`PRETTIER_UNREADABLE`] as its reason, and the
+    /// run's one warning (see [`prettier_unverified`]) goes to `slots`. A block whose formatter isn't prettier, or whose prettier isn't found, is left to
+    /// the usual lookup. Whether the block goes on to its tools: its linter still runs.
+    ///
+    /// Effect: runs `prettier --version` the first time.
+    fn verified(
+        &mut self,
+        record: &mut BlockRecord,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> bool {
+        let Some(tool) = record
+            .tool
+            .as_ref()
+            .and_then(Tool::cartridge)
+            .filter(|tool| tool.name == PRETTIER)
+        else {
+            return true;
+        };
+        let (Found::OnPath(program) | Found::InsideRoot(program)) =
+            tools::find_in(tool.binary, tool.bins(), env, root)
+        else {
+            return true;
+        };
+        let timeout = self.timeout;
+        let (version, warned) = self
+            .version
+            .get_or_insert_with(|| (prettier::version_of(&program, env, root, timeout), false));
+        let Err(unverified) = version else {
+            return true;
+        };
+        if !*warned {
+            *warned = true;
+            slots.push(Slot::Found(prettier_unverified(
+                unverified,
+                tool.install,
+                &record.at,
+            )));
+        }
+        record.tool = None;
+        record.steps.format = StepState::Unrunnable {
+            reason: match unverified {
+                prettier::Unverified::Older(_) => PRETTIER_OLDER,
+                prettier::Unverified::Unreadable(_) => PRETTIER_UNREADABLE,
+            },
+        };
+        record.linter.is_some()
+    }
+}
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose prettier step
+/// didn't run because `unverified`: the release prettier named is older than
+/// [`prettier::FLOOR`], with help to `install` a later one, or supdoc couldn't read it.
+fn prettier_unverified(unverified: &prettier::Unverified, install: &str, at: &Location) -> Finding {
+    let floor = prettier::FLOOR.map(|part| part.to_string()).join(".");
+    let (message, help) = match unverified {
+        prettier::Unverified::Older(version) => (
+            format!(
+                "prettier {version} isn't {floor} or later, the first release that accepts every \
+                 flag supdoc gives it, so its blocks' format steps didn't run"
+            ),
+            format!(
+                "install prettier {floor} or later: `{install}`, or into the project's \
+                 node_modules/.bin"
+            ),
+        ),
+        prettier::Unverified::Unreadable(said) => (
+            format!(
+                "supdoc couldn't read prettier's version: `prettier --version` {}, so its \
+                 blocks' format steps didn't run",
+                said.strip_prefix("it ").unwrap_or(said)
+            ),
+            format!(
+                "check that `prettier --version`, run from the project root, prints a release \
+                 such as {floor} and exits successfully"
+            ),
+        ),
+    };
+    Finding::new(NOT_CHECKED, Severity::Warning, message)
+        .with_help(help)
+        .with_location(at.clone())
+}
+
+/// Why prettier's step didn't run when the release it named is older than [`prettier::FLOOR`].
+const PRETTIER_OLDER: &str = "the prettier found is older than 3.6.0, the first release that \
+                              accepts every flag supdoc gives it";
+
+/// Why prettier's step didn't run when supdoc couldn't read its version.
+const PRETTIER_UNREADABLE: &str = "supdoc couldn't read the version of the prettier found";
 
 /// The biome config flags found for each doc directory, and the refusals already warned about.
 #[derive(Debug, Default)]
@@ -2675,7 +2803,7 @@ fn run_formatter(
                 return Err(not_run);
             }
             let named = result.map(|ran| Ran {
-                stderr: given.map_or_else(|| ran.stderr.clone(), |given| given.named(&ran.stderr)),
+                stderr: shown_stderr(tool, given, &ran.stderr),
                 ..ran
             });
             Ok(match &framed {
@@ -2705,6 +2833,18 @@ fn run_formatter(
         (_, finding) => finding.into_iter().collect(),
     };
     Some(Ok((verdict, findings)))
+}
+
+/// `stderr`, a run of `tool`'s, as a finding quotes it: its biome mirror paths named as the doc
+/// when `given` mirrors the doc (see [`biome::Given::named`]), and without ANSI escapes for a
+/// project-tier tool, whose stderr can quote the project's own colored text.
+fn shown_stderr(tool: &ToolCartridge, given: Option<&biome::Given>, stderr: &[u8]) -> Vec<u8> {
+    let stderr = given.map_or_else(|| stderr.to_vec(), |given| given.named(stderr));
+    if tool.tier() == Tier::Project {
+        format::strip_ansi(&String::from_utf8_lossy(&stderr)).into_bytes()
+    } else {
+        stderr
+    }
 }
 
 /// Runs `tool`, a custom formatter found at `program`, on `record`'s block from `session`'s root
@@ -3090,6 +3230,25 @@ const PYLINT_SWITCHED_OFF: &str = "the block holds a `pylint:` comment that name
                                    than message codes or hyphenated message names, so supdoc \
                                    can't confirm pylint still lints it; name messages that way, \
                                    or mark the block `lint(off: <reason>)`";
+
+/// The name of prettier's cartridges.
+const PRETTIER: &str = "prettier";
+
+/// Why prettier's step didn't run on a block holding `prettier-ignore` (see
+/// [`prettier::switches_format_off`]).
+const PRETTIER_SWITCHED_OFF: &str = "the block holds `prettier-ignore`, so supdoc can't confirm \
+                                     prettier formats all of it; drop the comment, or mark the \
+                                     block `format(off: <reason>)`";
+
+/// Whether `tool` is prettier and `record`'s block holds `prettier-ignore` (see
+/// [`prettier::switches_format_off`]), so the step doesn't run and prettier is never spawned.
+fn format_switched_off(tool: &ToolCartridge, record: &BlockRecord) -> bool {
+    tool.name == PRETTIER
+        && record
+            .pending
+            .as_ref()
+            .is_some_and(|pending| prettier::switches_format_off(&pending.input))
+}
 
 /// Whether `tool` is pylint and `record`'s block holds a `pylint:` comment supdoc can't tell
 /// from one that switches it off for the whole block (see [`pylint::switches_lint_off`]), so the step doesn't run and pylint is

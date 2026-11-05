@@ -13,9 +13,10 @@ mod raw;
 mod tests;
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use self::code_blocks::CodeBlocks;
+use self::confine::Boundary;
 use crate::hash::{HashSettings, LineEndings};
 use crate::limits::{CommandLineLimits, ConfigLimits, Limits, SizeLimit};
 use crate::namespace::NamespaceName;
@@ -86,8 +87,8 @@ impl Namespace {
 pub(crate) struct Config {
     /// The directory of the config that was found, not of anything it extends.
     root: AbsolutePath,
-    /// `root` with every symlink followed: the boundary supdoc reads inside.
-    real_root: PathBuf,
+    /// `root` with every symlink followed: the boundary supdoc reads and writes inside.
+    boundary: Boundary,
     /// Config files in the chain, child first. Empty when running on defaults.
     files: Vec<AbsolutePath>,
     /// Files to read links from.
@@ -175,7 +176,7 @@ impl Config {
     fn defaults(root: &AbsolutePath) -> Self {
         Self {
             root: root.clone(),
-            real_root: real_root(root),
+            boundary: Boundary::resolve(root),
             files: Vec::new(),
             include: AnchoredPatterns::built_in(root.clone(), PatternList::everything()),
             exclude: None,
@@ -201,7 +202,15 @@ impl Config {
     /// Effect: reads file metadata and symlinks along `path`.
     #[must_use]
     pub(crate) fn contains(&self, path: &Path) -> bool {
-        confine::real_location(path).is_some_and(|real| real.starts_with(&self.real_root))
+        self.boundary.contains(path)
+    }
+
+    /// The project root as a write boundary: every write inside the project passes its
+    /// [`Boundary::admit`] first.
+    #[must_use]
+    #[expect(dead_code, reason = "project writes admit through it from PH02")]
+    pub(crate) fn boundary(&self) -> &Boundary {
+        &self.boundary
     }
 
     /// The config files in the chain, child first. Empty when running on defaults.
@@ -332,11 +341,4 @@ pub(crate) fn read_config_text(
     limit: SizeLimit,
 ) -> Result<String, ConfigError> {
     chain::read_text(file, false, limit)
-}
-
-/// `root` with every symlink followed, or `root` as written when it can't be resolved.
-///
-/// Effect: reads the filesystem.
-fn real_root(root: &AbsolutePath) -> PathBuf {
-    confine::real_location(root.as_path()).unwrap_or_else(|| root.as_path().to_path_buf())
 }
