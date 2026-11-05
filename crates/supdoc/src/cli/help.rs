@@ -52,8 +52,9 @@ deploy.yaml#1.spec.replicas. An alias is never expanded.
 
 A data file whose key paths hold more segments than max-key-segments, or more text than \
 max-key-path-size, fails read-too-many-keys or read-key-paths-too-large. A package-lock.json over \
-about 3 MB exceeds the default max-key-segments: raise it under [limits], with \
-SUPDOC_MAX_KEY_SEGMENTS or with --max-key-segments. A YAML file past 32,768 lines, where a \\r\\n \
+about 3 MB exceeds the default max-key-segments: raise it with --max-key-segments or \
+SUPDOC_MAX_KEY_SEGMENTS. max-key-segments under [limits] raises it only in a checkout you trust \
+(see `supdoc trust --help`). A YAML file past 32,768 lines, where a \\r\\n \
 counts as two, fails read-too-many-lines, and one nested past column 100 fails read-too-deep; no \
 setting raises either.
 
