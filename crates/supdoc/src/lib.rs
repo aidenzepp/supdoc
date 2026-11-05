@@ -121,6 +121,9 @@ pub(crate) mod cartridges {
     /// JSON, a link target only.
     pub(crate) mod json;
 
+    /// YAML, a link target only.
+    pub(crate) mod yaml;
+
     /// Markdown.
     pub(crate) mod markdown {
         /// The Markdown cartridge.

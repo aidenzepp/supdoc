@@ -46,6 +46,18 @@ pub(crate) trait Cartridge: Send + Sync + fmt::Debug {
         Ok(())
     }
 
+    /// Refuses `_text`, the file at `_path`, before it is parsed, when the grammar can't parse it
+    /// faithfully. Runs before the parser is built, so a refused file builds no tree. The default
+    /// admits everything.
+    ///
+    /// # Errors
+    ///
+    /// The [`ReadError`] naming why the file can't be parsed, such as
+    /// [`ReadError::TooManyLines`].
+    fn admit(&self, _path: &AbsolutePath, _text: &str) -> Result<(), ReadError> {
+        Ok(())
+    }
+
     /// Whether files of this language are walked as link sources.
     ///
     /// `false` makes the language a link target only: its files still resolve as destinations
@@ -172,6 +184,8 @@ impl SourceFile {
     ///
     /// - [`ReadError::CartridgeLoad`] when `language`'s built-in queries don't compile, which is
     ///   a supdoc bug that fails the run.
+    /// - The error [`Cartridge::admit`] refuses `text` with, such as [`ReadError::TooManyLines`],
+    ///   before the parser is built.
     /// - [`ReadError::Timeout`] when `deadline` passes during the parse.
     /// - [`ReadError::Internal`] when the grammar can't be loaded into a parser or tree-sitter
     ///   returns no tree for another reason, which is a supdoc bug.
@@ -185,6 +199,7 @@ impl SourceFile {
         if let Err(error) = language.load() {
             return Err(ReadError::CartridgeLoad { path, error });
         }
+        language.admit(&path, &text)?;
         let internal = |path: &AbsolutePath, reason| ReadError::Internal {
             path: path.clone(),
             reason,
@@ -282,6 +297,17 @@ pub(crate) struct Deadline {
     limit: TimeLimit,
     /// The moment it passes, or `None` for no limit.
     at: Option<Instant>,
+    /// For a test, how many checks it allows before it passes, counted on the checking thread,
+    /// in place of the clock.
+    #[cfg(test)]
+    checks: Option<usize>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times a deadline made by [`Deadline::after_checks`] has been checked on this
+    /// thread.
+    static CHECKS: Cell<usize> = const { Cell::new(0) };
 }
 
 /// How far a parse or query got before its [`Deadline`] stopped it.
@@ -300,6 +326,21 @@ impl Deadline {
             at: limit
                 .get()
                 .and_then(|duration| Instant::now().checked_add(duration)),
+            #[cfg(test)]
+            checks: None,
+        }
+    }
+
+    /// A deadline that passes at its check after `checks` checks on this thread, so a test can
+    /// stop a read at an exact point however fast the machine is. Resets this thread's count.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn after_checks(checks: usize) -> Self {
+        CHECKS.set(0);
+        Self {
+            limit: crate::limits::Limits::PARSE_TIMEOUT,
+            at: None,
+            checks: Some(checks),
         }
     }
 
@@ -312,6 +353,12 @@ impl Deadline {
     /// Whether it has passed. Effect: reads the clock.
     #[must_use]
     pub(crate) fn passed(self) -> bool {
+        #[cfg(test)]
+        if let Some(checks) = self.checks {
+            let seen = CHECKS.get().saturating_add(1);
+            CHECKS.set(seen);
+            return seen > checks;
+        }
         self.at.is_some_and(|at| Instant::now() >= at)
     }
 

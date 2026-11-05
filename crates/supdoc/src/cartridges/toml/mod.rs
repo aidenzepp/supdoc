@@ -810,6 +810,50 @@ name = "second"
     }
 
     #[test]
+    fn a_dotted_key_longer_than_the_segment_budget_is_refused_before_a_part_is_charged() {
+        // A byte budget of zero fails any charge with the other error, so the segment error
+        // shows the key was refused at its fourth part, before its parts were listed or charged.
+        let file = parse_under(
+            "a.b.c.d = 1\n",
+            KeyPathBudget {
+                segments: 3,
+                bytes: 0,
+            },
+        );
+
+        let error = file
+            .language()
+            .symbols(&file)
+            .expect_err("a four-part key can't fit a three-segment budget");
+
+        assert!(
+            matches!(error, ReadError::TooManyKeys { limit: 3, .. }),
+            "expected read-too-many-keys at 3 before any charge, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn the_deadline_stops_the_walk_inside_a_run_of_children_that_name_nothing() {
+        // The comments name nothing, so only the per-child check can stop the walk among them;
+        // without it the walk would run on to `2` and stop there. The deadline counts checks
+        // rather than time, so it passes inside the run of 2,000 on any machine.
+        let comments = "# nothing\n".repeat(2_000);
+        let text = format!("a = [1,\n{comments}2]\n");
+        let last = text.rfind('2').expect("the fixture should end with `2`");
+        let file = parse(&text).with_deadline(Deadline::after_checks(1_000));
+
+        let error = file
+            .language()
+            .symbols(&file)
+            .expect_err("the walk should stop at the thousandth check");
+
+        assert!(
+            matches!(error, ReadError::Timeout { offset, .. } if offset < last),
+            "the walk should stop among the comments, before byte {last}: {error:?}"
+        );
+    }
+
+    #[test]
     fn a_trailing_comma_or_a_dangling_key_names_no_placeholder() {
         for (text, want) in [
             ("a = [1, 2, ]\n", &["a", "a.0", "a.1"][..]),

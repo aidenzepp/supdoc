@@ -9,6 +9,9 @@ pub(crate) mod args;
 /// Example invocations shown in help.
 pub(crate) mod examples;
 
+/// The long help each command shows under `--help`.
+pub(crate) mod help;
+
 /// Parsing arguments, including JSON usage errors.
 pub(crate) mod parse;
 
