@@ -67,6 +67,12 @@ impl fmt::Display for TimeLimit {
 pub(crate) struct SizeLimit(Option<u64>);
 
 impl SizeLimit {
+    /// The ceiling of `bytes` bytes; `0` is no limit, as when it is written.
+    #[must_use]
+    pub(crate) const fn bytes(bytes: u64) -> Self {
+        Self(if bytes == 0 { None } else { Some(bytes) })
+    }
+
     /// The ceiling in bytes, or `None` when there is no limit.
     #[must_use]
     pub(crate) const fn get(self) -> Option<u64> {
@@ -214,25 +220,34 @@ impl fmt::Display for LimitError {
 
 impl std::error::Error for LimitError {}
 
-/// Deserializes a limit from a TOML string, or the integer `0`, through its [`FromStr`].
+/// What a time or size limit's value is expected to be, in serde's message for a value of the
+/// wrong type.
+const EXPECTING_UNIT: &str =
+    "a value with a unit, such as \"10s\" or \"256KiB\", or 0 for no limit";
+
+/// What a count limit's value is expected to be, in serde's message for a value of the wrong type.
+const EXPECTING_COUNT: &str = "a whole number with no unit, such as 200000, or 0 for no limit";
+
+/// Deserializes a limit from a TOML string, or an integer, through its [`FromStr`]. `expecting`
+/// names the values it takes when the value is of another type.
 ///
 /// # Errors
 ///
 /// The deserializer's error for a value that is neither text nor an integer, or that
 /// [`FromStr`] refuses.
-fn deserialize_limit<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+fn deserialize_limit<'de, D, T>(deserializer: D, expecting: &'static str) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: FromStr<Err = LimitError>,
 {
     /// Accepts a string, or an integer as the text it would be written as.
-    struct Text;
+    struct Text(&'static str);
 
     impl serde::de::Visitor<'_> for Text {
         type Value = String;
 
         fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("a value with a unit, such as \"10s\" or \"256KiB\", or 0 for no limit")
+            f.write_str(self.0)
         }
 
         fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<String, E> {
@@ -249,26 +264,26 @@ where
     }
 
     deserializer
-        .deserialize_any(Text)?
+        .deserialize_any(Text(expecting))?
         .parse()
         .map_err(serde::de::Error::custom)
 }
 
 impl<'de> serde::Deserialize<'de> for TimeLimit {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserialize_limit(deserializer)
+        deserialize_limit(deserializer, EXPECTING_UNIT)
     }
 }
 
 impl<'de> serde::Deserialize<'de> for SizeLimit {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserialize_limit(deserializer)
+        deserialize_limit(deserializer, EXPECTING_UNIT)
     }
 }
 
 impl<'de> serde::Deserialize<'de> for CountLimit {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserialize_limit(deserializer)
+        deserialize_limit(deserializer, EXPECTING_COUNT)
     }
 }
 
@@ -384,9 +399,10 @@ impl Limits {
     /// The default key-path segment ceiling: 200,000.
     ///
     /// A symbol costs about 415 bytes of table at one segment each (measured at 415 MB for
-    /// 1,000,000 one-byte keys), so this keeps the worst-case file near 83 MB, under the roughly
-    /// 100 MB the design allows. It is still four times the 50,000 segments of Cargo.toml or a
-    /// 3,000-line API spec.
+    /// 1,000,000 one-byte keys), so this keeps the worst-case file near 81 MB, under the roughly
+    /// 100 MB the design allows. Cargo.toml and a 3,000-line API spec are well under 50,000
+    /// segments. A 1.66 MB `package-lock.json` measured 115,748, so a lockfile over about 2.9 MB
+    /// exceeds this default.
     pub(crate) const MAX_KEY_SEGMENTS: CountLimit = CountLimit(Some(200_000));
     /// The default key-path text ceiling: 32 MiB.
     pub(crate) const MAX_KEY_PATH_SIZE: SizeLimit = SizeLimit(Some(32 * MIB));
