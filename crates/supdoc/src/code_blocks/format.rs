@@ -18,7 +18,7 @@ use super::fragment::{Frame, Kind};
 use super::project::BuildFailed;
 use super::runner::{Failure, Ran};
 use super::states;
-use super::tools::ToolCartridge;
+use super::tools::{Step, ToolCartridge};
 
 /// The code for a block its formatter would change.
 const UNFORMATTED: &str = "code-block-unformatted";
@@ -306,10 +306,16 @@ pub(crate) fn finding(
             Severity::Error,
             format!("`{name}` couldn't parse the block: {detail}"),
         )
-        .with_help(format!(
-            "fix the code, or mark the block `ignore(<why>)` or `format(off: <why>)`; \
-             `{name}` doesn't run on a block it can't parse"
-        )),
+        .with_help(match tool.step() {
+            Step::Format => format!(
+                "fix the code, or mark the block `ignore(<why>)` or `format(off: <why>)`; \
+                 `{name}` doesn't run on a block it can't parse"
+            ),
+            Step::Lint => format!(
+                "fix the code, or mark the block `ignore(<why>)` or `lint(off: <why>)`; \
+                 `{name}` reports nothing else for a block with a syntax error"
+            ),
+        }),
         Verdict::TimedOut => Finding::new(
             TOOL_TIMEOUT,
             Severity::Error,
@@ -1187,6 +1193,35 @@ mod tests {
                 "{finding:?} should hold no frame line"
             );
         }
+    }
+
+    #[test]
+    fn a_parse_failure_names_the_off_switch_of_the_step_that_failed() {
+        let at = block_of("docs/guide.md", "```rust\nx\n```\n", cartridge()).fence;
+        let verdict = Verdict::ParseFailed {
+            detail: "error: expected item".to_owned(),
+            line: None,
+        };
+        let biome_lint = crate::code_blocks::tools::CARTRIDGES
+            .iter()
+            .find(|tool| tool.name == "biome-lint" && tool.language == Language::TypeScript)
+            .expect("the cartridges should include biome-lint for TypeScript");
+        let help = |tool| {
+            finding(&verdict, tool, &at, None)
+                .and_then(|finding| finding.help)
+                .expect("a parse failure has help")
+        };
+
+        assert_eq!(
+            help(rustfmt()),
+            "fix the code, or mark the block `ignore(<why>)` or `format(off: <why>)`; \
+             `rustfmt` doesn't run on a block it can't parse"
+        );
+        assert_eq!(
+            help(biome_lint),
+            "fix the code, or mark the block `ignore(<why>)` or `lint(off: <why>)`; \
+             `biome-lint` reports nothing else for a block with a syntax error"
+        );
     }
 
     #[test]
