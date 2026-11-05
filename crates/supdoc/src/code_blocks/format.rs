@@ -65,7 +65,27 @@ pub(crate) enum Verdict {
     /// The formatter's output around a block of this kind doesn't keep the frame it is expected
     /// to print back, or the block's lines inside it lack the frame's indent.
     FrameReformatted(Kind),
+    /// The formatter exited 0 and printed nothing, or only whitespace, for a block that isn't
+    /// blank: it didn't format the block (its config can switch formatting off), so the step
+    /// didn't run. Never a failure and never a fix, which would empty the block. A framed run
+    /// that prints the frame alone around such a block is the same.
+    PrintedNothing,
 }
+
+/// Whether `text` is nothing, or only whitespace by Unicode's measure.
+fn blank(text: &str) -> bool {
+    text.chars().all(char::is_whitespace)
+}
+
+/// Whether a formatter's `output` is nothing, or only whitespace: no formatting of a block that
+/// isn't blank. Output that isn't UTF-8 isn't blank.
+fn printed_blank(output: &[u8]) -> bool {
+    std::str::from_utf8(output).is_ok_and(blank)
+}
+
+/// Why a block's format step didn't run when its formatter exited 0 and printed nothing for it.
+pub(crate) const PRINTED_NOTHING: &str =
+    "the formatter printed nothing for the block, so it didn't format it";
 
 /// Judges a formatter's `result` on a block whose body as written is `input`, run inside
 /// `frame` with each non-empty line led by `indent` (see [`Frame::wrap_indented`]). Output that
@@ -75,7 +95,8 @@ pub(crate) enum Verdict {
 /// is [`Verdict::FrameReformatted`], never a guess. A blank block passes when the output is the
 /// frame alone ([`Frame::alone`]). A syntax error is shifted past the frame's leading lines; one
 /// on a frame line is [`Verdict::NotKind`]. A failure's detail is in the block's coordinates and
-/// shows no line of the frame.
+/// shows no line of the frame. Exit 0 with nothing printed, or the frame alone, for a block that
+/// isn't blank is [`Verdict::PrintedNothing`].
 #[must_use]
 pub(crate) fn judge_framed(
     tool: &ToolCartridge,
@@ -86,12 +107,16 @@ pub(crate) fn judge_framed(
 ) -> Verdict {
     let lines = input.lines().count();
     match result {
+        Ok(ran) if ran.success && printed_blank(&ran.stdout) && !blank(input) => {
+            Verdict::PrintedNothing
+        }
         Ok(ran) if ran.success => match String::from_utf8(ran.stdout) {
             Err(_) => Verdict::ToolFailed("it printed output that isn't UTF-8".to_owned()),
-            Ok(output) if input.trim().is_empty() && frame.alone(&output) => Verdict::Formatted,
+            Ok(output) if blank(input) && frame.alone(&output) => Verdict::Formatted,
             Ok(output) => match frame.inner(&output, indent) {
                 None => Verdict::FrameReformatted(frame.kind),
                 Some(inner) if inner == input => Verdict::Formatted,
+                Some(inner) if blank(&inner) => Verdict::PrintedNothing,
                 Some(inner) => Verdict::Unformatted(inner),
             },
         },
@@ -124,6 +149,18 @@ pub(crate) fn hidden(frame: Frame, failed: &Verdict, lines: usize, indent: &str)
         },
         other => other.clone(),
     }
+}
+
+/// How far a formatter's syntax-error positions on a block are the block's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Positions {
+    /// Lines and columns both: the tool read the block as written.
+    Own,
+    /// Lines only: the tool read the block inside a wrapper that keeps its line numbers, so a
+    /// column may count the wrapper's text and a line past the block's end is the wrapper's.
+    Lines,
+    /// Neither: a directive in the block renames the positions the tool reports.
+    Renamed,
 }
 
 /// A syntax error a formatter reported: the line it named, when it named one.
@@ -180,6 +217,7 @@ impl Verdict {
                 states::BlockState::Failed(states::Failure::ParseFailed)
             }
             Self::TimedOut => states::BlockState::Failed(states::Failure::ToolTimeout),
+            Self::PrintedNothing => states::BlockState::NotChecked(states::NotChecked::NoStepRan),
         }
     }
 }
@@ -202,11 +240,19 @@ pub(crate) fn input(block: &CodeBlock, text: &str) -> Option<String> {
 /// `tool`'s stderr is its syntax-error report (see [`ToolCartridge::parse_error`]; the runner
 /// gives no exit status beyond success, so each tool is told by its message alone) and places
 /// the error on a line; a report without a location, like any other non-zero exit, is a tool
-/// failure. Stderr after exit 0 is never judged.
+/// failure. How far the report's positions are the block's own is the tool's
+/// [`ToolCartridge::positions`] on `input`: a report whose line numbers alone are the block's is
+/// placed by them ([`in_block_lines`]), and one whose positions name another text is a parse
+/// failure with no line, its positions dropped. Stderr after exit 0 is never judged. Exit 0 with
+/// nothing printed for a block that isn't blank is [`Verdict::PrintedNothing`]: the formatter
+/// didn't format it.
 #[must_use]
 pub(crate) fn judge(tool: &ToolCartridge, input: &str, result: Result<Ran, Failure>) -> Verdict {
     match result {
         Ok(ran) if ran.success && ran.stdout == input.as_bytes() => Verdict::Formatted,
+        Ok(ran) if ran.success && printed_blank(&ran.stdout) && !blank(input) => {
+            Verdict::PrintedNothing
+        }
         Ok(ran) if ran.success => String::from_utf8(ran.stdout).map_or_else(
             |_| Verdict::ToolFailed("it printed output that isn't UTF-8".to_owned()),
             Verdict::Unformatted,
@@ -214,19 +260,84 @@ pub(crate) fn judge(tool: &ToolCartridge, input: &str, result: Result<Ran, Failu
         Ok(ran) => {
             let stderr = String::from_utf8_lossy(&ran.stderr);
             let lines: Vec<&str> = stderr.lines().take(STDERR_LINES).collect();
-            let located = tool
-                .parse_error(&stderr)
-                .filter(|error| error.line.is_some());
-            if let Some(error) = located {
-                return Verdict::ParseFailed {
-                    detail: lines.join("\n"),
-                    line: error.line,
-                };
+            match tool.positions(input) {
+                Positions::Own => {
+                    if let Some(error) = tool
+                        .parse_error(&stderr)
+                        .filter(|error| error.line.is_some())
+                    {
+                        return Verdict::ParseFailed {
+                            detail: lines.join("\n"),
+                            line: error.line,
+                        };
+                    }
+                }
+                Positions::Lines => {
+                    if tool.parse_error(&stderr).is_some() {
+                        return in_block_lines(&lines, input.lines().count());
+                    }
+                }
+                Positions::Renamed => {
+                    if lines.first().is_some_and(|line| positioned(line).is_some()) {
+                        return Verdict::ParseFailed {
+                            detail: lines
+                                .iter()
+                                .map(|line| unplaced(line))
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                            line: None,
+                        };
+                    }
+                }
             }
             Verdict::ToolFailed(exit_detail(&ran.stderr))
         }
         Err(failure) => failed(failure),
     }
+}
+
+/// The parse failure in `lines`, a syntax-error report whose line numbers are those of a block of
+/// `count` lines but whose columns may not be: each report line on one of the block's lines,
+/// its position dropped, and the first one's line. A report line past the block (a wrapper's end
+/// the tool added) is dropped too, unless no line is the block's: then every line is kept and the
+/// failure names no line.
+fn in_block_lines(lines: &[&str], count: usize) -> Verdict {
+    let read: Vec<(Option<usize>, &str)> = lines
+        .iter()
+        .map(|line| positioned(line).map_or((None, *line), |(row, message)| (Some(row), message)))
+        .collect();
+    let inside: Vec<&(Option<usize>, &str)> = read
+        .iter()
+        .filter(|(row, _)| row.is_some_and(|row| row < count))
+        .collect();
+    let kept: Vec<&str> = if inside.is_empty() {
+        read.iter().map(|(_, message)| *message).collect()
+    } else {
+        inside.iter().map(|(_, message)| *message).collect()
+    };
+    Verdict::ParseFailed {
+        detail: kept.join("\n"),
+        line: inside.first().and_then(|(row, _)| *row),
+    }
+}
+
+/// The 0-based line and the message of `line`, a syntax-error report line led by a position:
+/// `<name>:L:C: `, `<name>:L: ` or `L: `. `None` when it has no such position.
+fn positioned(line: &str) -> Option<(usize, &str)> {
+    let (at, message) = line.split_once(": ")?;
+    let numbers: Vec<&str> = at
+        .rsplit(':')
+        .take(2)
+        .take_while(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        .collect();
+    let row = numbers.last()?.parse::<usize>().ok()?.checked_sub(1)?;
+    Some((row, message))
+}
+
+/// `line` of a syntax-error report without its leading position (see [`positioned`]), which
+/// counts a text other than the block's. A line with no such position is kept whole.
+fn unplaced(line: &str) -> &str {
+    positioned(line).map_or(line, |(_, message)| message)
 }
 
 /// What a tool's non-zero exit says, from its `stderr`: the first lines, or that it printed
@@ -284,7 +395,7 @@ pub(crate) fn finding(
 ) -> Option<Finding> {
     let name = tool.name;
     let finding = match verdict {
-        Verdict::Formatted => return None,
+        Verdict::Formatted | Verdict::PrintedNothing => return None,
         Verdict::Unformatted(_) => Finding::new(
             UNFORMATTED,
             Severity::Error,
@@ -1031,6 +1142,115 @@ mod tests {
 
     /// rustfmt's default indent unit.
     const FOUR: &str = "    ";
+
+    #[test]
+    fn a_framed_run_that_prints_the_frame_alone_for_code_printed_nothing() {
+        assert_eq!(
+            judge_framed(
+                rustfmt(),
+                STATEMENTS,
+                FOUR,
+                "let x = 1;\n",
+                Ok(printed("fn main() {\n}\n"))
+            ),
+            Verdict::PrintedNothing,
+            "the frame alone around code must never become an empty fix"
+        );
+        assert_eq!(
+            judge_framed(rustfmt(), STATEMENTS, FOUR, "let x = 1;\n", Ok(printed(""))),
+            Verdict::PrintedNothing
+        );
+    }
+
+    #[test]
+    fn output_of_unicode_whitespace_alone_printed_nothing() {
+        assert_eq!(
+            judge(shfmt(), "echo hi\n", Ok(printed("\u{3000}\u{a0}\n"))),
+            Verdict::PrintedNothing
+        );
+        assert_eq!(
+            judge(shfmt(), "echo hi\n", Ok(printed("\n"))),
+            Verdict::PrintedNothing
+        );
+        assert_eq!(
+            judge(shfmt(), "\u{3000}\n", Ok(printed("\n"))),
+            Verdict::Unformatted("\n".to_owned()),
+            "a blank block that formats to nothing is a formatting change, not nothing printed"
+        );
+    }
+
+    /// The Go formatter.
+    fn gofmt() -> &'static crate::code_blocks::tools::ToolCartridge {
+        formatter(Language::Go).expect("Go has a formatter")
+    }
+
+    #[test]
+    fn a_go_fragments_error_sits_at_its_line_and_drops_the_wrappers_end() {
+        let stderr = "<standard input>:3:6: expected operand, found '<'\n\
+                      <standard input>:6:2: expected ';', found 'EOF'\n";
+
+        assert_eq!(
+            judge(
+                gofmt(),
+                "a := 1\nb := 2\nc := <\n",
+                Ok(exited(false, "", stderr))
+            ),
+            Verdict::ParseFailed {
+                detail: "expected operand, found '<'".to_owned(),
+                line: Some(2),
+            }
+        );
+    }
+
+    #[test]
+    fn a_go_fragments_error_only_past_the_block_names_no_line_and_keeps_the_message() {
+        let stderr = "<standard input>:4:1: expected operand, found '}'\n";
+
+        assert_eq!(
+            judge(gofmt(), "a+\n", Ok(exited(false, "", stderr))),
+            Verdict::ParseFailed {
+                detail: "expected operand, found '}'".to_owned(),
+                line: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_go_block_with_a_line_directive_is_a_parse_failure_with_no_position() {
+        let block = "x := 1\n//line foo.go:10\ny := (\n";
+
+        for stderr in [
+            "foo.go:13: expected operand, found '}'\n",
+            "13: expected operand, found '}'\n",
+            "foo.go:13:2: expected operand, found '}'\n",
+        ] {
+            assert_eq!(
+                judge(gofmt(), block, Ok(exited(false, "", stderr))),
+                Verdict::ParseFailed {
+                    detail: "expected operand, found '}'".to_owned(),
+                    line: None,
+                },
+                "{stderr}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_go_file_keeps_its_error_position() {
+        let stderr = "<standard input>:4:7: expected operand, found '<'\n";
+
+        assert_eq!(
+            judge(
+                gofmt(),
+                "package p\n\nfunc f() {\n\tx := <\n}\n",
+                Ok(exited(false, "", stderr))
+            ),
+            Verdict::ParseFailed {
+                detail: "<standard input>:4:7: expected operand, found '<'".to_owned(),
+                line: Some(3),
+            }
+        );
+    }
 
     /// biome's entries frame, whose closing line the formatter ends with `;`.
     const ENTRIES: Frame = Frame {
