@@ -230,7 +230,7 @@ impl VetModule {
             return None;
         }
         let cache = neutral.parent()?.to_path_buf();
-        let owner = Boundary::resolve(&AbsolutePath::new(&cache)?);
+        let owner = Boundary::resolve(&exact(&cache)?);
         let shared = |name: &str| {
             let dir = AbsolutePath::new(&cache.join(name))?;
             private(&owner, &dir).map(|boundary| (dir, boundary))
@@ -339,6 +339,12 @@ fn private(parent: &Boundary, dir: &AbsolutePath) -> Option<Boundary> {
     confine::create_dir_all(&parent.admit(dir).ok()?, 0o700).ok()?;
     let meta = std::fs::symlink_metadata(dir.as_path()).ok()?;
     (meta.is_dir() && meta.permissions().mode() & 0o777 == 0o700).then(|| Boundary::resolve(dir))
+}
+
+/// `path` as an [`AbsolutePath`] when normalizing doesn't move it: it is absolute and holds no
+/// `..`, so the boundary built from it names the place that was checked. `None` otherwise.
+fn exact(path: &Path) -> Option<AbsolutePath> {
+    AbsolutePath::new(path).filter(|exact| exact.as_path() == path)
 }
 
 /// Creates `dir` mode 0700, admitted beneath `parent`, when nothing is there yet, so the run that
@@ -1125,6 +1131,25 @@ mod tests {
                 .is_ok_and(|mut entries| entries.next().is_none())),
             "every planted module directory should be left empty"
         );
+    }
+
+    #[test]
+    fn a_neutral_path_holding_dot_dot_gets_no_module_and_creates_nothing() {
+        let place = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let deep = place.path().join("elsewhere/deep");
+        std::fs::create_dir_all(&deep).expect("the link's target");
+        std::os::unix::fs::symlink(&deep, place.path().join("link")).expect("the planted link");
+        let neutral = place.path().join("link/../cache/cwd");
+
+        let module = VetModule::create(&neutral, "module m\n", None);
+
+        assert!(module.is_none(), "{module:?}");
+        for at in [
+            place.path().join("cache"),
+            place.path().join("elsewhere/cache"),
+        ] {
+            assert!(!at.exists(), "nothing should be created at {at:?}");
+        }
     }
 
     #[test]
