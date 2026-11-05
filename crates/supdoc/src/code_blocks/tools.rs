@@ -156,6 +156,9 @@ pub(crate) struct ToolCartridge {
     pub(crate) modes: &'static [&'static str],
     /// The fragment kinds it checks, and how.
     pub(crate) fragments: &'static [(Kind, Support)],
+    /// Whether a block tagged `tag` can hold a fragment of `kind` at all, whatever `fragments`
+    /// lists: biome reads a markup element's children only in a JSX flavor.
+    holds: fn(&str, Kind) -> bool,
     /// Its arguments for a block.
     argv: fn(&Invocation<'_>) -> Vec<OsString>,
     /// How a run is read.
@@ -172,10 +175,10 @@ impl ToolCartridge {
         }
     }
 
-    /// Whether it checks a fragment of `kind`.
+    /// Whether it checks a fragment of `kind` in a block tagged `tag`.
     #[must_use]
-    pub(crate) fn supports(&self, kind: Kind) -> bool {
-        self.fragments.iter().any(|(listed, _)| *listed == kind)
+    pub(crate) fn supports(&self, kind: Kind, tag: &str) -> bool {
+        self.fragments.iter().any(|(listed, _)| *listed == kind) && (self.holds)(tag, kind)
     }
 
     /// Its arguments for the block `invocation` describes.
@@ -245,6 +248,85 @@ const RUFF_FRAGMENTS: &[(Kind, Support)] = &[
     (Kind::Members, Support::NATIVE),
 ];
 
+/// biome lint's kinds, each read inside a frame that draws no diagnostic of its own under
+/// biome's default rules, so no rule is ever left off for a whole block: statements as an
+/// `async` function's body (so `await` reads as written) that awaits a promise of its own (so
+/// `suspicious/useAwait` never fires on the frame), members as a class's that has an instance
+/// method of its own using `this` (so `complexity/noStaticOnlyClass` never fires on the frame),
+/// an expression in parentheses (an assignment included), and map entries and a markup
+/// element's children (only in a `tsx` or `jsx` block, see [`biome::holds`]) as the value of a
+/// `const`, children in a `<div>`, never a `<>`, which biome calls unnecessary around one child.
+/// biome lint prints no code, so the output lines are the input's. A JavaScript block reads
+/// these; a TypeScript block reads [`BIOME_LINT_TS_FRAGMENTS`].
+const BIOME_LINT_FRAGMENTS: &[(Kind, Support)] = &[
+    BIOME_LINT_STATEMENTS,
+    BIOME_LINT_EXPRESSION,
+    BIOME_LINT_ENTRIES,
+    BIOME_LINT_CHILDREN,
+    (
+        Kind::Members,
+        framed(
+            "class SupdocFragment$ { supdocFrame$() { return this; }",
+            "}",
+        ),
+    ),
+];
+
+/// [`BIOME_LINT_FRAGMENTS`] for a TypeScript block, whose members frame is an `abstract`
+/// class so an abstract member reads as written. JavaScript has no abstract class, so a
+/// JavaScript block keeps the plain one.
+const BIOME_LINT_TS_FRAGMENTS: &[(Kind, Support)] = &[
+    BIOME_LINT_STATEMENTS,
+    BIOME_LINT_EXPRESSION,
+    BIOME_LINT_ENTRIES,
+    BIOME_LINT_CHILDREN,
+    (
+        Kind::Members,
+        framed(
+            "abstract class SupdocFragment$ { supdocFrame$() { return this; }",
+            "}",
+        ),
+    ),
+];
+
+/// biome lint's statements frame, in both languages.
+const BIOME_LINT_STATEMENTS: (Kind, Support) = (
+    Kind::Statements,
+    framed(
+        "async function supdocFragment$() { await Promise.resolve();",
+        "}",
+    ),
+);
+
+/// biome lint's expression frame, in both languages.
+const BIOME_LINT_EXPRESSION: (Kind, Support) = (Kind::Expression, framed("(", ")"));
+
+/// biome lint's entries frame, in both languages.
+const BIOME_LINT_ENTRIES: (Kind, Support) =
+    (Kind::Entries, framed("const supdocFragment$ = {", "};"));
+
+/// biome lint's children frame, in both languages.
+const BIOME_LINT_CHILDREN: (Kind, Support) = (
+    Kind::Children,
+    framed("const supdocFragment$ = <div>", "</div>;"),
+);
+
+/// A frame of `before` and `after` that a linter reads, which prints nothing back.
+const fn framed(before: &'static str, after: &'static str) -> Support {
+    Support::Framed {
+        before,
+        after,
+        out_before: before,
+        out_after: after,
+    }
+}
+
+/// Whether a block tagged `tag` can hold a fragment of `kind`: always, for a tool whose
+/// `fragments` alone say.
+const fn every_tag(_tag: &str, _kind: Kind) -> bool {
+    true
+}
+
 /// The rules `fragments` leaves off for a block of `kind`: none for a whole file or a kind it
 /// doesn't list.
 fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'static str] {
@@ -265,6 +347,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         config_files: &["rustfmt.toml", ".rustfmt.toml"],
         modes: FULL_OR_OFF,
         fragments: RUSTFMT_FRAGMENTS,
+        holds: every_tag,
         argv: rustfmt_args,
         reader: Reader::Format(rust::parse_error),
     },
@@ -277,6 +360,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         config_files: &[".editorconfig"],
         modes: FULL_OR_OFF,
         fragments: SHELL_FRAGMENTS,
+        holds: every_tag,
         argv: shfmt_args,
         reader: Reader::Format(shell::parse_error),
     },
@@ -289,6 +373,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         config_files: &["ruff.toml", ".ruff.toml", "pyproject.toml"],
         modes: FULL_OR_OFF,
         fragments: PYTHON_FORMAT_FRAGMENTS,
+        holds: every_tag,
         argv: ruff_format_args,
         reader: Reader::Format(python::ruff_parse_error),
     },
@@ -301,6 +386,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         config_files: &["pyproject.toml"],
         modes: FULL_OR_OFF,
         fragments: PYTHON_FORMAT_FRAGMENTS,
+        holds: every_tag,
         argv: black_args,
         reader: Reader::Format(python::black_parse_error),
     },
@@ -313,6 +399,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         config_files: &["ruff.toml", ".ruff.toml", "pyproject.toml"],
         modes: FULL_OR_OFF,
         fragments: RUFF_FRAGMENTS,
+        holds: every_tag,
         argv: ruff_args,
         reader: Reader::Lint(python::lint_verdict),
     },
@@ -325,6 +412,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         config_files: &[".shellcheckrc"],
         modes: FULL_OR_OFF,
         fragments: SHELL_FRAGMENTS,
+        holds: every_tag,
         argv: shellcheck_args,
         reader: Reader::Lint(shell::lint_verdict),
     },
@@ -337,6 +425,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         config_files: &["clippy.toml", ".clippy.toml", "Cargo.toml"],
         modes: FULL_OR_OFF,
         fragments: &[],
+        holds: every_tag,
         argv: clippy_args,
         reader: Reader::Lint(rust::lint_verdict),
     },
@@ -349,6 +438,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
         fragments: &[],
+        holds: biome::holds,
         argv: biome_format_args,
         reader: Reader::Format(biome::parse_error),
     },
@@ -361,6 +451,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
         fragments: &[],
+        holds: biome::holds,
         argv: biome_format_args,
         reader: Reader::Format(biome::parse_error),
     },
@@ -373,6 +464,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
         fragments: &[],
+        holds: every_tag,
         argv: biome_format_args,
         reader: Reader::Format(biome::parse_error),
     },
@@ -384,7 +476,8 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         install: "npm install --global @biomejs/biome",
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
-        fragments: &[],
+        fragments: BIOME_LINT_TS_FRAGMENTS,
+        holds: biome::holds,
         argv: biome_lint_args,
         reader: Reader::Lint(biome::lint_verdict),
     },
@@ -396,7 +489,8 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         install: "npm install --global @biomejs/biome",
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
-        fragments: &[],
+        fragments: BIOME_LINT_FRAGMENTS,
+        holds: biome::holds,
         argv: biome_lint_args,
         reader: Reader::Lint(biome::lint_verdict),
     },
@@ -409,6 +503,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
         fragments: &[],
+        holds: every_tag,
         argv: biome_lint_args,
         reader: Reader::Lint(biome::lint_verdict),
     },
@@ -421,6 +516,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         config_files: RUMDL_CONFIGS,
         modes: FULL_OR_OFF,
         fragments: &[],
+        holds: every_tag,
         argv: rumdl_format_args,
         reader: Reader::Format(rumdl::parse_error),
     },
@@ -433,6 +529,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         config_files: RUMDL_CONFIGS,
         modes: FULL_OR_OFF,
         fragments: &[],
+        holds: every_tag,
         argv: rumdl_args,
         reader: Reader::Lint(rumdl::lint_verdict),
     },
@@ -905,7 +1002,8 @@ mod tests {
     use super::{
         CARTRIDGES, Found, Invocation, ToolCartridge, ToolEnv, find, search_dirs, under_same_file,
     };
-    use crate::config::code_blocks::{Dialect, Edition};
+    use crate::code_blocks::fragment::Kind;
+    use crate::config::code_blocks::{Dialect, Edition, Language};
 
     /// The cartridge named `name`.
     fn cartridge(name: &str) -> &'static ToolCartridge {
@@ -1486,5 +1584,128 @@ mod tests {
             "the alias should not be a path prefix"
         );
         assert!(under_same_file(&real, &alias));
+    }
+
+    /// A frame row of `check --help`: its tool, its kind, its frame and the language its
+    /// marker names, `None` for a row every one of the tool's languages reads.
+    struct HelpRow<'a> {
+        tool: &'a str,
+        kind: &'a str,
+        frame: &'a str,
+        language: Option<Language>,
+        line: &'a str,
+    }
+
+    impl HelpRow<'_> {
+        /// Whether this row lists `frame` as `tool`'s frame for `kind`.
+        fn lists(&self, tool: &ToolCartridge, kind: Kind, frame: &str) -> bool {
+            self.tool == tool.name
+                && self.kind == kind.name()
+                && self.frame == frame
+                && self
+                    .language
+                    .is_none_or(|language| language == tool.language)
+        }
+    }
+
+    #[test]
+    fn check_help_lists_exactly_the_frames_the_tools_read() {
+        let rows: Vec<HelpRow<'_>> = crate::cli::help::CHECK_LONG_ABOUT
+            .lines()
+            .filter_map(|line| {
+                let mut words = line.split_whitespace();
+                let (tool, kind) = (words.next()?, words.next()?);
+                let rest = line.trim_start().strip_prefix(tool)?.trim_start();
+                let mut columns = rest
+                    .strip_prefix(kind)?
+                    .split("  ")
+                    .map(str::trim)
+                    .filter(|column| !column.is_empty());
+                let (frame, marker) = (columns.next()?, columns.next().unwrap_or_default());
+                let language = [Language::TypeScript, Language::JavaScript]
+                    .into_iter()
+                    .find(|language| marker.to_lowercase().contains(language.table()));
+                (line.starts_with("  ")
+                    && CARTRIDGES.iter().any(|known| known.name == tool)
+                    && Kind::from_name(kind).is_some())
+                .then_some(HelpRow {
+                    tool,
+                    kind,
+                    frame,
+                    language,
+                    line,
+                })
+            })
+            .collect();
+        let frames: Vec<(&ToolCartridge, Kind, String)> = CARTRIDGES
+            .iter()
+            .flat_map(|tool| {
+                tool.fragments.iter().filter_map(move |(kind, support)| {
+                    let frame = support.frame(*kind)?;
+                    Some((tool, *kind, format!("{} ... {}", frame.before, frame.after)))
+                })
+            })
+            .collect();
+
+        for (tool, kind, shown) in &frames {
+            assert!(
+                rows.iter().any(|row| row.lists(tool, *kind, shown)),
+                "`check --help` should list {} for {}'s {} frame as `{shown}`",
+                tool.name,
+                tool.language.table(),
+                kind.name()
+            );
+        }
+        for row in &rows {
+            assert!(
+                frames
+                    .iter()
+                    .any(|(tool, kind, shown)| row.lists(tool, *kind, shown)),
+                "`check --help` lists a frame no tool reads: {}",
+                row.line
+            );
+        }
+    }
+
+    #[test]
+    fn biome_lint_reads_children_only_in_a_jsx_flavor() {
+        let lint = CARTRIDGES
+            .iter()
+            .find(|tool| tool.name == "biome-lint" && tool.language == Language::TypeScript)
+            .expect("the cartridges should include biome-lint for TypeScript");
+
+        assert!(lint.supports(Kind::Children, "tsx"));
+        assert!(!lint.supports(Kind::Children, "ts"));
+        assert!(lint.supports(Kind::Entries, "ts"));
+    }
+
+    #[test]
+    fn biome_lint_leaves_no_rule_off_for_a_framed_block() {
+        let plain = cartridge("biome-lint").args(&Invocation {
+            doc: Path::new("/p/docs/a.md"),
+            tag: "ts",
+            index: 1,
+            edition: Edition::E2024,
+            dialect: Dialect::Bash,
+            project: &[],
+            emit: None,
+            externs: &[],
+            fragment: None,
+        });
+
+        for kind in Kind::ALL {
+            let framed = cartridge("biome-lint").args(&Invocation {
+                doc: Path::new("/p/docs/a.md"),
+                tag: "ts",
+                index: 1,
+                edition: Edition::E2024,
+                dialect: Dialect::Bash,
+                project: &[],
+                emit: None,
+                externs: &[],
+                fragment: Some(kind),
+            });
+            assert_eq!(framed, plain, "{}", kind.name());
+        }
     }
 }

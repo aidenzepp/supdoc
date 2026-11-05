@@ -271,7 +271,8 @@ impl Steps {
         if *state != BlockState::NotChecked(NotChecked::Pending) {
             return Self::default();
         }
-        let language = tag_of(block).and_then(Language::from_tag);
+        let tag = tag_of(block).unwrap_or_default();
+        let language = Language::from_tag(tag);
         let fragment = block_fragment(block);
         let step = |step: Step| {
             let Some((language, tool)) = language.and_then(|language| {
@@ -289,7 +290,7 @@ impl Steps {
                     key: step.key(),
                 },
                 Some(StepValue::Full | StepValue::Other(_)) | None => match fragment {
-                    Some(kind) if !tool.supports(kind) => StepState::Unsupported {
+                    Some(kind) if !tool.supports(kind, tag) => StepState::Unsupported {
                         tool: tool.name,
                         kind,
                     },

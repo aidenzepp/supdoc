@@ -96,7 +96,7 @@ the current text in.
   fragment(KIND)
       The block is part of a larger construct: statements, expression, entries, children, \
 members or declarations. A step whose tool can't check that kind doesn't run, with a \
-code-block-fragment-unsupported warning.
+code-block-fragment-unsupported warning. Some tools read a kind only inside a frame (below).
   ignore(reason)
       Check nothing in this block.
   format(off: reason), lint(off: reason)
@@ -115,6 +115,30 @@ that reads a file or an environment variable at compile time (include_str!, env!
 clippy compiles it, one that calls a macro off supdoc's list: it isn't checked, with a \
 code-block-not-checked warning. In a trusted checkout, a Rust block that names an item it \
 doesn't define fails code-block-missing-name, once per name.
+
+A tool reads some fragment kinds only inside a frame: fixed lines before and after the block, \
+the same for every block of that kind and never chosen from its content. No finding shows a \
+frame line and a fix never writes one. A block the tool can't parse inside its frame fails \
+code-block-parse \"couldn't parse the block as KIND\" and nothing else, never with the tool's \
+own message. In a block that parsed, a finding on a frame line is reported at the block's \
+attributes, and no rule is left off. A block that closes \
+the frame itself (a lone } then more code) is checked as written. The frames, each block \
+standing where the ... is:
+
+  biome-lint    statements    async function supdocFragment$() { await Promise.resolve(); ... }
+  biome-lint    expression    ( ... )
+  biome-lint    entries       const supdocFragment$ = { ... };
+  biome-lint    children      const supdocFragment$ = <div> ... </div>;   (tsx and jsx blocks only)
+  biome-lint    members       abstract class SupdocFragment$ { supdocFrame$() { return this; } ... }   (TypeScript blocks)
+  biome-lint    members       class SupdocFragment$ { supdocFrame$() { return this; } ... }   (JavaScript blocks)
+
+A statements block's leading \"use strict\" or \"use server\" isn't read as a directive, since \
+the frame's first line stands before it. A members frame has no base class, so a constructor \
+that calls super() isn't a member it can hold.
+
+A project that turns on rules about the frame's own code, such as biome's opt-in nursery rules \
+wanting an explicit type or a function expression, gets their findings at the block's \
+attributes; switch the step off for such a block with lint(off: reason).
 
 The summary counts each step: a step its tool's table sets to \"off\" is `format off` or `lint \
 off`; one a block marks off is `format skipped` or `lint skipped`; one that was due but didn't \
