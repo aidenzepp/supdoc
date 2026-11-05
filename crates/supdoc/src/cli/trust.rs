@@ -16,7 +16,7 @@ use crate::config::discover_config;
 use crate::exit::ExitStatus;
 use crate::output::{Output, Report, TextContext};
 use crate::path::AbsolutePath;
-use crate::trust::{AddError, TrustEnv};
+use crate::trust::{AddError, Store, TrustEnv};
 
 use super::args::TrustArgs;
 use super::project::{absolute, config_failure, load_config};
@@ -105,7 +105,7 @@ pub(crate) fn run(
     let (action, shown) = if args.revoke {
         match store
             .revoke(root.as_path())
-            .map_err(|error| store_failed(&error))?
+            .map_err(|error| store_failed(&store, &error))?
         {
             Some(removed) => (TrustAction::Revoked, removed),
             None => (TrustAction::NotTrusted, root.as_path().to_path_buf()),
@@ -113,7 +113,7 @@ pub(crate) fn run(
     } else {
         let added = store.add(root.as_path()).map_err(|error| match error {
             AddError::Broad(real) => broad_root(&real),
-            AddError::Io(error) => store_failed(&error),
+            AddError::Io(error) => store_failed(&store, &error),
         })?;
         let action = if added {
             TrustAction::Trusted
@@ -210,8 +210,9 @@ fn no_state() -> CliError {
     )
 }
 
-/// The error when the trust store can't be read or written.
-fn store_failed(error: &io::Error) -> CliError {
+/// The error when `store` can't be read or written. Its help says to drop the `..` when the
+/// variable the store is located through holds one, since nothing else then fixes it.
+fn store_failed(store: &Store, error: &io::Error) -> CliError {
     if error.kind() == io::ErrorKind::InvalidInput {
         return CliError::new(
             "cli-trust-path",
@@ -220,10 +221,50 @@ fn store_failed(error: &io::Error) -> CliError {
             ExitStatus::Usage,
         );
     }
+    let help = match store.climbing() {
+        Some(variable) => {
+            format!("Set `{variable}` to a path without `..`, then run `supdoc trust` again")
+        }
+        None => "Check that you can create and write files in `$XDG_STATE_HOME/supdoc` (under `$HOME/.local/state` when it is unset)".to_owned(),
+    };
     CliError::new(
         "cli-trust-store",
         format!("cannot update the trust store: {}", cause(error)),
-        "Check that you can create and write files in `$XDG_STATE_HOME/supdoc` (under `$HOME/.local/state` when it is unset)",
+        help,
         ExitStatus::Io,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+
+    use super::{AddError, TrustEnv, store_failed};
+
+    #[test]
+    fn a_store_refused_for_dot_dot_says_to_set_the_variable_without_it() {
+        let scratch = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let root = scratch.path().join("root");
+        std::fs::create_dir_all(scratch.path().join("detour"))
+            .expect("the detour should be creatable");
+        std::fs::create_dir(&root).expect("the root should be creatable");
+        let climbing = scratch.path().join("detour").join("..").join("state");
+        let env = TrustEnv::from_vars(|name| {
+            (name == "XDG_STATE_HOME").then(|| OsString::from(climbing.clone()))
+        });
+        let store = env
+            .store()
+            .expect("an absolute XDG_STATE_HOME should locate the store");
+
+        let Err(AddError::Io(error)) = store.add(&root) else {
+            panic!("adding through `..` should fail with an I/O refusal");
+        };
+        let refusal = store_failed(&store, &error);
+
+        assert_eq!(refusal.code(), "cli-trust-store");
+        assert_eq!(
+            refusal.help(),
+            "Set `XDG_STATE_HOME` to a path without `..`, then run `supdoc trust` again"
+        );
+    }
 }

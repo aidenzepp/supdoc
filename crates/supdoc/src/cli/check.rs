@@ -19,7 +19,7 @@ use crate::code_blocks::fragment::Kind;
 use crate::code_blocks::tools::ToolEnv;
 use crate::code_blocks::uses::UseState;
 use crate::exit::ExitStatus;
-use crate::finding::{Finding, Location};
+use crate::finding::{Finding, Location, Severity};
 use crate::link::destination::Untracked;
 use crate::link::{LinkKey, SourcePath};
 use crate::output::json::{Envelope, FindingJson};
@@ -85,6 +85,7 @@ pub(crate) fn run(
     .map_err(|error| CliError::from(&error))?;
     evaluation.look_up_tools(tools, config.root().as_path());
     scan.findings.extend(evaluation.findings);
+    scan.findings.extend(trust_unread(trust));
 
     let model = reconcile_in(&scan, &lock, &scope, &paths);
     let outcome = match check_outcome(&model, args.deny_warnings) {
@@ -128,6 +129,32 @@ pub(super) fn granted_tier(root: &Path, env: &TrustEnv) -> Result<Grant, CliErro
         )
     })
 }
+
+/// The run's one warning that the trust store wasn't read, naming the variable it is located
+/// through, when that variable holds a `..` and `SUPDOC_TRUST` leaves trust to the store
+/// ([`TrustEnv::unread_store`]). The checkout is then untrusted for a reason the operator can
+/// fix, so the run says so instead of passing over it.
+///
+/// Effect: reads file metadata and symlinks along the store's directory.
+pub(super) fn trust_unread(env: &TrustEnv) -> Option<Finding> {
+    let variable = env.unread_store()?;
+    Some(
+        Finding::new(
+            NOT_TRUSTED_CODE,
+            Severity::Warning,
+            format!(
+                "the trust store wasn't read, so nothing is trusted this run: `{variable}` holds \
+                 `..`, which the trust store's path must not contain"
+            ),
+        )
+        .with_help(format!(
+            "Set `{variable}` to a path without `..`, then run supdoc again"
+        )),
+    )
+}
+
+/// The code of the warning that trust held something back, shared with code-block evaluation.
+const NOT_TRUSTED_CODE: &str = "code-block-not-trusted";
 
 /// The JSON Schema of `supdoc check`'s `--json` output: the whole envelope, with `data` typed as
 /// [`CheckReport`].
@@ -575,6 +602,12 @@ mod tests {
 
     /// Runs `supdoc <args>` from `cwd`. `args` must start with `check`.
     fn check_in(cwd: AbsolutePath, args: &[&str]) -> Run {
+        check_with_trust(cwd, args, &TrustEnv::default())
+    }
+
+    /// Runs `supdoc <args>` from `cwd` with trust decided from `trust`. `args` must start with
+    /// `check`.
+    fn check_with_trust(cwd: AbsolutePath, args: &[&str], trust: &TrustEnv) -> Run {
         let mut session = Session::new(cwd, args);
         let Command::Check(check_args) = &session.cli.command else {
             panic!("`supdoc {}` should be a check command", args.join(" "));
@@ -582,7 +615,7 @@ mod tests {
         let result = run(
             check_args,
             &ToolEnv::default(),
-            &TrustEnv::default(),
+            trust,
             &session.context,
             &mut session.output,
         );
@@ -631,6 +664,43 @@ mod tests {
             granted_tier(root.path(), &env).expect("the store should be read"),
             Grant::Trusted
         );
+    }
+
+    #[test]
+    fn a_trust_store_reached_through_dot_dot_warns_once_naming_the_variable() {
+        let project = project();
+        let state = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        fs::create_dir(state.path().join("detour")).expect("the detour should be creatable");
+        let climbing = state.path().join("detour").join("..").join("state");
+        let env = trust_env(&[("XDG_STATE_HOME", climbing.as_os_str())]);
+
+        let run = check_with_trust(project.root(), &["check"], &env);
+
+        let warnings = run
+            .stdout
+            .matches("warning[code-block-not-trusted]")
+            .count();
+        assert_eq!(warnings, 1, "one warning should say why: {}", run.stdout);
+        assert!(
+            run.stdout.contains("`XDG_STATE_HOME` holds `..`"),
+            "the warning should name the variable: {}",
+            run.stdout
+        );
+    }
+
+    #[test]
+    fn trust_unread_says_nothing_without_dot_dot_or_when_supdoc_trust_decides() {
+        let state = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let climbing = state.path().join("x").join("..").join("state");
+
+        let plain = trust_env(&[("XDG_STATE_HOME", state.path().as_os_str())]);
+        let decided = trust_env(&[
+            ("XDG_STATE_HOME", climbing.as_os_str()),
+            ("SUPDOC_TRUST", "1".as_ref()),
+        ]);
+
+        assert_eq!(trust_unread(&plain), None);
+        assert_eq!(trust_unread(&decided), None);
     }
 
     #[test]

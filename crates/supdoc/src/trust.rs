@@ -70,6 +70,18 @@ impl TrustEnv {
             variable,
         })
     }
+
+    /// The variable the trust store is located through, when `SUPDOC_TRUST` leaves trust to the
+    /// store and that variable holds a `..` ([`Store::climbing`]): [`granted`] then reads no
+    /// store and trusts nothing.
+    ///
+    /// Effect: reads file metadata and symlinks along the store's directory.
+    pub(crate) fn unread_store(&self) -> Option<&'static str> {
+        match self.trust.as_deref().map(OsStr::as_bytes) {
+            None | Some(b"") => self.store()?.climbing(),
+            Some(_) => None,
+        }
+    }
 }
 
 /// `SUPDOC_TRUST` holds a value other than `1`, `0` or empty.
@@ -249,15 +261,10 @@ impl Store {
     /// directory has been replaced by a symlink to elsewhere.
     fn admit(&self, path: &Path) -> io::Result<Admitted<'_>> {
         self.boundary.admit(path).map_err(|_| {
-            let climbs = self
-                .file
-                .components()
-                .any(|component| component == Component::ParentDir);
-            let reason = if climbs {
+            let reason = if let Some(variable) = self.climbing() {
                 format!(
-                    "`{}` holds `..`, which the trust store's path must not contain: set it to a \
-                     path without `..`",
-                    self.variable
+                    "`{variable}` holds `..`, which the trust store's path must not contain: set \
+                     it to a path without `..`"
                 )
             } else {
                 format!(
@@ -267,6 +274,15 @@ impl Store {
             };
             io::Error::new(io::ErrorKind::PermissionDenied, reason)
         })
+    }
+
+    /// The variable the store's directory comes from, `XDG_STATE_HOME` or `HOME`, when its value
+    /// holds a `..`: every read and write of the store is then refused.
+    pub(crate) fn climbing(&self) -> Option<&'static str> {
+        self.file
+            .components()
+            .any(|component| component == Component::ParentDir)
+            .then_some(self.variable)
     }
 
     /// The store's directory.
