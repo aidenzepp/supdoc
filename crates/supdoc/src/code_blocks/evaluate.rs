@@ -1252,8 +1252,8 @@ struct RustSetup {
     lints: Vec<OsString>,
     /// `CLIPPY_CONF_DIR` for an in-root clippy config, or nothing.
     clippy_conf: Option<OsString>,
-    /// The indent unit rustfmt uses under `config`: `None` when the config can't be read for it.
-    indent: Option<String>,
+    /// The indent rustfmt's config gives it: `None` when the config can't be read for it.
+    indent: Option<RustfmtIndent>,
 }
 
 impl RustSetup {
@@ -1272,7 +1272,7 @@ impl RustSetup {
         let config = rust::config_args(root);
         Self {
             toolchain,
-            indent: rustfmt_indent(&config),
+            indent: RustfmtIndent::read(&config),
             config,
             edition: toolchain::cargo_edition(root).unwrap_or(Edition::E2024),
             lints: toolchain::cargo_lints(root),
@@ -1286,40 +1286,78 @@ impl RustSetup {
     }
 }
 
-/// The indent unit rustfmt uses under `config`, its `--config-path` arguments: a tab under
-/// `hard_tabs = true`, else `tab_spaces` spaces, four by default and with no config. `None` when
-/// the config file can't be read or parsed, or either key holds a value rustfmt wouldn't take.
-///
-/// Effect: reads the config file.
-fn rustfmt_indent(config: &[OsString]) -> Option<String> {
-    let Some(path) = config
-        .iter()
-        .skip_while(|arg| *arg != "--config-path")
-        .nth(1)
-    else {
-        return Some("    ".to_owned());
+/// The indent settings rustfmt formats with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RustfmtIndent {
+    /// `hard_tabs`: indent with a tab.
+    hard_tabs: bool,
+    /// `tab_spaces`: the spaces in one indent, and a tab's width under `hard_tabs`.
+    tab_spaces: usize,
+}
+
+impl RustfmtIndent {
+    /// rustfmt's own defaults.
+    const DEFAULT: Self = Self {
+        hard_tabs: false,
+        tab_spaces: 4,
     };
-    let table: toml::Table = std::fs::read_to_string(path).ok()?.parse().ok()?;
-    let hard_tabs = table
-        .get("hard_tabs")
-        .map_or(Some(false), toml::Value::as_bool)?;
-    if hard_tabs {
-        return Some("\t".to_owned());
+
+    /// The settings `config`, rustfmt's `--config-path` arguments, give it: its defaults with no
+    /// config. `None` when the config file can't be read or parsed, or either key holds a value
+    /// rustfmt wouldn't take.
+    ///
+    /// Effect: reads the config file.
+    fn read(config: &[OsString]) -> Option<Self> {
+        let Some(path) = config
+            .iter()
+            .skip_while(|arg| *arg != "--config-path")
+            .nth(1)
+        else {
+            return Some(Self::DEFAULT);
+        };
+        let table: toml::Table = std::fs::read_to_string(path).ok()?.parse().ok()?;
+        let hard_tabs = table
+            .get("hard_tabs")
+            .map_or(Some(false), toml::Value::as_bool)?;
+        let tab_spaces = match table.get("tab_spaces") {
+            None => Self::DEFAULT.tab_spaces,
+            Some(value) => usize::try_from(value.as_integer()?)
+                .ok()
+                .filter(|width| *width > 0)?,
+        };
+        Some(Self {
+            hard_tabs,
+            tab_spaces,
+        })
     }
-    let width = match table.get("tab_spaces") {
-        None => 4,
-        Some(value) => usize::try_from(value.as_integer()?)
-            .ok()
-            .filter(|width| *width > 0)?,
-    };
-    Some(" ".repeat(width))
+
+    /// The indent unit: a tab under `hard_tabs`, else `tab_spaces` spaces.
+    fn unit(self) -> String {
+        if self.hard_tabs {
+            "\t".to_owned()
+        } else {
+            " ".repeat(self.tab_spaces)
+        }
+    }
+
+    /// The arguments that make rustfmt use these settings whatever config it finds on its own,
+    /// such as one above its working directory or in the user's home.
+    fn args(self) -> [OsString; 2] {
+        [
+            OsString::from("--config"),
+            OsString::from(format!(
+                "hard_tabs={},tab_spaces={}",
+                self.hard_tabs, self.tab_spaces
+            )),
+        ]
+    }
 }
 
 /// The indent unit biome uses for a `language` block under `given`'s config: its language
 /// section's `formatter.indentStyle` and `indentWidth`, else the top-level `formatter`'s, else
 /// biome's defaults (a tab; two spaces when the style is `space`). No config is biome's defaults.
-/// `None` when the config can't be read or parsed, declares `overrides` (which may set another
-/// indent for some paths), or holds a value biome wouldn't take.
+/// `None` when the config can't be read or parsed, has an override that sets an indent (which
+/// would give some paths another one), or holds a value biome wouldn't take.
 ///
 /// Effect: reads the private config file.
 fn biome_indent(language: Language, given: Option<&biome::Given>) -> Option<String> {
@@ -1332,8 +1370,27 @@ fn biome_indent(language: Language, given: Option<&biome::Given>) -> Option<Stri
     };
     let config: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-    if config.get("overrides").is_some() {
-        return None;
+    let indent_keys = ["indentStyle", "indentWidth"];
+    let sets_indent = |override_: &serde_json::Value| {
+        ["formatter", section].iter().any(|table| {
+            indent_keys.iter().any(|key| {
+                let at = if *table == "formatter" {
+                    format!("/formatter/{key}")
+                } else {
+                    format!("/{table}/formatter/{key}")
+                };
+                override_.pointer(&at).is_some()
+            })
+        })
+    };
+    match config.get("overrides") {
+        None => {}
+        Some(serde_json::Value::Array(overrides)) => {
+            if overrides.iter().any(sets_indent) {
+                return None;
+            }
+        }
+        Some(_) => return None,
     }
     let setting = |key: &str| {
         config
@@ -1352,18 +1409,21 @@ fn biome_indent(language: Language, given: Option<&biome::Given>) -> Option<Stri
 }
 
 /// The indent unit `tool` puts before each line of a block it formats inside a frame, read
-/// from the project's config for it (`rust`'s for rustfmt, `given`'s for biome). `None` for a
-/// formatter whose indent supdoc can't read, and when the config can't be read for it.
+/// from the project's config for it (`rust`'s for rustfmt, `given`'s for biome), with the
+/// arguments that hold the tool to it. `None` for a formatter whose indent supdoc can't read,
+/// and when the config can't be read for it.
 ///
 /// Effect: reads biome's private config file.
 fn indent_unit(
     tool: &ToolCartridge,
     rust: Option<&RustSetup>,
     given: Option<&biome::Given>,
-) -> Option<String> {
+) -> Option<(String, Vec<OsString>)> {
     match tool.binary {
-        "rustfmt" => rust?.indent.clone(),
-        "biome" => biome_indent(tool.language, given),
+        "rustfmt" => rust?
+            .indent
+            .map(|indent| (indent.unit(), indent.args().to_vec())),
+        "biome" => biome_indent(tool.language, given).map(|unit| (unit, Vec::new())),
         _ => None,
     }
 }
@@ -1412,15 +1472,14 @@ fn run_formatter(
     let framed = match frame {
         None => None,
         Some(frame) => match indent_unit(tool, rust, given) {
-            Some(indent) => Some((frame, indent)),
+            Some((indent, held)) => Some((frame, indent, held)),
             None => return Some(Err(FRAME_INDENT_UNKNOWN)),
         },
     };
-    let checked = framed
-        .as_ref()
-        .map_or(Cow::Borrowed(pending.input.as_str()), |(frame, indent)| {
-            Cow::Owned(frame.wrap_indented(&pending.input, indent))
-        });
+    let checked = framed.as_ref().map_or(
+        Cow::Borrowed(pending.input.as_str()),
+        |(frame, indent, _)| Cow::Owned(frame.wrap_indented(&pending.input, indent)),
+    );
     let input = checked.as_ref();
     let doc = root.join(record.at.file.as_str());
     let edition = record
@@ -1447,7 +1506,10 @@ fn run_formatter(
         .iter()
         .map(|(name, value)| (*name, value.as_os_str()))
         .collect();
-    let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
+    let held = framed
+        .as_ref()
+        .map_or(&[][..], |(_, _, held)| held.as_slice());
+    let args: Vec<&OsStr> = args.iter().chain(held).map(OsString::as_os_str).collect();
     let run = cache::Run {
         tool,
         program,
@@ -1467,7 +1529,7 @@ fn run_formatter(
                 ..ran
             });
             match &framed {
-                Some((frame, indent)) => {
+                Some((frame, indent, _)) => {
                     format::judge_framed(tool, *frame, indent, &pending.input, named)
                 }
                 None => format::judge(tool, input, named),
@@ -3591,13 +3653,14 @@ mod tests {
         use std::time::Duration;
 
         use super::super::{
-            FRAME_INDENT_UNKNOWN, FormatRan, RustSetup, Session, biome_indent, parses,
-            run_formatter,
+            Evaluation, FRAME_INDENT_UNKNOWN, FormatRan, Job, RustSetup, Session, Slot, StepsRan,
+            ToolRun, biome_indent, parses, run_formatter,
         };
-        use super::{rust_record, temporary};
+        use super::{rust_record, rust_records, temporary};
         use crate::code_blocks::biome::Given;
         use crate::code_blocks::format::Verdict;
         use crate::code_blocks::fragment::{Kind, Support};
+        use crate::code_blocks::states::StepState;
         use crate::code_blocks::tools::{ToolEnv, formatter};
         use crate::config::code_blocks::Language;
         use crate::finding::Finding;
@@ -3618,10 +3681,24 @@ mod tests {
         /// [`run_formatter`] with `program` as framed rustfmt on the one block of `text` under
         /// `root`, with the test process's environment.
         fn format_run(program: &Path, root: &Path, text: &str) -> FormatRan {
+            format_run_cached(program, root, text, None)
+        }
+
+        /// [`format_run`], with `XDG_CACHE_HOME`, which holds the tools' neutral working
+        /// directory, at `cache` when given.
+        fn format_run_cached(
+            program: &Path,
+            root: &Path,
+            text: &str,
+            cache: Option<&Path>,
+        ) -> FormatRan {
             let mut record = rust_record(root, text);
             record.fragment = Some(Kind::Statements);
             record.linter = None;
-            let env = ToolEnv::from_vars(|name| std::env::var_os(name));
+            let env = ToolEnv::from_vars(|name| match cache {
+                Some(cache) if name == "XDG_CACHE_HOME" => Some(cache.as_os_str().to_owned()),
+                _ => std::env::var_os(name),
+            });
             let session = Session {
                 env: &env,
                 root,
@@ -3791,7 +3868,21 @@ mod tests {
                 .as_deref(),
                 Some("    ")
             );
-            assert_eq!(indent(r#"{"overrides":[]}"#), None);
+            assert_eq!(indent(r#"{"overrides":[]}"#).as_deref(), Some("\t"));
+            assert_eq!(
+                indent(r#"{"overrides":[{"includes":["**/*.ts"],"linter":{"enabled":false}}]}"#)
+                    .as_deref(),
+                Some("\t"),
+                "an override that sets no indent leaves the top-level one"
+            );
+            assert_eq!(
+                indent(r#"{"overrides":[{"formatter":{"indentWidth":3}}]}"#),
+                None
+            );
+            assert_eq!(
+                indent(r#"{"overrides":[{"javascript":{"formatter":{"indentStyle":"space"}}}]}"#),
+                None
+            );
             assert_eq!(indent(r#"{"formatter":{"indentStyle":"wide"}}"#), None);
         }
 
@@ -3840,6 +3931,106 @@ mod tests {
                 assert_eq!(verdict, Verdict::Formatted, "{config}: {findings:?}");
                 assert!(findings.is_empty(), "{config}: {findings:?}");
             }
+        }
+
+        #[test]
+        fn frame_format_an_unreadable_indent_warns_once_and_leaves_each_step_not_run() {
+            let root = temporary();
+            let text = doc("let x = 1;\n") + &doc("let y = 2;\n");
+            let rustfmt = formatter(Language::Rust).expect("Rust has a formatter");
+            let mut evaluation = Evaluation {
+                records: rust_records(root.path(), &text),
+                ..Evaluation::default()
+            };
+            let jobs: Vec<Job> = (0..2)
+                .map(|record| Job {
+                    record,
+                    format: Some(ToolRun {
+                        tool: rustfmt,
+                        program: PathBuf::from("/bin/rustfmt"),
+                    }),
+                    lint: None,
+                    unbuilt: None,
+                })
+                .collect();
+            let unrun = || {
+                Some(StepsRan {
+                    format: Some(Err(FRAME_INDENT_UNKNOWN)),
+                    lint: None,
+                })
+            };
+
+            evaluation.settle(
+                vec![Slot::Run(0), Slot::Run(1)],
+                &jobs,
+                vec![unrun(), unrun()],
+            );
+
+            let warnings: Vec<_> = evaluation
+                .findings
+                .iter()
+                .map(|finding| finding.code)
+                .collect();
+            assert_eq!(warnings, ["code-block-not-checked"]);
+            for record in &evaluation.records {
+                assert_eq!(
+                    record.steps.format,
+                    StepState::Unrunnable {
+                        reason: FRAME_INDENT_UNKNOWN
+                    }
+                );
+            }
+        }
+
+        #[test]
+        fn frame_format_real_rustfmt_keeps_supdocs_indent_over_a_config_it_finds() {
+            let test = "frame_format_real_rustfmt_keeps_supdocs_indent_over_a_config_it_finds";
+            let Some(rustfmt) = real_rustfmt(test) else {
+                return;
+            };
+            let root = temporary();
+            let cache = temporary();
+            std::fs::write(cache.path().join("rustfmt.toml"), "tab_spaces = 8\n")
+                .expect("the config should be writable");
+            let nested = doc("if x {\n    y();\n}\n");
+
+            let (verdict, findings) = ran(format_run_cached(
+                &rustfmt,
+                root.path(),
+                &nested,
+                Some(cache.path()),
+            ));
+
+            assert_eq!(verdict, Verdict::Formatted, "{findings:?}");
+            assert!(
+                findings.is_empty(),
+                "the fix never adds indent: {findings:?}"
+            );
+        }
+
+        #[test]
+        fn frame_format_real_rustfmt_parse_detail_names_the_blocks_position() {
+            let test = "frame_format_real_rustfmt_parse_detail_names_the_blocks_position";
+            let Some(rustfmt) = real_rustfmt(test) else {
+                return;
+            };
+            let root = temporary();
+
+            let (verdict, findings) = ran(format_run(
+                &rustfmt,
+                root.path(),
+                &doc("let x = 1\nlet y = 2;\n"),
+            ));
+
+            let Verdict::ParseFailed { detail, line } = verdict else {
+                panic!("a missing `;` is a parse failure: {findings:?}");
+            };
+            assert_eq!(line, Some(0));
+            assert!(
+                detail.contains("<stdin>:1:10") && detail.contains("1 | let x = 1"),
+                "{detail}"
+            );
+            assert!(!detail.contains("fn main"), "{detail}");
         }
     }
 }

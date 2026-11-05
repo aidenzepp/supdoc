@@ -74,7 +74,8 @@ pub(crate) enum Verdict {
 /// with `input` as [`judge`] compares a whole block's output; output that doesn't keep the frame
 /// is [`Verdict::FrameReformatted`], never a guess. A blank block passes when the output is the
 /// frame alone ([`Frame::alone`]). A syntax error is shifted past the frame's leading lines; one
-/// on a frame line is [`Verdict::NotKind`]. A failure's detail shows no line of the frame.
+/// on a frame line is [`Verdict::NotKind`]. A failure's detail is in the block's coordinates and
+/// shows no line of the frame.
 #[must_use]
 pub(crate) fn judge_framed(
     tool: &ToolCartridge,
@@ -102,22 +103,23 @@ pub(crate) fn judge_framed(
                 .checked_sub(frame.lead())
                 .filter(|line| *line < lines)
                 .map_or(Verdict::NotKind(frame.kind), |line| Verdict::ParseFailed {
-                    detail: frame.hidden(&detail, lines),
+                    detail: frame.hidden(&detail, lines, indent),
                     line: Some(line),
                 }),
-            failed => hidden(frame, &failed, lines),
+            failed => hidden(frame, &failed, lines, indent),
         },
     }
 }
 
-/// `failed`, a verdict on a block of `lines` lines run inside `frame`, with no line of its detail
-/// referring to the frame (see [`Frame::hidden`]).
+/// `failed`, a verdict on a block of `lines` lines run inside `frame`, each non-empty line led
+/// by `indent`, with its detail in the block's coordinates and no line of it showing the frame
+/// (see [`Frame::hidden`]).
 #[must_use]
-pub(crate) fn hidden(frame: Frame, failed: &Verdict, lines: usize) -> Verdict {
+pub(crate) fn hidden(frame: Frame, failed: &Verdict, lines: usize, indent: &str) -> Verdict {
     match failed {
-        Verdict::ToolFailed(detail) => Verdict::ToolFailed(frame.hidden(detail, lines)),
+        Verdict::ToolFailed(detail) => Verdict::ToolFailed(frame.hidden(detail, lines, indent)),
         Verdict::ParseFailed { detail, line } => Verdict::ParseFailed {
-            detail: frame.hidden(detail, lines),
+            detail: frame.hidden(detail, lines, indent),
             line: *line,
         },
         other => other.clone(),
@@ -1119,7 +1121,7 @@ mod tests {
                 Ok(exited(false, "", inside))
             ),
             Verdict::ParseFailed {
-                detail: "error: expected `;`\n --> <stdin>:3:9\n  |\n<the frame supdoc adds>"
+                detail: "error: expected `;`\n --> <stdin>:2:5\n  |\n<the frame supdoc adds>"
                     .to_owned(),
                 line: Some(1),
             }
@@ -1140,9 +1142,12 @@ mod tests {
                 STATEMENTS,
                 FOUR,
                 body,
-                Ok(exited(false, "", "4 | }\nboom\n"))
+                Ok(exited(false, "", "4 | }\n}\nboom\n"))
             ),
-            Verdict::ToolFailed("<the frame supdoc adds>\nboom".to_owned())
+            Verdict::ToolFailed(
+                "<the frame supdoc adds>\n<the frame supdoc adds>\nboom".to_owned()
+            ),
+            "a frame line is hidden by its number, and one with no number by its text"
         );
     }
 
@@ -1273,6 +1278,41 @@ mod tests {
             judge_framed(rustfmt(), STATEMENTS, FOUR, input, Ok(printed(&sent))),
             Verdict::Formatted,
             "a formatter that copies the literal's lines verbatim leaves the block as written"
+        );
+    }
+
+    #[test]
+    fn frame_format_a_blank_block_with_the_frame_lost_is_frame_reformatted() {
+        for input in ["", "\n"] {
+            assert_eq!(
+                judge_framed(rustfmt(), STATEMENTS, FOUR, input, Ok(printed("garbage\n"))),
+                Verdict::FrameReformatted(Kind::Statements),
+                "blank block {input:?}: only the frame alone passes"
+            );
+        }
+    }
+
+    #[test]
+    fn frame_format_a_parse_detail_names_the_blocks_own_line_and_column() {
+        let stderr = "error: expected `;`, found keyword `let`\n --> <stdin>:2:14\n  |\n\
+                      2 |     let x = 1\n  |              ^ help: add `;` here\n";
+
+        let verdict = judge_framed(
+            rustfmt(),
+            STATEMENTS,
+            FOUR,
+            "let x = 1\nlet y = 2;\n",
+            Ok(exited(false, "", stderr)),
+        );
+
+        assert_eq!(
+            verdict,
+            Verdict::ParseFailed {
+                detail: "error: expected `;`, found keyword `let`\n --> <stdin>:1:10\n  |\n\
+                         1 | let x = 1\n  |          ^ help: add `;` here"
+                    .to_owned(),
+                line: Some(0),
+            }
         );
     }
 }

@@ -173,7 +173,7 @@ pub(crate) fn findings(
         Verdict::Failed(failed) => {
             let failed = frame.map_or_else(
                 || failed.clone(),
-                |frame| format::hidden(frame, failed, block.body.len()),
+                |frame| format::hidden(frame, failed, block.body.len(), ""),
             );
             format::finding(&failed, tool, &block.fence, timeout)
                 .into_iter()
@@ -708,6 +708,33 @@ mod tests {
     #[test]
     fn a_framed_tool_failure_shows_no_line_of_the_frame() {
         let block = markdown_block(TWO_ENTRIES);
+        let stderr = "error: unexpected token\n  ({\na: 1,\n})\nend";
+        let failed = Verdict::Failed(super::format::Verdict::ToolFailed(stderr.to_owned()));
+
+        let found = findings(
+            &failed,
+            &read(&block, TWO_ENTRIES, Some(ENTRIES)),
+            None,
+            false,
+        );
+        let plain = findings(&failed, &read(&block, TWO_ENTRIES, None), None, false);
+
+        let message = found.first().map(|finding| finding.message.as_str());
+        let message = message.unwrap_or_default();
+        assert!(
+            message.contains(
+                "error: unexpected token\n<the frame supdoc adds>\na: 1,\n<the frame supdoc adds>\nend"
+            ),
+            "{message}"
+        );
+        assert_no_frame_line(&found, TWO_ENTRIES, ENTRIES);
+        let unframed = plain.first().map(|finding| finding.message.as_str());
+        assert!(unframed.unwrap_or_default().contains("  ({"), "{plain:?}");
+    }
+
+    #[test]
+    fn a_framed_tool_failure_hides_a_frame_line_named_by_its_gutter_or_location() {
+        let block = markdown_block(TWO_ENTRIES);
         let stderr = "error: unexpected token\n --> <stdin>:1:1\n  |\n1 | ({\n2 | a: 1,\n  \
                       > 4 \u{2502} })\nend";
         let failed = Verdict::Failed(super::format::Verdict::ToolFailed(stderr.to_owned()));
@@ -725,7 +752,7 @@ mod tests {
         assert!(
             message.contains(
                 "error: unexpected token\n<the frame supdoc adds>\n  |\n<the frame supdoc adds>\n\
-                 2 | a: 1,\n<the frame supdoc adds>\nend"
+                 1 | a: 1,\n<the frame supdoc adds>\nend"
             ),
             "{message}"
         );
@@ -747,7 +774,7 @@ mod tests {
         assert!(
             message
                 .unwrap_or_default()
-                .contains("error: x\n --> <stdin>:3:1\n3 | }\n<the frame supdoc adds>"),
+                .contains("error: x\n --> <stdin>:2:1\n2 | }\n<the frame supdoc adds>"),
             "the block's own `}}` on line 3 stays, the frame's on line 4 goes: {found:?}"
         );
     }
