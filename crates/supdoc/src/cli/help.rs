@@ -121,8 +121,8 @@ frame line and a fix never writes one. A block the tool can't parse inside its f
 code-block-parse \"couldn't parse the block as KIND\" and nothing else, never with the tool's \
 own message. In a block that parsed, a finding on a frame line is reported at the block's \
 attributes, and no rule is left off. A block that closes \
-the frame itself (a lone } then more code) is checked as written. The frames, each block \
-standing where the ... is:
+the frame itself (a lone } then more code) is linted as written; rustfmt's format step reports \
+it as not its kind. The frames, each block standing where the ... is:
 
   rustfmt       statements    fn supdoc_fragment() { ... }
   rustfmt       expression    fn supdoc_fragment() { ... }
