@@ -136,8 +136,8 @@ impl Project {
 /// doc `docs/a.md` (a pattern with a `/` is anchored at this root; run in the project, from its
 /// root or from `docs`, with the config found by discovery):
 ///
-/// - the nearest directory at or above the config's directory that holds a `.git` (a directory
-///   or a file), so for a config at the project root (`.rumdl.toml`), a nested `docs/rumdl.toml`,
+/// - the nearest directory at or above the config's directory that holds a `.git` (see
+///   [`holds_git`]), so for a config at the project root (`.rumdl.toml`), a nested `docs/rumdl.toml`,
 ///   `.config/rumdl.toml` and a `pyproject.toml` alike it is the project's git root, and for a
 ///   supdoc root below the git root (`repo/sub/.rumdl.toml`, `.git` in `repo`) it is `repo`;
 /// - with no `.git` above it: the config's directory (`docs/rumdl.toml` gives `docs`, the root
@@ -145,9 +145,7 @@ impl Project {
 ///   the directory that holds `.config`.
 fn pattern_root(config: &Path) -> Option<PathBuf> {
     let dir = config.parent()?;
-    let git = dir
-        .ancestors()
-        .find(|ancestor| fs::symlink_metadata(ancestor.join(".git")).is_ok());
+    let git = dir.ancestors().find(|ancestor| holds_git(ancestor));
     let is_dot_config = dir.file_name().is_some_and(|name| name == ".config");
     git.map(Path::to_path_buf).or_else(|| {
         if is_dot_config {
@@ -207,8 +205,8 @@ fn relative(root: &Path, path: &Path) -> String {
 }
 
 /// The config files in `doc`'s directory and its ancestors, nearest first, up to and including
-/// the first that holds a `.git` (a directory or a file), and never above `root`: rumdl itself
-/// stops its search at a repository's root, so a nested repository doesn't take an outer config.
+/// the first that holds a `.git` (see [`holds_git`]), and never above `root`: rumdl itself stops
+/// its search at a repository's root, so a nested repository doesn't take an outer config.
 fn candidates(root: &Path, doc: &Path) -> impl Iterator<Item = PathBuf> {
     let mut dirs = Vec::new();
     for dir in doc
@@ -218,13 +216,22 @@ fn candidates(root: &Path, doc: &Path) -> impl Iterator<Item = PathBuf> {
         .take_while(|dir| dir.starts_with(root))
     {
         dirs.push(dir.to_path_buf());
-        if fs::symlink_metadata(dir.join(".git")).is_ok() {
+        if holds_git(dir) {
             break;
         }
     }
     dirs.into_iter()
         .flat_map(|dir| CONFIG_FILES.map(|name| dir.join(name)))
         .filter(|candidate| fs::symlink_metadata(candidate).is_ok())
+}
+
+/// Whether `dir` holds a `.git` the way rumdl 0.3.2 decides it: something exists there once a
+/// symlink is followed (a directory, a `gitdir:` file, or a link to either), so a dangling `.git`
+/// link doesn't count and the walk goes on. The `.git` is never read or followed further.
+///
+/// Effect: reads file metadata.
+fn holds_git(dir: &Path) -> bool {
+    fs::metadata(dir.join(".git")).is_ok()
 }
 
 /// The validated rumdl table of the config at `found`; `None` for a `pyproject.toml` that supdoc
@@ -708,6 +715,29 @@ mod tests {
 
         assert_eq!(hidden, Vec::<PathBuf>::new());
         assert_eq!(beside, [at("inner/.rumdl.toml")]);
+    }
+
+    #[test]
+    fn a_dangling_git_link_does_not_stop_the_search_and_a_live_one_does() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let at = |relative: &str| root.path().join(relative);
+        for dir in ["dangling/docs", "live/docs", "target"] {
+            fs::create_dir_all(at(dir)).expect("the fixture dirs");
+        }
+        std::os::unix::fs::symlink(at("nowhere"), at("dangling/.git")).expect("a dangling link");
+        std::os::unix::fs::symlink(at("target"), at("live/.git")).expect("a link to a dir");
+        fs::write(at(".rumdl.toml"), "[global]\n").expect("outer config");
+
+        let dangling: Vec<_> = candidates(root.path(), &at("dangling/docs/a.md")).collect();
+        let live: Vec<_> = candidates(root.path(), &at("live/docs/a.md")).collect();
+        let roots = [
+            pattern_root(&at("dangling/docs/rumdl.toml")),
+            pattern_root(&at("live/docs/rumdl.toml")),
+        ];
+
+        assert_eq!(dangling, [at(".rumdl.toml")]);
+        assert_eq!(live, Vec::<PathBuf>::new());
+        assert_eq!(roots, [Some(at("dangling/docs")), Some(at("live"))]);
     }
 
     #[test]
