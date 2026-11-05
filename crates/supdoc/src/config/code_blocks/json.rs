@@ -1,7 +1,7 @@
 //! `[features.code-blocks.json]`: the table that turns checking JSON code blocks on, tagged `json`
 //! or `jsonc`.
 
-use super::{Language, Selection, ToolTable, deserialize_choice, deserialize_tool};
+use super::{Choice, Language, Selection, ToolTable, deserialize_choice, deserialize_tool};
 use crate::code_blocks::tools::Step;
 
 /// The JSON formatters supdoc knows.
@@ -16,12 +16,12 @@ const LINTERS: &[&str] = &["biome-lint"];
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawJson {
-    /// `"biome-format"`; unset takes the default.
+    /// `"biome-format"`, or a custom `{ command = [...] }`; unset takes the default.
     #[serde(default, deserialize_with = "formatter")]
-    pub(super) formatter: Option<String>,
-    /// `"biome-lint"`; unset takes the default.
+    pub(super) formatter: Option<Choice>,
+    /// `"biome-lint"`, or a custom `{ command = [...], diagnostics = "gnu" }`; unset takes the default.
     #[serde(default, deserialize_with = "linter")]
-    pub(super) linter: Option<String>,
+    pub(super) linter: Option<Choice>,
     /// `[features.code-blocks.json.biome-format]`, when written.
     #[serde(default, rename = "biome-format", deserialize_with = "biome_format")]
     pub(super) biome_format: Option<ToolTable>,
@@ -34,8 +34,8 @@ pub(crate) struct RawJson {
 ///
 /// # Errors
 ///
-/// The deserializer's error for any value but `"biome-format"`.
-fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+/// The deserializer's error for any value but `"biome-format"` or a valid custom command.
+fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D::Error> {
     deserialize_choice(d, Language::Json, Step::Format, KNOWN)
 }
 
@@ -43,8 +43,8 @@ fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D
 ///
 /// # Errors
 ///
-/// The deserializer's error for any value but `"biome-lint"`.
-fn linter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+/// The deserializer's error for any value but `"biome-lint"` or a valid custom command.
+fn linter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D::Error> {
     deserialize_choice(d, Language::Json, Step::Lint, LINTERS)
 }
 
@@ -70,8 +70,8 @@ impl RawJson {
     /// What this table selects and the tool tables it writes.
     pub(super) fn selection(&self) -> Selection<'_> {
         Selection {
-            formatter: self.formatter.as_deref(),
-            linter: self.linter.as_deref(),
+            formatter: self.formatter.as_ref(),
+            linter: self.linter.as_ref(),
             tools: [
                 ("biome-format", &self.biome_format),
                 ("biome-lint", &self.biome_lint),

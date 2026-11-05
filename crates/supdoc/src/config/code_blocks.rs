@@ -43,6 +43,7 @@ use self::shell::RawShell;
 use self::toml::RawToml;
 use self::typescript::RawTypeScript;
 use self::yaml::RawYaml;
+use super::error::ConfigError;
 use super::pattern::{AnchoredPatterns, PatternList};
 
 /// A language supdoc has a `[features.code-blocks]` table for.
@@ -126,28 +127,252 @@ const fn mode_key(step: Step) -> &'static str {
     }
 }
 
-/// Reads a `formatter` or `linter` value, named by `key`, for `language`: a name from `known`. A
-/// `{ command = [...] }` table is refused until custom commands have a trust model, and `false`,
-/// removed, names the tool table that turns the step off.
+/// What a `formatter` or `linter` value selects: a known tool by its name, or a custom command.
+#[derive(Debug, Clone)]
+pub(crate) enum Choice {
+    /// A tool from supdoc's table, by its name.
+    Known(&'static str),
+    /// A custom `{ command = [...] }`, which the checkout chose.
+    Command(CustomCommand),
+}
+
+impl Choice {
+    /// The known tool's name, or `None` for a custom command.
+    #[must_use]
+    pub(crate) const fn known(&self) -> Option<&'static str> {
+        match self {
+            Self::Known(name) => Some(name),
+            Self::Command(_) => None,
+        }
+    }
+}
+
+/// A validated custom `{ command = [...] }`: at most [`MAX_ARGUMENTS`] elements, each 1 to
+/// [`MAX_ARGUMENT_BYTES`] bytes with no NUL, a program that isn't blank and holds no `{path}`,
+/// and no placeholder but `{path}`.
+#[derive(Debug, Clone)]
+pub(crate) struct CustomCommand {
+    /// The program, `command`'s first element.
+    program: String,
+    /// The arguments after it, as written; `{path}` is still unreplaced.
+    #[expect(
+        dead_code,
+        reason = "read when custom commands are wired to run, in P5-CC03 and P5-CC04"
+    )]
+    arguments: Vec<String>,
+    /// How a linter's output is read: `Some` for `diagnostics = "gnu"`. Always `None` for a
+    /// formatter.
+    #[expect(
+        dead_code,
+        reason = "read when custom linters are wired to run, in P5-CC04"
+    )]
+    diagnostics: Option<Diagnostics>,
+    /// Where the value is, in the file that wrote it.
+    span: Range<usize>,
+}
+
+/// How a custom linter's output is read, written as `diagnostics = "..."`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Diagnostics {
+    /// `"gnu"`: `PATH:LINE[:COL]: MESSAGE` lines.
+    Gnu,
+}
+
+/// The most elements a custom `command` may have.
+const MAX_ARGUMENTS: usize = 64;
+
+/// The most bytes one element of a custom `command` may have.
+const MAX_ARGUMENT_BYTES: usize = 4096;
+
+/// The only placeholder a custom `command` may hold.
+const PATH_PLACEHOLDER: &str = "{path}";
+
+/// The first `{word}` in `argument` other than `{path}`, where a word is ASCII letters, digits,
+/// `_` or `-`.
+fn stray_placeholder(argument: &str) -> Option<&str> {
+    argument.match_indices('{').find_map(|(start, _)| {
+        let (word, _) = argument.get(start + 1..)?.split_once('}')?;
+        let is_word = !word.is_empty()
+            && word
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        let placeholder = argument.get(start..start + word.len() + 2)?;
+        (is_word && placeholder != PATH_PLACEHOLDER).then_some(placeholder)
+    })
+}
+
+/// Reads one element of `command`, the `index`th (0-based).
 ///
 /// # Errors
 ///
-/// The deserializer's error when the value is a boolean, a table, an unknown name or any other
-/// type.
+/// A message when it isn't a string, is empty, is longer than [`MAX_ARGUMENT_BYTES`], holds a
+/// NUL, holds a placeholder other than `{path}`, or is the program and is blank or holds
+/// `{path}`.
+fn command_argument(index: usize, value: ::toml::Value) -> Result<String, String> {
+    let ordinal = index + 1;
+    let ::toml::Value::String(argument) = value else {
+        return Err(format!(
+            "element {ordinal} of `command` must be a string, not a TOML {}",
+            value.type_str()
+        ));
+    };
+    if argument.is_empty() || argument.len() > MAX_ARGUMENT_BYTES {
+        return Err(format!(
+            "element {ordinal} of `command` is {} bytes; each must be 1 to {MAX_ARGUMENT_BYTES} \
+             bytes",
+            argument.len()
+        ));
+    }
+    if argument.contains('\0') {
+        return Err(format!(
+            "element {ordinal} of `command` holds a NUL byte, which no program argument can carry"
+        ));
+    }
+    if let Some(placeholder) = stray_placeholder(&argument) {
+        return Err(format!(
+            "`{placeholder}` in element {ordinal} of `command` isn't a placeholder; \
+             `{PATH_PLACEHOLDER}` is the only one"
+        ));
+    }
+    if index == 0 && argument.trim().is_empty() {
+        return Err("the program, `command`'s first element, is blank".to_owned());
+    }
+    if index == 0 && argument.contains(PATH_PLACEHOLDER) {
+        return Err(format!(
+            "the program, `command`'s first element, can't hold `{PATH_PLACEHOLDER}`; name the \
+             program there and pass `{PATH_PLACEHOLDER}` as a later element"
+        ));
+    }
+    Ok(argument)
+}
+
+/// Reads the `command` of a custom `key` (`formatter` or `linter`).
+///
+/// # Errors
+///
+/// A message when it isn't an array of strings, is empty, has more than [`MAX_ARGUMENTS`]
+/// elements, or one element is refused by [`command_argument`].
+fn command_argv(key: &str, value: ::toml::Value) -> Result<(String, Vec<String>), String> {
+    let elements = match value {
+        ::toml::Value::Array(elements) => elements,
+        ::toml::Value::String(_) => {
+            return Err(format!(
+                "`command` is a string; use an array, it is not run through a shell, such as \
+                  `{key} = {{ command = [\"tool\", \"--flag\", \"{PATH_PLACEHOLDER}\"] }}`",
+            ));
+        }
+        other => {
+            return Err(format!(
+                "`command` must be an array of strings, the program then its arguments, not a \
+                 TOML {}",
+                other.type_str()
+            ));
+        }
+    };
+    if elements.is_empty() {
+        return Err("`command` is empty; it needs at least the program to run".to_owned());
+    }
+    if elements.len() > MAX_ARGUMENTS {
+        return Err(format!(
+            "`command` has {} elements; at most {MAX_ARGUMENTS} are allowed",
+            elements.len()
+        ));
+    }
+    let mut argv = elements
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| command_argument(index, value))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter();
+    let program = argv
+        .next()
+        .ok_or_else(|| "`command` is empty; it needs at least the program to run".to_owned())?;
+    Ok((program, argv.collect()))
+}
+
+/// Reads a custom `{ command = [...] }` for `step`, from the keys of its table, at `span`.
+///
+/// # Errors
+///
+/// A message for a missing or refused `command`, `diagnostics` on a formatter or set to
+/// anything but `"gnu"`, or any other key.
+fn custom_command(
+    step: Step,
+    entries: Vec<(String, ::toml::Value)>,
+    span: Range<usize>,
+) -> Result<CustomCommand, String> {
+    let (key, keys) = match step {
+        Step::Format => ("formatter", "`command`"),
+        Step::Lint => ("linter", "`command` and `diagnostics`"),
+    };
+    let mut argv = None;
+    let mut diagnostics = None;
+    for (name, value) in entries {
+        match (name.as_str(), step) {
+            ("command", _) => argv = Some(command_argv(key, value)?),
+            ("diagnostics", Step::Lint) => {
+                if value.as_str() != Some("gnu") {
+                    return Err(format!(
+                        "`diagnostics = {value}` isn't supported; write `diagnostics = \"gnu\"`, \
+                         or leave it out to report the linter's output as one finding"
+                    ));
+                }
+                diagnostics = Some(Diagnostics::Gnu);
+            }
+            ("diagnostics", Step::Format) => {
+                return Err(
+                    "`diagnostics` applies only to a custom linter; a custom formatter's output \
+                     is the formatted block"
+                        .to_owned(),
+                );
+            }
+            (other, _) => {
+                return Err(format!(
+                    "`{}` isn't a key of a custom {key} command; it takes only {keys}",
+                    other.escape_debug()
+                ));
+            }
+        }
+    }
+    let (program, arguments) = argv.ok_or_else(|| {
+        format!(
+            "a custom {key} command needs `command`, the program then its arguments, such as \
+             `{key} = {{ command = [\"tool\", \"{PATH_PLACEHOLDER}\"] }}`"
+        )
+    })?;
+    Ok(CustomCommand {
+        program,
+        arguments,
+        diagnostics,
+        span,
+    })
+}
+
+/// Reads a `formatter` or `linter` value, named by `key`, for `language`: a name from `known`, or
+/// a custom `{ command = [...] }` table, validated in full. `false`, removed, names the tool
+/// table that turns the step off.
+///
+/// # Errors
+///
+/// The deserializer's error when the value is a boolean, an unknown name, a custom command
+/// table [`custom_command`] refuses, or any other type.
 fn deserialize_choice<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
     language: Language,
     step: Step,
     known: &'static [&'static str],
-) -> Result<Option<String>, D::Error> {
+) -> Result<Option<Choice>, D::Error> {
     use std::fmt;
 
+    use serde::Deserialize as _;
+    use serde::Deserializer as _;
     use serde::de::{Error, MapAccess, Visitor};
 
     struct Reader {
         language: Language,
         step: Step,
         known: &'static [&'static str],
+        span: Range<usize>,
     }
     impl Reader {
         /// `formatter` or `linter`.
@@ -159,13 +384,13 @@ fn deserialize_choice<'de, D: serde::Deserializer<'de>>(
         }
     }
     impl<'de> Visitor<'de> for Reader {
-        type Value = String;
+        type Value = Choice;
 
         fn expecting(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
             write!(out, "a {} {} name", self.language.table(), self.key())
         }
 
-        fn visit_bool<E: Error>(self, value: bool) -> Result<String, E> {
+        fn visit_bool<E: Error>(self, value: bool) -> Result<Choice, E> {
             let default =
                 tools::default_for(self.language, self.step).map_or("<tool>", |tool| tool.name);
             Err(E::custom(format!(
@@ -179,36 +404,44 @@ fn deserialize_choice<'de, D: serde::Deserializer<'de>>(
             )))
         }
 
-        fn visit_str<E: Error>(self, value: &str) -> Result<String, E> {
-            if self.known.contains(&value) {
-                Ok(value.to_owned())
-            } else {
-                Err(E::custom(format!(
-                    "`{value}` isn't a known {} {}; the known tools are {}",
-                    self.language.table(),
-                    self.key(),
-                    tool_list(self.known)
-                )))
-            }
+        fn visit_str<E: Error>(self, value: &str) -> Result<Choice, E> {
+            self.known
+                .iter()
+                .find(|name| **name == value)
+                .map(|name| Choice::Known(name))
+                .ok_or_else(|| {
+                    E::custom(format!(
+                        "`{value}` isn't a known {} {}; the known tools are {}",
+                        self.language.table(),
+                        self.key(),
+                        tool_list(self.known)
+                    ))
+                })
         }
 
-        fn visit_map<A: MapAccess<'de>>(self, _map: A) -> Result<String, A::Error> {
-            Err(A::Error::custom(format!(
-                "a custom {} command needs trust and arrives in a later release; the known {} tools are {}",
-                self.key(),
-                self.language.table(),
-                tool_list(self.known)
-            )))
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Choice, A::Error> {
+            let mut entries = Vec::new();
+            while let Some(entry) = map.next_entry::<String, ::toml::Value>()? {
+                entries.push(entry);
+            }
+            custom_command(self.step, entries, self.span)
+                .map(Choice::Command)
+                .map_err(A::Error::custom)
         }
     }
 
-    deserializer
+    let written = ::toml::Spanned::<::toml::Value>::deserialize(deserializer)?;
+    let span = written.span();
+    written
+        .into_inner()
         .deserialize_any(Reader {
             language,
             step,
             known,
+            span,
         })
         .map(Some)
+        .map_err(|error| D::Error::custom(error.message()))
 }
 
 /// The options written in one tool's table, `[features.code-blocks.<language>.<tool>]`.
@@ -289,9 +522,9 @@ fn deserialize_tool<'de, D: serde::Deserializer<'de>>(
 /// by the tool's name.
 pub(super) struct Selection<'raw> {
     /// `formatter`, when written.
-    pub(super) formatter: Option<&'raw str>,
+    pub(super) formatter: Option<&'raw Choice>,
     /// `linter`, when written.
-    pub(super) linter: Option<&'raw str>,
+    pub(super) linter: Option<&'raw Choice>,
     /// Each tool table written.
     pub(super) tools: Vec<(&'static str, &'raw ToolTable)>,
 }
@@ -310,8 +543,35 @@ pub(crate) struct Unselected {
     pub(crate) tool: &'static str,
     /// The selecting key, `formatter` or `linter`.
     pub(crate) key: &'static str,
-    /// The tool the chain selects instead, when the language has one.
-    pub(crate) selected: Option<&'static str>,
+    /// What the chain selects instead, when the language has a tool for the step.
+    pub(crate) selected: Option<Selected>,
+}
+
+/// What the merged chain selects for a step, named in an [`Unselected`] error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Selected {
+    /// A known tool, by its name.
+    Known(&'static str),
+    /// A custom command.
+    Command {
+        /// Its program, `command`'s first element.
+        program: String,
+    },
+}
+
+/// A custom command the merged chain selects, refused until custom commands are wired to run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Unwired {
+    /// The file that wrote the command.
+    pub(crate) file: AbsolutePath,
+    /// Where the command is in `file`.
+    pub(crate) span: Range<usize>,
+    /// The language's table name, such as `rust` or `typescript`.
+    pub(crate) language: &'static str,
+    /// The key that selects it, `formatter` or `linter`.
+    pub(crate) key: &'static str,
+    /// Its program, `command`'s first element.
+    pub(crate) program: String,
 }
 
 /// Refuses the removed `[features.code-blocks] lint` key, naming where a linter's mode lives now.
@@ -362,15 +622,34 @@ fn tool_list(known: &[&str]) -> String {
         .join(", ")
 }
 
+/// A `formatter` or `linter` value and the file that wrote it.
+#[derive(Debug, Clone)]
+struct Chosen {
+    /// The value.
+    choice: Choice,
+    /// The file that wrote it.
+    file: AbsolutePath,
+}
+
+impl Chosen {
+    /// `choice`, written in `file`.
+    fn new(choice: &Choice, file: &AbsolutePath) -> Self {
+        Self {
+            choice: choice.clone(),
+            file: file.clone(),
+        }
+    }
+}
+
 /// What some file in the chain wrote for one language.
 #[derive(Debug, Clone, Default)]
 struct Table {
     /// The language's table is written.
     written: bool,
-    /// The nearest `formatter` written.
-    formatter: Option<String>,
-    /// The nearest `linter` written.
-    linter: Option<String>,
+    /// The nearest `formatter` written, whole: a nearer value replaces a farther one entirely.
+    formatter: Option<Chosen>,
+    /// The nearest `linter` written, whole: a nearer value replaces a farther one entirely.
+    linter: Option<Chosen>,
     /// The nearest mode written for each tool, by the tool's name.
     modes: Vec<(&'static str, Mode)>,
     /// Every tool table written in any layer, nearest first: the tool's name, the file that
@@ -397,8 +676,12 @@ impl Table {
         }
         Self {
             written: true,
-            formatter: self.formatter.or(selection.formatter.map(str::to_owned)),
-            linter: self.linter.or(selection.linter.map(str::to_owned)),
+            formatter: self
+                .formatter
+                .or_else(|| selection.formatter.map(|choice| Chosen::new(choice, file))),
+            linter: self
+                .linter
+                .or_else(|| selection.linter.map(|choice| Chosen::new(choice, file))),
             modes,
             tables,
         }
@@ -410,22 +693,47 @@ impl Table {
         self.tables.iter().find_map(|(name, file, span)| {
             let tool = CARTRIDGES.iter().find(|tool| tool.name == *name)?;
             let (key, written) = match tool.step() {
-                Step::Format => ("formatter", self.formatter.as_deref()),
-                Step::Lint => ("linter", self.linter.as_deref()),
+                Step::Format => ("formatter", self.formatter.as_ref()),
+                Step::Lint => ("linter", self.linter.as_ref()),
             };
-            let selected = written.map_or_else(
-                || tools::default_for(language, tool.step()),
-                |written| tools::named(language, tool.step(), written),
-            );
-            (selected.map(|tool| tool.name) != Some(tool.name)).then(|| Unselected {
+            let selected =
+                match written.map(|chosen| &chosen.choice) {
+                    None => tools::default_for(language, tool.step())
+                        .map(|tool| Selected::Known(tool.name)),
+                    Some(Choice::Known(name)) => tools::named(language, tool.step(), name)
+                        .map(|tool| Selected::Known(tool.name)),
+                    Some(Choice::Command(command)) => Some(Selected::Command {
+                        program: command.program.clone(),
+                    }),
+                };
+            (selected != Some(Selected::Known(tool.name))).then(|| Unselected {
                 file: file.clone(),
                 span: span.clone(),
                 language: language.table(),
                 tool: tool.name,
                 key,
-                selected: selected.map(|tool| tool.name),
+                selected,
             })
         })
+    }
+
+    /// The custom command this table's merged `formatter`, else `linter`, selects, if any.
+    fn unwired(&self, language: Language) -> Option<Unwired> {
+        [("formatter", &self.formatter), ("linter", &self.linter)]
+            .into_iter()
+            .find_map(|(key, chosen)| {
+                let chosen = chosen.as_ref()?;
+                let Choice::Command(command) = &chosen.choice else {
+                    return None;
+                };
+                Some(Unwired {
+                    file: chosen.file.clone(),
+                    span: command.span.clone(),
+                    language: language.table(),
+                    key,
+                    program: command.program.clone(),
+                })
+            })
     }
 }
 
@@ -456,6 +764,38 @@ struct Languages {
     dialect: Option<Dialect>,
     /// The nearest Rust `edition` written.
     edition: Option<Edition>,
+}
+
+impl Languages {
+    /// Every language, in the order the chain's checks report them.
+    const ORDER: [Language; 10] = [
+        Language::Rust,
+        Language::Shell,
+        Language::Python,
+        Language::TypeScript,
+        Language::JavaScript,
+        Language::Json,
+        Language::Yaml,
+        Language::Toml,
+        Language::Markdown,
+        Language::Go,
+    ];
+
+    /// `language`'s table as written.
+    const fn table(&self, language: Language) -> &Table {
+        match language {
+            Language::Rust => &self.rust,
+            Language::Shell => &self.shell,
+            Language::Python => &self.python,
+            Language::Markdown => &self.markdown,
+            Language::TypeScript => &self.typescript,
+            Language::JavaScript => &self.javascript,
+            Language::Json => &self.json,
+            Language::Yaml => &self.yaml,
+            Language::Toml => &self.toml,
+            Language::Go => &self.go,
+        }
+    }
 }
 
 /// The `[features.code-blocks]` table, exactly as written. Any other key inside it is refused as
@@ -518,28 +858,28 @@ impl Written {
     ///
     /// # Errors
     ///
-    /// The first tool table, Rust, shell, Python, TypeScript, JavaScript, JSON, YAML, TOML,
-    /// Markdown then Go, whose tool the merged chain doesn't select.
+    /// [`ConfigError::ToolNotSelected`] for the first tool table, Rust, shell, Python,
+    /// TypeScript, JavaScript, JSON, YAML, TOML, Markdown then Go, whose tool the merged chain
+    /// doesn't select. Then, once the whole chain is valid, [`ConfigError::CustomCommandNotWired`]
+    /// for the first custom command it selects, in the same order: custom commands are not
+    /// wired to run yet.
     pub(super) fn resolve(
         self,
         include: &AnchoredPatterns,
         exclude: Option<&AnchoredPatterns>,
-    ) -> Result<CodeBlocks, Unselected> {
+    ) -> Result<CodeBlocks, ConfigError> {
         let languages = &self.languages;
-        let unselected = languages
-            .rust
-            .unselected(Language::Rust)
-            .or_else(|| languages.shell.unselected(Language::Shell))
-            .or_else(|| languages.python.unselected(Language::Python))
-            .or_else(|| languages.typescript.unselected(Language::TypeScript))
-            .or_else(|| languages.javascript.unselected(Language::JavaScript))
-            .or_else(|| languages.json.unselected(Language::Json))
-            .or_else(|| languages.yaml.unselected(Language::Yaml))
-            .or_else(|| languages.toml.unselected(Language::Toml))
-            .or_else(|| languages.markdown.unselected(Language::Markdown))
-            .or_else(|| languages.go.unselected(Language::Go));
-        if let Some(unselected) = unselected {
-            return Err(unselected);
+        if let Some(table) = Languages::ORDER
+            .into_iter()
+            .find_map(|language| languages.table(language).unselected(language))
+        {
+            return Err(ConfigError::ToolNotSelected { table });
+        }
+        if let Some(command) = Languages::ORDER
+            .into_iter()
+            .find_map(|language| languages.table(language).unwired(language))
+        {
+            return Err(ConfigError::CustomCommandNotWired { command });
         }
         Ok(CodeBlocks {
             include: self.include.unwrap_or_else(|| include.clone()),
@@ -576,16 +916,26 @@ impl CodeBlocks {
         self.tier
     }
 
-    /// `language`'s `formatter` key: `None` selects its default formatter.
+    /// The known tool `language`'s `formatter` key names: `None` selects its default formatter.
+    /// It never holds a custom command: [`Written::resolve`] refuses one until custom commands
+    /// are wired to run.
     #[must_use]
     pub(crate) fn formatter(&self, language: Language) -> Option<&str> {
-        self.table(language).formatter.as_deref()
+        self.table(language)
+            .formatter
+            .as_ref()
+            .and_then(|chosen| chosen.choice.known())
     }
 
-    /// `language`'s `linter` key: `None` selects its default linter.
+    /// The known tool `language`'s `linter` key names: `None` selects its default linter. It
+    /// never holds a custom command: [`Written::resolve`] refuses one until custom commands are
+    /// wired to run.
     #[must_use]
     pub(crate) fn linter(&self, language: Language) -> Option<&str> {
-        self.table(language).linter.as_deref()
+        self.table(language)
+            .linter
+            .as_ref()
+            .and_then(|chosen| chosen.choice.known())
     }
 
     /// The mode of `tool`'s step for `language`: the nearest one written in
@@ -614,18 +964,7 @@ impl CodeBlocks {
 
     /// `language`'s table as written.
     const fn table(&self, language: Language) -> &Table {
-        match language {
-            Language::Rust => &self.languages.rust,
-            Language::Shell => &self.languages.shell,
-            Language::Python => &self.languages.python,
-            Language::Markdown => &self.languages.markdown,
-            Language::TypeScript => &self.languages.typescript,
-            Language::JavaScript => &self.languages.javascript,
-            Language::Json => &self.languages.json,
-            Language::Yaml => &self.languages.yaml,
-            Language::Toml => &self.languages.toml,
-            Language::Go => &self.languages.go,
-        }
+        self.languages.table(language)
     }
 
     /// Whether code-blocks reads `path`: included and not excluded.
@@ -1022,10 +1361,275 @@ mod tests {
     }
 
     #[test]
-    fn a_custom_command_table_is_refused_until_trust_exists() {
-        let message = refused("shell", "formatter = { command = [\"shfmt\"] }");
+    fn a_valid_custom_formatter_command_is_read_then_refused_as_not_wired_yet() {
+        let error = load_error(
+            "[features.code-blocks.python]\n\
+             formatter = { command = [\"ruff\", \"format\", \"--stdin-filename\", \"{path}\", \"-\"] }\n",
+        );
 
-        assert!(message.contains("needs trust"), "got {message}");
+        assert_eq!(error.code(), "config-parse", "got {error:?}");
+        assert_eq!(error.status(), ExitStatus::Config);
+        let message = error.to_string();
+        assert!(
+            message.contains(
+                "`formatter` in `[features.code-blocks.python]` is the custom command `ruff`, \
+                 but custom commands are not wired yet"
+            ),
+            "got {message}"
+        );
+        let help = error.help().expect("the refusal should say what to do");
+        assert!(
+            help.contains("Remove `formatter` from `[features.code-blocks.python]`"),
+            "got {help}"
+        );
+    }
+
+    #[test]
+    fn a_program_with_control_characters_is_escaped_in_the_message() {
+        let error = load_error(
+            "[features.code-blocks.shell]\nformatter = { command = [\"fmt\\u001b[31m\"] }\n",
+        );
+
+        let message = error.to_string();
+        assert!(
+            message.contains("`fmt\\u{1b}[31m`") && !message.contains('\u{1b}'),
+            "the escape byte should be shown escaped, never raw: {message:?}"
+        );
+    }
+
+    #[test]
+    fn a_custom_command_array_is_refused_naming_the_rule_it_breaks() {
+        let long = "a".repeat(4097);
+        let many = vec!["\"a\""; 65].join(", ");
+        let cases = [
+            (
+                "python",
+                "formatter = { command = \"ruff format -\" }".to_owned(),
+                "use an array, it is not run through a shell",
+            ),
+            (
+                "python",
+                "formatter = { command = 3 }".to_owned(),
+                "must be an array of strings",
+            ),
+            (
+                "python",
+                "formatter = { command = [] }".to_owned(),
+                "`command` is empty",
+            ),
+            (
+                "python",
+                format!("formatter = {{ command = [{many}] }}"),
+                "`command` has 65 elements; at most 64 are allowed",
+            ),
+            (
+                "python",
+                "formatter = { command = [\"fmt\", 3] }".to_owned(),
+                "element 2 of `command` must be a string, not a TOML integer",
+            ),
+            (
+                "python",
+                "formatter = { command = [\"fmt\", \"\"] }".to_owned(),
+                "element 2 of `command` is 0 bytes; each must be 1 to 4096 bytes",
+            ),
+            (
+                "python",
+                format!("formatter = {{ command = [\"fmt\", \"{long}\"] }}"),
+                "element 2 of `command` is 4097 bytes",
+            ),
+            (
+                "python",
+                "formatter = { command = [\"fmt\", \"a\\u0000b\"] }".to_owned(),
+                "element 2 of `command` holds a NUL byte",
+            ),
+            (
+                "python",
+                "formatter = { command = [\"fmt\", \"--file={file}\"] }".to_owned(),
+                "`{file}` in element 2 of `command` isn't a placeholder; `{path}` is the only one",
+            ),
+            (
+                "python",
+                "formatter = { command = [\"{path}\"] }".to_owned(),
+                "the program, `command`'s first element, can't hold `{path}`",
+            ),
+            (
+                "python",
+                "formatter = { command = [\" \"] }".to_owned(),
+                "the program, `command`'s first element, is blank",
+            ),
+        ];
+
+        for (table, line, expected) in cases {
+            let message = refused(table, &line);
+
+            assert!(
+                message.contains(expected),
+                "`{line}` should be refused with {expected:?}, got {message}"
+            );
+            assert!(
+                !message.contains("not wired yet"),
+                "an invalid command should be refused for its own rule: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_custom_command_table_with_a_wrong_key_is_refused_naming_the_keys_it_takes() {
+        let cases = [
+            (
+                "python",
+                "formatter = { command = [\"fmt\"], diagnostics = \"gnu\" }".to_owned(),
+                "`diagnostics` applies only to a custom linter",
+            ),
+            (
+                "python",
+                "linter = { command = [\"lint\"], diagnostics = \"json\" }".to_owned(),
+                "`diagnostics = \"json\"` isn't supported; write `diagnostics = \"gnu\"`",
+            ),
+            (
+                "python",
+                "linter = { command = [\"lint\"], diagnostics = true }".to_owned(),
+                "`diagnostics = true` isn't supported",
+            ),
+            (
+                "python",
+                "formatter = { command = [\"fmt\"], cwd = \".\" }".to_owned(),
+                "`cwd` isn't a key of a custom formatter command; it takes only `command`",
+            ),
+            (
+                "python",
+                "linter = { command = [\"lint\"], env = {} }".to_owned(),
+                "`env` isn't a key of a custom linter command; it takes only `command` and \
+                 `diagnostics`",
+            ),
+            (
+                "python",
+                "linter = { diagnostics = \"gnu\" }".to_owned(),
+                "a custom linter command needs `command`",
+            ),
+        ];
+
+        for (table, line, expected) in cases {
+            let message = refused(table, &line);
+
+            assert!(
+                message.contains(expected),
+                "`{line}` should be refused with {expected:?}, got {message}"
+            );
+            assert!(
+                !message.contains("not wired yet"),
+                "an invalid command should be refused for its own rule: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_nearest_file_wins_for_the_whole_command_value() {
+        let parent = "[features.code-blocks.python]\n\
+                      formatter = { command = [\"parent-fmt\"] }\n\
+                      linter = { command = [\"parent-lint\"], diagnostics = \"gnu\" }\n";
+        let known = tree(&[
+            ("supdoc.config.toml", parent),
+            (
+                "apps/web/supdoc.config.toml",
+                "extends = \"../../supdoc.config.toml\"\n\
+                 [features.code-blocks.python]\nformatter = \"black\"\nlinter = \"ruff\"\n",
+            ),
+        ]);
+        let command = tree(&[
+            ("supdoc.config.toml", parent),
+            (
+                "apps/web/supdoc.config.toml",
+                "extends = \"../../supdoc.config.toml\"\n\
+                 [features.code-blocks.python]\nlinter = { command = [\"child-lint\"] }\n",
+            ),
+        ]);
+
+        let config = Config::load(&at(&known, "apps/web"))
+            .expect("the child's known tools should replace the parent's commands");
+        let error = Config::load(&at(&command, "apps/web"))
+            .expect_err("the child's command should still be refused");
+
+        let code_blocks = config.code_blocks().expect("the table is written");
+        assert_eq!(code_blocks.formatter(Language::Python), Some("black"));
+        assert_eq!(code_blocks.linter(Language::Python), Some("ruff"));
+        assert_eq!(error.code(), "config-parse", "got {error:?}");
+        let message = error.to_string();
+        assert!(
+            message.contains("parent-fmt"),
+            "the parent's formatter command is refused first: {message}"
+        );
+        let linter_only = tree(&[
+            (
+                "supdoc.config.toml",
+                "[features.code-blocks.python]\n\
+                 linter = { command = [\"parent-lint\"], diagnostics = \"gnu\" }\n",
+            ),
+            (
+                "apps/web/supdoc.config.toml",
+                "extends = \"../../supdoc.config.toml\"\n\
+                 [features.code-blocks.python]\nlinter = { command = [\"child-lint\"] }\n",
+            ),
+        ]);
+        let message = Config::load(&at(&linter_only, "apps/web"))
+            .expect_err("the child's command should still be refused")
+            .to_string();
+        assert!(
+            message.contains("apps/web/supdoc.config.toml")
+                && message.contains("the custom command `child-lint`")
+                && !message.contains("parent-lint"),
+            "the child's whole value should win: {message}"
+        );
+    }
+
+    #[test]
+    fn a_known_tool_table_beside_a_command_is_refused_naming_the_command() {
+        let error = load_error(
+            "[features.code-blocks.python]\nformatter = { command = [\"my-fmt\"] }\n\
+             [features.code-blocks.python.ruff-format]\nformat = \"off\"\n",
+        );
+
+        assert_eq!(error.code(), "config-parse", "got {error:?}");
+        assert_eq!(error.status(), ExitStatus::Config);
+        let message = error.to_string();
+        assert!(
+            message.contains(
+                "`[features.code-blocks.python.ruff-format]` sets options for `ruff-format`, but \
+                 the python formatter the config chain selects is the custom command `my-fmt`"
+            ),
+            "got {message}"
+        );
+        let help = error.help().expect("the refusal should say what to do");
+        assert_eq!(
+            help,
+            "Remove `[features.code-blocks.python.ruff-format]`, since a custom command takes no \
+             tool table, or select the tool with `formatter = \"ruff-format\"` in \
+             `[features.code-blocks.python]`"
+        );
+    }
+
+    #[test]
+    fn a_known_tool_table_beside_another_known_tool_keeps_its_message() {
+        let error = load_error(
+            "[features.code-blocks.python]\nformatter = \"black\"\n\
+             [features.code-blocks.python.ruff-format]\nformat = \"off\"\n",
+        );
+
+        let message = error.to_string();
+        assert!(
+            message.ends_with(
+                "`[features.code-blocks.python.ruff-format]` sets options for `ruff-format`, but \
+                 the python formatter the config chain selects is `black`"
+            ),
+            "got {message}"
+        );
+        assert_eq!(
+            error.help().as_deref(),
+            Some(
+                "Select it with `formatter = \"ruff-format\"` in `[features.code-blocks.python]`, \
+                 or move the options to `[features.code-blocks.python.black]`"
+            )
+        );
     }
 
     #[test]
@@ -1096,11 +1700,23 @@ mod tests {
     }
 
     #[test]
-    fn a_custom_linter_command_table_or_true_is_refused() {
-        let command = refused("rust", "linter = { command = [\"clippy\"] }");
-        let _true = refused("rust", "linter = true");
+    fn a_valid_custom_linter_command_is_read_then_refused_and_true_is_refused() {
+        let command = refused(
+            "rust",
+            "linter = { command = [\"lint\", \"{path}\"], diagnostics = \"gnu\" }",
+        );
+        let removed = refused("rust", "linter = true");
 
-        assert!(command.contains("needs trust"), "got {command}");
+        assert!(
+            command
+                .contains("`linter` in `[features.code-blocks.rust]` is the custom command `lint`")
+                && command.contains("not wired yet"),
+            "got {command}"
+        );
+        assert!(
+            removed.contains("`linter = true` is removed"),
+            "got {removed}"
+        );
     }
 
     #[test]

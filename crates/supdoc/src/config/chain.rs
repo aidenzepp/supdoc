@@ -428,8 +428,7 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Result<Config, Co
         .unwrap_or_else(|| AnchoredPatterns::built_in(root.clone(), PatternList::everything()));
     let code_blocks = code_blocks
         .map(|written| written.resolve(&include, exclude.as_ref()))
-        .transpose()
-        .map_err(|table| ConfigError::ToolNotSelected { table })?;
+        .transpose()?;
     Ok(Config {
         root,
         real_root,

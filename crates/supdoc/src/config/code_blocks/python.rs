@@ -1,6 +1,6 @@
 //! `[features.code-blocks.python]`: the table that turns checking Python code blocks on.
 
-use super::{Language, Selection, ToolTable, deserialize_choice, deserialize_tool};
+use super::{Choice, Language, Selection, ToolTable, deserialize_choice, deserialize_tool};
 use crate::code_blocks::tools::Step;
 
 /// The Python formatters supdoc knows.
@@ -15,12 +15,12 @@ const LINTERS: &[&str] = &["ruff"];
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawPython {
-    /// `"ruff-format"` or `"black"`; unset takes the default.
+    /// `"ruff-format"`, `"black"` or a custom `{ command = [...] }`; unset takes the default.
     #[serde(default, deserialize_with = "formatter")]
-    pub(super) formatter: Option<String>,
-    /// `"ruff"`; unset takes the default.
+    pub(super) formatter: Option<Choice>,
+    /// `"ruff"`, or a custom `{ command = [...], diagnostics = "gnu" }`; unset takes the default.
     #[serde(default, deserialize_with = "linter")]
-    pub(super) linter: Option<String>,
+    pub(super) linter: Option<Choice>,
     /// `[features.code-blocks.python.ruff-format]`, when written.
     #[serde(default, rename = "ruff-format", deserialize_with = "ruff_format")]
     pub(super) ruff_format: Option<ToolTable>,
@@ -36,8 +36,8 @@ pub(crate) struct RawPython {
 ///
 /// # Errors
 ///
-/// The deserializer's error for any value but a known name.
-fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+/// The deserializer's error for any value but a known name or a valid custom command.
+fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D::Error> {
     deserialize_choice(d, Language::Python, Step::Format, KNOWN)
 }
 
@@ -45,8 +45,8 @@ fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D
 ///
 /// # Errors
 ///
-/// The deserializer's error for any value but `"ruff"`.
-fn linter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+/// The deserializer's error for any value but `"ruff"` or a valid custom command.
+fn linter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D::Error> {
     deserialize_choice(d, Language::Python, Step::Lint, LINTERS)
 }
 
@@ -81,8 +81,8 @@ impl RawPython {
     /// What this table selects and the tool tables it writes.
     pub(super) fn selection(&self) -> Selection<'_> {
         Selection {
-            formatter: self.formatter.as_deref(),
-            linter: self.linter.as_deref(),
+            formatter: self.formatter.as_ref(),
+            linter: self.linter.as_ref(),
             tools: [
                 ("ruff-format", &self.ruff_format),
                 ("black", &self.black),
