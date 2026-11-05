@@ -4,7 +4,7 @@ These patterns create green tests without trustworthy evidence or failures witho
 
 ## Opaque Failure Messages
 
-```rust ignore(statements only: three opaque-failure lines from a test body)
+```rust fragment(statements) lint(off: needs crate context)
 let config = load_fixture().expect("failed");
 let first = values.first().unwrap();
 assert!(output.status.success());
@@ -18,15 +18,15 @@ Problems:
 
 ## Repeating the Source Error
 
-```rust ignore(one statement showing a panic that repeats the source error)
+```rust fragment(statements) lint(off: needs crate context)
 let value = parse_fixture().unwrap_or_else(|error| panic!("{error}"));
 ```
 
 The panic repeats the source error without explaining why parsing should have succeeded. Prefer:
 
-```rust ignore(one statement: the preferred expect for the panic shown above)
-let value = parse_fixture()
-    .expect("the checked-in fixture should satisfy the current parser contract");
+```rust fragment(statements) lint(off: needs crate context)
+let value =
+    parse_fixture().expect("the checked-in fixture should satisfy the current parser contract");
 ```
 
 ## Testing the Implementation Path
@@ -113,9 +113,8 @@ That does not prove the behavior is missing or broken. RED is valid only when th
 
 ## Hidden Machine State
 
-```rust ignore(one statement showing a test that reads a machine-specific path)
-let config = std::fs::read_to_string("/Users/me/.config/app.toml")
-    .expect("config should exist");
+```rust fragment(statements) lint(off: needs crate context)
+let config = std::fs::read_to_string("/Users/me/.config/app.toml").expect("config should exist");
 ```
 
 This test depends on one machine and may read real user data. Use an isolated temporary directory with an explicit fixture.
@@ -141,7 +140,7 @@ Follow the policy-change procedure in `AGENTS.md` if the rule is genuinely wrong
 
 ## Over-Abstracted Setup
 
-```rust ignore(one statement showing setup hidden behind a helper)
+```rust fragment(statements) lint(off: needs crate context)
 let context = standard_context();
 ```
 

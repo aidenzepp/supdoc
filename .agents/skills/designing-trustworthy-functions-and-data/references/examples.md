@@ -192,7 +192,7 @@ The first operation only traverses values. The second honestly asks for contiguo
 
 ## Use a Cohesive Parameter Object
 
-```rust ignore(the struct is followed by a top-level set_timer call, which only parses inside a fn)
+```rust fragment(statements) lint(off: needs crate context)
 struct TimerOptions {
     id: TimerId,
     interval: Duration,

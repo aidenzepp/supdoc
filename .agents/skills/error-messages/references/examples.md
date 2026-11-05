@@ -141,7 +141,7 @@ Prefer distinct, structured violations over one generic validation message.
 
 Weak:
 
-```ts
+```ts fragment(statements)
 return res.status(400).json({
   error: "Invalid request",
 });
@@ -149,7 +149,7 @@ return res.status(400).json({
 
 Better:
 
-```ts
+```ts fragment(statements)
 return res.status(400).json({
   error: {
     code: "INVALID_ARGUMENT",

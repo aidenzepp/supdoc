@@ -159,7 +159,7 @@ A callback is one explicit consumer-injection shape. In Rust, an iterator often 
 
 ### Non-example
 
-```rust ignore(the impl is followed by a top-level populate call, which only parses inside a fn)
+```rust fragment(statements) lint(off: needs crate context)
 impl ParticleWorld {
     fn populate(&mut self, count: usize) {
         let mut rng = rand::rng();
@@ -183,13 +183,9 @@ world.populate(42);
 
 ### Honest Rust version
 
-```rust ignore(the impl is followed by the seeded call site, which only parses inside a fn returning Result)
+```rust fragment(statements) lint(off: needs crate context)
 impl ParticleWorld {
-    fn populate<R: Rng + ?Sized>(
-        &mut self,
-        count: usize,
-        rng: &mut R,
-    ) {
+    fn populate<R: Rng + ?Sized>(&mut self, count: usize, rng: &mut R) {
         self.particles.extend(
             std::iter::repeat_with(|| Particle {
                 position: random_vec3(rng),
@@ -201,15 +197,14 @@ impl ParticleWorld {
     }
 }
 
-let mut rng = ChaCha12Rng::try_from_os_rng()
-    .map_err(PopulateError::EntropyUnavailable)?;
+let mut rng = ChaCha12Rng::try_from_os_rng().map_err(PopulateError::EntropyUnavailable)?;
 let mut world = ParticleWorld::default();
 world.populate(42, &mut rng);
 ```
 
 Production selects an unpredictable seed at the boundary and exposes entropy acquisition failure. Tests, simulations, and bug reproductions select a known seed with a named portable algorithm:
 
-```rust ignore(test body only: seeding, populate and the assertion belong to an unshown test fn)
+```rust fragment(statements) lint(off: needs crate context)
 let mut rng = ChaCha12Rng::seed_from_u64(0x5EED);
 let mut world = ParticleWorld::default();
 
@@ -224,7 +219,7 @@ This is dependency injection without a DI framework or repository-specific RNG t
 
 ### Non-example
 
-```rust ignore(one call-site expression showing positional primitives and Booleans)
+```rust fragment(statements) lint(off: needs crate context)
 set_timer(None, "refresh", 5.0, true, false, true)?;
 ```
 
@@ -232,7 +227,7 @@ The call site does not identify the time unit or what any Boolean means.
 
 ### Better
 
-```rust ignore(one call-site expression; set_timer and TimerOptions are defined elsewhere)
+```rust fragment(statements) lint(off: needs crate context)
 set_timer(TimerOptions {
     context: None,
     id: TimerId::new("refresh")?,
@@ -289,7 +284,7 @@ Do not choose the weakest type merely because it compiles. Ask for `&[T]`, `Vec<
 
 ### Non-example
 
-```rust ignore(call-site statements showing the initialize-before-run ordering hazard)
+```rust fragment(statements) lint(off: needs crate context)
 let mut system = System::new();
 system.initialize()?;
 
@@ -339,16 +334,12 @@ fn update_shared_state() {
 
 ### Better
 
-```rust ignore(the fn is followed by its call site, which only parses inside a fn returning Result)
-fn update_shared_state(
-    state: &mut MutexGuard<'_, SharedState>,
-) {
+```rust fragment(statements) lint(off: needs crate context)
+fn update_shared_state(state: &mut MutexGuard<'_, SharedState>) {
     state.advance();
 }
 
-let mut state = shared_state
-    .lock()
-    .map_err(|_| UpdateError::LockPoisoned)?;
+let mut state = shared_state.lock().map_err(|_| UpdateError::LockPoisoned)?;
 update_shared_state(&mut state);
 ```
 
