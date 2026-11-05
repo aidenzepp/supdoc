@@ -1,6 +1,6 @@
 //! `[features.code-blocks.shell]`: the table that turns checking shell code blocks on.
 
-use super::{Language, Selection, ToolTable, deserialize_choice, deserialize_tool};
+use super::{Choice, Language, Selection, ToolTable, deserialize_choice, deserialize_tool};
 use crate::code_blocks::tools::Step;
 
 /// The shell formatters supdoc knows.
@@ -40,12 +40,12 @@ impl Dialect {
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawShell {
-    /// `"shfmt"`; unset takes the default.
+    /// `"shfmt"`, or a custom `{ command = [...] }`; unset takes the default.
     #[serde(default, deserialize_with = "formatter")]
-    pub(super) formatter: Option<String>,
-    /// `"shellcheck"`; unset takes the default.
+    pub(super) formatter: Option<Choice>,
+    /// `"shellcheck"`, or a custom `{ command = [...], diagnostics = "gnu" }`; unset takes the default.
     #[serde(default, deserialize_with = "linter")]
-    pub(super) linter: Option<String>,
+    pub(super) linter: Option<Choice>,
     /// `bash`, `posix` or `mksh`; unset is `bash`.
     pub(super) dialect: Option<Dialect>,
     /// `[features.code-blocks.shell.shfmt]`, when written.
@@ -60,8 +60,8 @@ pub(crate) struct RawShell {
 ///
 /// # Errors
 ///
-/// The deserializer's error for any value but `"shfmt"`.
-fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+/// The deserializer's error for any value but `"shfmt"` or a valid custom command.
+fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D::Error> {
     deserialize_choice(d, Language::Shell, Step::Format, KNOWN)
 }
 
@@ -69,8 +69,8 @@ fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D
 ///
 /// # Errors
 ///
-/// The deserializer's error for any value but `"shellcheck"`.
-fn linter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+/// The deserializer's error for any value but `"shellcheck"` or a valid custom command.
+fn linter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D::Error> {
     deserialize_choice(d, Language::Shell, Step::Lint, LINTERS)
 }
 
@@ -96,8 +96,8 @@ impl RawShell {
     /// What this table selects and the tool tables it writes.
     pub(super) fn selection(&self) -> Selection<'_> {
         Selection {
-            formatter: self.formatter.as_deref(),
-            linter: self.linter.as_deref(),
+            formatter: self.formatter.as_ref(),
+            linter: self.linter.as_ref(),
             tools: [("shfmt", &self.shfmt), ("shellcheck", &self.shellcheck)]
                 .into_iter()
                 .filter_map(|(name, table)| Some((name, table.as_ref()?)))

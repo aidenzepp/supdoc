@@ -4,7 +4,7 @@ use std::fmt;
 use std::io::ErrorKind;
 use std::ops::Range;
 
-use super::code_blocks::Unselected;
+use super::code_blocks::{Selected, Unselected, Unwired};
 use crate::exit::ExitStatus;
 use crate::lock::error::shell_quote;
 use crate::namespace::NamespaceName;
@@ -130,6 +130,14 @@ pub(crate) enum ConfigError {
         table: Unselected,
     },
 
+    /// The merged `extends` chain selects a custom `{ command = [...] }` that is valid in full,
+    /// but custom commands are not wired to run yet. It shares `config-parse`'s code: it is a
+    /// value the config can't use yet, judged once the whole chain is valid.
+    CustomCommandNotWired {
+        /// The command, the file that wrote it, and the key that selects it.
+        command: Unwired,
+    },
+
     /// A chain of `extends` comes back to a file it already visited.
     ExtendsLoop {
         /// The files in the loop, in order. The last is the first again.
@@ -159,7 +167,9 @@ impl ConfigError {
             Self::NotFound { .. } => "config-not-found",
             Self::Read { .. } => "config-read",
             Self::TooLarge { .. } => "config-too-large",
-            Self::Parse { .. } | Self::ToolNotSelected { .. } => "config-parse",
+            Self::Parse { .. }
+            | Self::ToolNotSelected { .. }
+            | Self::CustomCommandNotWired { .. } => "config-parse",
             Self::ExtendsMissing { .. } => "config-extends-missing",
             Self::ExtendsDirectory { .. } => "config-extends-directory",
             Self::ExtendsLoop { .. } => "config-extends-loop",
@@ -191,14 +201,22 @@ impl ConfigError {
             Self::Parse { path, error } => format!("{}: {}", show(path), error.message()),
             Self::ToolNotSelected { table } => format!(
                 "{}: `[features.code-blocks.{}.{}]` sets options for `{}`, but the {} {} the \
-                 config chain selects is `{}`",
+                 config chain selects is {}",
                 show(&table.file),
                 table.language,
                 table.tool,
                 table.tool,
                 table.language,
                 table.key,
-                table.selected.unwrap_or("none"),
+                selected_text(table.selected.as_ref()),
+            ),
+            Self::CustomCommandNotWired { command } => format!(
+                "{}: `{}` in `[features.code-blocks.{}]` is the custom command `{}`, but custom \
+                 commands are not wired yet",
+                show(&command.file),
+                command.key,
+                command.language,
+                command.program.escape_debug(),
             ),
             Self::ExtendsMissing {
                 file,
@@ -308,13 +326,32 @@ impl ConfigError {
                 ))
             }
             Self::Parse { error, .. } => parse_help(error.message()),
-            Self::ToolNotSelected { table } => Some(format!(
-                "Select it with `{key} = \"{tool}\"` in `[features.code-blocks.{language}]`, or \
-                 move the options to `[features.code-blocks.{language}.{selected}]`",
-                key = table.key,
-                tool = table.tool,
-                language = table.language,
-                selected = table.selected.unwrap_or("<tool>"),
+            Self::ToolNotSelected { table } => Some(match &table.selected {
+                Some(Selected::Command { .. }) => format!(
+                    "Remove `[features.code-blocks.{language}.{tool}]`, since a custom command \
+                     takes no tool table, or select the tool with `{key} = \"{tool}\"` in \
+                     `[features.code-blocks.{language}]`",
+                    key = table.key,
+                    tool = table.tool,
+                    language = table.language,
+                ),
+                selected => format!(
+                    "Select it with `{key} = \"{tool}\"` in `[features.code-blocks.{language}]`, \
+                     or move the options to `[features.code-blocks.{language}.{selected}]`",
+                    key = table.key,
+                    tool = table.tool,
+                    language = table.language,
+                    selected = match selected {
+                        Some(Selected::Known(name)) => name,
+                        _ => "<tool>",
+                    },
+                ),
+            }),
+            Self::CustomCommandNotWired { command } => Some(format!(
+                "Remove `{key}` from `[features.code-blocks.{language}]` to use the default tool, \
+                 or set it to a known tool's name",
+                key = command.key,
+                language = command.language,
             )),
             Self::ExtendsMissing { resolved, .. } => {
                 let resolved = shell_quote(&show(resolved));
@@ -377,12 +414,26 @@ impl ConfigError {
             | Self::TooLarge { .. }
             | Self::Parse { .. }
             | Self::ToolNotSelected { .. }
+            | Self::CustomCommandNotWired { .. }
             | Self::ExtendsMissing { .. }
             | Self::ExtendsDirectory { .. }
             | Self::ExtendsLoop { .. }
             | Self::ExtendsNotConfig { .. }
             | Self::SymlinkNotConfig { .. }
             | Self::NamespaceOutsideRoot { .. } => ExitStatus::Config,
+        }
+    }
+}
+
+/// What an unselected tool table's chain selects instead, as its message names it: a known
+/// tool's name or `none` in backticks, or the custom command, its program escaped so a control
+/// character can't reach the terminal.
+fn selected_text(selected: Option<&Selected>) -> String {
+    match selected {
+        None => "`none`".to_owned(),
+        Some(Selected::Known(name)) => format!("`{name}`"),
+        Some(Selected::Command { program }) => {
+            format!("the custom command `{}`", program.escape_debug())
         }
     }
 }

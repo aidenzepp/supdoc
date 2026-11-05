@@ -1,6 +1,6 @@
 //! `[features.code-blocks.rust]`: the table that turns checking Rust code blocks on.
 
-use super::{Language, Selection, ToolTable, deserialize_choice, deserialize_tool};
+use super::{Choice, Language, Selection, ToolTable, deserialize_choice, deserialize_tool, shown};
 use crate::code_blocks::tools::Step;
 
 /// The Rust formatters supdoc knows.
@@ -53,12 +53,12 @@ impl Edition {
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawRust {
-    /// `"rustfmt"`; unset takes the default.
+    /// `"rustfmt"`, or a custom `{ command = [...] }`; unset takes the default.
     #[serde(default, deserialize_with = "formatter")]
-    pub(super) formatter: Option<String>,
-    /// `"clippy"`; unset takes the default.
+    pub(super) formatter: Option<Choice>,
+    /// `"clippy"`, or a custom `{ command = [...], diagnostics = "gnu" }`; unset takes the default.
     #[serde(default, deserialize_with = "linter")]
-    pub(super) linter: Option<String>,
+    pub(super) linter: Option<Choice>,
     /// `"2015"`, `"2018"`, `"2021"` or `"2024"`; unset reads the root's `Cargo.toml`.
     #[serde(default, deserialize_with = "edition")]
     pub(super) edition: Option<Edition>,
@@ -86,7 +86,8 @@ fn edition<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Edition>, D:
     })?;
     Edition::from_year(&year).map(Some).ok_or_else(|| {
         D::Error::custom(format!(
-            "`{year}` isn't a Rust edition supdoc knows; write \"2015\", \"2018\", \"2021\" or \"2024\""
+            "`{}` isn't a Rust edition supdoc knows; write \"2015\", \"2018\", \"2021\" or \"2024\"",
+            shown(&year)
         ))
     })
 }
@@ -95,8 +96,8 @@ fn edition<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Edition>, D:
 ///
 /// # Errors
 ///
-/// The deserializer's error for any value but `"rustfmt"`.
-fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+/// The deserializer's error for any value but `"rustfmt"` or a valid custom command.
+fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D::Error> {
     deserialize_choice(d, Language::Rust, Step::Format, KNOWN)
 }
 
@@ -104,8 +105,8 @@ fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D
 ///
 /// # Errors
 ///
-/// The deserializer's error for any value but `"clippy"`.
-fn linter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+/// The deserializer's error for any value but `"clippy"` or a valid custom command.
+fn linter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D::Error> {
     deserialize_choice(d, Language::Rust, Step::Lint, LINTERS)
 }
 
@@ -131,8 +132,8 @@ impl RawRust {
     /// What this table selects and the tool tables it writes.
     pub(super) fn selection(&self) -> Selection<'_> {
         Selection {
-            formatter: self.formatter.as_deref(),
-            linter: self.linter.as_deref(),
+            formatter: self.formatter.as_ref(),
+            linter: self.linter.as_ref(),
             tools: [("rustfmt", &self.rustfmt), ("clippy", &self.clippy)]
                 .into_iter()
                 .filter_map(|(name, table)| Some((name, table.as_ref()?)))

@@ -1,7 +1,7 @@
 //! `[features.code-blocks.toml]`: the table that turns checking TOML code blocks on, tagged
 //! `toml`.
 
-use super::{Language, Selection, ToolTable, deserialize_choice, deserialize_tool};
+use super::{Choice, Language, Selection, ToolTable, deserialize_choice, deserialize_tool};
 use crate::code_blocks::tools::Step;
 
 /// The TOML formatters supdoc knows.
@@ -16,12 +16,12 @@ const LINTERS: &[&str] = &["tombi-lint"];
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawToml {
-    /// `"tombi-format"`; unset takes the default.
+    /// `"tombi-format"`, or a custom `{ command = [...] }`; unset takes the default.
     #[serde(default, deserialize_with = "formatter")]
-    pub(super) formatter: Option<String>,
-    /// `"tombi-lint"`; unset takes the default.
+    pub(super) formatter: Option<Choice>,
+    /// `"tombi-lint"`, or a custom `{ command = [...], diagnostics = "gnu" }`; unset takes the default.
     #[serde(default, deserialize_with = "linter")]
-    pub(super) linter: Option<String>,
+    pub(super) linter: Option<Choice>,
     /// `[features.code-blocks.toml.tombi-format]`, when written.
     #[serde(default, rename = "tombi-format", deserialize_with = "tombi_format")]
     pub(super) tombi_format: Option<ToolTable>,
@@ -34,8 +34,8 @@ pub(crate) struct RawToml {
 ///
 /// # Errors
 ///
-/// The deserializer's error for any value but `"tombi-format"`.
-fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+/// The deserializer's error for any value but `"tombi-format"` or a valid custom command.
+fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D::Error> {
     deserialize_choice(d, Language::Toml, Step::Format, KNOWN)
 }
 
@@ -43,8 +43,8 @@ fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D
 ///
 /// # Errors
 ///
-/// The deserializer's error for any value but `"tombi-lint"`.
-fn linter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+/// The deserializer's error for any value but `"tombi-lint"` or a valid custom command.
+fn linter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D::Error> {
     deserialize_choice(d, Language::Toml, Step::Lint, LINTERS)
 }
 
@@ -70,8 +70,8 @@ impl RawToml {
     /// What this table selects and the tool tables it writes.
     pub(super) fn selection(&self) -> Selection<'_> {
         Selection {
-            formatter: self.formatter.as_deref(),
-            linter: self.linter.as_deref(),
+            formatter: self.formatter.as_ref(),
+            linter: self.linter.as_ref(),
             tools: [
                 ("tombi-format", &self.tombi_format),
                 ("tombi-lint", &self.tombi_lint),

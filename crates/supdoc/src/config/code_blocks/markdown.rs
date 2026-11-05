@@ -1,6 +1,6 @@
 //! `[features.code-blocks.markdown]`: the table that turns checking Markdown code blocks on.
 
-use super::{Language, Selection, ToolTable, deserialize_choice, deserialize_tool};
+use super::{Choice, Language, Selection, ToolTable, deserialize_choice, deserialize_tool};
 use crate::code_blocks::tools::Step;
 
 /// The Markdown formatters supdoc knows.
@@ -15,12 +15,12 @@ const LINTERS: &[&str] = &["rumdl"];
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawMarkdown {
-    /// `"rumdl-format"`; unset takes the default.
+    /// `"rumdl-format"`, or a custom `{ command = [...] }`; unset takes the default.
     #[serde(default, deserialize_with = "formatter")]
-    pub(super) formatter: Option<String>,
-    /// `"rumdl"`; unset takes the default.
+    pub(super) formatter: Option<Choice>,
+    /// `"rumdl"`, or a custom `{ command = [...], diagnostics = "gnu" }`; unset takes the default.
     #[serde(default, deserialize_with = "linter")]
-    pub(super) linter: Option<String>,
+    pub(super) linter: Option<Choice>,
     /// `[features.code-blocks.markdown.rumdl-format]`, when written.
     #[serde(default, rename = "rumdl-format", deserialize_with = "rumdl_format")]
     pub(super) rumdl_format: Option<ToolTable>,
@@ -33,8 +33,8 @@ pub(crate) struct RawMarkdown {
 ///
 /// # Errors
 ///
-/// The deserializer's error for any value but `"rumdl-format"`.
-fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+/// The deserializer's error for any value but `"rumdl-format"` or a valid custom command.
+fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D::Error> {
     deserialize_choice(d, Language::Markdown, Step::Format, FORMATTERS)
 }
 
@@ -42,8 +42,8 @@ fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D
 ///
 /// # Errors
 ///
-/// The deserializer's error for any value but `"rumdl"`.
-fn linter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+/// The deserializer's error for any value but `"rumdl"` or a valid custom command.
+fn linter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D::Error> {
     deserialize_choice(d, Language::Markdown, Step::Lint, LINTERS)
 }
 
@@ -69,8 +69,8 @@ impl RawMarkdown {
     /// What this table selects and the tool tables it writes.
     pub(super) fn selection(&self) -> Selection<'_> {
         Selection {
-            formatter: self.formatter.as_deref(),
-            linter: self.linter.as_deref(),
+            formatter: self.formatter.as_ref(),
+            linter: self.linter.as_ref(),
             tools: [("rumdl-format", &self.rumdl_format), ("rumdl", &self.rumdl)]
                 .into_iter()
                 .filter_map(|(name, table)| Some((name, table.as_ref()?)))
