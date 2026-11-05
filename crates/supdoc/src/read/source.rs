@@ -4,6 +4,7 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
+use crate::cartridges::data::KeyPathBudget;
 #[cfg(test)]
 use crate::limits::Limits;
 use crate::limits::TimeLimit;
@@ -36,7 +37,8 @@ impl SourceFile {
     }
 
     /// Reads `path` from the filesystem and parses it with the cartridge `languages` picks for
-    /// the extension of the file it really is.
+    /// the extension of the file it really is. A data cartridge builds its key paths under
+    /// `key_paths`, the run's `max-key-segments` and `max-key-path-size`.
     ///
     /// A symlink is judged by the file it points at, so `env.py -> .env` is not read as Python.
     ///
@@ -54,6 +56,7 @@ impl SourceFile {
         path: AbsolutePath,
         languages: &Languages,
         limit: TimeLimit,
+        key_paths: KeyPathBudget,
     ) -> Result<Self, ReadError> {
         let real = real_file(&path);
         let Some(language) = languages.for_path(&real) else {
@@ -64,7 +67,7 @@ impl SourceFile {
             path: path.clone(),
             offset: error.utf8_error().valid_up_to(),
         })?;
-        Self::from_text(path, text, language, Deadline::start(limit))
+        Self::from_text_under(path, text, language, Deadline::start(limit), key_paths)
     }
 
     /// Whether the tree has any `ERROR` or missing node. The file is still symbolized and hashed,
@@ -344,6 +347,7 @@ mod tests {
             path.clone(),
             Languages::builtin().expect("the built-in cartridges should load"),
             Limits::PARSE_TIMEOUT,
+            KeyPathBudget::defaults(),
         )
         .expect("a small UTF-8 Rust file should read");
 
@@ -363,6 +367,7 @@ mod tests {
             path.clone(),
             Languages::builtin().expect("the built-in cartridges should load"),
             Limits::PARSE_TIMEOUT,
+            KeyPathBudget::defaults(),
         )
         .expect_err("a file with an invalid UTF-8 byte should be rejected");
 
@@ -393,6 +398,7 @@ mod tests {
             path,
             Languages::builtin().expect("the built-in cartridges should load"),
             Limits::PARSE_TIMEOUT,
+            KeyPathBudget::defaults(),
         )
         .expect_err("a file one byte over the limit should be rejected");
 
@@ -418,6 +424,7 @@ mod tests {
             path,
             Languages::builtin().expect("the built-in cartridges should load"),
             Limits::PARSE_TIMEOUT,
+            KeyPathBudget::defaults(),
         )
         .expect_err("a file that doesn't exist can't be read");
 
@@ -438,6 +445,7 @@ mod tests {
             link,
             Languages::builtin().expect("the built-in cartridges should load"),
             Limits::PARSE_TIMEOUT,
+            KeyPathBudget::defaults(),
         )
         .expect_err("a .env file behind a .py name must not be parsed as Python");
 
@@ -462,6 +470,7 @@ mod tests {
             link.clone(),
             Languages::builtin().expect("the built-in cartridges should load"),
             Limits::PARSE_TIMEOUT,
+            KeyPathBudget::defaults(),
         )
         .expect("a symlink to a Rust file should read as Rust");
 
@@ -482,6 +491,7 @@ mod tests {
             path,
             Languages::builtin().expect("the built-in cartridges should load"),
             Limits::PARSE_TIMEOUT,
+            KeyPathBudget::defaults(),
         )
         .expect_err("no cartridge reads .png files");
 
@@ -504,6 +514,7 @@ mod tests {
                 path,
                 Languages::builtin().expect("the built-in cartridges should load"),
                 Limits::PARSE_TIMEOUT,
+                KeyPathBudget::defaults(),
             );
             let _sent = sender.send(read);
         });

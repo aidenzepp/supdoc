@@ -11,6 +11,7 @@ use std::path::Path;
 use schemars::JsonSchema;
 use serde::Serialize;
 
+use crate::cartridges::data::KeyPathBudget;
 use crate::check::model::LinkReport;
 use crate::check::reconcile::reconcile_in;
 use crate::config::Config;
@@ -380,7 +381,8 @@ impl Wanted {
     ///
     /// # Errors
     ///
-    /// `read-timeout` (1) when reading the file to resolve the symbol outlasts `parse-timeout`.
+    /// `read-timeout`, `read-too-many-keys` or `read-key-paths-too-large` (1) when reading the
+    /// file to resolve the symbol outlasts `parse-timeout` or its key paths are over a ceiling.
     fn new(target: &LinkRef, config: &Config) -> Result<Self, CliError> {
         let place = Place::of(&target.target, config.root(), config);
         let symbol = match (&target.symbol, &place) {
@@ -396,8 +398,10 @@ impl Wanted {
     ///
     /// # Errors
     ///
-    /// `read-timeout` (1) when reading the file outlasts `parse-timeout`: the run never falls
-    /// back to matching text for a file it stopped reading.
+    /// `read-timeout` (1) when reading the file outlasts `parse-timeout`, and `read-too-many-keys`
+    /// or `read-key-paths-too-large` (1) when its key paths are over `max-key-segments` or
+    /// `max-key-path-size`: the run never falls back to matching text for a file it stopped
+    /// reading.
     fn resolve_symbol(
         typed: &SymbolPath,
         path: &AbsolutePath,
@@ -406,12 +410,21 @@ impl Wanted {
         let Ok(languages) = Languages::builtin() else {
             return Ok(SymbolFilter::Text(typed.clone()));
         };
-        let limit = config.limits_in_effect().parse_timeout.value;
-        let read = SourceFile::read(path.clone(), languages, limit)
-            .and_then(|file| Ok((file.language().symbols(&file)?, file)));
+        let limits = config.limits_in_effect();
+        let read = SourceFile::read(
+            path.clone(),
+            languages,
+            limits.parse_timeout.value,
+            KeyPathBudget::from_limits(limits),
+        )
+        .and_then(|file| Ok((file.language().symbols(&file)?, file)));
         let (table, file) = match read {
             Ok(read) => read,
-            Err(error @ ReadError::Timeout { .. }) => {
+            Err(
+                error @ (ReadError::Timeout { .. }
+                | ReadError::TooManyKeys { .. }
+                | ReadError::KeyPathsTooLarge { .. }),
+            ) => {
                 let shown = relative_to(config.root(), error.path());
                 return Err(CliError::new(
                     error.code(),
