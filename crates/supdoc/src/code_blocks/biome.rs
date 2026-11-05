@@ -1,4 +1,4 @@
-//! biome: the extension a tag selects, its syntax-error report, its lint diagnostics, the
+//! biome, for TypeScript, JavaScript and JSON blocks: the extension a tag selects, its syntax-error report, its lint diagnostics, the
 //! project config supdoc finds for it, and the private file a block is linted from.
 //!
 //! biome finds its config from the directory it runs in, never from the block's virtual path,
@@ -30,7 +30,8 @@ const MAX_CONFIG: u64 = 64 * 1024;
 const EMPTY_CONFIG: &str = "{}";
 
 /// The file extension biome reads a block tagged `tag` by: the tag itself when it names a
-/// module or JSX flavor (`mts`, `cts`, `tsx`, `mjs`, `cjs`, `jsx`), else `ts` or `js`.
+/// module or JSX flavor (`mts`, `cts`, `tsx`, `mjs`, `cjs`, `jsx`) or JSON (`json`, or `jsonc`,
+/// whose comments biome parses), else `ts` or `js`.
 #[must_use]
 pub(crate) fn extension(tag: &str) -> &'static str {
     match tag {
@@ -41,6 +42,8 @@ pub(crate) fn extension(tag: &str) -> &'static str {
         "cjs" => "cjs",
         "jsx" => "jsx",
         "js" | "javascript" => "js",
+        "json" => "json",
+        "jsonc" => "jsonc",
         _ => "ts",
     }
 }
@@ -59,7 +62,10 @@ pub(crate) fn parse_error(stderr: &str) -> Option<ParseError> {
     let (rest, extension) = path.rsplit_once('.')?;
     let (_, index) = rest.rsplit_once('.')?;
     let virtual_path = index.parse::<usize>().is_ok()
-        && ["ts", "mts", "cts", "tsx", "js", "mjs", "cjs", "jsx"].contains(&extension);
+        && [
+            "ts", "mts", "cts", "tsx", "js", "mjs", "cjs", "jsx", "json", "jsonc",
+        ]
+        .contains(&extension);
     virtual_path.then_some(ParseError {
         line: line.checked_sub(1),
     })
@@ -1066,6 +1072,8 @@ mod tests {
             "mjs",
             "cjs",
             "jsx",
+            "json",
+            "jsonc",
         ]
         .map(extension)
         .into();
@@ -1073,7 +1081,7 @@ mod tests {
         assert_eq!(
             picked,
             [
-                "ts", "ts", "mts", "cts", "tsx", "js", "js", "mjs", "cjs", "jsx"
+                "ts", "ts", "mts", "cts", "tsx", "js", "js", "mjs", "cjs", "jsx", "json", "jsonc"
             ]
         );
     }

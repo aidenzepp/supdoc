@@ -9,13 +9,14 @@
 //! linking reads.
 //!
 //! A language is on exactly when its table, `[features.code-blocks.rust]`, `.shell`, `.python`,
-//! `.typescript`, `.javascript` or `.markdown`, is written in some file of the chain; an empty
+//! `.typescript`, `.javascript`, `.json` or `.markdown`, is written in some file of the chain; an empty
 //! table turns it on. The language
 //! table selects tools (`formatter`, `linter`) and holds the language's own settings; each
 //! tool's options, its step's mode, live in the tool's own table,
 //! `[features.code-blocks.<language>.<tool>]`, validated by its cartridge.
 
 mod javascript;
+mod json;
 mod markdown;
 mod python;
 mod rust;
@@ -28,6 +29,7 @@ use std::ops::Range;
 use crate::path::AbsolutePath;
 
 use self::javascript::RawJavaScript;
+use self::json::RawJson;
 use self::markdown::RawMarkdown;
 use self::python::RawPython;
 pub(crate) use self::rust::Edition;
@@ -52,6 +54,8 @@ pub(crate) enum Language {
     TypeScript,
     /// JavaScript: tagged `js`, `javascript`, `mjs`, `cjs` or `jsx`.
     JavaScript,
+    /// JSON: tagged `json`, or `jsonc` for JSON that may hold comments.
+    Json,
 }
 
 impl Language {
@@ -65,11 +69,13 @@ impl Language {
             "md" | "markdown" => Some(Self::Markdown),
             "ts" | "typescript" | "mts" | "cts" | "tsx" => Some(Self::TypeScript),
             "js" | "javascript" | "mjs" | "cjs" | "jsx" => Some(Self::JavaScript),
+            "json" | "jsonc" => Some(Self::Json),
             _ => None,
         }
     }
 
-    /// The name of its table: `rust`, `shell`, `python`, `typescript`, `javascript` or `markdown`.
+    /// The name of its table: `rust`, `shell`, `python`, `typescript`, `javascript`, `json` or
+    /// `markdown`.
     #[must_use]
     pub(crate) const fn table(self) -> &'static str {
         match self {
@@ -79,6 +85,7 @@ impl Language {
             Self::Markdown => "markdown",
             Self::TypeScript => "typescript",
             Self::JavaScript => "javascript",
+            Self::Json => "json",
         }
     }
 }
@@ -419,6 +426,8 @@ struct Languages {
     typescript: Table,
     /// `[features.code-blocks.javascript]`.
     javascript: Table,
+    /// `[features.code-blocks.json]`.
+    json: Table,
     /// The nearest shell `dialect` written.
     dialect: Option<Dialect>,
     /// The nearest Rust `edition` written.
@@ -457,6 +466,8 @@ pub(crate) struct RawCodeBlocks {
     typescript: Option<RawTypeScript>,
     /// `[features.code-blocks.javascript]`, when written.
     javascript: Option<RawJavaScript>,
+    /// `[features.code-blocks.json]`, when written.
+    json: Option<RawJson>,
 }
 
 /// The table's keys merged across the chain, before the top-level defaults fill the gaps.
@@ -477,7 +488,8 @@ impl Written {
     ///
     /// # Errors
     ///
-    /// The first tool table, Rust, shell, Python, TypeScript, JavaScript then Markdown, whose tool
+    /// The first tool table, Rust, shell, Python, TypeScript, JavaScript, JSON then Markdown, whose
+    /// tool
     /// the merged chain doesn't select.
     pub(super) fn resolve(
         self,
@@ -492,6 +504,7 @@ impl Written {
             .or_else(|| languages.python.unselected(Language::Python))
             .or_else(|| languages.typescript.unselected(Language::TypeScript))
             .or_else(|| languages.javascript.unselected(Language::JavaScript))
+            .or_else(|| languages.json.unselected(Language::Json))
             .or_else(|| languages.markdown.unselected(Language::Markdown));
         if let Some(unselected) = unselected {
             return Err(unselected);
@@ -576,6 +589,7 @@ impl CodeBlocks {
             Language::Markdown => &self.languages.markdown,
             Language::TypeScript => &self.languages.typescript,
             Language::JavaScript => &self.languages.javascript,
+            Language::Json => &self.languages.json,
         }
     }
 
@@ -615,6 +629,7 @@ pub(super) fn merge(
         markdown,
         typescript,
         javascript,
+        json,
         ..
     }) = raw
     else {
@@ -659,6 +674,10 @@ pub(super) fn merge(
                 .languages
                 .javascript
                 .behind(javascript.as_ref().map(RawJavaScript::selection), file),
+            json: nearer
+                .languages
+                .json
+                .behind(json.as_ref().map(RawJson::selection), file),
         },
     })
 }

@@ -582,8 +582,8 @@ fn linted_nothing(at: &Location) -> Finding {
     Finding::new(
         NOT_CHECKED,
         Severity::Warning,
-        "biome lint checked no file for this block, so its TypeScript and JavaScript blocks' lint \
-         step didn't run: the project's biome config leaves them out",
+        "biome lint checked no file for this block, so its TypeScript, JavaScript and JSON blocks' \
+         lint step didn't run: the project's biome config leaves them out",
     )
     .with_help(
         "find the setting in the project's biome config that excludes the doc's blocks, or mark \
@@ -773,7 +773,7 @@ struct BiomeConfigs {
 }
 
 impl BiomeConfigs {
-    /// Gives `record`, a TypeScript or JavaScript block, the flags biome gets for its doc,
+    /// Gives `record`, a TypeScript, JavaScript or JSON block, the flags biome gets for its doc,
     /// found once per directory. A refusal settles the block as not checked, with its one
     /// warning per refusal added to `slots`.
     ///
@@ -789,7 +789,10 @@ impl BiomeConfigs {
         (env, root): (&ToolEnv, &Path),
         slots: &mut Vec<Slot>,
     ) -> Result<(), biome::Refusal> {
-        if !matches!(tool.language, Language::TypeScript | Language::JavaScript) {
+        if !matches!(
+            tool.language,
+            Language::TypeScript | Language::JavaScript | Language::Json
+        ) {
             return Ok(());
         }
         let doc = root.join(record.at.file.as_str());
@@ -835,7 +838,8 @@ fn biome_refusal(refusal: &biome::Refusal, at: &Location) -> (String, Finding) {
         biome::Refusal::Config { file, why, help } => (
             format!("biome config `{file}` {why}"),
             format!(
-                "the project's `{file}` {why}, so its TypeScript and JavaScript blocks aren't checked"
+                "the project's `{file}` {why}, so its TypeScript, JavaScript and JSON blocks aren't \
+                 checked"
             ),
             format!("in `{file}`: {help}"),
         ),
@@ -1319,7 +1323,8 @@ fn run_formatter(
             .unwrap_or_else(|| record.at.clone()),
         _ => record.at.clone(),
     };
-    let finding = format::finding(&verdict, tool, &at, timeout);
+    let finding = format::finding(&verdict, tool, &at, timeout)
+        .map(|finding| jsonc_hint(finding, &verdict, record.language.as_deref()));
     let findings = match (&verdict, finding) {
         (format::Verdict::Unformatted(output), Some(unformatted)) => {
             format::fixed(unformatted, &pending.block, &pending.doc, output, tool)
@@ -1327,6 +1332,20 @@ fn run_formatter(
         (_, finding) => finding.into_iter().collect(),
     };
     Some((verdict, findings))
+}
+
+/// `finding`, with help that names the `jsonc` tag when `verdict` is a parse error in a block
+/// tagged `json`: biome reads a `json` block as strict JSON, where a comment is a syntax error.
+fn jsonc_hint(finding: Finding, verdict: &format::Verdict, tag: Option<&str>) -> Finding {
+    if tag == Some("json") && matches!(verdict, format::Verdict::ParseFailed { .. }) {
+        finding.with_help(
+            "a `json` block is strict JSON, so a comment in it is a syntax error: tag a block \
+             that holds comments `jsonc`; otherwise fix the JSON, or mark the block \
+             `ignore(<why>)` or `format(off: <why>)`",
+        )
+    } else {
+        finding
+    }
 }
 
 /// Runs `tool`, a linter found at `program`, on `record`'s block as [`cached_run`] does: its

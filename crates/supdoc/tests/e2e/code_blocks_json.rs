@@ -1,0 +1,213 @@
+//! Checking JSON code blocks, tagged `json` or `jsonc`, formatted and linted by biome.
+
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::Path;
+
+use crate::support::{Project, array_at, at, real_tool_dir};
+
+/// The codes of a `--json` check's loose findings, in order.
+fn finding_kinds(json: &serde_json::Value) -> Vec<String> {
+    array_at(json, "/findings")
+        .iter()
+        .filter_map(|finding| finding["kind"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// A recorded `basic` project with a `json` table and one block tagged `tag` holding `body` in
+/// `docs/blocks.md`.
+fn json_project(tag: &str, body: &str) -> Project {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write(
+        "supdoc.config.toml",
+        "[features.code-blocks]\n[features.code-blocks.json]\n",
+    );
+    project.write(
+        "docs/blocks.md",
+        &format!("# Blocks\n\n```{tag}\n{body}\n```\n"),
+    );
+    project
+}
+
+/// Writes an executable `#!/bin/sh` stub named `biome` running `script` in `dir`.
+fn stub_biome(dir: &Path, script: &str) {
+    let path = dir.join("biome");
+    std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("the stub should be writable");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("the stub should be made executable");
+}
+
+/// A stub whose `biome format` accepts only the stdin path `<doc>.1.<ext>`, then runs `then`, and
+/// whose `biome lint` accepts only a block file ending `blocks.md.1.<ext>` and prints `report`.
+fn stub_for(ext: &str, then: &str, report: &str) -> String {
+    format!(
+        "if [ \"$1\" = lint ]; then\n\
+         for arg in \"$@\"; do file=\"$arg\"; done\n\
+         case \"$file\" in */biome-lint/*/blocks.md.1.{ext}) ;; *) exit 6;; esac\n\
+         echo '{report}'\nexit 0\nfi\n\
+         [ \"$1 $2\" = 'format --colors=off' ] || exit 3\n\
+         case \"$3\" in --stdin-file-path=*/docs/blocks.md.1.{ext}) ;; *) exit 4;; esac\n\
+         {then}"
+    )
+}
+
+/// biome lint's report for a block it checked and found nothing in.
+const CLEAN: &str = r#"{"summary":{"changed":0,"unchanged":1},"diagnostics":[]}"#;
+
+/// A biome format that reports a syntax error at line 2 of the block, as it does for a comment
+/// in strict JSON.
+const PARSE_ERROR: &str = "echo \"${3#--stdin-file-path=}:2:3 parse ━━━━━━━━\" >&2\n\
+     echo \"  × Expected a property but instead found '// c'.\" >&2\nexit 1";
+
+#[test]
+fn json_each_tag_gets_its_own_extension_for_format_and_lint() {
+    for (tag, ext) in [("json", "json"), ("jsonc", "jsonc")] {
+        let project = json_project(tag, "{ \"a\": 1 }");
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        stub_biome(outside.path(), &stub_for(ext, "/bin/cat", CLEAN));
+
+        let json = project
+            .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+            .assert_exit(0)
+            .json();
+
+        assert!(finding_kinds(&json).is_empty(), "{tag}: {json}");
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/passed"),
+            1,
+            "{tag}: {json}"
+        );
+    }
+}
+
+#[test]
+fn json_a_comment_in_a_json_block_is_a_parse_error_whose_help_names_jsonc() {
+    let project = json_project("json", "{\n  // c\n  \"a\": 1\n}");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    stub_biome(outside.path(), &stub_for("json", PARSE_ERROR, CLEAN));
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-parse"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 5, "{json}");
+    assert!(
+        at(&json, "/findings/0/help")
+            .as_str()
+            .is_some_and(|help| help.contains("tag a block that holds comments `jsonc`")),
+        "{json}"
+    );
+}
+
+#[test]
+fn json_a_parse_error_in_a_jsonc_block_keeps_the_usual_help() {
+    let project = json_project("jsonc", "{\n  \"a\": \n}");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    stub_biome(outside.path(), &stub_for("jsonc", PARSE_ERROR, CLEAN));
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-parse"], "{json}");
+    assert!(
+        at(&json, "/findings/0/help")
+            .as_str()
+            .is_some_and(|help| !help.contains("jsonc")),
+        "{json}"
+    );
+}
+
+#[test]
+fn json_a_lint_diagnostic_is_a_code_block_lint_error_at_its_doc_line() {
+    let project = json_project("json", "{ \"a\": 1, \"a\": 2 }");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let report = r#"{"summary":{"changed":0,"unchanged":1},"diagnostics":[{"severity":"error","message":"The key a was already declared.","category":"lint/suspicious/noDuplicateObjectKeys","location":{"path":"x","start":{"line":1,"column":11},"end":{"line":1,"column":14}},"advices":[]}],"command":"lint"}"#;
+    stub_biome(outside.path(), &stub_for("json", "/bin/cat", report));
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-lint"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 4, "{json}");
+    assert!(
+        at(&json, "/findings/0/message")
+            .as_str()
+            .is_some_and(|m| m.contains("`biome-lint` reports `suspicious/noDuplicateObjectKeys`")),
+        "{json}"
+    );
+}
+
+#[test]
+fn json_the_real_biome_passes_jsonc_comments_and_fails_them_in_json() {
+    let Some(dir) = real_tool_dir(
+        "biome",
+        "json_the_real_biome_passes_jsonc_comments_and_fails_them_in_json",
+    ) else {
+        return;
+    };
+    let commented = "{\n\t// c\n\t\"a\": 1\n}";
+
+    let formatted = json_project("json", "{ \"a\": 1 }")
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", &dir)])
+        .assert_exit(0)
+        .json();
+    let unformatted = json_project("json", "{\"a\":1}")
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", &dir)])
+        .assert_exit(1)
+        .json();
+    let jsonc = json_project("jsonc", commented)
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", &dir)])
+        .assert_exit(0)
+        .json();
+    let json = json_project("json", commented)
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", &dir)])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(
+        at(&formatted, "/data/summary/code_blocks/passed"),
+        1,
+        "{formatted}"
+    );
+    assert_eq!(
+        finding_kinds(&unformatted),
+        ["code-block-unformatted"],
+        "{unformatted}"
+    );
+    assert_eq!(at(&jsonc, "/data/summary/code_blocks/passed"), 1, "{jsonc}");
+    assert_eq!(finding_kinds(&json), ["code-block-parse"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 5, "{json}");
+    assert!(
+        at(&json, "/findings/0/help")
+            .as_str()
+            .is_some_and(|help| help.contains("`jsonc`")),
+        "{json}"
+    );
+}
+
+#[test]
+fn json_the_real_biome_lint_reports_a_duplicate_key() {
+    let Some(dir) = real_tool_dir("biome", "json_the_real_biome_lint_reports_a_duplicate_key")
+    else {
+        return;
+    };
+
+    let json = json_project("json", "{ \"a\": 1, \"a\": 2 }")
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", &dir)])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-lint"], "{json}");
+    assert!(
+        at(&json, "/findings/0/message")
+            .as_str()
+            .is_some_and(|m| m.contains("suspicious/noDuplicateObjectKeys")),
+        "{json}"
+    );
+}
