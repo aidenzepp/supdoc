@@ -38,10 +38,14 @@ fn gofmt_stub(dir: &Path, script: &str) {
         .expect("the stub should be made executable");
 }
 
-/// `supdoc check --json` in `project` with `PATH` set to `dir` alone, expecting `code`.
+/// The `check` the verdict tests run: JSON, and a time limit a cold toolchain cache stays under.
+const CHECK: [&str; 4] = ["check", "--json", "--code-block-timeout", "120s"];
+
+/// `supdoc check --json` in `project` with `PATH` set to `dir` alone, expecting `code`. The
+/// time limit is generous, so a real `gofmt` on a cold cache reaches its verdict.
 fn check(project: &Project, dir: &Path, code: i32) -> serde_json::Value {
     project
-        .supdoc_in_with(".", &["check", "--json"], &[("PATH", dir)])
+        .supdoc_in_with(".", &CHECK, &[("PATH", dir)])
         .assert_exit(code)
         .json()
 }
@@ -418,10 +422,11 @@ fn go_stub_of(dir: &Path, release: &str, script: &str) {
 }
 
 /// `supdoc check --json` in `project` with `PATH` set to `dir` and `HOME` to `home`, expecting
-/// `code`.
+/// `code`. The time limit is generous, so a real `go vet` on a cold build cache reaches its
+/// verdict.
 fn check_at_home(project: &Project, dir: &Path, home: &Path, code: i32) -> serde_json::Value {
     project
-        .supdoc_in_with(".", &["check", "--json"], &[("PATH", dir), ("HOME", home)])
+        .supdoc_in_with(".", &CHECK, &[("PATH", dir), ("HOME", home)])
         .assert_exit(code)
         .json()
 }

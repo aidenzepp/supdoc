@@ -4332,8 +4332,28 @@ mod tests {
     }
 
     /// Writes an executable `sh` script at `path` running `body`.
+    ///
+    /// The bytes go to a sibling `<name>.body` first and `/bin/cp` writes `path`, so this process
+    /// never holds `path` open for writing. On Linux a descriptor another test thread's fork
+    /// inherits in that window makes the stub's later spawn fail with `ETXTBSY`, and the stub
+    /// never runs.
     fn script(path: &Path, body: &str) {
-        std::fs::write(path, format!("#!/bin/sh\n{body}")).expect("the stub should be writable");
+        let mut source = path.as_os_str().to_owned();
+        source.push(".body");
+        let source = PathBuf::from(source);
+        std::fs::write(&source, format!("#!/bin/sh\n{body}"))
+            .expect("the stub's body should be writable");
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755))
+            .expect("the stub's body should be made executable");
+        let copied = std::process::Command::new("/bin/cp")
+            .arg(&source)
+            .arg(path)
+            .status()
+            .expect("/bin/cp should run");
+        assert!(
+            copied.success(),
+            "/bin/cp should write the stub at {path:?}"
+        );
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
             .expect("the stub should be made executable");
     }
@@ -4360,13 +4380,30 @@ mod tests {
                     .expect("the manifest should be writable");
             }
             linking.set_rmeta("rmeta");
+            linking.set_before(before);
             let records = linking.records();
-            let real_manifest = root
+            script(
+                &linking.bin().join("clippy-driver"),
+                &format!(
+                    "echo \"$*\" >> '{records}/clippy-runs'\n\
+                     echo \"$RUSTUP_TOOLCHAIN|$RUSTUP_AUTO_INSTALL\" >> '{records}/clippy-toolchain'\n",
+                    records = records.display()
+                ),
+            );
+            linking
+        }
+
+        /// Writes the stub cargo so that, from its next run, it records the run and then runs
+        /// `before` ahead of its build.
+        fn set_before(&self, before: &str) {
+            let records = self.records();
+            let real_manifest = self
+                .root()
                 .canonicalize()
                 .expect("the root should resolve")
                 .join("Cargo.toml");
             script(
-                &linking.bin().join("cargo"),
+                &self.bin().join("cargo"),
                 &format!(
                     "echo build >> '{records}/cargo-runs'\n\
                      echo \"$RUSTUP_TOOLCHAIN|$RUSTUP_AUTO_INSTALL\" >> '{records}/cargo-toolchain'\n\
@@ -4380,15 +4417,6 @@ mod tests {
                     manifest = real_manifest.display(),
                 ),
             );
-            script(
-                &linking.bin().join("clippy-driver"),
-                &format!(
-                    "echo \"$*\" >> '{records}/clippy-runs'\n\
-                     echo \"$RUSTUP_TOOLCHAIN|$RUSTUP_AUTO_INSTALL\" >> '{records}/clippy-toolchain'\n",
-                    records = records.display()
-                ),
-            );
-            linking
         }
 
         /// The project root.
@@ -4945,22 +4973,31 @@ mod tests {
 
     #[test]
     fn a_timed_out_build_is_one_timeout_error_fails_each_block_and_caches_nothing() {
-        let linking = Linking::new(Some(PROJ), "/bin/sleep 5");
+        let linking = Linking::new(Some(PROJ), "/bin/sleep 600");
         let doc = "# D\n\n```rust\npub fn a() {}\n```\n\n```rust\npub fn b() {}\n```\n";
 
-        let first = linking.look_up_blocks(doc, None, Duration::from_millis(200));
-        let _second = linking.look_up_blocks(doc, None, Duration::from_millis(200));
+        // A timeout of zero has passed before the build starts, however fast the machine is.
+        let timed_out = linking.look_up_blocks(doc, None, Duration::ZERO);
+        let clippy_after_the_timeout = linking.runs("clippy-runs");
+        linking.set_before("");
+        let builds_before = linking.runs("cargo-runs").len();
+        let rerun = linking.look_up_blocks(doc, None, Duration::from_secs(120));
 
-        assert_eq!(codes(&first), ["code-block-tool-timeout"]);
-        for record in &first.records {
+        assert_eq!(codes(&timed_out), ["code-block-tool-timeout"]);
+        for record in &timed_out.records {
             assert_eq!(
                 record.state,
                 BlockState::Failed(Failure::ToolTimeout),
                 "{record:?}"
             );
         }
-        assert_eq!(linking.runs("cargo-runs").len(), 2, "nothing is cached");
-        assert_eq!(linking.runs("clippy-runs"), [] as [String; 0]);
+        assert_eq!(clippy_after_the_timeout, [] as [String; 0]);
+        assert_eq!(
+            linking.runs("cargo-runs").len(),
+            builds_before + 1,
+            "the rerun builds again, so nothing was cached"
+        );
+        assert!(codes(&rerun).is_empty(), "{:?}", rerun.findings);
     }
 
     #[test]

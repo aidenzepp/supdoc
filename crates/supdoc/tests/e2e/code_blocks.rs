@@ -1549,9 +1549,8 @@ const PARALLEL_BLOCKS: usize = 16;
 
 /// Runs `check --json` on a recorded `basic` project with the shell table on, its linter off, and
 /// [`PARALLEL_BLOCKS`] `sh` blocks in `docs/blocks.md`, with an `shfmt` stub running `script`
-/// as the only `PATH` entry, asserting it exits `exit`. Returns the report and how long the run
-/// took.
-fn check_many_with_shfmt(script: &str, exit: i32) -> (serde_json::Value, std::time::Duration) {
+/// as the only `PATH` entry, asserting it exits `exit`. Returns the report.
+fn check_many_with_shfmt(script: &str, exit: i32) -> serde_json::Value {
     use std::os::unix::fs::PermissionsExt as _;
     let project = Project::fixture("basic");
     project.record();
@@ -1566,39 +1565,56 @@ fn check_many_with_shfmt(script: &str, exit: i32) -> (serde_json::Value, std::ti
     std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("the stub should be writable");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
         .expect("the stub should be made executable");
-    let started = std::time::Instant::now();
-    let json = project
-        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+    project
+        .supdoc_in_with(
+            ".",
+            &["check", "--json", "--code-block-timeout", "120s"],
+            &[("PATH", outside.path())],
+        )
         .assert_exit(exit)
-        .json();
-    (json, started.elapsed())
+        .json()
 }
 
+/// How many formatter runs [`parallel_blocks_run_their_formatters_at_once`] waits to see at once.
+const AT_ONCE: usize = 4;
+
 #[test]
-fn parallel_sixteen_blocks_with_a_300ms_formatter_finish_in_under_3s() {
+fn parallel_blocks_run_their_formatters_at_once() {
     let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-    if cores < 4 {
+    if cores < AT_ONCE {
         // Written to the process's stderr directly, which `cargo test` shows for a passing test.
         let _ignored = std::io::Write::write_all(
             &mut std::io::stderr(),
             format!(
-                "SKIPPED parallel_sixteen_blocks: available_parallelism() is {cores}, below 4\n"
+                "SKIPPED parallel_blocks_run_their_formatters_at_once: available_parallelism() is {cores}, below {AT_ONCE}\n"
             )
             .as_bytes(),
         );
         return;
     }
 
-    let (json, took) = check_many_with_shfmt("/bin/sleep 0.3\n/bin/cat", 0);
+    // Each run marks itself started, then waits until AT_ONCE runs have started before it
+    // formats. Runs one after another never get there and fail: no clock decides it, only
+    // whether the runs overlap. The wait gives up after about a minute so such a failure ends.
+    let started = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let script = format!(
+        ": > '{dir}/'$$\n\
+         tries=0\n\
+         while set -- '{dir}'/*; [ $# -lt {AT_ONCE} ]; do\n\
+         [ $tries -ge 6000 ] && {{ echo \"only $# runs at once\" >&2; exit 1; }}\n\
+         tries=$((tries + 1))\n\
+         /bin/sleep 0.01\n\
+         done\n\
+         /bin/cat",
+        dir = started.path().display()
+    );
+
+    let json = check_many_with_shfmt(&script, 0);
 
     assert_eq!(
         at(&json, "/data/summary/code_blocks/passed"),
         PARALLEL_BLOCKS,
         "{json}"
-    );
-    assert!(
-        took < std::time::Duration::from_secs(3),
-        "16 runs of 300ms took {took:?}, so they didn't run in parallel"
     );
 }
 
@@ -1607,7 +1623,7 @@ fn parallel_findings_come_out_in_document_order() {
     // Earlier blocks sleep longer, so their runs finish last.
     let script = "n=${2##*.md.}\nn=${n%.sh}\n/bin/sleep \"$(printf '0.%02d' $(( (17 - n) * 5 )))\"\necho \"bad $2\" >&2\nexit 1";
 
-    let (json, _took) = check_many_with_shfmt(script, 1);
+    let json = check_many_with_shfmt(script, 1);
 
     let messages: Vec<String> = array_at(&json, "/findings")
         .iter()
