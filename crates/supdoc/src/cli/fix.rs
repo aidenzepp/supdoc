@@ -161,7 +161,6 @@ impl Planned {
         .map_err(|error| CliError::from(&error))?;
         evaluation.look_up_tools(tools, config.root().as_path());
         scan.findings.extend(evaluation.findings);
-        scan.findings.extend(super::check::trust_unread(trust));
         let stale = scan
             .findings
             .iter()
