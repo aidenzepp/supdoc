@@ -1869,3 +1869,70 @@ fn jsdoc_block_and_line_comments_are_not_checked() {
 
     assert!(finding_kinds(&json).is_empty(), "{json}");
 }
+
+/// A `/** */` comment with no `*` gutter on a method, indented 4 spaces, holding one `ts` block of a
+/// two-level object literal indented with tabs, as biome formats it, whose innermost line is
+/// `inner`.
+fn gutterless_source(inner: &str) -> String {
+    format!(
+        "export class C {{\n  /**\n    Makes.\n\n    ```ts\n    const a = {{\n    \tb: {{\n    \t\t{inner}\n    \t}},\n    }};\n    ```\n  */\n  make() {{}}\n}}\n"
+    )
+}
+
+#[test]
+fn jsdoc_gutterless_fix_keeps_the_comments_and_the_codes_indentation() {
+    let (project, outside) = jsdoc_project(&gutterless_source("c:1,"));
+    stub_biome(
+        outside.path(),
+        "/bin/cat >/dev/null\nprintf 'const a = {\\n\\tb: {\\n\\t\\tc: 1,\\n\\t},\\n};\\n'",
+    );
+    let path = [("PATH", outside.path())];
+
+    let _fix = project
+        .supdoc_in_with(".", &["fix", "--yes"], &path)
+        .assert_exit(0);
+
+    assert_eq!(
+        project.read("src/blocks.ts"),
+        gutterless_source("c: 1,"),
+        "the fix should rewrite the block behind the comment's 4-space prefix, keeping the code's tabs"
+    );
+}
+
+#[test]
+fn jsdoc_the_real_biome_checks_and_fixes_a_gutterless_comments_indented_block() {
+    let Some(dir) = real_tool_dir(
+        "biome",
+        "jsdoc_the_real_biome_checks_and_fixes_a_gutterless_comments_indented_block",
+    ) else {
+        return;
+    };
+    let path = [("PATH", dir.as_path())];
+    let (formatted, _) = jsdoc_project(&gutterless_source("c: 1,"));
+    let (unformatted, _) = jsdoc_project(&gutterless_source("c:1,"));
+
+    let passes = formatted
+        .supdoc_in_with(".", &["check", "--json"], &path)
+        .assert_exit(0)
+        .json();
+    let fails = unformatted
+        .supdoc_in_with(".", &["check", "--json"], &path)
+        .assert_exit(1)
+        .json();
+    let _fix = unformatted
+        .supdoc_in_with(".", &["fix", "--yes"], &path)
+        .assert_exit(0);
+
+    assert_eq!(
+        at(&passes, "/data/summary/code_blocks/passed"),
+        1,
+        "{passes}"
+    );
+    assert_eq!(finding_kinds(&fails), ["code-block-unformatted"], "{fails}");
+    assert_eq!(at(&fails, "/findings/0/location/line"), 5, "{fails}");
+    assert_eq!(
+        unformatted.read("src/blocks.ts"),
+        gutterless_source("c: 1,"),
+        "biome's fix should land behind the comment's prefix with the code's indent kept"
+    );
+}

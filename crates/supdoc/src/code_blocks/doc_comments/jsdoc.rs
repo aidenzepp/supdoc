@@ -1,9 +1,10 @@
 //! Doc comments of JavaScript, TypeScript and TSX files: the `/** ... */` containers.
 //!
-//! A comment's body, without `/**`, `*/` and each line's gutter, is the Markdown text. A line's
-//! gutter is its leading whitespace plus an optional `*` and one space or tab after it. `/* */` and
-//! `//` comments are not containers. Fenced blocks are blocks, anywhere in the comment; an untagged
-//! fence is text.
+//! A comment's body, without `/**`, `*/` and each line's prefix, is the Markdown text. A line with
+//! a `*` gutter loses its leading whitespace, the `*` and one space or tab after it. Every other
+//! non-blank line loses the leading whitespace all of them share, so code indented inside a fence
+//! keeps its indentation. `/* */` and `//` comments are not containers. Fenced blocks are blocks,
+//! anywhere in the comment; an untagged fence is text.
 
 use std::ops::Range;
 
@@ -51,8 +52,12 @@ fn jsdoc_run(text: &str, comment: Range<usize>) -> Option<(Run, String)> {
 /// The [`Run`] and Markdown text of `body`, a `/** */` comment without its `/**` and `*/`, which
 /// starts at `start` in `text`.
 ///
-/// Line 1 is the text after `/**`; the last line ends before `*/`. Each line loses its gutter.
+/// Line 1 is the text after `/**`, with no prefix; the last line ends before `*/`. A later line
+/// with a `*` gutter loses it. A later line without one loses the leading whitespace shared, byte
+/// for byte, by every non-blank line after the first that has no gutter. A blank line keeps all its
+/// text and has an empty prefix.
 fn run_of(text: &str, body: &str, start: usize) -> (Run, String) {
+    let margin = shared_indent(body);
     let mut lines = Vec::new();
     let mut markdown = String::new();
     let mut at = start;
@@ -61,7 +66,12 @@ fn run_of(text: &str, body: &str, start: usize) -> (Run, String) {
             .get(..at)
             .and_then(|head| head.rfind('\n'))
             .map_or(0, |newline| newline + 1);
-        let skipped = gutter_len(line);
+        let skipped = match star_gutter_len(line) {
+            _ if number == 0 => 0,
+            Some(gutter) => gutter,
+            None if is_blank(line) => 0,
+            None => margin,
+        };
         if number > 0 {
             markdown.push('\n');
         }
@@ -78,15 +88,41 @@ fn run_of(text: &str, body: &str, start: usize) -> (Run, String) {
     (Run { lines }, markdown)
 }
 
-/// The length of `line`'s gutter: its leading whitespace, then an optional `*` and one space or
-/// tab after it.
-fn gutter_len(line: &str) -> usize {
-    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
-    let Some(after_star) = line.get(indent..).and_then(|rest| rest.strip_prefix('*')) else {
-        return indent;
-    };
+/// The length of the longest leading run of spaces and tabs that every non-blank line of `body`
+/// after the first, and without a `*` gutter, starts with. Zero when there is no such line.
+fn shared_indent(body: &str) -> usize {
+    body.split('\n')
+        .skip(1)
+        .filter(|line| star_gutter_len(line).is_none() && !is_blank(line))
+        .map(|line| line.get(..indent_len(line)).unwrap_or_default())
+        .reduce(|shared, indent| {
+            let common = shared
+                .bytes()
+                .zip(indent.bytes())
+                .take_while(|(a, b)| a == b)
+                .count();
+            shared.get(..common).unwrap_or_default()
+        })
+        .map_or(0, str::len)
+}
+
+/// The length of `line`'s `*` gutter: its leading whitespace, the `*`, and one space or tab after
+/// it. `None` when the line's first character after its whitespace isn't `*`.
+fn star_gutter_len(line: &str) -> Option<usize> {
+    let indent = indent_len(line);
+    let after_star = line.get(indent..)?.strip_prefix('*')?;
     let space = usize::from(after_star.starts_with([' ', '\t']));
-    indent + 1 + space
+    Some(indent + 1 + space)
+}
+
+/// The length of `line`'s leading run of spaces and tabs.
+fn indent_len(line: &str) -> usize {
+    line.len() - line.trim_start_matches([' ', '\t']).len()
+}
+
+/// Whether `line` holds only spaces, tabs and a CR.
+fn is_blank(line: &str) -> bool {
+    line.trim_matches([' ', '\t', '\r']).is_empty()
 }
 
 #[cfg(test)]
@@ -195,10 +231,72 @@ mod tests {
     }
 
     #[test]
-    fn a_gutterless_comment_keeps_each_lines_indentation_as_its_prefix() {
-        let text = "/**\n  Adds.\n\n  ```ts\n  add(1, 2);\n  ```\n*/\n";
+    fn a_gutterless_comment_shares_one_prefix_so_indented_code_keeps_its_indent() {
+        let text = "/**\n  Makes.\n\n  ```ts\n  const a = {\n    b: {\n      c: 1,\n    },\n  };\n  ```\n*/\n";
 
-        assert_eq!(lines(text, &only(text)), [("  ", "add(1, 2);")]);
+        assert_eq!(
+            lines(text, &only(text)),
+            [
+                ("  ", "const a = {"),
+                ("  ", "  b: {"),
+                ("  ", "    c: 1,"),
+                ("  ", "  },"),
+                ("  ", "};"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_gutterless_replacement_keeps_the_comments_and_the_codes_indentation() {
+        let text = "  /**\n    ```ts\n    old\n    ```\n  */\n";
+        let block = only(text);
+
+        let (range, replacement) = replacement_for(&block, text, "a = {\n  b: 1,\n};")
+            .expect("the block has a body to replace");
+
+        assert_eq!(replacement, "    a = {\n      b: 1,\n    };");
+        assert_eq!(text.get(range), Some("    old"));
+    }
+
+    #[test]
+    fn gutter_and_gutterless_lines_each_lose_their_own_prefix() {
+        let text =
+            "/**\n * Doc.\n *\n   ```ts\n   if (a) {\n * b();\n     c();\n   }\n   ```\n */\n";
+
+        assert_eq!(
+            lines(text, &only(text)),
+            [
+                ("   ", "if (a) {"),
+                (" * ", "b();"),
+                ("   ", "  c();"),
+                ("   ", "}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn mixed_tabs_and_spaces_share_only_their_matching_leading_bytes() {
+        let text = "/**\n\t```ts\n\tx = {\n\t\ty,\n\t    z,\n\t};\n\t```\n*/\n";
+
+        assert_eq!(
+            lines(text, &only(text)),
+            [
+                ("\t", "x = {"),
+                ("\t", "\ty,"),
+                ("\t", "    z,"),
+                ("\t", "};")
+            ]
+        );
+    }
+
+    #[test]
+    fn line_one_after_the_opener_has_no_prefix() {
+        let text = "/** ```ts\n * f();\n * ```\n */\n";
+
+        let block = only(text);
+
+        assert_eq!(block.fence.line, 1, "the fence opens on line 1");
+        assert_eq!(lines(text, &block), [(" * ", "f();")]);
     }
 
     #[test]
