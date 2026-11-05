@@ -12,11 +12,11 @@ use std::collections::btree_map::Entry;
 use std::fs::{self, File};
 use std::io::{self, ErrorKind, Read as _};
 use std::ops::Range;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, PathBuf};
 
 use crate::limits::{CommandLineLimits, ConfigLimits, Limits, SizeLimit};
 use crate::namespace::NamespaceName;
-use crate::path::{AbsolutePath, RelativePath, holds_git, is_regular_file};
+use crate::path::{AbsolutePath, RelativePath, fixed, holds_git, is_regular_file};
 
 use super::code_blocks;
 use super::confine::{Boundary, real_location};
@@ -43,7 +43,7 @@ pub(super) fn directory_of(file: &AbsolutePath) -> AbsolutePath {
 
 /// `dir/supdoc.config.toml`.
 fn config_in(dir: &AbsolutePath) -> AbsolutePath {
-    dir.join_path(Path::new(CONFIG_FILE_NAME))
+    dir.beneath(&fixed::CONFIG_FILE)
 }
 
 /// Walks up from `start` to the nearest directory holding a config file, stopping at the

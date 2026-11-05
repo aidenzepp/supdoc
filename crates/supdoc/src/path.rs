@@ -42,21 +42,6 @@ impl AbsolutePath {
         Self(joined)
     }
 
-    /// Appends `path` and normalizes the result. An absolute `path` replaces `self`, as
-    /// [`Path::join`] does.
-    ///
-    /// Infallible: the result is absolute either way, so no caller needs a fallback.
-    #[must_use]
-    pub(crate) fn join_path(&self, path: &Path) -> Self {
-        let mut joined = if path.is_absolute() {
-            PathBuf::new()
-        } else {
-            self.0.clone()
-        };
-        push_normalized(&mut joined, path);
-        Self(joined)
-    }
-
     /// Appends `rel`, which [`Beneath`] proves has no root, `..` or `.`, so the result is always
     /// beneath `self`.
     #[must_use]
@@ -157,16 +142,8 @@ pub(crate) trait Beneath: sealed::Sealed {
 /// A relative path fixed at compile time, such as `supdoc.lock`. Every value is a constant in
 /// [`fixed`], checked when it is compiled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the fixed-name joins move onto it in PH10")
-)]
 pub(crate) struct FixedPath(&'static str);
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the fixed-name joins move onto it in PH10")
-)]
 impl FixedPath {
     /// Wraps `path`. Private, so the constants in [`fixed`] are the only values.
     ///
@@ -216,10 +193,6 @@ impl FixedPath {
 
 /// Every [`FixedPath`]. Each is a `const` item, which the compiler evaluates even when nothing
 /// uses it, so a constant that breaks [`Beneath`]'s rules does not compile.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the fixed-name joins move onto these in PH10")
-)]
 pub(crate) mod fixed {
     use super::{CONFIG_FILE_NAME, FixedPath, LOCK_FILE_NAME};
 
@@ -473,22 +446,6 @@ mod tests {
 
     fn relative(raw: &str) -> RelativePath {
         RelativePath::try_from(raw.to_owned()).expect("the fixture path should be relative")
-    }
-
-    #[test]
-    fn join_path_appends_a_relative_path_and_normalizes_it() {
-        assert_eq!(
-            absolute("/repo/docs").join_path(Path::new("../src/./lib.rs")),
-            absolute("/repo/src/lib.rs")
-        );
-    }
-
-    #[test]
-    fn join_path_with_an_absolute_path_replaces_the_base() {
-        assert_eq!(
-            absolute("/repo").join_path(Path::new("/elsewhere/../etc/x.toml")),
-            absolute("/etc/x.toml")
-        );
     }
 
     #[test]

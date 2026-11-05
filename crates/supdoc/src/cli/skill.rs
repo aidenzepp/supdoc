@@ -27,26 +27,14 @@ use crate::output::json::Envelope;
 use crate::output::paths::{relative_or_absolute, relative_to};
 use crate::output::text::{render_finding, visible};
 use crate::output::{Output, RecordArray, Report, TextContext, preview_note};
-use crate::path::AbsolutePath;
+use crate::path::{AbsolutePath, fixed};
 
-use super::args::{SkillInstallArgs, WriteMode};
+use super::args::{OperatorPath, SkillInstallArgs, WriteMode};
 use super::project::{absolute, command_line, config_failure};
 use super::{CliError, Context, Outcome, cause};
 
 /// The skill, embedded so the installed copy always matches this binary.
 const SKILL: &str = include_str!("../../SKILL.md");
-
-/// Where the skill goes beneath the shared agents base: the project root or `HOME`.
-const AGENTS_SKILL: &str = ".agents/skills/supdoc/SKILL.md";
-
-/// Where the skill goes beneath the project root for Claude Code.
-const PROJECT_CLAUDE_SKILL: &str = ".claude/skills/supdoc/SKILL.md";
-
-/// Claude Code's config directory beneath `HOME` when `CLAUDE_CONFIG_DIR` is not set.
-const DEFAULT_CLAUDE_DIR: &str = ".claude";
-
-/// Where the skill goes beneath Claude Code's config directory.
-const CLAUDE_DIR_SKILL: &str = "skills/supdoc/SKILL.md";
 
 /// The closing note when every copy already holds the embedded skill.
 const UP_TO_DATE_NOTE: &str = "The supdoc skill is already installed and up to date.";
@@ -230,21 +218,21 @@ fn destinations(
 ) -> Result<[(AbsolutePath, AbsolutePath); 2], CliError> {
     if !global {
         return Ok([
-            (root.clone(), beneath(root, AGENTS_SKILL)),
-            (root.clone(), beneath(root, PROJECT_CLAUDE_SKILL)),
+            (root.clone(), root.beneath(&fixed::AGENTS_SKILL)),
+            (root.clone(), root.beneath(&fixed::PROJECT_CLAUDE_SKILL)),
         ]);
     }
     let home = dirs.home.as_ref().ok_or_else(no_home)?;
     let claude_dir = match &dirs.claude_config_dir {
-        ClaudeConfigDir::Unset => beneath(home, DEFAULT_CLAUDE_DIR),
+        ClaudeConfigDir::Unset => home.beneath(&fixed::DEFAULT_CLAUDE_DIR),
         ClaudeConfigDir::Absolute(dir) => dir.clone(),
         ClaudeConfigDir::Relative(value) => return Err(relative_claude_dir(value)),
     };
     let in_own_directory =
         |file: AbsolutePath| (file.parent().unwrap_or_else(|| file.clone()), file);
     Ok([
-        in_own_directory(beneath(home, AGENTS_SKILL)),
-        in_own_directory(beneath(&claude_dir, CLAUDE_DIR_SKILL)),
+        in_own_directory(home.beneath(&fixed::AGENTS_SKILL)),
+        in_own_directory(claude_dir.beneath(&fixed::CLAUDE_DIR_SKILL)),
     ])
 }
 
@@ -260,7 +248,7 @@ fn destinations(
 /// stops at a symlinked `supdoc.config.toml` that does not lead to a file of that name.
 fn project_root(context: &Context, output: &mut Output) -> Result<AbsolutePath, CliError> {
     if let Some(file) = &context.global.config {
-        let file = absolute(&context.cwd, file);
+        let file = absolute(&context.cwd, OperatorPath::typed(file));
         check_config_exists(&file).map_err(|error| config_failure(&error, context, output))?;
         return Ok(file.parent().unwrap_or(file));
     }
@@ -301,11 +289,6 @@ fn check_config_exists(file: &AbsolutePath) -> Result<(), ConfigError> {
         }
         Err(error) => Err(read_failure(error)),
     }
-}
-
-/// `relative` joined onto `base`.
-fn beneath(base: &AbsolutePath, relative: &str) -> AbsolutePath {
-    base.join_path(Path::new(relative))
 }
 
 /// Refuses `target` when a directory between `root` and it leads outside `boundary`, the
@@ -741,6 +724,15 @@ mod tests {
     use crate::config::CONFIG_FILE_NAME;
 
     use super::*;
+
+    /// Where the skill goes beneath the shared agents base, as the tests expect to find it.
+    const AGENTS_SKILL: &str = ".agents/skills/supdoc/SKILL.md";
+
+    /// Where the skill goes beneath the project root for Claude Code.
+    const PROJECT_CLAUDE_SKILL: &str = ".claude/skills/supdoc/SKILL.md";
+
+    /// Where the skill goes beneath Claude Code's config directory.
+    const CLAUDE_DIR_SKILL: &str = "skills/supdoc/SKILL.md";
 
     /// A fresh project directory and a fresh home directory, both empty.
     struct World {
@@ -1482,7 +1474,7 @@ mod tests {
         symlink(&victim, &world.project_file(PROJECT_CLAUDE_SKILL));
         let base =
             AbsolutePath::new(world.project.path()).expect("a temp directory should be absolute");
-        let link = beneath(&base, PROJECT_CLAUDE_SKILL);
+        let link = base.beneath(&fixed::PROJECT_CLAUDE_SKILL);
         let escape = Boundary::resolve(&base)
             .admit(&link)
             .expect_err("a SKILL.md symlinked out should be refused");
@@ -1498,7 +1490,7 @@ mod tests {
         let race = copy_outside(
             &place,
             &base,
-            &beneath(&base, AGENTS_SKILL),
+            &base.beneath(&fixed::AGENTS_SKILL),
             &Escape::Real { real: None },
             &session.context,
             &written,
@@ -1548,7 +1540,11 @@ mod tests {
         let boundary = Boundary::resolve(&base);
         symlink(outside.path(), &root.path().join(".agents"));
 
-        let installed = install_file(&boundary, &beneath(&base, AGENTS_SKILL), SKILL.as_bytes());
+        let installed = install_file(
+            &boundary,
+            &base.beneath(&fixed::AGENTS_SKILL),
+            SKILL.as_bytes(),
+        );
 
         assert!(
             matches!(installed, Err(NotInstalled::Outside(_))),

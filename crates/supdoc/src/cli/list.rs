@@ -29,7 +29,7 @@ use crate::read::cartridge::{Languages, SourceFile, SymbolTable};
 use crate::read::error::{ReadError, ReadRole, ResolveError};
 use crate::scan::model::Scope;
 
-use super::args::{Limit, ListArgs, TargetArg};
+use super::args::{Limit, ListArgs, OperatorPath, TargetArg};
 use super::check::LinkJson;
 use super::fix::timed_out;
 use super::project::{
@@ -158,7 +158,7 @@ fn parse_target(arg: &TargetArg, config: &Config, cwd: &AbsolutePath) -> Result<
         typed
     } else {
         let path = arg.file();
-        let absolute = absolute(cwd, Path::new(path));
+        let absolute = absolute(cwd, OperatorPath::typed(Path::new(path)));
         let relative = absolute
             .strip_prefix(config.root())
             .ok_or_else(|| path_outside_config(Path::new(path), config))?;
@@ -340,7 +340,7 @@ impl Place {
                 None => return Self::Unlocated(target.clone()),
             },
         };
-        let file = base.join_path(Path::new(target.path().as_str()));
+        let file = base.beneath(target.path());
         if !config.contains(base.as_path()) || !config.contains(file.as_path()) {
             return Self::Unlocated(target.clone());
         }
@@ -512,7 +512,7 @@ impl Wanted {
             Place::File(file) => file,
             Place::Unlocated(_) => return Some(path_outside_config(typed_file, config)),
         };
-        if let Err(error) = ensure_exists(file, typed_file, cwd) {
+        if let Err(error) = ensure_exists(file, OperatorPath::typed(typed_file), cwd) {
             let namespaced = target
                 .target
                 .namespace()

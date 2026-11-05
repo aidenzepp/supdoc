@@ -18,7 +18,7 @@ use crate::output::{Output, Report, TextContext};
 use crate::path::AbsolutePath;
 use crate::trust::{self, AddError, TrustEnv};
 
-use super::args::TrustArgs;
+use super::args::{OperatorPath, TrustArgs};
 use super::project::{absolute, config_failure, load_config};
 use super::{CliError, Context, Outcome, cause};
 
@@ -146,7 +146,7 @@ fn real_or(path: &AbsolutePath) -> PathBuf {
 ///
 /// Returns `cli-trust-path` when `path` is to be trusted and isn't an existing directory.
 fn explicit_root(path: &Path, revoke: bool, context: &Context) -> Result<AbsolutePath, CliError> {
-    let full = absolute(&context.cwd, path);
+    let full = absolute(&context.cwd, OperatorPath::typed(path));
     if revoke || full.as_path().is_dir() {
         Ok(full)
     } else {
