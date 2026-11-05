@@ -16,6 +16,10 @@ use super::examples::{
     NAMESPACE_RENAME_EXAMPLES, RESOLVE_EXAMPLES, SCHEMA_EXAMPLES, SKILL_EXAMPLES,
     SKILL_INSTALL_EXAMPLES, TOP_EXAMPLES, UPDATE_EXAMPLES,
 };
+use super::help::{
+    CHECK_LONG_ABOUT, FIX_LONG_ABOUT, SCHEMA_LONG_ABOUT, SKILL_INSTALL_LONG_ABOUT,
+    TRUST_LONG_ABOUT, UPGRADE_LONG_ABOUT,
+};
 use super::upgrade::{ReleaseVersion, UPGRADE_EXAMPLES};
 use crate::limits::{CommandLineLimits, CountLimit, Given, Limits, SizeLimit, TimeLimit};
 use crate::link::SymbolPath;
@@ -263,13 +267,13 @@ pub(super) const fn resolve_format(output: OutputFormat, json: bool, jsonl: bool
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
     /// Check links against supdoc.lock (read-only)
-    #[command(after_help = CHECK_EXAMPLES)]
+    #[command(long_about = CHECK_LONG_ABOUT, after_help = CHECK_EXAMPLES)]
     Check(CheckArgs),
     /// Accept code changes into supdoc.lock (writes; previews unless --yes; to install a newer supdoc, see `upgrade`)
     #[command(after_help = UPDATE_EXAMPLES)]
     Update(UpdateArgs),
     /// Repair broken links in docs and comments (writes; previews unless --yes)
-    #[command(after_help = FIX_EXAMPLES)]
+    #[command(long_about = FIX_LONG_ABOUT, after_help = FIX_EXAMPLES)]
     Fix(FixArgs),
     /// List links and their states (read-only)
     #[command(after_help = LIST_EXAMPLES)]
@@ -287,7 +291,7 @@ pub(crate) enum Command {
     #[command(subcommand, after_help = NAMESPACE_EXAMPLES)]
     Namespace(NamespaceCommand),
     /// Print the JSON Schema of a command's --json output (read-only)
-    #[command(after_help = SCHEMA_EXAMPLES)]
+    #[command(long_about = SCHEMA_LONG_ABOUT, after_help = SCHEMA_EXAMPLES)]
     Schema(SchemaArgs),
     /// Print a shell completion script (read-only)
     #[command(after_help = COMPLETIONS_EXAMPLES)]
@@ -296,10 +300,10 @@ pub(crate) enum Command {
     #[command(subcommand, after_help = SKILL_EXAMPLES)]
     Skill(SkillCommand),
     /// Install a newer or older supdoc with cargo (writes; previews unless --yes; to accept code changes, see `update`)
-    #[command(after_help = UPGRADE_EXAMPLES)]
+    #[command(long_about = UPGRADE_LONG_ABOUT, after_help = UPGRADE_EXAMPLES)]
     Upgrade(UpgradeArgs),
     /// Trust a checkout to run its code blocks' tools, or revoke it (writes your state directory)
-    #[command(after_help = TRUST_EXAMPLES)]
+    #[command(long_about = TRUST_LONG_ABOUT, after_help = TRUST_EXAMPLES)]
     Trust(TrustArgs),
 }
 
@@ -672,7 +676,10 @@ pub(crate) struct TrustArgs {
 #[command(subcommand_required = true, arg_required_else_help = true)]
 pub(crate) enum SkillCommand {
     /// Install SKILL.md for agent runtimes (writes; previews unless --yes)
-    #[command(after_help = SKILL_INSTALL_EXAMPLES)]
+    #[command(
+        long_about = SKILL_INSTALL_LONG_ABOUT,
+        after_help = SKILL_INSTALL_EXAMPLES
+    )]
     Install(SkillInstallArgs),
 }
 
