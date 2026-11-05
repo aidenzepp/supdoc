@@ -623,3 +623,203 @@ fn a_git_link_to_a_directory_still_stops_the_config_search() {
         "{json}"
     );
 }
+
+/// Each Markdown tag prettier reads, with the parser and virtual-path extension it gets.
+const CASES: [(&str, &str, &str); 2] = [("markdown", "markdown", "md"), ("md", "markdown", "md")];
+
+/// A Markdown block prettier leaves as it is.
+const FORMATTED: &str = "- item\n- two";
+
+/// A Markdown block prettier reformats.
+const MISFORMATTED: &str = "*  item\n*  two";
+
+/// A Markdown block holding `prettier-ignore`.
+const IGNORED: &str = "<!-- prettier-ignore -->\n*  item";
+
+/// The config that selects prettier for markdown blocks, with rumdl's step off so prettier is the
+/// block's one tool.
+const PRETTIER_CONFIG: &str = "[features.code-blocks]\n[features.code-blocks.markdown]\n\
+    formatter = \"prettier\"\n[features.code-blocks.markdown.rumdl]\nlint = \"off\"\n";
+
+/// A recorded `basic` project selecting prettier for markdown, with one block tagged `tag` holding
+/// `body` in `docs/blocks.md`, which starts on doc line 4.
+fn prettier_project(tag: &str, body: &str) -> Project {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write("supdoc.config.toml", PRETTIER_CONFIG);
+    project.write(
+        "docs/blocks.md",
+        &format!("# Blocks\n\n```{tag}\n{body}\n```\n"),
+    );
+    project
+}
+
+/// Writes a `prettier` stub in `dir` that appends its working directory and arguments to
+/// `<dir>/prettier-runs`, one line per call, prints `3.9.10` for `--version` and echoes its input
+/// for any other call.
+fn prettier_stub(dir: &Path) {
+    let path = dir.join("prettier");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\necho \"$(pwd -P) $*\" >> '{}'\n\
+             if [ \"$1\" = --version ]; then echo 3.9.10; exit 0; fi\n/bin/cat\n",
+            dir.join("prettier-runs").display()
+        ),
+    )
+    .expect("the stub should be writable");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("the stub should be made executable");
+}
+
+/// The calls the [`prettier_stub`] in `dir` recorded that format a block: every one but
+/// `--version`.
+fn prettier_formats(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("prettier-runs"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|run| !run.ends_with(" --version"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Runs a `check --json` on `project` with `path` as the only `PATH` entry, `trust` as
+/// `SUPDOC_TRUST` and its cache in a fresh directory, asserting it exits `exit`.
+/// A generous code-block timeout keeps a loaded machine from turning a verdict into a timeout.
+fn prettier_check(project: &Project, path: &Path, trust: &str, exit: i32) -> serde_json::Value {
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    project
+        .supdoc_in_with(
+            ".",
+            &["check", "--json", "--code-block-timeout", "120s"],
+            &[
+                ("PATH", path),
+                ("SUPDOC_TRUST", Path::new(trust)),
+                ("XDG_CACHE_HOME", cache.path()),
+            ],
+        )
+        .assert_exit(exit)
+        .json()
+}
+
+#[test]
+fn prettier_formats_a_markdown_block_from_the_root_by_its_tags_parser() {
+    for (tag, parser, extension) in CASES {
+        let project = prettier_project(tag, FORMATTED);
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        prettier_stub(outside.path());
+
+        let json = prettier_check(&project, outside.path(), "1", 0);
+
+        let root = project
+            .path(".")
+            .canonicalize()
+            .expect("the project root should resolve");
+        let runs = prettier_formats(outside.path());
+        let [run] = runs.as_slice() else {
+            panic!("{tag}: prettier formats the block once: {runs:?}");
+        };
+        let (cwd, args) = run
+            .split_once(' ')
+            .expect("the record names a cwd and args");
+        assert_eq!(
+            Path::new(cwd),
+            root,
+            "{tag}: prettier runs from the root: {run}"
+        );
+        let overrides = format!(
+            "--ignore-path= --with-node-modules --no-require-pragma --no-check-ignore-pragma \
+             --no-insert-pragma --range-start=0 --range-end=Infinity --parser={parser} \
+             --stdin-filepath "
+        );
+        let path = args.strip_prefix(&overrides);
+        assert!(
+            path.is_some_and(|path| path.ends_with(&format!("/docs/blocks.md.1.{extension}"))),
+            "{tag}: prettier gets its overrides, the tag's parser and the block's path: {run}"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/passed"),
+            1,
+            "{tag}: {json}"
+        );
+    }
+}
+
+#[test]
+fn prettier_untrusted_leaves_a_markdown_block_format_not_run_naming_trust() {
+    let project = prettier_project(CASES[0].0, FORMATTED);
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    prettier_stub(outside.path());
+
+    let json = prettier_check(&project, outside.path(), "0", 0);
+
+    assert!(prettier_formats(outside.path()).is_empty(), "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/format"), "not_run", "{json}");
+    let reason = at(&json, "/data/code_blocks/0/reason");
+    assert!(
+        reason.as_str().is_some_and(|reason| reason
+            .starts_with("prettier runs on Markdown blocks only in the project tier")),
+        "{json}"
+    );
+}
+
+#[test]
+fn prettier_ignore_in_a_markdown_block_is_format_not_run_naming_format_off() {
+    let project = prettier_project(CASES[0].0, IGNORED);
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    prettier_stub(outside.path());
+
+    let json = prettier_check(&project, outside.path(), "1", 0);
+
+    assert!(prettier_formats(outside.path()).is_empty(), "{json}");
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/format"), "not_run", "{json}");
+}
+
+#[test]
+fn prettier_the_real_one_passes_a_formatted_markdown_block_and_fails_a_misformatted_one() {
+    let Some(dir) = real_tool_dir(
+        "prettier",
+        "prettier_the_real_one_passes_a_formatted_markdown_block_and_fails_a_misformatted_one",
+    ) else {
+        return;
+    };
+    for (tag, _, _) in CASES {
+        let passes = prettier_check(&prettier_project(tag, FORMATTED), &dir, "1", 0);
+        let fails = prettier_check(&prettier_project(tag, MISFORMATTED), &dir, "1", 1);
+
+        assert_eq!(
+            at(&passes, "/data/summary/code_blocks/passed"),
+            1,
+            "{tag}: {passes}"
+        );
+        assert_eq!(
+            finding_kinds(&fails),
+            ["code-block-unformatted"],
+            "{tag}: {fails}"
+        );
+    }
+}
+
+#[test]
+fn prettier_the_real_one_fails_a_misformatted_markdown_block_the_projects_ignore_files_cover() {
+    let Some(dir) = real_tool_dir(
+        "prettier",
+        "prettier_the_real_one_fails_a_misformatted_markdown_block_the_projects_ignore_files_cover",
+    ) else {
+        return;
+    };
+    for ignore in [".gitignore", ".prettierignore"] {
+        let project = prettier_project(CASES[0].0, MISFORMATTED);
+        // Covers the block's virtual path, never the doc itself, which supdoc would then skip.
+        project.write(ignore, "docs/blocks.md.*\n");
+
+        let json = prettier_check(&project, &dir, "1", 1);
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-unformatted"],
+            "{ignore} never turns the block into a pass: {json}"
+        );
+    }
+}
