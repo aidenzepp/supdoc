@@ -414,6 +414,10 @@ const BIOME_MEMBERS: &str = "class SupdocFragment$ { supdocFrame$() { return thi
 /// The line biome's members frame opens with in a TypeScript block.
 const BIOME_TS_MEMBERS: &str = "abstract class SupdocFragment$ { supdocFrame$() { return this; }";
 
+/// biome's kind for a JSON block, in format and lint alike: an object's entries, read inside the
+/// object's braces, which biome prints back as written with each entry one indent unit deep.
+const BIOME_JSON_FRAGMENTS: &[(Kind, Support)] = &[(Kind::Entries, framed("{", "}"))];
+
 /// A frame of `before` and `after` that a formatter prints back as `out_before` and
 /// `out_after`, a tab in them standing for one indent unit.
 const fn printed(
@@ -614,7 +618,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 19] = [
         install: "npm install --global @biomejs/biome",
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
-        fragments: &[],
+        fragments: BIOME_JSON_FRAGMENTS,
         holds: every_tag,
         vars: &[],
         positions: own_positions,
@@ -659,7 +663,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 19] = [
         install: "npm install --global @biomejs/biome",
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
-        fragments: &[],
+        fragments: BIOME_JSON_FRAGMENTS,
         holds: every_tag,
         vars: &[],
         positions: own_positions,

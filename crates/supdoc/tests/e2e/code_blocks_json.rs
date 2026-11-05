@@ -353,3 +353,48 @@ fn json_the_real_biome_lint_reports_a_duplicate_key() {
         "{json}"
     );
 }
+
+#[test]
+fn frame_entries_pass_formatted_and_linted_inside_the_objects_braces() {
+    let test = "frame_entries_pass_formatted_and_linted_inside_the_objects_braces";
+    let Some(dir) = real_tool_dir("biome", test) else {
+        return;
+    };
+
+    let json = json_project(
+        "json fragment(entries)",
+        "\"steward\": { \"enabled\": true }",
+    )
+    .supdoc_in_with(".", &["check", "--json"], &[("PATH", &dir)])
+    .assert_exit(0)
+    .json();
+
+    assert!(finding_kinds(&json).is_empty(), "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+}
+
+#[test]
+fn frame_entries_a_duplicate_key_is_found_at_its_doc_line() {
+    let test = "frame_entries_a_duplicate_key_is_found_at_its_doc_line";
+    let Some(dir) = real_tool_dir("biome", test) else {
+        return;
+    };
+
+    let json = json_project("json fragment(entries)", "\"a\": 1,\n\"a\": 2")
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", &dir)])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-lint"], "{json}");
+    assert!(
+        at(&json, "/findings/0/message")
+            .as_str()
+            .is_some_and(|m| m.contains("suspicious/noDuplicateObjectKeys")),
+        "{json}"
+    );
+    assert_eq!(
+        at(&json, "/findings/0/location/line"),
+        4,
+        "biome names the first `a`, at its doc line rather than a frame line or the attribute: {json}"
+    );
+}
