@@ -131,6 +131,20 @@ pub(crate) const CODE_TOO_MANY_KEYS: &str = "read-too-many-keys";
 /// The code of [`ReadError::KeyPathsTooLarge`], the `max-key-path-size` ceiling.
 pub(crate) const CODE_KEY_PATHS_TOO_LARGE: &str = "read-key-paths-too-large";
 
+/// The codes of a read that left a file unchecked: a doc whose links or code blocks weren't read,
+/// or a target whose symbols weren't. A missing file and an unsupported language are left out: a
+/// link to either is an ordinary broken link, which `fix` may still mend.
+pub(crate) const UNCHECKED_CODES: [&str; 8] = [
+    "read-not-a-file",
+    "read-io",
+    "read-not-utf8",
+    "read-too-large",
+    CODE_TIMEOUT,
+    CODE_TOO_MANY_KEYS,
+    CODE_KEY_PATHS_TOO_LARGE,
+    "read-internal",
+];
+
 /// How to raise the key-path segment ceiling: its key, variable and flag, and the value that
 /// lifts it.
 const SEGMENT_KNOBS: &str = "Raise the limit with `max-key-segments` under `[limits]` in \

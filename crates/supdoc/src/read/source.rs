@@ -121,22 +121,34 @@ fn read_capped(path: &AbsolutePath, max_size: SizeLimit) -> Result<Vec<u8>, Read
         return Err(ReadError::NotAFile { path: path.clone() });
     }
     let size = metadata.len();
-    let mut bytes = Vec::new();
-    let Some(limit) = max_size.get() else {
-        let _read = (&file).read_to_end(&mut bytes).map_err(io_error)?;
-        return Ok(bytes);
-    };
-    if size > limit {
+    if let Some(limit) = max_size.get()
+        && size > limit
+    {
         return Err(too_large(size, limit));
     }
-    let _read = file
-        .take(limit.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(io_error)?;
+    let bytes = read_up_to(file, max_size).map_err(io_error)?;
     let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    if read > limit {
-        return Err(too_large(read, limit));
+    match max_size.get() {
+        Some(limit) if read > limit => Err(too_large(read, limit)),
+        _ => Ok(bytes),
     }
+}
+
+/// Reads `reader` to its end, but never more than one byte past `max_size`: one byte over is
+/// enough to know the source is too large, so a file that keeps growing can't make the read go on.
+/// With no limit, it reads to the end.
+///
+/// # Errors
+///
+/// Whatever reading `reader` reports.
+fn read_up_to(mut reader: impl Read, max_size: SizeLimit) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let _read = match max_size.get() {
+        Some(limit) => reader
+            .take(limit.saturating_add(1))
+            .read_to_end(&mut bytes)?,
+        None => reader.read_to_end(&mut bytes)?,
+    };
     Ok(bytes)
 }
 
@@ -449,6 +461,41 @@ mod tests {
         let error = read_under(path, SizeLimit::bytes(11))
             .expect_err("a file one byte over the limit should be rejected");
         assert_eq!(error.code(), "read-too-large");
+    }
+
+    /// A reader of `len` bytes that counts how many it has handed out.
+    struct Counted {
+        /// The bytes still to hand out.
+        inner: io::Take<io::Repeat>,
+        /// How many bytes it has handed out so far.
+        handed_out: std::rc::Rc<std::cell::Cell<u64>>,
+    }
+
+    impl Read for Counted {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let read = self.inner.read(buf)?;
+            self.handed_out
+                .set(self.handed_out.get() + u64::try_from(read).expect("a read fits in u64"));
+            Ok(read)
+        }
+    }
+
+    #[test]
+    fn a_capped_read_stops_one_byte_past_the_cap_however_much_the_source_holds() {
+        let handed_out = std::rc::Rc::new(std::cell::Cell::new(0));
+        let source = Counted {
+            inner: io::repeat(b'x').take(4096),
+            handed_out: std::rc::Rc::clone(&handed_out),
+        };
+
+        let bytes = read_up_to(source, SizeLimit::bytes(100)).expect("an in-memory read succeeds");
+
+        assert_eq!(bytes.len(), 101, "one byte past the cap is kept");
+        assert_eq!(
+            handed_out.get(),
+            101,
+            "the read should stop at cap + 1 bytes, not read the whole source first"
+        );
     }
 
     #[test]

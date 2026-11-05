@@ -398,6 +398,11 @@ impl Limits {
         TimeLimit(Some(Duration::from_secs(600)));
     /// The default ceiling on a doc or linked file: 16 MiB. Parsing a file can take a few hundred
     /// times its size in memory.
+    ///
+    /// Changing it also changes the `--max-file-size` help example ("such as 16MiB") in
+    /// `cli/args.rs`, the `max-file-size` row of the `config show` golden
+    /// (`tests/output/snapshots/output__goldens__config_show.snap`) and the 16 MiB figure in the
+    /// README's Configuration section.
     pub(crate) const MAX_FILE_SIZE: SizeLimit = SizeLimit(Some(16 * MIB));
     /// The default lock size ceiling: 16 MiB.
     pub(crate) const MAX_LOCK_SIZE: SizeLimit = SizeLimit(Some(16 * MIB));
