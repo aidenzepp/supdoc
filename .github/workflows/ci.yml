@@ -29,7 +29,9 @@ jobs:
         # Pinned shfmt and ruff binaries, checked against ci/tools.sha256, and black with every
         # dependency hash-pinned in ci/requirements-black.txt. Those files name the sources.
         # shellcheck is pinned the same way, so the runner's own older one is never used.
-        # biome, tombi, yamlfmt, rumdl and Go are pinned the same way; yamllint like black.
+        # biome, tombi, yamlfmt, rumdl, Go and Node are pinned the same way; yamllint and pylint
+        # like black. prettier and eslint come from ci/node-tools/package-lock.json, whose
+        # integrity hashes `npm ci` checks; --ignore-scripts keeps their install scripts from running.
         run: |
           set -euo pipefail
           tools="$RUNNER_TEMP/code-block-tools"
@@ -43,6 +45,7 @@ jobs:
           curl -fsSLO https://github.com/google/yamlfmt/releases/download/v0.21.0/yamlfmt_0.21.0_Linux_x86_64.tar.gz
           curl -fsSLO https://github.com/rvben/rumdl/releases/download/v0.3.2/rumdl-v0.3.2-x86_64-unknown-linux-gnu.tar.gz
           curl -fsSLO https://go.dev/dl/go1.27.3.linux-amd64.tar.gz
+          curl -fsSLO https://nodejs.org/dist/v24.22.2/node-v24.22.2-linux-x64.tar.xz
           grep -v '^#' "$GITHUB_WORKSPACE/ci/tools.sha256" | sha256sum --strict -c -
           install -m 0755 shfmt_v3.14.1_linux_amd64 "$tools/bin/shfmt"
           tar -xzf ruff-x86_64-unknown-linux-gnu.tar.gz
@@ -57,6 +60,13 @@ jobs:
           tar -xzf rumdl-v0.3.2-x86_64-unknown-linux-gnu.tar.gz rumdl
           install -m 0755 rumdl "$tools/bin/rumdl"
           tar -xzf go1.27.3.linux-amd64.tar.gz -C "$tools"
+          tar -xJf node-v24.22.2-linux-x64.tar.xz -C "$tools"
+          ln -s "$tools/node-v24.22.2-linux-x64/bin/node" "$tools/bin/node"
+          cp -R "$GITHUB_WORKSPACE/ci/node-tools" "$tools/node-tools"
+          (cd "$tools/node-tools" && PATH="$tools/node-v24.22.2-linux-x64/bin:$PATH" \
+            npm ci --ignore-scripts --no-audit --no-fund)
+          ln -s "$tools/node-tools/node_modules/.bin/prettier" "$tools/bin/prettier"
+          ln -s "$tools/node-tools/node_modules/.bin/eslint" "$tools/bin/eslint"
           python3 -m venv "$tools/yamllint"
           "$tools/yamllint/bin/python" -m pip install --quiet --disable-pip-version-check \
             --require-hashes --only-binary=:all: -r "$GITHUB_WORKSPACE/ci/requirements-yamllint.txt"
@@ -65,6 +75,10 @@ jobs:
           "$tools/black/bin/python" -m pip install --quiet --disable-pip-version-check \
             --require-hashes --only-binary=:all: -r "$GITHUB_WORKSPACE/ci/requirements-black.txt"
           ln -s "$tools/black/bin/black" "$tools/bin/black"
+          python3 -m venv "$tools/pylint"
+          "$tools/pylint/bin/python" -m pip install --quiet --disable-pip-version-check \
+            --require-hashes --only-binary=:all: -r "$GITHUB_WORKSPACE/ci/requirements-pylint.txt"
+          ln -s "$tools/pylint/bin/pylint" "$tools/bin/pylint"
           echo "$tools/bin" >> "$GITHUB_PATH"
           echo "$tools/go/bin" >> "$GITHUB_PATH"
           "$tools/bin/shfmt" --version
@@ -77,6 +91,12 @@ jobs:
           "$tools/bin/rumdl" --version
           "$tools/bin/yamllint" --version
           "$tools/go/bin/go" version
+          "$tools/bin/node" --version
+          # prettier and eslint start with `#!/usr/bin/env node`: run them with the pinned Node, not
+          # the runner's own.
+          PATH="$tools/bin:$PATH" "$tools/bin/prettier" --version
+          PATH="$tools/bin:$PATH" "$tools/bin/eslint" --version
+          "$tools/bin/pylint" --version
       - name: Test
         env:
           # A real-tool test whose tool is missing fails here instead of skipping.
