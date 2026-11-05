@@ -1936,3 +1936,116 @@ fn jsdoc_the_real_biome_checks_and_fixes_a_gutterless_comments_indented_block() 
         "biome's fix should land behind the comment's prefix with the code's indent kept"
     );
 }
+
+/// A `/** */` comment on a method with an unfenced `@example` holding one unformatted line,
+/// followed by a `@returns` tag.
+const EXAMPLE_SOURCE: &str = "export class C {\n  /**\n   * Adds.\n   * @example\n   * const   a = 1\n   * @returns nothing\n   */\n  add() {}\n}\n";
+
+#[test]
+fn example_without_a_fence_is_checked_at_its_tag_line() {
+    let (project, outside) = jsdoc_project(EXAMPLE_SOURCE);
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-unformatted"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 4, "{json}");
+}
+
+#[test]
+fn example_fix_keeps_the_gutter_and_the_next_tag() {
+    let (project, outside) = jsdoc_project(EXAMPLE_SOURCE);
+    let path = [("PATH", outside.path())];
+
+    let _fix = project
+        .supdoc_in_with(".", &["fix", "--yes"], &path)
+        .assert_exit(0);
+
+    assert_eq!(
+        project.read("src/blocks.ts"),
+        EXAMPLE_SOURCE.replace("const   a = 1", "const a = 1;"),
+        "the fix should rewrite the example's line behind its `   * ` gutter and keep `@returns`"
+    );
+}
+
+/// The kinds of a `check --json` on a project with `table` under `[features.code-blocks]` and
+/// `source` at `src/<name>`, whose stub `biome` formats only a block given the virtual extension
+/// `extension`, turning it into `const a = 1;`, and fails on any other.
+fn example_kinds_in(name: &str, table: &str, extension: &str) -> Vec<String> {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write(
+        "supdoc.config.toml",
+        &format!("[features.code-blocks]\n[features.code-blocks.{table}]\n"),
+    );
+    project.write(
+        &format!("src/{name}"),
+        "/**\n * @example\n * const   a = <A />\n */\nexport function f() {}\n",
+    );
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    stub_biome(
+        outside.path(),
+        &format!(
+            "case \"$3\" in *.{extension}) ;; *) exit 4;; esac\n/bin/cat >/dev/null\necho 'const a = 1;'"
+        ),
+    );
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(1)
+        .json();
+    finding_kinds(&json)
+}
+
+#[test]
+fn example_in_a_js_file_is_js_and_in_a_tsx_file_is_tsx() {
+    for (name, table, extension) in [
+        ("blocks.js", "javascript", "js"),
+        ("view.tsx", "typescript", "tsx"),
+    ] {
+        assert_eq!(
+            example_kinds_in(name, table, extension),
+            ["code-block-unformatted"],
+            "{name}: biome should be given the block as `.{extension}`"
+        );
+    }
+}
+
+#[test]
+fn example_fix_that_would_start_a_block_tag_or_close_the_comment_is_never_written() {
+    for output in ["@sealed\\nclass A {}", "const a = 1; */"] {
+        let (project, outside) = jsdoc_project(EXAMPLE_SOURCE);
+        stub_biome(
+            outside.path(),
+            &format!("/bin/cat >/dev/null\nprintf '{output}\\n'"),
+        );
+        let path = [("PATH", outside.path())];
+
+        let _fix = project
+            .supdoc_in_with(".", &["fix", "--yes"], &path)
+            .assert_exit(0);
+        let json = project
+            .supdoc_in_with(".", &["check", "--json"], &path)
+            .assert_exit(1)
+            .json();
+
+        assert_eq!(project.read("src/blocks.ts"), EXAMPLE_SOURCE, "{output}");
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-unformatted", "code-block-fix-unsafe"],
+            "{output}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/findings/1/message"),
+            "`biome-format`'s output for the block has a line that starts with `@` or holds `*/`, which would end its `@example` section or its comment, so `fix` won't write it",
+            "{output}: {json}"
+        );
+        assert!(
+            array_at(&json, "/findings")
+                .iter()
+                .all(|finding| finding.get("fix").is_none()),
+            "{output}: no finding should offer the fix: {json}"
+        );
+    }
+}
