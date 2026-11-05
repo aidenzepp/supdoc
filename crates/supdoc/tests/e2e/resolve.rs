@@ -349,3 +349,24 @@ fn resolve_through_a_symlink_to_a_file_inside_the_root_still_lists_its_symbols()
         "src/alias.rs",
     );
 }
+
+#[test]
+fn resolve_reads_a_toml_file_under_the_flag_s_key_segment_limit() {
+    let project = Project::fixture("basic");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+    );
+
+    let within = project.supdoc(&["--json", "resolve", "Cargo.toml"]);
+    let over = project.supdoc(&["--max-key-segments", "2", "--json", "resolve", "Cargo.toml"]);
+
+    let _ = within.assert_exit(0);
+    let _ = over.assert_exit(1);
+    assert_eq!(
+        at(&error_json(&over), "/kind"),
+        "read-too-many-keys",
+        "the flag's limit should bound the read; stderr: {}",
+        over.stderr
+    );
+}

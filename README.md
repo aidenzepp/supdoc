@@ -104,14 +104,37 @@ Threat model, for a checkout you don't trust:
     root is not read, so rumdl run in the project may judge a block differently: put the config inside the
     root.
   - **A checkout you trust:** tools that compile or load code from the checkout belong to the project tier.
-    clippy is the only one today, and it doesn't run yet even in a trusted checkout: it waits for a later
-    audit of the scanner in front of it, and its step counts as `lint not run`. supdoc trusts a checkout only
-    from outside it: run `supdoc trust` once (it records the directory of the config; `supdoc trust --revoke`
-    undoes it, and a linked worktree of a trusted repository at the same path inside its work tree is
+    clippy is the only one today. supdoc trusts a checkout only from outside it: run `supdoc trust` once
+    (it records the directory of the config; `supdoc trust --revoke` undoes it, and a linked worktree of a trusted repository at the same path inside its work tree is
     trusted too), or set `SUPDOC_TRUST=1` for one run, as in a CI workflow. No file in the checkout can turn
     trust on. `tier = "static"` in `[features.code-blocks]` can only turn it off: it holds every step to
     the default list even in a trusted checkout, with no warning. `tier = "run"` is a config error until
     running examples exists.
+  - **What trust runs:** supdoc runs `cargo check --lib --locked --offline` on the root's own
+    `Cargo.toml`, so the project's build scripts and proc macros run; that is what trust grants. Then
+    clippy lints each Rust block against your crate. cargo reads your cargo config as it does when you run
+    `cargo check` in the root, `.cargo/config.toml` files above the root and in `CARGO_HOME` included, and
+    builds the path dependencies, workspace members and `[patch]` paths the root's `Cargo.toml` names. A
+    root package that would join a workspace outside the root isn't built.
+  - cargo and clippy get a cleared environment (`PATH`, `HOME`, `RUSTUP_HOME`, `CARGO_HOME`,
+    `XDG_CACHE_HOME` and supdoc's own toolchain settings), so secrets in your environment don't reach
+    them; files your user can read, such as `~/.cargo/credentials.toml`, still can.
+  - supdoc never writes `Cargo.lock` and never downloads a crate. A project without a `Cargo.lock`, or
+    with dependencies not yet fetched, fails with `code-block-tool-failed`: run `cargo generate-lockfile`
+    or `cargo fetch` first. The build gets 10 minutes; `code-block-build-timeout` in `[limits]` raises it.
+  - The build goes into its own directory, `~/.cache/supdoc/code-blocks/target/<hash of the root>`
+    (under `$XDG_CACHE_HOME` when it's set), never inside the checkout. Each trusted checkout, and each
+    of its worktrees, gets a full `cargo check` build there, which can take as much disk as the
+    project's own. Delete the directory to get the space back.
+  - supdoc still refuses a block whose own text reads a file or an environment variable at compile
+    time, but that check covers only the block's text: macros and derives the block brings in from your
+    crate or its dependencies run as your project's code, which trusting the checkout already allows. A
+    block that calls a macro from your crate or a dependency, or any macro off supdoc's list, isn't
+    checked, because supdoc reads only the block's own text. Functions, types and derives from your
+    crate are checked.
+  - Once you trust a checkout, a Rust block that names an item it doesn't define fails with
+    `code-block-missing-name` until it defines or imports the item, or says
+    `lint(off: needs crate context)`.
   - A step held back because the checkout isn't trusted is counted `not run` with its reason, never as
     passed, and the run gets one `code-block-not-trusted` warning (exit 0; a failure under
     `--deny-warnings`) that names `supdoc trust`, `SUPDOC_TRUST=1` and the opt-outs.
@@ -119,7 +142,7 @@ Threat model, for a checkout you don't trust:
     (`$XDG_STATE_HOME/supdoc/trusted-roots`, else `~/.local/state/supdoc/trusted-roots`). Anyone who can
     write that file can grant trust.
   - Trust follows the directory, not its contents: if you trust a checkout and then switch it to a branch
-    you don't trust, the next check runs that branch's code once clippy is enabled. Never set
+    you don't trust, the next check builds that branch and runs its build scripts. Never set
     `SUPDOC_TRUST` in a `pull_request_target` or `workflow_run` workflow, or in any job that has secrets and
     checks out a pull request's code.
   - A linked worktree of a trusted repository inherits trust whatever branch it has checked out, so a
@@ -203,7 +226,7 @@ supdoc checks what is written and never skips a block on its own. To exclude a b
 - `format(off: reason)` and `lint(off: reason)`: skip only formatting or only linting. The reason runs
   to the matching `)`, so it may hold spaces and commas.
 - `format(full)` and `lint(full)`: run the step on this block even though its tool's table turns it off.
-  A Rust block's lint doesn't run yet: clippy needs `supdoc trust` and a later audit.
+  A Rust block's lint is clippy, which runs only in a checkout you trust.
 
 A block attribute beats the tool's table for that block only. The selected tool accepts `full` and `off`;
 any other value, or a step attribute on a block whose language has no tool for that step, warns
@@ -236,7 +259,7 @@ edition = "2021"         # Rust also takes `edition`; shell takes `dialect` ("ba
 A table for a tool the language doesn't select, or a key or value its tool doesn't accept, is a config
 error. A step a config table sets to `"off"` counts as `format off` or `lint off` in the summary, and one an
 author marks `format(off: ...)` or `lint(off: ...)` counts as `format skipped` or `lint skipped`; a step that was due but
-didn't run, such as clippy's, which is project tier, counts as `lint not run` with its reason.
+didn't run, such as clippy's in a checkout you don't trust, counts as `lint not run` with its reason.
 
 A Rust snippet that needs surrounding code to make sense takes one of three explicit forms:
 

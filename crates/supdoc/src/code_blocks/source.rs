@@ -200,9 +200,13 @@ fn resolve<T>(
 ) -> Result<T, Unresolved> {
     let name = kind.name();
     let limits = config.limits_in_effect();
-    let source = SourceFile::read(located.file.clone(), languages, limits.parse_timeout.value)
-        .map(|file| file.with_key_paths(KeyPathBudget::from_limits(limits)))
-        .map_err(|error| read_failed(&error, config.root(), kind))?;
+    let source = SourceFile::read(
+        located.file.clone(),
+        languages,
+        limits.parse_timeout.value,
+        KeyPathBudget::from_limits(limits),
+    )
+    .map_err(|error| read_failed(&error, config.root(), kind))?;
     let shown = relative_to(config.root(), source.path());
     let outside = || {
         Unresolved::Missing(Missing::new(
