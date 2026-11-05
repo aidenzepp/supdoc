@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use crate::support::{Project, at};
+use crate::support::{Project, array_at, at};
 
 #[test]
 fn a_flag_beats_its_environment_variable() {
@@ -640,5 +640,44 @@ fn a_missing_global_excludes_file_is_silent() {
         !all_output(&run).contains("global excludes"),
         "no global excludes file is nothing to report:\n{}",
         all_output(&run)
+    );
+}
+
+#[test]
+fn a_code_block_source_is_read_under_the_flag_s_key_segment_limit() {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+    );
+    project.write("supdoc.config.toml", "[features.code-blocks]\n");
+    project.write(
+        "docs/blocks.md",
+        "# Blocks\n\n```rust uses(/Cargo.toml#package.version)\nfn add() {}\n```\n",
+    );
+    let over_the_limit = |args: &[&str]| -> Vec<String> {
+        let command: Vec<&str> = args.iter().chain(&["check", "--json"]).copied().collect();
+        let json = project.supdoc(&command).json();
+        array_at(&json, "/findings")
+            .iter()
+            .filter(|finding| finding.to_string().contains("max-key-segments"))
+            .map(ToString::to_string)
+            .collect()
+    };
+
+    let within = over_the_limit(&[]);
+    let over = over_the_limit(&["--max-key-segments", "2"]);
+
+    assert!(
+        within.is_empty(),
+        "the default limit holds the file: {within:?}"
+    );
+    assert!(
+        over.len() == 1
+            && over
+                .iter()
+                .all(|finding| finding.contains("code-block-source-missing")),
+        "the flag's limit should bound the source's read: {over:?}"
     );
 }

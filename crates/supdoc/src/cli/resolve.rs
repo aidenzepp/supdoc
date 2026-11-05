@@ -57,8 +57,8 @@ pub(crate) fn run(
         path,
         Languages::builtin().map_err(CliError::from)?,
         limits.parse_timeout.value,
+        KeyPathBudget::from_limits(limits),
     )
-    .map(|file| file.with_key_paths(KeyPathBudget::from_limits(limits)))
     .map_err(|error| read_failed(&error, config.root(), &args.file))?;
     let table = file
         .language()

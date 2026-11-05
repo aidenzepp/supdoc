@@ -73,13 +73,17 @@ impl Parsed {
         match self.files.entry(path.clone()) {
             Entry::Occupied(parsed) => Ok(parsed.into_mut()),
             Entry::Vacant(slot) => {
-                let file = SourceFile::read(path.clone(), languages, limits.parse_timeout.value)
-                    .inspect_err(|error| {
-                        if let ReadError::CartridgeLoad { error, .. } = error {
-                            let _first = self.cartridge_failure.get_or_insert(*error);
-                        }
-                    })?
-                    .with_key_paths(KeyPathBudget::from_limits(limits));
+                let file = SourceFile::read(
+                    path.clone(),
+                    languages,
+                    limits.parse_timeout.value,
+                    KeyPathBudget::from_limits(limits),
+                )
+                .inspect_err(|error| {
+                    if let ReadError::CartridgeLoad { error, .. } = error {
+                        let _first = self.cartridge_failure.get_or_insert(*error);
+                    }
+                })?;
                 #[cfg(test)]
                 {
                     self.parses += 1;
@@ -706,6 +710,7 @@ mod tests {
                 AbsolutePath::new(&path).expect("a temp dir path should be absolute"),
                 languages,
                 Limits::PARSE_TIMEOUT,
+                KeyPathBudget::defaults(),
             )
             .expect("the fixture should read");
             hash_file(&file, HashSettings { line_endings })
