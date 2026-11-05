@@ -23,7 +23,7 @@ use crate::output::paths::PathStyle;
 use crate::path::AbsolutePath;
 use crate::read::cartridge::Languages;
 use crate::read::error::CartridgeLoadError;
-use crate::trust::Grant;
+use crate::trust::{Grant, Unread};
 
 use super::biome;
 use super::block::{CodeBlock, Info};
@@ -269,7 +269,7 @@ pub(crate) fn evaluate(
     let judged = |doc: &str| in_scope(doc) && !unresolved_uses.contains(doc);
     let command = |doc: &str| paths.command_word(doc);
     findings.extend(uses::judge(&written, lock.recorded_uses(), judged, command));
-    findings.extend(not_trusted(&records, |record, step| {
+    findings.extend(not_trusted(&records, granted, |record, step| {
         custom_named(code_blocks, record, step)
     }));
     Ok(Evaluation {
@@ -1136,10 +1136,12 @@ fn tier_gate(
 /// The run's one `code-block-not-trusted` warning, at the first of `records` with a step held
 /// because the operator hasn't granted trust. It names every held tool in the order first seen
 /// (see [`trust_words`]); a held custom command by its program, as `named` names the custom
-/// command a record's step selects (see [`custom_named`]). `None` when no step was held for want
-/// of trust.
+/// command a record's step selects (see [`custom_named`]). Under [`Grant::Unread`] it says why
+/// the trust store wasn't read and what fixes that. `None` when no step was held for want of
+/// trust.
 fn not_trusted(
     records: &[BlockRecord],
+    granted: Grant,
     named: impl Fn(&BlockRecord, Step) -> Option<String>,
 ) -> Option<Finding> {
     let mut at = None;
@@ -1162,7 +1164,11 @@ fn not_trusted(
             }
         }
     }
-    Some(trust_words(&didnt_run, &off, turned_off).with_location(at?.clone()))
+    let unread = match granted {
+        Grant::Unread(unread) => Some(unread),
+        Grant::Trusted | Grant::Untrusted | Grant::TurnedOff => None,
+    };
+    Some(trust_words(&didnt_run, &off, turned_off, unread).with_location(at?.clone()))
 }
 
 /// The custom command `code_blocks` selects for `record`'s `step`, as messages name it (see
@@ -1181,14 +1187,20 @@ fn custom_named(code_blocks: &CodeBlocks, record: &BlockRecord, step: Step) -> O
 fn trust_warning(held: &[&tools::Held], turned_off: bool) -> Finding {
     let didnt_run: Vec<String> = held.iter().map(|held| held.didnt_run.to_owned()).collect();
     let off: Vec<&str> = held.iter().map(|held| held.off).collect();
-    trust_words(&didnt_run, &off, turned_off)
+    trust_words(&didnt_run, &off, turned_off, None)
 }
 
 /// The `code-block-not-trusted` warning saying what didn't run and why, each of `didnt_run` in
 /// order. When `turned_off`, it says `SUPDOC_TRUST=0` held them and how to undo that, since
-/// `supdoc trust` can't help then. Its help ends with the settings that stop asking:
-/// `tier = "static"`, or each of `off`, the held tools' own off settings.
-fn trust_words(didnt_run: &[String], off: &[&str], turned_off: bool) -> Finding {
+/// `supdoc trust` can't help then. When the trust store went `unread`, it says why and what fixes
+/// that, since `supdoc trust` fails for the same reason. Its help ends with the settings that
+/// stop asking: `tier = "static"`, or each of `off`, the held tools' own off settings.
+fn trust_words(
+    didnt_run: &[String],
+    off: &[&str],
+    turned_off: bool,
+    unread: Option<Unread>,
+) -> Finding {
     let didnt_run = didnt_run.join("; ");
     let off = off.join(" and ");
     let stop_asking =
@@ -1202,6 +1214,19 @@ fn trust_words(didnt_run: &[String], off: &[&str], turned_off: bool) -> Finding 
         .with_help(format!(
             "unset `SUPDOC_TRUST` to let `supdoc trust` decide, or set it to `1` to trust this \
              run; {stop_asking}"
+        ))
+    } else if let Some(unread) = unread {
+        Finding::new(
+            NOT_TRUSTED,
+            Severity::Warning,
+            format!(
+                "{didnt_run}, and this checkout isn't trusted: the trust store wasn't read, as {}",
+                unread.reason()
+            ),
+        )
+        .with_help(format!(
+            "{}, or set `SUPDOC_TRUST=1` for one run; {stop_asking}",
+            unread.fix()
         ))
     } else {
         Finding::new(
@@ -4744,7 +4769,8 @@ mod tests {
             .map(|record| record.at.clone())
             .expect("the doc holds three blocks");
 
-        let warning = not_trusted(&records, |_, _| None).expect("two steps were held for trust");
+        let warning = not_trusted(&records, Grant::Untrusted, |_, _| None)
+            .expect("two steps were held for trust");
 
         assert_eq!(
             (warning.location, warning.message),

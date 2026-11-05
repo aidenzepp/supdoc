@@ -575,6 +575,12 @@ mod tests {
 
     /// Runs `supdoc <args>` from `cwd`. `args` must start with `check`.
     fn check_in(cwd: AbsolutePath, args: &[&str]) -> Run {
+        check_with_trust(cwd, args, &TrustEnv::default())
+    }
+
+    /// Runs `supdoc <args>` from `cwd` with trust decided from `trust`. `args` must start with
+    /// `check`.
+    fn check_with_trust(cwd: AbsolutePath, args: &[&str], trust: &TrustEnv) -> Run {
         let mut session = Session::new(cwd, args);
         let Command::Check(check_args) = &session.cli.command else {
             panic!("`supdoc {}` should be a check command", args.join(" "));
@@ -582,7 +588,7 @@ mod tests {
         let result = run(
             check_args,
             &ToolEnv::default(),
-            &TrustEnv::default(),
+            trust,
             &session.context,
             &mut session.output,
         );
@@ -630,6 +636,115 @@ mod tests {
         assert_eq!(
             granted_tier(root.path(), &env).expect("the store should be read"),
             Grant::Trusted
+        );
+    }
+
+    /// A config turning code blocks on with rustfmt's format step off, so a Rust block's one
+    /// due step is clippy's lint, a project-tier tool held unless the checkout is trusted.
+    const CLIPPY_ONLY: &str =
+        "[features.code-blocks]\n[features.code-blocks.rust.rustfmt]\nformat = \"off\"\n";
+
+    /// A trust environment whose `XDG_STATE_HOME` climbs out of and back into `state` with `..`.
+    fn climbing_env(state: &tempfile::TempDir) -> TrustEnv {
+        fs::create_dir(state.path().join("detour")).expect("the detour should be creatable");
+        let climbing = state.path().join("detour").join("..").join("state");
+        trust_env(&[("XDG_STATE_HOME", climbing.as_os_str())])
+    }
+
+    #[test]
+    fn a_dot_dot_store_changes_nothing_when_no_step_needs_trust() {
+        let project = project();
+        let state = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+
+        let plain = check_with_trust(
+            project.root(),
+            &["check", "--deny-warnings"],
+            &trust_env(&[]),
+        );
+        let climbing = check_with_trust(
+            project.root(),
+            &["check", "--deny-warnings"],
+            &climbing_env(&state),
+        );
+
+        assert_eq!(
+            climbing.stdout, plain.stdout,
+            "no step needed trust, so nothing is said"
+        );
+        assert_eq!(climbing.result, plain.result);
+    }
+
+    #[test]
+    fn a_dot_dot_store_with_a_held_step_warns_once_naming_the_variable() {
+        let project = Project::empty();
+        project.write("supdoc.config.toml", CLIPPY_ONLY);
+        project.write(
+            "docs/blocks.md",
+            "# Blocks\n\n```rust\npub fn one() -> i32 {\n    1\n}\n```\n",
+        );
+        let state = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+
+        let run = check_with_trust(project.root(), &["check"], &climbing_env(&state));
+
+        let warnings = run
+            .stdout
+            .matches("warning[code-block-not-trusted]")
+            .count();
+        assert_eq!(
+            warnings, 1,
+            "one trust warning should say why: {}",
+            run.stdout
+        );
+        assert!(
+            run.stdout.contains("`XDG_STATE_HOME` holds `..`")
+                && run
+                    .stdout
+                    .contains("set `XDG_STATE_HOME` to a path without `..`"),
+            "the warning should name the variable and its fix: {}",
+            run.stdout
+        );
+        assert!(
+            !run.stdout.contains("run `supdoc trust`"),
+            "`supdoc trust` fails in this state, so the help shouldn't suggest it: {}",
+            run.stdout
+        );
+    }
+
+    #[test]
+    fn an_unreadable_store_with_a_held_step_warns_once_saying_why() {
+        let project = Project::empty();
+        project.write("supdoc.config.toml", CLIPPY_ONLY);
+        project.write(
+            "docs/blocks.md",
+            "# Blocks\n\n```rust\npub fn one() -> i32 {\n    1\n}\n```\n",
+        );
+        let state = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let store = state.path().join("supdoc/trusted-roots");
+        fs::create_dir(state.path().join("supdoc")).expect("the store dir should be creatable");
+        fs::write(&store, "").expect("the store should be writable");
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&store, fs::Permissions::from_mode(0o000))
+                .expect("the store's mode should be settable");
+        }
+        let env = trust_env(&[("XDG_STATE_HOME", state.path().as_os_str())]);
+
+        let run = check_with_trust(project.root(), &["check"], &env);
+
+        let warnings = run
+            .stdout
+            .matches("warning[code-block-not-trusted]")
+            .count();
+        assert_eq!(
+            warnings, 1,
+            "one trust warning should say why: {}",
+            run.stdout
+        );
+        assert!(
+            run.stdout.contains("can't be read: permission denied")
+                && run.stdout.contains("readable by you"),
+            "the warning should name the error and its fix: {}",
+            run.stdout
         );
     }
 
