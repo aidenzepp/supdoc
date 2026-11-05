@@ -6,9 +6,9 @@ supdoc tells you when the code behind your docs changed.
 
 It reads Markdown links to code, such as `[add](src/lib.rs#add)`, from your docs and from code comments
 in Rust, TypeScript, JavaScript, Python, Go and Bash. It records a hash of each linked file, symbol,
-Markdown heading or TOML and JSON key in `supdoc.lock`, and `supdoc check` fails when one changes. It
-doesn't judge whether a doc is still right. A person rereads it and runs `supdoc update`. supdoc can
-also check the code blocks in your docs. It is pre-1.0 and published on
+Markdown heading or JSON, YAML or TOML key in `supdoc.lock`, and `supdoc check` fails when one
+changes. It doesn't judge whether a doc is still right. A person rereads it and runs `supdoc update`.
+supdoc can also check the code blocks in your docs. It is pre-1.0 and published on
 [crates.io](https://crates.io/crates/supdoc).
 
 ## Install
@@ -79,7 +79,7 @@ Commit `supdoc.config.toml` and `supdoc.lock`, and run `supdoc check` in CI.
 | `completions SHELL` | no | Prints a shell completion script |
 | `skill install` | skill files | Installs supdoc's agent skill |
 | `upgrade [VERSION]` | the binary | Installs a newer or older supdoc with cargo |
-| `trust [PATH]` | the trust store | Trusts a checkout to run its code blocks' build tools; `--revoke` undoes it |
+| `trust [PATH]` | the trust store | Trusts a checkout to run code-block tools that load its code; `--revoke` undoes it |
 
 `update`, `fix`, `namespace rename`, `skill install` and `upgrade` preview unless given `--yes`. `init`
 writes at once, and `--dry-run` previews it. Every command accepts `--json` and `--jsonl`. Exit codes: 0
@@ -120,9 +120,9 @@ names one instead. `supdoc.lock` sits beside it. supdoc reads the files your `.g
 exclude files leave, with a few differences from git that `supdoc check --help` lists.
 
 A `[features.code-blocks]` table, even an empty one, turns on code-block checking. A block marked
-`from(PATH#SYMBOL)` must stay a copy of that symbol. A block marked `uses(PATH#SYMBOL)` is tracked like a link. A language's table, such as
-`[features.code-blocks.rust]`, turns on that language's formatter and linter. `supdoc check --help` lists
-every attribute and how to opt a block out.
+`from(PATH#SYMBOL)` must stay a copy of that symbol. A block marked `uses(PATH#SYMBOL)` is tracked
+like a link. A language's table, such as `[features.code-blocks.rust]`, turns on that language's
+formatter and linter. `supdoc check --help` lists every tool, attribute and how to opt a block out.
 
 ## Safety
 
@@ -131,16 +131,25 @@ every attribute and how to opt a block out.
   store, its result cache, and, for `upgrade`, cargo's `.crates2.json`. It never reads, hashes or quotes
   a linked file outside the root, and never quotes an ignore rule or git config line from there.
 - `supdoc upgrade` is the only command that uses the network. Nothing checks for updates on its own.
-- Code-block tools come from supdoc's own list, never from a path in the config or a binary in the
-  checkout. By default they read only the block and plain config files.
-- A `rust-toolchain.toml` that names a path is ignored, and supdoc never downloads a toolchain.
+- Each write supdoc makes is checked to land inside the directory that owns it, just before it
+  happens, and an ignore file that is a symlink isn't read. Both checks hold when they are made: a
+  file or directory swapped for a symlink while supdoc runs can still send a write outside, or make
+  supdoc read one ignore file from outside the root.
+- In a checkout you don't trust, code-block tools come from supdoc's own list, found on `PATH` but
+  never inside the checkout, and read only the block and plain config files.
+- A `rust-toolchain.toml` that names a path leaves Rust blocks unchecked, and supdoc never downloads a
+  toolchain.
 - A Rust block that reads a file or an environment variable at compile time (`include_str!`, `env!`)
   isn't checked.
-- Linting Rust blocks with clippy builds your project and runs its build scripts and proc macros, so it
-  happens only in a checkout you trust. `supdoc trust` records trust, and `SUPDOC_TRUST=1` grants it
-  for one run. No file in the checkout can grant it. supdoc doesn't check who owns the trust store, so
-  anyone who can write it can grant trust. A step held for trust gets one `code-block-not-trusted`
-  warning per run: exit 0, but a failure under `--deny-warnings`.
+- Some tools run the project's own code, so they run only in a checkout you trust. clippy builds your
+  project and runs its build scripts and proc macros. pylint imports the blocks' modules, prettier and
+  eslint load the project's config and plugins, and each is found in the project's `.venv/bin` or
+  `node_modules/.bin` before `PATH`. Custom formatter and linter commands written in the config, or in
+  a config it extends, run only in a checkout you trust, as pylint and clippy do.
+- `supdoc trust` records trust, and `SUPDOC_TRUST=1` grants it for one run. No file in the checkout
+  can grant it. supdoc doesn't check who owns the trust store, so anyone who can write it can grant
+  trust. What trust would have run is named in one `code-block-not-trusted` warning per run: exit 0,
+  but a failure under `--deny-warnings`.
 - Never set `SUPDOC_TRUST` in a CI job that has secrets and checks out a pull request's code. Don't run
   supdoc on an untrusted pull request after writing secrets into the checkout. `supdoc trust --help`
   covers worktrees and CI runners.
