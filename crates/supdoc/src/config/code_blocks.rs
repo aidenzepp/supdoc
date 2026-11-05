@@ -171,6 +171,14 @@ pub(crate) struct CustomCommand {
     span: Range<usize>,
 }
 
+impl CustomCommand {
+    /// The program, `command`'s first element.
+    #[must_use]
+    pub(crate) fn program(&self) -> &str {
+        &self.program
+    }
+}
+
 /// How a custom linter's output is read, written as `diagnostics = "..."`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Diagnostics {

@@ -11,8 +11,9 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use crate::config::code_blocks::{CodeBlocks, Dialect, Edition, Language};
+use crate::config::code_blocks::{CodeBlocks, CustomCommand, Dialect, Edition, Language};
 
 use super::format::{ParseError, Positions};
 use super::fragment::{Kind, Support};
@@ -127,17 +128,20 @@ pub(crate) struct Hold {
     pub(crate) turned_off: bool,
 }
 
-/// The hold `reason` records, when it is a project-tier cartridge's [`Held::needs_trust`] or
+/// The hold `reason` records, when it is a project-tier tool's [`Held::needs_trust`] or
 /// [`Held::trust_off`]. `None` for any other reason.
 #[must_use]
 pub(crate) fn hold(reason: &str) -> Option<Hold> {
-    CARTRIDGES.iter().find_map(|tool| {
-        let held = tool.held()?;
-        (reason == held.needs_trust || reason == held.trust_off).then_some(Hold {
-            held,
-            turned_off: reason == held.trust_off,
+    CARTRIDGES
+        .iter()
+        .filter_map(ToolCartridge::held)
+        .chain([&CUSTOM_HELD])
+        .find_map(|held| {
+            (reason == held.needs_trust || reason == held.trust_off).then_some(Hold {
+                held,
+                turned_off: reason == held.trust_off,
+            })
         })
-    })
 }
 
 /// What a cartridge's argv is built from: the block's place in its doc and its language's
@@ -302,6 +306,133 @@ impl ToolCartridge {
             Reader::Lint(read) => read(input, framed, result),
             Reader::Format(_) => lint::judge(result, |_| None),
         }
+    }
+}
+
+/// A command the config wrote as a language's `formatter` or `linter`, held as a [`Tool`]: the
+/// program and its arguments as written, for one step.
+#[derive(Debug)]
+pub(crate) struct CustomTool {
+    /// The command as config validated it.
+    command: CustomCommand,
+    /// The step it does.
+    step: Step,
+}
+
+/// What supdoc says when trust holds a custom command back. Its reasons stay static, as every
+/// block reason is; the program it names goes in findings, not here.
+static CUSTOM_HELD: Held = Held {
+    needs_trust: "a custom command runs only in the project tier, which needs `supdoc trust`",
+    trust_off: "a custom command runs only in the project tier, and `SUPDOC_TRUST=0` turns trust \
+                off for this run",
+    short: "custom command needs trust",
+    didnt_run: "custom commands didn't run: the checkout chose them",
+    off: "a known tool's name as the `formatter` or `linter`",
+};
+
+/// The tool selected for a step: one of supdoc's [`CARTRIDGES`], or a command the config wrote.
+/// Everything from selection to the verdict holds this handle, so either kind can flow through.
+#[derive(Debug, Clone)]
+pub(crate) enum Tool {
+    /// One of supdoc's cartridges.
+    Cartridge(&'static ToolCartridge),
+    /// A custom command, shared by every block that selects it.
+    #[expect(
+        dead_code,
+        reason = "built from config once custom commands are wired to run, in P5-CC03"
+    )]
+    Custom(Arc<CustomTool>),
+}
+
+impl Tool {
+    /// The name its step's reasons and findings give it: a cartridge's config name, or a
+    /// custom command's program.
+    #[must_use]
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            Self::Cartridge(cartridge) => cartridge.name,
+            Self::Custom(custom) => custom.command.program(),
+        }
+    }
+
+    /// The binary looked up: a cartridge's, or a custom command's program.
+    #[must_use]
+    pub(crate) fn binary(&self) -> &str {
+        match self {
+            Self::Cartridge(cartridge) => cartridge.binary,
+            Self::Custom(custom) => custom.command.program(),
+        }
+    }
+
+    /// The tier it needs: every custom command needs [`Tier::Project`].
+    #[must_use]
+    pub(crate) const fn tier(&self) -> Tier {
+        match self {
+            Self::Cartridge(cartridge) => cartridge.tier(),
+            Self::Custom(_) => Tier::Project,
+        }
+    }
+
+    /// What supdoc says when trust holds it back. `None` for a [`Tier::Static`] cartridge, which
+    /// trust never holds.
+    #[must_use]
+    pub(crate) fn held(&self) -> Option<&'static Held> {
+        match self {
+            Self::Cartridge(cartridge) => cartridge.held(),
+            Self::Custom(_) => Some(&CUSTOM_HELD),
+        }
+    }
+
+    /// The check it does.
+    #[must_use]
+    pub(crate) fn step(&self) -> Step {
+        match self {
+            Self::Cartridge(cartridge) => cartridge.step(),
+            Self::Custom(custom) => custom.step,
+        }
+    }
+
+    /// The values its step's mode accepts, in config and in a block attribute.
+    #[must_use]
+    pub(crate) const fn modes(&self) -> &'static [&'static str] {
+        match self {
+            Self::Cartridge(cartridge) => cartridge.modes,
+            Self::Custom(_) => FULL_OR_OFF,
+        }
+    }
+
+    /// Whether it checks a fragment of `kind` in a block tagged `tag`: a custom command checks
+    /// none.
+    #[must_use]
+    pub(crate) fn supports(&self, kind: Kind, tag: &str) -> bool {
+        match self {
+            Self::Cartridge(cartridge) => cartridge.supports(kind, tag),
+            Self::Custom(_) => false,
+        }
+    }
+
+    /// The cartridge it is. `None` for a custom command.
+    #[must_use]
+    pub(crate) const fn cartridge(&self) -> Option<&'static ToolCartridge> {
+        match self {
+            Self::Cartridge(cartridge) => Some(cartridge),
+            Self::Custom(_) => None,
+        }
+    }
+
+    /// Whether it is the cartridge named `name`. Never a custom command, whatever its program.
+    #[must_use]
+    pub(crate) fn is(&self, name: &str) -> bool {
+        self.cartridge()
+            .is_some_and(|cartridge| cartridge.name == name)
+    }
+
+    /// Whether it is a cartridge that runs `binary`. Never a custom command, whatever its
+    /// program, so no custom command inherits a cartridge's setup.
+    #[must_use]
+    pub(crate) fn runs(&self, binary: &str) -> bool {
+        self.cartridge()
+            .is_some_and(|cartridge| cartridge.binary == binary)
     }
 }
 
@@ -916,22 +1047,20 @@ pub(crate) fn default_for(language: Language, step: Step) -> Option<&'static Too
         .find(|tool| tool.language == language && tool.step() == step)
 }
 
-/// The cartridge `code_blocks` selects for `language`'s `step`: the one its `formatter` or
+/// The tool `code_blocks` selects for `language`'s `step`: the cartridge its `formatter` or
 /// `linter` names, else the default. `None` when the language has none.
 #[must_use]
-pub(crate) fn selected(
-    code_blocks: &CodeBlocks,
-    language: Language,
-    step: Step,
-) -> Option<&'static ToolCartridge> {
+pub(crate) fn selected(code_blocks: &CodeBlocks, language: Language, step: Step) -> Option<Tool> {
     let written = match step {
         Step::Format => code_blocks.formatter(language),
         Step::Lint => code_blocks.linter(language),
     };
-    written.map_or_else(
-        || default_for(language, step),
-        |name| named(language, step, name),
-    )
+    written
+        .map_or_else(
+            || default_for(language, step),
+            |name| named(language, step, name),
+        )
+        .map(Tool::Cartridge)
 }
 
 /// The cartridge named `name` for `language`'s `step`, as config selects it.

@@ -20,7 +20,6 @@ use super::runner::{Failure, Ran};
 use super::states;
 use super::tools::{Step, ToolCartridge};
 use super::yaml;
-use crate::config::code_blocks::Language;
 
 /// The code for a block its formatter would change.
 const UNFORMATTED: &str = "code-block-unformatted";
@@ -636,7 +635,7 @@ pub(crate) fn fixed(
         .strip_suffix("\r\n")
         .or_else(|| output.strip_suffix('\n'))
         .unwrap_or(output);
-    if tool.language == Language::Yaml {
+    if tool.name == "yamlfmt" {
         let Some((marker, _)) = fence_of(block, doc.text()) else {
             return vec![unformatted];
         };
