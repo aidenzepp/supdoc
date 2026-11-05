@@ -27,6 +27,7 @@ use super::biome;
 use super::block::{CodeBlock, Info};
 use super::cache::{self, Cache};
 use super::custom;
+use super::eslint;
 use super::excerpt;
 use super::format::{self, FixDoc};
 use super::fragment::{Frame, Kind};
@@ -492,7 +493,11 @@ impl Evaluation {
                     outcomes.push((lint_state(&verdict), Some(&run.tool)));
                 }
                 (Some(Err(not_run)), Some(_)) => {
-                    self.findings.extend(warnings.first(&not_run, &record.at));
+                    if not_run.reason == ESLINT_NO_RULES {
+                        warnings.unruled(&not_run, &record.at, self.findings.len());
+                    } else {
+                        self.findings.extend(warnings.first(&not_run, &record.at));
+                    }
                     record.steps.lint = StepState::Unrunnable {
                         reason: not_run.reason,
                     };
@@ -523,6 +528,10 @@ impl Evaluation {
                     None => Some(PROJECT_UNBUILT.to_owned()),
                 };
             }
+        }
+        if let Some((position, warning)) = warnings.unruled_warning() {
+            self.findings
+                .insert(position.min(self.findings.len()), warning);
         }
     }
 
@@ -590,8 +599,8 @@ fn run_jobs(
             .and_then(|run| match &run.tool {
                 Tool::Custom(custom) => run_custom_linter(custom, &run.program, record, session),
                 Tool::Cartridge(tool) => {
-                    if switched_off(tool, record) {
-                        return Some(Err(PYLINT_SWITCHED_OFF.into()));
+                    if let Some(reason) = switched_off(tool, record) {
+                        return Some(Err(reason.into()));
                     }
                     let rust = rust.filter(|_| run.tool.is("clippy"));
                     run_linter(tool, &run.program, record, session, rust)
@@ -781,6 +790,72 @@ fn pylint_switched_off(at: &Location) -> Finding {
     .with_location(at.clone())
 }
 
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose eslint step
+/// didn't run because an `eslint-disable` comment in it names no rule, or more than rule names
+/// (see [`eslint::switches_lint_off`]).
+fn eslint_switched_off(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "the block holds an `eslint-disable` comment that names no rule, or something other than \
+         rule names, so supdoc can't confirm eslint lints all of it, and its lint step didn't run",
+    )
+    .with_help(
+        "name each rule the comment switches off, such as `/* eslint-disable no-var */`, or mark \
+         the block `lint(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
+/// The most block files [`eslint_no_rules`] names before counting the rest.
+const NAMED_FILES: usize = 5;
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose eslint step
+/// didn't run because no rule of the project's eslint config applies to its file, naming each
+/// such block file in `files` (virtual paths relative to the root, such as `docs/a.md.1.ts`, in
+/// first-seen order): the first [`NAMED_FILES`], then how many more.
+fn eslint_no_rules(at: &Location, files: &[String]) -> Finding {
+    let shown = files
+        .iter()
+        .take(NAMED_FILES)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let named = match files.len().saturating_sub(NAMED_FILES) {
+        0 => shown,
+        more => format!("{shown} and {more} more"),
+    };
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        format!(
+            "no eslint rule applies to {named}, so those blocks' lint steps didn't run: the \
+             project's eslint config sets no rule supdoc reports to warn or error for them"
+        ),
+    )
+    .with_help(
+        "supdoc names each block `<doc>.<n>.<extension>` beside its doc: set rules in a config \
+         object whose `files` match those names, or mark the blocks `lint(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose eslint step
+/// didn't run because eslint said it ignored the block's file.
+fn eslint_ignored(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "eslint ignored the block's file, so its lint step didn't run: the project's eslint \
+         config ignores the doc's blocks or has no config object whose `files` match them",
+    )
+    .with_help(
+        "supdoc names each block `<doc>.<n>.<extension>` beside its doc: match those names in \
+         the eslint config's `files`, or mark the blocks `lint(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
 /// The run's one `code-block-not-checked` warning, at `at`, the first block whose prettier step
 /// didn't run because it holds `prettier-ignore` (see [`prettier::switches_format_off`]).
 fn prettier_switched_off(at: &Location) -> Finding {
@@ -928,6 +1003,11 @@ struct NotRunWarnings {
     given: Vec<&'static str>,
     /// The messages of the `code-block-not-checked` warnings lint steps have given.
     said: Vec<String>,
+    /// The block files no eslint rule applies to, each once, in first-seen order.
+    unruled: Vec<String>,
+    /// Where the first of them was found: the count of findings given before it, and its block's
+    /// fence.
+    unruled_at: Option<(usize, Location)>,
 }
 
 impl NotRunWarnings {
@@ -943,6 +1023,27 @@ impl NotRunWarnings {
         }
         self.said.push(found.message.clone());
         Some(found)
+    }
+
+    /// Notes `not_run`'s block file, one no eslint rule applies to, found at `at` after
+    /// `position` findings, for the run's one warning naming them all (see
+    /// [`Self::unruled_warning`]).
+    fn unruled(&mut self, not_run: &NotRun, at: &Location, position: usize) {
+        if self.unruled_at.is_none() {
+            self.unruled_at = Some((position, at.clone()));
+        }
+        let file = not_run.said.clone().unwrap_or_default();
+        if !self.unruled.contains(&file) {
+            self.unruled.push(file);
+        }
+    }
+
+    /// The run's one warning for the block files no eslint rule applies to (see
+    /// [`eslint_no_rules`]), at the first, with the count of findings given before it. `None`
+    /// when there are none.
+    fn unruled_warning(&self) -> Option<(usize, Finding)> {
+        let (position, at) = self.unruled_at.as_ref()?;
+        Some((*position, eslint_no_rules(at, &self.unruled)))
     }
 
     /// The warning for `not_run`, at `at`, the first time its reason comes up in the run. `None`
@@ -963,6 +1064,8 @@ impl NotRunWarnings {
             BIOME_LINTED_NOTHING => linted_nothing(at),
             PYLINT_SWITCHED_OFF => pylint_switched_off(at),
             PRETTIER_SWITCHED_OFF => prettier_switched_off(at),
+            ESLINT_SWITCHED_OFF => eslint_switched_off(at),
+            ESLINT_IGNORED => eslint_ignored(at),
             YAMLLINT_REJECTED => yamllint_rejected(at, said),
             YAMLLINT_LOCALE => yamllint_locale(at, said),
             go::VET_OFFLINE => vet_offline(at),
@@ -3066,6 +3169,10 @@ fn run_linter(
         Ok(release) => release,
         Err(not_run) => return Some(Err(not_run)),
     };
+    let unruled = match eslint_rules(tool, program, &invocation, record, session) {
+        Ok(unruled) => unruled,
+        Err(not_run) => return Some(Err(not_run)),
+    };
     let fingerprint = release.as_ref().map(go::GoVersion::fingerprint);
     let run = cache::Run {
         tool,
@@ -3104,8 +3211,8 @@ fn run_linter(
             }),
         }
     };
-    let verdict = if let Some(forbidden) = forbidden_by_yaml(tool, input) {
-        forbidden
+    let verdict = if let Some(early) = forbidden_by_yaml(tool, input).or(unruled) {
+        early
     } else {
         match cached_run(&run, session, spawn, judge, |judged| {
             judged.as_ref().is_ok_and(lint::Verdict::cacheable)
@@ -3250,20 +3357,45 @@ fn format_switched_off(tool: &ToolCartridge, record: &BlockRecord) -> bool {
             .is_some_and(|pending| prettier::switches_format_off(&pending.input))
 }
 
-/// Whether `tool` is pylint and `record`'s block holds a `pylint:` comment supdoc can't tell
-/// from one that switches it off for the whole block (see [`pylint::switches_lint_off`]), so the step doesn't run and pylint is
-/// never spawned.
-fn switched_off(tool: &ToolCartridge, record: &BlockRecord) -> bool {
-    tool.name == PYLINT
-        && record
-            .pending
-            .as_ref()
-            .is_some_and(|pending| pylint::switches_lint_off(&pending.input))
+/// The name of eslint's cartridges.
+const ESLINT: &str = "eslint";
+
+/// Why eslint's step didn't run on a block when eslint said it ignored the block's file.
+const ESLINT_IGNORED: &str = "eslint ignored the block's file: the project's eslint config \
+                              ignores it or has no config object matching it";
+
+/// Why eslint's step didn't run on a block when no rule of the project's eslint config applies to
+/// its file.
+const ESLINT_NO_RULES: &str = "no eslint rule applies to the block's file: the project's eslint \
+                               config sets none to warn or error for it";
+
+/// Why eslint's step didn't run on a block holding an `eslint-disable` comment supdoc can't tell
+/// from one that switches eslint off for all of it (see [`eslint::switches_lint_off`]).
+const ESLINT_SWITCHED_OFF: &str = "the block holds an `eslint-disable` comment that names no \
+                                   rule, or more than rule names, so supdoc can't confirm eslint \
+                                   lints all of it; name the rules, or mark the block \
+                                   `lint(off: <reason>)`";
+
+/// Why `tool`'s lint step doesn't run on `record`'s block, so the tool is never spawned: it is
+/// pylint and the block holds a `pylint:` comment supdoc can't tell from one that switches it
+/// off for the whole block (see [`pylint::switches_lint_off`]), or it is eslint and the block
+/// holds such an `eslint-disable` comment (see [`eslint::switches_lint_off`]). `None` otherwise.
+fn switched_off(tool: &ToolCartridge, record: &BlockRecord) -> Option<&'static str> {
+    let (switches_off, reason): (fn(&str) -> bool, _) = match tool.name {
+        PYLINT => (pylint::switches_lint_off, PYLINT_SWITCHED_OFF),
+        ESLINT => (eslint::switches_lint_off, ESLINT_SWITCHED_OFF),
+        _ => return None,
+    };
+    record
+        .pending
+        .as_ref()
+        .is_some_and(|pending| switches_off(&pending.input))
+        .then_some(reason)
 }
 
 /// Why `tool`'s finished run `ran` says nothing about its block, so its step counts as not run:
 /// biome lint, given the block as a file (`biome_file`), checked no file; tombi lint didn't
-/// report linting it; pylint linted no module; or go vet couldn't load the block `input` (see
+/// report linting it; pylint linted no module; eslint ignored the block's file; or go vet couldn't load the block `input` (see
 /// [`go::vet_not_run`]). `None` otherwise.
 fn said_nothing(
     tool: &ToolCartridge,
@@ -3277,6 +3409,7 @@ fn said_nothing(
         }
         TOMBI_LINT => tombi::linted_nothing(ran).then_some(TOMBI_LINTED_NOTHING),
         PYLINT => pylint::linted_nothing(&ran.stdout).then_some(PYLINT_LINTED_NOTHING),
+        ESLINT => eslint::linted_nothing(&ran.stdout).then_some(ESLINT_IGNORED),
         GO_VET => go::vet_not_run(input, ran),
         _ => None,
     }
@@ -3308,6 +3441,49 @@ fn go_release(
             reason: go::VET_VERSION,
             said: Some(said),
         })
+}
+
+/// Whether eslint, when `tool` is it, at `program`, may lint `record`'s block, `invocation`'s:
+/// some rule of the project's config applies to the block's virtual path (see
+/// [`eslint::rules_apply`]). `Ok(None)` when it may, or `tool` is any other linter; the lint
+/// step's failure when eslint couldn't say.
+///
+/// # Errors
+///
+/// [`ESLINT_NO_RULES`], naming the block's virtual path relative to the root, when no rule
+/// applies.
+///
+/// Effect: runs `eslint --print-config` for the block's own virtual path.
+fn eslint_rules(
+    tool: &ToolCartridge,
+    program: &Path,
+    invocation: &Invocation<'_>,
+    record: &BlockRecord,
+    session: &Session<'_>,
+) -> Result<Option<lint::Verdict>, NotRun> {
+    if tool.name != ESLINT {
+        return Ok(None);
+    }
+    let extension = biome::extension(invocation.tag);
+    let path = tools::virtual_path(invocation.doc, record.index, extension);
+    match eslint::rules_apply(
+        program,
+        session.env,
+        session.root,
+        session.timeout,
+        Path::new(&path),
+    ) {
+        Ok(true) => Ok(None),
+        Ok(false) => Err(NotRun {
+            reason: ESLINT_NO_RULES,
+            said: Some(format!(
+                "{}.{}.{extension}",
+                record.at.file.as_str(),
+                record.index
+            )),
+        }),
+        Err(failed) => Ok(Some(lint::Verdict::Failed(failed))),
+    }
 }
 
 /// Runs `call`, `go vet`'s, on the block `input`, written as `main.go` beside a `go.mod` of

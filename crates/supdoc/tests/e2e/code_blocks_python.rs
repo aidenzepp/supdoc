@@ -709,6 +709,34 @@ fn pylint_exiting_fatal_or_usage_with_no_message_is_a_tool_failure() {
 }
 
 #[test]
+fn pylint_output_that_isnt_its_report_is_a_tool_failure_even_at_exit_zero() {
+    for stdout in [
+        format!("'plugin loaded\\n'; printf {}", empty_report(1)),
+        "'not json'".to_owned(),
+        "'{}'".to_owned(),
+    ] {
+        let project = project_with_python_block(PYLINT, "X = 1");
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        pylint_stub(outside.path(), &format!("printf {stdout}\nexit 0"));
+
+        let json = trusted_pylint_check(&project, outside.path(), cache.path(), 1);
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-tool-failed"],
+            "{stdout}: {json}"
+        );
+        assert!(
+            at(&json, "/findings/0/message")
+                .as_str()
+                .is_some_and(|message| message.contains("wasn't its json2 report")),
+            "{stdout}: {json}"
+        );
+    }
+}
+
+#[test]
 fn pylint_missing_names_the_venv_bin_dir_it_searched() {
     let project = project_with_python_block(PYLINT, "X = 1");
     let empty = tempfile::TempDir::new().expect("a temporary directory should be creatable");

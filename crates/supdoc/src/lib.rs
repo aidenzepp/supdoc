@@ -237,6 +237,9 @@ pub(crate) mod code_blocks {
     /// prettier's format step, a project-tier TypeScript and JavaScript formatter.
     mod prettier;
 
+    /// eslint's lint step, a project-tier TypeScript and JavaScript linter.
+    mod eslint;
+
     /// TypeScript, JavaScript and JSON's format and lint steps, run by biome.
     mod biome;
     /// Markdown's format and lint steps, run by rumdl.
