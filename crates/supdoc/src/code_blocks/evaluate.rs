@@ -605,8 +605,8 @@ fn indent_unknown(at: &Location) -> Finding {
     )
     .with_help(
         "set the indent plainly in the formatter's config (rustfmt's `hard_tabs`, `tab_spaces` \
-         and `max_width`; biome's `indentStyle` and `indentWidth`, outside `overrides`), or mark \
-         the blocks `format(off: <reason>)`",
+         and `max_width`; biome's `indentStyle`, `indentWidth` and `lineWidth`, outside \
+         `overrides`), or mark the blocks `format(off: <reason>)`",
     )
     .with_location(at.clone())
 }
@@ -1495,27 +1495,56 @@ fn scaled(share: u16, scale: f32) -> usize {
     usize::from(low)
 }
 
-/// The indent unit biome uses for a `language` block under `given`'s config: its language
-/// section's `formatter.indentStyle` and `indentWidth`, else the top-level `formatter`'s, else
-/// biome's defaults (a tab; two spaces when the style is `space`). No config is biome's defaults.
-/// `None` when the config can't be read or parsed, has an override that sets an indent (which
-/// would give some paths another one), or holds a value biome wouldn't take.
+/// The indent and line width biome formats a block with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BiomeLayout {
+    /// The indent unit: a tab, or `indentWidth` spaces.
+    indent: String,
+    /// The columns one indent unit takes: `indentWidth`, which is also a tab's width.
+    columns: usize,
+    /// `lineWidth`: the widest a line may be.
+    line_width: usize,
+}
+
+impl BiomeLayout {
+    /// biome's arguments for a block that sits `depth` indent units inside a frame: its line
+    /// width raised by those units' columns, so the frame's indent never moves where biome wraps
+    /// the block's lines. `None` when that width is above the most biome takes.
+    fn framed_args(&self, depth: usize) -> Option<Vec<OsString>> {
+        let width = self
+            .line_width
+            .checked_add(self.columns.checked_mul(depth)?)
+            .filter(|width| *width <= BIOME_MAX_LINE_WIDTH)?;
+        Some(vec![OsString::from(format!(
+            "--javascript-formatter-line-width={width}"
+        ))])
+    }
+}
+
+/// The widest `lineWidth` biome takes.
+const BIOME_MAX_LINE_WIDTH: usize = 320;
+
+/// The indent and line width biome uses for a `language` block under `given`'s config: its
+/// language section's `formatter.indentStyle`, `indentWidth` and `lineWidth`, else the top-level
+/// `formatter`'s, else biome's defaults (a tab two columns wide, two spaces when the style is
+/// `space`, and 80 columns). No config is biome's defaults. `None` when the config can't be read
+/// or parsed, has an override that sets one of them (which would give some paths another
+/// layout), or holds a value biome wouldn't take.
 ///
 /// Effect: reads the private config file.
-fn biome_indent(language: Language, given: Option<&biome::Given>) -> Option<String> {
+fn biome_layout(language: Language, given: Option<&biome::Given>) -> Option<BiomeLayout> {
     let section = match language {
         Language::TypeScript | Language::JavaScript => "javascript",
         _ => return None,
     };
-    let Some(path) = given.and_then(|given| given.config.as_ref()) else {
-        return Some("\t".to_owned());
+    let config: serde_json::Value = match given.and_then(|given| given.config.as_ref()) {
+        None => serde_json::Value::Null,
+        Some(path) => serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?,
     };
-    let config: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-    let indent_keys = ["indentStyle", "indentWidth"];
-    let sets_indent = |override_: &serde_json::Value| {
+    let layout_keys = ["indentStyle", "indentWidth", "lineWidth"];
+    let sets_layout = |override_: &serde_json::Value| {
         ["formatter", section].iter().any(|table| {
-            indent_keys.iter().any(|key| {
+            layout_keys.iter().any(|key| {
                 let at = if *table == "formatter" {
                     format!("/formatter/{key}")
                 } else {
@@ -1528,7 +1557,7 @@ fn biome_indent(language: Language, given: Option<&biome::Given>) -> Option<Stri
     match config.get("overrides") {
         None => {}
         Some(serde_json::Value::Array(overrides)) => {
-            if overrides.iter().any(sets_indent) {
+            if overrides.iter().any(sets_layout) {
                 return None;
             }
         }
@@ -1539,15 +1568,22 @@ fn biome_indent(language: Language, given: Option<&biome::Given>) -> Option<Stri
             .pointer(&format!("/{section}/formatter/{key}"))
             .or_else(|| config.pointer(&format!("/formatter/{key}")))
     };
-    match setting("indentStyle").map_or(Some("tab"), serde_json::Value::as_str)? {
-        "tab" => Some("\t".to_owned()),
-        "space" => {
-            let width = setting("indentWidth").map_or(Some(2), serde_json::Value::as_u64)?;
-            let width = usize::try_from(width).ok().filter(|width| *width > 0)?;
-            Some(" ".repeat(width))
-        }
-        _ => None,
-    }
+    let number = |key: &str, default: u64| {
+        let value = setting(key).map_or(Some(default), serde_json::Value::as_u64)?;
+        usize::try_from(value).ok().filter(|value| *value > 0)
+    };
+    let columns = number("indentWidth", 2)?;
+    let line_width = number("lineWidth", 80).filter(|width| *width <= BIOME_MAX_LINE_WIDTH)?;
+    let indent = match setting("indentStyle").map_or(Some("tab"), serde_json::Value::as_str)? {
+        "tab" => "\t".to_owned(),
+        "space" => " ".repeat(columns),
+        _ => return None,
+    };
+    Some(BiomeLayout {
+        indent,
+        columns,
+        line_width,
+    })
 }
 
 /// How a formatter runs on a block inside a frame.
@@ -1584,10 +1620,11 @@ impl Framing {
     }
 }
 
-/// How `tool` formats a block inside a frame, read from the project's config for it (`rust`'s
-/// for rustfmt, `given`'s for biome). [`FRAME_INDENT_UNKNOWN`] for a formatter whose indent
-/// supdoc can't read, and when the config can't be read for it; [`FRAME_RESHAPED`] when
-/// rustfmt's config reshapes the frame.
+/// How `tool` formats a block inside `frame`, read from the project's config for it (`rust`'s
+/// for rustfmt, `given`'s for biome), each tool's line width raised by the indent the frame puts
+/// before the block. [`FRAME_INDENT_UNKNOWN`] for a formatter whose indent or line width supdoc
+/// can't read, and when the config can't be read for it; [`FRAME_RESHAPED`] when rustfmt's
+/// config reshapes the frame.
 ///
 /// # Errors
 ///
@@ -1596,6 +1633,7 @@ impl Framing {
 /// Effect: reads biome's private config file.
 fn framing(
     tool: &ToolCartridge,
+    frame: Frame,
     rust: Option<&RustSetup>,
     given: Option<&biome::Given>,
 ) -> Result<Framing, &'static str> {
@@ -1609,11 +1647,13 @@ fn framing(
                 widened: layout.tab_spaces,
             }),
         },
-        "biome" => biome_indent(tool.language, given)
-            .map(|indent| Framing {
-                indent,
-                args: Vec::new(),
-                widened: 0,
+        "biome" => biome_layout(tool.language, given)
+            .and_then(|layout| {
+                Some(Framing {
+                    args: layout.framed_args(format::depth(frame))?,
+                    indent: layout.indent,
+                    widened: 0,
+                })
             })
             .ok_or(FRAME_INDENT_UNKNOWN),
         _ => Err(FRAME_INDENT_UNKNOWN),
@@ -1664,7 +1704,7 @@ fn run_formatter(
     let given = record.given.as_ref();
     let framed = match frame {
         None => None,
-        Some(frame) => match framing(tool, rust, given) {
+        Some(frame) => match framing(tool, frame, rust, given) {
             Ok(framing) => Some((frame, framing)),
             Err(reason) => return Some(Err(reason)),
         },
@@ -3847,7 +3887,7 @@ mod tests {
 
         use super::super::{
             Evaluation, FRAME_INDENT_UNKNOWN, FRAME_RESHAPED, FormatRan, Job, RustSetup,
-            RustfmtLayout, Session, Slot, StepsRan, ToolRun, biome_indent, parses, run_formatter,
+            RustfmtLayout, Session, Slot, StepsRan, ToolRun, biome_layout, parses, run_formatter,
         };
         use super::{rust_record, rust_records, temporary};
         use crate::code_blocks::biome::Given;
@@ -4257,11 +4297,12 @@ mod tests {
                     names: None,
                 }
             };
-            let indent = |config: &str| biome_indent(Language::TypeScript, Some(&given(config)));
+            let layout = |config: &str| biome_layout(Language::TypeScript, Some(&given(config)));
+            let indent = |config: &str| layout(config).map(|layout| layout.indent);
 
             assert_eq!(
-                biome_indent(Language::TypeScript, None).as_deref(),
-                Some("\t")
+                biome_layout(Language::TypeScript, None).map(|layout| layout.indent),
+                Some("\t".to_owned())
             );
             assert_eq!(indent("{}").as_deref(), Some("\t"));
             assert_eq!(
@@ -4292,6 +4333,61 @@ mod tests {
                 None
             );
             assert_eq!(indent(r#"{"formatter":{"indentStyle":"wide"}}"#), None);
+            assert_eq!(
+                indent(r#"{"overrides":[{"javascript":{"formatter":{"lineWidth":40}}}]}"#),
+                None,
+                "an override that sets a line width would wrap some paths elsewhere"
+            );
+        }
+
+        #[test]
+        fn frame_format_biome_widens_its_line_by_the_frames_indent() {
+            let dir = temporary();
+            let args = |config: &str, depth: usize| {
+                let path = dir.path().join("biome.json");
+                std::fs::write(&path, config).expect("the config should be writable");
+                let given = Given {
+                    flags: Vec::new(),
+                    config: Some(path),
+                    mirror: None,
+                    names: None,
+                };
+                biome_layout(Language::TypeScript, Some(&given))
+                    .and_then(|layout| layout.framed_args(depth))
+                    .map(|args| {
+                        args.iter()
+                            .map(|arg| arg.to_string_lossy().into_owned())
+                            .collect::<String>()
+                    })
+            };
+            let width = |value: usize| Some(format!("--javascript-formatter-line-width={value}"));
+
+            assert_eq!(
+                args("{}", 1),
+                width(82),
+                "a tab is two columns wide by default"
+            );
+            assert_eq!(args("{}", 2), width(84));
+            assert_eq!(
+                args(
+                    r#"{"formatter":{"indentStyle":"space","indentWidth":4}}"#,
+                    1
+                ),
+                width(84)
+            );
+            assert_eq!(
+                args(
+                    r#"{"formatter":{"lineWidth":100},"javascript":{"formatter":{"lineWidth":60}}}"#,
+                    1
+                ),
+                width(62),
+                "the language section's width wins"
+            );
+            assert_eq!(
+                args(r#"{"formatter":{"lineWidth":320}}"#, 1),
+                None,
+                "a width biome wouldn't take leaves the step not run"
+            );
         }
 
         #[test]

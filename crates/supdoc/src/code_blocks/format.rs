@@ -88,11 +88,16 @@ pub(crate) fn judge_framed(
     match result {
         Ok(ran) if ran.success => match String::from_utf8(ran.stdout) {
             Err(_) => Verdict::ToolFailed("it printed output that isn't UTF-8".to_owned()),
-            Ok(output) if input.trim().is_empty() && frame.alone(&output) => Verdict::Formatted,
-            Ok(output) => match frame.inner(&output, indent) {
+            Ok(output) => match canonical(frame, &output, indent) {
                 None => Verdict::FrameReformatted(frame.kind),
-                Some(inner) if inner == input => Verdict::Formatted,
-                Some(inner) => Verdict::Unformatted(inner),
+                Some(output) if input.trim().is_empty() && frame.alone(&output) => {
+                    Verdict::Formatted
+                }
+                Some(output) => match frame.inner(&output, indent) {
+                    None => Verdict::FrameReformatted(frame.kind),
+                    Some(inner) if inner == input => Verdict::Formatted,
+                    Some(inner) => Verdict::Unformatted(inner),
+                },
             },
         },
         result => match judge(tool, input, result) {
@@ -109,6 +114,47 @@ pub(crate) fn judge_framed(
             failed => hidden(frame, &failed, lines, indent),
         },
     }
+}
+
+/// How many indent units a formatter puts before the block's lines inside `frame`: one more
+/// than the first line of its `out_after` starts with, each a tab there. One for a frame that
+/// closes at the left margin; two for biome's children frame, whose block sits inside a `<div>`
+/// that biome indents inside parentheses.
+#[must_use]
+pub(crate) fn depth(frame: Frame) -> usize {
+    let closing = frame.out_after.lines().next().unwrap_or_default();
+    1 + closing.len() - closing.trim_start_matches('\t').len()
+}
+
+/// `output`, a formatter's stdout for a block run inside `frame` with each non-empty line led by
+/// `indent`, in the form [`Frame::inner`] reads: each frame line's leading `indent` units written
+/// as the tabs `frame` writes them with, and each non-empty block line led by one `indent`, the
+/// units [`depth`] puts before it beyond the first removed. Output too short to hold the frame's
+/// lines is returned as it is, for [`Frame::alone`] and [`Frame::inner`] to judge. `None` when a
+/// non-empty block line lacks those units, which is the frame reshaped.
+fn canonical(frame: Frame, output: &str, indent: &str) -> Option<String> {
+    let lines: Vec<&str> = output.lines().collect();
+    let head = frame.out_before.lines().count();
+    let tail = frame.out_after.lines().count();
+    if lines.len() < head + tail || indent.is_empty() {
+        return Some(output.to_owned());
+    }
+    let extra = indent.repeat(depth(frame) - 1);
+    let mut canonical = String::with_capacity(output.len());
+    for (at, line) in lines.iter().enumerate() {
+        if at < head || at >= lines.len() - tail {
+            let mut rest = *line;
+            while let Some(after) = rest.strip_prefix(indent) {
+                canonical.push('\t');
+                rest = after;
+            }
+            canonical.push_str(rest);
+        } else if !line.is_empty() {
+            canonical.push_str(line.strip_prefix(extra.as_str())?);
+        }
+        canonical.push('\n');
+    }
+    Some(canonical)
 }
 
 /// `failed`, a verdict on a block of `lines` lines run inside `frame`, each non-empty line led
