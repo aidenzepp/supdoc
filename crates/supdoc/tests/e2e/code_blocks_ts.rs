@@ -2113,7 +2113,8 @@ fn trusted_prettier_check(
 }
 
 #[test]
-fn prettier_runs_from_the_root_reading_no_ignore_file_and_spawns_again_on_a_second_run() {
+fn prettier_runs_from_the_root_reading_no_ignore_file_nor_pragma_and_spawns_again_on_a_second_run()
+{
     let project = prettier_project("const a = 1;");
     let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
     let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
@@ -2138,8 +2139,17 @@ fn prettier_runs_from_the_root_reading_no_ignore_file_and_spawns_again_on_a_seco
             .expect("the record names a cwd and args");
         assert_eq!(Path::new(cwd), root, "prettier runs from the root: {run}");
         let args: Vec<&str> = args.split(' ').collect();
-        let ["--ignore-path=", "--stdin-filepath", path] = args.as_slice() else {
-            panic!("prettier should read no ignore file and get the block's path: {run}");
+        let [
+            "--ignore-path=",
+            "--no-require-pragma",
+            "--no-check-ignore-pragma",
+            "--stdin-filepath",
+            path,
+        ] = args.as_slice()
+        else {
+            panic!(
+                "prettier should read no ignore file nor pragma and get the block's path: {run}"
+            );
         };
         assert!(path.ends_with("/docs/blocks.md.1.ts"), "{run}");
     }
@@ -2316,6 +2326,39 @@ fn prettier_the_real_one_fails_a_misformatted_block_the_projects_ignore_files_co
             finding_kinds(&json),
             ["code-block-unformatted"],
             "{ignore} never turns the block into a pass: {json}"
+        );
+    }
+}
+
+#[test]
+fn prettier_the_real_one_fails_a_misformatted_block_whatever_the_configs_pragma_options() {
+    let Some(dir) = real_tool_dir(
+        "prettier",
+        "prettier_the_real_one_fails_a_misformatted_block_whatever_the_configs_pragma_options",
+    ) else {
+        return;
+    };
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    for (config, body) in [
+        ("{\"requirePragma\": true}", "const   a = 1"),
+        (
+            "{\"checkIgnorePragma\": true}",
+            "/** @noprettier */\nconst   a = 1",
+        ),
+        (
+            "{\"checkIgnorePragma\": true}",
+            "/** @NoFormat */\nconst   a = 1",
+        ),
+    ] {
+        let project = prettier_project(body);
+        project.write(".prettierrc", config);
+
+        let json = trusted_prettier_check(&project, &dir, cache.path(), 1);
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-unformatted"],
+            "{config} never turns {body:?} into a pass: {json}"
         );
     }
 }

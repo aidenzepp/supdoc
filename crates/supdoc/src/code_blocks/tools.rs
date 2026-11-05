@@ -1438,12 +1438,16 @@ fn pylint_args(invocation: &Invocation<'_>) -> Vec<OsString> {
     ]
 }
 
-/// prettier's arguments: no ignore file read, so a `.gitignore` or `.prettierignore` covering the
-/// doc can't make prettier print the block back unformatted (see [`prettier`]), and the block on
-/// stdin under its virtual path, its extension from the tag as biome's (see [`biome::extension`]).
+/// prettier's arguments: no ignore file read and no pragma required or honored, so neither a
+/// `.gitignore` or `.prettierignore` covering the doc nor a config's `requirePragma` or
+/// `checkIgnorePragma` can make prettier print the block back unformatted (see [`prettier`]), and
+/// the block on stdin under its virtual path, its extension from the tag as biome's (see
+/// [`biome::extension`]).
 fn prettier_args(invocation: &Invocation<'_>) -> Vec<OsString> {
     vec![
         OsString::from("--ignore-path="),
+        OsString::from("--no-require-pragma"),
+        OsString::from("--no-check-ignore-pragma"),
         OsString::from("--stdin-filepath"),
         virtual_path(
             invocation.doc,
@@ -1922,7 +1926,7 @@ mod tests {
     }
 
     #[test]
-    fn prettier_reads_no_ignore_file_and_gets_the_block_under_its_virtual_path_by_its_tag() {
+    fn prettier_reads_no_ignore_file_nor_pragma_and_gets_the_block_under_its_virtual_path() {
         for (tag, path) in [
             ("ts", "/p/docs/a.md.3.ts"),
             ("tsx", "/p/docs/a.md.3.tsx"),
@@ -1943,7 +1947,14 @@ mod tests {
 
             assert_eq!(
                 args,
-                ["--ignore-path=", "--stdin-filepath", path].map(OsString::from),
+                [
+                    "--ignore-path=",
+                    "--no-require-pragma",
+                    "--no-check-ignore-pragma",
+                    "--stdin-filepath",
+                    path
+                ]
+                .map(OsString::from),
                 "{tag}"
             );
         }

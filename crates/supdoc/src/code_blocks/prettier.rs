@@ -14,7 +14,10 @@
 //!
 //! Its lines and columns are 1-based. Without `--ignore-path=`, a stdin path that the root's
 //! `.gitignore` or `.prettierignore` covers is printed back unchanged with exit 0, which would
-//! pass a misformatted block; an empty `--ignore-path` reads neither file.
+//! pass a misformatted block; an empty `--ignore-path` reads neither file. A config's
+//! `requirePragma: true` prints back a block without `@format`, and its `checkIgnorePragma: true`
+//! one whose first docblock holds `@noprettier` or `@noformat`, the same way;
+//! `--no-require-pragma` and `--no-check-ignore-pragma` override both.
 
 use super::format::ParseError;
 
