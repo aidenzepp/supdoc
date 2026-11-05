@@ -1,4 +1,4 @@
-//! biome: the extension a tag selects, its syntax-error report, its lint diagnostics, the
+//! biome, for TypeScript, JavaScript and JSON blocks: the extension a tag selects, its syntax-error report, its lint diagnostics, the
 //! project config supdoc finds for it, and the private file a block is linted from.
 //!
 //! biome finds its config from the directory it runs in, never from the block's virtual path,
@@ -30,7 +30,8 @@ const MAX_CONFIG: u64 = 64 * 1024;
 const EMPTY_CONFIG: &str = "{}";
 
 /// The file extension biome reads a block tagged `tag` by: the tag itself when it names a
-/// module or JSX flavor (`mts`, `cts`, `tsx`, `mjs`, `cjs`, `jsx`), else `ts` or `js`.
+/// module or JSX flavor (`mts`, `cts`, `tsx`, `mjs`, `cjs`, `jsx`) or JSON (`json`, or `jsonc`,
+/// whose comments biome parses), else `ts` or `js`.
 #[must_use]
 pub(crate) fn extension(tag: &str) -> &'static str {
     match tag {
@@ -41,6 +42,8 @@ pub(crate) fn extension(tag: &str) -> &'static str {
         "cjs" => "cjs",
         "jsx" => "jsx",
         "js" | "javascript" => "js",
+        "json" => "json",
+        "jsonc" => "jsonc",
         _ => "ts",
     }
 }
@@ -59,7 +62,10 @@ pub(crate) fn parse_error(stderr: &str) -> Option<ParseError> {
     let (rest, extension) = path.rsplit_once('.')?;
     let (_, index) = rest.rsplit_once('.')?;
     let virtual_path = index.parse::<usize>().is_ok()
-        && ["ts", "mts", "cts", "tsx", "js", "mjs", "cjs", "jsx"].contains(&extension);
+        && [
+            "ts", "mts", "cts", "tsx", "js", "mjs", "cjs", "jsx", "json", "jsonc",
+        ]
+        .contains(&extension);
     virtual_path.then_some(ParseError {
         line: line.checked_sub(1),
     })
@@ -115,17 +121,16 @@ struct BiomeSummary {
 }
 
 /// The diagnostics in `biome lint --reporter=json`'s `stdout`, at every severity: each rule's
-/// named without the `lint/` prefix (`suspicious/noDebugger`), and each about a suppression
-/// comment in the block named by its whole category (`suppressions/unused`). When the checked
-/// text is `framed`, a `parse` diagnostic is a syntax error named `parse`, since it says whether
-/// the block is the kind the frame holds. `None` when it isn't biome's JSON report.
+/// named without the `lint/` prefix (`suspicious/noDebugger`), each about a suppression comment
+/// in the block named by its whole category (`suppressions/unused`), and each `parse` diagnostic
+/// a syntax error named `parse`. `None` when it isn't biome's JSON report.
 ///
 /// # Errors
 ///
-/// What biome said, when a diagnostic's category names neither a rule nor a suppression (nor,
-/// framed, a syntax error): biome reporting on the run, such as a file it skipped, never a
-/// finding in the block.
-pub(crate) fn diagnostics(stdout: &[u8], framed: bool) -> Option<Result<Vec<Diagnostic>, String>> {
+/// What biome said, when a diagnostic's category names neither a rule, a suppression nor a
+/// syntax error: biome reporting on the run, such as a file it skipped, never a finding in the
+/// block.
+pub(crate) fn diagnostics(stdout: &[u8]) -> Option<Result<Vec<Diagnostic>, String>> {
     let report: BiomeReport = serde_json::from_slice(stdout).ok()?;
     Some(
         report
@@ -133,7 +138,7 @@ pub(crate) fn diagnostics(stdout: &[u8], framed: bool) -> Option<Result<Vec<Diag
             .into_iter()
             .map(|diagnostic| {
                 let category = &diagnostic.category;
-                let syntax = framed && category == "parse";
+                let syntax = category == "parse";
                 let rule = category
                     .strip_prefix("lint/")
                     .filter(|rule| !rule.is_empty())
@@ -174,8 +179,9 @@ pub(crate) fn diagnostics(stdout: &[u8], framed: bool) -> Option<Result<Vec<Diag
 /// block. A report with none is clean on a zero exit; a diagnostic that names neither, a
 /// non-zero exit without
 /// diagnostics, or output that isn't the report, is a tool failure; a timeout is a timeout.
-/// `input` isn't needed: biome counts columns in characters. A `framed` run's syntax error is a
-/// diagnostic (see [`diagnostics`]).
+/// `input` isn't needed: biome counts columns in characters. A syntax error in a run that isn't
+/// `framed` is a parse failure at its first line, as the format step reports one; a `framed`
+/// run's is a diagnostic, since it says whether the block is the kind the frame holds.
 #[must_use]
 pub(crate) fn lint_verdict(
     _input: &str,
@@ -186,7 +192,18 @@ pub(crate) fn lint_verdict(
         Ok(ran) => ran,
         Err(failure) => return lint::Verdict::Failed(format::failed(failure)),
     };
-    match diagnostics(&ran.stdout, framed) {
+    let found = diagnostics(&ran.stdout);
+    let syntax = found
+        .as_ref()
+        .and_then(|found| found.as_ref().ok())
+        .and_then(|found| found.iter().find(|found| found.syntax && !framed));
+    if let Some(syntax) = syntax {
+        return lint::Verdict::Failed(format::Verdict::ParseFailed {
+            detail: syntax.message.clone(),
+            line: syntax.line.checked_sub(1),
+        });
+    }
+    match found {
         Some(Err(detail)) => lint::Verdict::Failed(format::Verdict::ToolFailed(detail)),
         Some(Ok(found)) if !found.is_empty() => lint::Verdict::Diagnostics(found),
         Some(Ok(_)) if ran.success => lint::Verdict::Clean,
@@ -623,6 +640,13 @@ fn strip_jsonc(text: &str) -> String {
     without_trailing_commas(&without_comments(text))
 }
 
+/// Whether `text` holds a `//` or `/* */` comment outside its strings: in a block tagged `json`,
+/// biome reads one as a syntax error, which JSON with comments, tagged `jsonc`, allows.
+#[must_use]
+pub(crate) fn holds_comment(text: &str) -> bool {
+    without_comments(text) != text
+}
+
 /// `text` with its `//` and `/* */` comments removed.
 fn without_comments(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -750,8 +774,8 @@ fn private_dir(dir: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        LintFile, Refusal, diagnostics, extension, lint_verdict, linted_nothing, parse_error,
-        project_args, without_exclusions, write_new,
+        LintFile, Refusal, diagnostics, extension, holds_comment, lint_verdict, linted_nothing,
+        parse_error, project_args, without_exclusions, write_new,
     };
     use crate::code_blocks::format::{ParseError, Verdict as FormatVerdict};
     use crate::code_blocks::lint::{Diagnostic, Verdict};
@@ -769,7 +793,7 @@ mod tests {
         ],"command":"lint"}"#;
 
         assert_eq!(
-            diagnostics(stdout, false),
+            diagnostics(stdout),
             Some(Ok(vec![
                 Diagnostic {
                     line: 2,
@@ -796,7 +820,7 @@ mod tests {
         let unused = br#"{"summary":{"changed":0,"unchanged":1},"diagnostics":[{"severity":"warning","message":"Suppression comment has no effect.","category":"suppressions/unused","location":{"path":"x","start":{"line":1,"column":1},"end":{"line":1,"column":46}},"advices":[]}],"command":"lint"}"#;
 
         assert_eq!(
-            diagnostics(unused, false),
+            diagnostics(unused),
             Some(Ok(vec![Diagnostic {
                 line: 1,
                 column: 1,
@@ -816,7 +840,6 @@ mod tests {
         for found in [
             too_large.to_owned(),
             too_large.replace(r#""lint""#, r#""lint/""#),
-            too_large.replace(r#""lint""#, r#""parse""#),
             too_large.replace(r#""lint""#, r#""suppressions/""#),
             format!("{rule},{too_large}"),
         ] {
@@ -854,13 +877,42 @@ mod tests {
             })
             .collect();
         assert_eq!(read, [("parse", 3, 4, true)]);
-        assert!(
-            matches!(
-                lint_verdict("", false, Ok(ran(false, report(parse)))),
-                Verdict::Failed(FormatVerdict::ToolFailed(_))
-            ),
-            "unframed, a parse diagnostic stays a tool failure"
+    }
+
+    #[test]
+    fn an_unframed_runs_parse_diagnostic_is_a_parse_failure_at_its_zero_based_line() {
+        let lint = r#"{"severity":"error","message":"This is an unexpected use of the debugger statement.","category":"lint/suspicious/noDebugger","location":{"path":"x","start":{"line":1,"column":1}},"advices":[]}"#;
+        let parse = r#"{"severity":"error","message":"JSON standard does not allow comments.","category":"parse","location":{"path":"x","start":{"line":2,"column":3}},"advices":[]}"#;
+
+        let verdict = lint_verdict(
+            "",
+            false,
+            Ok(ran(false, report(&format!("{lint},{parse}")))),
         );
+
+        assert_eq!(
+            verdict,
+            Verdict::Failed(FormatVerdict::ParseFailed {
+                detail: "JSON standard does not allow comments.".to_owned(),
+                line: Some(1),
+            }),
+            "a syntax error is a parse failure, never a tool failure or a lint finding"
+        );
+    }
+
+    #[test]
+    fn a_comment_is_found_outside_strings_only() {
+        for (text, holds) in [
+            ("{\n  // c\n  \"a\": 1\n}", true),
+            ("{ \"a\": 1 /* c */ }", true),
+            ("{ \"a\": 1 } // end", true),
+            ("{ \"a\": 1, }", false),
+            ("{ \"url\": \"https://x/*y*/\" }", false),
+            ("{ \"a\": \"\\\" // \" }", false),
+            ("", false),
+        ] {
+            assert_eq!(holds_comment(text), holds, "{text}");
+        }
     }
 
     /// A report holding `diagnostics` (JSON array items) for one checked file.
@@ -978,8 +1030,8 @@ mod tests {
 
     #[test]
     fn output_that_isnt_biomes_json_report_has_no_diagnostics() {
-        assert_eq!(diagnostics(b"The contents aren't fixed.\n", false), None);
-        assert_eq!(diagnostics(b"[]", false), None);
+        assert_eq!(diagnostics(b"The contents aren't fixed.\n"), None);
+        assert_eq!(diagnostics(b"[]"), None);
     }
 
     #[test]
@@ -1066,6 +1118,8 @@ mod tests {
             "mjs",
             "cjs",
             "jsx",
+            "json",
+            "jsonc",
         ]
         .map(extension)
         .into();
@@ -1073,7 +1127,7 @@ mod tests {
         assert_eq!(
             picked,
             [
-                "ts", "ts", "mts", "cts", "tsx", "js", "js", "mjs", "cjs", "jsx"
+                "ts", "ts", "mts", "cts", "tsx", "js", "js", "mjs", "cjs", "jsx", "json", "jsonc"
             ]
         );
     }
