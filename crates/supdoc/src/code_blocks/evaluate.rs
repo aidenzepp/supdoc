@@ -29,6 +29,7 @@ use super::cache::{self, Cache};
 use super::excerpt;
 use super::format::{self, FixDoc};
 use super::fragment::{Frame, Kind};
+use super::go;
 use super::info::{
     KNOWN_ATTRIBUTES, SourceKind, StepValue, fragment_kind, is_fragment_word, is_known_attribute,
     parenthesized_spelling, reasoned, replacement_for_removed, source_attributes, step_attribute,
@@ -702,6 +703,39 @@ fn linted_nothing(at: &Location) -> Finding {
     .with_location(at.clone())
 }
 
+/// The run's one `code-block-not-checked` warning, at `at`, the first Go block whose `go vet`
+/// step didn't run because it imports a package outside the standard library.
+fn vet_offline(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "`go vet` didn't run on this Go block, nor on any other that imports a package outside \
+         Go's standard library: supdoc vets a block alone and offline, so it can't load one",
+    )
+    .with_help(
+        "show the block using the standard library alone, or mark such blocks \
+         `lint(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first Go block whose `go vet`
+/// step didn't run because its build constraints leave its file out.
+fn vet_excluded(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "`go vet` checked no file for this Go block, nor for any other whose build constraints \
+         leave it out: a `//go:build` line that doesn't hold here, or `import \"C\"`, since cgo \
+         is off",
+    )
+    .with_help(
+        "drop the build constraint or the `import \"C\"` from the block, or mark such blocks \
+         `lint(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
 /// The state a lint verdict alone puts a block in.
 fn lint_state(verdict: &lint::Verdict) -> BlockState {
     match verdict {
@@ -795,6 +829,8 @@ impl NotRunWarnings {
             YAML_EMPTY => yaml_empty(at),
             FRAME_RESHAPED => frame_reshaped(at),
             BIOME_LINTED_NOTHING => linted_nothing(at),
+            go::VET_OFFLINE => vet_offline(at),
+            go::VET_EXCLUDED => vet_excluded(at),
             _ => return None,
         };
         self.given.push(not_run.reason);
@@ -2370,8 +2406,10 @@ fn run_linter(
         project: None,
     };
     let biome = given.filter(|_| tool.name == BIOME_LINT);
+    let go_vet = tool.name == GO_VET;
     let spawn = |call: &Call<'_>| match biome {
         Some(given) => biome_lint(tool, call, &invocation, given, input, session),
+        None if go_vet => vet_in_module(call, input, session),
         None => run_in_place(call, record, session),
     };
     let named = given.filter(|_| record.tombi.is_some());
@@ -2386,6 +2424,7 @@ fn run_linter(
             Ok(ran) if tool.name == TOMBI_LINT && tombi::linted_nothing(&ran) => {
                 Err(TOMBI_LINTED_NOTHING.into())
             }
+            Ok(ran) if go_vet && let Some(reason) = go::vet_not_run(&ran) => Err(reason.into()),
             result => Ok(tool.lint_verdict(input, frame.is_some(), result)),
         }
     };
@@ -2437,6 +2476,59 @@ const TOMBI_LINT: &str = "tombi-lint";
 
 /// Why tombi lint's step didn't run on a block when tombi didn't report linting it.
 const TOMBI_LINTED_NOTHING: &str = "tombi lint didn't report checking the block";
+
+/// The linter that vets the block in a module supdoc writes rather than on stdin.
+const GO_VET: &str = "go-vet";
+
+/// Runs `call`, `go vet`'s, on the block `input`, written as `main.go` beside a `go.mod` of
+/// supdoc's in a fresh [`go::VetModule`] beside the neutral directory, and run there with the
+/// module's `HOME`, `GOPATH` and `GOCACHE`, since `go vet` reads no block on stdin. Every
+/// private path it prints is taken out, and the module is removed after the run whatever its
+/// outcome.
+///
+/// # Errors
+///
+/// The run's failure, or a failed start when there is no private directory to write the module
+/// to.
+///
+/// Effect: creates and removes the module directory, creates the shared Go directories, and
+/// runs `go vet`, killing it at the timeout.
+fn vet_in_module(
+    call: &Call<'_>,
+    input: &str,
+    session: &Session<'_>,
+) -> Result<Ran, runner::Failure> {
+    let neutral = runner::neutral_dir(session.env, session.root);
+    let module = go::VetModule::create(&neutral, input).ok_or_else(|| {
+        runner::Failure::Spawn(std::io::Error::other(
+            "supdoc couldn't create a private Go module for the block go vet checks",
+        ))
+    })?;
+    let extra: Vec<(&str, &OsStr)> = call
+        .extra
+        .iter()
+        .copied()
+        .chain(
+            module
+                .vars()
+                .iter()
+                .map(|(name, value)| (*name, value.as_os_str())),
+        )
+        .collect();
+    let result = runner::run(
+        &Call {
+            extra: &extra,
+            stdin: &[],
+            cwd: runner::Cwd::Private(module.dir()),
+            ..*call
+        },
+        session.env,
+        session.root,
+    )
+    .map(|ran| module.unnamed(&ran));
+    drop(module);
+    result
+}
 
 /// Runs `call`, `tool` being biome lint, on the block `invocation` describes, written with
 /// `given`'s config to a fresh [`biome::LintFile`] beside the neutral directory, since biome
