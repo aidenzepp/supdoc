@@ -128,7 +128,12 @@ standing where the ... is:
   biome-lint    expression    ( ... )
   biome-lint    entries       const supdocFragment$ = { ... };
   biome-lint    children      const supdocFragment$ = <div> ... </div>;   (tsx and jsx blocks only)
-  biome-lint    members       class SupdocFragment$ { supdocFrame$() { return this; } ... }
+  biome-lint    members       abstract class SupdocFragment$ { supdocFrame$() { return this; } ... }   (TypeScript blocks)
+  biome-lint    members       class SupdocFragment$ { supdocFrame$() { return this; } ... }   (JavaScript blocks)
+
+A statements block's leading \"use strict\" or \"use server\" isn't read as a directive, since \
+the frame's first line stands before it. A members frame has no base class, so a constructor \
+that calls super() isn't a member it can hold.
 
 A project that turns on rules about the frame's own code, such as biome's opt-in nursery rules \
 wanting an explicit type or a function expression, gets their findings at the block's \

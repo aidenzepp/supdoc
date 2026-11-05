@@ -874,12 +874,13 @@ fn lint_the_real_biome_names_the_projects_config_in_a_config_error() {
 }
 
 /// Every line of two or more characters biome lint's frames put around a block.
-const FRAME_LINES: [&str; 7] = [
+const FRAME_LINES: [&str; 8] = [
     "async function supdocFragment$() { await Promise.resolve();",
     "const supdocFragment$ = {",
     "};",
     "const supdocFragment$ = <div>",
     "</div>;",
+    "abstract class SupdocFragment$ { supdocFrame$() { return this; }",
     "class SupdocFragment$ { supdocFrame$() { return this; }",
     "Promise.resolve()",
 ];
@@ -1298,7 +1299,83 @@ fn frame_lint_a_run_that_didnt_parse_as_its_kind_gives_only_the_parse_error() {
             format!("`biome-lint` couldn't parse the block as `{kind}`").as_str(),
             "{json}"
         );
+        let help = at(&json, "/findings/0/help").as_str().unwrap_or_default();
+        assert!(
+            !help.contains("name the kind") && help.contains("write the lines around the code"),
+            "the help should offer an exit that works for every kind: {json}"
+        );
     }
+}
+
+#[test]
+fn frame_lint_a_leading_directive_in_statements_is_not_read_as_a_directive() {
+    let Some(json) = frame_check(
+        "frame_lint_a_leading_directive_in_statements_is_not_read_as_a_directive",
+        "ts",
+        &format!("fragment(statements) {LINT_ONLY}"),
+        "\"use strict\";\nconst a = 1;\nconsole.log(a);",
+        0,
+    ) else {
+        return;
+    };
+
+    assert_passed(&json, "a statements block opening with \"use strict\"");
+}
+
+#[test]
+fn frame_lint_an_abstract_member_passes_in_a_ts_members_block() {
+    let test = "frame_lint_an_abstract_member_passes_in_a_ts_members_block";
+    let info = format!("fragment(members) {LINT_ONLY}");
+    let Some(json) = frame_check(
+        test,
+        "ts",
+        &info,
+        "abstract area(): number;\ndescribe(): string {\n\treturn `${this.area()}`;\n}",
+        0,
+    ) else {
+        return;
+    };
+    assert_passed(&json, "a ts members block with an abstract member");
+
+    let flagged = frame_check(
+        test,
+        "ts",
+        &info,
+        "abstract area(): number;\ndescribe(): string {\n\tdebugger;\n\treturn `${this.area()}`;\n}",
+        1,
+    )
+    .expect("biome was on PATH a moment ago");
+    assert_eq!(
+        kinds_and_lines(&flagged),
+        [("code-block-lint".to_owned(), 6)],
+        "{flagged}"
+    );
+    assert!(
+        at(&flagged, "/findings/0")
+            .to_string()
+            .contains("noDebugger"),
+        "{flagged}"
+    );
+}
+
+#[test]
+fn frame_lint_an_abstract_member_in_a_js_members_block_is_one_parse_error() {
+    let Some(json) = frame_check(
+        "frame_lint_an_abstract_member_in_a_js_members_block_is_one_parse_error",
+        "js",
+        &format!("fragment(members) {LINT_ONLY}"),
+        "abstract area();",
+        1,
+    ) else {
+        return;
+    };
+
+    assert_eq!(finding_kinds(&json), ["code-block-parse"], "{json}");
+    assert_eq!(
+        at(&json, "/findings/0/message"),
+        "`biome-lint` couldn't parse the block as `members`",
+        "{json}"
+    );
 }
 
 #[test]
@@ -1323,5 +1400,10 @@ fn frame_lint_an_unframed_syntax_rule_is_a_parse_error_at_its_line() {
             .as_str()
             .is_some_and(|message| message.contains("#a")),
         "{json}"
+    );
+    let help = at(&json, "/findings/0/help").as_str().unwrap_or_default();
+    assert!(
+        help.contains("lint(off") && !help.contains("format(off"),
+        "the help should name the lint step's off switch: {json}"
     );
 }
