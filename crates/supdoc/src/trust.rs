@@ -106,8 +106,10 @@ pub(crate) enum Unread {
     Climbs(&'static str),
     /// The store file leads outside the store's directory once symlinks are followed.
     LeadsOutside(&'static str),
-    /// The store file isn't a regular file, such as a FIFO or a directory.
+    /// The store file isn't a regular file, such as a FIFO, a socket or a directory.
     NotAFile(&'static str),
+    /// The store file exists but couldn't be read, failing with this kind of error.
+    Unreadable(&'static str, io::ErrorKind),
 }
 
 impl Unread {
@@ -124,54 +126,81 @@ impl Unread {
             Self::NotAFile(variable) => {
                 format!("the trust store file under `{variable}` isn't a regular file")
             }
+            Self::Unreadable(variable, kind) => {
+                format!("the trust store file under `{variable}` can't be read: {kind}")
+            }
         }
     }
 
-    /// What lets the store be read again, as a clause.
+    /// What lets the store be read again, as a clause starting lowercase.
     pub(crate) fn fix(self) -> String {
         match self {
             Self::Climbs(variable) => format!("set `{variable}` to a path without `..`"),
             Self::LeadsOutside(variable) | Self::NotAFile(variable) => format!(
                 "make `supdoc/trusted-roots` under `{variable}` a regular file in that directory, \
-                 not a symlink out of it, then run `supdoc trust`"
+                 not a symlink out of it"
             ),
+            Self::Unreadable(variable, _) => {
+                format!("make `supdoc/trusted-roots` under `{variable}` readable by you")
+            }
         }
     }
 
-    /// The error a read or write of the store at `path` fails with for this reason:
-    /// [`io::ErrorKind::PermissionDenied`], or [`io::ErrorKind::InvalidData`] for a store file
-    /// that isn't a regular file.
+    /// The error a read or write of the store at `path` fails with for this reason, carrying
+    /// it for [`unread_of`]: [`io::ErrorKind::PermissionDenied`] for a `..` or a path leading
+    /// outside, [`io::ErrorKind::InvalidData`] for a store file that isn't a regular file, and the
+    /// read's own kind for one that couldn't be read.
     fn error(self, path: &Path) -> io::Error {
-        match self {
-            Self::Climbs(variable) => io::Error::new(
+        let (kind, message) = match self {
+            Self::Climbs(variable) => (
                 io::ErrorKind::PermissionDenied,
                 format!(
                     "`{variable}` holds `..`, which the trust store's path must not contain: set \
                      it to a path without `..`"
                 ),
             ),
-            Self::LeadsOutside(_) => io::Error::new(
+            Self::LeadsOutside(_) => (
                 io::ErrorKind::PermissionDenied,
                 format!(
                     "`{}` lies outside the trust store's directory once symlinks are followed",
                     path.display()
                 ),
             ),
-            Self::NotAFile(_) => io::Error::new(
+            Self::NotAFile(_) => (
                 io::ErrorKind::InvalidData,
                 format!("`{}` isn't a regular file", path.display()),
             ),
-        }
+            Self::Unreadable(_, kind) => {
+                (kind, format!("`{}` can't be read: {kind}", path.display()))
+            }
+        };
+        io::Error::new(
+            kind,
+            Refusal {
+                unread: self,
+                message,
+            },
+        )
     }
 }
 
-/// Why [`Store::read_roots`] didn't list the roots.
-#[derive(Debug)]
-enum ReadError {
-    /// The store wasn't read, for a reason the operator can fix.
-    Unread(Unread),
-    /// The store exists but couldn't be read.
-    Io(io::Error),
+/// An [`Unread`] carried inside the [`io::Error`] a store read or write fails with.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+struct Refusal {
+    /// Why the store was refused.
+    unread: Unread,
+    /// What the error says.
+    message: String,
+}
+
+/// Why the trust store refused the read or write that failed with `error`, when it was refused
+/// for a reason the operator can fix rather than a plain I/O failure.
+pub(crate) fn unread_of(error: &io::Error) -> Option<Unread> {
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<Refusal>())
+        .map(|refusal| refusal.unread)
 }
 
 /// What `root` is granted: [`Grant::Trusted`] when `SUPDOC_TRUST` is `1`, or it is unset or empty
@@ -386,7 +415,7 @@ impl Store {
     /// holds real paths, so one that resolves elsewhere has been replaced since it was listed. A
     /// root too broad to trust ([`Store::broad`]) is never trusted by either rule, and a listed one
     /// counts for nothing. A store [`Store::read_roots`] refuses grants [`Grant::Unread`]; a
-    /// missing or otherwise unreadable one, [`Grant::Untrusted`].
+    /// missing one, [`Grant::Untrusted`].
     ///
     /// Effect: reads the store, resolves `root` and `HOME`, and reads the `.git` files and git
     /// directories of `root` and of each listed root.
@@ -400,8 +429,7 @@ impl Store {
         }
         let mut roots = match self.read_roots() {
             Ok(roots) => roots,
-            Err(ReadError::Unread(unread)) => return Grant::Unread(unread),
-            Err(ReadError::Io(_)) => return Grant::Untrusted,
+            Err(unread) => return Grant::Unread(unread),
         };
         roots.retain(|listed| !broad.contains(listed));
         let trusted = roots.contains(&real)
@@ -429,28 +457,35 @@ impl Store {
     /// [`io::ErrorKind::InvalidData`] when the store isn't a regular file, and otherwise when the
     /// store exists but can't be read.
     fn read(&self) -> io::Result<Vec<PathBuf>> {
-        self.read_roots().map_err(|error| match error {
-            ReadError::Unread(unread) => unread.error(&self.file),
-            ReadError::Io(error) => error,
-        })
+        self.read_roots().map_err(|unread| unread.error(&self.file))
     }
 
     /// The listed roots, in order: each line that is an absolute path. None when the file is
     /// missing. The store is admitted ([`Store::admit`]) before it is read, so reads refuse
-    /// exactly what writes refuse, and opened without blocking, so a FIFO there never hangs.
+    /// exactly what writes refuse. Its type is checked before it is opened, and again once open,
+    /// and it is opened without blocking, so a FIFO or socket there never hangs or slips past.
+    /// Its symlinks are followed for the type: the admitted path already lies inside the store's
+    /// directory once they are.
     ///
     /// Effect: reads file metadata and symlinks along the store's path, then the store.
     ///
     /// # Errors
     ///
-    /// [`ReadError::Unread`] when the variable the store's directory comes from holds a `..`, the
-    /// store leads outside its directory, or it isn't a regular file; [`ReadError::Io`] when it
-    /// exists but can't be read.
-    fn read_roots(&self) -> Result<Vec<PathBuf>, ReadError> {
+    /// The [`Unread`] reason when the variable the store's directory comes from holds a `..`,
+    /// the store leads outside its directory, it isn't a regular file, or it exists but can't be
+    /// read.
+    fn read_roots(&self) -> Result<Vec<PathBuf>, Unread> {
         let path = self
             .boundary
             .admit(&self.file)
-            .map_err(|_| ReadError::Unread(self.refused()))?;
+            .map_err(|_| self.refused())?;
+        let unreadable = |error: io::Error| Unread::Unreadable(self.variable, error.kind());
+        match fs::metadata(path.as_path()) {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => return Err(Unread::NotAFile(self.variable)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(unreadable(error)),
+        }
         let mut file = match fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NONBLOCK)
@@ -458,13 +493,13 @@ impl Store {
         {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(ReadError::Io(error)),
+            Err(error) => return Err(unreadable(error)),
         };
-        if !file.metadata().map_err(ReadError::Io)?.is_file() {
-            return Err(ReadError::Unread(Unread::NotAFile(self.variable)));
+        if !file.metadata().map_err(unreadable)?.is_file() {
+            return Err(Unread::NotAFile(self.variable));
         }
         let mut bytes = Vec::new();
-        let _read = file.read_to_end(&mut bytes).map_err(ReadError::Io)?;
+        let _read = file.read_to_end(&mut bytes).map_err(unreadable)?;
         Ok(bytes
             .split(|byte| *byte == b'\n')
             .map(|line| PathBuf::from(OsString::from_vec(line.to_vec())))
@@ -747,6 +782,26 @@ mod tests {
             receiver
                 .recv_timeout(Duration::from_secs(10))
                 .expect("reading a FIFO store should not hang"),
+            Ok(Grant::Unread(Unread::NotAFile("XDG_STATE_HOME")))
+        );
+    }
+
+    #[test]
+    fn a_socket_store_file_is_not_a_regular_file_and_never_hangs() {
+        let scratch = Scratch::new();
+        let root = scratch.mkdir("root");
+        let socket = scratch.mkdir("state/supdoc").join("trusted-roots");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket)
+            .expect("a socket should be bindable at the store's path");
+        let env = scratch.env(None);
+        let (sender, receiver) = mpsc::channel();
+
+        let _reader = thread::spawn(move || sender.send(granted(&root, &env)));
+
+        assert_eq!(
+            receiver
+                .recv_timeout(Duration::from_secs(10))
+                .expect("reading a socket store should not hang"),
             Ok(Grant::Unread(Unread::NotAFile("XDG_STATE_HOME")))
         );
     }

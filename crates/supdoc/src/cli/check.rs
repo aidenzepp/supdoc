@@ -711,6 +711,44 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_store_with_a_held_step_warns_once_saying_why() {
+        let project = Project::empty();
+        project.write("supdoc.config.toml", CLIPPY_ONLY);
+        project.write(
+            "docs/blocks.md",
+            "# Blocks\n\n```rust\npub fn one() -> i32 {\n    1\n}\n```\n",
+        );
+        let state = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let store = state.path().join("supdoc/trusted-roots");
+        fs::create_dir(state.path().join("supdoc")).expect("the store dir should be creatable");
+        fs::write(&store, "").expect("the store should be writable");
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&store, fs::Permissions::from_mode(0o000))
+                .expect("the store's mode should be settable");
+        }
+        let env = trust_env(&[("XDG_STATE_HOME", state.path().as_os_str())]);
+
+        let run = check_with_trust(project.root(), &["check"], &env);
+
+        let warnings = run
+            .stdout
+            .matches("warning[code-block-not-trusted]")
+            .count();
+        assert_eq!(
+            warnings, 1,
+            "one trust warning should say why: {}",
+            run.stdout
+        );
+        assert!(
+            run.stdout.contains("can't be read: permission denied")
+                && run.stdout.contains("readable by you"),
+            "the warning should name the error and its fix: {}",
+            run.stdout
+        );
+    }
+
+    #[test]
     fn a_bad_supdoc_trust_is_a_usage_error_naming_the_accepted_values() {
         let root = tempfile::TempDir::new().expect("a temporary directory should be creatable");
 
