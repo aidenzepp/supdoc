@@ -107,6 +107,9 @@ pub(crate) struct Invocation<'run> {
     /// placed right after `--error-format=json`. Empty when the block compiles alone, and for
     /// every other tool.
     pub(crate) externs: &'run [OsString],
+    /// The kind the block's `fragment(<kind>)` declares, which names the rules a tool relaxes
+    /// for it (see [`Support::relax`]). `None` for a block checked as a whole file.
+    pub(crate) fragment: Option<Kind>,
 }
 
 /// How a cartridge reads a finished run, which also says which step it does.
@@ -196,6 +199,47 @@ impl ToolCartridge {
 /// The values every cartridge's mode accepts today.
 const FULL_OR_OFF: &[&str] = &["full", "off"];
 
+/// rustfmt's kinds: a method without its `impl` is an item, so `members` parses as written.
+/// Statements and an expression are not items, and it rejects both.
+const RUSTFMT_FRAGMENTS: &[(Kind, Support)] = &[(Kind::Members, Support::NATIVE)];
+
+/// shfmt's and shellcheck's kinds: any command list is a program, and one command is a list.
+const SHELL_FRAGMENTS: &[(Kind, Support)] = &[
+    (Kind::Statements, Support::NATIVE),
+    (Kind::Expression, Support::NATIVE),
+];
+
+/// ruff format's and black's kinds: statements, an expression and a method without its class
+/// all parse as a module (a top-level `return` included). Map entries without their braces don't.
+const PYTHON_FORMAT_FRAGMENTS: &[(Kind, Support)] = &[
+    (Kind::Statements, Support::NATIVE),
+    (Kind::Expression, Support::NATIVE),
+    (Kind::Members, Support::NATIVE),
+];
+
+/// ruff check's kinds, as [`PYTHON_FORMAT_FRAGMENTS`]. A function body outside its function
+/// trips `return` outside a function (F706), `yield` or `await` outside a function (F704) and
+/// `await` outside an async function (PLE1142), so `statements` leaves those off.
+const RUFF_FRAGMENTS: &[(Kind, Support)] = &[
+    (
+        Kind::Statements,
+        Support::Native {
+            relax: &["F706", "F704", "PLE1142"],
+        },
+    ),
+    (Kind::Expression, Support::NATIVE),
+    (Kind::Members, Support::NATIVE),
+];
+
+/// The rules `fragments` leaves off for a block of `kind`: none for a whole file or a kind it
+/// doesn't list.
+fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'static str] {
+    fragments
+        .iter()
+        .find(|(listed, _)| Some(*listed) == kind)
+        .map_or(&[], |(_, support)| support.relax())
+}
+
 /// The known tools. A language's first cartridge for a step is its default for that step.
 pub(crate) static CARTRIDGES: [ToolCartridge; 11] = [
     ToolCartridge {
@@ -206,7 +250,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 11] = [
         install: "rustup component add rustfmt",
         config_files: &["rustfmt.toml", ".rustfmt.toml"],
         modes: FULL_OR_OFF,
-        fragments: &[],
+        fragments: RUSTFMT_FRAGMENTS,
         argv: rustfmt_args,
         reader: Reader::Format(rust::parse_error),
     },
@@ -218,7 +262,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 11] = [
         install: "go install mvdan.cc/sh/v3/cmd/shfmt@latest",
         config_files: &[".editorconfig"],
         modes: FULL_OR_OFF,
-        fragments: &[],
+        fragments: SHELL_FRAGMENTS,
         argv: shfmt_args,
         reader: Reader::Format(shell::parse_error),
     },
@@ -230,7 +274,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 11] = [
         install: "pipx install ruff",
         config_files: &["ruff.toml", ".ruff.toml", "pyproject.toml"],
         modes: FULL_OR_OFF,
-        fragments: &[],
+        fragments: PYTHON_FORMAT_FRAGMENTS,
         argv: ruff_format_args,
         reader: Reader::Format(python::ruff_parse_error),
     },
@@ -242,7 +286,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 11] = [
         install: "pipx install black",
         config_files: &["pyproject.toml"],
         modes: FULL_OR_OFF,
-        fragments: &[],
+        fragments: PYTHON_FORMAT_FRAGMENTS,
         argv: black_args,
         reader: Reader::Format(python::black_parse_error),
     },
@@ -254,7 +298,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 11] = [
         install: "pipx install ruff",
         config_files: &["ruff.toml", ".ruff.toml", "pyproject.toml"],
         modes: FULL_OR_OFF,
-        fragments: &[],
+        fragments: RUFF_FRAGMENTS,
         argv: ruff_args,
         reader: Reader::Lint(python::lint_verdict),
     },
@@ -266,7 +310,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 11] = [
         install: "cabal install ShellCheck",
         config_files: &[".shellcheckrc"],
         modes: FULL_OR_OFF,
-        fragments: &[],
+        fragments: SHELL_FRAGMENTS,
         argv: shellcheck_args,
         reader: Reader::Lint(shell::lint_verdict),
     },
@@ -442,8 +486,13 @@ fn black_args(invocation: &Invocation<'_>) -> Vec<OsString> {
 const RUFF_RELAXED: &str = "F821,F401,F841";
 
 /// `ruff check`'s arguments: the block on stdin under its virtual path, JSON diagnostics, no
-/// cache, the snippet relaxations ignored, and never `--fix`.
+/// cache, the snippet relaxations and the block's fragment relaxations ignored, and never
+/// `--fix`.
 fn ruff_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    let ignored = std::iter::once(RUFF_RELAXED)
+        .chain(relaxed(RUFF_FRAGMENTS, invocation.fragment).iter().copied())
+        .collect::<Vec<_>>()
+        .join(",");
     vec![
         OsString::from("check"),
         OsString::from("--no-cache"),
@@ -451,7 +500,7 @@ fn ruff_args(invocation: &Invocation<'_>) -> Vec<OsString> {
         OsString::from("--stdin-filename"),
         virtual_path(invocation.doc, invocation.index, "py"),
         OsString::from("--ignore"),
-        OsString::from(RUFF_RELAXED),
+        OsString::from(ignored),
         OsString::from("-"),
     ]
 }
@@ -717,6 +766,7 @@ mod tests {
             project,
             emit: None,
             externs: &[],
+            fragment: None,
         })
     }
 
@@ -858,6 +908,7 @@ mod tests {
             project: &[],
             emit: None,
             externs: &[],
+            fragment: None,
         });
 
         assert_eq!(posix, ["--filename", "/p/docs/a.md.3.sh", "-ln", "posix"]);
@@ -909,6 +960,7 @@ mod tests {
                     project: &[],
                     emit: None,
                     externs: &[],
+                    fragment: None,
                 })
                 .get(5)
                 .cloned()
@@ -1008,6 +1060,7 @@ mod tests {
                     project: &[],
                     emit: None,
                     externs: &[],
+                    fragment: None,
                 })
                 .into_iter()
                 .take(2)
@@ -1031,6 +1084,7 @@ mod tests {
             project: &lints,
             emit: Some(Path::new("/c/emit/1-0/block.rmeta")),
             externs: &[],
+            fragment: None,
         };
 
         let args = cartridge("clippy").args(&invocation);
@@ -1090,6 +1144,7 @@ mod tests {
             emit: None,
             tag: "",
             externs: &externs,
+            fragment: None,
         });
 
         let at = args

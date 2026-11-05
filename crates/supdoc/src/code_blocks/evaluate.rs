@@ -1299,6 +1299,7 @@ fn run_formatter(
         }),
         emit: None,
         externs: &[],
+        fragment: record.fragment,
     });
     let vars = rust.map(|rust| rust.toolchain.env()).unwrap_or_default();
     let extra: Vec<(&str, &OsStr)> = vars
@@ -1376,6 +1377,7 @@ fn run_linter(
         project: given.map_or(&[], |given| given.flags.as_slice()),
         emit: None,
         externs: &[],
+        fragment: record.fragment,
     });
     let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
     let run = cache::Run {
@@ -1442,6 +1444,7 @@ fn run_clippy(
         project: &rust.lints,
         emit: None,
         externs: session.linked.flags,
+        fragment: record.fragment,
     };
     let key_args = tool.args(&invocation);
     let key_args: Vec<&OsStr> = key_args.iter().map(OsString::as_os_str).collect();
@@ -2352,6 +2355,7 @@ mod tests {
             project: &rust.lints,
             emit: None,
             externs: &[],
+            fragment: None,
         });
         let args = args
             .iter()
