@@ -4,7 +4,7 @@
 //! lives in the sibling modules.
 
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
 
 use clap::builder::FalseyValueParser;
@@ -25,6 +25,7 @@ use crate::limits::{CommandLineLimits, CountLimit, Given, Limits, SizeLimit, Tim
 use crate::link::SymbolPath;
 use crate::namespace::NamespaceName;
 use crate::output::OutputFormat;
+use crate::path::AbsolutePath;
 use crate::state::LinkState;
 
 /// Keep documentation in step with the code it describes.
@@ -430,6 +431,32 @@ pub(crate) struct ListArgs {
     pub(crate) limit: Limit,
 }
 
+/// A path the operator typed on the command line, such as `-c PATH`, `resolve FILE` or the
+/// `rest` of `ns:rest`. Only `crate::cli` can build one, so [`AbsolutePath::resolve_operator`],
+/// the one join that lets a path climb out of or replace its base, never sees a path read from a
+/// file.
+#[derive(Debug)]
+pub(in crate::cli) struct OperatorPath<'a>(&'a Path);
+
+impl<'a> OperatorPath<'a> {
+    /// Marks `path` as typed by the operator.
+    pub(in crate::cli) fn typed(path: &'a Path) -> Self {
+        Self(path)
+    }
+}
+
+impl AbsolutePath {
+    /// `path` made absolute against `self` and normalized: a relative `path` is appended, and an
+    /// absolute one replaces `self`, as [`Path::join`] does.
+    ///
+    /// The one join of an unchecked path: it may climb out of `self`, which the operator is free
+    /// to ask for. A caller that must stay inside the project still checks the result.
+    pub(in crate::cli) fn resolve_operator(&self, path: &OperatorPath<'_>) -> Self {
+        // Anything joined onto an absolute path is absolute, so `new` never refuses it.
+        Self::new(&self.as_path().join(path.0)).unwrap_or_else(|| self.clone())
+    }
+}
+
 /// A `list` TARGET as typed, split once into its file part and optional symbol.
 ///
 /// Whether the file part is a `ns:path` is decided here, once, so nothing downstream re-splits
@@ -719,4 +746,31 @@ pub(crate) struct SkillInstallArgs {
     /// Preview or apply.
     #[command(flatten)]
     pub(crate) confirm: Confirm,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn absolute(raw: &str) -> AbsolutePath {
+        AbsolutePath::new(Path::new(raw)).expect("the fixture path should be absolute")
+    }
+
+    #[test]
+    fn resolve_operator_appends_a_relative_path_and_normalizes_it() {
+        assert_eq!(
+            absolute("/repo/docs")
+                .resolve_operator(&OperatorPath::typed(Path::new("../src/./lib.rs"))),
+            absolute("/repo/src/lib.rs")
+        );
+    }
+
+    #[test]
+    fn resolve_operator_with_an_absolute_path_replaces_the_base() {
+        assert_eq!(
+            absolute("/repo")
+                .resolve_operator(&OperatorPath::typed(Path::new("/elsewhere/../etc/x.toml"))),
+            absolute("/etc/x.toml")
+        );
+    }
 }

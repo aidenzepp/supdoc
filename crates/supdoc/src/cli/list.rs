@@ -340,7 +340,7 @@ impl Place {
                 None => return Self::Unlocated(target.clone()),
             },
         };
-        let file = base.join_path(Path::new(target.path().as_str()));
+        let file = base.beneath(target.path());
         if !config.contains(base.as_path()) || !config.contains(file.as_path()) {
             return Self::Unlocated(target.clone());
         }

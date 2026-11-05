@@ -24,7 +24,7 @@ use crate::path::AbsolutePath;
 use crate::read::cartridge::{Languages, SourceFile, Symbol};
 use crate::read::error::{ReadError, ReadRole, ResolveError};
 
-use super::args::{Limit, ResolveArgs};
+use super::args::{Limit, OperatorPath, ResolveArgs};
 use super::project::{
     CODE_PATH_MISSING, absolute, command_line, ensure_exists, load_config, namespaced_missing,
     path_outside_config,
@@ -149,7 +149,7 @@ fn locate(config: &Config, context: &Context, typed: &Path) -> Result<AbsolutePa
                 .namespace(&name)
                 .ok_or_else(|| unknown_namespace(config, &name))?;
             missing_in = Some((name, directory));
-            directory.join_path(Path::new(rest))
+            directory.resolve_operator(&OperatorPath::typed(Path::new(rest)))
         }
         None => absolute(cwd, typed),
     };

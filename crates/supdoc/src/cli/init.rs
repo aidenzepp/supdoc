@@ -5,7 +5,6 @@
 //! touched.
 
 use std::io::{self, Write as _};
-use std::path::Path;
 
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -17,9 +16,9 @@ use crate::lock::error::shell_quote;
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
 use crate::output::{Output, Report, TextContext};
-use crate::path::AbsolutePath;
+use crate::path::{AbsolutePath, fixed};
 
-use super::args::InitArgs;
+use super::args::{InitArgs, OperatorPath};
 use super::{CliError, Context, Outcome, cause};
 
 /// The file `supdoc init` writes. It loads as a valid config (see the tests). Every key is
@@ -129,12 +128,12 @@ pub(crate) fn schema() -> schemars::Schema {
 /// Where the starter config goes: `-c PATH` resolved against the current directory, otherwise
 /// the default config file name in the current directory.
 fn target(context: &Context) -> AbsolutePath {
-    let requested = context
-        .global
-        .config
-        .as_deref()
-        .unwrap_or_else(|| Path::new(CONFIG_FILE_NAME));
-    context.cwd.join_path(requested)
+    match context.global.config.as_deref() {
+        Some(requested) => context
+            .cwd
+            .resolve_operator(&OperatorPath::typed(requested)),
+        None => context.cwd.beneath(&fixed::CONFIG_FILE),
+    }
 }
 
 /// The `supdoc init` command that writes what a dry run previewed: with `-c PATH` when the
@@ -384,6 +383,7 @@ fn write_failed(target: &AbsolutePath, error: &io::Error, context: &Context) -> 
 mod tests {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt as _;
+    use std::path::Path;
 
     use clap::Parser as _;
 

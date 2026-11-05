@@ -15,13 +15,14 @@ use crate::finding::{Location, Snippet};
 use crate::hash::HashSettings;
 use crate::link::SourcePath;
 use crate::lock::error::{LockError, SettingsMismatch, shell_quote};
-use crate::lock::model::{LOCK_FILE_NAME, Lockfile};
+use crate::lock::model::Lockfile;
 use crate::namespace::NamespaceName;
 use crate::output::Output;
 use crate::output::paths::relative_to;
-use crate::path::AbsolutePath;
+use crate::path::{AbsolutePath, fixed};
 use crate::scan::model::Scope;
 
+use super::args::OperatorPath;
 use super::{CliError, Context, ErrorSite, cause};
 
 /// The config `--config` names, or the one found by searching upward from the current directory,
@@ -150,7 +151,7 @@ fn error_site(error: &ConfigError, context: &Context, output: &mut Output) -> Op
 
 /// `path` as typed, made absolute against the current directory.
 pub(crate) fn absolute(cwd: &AbsolutePath, path: &Path) -> AbsolutePath {
-    cwd.join_path(path)
+    cwd.resolve_operator(&OperatorPath::typed(path))
 }
 
 /// The part of the project `[PATHS]` names: everything when none are given, or when one of them
@@ -196,7 +197,7 @@ pub(crate) fn scope(
 
 /// Where the project's `supdoc.lock` is, whether or not it exists yet.
 pub(crate) fn lock_path(root: &AbsolutePath) -> AbsolutePath {
-    root.join_path(Path::new(LOCK_FILE_NAME))
+    root.beneath(&fixed::LOCK_FILE)
 }
 
 /// The lockfile in `config`'s root, or an empty one when there is none yet,
