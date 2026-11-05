@@ -310,15 +310,25 @@ fn custom_command(
     for (name, value) in entries {
         match (name.as_str(), step) {
             ("command", _) => argv = Some(command_argv(key, value)?),
-            ("diagnostics", Step::Lint) => {
-                if value.as_str() != Some("gnu") {
+            ("diagnostics", Step::Lint) => match value {
+                ::toml::Value::String(word) if word == "gnu" => {
+                    diagnostics = Some(Diagnostics::Gnu);
+                }
+                ::toml::Value::String(word) => {
                     return Err(format!(
-                        "`diagnostics = {value}` isn't supported; write `diagnostics = \"gnu\"`, \
-                         or leave it out to report the linter's output as one finding"
+                        "`diagnostics = \"{}\"` isn't supported; write `diagnostics = \"gnu\"`, \
+                             or leave it out to report the linter's output as one finding",
+                        shown(&word)
                     ));
                 }
-                diagnostics = Some(Diagnostics::Gnu);
-            }
+                other => {
+                    return Err(format!(
+                        "`diagnostics` must be the string \"gnu\", not a TOML {}; or leave it \
+                             out to report the linter's output as one finding",
+                        other.type_str()
+                    ));
+                }
+            },
             ("diagnostics", Step::Format) => {
                 return Err(
                     "`diagnostics` applies only to a custom linter; a custom formatter's output \
@@ -329,7 +339,7 @@ fn custom_command(
             (other, _) => {
                 return Err(format!(
                     "`{}` isn't a key of a custom {key} command; it takes only {keys}",
-                    other.escape_debug()
+                    shown(other)
                 ));
             }
         }
@@ -411,7 +421,8 @@ fn deserialize_choice<'de, D: serde::Deserializer<'de>>(
                 .map(|name| Choice::Known(name))
                 .ok_or_else(|| {
                     E::custom(format!(
-                        "`{value}` isn't a known {} {}; the known tools are {}",
+                        "`{}` isn't a known {} {}; the known tools are {}",
+                        shown(value),
                         self.language.table(),
                         self.key(),
                         tool_list(self.known)
@@ -491,7 +502,8 @@ fn deserialize_tool<'de, D: serde::Deserializer<'de>>(
     for (option, value) in written.get_ref() {
         if option != key {
             return Err(D::Error::custom(format!(
-                "`{option}` isn't an option of `{}`; {}",
+                "`{}` isn't an option of `{}`; {}",
+                shown(option),
                 tool.name,
                 accepted()
             )));
@@ -504,7 +516,8 @@ fn deserialize_tool<'de, D: serde::Deserializer<'de>>(
         };
         if !tool.modes.contains(&value) {
             return Err(D::Error::custom(format!(
-                "`{key} = \"{value}\"` isn't a mode of `{}`; {}",
+                "`{key} = \"{}\"` isn't a mode of `{}`; {}",
+                shown(value),
                 tool.name,
                 accepted()
             )));
@@ -608,9 +621,18 @@ fn tier<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Tier
             "`tier = \"run\"` isn't supported yet; for now {accepted}"
         ))),
         other => Err(D::Error::custom(format!(
-            "`{other}` isn't a tier supdoc knows; {accepted}"
+            "`{}` isn't a tier supdoc knows; {accepted}",
+            shown(other)
         ))),
     }
+}
+
+/// `text`, written in the checkout, as a config-parse message quotes it: every control, bidi or
+/// other non-printing character escaped, as `\u{202e}`, so a value can't recolor or reorder
+/// what the terminal or a `--json` reader shows. Every value these deserializers echo goes
+/// through it.
+pub(super) fn shown(text: &str) -> std::str::EscapeDebug<'_> {
+    text.escape_debug()
 }
 
 /// `known` as backticked names joined by `, `.
@@ -1385,6 +1407,41 @@ mod tests {
     }
 
     #[test]
+    fn every_echoed_value_shows_bidi_and_escape_characters_escaped() {
+        // ESC starts a colour sequence and U+202E reverses the text after it; TOML writes both
+        // as `\u` escapes, and the message must show them escaped, never raw.
+        let hostile = "g\\u001b[31m\\u202Enu";
+        let cases = [
+            format!(
+                "[features.code-blocks.python]\nlinter = {{ command = [\"x\"], diagnostics = \"{hostile}\" }}\n"
+            ),
+            format!("[features.code-blocks.python]\nformatter = \"{hostile}\"\n"),
+            format!(
+                "[features.code-blocks.python]\nformatter = {{ command = [\"x\"], \"{hostile}\" = 1 }}\n"
+            ),
+            format!("[features.code-blocks.python.ruff]\n\"{hostile}\" = \"off\"\n"),
+            format!("[features.code-blocks.python.ruff]\nlint = \"{hostile}\"\n"),
+            format!("[features.code-blocks]\ntier = \"{hostile}\"\n"),
+            format!("[features.code-blocks.rust]\nedition = \"{hostile}\"\n"),
+        ];
+
+        for text in cases {
+            let error = load_error(&text);
+            let message = error.to_string();
+
+            assert_eq!(error.code(), "config-parse", "got {error:?}");
+            assert!(
+                message.contains("g\\u{1b}[31m\\u{202e}nu"),
+                "the value should be shown escaped for {text:?}: {message:?}"
+            );
+            assert!(
+                !message.contains(['\u{1b}', '\u{202e}']),
+                "no raw ESC or U+202E may reach the message for {text:?}: {message:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_program_with_control_characters_is_escaped_in_the_message() {
         let error = load_error(
             "[features.code-blocks.shell]\nformatter = { command = [\"fmt\\u001b[31m\"] }\n",
@@ -1489,7 +1546,7 @@ mod tests {
             (
                 "python",
                 "linter = { command = [\"lint\"], diagnostics = true }".to_owned(),
-                "`diagnostics = true` isn't supported",
+                "`diagnostics` must be the string \"gnu\", not a TOML boolean",
             ),
             (
                 "python",

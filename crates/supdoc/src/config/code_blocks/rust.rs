@@ -1,6 +1,6 @@
 //! `[features.code-blocks.rust]`: the table that turns checking Rust code blocks on.
 
-use super::{Choice, Language, Selection, ToolTable, deserialize_choice, deserialize_tool};
+use super::{Choice, Language, Selection, ToolTable, deserialize_choice, deserialize_tool, shown};
 use crate::code_blocks::tools::Step;
 
 /// The Rust formatters supdoc knows.
@@ -86,7 +86,8 @@ fn edition<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Edition>, D:
     })?;
     Edition::from_year(&year).map(Some).ok_or_else(|| {
         D::Error::custom(format!(
-            "`{year}` isn't a Rust edition supdoc knows; write \"2015\", \"2018\", \"2021\" or \"2024\""
+            "`{}` isn't a Rust edition supdoc knows; write \"2015\", \"2018\", \"2021\" or \"2024\"",
+            shown(&year)
         ))
     })
 }
