@@ -569,6 +569,60 @@ mod tests {
         }
     }
 
+    /// A scratch place holding `real` (a plain directory), `elsewhere/deep` and `link` (a link
+    /// to it), with the two hostile `HOME` values `real/..` and `link/..`.
+    fn hostile_homes() -> (tempfile::TempDir, [PathBuf; 2]) {
+        let place = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        fs::create_dir(place.path().join("real")).expect("the plain directory");
+        fs::create_dir_all(place.path().join("elsewhere/deep")).expect("the link's target");
+        std::os::unix::fs::symlink(
+            place.path().join("elsewhere/deep"),
+            place.path().join("link"),
+        )
+        .expect("the planted link");
+        let homes = [place.path().join("real/.."), place.path().join("link/..")];
+        (place, homes)
+    }
+
+    /// Every path beneath `dir`, without following links.
+    fn every_path(dir: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(next) = pending.pop() {
+            for entry in fs::read_dir(&next).expect("the scratch place should be listable") {
+                let path = entry.expect("the scratch entry should be readable").path();
+                if fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir()) {
+                    pending.push(path.clone());
+                }
+                found.push(path);
+            }
+        }
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn a_home_holding_dot_dot_gives_no_neutral_or_private_directory_and_creates_nothing() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let (place, homes) = hostile_homes();
+        let before = every_path(place.path());
+        for home in homes {
+            let env = ToolEnv::from_vars(|name| (name == "HOME").then(|| home.clone().into()));
+
+            let neutral = neutral_dir(&env, root.path());
+            let private = private_dir(&env, root.path(), &place.path().join("real"));
+
+            assert_eq!(neutral, PathBuf::from("/"), "HOME={}", home.display());
+            assert_eq!(private, None, "HOME={}", home.display());
+            assert_eq!(
+                every_path(place.path()),
+                before,
+                "HOME={} created something",
+                home.display()
+            );
+        }
+    }
+
     #[test]
     fn a_plain_cache_base_gives_a_neutral_directory_under_it() {
         let root = tempfile::TempDir::new().expect("a temp dir should be creatable");

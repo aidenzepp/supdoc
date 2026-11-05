@@ -621,6 +621,72 @@ hash = \"41aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d2\"
     }
 
     #[test]
+    fn source_climbing_mid_path_is_rejected() {
+        let text = file(&[entry("docs/../../a.md", "src/lib.rs", None, HASH_A)]);
+
+        let error = parse_error(&text);
+
+        assert_eq!(error.code(), "lock-parse");
+        assert!(
+            error.to_string().contains("uses `..`"),
+            "the source should be rejected as climbing, got: {error}"
+        );
+    }
+
+    #[test]
+    fn absolute_source_or_target_is_rejected() {
+        for (source, target) in [
+            ("/etc/passwd", "src/lib.rs"),
+            ("//etc/passwd", "src/lib.rs"),
+            ("docs/a.md", "/etc/passwd"),
+            ("docs/a.md", "//etc/passwd"),
+        ] {
+            let text = file(&[entry(source, target, None, HASH_A)]);
+
+            let error = parse_error(&text);
+
+            assert_eq!(
+                error.code(),
+                "lock-parse",
+                "`{source}` -> `{target}` should be rejected"
+            );
+            assert!(
+                error.to_string().contains("is absolute"),
+                "`{source}` -> `{target}` should be rejected as absolute, got: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn uses_source_or_target_that_climbs_or_is_absolute_is_rejected() {
+        for (source, target, says) in [
+            ("../docs/a.md", "src/lib.rs", "uses `..`"),
+            ("/docs/a.md", "src/lib.rs", "is absolute"),
+            (
+                "docs/a.md",
+                "../src/lib.rs",
+                "climbs out of the project root",
+            ),
+            ("docs/a.md", "/src/lib.rs", "is absolute"),
+        ] {
+            let text = file(&[use_entry(source, target, None, HASH_A)])
+                .replace("version = 1", "version = 2");
+
+            let error = parse_error(&text);
+
+            assert_eq!(
+                error.code(),
+                "lock-parse",
+                "uses `{source}` -> `{target}` should be rejected"
+            );
+            assert!(
+                error.to_string().contains(says),
+                "uses `{source}` -> `{target}` should be rejected saying `{says}`, got: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn target_with_parent_segment_is_rejected() {
         for (target, says) in [
             ("../shared/x.rs", "climbs out of the project root"),
