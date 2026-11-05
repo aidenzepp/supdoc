@@ -155,6 +155,10 @@ Threat model, for a checkout you don't trust:
     Set `SUPDOC_TRUST` per job: a repository- or organization-level variable reaches every workflow.
   - `supdoc trust` refuses `$HOME` and its ancestors (and `/`): name the project directory instead.
 
+supdoc refuses to read a doc or linked file larger than 16 MiB (`read-too-large`). Parsing a file can take a
+few hundred times its size in memory, so a hostile file at that size could cost several GB. Change the cap with
+`[limits] max-file-size`, `--max-file-size` or `SUPDOC_MAX_FILE_SIZE`; `0` removes it.
+
 ### Differences from git
 
 supdoc reads ignore files as git does, with these known exceptions:

@@ -681,3 +681,111 @@ fn a_code_block_source_is_read_under_the_flag_s_key_segment_limit() {
         "the flag's limit should bound the source's read: {over:?}"
     );
 }
+
+/// The `max-file-size` the file size tests set: well above every file of the `basic` fixture and
+/// below [`big_rust`].
+const FILE_CAP: &str = "2KiB";
+
+/// Rust over [`FILE_CAP`] that defines `big`, padded by a comment.
+fn big_rust() -> String {
+    format!("fn big() {{}}\n// {}\n", "x".repeat(4096))
+}
+
+/// The `basic` fixture plus `src/big.rs`, over [`FILE_CAP`], and a doc that links into it,
+/// recorded under the default `max-file-size`.
+fn project_with_big_target() -> Project {
+    let project = Project::fixture("basic");
+    project.write("src/big.rs", &big_rust());
+    project.write("docs/big.md", "[big](../src/big.rs#big)\n");
+    project.record();
+    project
+}
+
+/// Asserts that `run` refused `src/big.rs`: `marker` is in what it printed, `read-too-large` for
+/// every command but `fix`, which reports only the broken link the refused target leaves.
+fn assert_refused(run: &crate::support::Run, marker: &str, how: &str) {
+    let output = all_output(run);
+    assert!(
+        output.contains(marker),
+        "`supdoc {}` ({how}) should refuse src/big.rs and print {marker:?}:\n{output}",
+        run.args
+    );
+}
+
+#[test]
+fn every_reading_command_honors_the_max_file_size_flag_and_variable() {
+    let project = project_with_big_target();
+    let commands: [(&[&str], &str); 5] = [
+        (&["check"], "read-too-large"),
+        (&["list"], "read-too-large"),
+        (&["update", "--yes"], "read-too-large"),
+        (&["fix"], "1 broken link"),
+        (&["resolve", "src/big.rs"], "read-too-large"),
+    ];
+
+    for (command, marker) in commands {
+        let within = project.supdoc(command);
+        let _ = within.assert_exit(0);
+        assert!(
+            !all_output(&within).contains(marker),
+            "the default limit holds src/big.rs:\n{}",
+            all_output(&within)
+        );
+        let flagged: Vec<&str> = ["--max-file-size", FILE_CAP]
+            .iter()
+            .chain(command)
+            .copied()
+            .collect();
+        assert_refused(&project.supdoc(&flagged), marker, "flag");
+        let from_env = project.supdoc_in_with(
+            ".",
+            command,
+            &[("SUPDOC_MAX_FILE_SIZE", Path::new(FILE_CAP))],
+        );
+        assert_refused(&from_env, marker, "variable");
+    }
+}
+
+#[test]
+fn the_max_file_size_config_key_reaches_the_reader_and_zero_lifts_it() {
+    let project = project_with_big_target();
+    project.write(
+        "supdoc.config.toml",
+        &format!("[limits]\nmax-file-size = \"{FILE_CAP}\"\n"),
+    );
+
+    assert_refused(&project.supdoc(&["check"]), "read-too-large", "config");
+    let _ = project
+        .supdoc(&["--max-file-size", "0", "check"])
+        .assert_exit(0);
+}
+
+#[test]
+fn max_file_size_takes_flag_then_variable_then_config_then_default() {
+    let project = Project::fixture("basic");
+    let show = |args: &[&str], env: &[(&str, &Path)]| {
+        project.supdoc_in_with(".", args, env).assert_exit(0).json()
+    };
+    let base = ["config", "show", "--json"];
+    let env = [("SUPDOC_MAX_FILE_SIZE", Path::new("2MiB"))];
+
+    let json = show(&base, &[]);
+    assert_eq!(at(&json, "/data/limits/max_file_size/source"), "default");
+
+    project.write("supdoc.config.toml", "[limits]\nmax-file-size = \"8MiB\"\n");
+    let json = show(&base, &[]);
+    assert_eq!(at(&json, "/data/limits/max_file_size/value"), "8MiB");
+    assert_eq!(at(&json, "/data/limits/max_file_size/source"), "config");
+    assert_eq!(
+        at(&json, "/data/limits/max_file_size/from"),
+        "supdoc.config.toml"
+    );
+
+    let json = show(&base, &env);
+    assert_eq!(at(&json, "/data/limits/max_file_size/value"), "2MiB");
+    assert_eq!(at(&json, "/data/limits/max_file_size/source"), "env");
+
+    let json = show(&["config", "show", "--json", "--max-file-size", "0"], &env);
+    assert_eq!(at(&json, "/data/limits/max_file_size/value"), "0");
+    assert_eq!(at(&json, "/data/limits/max_file_size/source"), "flag");
+}

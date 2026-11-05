@@ -318,6 +318,8 @@ pub(crate) struct CommandLineLimits {
     pub(crate) code_block_timeout: Option<Given<TimeLimit>>,
     /// `--code-block-build-timeout` or `SUPDOC_CODE_BLOCK_BUILD_TIMEOUT`.
     pub(crate) code_block_build_timeout: Option<Given<TimeLimit>>,
+    /// `--max-file-size` or `SUPDOC_MAX_FILE_SIZE`.
+    pub(crate) max_file_size: Option<Given<SizeLimit>>,
     /// `--max-lock-size` or `SUPDOC_MAX_LOCK_SIZE`.
     pub(crate) max_lock_size: Option<Given<SizeLimit>>,
     /// `--max-config-size` or `SUPDOC_MAX_CONFIG_SIZE`. No config key sets it, since it must apply
@@ -340,6 +342,8 @@ pub(crate) struct ConfigLimits {
     pub(crate) code_block_timeout: Option<(TimeLimit, AbsolutePath)>,
     /// `code-block-build-timeout` and the file that set it.
     pub(crate) code_block_build_timeout: Option<(TimeLimit, AbsolutePath)>,
+    /// `max-file-size` and the file that set it.
+    pub(crate) max_file_size: Option<(SizeLimit, AbsolutePath)>,
     /// `max-lock-size` and the file that set it.
     pub(crate) max_lock_size: Option<(SizeLimit, AbsolutePath)>,
     /// `max-ignore-size` and the file that set it.
@@ -369,6 +373,8 @@ pub(crate) struct Limits {
     pub(crate) code_block_timeout: Setting<TimeLimit>,
     /// How long building the project for a code block's lint may take. `0` means no limit.
     pub(crate) code_block_build_timeout: Setting<TimeLimit>,
+    /// How large a doc or linked file supdoc reads may be.
+    pub(crate) max_file_size: Setting<SizeLimit>,
     /// How large `supdoc.lock` may be.
     pub(crate) max_lock_size: Setting<SizeLimit>,
     /// How large each config file in the `extends` chain may be.
@@ -390,6 +396,9 @@ impl Limits {
     /// The default time building the project for a lint may take: 10 min.
     pub(crate) const CODE_BLOCK_BUILD_TIMEOUT: TimeLimit =
         TimeLimit(Some(Duration::from_secs(600)));
+    /// The default ceiling on a doc or linked file: 16 MiB. Parsing a file can take a few hundred
+    /// times its size in memory.
+    pub(crate) const MAX_FILE_SIZE: SizeLimit = SizeLimit(Some(16 * MIB));
     /// The default lock size ceiling: 16 MiB.
     pub(crate) const MAX_LOCK_SIZE: SizeLimit = SizeLimit(Some(16 * MIB));
     /// The default config size ceiling: 256 KiB.
@@ -425,6 +434,11 @@ impl Limits {
                 command_line.code_block_build_timeout,
                 config.code_block_build_timeout.as_ref(),
                 Self::CODE_BLOCK_BUILD_TIMEOUT,
+            ),
+            max_file_size: pick(
+                command_line.max_file_size,
+                config.max_file_size.as_ref(),
+                Self::MAX_FILE_SIZE,
             ),
             max_lock_size: pick(
                 command_line.max_lock_size,
@@ -530,6 +544,7 @@ mod tests {
             parse_timeout: Some((time("30s").expect("30s"), file.clone())),
             code_block_timeout: Some((time("20s").expect("20s"), file.clone())),
             code_block_build_timeout: None,
+            max_file_size: None,
             max_lock_size: Some((size("1MiB").expect("1MiB"), file.clone())),
             max_ignore_size: None,
             max_key_segments: None,
@@ -613,6 +628,42 @@ mod tests {
         let from_env = Limits::resolve(&env, &config);
         assert_eq!(from_env.code_block_build_timeout.source, Source::Env);
         assert_eq!(from_env.code_block_build_timeout.value.to_string(), "5s");
+    }
+
+    #[test]
+    fn max_file_size_takes_flag_then_env_then_config_then_its_default() {
+        let file = AbsolutePath::new(Path::new(std::path::MAIN_SEPARATOR_STR))
+            .expect("the root should be absolute");
+        let defaults = Limits::resolve(&CommandLineLimits::default(), &ConfigLimits::default());
+        assert_eq!(defaults.max_file_size.value, Limits::MAX_FILE_SIZE);
+        assert_eq!(defaults.max_file_size.source, Source::Default);
+        let config = ConfigLimits {
+            max_file_size: Some((size("1MiB").expect("1MiB"), file.clone())),
+            ..ConfigLimits::default()
+        };
+        let from_config = Limits::resolve(&CommandLineLimits::default(), &config);
+        assert_eq!(from_config.max_file_size.source, Source::Config(file));
+        let given = |text: &str, from_env| CommandLineLimits {
+            max_file_size: Some(Given {
+                value: size(text).expect("a size with a unit"),
+                from_env,
+            }),
+            ..CommandLineLimits::default()
+        };
+        let from_env = Limits::resolve(&given("2MiB", true), &config);
+        assert_eq!(from_env.max_file_size.source, Source::Env);
+        assert_eq!(from_env.max_file_size.value.to_string(), "2MiB");
+        let from_flag = Limits::resolve(&given("0", false), &config);
+        assert_eq!(from_flag.max_file_size.source, Source::Flag);
+        assert_eq!(
+            from_flag.max_file_size.value.get(),
+            None,
+            "0 lifts the limit"
+        );
+        assert!(
+            size("4").is_err(),
+            "a size without a unit should be refused"
+        );
     }
 
     #[test]

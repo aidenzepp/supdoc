@@ -105,7 +105,7 @@ pub(crate) struct GlobalArgs {
     pub(crate) limits: LimitFlags,
 }
 
-/// The `--parse-timeout`, `--code-block-timeout`, `--code-block-build-timeout`, `--max-lock-size`, `--max-config-size`, `--max-ignore-size`, `--max-key-segments` and `--max-key-path-size` flags.
+/// The `--parse-timeout`, `--code-block-timeout`, `--code-block-build-timeout`, `--max-file-size`, `--max-lock-size`, `--max-config-size`, `--max-ignore-size`, `--max-key-segments` and `--max-key-path-size` flags.
 ///
 /// Written by hand rather than derived, so each value keeps whether its flag or its `SUPDOC_*`
 /// variable gave it, which `config show` reports.
@@ -113,7 +113,7 @@ pub(crate) struct GlobalArgs {
 pub(crate) struct LimitFlags(pub CommandLineLimits);
 
 /// The clap id, flag, variable, value name, help and default of each limit flag.
-const LIMIT_FLAGS: [(&str, &str, &str, &str); 8] = [
+const LIMIT_FLAGS: [(&str, &str, &str, &str); 9] = [
     (
         "parse-timeout",
         "SUPDOC_PARSE_TIMEOUT",
@@ -131,6 +131,12 @@ const LIMIT_FLAGS: [(&str, &str, &str, &str); 8] = [
         "SUPDOC_CODE_BLOCK_BUILD_TIMEOUT",
         "DURATION",
         "Stop building the project for a code block's lint after this long, such as 10m or 90s; 0 for no limit",
+    ),
+    (
+        "max-file-size",
+        "SUPDOC_MAX_FILE_SIZE",
+        "SIZE",
+        "Refuse to read a doc or linked file larger than this, such as 16MiB; 0 for no limit",
     ),
     (
         "max-lock-size",
@@ -166,11 +172,12 @@ const LIMIT_FLAGS: [(&str, &str, &str, &str); 8] = [
 
 impl LimitFlags {
     /// The default each flag's help shows, in [`LIMIT_FLAGS`] order.
-    fn defaults() -> [String; 8] {
+    fn defaults() -> [String; 9] {
         [
             Limits::PARSE_TIMEOUT.to_string(),
             Limits::CODE_BLOCK_TIMEOUT.to_string(),
             Limits::CODE_BLOCK_BUILD_TIMEOUT.to_string(),
+            Limits::MAX_FILE_SIZE.to_string(),
             Limits::MAX_LOCK_SIZE.to_string(),
             Limits::MAX_CONFIG_SIZE.to_string(),
             Limits::MAX_IGNORE_SIZE.to_string(),
@@ -196,6 +203,7 @@ impl clap::FromArgMatches for LimitFlags {
             parse_timeout: given(matches, "parse-timeout"),
             code_block_timeout: given(matches, "code-block-timeout"),
             code_block_build_timeout: given(matches, "code-block-build-timeout"),
+            max_file_size: given(matches, "max-file-size"),
             max_lock_size: given(matches, "max-lock-size"),
             max_config_size: given(matches, "max-config-size"),
             max_ignore_size: given(matches, "max-ignore-size"),

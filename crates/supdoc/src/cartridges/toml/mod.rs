@@ -826,6 +826,7 @@ name = "second"
             path,
             Languages::builtin().expect("the built-in cartridges should load"),
             Limits::PARSE_TIMEOUT,
+            Limits::MAX_FILE_SIZE,
             KeyPathBudget::defaults(),
         )
         .expect_err("a file with an invalid UTF-8 byte should be rejected");
