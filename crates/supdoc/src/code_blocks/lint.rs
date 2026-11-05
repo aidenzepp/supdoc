@@ -8,7 +8,7 @@ use crate::finding::{Finding, Location, Severity};
 
 use super::block::CodeBlock;
 use super::format;
-use super::fragment::Kind;
+use super::fragment::Frame;
 use super::runner::{Failure, Ran};
 use super::rust::LineMap;
 use super::tools::ToolCartridge;
@@ -24,93 +24,6 @@ const MISSING_NAME: &str = "code-block-missing-name";
 const MISSING_NAME_CODES: [&str; 9] = [
     "E0405", "E0412", "E0422", "E0425", "E0432", "E0433", "E0463", "E0531", "E0532",
 ];
-
-/// What a tool-failure detail shows in place of a line of the frame.
-const FRAME_LINE: &str = "<the frame supdoc adds>";
-
-/// The fixed lines a linter sees around a block that declares a kind its tool reads only inside
-/// a frame (see [`super::fragment::Support::Framed`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Frame {
-    /// The kind the block declares.
-    pub(crate) kind: Kind,
-    /// The lines before the block. Empty for none.
-    pub(crate) before: &'static str,
-    /// The lines after the block. Empty for none.
-    pub(crate) after: &'static str,
-}
-
-impl Frame {
-    /// The frame `tool` puts around a block of `kind`. `None` for a block checked as a whole
-    /// file, and for a kind the tool reads as written or doesn't list.
-    #[must_use]
-    pub(crate) fn of(tool: &ToolCartridge, kind: Option<Kind>) -> Option<Self> {
-        let kind = kind?;
-        let (_, support) = tool.fragments.iter().find(|(listed, _)| *listed == kind)?;
-        let (before, after) = support.frame()?;
-        Some(Self {
-            kind,
-            before,
-            after,
-        })
-    }
-
-    /// The text the linter checks for a block whose `input` is its body as written: `before`,
-    /// the body and `after`, each starting on its own line.
-    #[must_use]
-    pub(crate) fn wrap(self, input: &str) -> String {
-        let mut text =
-            String::with_capacity(self.before.len() + input.len() + self.after.len() + 2);
-        for part in [self.before, input, self.after] {
-            if part.is_empty() {
-                continue;
-            }
-            text.push_str(part);
-            if !part.ends_with('\n') {
-                text.push('\n');
-            }
-        }
-        text
-    }
-
-    /// How many lines `before` takes.
-    fn lead(self) -> usize {
-        self.before.lines().count()
-    }
-
-    /// Whether `line`, trimmed, is one of the frame's lines.
-    fn holds(self, line: &str) -> bool {
-        let line = line.trim();
-        !line.is_empty()
-            && self
-                .before
-                .lines()
-                .chain(self.after.lines())
-                .any(|frame| frame.trim() == line)
-    }
-
-    /// `detail`, a tool's report, with each line that is one of the frame's lines replaced by
-    /// [`FRAME_LINE`].
-    fn hidden(self, detail: &str) -> String {
-        detail
-            .lines()
-            .map(|line| if self.holds(line) { FRAME_LINE } else { line })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    /// `failed`, with no line of the frame shown in its detail.
-    fn hide_in(self, failed: &format::Verdict) -> format::Verdict {
-        match failed {
-            format::Verdict::ToolFailed(detail) => format::Verdict::ToolFailed(self.hidden(detail)),
-            format::Verdict::ParseFailed { detail, line } => format::Verdict::ParseFailed {
-                detail: self.hidden(detail),
-                line: *line,
-            },
-            other => other.clone(),
-        }
-    }
-}
 
 /// The text a linter checks for a block whose body as written is `input`: `input` itself, or
 /// `input` inside `frame`.
@@ -258,7 +171,10 @@ pub(crate) fn findings(
     match verdict {
         Verdict::Clean => Vec::new(),
         Verdict::Failed(failed) => {
-            let failed = frame.map_or_else(|| failed.clone(), |frame| frame.hide_in(failed));
+            let failed = frame.map_or_else(
+                || failed.clone(),
+                |frame| format::hidden(frame, failed, block.body.len(), ""),
+            );
             format::finding(&failed, tool, &block.fence, timeout)
                 .into_iter()
                 .collect()
@@ -596,6 +512,8 @@ mod tests {
         kind: Kind::Entries,
         before: "({",
         after: "})",
+        out_before: "({",
+        out_after: "});",
     };
 
     /// The frame clippy is planned to use around statements (design §2.6).
@@ -603,6 +521,8 @@ mod tests {
         kind: Kind::Statements,
         before: "fn main() {",
         after: "}",
+        out_before: "fn main() {",
+        out_after: "}",
     };
 
     /// A diagnostic from line `line` to `end_line`, column 1, breaking `rule`, a syntax error
@@ -687,6 +607,8 @@ mod tests {
             kind: Kind::Declarations,
             before: "package fragment",
             after: "",
+            out_before: "package fragment",
+            out_after: "",
         };
         assert_eq!(header.wrap("var x = 1\n"), "package fragment\nvar x = 1\n");
     }
@@ -800,11 +722,60 @@ mod tests {
         let message = found.first().map(|finding| finding.message.as_str());
         let message = message.unwrap_or_default();
         assert!(
-            message.contains("error: unexpected token\n<the frame supdoc adds>\na: 1,\n<the frame supdoc adds>\nend"),
+            message.contains(
+                "error: unexpected token\n<the frame supdoc adds>\na: 1,\n<the frame supdoc adds>\nend"
+            ),
             "{message}"
         );
         assert_no_frame_line(&found, TWO_ENTRIES, ENTRIES);
         let unframed = plain.first().map(|finding| finding.message.as_str());
         assert!(unframed.unwrap_or_default().contains("  ({"), "{plain:?}");
+    }
+
+    #[test]
+    fn a_framed_tool_failure_hides_a_frame_line_named_by_its_gutter_or_location() {
+        let block = markdown_block(TWO_ENTRIES);
+        let stderr = "error: unexpected token\n --> <stdin>:1:1\n  |\n1 | ({\n2 | a: 1,\n  \
+                      > 4 \u{2502} })\nend";
+        let failed = Verdict::Failed(super::format::Verdict::ToolFailed(stderr.to_owned()));
+
+        let found = findings(
+            &failed,
+            &read(&block, TWO_ENTRIES, Some(ENTRIES)),
+            None,
+            false,
+        );
+        let plain = findings(&failed, &read(&block, TWO_ENTRIES, None), None, false);
+
+        let message = found.first().map(|finding| finding.message.as_str());
+        let message = message.unwrap_or_default();
+        assert!(
+            message.contains(
+                "error: unexpected token\n<the frame supdoc adds>\n  |\n<the frame supdoc adds>\n\
+                 1 | a: 1,\n<the frame supdoc adds>\nend"
+            ),
+            "{message}"
+        );
+        assert_no_frame_line(&found, TWO_ENTRIES, ENTRIES);
+        let unframed = plain.first().map(|finding| finding.message.as_str());
+        assert!(unframed.unwrap_or_default().contains("1 | ({"), "{plain:?}");
+    }
+
+    #[test]
+    fn a_framed_tool_failure_keeps_the_authors_own_closing_line() {
+        let text = "# D\n\n```rust fragment(statements)\nif x {\n}\n```\n";
+        let block = markdown_block(text);
+        let stderr = "error: x\n --> <stdin>:3:1\n3 | }\n4 | }";
+        let failed = Verdict::Failed(super::format::Verdict::ToolFailed(stderr.to_owned()));
+
+        let found = findings(&failed, &read(&block, text, Some(STATEMENTS)), None, false);
+
+        let message = found.first().map(|finding| finding.message.as_str());
+        assert!(
+            message
+                .unwrap_or_default()
+                .contains("error: x\n --> <stdin>:2:1\n2 | }\n<the frame supdoc adds>"),
+            "the block's own `}}` on line 3 stays, the frame's on line 4 goes: {found:?}"
+        );
     }
 }
