@@ -13,9 +13,9 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use crate::check::moves::Move;
+use crate::config::confine::{Boundary, Escape, write_atomically};
 use crate::finding::{Finding, Fix, Location, Severity};
 use crate::link::{LinkKey, SourcePath, SymbolPath, Target, TargetPath};
-use crate::lock::io::write_atomically;
 use crate::lock::model::Lockfile;
 use crate::path::AbsolutePath;
 use crate::scan::model::{Scan, TargetState};
@@ -318,8 +318,10 @@ fn rewritten_key(key: &LinkKey, code: &str, replacement: &str) -> Option<LinkKey
 }
 
 /// Verifies each file against the scan, then rewrites it atomically with its edits applied last
-/// first, so earlier offsets stay valid. `root` is the project root that source paths are
-/// relative to.
+/// first, so earlier offsets stay valid. `boundary` is the project root that source paths are
+/// relative to, as the config resolved it when it loaded. Every file is admitted against it
+/// immediately before it is written, so a file a symlink leads out of the root is skipped, never
+/// written.
 ///
 /// A file is rewritten whole or not at all: if any of its edits no longer finds the bytes it was
 /// planned against, nothing in that file is touched. Other files are unaffected.
@@ -327,7 +329,8 @@ fn rewritten_key(key: &LinkKey, code: &str, replacement: &str) -> Option<LinkKey
 /// `rerun` is the command a skipped file's help says to run again. A write failure's help says the
 /// other fixes were applied only when some were.
 #[must_use]
-pub(crate) fn apply_fixes(plan: &FixPlan, root: &AbsolutePath, rerun: &str) -> FixResult {
+pub(crate) fn apply_fixes(plan: &FixPlan, boundary: &Boundary, rerun: &str) -> FixResult {
+    let root = boundary.dir();
     let mut by_file: BTreeMap<&SourcePath, Vec<&PlannedFix>> = BTreeMap::new();
     for planned in plan.fixes() {
         by_file.entry(&planned.fix.file).or_default().push(planned);
@@ -337,7 +340,7 @@ pub(crate) fn apply_fixes(plan: &FixPlan, root: &AbsolutePath, rerun: &str) -> F
     let mut unwritten = Vec::new();
     for (file, planned) in by_file {
         let path = root.as_path().join(file.as_str());
-        match rewrite_file(&path, &planned) {
+        match rewrite_file(boundary, &path, &planned) {
             Ok(()) => result
                 .applied
                 .extend(planned.iter().map(|planned| AppliedFix {
@@ -380,6 +383,8 @@ enum Unwritable {
     },
     /// The source is neither a regular file nor a symlink.
     NotRegular,
+    /// The source leads out of the project root: a path on the way changed after the scan.
+    OutsideRoot,
     /// The operating system refused the read or the write.
     Io(io::Error),
 }
@@ -395,13 +400,15 @@ impl From<io::Error> for Skip {
     }
 }
 
-/// Reads `path`, checks every edit's expectation, applies them last first and writes the result.
+/// Reads `path`, checks every edit's expectation, applies them last first and writes the result,
+/// once `boundary` admits `path`.
 ///
 /// # Errors
 ///
 /// [`Skip::Changed`] if any edit's expected bytes are gone; [`Skip::Unwritable`] if the file is
-/// not a regular file or cannot be read or written. A file that vanished is `Changed`. The file is unchanged in both cases.
-fn rewrite_file(path: &Path, planned: &[&PlannedFix]) -> Result<(), Skip> {
+/// not a regular file, lies outside `boundary`, or cannot be read or written. A file that
+/// vanished is `Changed`. The file is unchanged in both cases.
+fn rewrite_file(boundary: &Boundary, path: &Path, planned: &[&PlannedFix]) -> Result<(), Skip> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_file() {
         return Err(Skip::Unwritable(if metadata.is_symlink() {
@@ -430,7 +437,11 @@ fn rewrite_file(path: &Path, planned: &[&PlannedFix]) -> Result<(), Skip> {
             .splice(range, planned.fix.replacement.bytes())
             .collect();
     }
-    write_atomically(path, &bytes, Some(&metadata.permissions()))?;
+    let admitted = AbsolutePath::new(path)
+        .ok_or(Escape::Lexical)
+        .and_then(|target| boundary.admit(&target))
+        .map_err(|_escape| Skip::Unwritable(Unwritable::OutsideRoot))?;
+    write_atomically(&admitted, &bytes, Some(&metadata.permissions()))?;
     Ok(())
 }
 
@@ -477,6 +488,13 @@ fn write_failed(
                 ),
             )
         }
+        Unwritable::OutsideRoot => (
+            "it now leads outside the project root: a path on the way changed after supdoc checked it"
+                .to_owned(),
+            format!(
+                "supdoc never writes outside the project root. Check what changed on the way to {file}, then run `{rerun}` again{others}"
+            ),
+        ),
         Unwritable::NotRegular => (
             "it is not a regular file".to_owned(),
             format!("supdoc only rewrites regular files. Apply the fix by hand{others}"),
@@ -610,6 +628,10 @@ mod tests {
 
         fn root(&self) -> AbsolutePath {
             AbsolutePath::new(self.dir.path()).expect("a temp directory path should be absolute")
+        }
+
+        fn boundary(&self) -> Boundary {
+            Boundary::resolve(&self.root())
         }
 
         fn read(&self, name: &str) -> String {
@@ -840,7 +862,7 @@ mod tests {
         finding.snippet = Some(snippet);
 
         let plan = plan_fixes(&scan_of([(key, link)]));
-        let result = apply_fixes(&plan, &project.root(), "supdoc fix --yes");
+        let result = apply_fixes(&plan, &project.boundary(), "supdoc fix --yes");
 
         assert_eq!(
             plan.fixes().len(),
@@ -865,7 +887,7 @@ mod tests {
         fs::write(project.dir.path().join("docs/a.md"), &edited)
             .expect("the edited doc should be written");
 
-        let result = apply_fixes(&plan, &project.root(), "supdoc fix --yes");
+        let result = apply_fixes(&plan, &project.boundary(), "supdoc fix --yes");
 
         assert_eq!(result.applied, vec![]);
         assert_eq!(result.skipped.len(), 1, "{:?}", result.skipped);
@@ -881,7 +903,7 @@ mod tests {
         let project = Project::with(&[("docs/a.md", DOC)]);
         let plan = plan_fixes(&scan_of([broken("docs/a.md", DOC, "ad", "add")]));
 
-        let result = apply_fixes(&plan, &project.root(), "supdoc fix --yes");
+        let result = apply_fixes(&plan, &project.boundary(), "supdoc fix --yes");
 
         assert_eq!(result.applied.len(), 1);
         assert_eq!(result.skipped, vec![]);
@@ -899,7 +921,7 @@ mod tests {
             broken("docs/a.md", DOC, "su", "s"),
         ]));
 
-        let result = apply_fixes(&plan, &project.root(), "supdoc fix --yes");
+        let result = apply_fixes(&plan, &project.boundary(), "supdoc fix --yes");
 
         assert_eq!(result.applied.len(), 2);
         assert_eq!(
@@ -921,7 +943,7 @@ mod tests {
         fs::write(project.dir.path().join("docs/a.md"), &edited)
             .expect("the fixture file should be writable");
 
-        let result = apply_fixes(&plan, &project.root(), "supdoc fix --yes");
+        let result = apply_fixes(&plan, &project.boundary(), "supdoc fix --yes");
 
         assert_eq!(
             project.read("docs/a.md"),
@@ -948,7 +970,7 @@ mod tests {
         let project = Project::with(&[("docs/b.md", DOC)]);
         let plan = plan_fixes(&scan_of([broken("docs/a.md", DOC, "ad", "add")]));
 
-        let result = apply_fixes(&plan, &project.root(), "supdoc fix --yes");
+        let result = apply_fixes(&plan, &project.boundary(), "supdoc fix --yes");
 
         assert_eq!(result.applied, vec![]);
         let [skipped] = result.skipped.as_slice() else {
@@ -966,7 +988,7 @@ mod tests {
         let project = Project::with(&[("docs/a.md", DOC)]);
         let plan = plan_fixes(&scan_of([broken("docs/a.md", DOC, "ad", "add")]));
 
-        let _result = apply_fixes(&plan, &project.root(), "supdoc fix --yes");
+        let _result = apply_fixes(&plan, &project.boundary(), "supdoc fix --yes");
 
         let names: Vec<_> = fs::read_dir(project.dir.path().join("docs"))
             .expect("the docs directory should be readable")
@@ -985,7 +1007,7 @@ mod tests {
             .expect("the fixture permissions should be settable");
         let plan = plan_fixes(&scan_of([broken("docs/a.md", DOC, "ad", "add")]));
 
-        let _result = apply_fixes(&plan, &project.root(), "supdoc fix --yes");
+        let _result = apply_fixes(&plan, &project.boundary(), "supdoc fix --yes");
 
         let mode = fs::metadata(&path)
             .expect("the file should exist")
@@ -1002,7 +1024,7 @@ mod tests {
             .expect("the fixture symlink should be creatable");
         let plan = plan_fixes(&scan_of([broken("docs-link.md", DOC, "ad", "add")]));
 
-        let result = apply_fixes(&plan, &project.root(), "supdoc fix --yes");
+        let result = apply_fixes(&plan, &project.boundary(), "supdoc fix --yes");
 
         assert_eq!(result.applied, vec![]);
         let [skipped] = result.skipped.as_slice() else {
@@ -1018,6 +1040,95 @@ mod tests {
             "the help should say supdoc never rewrites a symlink and name the real file, got {help:?}"
         );
         assert_eq!(project.read("real.md"), DOC);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_source_under_a_directory_symlinked_out_of_the_root_is_skipped_and_left_alone() {
+        let project = Project::with(&[]);
+        let outside = tempfile::tempdir().expect("an outside directory should be creatable");
+        let victim = outside.path().join("guide.md");
+        fs::write(&victim, DOC).expect("the outside doc should be writable");
+        std::os::unix::fs::symlink(outside.path(), project.dir.path().join("docs"))
+            .expect("the fixture symlink should be creatable");
+        let plan = plan_fixes(&scan_of([broken("docs/guide.md", DOC, "ad", "add")]));
+
+        let result = apply_fixes(&plan, &project.boundary(), "supdoc fix --yes");
+
+        assert_eq!(result.applied, vec![]);
+        let [skipped] = result.skipped.as_slice() else {
+            panic!(
+                "expected exactly one skipped finding, got {:?}",
+                result.skipped
+            );
+        };
+        assert_eq!(
+            (skipped.kind, skipped.finding.code),
+            (SkippedKind::WriteFailed, CODE_WRITE_FAILED)
+        );
+        assert_eq!(
+            fs::read(&victim).expect("the outside doc should be readable"),
+            DOC.as_bytes(),
+            "the outside file should be byte-identical"
+        );
+        assert_eq!(
+            fs::read_dir(outside.path())
+                .expect("the outside dir should be listable")
+                .count(),
+            1,
+            "no temporary file should be left outside"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_root_swapped_for_a_symlink_out_after_the_config_loaded_writes_nothing_outside() {
+        let dir = tempfile::tempdir().expect("a temp directory should be creatable");
+        let (root, outside) = (dir.path().join("root"), dir.path().join("outside"));
+        for tree in [&root, &outside] {
+            fs::create_dir_all(tree.join("docs")).expect("the fixture dirs should be creatable");
+            fs::write(tree.join("docs/guide.md"), DOC).expect("the fixture doc should be writable");
+        }
+        let boundary = Boundary::resolve(
+            &AbsolutePath::new(&root).expect("a temp directory path should be absolute"),
+        );
+        let plan = plan_fixes(&scan_of([broken("docs/guide.md", DOC, "ad", "add")]));
+        fs::rename(&root, dir.path().join("moved")).expect("the root should be movable");
+        std::os::unix::fs::symlink(&outside, &root).expect("the symlink should be creatable");
+
+        let result = apply_fixes(&plan, &boundary, "supdoc fix --yes");
+
+        assert_eq!(result.applied, vec![]);
+        let [skipped] = result.skipped.as_slice() else {
+            panic!(
+                "expected exactly one skipped finding, got {:?}",
+                result.skipped
+            );
+        };
+        assert_eq!(
+            (skipped.kind, skipped.finding.code),
+            (SkippedKind::WriteFailed, CODE_WRITE_FAILED)
+        );
+        assert!(
+            skipped
+                .finding
+                .message
+                .contains("now leads outside the project root"),
+            "the finding should say the file now leads outside: {}",
+            skipped.finding.message
+        );
+        assert_eq!(
+            fs::read(outside.join("docs/guide.md")).expect("the outside doc should be readable"),
+            DOC.as_bytes(),
+            "the outside file should be byte-identical"
+        );
+        assert_eq!(
+            fs::read_dir(outside.join("docs"))
+                .expect("the outside dir should be listable")
+                .count(),
+            1,
+            "no temporary file should be left outside"
+        );
     }
 
     #[test]
