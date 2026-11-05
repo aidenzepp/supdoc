@@ -6,6 +6,7 @@
 //! `extends` target in `supdoc.config.toml`.
 //! [`Beneath`] marks a relative path proven never to leave the base it is joined to, and
 //! [`AbsolutePath::beneath`] is the join for it.
+//! [`Pointer`] is a path read from a file that may point anywhere, such as a `gitdir:` line.
 
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
@@ -214,6 +215,30 @@ pub(crate) mod fixed {
 impl Beneath for FixedPath {
     fn segments(&self) -> &str {
         self.0
+    }
+}
+
+/// A path read from a file that may legitimately point anywhere: a `gitdir:` line, a `commondir`
+/// or worktree `gitdir` back-pointer, a path setting in a tool's config, a config program, or a
+/// path a tool reports. Unlike [`Beneath`], nothing proves it stays beneath a base, so its one
+/// join, [`Pointer::resolve_from`], is a lookup that may leave the base; the caller checks the
+/// result before showing what it holds or writing to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Pointer(PathBuf);
+
+impl Pointer {
+    /// Wraps `text` read from a file, or `None` when it is empty or holds a NUL byte, which no
+    /// path can.
+    #[must_use]
+    pub(crate) fn new(text: &str) -> Option<Self> {
+        (!text.is_empty() && !text.contains('\0')).then(|| Self(PathBuf::from(text)))
+    }
+
+    /// The pointer resolved from the directory `dir`: `dir` joined with it, or the pointer alone
+    /// when it is absolute. Not normalized, and not confined: the result may lie outside `dir`.
+    #[must_use]
+    pub(crate) fn resolve_from(&self, dir: &Path) -> PathBuf {
+        dir.join(&self.0)
     }
 }
 
@@ -446,6 +471,39 @@ mod tests {
 
     fn relative(raw: &str) -> RelativePath {
         RelativePath::try_from(raw.to_owned()).expect("the fixture path should be relative")
+    }
+
+    #[test]
+    fn a_pointer_refuses_empty_text() {
+        assert_eq!(Pointer::new(""), None, "empty text names no path");
+    }
+
+    #[test]
+    fn a_pointer_refuses_text_holding_a_nul_byte() {
+        assert_eq!(
+            Pointer::new("../repo\0/.git"),
+            None,
+            "no path holds a NUL byte"
+        );
+    }
+
+    #[test]
+    fn a_relative_pointer_resolves_beneath_the_directory_without_normalizing() {
+        let pointer = Pointer::new("../repo/.git").expect("a relative pointer should be accepted");
+        assert_eq!(
+            pointer.resolve_from(Path::new("/work/tree")),
+            Path::new("/work/tree/../repo/.git")
+        );
+    }
+
+    #[test]
+    fn an_absolute_pointer_replaces_the_directory() {
+        let pointer =
+            Pointer::new("/repo/.git/worktrees/w").expect("an absolute pointer should be accepted");
+        assert_eq!(
+            pointer.resolve_from(Path::new("/work/tree")),
+            Path::new("/repo/.git/worktrees/w")
+        );
     }
 
     #[test]

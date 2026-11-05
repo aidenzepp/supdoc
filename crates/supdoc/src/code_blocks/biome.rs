@@ -21,7 +21,7 @@ use super::lint::{self, Diagnostic};
 use super::runner::{self, Failure, Ran};
 use super::tools::ToolEnv;
 use crate::config::confine::{self, Admitted, Boundary};
-use crate::path::AbsolutePath;
+use crate::path::{AbsolutePath, Pointer};
 
 /// The config names biome looks for in a directory, in its own order.
 const CONFIG_FILES: [&str; 4] = ["biome.json", "biome.jsonc", ".biome.json", ".biome.jsonc"];
@@ -623,9 +623,11 @@ fn absolutize(
                 }
                 match inner {
                     Value::String(path) if named => {
-                        let real = dir.join(&*path).canonicalize().map_err(|_| {
-                            (format!("{parent}.{key}"), "names a path that doesn't exist")
-                        })?;
+                        let real = Pointer::new(path)
+                            .and_then(|pointer| pointer.resolve_from(dir).canonicalize().ok())
+                            .ok_or_else(|| {
+                                (format!("{parent}.{key}"), "names a path that doesn't exist")
+                            })?;
                         if !real.starts_with(root) {
                             return Err((
                                 format!("{parent}.{key}"),

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use ignore::gitignore::Gitignore;
 
 use crate::limits::SizeLimit;
-use crate::path::is_git_dir;
+use crate::path::{Pointer, is_git_dir};
 use crate::read::source::{open_without_blocking, read_up_to};
 use crate::scan::ignore::{ReadFailure, rules_in};
 
@@ -83,14 +83,14 @@ pub(super) fn git_exclude(dir: &Path, limit: SizeLimit) -> ExcludeFile {
 /// Effect: reads `dot_git` and the `commondir` file.
 pub(crate) fn common_dir(dir: &Path, dot_git: &Path) -> Option<PathBuf> {
     let line = first_line(dot_git)?;
-    let git_dir = dir.join(line.strip_prefix("gitdir: ")?);
+    let git_dir = Pointer::new(line.strip_prefix("gitdir: ")?)?.resolve_from(dir);
     let commondir = git_dir.join("commondir");
     if fs::symlink_metadata(&commondir).is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
     {
         return Some(git_dir);
     }
     let common = first_line(&commondir)?;
-    Some(git_dir.join(common))
+    Some(Pointer::new(&common)?.resolve_from(&git_dir))
 }
 
 /// The most bytes a `.git` file's or `commondir`'s first line may hold before its line ending:
