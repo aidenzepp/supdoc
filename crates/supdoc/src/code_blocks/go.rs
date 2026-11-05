@@ -345,13 +345,9 @@ fn private(parent: &Boundary, dir: &AbsolutePath) -> Option<Boundary> {
 /// creates it owns it alone. `None` when it isn't admitted, something is there, or it can't be
 /// created.
 ///
-/// Effect: reads `dir`'s metadata and creates it.
+/// Effect: creates the directory.
 fn create_fresh(parent: &Boundary, dir: &AbsolutePath) -> Option<()> {
-    let admitted = parent.admit(dir).ok()?;
-    if std::fs::symlink_metadata(dir.as_path()).is_ok() {
-        return None;
-    }
-    confine::create_dir_all(&admitted, 0o700).ok()
+    confine::create_dir(&parent.admit(dir).ok()?, 0o700).ok()
 }
 
 /// Writes `text` to the admitted `file`, which must not exist yet, mode 0600.
@@ -1102,6 +1098,32 @@ mod tests {
         assert!(
             !missing.exists(),
             "nothing should be created at {missing:?}"
+        );
+    }
+
+    #[test]
+    fn a_module_directory_already_there_is_never_taken_over() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let base = cache.path().join("go");
+        let next = super::VET_RUNS.load(std::sync::atomic::Ordering::Relaxed);
+        let planted: Vec<_> = (next..next + 64)
+            .map(|count| base.join(format!("{}-{count}", std::process::id())))
+            .collect();
+        for dir in &planted {
+            std::fs::create_dir_all(dir).expect("the planted module directory");
+        }
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700))
+            .expect("a private base");
+
+        let module = VetModule::create(&cache.path().join("neutral"), "module m\n", None);
+
+        assert!(module.is_none(), "{module:?}");
+        assert!(
+            planted.iter().all(|dir| std::fs::read_dir(dir)
+                .is_ok_and(|mut entries| entries.next().is_none())),
+            "every planted module directory should be left empty"
         );
     }
 
