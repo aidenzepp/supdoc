@@ -340,6 +340,18 @@ pub(crate) fn create_dir_all(dir: &Admitted<'_>, mode: u32) -> io::Result<()> {
         .create(&dir.path)
 }
 
+/// Creates the new directory `dir` with `mode`. Its parent must exist. Refuses an existing path,
+/// and never follows a symlink there, so the caller that creates it owns it alone.
+///
+/// Effect: creates a directory.
+///
+/// # Errors
+///
+/// `AlreadyExists` when anything is at `dir`; otherwise fails when it can't be created.
+pub(crate) fn create_dir(dir: &Admitted<'_>, mode: u32) -> io::Result<()> {
+    fs::DirBuilder::new().mode(mode).create(&dir.path)
+}
+
 /// Creates the new file `file` with `mode`, open for writing. Refuses an existing path, and never
 /// follows a symlink there.
 ///
@@ -397,10 +409,6 @@ pub(crate) fn remove_file(file: &Admitted<'_>) -> io::Result<()> {
 /// # Errors
 ///
 /// Fails when nothing is at `dir`, it is a file, or something in it can't be removed.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "private dirs are removed through it from PH05")
-)]
 pub(crate) fn remove_dir_all(dir: &Admitted<'_>) -> io::Result<()> {
     fs::remove_dir_all(&dir.path)
 }
@@ -772,6 +780,55 @@ mod tests {
         assert_eq!(mode & 0o777, 0o700);
         assert_eq!(fixture.names("root"), names(&["a"]));
         assert_eq!(fixture.names("root/a"), names(&["b"]));
+    }
+
+    #[test]
+    fn create_dir_creates_only_the_admitted_dir_with_the_mode() {
+        let fixture = Fixture::new();
+        let boundary = fixture.boundary();
+        let dir = boundary
+            .admit(&fixture.absolute("root/fresh"))
+            .expect("a missing dir inside the root should be admitted");
+
+        create_dir(&dir, 0o700).expect("the dir should be creatable");
+
+        let mode = fs::metadata(dir.as_path())
+            .expect("the created dir should exist")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
+        assert_eq!(fixture.names("root"), names(&["fresh"]));
+    }
+
+    #[test]
+    fn create_dir_refuses_an_existing_dir_file_or_symlink_and_changes_nothing() {
+        let fixture = Fixture::new();
+        let boundary = fixture.boundary();
+        fs::create_dir(fixture.path("root/dir")).expect("the fixture dir should be creatable");
+        fixture.write("root/file", "kept");
+        fixture.link("missing", "root/link");
+
+        for at in ["root/dir", "root/file", "root/link"] {
+            let path = boundary
+                .admit(&fixture.absolute(at))
+                .expect("a path inside the root should be admitted");
+
+            let made = create_dir(&path, 0o700);
+
+            assert_eq!(
+                made.map_err(|error| error.kind()),
+                Err(io::ErrorKind::AlreadyExists),
+                "{at}"
+            );
+        }
+        assert_eq!(fixture.names("root"), names(&["dir", "file", "link"]));
+        assert!(fixture.names("root/dir").is_empty());
+        assert_eq!(
+            fs::read_to_string(fixture.path("root/file"))
+                .ok()
+                .as_deref(),
+            Some("kept")
+        );
     }
 
     #[test]
