@@ -4,13 +4,13 @@
 //! directory. The lockfile is created by the first `update --yes`. An existing file is never
 //! touched.
 
-use std::fs::OpenOptions;
 use std::io::{self, Write as _};
 use std::path::Path;
 
 use schemars::JsonSchema;
 use serde::Serialize;
 
+use crate::config::confine::{self, Admitted, Boundary, Escape};
 use crate::config::{CONFIG_FILE_NAME, discover_config};
 use crate::exit::ExitStatus;
 use crate::lock::error::shell_quote;
@@ -214,43 +214,111 @@ fn refuse_if_present(target: &AbsolutePath, context: &Context) -> Result<(), Cli
     }
 }
 
+/// The mode a new config is created with, before the umask: what an ordinary file create uses.
+const NEW_FILE_MODE: u32 = 0o666;
+
 /// Creates `target` with the starter contents, failing rather than replacing anything.
 ///
 /// The starter is written to a temporary sibling and linked into place, which fails if `target`
 /// exists, so a config that appears between a check and the write is never overwritten and a
-/// failed write never leaves a partial config behind.
+/// failed write never leaves a partial config behind. Both paths are admitted against `target`'s
+/// directory immediately before each is created, so a symlink there can't lead the write out.
 ///
 /// # Errors
 ///
 /// Returns `cli-init-exists` when `target` exists, and `cli-init-write` when it cannot be written.
 fn write_new(target: &AbsolutePath, context: &Context) -> Result<(), CliError> {
-    let temporary = temporary_sibling(target);
-    let written = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .and_then(|mut file| {
-            file.write_all(STARTER.as_bytes())?;
-            file.flush()
-        });
-    let linked = written.and_then(|()| std::fs::hard_link(&temporary, target.as_path()));
-    // Best effort: the temporary is ours, and the outcome is already decided.
-    drop(std::fs::remove_file(&temporary));
-    linked.map_err(|error| match error.kind() {
+    let boundary = Boundary::resolve(&target.parent().unwrap_or_else(|| target.clone()));
+    write_beneath(&boundary, target, context, || ())
+}
+
+/// [`write_new`] against `boundary`, `target`'s directory as resolved before the write.
+/// `created` runs once the temporary exists, before anything is written to it.
+///
+/// The temporary is admitted again just before it is removed. When that is refused, because the
+/// directory was swapped for a symlink leading out after the create, the temporary is left where
+/// it was created rather than removing whatever the swapped path now names.
+///
+/// # Errors
+///
+/// As [`write_new`]; `cli-init-exists` also when the temporary file's name is taken.
+fn write_beneath(
+    boundary: &Boundary,
+    target: &AbsolutePath,
+    context: &Context,
+    created: impl FnOnce(),
+) -> Result<(), CliError> {
+    let failed = |error: io::Error| match error.kind() {
         io::ErrorKind::AlreadyExists => exists(target, context),
         _ => write_failed(target, &error, context),
-    })
+    };
+    let temporary_path = temporary_sibling(target)
+        .ok_or_else(|| failed(io::Error::other("it has no directory to write beside")))?;
+    let temporary_failed = |error: io::Error| match error.kind() {
+        io::ErrorKind::AlreadyExists => temporary_taken(&temporary_path, context),
+        _ => write_failed(target, &error, context),
+    };
+    let temporary = boundary
+        .admit(&temporary_path)
+        .map_err(|escape| temporary_failed(refusal(&temporary_path, &escape)))?;
+    let mut file = confine::create_new(&temporary, NEW_FILE_MODE).map_err(temporary_failed)?;
+    created();
+    let linked = file
+        .write_all(STARTER.as_bytes())
+        .and_then(|()| file.flush())
+        .and_then(|()| link_into_place(boundary, &temporary, target));
+    drop(file);
+    // Best effort: this run created the temporary, and the outcome is already decided.
+    if let Ok(again) = boundary.admit(&temporary_path) {
+        drop(confine::remove_file(&again));
+    }
+    linked.map_err(failed)
+}
+
+/// Links the written `temporary` to `target`, once `target` is admitted against `boundary`.
+///
+/// # Errors
+///
+/// `AlreadyExists` when anything is at `target`; otherwise fails when `target` is refused or the
+/// link can't be made.
+fn link_into_place(
+    boundary: &Boundary,
+    temporary: &Admitted<'_>,
+    target: &AbsolutePath,
+) -> io::Result<()> {
+    let link = boundary
+        .admit(target)
+        .map_err(|escape| refusal(target, &escape))?;
+    confine::hard_link_new(temporary, &link)
+}
+
+/// The I/O error for a path [`Boundary::admit`] refused, so it reports like a failed create:
+/// `AlreadyExists` when anything, such as a symlink leading out, is already at `path`.
+fn refusal(path: &AbsolutePath, escape: &Escape) -> io::Error {
+    if path.as_path().symlink_metadata().is_ok() {
+        return io::Error::from(io::ErrorKind::AlreadyExists);
+    }
+    match escape {
+        Escape::Lexical => io::Error::other("it isn't in the directory it names"),
+        Escape::Real { real: Some(_) } => {
+            io::Error::other("a symlink along it leads out of its directory")
+        }
+        Escape::Real { real: None } => io::Error::other("a symlink along it can't be followed"),
+    }
 }
 
 /// A hidden file beside `target` that this run alone writes before linking it into place.
-fn temporary_sibling(target: &AbsolutePath) -> std::path::PathBuf {
+///
+/// `None` only when the sibling isn't absolute, which an absolute `target` rules out.
+fn temporary_sibling(target: &AbsolutePath) -> Option<AbsolutePath> {
     let name = target
         .as_path()
         .file_name()
         .map_or_else(|| CONFIG_FILE_NAME.into(), |name| name.to_string_lossy());
-    target
+    let sibling = target
         .as_path()
-        .with_file_name(format!(".{name}.{}.tmp", std::process::id()))
+        .with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    AbsolutePath::new(&sibling)
 }
 
 /// The refusal for an existing config, naming it as the notes do.
@@ -260,6 +328,23 @@ fn exists(target: &AbsolutePath, context: &Context) -> CliError {
         format!("{} already exists", relative_to(&context.cwd, target)),
         format!(
             "The existing file wasn't changed. Edit it directly, or delete it and run `{}`.",
+            command(context)
+        ),
+        ExitStatus::Failed,
+    )
+}
+
+/// The refusal for a temporary file name already in use, naming it as the notes do.
+fn temporary_taken(temporary: &AbsolutePath, context: &Context) -> CliError {
+    CliError::new(
+        "cli-init-exists",
+        format!(
+            "the temporary file {} already exists",
+            relative_to(&context.cwd, temporary)
+        ),
+        format!(
+            "supdoc writes the config there before linking it into place. Move or delete that \
+             file, then run `{}` again.",
             command(context)
         ),
         ExitStatus::Failed,
@@ -298,6 +383,7 @@ fn write_failed(target: &AbsolutePath, error: &io::Error, context: &Context) -> 
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+    use std::os::unix::fs::PermissionsExt as _;
 
     use clap::Parser as _;
 
@@ -639,6 +725,247 @@ mod tests {
         assert_eq!(
             after, "include = [\"docs\"]\n",
             "the existing config is untouched"
+        );
+    }
+
+    /// A temp dir holding an empty `project` the run starts in and an empty `outside` beside it.
+    fn project_and_outside() -> (tempfile::TempDir, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("a temp directory should be created");
+        std::fs::create_dir(dir.path().join("project"))
+            .expect("the project directory should be created");
+        std::fs::create_dir(dir.path().join("outside"))
+            .expect("the outside directory should be created");
+        let project = tempfile::TempDir::new_in(dir.path().join("project"))
+            .expect("the run directory should be created");
+        (dir, project)
+    }
+
+    /// The names directly inside `dir`.
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("the directory should be listable")
+            .map(|entry| {
+                entry
+                    .expect("a directory entry should be readable")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_dangling_symlink_to_outside_at_the_target_is_refused_and_nothing_is_created_outside() {
+        let (dir, project) = project_and_outside();
+        let outside = dir.path().join("outside");
+        std::os::unix::fs::symlink(outside.join("planted.toml"), config_path(&project))
+            .expect("the dangling symlink should be created");
+        let (args, context) = context_in(&project, &["-c", "./supdoc.config.toml"]);
+
+        let (result, _, _) = run_captured(&args, &context);
+        let error = result.expect_err("init should refuse a symlink leading out at its target");
+
+        assert_eq!(error.code(), "cli-init-exists");
+        assert!(
+            names_in(&outside).is_empty(),
+            "nothing should be created outside: {:?}",
+            names_in(&outside)
+        );
+        assert_eq!(
+            names_in(project.path()),
+            [CONFIG_FILE_NAME],
+            "only the planted symlink remains; no temporary file is left"
+        );
+    }
+
+    #[test]
+    fn the_temporary_sibling_is_admitted_under_the_targets_directory() {
+        let (dir, project) = project_and_outside();
+        let outside = dir.path().join("outside");
+        let (args, context) = context_in(&project, &["-c", "./supdoc.config.toml"]);
+        let temporary = temporary_sibling(&target(&context))
+            .expect("the temporary sibling of an absolute target should be absolute");
+        std::os::unix::fs::symlink(outside.join("planted.tmp"), temporary.as_path())
+            .expect("the dangling symlink should be created");
+
+        let (result, _, _) = run_captured(&args, &context);
+        let _error = result.expect_err("init should refuse a symlink leading out at its temporary");
+
+        assert!(
+            names_in(&outside).is_empty(),
+            "nothing should be created outside: {:?}",
+            names_in(&outside)
+        );
+        assert!(
+            !config_path(&project).exists(),
+            "no config is linked into place when the temporary is refused"
+        );
+    }
+
+    #[test]
+    fn a_directory_swapped_for_a_symlink_to_outside_after_resolving_is_refused() {
+        let (dir, project) = project_and_outside();
+        let outside = dir.path().join("outside");
+        let docs = project.path().join("docs");
+        std::fs::create_dir(&docs).expect("the docs directory should be created");
+        let (_, context) = context_in(&project, &["-c", "docs/supdoc.config.toml"]);
+        let target = target(&context);
+        let boundary = Boundary::resolve(
+            &target
+                .parent()
+                .expect("the target should have a parent directory"),
+        );
+        std::fs::rename(&docs, project.path().join("moved"))
+            .expect("the docs directory should be movable");
+        std::os::unix::fs::symlink(&outside, &docs).expect("the swapped symlink should be created");
+        // Read-only, so a create that wasn't refused first fails with a different error.
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o500))
+            .expect("the outside directory should be made read-only");
+
+        let error = write_beneath(&boundary, &target, &context, || ())
+            .expect_err("init should refuse a directory that now leads outside");
+
+        assert_eq!(
+            (error.code(), error.message()),
+            (
+                "cli-init-write",
+                "cannot write docs/supdoc.config.toml: a symlink along it leads out of its directory"
+            )
+        );
+        assert!(
+            names_in(&outside).is_empty(),
+            "nothing should be created outside: {:?}",
+            names_in(&outside)
+        );
+    }
+
+    #[test]
+    fn a_directory_swapped_out_after_the_create_leaves_the_outside_file_of_the_temporarys_name() {
+        let (dir, project) = project_and_outside();
+        let outside = dir.path().join("outside");
+        let docs = project.path().join("docs");
+        std::fs::create_dir(&docs).expect("the docs directory should be created");
+        let (_, context) = context_in(&project, &["-c", "docs/supdoc.config.toml"]);
+        let target = target(&context);
+        let boundary = Boundary::resolve(
+            &target
+                .parent()
+                .expect("the target should have a parent directory"),
+        );
+        let temporary = temporary_sibling(&target)
+            .expect("the temporary sibling of an absolute target should be absolute");
+        let name = temporary
+            .as_path()
+            .file_name()
+            .expect("the temporary should have a file name")
+            .to_string_lossy()
+            .into_owned();
+        let swap = || {
+            std::fs::write(outside.join(&name), "not ours")
+                .expect("the outside file should be written");
+            std::fs::rename(&docs, project.path().join("moved"))
+                .expect("the docs directory should be movable");
+            std::os::unix::fs::symlink(&outside, &docs)
+                .expect("the swapped symlink should be created");
+        };
+
+        let error = write_beneath(&boundary, &target, &context, swap)
+            .expect_err("the link should be refused once the directory leads outside");
+
+        assert_eq!(error.code(), "cli-init-write");
+        assert_eq!(
+            std::fs::read_to_string(outside.join(&name))
+                .expect("the outside file of the temporary's name should survive"),
+            "not ours"
+        );
+        assert_eq!(
+            names_in(&outside),
+            std::slice::from_ref(&name),
+            "no config should be linked in outside"
+        );
+        assert_eq!(
+            names_in(&project.path().join("moved")),
+            [name],
+            "the run's own temporary is left in the moved directory"
+        );
+    }
+
+    #[test]
+    fn a_taken_temporary_name_is_named_in_the_refusal() {
+        let dir = tempfile::tempdir().expect("a temp directory should be created");
+        let (args, context) = context_in(&dir, &[]);
+        let temporary = temporary_sibling(&target(&context))
+            .expect("the temporary sibling of an absolute target should be absolute");
+        std::fs::write(temporary.as_path(), "someone else's")
+            .expect("the occupying file should be written");
+
+        let (result, _, _) = run_captured(&args, &context);
+        let error = result.expect_err("init should refuse a taken temporary name");
+
+        let name = temporary
+            .as_path()
+            .file_name()
+            .expect("the temporary should have a file name")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            (error.code(), error.message()),
+            (
+                "cli-init-exists",
+                format!("the temporary file {name} already exists").as_str()
+            )
+        );
+        assert!(
+            !config_path(&dir).exists(),
+            "no config is written when the temporary name is taken"
+        );
+        assert_eq!(
+            std::fs::read_to_string(temporary.as_path()).expect("the occupying file should remain"),
+            "someone else's"
+        );
+    }
+
+    #[test]
+    fn the_target_is_admitted_again_before_the_link() {
+        let (dir, project) = project_and_outside();
+        let outside = dir.path().join("outside");
+        let docs = project.path().join("docs");
+        std::fs::create_dir(&docs).expect("the docs directory should be created");
+        let (_, context) = context_in(&project, &["-c", "docs/supdoc.config.toml"]);
+        let target = target(&context);
+        let boundary = Boundary::resolve(
+            &target
+                .parent()
+                .expect("the target should have a parent directory"),
+        );
+        let temporary = temporary_sibling(&target)
+            .expect("the temporary sibling of an absolute target should be absolute");
+        let temporary = boundary
+            .admit(&temporary)
+            .expect("the temporary should be admitted before the swap");
+        drop(confine::create_new(&temporary, NEW_FILE_MODE).expect("the temporary is creatable"));
+        let name = temporary
+            .as_path()
+            .file_name()
+            .expect("the temporary should have a file name");
+        std::fs::write(outside.join(name), "planted").expect("the planted file should be written");
+        std::fs::rename(&docs, project.path().join("moved"))
+            .expect("the docs directory should be movable");
+        std::os::unix::fs::symlink(&outside, &docs).expect("the swapped symlink should be created");
+
+        let error = link_into_place(&boundary, &temporary, &target)
+            .expect_err("the link should be refused once the directory leads outside");
+
+        assert_eq!(
+            error.to_string(),
+            "a symlink along it leads out of its directory"
+        );
+        assert_eq!(
+            names_in(&outside),
+            [name.to_string_lossy().into_owned()],
+            "no config should be linked in outside"
         );
     }
 

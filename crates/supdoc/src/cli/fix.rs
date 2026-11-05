@@ -561,13 +561,7 @@ fn state_at(
 fn shown_files(done: &[&PlannedFix], root: &AbsolutePath, cwd: &AbsolutePath) -> Vec<String> {
     let shown: BTreeSet<String> = done
         .iter()
-        .map(|planned| {
-            let file = root.as_path().join(planned.fix.file.as_str());
-            AbsolutePath::new(&file).map_or_else(
-                || planned.fix.file.as_str().to_owned(),
-                |file| relative_to(cwd, &file),
-            )
-        })
+        .map(|planned| relative_to(cwd, &root.beneath(&planned.fix.file)))
         .collect();
     shown.into_iter().collect()
 }

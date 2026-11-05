@@ -46,9 +46,9 @@ pub(crate) fn reconcile_in(
     scope: &Scope,
     paths: &PathStyle,
 ) -> Report {
-    let root = paths.root().as_path();
+    let root = paths.root();
     let source_is_gone = |source: &SourcePath| {
-        fs::symlink_metadata(root.join(source.as_str()))
+        fs::symlink_metadata(root.beneath(source).as_path())
             .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
     };
     reconcile_with(

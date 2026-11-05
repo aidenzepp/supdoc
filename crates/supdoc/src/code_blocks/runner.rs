@@ -294,7 +294,9 @@ fn kill_group(pgid: u32) {
 
 /// The working directory a tool runs in: `cwd` under `$XDG_CACHE_HOME/supdoc/code-blocks`, or
 /// under `$HOME/.cache/supdoc/code-blocks`, created mode 0700. `/` when neither is usable: not
-/// absolute, inside `root`, not a directory only its owner reaches, or not empty.
+/// absolute, holding a `..` (which the kernel resolves after symlinks but a lexical join folds
+/// away, so a check and a later write could name two places), inside `root`, not a directory only
+/// its owner reaches, or not empty.
 ///
 /// Effect: creates the directory and reads its metadata and entries.
 #[must_use]
@@ -303,7 +305,7 @@ pub(crate) fn neutral_dir(env: &ToolEnv, root: &Path) -> PathBuf {
         env.vars()
             .find(|(key, _)| *key == name)
             .map(|(_, value)| PathBuf::from(value))
-            .filter(|path| path.is_absolute())
+            .filter(|path| path.is_absolute() && !holds_parent(path))
     };
     let candidates = [
         var("XDG_CACHE_HOME"),
@@ -315,6 +317,12 @@ pub(crate) fn neutral_dir(env: &ToolEnv, root: &Path) -> PathBuf {
         .map(|cache| cache.join("supdoc/code-blocks/cwd"))
         .find(|dir| usable(dir, root))
         .unwrap_or_else(|| PathBuf::from("/"))
+}
+
+/// Whether `path` has a `..` component.
+fn holds_parent(path: &Path) -> bool {
+    path.components()
+        .any(|component| component == std::path::Component::ParentDir)
 }
 
 /// Whether `dir`, created mode 0700 when missing, is an empty directory only its owner reaches,
@@ -491,6 +499,41 @@ mod tests {
             "the test process should have CARGO_PKG_NAME to leak"
         );
         assert_eq!(names, ["HOME", "PATH", "SUPDOC_EXTRA"], "{printed}");
+    }
+
+    #[test]
+    fn a_cache_base_holding_dot_dot_after_a_link_is_refused_and_nothing_is_created() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let place = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let deep = place.path().join("elsewhere/deep");
+        fs::create_dir_all(&deep).expect("the link's target");
+        std::os::unix::fs::symlink(&deep, place.path().join("link")).expect("the planted link");
+        let base = place.path().join("link/..");
+        let env =
+            ToolEnv::from_vars(|name| (name == "XDG_CACHE_HOME").then(|| base.clone().into()));
+
+        let neutral = neutral_dir(&env, root.path());
+
+        assert_eq!(neutral, PathBuf::from("/"));
+        for at in [
+            place.path().join("supdoc"),
+            place.path().join("elsewhere/supdoc"),
+        ] {
+            assert!(!at.exists(), "nothing should be created at {at:?}");
+        }
+    }
+
+    #[test]
+    fn a_plain_cache_base_gives_a_neutral_directory_under_it() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let base = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let path = base.path().to_path_buf();
+        let env =
+            ToolEnv::from_vars(|name| (name == "XDG_CACHE_HOME").then(|| path.clone().into()));
+
+        let neutral = neutral_dir(&env, root.path());
+
+        assert_eq!(neutral, base.path().join("supdoc/code-blocks/cwd"));
     }
 
     #[test]
