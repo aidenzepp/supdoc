@@ -543,12 +543,14 @@ impl<'text> Lexer<'text> {
 /// isn't a Go file, so it fails with one diagnostic naming the clause to add, whatever the run.
 /// A run that exits 0 gives its `-json` report's diagnostics, each named by its analyzer. One that
 /// fails gives its first syntax error as a parse failure, else its type errors as `typecheck`
-/// diagnostics, else a tool failure. A `//line` or `/*line` directive renames the positions `go`
-/// reports, so each such block's diagnostics sit at its fence.
+/// diagnostics, else a tool failure. A `framed` run's errors, syntax errors among them, are all
+/// diagnostics, since a syntax error says whether the block is the kind the frame holds. A
+/// `//line` or `/*line` directive renames the positions `go` reports, so each such block's
+/// diagnostics sit at its fence.
 #[must_use]
 pub(crate) fn vet_verdict(
     input: &str,
-    _framed: bool,
+    framed: bool,
     result: Result<Ran, Failure>,
 ) -> lint::Verdict {
     if !is_file(input) {
@@ -574,7 +576,7 @@ pub(crate) fn vet_verdict(
         },
         Ok(ran) => {
             let errors = errors(&String::from_utf8_lossy(&ran.stderr), renamed);
-            if let Some(syntax) = errors.iter().find(|error| error.syntax) {
+            if let Some(syntax) = errors.iter().find(|error| error.syntax && !framed) {
                 let detail = if syntax.line == 0 {
                     syntax.message.clone()
                 } else {

@@ -148,6 +148,8 @@ block standing where the ... is:
   biome-format  members       abstract class SupdocFragment$ { supdocFrame$() { return this; } ... }   (TypeScript blocks)
   biome-format  members       class SupdocFragment$ { supdocFrame$() { return this; } ... }   (JavaScript blocks)
   biome-format  entries       { ... }   (json and jsonc blocks)
+  go-vet        statements    package supdocfragment; func supdocFragment() { ... }
+  go-vet        declarations  package supdocfragment ...
 
 A statements block's leading \"use strict\" or \"use server\" isn't read as a directive, since \
 the frame's first line stands before it. A members frame has no base class, so a constructor \
