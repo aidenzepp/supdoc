@@ -59,6 +59,14 @@ pub(crate) enum Verdict {
         /// The block body line (0-based) the tool named, when it named one.
         line: Option<usize>,
     },
+    /// supdoc didn't give the block to its tool, for a reason in its text that makes the block
+    /// fail as one that doesn't parse: `detail` says why, in supdoc's words, naming no tool.
+    Refused {
+        /// Why, as the finding's message.
+        detail: String,
+        /// The block body line (0-based) the reason is on.
+        line: usize,
+    },
     /// The formatter passed its timeout.
     TimedOut,
     /// The formatter reported a syntax error in a block it reads inside a frame: the block isn't
@@ -305,7 +313,7 @@ impl Verdict {
             Self::ToolFailed(_) | Self::FrameReformatted(_) | Self::Uncompared(_) => {
                 states::BlockState::Failed(states::Failure::ToolFailed)
             }
-            Self::ParseFailed { .. } | Self::NotKind { .. } => {
+            Self::ParseFailed { .. } | Self::NotKind { .. } | Self::Refused { .. } => {
                 states::BlockState::Failed(states::Failure::ParseFailed)
             }
             Self::TimedOut => states::BlockState::Failed(states::Failure::ToolTimeout),
@@ -519,6 +527,8 @@ pub(crate) fn finding(
                  `{name}` reports nothing else for a block with a syntax error"
             ),
         }),
+        Verdict::Refused { detail, .. } => Finding::new(PARSE, Severity::Error, detail.clone())
+            .with_help("remove the character from the block, or mark it `ignore(<why>)`"),
         Verdict::TimedOut => Finding::new(
             TOOL_TIMEOUT,
             Severity::Error,

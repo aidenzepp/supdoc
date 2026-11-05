@@ -461,10 +461,21 @@ impl Evaluation {
                 }
                 _ => {}
             }
+            let mut refused = false;
             match (lint, job.lint.as_ref()) {
                 (Some(Ok((verdict, findings))), Some(run)) => {
                     self.findings.extend(findings);
-                    record.steps.lint = StepState::Ran;
+                    refused = matches!(
+                        verdict,
+                        lint::Verdict::Failed(format::Verdict::Refused { .. })
+                    );
+                    record.steps.lint = if refused {
+                        StepState::Unrunnable {
+                            reason: YAML_CONTROL_REFUSED,
+                        }
+                    } else {
+                        StepState::Ran
+                    };
                     outcomes.push((lint_state(&verdict), Some(run.tool)));
                 }
                 (Some(Err(not_run)), Some(_)) => {
@@ -487,7 +498,10 @@ impl Evaluation {
                 .or_else(|| outcomes.first());
             if let Some((state, tool)) = decided {
                 record.state = state.clone();
+                let linted = tool.is_some_and(|tool| tool.step() == Step::Lint);
                 record.reason = match tool {
+                    // supdoc refused the block itself: the reason names no tool.
+                    Some(_) if refused && linted => Some(YAML_CONTROL_REFUSED.to_owned()),
                     Some(tool) => record.state.reason(
                         &record.steps,
                         record.language.as_deref(),
@@ -801,6 +815,7 @@ impl NotRunWarnings {
             FRAME_RESHAPED => frame_reshaped(at),
             BIOME_LINTED_NOTHING => linted_nothing(at),
             YAMLLINT_REJECTED => yamllint_rejected(at, said),
+            YAMLLINT_LOCALE => yamllint_locale(at, said),
             _ => return None,
         };
         self.given.push(not_run.reason);
@@ -1483,8 +1498,8 @@ struct YamllintConfigs {
 
 impl YamllintConfigs {
     /// Gives `record`, a YAML block whose linter is yamllint, the `-c` flag yamllint gets for its
-    /// doc, found once per directory. A block holding a yamllint comment that switches every rule
-    /// off (see [`yaml::switches_lint_off`]) has its lint step taken off, with one
+    /// doc, found once per directory. A block holding yamllint comments that switch off every rule
+    /// its config leaves on (see [`yaml::switches_lint_off`]) has its lint step taken off, with one
     /// `code-block-not-checked` warning for the block; a refused config takes the lint step off
     /// each block of its directory, with one warning per refusal; and a yamllint on `PATH` that
     /// isn't [`yaml::VERIFIED`] takes it off every block, with one warning for the run. Either way
@@ -1501,26 +1516,6 @@ impl YamllintConfigs {
         if record.linter.is_none_or(|linter| linter.name != YAMLLINT) {
             return true;
         }
-        let switched_off = record
-            .pending
-            .as_ref()
-            .is_some_and(|pending| yaml::switches_lint_off(&pending.input));
-        if switched_off {
-            slots.push(Slot::Found(
-                Finding::new(
-                    NOT_CHECKED,
-                    Severity::Warning,
-                    "the block holds a yamllint comment that switches every rule off, which \
-                     supdoc doesn't give to yamllint, so its lint step didn't run",
-                )
-                .with_help(
-                    "name the rules the comment switches off, as in `# yamllint disable-line \
-                     rule:truthy`, or switch the step off with `lint(off: <why>)`",
-                )
-                .with_location(record.at.clone()),
-            ));
-            return take_lint_off(record, YAMLLINT_SWITCHED_OFF);
-        }
         let doc = root.join(record.at.file.as_str());
         let dir = doc.parent().unwrap_or(root).to_path_buf();
         let found = if let Some((_, found)) = self.found.iter().find(|(known, _)| *known == dir) {
@@ -1532,6 +1527,27 @@ impl YamllintConfigs {
         };
         match found {
             Ok(lint) => {
+                let switched_off = record
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| yaml::switches_lint_off(&pending.input, &lint.enabled));
+                if switched_off {
+                    slots.push(Slot::Found(
+                        Finding::new(
+                            NOT_CHECKED,
+                            Severity::Warning,
+                            "the block holds yamllint comments that switch off every rule its config \
+                             leaves on, which supdoc doesn't give to yamllint, so its lint step \
+                             didn't run",
+                        )
+                        .with_help(
+                            "name the rules the comment switches off, as in `# yamllint disable-line \
+                             rule:truthy`, or switch the step off with `lint(off: <why>)`",
+                        )
+                        .with_location(record.at.clone()),
+                    ));
+                    return take_lint_off(record, YAMLLINT_SWITCHED_OFF);
+                }
                 let verified = self.verified(&lint.cwd, record, (env, root), slots);
                 record.yamllint = Some(lint);
                 verified || take_lint_off(record, YAMLLINT_UNVERIFIED)
@@ -1599,6 +1615,29 @@ const YAMLLINT_INSTALL: &str = "pipx install 'yamllint==1.38.0'";
 const YAMLLINT_UNVERIFIED: &str =
     "the yamllint on `PATH` isn't the version supdoc is verified against";
 
+/// Why a YAML block's lint step didn't run when yamllint couldn't use the `locale` its config
+/// sets.
+pub(super) const YAMLLINT_LOCALE: &str = "yamllint couldn't use the locale its config sets";
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose lint step
+/// yamllint didn't run because the host lacks the locale `said` names, with the config setting
+/// it. yamllint's traceback is never shown.
+fn yamllint_locale(at: &Location, said: Option<&str>) -> Finding {
+    let said = said.unwrap_or("the locale its config sets,");
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        format!(
+            "yamllint couldn't use the locale {said} so its YAML blocks' lint steps didn't run"
+        ),
+    )
+    .with_help(
+        "install that locale on the host, or remove `locale` from the yamllint config, or mark \
+         the blocks `lint(off: <why>)`",
+    )
+    .with_location(at.clone())
+}
+
 /// Why a YAML block's lint step didn't run when yamllint rejected the config supdoc gave it.
 pub(super) const YAMLLINT_REJECTED: &str = "yamllint rejected the config supdoc gave it";
 
@@ -1642,7 +1681,7 @@ const YAMLLINT: &str = "yamllint";
 /// Why a YAML block's lint step didn't run when it holds a yamllint comment switching every rule
 /// off.
 const YAMLLINT_SWITCHED_OFF: &str =
-    "the block holds a yamllint comment that switches every rule off";
+    "the block holds yamllint comments that switch off every rule its config leaves on";
 
 /// Why a YAML block's lint step didn't run when supdoc couldn't give yamllint its config.
 const YAMLLINT_REFUSED: &str = "supdoc couldn't give yamllint the project's config";
@@ -2497,9 +2536,10 @@ fn verdict_place(verdict: &format::Verdict, record: &BlockRecord, pending: &Pend
 /// The doc line a parse failure names in `pending`'s block. `None` for any other verdict, or a
 /// line that isn't the block's.
 fn parse_place(verdict: &format::Verdict, pending: &Pending) -> Option<Location> {
-    let format::Verdict::ParseFailed {
+    let (format::Verdict::ParseFailed {
         line: Some(line), ..
-    } = verdict
+    }
+    | format::Verdict::Refused { line, .. }) = verdict
     else {
         return None;
     };
@@ -2677,21 +2717,32 @@ fn rejected_by_yamllint(ran: &Ran) -> bool {
         && yaml::rejected_config(&ran.stderr)
 }
 
-/// The parse failure yamllint's lint step gives `input` without running when it holds a control
-/// character YAML forbids (see [`yaml::forbidden_char`]): yamllint would read a NUL as a sign of
-/// UTF-16 or UTF-32 text. `None` for every other tool and input.
+/// supdoc's refusal of `input` for yamllint's lint step, which then doesn't run, when it holds a
+/// control character (see [`yaml::forbidden_char`]): yamllint would read a NUL as a sign of UTF-16
+/// or UTF-32 text, and U+0085 as a line break supdoc doesn't count. `None` for every other tool
+/// and input.
 fn forbidden_by_yaml(tool: &ToolCartridge, input: &str) -> Option<lint::Verdict> {
     let (line, c) = (tool.name == YAMLLINT)
         .then(|| yaml::forbidden_char(input))
         .flatten()?;
-    Some(lint::Verdict::Failed(format::Verdict::ParseFailed {
-        detail: format!(
-            "the block holds U+{:04X}, a control character YAML doesn't allow",
-            u32::from(c)
-        ),
-        line: Some(line),
+    let code = u32::from(c);
+    let detail = if c == '\u{85}' {
+        format!(
+            "the block holds U+{code:04X}, a line break that supdoc and yamllint count \
+             differently, so supdoc doesn't check the block"
+        )
+    } else {
+        format!("the block holds U+{code:04X}, a control character YAML doesn't allow")
+    };
+    Some(lint::Verdict::Failed(format::Verdict::Refused {
+        detail,
+        line,
     }))
 }
+
+/// Why a YAML block's lint step didn't run when supdoc refused the block for a control character
+/// in it (see [`forbidden_by_yaml`]).
+const YAML_CONTROL_REFUSED: &str = "the block holds a control character supdoc doesn't check";
 
 /// The linter that reads the block from a private file rather than stdin.
 const BIOME_LINT: &str = "biome-lint";
@@ -2879,6 +2930,18 @@ fn config_skipped_by(
 ) -> Option<NotRun> {
     let ran = result.as_ref().ok()?;
     if let Some(lint) = record.yamllint.as_ref().filter(|_| tool.name == YAMLLINT) {
+        if !ran.success && yaml::locale_failed(&ran.stderr) {
+            let locale = lint.locale.as_deref().unwrap_or_default().replace('`', "'");
+            let file = if lint.file.is_empty() {
+                "yamllint's defaults".to_owned()
+            } else {
+                format!("the project's `{}`", lint.file)
+            };
+            return Some(NotRun {
+                reason: YAMLLINT_LOCALE,
+                said: Some(format!("`{locale}`, which {file} sets,")),
+            });
+        }
         return rejected_by_yamllint(ran).then(|| NotRun {
             reason: YAMLLINT_REJECTED,
             said: Some(lint.file.clone()),

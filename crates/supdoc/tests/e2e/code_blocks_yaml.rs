@@ -967,15 +967,147 @@ fn lint_never_gives_yamllint_a_block_holding_a_control_yaml_forbids() {
 
     assert_eq!(finding_kinds(&json), ["code-block-parse"], "{json}");
     assert_eq!(at(&json, "/findings/0/location/line"), 5, "{json}");
-    let message = at(&json, "/findings/0/message");
-    assert!(
-        message.as_str().is_some_and(|said| said.contains("U+0000")),
+    assert_eq!(
+        at(&json, "/findings/0/message"),
+        "the block holds U+0000, a control character YAML doesn't allow",
         "{json}"
     );
+    assert_eq!(at(&json, "/data/code_blocks/0/state"), "failed", "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/lint"), "not_run", "{json}");
     assert!(
         !outside.path().join("ran").exists(),
         "yamllint should never run on the block"
     );
+}
+
+#[test]
+fn lint_fails_a_block_holding_a_next_line_without_running_yamllint_and_says_why() {
+    let project = lint_project("a: 1\nb: x\u{85}y");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    yamllint_never_to_run(outside.path());
+
+    let json = stub_run(&project, outside.path(), 1);
+
+    assert_eq!(finding_kinds(&json), ["code-block-parse"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 5, "{json}");
+    assert_eq!(
+        at(&json, "/findings/0/message"),
+        "the block holds U+0085, a line break that supdoc and yamllint count differently, so \
+         supdoc doesn't check the block",
+        "{json}"
+    );
+    assert_eq!(at(&json, "/data/code_blocks/0/lint"), "not_run", "{json}");
+    assert!(
+        !outside.path().join("ran").exists(),
+        "yamllint should never run on the block"
+    );
+}
+
+#[test]
+fn lint_counts_comments_naming_every_enabled_rule_as_switching_the_step_off() {
+    let defaults = [
+        "anchors",
+        "braces",
+        "brackets",
+        "colons",
+        "commas",
+        "comments",
+        "comments-indentation",
+        "empty-lines",
+        "hyphens",
+        "indentation",
+        "key-duplicates",
+        "line-length",
+        "new-line-at-end-of-file",
+        "new-lines",
+        "trailing-spaces",
+        "truthy",
+    ];
+    let named = defaults
+        .iter()
+        .map(|rule| format!(" rule:{rule}"))
+        .collect::<Vec<_>>()
+        .concat();
+    let enabled16 = lint_project(&format!("# yamllint disable{named}\na:   1\nb: yes"));
+    let only_truthy = lint_project("# yamllint disable rule:truthy\nb: yes");
+    only_truthy.write(".yamllint", "rules:\n  truthy: enable\n");
+
+    for project in [enabled16, only_truthy] {
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        yamllint_never_to_run(outside.path());
+
+        let json = stub_run(&project, outside.path(), 0);
+
+        assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+        assert_eq!(at(&json, "/data/code_blocks/0/lint"), "not_run", "{json}");
+        assert!(
+            !outside.path().join("ran").exists(),
+            "yamllint should never run on the block"
+        );
+    }
+}
+
+#[test]
+fn lint_names_a_yamllint_traceback_by_its_last_line_only() {
+    let project = lint_project("a: 1");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let last = format!("ValueError: {}", "v".repeat(300));
+    stub(
+        outside.path(),
+        "yamllint",
+        &format!(
+            "{VERIFIED_VERSION}/bin/cat >/dev/null\n\
+             echo 'Traceback (most recent call last):' >&2\n\
+             echo '  File \"/opt/private/yamllint/cli.py\", line 1, in run' >&2\n\
+             echo '{last}' >&2\n\
+             exit 1"
+        ),
+    );
+
+    let json = stub_run(&project, outside.path(), 1);
+
+    assert_eq!(finding_kinds(&json), ["code-block-tool-failed"], "{json}");
+    let message = at(&json, "/findings/0/message");
+    let said = message.as_str().unwrap_or_default();
+    assert!(
+        said.contains(&format!(
+            "yamllint stopped with an internal error: ValueError: {}",
+            "v".repeat(188)
+        )),
+        "{json}"
+    );
+    assert!(!said.contains(&"v".repeat(189)), "{json}");
+    assert!(!json.to_string().contains("Traceback"), "{json}");
+    assert!(!json.to_string().contains("/opt/private"), "{json}");
+}
+
+#[test]
+fn lint_with_the_real_yamllint_warns_once_for_a_locale_the_host_lacks() {
+    let Some(dir) = real_tool_dir(
+        "yamllint",
+        "lint_with_the_real_yamllint_warns_once_for_a_locale_the_host_lacks",
+    ) else {
+        return;
+    };
+    let project = project_configured(LINT_ONLY, "```yaml\na: 1\n```\n\n```yaml\nb: 2\n```");
+    project.write(".yamllint", "extends: default\nlocale: xx_XX.UTF-8\n");
+
+    let json = real_run(&project, &dir, &[], 0);
+
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+    let message = at(&json, "/findings/0/message");
+    assert!(
+        message
+            .as_str()
+            .is_some_and(|said| said.contains("`xx_XX.UTF-8`") && said.contains("`.yamllint`")),
+        "{json}"
+    );
+    assert_eq!(
+        at(&json, "/data/summary/code_blocks/lint_not_run"),
+        2,
+        "{json}"
+    );
+    assert!(!json.to_string().contains("Traceback"), "{json}");
 }
 
 #[test]
