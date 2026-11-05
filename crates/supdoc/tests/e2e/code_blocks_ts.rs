@@ -3065,17 +3065,27 @@ fn eslint_with_no_rule_for_the_blocks_files_is_lint_not_run_with_one_warning() {
 
     let json = trusted_prettier_check(&project, outside.path(), cache.path(), 0);
 
+    let mut configs = eslint_configs(outside.path());
+    configs.sort();
     assert_eq!(
-        eslint_configs(outside.path()).len(),
-        1,
-        "the config is asked for once per doc directory and extension: {json}"
+        configs.len(),
+        2,
+        "the config is asked for each block's own path: {configs:?}"
     );
+    for (config, index) in configs.iter().zip(1..) {
+        assert!(
+            config.ends_with(&format!("/docs/blocks.md.{index}.ts")),
+            "{configs:?}"
+        );
+    }
     assert!(eslint_lints(outside.path()).is_empty(), "{json}");
     assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
     assert!(
         at(&json, "/findings/0/message")
             .as_str()
-            .is_some_and(|message| message.starts_with("no eslint rule applies to docs/*.ts")),
+            .is_some_and(|message| message.starts_with(
+                "no eslint rule applies to docs/blocks.md.1.ts, docs/blocks.md.2.ts, so"
+            )),
         "{json}"
     );
     for block in 0..2 {
@@ -3148,13 +3158,19 @@ fn eslint_the_real_one_with_no_rule_for_the_blocks_files_is_lint_not_run() {
             "javascript",
             "js",
             "module.exports = [{ files: [\"src/**/*.js\"], rules: { \"no-var\": \"error\" } }];\n",
-            "docs/*.js",
+            "docs/blocks.md.1.js",
         ),
         (
             "typescript",
             "ts",
             "module.exports = [{ files: [\"**/*.ts\"] }];\n",
-            "docs/*.ts",
+            "docs/blocks.md.1.ts",
+        ),
+        (
+            "typescript",
+            "ts",
+            "module.exports = [{ files: [\"**/*.ts\"], rules: { \"no-unused-vars\": \"error\" } }];\n",
+            "docs/blocks.md.1.ts",
         ),
     ] {
         let project = project_with_block(&eslint_tables(table), tag, "var a = 1;");
@@ -3173,10 +3189,112 @@ fn eslint_the_real_one_with_no_rule_for_the_blocks_files_is_lint_not_run() {
             "{tag}: {json}"
         );
         assert!(
-            at(&json, "/findings/0/message").as_str().is_some_and(
-                |message| message.starts_with(&format!("no eslint rule applies to {pattern}"))
-            ),
+            at(&json, "/findings/0/message")
+                .as_str()
+                .is_some_and(|message| message
+                    .starts_with(&format!("no eslint rule applies to {pattern}, so"))),
             "{tag}: {json}"
         );
+    }
+}
+
+#[test]
+fn eslint_the_real_one_lints_the_doc_its_config_names_and_never_its_sibling() {
+    let Some(dir) = real_tool_dir(
+        "eslint",
+        "eslint_the_real_one_lints_the_doc_its_config_names_and_never_its_sibling",
+    ) else {
+        return;
+    };
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let project = project_with_block(&eslint_tables("javascript"), "js", "var a = 1;");
+    project.write("docs/named.md", "# Named\n\n```js\nvar a = 1;\n```\n");
+    project.write("docs/sibling.md", "# Sibling\n\n```js\nvar b = 1;\n```\n");
+    std::fs::remove_file(project.path("docs/blocks.md"))
+        .expect("the fixture doc should be removable");
+    project.write(
+        "eslint.config.js",
+        "module.exports = [{ files: [\"docs/named.md.*.js\"], rules: { \"no-var\": \"error\" } }];\n",
+    );
+
+    for rerun in 0..10 {
+        let json = trusted_prettier_check(&project, &dir, cache.path(), 1);
+
+        let blocks = array_at(&json, "/data/code_blocks");
+        let block = |file: &str| {
+            blocks
+                .iter()
+                .find(|block| block["file"] == file)
+                .unwrap_or_else(|| panic!("rerun {rerun}: {file} should be listed: {json}"))
+        };
+        assert_eq!(
+            block("docs/named.md")["state"],
+            "failed",
+            "rerun {rerun}: {json}"
+        );
+        assert_eq!(
+            block("docs/sibling.md")["lint"],
+            "not_run",
+            "rerun {rerun}: {json}"
+        );
+        let mut kinds = finding_kinds(&json);
+        kinds.sort();
+        assert_eq!(
+            kinds,
+            ["code-block-lint", "code-block-not-checked"],
+            "rerun {rerun}: {json}"
+        );
+        let warning = array_at(&json, "/findings")
+            .iter()
+            .find(|finding| finding["kind"] == "code-block-not-checked")
+            .expect("the run warns once");
+        assert!(
+            warning["message"]
+                .as_str()
+                .is_some_and(|message| message
+                    .starts_with("no eslint rule applies to docs/sibling.md.1.js, so")),
+            "rerun {rerun}: {json}"
+        );
+    }
+}
+
+#[test]
+fn eslint_with_no_rule_for_many_files_names_each_once_the_first_five_then_how_many_more() {
+    for (docs, named) in [
+        (
+            vec![("docs/a.md", 1), ("guide/b.md", 1)],
+            "docs/a.md.1.ts, guide/b.md.1.ts, so",
+        ),
+        (
+            vec![("docs/a.md", 6), ("guide/b.md", 1)],
+            "docs/a.md.1.ts, docs/a.md.2.ts, docs/a.md.3.ts, docs/a.md.4.ts, docs/a.md.5.ts and 2 \
+             more, so",
+        ),
+    ] {
+        let project = eslint_project("const a = 1;");
+        std::fs::remove_file(project.path("docs/blocks.md"))
+            .expect("the fixture doc should be removable");
+        for (doc, blocks) in &docs {
+            let body = (0..*blocks)
+                .map(|n| format!("```ts\nconst a{n} = 1;\n```\n"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            project.write(doc, &format!("# Doc\n\n{body}"));
+        }
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        eslint_stub_configured(outside.path(), "echo '{\"rules\":{}}'", ESLINT_CLEAN);
+
+        let json = trusted_prettier_check(&project, outside.path(), cache.path(), 0);
+
+        assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+        let message = at(&json, "/findings/0/message");
+        assert!(
+            message.as_str().is_some_and(
+                |message| message.starts_with(&format!("no eslint rule applies to {named}"))
+            ),
+            "{json}"
+        );
+        assert!(eslint_lints(outside.path()).is_empty(), "{json}");
     }
 }

@@ -493,7 +493,11 @@ impl Evaluation {
                     outcomes.push((lint_state(&verdict), Some(&run.tool)));
                 }
                 (Some(Err(not_run)), Some(_)) => {
-                    self.findings.extend(warnings.first(&not_run, &record.at));
+                    if not_run.reason == ESLINT_NO_RULES {
+                        warnings.unruled(&not_run, &record.at, self.findings.len());
+                    } else {
+                        self.findings.extend(warnings.first(&not_run, &record.at));
+                    }
                     record.steps.lint = StepState::Unrunnable {
                         reason: not_run.reason,
                     };
@@ -524,6 +528,10 @@ impl Evaluation {
                     None => Some(PROJECT_UNBUILT.to_owned()),
                 };
             }
+        }
+        if let Some((position, warning)) = warnings.unruled_warning() {
+            self.findings
+                .insert(position.min(self.findings.len()), warning);
         }
     }
 
@@ -799,17 +807,30 @@ fn eslint_switched_off(at: &Location) -> Finding {
     .with_location(at.clone())
 }
 
+/// The most block files [`eslint_no_rules`] names before counting the rest.
+const NAMED_FILES: usize = 5;
+
 /// The run's one `code-block-not-checked` warning, at `at`, the first block whose eslint step
-/// didn't run because no rule of the project's eslint config applies to block files matching
-/// `pattern`, such as `docs/*.ts`.
-fn eslint_no_rules(at: &Location, pattern: Option<&str>) -> Finding {
-    let pattern = pattern.unwrap_or("the block's file");
+/// didn't run because no rule of the project's eslint config applies to its file, naming each
+/// such block file in `files` (virtual paths relative to the root, such as `docs/a.md.1.ts`, in
+/// first-seen order): the first [`NAMED_FILES`], then how many more.
+fn eslint_no_rules(at: &Location, files: &[String]) -> Finding {
+    let shown = files
+        .iter()
+        .take(NAMED_FILES)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let named = match files.len().saturating_sub(NAMED_FILES) {
+        0 => shown,
+        more => format!("{shown} and {more} more"),
+    };
     Finding::new(
         NOT_CHECKED,
         Severity::Warning,
         format!(
-            "no eslint rule applies to {pattern}, so its blocks' lint step didn't run: the \
-             project's eslint config sets no rule to warn or error for them"
+            "no eslint rule applies to {named}, so those blocks' lint steps didn't run: the \
+             project's eslint config sets no rule supdoc reports to warn or error for them"
         ),
     )
     .with_help(
@@ -982,6 +1003,11 @@ struct NotRunWarnings {
     given: Vec<&'static str>,
     /// The messages of the `code-block-not-checked` warnings lint steps have given.
     said: Vec<String>,
+    /// The block files no eslint rule applies to, each once, in first-seen order.
+    unruled: Vec<String>,
+    /// Where the first of them was found: the count of findings given before it, and its block's
+    /// fence.
+    unruled_at: Option<(usize, Location)>,
 }
 
 impl NotRunWarnings {
@@ -997,6 +1023,27 @@ impl NotRunWarnings {
         }
         self.said.push(found.message.clone());
         Some(found)
+    }
+
+    /// Notes `not_run`'s block file, one no eslint rule applies to, found at `at` after
+    /// `position` findings, for the run's one warning naming them all (see
+    /// [`Self::unruled_warning`]).
+    fn unruled(&mut self, not_run: &NotRun, at: &Location, position: usize) {
+        if self.unruled_at.is_none() {
+            self.unruled_at = Some((position, at.clone()));
+        }
+        let file = not_run.said.clone().unwrap_or_default();
+        if !self.unruled.contains(&file) {
+            self.unruled.push(file);
+        }
+    }
+
+    /// The run's one warning for the block files no eslint rule applies to (see
+    /// [`eslint_no_rules`]), at the first, with the count of findings given before it. `None`
+    /// when there are none.
+    fn unruled_warning(&self) -> Option<(usize, Finding)> {
+        let (position, at) = self.unruled_at.as_ref()?;
+        Some((*position, eslint_no_rules(at, &self.unruled)))
     }
 
     /// The warning for `not_run`, at `at`, the first time its reason comes up in the run. `None`
@@ -1019,7 +1066,6 @@ impl NotRunWarnings {
             PRETTIER_SWITCHED_OFF => prettier_switched_off(at),
             ESLINT_SWITCHED_OFF => eslint_switched_off(at),
             ESLINT_IGNORED => eslint_ignored(at),
-            ESLINT_NO_RULES => eslint_no_rules(at, said),
             YAMLLINT_REJECTED => yamllint_rejected(at, said),
             YAMLLINT_LOCALE => yamllint_locale(at, said),
             go::VET_OFFLINE => vet_offline(at),
@@ -3404,9 +3450,10 @@ fn go_release(
 ///
 /// # Errors
 ///
-/// [`ESLINT_NO_RULES`], naming the block files' pattern, when no rule applies.
+/// [`ESLINT_NO_RULES`], naming the block's virtual path relative to the root, when no rule
+/// applies.
 ///
-/// Effect: runs `eslint --print-config` the first time for the block's directory and extension.
+/// Effect: runs `eslint --print-config` for the block's own virtual path.
 fn eslint_rules(
     tool: &ToolCartridge,
     program: &Path,
@@ -3427,19 +3474,14 @@ fn eslint_rules(
         Path::new(&path),
     ) {
         Ok(true) => Ok(None),
-        Ok(false) => {
-            let dir = Path::new(record.at.file.as_str())
-                .parent()
-                .map(|dir| dir.to_string_lossy().into_owned())
-                .filter(|dir| !dir.is_empty());
-            Err(NotRun {
-                reason: ESLINT_NO_RULES,
-                said: Some(dir.map_or_else(
-                    || format!("*.{extension}"),
-                    |dir| format!("{dir}/*.{extension}"),
-                )),
-            })
-        }
+        Ok(false) => Err(NotRun {
+            reason: ESLINT_NO_RULES,
+            said: Some(format!(
+                "{}.{}.{extension}",
+                record.at.file.as_str(),
+                record.index
+            )),
+        }),
         Err(failed) => Ok(Some(lint::Verdict::Failed(failed))),
     }
 }

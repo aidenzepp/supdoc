@@ -31,8 +31,7 @@
 //! processor that turns a block into no code at all still lints nothing and reports nothing: that
 //! residual can't be seen from the config.
 
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::path::Path;
 use std::time::Duration;
 
 use super::format;
@@ -72,22 +71,6 @@ const NOT_CONFIG: &str = "`eslint --print-config` printed something other than t
 /// The lines eslint prints before the cause of a failure.
 const BANNER: [&str; 2] = ["Oops! Something went wrong!", "ESLint: "];
 
-/// What `--print-config` printed for each block file supdoc asked about in the process, by eslint
-/// binary, doc directory and extension (see [`rules_apply`]).
-static ASKED: Mutex<Vec<(Asked, Result<bool, format::Verdict>)>> = Mutex::new(Vec::new());
-
-/// What a `--print-config` answer is kept under: the eslint binary, the block file's directory
-/// and its extension.
-type Asked = (PathBuf, PathBuf, String);
-
-/// The config eslint prints for a file with `--print-config`.
-#[derive(serde::Deserialize)]
-struct Printed {
-    /// Each rule's setting, as eslint normalizes it: an array led by its severity.
-    #[serde(default)]
-    rules: serde_json::Map<String, serde_json::Value>,
-}
-
 /// Whether `setting`, a rule's in a printed config, sets it to warn or error: a severity `1`,
 /// `2`, `"warn"` or `"error"`, alone or leading an array.
 fn enabled(setting: &serde_json::Value) -> bool {
@@ -103,9 +86,11 @@ fn enabled(setting: &serde_json::Value) -> bool {
     }
 }
 
-/// Whether any rule of the project's eslint config applies to the block file at `path`, asked of
-/// `program` with `--print-config` from `root` with `env` under `timeout`, once per directory and
-/// extension in the process. A path the config ignores answers `true`: the lint run reports it
+/// Whether any rule of the project's eslint config applies to the block file at `path`, its
+/// exact virtual path, asked of `program` with `--print-config` from `root` with `env` under
+/// `timeout`. Asked afresh for each block: a config's `files` can name one doc and not its
+/// sibling, so no block's answer stands for another's. A rule supdoc's reader drops (see
+/// [`RELAXED`]) doesn't count. A path the config ignores answers `true`: the lint run reports it
 /// ignored (see [`linted_nothing`]).
 ///
 /// # Errors
@@ -113,39 +98,8 @@ fn enabled(setting: &serde_json::Value) -> bool {
 /// The failure of a run that timed out, failed or printed anything but the config: a tool
 /// failure in supdoc's words, as the lint step reports it.
 ///
-/// Effect: runs `eslint --print-config` the first time for each directory and extension.
-pub(crate) fn rules_apply(
-    program: &Path,
-    env: &ToolEnv,
-    root: &Path,
-    timeout: Option<Duration>,
-    path: &Path,
-) -> Result<bool, format::Verdict> {
-    let key = (
-        program.to_path_buf(),
-        path.parent().unwrap_or(root).to_path_buf(),
-        path.extension()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned(),
-    );
-    let mut asked = ASKED.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some((_, answer)) = asked.iter().find(|(known, _)| *known == key) {
-        return answer.clone();
-    }
-    let answer = ask_rules(program, env, root, timeout, path);
-    asked.push((key, answer.clone()));
-    answer
-}
-
-/// `eslint --print-config`'s answer for `path`, as [`rules_apply`] reads it, asked afresh.
-///
-/// # Errors
-///
-/// As [`rules_apply`].
-///
 /// Effect: runs the binary.
-fn ask_rules(
+pub(crate) fn rules_apply(
     program: &Path,
     env: &ToolEnv,
     root: &Path,
@@ -167,12 +121,29 @@ fn ask_rules(
     if !ran.success {
         return Err(cause(&ran.stderr).map_or_else(not_config, format::Verdict::ToolFailed));
     }
-    let printed = String::from_utf8_lossy(&ran.stdout);
+    applies(&ran.stdout).ok_or_else(not_config)
+}
+
+/// Whether the config `--print-config` printed in `stdout` sets a rule supdoc keeps (one not in
+/// [`RELAXED`]) to warn or error; `true` for `undefined`, eslint's answer for an ignored path.
+/// `None` when stdout is neither.
+fn applies(stdout: &[u8]) -> Option<bool> {
+    let printed = String::from_utf8_lossy(stdout);
     if printed.trim() == "undefined" {
-        return Ok(true);
+        return Some(true);
     }
-    let printed: Printed = serde_json::from_str(&printed).map_err(|_| not_config())?;
-    Ok(printed.rules.values().any(enabled))
+    // A JSON object, its `rules` mapping each rule to its setting, as eslint normalizes it.
+    let printed: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&printed).ok()?;
+    let rules = match printed.get("rules") {
+        None => return Some(false),
+        Some(rules) => rules.as_object()?,
+    };
+    Some(
+        rules
+            .iter()
+            .any(|(rule, setting)| !RELAXED.contains(&rule.as_str()) && enabled(setting)),
+    )
 }
 
 /// The cause eslint printed for a failure in `stderr`: its first lines after the banner (see
@@ -356,7 +327,7 @@ fn names_rules(list: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        FAILED_SILENTLY, NOT_REPORT, cause, enabled, lint_verdict, linted_nothing,
+        FAILED_SILENTLY, NOT_REPORT, applies, cause, enabled, lint_verdict, linted_nothing,
         switches_lint_off,
     };
     use crate::code_blocks::format;
@@ -596,6 +567,30 @@ mod tests {
             let value: serde_json::Value =
                 serde_json::from_str(setting).expect("the fixture setting is JSON");
             assert_eq!(enabled(&value), on, "{setting}");
+        }
+    }
+
+    #[test]
+    fn a_printed_config_applies_only_with_a_kept_rule_set_to_warn_or_error() {
+        for (printed, expected) in [
+            (r#"{"rules":{"no-var":[2]}}"#, Some(true)),
+            (
+                r#"{"rules":{"eqeqeq":[1,"always"],"semi":[0]}}"#,
+                Some(true),
+            ),
+            (r#"{"rules":{}}"#, Some(false)),
+            (r#"{"language":"@/js"}"#, Some(false)),
+            (r#"{"rules":{"semi":[0],"no-undef":"off"}}"#, Some(false)),
+            (r#"{"rules":{"no-unused-vars":[2]}}"#, Some(false)),
+            (
+                r#"{"rules":{"no-unused-vars":[2],"@typescript-eslint/no-unused-vars":["warn"]}}"#,
+                Some(false),
+            ),
+            ("undefined\n", Some(true)),
+            ("config loaded\n{\"rules\":{\"no-var\":[2]}}", None),
+            ("[]", None),
+        ] {
+            assert_eq!(applies(printed.as_bytes()), expected, "{printed}");
         }
     }
 
