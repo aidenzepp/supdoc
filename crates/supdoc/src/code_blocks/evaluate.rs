@@ -2366,7 +2366,8 @@ fn fragment_unsupported(block: &CodeBlock, steps: &Steps) -> Vec<Finding> {
     let Some(info) = block.info.as_ref() else {
         return Vec::new();
     };
-    let language = tag_of(block).and_then(Language::from_tag);
+    let tag = tag_of(block).unwrap_or_default();
+    let language = Language::from_tag(tag);
     [(Step::Format, &steps.format), (Step::Lint, &steps.lint)]
         .into_iter()
         .filter_map(|(step, state)| {
@@ -2375,7 +2376,7 @@ fn fragment_unsupported(block: &CodeBlock, steps: &Steps) -> Vec<Finding> {
             };
             let checking: Vec<String> = tools::CARTRIDGES
                 .iter()
-                .filter(|other| Some(other.language) == language && other.supports(*kind))
+                .filter(|other| Some(other.language) == language && other.supports(*kind, tag))
                 .map(|other| format!("`{}`", other.name))
                 .collect();
             let key = step.key();
