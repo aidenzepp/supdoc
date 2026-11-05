@@ -51,7 +51,7 @@ pub(crate) enum ReadError {
         path: AbsolutePath,
         /// Its size in bytes.
         size: u64,
-        /// The largest size supdoc reads.
+        /// The `max-file-size` ceiling in effect, in bytes.
         limit: u64,
     },
 
@@ -161,6 +161,22 @@ pub(crate) const CODE_TOO_MANY_LINES: &str = "read-too-many-lines";
 /// The code of [`ReadError::TooDeep`], the YAML scanner's nesting limit.
 pub(crate) const CODE_TOO_DEEP: &str = "read-too-deep";
 
+/// The codes of a read that left a file unchecked: a doc whose links or code blocks weren't read,
+/// or a target whose symbols weren't. A missing file and an unsupported language are left out: a
+/// link to either is an ordinary broken link, which `fix` may still mend.
+pub(crate) const UNCHECKED_CODES: [&str; 10] = [
+    "read-not-a-file",
+    "read-io",
+    "read-not-utf8",
+    "read-too-large",
+    CODE_TIMEOUT,
+    CODE_TOO_MANY_KEYS,
+    CODE_KEY_PATHS_TOO_LARGE,
+    CODE_TOO_MANY_LINES,
+    CODE_TOO_DEEP,
+    "read-internal",
+];
+
 /// How to raise the key-path segment ceiling: its key, variable and flag, and the value that
 /// lifts it.
 const SEGMENT_KNOBS: &str = "Raise the limit with `max-key-segments` under `[limits]` in \
@@ -172,6 +188,11 @@ const SEGMENT_KNOBS: &str = "Raise the limit with `max-key-segments` under `[lim
 const KEY_PATH_SIZE_KNOBS: &str = "Raise the limit with `max-key-path-size` under `[limits]` in \
      `supdoc.config.toml`, `SUPDOC_MAX_KEY_PATH_SIZE` or `--max-key-path-size` (such as `64MiB`, \
      or `0` for no limit)";
+
+/// How to raise the file size ceiling: its key, variable and flag, and the value that lifts it.
+const FILE_SIZE_KNOBS: &str = "Raise the limit with `max-file-size` under `[limits]` in \
+     `supdoc.config.toml`, `SUPDOC_MAX_FILE_SIZE` or `--max-file-size` (such as `32MiB`, or `0` \
+     for no limit)";
 
 /// What to do about a read the filesystem refused with `kind`: only a permission error is fixed
 /// by `chmod`.
@@ -308,9 +329,10 @@ impl ReadError {
             Self::NotUtf8 { offset, .. } => {
                 format!("{shown} is not UTF-8 (first invalid byte at offset {offset})")
             }
-            Self::TooLarge { size, limit, .. } => {
-                format!("{shown} is {size} bytes; the limit is {limit}")
-            }
+            Self::TooLarge { size, limit, .. } => format!(
+                "{shown} is {size} bytes, over the {} `max-file-size` limit",
+                SizeLimit::bytes(*limit)
+            ),
             Self::UnsupportedLanguage { extension, .. } if extension.is_empty() => {
                 format!("supdoc can't read symbols in {shown}: it has no file extension")
             }
@@ -372,19 +394,19 @@ impl ReadError {
             (Self::NotUtf8 { .. }, ReadRole::ResolveArgument) => {
                 format!("Save `{shown}` as UTF-8, or resolve a file that is")
             }
-            (Self::TooLarge { limit, .. }, ReadRole::ScannedSource) => format!(
-                "Shrink the file under `{limit}` bytes, or add it to `exclude` in \
-                 `supdoc.config.toml`"
+            (Self::TooLarge { .. }, ReadRole::ScannedSource) => format!(
+                "Shrink the file, or add it to `exclude` in `supdoc.config.toml`. \
+                 {FILE_SIZE_KNOBS}"
             ),
-            (Self::TooLarge { limit, .. }, ReadRole::RenamedSource) => {
-                format!("Shrink the file under `{limit}` bytes")
+            (Self::TooLarge { .. }, ReadRole::RenamedSource) => {
+                format!("Shrink the file. {FILE_SIZE_KNOBS}")
             }
-            (Self::TooLarge { limit, .. }, ReadRole::ResolveArgument) => {
-                format!("Resolve a file under `{limit}` bytes")
+            (Self::TooLarge { .. }, ReadRole::ResolveArgument) => {
+                format!("Resolve a smaller file. {FILE_SIZE_KNOBS}")
             }
-            (Self::TooLarge { limit, .. }, ReadRole::Target) => format!(
-                "Link to a symbol in a file under `{limit}` bytes. Generated files usually \
-                 shouldn't be linked"
+            (Self::TooLarge { .. }, ReadRole::Target) => format!(
+                "Link to a symbol in a smaller file; generated files usually shouldn't be \
+                 linked. {FILE_SIZE_KNOBS}"
             ),
             (
                 Self::Timeout {
@@ -784,8 +806,10 @@ mod tests {
     fn too_large_source_help_gives_source_advice_not_link_advice() {
         let error = ReadError::TooLarge {
             path: absolute("/repo/big.md"),
-            size: 18_000_000,
-            limit: 16_777_216,
+            size: u64::MAX,
+            limit: crate::limits::Limits::MAX_FILE_SIZE
+                .get()
+                .expect("the default max-file-size should be a limit"),
         };
 
         let scanned = error.help(ReadRole::ScannedSource, "big.md");
@@ -804,5 +828,28 @@ mod tests {
                 .contains("Link to a symbol"),
             "a too-large target keeps the link advice"
         );
+        assert!(
+            error.to_string().contains(&format!(
+                "over the {} `max-file-size` limit",
+                crate::limits::Limits::MAX_FILE_SIZE
+            )),
+            "the message should name the limit and its key: {error}"
+        );
+        for role in [
+            ReadRole::ScannedSource,
+            ReadRole::RenamedSource,
+            ReadRole::ResolveArgument,
+            ReadRole::Target,
+        ] {
+            let help = error.help(role, "big.md");
+            for knob in [
+                "`max-file-size`",
+                "`SUPDOC_MAX_FILE_SIZE`",
+                "`--max-file-size`",
+                "`0` for no limit",
+            ] {
+                assert!(help.contains(knob), "{knob} missing from {help:?}");
+            }
+        }
     }
 }

@@ -415,6 +415,7 @@ impl Wanted {
             path.clone(),
             languages,
             limits.parse_timeout.value,
+            limits.max_file_size.value,
             KeyPathBudget::from_limits(limits),
         )
         .and_then(|file| Ok((file.language().symbols(&file)?, file)));

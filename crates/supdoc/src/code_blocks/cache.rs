@@ -22,7 +22,7 @@ use super::tools::{ToolCartridge, ToolEnv};
 
 /// The version of the rules that decide what a tool reads for a block, such as wrapping. Raised
 /// whenever they change, so results judged under old rules are never reused.
-const RULES_VERSION: u32 = 2;
+const RULES_VERSION: u32 = 3;
 
 /// The first bytes of every entry, naming its format.
 const MAGIC: &[u8] = b"supdoc code-block cache 1\n";

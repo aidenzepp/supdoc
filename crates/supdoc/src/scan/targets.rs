@@ -77,6 +77,7 @@ impl Parsed {
                     path.clone(),
                     languages,
                     limits.parse_timeout.value,
+                    limits.max_file_size.value,
                     KeyPathBudget::from_limits(limits),
                 )
                 .inspect_err(|error| {
@@ -710,6 +711,7 @@ mod tests {
                 AbsolutePath::new(&path).expect("a temp dir path should be absolute"),
                 languages,
                 Limits::PARSE_TIMEOUT,
+                Limits::MAX_FILE_SIZE,
                 KeyPathBudget::defaults(),
             )
             .expect("the fixture should read");
