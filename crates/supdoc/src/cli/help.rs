@@ -130,6 +130,9 @@ block standing where the ... is:
 
   rustfmt       statements    fn supdoc_fragment() { ... }
   rustfmt       expression    fn supdoc_fragment() { ... }
+  clippy        statements    fn supdoc_fragment() { ... }
+  clippy        expression    fn supdoc_fragment() -> impl Sized { ... }
+  clippy        members       struct SupdocFragment; impl SupdocFragment { ... }
   biome-lint    statements    async function supdocFragment$() { await Promise.resolve(); ... }
   biome-lint    expression    ( ... )
   biome-lint    entries       const supdocFragment$ = { ... };
@@ -145,6 +148,13 @@ block standing where the ... is:
 A statements block's leading \"use strict\" or \"use server\" isn't read as a directive, since \
 the frame's first line stands before it. A members frame has no base class, so a constructor \
 that calls super() isn't a member it can hold.
+
+clippy compiles a framed block as a library in a trusted checkout, linked against the project's \
+crate like any Rust block. A ? in a statements block is a true error, since the frame returns \
+nothing; a members block's methods belong to a unit struct, so a field read on self fails, and \
+clippy's messages name that struct Self. Every frame is private, so a project that denies \
+unreachable_pub gets it on any pub item a framed block declares: a members block's pub fn, or a \
+pub fn or struct inside a statements or expression block.
 
 A project that turns on rules about the frame's own code, such as biome's opt-in nursery rules \
 wanting an explicit type or a function expression, gets their findings at the block's \
