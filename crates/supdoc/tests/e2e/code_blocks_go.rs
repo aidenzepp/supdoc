@@ -375,6 +375,11 @@ fn the_real_gofmt_applies_no_config_planted_in_the_project_home_or_above_the_cac
 /// A recorded `basic` project with the go table, gofmt off, and one `go` block holding `body` in
 /// `docs/blocks.md`, its fence on line 3 and its body from line 4.
 fn project_vetting(body: &str) -> Project {
+    project_vetting_as("go", body)
+}
+
+/// [`project_vetting`] with the block's info string `info`.
+fn project_vetting_as(info: &str, body: &str) -> Project {
     let project = Project::fixture("basic");
     project.record();
     project.write(
@@ -384,7 +389,7 @@ fn project_vetting(body: &str) -> Project {
     );
     project.write(
         "docs/blocks.md",
-        &format!("# Blocks\n\n```go\n{body}\n```\n"),
+        &format!("# Blocks\n\n```{info}\n{body}\n```\n"),
     );
     project
 }
@@ -895,4 +900,96 @@ fn vet_the_real_go_fails_a_block_whose_import_path_writes_gos_lines() {
             "`{path}`: {json}"
         );
     }
+}
+
+/// The names go vet's frames hold that no block writes: neither may show in any finding.
+const FRAME_NAMES: [&str; 2] = ["supdocfragment", "supdocFragment"];
+
+/// Asserts no finding of `json` holds a name of go vet's frames.
+fn assert_no_frame_text(json: &serde_json::Value) {
+    let findings = at(json, "/findings").to_string();
+    for name in FRAME_NAMES {
+        assert!(!findings.contains(name), "{name} in {json}");
+    }
+}
+
+#[test]
+fn frame_vets_a_declarations_block_with_no_package_clause_behind_the_frame() {
+    let Some(dir) =
+        real_go("frame_vets_a_declarations_block_with_no_package_clause_behind_the_frame")
+    else {
+        return;
+    };
+    let home = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let wrong = "import \"fmt\"\n\nfunc show() {\n\tfmt.Printf(\"%d\\n\", \"x\")\n}";
+    let right = "import \"fmt\"\n\nfunc show() {\n\tfmt.Printf(\"%d\\n\", 1)\n}";
+    let marked = |body| project_vetting_as("go fragment(declarations)", body);
+
+    let fails = check_at_home(&marked(wrong), &dir, home.path(), 1);
+    let passes = check_at_home(&marked(right), &dir, home.path(), 0);
+    let unmarked = check_at_home(&project_vetting(right), &dir, home.path(), 1);
+
+    assert_eq!(finding_kinds(&fails), ["code-block-lint"], "{fails}");
+    assert_eq!(at(&fails, "/findings/0/location/line"), 7, "{fails}");
+    assert!(
+        message_of(&fails).contains("`go-vet` reports `printf`"),
+        "{fails}"
+    );
+    assert_no_frame_text(&fails);
+    assert!(finding_kinds(&passes).is_empty(), "{passes}");
+    assert_eq!(
+        at(&passes, "/data/summary/code_blocks/passed"),
+        1,
+        "{passes}"
+    );
+    assert_eq!(finding_kinds(&unmarked), ["code-block-lint"], "{unmarked}");
+    assert!(
+        message_of(&unmarked).contains("no `package` clause"),
+        "{unmarked}"
+    );
+}
+
+#[test]
+fn frame_vets_a_statements_block_inside_a_function() {
+    let Some(dir) = real_go("frame_vets_a_statements_block_inside_a_function") else {
+        return;
+    };
+    let home = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let marked = |body| project_vetting_as("go fragment(statements)", body);
+
+    let fails = check_at_home(&marked("x := 1\nx = x"), &dir, home.path(), 1);
+    let passes = check_at_home(&marked("x := 1\n_ = x"), &dir, home.path(), 0);
+
+    assert_eq!(finding_kinds(&fails), ["code-block-lint"], "{fails}");
+    assert_eq!(at(&fails, "/findings/0/location/line"), 5, "{fails}");
+    assert!(
+        message_of(&fails).contains("`go-vet` reports `assign`"),
+        "{fails}"
+    );
+    assert_no_frame_text(&fails);
+    assert!(finding_kinds(&passes).is_empty(), "{passes}");
+}
+
+#[test]
+fn frame_reads_a_block_that_isnt_its_kind_as_one_parse_error_without_gos_message() {
+    let Some(dir) =
+        real_go("frame_reads_a_block_that_isnt_its_kind_as_one_parse_error_without_gos_message")
+    else {
+        return;
+    };
+    let home = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let project = project_vetting_as(
+        "go fragment(declarations)",
+        "package main\n\nfunc main() {}",
+    );
+
+    let json = check_at_home(&project, &dir, home.path(), 1);
+
+    assert_eq!(finding_kinds(&json), ["code-block-parse"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 4, "{json}");
+    assert!(
+        message_of(&json).contains("couldn't parse the block as `declarations`"),
+        "{json}"
+    );
+    assert_no_frame_text(&json);
 }
