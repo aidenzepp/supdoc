@@ -31,7 +31,7 @@ use crate::output::{Output, PathStyle, RecordArray, Report, Summary, TextContext
 use crate::read::cartridge::Languages;
 use crate::state::LinkState;
 
-use super::args::{UpdateArgs, WriteMode};
+use super::args::{OperatorPath, UpdateArgs, WriteMode};
 use super::check::LinkLocationJson;
 use super::fix::timed_out;
 use super::project::{
@@ -60,7 +60,7 @@ fn refuse_version_argument(
         if text.parse::<ReleaseVersion>().is_err() {
             continue;
         }
-        if super::project::absolute(&context.cwd, typed)
+        if super::project::absolute(&context.cwd, OperatorPath::typed(typed))
             .as_path()
             .symlink_metadata()
             .is_ok()
@@ -105,7 +105,7 @@ pub(crate) fn run(
 ) -> Result<Outcome, CliError> {
     refuse_version_argument(&args.paths, context)?;
     let config = load_config(context, output)?;
-    let scope = scope(&args.paths, &config, context)?;
+    let scope = scope(&OperatorPath::each(&args.paths), &config, context)?;
     let LockForUpdate {
         lock,
         settings,

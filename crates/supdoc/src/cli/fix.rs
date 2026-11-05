@@ -39,7 +39,7 @@ use crate::scan::walk::GlobalExcludes;
 use crate::state::LinkState;
 use crate::trust::TrustEnv;
 
-use super::args::{FixArgs, WriteMode};
+use super::args::{FixArgs, OperatorPath, WriteMode};
 use super::project::{command_line, load_config, lock_path, read_lock, scope};
 use super::{CliError, Context, Outcome};
 
@@ -139,7 +139,7 @@ impl Planned {
         output: &mut Output,
     ) -> Result<Self, CliError> {
         let config = load_config(context, output)?;
-        let scope = scope(paths, &config, context)?;
+        let scope = scope(&OperatorPath::each(paths), &config, context)?;
         let lock = read_lock(&config, &context.cwd)?;
         let granted = super::check::granted_tier(config.root().as_path(), trust)?;
         let mut scan = scan(&config, &scope, &context.global_excludes)?;

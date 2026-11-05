@@ -29,7 +29,7 @@ use crate::output::text::{render_finding, visible};
 use crate::output::{Output, RecordArray, Report, TextContext, preview_note};
 use crate::path::{AbsolutePath, fixed};
 
-use super::args::{SkillInstallArgs, WriteMode};
+use super::args::{OperatorPath, SkillInstallArgs, WriteMode};
 use super::project::{absolute, command_line, config_failure};
 use super::{CliError, Context, Outcome, cause};
 
@@ -248,7 +248,7 @@ fn destinations(
 /// stops at a symlinked `supdoc.config.toml` that does not lead to a file of that name.
 fn project_root(context: &Context, output: &mut Output) -> Result<AbsolutePath, CliError> {
     if let Some(file) = &context.global.config {
-        let file = absolute(&context.cwd, file);
+        let file = absolute(&context.cwd, OperatorPath::typed(file));
         check_config_exists(&file).map_err(|error| config_failure(&error, context, output))?;
         return Ok(file.parent().unwrap_or(file));
     }

@@ -37,7 +37,9 @@ use super::{CliError, Context, ErrorSite, cause};
 pub(crate) fn load_config(context: &Context, output: &mut Output) -> Result<Config, CliError> {
     let given = &context.global.limits.0;
     let loaded = match &context.global.config {
-        Some(file) => Config::load_file_under(&absolute(&context.cwd, file), given),
+        Some(file) => {
+            Config::load_file_under(&absolute(&context.cwd, OperatorPath::typed(file)), given)
+        }
         None => Config::load_under(&context.cwd, given),
     };
     let config = loaded.map_err(|error| config_failure(&error, context, output))?;
@@ -150,8 +152,8 @@ fn error_site(error: &ConfigError, context: &Context, output: &mut Output) -> Op
 }
 
 /// `path` as typed, made absolute against the current directory.
-pub(crate) fn absolute(cwd: &AbsolutePath, path: &Path) -> AbsolutePath {
-    cwd.resolve_operator(&OperatorPath::typed(path))
+pub(crate) fn absolute(cwd: &AbsolutePath, path: OperatorPath<'_>) -> AbsolutePath {
+    cwd.resolve_operator(&path)
 }
 
 /// The part of the project `[PATHS]` names: everything when none are given, or when one of them
@@ -167,16 +169,17 @@ pub(crate) fn absolute(cwd: &AbsolutePath, path: &Path) -> AbsolutePath {
 /// (all exit 2), and `cli-path-unreadable` (74) for one that can't be looked up for any other
 /// reason, such as a parent directory it has no permission to search.
 pub(crate) fn scope(
-    paths: &[PathBuf],
+    paths: &[OperatorPath<'_>],
     config: &Config,
     context: &Context,
 ) -> Result<Scope, CliError> {
     let (cwd, root) = (&context.cwd, config.root());
     let mut sources = Vec::with_capacity(paths.len());
     let mut names_root = false;
-    for typed in paths {
-        let path = absolute(cwd, typed);
-        ensure_exists(&path, typed, cwd)?;
+    for &operator in paths {
+        let typed = operator.as_path();
+        let path = absolute(cwd, operator);
+        ensure_exists(&path, operator, cwd)?;
         let Some(inside) = path.strip_prefix(root) else {
             return Err(path_outside_config(typed, config));
         };
@@ -306,7 +309,7 @@ pub(crate) fn lock_failure(error: &LockError, root: &AbsolutePath, cwd: &Absolut
 /// couldn't check is never reported as absent.
 pub(crate) fn ensure_exists(
     path: &AbsolutePath,
-    typed: &Path,
+    typed: OperatorPath<'_>,
     cwd: &AbsolutePath,
 ) -> Result<(), CliError> {
     match path.as_path().symlink_metadata() {
@@ -314,7 +317,7 @@ pub(crate) fn ensure_exists(
         Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
             Err(path_missing(typed, cwd))
         }
-        Err(error) => Err(path_unreadable(typed, &error)),
+        Err(error) => Err(path_unreadable(typed.as_path(), &error)),
     }
 }
 
@@ -340,10 +343,10 @@ pub(crate) const CODE_PATH_MISSING: &str = "cli-path-missing";
 ///
 /// The help lists the nearest directory of `typed` that exists under `cwd`, so the command it
 /// names runs where this one did.
-pub(crate) fn path_missing(typed: &Path, cwd: &AbsolutePath) -> CliError {
+pub(crate) fn path_missing(typed: OperatorPath<'_>, cwd: &AbsolutePath) -> CliError {
     CliError::new(
         CODE_PATH_MISSING,
-        format!("{} does not exist", typed.display()),
+        format!("{} does not exist", typed.as_path().display()),
         format!(
             "Check the path, which is relative to the current directory. `ls {}` lists what is \
              there",
@@ -380,12 +383,17 @@ pub(crate) fn namespaced_missing(
 
 /// The nearest ancestor of a missing `typed` path that exists under `cwd`, as typed: `.` when
 /// none of them does.
-fn listing_dir<'a>(typed: &'a Path, cwd: &AbsolutePath) -> &'a Path {
+fn listing_dir<'a>(typed: OperatorPath<'a>, cwd: &AbsolutePath) -> &'a Path {
     typed
+        .as_path()
         .ancestors()
         .skip(1)
         .filter(|ancestor| !ancestor.as_os_str().is_empty())
-        .find(|ancestor| absolute(cwd, ancestor).as_path().is_dir())
+        .find(|ancestor| {
+            absolute(cwd, OperatorPath::typed(ancestor))
+                .as_path()
+                .is_dir()
+        })
         .unwrap_or_else(|| Path::new("."))
 }
 
@@ -656,7 +664,8 @@ mod tests {
             cwd,
             global_excludes: GlobalExcludes::none(),
         };
-        let paths: Vec<PathBuf> = paths.iter().map(|path| path.to_path_buf()).collect();
+        let paths: Vec<OperatorPath<'_>> =
+            paths.iter().map(|path| OperatorPath::typed(path)).collect();
         scope(&paths, &config, &context)
     }
 

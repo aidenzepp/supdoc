@@ -434,14 +434,25 @@ pub(crate) struct ListArgs {
 /// A path the operator typed on the command line, such as `-c PATH`, `resolve FILE` or the
 /// `rest` of `ns:rest`. Only `crate::cli` can build one, so [`AbsolutePath::resolve_operator`],
 /// the one join that lets a path climb out of or replace its base, never sees a path read from a
-/// file.
-#[derive(Debug)]
-pub(in crate::cli) struct OperatorPath<'a>(&'a Path);
+/// file. Code outside `crate::cli` can name the type but never build one, so it can't reach that
+/// join through a helper that takes one.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct OperatorPath<'a>(&'a Path);
 
 impl<'a> OperatorPath<'a> {
     /// Marks `path` as typed by the operator.
     pub(in crate::cli) fn typed(path: &'a Path) -> Self {
         Self(path)
+    }
+
+    /// Marks each of `paths`, such as a command's `[PATHS]`, as typed by the operator.
+    pub(in crate::cli) fn each(paths: &'a [PathBuf]) -> Vec<Self> {
+        paths.iter().map(|path| Self(path)).collect()
+    }
+
+    /// The path exactly as typed, for messages.
+    pub(in crate::cli) fn as_path(self) -> &'a Path {
+        self.0
     }
 }
 

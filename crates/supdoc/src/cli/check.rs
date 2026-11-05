@@ -31,7 +31,7 @@ use crate::scan::assemble::UntrackedLinks;
 use crate::state::LinkState;
 use crate::trust::{self, Grant, TrustEnv};
 
-use super::args::CheckArgs;
+use super::args::{CheckArgs, OperatorPath};
 use super::parse::USAGE_ERROR_CODE;
 use super::project::{load_config, read_lock, scope};
 use super::{CliError, Context, Outcome};
@@ -57,7 +57,7 @@ pub(crate) fn run(
     output: &mut Output,
 ) -> Result<Outcome, CliError> {
     let config = load_config(context, output)?;
-    let scope = scope(&args.paths, &config, context)?;
+    let scope = scope(&OperatorPath::each(&args.paths), &config, context)?;
     let lock = read_lock(&config, &context.cwd)?;
     let granted = granted_tier(config.root().as_path(), trust)?;
     let languages = Languages::builtin().map_err(CliError::from)?;

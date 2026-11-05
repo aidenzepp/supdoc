@@ -151,7 +151,7 @@ fn locate(config: &Config, context: &Context, typed: &Path) -> Result<AbsolutePa
             missing_in = Some((name, directory));
             directory.resolve_operator(&OperatorPath::typed(Path::new(rest)))
         }
-        None => absolute(cwd, typed),
+        None => absolute(cwd, OperatorPath::typed(typed)),
     };
     if !config.contains(found.as_path()) {
         return Err(path_outside_config(typed, config));
@@ -161,7 +161,7 @@ fn locate(config: &Config, context: &Context, typed: &Path) -> Result<AbsolutePa
     {
         return Err(error);
     }
-    ensure_exists(&found, typed, cwd).map_err(|error| match missing_in {
+    ensure_exists(&found, OperatorPath::typed(typed), cwd).map_err(|error| match missing_in {
         Some((name, directory)) if error.code() == CODE_PATH_MISSING => {
             namespaced_missing(typed, &name, directory, cwd)
         }
