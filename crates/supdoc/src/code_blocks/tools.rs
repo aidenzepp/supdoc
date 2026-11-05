@@ -259,6 +259,26 @@ const RUSTFMT_BODY: Support = Support::Framed {
     out_after: "}",
 };
 
+/// clippy's kinds, each read inside a frame that draws no lint of its own under clippy's default
+/// lints, so no lint is ever left off for a whole block. The block compiles as a library, where
+/// the frame's private items are never reported unused. Statements are the body of a function
+/// with no parameters and no return type, so a `?` in them is a true error, never one the
+/// block's content chose a `Result` for. An expression is the tail of a function returning
+/// `impl Sized`, so a value of any type reads as written. Members are the `impl` of a unit
+/// struct the frame declares, so a field read on `self` is a true error. clippy prints no code.
+/// The frame's names are the ones [`super::rust::lint_verdict`] keeps out of clippy's messages.
+const CLIPPY_FRAGMENTS: &[(Kind, Support)] = &[
+    (Kind::Statements, framed("fn supdoc_fragment() {", "}")),
+    (
+        Kind::Expression,
+        framed("fn supdoc_fragment() -> impl Sized {", "}"),
+    ),
+    (
+        Kind::Members,
+        framed("struct SupdocFragment; impl SupdocFragment {", "}"),
+    ),
+];
+
 /// shfmt's and shellcheck's kinds: any command list is a program, and one command is a list.
 const SHELL_FRAGMENTS: &[(Kind, Support)] = &[
     (Kind::Statements, Support::NATIVE),
@@ -394,6 +414,10 @@ const BIOME_MEMBERS: &str = "class SupdocFragment$ { supdocFrame$() { return thi
 /// The line biome's members frame opens with in a TypeScript block.
 const BIOME_TS_MEMBERS: &str = "abstract class SupdocFragment$ { supdocFrame$() { return this; }";
 
+/// biome's kind for a JSON block, in format and lint alike: an object's entries, read inside the
+/// object's braces, which biome prints back as written with each entry one indent unit deep.
+const BIOME_JSON_FRAGMENTS: &[(Kind, Support)] = &[(Kind::Entries, framed("{", "}"))];
+
 /// A frame of `before` and `after` that a formatter prints back as `out_before` and
 /// `out_after`, a tab in them standing for one indent unit.
 const fn printed(
@@ -434,6 +458,20 @@ const GO_FRAGMENTS: &[(Kind, Support)] = &[
     (Kind::Declarations, Support::NATIVE),
 ];
 
+/// go vet's kinds: it reads only a whole file, so declarations are read behind a package clause
+/// and statements inside a function too, each frame on one line. An expression is no statement
+/// Go accepts alone (its value would be unused), so go vet doesn't list it.
+const GO_VET_FRAGMENTS: &[(Kind, Support)] = &[
+    (Kind::Statements, framed(GO_VET_STATEMENTS, "}")),
+    (Kind::Declarations, framed(GO_VET_PACKAGE, "")),
+];
+
+/// The package clause go vet's frames open with.
+const GO_VET_PACKAGE: &str = "package supdocfragment";
+
+/// The line go vet's statements frame opens with: [`GO_VET_PACKAGE`] and a function.
+const GO_VET_STATEMENTS: &str = "package supdocfragment; func supdocFragment() {";
+
 /// Whether a block tagged `tag` can hold a fragment of `kind`: always, for a tool whose
 /// `fragments` alone say.
 const fn every_tag(_tag: &str, _kind: Kind) -> bool {
@@ -450,7 +488,7 @@ fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'sta
 }
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 20] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -549,7 +587,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 20] = [
         install: "rustup component add clippy",
         config_files: &["clippy.toml", ".clippy.toml", "Cargo.toml"],
         modes: FULL_OR_OFF,
-        fragments: &[],
+        fragments: CLIPPY_FRAGMENTS,
         holds: every_tag,
         vars: &[],
         positions: own_positions,
@@ -594,7 +632,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 20] = [
         install: "npm install --global @biomejs/biome",
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
-        fragments: &[],
+        fragments: BIOME_JSON_FRAGMENTS,
         holds: every_tag,
         vars: &[],
         positions: own_positions,
@@ -639,7 +677,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 20] = [
         install: "npm install --global @biomejs/biome",
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
-        fragments: &[],
+        fragments: BIOME_JSON_FRAGMENTS,
         holds: every_tag,
         vars: &[],
         positions: own_positions,
@@ -755,6 +793,22 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 20] = [
         argv: gofmt_args,
         reader: Reader::Format(go::parse_error),
     },
+    ToolCartridge {
+        name: "go-vet",
+        language: Language::Go,
+        binary: "go",
+        tier: Tier::Static,
+        install: "install Go from https://go.dev/dl/",
+        // go vet reads only the module supdoc writes for the block (see [`go::VetModule`]).
+        config_files: &[],
+        modes: FULL_OR_OFF,
+        fragments: GO_VET_FRAGMENTS,
+        holds: every_tag,
+        vars: go::VET_VARS,
+        positions: own_positions,
+        argv: go_vet_args,
+        reader: Reader::Lint(go::vet_verdict),
+    },
 ];
 
 /// The files rumdl's results depend on: its config names (see [`rumdl::CONFIG_FILES`]) and the
@@ -845,6 +899,15 @@ fn shfmt_args(invocation: &Invocation<'_>) -> Vec<OsString> {
 /// no config file and no stdin file name, so neither the doc nor the project reaches it.
 fn gofmt_args(_invocation: &Invocation<'_>) -> Vec<OsString> {
     Vec::new()
+}
+
+/// `go vet`'s arguments: `vet -json .`, the package in the module supdoc writes for the block,
+/// where it runs (see [`go::VetModule`]). The doc and the project never reach it.
+fn go_vet_args(_invocation: &Invocation<'_>) -> Vec<OsString> {
+    ["vet", "-json", "."]
+        .into_iter()
+        .map(OsString::from)
+        .collect()
 }
 
 /// `ruff format`'s arguments: the block on stdin under its virtual path, no cache.
@@ -1296,6 +1359,7 @@ mod tests {
                 "yamlfmt Yaml Format yamlfmt Static",
                 "yamllint Yaml Lint yamllint Static",
                 "gofmt Go Format gofmt Static",
+                "go-vet Go Lint go Static",
             ]
         );
     }
@@ -1873,7 +1937,8 @@ mod tests {
             .flat_map(|tool| {
                 tool.fragments.iter().filter_map(move |(kind, support)| {
                     let frame = support.frame(*kind)?;
-                    Some((tool, *kind, format!("{} ... {}", frame.before, frame.after)))
+                    let shown = format!("{} ... {}", frame.before, frame.after);
+                    Some((tool, *kind, shown.trim_end().to_owned()))
                 })
             })
             .collect();

@@ -29,6 +29,7 @@ use super::cache::{self, Cache};
 use super::excerpt;
 use super::format::{self, FixDoc};
 use super::fragment::{Frame, Kind};
+use super::go;
 use super::info::{
     KNOWN_ATTRIBUTES, SourceKind, StepValue, fragment_kind, is_fragment_word, is_known_attribute,
     parenthesized_spelling, reasoned, replacement_for_removed, source_attributes, step_attribute,
@@ -721,6 +722,59 @@ fn linted_nothing(at: &Location) -> Finding {
     .with_location(at.clone())
 }
 
+/// The run's one `code-block-not-checked` warning, at `at`, the first Go block whose `go vet`
+/// step didn't run because it imports a package outside the standard library.
+fn vet_offline(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "`go vet` didn't run on this Go block, nor on any other that imports a package outside \
+         Go's standard library: supdoc vets a block alone and offline, so it can't load one",
+    )
+    .with_help(
+        "show the block using the standard library alone, or mark such blocks \
+         `lint(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first Go block, when no Go block's
+/// `go vet` step ran because `go env GOVERSION` named no release supdoc reads, quoting what was
+/// `said`.
+fn vet_version(at: &Location, said: Option<&str>) -> Finding {
+    let said = said.map_or_else(String::new, |said| format!(": {said}"));
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        format!(
+            "`go vet` didn't run on any Go block, since supdoc couldn't read which Go release `go` \
+             is{said}"
+        ),
+    )
+    .with_help(
+        "put a released Go from https://go.dev/dl/ first on PATH, whose `go env GOVERSION` reads \
+         `go1.<minor>` or `go1.<minor>.<patch>`, or mark the blocks `lint(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first Go block whose `go vet`
+/// step didn't run because its build constraints leave its file out.
+fn vet_excluded(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "`go vet` checked no file for this Go block, nor for any other whose build constraints \
+         leave it out: a `//go:build` line that doesn't hold here, or `import \"C\"`, since cgo \
+         is off",
+    )
+    .with_help(
+        "drop the build constraint or the `import \"C\"` from the block, or mark such blocks \
+         `lint(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
 /// The state a lint verdict alone puts a block in.
 fn lint_state(verdict: &lint::Verdict) -> BlockState {
     match verdict {
@@ -816,6 +870,9 @@ impl NotRunWarnings {
             BIOME_LINTED_NOTHING => linted_nothing(at),
             YAMLLINT_REJECTED => yamllint_rejected(at, said),
             YAMLLINT_LOCALE => yamllint_locale(at, said),
+            go::VET_OFFLINE => vet_offline(at),
+            go::VET_EXCLUDED => vet_excluded(at),
+            go::VET_VERSION => vet_version(at, said),
             _ => return None,
         };
         self.given.push(not_run.reason);
@@ -2192,6 +2249,9 @@ fn scaled(share: u16, scale: f32) -> usize {
 /// The indent and line width biome formats a block with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BiomeLayout {
+    /// The config section biome reads the block's language's settings from: `javascript` or
+    /// `json`, which also names its line-width flag.
+    section: &'static str,
     /// The indent unit: a tab, or `indentWidth` spaces.
     indent: String,
     /// The columns one indent unit takes: `indentWidth`, which is also a tab's width.
@@ -2216,7 +2276,8 @@ impl BiomeLayout {
             .filter(|width| *width <= BIOME_MAX_LINE_WIDTH)
             .ok_or(FRAME_WIDTH_UNKNOWN)?;
         Ok(vec![OsString::from(format!(
-            "--javascript-formatter-line-width={width}"
+            "--{}-formatter-line-width={width}",
+            self.section
         ))])
     }
 }
@@ -2243,6 +2304,7 @@ fn biome_layout(
 ) -> Result<BiomeLayout, &'static str> {
     let section = match language {
         Language::TypeScript | Language::JavaScript => "javascript",
+        Language::Json => "json",
         _ => return Err(FRAME_INDENT_UNKNOWN),
     };
     let config: serde_json::Value = match given.and_then(|given| given.config.as_ref()) {
@@ -2297,6 +2359,7 @@ fn biome_layout(
         _ => return Err(FRAME_INDENT_UNKNOWN),
     };
     Ok(BiomeLayout {
+        section,
         indent,
         columns,
         line_width,
@@ -2628,6 +2691,11 @@ fn run_linter(
         .map(|(name, value)| (*name, value.as_os_str()))
         .chain(tool.vars())
         .collect();
+    let release = match go_release(tool, program, session) {
+        Ok(release) => release,
+        Err(not_run) => return Some(Err(not_run)),
+    };
+    let fingerprint = release.as_ref().map(go::GoVersion::fingerprint);
     let run = cache::Run {
         tool,
         program,
@@ -2635,12 +2703,13 @@ fn run_linter(
         extra: &extra,
         input,
         doc: &doc,
-        project: None,
+        project: fingerprint.as_ref(),
     };
     let biome = given.filter(|_| tool.name == BIOME_LINT);
-    let spawn = |call: &Call<'_>| match biome {
-        Some(given) => biome_lint(tool, call, &invocation, given, input, session),
-        None => run_in_place(call, record, session),
+    let spawn = |call: &Call<'_>| match (biome, &release) {
+        (Some(given), _) => biome_lint(tool, call, &invocation, given, input, session),
+        (None, Some(release)) => vet_in_module(call, input, release, session),
+        (None, None) => run_in_place(call, record, session),
     };
     let named = given.filter(|_| record.tombi.is_some());
     let judge = |result: Result<Ran, runner::Failure>| {
@@ -2648,11 +2717,8 @@ fn run_linter(
             return Err(not_run);
         }
         match named_by(named, result) {
-            Ok(ran) if biome.is_some() && biome::linted_nothing(&ran.stdout) => {
-                Err(BIOME_LINTED_NOTHING.into())
-            }
-            Ok(ran) if tool.name == TOMBI_LINT && tombi::linted_nothing(&ran) => {
-                Err(TOMBI_LINTED_NOTHING.into())
+            Ok(ran) if let Some(reason) = said_nothing(tool, biome.is_some(), input, &ran) => {
+                Err(reason.into())
             }
             result => Ok(tool.lint_verdict(input, frame.is_some(), result)),
         }
@@ -2757,6 +2823,95 @@ const TOMBI_LINT: &str = "tombi-lint";
 
 /// Why tombi lint's step didn't run on a block when tombi didn't report linting it.
 const TOMBI_LINTED_NOTHING: &str = "tombi lint didn't report checking the block";
+
+/// Why `tool`'s finished run `ran` says nothing about its block, so its step counts as not run:
+/// biome lint, given the block as a file (`biome_file`), checked no file; tombi lint didn't
+/// report linting it; or go vet couldn't load the block `input` (see [`go::vet_not_run`]).
+/// `None` otherwise.
+fn said_nothing(
+    tool: &ToolCartridge,
+    biome_file: bool,
+    input: &str,
+    ran: &Ran,
+) -> Option<&'static str> {
+    match tool.name {
+        BIOME_LINT if biome_file => {
+            biome::linted_nothing(&ran.stdout).then_some(BIOME_LINTED_NOTHING)
+        }
+        TOMBI_LINT => tombi::linted_nothing(ran).then_some(TOMBI_LINTED_NOTHING),
+        GO_VET => go::vet_not_run(input, ran),
+        _ => None,
+    }
+}
+
+/// The linter that vets the block in a module supdoc writes rather than on stdin.
+const GO_VET: &str = "go-vet";
+
+/// The Go release `tool`, when it is go vet at `program`, reads every block at (see
+/// [`go::release`]). `None` for any other linter.
+///
+/// # Errors
+///
+/// [`go::VET_VERSION`], quoting what `go env GOVERSION` said, when it names no release supdoc
+/// reads.
+///
+/// Effect: runs `go env GOVERSION` the first time in the process.
+fn go_release(
+    tool: &ToolCartridge,
+    program: &Path,
+    session: &Session<'_>,
+) -> Result<Option<go::GoVersion>, NotRun> {
+    if tool.name != GO_VET {
+        return Ok(None);
+    }
+    go::release(program, session.env, session.root, session.timeout)
+        .map(Some)
+        .map_err(|said| NotRun {
+            reason: go::VET_VERSION,
+            said: Some(said),
+        })
+}
+
+/// Runs `call`, `go vet`'s, on the block `input`, written as `main.go` beside a `go.mod` of
+/// supdoc's for `release` in a fresh [`go::VetModule`] beside the neutral directory, and run
+/// there with the module's variables (see [`go::VetModule::extra`]), since `go vet` reads no
+/// block on stdin. Every private path it prints is taken out, and the module, with any work
+/// files `go` left in it, is removed after the run whatever its outcome.
+///
+/// # Errors
+///
+/// The run's failure, or a failed start when there is no private directory to write the module
+/// to.
+///
+/// Effect: creates and removes the module directory, creates the shared Go directories, and
+/// runs `go vet`, killing it at the timeout.
+fn vet_in_module(
+    call: &Call<'_>,
+    input: &str,
+    release: &go::GoVersion,
+    session: &Session<'_>,
+) -> Result<Ran, runner::Failure> {
+    let neutral = runner::neutral_dir(session.env, session.root);
+    let module = go::VetModule::for_block(&neutral, release, input).ok_or_else(|| {
+        runner::Failure::Spawn(std::io::Error::other(
+            "supdoc couldn't create a private Go module for the block go vet checks",
+        ))
+    })?;
+    let extra = module.extra();
+    let result = runner::run(
+        &Call {
+            extra: &extra,
+            stdin: &[],
+            cwd: runner::Cwd::Private(module.dir()),
+            ..*call
+        },
+        session.env,
+        session.root,
+    )
+    .map(|ran| module.unnamed(&ran));
+    drop(module);
+    result
+}
 
 /// Runs `call`, `tool` being biome lint, on the block `invocation` describes, written with
 /// `given`'s config to a fresh [`biome::LintFile`] beside the neutral directory, since biome

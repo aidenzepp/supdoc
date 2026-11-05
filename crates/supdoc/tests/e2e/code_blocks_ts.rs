@@ -1808,3 +1808,131 @@ fn frame_format_a_block_that_isnt_its_kind_is_one_parse_error_at_the_attributes(
         "{json}"
     );
 }
+
+/// A recorded `basic` project with a `typescript` table and `source` at `src/blocks.ts`, and a
+/// directory holding a stub `biome` whose lint passes and whose format turns every block into
+/// `const a = 1;`.
+fn jsdoc_project(source: &str) -> (Project, tempfile::TempDir) {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write(
+        "supdoc.config.toml",
+        "[features.code-blocks]\n[features.code-blocks.typescript]\n",
+    );
+    project.write("src/blocks.ts", source);
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    stub_biome(outside.path(), "/bin/cat >/dev/null\necho 'const a = 1;'");
+    (project, outside)
+}
+
+/// A `/** */` comment on a method holding one unformatted `ts` block.
+const JSDOC_SOURCE: &str = "export class C {\n  /**\n   * Adds.\n   *\n   * ```ts\n   * const   a = 1\n   * ```\n   */\n  add() {}\n}\n";
+
+#[test]
+fn jsdoc_block_is_checked_at_its_file_line() {
+    let (project, outside) = jsdoc_project(JSDOC_SOURCE);
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-unformatted"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 5, "{json}");
+}
+
+#[test]
+fn jsdoc_fix_keeps_the_gutter() {
+    let (project, outside) = jsdoc_project(JSDOC_SOURCE);
+    let path = [("PATH", outside.path())];
+
+    let _fix = project
+        .supdoc_in_with(".", &["fix", "--yes"], &path)
+        .assert_exit(0);
+
+    assert_eq!(
+        project.read("src/blocks.ts"),
+        JSDOC_SOURCE.replace("const   a = 1", "const a = 1;"),
+        "the fix should rewrite the block's line behind its `   * ` gutter"
+    );
+}
+
+#[test]
+fn jsdoc_block_and_line_comments_are_not_checked() {
+    let source = "/* ```ts\nconst   a = 1\n``` */\n// ```ts\n// const   a = 1\n// ```\nexport const b = 2;\n";
+    let (project, outside) = jsdoc_project(source);
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(0)
+        .json();
+
+    assert!(finding_kinds(&json).is_empty(), "{json}");
+}
+
+/// A `/** */` comment with no `*` gutter on a method, indented 4 spaces, holding one `ts` block of a
+/// two-level object literal indented with tabs, as biome formats it, whose innermost line is
+/// `inner`.
+fn gutterless_source(inner: &str) -> String {
+    format!(
+        "export class C {{\n  /**\n    Makes.\n\n    ```ts\n    const a = {{\n    \tb: {{\n    \t\t{inner}\n    \t}},\n    }};\n    ```\n  */\n  make() {{}}\n}}\n"
+    )
+}
+
+#[test]
+fn jsdoc_gutterless_fix_keeps_the_comments_and_the_codes_indentation() {
+    let (project, outside) = jsdoc_project(&gutterless_source("c:1,"));
+    stub_biome(
+        outside.path(),
+        "/bin/cat >/dev/null\nprintf 'const a = {\\n\\tb: {\\n\\t\\tc: 1,\\n\\t},\\n};\\n'",
+    );
+    let path = [("PATH", outside.path())];
+
+    let _fix = project
+        .supdoc_in_with(".", &["fix", "--yes"], &path)
+        .assert_exit(0);
+
+    assert_eq!(
+        project.read("src/blocks.ts"),
+        gutterless_source("c: 1,"),
+        "the fix should rewrite the block behind the comment's 4-space prefix, keeping the code's tabs"
+    );
+}
+
+#[test]
+fn jsdoc_the_real_biome_checks_and_fixes_a_gutterless_comments_indented_block() {
+    let Some(dir) = real_tool_dir(
+        "biome",
+        "jsdoc_the_real_biome_checks_and_fixes_a_gutterless_comments_indented_block",
+    ) else {
+        return;
+    };
+    let path = [("PATH", dir.as_path())];
+    let (formatted, _) = jsdoc_project(&gutterless_source("c: 1,"));
+    let (unformatted, _) = jsdoc_project(&gutterless_source("c:1,"));
+
+    let passes = formatted
+        .supdoc_in_with(".", &["check", "--json"], &path)
+        .assert_exit(0)
+        .json();
+    let fails = unformatted
+        .supdoc_in_with(".", &["check", "--json"], &path)
+        .assert_exit(1)
+        .json();
+    let _fix = unformatted
+        .supdoc_in_with(".", &["fix", "--yes"], &path)
+        .assert_exit(0);
+
+    assert_eq!(
+        at(&passes, "/data/summary/code_blocks/passed"),
+        1,
+        "{passes}"
+    );
+    assert_eq!(finding_kinds(&fails), ["code-block-unformatted"], "{fails}");
+    assert_eq!(at(&fails, "/findings/0/location/line"), 5, "{fails}");
+    assert_eq!(
+        unformatted.read("src/blocks.ts"),
+        gutterless_source("c: 1,"),
+        "biome's fix should land behind the comment's prefix with the code's indent kept"
+    );
+}

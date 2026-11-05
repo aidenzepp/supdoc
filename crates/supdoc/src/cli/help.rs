@@ -73,14 +73,17 @@ top-level keys, and never change which files links are read from. A language's t
   yaml          formatter yamlfmt, linter yamllint
   toml          formatter tombi-format, linter tombi-lint
   markdown      formatter rumdl-format, linter rumdl
-  go            formatter gofmt, no linter yet; tag a block go or golang
+  go            formatter gofmt, linter go-vet; tag a block go or golang
 
 Each tool's options live in its own table, such as [features.code-blocks.python.ruff] with \
 lint = \"off\". A table for a tool the language doesn't select is a config error.
 
 Each tool reads the block on standard input and its own config files, which can sit outside the \
 project; its errors can quote them. rumdl's config is found from the doc's directory up to the \
-nearest .git inside the root, never above the root; yamlfmt's and yamllint's up to the root.
+nearest .git inside the root, never above the root; yamlfmt's and yamllint's up to the root. \
+go vet reads none: it checks a block that opens with a package clause as main.go, alone in a \
+module supdoc writes, offline, so a block that imports a package outside Go's standard library \
+isn't vetted.
 
 A snippet lacks the code around it, so some rules are off for blocks: biome lint skips \
 noUnusedVariables, noUnusedImports and noUnusedFunctionParameters; rumdl turns off MD041, MD051 \
@@ -134,21 +137,35 @@ block standing where the ... is:
 
   rustfmt       statements    fn supdoc_fragment() { ... }
   rustfmt       expression    fn supdoc_fragment() { ... }
+  clippy        statements    fn supdoc_fragment() { ... }
+  clippy        expression    fn supdoc_fragment() -> impl Sized { ... }
+  clippy        members       struct SupdocFragment; impl SupdocFragment { ... }
   biome-lint    statements    async function supdocFragment$() { await Promise.resolve(); ... }
   biome-lint    expression    ( ... )
   biome-lint    entries       const supdocFragment$ = { ... };
   biome-lint    children      const supdocFragment$ = <div> ... </div>;   (tsx and jsx blocks only)
   biome-lint    members       abstract class SupdocFragment$ { supdocFrame$() { return this; } ... }   (TypeScript blocks)
   biome-lint    members       class SupdocFragment$ { supdocFrame$() { return this; } ... }   (JavaScript blocks)
+  biome-lint    entries       { ... }   (json and jsonc blocks)
   biome-format  statements    async function supdocFragment$() { await Promise.resolve(); ... }
   biome-format  entries       const supdocFragment$ = { ... };
   biome-format  children      const supdocFragment$ = <div> ... </div>;   (tsx and jsx blocks only)
   biome-format  members       abstract class SupdocFragment$ { supdocFrame$() { return this; } ... }   (TypeScript blocks)
   biome-format  members       class SupdocFragment$ { supdocFrame$() { return this; } ... }   (JavaScript blocks)
+  biome-format  entries       { ... }   (json and jsonc blocks)
+  go-vet        statements    package supdocfragment; func supdocFragment() { ... }
+  go-vet        declarations  package supdocfragment ...
 
 A statements block's leading \"use strict\" or \"use server\" isn't read as a directive, since \
 the frame's first line stands before it. A members frame has no base class, so a constructor \
 that calls super() isn't a member it can hold.
+
+clippy compiles a framed block as a library in a trusted checkout, linked against the project's \
+crate like any Rust block. A ? in a statements block is a true error, since the frame returns \
+nothing; a members block's methods belong to a unit struct, so a field read on self fails, and \
+clippy's messages name that struct Self. Every frame is private, so a project that denies \
+unreachable_pub gets it on any pub item a framed block declares: a members block's pub fn, or a \
+pub fn or struct inside a statements or expression block.
 
 A project that turns on rules about the frame's own code, such as biome's opt-in nursery rules \
 wanting an explicit type or a function expression, gets their findings at the block's \

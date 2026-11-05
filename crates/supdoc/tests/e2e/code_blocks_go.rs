@@ -1,4 +1,4 @@
-//! Checking Go code blocks with gofmt.
+//! Checking Go code blocks with gofmt and go vet.
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
@@ -13,14 +13,15 @@ fn finding_kinds(json: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-/// A recorded `basic` project with the go table and one block tagged `tag` holding `body` in
-/// `docs/blocks.md`, its fence on line 3 and its body from line 4.
+/// A recorded `basic` project with the go table, go vet off, and one block tagged `tag` holding
+/// `body` in `docs/blocks.md`, its fence on line 3 and its body from line 4.
 fn project_with_block(tag: &str, body: &str) -> Project {
     let project = Project::fixture("basic");
     project.record();
     project.write(
         "supdoc.config.toml",
-        "[features.code-blocks]\n[features.code-blocks.go]\n",
+        "[features.code-blocks]\n[features.code-blocks.go]\n\
+         [features.code-blocks.go.go-vet]\nlint = \"off\"\n",
     );
     project.write(
         "docs/blocks.md",
@@ -369,4 +370,626 @@ fn the_real_gofmt_applies_no_config_planted_in_the_project_home_or_above_the_cac
 
     assert!(finding_kinds(&json).is_empty(), "{json}");
     assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+}
+
+/// A recorded `basic` project with the go table, gofmt off, and one `go` block holding `body` in
+/// `docs/blocks.md`, its fence on line 3 and its body from line 4.
+fn project_vetting(body: &str) -> Project {
+    project_vetting_as("go", body)
+}
+
+/// [`project_vetting`] with the block's info string `info`.
+fn project_vetting_as(info: &str, body: &str) -> Project {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write(
+        "supdoc.config.toml",
+        "[features.code-blocks]\n[features.code-blocks.go]\n\
+         [features.code-blocks.go.gofmt]\nformat = \"off\"\n",
+    );
+    project.write(
+        "docs/blocks.md",
+        &format!("# Blocks\n\n```{info}\n{body}\n```\n"),
+    );
+    project
+}
+
+/// Writes an executable `#!/bin/sh` stub named `go` in `dir` that answers `go env GOVERSION`
+/// with `go1.27.3` and runs `script` for anything else.
+fn go_stub(dir: &Path, script: &str) {
+    go_stub_of(dir, "go1.27.3", script);
+}
+
+/// Writes an executable `#!/bin/sh` stub named `go` in `dir` that answers `go env GOVERSION`
+/// with `release` and runs `script` for anything else.
+fn go_stub_of(dir: &Path, release: &str, script: &str) {
+    let path = dir.join("go");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\n\
+             if [ \"$*\" = 'env GOVERSION' ]; then echo '{release}'; exit 0; fi\n\
+             {script}\n"
+        ),
+    )
+    .expect("the stub should be writable");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("the stub should be made executable");
+}
+
+/// `supdoc check --json` in `project` with `PATH` set to `dir` and `HOME` to `home`, expecting
+/// `code`.
+fn check_at_home(project: &Project, dir: &Path, home: &Path, code: i32) -> serde_json::Value {
+    project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", dir), ("HOME", home)])
+        .assert_exit(code)
+        .json()
+}
+
+#[test]
+fn vet_runs_offline_in_a_private_module_outside_the_root_and_home_and_places_its_report() {
+    let project = project_vetting("package p\n\nfunc f() {}");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let home = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let root = project
+        .path(".")
+        .canonicalize()
+        .expect("the project root should resolve");
+    let given_home = home
+        .path()
+        .canonicalize()
+        .expect("the home directory should resolve");
+    go_stub(
+        outside.path(),
+        &format!(
+            "[ \"$*\" = 'vet -json .' ] || exit 3\n\
+             [ \"$CGO_ENABLED$GOTOOLCHAIN$GOPROXY$GOWORK$GOENV$GOFLAGS\" = '0localoffoffoff-mod=readonly' ] || exit 4\n\
+             here=\"$(pwd -P)\"\n\
+             [ \"$(cd \"$GOTMPDIR\" && pwd -P)\" = \"$here/tmp\" ] || exit 9\n\
+             for dir in \"$here\" \"$HOME\" \"$GOPATH\" \"$GOCACHE\"; do\n\
+               case \"$dir\" in '{root}'*|'{home}'|'') exit 5;; esac\n\
+             done\n\
+             [ \"$(/bin/cat go.mod)\" = \"$(printf 'module supdoc.invalid/block\\n\\ngo 1.27')\" ] || exit 6\n\
+             /usr/bin/grep -qx 'func f() {{}}' main.go || exit 7\n\
+             [ \"$(/bin/ls)\" = \"$(printf 'go.mod\\nmain.go\\ntmp')\" ] || exit 8\n\
+             printf '{{\"supdoc.invalid/block\": {{\"printf\": [{{\"posn\": \"%s/main.go:3:6\", \"end\": \"%s/main.go:3:8\", \"message\": \"f is in %s\"}}]}}}}' \"$here\" \"$here\" \"$here\"",
+            root = root.display(),
+            home = given_home.display(),
+        ),
+    );
+
+    let json = check_at_home(&project, outside.path(), home.path(), 1);
+
+    assert_eq!(finding_kinds(&json), ["code-block-lint"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 6, "{json}");
+    assert_eq!(at(&json, "/findings/0/location/column"), 6, "{json}");
+    let message = message_of(&json);
+    assert!(message.contains("`go-vet` reports `printf`"), "{json}");
+    assert!(
+        !message.contains("supdoc/code-blocks") && message.contains("f is in ."),
+        "the module's private path should be taken out: {json}"
+    );
+}
+
+#[test]
+fn vet_fails_a_block_with_no_package_clause_naming_the_clause_and_lint_off() {
+    let project = project_vetting("x := 1");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    go_stub(
+        outside.path(),
+        "echo \"main.go:1:1: expected 'package', found x\" >&2\nexit 1",
+    );
+
+    let json = check(&project, outside.path(), 1);
+
+    assert_eq!(finding_kinds(&json), ["code-block-lint"], "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/state"), "failed", "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 4, "{json}");
+    assert!(message_of(&json).contains("no `package` clause"), "{json}");
+    let help = at(&json, "/findings/0/help")
+        .as_str()
+        .expect("the help should be a string");
+    assert!(help.contains("lint(off: <reason>)"), "{json}");
+}
+
+#[test]
+fn vet_leaves_blocks_importing_outside_the_standard_library_not_run_with_one_warning() {
+    let project = project_vetting("package p\n\nimport \"example.com/x\"\n\nvar _ = x.Y");
+    project.write(
+        "docs/blocks.md",
+        "# Blocks\n\n```go\npackage p\n\nimport \"example.com/x\"\n```\n\n\
+         ```go\npackage q\n\nimport \"example.com/y\"\n```\n",
+    );
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    go_stub(
+        outside.path(),
+        "path=\"$(/usr/bin/sed -n 's/^import \"\\(.*\\)\"$/\\1/p' main.go)\"\n\
+         echo \"main.go:3:8: cannot find module providing package $path: import lookup disabled \
+         by -mod=readonly\" >&2\nexit 1",
+    );
+
+    let json = check(&project, outside.path(), 0);
+
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+    for block in 0..2 {
+        assert_eq!(
+            at(&json, &format!("/data/code_blocks/{block}/state")),
+            "not_checked",
+            "{json}"
+        );
+        assert_eq!(
+            at(&json, &format!("/data/code_blocks/{block}/lint")),
+            "not_run",
+            "{json}"
+        );
+    }
+    assert!(
+        message_of(&json).contains("outside Go's standard library"),
+        "{json}"
+    );
+}
+
+/// The real go's `PATH` directory, or `None` to skip `test`.
+fn real_go(test: &str) -> Option<std::path::PathBuf> {
+    real_tool_dir("go", test)
+}
+
+#[test]
+fn vet_the_real_go_finds_a_printf_verb_mistake_at_its_doc_line_and_passes_a_clean_file() {
+    let Some(dir) = real_go(
+        "vet_the_real_go_finds_a_printf_verb_mistake_at_its_doc_line_and_passes_a_clean_file",
+    ) else {
+        return;
+    };
+    let home = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let wrong = project_vetting(
+        "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Printf(\"%d\\n\", \"x\")\n}",
+    );
+    let right = project_vetting(
+        "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Printf(\"%d\\n\", 1)\n}",
+    );
+
+    let fails = check_at_home(&wrong, &dir, home.path(), 1);
+    let passes = check_at_home(&right, &dir, home.path(), 0);
+
+    assert_eq!(finding_kinds(&fails), ["code-block-lint"], "{fails}");
+    assert_eq!(at(&fails, "/findings/0/location/line"), 9, "{fails}");
+    let message = message_of(&fails);
+    assert!(
+        message.contains("`go-vet` reports `printf`") && message.contains("%d"),
+        "{fails}"
+    );
+    assert!(finding_kinds(&passes).is_empty(), "{passes}");
+    assert_eq!(
+        at(&passes, "/data/summary/code_blocks/passed"),
+        1,
+        "{passes}"
+    );
+}
+
+#[test]
+fn vet_the_real_go_reads_a_syntax_error_as_a_parse_error_at_its_doc_line() {
+    let Some(dir) =
+        real_go("vet_the_real_go_reads_a_syntax_error_as_a_parse_error_at_its_doc_line")
+    else {
+        return;
+    };
+    let home = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let project = project_vetting("package p\n\nfunc f() {\n\tx := <\n}");
+
+    let json = check_at_home(&project, &dir, home.path(), 1);
+
+    assert_eq!(finding_kinds(&json), ["code-block-parse"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 7, "{json}");
+    let message = message_of(&json);
+    assert!(message.contains("4:7: expected operand"), "{json}");
+    assert!(!message.contains("supdoc/code-blocks"), "{json}");
+}
+
+#[test]
+fn vet_the_real_go_fetches_nothing_for_an_import_outside_the_standard_library() {
+    let Some(dir) =
+        real_go("vet_the_real_go_fetches_nothing_for_an_import_outside_the_standard_library")
+    else {
+        return;
+    };
+    let home = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let project = project_vetting("package p\n\nimport \"example.com/x\"\n\nfunc F() { x.Do() }");
+
+    let json = check_at_home(&project, &dir, home.path(), 0);
+
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/lint"), "not_run", "{json}");
+    let cache = home.path().join(".cache/supdoc/code-blocks");
+    assert!(
+        !cache.join("go-path/pkg/mod/cache/download").exists()
+            && !cache.join("go-path/pkg/mod/example.com").exists(),
+        "go vet should download nothing into its module cache"
+    );
+    let left: Vec<_> = std::fs::read_dir(cache.join("go"))
+        .expect("the module directory's parent should exist")
+        .collect();
+    assert!(
+        left.is_empty(),
+        "the block's module should be removed: {left:?}"
+    );
+}
+
+#[test]
+fn vet_the_real_go_leaves_a_block_its_build_constraints_exclude_not_run() {
+    let Some(dir) = real_go("vet_the_real_go_leaves_a_block_its_build_constraints_exclude_not_run")
+    else {
+        return;
+    };
+    let home = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let project = project_vetting("//go:build ignore\n\npackage p");
+
+    let json = check_at_home(&project, &dir, home.path(), 0);
+
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/lint"), "not_run", "{json}");
+    assert!(message_of(&json).contains("build constraints"), "{json}");
+}
+
+#[test]
+fn vet_the_real_go_applies_no_go_mod_go_work_or_go_env_planted_in_the_project_home_or_above_the_cache()
+ {
+    let Some(dir) = real_go(
+        "vet_the_real_go_applies_no_go_mod_go_work_or_go_env_planted_in_the_project_home_or_above_the_cache",
+    ) else {
+        return;
+    };
+    let project = project_vetting("package p\n\nfunc F() int { return 1 }");
+    let home = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let env = "GOFLAGS=-mod=vendor\nGOPROXY=https://127.0.0.1:9\nGOTOOLCHAIN=go9.99.0\nGOWORK=/nowhere/go.work\n";
+    let plant = |base: &Path| {
+        for config in [".config/go", "Library/Application Support/go"] {
+            std::fs::create_dir_all(base.join(config))
+                .expect("the planted config directory should be creatable");
+            std::fs::write(base.join(config).join("env"), env)
+                .expect("the plant should be writable");
+        }
+        std::fs::write(base.join("go.mod"), "module planted\n\ngo 9.99\n")
+            .expect("the plant should be writable");
+        std::fs::write(base.join("go.work"), "go 9.99\n\nuse ./nowhere\n")
+            .expect("the plant should be writable");
+    };
+    let cache = home.path().join(".cache/supdoc/code-blocks");
+    std::fs::create_dir_all(&cache).expect("the cache directory should be creatable");
+    plant(home.path());
+    plant(&home.path().join(".cache"));
+    plant(&home.path().join(".cache/supdoc"));
+    plant(&project.path("."));
+
+    let json = check_at_home(&project, &dir, home.path(), 0);
+
+    assert!(finding_kinds(&json).is_empty(), "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+}
+
+#[test]
+fn vet_a_go_naming_no_release_supdoc_reads_leaves_every_go_block_not_run_with_one_warning() {
+    for printed in [
+        "devel go1.28-abc123",
+        "go1.27rc1",
+        "go1.27.3 X:boringcrypto",
+    ] {
+        let project = project_vetting("package p");
+        project.write(
+            "docs/blocks.md",
+            "# Blocks\n\n```go\npackage p\n```\n\n```go\npackage q\n```\n",
+        );
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        go_stub_of(outside.path(), printed, "exit 3");
+
+        let json = check(&project, outside.path(), 0);
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-not-checked"],
+            "`{printed}`: {json}"
+        );
+        for block in 0..2 {
+            assert_eq!(
+                at(&json, &format!("/data/code_blocks/{block}/lint")),
+                "not_run",
+                "`{printed}`: {json}"
+            );
+        }
+        assert!(
+            message_of(&json).contains(&format!("printed `{printed}`")),
+            "the warning should name what `go env GOVERSION` printed: {json}"
+        );
+    }
+}
+
+#[test]
+fn vet_a_timed_out_run_leaves_nothing_beside_the_module_and_its_work_files_were_private() {
+    let project = project_vetting("package p");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let home = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let seen = outside.path().join("gotmpdir");
+    go_stub(
+        outside.path(),
+        &format!(
+            "cd \"$GOTMPDIR\" && pwd -P > '{seen}'\n\
+             /bin/mkdir \"$GOTMPDIR/go-build1\" && /usr/bin/touch \"$GOTMPDIR/go-build1/x\"\n\
+             /bin/sleep 30",
+            seen = seen.display()
+        ),
+    );
+
+    let _ = project
+        .supdoc_in_with(
+            ".",
+            &["check", "--json", "--code-block-timeout", "500ms"],
+            &[("PATH", outside.path()), ("HOME", home.path())],
+        )
+        .assert_exit(1);
+
+    let modules = home
+        .path()
+        .join(".cache/supdoc/code-blocks/go")
+        .canonicalize()
+        .expect("the modules' directory should exist");
+    let gotmpdir = std::fs::read_to_string(&seen).expect("the stub should record GOTMPDIR");
+    let gotmpdir = Path::new(gotmpdir.trim_end());
+    assert!(
+        gotmpdir.starts_with(&modules) && gotmpdir.ends_with("tmp"),
+        "GOTMPDIR should be the module's own tmp: {}",
+        gotmpdir.display()
+    );
+    let left: Vec<_> = std::fs::read_dir(&modules)
+        .expect("the modules' directory should be readable")
+        .collect();
+    assert!(
+        left.is_empty(),
+        "the timed-out module should be removed: {left:?}"
+    );
+}
+
+#[test]
+fn vet_the_real_go_reads_a_block_at_its_own_release_so_a_newer_feature_passes() {
+    let Some(dir) =
+        real_go("vet_the_real_go_reads_a_block_at_its_own_release_so_a_newer_feature_passes")
+    else {
+        return;
+    };
+    let home = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    // `new` with an expression needs Go 1.26.
+    let project = project_vetting("package p\n\nvar p = new(42)");
+
+    let json = check_at_home(&project, &dir, home.path(), 0);
+
+    assert!(finding_kinds(&json).is_empty(), "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+}
+
+#[test]
+fn vet_the_real_go_fails_a_type_error_quoting_go_s_import_words_rather_than_not_running() {
+    let Some(dir) = real_go(
+        "vet_the_real_go_fails_a_type_error_quoting_go_s_import_words_rather_than_not_running",
+    ) else {
+        return;
+    };
+    let home = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    for words in [
+        "is not in std",
+        "cannot find module providing package x",
+        "build constraints exclude all Go files in .",
+    ] {
+        let project = project_vetting(&format!("package p\n\nvar x int = \"{words}\""));
+
+        let json = check_at_home(&project, &dir, home.path(), 1);
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-lint"],
+            "`{words}`: {json}"
+        );
+        assert_eq!(
+            at(&json, "/findings/0/location/line"),
+            6,
+            "`{words}`: {json}"
+        );
+        assert!(
+            message_of(&json).contains("`go-vet` reports `typecheck`"),
+            "`{words}`: {json}"
+        );
+    }
+}
+
+#[test]
+fn vet_the_real_go_places_a_type_error_after_a_line_directive_naming_any_file_at_the_fence() {
+    let Some(dir) = real_go(
+        "vet_the_real_go_places_a_type_error_after_a_line_directive_naming_any_file_at_the_fence",
+    ) else {
+        return;
+    };
+    let home = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let project = project_vetting("package p\n\n//line /etc/passwd:1\nvar x int = \"s\"");
+
+    let json = check_at_home(&project, &dir, home.path(), 1);
+
+    assert_eq!(finding_kinds(&json), ["code-block-lint"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 3, "{json}");
+    let message = message_of(&json);
+    assert!(message.contains("`go-vet` reports `typecheck`"), "{json}");
+    assert!(
+        !message.contains("vet:") && !message.contains("/etc/passwd"),
+        "the message should not be go's raw stderr: {json}"
+    );
+}
+
+#[test]
+fn vet_the_real_go_places_a_use_of_an_internal_package_at_its_doc_line() {
+    let Some(dir) = real_go("vet_the_real_go_places_a_use_of_an_internal_package_at_its_doc_line")
+    else {
+        return;
+    };
+    let home = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let project = project_vetting("package p\n\nimport _ \"internal/abi\"");
+
+    let json = check_at_home(&project, &dir, home.path(), 1);
+
+    assert_eq!(finding_kinds(&json), ["code-block-lint"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 6, "{json}");
+    assert!(
+        message_of(&json).contains("use of internal package"),
+        "{json}"
+    );
+}
+
+#[test]
+fn vet_the_real_go_fails_a_block_whose_line_directive_names_gos_load_words() {
+    let Some(dir) =
+        real_go("vet_the_real_go_fails_a_block_whose_line_directive_names_gos_load_words")
+    else {
+        return;
+    };
+    let home = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let project = project_vetting(
+        "package p\nimport (\n//line main.go:3:8: cannot find module providing package x:1\n  \
+         \"fmt\" +\n)",
+    );
+
+    let json = check_at_home(&project, &dir, home.path(), 1);
+
+    let kinds = finding_kinds(&json);
+    assert!(
+        kinds == ["code-block-parse"] || kinds == ["code-block-lint"],
+        "the syntax error should fail the block, not leave it unchecked: {json}"
+    );
+    assert_ne!(at(&json, "/data/code_blocks/0/lint"), "not_run", "{json}");
+}
+
+#[test]
+fn vet_the_real_go_fails_a_block_whose_import_path_writes_gos_lines() {
+    let Some(dir) = real_go("vet_the_real_go_fails_a_block_whose_import_path_writes_gos_lines")
+    else {
+        return;
+    };
+    let home = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    for path in [
+        "a\\nmain.go:1:1: cannot find module providing package b",
+        "a\\n\\tmain.go:1:1: cannot find module providing package b",
+        "a\\npackage supdoc.invalid/block: build constraints exclude all Go files in .",
+    ] {
+        let project = project_vetting(&format!("package p\n\nimport _ \"{path}\""));
+
+        let json = check_at_home(&project, &dir, home.path(), 1);
+
+        assert!(
+            finding_kinds(&json)
+                .iter()
+                .all(|kind| kind == "code-block-lint"),
+            "`{path}`: {json}"
+        );
+        assert_eq!(
+            at(&json, "/findings/0/location/line"),
+            6,
+            "`{path}`: {json}"
+        );
+        assert!(
+            message_of(&json).contains("invalid import path"),
+            "`{path}`: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/code_blocks/0/lint"),
+            "ran",
+            "`{path}`: {json}"
+        );
+    }
+}
+
+/// The names go vet's frames hold that no block writes: neither may show in any finding.
+const FRAME_NAMES: [&str; 2] = ["supdocfragment", "supdocFragment"];
+
+/// Asserts no finding of `json` holds a name of go vet's frames.
+fn assert_no_frame_text(json: &serde_json::Value) {
+    let findings = at(json, "/findings").to_string();
+    for name in FRAME_NAMES {
+        assert!(!findings.contains(name), "{name} in {json}");
+    }
+}
+
+#[test]
+fn frame_vets_a_declarations_block_with_no_package_clause_behind_the_frame() {
+    let Some(dir) =
+        real_go("frame_vets_a_declarations_block_with_no_package_clause_behind_the_frame")
+    else {
+        return;
+    };
+    let home = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let wrong = "import \"fmt\"\n\nfunc show() {\n\tfmt.Printf(\"%d\\n\", \"x\")\n}";
+    let right = "import \"fmt\"\n\nfunc show() {\n\tfmt.Printf(\"%d\\n\", 1)\n}";
+    let marked = |body| project_vetting_as("go fragment(declarations)", body);
+
+    let fails = check_at_home(&marked(wrong), &dir, home.path(), 1);
+    let passes = check_at_home(&marked(right), &dir, home.path(), 0);
+    let unmarked = check_at_home(&project_vetting(right), &dir, home.path(), 1);
+
+    assert_eq!(finding_kinds(&fails), ["code-block-lint"], "{fails}");
+    assert_eq!(at(&fails, "/findings/0/location/line"), 7, "{fails}");
+    assert!(
+        message_of(&fails).contains("`go-vet` reports `printf`"),
+        "{fails}"
+    );
+    assert_no_frame_text(&fails);
+    assert!(finding_kinds(&passes).is_empty(), "{passes}");
+    assert_eq!(
+        at(&passes, "/data/summary/code_blocks/passed"),
+        1,
+        "{passes}"
+    );
+    assert_eq!(finding_kinds(&unmarked), ["code-block-lint"], "{unmarked}");
+    assert!(
+        message_of(&unmarked).contains("no `package` clause"),
+        "{unmarked}"
+    );
+}
+
+#[test]
+fn frame_vets_a_statements_block_inside_a_function() {
+    let Some(dir) = real_go("frame_vets_a_statements_block_inside_a_function") else {
+        return;
+    };
+    let home = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let marked = |body| project_vetting_as("go fragment(statements)", body);
+
+    let fails = check_at_home(&marked("x := 1\nx = x"), &dir, home.path(), 1);
+    let passes = check_at_home(&marked("x := 1\n_ = x"), &dir, home.path(), 0);
+
+    assert_eq!(finding_kinds(&fails), ["code-block-lint"], "{fails}");
+    assert_eq!(at(&fails, "/findings/0/location/line"), 5, "{fails}");
+    assert!(
+        message_of(&fails).contains("`go-vet` reports `assign`"),
+        "{fails}"
+    );
+    assert_no_frame_text(&fails);
+    assert!(finding_kinds(&passes).is_empty(), "{passes}");
+}
+
+#[test]
+fn frame_reads_a_block_that_isnt_its_kind_as_one_parse_error_without_gos_message() {
+    let Some(dir) =
+        real_go("frame_reads_a_block_that_isnt_its_kind_as_one_parse_error_without_gos_message")
+    else {
+        return;
+    };
+    let home = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let project = project_vetting_as(
+        "go fragment(declarations)",
+        "package main\n\nfunc main() {}",
+    );
+
+    let json = check_at_home(&project, &dir, home.path(), 1);
+
+    assert_eq!(finding_kinds(&json), ["code-block-parse"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 4, "{json}");
+    assert!(
+        message_of(&json).contains("couldn't parse the block as `declarations`"),
+        "{json}"
+    );
+    assert_no_frame_text(&json);
 }

@@ -722,8 +722,13 @@ mod helps {
         codes
     }
 
-    /// Config keys that look like codes but are not.
-    const NOT_CODES: &[&str] = &["code-block-timeout", "code-block-build-timeout"];
+    /// Config keys that look like codes but are not: supdoc's `[limits]` keys and yamllint's
+    /// `ignore-from-file`.
+    const NOT_CODES: &[&str] = &[
+        "code-block-timeout",
+        "code-block-build-timeout",
+        "ignore-from-file",
+    ];
 
     /// Whether `text` has the shape of a code: `area-name` in kebab-case, whose first word is one
     /// of supdoc's code areas, such as `link-failed` or `cli-usage`.
@@ -752,6 +757,10 @@ mod helps {
         assert!(
             !is_code("code-block-timeout"),
             "`code-block-timeout` is a `[limits]` key"
+        );
+        assert!(
+            !is_code("ignore-from-file"),
+            "`ignore-from-file` is a yamllint config key"
         );
     }
 
@@ -958,7 +967,7 @@ mod helps {
                 config_with(p, "[features.code-blocks]\n[features.code-blocks.rust]\n");
                 p.write(
                     "docs/blocks.md",
-                    "# B\n\n```rust fragment(statements)\nlet x = 1;\n```\n",
+                    "# B\n\n```rust fragment(entries)\nlet x = 1;\n```\n",
                 );
             },
             &["check"],
