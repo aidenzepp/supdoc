@@ -444,7 +444,7 @@ fn vet_runs_offline_in_a_private_module_outside_the_root_and_home_and_places_its
              for dir in \"$here\" \"$HOME\" \"$GOPATH\" \"$GOCACHE\"; do\n\
                case \"$dir\" in '{root}'*|'{home}'|'') exit 5;; esac\n\
              done\n\
-             [ \"$(/bin/cat go.mod)\" = \"$(printf 'module supdoc.invalid/block\\n\\ngo 1.27.3')\" ] || exit 6\n\
+             [ \"$(/bin/cat go.mod)\" = \"$(printf 'module supdoc.invalid/block\\n\\ngo 1.27')\" ] || exit 6\n\
              /usr/bin/grep -qx 'func f() {{}}' main.go || exit 7\n\
              [ \"$(/bin/ls)\" = \"$(printf 'go.mod\\nmain.go\\ntmp')\" ] || exit 8\n\
              printf '{{\"supdoc.invalid/block\": {{\"printf\": [{{\"posn\": \"%s/main.go:3:6\", \"end\": \"%s/main.go:3:8\", \"message\": \"f is in %s\"}}]}}}}' \"$here\" \"$here\" \"$here\"",
@@ -498,8 +498,9 @@ fn vet_leaves_blocks_importing_outside_the_standard_library_not_run_with_one_war
     let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
     go_stub(
         outside.path(),
-        "echo 'main.go:3:8: cannot find module providing package example.com/x: module lookup \
-         disabled by GOPROXY=off' >&2\nexit 1",
+        "path=\"$(/usr/bin/sed -n 's/^import \"\\(.*\\)\"$/\\1/p' main.go)\"\n\
+         echo \"main.go:3:8: cannot find module providing package $path: import lookup disabled \
+         by -mod=readonly\" >&2\nexit 1",
     );
 
     let json = check(&project, outside.path(), 0);
@@ -832,4 +833,66 @@ fn vet_the_real_go_places_a_use_of_an_internal_package_at_its_doc_line() {
         message_of(&json).contains("use of internal package"),
         "{json}"
     );
+}
+
+#[test]
+fn vet_the_real_go_fails_a_block_whose_line_directive_names_gos_load_words() {
+    let Some(dir) =
+        real_go("vet_the_real_go_fails_a_block_whose_line_directive_names_gos_load_words")
+    else {
+        return;
+    };
+    let home = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let project = project_vetting(
+        "package p\nimport (\n//line main.go:3:8: cannot find module providing package x:1\n  \
+         \"fmt\" +\n)",
+    );
+
+    let json = check_at_home(&project, &dir, home.path(), 1);
+
+    let kinds = finding_kinds(&json);
+    assert!(
+        kinds == ["code-block-parse"] || kinds == ["code-block-lint"],
+        "the syntax error should fail the block, not leave it unchecked: {json}"
+    );
+    assert_ne!(at(&json, "/data/code_blocks/0/lint"), "not_run", "{json}");
+}
+
+#[test]
+fn vet_the_real_go_fails_a_block_whose_import_path_writes_gos_lines() {
+    let Some(dir) = real_go("vet_the_real_go_fails_a_block_whose_import_path_writes_gos_lines")
+    else {
+        return;
+    };
+    let home = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    for path in [
+        "a\\nmain.go:1:1: cannot find module providing package b",
+        "a\\n\\tmain.go:1:1: cannot find module providing package b",
+        "a\\npackage supdoc.invalid/block: build constraints exclude all Go files in .",
+    ] {
+        let project = project_vetting(&format!("package p\n\nimport _ \"{path}\""));
+
+        let json = check_at_home(&project, &dir, home.path(), 1);
+
+        assert!(
+            finding_kinds(&json)
+                .iter()
+                .all(|kind| kind == "code-block-lint"),
+            "`{path}`: {json}"
+        );
+        assert_eq!(
+            at(&json, "/findings/0/location/line"),
+            6,
+            "`{path}`: {json}"
+        );
+        assert!(
+            message_of(&json).contains("invalid import path"),
+            "`{path}`: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/code_blocks/0/lint"),
+            "ran",
+            "`{path}`: {json}"
+        );
+    }
 }

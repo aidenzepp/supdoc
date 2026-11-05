@@ -68,7 +68,7 @@ pub(crate) const VET_EXCLUDED: &str =
     "`go vet` checked no file: the block's build constraints leave it out";
 
 /// A Go release as `go env GOVERSION` names it, `go1.<minor>` or `go1.<minor>.<patch>`, held
-/// as the `go` line it is written as: `1.<minor>[.<patch>]`.
+/// without its `go` prefix: `1.<minor>[.<patch>]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GoVersion(String);
 
@@ -83,10 +83,13 @@ impl GoVersion {
         (parts.len() <= 2 && parts.iter().all(decimal)).then(|| Self(format!("1.{numbers}")))
     }
 
-    /// The `go.mod` this release reads a block at: [`MODULE`], and the release as its `go`
-    /// line, so `GOTOOLCHAIN=local` never asks for another toolchain.
+    /// The `go.mod` this release reads a block at: [`MODULE`], and the release's language
+    /// version `1.<minor>` as its `go` line, which every Go reads (Go 1.20 and older refuse a
+    /// patch there) and no local toolchain of this release is older than, so
+    /// `GOTOOLCHAIN=local` never asks for another.
     fn go_mod(&self) -> String {
-        format!("module {MODULE}\n\ngo {}\n", self.0)
+        let language = self.0.splitn(3, '.').take(2).collect::<Vec<_>>().join(".");
+        format!("module {MODULE}\n\ngo {language}\n")
     }
 
     /// The release's digest, which a cached `go vet` result is keyed on, so a block is checked
@@ -344,45 +347,196 @@ fn write_new(path: &Path, text: &str) -> Option<()> {
         .ok()
 }
 
-/// Why a finished `go vet` run says nothing about its block, so its step counts as not run:
-/// [`VET_EXCLUDED`] when `go` printed its line for a module whose one file is left out, or
-/// [`VET_OFFLINE`] when it printed, at the block's own file, that it can't load an import. Only
-/// `go`'s own line shapes count: text quoted in a type checker's `vet: ` line never does. `None`
-/// for any other run.
+/// Why a finished `go vet` run on the block `input` says nothing about it, so its step counts as
+/// not run: [`VET_OFFLINE`] when `go` couldn't load an import the block names, or
+/// [`VET_EXCLUDED`] when the block's build constraints leave its file out. Only when the block's
+/// text can't have written those lines itself: it holds no `//line` or `/*line` directive, its
+/// import declarations read plainly (see [`plain_imports`]), and every line of stderr is one of
+/// `go`'s own load or exclusion lines (see [`go_line`]), each load line naming an import the
+/// block declares. `None` for any other run, which is then judged as a failure.
 #[must_use]
-pub(crate) fn vet_not_run(ran: &Ran) -> Option<&'static str> {
-    if ran.success {
+pub(crate) fn vet_not_run(input: &str, ran: &Ran) -> Option<&'static str> {
+    if ran.success || positions(input) == Positions::Renamed {
         return None;
     }
-    String::from_utf8_lossy(&ran.stderr)
-        .lines()
-        .map(str::trim_start)
-        .find_map(|line| {
-            if line.starts_with(EXCLUDED) {
-                return Some(VET_EXCLUDED);
-            }
-            let (posn, message) = line.split_once(": ")?;
-            let (file, ..) = position(posn)?;
-            (file == MAIN && unloadable(message)).then_some(VET_OFFLINE)
-        })
+    let paths = plain_imports(input)?;
+    let stderr = String::from_utf8_lossy(&ran.stderr);
+    let mut reason = None;
+    for line in stderr.lines().filter(|line| !line.trim().is_empty()) {
+        match go_line(line, &paths)? {
+            GoLine::Load => reason = Some(VET_OFFLINE),
+            GoLine::Excluded => reason = reason.or(Some(VET_EXCLUDED)),
+            GoLine::Note => {}
+        }
+    }
+    reason
 }
 
-/// Whether `message`, at an import in the block's file, is `go` saying it can't load that
-/// import: a module it would have to look up, a path in no module and not in the standard
-/// library, or a relative path.
-fn unloadable(message: &str) -> bool {
-    let not_in_std = message
-        .strip_prefix("package ")
-        .and_then(|rest| rest.split_once(' '))
-        .is_some_and(|(_, rest)| rest.starts_with("is not in std"));
-    let relative = message.starts_with('"')
-        && message.split_once("\" ").is_some_and(|(_, rest)| {
-            rest.starts_with("is relative, but relative import paths are not supported")
-        });
-    message.starts_with("cannot find module providing package ")
-        || message.starts_with("no required module provides package ")
-        || not_in_std
-        || relative
+/// One line of `go`'s own that says it didn't check the block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GoLine {
+    /// It couldn't load an import the block declares.
+    Load,
+    /// The block's build constraints leave its one file out.
+    Excluded,
+    /// It went looking for an import the block declares, or says how to add it.
+    Note,
+}
+
+/// What `line`, a whole line of `go`'s stderr, says about an import in `paths` (the block's) or
+/// the block's file, as `go` itself prints it. `None` for any other line.
+fn go_line(line: &str, paths: &[&str]) -> Option<GoLine> {
+    let declared = |path: &str| paths.contains(&path);
+    if line.strip_prefix(EXCLUDED) == Some(".") {
+        return Some(GoLine::Excluded);
+    }
+    if let Some(path) = line
+        .strip_prefix("go: finding module for package ")
+        .or_else(|| line.strip_prefix("\tgo get "))
+    {
+        return declared(path).then_some(GoLine::Note);
+    }
+    let (posn, message) = line.split_once(": ")?;
+    let (file, ..) = position(posn)?;
+    (file == MAIN && posn.starts_with(MAIN) && unloadable(message).is_some_and(declared))
+        .then_some(GoLine::Load)
+}
+
+/// The text of `rest` before `end`, when `end` is in it.
+fn before<'text>(rest: &'text str, end: &str) -> Option<&'text str> {
+    rest.split_once(end).map(|(path, _)| path)
+}
+
+/// The import `message`, at an import in the block's file, says `go` can't load: a module it
+/// would have to look up, a path in no module and not in the standard library, or a relative
+/// path. `None` for any other message.
+fn unloadable(message: &str) -> Option<&str> {
+    if let Some(rest) = message.strip_prefix("cannot find module providing package ") {
+        return Some(before(rest, ": ").unwrap_or(rest));
+    }
+    if let Some(rest) = message.strip_prefix("no required module provides package ") {
+        return before(rest, ";");
+    }
+    if let Some(rest) = message.strip_prefix("package ") {
+        return before(rest, " is not in std");
+    }
+    if let Some(rest) = message.strip_prefix("local import \"") {
+        return before(rest, "\" in non-local package");
+    }
+    let rest = message.strip_prefix('"')?;
+    before(
+        rest,
+        "\" is relative, but relative import paths are not supported",
+    )
+}
+
+/// The import paths `input`'s import declarations name, each as written between its quotes, when
+/// they read plainly: the package clause, then import declarations, each path an interpreted
+/// string with no escape or control character or a raw string with no control character. `None`
+/// otherwise, and for a comment or literal left open, since a path `go` prints raw could then
+/// write a line of its own.
+fn plain_imports(input: &str) -> Option<Vec<&str>> {
+    let mut tokens = Lexer { rest: input };
+    if tokens.next()? != Token::Word("package") || !matches!(tokens.next()?, Token::Word(_)) {
+        return None;
+    }
+    let mut paths = Vec::new();
+    loop {
+        match tokens.next() {
+            Some(Token::Punct(';')) => {}
+            Some(Token::Word("import")) => match tokens.next()? {
+                Token::Punct('(') => loop {
+                    match tokens.next()? {
+                        Token::Punct(')') => break,
+                        Token::Punct(';') => {}
+                        first => paths.push(spec(first, &mut tokens)?),
+                    }
+                },
+                first => paths.push(spec(first, &mut tokens)?),
+            },
+            Some(Token::Unplain) => return None,
+            _ => return Some(paths),
+        }
+    }
+}
+
+/// The path of the import spec opening with `first`: a path, or a name, `.` or `_` and then a
+/// path. `None` for any other spec.
+fn spec<'text>(first: Token<'text>, tokens: &mut Lexer<'text>) -> Option<&'text str> {
+    match first {
+        Token::Path(path) => Some(path),
+        Token::Word(_) | Token::Punct('.') => match tokens.next()? {
+            Token::Path(path) => Some(path),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// One token of the start of a Go file, as far as its import declarations go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Token<'text> {
+    /// An identifier or keyword.
+    Word(&'text str),
+    /// A string literal that reads plainly, between its quotes.
+    Path(&'text str),
+    /// Any other character.
+    Punct(char),
+    /// A literal or comment left open, or a literal that doesn't read plainly.
+    Unplain,
+}
+
+/// The tokens of a Go file's start, comments skipped.
+struct Lexer<'text> {
+    /// The text not yet read.
+    rest: &'text str,
+}
+
+impl<'text> Lexer<'text> {
+    /// The next token, past whitespace and comments. `None` at the end.
+    fn next(&mut self) -> Option<Token<'text>> {
+        loop {
+            self.rest = self.rest.trim_start();
+            if let Some(comment) = self.rest.strip_prefix("//") {
+                self.rest = comment.split_once('\n').map_or("", |(_, after)| after);
+            } else if let Some(comment) = self.rest.strip_prefix("/*") {
+                let Some((_, after)) = comment.split_once("*/") else {
+                    self.rest = "";
+                    return Some(Token::Unplain);
+                };
+                self.rest = after;
+            } else {
+                break;
+            }
+        }
+        let mut chars = self.rest.chars();
+        let first = chars.next()?;
+        if first == '"' || first == '`' {
+            let Some((path, after)) = chars.as_str().split_once(first) else {
+                self.rest = "";
+                return Some(Token::Unplain);
+            };
+            self.rest = after;
+            let plain =
+                !path.chars().any(char::is_control) && (first == '`' || !path.contains('\\'));
+            return Some(if plain {
+                Token::Path(path)
+            } else {
+                Token::Unplain
+            });
+        }
+        if first.is_alphanumeric() || first == '_' {
+            let end = self
+                .rest
+                .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .unwrap_or(self.rest.len());
+            let (word, after) = self.rest.split_at(end);
+            self.rest = after;
+            return Some(Token::Word(word));
+        }
+        self.rest = chars.as_str();
+        Some(Token::Punct(first))
+    }
 }
 
 /// `go vet`'s verdict on `result`, a run over the block `input`. A block with no `package` clause
@@ -694,14 +848,8 @@ mod tests {
 
     #[test]
     fn a_release_is_go1_minor_or_go1_minor_patch_and_nothing_else() {
-        assert_eq!(
-            GoVersion::parse("go1.27.3").map(|release| release.go_mod()),
-            Some("module supdoc.invalid/block\n\ngo 1.27.3\n".to_owned())
-        );
-        assert_eq!(
-            GoVersion::parse("go1.27").map(|release| release.go_mod()),
-            Some("module supdoc.invalid/block\n\ngo 1.27\n".to_owned())
-        );
+        assert!(GoVersion::parse("go1.27.3").is_some());
+        assert!(GoVersion::parse("go1.27").is_some());
         for refused in [
             "",
             "go1",
@@ -721,6 +869,24 @@ mod tests {
     }
 
     #[test]
+    fn the_go_line_is_the_releases_language_version_without_its_patch() {
+        let go_mod = |text| GoVersion::parse(text).map(|release| release.go_mod());
+
+        for (release, line) in [
+            ("go1.27.3", "1.27"),
+            ("go1.27", "1.27"),
+            ("go1.20.5", "1.20"),
+            ("go1.9", "1.9"),
+        ] {
+            assert_eq!(
+                go_mod(release),
+                Some(format!("module supdoc.invalid/block\n\ngo {line}\n")),
+                "`{release}`"
+            );
+        }
+    }
+
+    #[test]
     fn two_releases_have_different_fingerprints() {
         let fingerprint = |text| GoVersion::parse(text).map(|release| release.fingerprint());
         assert_ne!(fingerprint("go1.27.3"), fingerprint("go1.27.2"));
@@ -736,7 +902,11 @@ mod tests {
             let stderr = format!(
                 "# supdoc.invalid/block\nvet: ./main.go:3:13: cannot use \"{words}\" as int value\n"
             );
-            assert_eq!(vet_not_run(&ran(false, "", &stderr)), None, "`{words}`");
+            assert_eq!(
+                vet_not_run(FILE, &ran(false, "", &stderr)),
+                None,
+                "`{words}`"
+            );
         }
     }
 
@@ -770,14 +940,69 @@ mod tests {
         let excluded =
             "package supdoc.invalid/block: build constraints exclude all Go files in .\n";
 
-        assert_eq!(vet_not_run(&ran(false, "", offline)), Some(VET_OFFLINE));
-        assert_eq!(vet_not_run(&ran(false, "", unknown)), Some(VET_OFFLINE));
-        assert_eq!(vet_not_run(&ran(false, "", excluded)), Some(VET_EXCLUDED));
+        let relative = "main.go:5:2: \"./x\" is relative, but relative import paths are not \
+                        supported in module mode\nmain.go:5:2: local import \"./x\" in non-local \
+                        package\n";
+
         assert_eq!(
-            vet_not_run(&ran(false, "", "main.go:1:1: expected x\n")),
+            vet_not_run(IMPORTS, &ran(false, "", offline)),
+            Some(VET_OFFLINE)
+        );
+        assert_eq!(
+            vet_not_run(IMPORTS, &ran(false, "", unknown)),
+            Some(VET_OFFLINE)
+        );
+        assert_eq!(
+            vet_not_run(IMPORTS, &ran(false, "", relative)),
+            Some(VET_OFFLINE)
+        );
+        assert_eq!(
+            vet_not_run(FILE, &ran(false, "", excluded)),
+            Some(VET_EXCLUDED)
+        );
+        assert_eq!(
+            vet_not_run(IMPORTS, &ran(false, "", "main.go:1:1: expected x\n")),
             None
         );
-        assert_eq!(vet_not_run(&ran(true, "{}", excluded)), None);
+        assert_eq!(vet_not_run(FILE, &ran(true, "{}", excluded)), None);
+    }
+
+    /// A file importing three packages `go` can't load offline.
+    const IMPORTS: &str = "// Package p.\npackage p\n\nimport \"example.com/x\"\n\nimport (\n\t\
+                           bar \"foo/bar\" // a comment\n\t_ `./x`\n)\n\nvar s = \"a\\nb\"\n";
+
+    #[test]
+    fn a_load_line_beside_any_other_error_line_is_a_failure_not_a_reason_not_to_run() {
+        let mixed = "main.go:3:8: invalid import path: a\nmain.go:1:1: cannot find module providing \
+                     package example.com/x\n";
+
+        assert_eq!(vet_not_run(IMPORTS, &ran(false, "", mixed)), None);
+    }
+
+    #[test]
+    fn a_load_line_for_an_import_the_block_doesnt_declare_is_a_failure() {
+        let other = "main.go:3:8: cannot find module providing package example.com/y: x\n";
+
+        assert_eq!(vet_not_run(IMPORTS, &ran(false, "", other)), None);
+    }
+
+    #[test]
+    fn a_block_whose_text_could_write_gos_lines_is_never_not_run() {
+        let load = "main.go:3:8: cannot find module providing package b\n";
+        for input in [
+            "package p\n//line main.go:1\nimport \"b\"\n",
+            "package p\n\nimport _ \"a\\nmain.go:3:8: cannot find module providing package b\"\nimport \"b\"\n",
+            "package p\n\nimport _ `a\nb`\nimport \"b\"\n",
+            "package p\n\nimport \"b\"\nimport \"c",
+            "package p\n\nimport \"b\" /* open",
+            "package p\n\nimport \"b\u{1b}\"\nimport \"b\"\n",
+        ] {
+            assert_eq!(vet_not_run(input, &ran(false, "", load)), None, "{input:?}");
+        }
+        assert_eq!(
+            vet_not_run("package p\n\nimport \"b\"\n", &ran(false, "", load)),
+            Some(VET_OFFLINE)
+        );
     }
 
     #[test]

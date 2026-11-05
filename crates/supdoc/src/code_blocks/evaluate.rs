@@ -2443,7 +2443,7 @@ fn run_linter(
             return Err(not_run);
         }
         match named_by(named, result) {
-            Ok(ran) if let Some(reason) = said_nothing(tool, biome.is_some(), &ran) => {
+            Ok(ran) if let Some(reason) = said_nothing(tool, biome.is_some(), input, &ran) => {
                 Err(reason.into())
             }
             result => Ok(tool.lint_verdict(input, frame.is_some(), result)),
@@ -2500,14 +2500,20 @@ const TOMBI_LINTED_NOTHING: &str = "tombi lint didn't report checking the block"
 
 /// Why `tool`'s finished run `ran` says nothing about its block, so its step counts as not run:
 /// biome lint, given the block as a file (`biome_file`), checked no file; tombi lint didn't
-/// report linting it; or go vet couldn't load it (see [`go::vet_not_run`]). `None` otherwise.
-fn said_nothing(tool: &ToolCartridge, biome_file: bool, ran: &Ran) -> Option<&'static str> {
+/// report linting it; or go vet couldn't load the block `input` (see [`go::vet_not_run`]).
+/// `None` otherwise.
+fn said_nothing(
+    tool: &ToolCartridge,
+    biome_file: bool,
+    input: &str,
+    ran: &Ran,
+) -> Option<&'static str> {
     match tool.name {
         BIOME_LINT if biome_file => {
             biome::linted_nothing(&ran.stdout).then_some(BIOME_LINTED_NOTHING)
         }
         TOMBI_LINT => tombi::linted_nothing(ran).then_some(TOMBI_LINTED_NOTHING),
-        GO_VET => go::vet_not_run(ran),
+        GO_VET => go::vet_not_run(input, ran),
         _ => None,
     }
 }
