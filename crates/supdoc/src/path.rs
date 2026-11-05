@@ -227,11 +227,11 @@ impl Beneath for FixedPath {
 pub(crate) struct Pointer(PathBuf);
 
 impl Pointer {
-    /// Wraps `text` read from a file, or `None` when it is empty or holds a NUL byte, which no
-    /// path can.
+    /// Wraps `text` read from a file, or `None` when it holds a NUL byte, which no path can.
+    /// Empty text is accepted: it resolves to the directory itself, as [`Path::join`] does.
     #[must_use]
     pub(crate) fn new(text: &str) -> Option<Self> {
-        (!text.is_empty() && !text.contains('\0')).then(|| Self(PathBuf::from(text)))
+        (!text.contains('\0')).then(|| Self(PathBuf::from(text)))
     }
 
     /// The pointer resolved from the directory `dir`: `dir` joined with it, or the pointer alone
@@ -474,8 +474,13 @@ mod tests {
     }
 
     #[test]
-    fn a_pointer_refuses_empty_text() {
-        assert_eq!(Pointer::new(""), None, "empty text names no path");
+    fn an_empty_pointer_resolves_to_the_directory_itself() {
+        let pointer =
+            Pointer::new("").expect("empty text should be accepted, as `Path::join` does");
+        assert_eq!(
+            pointer.resolve_from(Path::new("/work/tree")),
+            Path::new("/work/tree")
+        );
     }
 
     #[test]
