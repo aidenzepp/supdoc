@@ -3,6 +3,12 @@
 //! Words are separated by spaces only, as strict CommonMark reads an info string: the language is
 //! everything before the first space. Text inside parentheses stays whole, so
 //! `ignore(needs a server)` is one attribute.
+//!
+//! Attributes are parenthesized, never `key=value`: rustdoc rejects the `=` and then stops treating
+//! the block as Rust, so it loses highlighting and drops out of `cargo test --doc`. A comma doesn't
+//! separate attributes either (`rust,ignore` is one unknown word), and supdoc's warning names the
+//! spaced spelling. GitHub, markdown-it, Docusaurus, mdBook and TypeDoc show only the highlighted
+//! code; Mintlify shows the text after the language as the block's title.
 
 use std::ops::Range;
 

@@ -3,6 +3,11 @@
 //!
 //! A tool is chosen only by its name in [`CARTRIDGES`]; no path or command ever comes from
 //! config.
+//!
+//! In a checkout supdoc doesn't trust, only [`Tier::Static`] tools run, and each gets the block on
+//! standard input, so it opens no other source file. A tool installed inside the checkout is never
+//! used. Each tool still reads its own config files, which can sit outside the project, and its
+//! errors can quote them.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};

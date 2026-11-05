@@ -73,7 +73,8 @@ impl IgnoreFile {
 /// `objects` and `refs` but a corrupt `HEAD` still marks the top here, where git searches further
 /// up. The root and the directories above it are never judged themselves, so a rule above the root
 /// that ignores the root, or a directory on the way to it, hides nothing beneath it, where git
-/// ignores it all.
+/// ignores it all. The index isn't read either, so a rule ignores a file git tracks, which git
+/// never does.
 ///
 /// A `.ignore` or `.gitignore` that is a symlink is not read, whatever it points to, inside the
 /// root or above it, as every directory above lies inside the git work tree. Only inside the root
