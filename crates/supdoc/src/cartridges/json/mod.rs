@@ -3,12 +3,15 @@
 //! Paths follow the key-path model the data cartridges share ([`crate::cartridges::data`]):
 //! `package.json#scripts.build`, `package.json#exports.~1/utils` for the key `./utils`, and
 //! `tsconfig.json#compilerOptions.paths.@app~1*.0`. A key is its string with the JSON escapes
-//! decoded, so `"."` is the key `.`, written `~1`. A top-level array names its elements by
+//! decoded, so `"\u002e"` is the key `.`, written `~1`. A top-level array names its elements by
 //! index from the root: `data.json#0.name`. A top-level scalar names nothing.
 //!
 //! A key's symbol covers its `pair` node (key, `:` and value); an array element's covers its value.
 //! Two keys with the same path, which JSON parsers disagree on, are both kept, so a link to that
-//! path is ambiguous. `.jsonc` files parse with the same grammar, which knows comments.
+//! path is ambiguous. Comments parse too, with the same grammar: `.jsonc` files, and the `.json`
+//! files that are JSONC in all but name, such as `tsconfig.json` and VS Code's `settings.json`.
+//! A placeholder the parser inserts to recover from an error, such as the value a trailing comma
+//! seems to promise, names nothing.
 //!
 //! JSON files are link targets only: the cartridge returns no Markdown regions and the walk never
 //! reads them as sources. The walk keeps its own stack and charges every symbol to the file's
@@ -135,7 +138,8 @@ impl<'tree> Frame<'tree> {
     }
 
     /// The next child after the last one taken that names something here: a `pair` in an
-    /// object, a value anywhere else. `None` once there are none. The cursor moves one sibling at
+    /// object, a value anywhere else, never a placeholder the parser inserted to recover from an
+    /// error. `None` once there are none. The cursor moves one sibling at
     /// a time, so nothing is allocated, and every child passed over is checked against the
     /// deadline.
     ///
@@ -159,11 +163,17 @@ impl<'tree> Frame<'tree> {
                 Children::Members => child.kind() == "pair",
                 Children::Top | Children::Elements { .. } => VALUE_KINDS.contains(&child.kind()),
             };
-            if child.is_named() && wanted {
+            if child.is_named() && is_written(child) && wanted {
                 return Ok(Some(child));
             }
         }
     }
+}
+
+/// Whether `node` is written in the file, rather than a placeholder the parser inserted to recover
+/// from an error, such as the element a trailing comma in `[1, 2, ]` seems to promise.
+fn is_written(node: Node<'_>) -> bool {
+    !node.is_missing() && node.start_byte() < node.end_byte()
 }
 
 /// Makes a symbol for every key and array element of the document rooted at `root`, depth first
@@ -310,7 +320,7 @@ mod tests {
     "./utils": "./dist/utils.js"
   },
   "files": ["dist", "README.md"],
-  "café~.": true
+  "caf\u00e9~\u002e": true
 }
 "#;
 
@@ -419,23 +429,72 @@ mod tests {
 
         let symbol = resolved(&file, &table, "café~0~1");
 
-        assert!(text_of(&file, symbol).starts_with(r#""café~.""#));
+        assert!(text_of(&file, symbol).starts_with(r#""caf\u00e9~\u002e""#));
     }
 
     #[test]
     fn json_escapes_decode_and_a_lone_surrogate_names_nothing() {
         assert_eq!(
-            unquote(r#""a\tb\/c\"\\é😀""#).as_deref(),
-            Some("a\tb/c\"\\é😀")
+            unquote(r#""a\tb\/c\"\\\u00e9\ud83d\ude00""#).as_deref(),
+            Some("a\tb/c\"\\\u{e9}\u{1f600}")
         );
         assert_eq!(unquote(r#""\ud800""#), None, "a lone surrogate");
         assert_eq!(
-            unquote(r#""\ud800A""#),
+            unquote(r#""\ud800\u0041""#),
             None,
             "a high surrogate then a scalar"
         );
         assert_eq!(unquote(r#""\x41""#), None, "JSON has no `\\x` escape");
         assert_eq!(unquote(r#""\u12""#), None, "a short `\\u` escape");
+    }
+
+    #[test]
+    fn keys_written_with_escapes_are_named_by_what_they_decode_to() {
+        let file = parse(r#"{"caf\u00e9": {"\ud83d\ude00": 1}, "a\u002eb": 2}"#);
+
+        assert_eq!(
+            paths(&symbols(&file)),
+            ["caf\u{e9}", "caf\u{e9}.\u{1f600}", "a~1b"]
+        );
+    }
+
+    #[test]
+    fn an_escaped_and_a_literal_spelling_of_one_key_are_ambiguous() {
+        let file = parse("{\"caf\\u00e9\": 1, \"caf\u{e9}\": 2}");
+        let table = symbols(&file);
+
+        let error = table
+            .resolve_text(file.path(), "caf\u{e9}")
+            .expect("the path should parse")
+            .expect_err("two spellings of one key should not resolve to one");
+
+        assert_eq!(error.code(), "resolve-ambiguous");
+    }
+
+    #[test]
+    fn a_trailing_comma_in_an_array_names_no_placeholder_element() {
+        let file = parse(r#"{"b": [1, 2, ]}"#);
+
+        assert_eq!(paths(&symbols(&file)), ["b", "b.0", "b.1"]);
+    }
+
+    #[test]
+    fn a_tsconfig_with_a_trailing_comma_names_only_its_written_elements() {
+        let file = parse(
+            "{\n  // TypeScript allows comments and trailing commas\n  \"compilerOptions\": {\n    \"lib\": [\"es2022\", \"dom\",],\n  },\n}\n",
+        );
+
+        let found = paths(&symbols(&file));
+
+        assert_eq!(
+            found,
+            [
+                "compilerOptions",
+                "compilerOptions.lib",
+                "compilerOptions.lib.0",
+                "compilerOptions.lib.1",
+            ],
+        );
     }
 
     #[test]
