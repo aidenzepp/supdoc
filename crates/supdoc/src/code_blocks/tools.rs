@@ -249,24 +249,35 @@ const RUFF_FRAGMENTS: &[(Kind, Support)] = &[
 ];
 
 /// biome lint's kinds, each read inside a frame that draws no diagnostic of its own under
-/// biome's default rules: statements as an `async` function's body (so `await` reads as
-/// written), members as a class's, and an expression, map entries and a markup element's
-/// children (only in a `tsx` or `jsx` block, see [`biome::holds`]) as the value of a `const`,
-/// so an expression that starts with `{` is an object literal rather than a block. A `<div>`
-/// holds the children, never a `<>`, which biome calls unnecessary around one child. biome lint
-/// prints no code, so the output lines are the input's.
+/// biome's default rules, so no rule is ever left off for a whole block: statements as an
+/// `async` function's body (so `await` reads as written) that awaits a promise of its own (so
+/// `suspicious/useAwait` never fires on the frame), members as a class's that has an instance
+/// method of its own using `this` (so `complexity/noStaticOnlyClass` never fires on the frame),
+/// an expression in parentheses (an assignment included), and map entries and a markup
+/// element's children (only in a `tsx` or `jsx` block, see [`biome::holds`]) as the value of a
+/// `const`, children in a `<div>`, never a `<>`, which biome calls unnecessary around one child.
+/// biome lint prints no code, so the output lines are the input's.
 const BIOME_LINT_FRAGMENTS: &[(Kind, Support)] = &[
     (
         Kind::Statements,
-        framed("async function supdocFragment$() {", "}"),
+        framed(
+            "async function supdocFragment$() { await Promise.resolve();",
+            "}",
+        ),
     ),
-    (Kind::Expression, framed("const supdocFragment$ = (", ");")),
+    (Kind::Expression, framed("(", ")")),
     (Kind::Entries, framed("const supdocFragment$ = {", "};")),
     (
         Kind::Children,
         framed("const supdocFragment$ = <div>", "</div>;"),
     ),
-    (Kind::Members, framed("class SupdocFragment$ {", "}")),
+    (
+        Kind::Members,
+        framed(
+            "class SupdocFragment$ { supdocFrame$() { return this; }",
+            "}",
+        ),
+    ),
 ];
 
 /// A frame of `before` and `after` that a linter reads, which prints nothing back.
@@ -422,6 +433,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 15] = [
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
         fragments: &[],
+        holds: every_tag,
         argv: biome_format_args,
         reader: Reader::Format(biome::parse_error),
     },
@@ -460,6 +472,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 15] = [
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
         fragments: &[],
+        holds: every_tag,
         argv: biome_lint_args,
         reader: Reader::Lint(biome::lint_verdict),
     },
@@ -669,24 +682,6 @@ const BIOME_RELAXED: [&str; 3] = [
     "correctness/noUnusedFunctionParameters",
 ];
 
-/// The rules `biome lint` leaves off for a block of a framed kind, each one whose subject is
-/// the frame itself: the frame's class holds only static members when the block's members are
-/// all static (`complexity/noStaticOnlyClass`), and the frame's `async` function awaits nothing
-/// when the block doesn't (`suspicious/useAwait`, off by default). Only rules in biome's stable
-/// groups: a `--skip` naming a rule a biome version doesn't have fails the run.
-const BIOME_FRAME_RELAXED: &[(Kind, &[&str])] = &[
-    (Kind::Statements, &["suspicious/useAwait"]),
-    (Kind::Members, &["complexity/noStaticOnlyClass"]),
-];
-
-/// The rules [`BIOME_FRAME_RELAXED`] leaves off for a block of `kind`: none for a whole file.
-fn biome_frame_relaxed(kind: Option<Kind>) -> &'static [&'static str] {
-    BIOME_FRAME_RELAXED
-        .iter()
-        .find(|(listed, _)| Some(*listed) == kind)
-        .map_or(&[], |(_, rules)| rules)
-}
-
 /// `biome lint`'s arguments: no colors, JSON diagnostics with none held back, a block biome's
 /// config doesn't include passing rather than failing, the snippet relaxations skipped, the
 /// project's `--config-path`, then the block's file. biome lint reports nothing for a block on
@@ -715,7 +710,6 @@ fn biome_lint_args(invocation: &Invocation<'_>) -> Vec<OsString> {
     .chain(
         BIOME_RELAXED
             .iter()
-            .chain(biome_frame_relaxed(invocation.fragment))
             .map(|rule| OsString::from(format!("--skip={rule}"))),
     )
     .chain(invocation.project.iter().cloned())
@@ -918,8 +912,7 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        CARTRIDGES, Found, Invocation, ToolCartridge, ToolEnv, biome_frame_relaxed, find,
-        search_dirs, under_same_file,
+        CARTRIDGES, Found, Invocation, ToolCartridge, ToolEnv, find, search_dirs, under_same_file,
     };
     use crate::code_blocks::fragment::Kind;
     use crate::config::code_blocks::{Dialect, Edition, Language};
@@ -1503,32 +1496,8 @@ mod tests {
         assert!(under_same_file(&real, &alias));
     }
 
-    /// The rules `tool` leaves off for a block of `kind` because of its frame.
-    fn frame_relaxed(tool: &ToolCartridge, kind: Kind) -> &'static [&'static str] {
-        if tool.name == "biome-lint" {
-            biome_frame_relaxed(Some(kind))
-        } else {
-            &[]
-        }
-    }
-
-    /// The rule names (`group/rule`) a line of help names.
-    fn rules_named(line: &str) -> Vec<&str> {
-        line.split_whitespace()
-            .map(|word| word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '/'))
-            .filter(|word| {
-                word.split_once('/').is_some_and(|(group, rule)| {
-                    !group.is_empty()
-                        && !rule.is_empty()
-                        && group.chars().all(|c| c.is_ascii_lowercase())
-                        && rule.chars().all(|c| c.is_ascii_alphanumeric())
-                })
-            })
-            .collect()
-    }
-
     #[test]
-    fn check_help_lists_exactly_the_frames_the_tools_read_and_their_relaxed_rules() {
+    fn check_help_lists_exactly_the_frames_the_tools_read() {
         let rows: Vec<(&str, &str, &str)> = crate::cli::help::CHECK_LONG_ABOUT
             .lines()
             .filter_map(|line| {
@@ -1566,13 +1535,9 @@ mod tests {
             let frame = frames.iter().find(|(tool, kind, shown)| {
                 tool.name == *name && kind.name() == *listed && line.contains(shown.as_str())
             });
-            let Some((tool, kind, _)) = frame else {
-                panic!("`check --help` lists a frame no tool reads: {line}");
-            };
-            assert_eq!(
-                rules_named(line),
-                frame_relaxed(tool, *kind),
-                "`check --help` should name exactly the rules {name} leaves off for {listed}: {line}"
+            assert!(
+                frame.is_some(),
+                "`check --help` lists a frame no tool reads: {line}"
             );
         }
     }
@@ -1590,9 +1555,21 @@ mod tests {
     }
 
     #[test]
-    fn biome_lint_leaves_off_a_frame_rule_only_for_its_kind() {
-        let args_for = |fragment| {
-            cartridge("biome-lint").args(&Invocation {
+    fn biome_lint_leaves_no_rule_off_for_a_framed_block() {
+        let plain = cartridge("biome-lint").args(&Invocation {
+            doc: Path::new("/p/docs/a.md"),
+            tag: "ts",
+            index: 1,
+            edition: Edition::E2024,
+            dialect: Dialect::Bash,
+            project: &[],
+            emit: None,
+            externs: &[],
+            fragment: None,
+        });
+
+        for kind in Kind::ALL {
+            let framed = cartridge("biome-lint").args(&Invocation {
                 doc: Path::new("/p/docs/a.md"),
                 tag: "ts",
                 index: 1,
@@ -1601,13 +1578,9 @@ mod tests {
                 project: &[],
                 emit: None,
                 externs: &[],
-                fragment,
-            })
-        };
-        let skip = OsString::from("--skip=complexity/noStaticOnlyClass");
-
-        assert!(args_for(Some(Kind::Members)).contains(&skip));
-        assert!(!args_for(Some(Kind::Statements)).contains(&skip));
-        assert!(!args_for(None).contains(&skip));
+                fragment: Some(kind),
+            });
+            assert_eq!(framed, plain, "{}", kind.name());
+        }
     }
 }

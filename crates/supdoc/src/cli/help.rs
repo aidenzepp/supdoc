@@ -118,16 +118,17 @@ doesn't define fails code-block-missing-name, once per name.
 A tool reads some fragment kinds only inside a frame: fixed lines before and after the block, \
 the same for every block of that kind and never chosen from its content. No finding shows a \
 frame line and a fix never writes one. A block the tool can't parse inside its frame fails \
-code-block-parse \"couldn't parse the block as KIND\", once, never with the tool's own message; \
-any other finding on a frame line is reported at the block's attributes. A block that closes \
+code-block-parse \"couldn't parse the block as KIND\" and nothing else, never with the tool's \
+own message. In a block that parsed, a finding on a frame line is reported at the block's \
+attributes, and no rule is left off. A block that closes \
 the frame itself (a lone } then more code) is checked as written. The frames, each block \
-standing where the ... is, and the rules each leaves off because the frame is their subject:
+standing where the ... is:
 
-  biome-lint    statements    async function supdocFragment$() { ... }   (suspicious/useAwait off)
-  biome-lint    expression    const supdocFragment$ = ( ... );
+  biome-lint    statements    async function supdocFragment$() { await Promise.resolve(); ... }
+  biome-lint    expression    ( ... )
   biome-lint    entries       const supdocFragment$ = { ... };
   biome-lint    children      const supdocFragment$ = <div> ... </div>;   (tsx and jsx blocks only)
-  biome-lint    members       class SupdocFragment$ { ... }   (complexity/noStaticOnlyClass off)
+  biome-lint    members       class SupdocFragment$ { supdocFrame$() { return this; } ... }
 
 A project that turns on rules about the frame's own code, such as biome's opt-in nursery rules \
 wanting an explicit type or a function expression, gets their findings at the block's \

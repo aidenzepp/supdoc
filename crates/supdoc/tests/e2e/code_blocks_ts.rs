@@ -873,27 +873,31 @@ fn lint_the_real_biome_names_the_projects_config_in_a_config_error() {
     );
 }
 
-/// Every line biome lint's frames put around a block.
-const FRAME_LINES: [&str; 8] = [
-    "async function supdocFragment$() {",
-    "const supdocFragment$ = (",
-    ");",
+/// Every line of two or more characters biome lint's frames put around a block.
+const FRAME_LINES: [&str; 7] = [
+    "async function supdocFragment$() { await Promise.resolve();",
     "const supdocFragment$ = {",
     "};",
     "const supdocFragment$ = <div>",
     "</div>;",
-    "class SupdocFragment$ {",
+    "class SupdocFragment$ { supdocFrame$() { return this; }",
+    "Promise.resolve()",
 ];
 
-/// Every name only a frame introduces.
-const FRAME_NAMES: [&str; 2] = ["supdocFragment$", "SupdocFragment$"];
+/// The expression frame's lines, each one character.
+const FRAME_CHARS: [&str; 2] = ["(", ")"];
 
-/// Asserts that no finding in `json` shows frame text in its message, help or location: no frame
-/// line or frame-only name, and no frame token quoted alone, as a tool quotes what it expected
+/// Every name only a frame introduces.
+const FRAME_NAMES: [&str; 3] = ["supdocFragment$", "SupdocFragment$", "supdocFrame$"];
+
+/// Asserts that no finding in `json` shows frame text in its message, help or location: no
+/// frame line of two or more characters or frame-only name anywhere, no line that is exactly a
+/// one-character frame line, and no frame token quoted alone, as a tool quotes what it expected
 /// (`` `)` ``, `` `;` ``, `` `async` ``).
 fn assert_no_frame_text(json: &serde_json::Value) {
     let tokens: Vec<String> = FRAME_LINES
         .iter()
+        .chain(&FRAME_CHARS)
         .chain(["}"].iter())
         .flat_map(|line| {
             line.split_whitespace()
@@ -916,6 +920,10 @@ fn assert_no_frame_text(json: &serde_json::Value) {
             for frame in FRAME_LINES.iter().chain(&FRAME_NAMES) {
                 assert!(!text.contains(frame), "{field} shows `{frame}`: {finding}");
             }
+            assert!(
+                !text.lines().any(|line| FRAME_CHARS.contains(&line.trim())),
+                "{field} shows the expression frame: {finding}"
+            );
             for token in &tokens {
                 assert!(
                     !text.contains(token.as_str()),
@@ -1113,6 +1121,7 @@ fn frame_lint_statements_members_and_expressions_pass_as_written() {
         ("ts", "members", "static create(): number {\n\treturn 1;\n}"),
         ("ts", "expression", "{ type: \"spring\", stiffness: 100 }"),
         ("js", "expression", "items.map((item) => item.id)"),
+        ("ts", "expression", "a = 1"),
     ] {
         let Some(json) = frame_check(test, tag, &format!("fragment({kind}) {LINT_ONLY}"), body, 0)
         else {
@@ -1199,6 +1208,120 @@ fn frame_lint_a_rule_on_a_frame_line_is_reported_at_the_attributes_in_supdocs_wo
         at(&json, "/findings/0/message"),
         "`biome-lint` reports `nursery/useExplicitType` where the block meets the frame supdoc \
          adds around a children fragment",
+        "{json}"
+    );
+}
+
+/// A project biome config that turns `suspicious/useAwait` on.
+const USE_AWAIT_ON: &str = "{\"linter\":{\"rules\":{\"suspicious\":{\"useAwait\":\"on\"}}}}";
+
+#[test]
+fn frame_lint_the_authors_nested_static_only_class_is_flagged_at_its_line() {
+    let Some(json) = frame_check(
+        "frame_lint_the_authors_nested_static_only_class_is_flagged_at_its_line",
+        "ts",
+        &format!("fragment(members) {LINT_ONLY}"),
+        "static Inner = class {\n\tstatic x = 1;\n};",
+        1,
+    ) else {
+        return;
+    };
+
+    assert_eq!(
+        kinds_and_lines(&json),
+        [("code-block-lint".to_owned(), 4)],
+        "{json}"
+    );
+    assert!(
+        at(&json, "/findings/0")
+            .to_string()
+            .contains("noStaticOnlyClass"),
+        "{json}"
+    );
+}
+
+#[test]
+fn frame_lint_use_await_flags_the_authors_function_never_the_frame() {
+    let test = "frame_lint_use_await_flags_the_authors_function_never_the_frame";
+    let info = format!("fragment(statements) {LINT_ONLY}");
+    let Some(flagged) = frame_check_with(
+        test,
+        Some(USE_AWAIT_ON),
+        (
+            "ts",
+            &info,
+            "async function load() {\n\treturn 1;\n}\nreturn load;",
+        ),
+        1,
+    ) else {
+        return;
+    };
+    assert_eq!(
+        kinds_and_lines(&flagged),
+        [("code-block-lint".to_owned(), 4)],
+        "{flagged}"
+    );
+    assert!(
+        at(&flagged, "/findings/0").to_string().contains("useAwait"),
+        "{flagged}"
+    );
+
+    let quiet = frame_check_with(
+        test,
+        Some(USE_AWAIT_ON),
+        ("ts", &info, "const total = 1;\nreturn total;"),
+        0,
+    )
+    .expect("biome was on PATH a moment ago");
+    assert_passed(&quiet, "statements with no await of its own");
+}
+
+#[test]
+fn frame_lint_a_run_that_didnt_parse_as_its_kind_gives_only_the_parse_error() {
+    let test = "frame_lint_a_run_that_didnt_parse_as_its_kind_gives_only_the_parse_error";
+    for (tag, kind, body, line) in [
+        ("ts", "members", "constructor() {\n\tsuper();\n}", 5),
+        ("tsx", "children", "<a href=\"x\">a</a>\n<b>", 5),
+        ("ts", "members", "x = 1;\nfoo( {", 3),
+    ] {
+        let Some(json) = frame_check(test, tag, &format!("fragment({kind}) {LINT_ONLY}"), body, 1)
+        else {
+            return;
+        };
+        assert_eq!(
+            kinds_and_lines(&json),
+            [("code-block-parse".to_owned(), line)],
+            "{kind} {body:?}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/findings/0/message"),
+            format!("`biome-lint` couldn't parse the block as `{kind}`").as_str(),
+            "{json}"
+        );
+    }
+}
+
+#[test]
+fn frame_lint_an_unframed_syntax_rule_is_a_parse_error_at_its_line() {
+    let Some(json) = frame_check(
+        "frame_lint_an_unframed_syntax_rule_is_a_parse_error_at_its_line",
+        "ts",
+        LINT_ONLY,
+        "class A {\n\t#a = 1;\n\t#a = 2;\n}",
+        1,
+    ) else {
+        return;
+    };
+
+    assert_eq!(
+        kinds_and_lines(&json),
+        [("code-block-parse".to_owned(), 6)],
+        "{json}"
+    );
+    assert!(
+        at(&json, "/findings/0/message")
+            .as_str()
+            .is_some_and(|message| message.contains("#a")),
         "{json}"
     );
 }
