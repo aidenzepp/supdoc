@@ -46,7 +46,7 @@ use super::states::{
 };
 use super::tombi;
 use super::toolchain::{self, Refusal, Toolchain};
-use super::tools::{self, Found, Invocation, Step, Tier, ToolCartridge, ToolEnv, find};
+use super::tools::{self, Found, Held, Invocation, Step, Tier, ToolCartridge, ToolEnv, find};
 use super::uses::{self, UseState, Written};
 use super::yaml;
 
@@ -329,7 +329,7 @@ impl Evaluation {
             let rust = (tool.language == Language::Rust)
                 .then(|| &*rust_setup.get_or_insert_with(|| RustSetup::read(env, root, timeout)));
             if let Some(rust) = rust {
-                let compiles = linter.is_some_and(|linter| linter.tier == Tier::Project);
+                let compiles = linter.is_some_and(|linter| linter.name == "clippy");
                 let refused =
                     rust_refusal(record, rust, compiles, &mut toolchain_warned, &mut slots);
                 if let Some((refused, named)) = refused {
@@ -361,9 +361,7 @@ impl Evaluation {
             if format.is_some() || lint.is_some() {
                 let ran = [format.is_some(), lint.is_some()];
                 refuse_unfound(&mut record.steps, [record.tool, linter], ran, &looked_up);
-                let compiles = lint
-                    .as_ref()
-                    .is_some_and(|run| run.tool.tier == Tier::Project);
+                let compiles = lint.as_ref().is_some_and(|run| run.tool.name == "clippy");
                 let unbuilt = rust.filter(|_| compiles).and_then(|rust| {
                     against
                         .get_or_insert_with(|| {
@@ -898,23 +896,14 @@ fn parses(format: Option<&FormatRan>) -> bool {
     )
 }
 
-/// Why a step whose cartridge is above the effective tier doesn't run when the operator hasn't
-/// granted trust: clippy compiles the block, so it belongs to the project tier.
-pub(super) const CLIPPY_NEEDS_TRUST: &str =
-    "clippy runs only in the project tier, which needs `supdoc trust`";
-
-/// Why such a step doesn't run when `SUPDOC_TRUST=0` turned trust off for the run.
-pub(super) const CLIPPY_TRUST_OFF: &str =
-    "clippy runs only in the project tier, and `SUPDOC_TRUST=0` turns trust off for this run";
-
 /// Why such a step doesn't run when the project itself lowered the tier.
 const TIER_LOWERED: &str = "`tier = \"static\"` in `[features.code-blocks]`";
 
 /// `tool` as the tiers allow it: `None` for a cartridge above the effective tier, the lower of
 /// the tier `granted` allows (the project tier only for [`Grant::Trusted`]) and `ceiling` (the
 /// project's `tier`). Its `step` then doesn't run, with [`TIER_LOWERED`] as its reason when the
-/// ceiling holds it, [`CLIPPY_TRUST_OFF`] when `SUPDOC_TRUST=0` turned trust off, else
-/// [`CLIPPY_NEEDS_TRUST`]. A project-tier cartridge runs only in a trusted checkout whose
+/// ceiling holds it, the tool's own [`Held::trust_off`] when `SUPDOC_TRUST=0` turned trust off,
+/// else its [`Held::needs_trust`]. A project-tier cartridge runs only in a trusted checkout whose
 /// ceiling allows it. The gate sits where the tool is chosen, before any scan, cache key or spawn.
 fn tier_gate(
     tool: Option<&'static ToolCartridge>,
@@ -929,53 +918,77 @@ fn tier_gate(
         Tier::Static
     };
     let effective = allowed.min(ceiling);
-    if found.tier <= effective {
+    if found.tier() <= effective {
         return tool;
     }
-    let reason = if found.tier > ceiling {
-        TIER_LOWERED
-    } else if granted == Grant::TurnedOff {
-        CLIPPY_TRUST_OFF
-    } else {
-        CLIPPY_NEEDS_TRUST
+    let reason = match found.held() {
+        _ if found.tier() > ceiling => TIER_LOWERED,
+        Some(held) if granted == Grant::TurnedOff => held.trust_off,
+        Some(held) => held.needs_trust,
+        // Trust never holds a static-tier tool, so it got past the tier check above.
+        None => return tool,
     };
     *step = StepState::Unrunnable { reason };
     None
 }
 
 /// The run's one `code-block-not-trusted` warning, at the first of `records` with a step held
-/// because the operator hasn't granted trust. When `SUPDOC_TRUST=0` turned trust off, it says so
-/// and how to undo that, since `supdoc trust` can't help then. `None` when no step was held for
-/// want of trust.
+/// because the operator hasn't granted trust. It names every held tool in the order first seen
+/// (see [`trust_warning`]). `None` when no step was held for want of trust.
 fn not_trusted(records: &[BlockRecord]) -> Option<Finding> {
-    let (at, reason) = records
+    let mut at = None;
+    let mut held: Vec<&'static Held> = Vec::new();
+    let mut turned_off = false;
+    for record in records {
+        for hold in record.steps.held_for_trust() {
+            at = at.or(Some(&record.at));
+            turned_off |= hold.turned_off;
+            if !held.contains(&hold.held) {
+                held.push(hold.held);
+            }
+        }
+    }
+    Some(trust_warning(&held, turned_off).with_location(at?.clone()))
+}
+
+/// The `code-block-not-trusted` warning for the tools `held` back, in order, each saying what
+/// didn't run and why. When `turned_off`, it says `SUPDOC_TRUST=0` held them and how to undo
+/// that, since `supdoc trust` can't help then. Its help ends with the settings that stop asking:
+/// `tier = "static"`, or each held tool's own off setting.
+fn trust_warning(held: &[&Held], turned_off: bool) -> Finding {
+    let didnt_run = held
         .iter()
-        .find_map(|record| Some((&record.at, record.steps.held_for_trust()?)))?;
-    let finding = if reason == CLIPPY_TRUST_OFF {
+        .map(|held| held.didnt_run)
+        .collect::<Vec<_>>()
+        .join("; ");
+    let off = held
+        .iter()
+        .map(|held| held.off)
+        .collect::<Vec<_>>()
+        .join(" and ");
+    let stop_asking =
+        format!("to stop asking, set `tier = \"static\"` in `[features.code-blocks]` or {off}");
+    if turned_off {
         Finding::new(
             NOT_TRUSTED,
             Severity::Warning,
-            "clippy didn't run on Rust blocks: it compiles them, and `SUPDOC_TRUST=0` turns \
-             trust off for this run",
+            format!("{didnt_run}, and `SUPDOC_TRUST=0` turns trust off for this run"),
         )
-        .with_help(
+        .with_help(format!(
             "unset `SUPDOC_TRUST` to let `supdoc trust` decide, or set it to `1` to trust this \
-             run; to stop asking, set `tier = \"static\"` in `[features.code-blocks]` or \
-             `lint = \"off\"` in `[features.code-blocks.rust.clippy]`",
-        )
+             run; {stop_asking}"
+        ))
     } else {
         Finding::new(
             NOT_TRUSTED,
             Severity::Warning,
-            "clippy didn't run on Rust blocks: it compiles them, and this checkout isn't trusted",
+            format!("{didnt_run}, and this checkout isn't trusted"),
         )
-        .with_help(
+        .with_help(format!(
             "run `supdoc trust` to trust this checkout, or set `SUPDOC_TRUST=1` for one run (as \
-             in CI); to stop asking, set `tier = \"static\"` in `[features.code-blocks]` or \
-             `lint = \"off\"` in `[features.code-blocks.rust.clippy]`",
-        )
-    };
-    Some(finding.with_location(at.clone()))
+             in CI); {stop_asking}"
+        ))
+    }
 }
 
 /// What the format step needs for `block`, its doc read through `doc` with `read`: `None` unless
@@ -3924,7 +3937,8 @@ mod tests {
     use super::{
         BlockRecord, Evaluation, Linked, LintRan, MANIFEST_AMBIGUOUS, MANIFEST_OUTSIDE,
         MANIFEST_UNREADABLE, MAX_WORKERS, OUTSIDE_WORKSPACE, PROJECT_UNBUILT, Pending, RustSetup,
-        Session, in_parallel, refused_build, run_clippy, rust_refusal, unresolved_warning,
+        Session, TIER_LOWERED, in_parallel, not_trusted, refused_build, run_clippy, rust_refusal,
+        tier_gate, trust_warning, unresolved_warning,
     };
     use crate::cartridges::markdown::cartridge::cartridge as markdown;
     use crate::code_blocks::block::blocks_in;
@@ -3934,11 +3948,144 @@ mod tests {
     use crate::code_blocks::states::{BlockState, NotChecked, Steps};
     use crate::code_blocks::states::{Failure, StepState};
     use crate::code_blocks::toolchain::Refusal;
-    use crate::code_blocks::tools::{CARTRIDGES, Found, Invocation, ToolCartridge, ToolEnv, find};
+    use crate::code_blocks::tools::{
+        CARTRIDGES, Found, Held, Invocation, Tier, ToolCartridge, ToolEnv, find,
+    };
     use crate::config::code_blocks::{Dialect, Edition};
     use crate::finding::Location;
     use crate::path::AbsolutePath;
     use crate::read::cartridge::SourceFile;
+    use crate::trust::Grant;
+
+    /// clippy's trust words.
+    fn clippy_held() -> &'static Held {
+        clippy().held().expect("clippy is a project-tier cartridge")
+    }
+
+    /// A second project-tier tool's trust words, as one on Python blocks would write them.
+    const PYLINT_HELD: Held = Held {
+        needs_trust: "pylint runs only in the project tier, which needs `supdoc trust`",
+        trust_off: "pylint runs only in the project tier, and `SUPDOC_TRUST=0` turns trust off \
+                    for this run",
+        short: "pylint needs trust",
+        didnt_run: "pylint didn't run on Python blocks: it imports their modules",
+        off: "`lint = \"off\"` in `[features.code-blocks.python.pylint]`",
+    };
+
+    #[test]
+    fn tier_gate_holds_a_project_tool_with_its_own_reasons() {
+        let held = clippy_held();
+        let gated = |granted, ceiling| {
+            let mut step = StepState::NotRun;
+            let tool = tier_gate(Some(clippy()), &mut step, granted, ceiling);
+            (tool.map(|tool| tool.name), step)
+        };
+        let held_with = |reason| (None, StepState::Unrunnable { reason });
+
+        assert_eq!(
+            [
+                gated(Grant::Untrusted, Tier::Project),
+                gated(Grant::TurnedOff, Tier::Project),
+                gated(Grant::Trusted, Tier::Static),
+                gated(Grant::Trusted, Tier::Project),
+            ],
+            [
+                held_with(held.needs_trust),
+                held_with(held.trust_off),
+                held_with(TIER_LOWERED),
+                (Some("clippy"), StepState::NotRun),
+            ],
+            "clippy should be held with its own reason for each grant, by the project's tier, \
+             or run when trusted"
+        );
+    }
+
+    #[test]
+    fn tier_warning_with_clippy_alone_keeps_its_words() {
+        let words = |turned_off| {
+            let warning = trust_warning(&[clippy_held()], turned_off);
+            (warning.message, warning.help.unwrap_or_default())
+        };
+
+        assert_eq!(
+            [words(false), words(true)],
+            [
+                (
+                    "clippy didn't run on Rust blocks: it compiles them, and this checkout isn't \
+                     trusted"
+                        .to_owned(),
+                    "run `supdoc trust` to trust this checkout, or set `SUPDOC_TRUST=1` for one \
+                     run (as in CI); to stop asking, set `tier = \"static\"` in \
+                     `[features.code-blocks]` or `lint = \"off\"` in \
+                     `[features.code-blocks.rust.clippy]`"
+                        .to_owned(),
+                ),
+                (
+                    "clippy didn't run on Rust blocks: it compiles them, and `SUPDOC_TRUST=0` \
+                     turns trust off for this run"
+                        .to_owned(),
+                    "unset `SUPDOC_TRUST` to let `supdoc trust` decide, or set it to `1` to trust \
+                     this run; to stop asking, set `tier = \"static\"` in \
+                     `[features.code-blocks]` or `lint = \"off\"` in \
+                     `[features.code-blocks.rust.clippy]`"
+                        .to_owned(),
+                ),
+            ],
+            "with clippy the only held tool, the warning should read as it always has"
+        );
+    }
+
+    #[test]
+    fn tier_warning_names_every_held_tool_in_order_with_its_off_setting() {
+        let warning = trust_warning(&[&PYLINT_HELD, clippy_held()], false);
+
+        assert_eq!(
+            (warning.message, warning.help.unwrap_or_default()),
+            (
+                "pylint didn't run on Python blocks: it imports their modules; clippy didn't run \
+                 on Rust blocks: it compiles them, and this checkout isn't trusted"
+                    .to_owned(),
+                "run `supdoc trust` to trust this checkout, or set `SUPDOC_TRUST=1` for one run \
+                 (as in CI); to stop asking, set `tier = \"static\"` in `[features.code-blocks]` \
+                 or `lint = \"off\"` in `[features.code-blocks.python.pylint]` and \
+                 `lint = \"off\"` in `[features.code-blocks.rust.clippy]`"
+                    .to_owned(),
+            ),
+            "each held tool should say what didn't run, first seen first, and offer its own off \
+             setting"
+        );
+    }
+
+    #[test]
+    fn tier_warning_comes_once_at_the_first_held_block() {
+        let held = clippy_held();
+        let mut records = rust_records(
+            Path::new("/project"),
+            "```rust\nlet a = 1;\n```\n\n```rust\nlet b = 2;\n```\n\n```rust\nlet c = 3;\n```\n",
+        );
+        for record in records.iter_mut().skip(1) {
+            record.steps.lint = StepState::Unrunnable {
+                reason: held.needs_trust,
+            };
+        }
+        let second = records
+            .get(1)
+            .map(|record| record.at.clone())
+            .expect("the doc holds three blocks");
+
+        let warning = not_trusted(&records).expect("two steps were held for trust");
+
+        assert_eq!(
+            (warning.location, warning.message),
+            (
+                Some(second),
+                "clippy didn't run on Rust blocks: it compiles them, and this checkout isn't \
+                 trusted"
+                    .to_owned()
+            ),
+            "the one warning should sit at the first held block and name clippy once"
+        );
+    }
 
     #[test]
     fn in_parallel_keeps_the_items_order_when_later_items_finish_first() {
