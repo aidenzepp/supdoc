@@ -1,5 +1,5 @@
-//! biome: the extension a tag selects, its syntax-error report, and the project config supdoc
-//! finds for it.
+//! biome: the extension a tag selects, its syntax-error report, its lint diagnostics, the
+//! project config supdoc finds for it, and the private file a block is linted from.
 //!
 //! biome finds its config from the directory it runs in, never from the block's virtual path,
 //! and supdoc runs it from an empty directory of its own. So supdoc walks up from the doc inside
@@ -11,11 +11,13 @@
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::Value;
 
 use super::format::ParseError;
-use super::runner;
+use super::lint::{self, Diagnostic};
+use super::runner::{self, Failure, Ran};
 use super::tools::ToolEnv;
 
 /// The config names biome looks for in a directory, in its own order.
@@ -63,6 +65,183 @@ pub(crate) fn parse_error(stderr: &str) -> Option<ParseError> {
     })
 }
 
+/// One diagnostic of `biome lint --reporter=json`.
+#[derive(serde::Deserialize)]
+struct BiomeDiagnostic {
+    /// Its rule, as `lint/<group>/<rule>`, or `parse` for a syntax error.
+    category: String,
+    /// What biome says.
+    message: String,
+    /// Where it starts.
+    location: BiomeLocation,
+}
+
+/// A diagnostic's place in biome's JSON.
+#[derive(serde::Deserialize)]
+struct BiomeLocation {
+    /// Its first character.
+    start: BiomePosition,
+}
+
+/// A 1-based line and column in biome's JSON.
+#[derive(serde::Deserialize)]
+struct BiomePosition {
+    /// The line.
+    line: usize,
+    /// The column.
+    column: usize,
+}
+
+/// The report `biome lint --reporter=json` prints on stdout.
+#[derive(serde::Deserialize)]
+struct BiomeReport {
+    /// Every diagnostic, none held back under `--max-diagnostics=none`.
+    diagnostics: Vec<BiomeDiagnostic>,
+}
+
+/// The diagnostics in `biome lint --reporter=json`'s `stdout`, each named by its rule without
+/// the `lint/` prefix (`suspicious/noDebugger`). `None` when it isn't biome's JSON report.
+#[must_use]
+pub(crate) fn diagnostics(stdout: &[u8]) -> Option<Vec<Diagnostic>> {
+    let report: BiomeReport = serde_json::from_slice(stdout).ok()?;
+    Some(
+        report
+            .diagnostics
+            .into_iter()
+            .map(|diagnostic| Diagnostic {
+                line: diagnostic.location.start.line,
+                column: diagnostic.location.start.column,
+                rule: diagnostic
+                    .category
+                    .strip_prefix("lint/")
+                    .map_or_else(|| diagnostic.category.clone(), str::to_owned),
+                message: diagnostic.message,
+            })
+            .collect(),
+    )
+}
+
+/// Judges a `biome lint` run as [`lint::judge`] does, reading its stdout as biome's JSON report.
+/// `input` isn't needed: biome counts columns in characters.
+#[must_use]
+pub(crate) fn lint_verdict(_input: &str, result: Result<Ran, Failure>) -> lint::Verdict {
+    lint::judge(result, diagnostics)
+}
+
+/// One `biome lint` run's private directory, removed when this is dropped: a copy of the config
+/// biome is given and the block written as a file, since biome lint reports nothing for a block
+/// on stdin. The block sits where its virtual path sits under the config's directory, so the
+/// config's relative globs match it as they would the doc's own blocks.
+#[derive(Debug)]
+pub(crate) struct LintFile {
+    /// The directory, owned by this run alone.
+    dir: PathBuf,
+    /// The block's file in it.
+    file: PathBuf,
+}
+
+/// How many [`LintFile`] directories this process has tried to create, which makes each name
+/// unique.
+static LINT_RUNS: AtomicUsize = AtomicUsize::new(0);
+
+impl LintFile {
+    /// A new directory `biome-lint/<pid>-<n>` beside `neutral`, the tool's working directory,
+    /// mode 0700 inside a 0700 `biome-lint` directory, holding `biome.json` (a copy of the
+    /// config `given` names) and `input` as the `index`th block of `doc`, its extension picked
+    /// by `tag`. Every file is created new, mode 0600. `None` when `neutral` is `/`, `given`
+    /// names no config, or anything can't be created.
+    ///
+    /// Effect: reads the private config, creates directories and writes two files.
+    #[must_use]
+    pub(crate) fn create(
+        neutral: &Path,
+        given: &Given,
+        (doc, index, tag): (&Path, usize, &str),
+        input: &str,
+    ) -> Option<Self> {
+        use std::os::unix::fs::DirBuilderExt as _;
+
+        if neutral == Path::new("/") {
+            return None;
+        }
+        let config = given.config.as_deref()?;
+        let strict = fs::read_to_string(config).ok()?;
+        let base = private_dir(&neutral.parent()?.join("biome-lint"))?;
+        let dir = (0..16).find_map(|_| {
+            let count = LINT_RUNS.fetch_add(1, Ordering::Relaxed);
+            let dir = base.join(format!("{}-{count}", std::process::id()));
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&dir)
+                .ok()
+                .map(|()| dir)
+        })?;
+        let mut run = Self {
+            dir,
+            file: PathBuf::new(),
+        };
+        let placed = given
+            .mirror
+            .as_deref()
+            .zip(config.parent())
+            .and_then(|(mirror, private)| mirror.strip_prefix(private).ok())
+            .map_or_else(
+                || PathBuf::from(doc.file_name().unwrap_or_default()),
+                Path::to_path_buf,
+            );
+        let mut name = placed.file_name()?.to_os_string();
+        name.push(format!(".{index}.{}", extension(tag)));
+        let file = run.dir.join(placed.with_file_name(name));
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(file.parent()?)
+            .ok()?;
+        write_new(&run.dir.join("biome.json"), &strict)?;
+        write_new(&file, input)?;
+        run.file = file;
+        Some(run)
+    }
+
+    /// The block's file.
+    #[must_use]
+    pub(crate) fn file(&self) -> &Path {
+        &self.file
+    }
+
+    /// `--config-path=<the config copy>`, which biome reads instead of the shared private
+    /// config, so the block is inside the config's directory.
+    #[must_use]
+    pub(crate) fn config_flag(&self) -> OsString {
+        let mut flag = OsString::from("--config-path=");
+        flag.push(self.dir.join("biome.json"));
+        flag
+    }
+}
+
+impl Drop for LintFile {
+    fn drop(&mut self) {
+        let _removed = fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Writes `text` to `path`, which must not exist yet, mode 0600.
+///
+/// Effect: creates and writes the file.
+fn write_new(path: &Path, text: &str) -> Option<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .ok()?
+        .write_all(text.as_bytes())
+        .ok()
+}
+
 /// Why a block isn't given to biome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Refusal {
@@ -84,6 +263,9 @@ pub(crate) enum Refusal {
 pub(crate) struct Given {
     /// `--config-path=<the private file>`.
     pub(crate) flags: Vec<OsString>,
+    /// The private file `flags` names, which a [`LintFile`] copies. `None` for rumdl, which
+    /// shares this type.
+    pub(crate) config: Option<PathBuf>,
     /// With a project config: the doc's place under the private directory, mirroring its place
     /// under the config's directory, which the block's virtual path is built from so relative
     /// globs resolve as they do in the project. `None` when there is no project config.
@@ -130,6 +312,7 @@ pub(crate) fn project_args(env: &ToolEnv, root: &Path, doc: &Path) -> Result<Giv
     let config = write_private(env, root, &strict).ok_or(Refusal::NoPrivateDir)?;
     let mut flag = OsString::from("--config-path=");
     flag.push(&config);
+    let private_config = config.clone();
     let project_dir = found.as_deref().and_then(Path::parent);
     let private_dir = config.parent().map(Path::to_path_buf);
     let mirror = project_dir
@@ -141,6 +324,7 @@ pub(crate) fn project_args(env: &ToolEnv, root: &Path, doc: &Path) -> Result<Giv
         .map(|(file, (dir, private))| [(config, file.to_path_buf()), (private, dir.to_path_buf())]);
     Ok(Given {
         flags: vec![flag],
+        config: Some(private_config),
         mirror,
         names,
     })
@@ -430,10 +614,117 @@ fn private_dir(dir: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Refusal, extension, parse_error, project_args};
+    use super::{LintFile, Refusal, diagnostics, extension, parse_error, project_args};
     use crate::code_blocks::format::ParseError;
+    use crate::code_blocks::lint::Diagnostic;
+    use crate::code_blocks::runner;
     use crate::code_blocks::tools::ToolEnv;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::Path;
+
+    #[test]
+    fn biomes_json_report_gives_one_diagnostic_each_at_its_1_based_line_and_column() {
+        let stdout = br#"{"summary":{"errors":2},"diagnostics":[
+            {"severity":"error","message":"This is an unexpected use of the debugger statement.","category":"lint/suspicious/noDebugger","location":{"path":"/r/a.md.1.js","start":{"line":2,"column":1},"end":{"line":2,"column":10}},"advices":[]},
+            {"severity":"error","message":"Expected an expression","category":"parse","location":{"path":"/r/a.md.1.js","start":{"line":3,"column":9},"end":{"line":3,"column":10}},"advices":[]}
+        ],"command":"lint"}"#;
+
+        assert_eq!(
+            diagnostics(stdout),
+            Some(vec![
+                Diagnostic {
+                    line: 2,
+                    column: 1,
+                    rule: "suspicious/noDebugger".to_owned(),
+                    message: "This is an unexpected use of the debugger statement.".to_owned(),
+                },
+                Diagnostic {
+                    line: 3,
+                    column: 9,
+                    rule: "parse".to_owned(),
+                    message: "Expected an expression".to_owned(),
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn output_that_isnt_biomes_json_report_has_no_diagnostics() {
+        assert_eq!(diagnostics(b"The contents aren't fixed.\n"), None);
+        assert_eq!(diagnostics(b"[]"), None);
+    }
+
+    #[test]
+    fn a_lint_file_mirrors_the_docs_place_under_a_private_config_copy_and_is_removed_when_dropped()
+    {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let home = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        fs::create_dir_all(root.path().join("pkg/docs")).expect("the fixture dirs");
+        fs::write(root.path().join("pkg/biome.json"), "{\"linter\":{}}").expect("the config");
+        let env = ToolEnv::from_vars(|name| (name == "HOME").then(|| home.path().into()));
+        let doc = root.path().join("pkg/docs/a.md");
+        let given = project_args(&env, root.path(), &doc).expect("a plain config is given");
+        let neutral = runner::neutral_dir(&env, root.path());
+        let mirror = given
+            .mirror
+            .clone()
+            .expect("a project config gives a mirror");
+
+        let run = LintFile::create(&neutral, &given, (&mirror, 3, "tsx"), "let a = 1;\n")
+            .expect("the run's private directory is creatable");
+
+        let file = run.file().to_path_buf();
+        let dir = file
+            .parent()
+            .and_then(Path::parent)
+            .expect("the block sits one directory down")
+            .to_path_buf();
+        assert!(file.ends_with("docs/a.md.3.tsx"), "{file:?}");
+        assert!(!file.starts_with(root.path()), "{file:?}");
+        assert_eq!(
+            fs::read_to_string(&file).ok().as_deref(),
+            Some("let a = 1;\n")
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("biome.json")).ok().as_deref(),
+            Some("{\"linter\":{}}")
+        );
+        let mode = |path: &Path| {
+            fs::symlink_metadata(path)
+                .map(|meta| meta.permissions().mode() & 0o777)
+                .ok()
+        };
+        assert_eq!(mode(&dir), Some(0o700));
+        assert_eq!(mode(&file), Some(0o600));
+        let mut flag = std::ffi::OsString::from("--config-path=");
+        flag.push(dir.join("biome.json"));
+        assert_eq!(run.config_flag(), flag);
+        drop(run);
+        assert!(!dir.exists(), "the run's directory should be gone: {dir:?}");
+    }
+
+    #[test]
+    fn with_no_project_config_the_lint_file_sits_beside_the_empty_config() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let home = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let env = ToolEnv::from_vars(|name| (name == "HOME").then(|| home.path().into()));
+        let doc = root.path().join("docs/a.md");
+        let given = project_args(&env, root.path(), &doc).expect("no config gives an empty one");
+        let neutral = runner::neutral_dir(&env, root.path());
+
+        let run = LintFile::create(&neutral, &given, (&doc, 1, "js"), "f();\n")
+            .expect("the run's private directory is creatable");
+
+        let file = run.file();
+        assert!(file.ends_with("a.md.1.js"), "{file:?}");
+        assert_eq!(
+            fs::read_to_string(file.with_file_name("biome.json"))
+                .ok()
+                .as_deref(),
+            Some("{}")
+        );
+    }
 
     #[test]
     fn a_tag_picks_the_extension_biome_reads_the_block_by() {

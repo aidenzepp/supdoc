@@ -884,6 +884,7 @@ impl RumdlConfigs {
                 record.given = Some(biome::Given {
                     mirror: Some(project.doc_as_seen(&doc)),
                     flags: project.flags,
+                    config: None,
                     names: None,
                 });
                 Ok(())
@@ -1334,7 +1335,7 @@ fn run_linter(
     }
     let doc = session.root.join(record.at.file.as_str());
     let given = record.given.as_ref();
-    let args = tool.args(&Invocation {
+    let invocation = Invocation {
         doc: given
             .and_then(|given| given.mirror.as_deref())
             .unwrap_or(&doc),
@@ -1346,7 +1347,8 @@ fn run_linter(
         emit: None,
         externs: &[],
         fragment: record.fragment,
-    });
+    };
+    let args = tool.args(&invocation);
     let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
     let run = cache::Run {
         tool,
@@ -1357,10 +1359,14 @@ fn run_linter(
         doc: &doc,
         project: None,
     };
+    let spawn = |call: &Call<'_>| match given.filter(|_| tool.name == BIOME_LINT) {
+        Some(given) => biome_lint(tool, call, &invocation, given, &pending.input, session),
+        None => runner::run(call, session.env, session.root),
+    };
     let verdict = cached_run(
         &run,
         session,
-        |call| runner::run(call, session.env, session.root),
+        spawn,
         |result| tool.lint_verdict(&pending.input, result),
         lint::Verdict::cacheable,
     );
@@ -1373,6 +1379,55 @@ fn run_linter(
         false,
     );
     Some(Ok((verdict, findings)))
+}
+
+/// The linter that reads the block from a private file rather than stdin.
+const BIOME_LINT: &str = "biome-lint";
+
+/// Runs `call`, `tool` being biome lint, on the block `invocation` describes, written with
+/// `given`'s config to a fresh [`biome::LintFile`] beside the neutral directory, since biome
+/// lint reports nothing for a block on stdin. The directory is removed after the run whatever
+/// its outcome.
+///
+/// # Errors
+///
+/// The run's failure, or a failed start when there is no private directory to write the block
+/// to.
+///
+/// Effect: creates and removes the private directory, and runs biome, killing it at the
+/// timeout.
+fn biome_lint(
+    tool: &ToolCartridge,
+    call: &Call<'_>,
+    invocation: &Invocation<'_>,
+    given: &biome::Given,
+    input: &str,
+    session: &Session<'_>,
+) -> Result<Ran, runner::Failure> {
+    let neutral = runner::neutral_dir(session.env, session.root);
+    let place = (invocation.doc, invocation.index, invocation.tag);
+    let file = biome::LintFile::create(&neutral, given, place, input).ok_or_else(|| {
+        runner::Failure::Spawn(std::io::Error::other(
+            "supdoc couldn't create a private directory for the block biome lints",
+        ))
+    })?;
+    let project = [file.config_flag()];
+    let args = tool.args(&Invocation {
+        project: &project,
+        emit: Some(file.file()),
+        ..*invocation
+    });
+    let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
+    let result = runner::run(
+        &Call {
+            args: &args,
+            ..*call
+        },
+        session.env,
+        session.root,
+    );
+    drop(file);
+    result
 }
 
 /// Runs `tool`, clippy found at `program`, on `record`'s Rust block, read as `pending`, as

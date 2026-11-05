@@ -34,8 +34,15 @@ fn ts_project(body: &str) -> Project {
     project_with_block("[features.code-blocks.typescript]\n", "ts", body)
 }
 
-/// Writes an executable `#!/bin/sh` stub named `biome` running `script` in `dir`.
+/// Writes an executable `#!/bin/sh` stub named `biome` in `dir` that passes `biome lint` and runs
+/// `script` for anything else, the format step.
 fn stub_biome(dir: &Path, script: &str) {
+    stub_biome_lint(dir, &format!("[ \"$1\" = lint ] && exit 0\n{script}"));
+}
+
+/// Writes an executable `#!/bin/sh` stub named `biome` running `script` in `dir`, for every
+/// subcommand.
+fn stub_biome_lint(dir: &Path, script: &str) {
     let path = dir.join("biome");
     std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("the stub should be writable");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
@@ -482,4 +489,172 @@ fn the_real_biome_reads_a_tsx_block_as_jsx() {
         .json();
 
     assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+}
+
+/// A stub that passes `biome format` as `/bin/cat`, and for `biome lint` records its arguments, its
+/// block file's path and content and the config beside it in `records`, then prints `report` and exits
+/// `code`.
+fn lint_stub(records: &Path, report: &str, code: u8) -> String {
+    let records = records.display();
+    format!(
+        "[ \"$1\" = lint ] || exec /bin/cat\n\
+         for arg in \"$@\"; do echo \"$arg\"; done > '{records}/args'\n\
+         for arg in \"$@\"; do file=\"$arg\"; done\n\
+         /bin/cp \"$file\" '{records}/block'\n\
+         /bin/cp \"${{file%/*}}/biome.json\" '{records}/config'\n\
+         echo \"$file\" > '{records}/file'\n\
+         echo '{report}'\n\
+         exit {code}"
+    )
+}
+
+#[test]
+fn lint_a_diagnostic_is_a_code_block_lint_error_at_its_doc_line_from_a_private_file() {
+    let project = ts_project("const a = 1;\ndebugger;");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let report = r#"{"summary":{},"diagnostics":[{"severity":"error","message":"This is an unexpected use of the debugger statement.","category":"lint/suspicious/noDebugger","location":{"path":"x","start":{"line":2,"column":1},"end":{"line":2,"column":10}},"advices":[]}],"command":"lint"}"#;
+    stub_biome_lint(outside.path(), &lint_stub(outside.path(), report, 1));
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-lint"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 5, "{json}");
+    assert_eq!(at(&json, "/findings/0/location/column"), 1, "{json}");
+    assert!(
+        at(&json, "/findings/0/message")
+            .as_str()
+            .is_some_and(|m| m.contains("`biome-lint` reports `suspicious/noDebugger`")),
+        "{json}"
+    );
+    let read = |name: &str| {
+        std::fs::read_to_string(outside.path().join(name)).expect("the stub recorded its run")
+    };
+    let args = read("args");
+    for skipped in [
+        "--skip=correctness/noUnusedVariables",
+        "--skip=correctness/noUnusedImports",
+        "--skip=correctness/noUnusedFunctionParameters",
+        "--reporter=json",
+    ] {
+        assert!(args.lines().any(|arg| arg == skipped), "{args}");
+    }
+    assert_eq!(read("block"), "const a = 1;\ndebugger;\n");
+    let file = read("file");
+    let file = Path::new(file.trim());
+    assert!(
+        file.to_string_lossy().contains("/biome-lint/")
+            && file.ends_with("blocks.md.1.ts")
+            && !file.starts_with(project.path("")),
+        "{file:?}"
+    );
+    assert!(
+        args.lines().any(|arg| arg
+            == format!(
+                "--config-path={}",
+                file.with_file_name("biome.json").display()
+            )),
+        "with no project config, the config sits beside the block: {args}"
+    );
+    assert_eq!(read("config"), "{}");
+    assert!(
+        !file.parent().is_some_and(Path::exists),
+        "the run's private directory should be gone: {file:?}"
+    );
+}
+
+#[test]
+fn lint_a_clean_block_passes_and_lint_off_in_the_tool_table_never_runs_biome_lint() {
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let clean = r#"{"summary":{},"diagnostics":[],"command":"lint"}"#;
+    stub_biome_lint(outside.path(), &lint_stub(outside.path(), clean, 0));
+    let passing = project_with_block("[features.code-blocks.javascript]\n", "js", "f();");
+    let off = project_with_block(
+        "[features.code-blocks.javascript]\n\
+         [features.code-blocks.javascript.biome-lint]\nlint = \"off\"\n",
+        "js",
+        "f();",
+    );
+
+    let passes = passing
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(0)
+        .json();
+    assert!(
+        outside.path().join("args").exists(),
+        "biome lint should have run"
+    );
+    std::fs::remove_file(outside.path().join("args")).expect("the record should be removable");
+    let skipped = off
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(0)
+        .json();
+
+    assert_eq!(
+        at(&passes, "/data/summary/code_blocks/passed"),
+        1,
+        "{passes}"
+    );
+    assert_eq!(
+        at(&skipped, "/data/summary/code_blocks/passed"),
+        1,
+        "{skipped}"
+    );
+    assert!(
+        !outside.path().join("args").exists(),
+        "biome lint ran though its table turns it off"
+    );
+}
+
+#[test]
+fn lint_the_real_biome_reports_a_debugger_skips_unused_names_and_honors_a_dir_scoped_override() {
+    let Some(dir) = real_tool_dir(
+        "biome",
+        "lint_the_real_biome_reports_a_debugger_skips_unused_names_and_honors_a_dir_scoped_override",
+    ) else {
+        return;
+    };
+    let body = "import { x } from \"y\";\n\nconst unused = 1;\nfunction f(a) {}\ndebugger;";
+    let project = project_with_block("[features.code-blocks.javascript]\n", "js", body);
+    project.write(
+        "biome.json",
+        "{\"overrides\":[{\"includes\":[\"other/**\"],\"linter\":{\"rules\":{\"suspicious\":{\"noDebugger\":\"off\"}}}}]}",
+    );
+    project.write("other/blocks.md", &format!("# O\n\n```js\n{body}\n```\n"));
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", &dir)])
+        .assert_exit(1)
+        .json();
+
+    let found: Vec<_> = array_at(&json, "/findings")
+        .iter()
+        .map(|finding| {
+            (
+                finding["kind"].as_str().unwrap_or_default().to_owned(),
+                finding
+                    .pointer("/location/file")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                finding
+                    .pointer("/location/line")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [("code-block-lint".to_owned(), "docs/blocks.md".to_owned(), 8)],
+        "{json}"
+    );
+    assert!(
+        at(&json, "/findings/0/message")
+            .as_str()
+            .is_some_and(|m| m.contains("suspicious/noDebugger")),
+        "{json}"
+    );
 }

@@ -100,8 +100,10 @@ pub(crate) struct Invocation<'run> {
     /// `--config-path`, rumdl's `--config` or `--no-config`, clippy's `[lints]` levels. Empty for
     /// every other tool.
     pub(crate) project: &'run [OsString],
-    /// Where clippy writes the block's metadata. `None` names no path, which is how a cache key
-    /// names every run of the same block alike.
+    /// The private file a run writes to: where clippy puts the block's metadata, and where
+    /// biome lint reads the block from (see [`biome::LintFile`]). `None` names no such path, which
+    /// is how a cache key names every run of the same block alike: biome lint then names the
+    /// block by its virtual path.
     pub(crate) emit: Option<&'run Path>,
     /// What clippy links the block against: the project build's `--extern` and `-L` flags,
     /// placed right after `--error-format=json`. Empty when the block compiles alone, and for
@@ -241,7 +243,7 @@ fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'sta
 }
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 11] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 13] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -349,6 +351,30 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 11] = [
         fragments: &[],
         argv: biome_format_args,
         reader: Reader::Format(biome::parse_error),
+    },
+    ToolCartridge {
+        name: "biome-lint",
+        language: Language::TypeScript,
+        binary: "biome",
+        tier: Tier::Static,
+        install: "npm install --global @biomejs/biome",
+        config_files: BIOME_CONFIGS,
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        argv: biome_lint_args,
+        reader: Reader::Lint(biome::lint_verdict),
+    },
+    ToolCartridge {
+        name: "biome-lint",
+        language: Language::JavaScript,
+        binary: "biome",
+        tier: Tier::Static,
+        install: "npm install --global @biomejs/biome",
+        config_files: BIOME_CONFIGS,
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        argv: biome_lint_args,
+        reader: Reader::Lint(biome::lint_verdict),
     },
     ToolCartridge {
         name: "rumdl-format",
@@ -546,6 +572,49 @@ fn biome_format_args(invocation: &Invocation<'_>) -> Vec<OsString> {
         .collect()
 }
 
+/// The rules `biome lint` leaves off for a block, which a snippet breaks for lack of context: the
+/// unused variables, imports and function parameters a doc shows without the code that uses them.
+const BIOME_RELAXED: [&str; 3] = [
+    "correctness/noUnusedVariables",
+    "correctness/noUnusedImports",
+    "correctness/noUnusedFunctionParameters",
+];
+
+/// `biome lint`'s arguments: no colors, JSON diagnostics with none held back, a block biome's
+/// config doesn't include passing rather than failing, the snippet relaxations skipped, the
+/// project's `--config-path`, then the block's file. biome lint reports nothing for a block on
+/// stdin, so the block is the private file `emit` names; without one it is named by its virtual
+/// path, whose extension the block's tag picks (see [`biome::extension`]).
+fn biome_lint_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    let file = invocation.emit.map_or_else(
+        || {
+            virtual_path(
+                invocation.doc,
+                invocation.index,
+                biome::extension(invocation.tag),
+            )
+        },
+        |file| file.as_os_str().to_owned(),
+    );
+    [
+        "lint",
+        "--colors=off",
+        "--reporter=json",
+        "--max-diagnostics=none",
+        "--no-errors-on-unmatched",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .chain(
+        BIOME_RELAXED
+            .iter()
+            .map(|rule| OsString::from(format!("--skip={rule}"))),
+    )
+    .chain(invocation.project.iter().cloned())
+    .chain([file])
+    .collect()
+}
+
 /// The rules rumdl leaves off for a block: MD041, which wants a file to open with a heading, and
 /// MD051 and MD057, which check a block's links against the doc's real directory and the files
 /// beside it, which the block's text is not. Line length (MD013) is left to the project's config.
@@ -741,10 +810,9 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        CARTRIDGES, Found, Invocation, Step, Tier, ToolCartridge, ToolEnv, find, search_dirs,
-        under_same_file,
+        CARTRIDGES, Found, Invocation, ToolCartridge, ToolEnv, find, search_dirs, under_same_file,
     };
-    use crate::config::code_blocks::{Dialect, Edition, Language};
+    use crate::config::code_blocks::{Dialect, Edition};
 
     /// The cartridge named `name`.
     fn cartridge(name: &str) -> &'static ToolCartridge {
@@ -775,12 +843,13 @@ mod tests {
         let declared: Vec<_> = CARTRIDGES
             .iter()
             .map(|tool| {
-                (
+                format!(
+                    "{} {:?} {:?} {} {:?}",
                     tool.name,
                     tool.language,
                     tool.step(),
                     tool.binary,
-                    tool.tier,
+                    tool.tier
                 )
             })
             .collect();
@@ -788,77 +857,19 @@ mod tests {
         assert_eq!(
             declared,
             [
-                (
-                    "rustfmt",
-                    Language::Rust,
-                    Step::Format,
-                    "rustfmt",
-                    Tier::Static
-                ),
-                (
-                    "shfmt",
-                    Language::Shell,
-                    Step::Format,
-                    "shfmt",
-                    Tier::Static
-                ),
-                (
-                    "ruff-format",
-                    Language::Python,
-                    Step::Format,
-                    "ruff",
-                    Tier::Static
-                ),
-                (
-                    "black",
-                    Language::Python,
-                    Step::Format,
-                    "black",
-                    Tier::Static
-                ),
-                ("ruff", Language::Python, Step::Lint, "ruff", Tier::Static),
-                (
-                    "shellcheck",
-                    Language::Shell,
-                    Step::Lint,
-                    "shellcheck",
-                    Tier::Static
-                ),
-                (
-                    "clippy",
-                    Language::Rust,
-                    Step::Lint,
-                    "clippy-driver",
-                    Tier::Project
-                ),
-                (
-                    "biome-format",
-                    Language::TypeScript,
-                    Step::Format,
-                    "biome",
-                    Tier::Static
-                ),
-                (
-                    "biome-format",
-                    Language::JavaScript,
-                    Step::Format,
-                    "biome",
-                    Tier::Static
-                ),
-                (
-                    "rumdl-format",
-                    Language::Markdown,
-                    Step::Format,
-                    "rumdl",
-                    Tier::Static
-                ),
-                (
-                    "rumdl",
-                    Language::Markdown,
-                    Step::Lint,
-                    "rumdl",
-                    Tier::Static
-                ),
+                "rustfmt Rust Format rustfmt Static",
+                "shfmt Shell Format shfmt Static",
+                "ruff-format Python Format ruff Static",
+                "black Python Format black Static",
+                "ruff Python Lint ruff Static",
+                "shellcheck Shell Lint shellcheck Static",
+                "clippy Rust Lint clippy-driver Project",
+                "biome-format TypeScript Format biome Static",
+                "biome-format JavaScript Format biome Static",
+                "biome-lint TypeScript Lint biome Static",
+                "biome-lint JavaScript Lint biome Static",
+                "rumdl-format Markdown Format rumdl Static",
+                "rumdl Markdown Lint rumdl Static",
             ]
         );
     }
@@ -912,6 +923,54 @@ mod tests {
         });
 
         assert_eq!(posix, ["--filename", "/p/docs/a.md.3.sh", "-ln", "posix"]);
+    }
+
+    #[test]
+    fn biome_lint_skips_the_unused_rules_and_names_the_private_file_or_else_the_virtual_path() {
+        let project = [OsString::from("--config-path=/c/biome.json")];
+        let lint = |emit: Option<&Path>| {
+            cartridge("biome-lint").args(&Invocation {
+                doc: Path::new("/p/docs/a.md"),
+                tag: "tsx",
+                index: 2,
+                edition: Edition::E2024,
+                dialect: Dialect::Bash,
+                project: &project,
+                emit,
+                externs: &[],
+                fragment: None,
+            })
+        };
+        let flags = [
+            "lint",
+            "--colors=off",
+            "--reporter=json",
+            "--max-diagnostics=none",
+            "--no-errors-on-unmatched",
+            "--skip=correctness/noUnusedVariables",
+            "--skip=correctness/noUnusedImports",
+            "--skip=correctness/noUnusedFunctionParameters",
+            "--config-path=/c/biome.json",
+        ];
+
+        assert_eq!(
+            lint(None),
+            flags
+                .iter()
+                .chain(&["/p/docs/a.md.2.tsx"])
+                .map(OsString::from)
+                .collect::<Vec<_>>(),
+            "a cache key names the block by its virtual path"
+        );
+        assert_eq!(
+            lint(Some(Path::new("/private/run/a.md.2.tsx"))),
+            flags
+                .iter()
+                .chain(&["/private/run/a.md.2.tsx"])
+                .map(OsString::from)
+                .collect::<Vec<_>>(),
+            "a run names the private file the block was written to"
+        );
     }
 
     #[test]
