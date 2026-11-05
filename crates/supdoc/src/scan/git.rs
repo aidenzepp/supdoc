@@ -1,14 +1,14 @@
 //! Finding a directory's git exclude file, however `.git` is laid out.
 
 use std::fs;
-use std::io::{self, Read as _};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use ignore::gitignore::Gitignore;
 
 use crate::limits::SizeLimit;
 use crate::path::is_git_dir;
-use crate::read::source::open_without_blocking;
+use crate::read::source::{open_without_blocking, read_up_to};
 use crate::scan::ignore::{ReadFailure, rules_in};
 
 /// The rules of a directory's git exclude file, whether they may be quoted, and the file when it
@@ -108,12 +108,20 @@ pub(crate) fn first_line(file: &Path) -> Option<String> {
     if !file.metadata().ok()?.is_file() {
         return None;
     }
-    let mut head = Vec::new();
-    let read = file.take(FIRST_LINE_MAX + 1).read_to_end(&mut head).ok()?;
-    if read == 0 {
+    first_line_of(file)
+}
+
+/// The first line `reader` holds, as [`first_line`] describes, read through [`read_up_to`] so at
+/// most `FIRST_LINE_MAX + 1` bytes are taken from it.
+///
+/// Effect: reads at most `FIRST_LINE_MAX + 1` bytes of `reader`.
+fn first_line_of(reader: impl Read) -> Option<String> {
+    let head = read_up_to(reader, SizeLimit::bytes(FIRST_LINE_MAX)).ok()?;
+    if head.is_empty() {
         return None;
     }
-    if !head.contains(&b'\n') && u64::try_from(read).unwrap_or(u64::MAX) > FIRST_LINE_MAX {
+    let over = u64::try_from(head.len()).unwrap_or(u64::MAX) > FIRST_LINE_MAX;
+    if over && !head.contains(&b'\n') {
         return None;
     }
     let line = head.split(|&byte| byte == b'\n').next()?;
@@ -136,6 +144,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::read::source::Counted;
 
     /// A temporary directory for one test.
     fn temp() -> tempfile::TempDir {
@@ -161,6 +170,18 @@ mod tests {
             first_line(&file),
             None,
             "8 KiB with no line ending is longer than any git link"
+        );
+    }
+
+    #[test]
+    fn a_first_line_read_stops_one_byte_past_the_cap() {
+        let (source, handed_out) = Counted::new(8 * 1024);
+
+        assert_eq!(first_line_of(source), None);
+        assert_eq!(
+            handed_out.get(),
+            FIRST_LINE_MAX + 1,
+            "the read should stop at the cap + 1 bytes, not read the whole file"
         );
     }
 

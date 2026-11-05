@@ -7,7 +7,7 @@
 
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{self, Read as _, Write as _};
+use std::io::{Read, Write as _};
 use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,8 +16,8 @@ use std::time::UNIX_EPOCH;
 use sha2::{Digest, Sha256};
 
 use crate::hash::Hash;
-use crate::limits::Limits;
-use crate::read::source::open_without_blocking;
+use crate::limits::{Limits, SizeLimit};
+use crate::read::source::{open_without_blocking, read_up_to};
 
 use super::runner::Ran;
 use super::tools::{ToolCartridge, ToolEnv};
@@ -248,35 +248,36 @@ fn config_state(candidate: &Path, in_root: bool, real_root: &Path) -> Option<Vec
     Some(state)
 }
 
-/// The sha256 of the regular file at `path`, streamed in. `None` when it can't be opened or read,
-/// isn't a regular file, or holds more than [`Limits::MAX_FILE_SIZE`] bytes: the block then runs
-/// uncached. The fixed ceiling, not the operator's `max-file-size`, bounds it, since going over
+/// The sha256 of the regular file at `path`. `None` when it can't be opened or read, isn't a
+/// regular file, or holds more than [`Limits::MAX_FILE_SIZE`] bytes ([`digest_of`]): the block
+/// then runs uncached. The fixed ceiling, not the operator's `max-file-size`, bounds it, since going over
 /// only costs caching and `0` there must not make the hash unbounded. The open never waits on a
 /// FIFO, and the read never takes more than one byte past the ceiling.
 ///
 /// Effect: opens `path` and reads at most one byte past the ceiling of it.
 fn content_digest(path: &Path) -> Option<Vec<u8>> {
-    let limit = Limits::MAX_FILE_SIZE.get()?;
     let file = open_without_blocking(path).ok()?;
     let meta = file.metadata().ok()?;
-    if !meta.is_file() || meta.len() > limit {
+    if !meta.is_file() {
         return None;
     }
-    let mut reader = file.take(limit + 1);
-    let mut hasher = Sha256::new();
-    let mut chunk = [0_u8; 8 * 1024];
-    let mut read = 0_u64;
-    loop {
-        let count = match reader.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(count) => count,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(_) => return None,
-        };
-        hasher.update(chunk.get(..count)?);
-        read = read.saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+    digest_of(file, meta.len(), Limits::MAX_FILE_SIZE)
+}
+
+/// The sha256 of what `reader` holds, read through [`read_up_to`]. `None` when `len`, its declared
+/// size, or the bytes it actually hands out pass `max_size`, when `max_size` is no limit, or when
+/// the read fails. An oversize `len` is refused before any byte is read, and the read never takes
+/// more than one byte past `max_size`, so a source that grows can't make it go on.
+///
+/// Effect: reads at most one byte past `max_size` of `reader`.
+fn digest_of(reader: impl Read, len: u64, max_size: SizeLimit) -> Option<Vec<u8>> {
+    let limit = max_size.get()?;
+    if len > limit {
+        return None;
     }
-    (read <= limit).then(|| hasher.finalize().to_vec())
+    let bytes = read_up_to(reader, max_size).ok()?;
+    let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    (read <= limit).then(|| Sha256::digest(&bytes).to_vec())
 }
 
 /// `path` with its longest existing ancestor resolved and the rest joined on. `None` when no
@@ -347,6 +348,7 @@ mod tests {
 
     use super::*;
     use crate::code_blocks::tools::CARTRIDGES;
+    use crate::read::source::Counted;
 
     /// A temporary directory for one test.
     fn temp() -> tempfile::TempDir {
@@ -367,6 +369,48 @@ mod tests {
             drop(fs::OpenOptions::new().write(true).open(candidate));
         }
         result.expect("reading a config candidate should return, not block")
+    }
+
+    #[test]
+    fn a_declared_size_over_the_ceiling_is_refused_before_any_byte_is_read() {
+        let (source, handed_out) = Counted::new(4096);
+
+        assert_eq!(digest_of(source, 101, SizeLimit::bytes(100)), None);
+        assert_eq!(
+            handed_out.get(),
+            0,
+            "an oversize file should not be read at all"
+        );
+    }
+
+    #[test]
+    fn a_source_that_outgrows_its_declared_size_stops_one_byte_past_the_ceiling() {
+        let (source, handed_out) = Counted::new(4096);
+
+        assert_eq!(digest_of(source, 0, SizeLimit::bytes(100)), None);
+        assert_eq!(
+            handed_out.get(),
+            101,
+            "the hash should read at most the ceiling + 1 bytes, not the whole source"
+        );
+    }
+
+    #[test]
+    fn a_source_at_the_ceiling_is_hashed_whole() {
+        let (source, _) = Counted::new(100);
+
+        assert_eq!(
+            digest_of(source, 100, SizeLimit::bytes(100)),
+            Some(Sha256::digest([b'x'; 100]).to_vec())
+        );
+    }
+
+    #[test]
+    fn no_ceiling_gives_no_digest_rather_than_an_unbounded_read() {
+        let (source, handed_out) = Counted::new(4096);
+
+        assert_eq!(digest_of(source, 0, SizeLimit::bytes(0)), None);
+        assert_eq!(handed_out.get(), 0);
     }
 
     #[test]
