@@ -10,7 +10,7 @@ use crate::config::code_blocks::{CodeBlocks, Language, Mode};
 use super::block::CodeBlock;
 use super::fragment::Kind;
 use super::info::{StepValue, fragment_kind, reasoned, step_attribute};
-use super::tools::{self, Hold, Step, ToolCartridge, formatter};
+use super::tools::{self, Hold, Step, Tool, formatter};
 
 /// The one state a code block is in. A block takes the first that applies, in this order:
 ///
@@ -156,7 +156,7 @@ pub(crate) enum StepState {
     /// inside the checkout. Named `not_run` in JSON.
     ToolRefused {
         /// The tool's binary, as its warning names it.
-        binary: &'static str,
+        binary: String,
         /// Whether the binary on `PATH` is inside the checkout, rather than missing.
         inside_root: bool,
     },
@@ -170,7 +170,7 @@ pub(crate) enum StepState {
     /// Named `not_run` in JSON.
     Unsupported {
         /// The tool's name.
-        tool: &'static str,
+        tool: String,
         /// The kind the block declares.
         kind: Kind,
     },
@@ -275,18 +275,22 @@ impl Steps {
             }) else {
                 return StepState::NotRun;
             };
-            let table_off = code_blocks.mode(language, tool.name) == Mode::Off;
-            match block_setting(block, step, tool) {
+            let table_off = code_blocks.mode(language, tool.name()) == Mode::Off;
+            match block_setting(block, step, &tool) {
                 Some(StepValue::Off { reason }) => StepState::Skipped {
                     reason: reason.map(str::to_owned),
                 },
                 Some(StepValue::Other(_)) | None if table_off => StepState::Off {
-                    table: format!("[features.code-blocks.{}.{}]", language.table(), tool.name),
+                    table: format!(
+                        "[features.code-blocks.{}.{}]",
+                        language.table(),
+                        tool.name()
+                    ),
                     key: step.key(),
                 },
                 Some(StepValue::Full | StepValue::Other(_)) | None => match fragment {
                     Some(kind) if !tool.supports(kind, tag) => StepState::Unsupported {
-                        tool: tool.name,
+                        tool: tool.name().to_owned(),
                         kind,
                     },
                     _ => StepState::NotRun,
@@ -360,13 +364,13 @@ pub(crate) fn tag_of(block: &CodeBlock) -> Option<&str> {
 }
 
 /// The value `block` sets `step` to with a `lint(...)` or `format(...)` attribute, the first one
-/// written, when `tool`'s cartridge accepts it. `None` when the block has no such attribute or
-/// the cartridge refuses its value, which then warns `code-block-unknown-attribute`.
+/// written, when `tool` accepts it. `None` when the block has no such attribute or `tool`
+/// refuses its value, which then warns `code-block-unknown-attribute`.
 #[must_use]
 pub(crate) fn block_setting<'block>(
     block: &'block CodeBlock,
     step: Step,
-    tool: &ToolCartridge,
+    tool: &Tool,
 ) -> Option<StepValue<'block>> {
     block
         .info
@@ -377,7 +381,11 @@ pub(crate) fn block_setting<'block>(
         .filter_map(step_attribute)
         .find(|found| found.step == step)
         .map(|found| found.value)
-        .filter(|value| value.mode().is_some_and(|mode| tool.modes.contains(&mode)))
+        .filter(|value| {
+            value
+                .mode()
+                .is_some_and(|mode| tool.modes().contains(&mode))
+        })
 }
 
 impl BlockState {
@@ -1071,14 +1079,14 @@ mod tests {
     fn format_not_run_gets_one_count_per_reason_most_first_then_by_reason() {
         let missing = Steps {
             format: StepState::ToolRefused {
-                binary: "shfmt",
+                binary: "shfmt".to_owned(),
                 inside_root: false,
             },
             lint: StepState::Ran,
         };
         let inside = Steps {
             format: StepState::ToolRefused {
-                binary: "shfmt",
+                binary: "shfmt".to_owned(),
                 inside_root: true,
             },
             lint: StepState::Ran,
@@ -1108,7 +1116,7 @@ mod tests {
         let steps = Steps {
             format: StepState::Ran,
             lint: StepState::ToolRefused {
-                binary: "shellcheck",
+                binary: "shellcheck".to_owned(),
                 inside_root: false,
             },
         };
@@ -1124,7 +1132,7 @@ mod tests {
         let steps = Steps {
             format: StepState::Ran,
             lint: StepState::ToolRefused {
-                binary: "shellcheck",
+                binary: "shellcheck".to_owned(),
                 inside_root: true,
             },
         };

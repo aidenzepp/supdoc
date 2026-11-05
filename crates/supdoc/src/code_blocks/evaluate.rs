@@ -46,7 +46,7 @@ use super::states::{
 };
 use super::tombi;
 use super::toolchain::{self, Refusal, Toolchain};
-use super::tools::{self, Found, Held, Invocation, Step, Tier, ToolCartridge, ToolEnv, find};
+use super::tools::{self, Found, Held, Invocation, Step, Tier, Tool, ToolCartridge, ToolEnv, find};
 use super::uses::{self, UseState, Written};
 use super::yaml;
 
@@ -105,9 +105,9 @@ pub(crate) struct BlockRecord {
     /// The block's 1-based position among the blocks of its doc.
     index: usize,
     /// The formatter the config selects for it, while the block is pending.
-    tool: Option<&'static ToolCartridge>,
+    tool: Option<Tool>,
     /// The linter the config selects for it, while the block is pending and its lint step due.
-    linter: Option<&'static ToolCartridge>,
+    linter: Option<Tool>,
     /// The shell dialect shfmt parses it as and shellcheck checks it as.
     dialect: Dialect,
     /// The edition its `edition20xx` attribute or the config's `edition` names, if either does.
@@ -242,7 +242,7 @@ pub(crate) fn evaluate(
         let pending = pending_of(&state, block, &mut doc, read);
         records.push(BlockRecord {
             at: block.fence.clone(),
-            reason: first_reason(&state, &steps, language.as_deref(), tool),
+            reason: first_reason(&state, &steps, language.as_deref(), tool.as_ref()),
             tool,
             linter,
             dialect: code_blocks.dialect(),
@@ -307,7 +307,7 @@ impl Evaluation {
     /// per block not in it, killing it at the timeout.
     pub(crate) fn look_up_tools(&mut self, env: &ToolEnv, root: &Path) {
         let mut cache: Option<Option<Cache>> = None;
-        let mut looked_up: Vec<(&'static str, Found)> = Vec::new();
+        let mut looked_up: Vec<(String, Found)> = Vec::new();
         let mut rust_setup: Option<RustSetup> = None;
         let mut against: Option<Against> = None;
         let build_timeout = self.build_timeout;
@@ -322,14 +322,14 @@ impl Evaluation {
             if record.state != BlockState::NotChecked(NotChecked::Pending) {
                 continue;
             }
-            let linter = record.linter;
-            let Some(tool) = record.tool.or(linter) else {
+            let linter = record.linter.clone();
+            let Some(tool) = record.tool.clone().or_else(|| linter.clone()) else {
                 continue;
             };
-            let rust = (tool.language == Language::Rust)
+            let rust = (tool.is("rustfmt") || tool.is("clippy"))
                 .then(|| &*rust_setup.get_or_insert_with(|| RustSetup::read(env, root, timeout)));
             if let Some(rust) = rust {
-                let compiles = linter.is_some_and(|linter| linter.name == "clippy");
+                let compiles = linter.as_ref().is_some_and(|linter| linter.is("clippy"));
                 let refused =
                     rust_refusal(record, rust, compiles, &mut toolchain_warned, &mut slots);
                 if let Some((refused, named)) = refused {
@@ -338,19 +338,19 @@ impl Evaluation {
                         record.state.reason(
                             &record.steps,
                             record.language.as_deref(),
-                            Some(tool.name),
+                            Some(tool.name()),
                         )
                     });
                     continue;
                 }
             }
-            if !configs.give(record, tool, (env, root), &mut slots) {
+            if !configs.give(record, &tool, (env, root), &mut slots) {
                 continue;
             }
             // Giving a TOML block its config can take a step off it (see `TombiConfigs::give`).
-            let linter = record.linter;
+            let linter = record.linter.clone();
             let (runs, refused) = found_runs(
-                [record.tool, linter],
+                [record.tool.clone(), linter.clone()],
                 &mut looked_up,
                 &mut slots,
                 env,
@@ -360,8 +360,13 @@ impl Evaluation {
             let [format, mut lint] = runs;
             if format.is_some() || lint.is_some() {
                 let ran = [format.is_some(), lint.is_some()];
-                refuse_unfound(&mut record.steps, [record.tool, linter], ran, &looked_up);
-                let compiles = lint.as_ref().is_some_and(|run| run.tool.name == "clippy");
+                refuse_unfound(
+                    &mut record.steps,
+                    [record.tool.clone(), linter],
+                    ran,
+                    &looked_up,
+                );
+                let compiles = lint.as_ref().is_some_and(|run| run.tool.is("clippy"));
                 let unbuilt = rust.filter(|_| compiles).and_then(|rust| {
                     against
                         .get_or_insert_with(|| {
@@ -388,7 +393,7 @@ impl Evaluation {
                 record.reason = record.state.reason(
                     &record.steps,
                     record.language.as_deref(),
-                    Some(tool.binary),
+                    Some(tool.binary()),
                 );
             }
         }
@@ -445,12 +450,12 @@ impl Evaluation {
                 continue;
             };
             // Each outcome with the tool that decided it, `None` for the project build.
-            let mut outcomes: Vec<(BlockState, Option<&ToolCartridge>)> = Vec::new();
+            let mut outcomes: Vec<(BlockState, Option<&Tool>)> = Vec::new();
             match (format, job.format.as_ref()) {
                 (Some(Ok((verdict, findings))), Some(run)) => {
                     self.findings.extend(findings);
                     record.steps.format = StepState::Ran;
-                    outcomes.push((verdict.state(), Some(run.tool)));
+                    outcomes.push((verdict.state(), Some(&run.tool)));
                 }
                 (Some(Err(not_run)), Some(_)) => {
                     self.findings.extend(warnings.first(&not_run, &record.at));
@@ -475,7 +480,7 @@ impl Evaluation {
                     } else {
                         StepState::Ran
                     };
-                    outcomes.push((lint_state(&verdict), Some(run.tool)));
+                    outcomes.push((lint_state(&verdict), Some(&run.tool)));
                 }
                 (Some(Err(not_run)), Some(_)) => {
                     self.findings.extend(warnings.first(&not_run, &record.at));
@@ -504,7 +509,7 @@ impl Evaluation {
                     Some(tool) => record.state.reason(
                         &record.steps,
                         record.language.as_deref(),
-                        Some(tool.name),
+                        Some(tool.name()),
                     ),
                     None => Some(PROJECT_UNBUILT.to_owned()),
                 };
@@ -521,7 +526,7 @@ impl Evaluation {
             if record.state != BlockState::NotChecked(NotChecked::Pending) {
                 continue;
             }
-            let tool = record.tool.or(record.linter);
+            let tool = record.tool.as_ref().or(record.linter.as_ref());
             let unreadable = tool.is_some() && record.pending.is_none();
             record.state = BlockState::NotChecked(if unreadable {
                 NotChecked::InputUnreadable
@@ -531,7 +536,7 @@ impl Evaluation {
             record.reason = record.state.reason(
                 &record.steps,
                 record.language.as_deref(),
-                tool.map(|tool| tool.name),
+                tool.map(Tool::name),
             );
         }
     }
@@ -551,14 +556,20 @@ fn run_jobs(
     in_parallel(jobs, |job| {
         let record = records.get(job.record)?;
         let format = job.format.as_ref().and_then(|run| {
-            let rust = rust.filter(|_| run.tool.language == Language::Rust);
-            let frame = Frame::of(run.tool, record.fragment);
-            run_formatter(run.tool, &run.program, record, frame, session, rust)
+            let Some(tool) = run.tool.cartridge() else {
+                return Some(Err(CUSTOM_NOT_WIRED.into()));
+            };
+            let rust = rust.filter(|_| run.tool.is("rustfmt"));
+            let frame = Frame::of(tool, record.fragment);
+            run_formatter(tool, &run.program, record, frame, session, rust)
         });
         let parses = parses(format.as_ref());
         let lint = job.lint.as_ref().filter(|_| parses).and_then(|run| {
-            let rust = rust.filter(|_| run.tool.language == Language::Rust);
-            run_linter(run.tool, &run.program, record, session, rust)
+            let Some(tool) = run.tool.cartridge() else {
+                return Some(Err(CUSTOM_NOT_WIRED.into()));
+            };
+            let rust = rust.filter(|_| run.tool.is("clippy"));
+            run_linter(tool, &run.program, record, session, rust)
         });
         Some(StepsRan { format, lint })
     })
@@ -570,10 +581,10 @@ fn first_reason(
     state: &BlockState,
     steps: &Steps,
     language: Option<&str>,
-    tool: Option<&ToolCartridge>,
+    tool: Option<&Tool>,
 ) -> Option<String> {
     (*state != BlockState::NotChecked(NotChecked::Pending))
-        .then(|| state.reason(steps, language, tool.map(|tool| tool.name)))
+        .then(|| state.reason(steps, language, tool.map(Tool::name)))
         .flatten()
 }
 
@@ -582,9 +593,9 @@ fn first_reason(
 /// found for its binary.
 fn refuse_unfound(
     steps: &mut Steps,
-    tools: [Option<&'static ToolCartridge>; 2],
+    tools: [Option<Tool>; 2],
     ran: [bool; 2],
-    looked_up: &[(&'static str, Found)],
+    looked_up: &[(String, Found)],
 ) {
     for ((step, tool), ran) in [&mut steps.format, &mut steps.lint]
         .into_iter()
@@ -594,11 +605,11 @@ fn refuse_unfound(
         let Some(tool) = tool.filter(|_| !ran) else {
             continue;
         };
-        let inside_root = looked_up
-            .iter()
-            .any(|(binary, found)| *binary == tool.binary && matches!(found, Found::InsideRoot(_)));
+        let inside_root = looked_up.iter().any(|(binary, found)| {
+            binary == tool.binary() && matches!(found, Found::InsideRoot(_))
+        });
         *step = StepState::ToolRefused {
-            binary: tool.binary,
+            binary: tool.binary().to_owned(),
             inside_root,
         };
     }
@@ -811,7 +822,7 @@ struct Job {
 /// A tool found on `PATH` to run on a block.
 struct ToolRun {
     /// The tool.
-    tool: &'static ToolCartridge,
+    tool: Tool,
     /// Where it was found on `PATH`.
     program: PathBuf,
 }
@@ -896,6 +907,10 @@ fn parses(format: Option<&FormatRan>) -> bool {
     )
 }
 
+/// Why a custom command's step doesn't run yet: config refuses one before any block is read, so
+/// no run reaches this.
+const CUSTOM_NOT_WIRED: &str = "custom commands are not wired to run yet";
+
 /// Why such a step doesn't run when the project itself lowered the tier.
 const TIER_LOWERED: &str = "`tier = \"static\"` in `[features.code-blocks]`";
 
@@ -906,11 +921,11 @@ const TIER_LOWERED: &str = "`tier = \"static\"` in `[features.code-blocks]`";
 /// else its [`Held::needs_trust`]. A project-tier cartridge runs only in a trusted checkout whose
 /// ceiling allows it. The gate sits where the tool is chosen, before any scan, cache key or spawn.
 fn tier_gate(
-    tool: Option<&'static ToolCartridge>,
+    tool: Option<Tool>,
     step: &mut StepState,
     granted: Grant,
     ceiling: Tier,
-) -> Option<&'static ToolCartridge> {
+) -> Option<Tool> {
     let found = tool?;
     let allowed = if granted == Grant::Trusted {
         Tier::Project
@@ -919,14 +934,14 @@ fn tier_gate(
     };
     let effective = allowed.min(ceiling);
     if found.tier() <= effective {
-        return tool;
+        return Some(found);
     }
     let reason = match found.held() {
         _ if found.tier() > ceiling => TIER_LOWERED,
         Some(held) if granted == Grant::TurnedOff => held.trust_off,
         Some(held) => held.needs_trust,
         // Trust never holds a static-tier tool, so it got past the tier check above.
-        None => return tool,
+        None => return Some(found),
     };
     *step = StepState::Unrunnable { reason };
     None
@@ -1043,14 +1058,14 @@ impl ToolConfigs {
     fn give(
         &mut self,
         record: &mut BlockRecord,
-        tool: &ToolCartridge,
+        tool: &Tool,
         place: (&ToolEnv, &Path),
         slots: &mut Vec<Slot>,
     ) -> bool {
         self.biome.give(record, tool, place, slots).is_ok()
             && self.rumdl.give(record, tool, place, slots).is_ok()
             && self.tombi.give(record, tool, place, slots)
-            && self.yamlfmt.give(record, tool, place, slots).is_ok()
+            && self.yamlfmt.give(record, place, slots).is_ok()
             && self.yamllint.give(record, place, slots)
     }
 }
@@ -1077,14 +1092,11 @@ impl BiomeConfigs {
     fn give(
         &mut self,
         record: &mut BlockRecord,
-        tool: &ToolCartridge,
+        tool: &Tool,
         (env, root): (&ToolEnv, &Path),
         slots: &mut Vec<Slot>,
     ) -> Result<(), biome::Refusal> {
-        if !matches!(
-            tool.language,
-            Language::TypeScript | Language::JavaScript | Language::Json
-        ) {
+        if !tool.runs("biome") {
             return Ok(());
         }
         let doc = root.join(record.at.file.as_str());
@@ -1172,11 +1184,11 @@ impl RumdlConfigs {
     fn give(
         &mut self,
         record: &mut BlockRecord,
-        tool: &ToolCartridge,
+        tool: &Tool,
         (env, root): (&ToolEnv, &Path),
         slots: &mut Vec<Slot>,
     ) -> Result<(), rumdl::Refusal> {
-        if tool.language != Language::Markdown {
+        if !tool.runs("rumdl") {
             return Ok(());
         }
         let doc = root.join(record.at.file.as_str());
@@ -1263,11 +1275,11 @@ impl TombiConfigs {
     fn give(
         &mut self,
         record: &mut BlockRecord,
-        tool: &ToolCartridge,
+        tool: &Tool,
         (env, root): (&ToolEnv, &Path),
         slots: &mut Vec<Slot>,
     ) -> bool {
-        if tool.language != Language::Toml {
+        if !tool.runs("tombi") {
             return true;
         }
         let names_schema = record
@@ -1280,7 +1292,7 @@ impl TombiConfigs {
             record.reason =
                 record
                     .state
-                    .reason(&record.steps, record.language.as_deref(), Some(tool.name));
+                    .reason(&record.steps, record.language.as_deref(), Some(tool.name()));
             return false;
         }
         if !refuse_directive(record, slots) {
@@ -1480,12 +1492,15 @@ impl YamlfmtConfigs {
     fn give(
         &mut self,
         record: &mut BlockRecord,
-        tool: &ToolCartridge,
         (env, root): (&ToolEnv, &Path),
         slots: &mut Vec<Slot>,
     ) -> Result<(), yaml::Refusal> {
         // A block whose format step is off goes to yamllint alone, whatever yamlfmt's config says.
-        if tool.language != Language::Yaml || record.tool.is_none() {
+        if record
+            .tool
+            .as_ref()
+            .is_none_or(|formatter| !formatter.is("yamlfmt"))
+        {
             return Ok(());
         }
         let doc = root.join(record.at.file.as_str());
@@ -1583,7 +1598,11 @@ impl YamllintConfigs {
         (env, root): (&ToolEnv, &Path),
         slots: &mut Vec<Slot>,
     ) -> bool {
-        if record.linter.is_none_or(|linter| linter.name != YAMLLINT) {
+        if record
+            .linter
+            .as_ref()
+            .is_none_or(|linter| !linter.is(YAMLLINT))
+        {
             return true;
         }
         let doc = root.join(record.at.file.as_str());
@@ -1850,7 +1869,7 @@ impl Against {
             }
             Self::CargoRefused { inside_root } => {
                 steps.lint = StepState::ToolRefused {
-                    binary: "cargo",
+                    binary: "cargo".to_owned(),
                     inside_root: *inside_root,
                 };
                 None
@@ -2574,7 +2593,7 @@ fn run_formatter(
     );
     let verdict = match judged {
         Ok(format::Verdict::PrintedNothing) => {
-            if tool.language == Language::Yaml && yaml::holds_no_yaml(&pending.input) {
+            if tool.name == "yamlfmt" && yaml::holds_no_yaml(&pending.input) {
                 return Some(Err(YAML_EMPTY.into()));
             }
             return Some(Err(format::PRINTED_NOTHING.into()));
@@ -3376,32 +3395,32 @@ fn rust_refusal(
 ///
 /// Effect: reads file metadata along `PATH` and resolves symlinks.
 fn found_runs(
-    tools: [Option<&'static ToolCartridge>; 2],
-    looked_up: &mut Vec<(&'static str, Found)>,
+    tools: [Option<Tool>; 2],
+    looked_up: &mut Vec<(String, Found)>,
     slots: &mut Vec<Slot>,
     env: &ToolEnv,
     root: &Path,
     at: &Location,
-) -> (
-    [Option<ToolRun>; 2],
-    Option<(BlockState, &'static ToolCartridge)>,
-) {
+) -> ([Option<ToolRun>; 2], Option<(BlockState, Tool)>) {
     let mut runs = [None, None];
     let mut refused = None;
     for (run, tool) in runs.iter_mut().zip(tools) {
         let Some(tool) = tool else {
             continue;
         };
-        let found =
-            if let Some((_, found)) = looked_up.iter().find(|(binary, _)| *binary == tool.binary) {
-                found.clone()
-            } else {
-                let found = find(tool.binary, env, root);
-                let install = format!("install it with `{}`", tool.install);
-                slots.extend(tool_warning(tool.binary, &install, &found, at).map(Slot::Found));
-                looked_up.push((tool.binary, found.clone()));
-                found
+        let binary = tool.binary();
+        let found = if let Some((_, found)) = looked_up.iter().find(|(known, _)| known == binary) {
+            found.clone()
+        } else {
+            let found = find(binary, env, root);
+            let install = match tool.cartridge() {
+                Some(cartridge) => format!("install it with `{}`", cartridge.install),
+                None => format!("put `{binary}` on PATH"),
             };
+            slots.extend(tool_warning(binary, &install, &found, at).map(Slot::Found));
+            looked_up.push((binary.to_owned(), found.clone()));
+            found
+        };
         let state = match found {
             Found::OnPath(program) => {
                 *run = Some(ToolRun { tool, program });
@@ -3426,10 +3445,7 @@ fn selected_tools(
     language: Option<Language>,
     state: &BlockState,
     granted: Grant,
-) -> (
-    Option<&'static ToolCartridge>,
-    Option<&'static ToolCartridge>,
-) {
+) -> (Option<Tool>, Option<Tool>) {
     let pending = *state == BlockState::NotChecked(NotChecked::Pending);
     let language = |step: &StepState| {
         (pending && *step == StepState::NotRun)
@@ -3787,13 +3803,13 @@ fn step_values(block: &CodeBlock, info: &Info, code_blocks: &CodeBlocks) -> Vec<
                     if found
                         .value
                         .mode()
-                        .is_some_and(|mode| tool.modes.contains(&mode)) =>
+                        .is_some_and(|mode| tool.modes().contains(&mode)) =>
                 {
                     return None;
                 }
                 Some(tool) => format!(
                     "write one of {} for {}",
-                    tool.modes
+                    tool.modes()
                         .iter()
                         .map(|mode| match *mode {
                             "off" => format!("`{step}(off: <why>)`"),
@@ -3801,7 +3817,7 @@ fn step_values(block: &CodeBlock, info: &Info, code_blocks: &CodeBlocks) -> Vec<
                         })
                         .collect::<Vec<_>>()
                         .join(", "),
-                    tool.name
+                    tool.name()
                 ),
             };
             Some(
@@ -3949,7 +3965,7 @@ mod tests {
     use crate::code_blocks::states::{Failure, StepState};
     use crate::code_blocks::toolchain::Refusal;
     use crate::code_blocks::tools::{
-        CARTRIDGES, Found, Held, Invocation, Tier, ToolCartridge, ToolEnv, find,
+        CARTRIDGES, Found, Held, Invocation, Tier, Tool, ToolCartridge, ToolEnv, find,
     };
     use crate::config::code_blocks::{Dialect, Edition};
     use crate::finding::Location;
@@ -3977,8 +3993,8 @@ mod tests {
         let held = clippy_held();
         let gated = |granted, ceiling| {
             let mut step = StepState::NotRun;
-            let tool = tier_gate(Some(clippy()), &mut step, granted, ceiling);
-            (tool.map(|tool| tool.name), step)
+            let tool = tier_gate(Some(Tool::Cartridge(clippy())), &mut step, granted, ceiling);
+            (tool.map(|tool| tool.name().to_owned()), step)
         };
         let held_with = |reason| (None, StepState::Unrunnable { reason });
 
@@ -3993,7 +4009,7 @@ mod tests {
                 held_with(held.needs_trust),
                 held_with(held.trust_off),
                 held_with(TIER_LOWERED),
-                (Some("clippy"), StepState::NotRun),
+                (Some("clippy".to_owned()), StepState::NotRun),
             ],
             "clippy should be held with its own reason for each grant, by the project's tier, \
              or run when trusted"
@@ -4179,7 +4195,7 @@ mod tests {
                 uses: Vec::new(),
                 index: position + 1,
                 tool: None,
-                linter: Some(clippy()),
+                linter: Some(Tool::Cartridge(clippy())),
                 dialect: Dialect::default(),
                 edition: None,
                 given: None,
@@ -4316,7 +4332,10 @@ mod tests {
             .expect("the stub should be made executable");
         let mut record = rust_record(root.path(), "# A\n\n```sh\necho hi\n```\n");
         record.language = Some("sh".to_owned());
-        record.tool = CARTRIDGES.iter().find(|tool| tool.name == "shfmt");
+        record.tool = CARTRIDGES
+            .iter()
+            .find(|tool| tool.name == "shfmt")
+            .map(Tool::Cartridge);
         record.linter = None;
         record.pending = None;
         let mut evaluation = super::Evaluation {
@@ -4630,7 +4649,7 @@ mod tests {
             let root = self.root();
             let mut records = rust_records(&root, doc);
             for record in &mut records {
-                record.tool = formatter;
+                record.tool = formatter.map(Tool::Cartridge);
             }
             let mut evaluation = Evaluation {
                 findings: Vec::new(),
@@ -4821,7 +4840,7 @@ mod tests {
             assert_eq!(
                 record.steps.lint,
                 StepState::ToolRefused {
-                    binary: "cargo",
+                    binary: "cargo".to_owned(),
                     inside_root: false
                 },
                 "{record:?}"
@@ -5204,7 +5223,7 @@ mod tests {
         use crate::code_blocks::fragment::{Frame, Kind};
         use crate::code_blocks::states::StepState;
         use crate::code_blocks::toolchain::Toolchain;
-        use crate::code_blocks::tools::{ToolEnv, formatter};
+        use crate::code_blocks::tools::{Tool, ToolEnv, formatter};
         use crate::config::code_blocks::Language;
         use crate::finding::Finding;
 
@@ -5558,7 +5577,7 @@ mod tests {
                 .map(|record| Job {
                     record,
                     format: Some(ToolRun {
-                        tool: rustfmt,
+                        tool: Tool::Cartridge(rustfmt),
                         program: PathBuf::from("/bin/rustfmt"),
                     }),
                     lint: None,
@@ -5775,7 +5794,7 @@ mod tests {
                 .map(|record| Job {
                     record,
                     format: Some(ToolRun {
-                        tool: rustfmt,
+                        tool: Tool::Cartridge(rustfmt),
                         program: PathBuf::from("/bin/rustfmt"),
                     }),
                     lint: None,
