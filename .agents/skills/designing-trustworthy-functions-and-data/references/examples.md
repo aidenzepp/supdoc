@@ -6,7 +6,7 @@ For paired before-and-after Rust refactors, read [design-transformations.md](des
 
 ## Classify the Real Contract
 
-```rust
+```rust lint(off: needs crate context)
 // Pure and honest: all inputs and the returned output are visible.
 fn total(values: &[i64]) -> i64 {
     values.iter().sum()
@@ -34,7 +34,7 @@ fn session_status(session: &Session) -> SessionStatus {
 
 A domain rule that compares a deadline needs a timestamp, not permanent access to a clock:
 
-```rust
+```rust lint(off: needs crate context)
 fn status_at(session: &Session, now: Instant) -> SessionStatus {
     if now >= session.expires_at() {
         SessionStatus::Expired
@@ -54,7 +54,7 @@ The environmental adapter owns obtaining time. The rule receives an ordinary con
 
 A generator that consumes randomness across many operations legitimately accepts an RNG:
 
-```rust
+```rust lint(off: needs crate context)
 fn populate<R: Rng + ?Sized>(world: &mut ParticleWorld, count: usize, rng: &mut R) {
     for _ in 0..count {
         world.push(Particle::new(random_velocity(rng)));
@@ -71,7 +71,7 @@ Production chooses an unpredictable seed. Tests and reproducible simulations cho
 
 ## Carry a Proven Invariant
 
-```rust
+```rust lint(off: needs crate context)
 #[derive(Clone, Copy)]
 struct UnitVec3(Vec3);
 
@@ -112,7 +112,7 @@ fn reflect(incident: Vec3, normal: UnitVec3) -> Vec3 {
 
 An operation must return the type it can prove:
 
-```rust
+```rust lint(off: needs crate context)
 fn cross(left: UnitVec3, right: UnitVec3) -> Vec3 {
     left.into_inner().cross(right.into_inner())
 }
@@ -126,7 +126,7 @@ The ordinary cross product is not necessarily unit length. Parallel unit vectors
 
 ## Parse a Primitive into a Domain Value
 
-```rust
+```rust lint(off: needs crate context)
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct NonPrivilegedPort(u16);
 
@@ -163,7 +163,7 @@ If the rule were meaningful only inside `PortPool` and elements never crossed it
 
 ## Preserve the Transaction Boundary
 
-```rust
+```rust lint(off: needs crate context)
 fn transfer(mut transaction: Transaction<'_>, command: Transfer) -> Result<Receipt, TransferError> {
     let accounts = transaction.lock_accounts(command.from, command.to)?;
     let plan = plan_transfer(&accounts, &command)?;
@@ -178,7 +178,7 @@ fn transfer(mut transaction: Transaction<'_>, command: Transfer) -> Result<Recei
 
 ## Request the Capability Actually Used
 
-```rust
+```rust lint(off: needs crate context)
 fn total(values: impl IntoIterator<Item = i64>) -> i64 {
     values.into_iter().sum()
 }
@@ -212,7 +212,7 @@ The fields describe one timer policy. Enums replace positional booleans and rule
 
 ## Keep Domain Intent at One Level
 
-```rust
+```rust lint(off: needs crate context)
 fn is_asset_of_type(&self, name: &AssetName, expected: AssetType) -> bool {
     self.types_by_name
         .get(name)
@@ -224,7 +224,7 @@ fn is_asset_of_type(&self, name: &AssetName, expected: AssetType) -> bool {
 
 ## Stream Results That Should Not Be Materialized
 
-```rust
+```rust lint(off: needs crate context)
 fn write_permutations(input: &str, output: &mut impl Write) -> io::Result<()> {
     for permutation in permutations(input) {
         writeln!(output, "{permutation}")?;
