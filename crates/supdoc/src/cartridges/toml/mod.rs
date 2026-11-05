@@ -458,7 +458,7 @@ mod tests {
 
     use super::{cartridge, unquote};
     use crate::cartridges::data::KeyPathBudget;
-    use crate::limits::Limits;
+    use crate::limits::{Limits, TimeLimit};
     use crate::path::AbsolutePath;
     use crate::read::cartridge::{Cartridge, Deadline, Languages, SourceFile, Symbol, SymbolTable};
     use crate::read::error::ReadError;
@@ -800,6 +800,50 @@ name = "second"
         assert!(
             matches!(error, ReadError::TooManyKeys { limit: 3, .. }),
             "expected read-too-many-keys at 3, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn a_dotted_key_longer_than_the_segment_budget_is_refused_before_a_part_is_charged() {
+        // A byte budget of zero fails any charge with the other error, so the segment error
+        // shows the key was refused at its fourth part, before its parts were listed or charged.
+        let file = parse_under(
+            "a.b.c.d = 1\n",
+            KeyPathBudget {
+                segments: 3,
+                bytes: 0,
+            },
+        );
+
+        let error = file
+            .language()
+            .symbols(&file)
+            .expect_err("a four-part key can't fit a three-segment budget");
+
+        assert!(
+            matches!(error, ReadError::TooManyKeys { limit: 3, .. }),
+            "expected read-too-many-keys at 3 before any charge, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn the_deadline_stops_the_walk_inside_a_run_of_children_that_name_nothing() {
+        // The comments name nothing, so only the per-child check can stop the walk among them;
+        // without it the walk would run on to `2` and stop there.
+        let comments = "# nothing\n".repeat(500_000);
+        let text = format!("a = [1,\n{comments}2]\n");
+        let last = text.rfind('2').expect("the fixture should end with `2`");
+        let limit: TimeLimit = "1ms".parse().expect("`1ms` should be a time limit");
+        let file = parse(&text).with_deadline(Deadline::start(limit));
+
+        let error = file
+            .language()
+            .symbols(&file)
+            .expect_err("half a million comments should outlast a 1 ms deadline");
+
+        assert!(
+            matches!(error, ReadError::Timeout { offset, .. } if offset < last),
+            "the walk should stop among the comments, before byte {last}: {error:?}"
         );
     }
 

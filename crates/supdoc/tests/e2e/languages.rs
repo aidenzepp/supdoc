@@ -1,5 +1,6 @@
 //! Links into each language's symbols are recorded, pass, and fail when the symbol changes (docref's
-//! TypeScript, Markdown, sub-declaration, JavaScript, Python, Go and Bash tests, plus TOML).
+//! TypeScript, Markdown, sub-declaration, JavaScript, Python, Go and Bash tests, plus TOML and
+//! YAML).
 
 use crate::support::{Project, array_at, at, links};
 
@@ -316,5 +317,64 @@ fn toml_target_over_the_key_budget_is_a_broken_link_update_leaves_unrecorded() {
         broken,
         [(Some("Cargo.toml"), Some("read-too-many-keys"))],
         "{list}"
+    );
+}
+
+/// A project whose guide links a workflow step and a key in the second of two Kubernetes objects.
+fn yaml_project() -> Project {
+    let project = Project::fixture("bash");
+    project.write(
+        ".github/workflows/ci.yml",
+        "on: push\njobs:\n  test:\n    steps:\n      - uses: actions/checkout@v4\n      - name: Test\n        run: cargo test\n",
+    );
+    project.write(
+        "deploy/web.yaml",
+        "kind: Service\n---\nkind: Deployment\nspec:\n  replicas: 3\n",
+    );
+    project.write(
+        "docs/ci.md",
+        "CI [runs the tests](../.github/workflows/ci.yml#jobs.test.steps.1) on \
+         [three replicas](../deploy/web.yaml#1.spec.replicas).\n",
+    );
+    project
+}
+
+#[test]
+fn yaml_key_and_step_links_are_recorded_and_pass() {
+    let project = yaml_project();
+
+    project.record();
+
+    let locked = project.locked_links("supdoc.lock");
+    for link in [
+        ".github/workflows/ci.yml#jobs.test.steps.1",
+        "deploy/web.yaml#1.spec.replicas",
+    ] {
+        assert!(
+            locked.contains(link),
+            "`{link}` should be recorded: {locked:?}"
+        );
+    }
+    let _ = project.supdoc(&["check"]).assert_exit(0);
+}
+
+#[test]
+fn yaml_changing_a_step_fails_its_link() {
+    let project = yaml_project();
+    project.record();
+    project.replace(
+        ".github/workflows/ci.yml",
+        "run: cargo test",
+        "run: cargo nextest run",
+    );
+
+    let report = project.supdoc(&["--json", "check"]).assert_exit(1).json();
+
+    assert_eq!(at(&report, "/data/summary/failed"), 1, "{report}");
+    assert_eq!(at(&report, "/data/summary/broken"), 0, "{report}");
+    assert_eq!(
+        at(&report, "/data/links/0/symbol"),
+        "jobs.test.steps.1",
+        "{report}"
     );
 }

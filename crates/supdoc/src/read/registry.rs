@@ -31,6 +31,7 @@ static BUILTIN: LazyLock<Result<Languages, CartridgeLoadError>> = LazyLock::new(
         &TSX,
         &PYTHON,
         crate::cartridges::toml::cartridge(),
+        crate::cartridges::yaml::cartridge(),
     ]))
 });
 
@@ -397,7 +398,7 @@ mod tests {
 
         assert_eq!(
             target_only,
-            ["toml"],
+            ["toml", "yaml"],
             "data files are link targets, never link sources (D2.3)"
         );
     }

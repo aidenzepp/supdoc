@@ -118,6 +118,9 @@ pub(crate) mod cartridges {
     /// TOML, a link target only.
     pub(crate) mod toml;
 
+    /// YAML, a link target only.
+    pub(crate) mod yaml;
+
     /// Markdown.
     pub(crate) mod markdown {
         /// The Markdown cartridge.
