@@ -1181,12 +1181,10 @@ mod helps {
         case(
             "read-too-large",
             |p| {
-                let big = vec![b'/'; 16 * 1024 * 1024 + 1];
-                std::fs::write(p.path().join("src/big.rs"), big)
-                    .expect("big.rs should be writable");
+                p.write("src/big.rs", &format!("// {}\n", "x".repeat(2048)));
                 p.write("docs/guide.md", "[x](../src/big.rs#add)\n");
             },
-            &["check"],
+            &["--max-file-size", "1KiB", "check"],
         ),
         case(
             "read-too-many-keys",

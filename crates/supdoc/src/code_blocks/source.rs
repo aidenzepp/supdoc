@@ -204,6 +204,7 @@ fn resolve<T>(
         located.file.clone(),
         languages,
         limits.parse_timeout.value,
+        limits.max_file_size.value,
         KeyPathBudget::from_limits(limits),
     )
     .map_err(|error| read_failed(&error, config.root(), kind))?;

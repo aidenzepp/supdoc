@@ -7,15 +7,12 @@ use std::path::{Path, PathBuf};
 use crate::cartridges::data::KeyPathBudget;
 #[cfg(test)]
 use crate::limits::Limits;
-use crate::limits::TimeLimit;
+use crate::limits::{SizeLimit, TimeLimit};
 use crate::path::AbsolutePath;
 #[cfg(test)]
 use crate::read::cartridge::Cartridge;
 use crate::read::cartridge::{Deadline, Languages, SourceFile};
 use crate::read::error::ReadError;
-
-/// The largest file supdoc reads: 16 MiB.
-pub(crate) const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 impl SourceFile {
     /// Parses `text` with `language`'s grammar under the default `parse-timeout`
@@ -37,8 +34,9 @@ impl SourceFile {
     }
 
     /// Reads `path` from the filesystem and parses it with the cartridge `languages` picks for
-    /// the extension of the file it really is. A data cartridge builds its key paths under
-    /// `key_paths`, the run's `max-key-segments` and `max-key-path-size`.
+    /// the extension of the file it really is, refusing one larger than `max_size`, the run's
+    /// `max-file-size`. A data cartridge builds its key paths under `key_paths`, the run's
+    /// `max-key-segments` and `max-key-path-size`.
     ///
     /// A symlink is judged by the file it points at, so `env.py -> .env` is not read as Python.
     ///
@@ -47,7 +45,7 @@ impl SourceFile {
     /// - [`ReadError::UnsupportedLanguage`] when no cartridge reads the extension.
     /// - [`ReadError::Missing`] or [`ReadError::Io`] when the file can't be opened or read.
     /// - [`ReadError::NotAFile`] when it is a directory, FIFO, socket or device.
-    /// - [`ReadError::TooLarge`] when it is over [`MAX_FILE_BYTES`].
+    /// - [`ReadError::TooLarge`] when it is over `max_size`.
     /// - [`ReadError::NotUtf8`] when it isn't UTF-8.
     /// - [`ReadError::Timeout`] when the parse takes longer than `limit`. The same deadline,
     ///   started just before the parse, then bounds every query and inline parse of the file.
@@ -56,13 +54,14 @@ impl SourceFile {
         path: AbsolutePath,
         languages: &Languages,
         limit: TimeLimit,
+        max_size: SizeLimit,
         key_paths: KeyPathBudget,
     ) -> Result<Self, ReadError> {
         let real = real_file(&path);
         let Some(language) = languages.for_path(&real) else {
             return Err(unsupported(path, &real, languages));
         };
-        let bytes = read_capped(&path)?;
+        let bytes = read_capped(&path, max_size)?;
         let text = String::from_utf8(bytes).map_err(|error| ReadError::NotUtf8 {
             path: path.clone(),
             offset: error.utf8_error().valid_up_to(),
@@ -78,7 +77,8 @@ impl SourceFile {
     }
 }
 
-/// Reads the whole file, refusing one over [`MAX_FILE_BYTES`] before reading its contents.
+/// Reads the whole file, refusing one over `max_size` before reading its contents. With no limit,
+/// the whole file is read.
 ///
 /// The file is opened first and judged by the open handle, so what is checked is what is read:
 /// no rename between a check and the open can swap in another file. On Unix the open is
@@ -93,7 +93,7 @@ impl SourceFile {
 ///
 /// [`ReadError::Missing`], [`ReadError::NotAFile`], [`ReadError::Io`] or
 /// [`ReadError::TooLarge`].
-fn read_capped(path: &AbsolutePath) -> Result<Vec<u8>, ReadError> {
+fn read_capped(path: &AbsolutePath, max_size: SizeLimit) -> Result<Vec<u8>, ReadError> {
     let io_error = |error: io::Error| {
         if error.kind() == io::ErrorKind::NotFound {
             ReadError::Missing { path: path.clone() }
@@ -104,10 +104,10 @@ fn read_capped(path: &AbsolutePath) -> Result<Vec<u8>, ReadError> {
             }
         }
     };
-    let too_large = |size| ReadError::TooLarge {
+    let too_large = |size, limit| ReadError::TooLarge {
         path: path.clone(),
         size,
-        limit: MAX_FILE_BYTES,
+        limit,
     };
 
     let file = open_without_blocking(path.as_path()).map_err(|error| {
@@ -121,18 +121,34 @@ fn read_capped(path: &AbsolutePath) -> Result<Vec<u8>, ReadError> {
         return Err(ReadError::NotAFile { path: path.clone() });
     }
     let size = metadata.len();
-    if size > MAX_FILE_BYTES {
-        return Err(too_large(size));
+    if let Some(limit) = max_size.get()
+        && size > limit
+    {
+        return Err(too_large(size, limit));
     }
-    let mut bytes = Vec::new();
-    let _read = file
-        .take(MAX_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(io_error)?;
+    let bytes = read_up_to(file, max_size).map_err(io_error)?;
     let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    if read > MAX_FILE_BYTES {
-        return Err(too_large(read));
+    match max_size.get() {
+        Some(limit) if read > limit => Err(too_large(read, limit)),
+        _ => Ok(bytes),
     }
+}
+
+/// Reads `reader` to its end, but never more than one byte past `max_size`: one byte over is
+/// enough to know the source is too large, so a file that keeps growing can't make the read go on.
+/// With no limit, it reads to the end.
+///
+/// # Errors
+///
+/// Whatever reading `reader` reports.
+fn read_up_to(mut reader: impl Read, max_size: SizeLimit) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let _read = match max_size.get() {
+        Some(limit) => reader
+            .take(limit.saturating_add(1))
+            .read_to_end(&mut bytes)?,
+        None => reader.read_to_end(&mut bytes)?,
+    };
     Ok(bytes)
 }
 
@@ -347,6 +363,7 @@ mod tests {
             path.clone(),
             Languages::builtin().expect("the built-in cartridges should load"),
             Limits::PARSE_TIMEOUT,
+            Limits::MAX_FILE_SIZE,
             KeyPathBudget::defaults(),
         )
         .expect("a small UTF-8 Rust file should read");
@@ -367,6 +384,7 @@ mod tests {
             path.clone(),
             Languages::builtin().expect("the built-in cartridges should load"),
             Limits::PARSE_TIMEOUT,
+            Limits::MAX_FILE_SIZE,
             KeyPathBudget::defaults(),
         )
         .expect_err("a file with an invalid UTF-8 byte should be rejected");
@@ -385,34 +403,113 @@ mod tests {
         );
     }
 
-    #[test]
-    fn oversized_file_is_rejected() {
-        let dir = temp_dir();
-        let path = absolute_in(&dir, "generated.rs");
+    /// A sparse `.rs` file of `len` bytes in `dir`, so a large size costs no disk.
+    fn sparse_file(dir: &tempfile::TempDir, len: u64) -> AbsolutePath {
+        let path = absolute_in(dir, "generated.rs");
         let file = File::create(path.as_path()).expect("the fixture should be creatable");
-        // Sparse on most filesystems, so the test doesn't write 16 MiB.
-        file.set_len(MAX_FILE_BYTES + 1)
-            .expect("the fixture should be resizable");
+        file.set_len(len).expect("the fixture should be resizable");
+        path
+    }
 
-        let error = SourceFile::read(
+    /// Reads `path` under the `max-file-size` ceiling `max_size`.
+    fn read_under(path: AbsolutePath, max_size: SizeLimit) -> Result<SourceFile, ReadError> {
+        SourceFile::read(
             path,
             Languages::builtin().expect("the built-in cartridges should load"),
             Limits::PARSE_TIMEOUT,
+            max_size,
             KeyPathBudget::defaults(),
         )
-        .expect_err("a file one byte over the limit should be rejected");
+    }
+
+    #[test]
+    fn a_file_one_byte_over_the_default_cap_is_read_too_large() {
+        let dir = temp_dir();
+        let cap = Limits::MAX_FILE_SIZE
+            .get()
+            .expect("the default max-file-size should be a limit");
+        let path = sparse_file(&dir, cap + 1);
+
+        let error = read_under(path, Limits::MAX_FILE_SIZE)
+            .expect_err("a file one byte over the limit should be rejected");
 
         assert!(
             matches!(
                 error,
-                ReadError::TooLarge {
-                    size,
-                    limit: MAX_FILE_BYTES,
-                    ..
-                } if size == MAX_FILE_BYTES + 1
+                ReadError::TooLarge { size, limit, .. } if size == cap + 1 && limit == cap
             ),
-            "expected TooLarge with the file's size and the 16 MiB limit, got {error:?}",
+            "expected TooLarge with the file's size and the default limit, got {error:?}",
         );
+        assert_eq!(error.code(), "read-too-large");
+        assert!(
+            error.to_string().contains("`max-file-size`"),
+            "the message should name the key: {error}"
+        );
+    }
+
+    #[test]
+    fn a_file_of_exactly_the_cap_reads() {
+        let dir = temp_dir();
+        let path = absolute_in(&dir, "lib.rs");
+        fs::write(path.as_path(), "fn add() {}\n").expect("the fixture should be writable");
+
+        let file = read_under(path, SizeLimit::bytes(12))
+            .expect("a file exactly at the limit should read");
+
+        assert_eq!(file.text(), "fn add() {}\n");
+        let path = absolute_in(&dir, "lib.rs");
+        let error = read_under(path, SizeLimit::bytes(11))
+            .expect_err("a file one byte over the limit should be rejected");
+        assert_eq!(error.code(), "read-too-large");
+    }
+
+    /// A reader of `len` bytes that counts how many it has handed out.
+    struct Counted {
+        /// The bytes still to hand out.
+        inner: io::Take<io::Repeat>,
+        /// How many bytes it has handed out so far.
+        handed_out: std::rc::Rc<std::cell::Cell<u64>>,
+    }
+
+    impl Read for Counted {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let read = self.inner.read(buf)?;
+            self.handed_out
+                .set(self.handed_out.get() + u64::try_from(read).expect("a read fits in u64"));
+            Ok(read)
+        }
+    }
+
+    #[test]
+    fn a_capped_read_stops_one_byte_past_the_cap_however_much_the_source_holds() {
+        let handed_out = std::rc::Rc::new(std::cell::Cell::new(0));
+        let source = Counted {
+            inner: io::repeat(b'x').take(4096),
+            handed_out: std::rc::Rc::clone(&handed_out),
+        };
+
+        let bytes = read_up_to(source, SizeLimit::bytes(100)).expect("an in-memory read succeeds");
+
+        assert_eq!(bytes.len(), 101, "one byte past the cap is kept");
+        assert_eq!(
+            handed_out.get(),
+            101,
+            "the read should stop at cap + 1 bytes, not read the whole source first"
+        );
+    }
+
+    #[test]
+    fn zero_lifts_the_cap_so_a_file_past_the_default_is_read_whole() {
+        let dir = temp_dir();
+        let cap = Limits::MAX_FILE_SIZE
+            .get()
+            .expect("the default max-file-size should be a limit");
+        let path = sparse_file(&dir, cap + 1);
+
+        // The bytes alone: parsing a file this size would cost far more memory than reading it.
+        let bytes = read_capped(&path, SizeLimit::bytes(0)).expect("with no limit, the file reads");
+
+        assert_eq!(u64::try_from(bytes.len()).ok(), Some(cap + 1));
     }
 
     #[test]
@@ -424,6 +521,7 @@ mod tests {
             path,
             Languages::builtin().expect("the built-in cartridges should load"),
             Limits::PARSE_TIMEOUT,
+            Limits::MAX_FILE_SIZE,
             KeyPathBudget::defaults(),
         )
         .expect_err("a file that doesn't exist can't be read");
@@ -445,6 +543,7 @@ mod tests {
             link,
             Languages::builtin().expect("the built-in cartridges should load"),
             Limits::PARSE_TIMEOUT,
+            Limits::MAX_FILE_SIZE,
             KeyPathBudget::defaults(),
         )
         .expect_err("a .env file behind a .py name must not be parsed as Python");
@@ -470,6 +569,7 @@ mod tests {
             link.clone(),
             Languages::builtin().expect("the built-in cartridges should load"),
             Limits::PARSE_TIMEOUT,
+            Limits::MAX_FILE_SIZE,
             KeyPathBudget::defaults(),
         )
         .expect("a symlink to a Rust file should read as Rust");
@@ -491,6 +591,7 @@ mod tests {
             path,
             Languages::builtin().expect("the built-in cartridges should load"),
             Limits::PARSE_TIMEOUT,
+            Limits::MAX_FILE_SIZE,
             KeyPathBudget::defaults(),
         )
         .expect_err("no cartridge reads .png files");
@@ -514,6 +615,7 @@ mod tests {
                 path,
                 Languages::builtin().expect("the built-in cartridges should load"),
                 Limits::PARSE_TIMEOUT,
+                Limits::MAX_FILE_SIZE,
                 KeyPathBudget::defaults(),
             );
             let _sent = sender.send(read);

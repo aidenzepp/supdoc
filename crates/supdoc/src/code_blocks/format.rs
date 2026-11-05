@@ -26,7 +26,7 @@ const UNFORMATTED: &str = "code-block-unformatted";
 const TOOL_FAILED: &str = "code-block-tool-failed";
 
 /// The code for a block its language's tool couldn't parse.
-const PARSE: &str = "code-block-parse";
+pub(super) const PARSE: &str = "code-block-parse";
 
 /// The code for a tool that passed the `[limits] code-block-timeout` limit.
 const TOOL_TIMEOUT: &str = "code-block-tool-timeout";

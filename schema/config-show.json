@@ -224,6 +224,10 @@
           "$ref": "#/$defs/LimitJson",
           "description": "How large each config file may be. Set only by flag or environment variable."
         },
+        "max_file_size": {
+          "$ref": "#/$defs/LimitJson",
+          "description": "How large a doc or linked file may be."
+        },
         "max_ignore_size": {
           "$ref": "#/$defs/LimitJson",
           "description": "How large each ignore file may be."
@@ -249,6 +253,7 @@
         "parse_timeout",
         "code_block_timeout",
         "code_block_build_timeout",
+        "max_file_size",
         "max_lock_size",
         "max_config_size",
         "max_ignore_size",

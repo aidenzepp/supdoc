@@ -681,3 +681,265 @@ fn a_code_block_source_is_read_under_the_flag_s_key_segment_limit() {
         "the flag's limit should bound the source's read: {over:?}"
     );
 }
+
+/// The `max-file-size` the file size tests set: well above every file of the `basic` fixture and
+/// below [`big_rust`].
+const FILE_CAP: &str = "2KiB";
+
+/// Rust over [`FILE_CAP`] that defines `big`, padded by a comment.
+fn big_rust() -> String {
+    format!("fn big() {{}}\n// {}\n", "x".repeat(4096))
+}
+
+/// The `basic` fixture plus `src/big.rs`, over [`FILE_CAP`], and a doc that links into it,
+/// recorded under the default `max-file-size`.
+fn project_with_big_target() -> Project {
+    let project = Project::fixture("basic");
+    project.write("src/big.rs", &big_rust());
+    project.write("docs/big.md", "[big](../src/big.rs#big)\n");
+    project.record();
+    project
+}
+
+/// Asserts that `run` refused `src/big.rs` and printed `read-too-large` for it.
+fn assert_refused(run: &crate::support::Run, how: &str) {
+    let output = all_output(run);
+    assert!(
+        output.contains("read-too-large") && output.contains("src/big.rs"),
+        "`supdoc {}` ({how}) should report src/big.rs as read-too-large:\n{output}",
+        run.args
+    );
+}
+
+#[test]
+fn every_reading_command_honors_the_max_file_size_flag_and_variable() {
+    let project = project_with_big_target();
+    let commands: [&[&str]; 5] = [
+        &["check"],
+        &["list"],
+        &["update", "--yes"],
+        &["fix"],
+        &["resolve", "src/big.rs"],
+    ];
+
+    for command in commands {
+        let within = project.supdoc(command);
+        let _ = within.assert_exit(0);
+        assert!(
+            !all_output(&within).contains("read-too-large"),
+            "the default limit holds src/big.rs:\n{}",
+            all_output(&within)
+        );
+        let flagged: Vec<&str> = ["--max-file-size", FILE_CAP]
+            .iter()
+            .chain(command)
+            .copied()
+            .collect();
+        assert_refused(&project.supdoc(&flagged), "flag");
+        let from_env = project.supdoc_in_with(
+            ".",
+            command,
+            &[("SUPDOC_MAX_FILE_SIZE", Path::new(FILE_CAP))],
+        );
+        assert_refused(&from_env, "variable");
+    }
+}
+
+#[test]
+fn the_max_file_size_config_key_reaches_the_reader_and_zero_lifts_it() {
+    let project = project_with_big_target();
+    project.write(
+        "supdoc.config.toml",
+        &format!("[limits]\nmax-file-size = \"{FILE_CAP}\"\n"),
+    );
+
+    assert_refused(&project.supdoc(&["check"]), "config");
+    let _ = project
+        .supdoc(&["--max-file-size", "0", "check"])
+        .assert_exit(0);
+}
+
+#[test]
+fn max_file_size_takes_flag_then_variable_then_config_then_default() {
+    let project = Project::fixture("basic");
+    let show = |args: &[&str], env: &[(&str, &Path)]| {
+        project.supdoc_in_with(".", args, env).assert_exit(0).json()
+    };
+    let base = ["config", "show", "--json"];
+    let env = [("SUPDOC_MAX_FILE_SIZE", Path::new("2MiB"))];
+
+    let json = show(&base, &[]);
+    assert_eq!(at(&json, "/data/limits/max_file_size/source"), "default");
+
+    project.write("supdoc.config.toml", "[limits]\nmax-file-size = \"8MiB\"\n");
+    let json = show(&base, &[]);
+    assert_eq!(at(&json, "/data/limits/max_file_size/value"), "8MiB");
+    assert_eq!(at(&json, "/data/limits/max_file_size/source"), "config");
+    assert_eq!(
+        at(&json, "/data/limits/max_file_size/from"),
+        "supdoc.config.toml"
+    );
+
+    let json = show(&base, &env);
+    assert_eq!(at(&json, "/data/limits/max_file_size/value"), "2MiB");
+    assert_eq!(at(&json, "/data/limits/max_file_size/source"), "env");
+
+    let json = show(&["config", "show", "--json", "--max-file-size", "0"], &env);
+    assert_eq!(at(&json, "/data/limits/max_file_size/value"), "0");
+    assert_eq!(at(&json, "/data/limits/max_file_size/source"), "flag");
+}
+
+/// Asserts that `fix`, previewed and applied, fails on `project` with `code` for `file` and never
+/// says there is nothing to fix.
+fn assert_fix_reports_the_read_error(project: &Project, args: &[&str], code: &str, file: &str) {
+    for mode in [&[][..], &["--yes"]] {
+        let command: Vec<&str> = args.iter().chain(&["fix"]).chain(mode).copied().collect();
+
+        let run = project.supdoc(&command);
+
+        let output = all_output(&run);
+        let _ = run.assert_exit(1);
+        assert!(
+            output.contains(code) && output.contains(file),
+            "`supdoc {}` should report {file} as {code}:\n{output}",
+            run.args
+        );
+        assert!(
+            !output.contains("Nothing to fix"),
+            "{file} was never checked for fixes:\n{output}"
+        );
+    }
+}
+
+#[test]
+fn fix_fails_with_read_too_large_for_a_doc_over_the_cap() {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write("docs/big.md", &format!("# Big\n\n{}\n", "x".repeat(4096)));
+
+    assert_fix_reports_the_read_error(
+        &project,
+        &["--max-file-size", FILE_CAP],
+        "read-too-large",
+        "docs/big.md",
+    );
+}
+
+#[test]
+fn fix_fails_with_read_too_large_for_a_target_over_the_cap() {
+    let project = Project::fixture("basic");
+    project.write("supdoc.config.toml", "include = [\"docs/**\"]\n");
+    project.write("src/big.rs", &big_rust());
+    project.write("docs/big.md", "[big](../src/big.rs#big)\n");
+    project.record();
+
+    assert_fix_reports_the_read_error(
+        &project,
+        &["--max-file-size", FILE_CAP],
+        "read-too-large",
+        "src/big.rs",
+    );
+}
+
+#[test]
+fn fix_fails_with_read_not_utf8_for_a_doc_that_is_not_utf8() {
+    let project = Project::fixture("basic");
+    project.record();
+    std::fs::write(project.path("docs/bad.md"), b"# Bad\n\n\xff\xfe\n")
+        .expect("the non-UTF-8 doc should be writable");
+
+    assert_fix_reports_the_read_error(&project, &[], "read-not-utf8", "docs/bad.md");
+}
+
+#[test]
+fn list_resolves_a_symbol_only_in_a_target_under_the_resolved_cap() {
+    let project = project_with_big_target();
+
+    let over = project.supdoc(&["--max-file-size", FILE_CAP, "list", "src/big.rs#nope"]);
+    let raised = project.supdoc(&["--max-file-size", "8KiB", "list", "src/big.rs#nope"]);
+
+    // Over the cap the file isn't read, so the symbol is matched as text and finds no link.
+    let _ = over.assert_exit(0);
+    assert!(
+        over.stderr.contains("No links to src/big.rs#nope"),
+        "a target over the cap should fall back to matching text:\n{}",
+        all_output(&over)
+    );
+    // Under a raised cap the file is read and the missing symbol is refused.
+    let _ = raised.assert_exit(1);
+    assert!(
+        !all_output(&raised).contains("No links to"),
+        "a target under the raised cap should be read and its symbol looked up:\n{}",
+        all_output(&raised)
+    );
+}
+
+#[test]
+fn a_code_block_source_is_read_under_the_flag_s_file_size_limit() {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write(
+        "Cargo.toml",
+        &format!(
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n# {}\n",
+            "x".repeat(4096)
+        ),
+    );
+    project.write("supdoc.config.toml", "[features.code-blocks]\n");
+    project.write(
+        "docs/blocks.md",
+        "# Blocks\n\n```rust uses(/Cargo.toml#package.version)\nfn add() {}\n```\n",
+    );
+    let refused_sources = |args: &[&str]| -> Vec<String> {
+        let command: Vec<&str> = args.iter().chain(&["check", "--json"]).copied().collect();
+        let json = project.supdoc(&command).json();
+        array_at(&json, "/findings")
+            .iter()
+            .map(ToString::to_string)
+            .filter(|finding| {
+                finding.contains("code-block-source-missing") && finding.contains("max-file-size")
+            })
+            .collect()
+    };
+
+    let within = refused_sources(&[]);
+    let over = refused_sources(&["--max-file-size", FILE_CAP]);
+
+    assert!(
+        within.is_empty(),
+        "the default limit holds the file: {within:?}"
+    );
+    assert_eq!(
+        over.len(),
+        1,
+        "the flag's limit should bound the source's read: {over:?}"
+    );
+}
+
+#[test]
+fn max_file_size_long_help_gives_the_measured_memory_cost_and_short_help_does_not() {
+    let project = Project::fixture("basic");
+
+    let long = project.supdoc(&["check", "--help"]);
+    let short = project.supdoc(&["check", "-h"]);
+
+    let _ = long.assert_exit(0);
+    for line in [
+        "- YAML: about 740 MiB on one line, 315 MiB across lines",
+        "- JavaScript, TypeScript: about 390 MiB",
+        "- JSON: about 235 MiB",
+        "- TOML: about 185 MiB",
+    ] {
+        assert!(
+            long.stdout.contains(line),
+            "`--help` should list {line:?}:\n{}",
+            long.stdout
+        );
+    }
+    let _ = short.assert_exit(0);
+    assert!(
+        short.stdout.contains("--max-file-size") && !short.stdout.contains("about 235 MiB"),
+        "`-h` keeps the one-line help:\n{}",
+        short.stdout
+    );
+}
