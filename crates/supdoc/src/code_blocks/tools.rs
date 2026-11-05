@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use crate::config::code_blocks::{CodeBlocks, Dialect, Edition, Language};
 
 use super::format::ParseError;
+use super::fragment::{Kind, Support};
 use super::lint;
 use super::runner::{Failure, Ran};
 use super::{biome, python, rumdl, rust, shell};
@@ -102,6 +103,10 @@ pub(crate) struct Invocation<'run> {
     /// Where clippy writes the block's metadata. `None` names no path, which is how a cache key
     /// names every run of the same block alike.
     pub(crate) emit: Option<&'run Path>,
+    /// What clippy links the block against: the project build's `--extern` and `-L` flags,
+    /// placed right after `--error-format=json`. Empty when the block compiles alone, and for
+    /// every other tool.
+    pub(crate) externs: &'run [OsString],
 }
 
 /// How a cartridge reads a finished run, which also says which step it does.
@@ -137,6 +142,8 @@ pub(crate) struct ToolCartridge {
     pub(crate) config_files: &'static [&'static str],
     /// The values its step's mode accepts, in config and in a block attribute.
     pub(crate) modes: &'static [&'static str],
+    /// The fragment kinds it checks, and how.
+    pub(crate) fragments: &'static [(Kind, Support)],
     /// Its arguments for a block.
     argv: fn(&Invocation<'_>) -> Vec<OsString>,
     /// How a run is read.
@@ -151,6 +158,12 @@ impl ToolCartridge {
             Reader::Format(_) => Step::Format,
             Reader::Lint(_) => Step::Lint,
         }
+    }
+
+    /// Whether it checks a fragment of `kind`.
+    #[must_use]
+    pub(crate) fn supports(&self, kind: Kind) -> bool {
+        self.fragments.iter().any(|(listed, _)| *listed == kind)
     }
 
     /// Its arguments for the block `invocation` describes.
@@ -193,6 +206,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 11] = [
         install: "rustup component add rustfmt",
         config_files: &["rustfmt.toml", ".rustfmt.toml"],
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: rustfmt_args,
         reader: Reader::Format(rust::parse_error),
     },
@@ -204,6 +218,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 11] = [
         install: "go install mvdan.cc/sh/v3/cmd/shfmt@latest",
         config_files: &[".editorconfig"],
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: shfmt_args,
         reader: Reader::Format(shell::parse_error),
     },
@@ -215,6 +230,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 11] = [
         install: "pipx install ruff",
         config_files: &["ruff.toml", ".ruff.toml", "pyproject.toml"],
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: ruff_format_args,
         reader: Reader::Format(python::ruff_parse_error),
     },
@@ -226,6 +242,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 11] = [
         install: "pipx install black",
         config_files: &["pyproject.toml"],
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: black_args,
         reader: Reader::Format(python::black_parse_error),
     },
@@ -237,6 +254,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 11] = [
         install: "pipx install ruff",
         config_files: &["ruff.toml", ".ruff.toml", "pyproject.toml"],
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: ruff_args,
         reader: Reader::Lint(python::lint_verdict),
     },
@@ -248,6 +266,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 11] = [
         install: "cabal install ShellCheck",
         config_files: &[".shellcheckrc"],
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: shellcheck_args,
         reader: Reader::Lint(shell::lint_verdict),
     },
@@ -259,6 +278,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 11] = [
         install: "rustup component add clippy",
         config_files: &["clippy.toml", ".clippy.toml", "Cargo.toml"],
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: clippy_args,
         reader: Reader::Lint(rust::lint_verdict),
     },
@@ -270,6 +290,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 11] = [
         install: "npm install --global @biomejs/biome",
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: biome_format_args,
         reader: Reader::Format(biome::parse_error),
     },
@@ -281,6 +302,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 11] = [
         install: "npm install --global @biomejs/biome",
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: biome_format_args,
         reader: Reader::Format(biome::parse_error),
     },
@@ -292,6 +314,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 11] = [
         install: "pipx install rumdl",
         config_files: RUMDL_CONFIGS,
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: rumdl_format_args,
         reader: Reader::Format(rumdl::parse_error),
     },
@@ -303,6 +326,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 11] = [
         install: "pipx install rumdl",
         config_files: RUMDL_CONFIGS,
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: rumdl_args,
         reader: Reader::Lint(rumdl::lint_verdict),
     },
@@ -542,8 +566,9 @@ const CLIPPY_RELAXED: [&str; 4] = [
 ];
 
 /// `clippy-driver`'s arguments: `--edition <E> --crate-type lib --emit=metadata=<emit>
-/// --error-format=json`, the project's `lints` flags, the snippet relaxations, and `-` for the
-/// block on stdin. Nothing else from the project: no `--extern`, `-L` or `--cfg`.
+/// --error-format=json`, the project build's `--extern` and `-L` flags when the block is linked
+/// against it, the project's `lints` flags, the snippet relaxations, and `-` for the block on
+/// stdin. Nothing else from the project: no `--cfg`.
 fn clippy_args(invocation: &Invocation<'_>) -> Vec<OsString> {
     let mut metadata = OsString::from("--emit=metadata");
     if let Some(emit) = invocation.emit {
@@ -558,6 +583,7 @@ fn clippy_args(invocation: &Invocation<'_>) -> Vec<OsString> {
         metadata,
         "--error-format=json".into(),
     ];
+    args.extend(invocation.externs.iter().cloned());
     args.extend(invocation.project.iter().cloned());
     for lint in CLIPPY_RELAXED {
         args.extend(["-A".into(), lint.into()]);
@@ -690,6 +716,7 @@ mod tests {
             dialect: Dialect::Bash,
             project,
             emit: None,
+            externs: &[],
         })
     }
 
@@ -830,6 +857,7 @@ mod tests {
             dialect: Dialect::Posix,
             project: &[],
             emit: None,
+            externs: &[],
         });
 
         assert_eq!(posix, ["--filename", "/p/docs/a.md.3.sh", "-ln", "posix"]);
@@ -880,6 +908,7 @@ mod tests {
                     dialect: Dialect::Bash,
                     project: &[],
                     emit: None,
+                    externs: &[],
                 })
                 .get(5)
                 .cloned()
@@ -978,6 +1007,7 @@ mod tests {
                     dialect,
                     project: &[],
                     emit: None,
+                    externs: &[],
                 })
                 .into_iter()
                 .take(2)
@@ -1000,6 +1030,7 @@ mod tests {
             dialect: Dialect::Bash,
             project: &lints,
             emit: Some(Path::new("/c/emit/1-0/block.rmeta")),
+            externs: &[],
         };
 
         let args = cartridge("clippy").args(&invocation);
@@ -1038,6 +1069,50 @@ mod tests {
             key.contains(&"--emit=metadata".into()),
             "a cache key names no metadata path"
         );
+    }
+
+    #[test]
+    fn clippy_gets_the_project_builds_externs_after_the_error_format_and_before_the_lints() {
+        let lints = ["-W".into(), "clippy::pedantic".into()];
+        let externs = [
+            "--extern".into(),
+            "proj=/t/debug/deps/libproj-1.rmeta".into(),
+            "-L".into(),
+            "dependency=/t/debug/deps".into(),
+        ];
+
+        let args = cartridge("clippy").args(&Invocation {
+            doc: Path::new("/p/docs/a.md"),
+            index: 1,
+            edition: Edition::E2021,
+            dialect: Dialect::Bash,
+            project: &lints,
+            emit: None,
+            tag: "",
+            externs: &externs,
+        });
+
+        let at = args
+            .iter()
+            .position(|arg| arg == "--error-format=json")
+            .expect("clippy should get its error format");
+        assert_eq!(
+            args.get(at + 1..at + 7),
+            Some(
+                [
+                    "--extern",
+                    "proj=/t/debug/deps/libproj-1.rmeta",
+                    "-L",
+                    "dependency=/t/debug/deps",
+                    "-W",
+                    "clippy::pedantic",
+                ]
+                .map(OsString::from)
+                .as_slice()
+            ),
+            "{args:?}"
+        );
+        assert_eq!(args.last(), Some(&OsString::from("-")), "{args:?}");
     }
 
     /// Writes an executable `#!/bin/sh` stub named `name` in `dir`.

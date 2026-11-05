@@ -208,6 +208,13 @@
           "description": "What the format step did: `ran`, `off`, `skipped` or `not_run`.",
           "type": "string"
         },
+        "fragment": {
+          "description": "The kind its `fragment(<kind>)` attribute declares: `statements`, `expression`, `entries`,\n`children`, `members` or `declarations`. Left out for a block that is a whole file.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "language": {
           "description": "The language tag the block is read as. Left out for an untagged block outside Rust docs.",
           "type": [

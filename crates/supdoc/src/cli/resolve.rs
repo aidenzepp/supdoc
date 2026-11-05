@@ -226,6 +226,8 @@ fn read_failed(error: &ReadError, root: &AbsolutePath, typed: &Path) -> CliError
         | ReadError::NotUtf8 { .. }
         | ReadError::TooLarge { .. }
         | ReadError::Timeout { .. }
+        | ReadError::TooManyKeys { .. }
+        | ReadError::KeyPathsTooLarge { .. }
         | ReadError::UnsupportedLanguage { .. } => ExitStatus::Failed,
     };
     let shown = relative_to(root, error.path());

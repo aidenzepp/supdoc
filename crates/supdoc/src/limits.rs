@@ -101,13 +101,48 @@ impl fmt::Display for SizeLimit {
     }
 }
 
-/// Whether a ceiling measures time or size, which decides its units.
+/// A count ceiling: how many of something one read of a file may make. `None` is no limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CountLimit(Option<u64>);
+
+impl CountLimit {
+    /// The ceiling, or `None` when there is no limit.
+    #[must_use]
+    pub(crate) const fn get(self) -> Option<u64> {
+        self.0
+    }
+}
+
+impl FromStr for CountLimit {
+    type Err = LimitError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let number: u64 = text
+            .trim()
+            .parse()
+            .map_err(|_| LimitError::new(text, Kind::Count))?;
+        Ok(Self((number != 0).then_some(number)))
+    }
+}
+
+impl fmt::Display for CountLimit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            None => f.write_str("0"),
+            Some(count) => write!(f, "{count}"),
+        }
+    }
+}
+
+/// Whether a ceiling measures time, size or a count, which decides its units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     /// `ms`, `s` or `m`.
     Time,
     /// `B`, `KiB` or `MiB`.
     Size,
+    /// A whole number with no unit.
+    Count,
 }
 
 /// Splits `text` into its number and its unit. A bare `0` is no limit, so it gets the unit that
@@ -152,7 +187,11 @@ impl LimitError {
 impl fmt::Display for LimitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let digits: String = self.text.chars().take_while(char::is_ascii_digit).collect();
-        let number = if digits.is_empty() { "10" } else { &digits };
+        let number = match (digits.is_empty(), self.kind) {
+            (false, _) => digits.as_str(),
+            (true, Kind::Count) => "200000",
+            (true, _) => "10",
+        };
         match self.kind {
             Kind::Time => write!(
                 f,
@@ -162,6 +201,11 @@ impl fmt::Display for LimitError {
             Kind::Size => write!(
                 f,
                 "`{}` is not a size; give a unit, such as `{number}KiB` (also `B` or `MiB`), or `0` for no limit",
+                self.text
+            ),
+            Kind::Count => write!(
+                f,
+                "`{}` is not a count; give a whole number with no unit, such as `{number}`, or `0` for no limit",
                 self.text
             ),
         }
@@ -222,6 +266,12 @@ impl<'de> serde::Deserialize<'de> for SizeLimit {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for CountLimit {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserialize_limit(deserializer)
+    }
+}
+
 /// Where a ceiling's value came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Source {
@@ -260,6 +310,10 @@ pub(crate) struct CommandLineLimits {
     pub(crate) max_config_size: Option<Given<SizeLimit>>,
     /// `--max-ignore-size` or `SUPDOC_MAX_IGNORE_SIZE`.
     pub(crate) max_ignore_size: Option<Given<SizeLimit>>,
+    /// `--max-key-segments` or `SUPDOC_MAX_KEY_SEGMENTS`.
+    pub(crate) max_key_segments: Option<Given<CountLimit>>,
+    /// `--max-key-path-size` or `SUPDOC_MAX_KEY_PATH_SIZE`.
+    pub(crate) max_key_path_size: Option<Given<SizeLimit>>,
 }
 
 /// The ceilings the config chain sets, each from the nearest file that sets it.
@@ -275,6 +329,10 @@ pub(crate) struct ConfigLimits {
     pub(crate) max_lock_size: Option<(SizeLimit, AbsolutePath)>,
     /// `max-ignore-size` and the file that set it.
     pub(crate) max_ignore_size: Option<(SizeLimit, AbsolutePath)>,
+    /// `max-key-segments` and the file that set it.
+    pub(crate) max_key_segments: Option<(CountLimit, AbsolutePath)>,
+    /// `max-key-path-size` and the file that set it.
+    pub(crate) max_key_path_size: Option<(SizeLimit, AbsolutePath)>,
 }
 
 /// One ceiling in effect and where it came from.
@@ -302,6 +360,11 @@ pub(crate) struct Limits {
     pub(crate) max_config_size: Setting<SizeLimit>,
     /// How large each ignore file may be.
     pub(crate) max_ignore_size: Setting<SizeLimit>,
+    /// How many path segments all the symbols of one data file (JSON, YAML, TOML) may hold
+    /// together.
+    pub(crate) max_key_segments: Setting<CountLimit>,
+    /// How many bytes of path text all the symbols of one data file may hold together.
+    pub(crate) max_key_path_size: Setting<SizeLimit>,
 }
 
 impl Limits {
@@ -318,6 +381,15 @@ impl Limits {
     pub(crate) const MAX_CONFIG_SIZE: SizeLimit = SizeLimit(Some(256 * KIB));
     /// The default ignore file size ceiling: 256 KiB.
     pub(crate) const MAX_IGNORE_SIZE: SizeLimit = SizeLimit(Some(256 * KIB));
+    /// The default key-path segment ceiling: 200,000.
+    ///
+    /// A symbol costs about 415 bytes of table at one segment each (measured at 415 MB for
+    /// 1,000,000 one-byte keys), so this keeps the worst-case file near 83 MB, under the roughly
+    /// 100 MB the design allows. It is still four times the 50,000 segments of Cargo.toml or a
+    /// 3,000-line API spec.
+    pub(crate) const MAX_KEY_SEGMENTS: CountLimit = CountLimit(Some(200_000));
+    /// The default key-path text ceiling: 32 MiB.
+    pub(crate) const MAX_KEY_PATH_SIZE: SizeLimit = SizeLimit(Some(32 * MIB));
 
     /// Each ceiling from the command line, else the config, else its default.
     #[must_use]
@@ -348,6 +420,16 @@ impl Limits {
                 command_line.max_ignore_size,
                 config.max_ignore_size.as_ref(),
                 Self::MAX_IGNORE_SIZE,
+            ),
+            max_key_segments: pick(
+                command_line.max_key_segments,
+                config.max_key_segments.as_ref(),
+                Self::MAX_KEY_SEGMENTS,
+            ),
+            max_key_path_size: pick(
+                command_line.max_key_path_size,
+                config.max_key_path_size.as_ref(),
+                Self::MAX_KEY_PATH_SIZE,
             ),
         }
     }
@@ -434,6 +516,8 @@ mod tests {
             code_block_build_timeout: None,
             max_lock_size: Some((size("1MiB").expect("1MiB"), file.clone())),
             max_ignore_size: None,
+            max_key_segments: None,
+            max_key_path_size: None,
         };
         let command_line = CommandLineLimits {
             parse_timeout: Some(Given {
@@ -513,5 +597,47 @@ mod tests {
         let from_env = Limits::resolve(&env, &config);
         assert_eq!(from_env.code_block_build_timeout.source, Source::Env);
         assert_eq!(from_env.code_block_build_timeout.value.to_string(), "5s");
+    }
+
+    #[test]
+    fn a_count_is_a_bare_number_and_zero_means_no_limit() {
+        let count = |text: &str| text.parse::<CountLimit>();
+        assert_eq!(count("200000").map(CountLimit::get), Ok(Some(200_000)));
+        assert_eq!(count("0").map(CountLimit::get), Ok(None));
+        let error = count("5KiB").expect_err("a count with a unit should be refused");
+        assert!(error.to_string().contains("whole number"), "{error}");
+        assert!(count("").is_err(), "an empty count should be refused");
+    }
+
+    #[test]
+    fn the_key_path_limits_take_flag_then_env_then_config_then_default() {
+        let file = AbsolutePath::new(Path::new(std::path::MAIN_SEPARATOR_STR))
+            .expect("the root should be absolute");
+        let config = ConfigLimits {
+            max_key_segments: Some((CountLimit(Some(5)), file.clone())),
+            max_key_path_size: Some((size("1MiB").expect("1MiB"), file.clone())),
+            ..ConfigLimits::default()
+        };
+        let from_config = Limits::resolve(&CommandLineLimits::default(), &config);
+        assert_eq!(from_config.max_key_segments.source, Source::Config(file));
+        assert_eq!(from_config.max_key_path_size.value.to_string(), "1MiB");
+        let command_line = CommandLineLimits {
+            max_key_segments: Some(Given {
+                value: CountLimit(Some(9)),
+                from_env: true,
+            }),
+            max_key_path_size: Some(Given {
+                value: size("2MiB").expect("2MiB"),
+                from_env: false,
+            }),
+            ..CommandLineLimits::default()
+        };
+        let from_command_line = Limits::resolve(&command_line, &config);
+        assert_eq!(from_command_line.max_key_segments.source, Source::Env);
+        assert_eq!(from_command_line.max_key_path_size.source, Source::Flag);
+        let defaults = Limits::resolve(&CommandLineLimits::default(), &ConfigLimits::default());
+        assert_eq!(defaults.max_key_segments.value.to_string(), "200000");
+        assert_eq!(defaults.max_key_path_size.value.to_string(), "32MiB");
+        assert_eq!(defaults.max_key_segments.source, Source::Default);
     }
 }

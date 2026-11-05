@@ -22,7 +22,7 @@ use super::tools::{ToolCartridge, ToolEnv};
 
 /// The version of the rules that decide what a tool reads for a block, such as wrapping. Raised
 /// whenever they change, so results judged under old rules are never reused.
-const RULES_VERSION: u32 = 1;
+const RULES_VERSION: u32 = 2;
 
 /// The first bytes of every entry, naming its format.
 const MAGIC: &[u8] = b"supdoc code-block cache 1\n";
@@ -67,6 +67,9 @@ pub(crate) struct Run<'run> {
     pub(crate) input: &'run str,
     /// The doc's absolute path, the virtual path's directory the tool's config search starts from.
     pub(crate) doc: &'run Path,
+    /// The fingerprint of the project build the block is linked against, `None` when it compiles
+    /// alone: the externs' paths don't change when their bytes do.
+    pub(crate) project: Option<&'run [u8; 32]>,
 }
 
 impl Cache {
@@ -108,7 +111,8 @@ impl Cache {
 
     /// The key of `run`, from `root`: the checked text, the tool's name, its real path, size and
     /// modification time (read, never run), its arguments and extra variables, each config file
-    /// its row names along the tool's own search (see [`config_state`]), and [`RULES_VERSION`].
+    /// its row names along the tool's own search (see [`config_state`]), the project build's
+    /// fingerprint when there is one, and [`RULES_VERSION`].
     /// `None` when the tool's metadata or an in-root config file can't be read, so the run isn't
     /// cached.
     ///
@@ -134,6 +138,7 @@ impl Cache {
             field(name.as_bytes());
             field(value.as_encoded_bytes());
         }
+        field(run.project.map_or(&[][..], |fingerprint| &fingerprint[..]));
         let real_root = root.canonicalize().ok()?;
         for dir in run.doc.parent().into_iter().flat_map(Path::ancestors) {
             for name in run.tool.config_files {
@@ -330,6 +335,12 @@ mod tests {
 
     /// The key of `shfmt` at `program` on `input` from `root`.
     fn key_of(program: &Path, input: &str, root: &Path) -> Key {
+        key_against(program, input, root, None)
+    }
+
+    /// The key of `shfmt` at `program` on `input` from `root`, linked against the build
+    /// `project` fingerprints.
+    fn key_against(program: &Path, input: &str, root: &Path, project: Option<&[u8; 32]>) -> Key {
         let doc = root.join("docs/a.md");
         let run = Run {
             tool: shfmt(),
@@ -338,6 +349,7 @@ mod tests {
             extra: &[],
             input,
             doc: &doc,
+            project,
         };
         Cache::key(&run, root).expect("the program's metadata should be readable")
     }
@@ -408,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn the_key_changes_with_the_text_the_config_and_the_tool() {
+    fn the_key_changes_with_the_text_the_config_the_tool_and_the_project_build() {
         let dir = temp();
         let program = program(dir.path());
         let base = key_of(&program, "echo hi\n", dir.path());
@@ -422,6 +434,10 @@ mod tests {
         assert_ne!(base, text, "the text");
         assert_ne!(base, config, "the config file");
         assert_ne!(config, tool, "the tool's binary");
+        let built = key_against(&program, "echo hi\n", dir.path(), Some(&[1; 32]));
+        let rebuilt = key_against(&program, "echo hi\n", dir.path(), Some(&[2; 32]));
+        assert_ne!(tool, built, "a project build");
+        assert_ne!(built, rebuilt, "the project build's fingerprint");
         assert_eq!(
             tool,
             key_of(&program, "echo hi\n", dir.path()),

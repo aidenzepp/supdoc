@@ -5,7 +5,7 @@
 //! (init, update, check), `containment`, `resolve`, `paths`, `ignore`, `namespaces` and `languages`
 //! (what links resolve to), `list` and `list_containment` (the `list` command), `limits`
 //! (the size, timeout and similar limits), and `code_blocks`, `code_blocks_fix`,
-//! `code_blocks_md`, `code_blocks_python`, `code_blocks_rust` and `code_blocks_ts` (checking the code blocks in docs), and `trust` (the
+//! `code_blocks_fragment`, `code_blocks_md`, `code_blocks_python`, `code_blocks_rust` and `code_blocks_ts` (checking the code blocks in docs), and `trust` (the
 //! trust store `supdoc trust` writes).
 //!
 //! The suite began as a port of docref's integration tests (`docref/tests/integration.rs`), adjusted
@@ -80,6 +80,7 @@ fn permissions_restrict_this_user(test: &str) -> bool {
 mod code_blocks;
 #[cfg(test)]
 mod code_blocks_fix;
+mod code_blocks_fragment;
 #[cfg(test)]
 mod code_blocks_md;
 #[cfg(test)]
