@@ -17,11 +17,13 @@ use crate::config::Config;
 use crate::config::code_blocks::{CodeBlocks, Dialect, Edition, Language};
 use crate::finding::{Finding, Location, Severity};
 use crate::hash::Hash;
+use crate::link::SourcePath;
 use crate::lock::model::Lockfile;
 use crate::output::paths::PathStyle;
+use crate::path::AbsolutePath;
 use crate::read::cartridge::Languages;
 use crate::read::error::CartridgeLoadError;
-use crate::trust::Grant;
+use crate::trust::{Grant, Unread};
 
 use super::biome;
 use super::block::{CodeBlock, Info};
@@ -187,9 +189,9 @@ pub(crate) fn evaluate(
         return Ok(Evaluation::default());
     };
     let mut findings = Vec::new();
-    let mut doc: Option<(&str, Option<Arc<FixDoc>>)> = None;
+    let mut doc: Option<(&SourcePath, Option<Arc<FixDoc>>)> = None;
     let limits = config.limits_in_effect();
-    let read = |file: &str| {
+    let read = |file: &SourcePath| {
         read_doc(config, file)
             .map(|text| Arc::new(FixDoc::new(Arc::from(text), limits.parse_timeout.value)))
     };
@@ -220,8 +222,7 @@ pub(crate) fn evaluate(
             unresolved_uses.extend(sources.use_missing.then_some(block.fence.file.as_str()));
             outcome = sources.from_missing.then_some(Excerpt::SourceMissing);
             if let Some(parts) = sources.parts {
-                let file = block.fence.file.as_str();
-                reread(&mut doc, file, read);
+                reread(&mut doc, &block.fence.file, read);
                 let stale = doc
                     .as_ref()
                     .and_then(|(_, text)| text.as_ref())
@@ -268,7 +269,7 @@ pub(crate) fn evaluate(
     let judged = |doc: &str| in_scope(doc) && !unresolved_uses.contains(doc);
     let command = |doc: &str| paths.command_word(doc);
     findings.extend(uses::judge(&written, lock.recorded_uses(), judged, command));
-    findings.extend(not_trusted(&records, |record, step| {
+    findings.extend(not_trusted(&records, granted, |record, step| {
         custom_named(code_blocks, record, step)
     }));
     Ok(Evaluation {
@@ -1135,10 +1136,12 @@ fn tier_gate(
 /// The run's one `code-block-not-trusted` warning, at the first of `records` with a step held
 /// because the operator hasn't granted trust. It names every held tool in the order first seen
 /// (see [`trust_words`]); a held custom command by its program, as `named` names the custom
-/// command a record's step selects (see [`custom_named`]). `None` when no step was held for want
-/// of trust.
+/// command a record's step selects (see [`custom_named`]). Under [`Grant::Unread`] it says why
+/// the trust store wasn't read and what fixes that. `None` when no step was held for want of
+/// trust.
 fn not_trusted(
     records: &[BlockRecord],
+    granted: Grant,
     named: impl Fn(&BlockRecord, Step) -> Option<String>,
 ) -> Option<Finding> {
     let mut at = None;
@@ -1161,7 +1164,11 @@ fn not_trusted(
             }
         }
     }
-    Some(trust_words(&didnt_run, &off, turned_off).with_location(at?.clone()))
+    let unread = match granted {
+        Grant::Unread(unread) => Some(unread),
+        Grant::Trusted | Grant::Untrusted | Grant::TurnedOff => None,
+    };
+    Some(trust_words(&didnt_run, &off, turned_off, unread).with_location(at?.clone()))
 }
 
 /// The custom command `code_blocks` selects for `record`'s `step`, as messages name it (see
@@ -1180,14 +1187,20 @@ fn custom_named(code_blocks: &CodeBlocks, record: &BlockRecord, step: Step) -> O
 fn trust_warning(held: &[&tools::Held], turned_off: bool) -> Finding {
     let didnt_run: Vec<String> = held.iter().map(|held| held.didnt_run.to_owned()).collect();
     let off: Vec<&str> = held.iter().map(|held| held.off).collect();
-    trust_words(&didnt_run, &off, turned_off)
+    trust_words(&didnt_run, &off, turned_off, None)
 }
 
 /// The `code-block-not-trusted` warning saying what didn't run and why, each of `didnt_run` in
 /// order. When `turned_off`, it says `SUPDOC_TRUST=0` held them and how to undo that, since
-/// `supdoc trust` can't help then. Its help ends with the settings that stop asking:
-/// `tier = "static"`, or each of `off`, the held tools' own off settings.
-fn trust_words(didnt_run: &[String], off: &[&str], turned_off: bool) -> Finding {
+/// `supdoc trust` can't help then. When the trust store went `unread`, it says why and what fixes
+/// that, since `supdoc trust` fails for the same reason. Its help ends with the settings that
+/// stop asking: `tier = "static"`, or each of `off`, the held tools' own off settings.
+fn trust_words(
+    didnt_run: &[String],
+    off: &[&str],
+    turned_off: bool,
+    unread: Option<Unread>,
+) -> Finding {
     let didnt_run = didnt_run.join("; ");
     let off = off.join(" and ");
     let stop_asking =
@@ -1201,6 +1214,19 @@ fn trust_words(didnt_run: &[String], off: &[&str], turned_off: bool) -> Finding 
         .with_help(format!(
             "unset `SUPDOC_TRUST` to let `supdoc trust` decide, or set it to `1` to trust this \
              run; {stop_asking}"
+        ))
+    } else if let Some(unread) = unread {
+        Finding::new(
+            NOT_TRUSTED,
+            Severity::Warning,
+            format!(
+                "{didnt_run}, and this checkout isn't trusted: the trust store wasn't read, as {}",
+                unread.reason()
+            ),
+        )
+        .with_help(format!(
+            "{}, or set `SUPDOC_TRUST=1` for one run; {stop_asking}",
+            unread.fix()
         ))
     } else {
         Finding::new(
@@ -1220,24 +1246,35 @@ fn trust_words(didnt_run: &[String], off: &[&str], turned_off: bool) -> Finding 
 fn pending_of<'doc>(
     state: &BlockState,
     block: &'doc CodeBlock,
-    doc: &mut Option<(&'doc str, Option<Arc<FixDoc>>)>,
-    read: impl Fn(&str) -> Option<Arc<FixDoc>>,
+    doc: &mut Option<(&'doc SourcePath, Option<Arc<FixDoc>>)>,
+    read: impl Fn(&SourcePath) -> Option<Arc<FixDoc>>,
 ) -> Option<Pending> {
     if *state != BlockState::NotChecked(NotChecked::Pending) {
         return None;
     }
-    reread(doc, block.fence.file.as_str(), read);
+    reread(doc, &block.fence.file, read);
     doc.as_ref()?
         .1
         .as_ref()
         .and_then(|text| Pending::of(block, text))
 }
 
+/// Where `file`, a doc relative to the project root, lies beneath `root`, the project root.
+///
+/// `root` is always absolute: it is [`Config::root`]. A relative one would leave `file`
+/// relative, naming no doc beneath it.
+fn doc_beneath(root: &Path, file: &SourcePath) -> PathBuf {
+    AbsolutePath::new(root).map_or_else(
+        || PathBuf::from(file.as_str()),
+        |root| root.beneath(file).as_path().to_path_buf(),
+    )
+}
+
 /// Points `doc` at `file`, read with `read`, unless it already holds it.
 fn reread<'doc>(
-    doc: &mut Option<(&'doc str, Option<Arc<FixDoc>>)>,
-    file: &'doc str,
-    read: impl Fn(&str) -> Option<Arc<FixDoc>>,
+    doc: &mut Option<(&'doc SourcePath, Option<Arc<FixDoc>>)>,
+    file: &'doc SourcePath,
+    read: impl Fn(&SourcePath) -> Option<Arc<FixDoc>>,
 ) {
     if doc.as_ref().is_none_or(|(held, _)| *held != file) {
         *doc = Some((file, read(file)));
@@ -1417,7 +1454,7 @@ impl BiomeConfigs {
         if !tool.runs("biome") {
             return Ok(());
         }
-        let doc = root.join(record.at.file.as_str());
+        let doc = doc_beneath(root, &record.at.file);
         let dir = doc.parent().unwrap_or(root).to_path_buf();
         let found = if let Some((_, found)) = self.found.iter().find(|(known, _)| *known == dir) {
             found.clone()
@@ -1509,7 +1546,7 @@ impl RumdlConfigs {
         if !tool.runs("rumdl") {
             return Ok(());
         }
-        let doc = root.join(record.at.file.as_str());
+        let doc = doc_beneath(root, &record.at.file);
         let dir = doc.parent().unwrap_or(root).to_path_buf();
         let found = if let Some((_, found)) = self.found.iter().find(|(known, _)| *known == dir) {
             found.clone()
@@ -1616,7 +1653,7 @@ impl TombiConfigs {
         if !refuse_directive(record, slots) {
             return false;
         }
-        let doc = root.join(record.at.file.as_str());
+        let doc = doc_beneath(root, &record.at.file);
         let dir = doc.parent().unwrap_or(root).to_path_buf();
         let found = if let Some((_, found)) = self.found.iter().find(|(known, _)| *known == dir) {
             found.clone()
@@ -1821,7 +1858,7 @@ impl YamlfmtConfigs {
         {
             return Ok(());
         }
-        let doc = root.join(record.at.file.as_str());
+        let doc = doc_beneath(root, &record.at.file);
         let dir = doc.parent().unwrap_or(root).to_path_buf();
         let found = if let Some((_, found)) = self.found.iter().find(|(known, _)| *known == dir) {
             found.clone()
@@ -1923,7 +1960,7 @@ impl YamllintConfigs {
         {
             return true;
         }
-        let doc = root.join(record.at.file.as_str());
+        let doc = doc_beneath(root, &record.at.file);
         let dir = doc.parent().unwrap_or(root).to_path_buf();
         let found = if let Some((_, found)) = self.found.iter().find(|(known, _)| *known == dir) {
             found.clone()
@@ -2856,7 +2893,7 @@ fn run_formatter(
                 ))
             });
     let input = checked.as_ref();
-    let doc = root.join(record.at.file.as_str());
+    let doc = doc_beneath(root, &record.at.file);
     let edition = record
         .edition
         .or_else(|| rust.map(|rust| rust.edition))
@@ -3135,7 +3172,7 @@ fn run_linter(
     if let Some(rust) = rust {
         return Some(run_clippy(tool, program, record, pending, session, rust));
     }
-    let doc = session.root.join(record.at.file.as_str());
+    let doc = doc_beneath(session.root, &record.at.file);
     let given = record.given.as_ref();
     let invocation = Invocation {
         doc: given
@@ -3603,7 +3640,7 @@ fn run_clippy(
     if neutral == Path::new("/") {
         return Err(NO_PRIVATE_DIR.into());
     }
-    let doc = session.root.join(record.at.file.as_str());
+    let doc = doc_beneath(session.root, &record.at.file);
     let edition = rust.edition_of(record);
     let invocation = Invocation {
         doc: &doc,
@@ -4273,8 +4310,8 @@ fn scan_warning(scan: &Scan, at: &Location) -> Option<Finding> {
 /// be read; its blocks then get no stale finding.
 ///
 /// Effect: reads the doc.
-fn read_doc(config: &Config, doc: &str) -> Option<String> {
-    std::fs::read_to_string(config.root().join_path(Path::new(doc))).ok()
+fn read_doc(config: &Config, doc: &SourcePath) -> Option<String> {
+    std::fs::read_to_string(config.root().beneath(doc).as_path()).ok()
 }
 
 /// What a block's `from(...)` and `uses(...)` values resolved to.
@@ -4732,7 +4769,8 @@ mod tests {
             .map(|record| record.at.clone())
             .expect("the doc holds three blocks");
 
-        let warning = not_trusted(&records, |_, _| None).expect("two steps were held for trust");
+        let warning = not_trusted(&records, Grant::Untrusted, |_, _| None)
+            .expect("two steps were held for trust");
 
         assert_eq!(
             (warning.location, warning.message),

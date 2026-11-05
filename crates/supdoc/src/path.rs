@@ -60,10 +60,6 @@ impl AbsolutePath {
     /// Appends `rel`, which [`Beneath`] proves has no root, `..` or `.`, so the result is always
     /// beneath `self`.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the content joins move onto it from PH08")
-    )]
     pub(crate) fn beneath(&self, rel: &impl Beneath) -> Self {
         let mut joined = self.0.clone();
         joined.extend(rel.segments().split('/'));
@@ -77,10 +73,6 @@ impl AbsolutePath {
     /// writes the result still checks it against the real root (`Config::contains` today, and
     /// `Boundary::admit` for a write once PH01 lands).
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the `from(...)` join moves onto it in PH09")
-    )]
     pub(crate) fn join_within(&self, rel: &RelativePath, boundary: &AbsolutePath) -> Option<Self> {
         let joined = self.join(rel);
         joined.strip_prefix(boundary).is_some().then_some(joined)

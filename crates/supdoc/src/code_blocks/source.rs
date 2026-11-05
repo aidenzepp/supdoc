@@ -8,15 +8,14 @@
 //! symlinks are followed. A source outside is refused before it is opened, so nothing of it is
 //! read or shown.
 
-use std::path::Path;
-
 use crate::cartridges::data::KeyPathBudget;
 use crate::config::Config;
 use crate::finding::{Finding, Location, Severity};
 use crate::hash::Hash;
+use crate::link::SourcePath;
 use crate::namespace::{NamespaceName, unknown_namespace_help};
 use crate::output::paths::relative_to;
-use crate::path::{AbsolutePath, percent_decode, split_namespace};
+use crate::path::{AbsolutePath, RelativePath, percent_decode, split_namespace};
 use crate::read::cartridge::{Languages, SourceFile, Symbol};
 use crate::read::error::{CartridgeLoadError, ReadError, ReadRole};
 use crate::read::hash::hash_symbol;
@@ -304,15 +303,20 @@ fn locate(config: &Config, doc: &str, kind: SourceKind, path: &str) -> Result<Lo
     } else if let Some(rest) = decoded.strip_prefix('/') {
         (root.clone(), root.clone(), rest)
     } else {
-        let doc_directory = root
-            .join_path(Path::new(doc))
-            .parent()
+        // Every doc is a `SourcePath`'s text, so the parse always succeeds.
+        let doc_directory = doc
+            .parse::<SourcePath>()
+            .ok()
+            .and_then(|doc| root.beneath(&doc).parent())
             .unwrap_or_else(|| root.clone());
         (root.clone(), doc_directory, decoded.as_str())
     };
 
-    let file = base.join_path(Path::new(rest));
-    if file.strip_prefix(&boundary).is_none() {
+    // A second root, as in `//etc/passwd` or `ns:/etc/hosts`, leaves the boundary as a climb does.
+    let file = RelativePath::try_from(rest.to_owned())
+        .ok()
+        .and_then(|rest| base.join_within(&rest, &boundary));
+    let Some(file) = file else {
         return Err(Missing::new(
             format!(
                 "`{name}({path})` climbs out of {}",
@@ -320,7 +324,7 @@ fn locate(config: &Config, doc: &str, kind: SourceKind, path: &str) -> Result<Lo
             ),
             "name a file inside the project root; supdoc never reads a source outside it",
         ));
-    }
+    };
     if !config.contains(boundary.as_path()) || !config.contains(file.as_path()) {
         return Err(Missing::new(
             format!("`{name}({path})` is outside the project root"),
@@ -369,6 +373,7 @@ fn read_failed(error: &ReadError, root: &AbsolutePath, kind: SourceKind) -> Unre
 mod tests {
     use std::fs;
     use std::os::unix::fs::symlink;
+    use std::path::Path;
 
     use tempfile::TempDir;
 
@@ -516,6 +521,40 @@ mod tests {
                     .as_ref()
                     .is_err_and(|missing| missing.message.contains("climbs out")),
                 "{value}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hostile_path_is_refused_with_the_message_it_always_had() {
+        let fixture = Fixture::new("");
+        symlink(
+            fixture.outside.path(),
+            fixture.root.path().join("docs/link"),
+        )
+        .expect("the symlink should be creatable");
+
+        for (value, expected) in [
+            ("../../x", "`from(../../x)` climbs out of the project root"),
+            (
+                "//etc/passwd",
+                "`from(//etc/passwd)` climbs out of the project root",
+            ),
+            (
+                "%2e%2e/%2e%2e/x",
+                "`from(%2e%2e/%2e%2e/x)` climbs out of the project root",
+            ),
+            (
+                "link/secret.rs",
+                "`from(link/secret.rs)` is outside the project root",
+            ),
+        ] {
+            let result = fixture.read(SourceKind::From, value);
+
+            assert_eq!(
+                result.map_err(|missing| missing.message),
+                Err(expected.to_owned()),
+                "{value}"
             );
         }
     }
