@@ -219,6 +219,9 @@ pub(crate) mod code_blocks {
     /// The format step.
     mod format;
 
+    /// Custom `{ command = [...] }` formatters, run in a trusted checkout.
+    mod custom;
+
     /// Rust's format and lint steps.
     mod rust;
 

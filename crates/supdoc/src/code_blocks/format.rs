@@ -22,16 +22,16 @@ use super::tools::{Step, ToolCartridge};
 use super::yaml;
 
 /// The code for a block its formatter would change.
-const UNFORMATTED: &str = "code-block-unformatted";
+pub(super) const UNFORMATTED: &str = "code-block-unformatted";
 
 /// The code for a tool that exited unexpectedly or wrote past the output cap.
-const TOOL_FAILED: &str = "code-block-tool-failed";
+pub(super) const TOOL_FAILED: &str = "code-block-tool-failed";
 
 /// The code for a block its language's tool couldn't parse.
 pub(super) const PARSE: &str = "code-block-parse";
 
 /// The code for a tool that passed the `[limits] code-block-timeout` limit.
-const TOOL_TIMEOUT: &str = "code-block-tool-timeout";
+pub(super) const TOOL_TIMEOUT: &str = "code-block-tool-timeout";
 
 /// The code for formatter output `fix` refuses to write, because it would escape the block.
 const FIX_UNSAFE: &str = "code-block-fix-unsafe";
@@ -96,13 +96,13 @@ pub(crate) enum Verdict {
 }
 
 /// Whether `text` is nothing, or only whitespace by Unicode's measure.
-fn blank(text: &str) -> bool {
+pub(super) fn blank(text: &str) -> bool {
     text.chars().all(char::is_whitespace)
 }
 
 /// Whether a formatter's `output` is nothing, or only whitespace: no formatting of a block that
 /// isn't blank. Output that isn't UTF-8 isn't blank.
-fn printed_blank(output: &[u8]) -> bool {
+pub(super) fn printed_blank(output: &[u8]) -> bool {
     std::str::from_utf8(output).is_ok_and(blank)
 }
 
@@ -456,6 +456,28 @@ pub(crate) fn exit_detail(stderr: &[u8]) -> String {
     }
 }
 
+/// `text` without its ANSI escape sequences (`ESC [ … <letter>`), which some tools write even to
+/// a pipe, so quoted output never colors or moves the terminal it is printed to.
+#[must_use]
+pub(crate) fn strip_ansi(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            if chars.next() == Some('[') {
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            plain.push(c);
+        }
+    }
+    plain
+}
+
 /// The verdict on a run that reached no exit: a timeout, or a tool failure saying how it failed.
 #[must_use]
 pub(crate) fn failed(failure: Failure) -> Verdict {
@@ -629,13 +651,33 @@ pub(crate) fn fixed(
     output: &str,
     tool: &ToolCartridge,
 ) -> Vec<Finding> {
-    let name = tool.name;
-    let what = format!("`{name}`'s output");
+    fixed_as(
+        unformatted,
+        block,
+        doc,
+        output,
+        &format!("`{}`", tool.name),
+        tool.name == "yamlfmt",
+    )
+}
+
+/// `unformatted` with its fix, as [`fixed`] gives it, for the formatter `named` (as messages
+/// name it, quoted), whose output must keep the block's YAML structure when `yaml`.
+#[must_use]
+pub(crate) fn fixed_as(
+    unformatted: Finding,
+    block: &CodeBlock,
+    doc: &FixDoc,
+    output: &str,
+    named: &str,
+    yaml: bool,
+) -> Vec<Finding> {
+    let what = format!("{named}'s output");
     let output = output
         .strip_suffix("\r\n")
         .or_else(|| output.strip_suffix('\n'))
         .unwrap_or(output);
-    if tool.name == "yamlfmt" {
+    if yaml {
         let Some((marker, _)) = fence_of(block, doc.text()) else {
             return vec![unformatted];
         };
@@ -656,7 +698,7 @@ pub(crate) fn fixed(
     match safe_fix(block, doc, output, &what) {
         Guarded::Fix(fix) => {
             let help = format!(
-                "run `supdoc fix {} --yes` to apply `{name}`'s output",
+                "run `supdoc fix {} --yes` to apply {what}",
                 fix.file.as_str()
             );
             vec![unformatted.with_help(help).with_fix(fix)]

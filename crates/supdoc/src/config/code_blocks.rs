@@ -136,17 +136,6 @@ pub(crate) enum Choice {
     Command(CustomCommand),
 }
 
-impl Choice {
-    /// The known tool's name, or `None` for a custom command.
-    #[must_use]
-    pub(crate) const fn known(&self) -> Option<&'static str> {
-        match self {
-            Self::Known(name) => Some(name),
-            Self::Command(_) => None,
-        }
-    }
-}
-
 /// A validated custom `{ command = [...] }`: at most [`MAX_ARGUMENTS`] elements, each 1 to
 /// [`MAX_ARGUMENT_BYTES`] bytes with no NUL, a program that isn't blank and holds no `{path}`,
 /// and no placeholder but `{path}`.
@@ -155,10 +144,6 @@ pub(crate) struct CustomCommand {
     /// The program, `command`'s first element.
     program: String,
     /// The arguments after it, as written; `{path}` is still unreplaced.
-    #[expect(
-        dead_code,
-        reason = "read when custom commands are wired to run, in P5-CC03 and P5-CC04"
-    )]
     arguments: Vec<String>,
     /// How a linter's output is read: `Some` for `diagnostics = "gnu"`. Always `None` for a
     /// formatter.
@@ -176,6 +161,12 @@ impl CustomCommand {
     #[must_use]
     pub(crate) fn program(&self) -> &str {
         &self.program
+    }
+
+    /// The arguments after the program, as written; `{path}` is still unreplaced.
+    #[must_use]
+    pub(crate) fn arguments(&self) -> &[String] {
+        &self.arguments
     }
 }
 
@@ -747,23 +738,20 @@ impl Table {
         })
     }
 
-    /// The custom command this table's merged `formatter`, else `linter`, selects, if any.
+    /// The custom command this table's merged `linter` selects, if any: custom linters are not
+    /// wired to run yet. A custom formatter runs.
     fn unwired(&self, language: Language) -> Option<Unwired> {
-        [("formatter", &self.formatter), ("linter", &self.linter)]
-            .into_iter()
-            .find_map(|(key, chosen)| {
-                let chosen = chosen.as_ref()?;
-                let Choice::Command(command) = &chosen.choice else {
-                    return None;
-                };
-                Some(Unwired {
-                    file: chosen.file.clone(),
-                    span: command.span.clone(),
-                    language: language.table(),
-                    key,
-                    program: command.program.clone(),
-                })
-            })
+        let chosen = self.linter.as_ref()?;
+        let Choice::Command(command) = &chosen.choice else {
+            return None;
+        };
+        Some(Unwired {
+            file: chosen.file.clone(),
+            span: command.span.clone(),
+            language: language.table(),
+            key: "linter",
+            program: command.program.clone(),
+        })
     }
 }
 
@@ -891,8 +879,8 @@ impl Written {
     /// [`ConfigError::ToolNotSelected`] for the first tool table, Rust, shell, Python,
     /// TypeScript, JavaScript, JSON, YAML, TOML, Markdown then Go, whose tool the merged chain
     /// doesn't select. Then, once the whole chain is valid, [`ConfigError::CustomCommandNotWired`]
-    /// for the first custom command it selects, in the same order: custom commands are not
-    /// wired to run yet.
+    /// for the first custom linter it selects, in the same order: custom linters are not wired
+    /// to run yet.
     pub(super) fn resolve(
         self,
         include: &AnchoredPatterns,
@@ -946,26 +934,17 @@ impl CodeBlocks {
         self.tier
     }
 
-    /// The known tool `language`'s `formatter` key names: `None` selects its default formatter.
-    /// It never holds a custom command: [`Written::resolve`] refuses one until custom commands
-    /// are wired to run.
+    /// What `language`'s `formatter` or `linter` key, for `step`, selects: a known tool's name
+    /// or a custom command. `None` selects the language's default tool. It never holds a custom
+    /// linter: [`Written::resolve`] refuses one until custom linters are wired to run.
     #[must_use]
-    pub(crate) fn formatter(&self, language: Language) -> Option<&str> {
-        self.table(language)
-            .formatter
-            .as_ref()
-            .and_then(|chosen| chosen.choice.known())
-    }
-
-    /// The known tool `language`'s `linter` key names: `None` selects its default linter. It
-    /// never holds a custom command: [`Written::resolve`] refuses one until custom commands are
-    /// wired to run.
-    #[must_use]
-    pub(crate) fn linter(&self, language: Language) -> Option<&str> {
-        self.table(language)
-            .linter
-            .as_ref()
-            .and_then(|chosen| chosen.choice.known())
+    pub(crate) fn choice(&self, language: Language, step: Step) -> Option<&Choice> {
+        let table = self.table(language);
+        let chosen = match step {
+            Step::Format => &table.formatter,
+            Step::Lint => &table.linter,
+        };
+        chosen.as_ref().map(|chosen| &chosen.choice)
     }
 
     /// The mode of `tool`'s step for `language`: the nearest one written in
@@ -1107,10 +1086,18 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{Dialect, Edition, Language, Mode, Tier};
+    use super::{Choice, Dialect, Edition, Language, Mode, Step, Tier};
     use crate::config::Config;
     use crate::exit::ExitStatus;
     use crate::path::AbsolutePath;
+
+    /// The known tool's name `choice` selects, `None` for a custom command or no choice.
+    fn known_name(choice: &Choice) -> Option<&'static str> {
+        match choice {
+            Choice::Known(name) => Some(name),
+            Choice::Command(_) => None,
+        }
+    }
 
     /// Writes `files` (relative path, contents) under a fresh temp dir.
     fn tree(files: &[(&str, &str)]) -> TempDir {
@@ -1373,7 +1360,12 @@ mod tests {
         let config = Config::load(&at(&dir, ".")).expect("the fixture config should load");
         let code_blocks = config.code_blocks().expect("the table is written");
 
-        assert_eq!(code_blocks.formatter(Language::Python), Some("black"));
+        assert_eq!(
+            code_blocks
+                .choice(Language::Python, Step::Format)
+                .and_then(known_name),
+            Some("black")
+        );
     }
 
     #[test]
@@ -1391,26 +1383,27 @@ mod tests {
     }
 
     #[test]
-    fn a_valid_custom_formatter_command_is_read_then_refused_as_not_wired_yet() {
-        let error = load_error(
+    fn a_valid_custom_formatter_command_is_selected_as_written() {
+        let dir = tree(&[(
+            "supdoc.config.toml",
             "[features.code-blocks.python]\n\
              formatter = { command = [\"ruff\", \"format\", \"--stdin-filename\", \"{path}\", \"-\"] }\n",
-        );
+        )]);
 
-        assert_eq!(error.code(), "config-parse", "got {error:?}");
-        assert_eq!(error.status(), ExitStatus::Config);
-        let message = error.to_string();
-        assert!(
-            message.contains(
-                "`formatter` in `[features.code-blocks.python]` is the custom command `ruff`, \
-                 but custom commands are not wired yet"
+        let config = Config::load(&at(&dir, ".")).expect("a custom formatter should load");
+        let code_blocks = config.code_blocks().expect("the table is written");
+        let choice = code_blocks.choice(Language::Python, Step::Format);
+
+        let Some(Choice::Command(command)) = choice else {
+            panic!("the formatter should be the custom command, got {choice:?}");
+        };
+        assert_eq!(
+            (command.program(), command.arguments()),
+            (
+                "ruff",
+                &["format", "--stdin-filename", "{path}", "-"].map(str::to_owned)[..]
             ),
-            "got {message}"
-        );
-        let help = error.help().expect("the refusal should say what to do");
-        assert!(
-            help.contains("Remove `formatter` from `[features.code-blocks.python]`"),
-            "got {help}"
+            "the command should be held exactly as written"
         );
     }
 
@@ -1452,7 +1445,7 @@ mod tests {
     #[test]
     fn a_program_with_control_characters_is_escaped_in_the_message() {
         let error = load_error(
-            "[features.code-blocks.shell]\nformatter = { command = [\"fmt\\u001b[31m\"] }\n",
+            "[features.code-blocks.shell]\nlinter = { command = [\"fmt\\u001b[31m\"] }\n",
         );
 
         let message = error.to_string();
@@ -1616,13 +1609,24 @@ mod tests {
             .expect_err("the child's command should still be refused");
 
         let code_blocks = config.code_blocks().expect("the table is written");
-        assert_eq!(code_blocks.formatter(Language::Python), Some("black"));
-        assert_eq!(code_blocks.linter(Language::Python), Some("ruff"));
+        assert_eq!(
+            code_blocks
+                .choice(Language::Python, Step::Format)
+                .and_then(known_name),
+            Some("black")
+        );
+        assert_eq!(
+            code_blocks
+                .choice(Language::Python, Step::Lint)
+                .and_then(known_name),
+            Some("ruff")
+        );
         assert_eq!(error.code(), "config-parse", "got {error:?}");
         let message = error.to_string();
         assert!(
-            message.contains("parent-fmt"),
-            "the parent's formatter command is refused first: {message}"
+            message.contains("child-lint") && !message.contains("parent-fmt"),
+            "the child's linter command is refused, and the inherited formatter command is \
+             not: {message}"
         );
         let linter_only = tree(&[
             (
@@ -1709,9 +1713,24 @@ mod tests {
         let config = Config::load(&at(&dir, ".")).expect("the fixture config should load");
         let code_blocks = config.code_blocks().expect("the table is written");
 
-        assert_eq!(code_blocks.linter(Language::Rust), Some("clippy"));
-        assert_eq!(code_blocks.linter(Language::Shell), Some("shellcheck"));
-        assert_eq!(code_blocks.linter(Language::Python), Some("ruff"));
+        assert_eq!(
+            code_blocks
+                .choice(Language::Rust, Step::Lint)
+                .and_then(known_name),
+            Some("clippy")
+        );
+        assert_eq!(
+            code_blocks
+                .choice(Language::Shell, Step::Lint)
+                .and_then(known_name),
+            Some("shellcheck")
+        );
+        assert_eq!(
+            code_blocks
+                .choice(Language::Python, Step::Lint)
+                .and_then(known_name),
+            Some("ruff")
+        );
     }
 
     #[test]
@@ -1735,16 +1754,16 @@ mod tests {
         let unset = Config::load(&at(&dir, "apps/api")).expect("the unset config should load");
 
         assert_eq!(
-            child
-                .code_blocks()
-                .and_then(|blocks| blocks.formatter(Language::Python)),
+            child.code_blocks().and_then(|blocks| blocks
+                .choice(Language::Python, Step::Format)
+                .and_then(known_name)),
             Some("ruff-format"),
             "the child's formatter should win"
         );
         assert_eq!(
-            unset
-                .code_blocks()
-                .and_then(|blocks| blocks.linter(Language::Python)),
+            unset.code_blocks().and_then(|blocks| blocks
+                .choice(Language::Python, Step::Lint)
+                .and_then(known_name)),
             None,
             "an unset linter should take the default"
         );

@@ -241,14 +241,14 @@ pub(crate) struct Steps {
 }
 
 impl Steps {
-    /// Each step held because the operator hasn't granted the checkout trust, format first: its
-    /// reason is a project-tier tool's [`needs_trust`](tools::Held::needs_trust), or its
-    /// [`trust_off`](tools::Held::trust_off) when `SUPDOC_TRUST=0` turned trust off.
-    pub(crate) fn held_for_trust(&self) -> impl Iterator<Item = Hold> {
-        [&self.format, &self.lint]
+    /// Each step held because the operator hasn't granted the checkout trust, format first, with
+    /// its hold: its reason is a project-tier tool's [`needs_trust`](tools::Held::needs_trust),
+    /// or its [`trust_off`](tools::Held::trust_off) when `SUPDOC_TRUST=0` turned trust off.
+    pub(crate) fn held_for_trust(&self) -> impl Iterator<Item = (Step, Hold)> {
+        [(Step::Format, &self.format), (Step::Lint, &self.lint)]
             .into_iter()
-            .filter_map(|step| match step {
-                StepState::Unrunnable { reason } => tools::hold(reason),
+            .filter_map(|(step, state)| match state {
+                StepState::Unrunnable { reason } => tools::hold(reason).map(|hold| (step, hold)),
                 _ => None,
             })
     }
@@ -275,7 +275,10 @@ impl Steps {
             }) else {
                 return StepState::NotRun;
             };
-            let table_off = code_blocks.mode(language, tool.name()) == Mode::Off;
+            // A custom command has no tool table: its program is never read as a tool's name.
+            let table_off = tool
+                .cartridge()
+                .is_some_and(|cartridge| code_blocks.mode(language, cartridge.name) == Mode::Off);
             match block_setting(block, step, &tool) {
                 Some(StepValue::Off { reason }) => StepState::Skipped {
                     reason: reason.map(str::to_owned),
@@ -704,7 +707,7 @@ mod tests {
         BlockState, CodeBlockCounts, Excerpt, Failure, NotChecked, StepState, Steps, state_of,
     };
     use crate::code_blocks::block::{CodeBlock, Info};
-    use crate::code_blocks::tools::{CARTRIDGES, Held, Hold, ToolCartridge};
+    use crate::code_blocks::tools::{CARTRIDGES, Held, Hold, Step, ToolCartridge};
     use crate::config::Config;
     use crate::config::code_blocks::{CodeBlocks, Language};
     use crate::finding::Location;
@@ -744,14 +747,20 @@ mod tests {
             ),
             (
                 vec![
-                    Hold {
-                        held,
-                        turned_off: true
-                    },
-                    Hold {
-                        held,
-                        turned_off: false
-                    }
+                    (
+                        Step::Format,
+                        Hold {
+                            held,
+                            turned_off: true
+                        }
+                    ),
+                    (
+                        Step::Lint,
+                        Hold {
+                            held,
+                            turned_off: false
+                        }
+                    )
                 ],
                 0
             ),

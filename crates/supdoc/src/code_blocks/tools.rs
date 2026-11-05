@@ -17,7 +17,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::config::code_blocks::{CodeBlocks, CustomCommand, Dialect, Edition, Language};
+use crate::config::code_blocks::{Choice, CodeBlocks, CustomCommand, Dialect, Edition, Language};
 
 use super::format::{ParseError, Positions};
 use super::fragment::{Kind, Support};
@@ -151,7 +151,7 @@ pub(crate) fn hold(reason: &str) -> Option<Hold> {
     CARTRIDGES
         .iter()
         .filter_map(ToolCartridge::held)
-        .chain([&CUSTOM_HELD])
+        .chain([&CUSTOM_FORMATTER_HELD, &CUSTOM_LINTER_HELD])
         .find_map(|held| {
             (reason == held.needs_trust || reason == held.trust_off).then_some(Hold {
                 held,
@@ -345,24 +345,77 @@ impl ToolCartridge {
 }
 
 /// A command the config wrote as a language's `formatter` or `linter`, held as a [`Tool`]: the
-/// program and its arguments as written, for one step.
+/// program and its arguments as written, for one language's step.
 #[derive(Debug)]
 pub(crate) struct CustomTool {
     /// The command as config validated it.
     command: CustomCommand,
+    /// The language whose blocks it checks.
+    language: Language,
     /// The step it does.
     step: Step,
 }
 
-/// What supdoc says when trust holds a custom command back. Its reasons stay static, as every
-/// block reason is; the program it names goes in findings, not here.
-static CUSTOM_HELD: Held = Held {
-    needs_trust: "a custom command runs only in the project tier, which needs `supdoc trust`",
-    trust_off: "a custom command runs only in the project tier, and `SUPDOC_TRUST=0` turns trust \
-                off for this run",
-    short: "custom command needs trust",
-    didnt_run: "custom commands didn't run: the checkout chose them",
-    off: "a known tool's name as the `formatter` or `linter`",
+impl CustomTool {
+    /// The command config wrote for `language`'s `step`.
+    #[must_use]
+    pub(crate) const fn new(command: CustomCommand, language: Language, step: Step) -> Self {
+        Self {
+            command,
+            language,
+            step,
+        }
+    }
+
+    /// The command as config validated it.
+    #[must_use]
+    pub(crate) const fn command(&self) -> &CustomCommand {
+        &self.command
+    }
+
+    /// The language whose blocks it checks.
+    #[must_use]
+    pub(crate) const fn language(&self) -> Language {
+        self.language
+    }
+
+    /// The step it does.
+    #[must_use]
+    pub(crate) const fn step(&self) -> Step {
+        self.step
+    }
+
+    /// How its messages name it: "custom formatter command" or "custom linter command".
+    #[must_use]
+    pub(crate) const fn kind(&self) -> &'static str {
+        match self.step {
+            Step::Format => "custom formatter command",
+            Step::Lint => "custom linter command",
+        }
+    }
+}
+
+/// What supdoc says when trust holds a custom formatter back. Its reasons stay static, as every
+/// block reason is; the trust warning names each held program (see [`CustomTool::command`]).
+pub(crate) static CUSTOM_FORMATTER_HELD: Held = Held {
+    needs_trust: "a custom formatter command runs only in the project tier, which needs \
+                  `supdoc trust`",
+    trust_off: "a custom formatter command runs only in the project tier, and `SUPDOC_TRUST=0` \
+                turns trust off for this run",
+    short: "custom formatter command needs trust",
+    didnt_run: "custom formatter commands didn't run: the checkout chose them",
+    off: "a known tool's name as the `formatter`",
+};
+
+/// What supdoc says when trust holds a custom linter back, as [`CUSTOM_FORMATTER_HELD`] does.
+pub(crate) static CUSTOM_LINTER_HELD: Held = Held {
+    needs_trust: "a custom linter command runs only in the project tier, which needs \
+                  `supdoc trust`",
+    trust_off: "a custom linter command runs only in the project tier, and `SUPDOC_TRUST=0` \
+                turns trust off for this run",
+    short: "custom linter command needs trust",
+    didnt_run: "custom linter commands didn't run: the checkout chose them",
+    off: "a known tool's name as the `linter`",
 };
 
 /// The tool selected for a step: one of supdoc's [`CARTRIDGES`], or a command the config wrote.
@@ -371,11 +424,7 @@ static CUSTOM_HELD: Held = Held {
 pub(crate) enum Tool {
     /// One of supdoc's cartridges.
     Cartridge(&'static ToolCartridge),
-    /// A custom command, shared by every block that selects it.
-    #[expect(
-        dead_code,
-        reason = "built from config once custom commands are wired to run, in P5-CC03"
-    )]
+    /// A custom command.
     Custom(Arc<CustomTool>),
 }
 
@@ -424,7 +473,10 @@ impl Tool {
     pub(crate) fn held(&self) -> Option<&'static Held> {
         match self {
             Self::Cartridge(cartridge) => cartridge.held(),
-            Self::Custom(_) => Some(&CUSTOM_HELD),
+            Self::Custom(custom) => Some(match custom.step {
+                Step::Format => &CUSTOM_FORMATTER_HELD,
+                Step::Lint => &CUSTOM_LINTER_HELD,
+            }),
         }
     }
 
@@ -1097,20 +1149,20 @@ pub(crate) fn default_for(language: Language, step: Step) -> Option<&'static Too
         .find(|tool| tool.language == language && tool.step() == step)
 }
 
-/// The tool `code_blocks` selects for `language`'s `step`: the cartridge its `formatter` or
-/// `linter` names, else the default. `None` when the language has none.
+/// The tool `code_blocks` selects for `language`'s `step`: the custom command its `formatter`
+/// or `linter` writes, the cartridge it names, else the default. A written command is never
+/// replaced by the default. `None` when the language has no tool for the step.
 #[must_use]
 pub(crate) fn selected(code_blocks: &CodeBlocks, language: Language, step: Step) -> Option<Tool> {
-    let written = match step {
-        Step::Format => code_blocks.formatter(language),
-        Step::Lint => code_blocks.linter(language),
-    };
-    written
-        .map_or_else(
-            || default_for(language, step),
-            |name| named(language, step, name),
-        )
-        .map(Tool::Cartridge)
+    match code_blocks.choice(language, step) {
+        Some(Choice::Command(command)) => Some(Tool::Custom(Arc::new(CustomTool::new(
+            command.clone(),
+            language,
+            step,
+        )))),
+        Some(Choice::Known(name)) => named(language, step, name).map(Tool::Cartridge),
+        None => default_for(language, step).map(Tool::Cartridge),
+    }
 }
 
 /// The cartridge named `name` for `language`'s `step`, as config selects it.
@@ -1514,7 +1566,7 @@ fn first_on_path(binary: &str, path: &OsStr) -> Option<PathBuf> {
 /// components, or under a directory that is the root's own file however it is spelled.
 ///
 /// Effect: reads the metadata of `root` and of each ancestor of `real`.
-fn inside(real: &Path, root: &Path) -> bool {
+pub(super) fn inside(real: &Path, root: &Path) -> bool {
     let real_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     real.starts_with(&real_root) || under_same_file(real, root)
 }
@@ -1543,7 +1595,7 @@ fn under_same_file(_real: &Path, _root: &Path) -> bool {
 /// Whether `path`, following symlinks, is a regular file someone may execute.
 ///
 /// Effect: reads the file's metadata.
-fn is_executable_file(path: &Path) -> bool {
+pub(super) fn is_executable_file(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && executable(&meta))
 }
 
