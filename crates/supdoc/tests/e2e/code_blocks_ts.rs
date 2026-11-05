@@ -692,6 +692,40 @@ fn lint_outcome(project: &Project, dir: &Path) -> (Vec<String>, String) {
 }
 
 #[test]
+fn lint_a_syntax_error_with_format_off_is_a_parse_error_at_its_doc_line() {
+    let project = lint_only("const a = 1;\nlet b = ;", None);
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let report = r#"{"summary":{"changed":0,"unchanged":1},"diagnostics":[{"severity":"error","message":"Expected an expression but instead found `;`.","category":"parse","location":{"path":"x","start":{"line":2,"column":9}},"advices":[]}],"command":"lint"}"#;
+    stub_biome_lint(outside.path(), &lint_stub(outside.path(), report, 1));
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-parse"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 5, "{json}");
+}
+
+#[test]
+fn lint_the_real_biome_reads_a_syntax_error_with_format_off_as_a_parse_error() {
+    let Some(dir) = real_tool_dir(
+        "biome",
+        "lint_the_real_biome_reads_a_syntax_error_with_format_off_as_a_parse_error",
+    ) else {
+        return;
+    };
+
+    let json = lint_only("const a = 1;\nlet b = ;", None)
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", &dir)])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-parse"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 5, "{json}");
+}
+
+#[test]
 fn lint_the_real_biome_fails_a_block_on_any_diagnostic_whatever_its_severity() {
     let Some(dir) = real_tool_dir(
         "biome",
