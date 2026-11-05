@@ -1438,22 +1438,22 @@ fn pylint_args(invocation: &Invocation<'_>) -> Vec<OsString> {
     ]
 }
 
-/// prettier's arguments: no ignore file read and no pragma required or honored, so neither a
-/// `.gitignore` or `.prettierignore` covering the doc nor a config's `requirePragma` or
-/// `checkIgnorePragma` can make prettier print the block back unformatted (see [`prettier`]), and
-/// the block on stdin under its virtual path, its extension from the tag as biome's (see
-/// [`biome::extension`]).
+/// prettier's arguments, each overriding what the project's config could set to make it print the
+/// block back unformatted (see [`prettier`]): no ignore file read, no pragma required or honored,
+/// the whole block as the range, and the parser the tag names (see [`prettier::parser`]), never
+/// one an `overrides` entry picks. Then the block on stdin under its virtual path, its extension
+/// from the tag as biome's (see [`biome::extension`]).
 fn prettier_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    let extension = biome::extension(invocation.tag);
     vec![
         OsString::from("--ignore-path="),
         OsString::from("--no-require-pragma"),
         OsString::from("--no-check-ignore-pragma"),
+        OsString::from("--range-start=0"),
+        OsString::from("--range-end=Infinity"),
+        OsString::from(format!("--parser={}", prettier::parser(extension))),
         OsString::from("--stdin-filepath"),
-        virtual_path(
-            invocation.doc,
-            invocation.index,
-            biome::extension(invocation.tag),
-        ),
+        virtual_path(invocation.doc, invocation.index, extension),
     ]
 }
 
@@ -1926,12 +1926,12 @@ mod tests {
     }
 
     #[test]
-    fn prettier_reads_no_ignore_file_nor_pragma_and_gets_the_block_under_its_virtual_path() {
-        for (tag, path) in [
-            ("ts", "/p/docs/a.md.3.ts"),
-            ("tsx", "/p/docs/a.md.3.tsx"),
-            ("javascript", "/p/docs/a.md.3.js"),
-            ("mjs", "/p/docs/a.md.3.mjs"),
+    fn prettier_overrides_ignore_pragma_range_and_parser_and_gets_the_blocks_virtual_path() {
+        for (tag, parser, path) in [
+            ("ts", "--parser=typescript", "/p/docs/a.md.3.ts"),
+            ("tsx", "--parser=typescript", "/p/docs/a.md.3.tsx"),
+            ("javascript", "--parser=babel", "/p/docs/a.md.3.js"),
+            ("mjs", "--parser=babel", "/p/docs/a.md.3.mjs"),
         ] {
             let args = cartridge("prettier").args(&Invocation {
                 doc: Path::new("/p/docs/a.md"),
@@ -1951,6 +1951,9 @@ mod tests {
                     "--ignore-path=",
                     "--no-require-pragma",
                     "--no-check-ignore-pragma",
+                    "--range-start=0",
+                    "--range-end=Infinity",
+                    parser,
                     "--stdin-filepath",
                     path
                 ]

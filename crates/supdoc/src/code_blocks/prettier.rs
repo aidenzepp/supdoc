@@ -17,7 +17,11 @@
 //! pass a misformatted block; an empty `--ignore-path` reads neither file. A config's
 //! `requirePragma: true` prints back a block without `@format`, and its `checkIgnorePragma: true`
 //! one whose first docblock holds `@noprettier` or `@noformat`, the same way;
-//! `--no-require-pragma` and `--no-check-ignore-pragma` override both.
+//! `--no-require-pragma` and `--no-check-ignore-pragma` override both. A config's `rangeStart` or
+//! `rangeEnd` (`rangeEnd: 0`) leaves the block as written too, and an `overrides` entry setting
+//! `parser` (`markdown` for `*.md.*.ts`) reads it as another language, which passed `const a=1;`
+//! unchanged; `--range-start=0 --range-end=Infinity` and a `--parser` on the command line override
+//! them. `typescript` formats a `.tsx` path's JSX, and `babel` a `.jsx` path's.
 
 use super::format::ParseError;
 
@@ -27,6 +31,16 @@ const SYNTAX_ERROR: &str = "SyntaxError: ";
 /// The comment that keeps prettier from formatting the node after it, and starts the
 /// `prettier-ignore-start` and `prettier-ignore-end` ranges.
 const IGNORE: &str = "prettier-ignore";
+
+/// The parser prettier reads a block by, from its virtual path's `extension` (see
+/// [`super::biome::extension`]): `typescript` for a TypeScript flavor, else `babel`.
+#[must_use]
+pub(crate) fn parser(extension: &str) -> &'static str {
+    match extension {
+        "ts" | "tsx" | "mts" | "cts" => "typescript",
+        _ => "babel",
+    }
+}
 
 /// prettier's syntax-error report in `stderr`: the first line holding `SyntaxError: `, at the
 /// `(L:C)` that ends it. `None` for any other stderr, and for that line without its position.
@@ -54,8 +68,24 @@ pub(crate) fn switches_format_off(block: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_error, switches_format_off};
+    use super::{parse_error, parser, switches_format_off};
     use crate::code_blocks::format::ParseError;
+
+    #[test]
+    fn a_typescript_flavor_is_read_by_typescript_and_any_other_by_babel() {
+        for (extension, expected) in [
+            ("ts", "typescript"),
+            ("tsx", "typescript"),
+            ("mts", "typescript"),
+            ("cts", "typescript"),
+            ("js", "babel"),
+            ("jsx", "babel"),
+            ("mjs", "babel"),
+            ("cjs", "babel"),
+        ] {
+            assert_eq!(parser(extension), expected, "{extension}");
+        }
+    }
 
     #[test]
     fn a_syntax_error_is_a_parse_error_at_its_line() {

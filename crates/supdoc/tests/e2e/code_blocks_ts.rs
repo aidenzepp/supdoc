@@ -2113,8 +2113,7 @@ fn trusted_prettier_check(
 }
 
 #[test]
-fn prettier_runs_from_the_root_reading_no_ignore_file_nor_pragma_and_spawns_again_on_a_second_run()
-{
+fn prettier_runs_from_the_root_with_its_overrides_and_spawns_again_on_a_second_run() {
     let project = prettier_project("const a = 1;");
     let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
     let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
@@ -2143,13 +2142,14 @@ fn prettier_runs_from_the_root_reading_no_ignore_file_nor_pragma_and_spawns_agai
             "--ignore-path=",
             "--no-require-pragma",
             "--no-check-ignore-pragma",
+            "--range-start=0",
+            "--range-end=Infinity",
+            "--parser=typescript",
             "--stdin-filepath",
             path,
         ] = args.as_slice()
         else {
-            panic!(
-                "prettier should read no ignore file nor pragma and get the block's path: {run}"
-            );
+            panic!("prettier should get its overrides and the block's path: {run}");
         };
         assert!(path.ends_with("/docs/blocks.md.1.ts"), "{run}");
     }
@@ -2359,6 +2359,41 @@ fn prettier_the_real_one_fails_a_misformatted_block_whatever_the_configs_pragma_
             finding_kinds(&json),
             ["code-block-unformatted"],
             "{config} never turns {body:?} into a pass: {json}"
+        );
+    }
+}
+
+#[test]
+fn prettier_the_real_one_fails_a_misformatted_block_whatever_the_configs_range_or_parser() {
+    let Some(dir) = real_tool_dir(
+        "prettier",
+        "prettier_the_real_one_fails_a_misformatted_block_whatever_the_configs_range_or_parser",
+    ) else {
+        return;
+    };
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    for (table, tag, config) in [
+        ("typescript", "ts", "{\"rangeEnd\": 0}"),
+        (
+            "typescript",
+            "ts",
+            "{\"overrides\": [{\"files\": \"*.md.*.ts\", \"options\": {\"parser\": \"markdown\"}}]}",
+        ),
+        (
+            "javascript",
+            "js",
+            "{\"overrides\": [{\"files\": \"*.md.*.js\", \"options\": {\"parser\": \"markdown\"}}]}",
+        ),
+    ] {
+        let project = project_with_block(&prettier_tables(table), tag, "const a=1;");
+        project.write(".prettierrc", config);
+
+        let json = trusted_prettier_check(&project, &dir, cache.path(), 1);
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-unformatted"],
+            "{config} never turns a {tag} block into a pass: {json}"
         );
     }
 }
