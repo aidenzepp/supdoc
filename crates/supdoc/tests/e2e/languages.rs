@@ -2,6 +2,8 @@
 //! TypeScript, Markdown, sub-declaration, JavaScript, Python, Go and Bash tests, plus TOML and
 //! YAML).
 
+use std::fmt::Write as _;
+
 use crate::support::{Project, array_at, at, links};
 
 #[test]
@@ -377,4 +379,63 @@ fn yaml_changing_a_step_fails_its_link() {
         "jobs.test.steps.1",
         "{report}"
     );
+}
+
+#[test]
+fn yaml_past_the_parser_s_line_limit_is_refused_never_not_found() {
+    let project = Project::fixture("bash");
+    let keys = (0..40_000).fold(String::new(), |mut text, key| {
+        let _ = writeln!(text, "k{key}: 1");
+        text
+    });
+    project.write("big.yaml", &keys);
+    project.write(
+        "docs/big.md",
+        "A [key](../big.yaml#k5) and [the file](../big.yaml).\n",
+    );
+
+    let list = project.supdoc(&["--json", "list"]).assert_exit(0).json();
+
+    let kinds: Vec<(Option<&str>, Option<&str>)> = array_at(&list, "/data/links")
+        .iter()
+        .filter(|link| {
+            link.pointer("/target").and_then(serde_json::Value::as_str) == Some("big.yaml")
+        })
+        .map(|link| {
+            (
+                link.pointer("/state").and_then(serde_json::Value::as_str),
+                link.pointer("/finding/kind")
+                    .and_then(serde_json::Value::as_str),
+            )
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            (Some("broken"), Some("read-too-many-lines")),
+            (Some("broken"), Some("read-too-many-lines")),
+        ],
+        "{list}"
+    );
+}
+
+#[test]
+fn yaml_a_blank_line_added_to_a_keep_chomped_value_fails_only_its_link() {
+    let project = Project::fixture("bash");
+    project.write(
+        "scripts.yaml",
+        "keep: |+\n  echo keep\n\nclip: |\n  echo clip\n\nend: 1\n",
+    );
+    project.write(
+        "docs/scripts.md",
+        "[keep](../scripts.yaml#keep) and [clip](../scripts.yaml#clip).\n",
+    );
+    project.record();
+    project.replace("scripts.yaml", "echo keep\n\n", "echo keep\n\n\n");
+    project.replace("scripts.yaml", "echo clip\n\n", "echo clip\n\n\n");
+
+    let report = project.supdoc(&["--json", "check"]).assert_exit(1).json();
+
+    assert_eq!(at(&report, "/data/summary/failed"), 1, "{report}");
+    assert_eq!(at(&report, "/data/links/0/symbol"), "keep", "{report}");
 }

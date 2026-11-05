@@ -17,6 +17,12 @@
 //! An element covers its `- ` item, or its flow item. A document of a several-document stream
 //! covers its `document` node.
 //!
+//! The grammar's scanner counts rows in a 16-bit integer, so text on row 32,768 or later parses
+//! to an error tree that names the wrong keys, or none. A file past that is refused before the
+//! parse with `read-too-many-lines`, counting line breaks as the scanner does: every `\r` and
+//! every `\n`, so a `\r\n` file is refused after 16,384 lines. No setting raises the limit,
+//! since the parser can't count further.
+//!
 //! YAML files are link targets only: the cartridge returns no Markdown regions and the walk never
 //! reads them as sources. The walk keeps its own stack and charges every symbol to the file's
 //! key-path budget and deadline, so hostile nesting fails closed (SEC-1). It steps through every
@@ -31,6 +37,7 @@ use std::sync::LazyLock;
 use tree_sitter::{Node, TreeCursor};
 
 use crate::cartridges::data::{KeyId, KeyPathError, KeyPaths, index_name, key_name};
+use crate::path::AbsolutePath;
 use crate::read::cartridge::{Cartridge, LanguageId, MarkdownRegion, SourceFile, SymbolTable};
 use crate::read::error::ReadError;
 
@@ -39,6 +46,10 @@ pub(crate) const ID: LanguageId = LanguageId::new("yaml");
 
 /// The extensions it reads, lowercase without the dot.
 pub(crate) const EXTENSIONS: &[&str] = &["yaml", "yml"];
+
+/// The most lines the grammar parses faithfully: its scanner keeps the row in an `int16_t`, so
+/// row 32,768 (0-based) wraps.
+const MAX_LINES: usize = 32_768;
 
 /// The node kinds whose text can end in a comment that is not part of what the node says.
 const BLOCKS: &[&str] = &[
@@ -79,6 +90,18 @@ impl Cartridge for Yaml {
 
     fn grammar(&self) -> &tree_sitter::Language {
         &self.grammar
+    }
+
+    fn admit(&self, path: &AbsolutePath, text: &str) -> Result<(), ReadError> {
+        let lines = lines(text);
+        if lines <= MAX_LINES {
+            return Ok(());
+        }
+        Err(ReadError::TooManyLines {
+            path: path.clone(),
+            lines: u64::try_from(lines).unwrap_or(u64::MAX),
+            limit: u64::try_from(MAX_LINES).unwrap_or(u64::MAX),
+        })
     }
 
     fn reads_links(&self) -> bool {
@@ -194,14 +217,16 @@ struct Walk<'file, 'paths> {
 }
 
 impl<'tree> Walk<'tree, '_> {
-    /// Makes every symbol of the stream rooted at `root`, in file order: each document's from its
-    /// root when there is one document, under the document's index when there are several.
+    /// Makes every symbol of the stream rooted at `root`, in file order: from its root when at
+    /// most one document has content, else under each document's index. An empty document (only
+    /// comments or directives, such as after a trailing `---`) doesn't make a stream several,
+    /// but it still takes an index, so indices match YAML tools.
     ///
     /// # Errors
     ///
     /// The first [`KeyPathError`]: the deadline passed or the file's key paths are over budget.
     fn stream(&mut self, root: Node<'tree>) -> Result<(), KeyPathError> {
-        let several = self.documents(root)? > 1;
+        let several = self.documents_with_content(root)? > 1;
         let mut cursor = root.walk();
         let mut index = 0_usize;
         for document in root.children(&mut cursor) {
@@ -226,17 +251,18 @@ impl<'tree> Walk<'tree, '_> {
         Ok(())
     }
 
-    /// How many documents the stream rooted at `root` holds.
+    /// How many documents of the stream rooted at `root` hold a node, not only comments or
+    /// directives.
     ///
     /// # Errors
     ///
     /// As [`KeyPaths::ensure_live`].
-    fn documents(&mut self, root: Node<'tree>) -> Result<usize, KeyPathError> {
+    fn documents_with_content(&mut self, root: Node<'tree>) -> Result<usize, KeyPathError> {
         let mut cursor = root.walk();
         let mut documents = 0_usize;
         for child in root.children(&mut cursor) {
             self.paths.ensure_live(child.start_byte())?;
-            if child.kind() == "document" {
+            if child.kind() == "document" && self.value(child)?.is_some() {
                 documents = documents.saturating_add(1);
             }
         }
@@ -379,7 +405,46 @@ impl<'tree> Walk<'tree, '_> {
                 child
             };
         }
-        Ok(node.start_byte()..last.end_byte())
+        let end = if last.kind() == "block_scalar" && self.keeps_trailing_lines(last) {
+            self.blank_lines_after(last.end_byte())?
+        } else {
+            last.end_byte()
+        };
+        Ok(node.start_byte()..end)
+    }
+
+    /// Whether `scalar`'s header asks for keep chomping (`|+`, `>2+`): its trailing blank lines
+    /// are part of its value, though the grammar ends the node at its last line of text.
+    fn keeps_trailing_lines(&self, scalar: Node<'tree>) -> bool {
+        self.text
+            .get(scalar.byte_range())
+            .and_then(|text| text.split([' ', '\t', '\r', '\n', '#']).next())
+            .is_some_and(|header| header.contains('+'))
+    }
+
+    /// Where the run of blank lines after `offset` ends: past the rest of `offset`'s line and
+    /// every line after it holding only spaces and tabs, so at the start of the next line with
+    /// text, or the end of the file. Each line is checked against the deadline.
+    ///
+    /// # Errors
+    ///
+    /// As [`KeyPaths::ensure_live`].
+    fn blank_lines_after(&mut self, offset: usize) -> Result<usize, KeyPathError> {
+        let bytes = self.text.as_bytes();
+        let mut end = offset;
+        let mut at = offset;
+        while let Some(&byte) = bytes.get(at) {
+            match byte {
+                b' ' | b'\t' => at = at.saturating_add(1),
+                b'\r' | b'\n' => {
+                    self.paths.ensure_live(at)?;
+                    at = at.saturating_add(1);
+                    end = at;
+                }
+                _ => return Ok(end),
+            }
+        }
+        Ok(bytes.len())
     }
 
     /// The last child of `parent` that is not a comment, in one forward pass checked against the
@@ -493,6 +558,18 @@ impl<'tree> Walk<'tree, '_> {
             _ => None,
         })
     }
+}
+
+/// The lines of `text` as the grammar's scanner counts rows: every `\r` byte and every `\n` byte
+/// ends one, so `\r\n` ends two, and text after the last break is one more. A file has more than
+/// [`MAX_LINES`] exactly when some byte follows its 32,768th break.
+fn lines(text: &str) -> usize {
+    let breaks = text
+        .bytes()
+        .filter(|byte| matches!(byte, b'\r' | b'\n'))
+        .count();
+    let tail = !text.is_empty() && !text.ends_with(['\r', '\n']);
+    breaks.saturating_add(usize::from(tail))
 }
 
 /// The key a single-quoted scalar spells: the text between its `'`s, each `''` one `'`. `None`
@@ -613,6 +690,41 @@ spec:
             budget,
         )
         .expect("tree-sitter should return a tree")
+    }
+
+    /// Why reading `text` as `/repo/big.yaml` under `deadline` is refused.
+    fn refusal_under(text: &str, deadline: Deadline) -> ReadError {
+        let path = AbsolutePath::new(Path::new("/repo/big.yaml"))
+            .expect("the fixture path should be absolute");
+        SourceFile::from_text_under(
+            path,
+            text.to_owned(),
+            cartridge(),
+            deadline,
+            KeyPathBudget::defaults(),
+        )
+        .expect_err("the file should be refused")
+    }
+
+    fn refusal(text: &str) -> ReadError {
+        refusal_under(text, Deadline::start(Limits::PARSE_TIMEOUT))
+    }
+
+    /// `lines` lines `kN: 1`, each ended by `end`.
+    fn keys(lines: usize, end: &str) -> String {
+        (0..lines).fold(String::new(), |mut text, key| {
+            let _ = write!(text, "k{key}: 1{end}");
+            text
+        })
+    }
+
+    /// Asserts `error` is the line limit, counting `lines` lines.
+    fn assert_too_many_lines(error: &ReadError, lines: u64) {
+        assert!(
+            matches!(error, ReadError::TooManyLines { lines: found, limit: 32_768, .. } if *found == lines),
+            "expected read-too-many-lines for {lines} lines at 32,768, got {error:?}"
+        );
+        assert_eq!(error.code(), "read-too-many-lines");
     }
 
     fn symbols(file: &SourceFile) -> SymbolTable {
@@ -736,15 +848,6 @@ spec:
     }
 
     #[test]
-    fn a_trailing_marker_starts_an_empty_second_document() {
-        // YAML reads `---` with nothing after it as an empty document, so the stream holds two
-        // and every path takes its document's index, as `yaml.load_all` sees it.
-        let file = parse("a: 1\n---\n");
-
-        assert_eq!(paths(&symbols(&file)), ["0", "0.a", "1"]);
-    }
-
-    #[test]
     fn anchors_tags_aliases_and_merge_keys_name_what_is_written() {
         let file = parse(
             "base: &defaults\n  timeout: 5\nprod:\n  <<: *defaults\n  replicas: 2\nalias: *defaults\n!!str tagged: !!int 1\n",
@@ -844,13 +947,23 @@ spec:
     #[test]
     fn sibling_keys_past_the_default_limit_fail_closed() {
         // One key past the 200,000-segment default is enough to show no partial table survives.
-        // A flow mapping on one line: the grammar's scanner counts rows in 16 bits, so a block
-        // mapping of 200,001 lines would not parse past line 32,768.
+        // A flow mapping on one line: 200,001 lines would pass the 32,768-line limit. Its parse
+        // is slow in a debug build, so the read has no deadline and only the budget can stop it.
         let keys = (0..=200_000).fold(String::new(), |mut text, key| {
             let _ = write!(text, "k{key}: 1, ");
             text
         });
-        let file = parse(&format!("{{{keys}}}\n"));
+        let path = AbsolutePath::new(Path::new("/repo/wide.yaml"))
+            .expect("the fixture path should be absolute");
+        let unlimited: TimeLimit = "0s".parse().expect("`0s` should mean no time limit");
+        let file = SourceFile::from_text_under(
+            path,
+            format!("{{{keys}}}\n"),
+            cartridge(),
+            Deadline::start(unlimited),
+            KeyPathBudget::defaults(),
+        )
+        .expect("tree-sitter should return a tree");
 
         let error = file
             .language()
@@ -882,10 +995,150 @@ spec:
     }
 
     #[test]
+    fn a_file_of_32_768_lines_reads_to_its_last_key() {
+        let file = parse(&keys(32_768, "\n"));
+        let table = symbols(&file);
+
+        assert_eq!(
+            text_of(&file, resolved(&file, &table, "k32767")),
+            "k32767: 1"
+        );
+        let unended = keys(32_768, "\n");
+        let unended = unended
+            .strip_suffix('\n')
+            .expect("the fixture ends with a newline");
+        assert!(
+            !parse(unended).has_syntax_errors(),
+            "no final newline is still 32,768 lines"
+        );
+    }
+
+    #[test]
+    fn a_32_769th_line_is_refused_with_or_without_a_final_newline() {
+        let ended = keys(32_769, "\n");
+        let unended = ended
+            .strip_suffix('\n')
+            .expect("the fixture ends with a newline");
+
+        assert_too_many_lines(&refusal(&ended), 32_769);
+        assert_too_many_lines(&refusal(unended), 32_769);
+    }
+
+    #[test]
+    fn a_carriage_return_counts_as_a_line_break_of_its_own() {
+        assert!(!parse(&keys(16_384, "\r\n")).has_syntax_errors());
+
+        assert_too_many_lines(&refusal(&keys(16_385, "\r\n")), 32_770);
+        assert_too_many_lines(&refusal(&keys(32_769, "\r")), 32_769);
+    }
+
+    #[test]
+    fn a_flow_only_file_past_the_limit_is_refused_too() {
+        let flow = format!("[\n{}]\n", "  1,\n".repeat(39_998));
+
+        assert_too_many_lines(&refusal(&flow), 40_000);
+    }
+
+    #[test]
+    fn the_line_limit_is_checked_before_the_parse() {
+        let expired: TimeLimit = "1ms".parse().expect("`1ms` should be a time limit");
+        let deadline = Deadline::start(expired);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        assert_too_many_lines(&refusal_under(&keys(40_000, "\n"), deadline), 40_000);
+    }
+
+    #[test]
+    fn a_root_key_is_never_matched_to_a_nested_twin_past_the_limit() {
+        // The audit's false pass: past row 32,768 the nested `replicas` read as a root key.
+        let children = keys(32_800, "\n").replace('k', "  k");
+        let text = format!("replicas: 3\ntop:\n{children}  replicas: 3\n");
+
+        let error = refusal(&text);
+
+        assert_too_many_lines(&error, 32_803);
+        assert_eq!(
+            error.message_naming(&"big.yaml"),
+            "big.yaml is too long for the YAML parser: it has 32803 lines and the parser reads \
+             at most 32768 (it counts `\\r\\n` as two line breaks)"
+        );
+    }
+
+    #[test]
+    fn other_languages_read_past_the_yaml_line_limit() {
+        let languages = Languages::builtin().expect("the built-in cartridges should load");
+        for (name, text) in [
+            ("/repo/big.toml", keys(40_000, "\n").replace(':', " =")),
+            ("/repo/big.rs", "// line\n".repeat(40_000)),
+        ] {
+            let path = AbsolutePath::new(Path::new(name)).expect("the path should be absolute");
+            let language = languages
+                .for_path(path.as_path())
+                .unwrap_or_else(|| panic!("the registry should claim `{name}`"));
+            let file = SourceFile::from_text_under(
+                path,
+                text,
+                language,
+                Deadline::start(Limits::PARSE_TIMEOUT),
+                KeyPathBudget::defaults(),
+            );
+            assert!(
+                file.is_ok(),
+                "`{name}` of 40,000 lines should read: {file:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keep_chomping_puts_the_trailing_blank_lines_in_the_key_s_span() {
+        for header in ["|+", ">+"] {
+            let one = parse(&format!("a: {header}\n  keep\n\nnext: 1\n"));
+            let three = parse(&format!("a: {header}\n  keep\n\n\n\nnext: 1\n"));
+
+            assert_ne!(
+                text_of(&one, resolved(&one, &symbols(&one), "a")),
+                text_of(&three, resolved(&three, &symbols(&three), "a")),
+                "a blank line added to a `{header}` value should change its span"
+            );
+        }
+    }
+
+    #[test]
+    fn clip_and_strip_chomping_leave_the_trailing_blank_lines_out() {
+        for header in ["|", ">", "|-"] {
+            let one = parse(&format!("a: {header}\n  keep\n\nnext: 1\n"));
+            let three = parse(&format!("a: {header}\n  keep\n\n\n\nnext: 1\n"));
+
+            assert_eq!(
+                text_of(&one, resolved(&one, &symbols(&one), "a")),
+                text_of(&three, resolved(&three, &symbols(&three), "a")),
+                "the blank lines after a `{header}` value are not part of it"
+            );
+        }
+    }
+
+    #[test]
+    fn one_document_and_a_trailing_marker_keep_plain_paths() {
+        let file = parse("a:\n  b: 1\n---\n");
+
+        assert_eq!(paths(&symbols(&file)), ["a", "a.b"]);
+    }
+
+    #[test]
+    fn empty_documents_take_an_index_but_never_make_a_stream_several() {
+        let lone = parse("---\n# nothing here\n---\nb: 2\n");
+        let two = parse("a: 1\n---\n# nothing here\n---\nb: 2\n");
+
+        assert_eq!(paths(&symbols(&lone)), ["b"]);
+        assert_eq!(paths(&symbols(&two)), ["0", "0.a", "1", "2", "2.b"]);
+    }
+
+    #[test]
     fn the_deadline_stops_the_walk_inside_a_run_of_children_that_name_nothing() {
         // The comments name nothing, so only the per-child check can stop the walk among them;
-        // without it the walk would run on to `last` and stop there.
-        let comments = "  # nothing\n".repeat(500_000);
+        // without it the walk would run on to `last` and stop there. 32,000 fit under the line
+        // limit; walking them takes 7-20 ms in a debug build, well past the deadline.
+        let comments = "  # nothing\n".repeat(32_000);
         let text = format!("a: [first,\n{comments}  last]\n");
         let last = text
             .rfind("last")
@@ -896,7 +1149,7 @@ spec:
         let error = file
             .language()
             .symbols(&file)
-            .expect_err("half a million comments should outlast a 1 ms deadline");
+            .expect_err("32,000 comments should outlast a 1 ms deadline");
 
         assert!(
             matches!(error, ReadError::Timeout { offset, .. } if offset < last),
