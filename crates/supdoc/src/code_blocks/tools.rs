@@ -88,6 +88,58 @@ pub(crate) enum Tier {
     Project,
 }
 
+/// What a cartridge loads: its [`Tier`], and for a tool above [`Tier::Static`] what supdoc says
+/// when trust holds it back, so a project-tier tool can't be declared without those words.
+#[derive(Debug)]
+enum Loads {
+    /// Only the block on stdin and plain-data config: [`Tier::Static`].
+    Static,
+    /// Project code: [`Tier::Project`], held back by trust with these words.
+    Project(Held),
+}
+
+/// What supdoc says about a project-tier tool's step that trust held back. Each string names the
+/// tool, so a reason leads back to the one tool that gave it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Held {
+    /// The step's reason when the operator hasn't granted trust: "clippy runs only in the
+    /// project tier, which needs `supdoc trust`".
+    pub(crate) needs_trust: &'static str,
+    /// The step's reason when `SUPDOC_TRUST=0` turned trust off for the run.
+    pub(crate) trust_off: &'static str,
+    /// [`needs_trust`](Self::needs_trust) as the summary line counts it: "clippy needs trust".
+    pub(crate) short: &'static str,
+    /// What didn't run and why, for the run's trust warning: "clippy didn't run on Rust blocks:
+    /// it compiles them".
+    pub(crate) didnt_run: &'static str,
+    /// The setting that stops the step, for the warning's help: "`lint = \"off\"` in
+    /// `[features.code-blocks.rust.clippy]`".
+    pub(crate) off: &'static str,
+}
+
+/// A step trust held back: the tool's words, and whether `SUPDOC_TRUST=0` held it rather than a
+/// checkout the operator hasn't trusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Hold {
+    /// The held tool's words.
+    pub(crate) held: &'static Held,
+    /// Whether the step's reason is [`Held::trust_off`] rather than [`Held::needs_trust`].
+    pub(crate) turned_off: bool,
+}
+
+/// The hold `reason` records, when it is a project-tier cartridge's [`Held::needs_trust`] or
+/// [`Held::trust_off`]. `None` for any other reason.
+#[must_use]
+pub(crate) fn hold(reason: &str) -> Option<Hold> {
+    CARTRIDGES.iter().find_map(|tool| {
+        let held = tool.held()?;
+        (reason == held.needs_trust || reason == held.trust_off).then_some(Hold {
+            held,
+            turned_off: reason == held.trust_off,
+        })
+    })
+}
+
 /// What a cartridge's argv is built from: the block's place in its doc and its language's
 /// settings.
 #[derive(Debug, Clone, Copy)]
@@ -146,7 +198,7 @@ pub(crate) struct ToolCartridge {
     /// The binary looked up on `PATH`.
     pub(crate) binary: &'static str,
     /// What it loads.
-    pub(crate) tier: Tier,
+    loads: Loads,
     /// The command that installs it.
     pub(crate) install: &'static str,
     /// The config files it reads, by name at the project root: each one's content is part of
@@ -171,6 +223,25 @@ pub(crate) struct ToolCartridge {
 }
 
 impl ToolCartridge {
+    /// The tier it needs.
+    #[must_use]
+    pub(crate) const fn tier(&self) -> Tier {
+        match self.loads {
+            Loads::Static => Tier::Static,
+            Loads::Project(_) => Tier::Project,
+        }
+    }
+
+    /// What supdoc says when trust holds it back. `None` for a [`Tier::Static`] tool, which trust
+    /// never holds.
+    #[must_use]
+    pub(crate) const fn held(&self) -> Option<&Held> {
+        match &self.loads {
+            Loads::Static => None,
+            Loads::Project(held) => Some(held),
+        }
+    }
+
     /// The check it does.
     #[must_use]
     pub(crate) const fn step(&self) -> Step {
@@ -493,7 +564,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
         name: "rustfmt",
         language: Language::Rust,
         binary: "rustfmt",
-        tier: Tier::Static,
+        loads: Loads::Static,
         install: "rustup component add rustfmt",
         config_files: &["rustfmt.toml", ".rustfmt.toml"],
         modes: FULL_OR_OFF,
@@ -508,7 +579,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
         name: "shfmt",
         language: Language::Shell,
         binary: "shfmt",
-        tier: Tier::Static,
+        loads: Loads::Static,
         install: "go install mvdan.cc/sh/v3/cmd/shfmt@latest",
         config_files: &[".editorconfig"],
         modes: FULL_OR_OFF,
@@ -523,7 +594,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
         name: "ruff-format",
         language: Language::Python,
         binary: "ruff",
-        tier: Tier::Static,
+        loads: Loads::Static,
         install: "pipx install ruff",
         config_files: &["ruff.toml", ".ruff.toml", "pyproject.toml"],
         modes: FULL_OR_OFF,
@@ -538,7 +609,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
         name: "black",
         language: Language::Python,
         binary: "black",
-        tier: Tier::Static,
+        loads: Loads::Static,
         install: "pipx install black",
         config_files: &["pyproject.toml"],
         modes: FULL_OR_OFF,
@@ -553,7 +624,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
         name: "ruff",
         language: Language::Python,
         binary: "ruff",
-        tier: Tier::Static,
+        loads: Loads::Static,
         install: "pipx install ruff",
         config_files: &["ruff.toml", ".ruff.toml", "pyproject.toml"],
         modes: FULL_OR_OFF,
@@ -568,7 +639,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
         name: "shellcheck",
         language: Language::Shell,
         binary: "shellcheck",
-        tier: Tier::Static,
+        loads: Loads::Static,
         install: "cabal install ShellCheck",
         config_files: &[".shellcheckrc"],
         modes: FULL_OR_OFF,
@@ -583,7 +654,14 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
         name: "clippy",
         language: Language::Rust,
         binary: "clippy-driver",
-        tier: Tier::Project,
+        loads: Loads::Project(Held {
+            needs_trust: "clippy runs only in the project tier, which needs `supdoc trust`",
+            trust_off: "clippy runs only in the project tier, and `SUPDOC_TRUST=0` turns trust off \
+                        for this run",
+            short: "clippy needs trust",
+            didnt_run: "clippy didn't run on Rust blocks: it compiles them",
+            off: "`lint = \"off\"` in `[features.code-blocks.rust.clippy]`",
+        }),
         install: "rustup component add clippy",
         config_files: &["clippy.toml", ".clippy.toml", "Cargo.toml"],
         modes: FULL_OR_OFF,
@@ -598,7 +676,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
         name: "biome-format",
         language: Language::TypeScript,
         binary: "biome",
-        tier: Tier::Static,
+        loads: Loads::Static,
         install: "npm install --global @biomejs/biome",
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
@@ -613,7 +691,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
         name: "biome-format",
         language: Language::JavaScript,
         binary: "biome",
-        tier: Tier::Static,
+        loads: Loads::Static,
         install: "npm install --global @biomejs/biome",
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
@@ -628,7 +706,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
         name: "biome-format",
         language: Language::Json,
         binary: "biome",
-        tier: Tier::Static,
+        loads: Loads::Static,
         install: "npm install --global @biomejs/biome",
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
@@ -643,7 +721,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
         name: "biome-lint",
         language: Language::TypeScript,
         binary: "biome",
-        tier: Tier::Static,
+        loads: Loads::Static,
         install: "npm install --global @biomejs/biome",
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
@@ -658,7 +736,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
         name: "biome-lint",
         language: Language::JavaScript,
         binary: "biome",
-        tier: Tier::Static,
+        loads: Loads::Static,
         install: "npm install --global @biomejs/biome",
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
@@ -673,7 +751,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
         name: "biome-lint",
         language: Language::Json,
         binary: "biome",
-        tier: Tier::Static,
+        loads: Loads::Static,
         install: "npm install --global @biomejs/biome",
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
@@ -688,7 +766,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
         name: "rumdl-format",
         language: Language::Markdown,
         binary: "rumdl",
-        tier: Tier::Static,
+        loads: Loads::Static,
         install: "pipx install rumdl",
         config_files: RUMDL_CONFIGS,
         modes: FULL_OR_OFF,
@@ -703,7 +781,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
         name: "rumdl",
         language: Language::Markdown,
         binary: "rumdl",
-        tier: Tier::Static,
+        loads: Loads::Static,
         install: "pipx install rumdl",
         config_files: RUMDL_CONFIGS,
         modes: FULL_OR_OFF,
@@ -718,7 +796,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
         name: "tombi-format",
         language: Language::Toml,
         binary: "tombi",
-        tier: Tier::Static,
+        loads: Loads::Static,
         install: TOMBI_INSTALL,
         // tombi reads only supdoc's private copy, named by its hash in the args and env.
         config_files: &[],
@@ -734,7 +812,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
         name: "tombi-lint",
         language: Language::Toml,
         binary: "tombi",
-        tier: Tier::Static,
+        loads: Loads::Static,
         install: TOMBI_INSTALL,
         // tombi reads only supdoc's private copy, named by its hash in the args and env.
         config_files: &[],
@@ -750,7 +828,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
         name: "yamlfmt",
         language: Language::Yaml,
         binary: "yamlfmt",
-        tier: Tier::Static,
+        loads: Loads::Static,
         install: "go install github.com/google/yamlfmt/cmd/yamlfmt@v0.21.0",
         // yamlfmt reads only supdoc's private copy, named by its hash in the args.
         config_files: &[],
@@ -766,7 +844,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
         name: "yamllint",
         language: Language::Yaml,
         binary: "yamllint",
-        tier: Tier::Static,
+        loads: Loads::Static,
         install: "pipx install 'yamllint==1.38.0'",
         // yamllint reads only supdoc's private copy, named by its hash in the args.
         config_files: &[],
@@ -782,7 +860,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
         name: "gofmt",
         language: Language::Go,
         binary: "gofmt",
-        tier: Tier::Static,
+        loads: Loads::Static,
         install: "install Go from https://go.dev/dl/",
         config_files: &[],
         modes: FULL_OR_OFF,
@@ -797,7 +875,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
         name: "go-vet",
         language: Language::Go,
         binary: "go",
-        tier: Tier::Static,
+        loads: Loads::Static,
         install: "install Go from https://go.dev/dl/",
         // go vet reads only the module supdoc writes for the block (see [`go::VetModule`]).
         config_files: &[],
@@ -1291,7 +1369,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        CARTRIDGES, Found, Invocation, ToolCartridge, ToolEnv, find, search_dirs, under_same_file,
+        CARTRIDGES, Found, Hold, Invocation, Tier, ToolCartridge, ToolEnv, find, hold, search_dirs,
+        under_same_file,
     };
     use crate::code_blocks::fragment::{Frame, Kind};
     use crate::config::code_blocks::{Dialect, Edition, Language};
@@ -1331,7 +1410,7 @@ mod tests {
                     tool.language,
                     tool.step(),
                     tool.binary,
-                    tool.tier
+                    tool.tier()
                 )
             })
             .collect();
@@ -1362,6 +1441,48 @@ mod tests {
                 "go-vet Go Lint go Static",
             ]
         );
+    }
+
+    #[test]
+    fn each_project_tier_cartridge_names_itself_in_its_trust_words() {
+        for tool in CARTRIDGES
+            .iter()
+            .filter(|tool| tool.tier() == Tier::Project)
+        {
+            let held = tool
+                .held()
+                .unwrap_or_else(|| panic!("{} is project-tier without trust words", tool.name));
+            let named = [held.needs_trust, held.trust_off, held.didnt_run]
+                .into_iter()
+                .all(|words| words.starts_with(&format!("{} ", tool.name)));
+            let off = format!(
+                "`{} = \"off\"` in `[features.code-blocks.{}.{}]`",
+                tool.step().key(),
+                tool.language.table(),
+                tool.name
+            );
+
+            assert!(
+                named && held.short == format!("{} needs trust", tool.name) && held.off == off,
+                "{} should name itself in each reason and its own off setting, got {held:?}",
+                tool.name
+            );
+            assert_eq!(
+                (hold(held.needs_trust), hold(held.trust_off)),
+                (
+                    Some(Hold {
+                        held,
+                        turned_off: false
+                    }),
+                    Some(Hold {
+                        held,
+                        turned_off: true
+                    })
+                ),
+                "{}'s reasons should lead back to it",
+                tool.name
+            );
+        }
     }
 
     #[test]
