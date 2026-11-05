@@ -18,7 +18,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::config::confine::{self, Admitted, Boundary};
-use crate::path::holds_git;
+use crate::path::{Pointer, holds_git};
 use crate::scan::git::{common_dir, first_line};
 
 /// Tells concurrent writers' temporary files apart within one process.
@@ -592,12 +592,12 @@ impl Place {
             return None;
         }
         let line = first_line(&dot_git)?;
-        let git_dir = top
-            .join(line.strip_prefix("gitdir: ")?)
+        let git_dir = Pointer::new(line.strip_prefix("gitdir: ")?)?
+            .resolve_from(top)
             .canonicalize()
             .ok()?;
         let place = Self::of(real)?;
-        let back = git_dir.join(first_line(&git_dir.join("gitdir"))?);
+        let back = Pointer::new(&first_line(&git_dir.join("gitdir"))?)?.resolve_from(&git_dir);
         let names_back = back.canonicalize().ok()? == dot_git.canonicalize().ok()?;
         let in_worktrees = git_dir.parent() == Some(place.common.join("worktrees").as_path());
         (names_back && in_worktrees).then_some(place)

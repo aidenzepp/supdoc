@@ -1366,6 +1366,29 @@ mod tests {
         assert_eq!(project.sources(&Scope::All), ["out.rs"]);
     }
 
+    #[test]
+    fn a_git_file_whose_commondir_holds_a_nul_warns_naming_the_commondir_file() {
+        let project = Project::new();
+        project.write(".git", "gitdir: .hidden-git/worktrees/w\n");
+        project.write(".hidden-git/worktrees/w/commondir", "../\0..\n");
+        project.write(".hidden-git/info/exclude", &format!("{RULE}\n"));
+        project.write("out.rs", "");
+
+        let walk = project.walk(&Scope::All);
+
+        assert_eq!(
+            project.sources(&Scope::All),
+            ["out.rs"],
+            "a `commondir` line that names no path brings no exclude file"
+        );
+        assert_eq!(codes(&walk), ["scan-ignore-file-unreadable"]);
+        assert_eq!(
+            messages(&walk),
+            "the git exclude file `.hidden-git/worktrees/w/commondir` could not be fully read, so \
+             some of its rules may not apply"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn root_whose_ignore_file_is_symlinked_out_is_walked_with_one_warning() {

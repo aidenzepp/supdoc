@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use crate::config::code_blocks::{Diagnostics, Language};
 use crate::finding::{Finding, Location, Severity};
+use crate::path::Pointer;
 
 use super::block::CodeBlock;
 use super::format::{self, Verdict};
@@ -91,7 +92,9 @@ pub(crate) fn find(program: &str, env: &ToolEnv, root: &Path) -> Found {
     if !program.contains('/') {
         return tools::find(program, env, root);
     }
-    let named = root.join(program);
+    let Some(named) = Pointer::new(program).map(|pointer| pointer.resolve_from(root)) else {
+        return Found::Missing;
+    };
     let Some(real) = tools::is_executable_file(&named)
         .then(|| named.canonicalize().ok())
         .flatten()

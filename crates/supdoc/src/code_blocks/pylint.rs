@@ -23,6 +23,7 @@
 use std::path::Path;
 
 use crate::finding::{Finding, Location, Severity};
+use crate::path::Pointer;
 
 use super::format;
 use super::lint::{self, Diagnostic};
@@ -123,7 +124,8 @@ impl Block<'_> {
     fn holds(&self, entry: &Entry) -> bool {
         STDIN_PATHS.contains(&entry.path.as_str())
             || Path::new(&entry.absolute_path) == self.path
-            || self.root.join(&entry.path) == self.path
+            || Pointer::new(&entry.path)
+                .is_some_and(|pointer| pointer.resolve_from(self.root) == self.path)
     }
 
     /// `entry`, about another file, as a note naming that file relative to the root.
