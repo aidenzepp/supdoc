@@ -72,6 +72,7 @@ top-level keys, and never change which files links are read from. A language's t
   json          formatter biome-format, linter biome-lint; tag a block with comments jsonc
   toml          formatter tombi-format, linter tombi-lint
   markdown      formatter rumdl-format, linter rumdl
+  go            formatter gofmt, no linter yet; tag a block go or golang
 
 Each tool's options live in its own table, such as [features.code-blocks.python.ruff] with \
 lint = \"off\". A table for a tool the language doesn't select is a config error.

@@ -14,11 +14,11 @@ use std::path::{Path, PathBuf};
 
 use crate::config::code_blocks::{CodeBlocks, Dialect, Edition, Language};
 
-use super::format::ParseError;
+use super::format::{ParseError, Positions};
 use super::fragment::{Kind, Support};
 use super::lint;
 use super::runner::{Failure, Ran};
-use super::{biome, python, rumdl, rust, shell, tombi};
+use super::{biome, go, python, rumdl, rust, shell, tombi};
 
 /// The variables a tool gets from supdoc's own environment, and no others.
 const PASSED: [&str; 5] = [
@@ -159,6 +159,11 @@ pub(crate) struct ToolCartridge {
     /// Whether a block tagged `tag` can hold a fragment of `kind` at all, whatever `fragments`
     /// lists: biome reads a markup element's children only in a JSX flavor.
     holds: fn(&str, Kind) -> bool,
+    /// The variables it gets beyond [`ToolEnv`]'s, each set to the value held.
+    vars: &'static [(&'static str, &'static str)],
+    /// How far the positions in its syntax-error report on `input` are the block's own: gofmt
+    /// reports a fragment's in a wrapper of its own.
+    positions: fn(&str) -> Positions,
     /// Its arguments for a block.
     argv: fn(&Invocation<'_>) -> Vec<OsString>,
     /// How a run is read.
@@ -185,6 +190,22 @@ impl ToolCartridge {
     #[must_use]
     pub(crate) fn args(&self, invocation: &Invocation<'_>) -> Vec<OsString> {
         (self.argv)(invocation)
+    }
+
+    /// The variables it gets beyond [`ToolEnv`]'s.
+    #[must_use]
+    pub(crate) fn vars(&self) -> Vec<(&'static str, &'static OsStr)> {
+        self.vars
+            .iter()
+            .map(|(name, value)| (*name, OsStr::new(*value)))
+            .collect()
+    }
+
+    /// How far the positions in its syntax-error report on `input` are the block's own, which
+    /// decides how the report places the error in the doc.
+    #[must_use]
+    pub(crate) fn positions(&self, input: &str) -> Positions {
+        (self.positions)(input)
     }
 
     /// Its syntax-error report in `stderr`. `None` for any other stderr, and always for a
@@ -339,6 +360,20 @@ const fn framed(before: &'static str, after: &'static str) -> Support {
     }
 }
 
+/// How far a tool's syntax-error positions on `input` are the block's own: wholly, for a tool
+/// that reads the block as written.
+const fn own_positions(_input: &str) -> Positions {
+    Positions::Own
+}
+
+/// gofmt's kinds: it tries the block as a file, then as a declaration list, then as a statement
+/// list (an expression is one), wrapping it itself, so each reads as written.
+const GO_FRAGMENTS: &[(Kind, Support)] = &[
+    (Kind::Statements, Support::NATIVE),
+    (Kind::Expression, Support::NATIVE),
+    (Kind::Declarations, Support::NATIVE),
+];
+
 /// Whether a block tagged `tag` can hold a fragment of `kind`: always, for a tool whose
 /// `fragments` alone say.
 const fn every_tag(_tag: &str, _kind: Kind) -> bool {
@@ -355,7 +390,7 @@ fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'sta
 }
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 18] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -366,6 +401,8 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         modes: FULL_OR_OFF,
         fragments: RUSTFMT_FRAGMENTS,
         holds: every_tag,
+        vars: &[],
+        positions: own_positions,
         argv: rustfmt_args,
         reader: Reader::Format(rust::parse_error),
     },
@@ -379,6 +416,8 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         modes: FULL_OR_OFF,
         fragments: SHELL_FRAGMENTS,
         holds: every_tag,
+        vars: &[],
+        positions: own_positions,
         argv: shfmt_args,
         reader: Reader::Format(shell::parse_error),
     },
@@ -392,6 +431,8 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         modes: FULL_OR_OFF,
         fragments: PYTHON_FORMAT_FRAGMENTS,
         holds: every_tag,
+        vars: &[],
+        positions: own_positions,
         argv: ruff_format_args,
         reader: Reader::Format(python::ruff_parse_error),
     },
@@ -405,6 +446,8 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         modes: FULL_OR_OFF,
         fragments: PYTHON_FORMAT_FRAGMENTS,
         holds: every_tag,
+        vars: &[],
+        positions: own_positions,
         argv: black_args,
         reader: Reader::Format(python::black_parse_error),
     },
@@ -418,6 +461,8 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         modes: FULL_OR_OFF,
         fragments: RUFF_FRAGMENTS,
         holds: every_tag,
+        vars: &[],
+        positions: own_positions,
         argv: ruff_args,
         reader: Reader::Lint(python::lint_verdict),
     },
@@ -431,6 +476,8 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         modes: FULL_OR_OFF,
         fragments: SHELL_FRAGMENTS,
         holds: every_tag,
+        vars: &[],
+        positions: own_positions,
         argv: shellcheck_args,
         reader: Reader::Lint(shell::lint_verdict),
     },
@@ -444,6 +491,8 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         modes: FULL_OR_OFF,
         fragments: &[],
         holds: every_tag,
+        vars: &[],
+        positions: own_positions,
         argv: clippy_args,
         reader: Reader::Lint(rust::lint_verdict),
     },
@@ -457,6 +506,8 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         modes: FULL_OR_OFF,
         fragments: &[],
         holds: biome::holds,
+        vars: &[],
+        positions: own_positions,
         argv: biome_format_args,
         reader: Reader::Format(biome::parse_error),
     },
@@ -470,6 +521,8 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         modes: FULL_OR_OFF,
         fragments: &[],
         holds: biome::holds,
+        vars: &[],
+        positions: own_positions,
         argv: biome_format_args,
         reader: Reader::Format(biome::parse_error),
     },
@@ -483,6 +536,8 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         modes: FULL_OR_OFF,
         fragments: &[],
         holds: every_tag,
+        vars: &[],
+        positions: own_positions,
         argv: biome_format_args,
         reader: Reader::Format(biome::parse_error),
     },
@@ -496,6 +551,8 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         modes: FULL_OR_OFF,
         fragments: BIOME_LINT_TS_FRAGMENTS,
         holds: biome::holds,
+        vars: &[],
+        positions: own_positions,
         argv: biome_lint_args,
         reader: Reader::Lint(biome::lint_verdict),
     },
@@ -509,6 +566,8 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         modes: FULL_OR_OFF,
         fragments: BIOME_LINT_FRAGMENTS,
         holds: biome::holds,
+        vars: &[],
+        positions: own_positions,
         argv: biome_lint_args,
         reader: Reader::Lint(biome::lint_verdict),
     },
@@ -522,6 +581,8 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         modes: FULL_OR_OFF,
         fragments: &[],
         holds: every_tag,
+        vars: &[],
+        positions: own_positions,
         argv: biome_lint_args,
         reader: Reader::Lint(biome::lint_verdict),
     },
@@ -535,6 +596,8 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         modes: FULL_OR_OFF,
         fragments: &[],
         holds: every_tag,
+        vars: &[],
+        positions: own_positions,
         argv: rumdl_format_args,
         reader: Reader::Format(rumdl::parse_error),
     },
@@ -548,6 +611,8 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         modes: FULL_OR_OFF,
         fragments: &[],
         holds: every_tag,
+        vars: &[],
+        positions: own_positions,
         argv: rumdl_args,
         reader: Reader::Lint(rumdl::lint_verdict),
     },
@@ -562,6 +627,8 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         modes: FULL_OR_OFF,
         fragments: &[],
         holds: every_tag,
+        vars: &[],
+        positions: own_positions,
         argv: tombi_format_args,
         reader: Reader::Format(tombi::parse_error),
     },
@@ -576,8 +643,25 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         modes: FULL_OR_OFF,
         fragments: &[],
         holds: every_tag,
+        vars: &[],
+        positions: own_positions,
         argv: tombi_lint_args,
         reader: Reader::Lint(tombi::lint_verdict),
+    },
+    ToolCartridge {
+        name: "gofmt",
+        language: Language::Go,
+        binary: "gofmt",
+        tier: Tier::Static,
+        install: "install Go from https://go.dev/dl/",
+        config_files: &[],
+        modes: FULL_OR_OFF,
+        fragments: GO_FRAGMENTS,
+        holds: every_tag,
+        vars: go::VARS,
+        positions: go::positions,
+        argv: gofmt_args,
+        reader: Reader::Format(go::parse_error),
     },
 ];
 
@@ -663,6 +747,12 @@ fn shfmt_args(invocation: &Invocation<'_>) -> Vec<OsString> {
         OsString::from("-ln"),
         OsString::from(invocation.dialect.language_name()),
     ]
+}
+
+/// `gofmt`'s arguments: none, so it reads the block on stdin and prints it formatted. gofmt has
+/// no config file and no stdin file name, so neither the doc nor the project reaches it.
+fn gofmt_args(_invocation: &Invocation<'_>) -> Vec<OsString> {
+    Vec::new()
 }
 
 /// `ruff format`'s arguments: the block on stdin under its virtual path, no cache.
@@ -1085,6 +1175,7 @@ mod tests {
                 "rumdl Markdown Lint rumdl Static",
                 "tombi-format Toml Format tombi Static",
                 "tombi-lint Toml Lint tombi Static",
+                "gofmt Go Format gofmt Static",
             ]
         );
     }

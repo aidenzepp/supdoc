@@ -1994,6 +1994,7 @@ fn run_formatter(
         .iter()
         .chain(tombi_vars.iter().flatten())
         .map(|(name, value)| (*name, value.as_os_str()))
+        .chain(tool.vars())
         .collect();
     let held = framed
         .as_ref()
@@ -2131,6 +2132,7 @@ fn run_linter(
         .iter()
         .flatten()
         .map(|(name, value)| (*name, value.as_os_str()))
+        .chain(tool.vars())
         .collect();
     let run = cache::Run {
         tool,

@@ -235,6 +235,9 @@ pub(crate) mod code_blocks {
     /// TOML's format and lint steps, run by tombi.
     mod tombi;
 
+    /// Go's format step, run by gofmt.
+    mod go;
+
     /// Reading the Rust toolchain a project pins.
     mod toolchain;
 
