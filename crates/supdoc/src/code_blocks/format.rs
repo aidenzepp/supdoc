@@ -580,7 +580,9 @@ pub(crate) fn finding(
             ),
         )
         .with_help(
-            "raise the limit with `--code-block-timeout 30s`, or mark the block `ignore(<why>)`",
+            "raise the limit with `--code-block-timeout 30s` or `SUPDOC_CODE_BLOCK_TIMEOUT=30s` \
+             (`code-block-timeout` under `[limits]` raises it only in a checkout you trust), or \
+             mark the block `ignore(<why>)`",
         ),
         Verdict::NotKind { kind, .. } => Finding::new(
             PARSE,
@@ -648,7 +650,9 @@ pub(crate) fn build_finding(
             ),
         )
         .with_help(format!(
-            "raise the limit with `--code-block-build-timeout 30m`, or set {off}"
+            "raise the limit with `--code-block-build-timeout 30m` or \
+             `SUPDOC_CODE_BLOCK_BUILD_TIMEOUT=30m` (`code-block-build-timeout` under `[limits]` \
+             raises it only in a checkout you trust), or set {off}"
         )),
     };
     finding.with_location(at.clone())
