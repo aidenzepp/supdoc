@@ -95,7 +95,7 @@ pub fn fix_file_changed(root: &Path, edit: impl FnOnce()) -> Result<Message, Str
         .map_err(|error| error.to_string())?;
     let plan = plan_fixes(&scan);
     edit();
-    let result = apply_fixes(&plan, &root, "supdoc fix --yes");
+    let result = apply_fixes(&plan, config.boundary(), "supdoc fix --yes");
     let skipped = result
         .skipped
         .first()

@@ -211,7 +211,7 @@ impl Project {
         }
         let path = AbsolutePath::new(&self.dir.path().join(LOCK_FILE_NAME))
             .expect("the lockfile path should be absolute");
-        lock.write(&path)
+        lock.write(&path, config.boundary())
             .expect("the fixture lockfile should be written");
     }
 

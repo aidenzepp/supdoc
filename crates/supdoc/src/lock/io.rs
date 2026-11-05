@@ -1,13 +1,12 @@
 //! Reading and atomically writing `supdoc.lock`.
 
 use std::fs;
-use std::io::{self, Read as _, Write as _};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::io::{self, Read as _};
+use std::path::Path;
 
 use super::error::LockError;
 use super::model::{LOCK_FILE_NAME, Lockfile};
+use crate::config::confine::{Boundary, write_atomically};
 use crate::limits::SizeLimit;
 use crate::path::{AbsolutePath, ProjectFile, is_regular_file, resolve_project_file};
 
@@ -36,15 +35,20 @@ impl Lockfile {
         let file = match locate(path).map_err(read_failed)? {
             Located::Absent => return Ok(None),
             Located::Inside(file) => file,
-            Located::Outside => return Err(LockError::OutsideRoot { path: path.clone() }),
+            Located::Outside => {
+                return Err(LockError::OutsideRoot {
+                    path: path.clone(),
+                    after_check: false,
+                });
+            }
         };
-        match is_regular_file(&file) {
+        match is_regular_file(file.as_path()) {
             Ok(true) => {}
             Ok(false) => return Err(LockError::NotRegularFile { path: path.clone() }),
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(read_failed(error)),
         }
-        let opened = match fs::File::open(&file) {
+        let opened = match fs::File::open(file.as_path()) {
             Ok(opened) => opened,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(read_failed(error)),
@@ -86,24 +90,33 @@ impl Lockfile {
     /// rename, so an interrupted run never leaves half a lockfile.
     ///
     /// A `path` that is a symlink to a `supdoc.lock` inside the root is written through: the real
-    /// file [`Lockfile::read`] reads gets the new text and the symlink stays.
+    /// file [`Lockfile::read`] reads gets the new text and the symlink stays. The file written is
+    /// admitted against `boundary`, the project root, immediately before the write.
     ///
     /// # Errors
     ///
-    /// `OutsideRoot` for a symlink that doesn't lead to a `supdoc.lock` inside the root, so no
-    /// write ever lands outside it. Otherwise fails if the temporary file cannot be written or
-    /// moved into place. Any existing lockfile is left unchanged.
-    pub(crate) fn write(&self, path: &AbsolutePath) -> Result<(), LockError> {
+    /// `OutsideRoot` for a symlink that doesn't lead to a `supdoc.lock` inside the root, or, with
+    /// `after_check`, a file `boundary` refuses because a path on the way changed and now leads
+    /// out, so no write ever lands outside the root. Otherwise fails if the temporary file cannot be written or moved into place. Any
+    /// existing lockfile is left unchanged.
+    pub(crate) fn write(&self, path: &AbsolutePath, boundary: &Boundary) -> Result<(), LockError> {
         let to_error = |error| LockError::Write {
             path: path.clone(),
             error,
         };
-        let target = match locate(path).map_err(to_error)? {
-            Located::Absent => path.as_path().to_path_buf(),
-            Located::Inside(file) => file,
-            Located::Outside => return Err(LockError::OutsideRoot { path: path.clone() }),
+        let outside = |after_check| LockError::OutsideRoot {
+            path: path.clone(),
+            after_check,
         };
-        write_atomically(&target, self.render().as_bytes(), None).map_err(to_error)
+        let target = match locate(path).map_err(to_error)? {
+            Located::Absent => path.clone(),
+            Located::Inside(file) => file,
+            Located::Outside => return Err(outside(false)),
+        };
+        let admitted = boundary
+            .admit_resolved(&target)
+            .map_err(|_escape| outside(true))?;
+        write_atomically(&admitted, self.render().as_bytes(), None).map_err(to_error)
     }
 }
 
@@ -113,7 +126,7 @@ enum Located {
     Absent,
     /// The file to read and write: the path itself, or the real file a symlink there leads to
     /// inside the project root.
-    Inside(PathBuf),
+    Inside(AbsolutePath),
     /// A symlink that doesn't lead to a `supdoc.lock` inside the root: dangling, looping,
     /// pointing outside or at a file of another name, deliberately not told apart.
     Outside,
@@ -132,7 +145,7 @@ fn locate(path: &AbsolutePath) -> io::Result<Located> {
         ProjectFile::Absent => Located::Absent,
         // The path itself when it isn't a symlink; otherwise its real file must be a lockfile.
         ProjectFile::Inside(file) if file == *path || is_named_lockfile(file.as_path()) => {
-            Located::Inside(file.as_path().to_path_buf())
+            Located::Inside(file)
         }
         ProjectFile::Inside(_) | ProjectFile::Outside(_) => Located::Outside,
     })
@@ -142,79 +155,6 @@ fn locate(path: &AbsolutePath) -> io::Result<Located> {
 /// is never parsed as a lockfile and quoted in the error.
 fn is_named_lockfile(real: &Path) -> bool {
     real.file_name().is_some_and(|name| name == LOCK_FILE_NAME)
-}
-
-/// How many fresh names to try before giving up on creating a temporary file.
-const TEMP_ATTEMPTS: u32 = 8;
-
-/// A scratch name next to `target`, so the final rename stays on one filesystem. The name mixes
-/// the process id, a process-wide counter, the clock, and the attempt number so it cannot be
-/// guessed and pre-planted.
-fn temp_path_beside(target: &Path, attempt: u32) -> PathBuf {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.subsec_nanos());
-    let mut name = target.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(
-        ".{}.{}.{nanos:x}.{attempt}.tmp",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed),
-    ));
-    target.with_file_name(name)
-}
-
-/// Creates a new file at the first free candidate path. `create_new` refuses an existing path
-/// and never follows a symlink, so a pre-placed file or link is skipped, not written through.
-///
-/// # Errors
-///
-/// Fails on any error other than `AlreadyExists`, or when every attempt finds its path taken.
-fn create_exclusive_temp(
-    mut candidate: impl FnMut(u32) -> PathBuf,
-) -> io::Result<(fs::File, PathBuf)> {
-    for attempt in 0..TEMP_ATTEMPTS {
-        let temp = candidate(attempt);
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)
-        {
-            Ok(file) => return Ok((file, temp)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        format!("no unused temporary file name found after {TEMP_ATTEMPTS} attempts"),
-    ))
-}
-
-/// Writes `bytes` to a new file beside `target` and renames it into place, so an interrupted
-/// run never leaves half a file. With `permissions`, the new file gets them before the rename;
-/// without, it keeps the default for a new file. The temporary file is created exclusively, so a
-/// planted path or symlink is never written through.
-///
-/// # Errors
-///
-/// Fails if the temporary file cannot be created, written or renamed; `target` is then unchanged.
-pub(crate) fn write_atomically(
-    target: &Path,
-    bytes: &[u8],
-    permissions: Option<&fs::Permissions>,
-) -> io::Result<()> {
-    let (mut file, temp) = create_exclusive_temp(|attempt| temp_path_beside(target, attempt))?;
-    let written = file
-        .write_all(bytes)
-        .and_then(|()| permissions.map_or(Ok(()), |kept| file.set_permissions(kept.clone())))
-        .and_then(|()| file.sync_all());
-    drop(file);
-    let finished = written.and_then(|()| fs::rename(&temp, target));
-    if finished.is_err() {
-        drop(fs::remove_file(&temp));
-    }
-    finished
 }
 
 #[cfg(test)]
@@ -235,6 +175,13 @@ mod tests {
             symbol: None,
         };
         [(key, Hash::digest(content))].into_iter().collect()
+    }
+
+    /// The project root `dir` as a write boundary.
+    fn boundary(dir: &tempfile::TempDir) -> Boundary {
+        Boundary::resolve(
+            &AbsolutePath::new(dir.path()).expect("a temp directory path should be absolute"),
+        )
     }
 
     fn lock_path(dir: &tempfile::TempDir) -> AbsolutePath {
@@ -258,7 +205,7 @@ mod tests {
         let path = lock_path(&dir);
         let lock = lock_with_one_entry(b"x");
 
-        lock.write(&path)
+        lock.write(&path, &boundary(&dir))
             .expect("writing to a temp directory should succeed");
 
         assert_eq!(
@@ -273,11 +220,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp directory should be creatable");
         let path = lock_path(&dir);
         lock_with_one_entry(b"old")
-            .write(&path)
+            .write(&path, &boundary(&dir))
             .expect("the first write should succeed");
         let new = lock_with_one_entry(b"new");
 
-        new.write(&path).expect("the second write should succeed");
+        new.write(&path, &boundary(&dir))
+            .expect("the second write should succeed");
 
         assert_eq!(
             Lockfile::read(&path, Limits::MAX_LOCK_SIZE).expect("it should read back"),
@@ -322,11 +270,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp directory should be creatable");
         let path = lock_path(&dir);
         let old = lock_with_one_entry(b"old");
-        old.write(&path).expect("the first write should succeed");
+        old.write(&path, &boundary(&dir))
+            .expect("the first write should succeed");
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555))
             .expect("the directory should become read-only");
 
-        let result = lock_with_one_entry(b"new").write(&path);
+        let result = lock_with_one_entry(b"new").write(&path, &boundary(&dir));
 
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755))
             .expect("the directory should become writable again");
@@ -336,43 +285,6 @@ mod tests {
             Lockfile::read(&path, Limits::MAX_LOCK_SIZE)
                 .expect("the old lockfile should still read"),
             Some(old)
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn preplaced_file_or_symlink_at_a_candidate_name_is_never_written_through() {
-        let dir = tempfile::tempdir().expect("a temp directory should be creatable");
-        let victim = dir.path().join("victim");
-        fs::write(&victim, "precious").expect("the victim should be writable");
-        let planted_file = dir.path().join("planted-file");
-        fs::write(&planted_file, "planted").expect("the planted file should be writable");
-        let planted_link = dir.path().join("planted-link");
-        std::os::unix::fs::symlink(&victim, &planted_link)
-            .expect("the symlink should be creatable");
-        let free = dir.path().join("free");
-        let candidates = [planted_file.clone(), planted_link.clone(), free.clone()];
-
-        let mut candidates = candidates.into_iter();
-        let (mut file, chosen) = create_exclusive_temp(|_| {
-            candidates
-                .next()
-                .expect("the free candidate should be reached before candidates run out")
-        })
-        .expect("the free candidate should be used after the taken ones are refused");
-        file.write_all(b"new")
-            .expect("the new file should be writable");
-
-        assert_eq!(chosen, free);
-        assert_eq!(
-            fs::read_to_string(&victim).expect("the victim should be readable"),
-            "precious",
-            "the symlink target must not be written through"
-        );
-        assert_eq!(
-            fs::read_to_string(&planted_file).expect("the planted file should be readable"),
-            "planted",
-            "the pre-existing file must not be overwritten"
         );
     }
 
@@ -436,7 +348,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp directory should be creatable");
         let path = lock_path(&dir);
         lock_with_one_entry(b"x")
-            .write(&path)
+            .write(&path, &boundary(&dir))
             .expect("writing to a temp directory should succeed");
         let size = fs::metadata(path.as_path())
             .expect("the lockfile should have metadata")
@@ -472,7 +384,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp directory should be creatable");
         let path = lock_path(&dir);
         let lock = lock_with_one_entry(b"x");
-        lock.write(&path)
+        lock.write(&path, &boundary(&dir))
             .expect("writing to a temp directory should succeed");
         let size = fs::metadata(path.as_path())
             .expect("the lockfile should have metadata")
@@ -488,22 +400,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn exhausted_candidates_fail_instead_of_overwriting() {
-        let dir = tempfile::tempdir().expect("a temp directory should be creatable");
-        let taken = dir.path().join("taken");
-        fs::write(&taken, "planted").expect("the planted file should be writable");
-
-        let error = create_exclusive_temp(|_| taken.clone())
-            .expect_err("every attempt finds the path taken");
-
-        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(
-            fs::read_to_string(&taken).expect("the planted file should be readable"),
-            "planted"
-        );
-    }
-
     #[cfg(unix)]
     #[test]
     fn write_through_an_in_root_symlink_updates_the_real_file_and_keeps_the_link() {
@@ -511,14 +407,17 @@ mod tests {
         let real = dir.path().join("state/supdoc.lock");
         fs::create_dir_all(dir.path().join("state")).expect("the state dir should be creatable");
         lock_with_one_entry(b"old")
-            .write(&AbsolutePath::new(&real).expect("the real path should be absolute"))
+            .write(
+                &AbsolutePath::new(&real).expect("the real path should be absolute"),
+                &boundary(&dir),
+            )
             .expect("the real lockfile should be writable");
         let path = lock_path(&dir);
         std::os::unix::fs::symlink("state/supdoc.lock", path.as_path())
             .expect("the symlink should be creatable");
         let new = lock_with_one_entry(b"new");
 
-        new.write(&path)
+        new.write(&path, &boundary(&dir))
             .expect("writing through the in-root symlink should succeed");
 
         assert!(
@@ -550,7 +449,7 @@ mod tests {
         std::os::unix::fs::symlink(&victim, path.as_path())
             .expect("the symlink should be creatable");
 
-        let written = lock_with_one_entry(b"x").write(&path);
+        let written = lock_with_one_entry(b"x").write(&path, &boundary(&project));
 
         assert!(
             matches!(written, Err(LockError::OutsideRoot { .. })),
@@ -559,6 +458,43 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&victim).expect("the outside file should be readable"),
             "victim"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_refuses_a_lock_whose_root_was_swapped_for_an_outside_symlink() {
+        let dir = tempfile::tempdir().expect("a temp directory should be creatable");
+        let root = dir.path().join("root");
+        let outside = dir.path().join("outside");
+        for created in [&root, &outside] {
+            fs::create_dir(created).expect("the fixture dirs should be creatable");
+        }
+        let path = AbsolutePath::new(&root.join("supdoc.lock"))
+            .expect("the lockfile path should be absolute");
+        let boundary =
+            Boundary::resolve(&AbsolutePath::new(&root).expect("the root path should be absolute"));
+        fs::rename(&root, dir.path().join("moved")).expect("the root should be movable");
+        std::os::unix::fs::symlink(&outside, &root).expect("the symlink should be creatable");
+
+        let written = lock_with_one_entry(b"x").write(&path, &boundary);
+
+        assert!(
+            matches!(
+                written,
+                Err(LockError::OutsideRoot {
+                    after_check: true,
+                    ..
+                })
+            ),
+            "a root swapped for a symlink out should be refused: {written:?}"
+        );
+        assert_eq!(
+            fs::read_dir(&outside)
+                .expect("the outside dir should be listable")
+                .count(),
+            0,
+            "nothing should be written outside"
         );
     }
 }

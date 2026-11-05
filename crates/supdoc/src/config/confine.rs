@@ -23,10 +23,12 @@
 //! and the call; it doesn't close it.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write as _};
 use std::marker::PhantomData;
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::path::AbsolutePath;
 
@@ -86,8 +88,15 @@ fn normal_name(path: &Path) -> Option<&std::ffi::OsStr> {
 /// A directory supdoc may write beneath, with its real location worked out once.
 #[derive(Debug, Clone)]
 pub(crate) struct Boundary {
-    /// The directory as given, normalized.
-    given: AbsolutePath,
+    /// The directory, or `None` when [`Boundary::resolve`] refused it: then nothing is admitted.
+    dir: Option<Dir>,
+}
+
+/// The directory of a [`Boundary`] that [`Boundary::resolve`] accepted.
+#[derive(Debug, Clone)]
+struct Dir {
+    /// The directory exactly as given: absolute, with no `..`.
+    given: PathBuf,
     /// `given` with every symlink followed, or `given` as written when that can't be worked out.
     real: PathBuf,
 }
@@ -107,8 +116,8 @@ pub(crate) struct Admitted<'b> {
 /// Why [`Boundary::admit`] refused a path, so each caller can keep its own error code and message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Escape {
-    /// The path isn't beneath the boundary as written: it climbs out with `..` or names an
-    /// absolute path elsewhere.
+    /// The path isn't beneath the boundary as written: it is relative, holds a `..`, or names an
+    /// absolute path elsewhere; or the boundary itself was relative or held a `..`.
     Lexical,
     /// The path is written beneath the boundary, but a symlink along it leads out. `real` is where
     /// it really lies, or `None` when that can't be worked out.
@@ -121,85 +130,200 @@ pub(crate) enum Escape {
 impl Boundary {
     /// The boundary at `dir`, its real location worked out now.
     ///
-    /// When `dir`'s real location can't be worked out, `dir` as written stands for it.
+    /// `dir` is taken exactly as written, never folded: a relative `dir`, or one holding a `..`,
+    /// is refused, and the boundary then admits nothing ([`Escape::Lexical`]) and contains
+    /// nothing. Folding `..` lexically would name a different directory from the one the kernel
+    /// reaches when the `..` follows a symlink. When `dir`'s real location can't be worked out,
+    /// `dir` as written stands for it.
     ///
     /// Effect: reads file metadata and symlinks along `dir`.
     #[must_use]
-    pub(crate) fn resolve(dir: &AbsolutePath) -> Self {
-        let real = real_location(dir.as_path()).unwrap_or_else(|| dir.as_path().to_path_buf());
-        Self {
-            given: dir.clone(),
-            real,
-        }
+    pub(crate) fn resolve(dir: &(impl AsRef<Path> + ?Sized)) -> Self {
+        let dir = dir.as_ref();
+        let accepted = plain(dir).then(|| Dir {
+            given: dir.to_path_buf(),
+            real: real_location(dir).unwrap_or_else(|| dir.to_path_buf()),
+        });
+        Self { dir: accepted }
+    }
+
+    /// The directory as given, or an empty path when [`Boundary::resolve`] refused it. A path
+    /// joined onto the empty path is relative, which [`Boundary::admit`] refuses, so a refused
+    /// boundary still writes nothing.
+    #[must_use]
+    pub(crate) fn dir(&self) -> &Path {
+        self.dir
+            .as_ref()
+            .map_or(Path::new(""), |dir| dir.given.as_path())
     }
 
     /// Whether `path` lies inside the boundary once every symlink along it is followed.
     ///
     /// A dangling symlink counts where it points, and a path whose real location can't be worked
-    /// out counts as outside.
+    /// out counts as outside. A refused boundary contains nothing.
     ///
     /// Effect: reads file metadata and symlinks along `path`.
     #[must_use]
     pub(crate) fn contains(&self, path: &Path) -> bool {
-        real_location(path).is_some_and(|real| real.starts_with(&self.real))
+        self.dir
+            .as_ref()
+            .is_some_and(|dir| real_location(path).is_some_and(|real| real.starts_with(&dir.real)))
     }
 
     /// `target`, once it is checked to lie inside the boundary both as written and once every
     /// symlink along it is followed. A missing tail counts where it would be.
     ///
+    /// `target` is taken exactly as written, never folded, and the admitted path is that same
+    /// path, so a caller that reads by it and writes by the admitted one names one file.
     /// Nothing is cached: call it immediately before the write it guards.
     ///
     /// Effect: reads file metadata and symlinks along `target`.
     ///
     /// # Errors
     ///
-    /// [`Escape::Lexical`] when `target` isn't beneath the boundary as given. [`Escape::Real`] when
-    /// it is, but its real location lies outside the boundary's or can't be worked out.
-    pub(crate) fn admit(&self, target: &AbsolutePath) -> Result<Admitted<'_>, Escape> {
-        if target.strip_prefix(&self.given).is_none() {
+    /// [`Escape::Lexical`] when `target` is relative, holds a `..`, or isn't beneath the boundary
+    /// as given, or when [`Boundary::resolve`] refused the boundary. [`Escape::Real`] when it is
+    /// beneath, but its real location lies outside the boundary's or can't be worked out.
+    pub(crate) fn admit(
+        &self,
+        target: &(impl AsRef<Path> + ?Sized),
+    ) -> Result<Admitted<'_>, Escape> {
+        let target = target.as_ref();
+        let Some(dir) = self.dir.as_ref() else {
+            return Err(Escape::Lexical);
+        };
+        if !plain(target) || !target.starts_with(&dir.given) {
             return Err(Escape::Lexical);
         }
-        match real_location(target.as_path()) {
-            Some(real) if real.starts_with(&self.real) => Ok(Admitted {
-                path: target.as_path().to_path_buf(),
+        match real_location(target) {
+            Some(real) if real.starts_with(&dir.real) => Ok(Admitted {
+                path: target.to_path_buf(),
                 boundary: PhantomData,
             }),
             real => Err(Escape::Real { real }),
         }
     }
+
+    /// [`Boundary::admit`] for `real`, a file whose symlinks were already followed, such as the
+    /// real lockfile or config an in-root symlink leads to. When `real` is named beneath the
+    /// boundary's real location rather than as given, the same file is admitted named beneath
+    /// the boundary as given, so a root reached through a symlink still admits its own files.
+    ///
+    /// Effect: reads file metadata and symlinks along `real`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Boundary::admit`]; [`Escape::Real`] naming `real` when it lies beneath neither.
+    pub(crate) fn admit_resolved(&self, real: &AbsolutePath) -> Result<Admitted<'_>, Escape> {
+        let Some(dir) = self.dir.as_ref() else {
+            return Err(Escape::Lexical);
+        };
+        let real = real.as_path();
+        if real.starts_with(&dir.given) {
+            return self.admit(real);
+        }
+        let named = real
+            .strip_prefix(&dir.real)
+            .ok()
+            .map(|beneath| dir.given.join(beneath))
+            .ok_or_else(|| Escape::Real {
+                real: Some(real.to_path_buf()),
+            })?;
+        self.admit(&named)
+    }
+}
+
+/// Whether `path` is absolute and holds no `..`, so the directory it names as written is the one
+/// the kernel reaches.
+fn plain(path: &Path) -> bool {
+    path.is_absolute()
+        && !path
+            .components()
+            .any(|component| component == Component::ParentDir)
 }
 
 impl Admitted<'_> {
     /// The admitted path, for messages and reads.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "write sites admit through it from PH02")
-    )]
     pub(crate) fn as_path(&self) -> &Path {
         &self.path
     }
 }
 
-/// Writes `bytes` to a new file beside `target` and renames it into place, as
-/// [`crate::lock::io::write_atomically`] does. The temporary file shares `target`'s admitted
-/// parent.
+/// How many fresh names to try before giving up on creating a temporary file.
+const TEMP_ATTEMPTS: u32 = 8;
+
+/// A scratch name next to `target`, so the final rename stays on one filesystem. The name mixes
+/// the process id, a process-wide counter, the clock, and the attempt number so it cannot be
+/// guessed and pre-planted.
+fn temp_path_beside(target: &Path, attempt: u32) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.subsec_nanos());
+    let mut name = target.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(
+        ".{}.{}.{nanos:x}.{attempt}.tmp",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed),
+    ));
+    target.with_file_name(name)
+}
+
+/// Creates a new file at the first free candidate path. `create_new` refuses an existing path
+/// and never follows a symlink, so a pre-placed file or link is skipped, not written through.
+///
+/// # Errors
+///
+/// Fails on any error other than `AlreadyExists`, or when every attempt finds its path taken.
+fn create_exclusive_temp(
+    mut candidate: impl FnMut(u32) -> PathBuf,
+) -> io::Result<(fs::File, PathBuf)> {
+    for attempt in 0..TEMP_ATTEMPTS {
+        let temp = candidate(attempt);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+        {
+            Ok(file) => return Ok((file, temp)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!("no unused temporary file name found after {TEMP_ATTEMPTS} attempts"),
+    ))
+}
+
+/// Writes `bytes` to a new file beside `target` and renames it into place, so an interrupted
+/// run never leaves half a file. With `permissions`, the new file gets them before the rename;
+/// without, it keeps the default for a new file. The temporary file is created exclusively, so a
+/// planted path or symlink is never written through, and it shares `target`'s admitted parent.
 ///
 /// Effect: creates, writes and renames a file beside `target`.
 ///
 /// # Errors
 ///
-/// Fails when the temporary file can't be created, written or renamed onto `target`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "write sites admit through it from PH02")
-)]
+/// Fails if the temporary file cannot be created, written or renamed; `target` is then unchanged.
 pub(crate) fn write_atomically(
     target: &Admitted<'_>,
     bytes: &[u8],
     permissions: Option<&fs::Permissions>,
 ) -> io::Result<()> {
-    crate::lock::io::write_atomically(&target.path, bytes, permissions)
+    let target = target.path.as_path();
+    let (mut file, temp) = create_exclusive_temp(|attempt| temp_path_beside(target, attempt))?;
+    let written = file
+        .write_all(bytes)
+        .and_then(|()| permissions.map_or(Ok(()), |kept| file.set_permissions(kept.clone())))
+        .and_then(|()| file.sync_all());
+    drop(file);
+    let finished = written.and_then(|()| fs::rename(&temp, target));
+    if finished.is_err() {
+        drop(fs::remove_file(&temp));
+    }
+    finished
 }
 
 /// Creates `dir` and any missing parents, each new one with `mode`.
@@ -209,10 +333,6 @@ pub(crate) fn write_atomically(
 /// # Errors
 ///
 /// Fails when a directory can't be created, or `dir` exists and isn't a directory.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "private dirs are created through it from PH05")
-)]
 pub(crate) fn create_dir_all(dir: &Admitted<'_>, mode: u32) -> io::Result<()> {
     fs::DirBuilder::new()
         .recursive(true)
@@ -243,12 +363,19 @@ pub(crate) fn create_new(file: &Admitted<'_>, mode: u32) -> io::Result<fs::File>
 /// # Errors
 ///
 /// Fails when the rename does.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "write sites rename through it from PH04")
-)]
 pub(crate) fn rename_into(from: &Admitted<'_>, to: &Admitted<'_>) -> io::Result<()> {
     fs::rename(&from.path, &to.path)
+}
+
+/// Opens the existing file `file` for writing, without creating or truncating it.
+///
+/// Effect: opens a file.
+///
+/// # Errors
+///
+/// Fails when nothing is at `file` or it can't be opened for writing.
+pub(crate) fn open_existing(file: &Admitted<'_>) -> io::Result<fs::File> {
+    fs::OpenOptions::new().write(true).open(&file.path)
 }
 
 /// Removes the file `file`. A symlink there is removed, not what it leads to.
@@ -296,6 +423,7 @@ mod tests {
     use std::os::unix::fs::{PermissionsExt as _, symlink};
 
     use super::*;
+    use crate::path::AbsolutePath;
 
     /// A temp dir holding an empty project `root` and an `outside` dir beside it.
     struct Fixture {
@@ -368,6 +496,58 @@ mod tests {
         let fixture = Fixture::new();
 
         assert_eq!(refusal(&fixture, "root/../outside/x"), Escape::Lexical);
+    }
+
+    #[test]
+    fn admit_refuses_a_dot_dot_that_stays_inside_when_folded() {
+        let fixture = Fixture::new();
+        fs::create_dir(fixture.path("root/a")).expect("the fixture dir should be creatable");
+
+        let refused = fixture
+            .boundary()
+            .admit(&fixture.path("root/a/../b"))
+            .map(|admitted| admitted.path);
+
+        assert_eq!(refused, Err(Escape::Lexical));
+    }
+
+    #[test]
+    fn admit_refuses_a_dot_dot_after_a_symlink_unfolded() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.path("outside/deep/x"))
+            .expect("the fixture dirs should be creatable");
+        fixture.link("../outside/deep/x", "root/link");
+
+        let refused = fixture
+            .boundary()
+            .admit(&fixture.path("root/link/../x"))
+            .map(|admitted| admitted.path);
+
+        assert_eq!(refused, Err(Escape::Lexical));
+    }
+
+    #[test]
+    fn a_boundary_given_with_a_dot_dot_admits_and_contains_nothing() {
+        let fixture = Fixture::new();
+        let boundary = Boundary::resolve(&fixture.path("outside/../root"));
+
+        let refused = boundary.admit(&fixture.path("root/x"));
+
+        assert_eq!(refused.map(|admitted| admitted.path), Err(Escape::Lexical));
+        assert!(!boundary.contains(&fixture.path("root")));
+    }
+
+    #[test]
+    fn admit_hands_back_the_target_exactly_as_written() {
+        let fixture = Fixture::new();
+        let target = fixture.path("root/./x");
+
+        let admitted = fixture
+            .boundary()
+            .admit(&target)
+            .map(|admitted| admitted.path.into_os_string());
+
+        assert_eq!(admitted, Ok(target.into_os_string()));
     }
 
     #[test]
@@ -473,6 +653,80 @@ mod tests {
         assert!(
             admitted.is_ok(),
             "a file under a symlinked root should be admitted, got {admitted:?}"
+        );
+    }
+
+    /// `relative` with every symlink followed.
+    fn canonical(fixture: &Fixture, relative: &str) -> AbsolutePath {
+        let real =
+            fs::canonicalize(fixture.path(relative)).expect("the fixture path should resolve");
+        AbsolutePath::new(&real).expect("a canonical path should be absolute")
+    }
+
+    /// The real location of the fixture's `root`, with `name` appended.
+    fn beneath_real_root(fixture: &Fixture, name: &str) -> AbsolutePath {
+        let real = canonical(fixture, "root");
+        AbsolutePath::new(&real.as_path().join(name)).expect("a canonical path should be absolute")
+    }
+
+    #[test]
+    fn admit_resolved_accepts_a_real_file_of_a_root_reached_through_a_symlink() {
+        let fixture = Fixture::new();
+        fixture.link("root", "root-link");
+        let boundary = Boundary::resolve(&fixture.absolute("root-link"));
+
+        let admitted = boundary
+            .admit_resolved(&beneath_real_root(&fixture, "supdoc.lock"))
+            .expect("the root's own real file should be admitted");
+
+        assert_eq!(
+            admitted.as_path(),
+            fixture.path("root-link/supdoc.lock"),
+            "the file should be admitted named beneath the root as given"
+        );
+    }
+
+    #[test]
+    fn admit_resolved_refuses_a_path_beneath_neither_the_root_nor_its_real_location() {
+        let fixture = Fixture::new();
+        fixture.link("root", "root-link");
+        let boundary = Boundary::resolve(&fixture.absolute("root-link"));
+        let elsewhere = canonical(&fixture, "outside");
+
+        let escape = boundary
+            .admit_resolved(&elsewhere)
+            .expect_err("a path outside the root should be refused");
+
+        assert_eq!(
+            escape,
+            Escape::Real {
+                real: Some(elsewhere.as_path().to_path_buf()),
+            }
+        );
+    }
+
+    #[test]
+    fn admit_resolved_refuses_a_real_file_whose_parent_was_swapped_for_a_symlink_out() {
+        let fixture = Fixture::new();
+        fixture.link("root", "root-link");
+        fs::create_dir(fixture.path("root/sub")).expect("the fixture dir should be creatable");
+        let boundary = Boundary::resolve(&fixture.absolute("root-link"));
+        let real = beneath_real_root(&fixture, "sub/supdoc.lock");
+        fs::rename(fixture.path("root/sub"), fixture.path("root/sub-old"))
+            .expect("the fixture dir should be movable");
+        fixture.link("../outside", "root/sub");
+
+        let escape = boundary
+            .admit_resolved(&real)
+            .expect_err("a parent swapped for a symlink out should be refused");
+
+        assert!(
+            is_real_escape(&escape),
+            "expected Escape::Real, got {escape:?}"
+        );
+        assert!(
+            fixture.names("outside").is_empty(),
+            "nothing should be written outside"
         );
     }
 
@@ -703,5 +957,58 @@ mod tests {
 
         assert_eq!(fixture.names("root"), names(&["real"]));
         assert_eq!(fixture.names("root/real"), names(&["kept"]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preplaced_file_or_symlink_at_a_candidate_name_is_never_written_through() {
+        let dir = tempfile::tempdir().expect("a temp directory should be creatable");
+        let victim = dir.path().join("victim");
+        fs::write(&victim, "precious").expect("the victim should be writable");
+        let planted_file = dir.path().join("planted-file");
+        fs::write(&planted_file, "planted").expect("the planted file should be writable");
+        let planted_link = dir.path().join("planted-link");
+        std::os::unix::fs::symlink(&victim, &planted_link)
+            .expect("the symlink should be creatable");
+        let free = dir.path().join("free");
+        let candidates = [planted_file.clone(), planted_link.clone(), free.clone()];
+
+        let mut candidates = candidates.into_iter();
+        let (mut file, chosen) = create_exclusive_temp(|_| {
+            candidates
+                .next()
+                .expect("the free candidate should be reached before candidates run out")
+        })
+        .expect("the free candidate should be used after the taken ones are refused");
+        file.write_all(b"new")
+            .expect("the new file should be writable");
+
+        assert_eq!(chosen, free);
+        assert_eq!(
+            fs::read_to_string(&victim).expect("the victim should be readable"),
+            "precious",
+            "the symlink target must not be written through"
+        );
+        assert_eq!(
+            fs::read_to_string(&planted_file).expect("the planted file should be readable"),
+            "planted",
+            "the pre-existing file must not be overwritten"
+        );
+    }
+
+    #[test]
+    fn exhausted_candidates_fail_instead_of_overwriting() {
+        let dir = tempfile::tempdir().expect("a temp directory should be creatable");
+        let taken = dir.path().join("taken");
+        fs::write(&taken, "planted").expect("the planted file should be writable");
+
+        let error = create_exclusive_temp(|_| taken.clone())
+            .expect_err("every attempt finds the path taken");
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            fs::read_to_string(&taken).expect("the planted file should be readable"),
+            "planted"
+        );
     }
 }
