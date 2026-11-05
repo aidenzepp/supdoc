@@ -6,7 +6,9 @@
 //! Code's config directory. Each copy is a real file written atomically. A copy that already
 //! holds the embedded text is left alone; a different one is replaced only under `--yes`. A
 //! project install writes nothing outside the project: it refuses a symlinked directory on the
-//! way to either copy that leads out of the root, and follows one that stays inside.
+//! way to either copy that leads out of the root, and follows one that stays inside. Either
+//! scope refuses a `SKILL.md` that is itself a symlink leading out of where the copy belongs,
+//! and writes neither copy unless both are allowed.
 
 use std::ffi::OsString;
 use std::fs;
@@ -16,7 +18,7 @@ use std::path::Path;
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::config::confine::{self, Boundary, real_location, write_atomically};
+use crate::config::confine::{self, Boundary, Escape, real_location, write_atomically};
 use crate::config::{ConfigError, discover_config};
 use crate::exit::ExitStatus;
 use crate::finding::{Finding, Severity};
@@ -105,7 +107,8 @@ impl SkillDirs {
 /// project root is a symlink that does not lead to a `supdoc.config.toml`, all before anything is
 /// written or previewed, `cli-skill-no-home` when `--global` is given and `HOME` is not set,
 /// `cli-skill-outside-root` when a project copy would be written through a symlink out of the
-/// project, before anything is written or previewed, `cli-skill-write` when a copy cannot be
+/// project, or a copy's `SKILL.md` is itself a symlink out of where it belongs, before anything
+/// is written or previewed, or when a path changed after that check, `cli-skill-write` when a copy cannot be
 /// written, `cli-skill-relative-claude-dir` when `--global` is given and `CLAUDE_CONFIG_DIR` is
 /// relative, and `cli-output-failed` when the report cannot be written.
 pub(crate) fn run(
@@ -124,11 +127,22 @@ pub(crate) fn run(
     let boundaries = destinations
         .each_ref()
         .map(|(owner, _path)| Boundary::resolve(owner));
+    let place = |owner: &AbsolutePath| Place {
+        owner: owner.clone(),
+        global: args.global,
+    };
     if !args.global {
         for ((_owner, path), boundary) in destinations.iter().zip(&boundaries) {
             contain(boundary, &base, path, context)?;
         }
     }
+    // Every copy is admitted before anything is previewed or written, so a preview refuses what
+    // `--yes` would, and no copy is written unless both can be.
+    for ((owner, path), boundary) in destinations.iter().zip(&boundaries) {
+        admit_copy(boundary, path)
+            .map_err(|escape| copy_outside(&place(owner), &base, path, &escape, context))?;
+    }
+    let owners = destinations.each_ref().map(|(owner, _path)| owner.clone());
     let changes: Vec<SkillChange> = destinations
         .into_iter()
         .map(|(_owner, path)| SkillChange {
@@ -139,13 +153,22 @@ pub(crate) fn run(
         .collect();
 
     if applied {
-        for (change, boundary) in changes
+        for ((change, boundary), owner) in changes
             .iter()
             .zip(&boundaries)
-            .filter(|(change, _boundary)| change.action.writes())
+            .zip(&owners)
+            .filter(|((change, _boundary), _owner)| change.action.writes())
         {
-            install_file(boundary, &change.path, SKILL.as_bytes())
-                .map_err(|error| write_failed(change, args.global, &context.cwd, &error))?;
+            install_file(boundary, &change.path, SKILL.as_bytes()).map_err(
+                |error| match error {
+                    NotInstalled::Outside(escape) => {
+                        copy_outside(&place(owner), &base, &change.path, &escape, context)
+                    }
+                    NotInstalled::Io(error) => {
+                        write_failed(change, args.global, &context.cwd, &error)
+                    }
+                },
+            )?;
         }
     }
 
@@ -433,29 +456,133 @@ impl SkillAction {
     }
 }
 
-/// Writes `bytes` to `target`, creating its directories, through the shared temp-and-rename
-/// writer, each admitted against `boundary`, the directory the copy belongs beneath, immediately
-/// before it is made. An existing regular file keeps its permissions; a symlink is replaced,
-/// never written through. A project install has already refused any directory that leads out of
-/// the project ([`contain`]).
+/// Checks that `boundary` admits `target`'s directory and `target` itself, writing nothing, so a
+/// refusal comes before any preview or write.
+///
+/// Effect: reads file metadata and symlinks along `target`.
 ///
 /// # Errors
 ///
-/// Fails if `boundary` refuses a directory or the file, a directory cannot be created, or the
-/// file cannot be written; `target` is then unchanged.
-fn install_file(boundary: &Boundary, target: &AbsolutePath, bytes: &[u8]) -> io::Result<()> {
-    let escaped = |_escape| {
-        io::Error::other("a symlinked directory on the way leads out of where the skill belongs")
-    };
+/// The first [`Escape`] `boundary` reports, for the directory or the file.
+fn admit_copy(boundary: &Boundary, target: &AbsolutePath) -> Result<(), Escape> {
     if let Some(parent) = target.parent() {
-        confine::create_dir_all(&boundary.admit(&parent).map_err(escaped)?, 0o777)?;
+        let _dir = boundary.admit(&parent)?;
     }
-    let admitted = boundary.admit(target).map_err(escaped)?;
+    boundary.admit(target).map(drop)
+}
+
+/// Why [`install_file`] wrote nothing.
+#[derive(Debug)]
+enum NotInstalled {
+    /// The boundary refused the copy's directory or the copy.
+    Outside(Escape),
+    /// A directory couldn't be created or the file couldn't be written.
+    Io(io::Error),
+}
+
+impl From<io::Error> for NotInstalled {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+/// Writes `bytes` to `target`, creating its directories, through the shared temp-and-rename
+/// writer, each admitted against `boundary`, the directory the copy belongs beneath, immediately
+/// before it is made. An existing regular file keeps its permissions; a symlink that stays inside
+/// is replaced, never written through. Every copy was already admitted ([`admit_copy`]), so a
+/// refusal here means a path changed since.
+///
+/// # Errors
+///
+/// [`NotInstalled::Outside`] if `boundary` refuses a directory or the file, and
+/// [`NotInstalled::Io`] if a directory cannot be created or the file cannot be written; `target`
+/// is then unchanged.
+fn install_file(
+    boundary: &Boundary,
+    target: &AbsolutePath,
+    bytes: &[u8],
+) -> Result<(), NotInstalled> {
+    if let Some(parent) = target.parent() {
+        let dir = boundary.admit(&parent).map_err(NotInstalled::Outside)?;
+        confine::create_dir_all(&dir, 0o777)?;
+    }
+    let admitted = boundary.admit(target).map_err(NotInstalled::Outside)?;
     let permissions = fs::symlink_metadata(admitted.as_path())
         .ok()
         .filter(fs::Metadata::is_file)
         .map(|metadata| metadata.permissions());
-    write_atomically(&admitted, bytes, permissions.as_ref())
+    Ok(write_atomically(&admitted, bytes, permissions.as_ref())?)
+}
+
+/// The directory a copy must stay inside, for refusals.
+struct Place {
+    /// The project root, or the copy's own directory for `--global`.
+    owner: AbsolutePath,
+    /// Whether this is a `--global` install.
+    global: bool,
+}
+
+impl Place {
+    /// The directory as a refusal names it.
+    fn shown(&self) -> String {
+        if self.global {
+            self.owner.display().to_string()
+        } else {
+            "the project root".to_owned()
+        }
+    }
+}
+
+/// The `cli-skill-outside-root` refusal for the copy at `target`, which `place`'s boundary
+/// refused with `escape`. A `SKILL.md` that is itself a symlink leading out is named with where it
+/// leads and help to remove the link. Anything else passed the checks before it and changed
+/// since, so it says that.
+fn copy_outside(
+    place: &Place,
+    base: &AbsolutePath,
+    target: &AbsolutePath,
+    escape: &Escape,
+    context: &Context,
+) -> CliError {
+    let shown = relative_or_absolute(base, target);
+    let inside = place.shown();
+    let flags: &[&str] = if place.global {
+        &["--global", "--yes"]
+    } else {
+        &["--yes"]
+    };
+    let rerun = command_line::<&str>(context, "skill install", &[], flags);
+    let leaf_link = fs::symlink_metadata(target.as_path())
+        .is_ok_and(|metadata| metadata.file_type().is_symlink());
+    let (message, help) = match escape {
+        Escape::Real { real } if leaf_link => {
+            let typed = if place.global {
+                shell_quote(&target.display().to_string())
+            } else {
+                shell_quote(&relative_to(&context.cwd, target))
+            };
+            let leads = real.as_deref().map_or_else(
+                || "somewhere that can't be worked out".to_owned(),
+                |real| real.display().to_string(),
+            );
+            (
+                format!("{shown} is a symlink to {leads}, outside {inside}"),
+                format!(
+                    "Nothing was written. supdoc installs the skill only as a real file inside \
+                     {inside}. Run `rm {typed}` (this removes only the link, not the file it \
+                     points to), then `{rerun}`"
+                ),
+            )
+        }
+        Escape::Real { .. } | Escape::Lexical => (
+            format!(
+                "{shown} now leads outside {inside}: a path on the way changed after supdoc \
+                 checked it"
+            ),
+            format!("Check what changed on the way to {shown}, then run `{rerun}` again"),
+        ),
+    };
+    CliError::new("cli-skill-outside-root", message, help, ExitStatus::Failed)
 }
 
 /// The warning for a different `SKILL.md` a preview would replace.
@@ -1328,13 +1455,99 @@ mod tests {
         let installed = install_file(&boundary, &beneath(&base, AGENTS_SKILL), SKILL.as_bytes());
 
         assert!(
-            installed.is_err(),
-            "a copy a symlink leads out of the boundary should not be written"
+            matches!(installed, Err(NotInstalled::Outside(_))),
+            "a copy a symlink leads out of the boundary should be refused: {installed:?}"
         );
         assert_eq!(
             tree(outside.path()),
             Vec::<PathBuf>::new(),
             "nothing should be created outside"
+        );
+    }
+
+    /// Fails unless `run` refused the `SKILL.md` at `shown`, a symlink to `victim`, with
+    /// `cli-skill-outside-root`, link-removal help naming `typed`, and no preview line.
+    #[cfg(unix)]
+    fn assert_refused_skill_link(run: &Run, shown: &str, typed: &str, victim: &Path) {
+        let error = run
+            .result
+            .as_ref()
+            .expect_err("a SKILL.md symlinked out should be refused");
+        assert_eq!(
+            (error.code(), run.exit_code()),
+            ("cli-skill-outside-root", ExitStatus::Failed.code()),
+            "got {error:?}"
+        );
+        let real = fs::canonicalize(victim).expect("the outside file should resolve");
+        assert!(
+            error.message().starts_with(&format!(
+                "{shown} is a symlink to {}, outside ",
+                real.display()
+            )),
+            "the message should name the link and where it leads: {}",
+            error.message()
+        );
+        assert!(
+            error.help().starts_with("Nothing was written.")
+                && error.help().contains(&format!("`rm {typed}`")),
+            "the help should say nothing was written and how to remove the link: {}",
+            error.help()
+        );
+        assert!(
+            !run.stdout.contains("replace"),
+            "a refusal should never preview a replacement: {}",
+            run.stdout
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_install_refuses_a_skill_file_symlinked_out_of_the_project_with_and_without_yes() {
+        let world = World::new();
+        let elsewhere = tempfile::tempdir().expect("an outside temp directory should be created");
+        let victim = elsewhere.path().join("SKILL.md");
+        fs::write(&victim, "outside\n").expect("the outside file should be written");
+        symlink(&victim, &world.project_file(AGENTS_SKILL));
+
+        for flags in [&[][..], &["--yes"]] {
+            let run = world.install(flags);
+
+            assert_refused_skill_link(&run, AGENTS_SKILL, AGENTS_SKILL, &victim);
+        }
+        assert_eq!(contents(&victim).as_deref(), Some("outside\n"));
+        assert!(
+            fs::symlink_metadata(world.project_file(AGENTS_SKILL))
+                .expect("the link should still exist")
+                .file_type()
+                .is_symlink(),
+            "the link should be left as it was"
+        );
+        assert!(
+            !world.project_file(".claude").exists(),
+            "a refusal should write neither copy"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_install_global_refuses_a_skill_file_symlinked_out_and_writes_neither_copy() {
+        let world = World::new();
+        let elsewhere = tempfile::tempdir().expect("an outside temp directory should be created");
+        let victim = elsewhere.path().join("SKILL.md");
+        fs::write(&victim, "outside\n").expect("the outside file should be written");
+        let link = world.home_file(".claude/skills/supdoc/SKILL.md");
+        symlink(&victim, &link);
+        let shown = link.display().to_string();
+
+        for flags in [&["--global"][..], &["--global", "--yes"]] {
+            let run = world.install(flags);
+
+            assert_refused_skill_link(&run, &shown, &shell_quote(&shown), &victim);
+        }
+        assert_eq!(contents(&victim).as_deref(), Some("outside\n"));
+        assert!(
+            !world.home_file(".agents").exists(),
+            "the other copy should not be written when one is refused"
         );
     }
 

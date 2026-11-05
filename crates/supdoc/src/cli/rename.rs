@@ -224,19 +224,21 @@ impl Plan {
                 replace_ranges(&source.text, source.prefixes(&self.old), self.new.as_str())
                     .ok_or_else(|| self.file_changed(source.source.as_str()))?;
             replace_file(&self.boundary, &source.file, renamed.as_bytes())
-                .map_err(|reason| self.write_failed(source.source.as_str(), &reason, &written))?;
+                .map_err(|why| self.unwritten(source.source.as_str(), why, &written))?;
             written.push(source.source.to_string());
         }
         if !self.lock.moved.is_empty() {
             self.lock
                 .next()
                 .write(&lock_path(&self.root), &self.boundary)
-                .map_err(|error| {
-                    let reason = match &error {
-                        LockError::Write { error, .. } => cause(error),
-                        other => other.message_from(&self.root),
-                    };
-                    self.write_failed(LOCK_FILE_NAME, &reason, &written)
+                .map_err(|error| match &error {
+                    LockError::OutsideRoot { .. } => self.moved_out(LOCK_FILE_NAME, &written),
+                    LockError::Write { error, .. } => {
+                        self.write_failed(LOCK_FILE_NAME, &cause(error), &written)
+                    }
+                    other => {
+                        self.write_failed(LOCK_FILE_NAME, &other.message_from(&self.root), &written)
+                    }
                 })?;
             written.push(LOCK_FILE_NAME.to_owned());
         }
@@ -247,7 +249,7 @@ impl Plan {
         )
         .ok_or_else(|| self.file_changed(&self.config.shown))?;
         replace_file(&self.boundary, &self.config.file, renamed.as_bytes())
-            .map_err(|reason| self.write_failed(&self.config.shown, &reason, &written))
+            .map_err(|why| self.unwritten(&self.config.shown, why, &written))
     }
 
     /// Refuses the rename when any file it will write is no longer exactly as read.
@@ -357,6 +359,42 @@ impl Plan {
     /// The error for a file that no longer holds what was read.
     fn file_changed(&self, file: &str) -> CliError {
         file_changed(file, &self.apply_command)
+    }
+
+    /// The error for `file`, which [`replace_file`] didn't write for `why`, after the files in
+    /// `written`.
+    fn unwritten(&self, file: &str, why: Unwritten, written: &[String]) -> CliError {
+        match why {
+            Unwritten::MovedOut => self.moved_out(file, written),
+            Unwritten::Failed(reason) => self.write_failed(file, &reason, written),
+        }
+    }
+
+    /// The `cli-rename-write` error for `file`, refused because a path on the way changed after
+    /// the plan was checked and now leads out of the project root, after the files in `written`.
+    fn moved_out(&self, file: &str, written: &[String]) -> CliError {
+        let again = &self.apply_command;
+        let help = if written.is_empty() {
+            format!(
+                "Nothing was written. Check what changed on the way to {file}, then run `{again}` again"
+            )
+        } else {
+            format!(
+                "Already written: {}. The config still defines `{}`, so once nothing on the way \
+                 to {file} leads out of the project root, `{again}` finishes the rename",
+                written.join(", "),
+                self.old
+            )
+        };
+        CliError::new(
+            "cli-rename-write",
+            format!(
+                "cannot write {file}: it now leads outside the project root because a path on the \
+                 way changed after supdoc checked it"
+            ),
+            help,
+            ExitStatus::Io,
+        )
     }
 
     /// The error for a file that couldn't be written, after the files in `written`.
@@ -680,22 +718,31 @@ fn holds(file: &AbsolutePath, text: &str) -> bool {
         && fs::read(file.as_path()).is_ok_and(|bytes| bytes == text.as_bytes())
 }
 
+/// Why [`replace_file`] wrote nothing.
+#[derive(Debug)]
+enum Unwritten {
+    /// A path on the way changed after the plan was checked and now leads out of the root.
+    MovedOut,
+    /// The file couldn't be inspected or written, with the reason.
+    Failed(String),
+}
+
 /// Writes `bytes` over `target` atomically, keeping `target`'s permissions, once `boundary`
 /// admits it.
 ///
 /// # Errors
 ///
-/// Returns the reason, for `cli-rename-write`, when `target` can't be inspected, a symlinked
-/// directory on the way leads out of `boundary`, or the replacement can't be written; `target`
-/// is then unchanged.
-fn replace_file(boundary: &Boundary, target: &AbsolutePath, bytes: &[u8]) -> Result<(), String> {
+/// [`Unwritten::MovedOut`] when `boundary` refuses `target`, and [`Unwritten::Failed`] when
+/// `target` can't be inspected or the replacement can't be written; `target` is then unchanged.
+fn replace_file(boundary: &Boundary, target: &AbsolutePath, bytes: &[u8]) -> Result<(), Unwritten> {
+    let failed = |error: io::Error| Unwritten::Failed(cause(&error));
     let permissions = fs::metadata(target.as_path())
-        .map_err(|error| cause(&error))?
+        .map_err(failed)?
         .permissions();
-    let admitted = boundary.admit_resolved(target).map_err(|_escape| {
-        "a symlinked directory on the way leads out of the project root".to_owned()
-    })?;
-    write_atomically(&admitted, bytes, Some(&permissions)).map_err(|error| cause(&error))
+    let admitted = boundary
+        .admit_resolved(target)
+        .map_err(|_escape| Unwritten::MovedOut)?;
+    write_atomically(&admitted, bytes, Some(&permissions)).map_err(failed)
 }
 
 /// The `cli-rename-file-changed` error (1) for `file`, shown relative to the project root, which
@@ -1534,12 +1581,16 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
 
         assert_eq!((error.code(), error.exit_code()), ("cli-rename-write", 74));
         assert!(
-            error.message().starts_with("cannot write docs/guide.md: "),
+            error
+                .message()
+                .starts_with("cannot write docs/guide.md: it now leads outside the project root"),
             "{}",
             error.message()
         );
         assert!(
-            error.help().starts_with("Nothing was written."),
+            error
+                .help()
+                .starts_with("Nothing was written. Check what changed"),
             "nothing outside is named as written: {}",
             error.help()
         );

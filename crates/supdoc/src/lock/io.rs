@@ -35,7 +35,12 @@ impl Lockfile {
         let file = match locate(path).map_err(read_failed)? {
             Located::Absent => return Ok(None),
             Located::Inside(file) => file,
-            Located::Outside => return Err(LockError::OutsideRoot { path: path.clone() }),
+            Located::Outside => {
+                return Err(LockError::OutsideRoot {
+                    path: path.clone(),
+                    after_check: false,
+                });
+            }
         };
         match is_regular_file(file.as_path()) {
             Ok(true) => {}
@@ -90,24 +95,27 @@ impl Lockfile {
     ///
     /// # Errors
     ///
-    /// `OutsideRoot` for a symlink that doesn't lead to a `supdoc.lock` inside the root, or a file
-    /// `boundary` refuses because a symlink along it leads out, so no write ever lands outside
-    /// the root. Otherwise fails if the temporary file cannot be written or moved into place. Any
+    /// `OutsideRoot` for a symlink that doesn't lead to a `supdoc.lock` inside the root, or, with
+    /// `after_check`, a file `boundary` refuses because a path on the way changed and now leads
+    /// out, so no write ever lands outside the root. Otherwise fails if the temporary file cannot be written or moved into place. Any
     /// existing lockfile is left unchanged.
     pub(crate) fn write(&self, path: &AbsolutePath, boundary: &Boundary) -> Result<(), LockError> {
         let to_error = |error| LockError::Write {
             path: path.clone(),
             error,
         };
-        let outside = || LockError::OutsideRoot { path: path.clone() };
+        let outside = |after_check| LockError::OutsideRoot {
+            path: path.clone(),
+            after_check,
+        };
         let target = match locate(path).map_err(to_error)? {
             Located::Absent => path.clone(),
             Located::Inside(file) => file,
-            Located::Outside => return Err(outside()),
+            Located::Outside => return Err(outside(false)),
         };
         let admitted = boundary
             .admit_resolved(&target)
-            .map_err(|_escape| outside())?;
+            .map_err(|_escape| outside(true))?;
         write_atomically(&admitted, self.render().as_bytes(), None).map_err(to_error)
     }
 }
@@ -472,7 +480,13 @@ mod tests {
         let written = lock_with_one_entry(b"x").write(&path, &boundary);
 
         assert!(
-            matches!(written, Err(LockError::OutsideRoot { .. })),
+            matches!(
+                written,
+                Err(LockError::OutsideRoot {
+                    after_check: true,
+                    ..
+                })
+            ),
             "a root swapped for a symlink out should be refused: {written:?}"
         );
         assert_eq!(

@@ -163,10 +163,13 @@ pub(crate) enum LockError {
 
     /// The lockfile is a symlink that doesn't lead to a `supdoc.lock` inside the project root,
     /// so supdoc refuses it without reading it. The message is the same whether or not anything
-    /// is there.
+    /// is there. With `after_check`, the lockfile passed that check, but a path on the way
+    /// changed before the write and now leads out, so nothing was written.
     OutsideRoot {
         /// The lockfile, as supdoc looked for it.
         path: AbsolutePath,
+        /// Whether the lockfile was checked and a path on the way changed after.
+        after_check: bool,
     },
 
     /// The lockfile is larger than `max-lock-size`, so supdoc refuses it before reading it.
@@ -217,7 +220,7 @@ impl LockError {
         match self {
             Self::Read { path, .. }
             | Self::NotRegularFile { path }
-            | Self::OutsideRoot { path }
+            | Self::OutsideRoot { path, .. }
             | Self::TooLarge { path, .. }
             | Self::Parse { path, .. }
             | Self::Write { path, .. } => path,
@@ -236,6 +239,12 @@ impl LockError {
         match self {
             Self::Read { error, .. } => format!("cannot read {shown}: {error}"),
             Self::NotRegularFile { .. } => format!("cannot read {shown}: it is not a regular file"),
+            Self::OutsideRoot {
+                after_check: true, ..
+            } => format!(
+                "{shown} now leads outside the project root: a path on the way changed after \
+                 supdoc checked it"
+            ),
             Self::OutsideRoot { .. } => format!(
                 "{shown} is a symlink that doesn't lead to a supdoc.lock inside the project root"
             ),
@@ -261,6 +270,13 @@ impl LockError {
             Self::NotRegularFile { .. } => format!(
                 "supdoc.lock must be a regular file. Move this one aside with `mv {0} {0}.old`, \
                  then run `supdoc update --yes` to record the links again",
+                shown()
+            ),
+            Self::OutsideRoot {
+                after_check: true, ..
+            } => format!(
+                "Nothing was written to {}. supdoc writes only inside the project root. Check \
+                 what changed on the way to it, then run the same command again",
                 shown()
             ),
             Self::OutsideRoot { .. } => format!(
@@ -543,7 +559,10 @@ mod tests {
                 path: path.clone(),
                 error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
             },
-            LockError::OutsideRoot { path: path.clone() },
+            LockError::OutsideRoot {
+                path: path.clone(),
+                after_check: false,
+            },
             LockError::Parse {
                 path: path.clone(),
                 error: Box::new(ParseLockError::ConflictMarkers { line: 3 }),
@@ -578,7 +597,10 @@ mod tests {
             path: path.clone(),
             error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
         };
-        let outside = LockError::OutsideRoot { path };
+        let outside = LockError::OutsideRoot {
+            path,
+            after_check: false,
+        };
 
         let helps = [read.help_from(&cwd), outside.help_from(&cwd)];
 

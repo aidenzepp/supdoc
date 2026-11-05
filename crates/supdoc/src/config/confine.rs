@@ -135,6 +135,12 @@ impl Boundary {
         }
     }
 
+    /// The directory as given, normalized.
+    #[must_use]
+    pub(crate) fn dir(&self) -> &AbsolutePath {
+        &self.given
+    }
+
     /// Whether `path` lies inside the boundary once every symlink along it is followed.
     ///
     /// A dangling symlink counts where it points, and a path whose real location can't be worked
@@ -562,6 +568,80 @@ mod tests {
         assert!(
             admitted.is_ok(),
             "a file under a symlinked root should be admitted, got {admitted:?}"
+        );
+    }
+
+    /// `relative` with every symlink followed.
+    fn canonical(fixture: &Fixture, relative: &str) -> AbsolutePath {
+        let real =
+            fs::canonicalize(fixture.path(relative)).expect("the fixture path should resolve");
+        AbsolutePath::new(&real).expect("a canonical path should be absolute")
+    }
+
+    /// The real location of the fixture's `root`, with `name` appended.
+    fn beneath_real_root(fixture: &Fixture, name: &str) -> AbsolutePath {
+        let real = canonical(fixture, "root");
+        AbsolutePath::new(&real.as_path().join(name)).expect("a canonical path should be absolute")
+    }
+
+    #[test]
+    fn admit_resolved_accepts_a_real_file_of_a_root_reached_through_a_symlink() {
+        let fixture = Fixture::new();
+        fixture.link("root", "root-link");
+        let boundary = Boundary::resolve(&fixture.absolute("root-link"));
+
+        let admitted = boundary
+            .admit_resolved(&beneath_real_root(&fixture, "supdoc.lock"))
+            .expect("the root's own real file should be admitted");
+
+        assert_eq!(
+            admitted.as_path(),
+            fixture.path("root-link/supdoc.lock"),
+            "the file should be admitted named beneath the root as given"
+        );
+    }
+
+    #[test]
+    fn admit_resolved_refuses_a_path_beneath_neither_the_root_nor_its_real_location() {
+        let fixture = Fixture::new();
+        fixture.link("root", "root-link");
+        let boundary = Boundary::resolve(&fixture.absolute("root-link"));
+        let elsewhere = canonical(&fixture, "outside");
+
+        let escape = boundary
+            .admit_resolved(&elsewhere)
+            .expect_err("a path outside the root should be refused");
+
+        assert_eq!(
+            escape,
+            Escape::Real {
+                real: Some(elsewhere.as_path().to_path_buf()),
+            }
+        );
+    }
+
+    #[test]
+    fn admit_resolved_refuses_a_real_file_whose_parent_was_swapped_for_a_symlink_out() {
+        let fixture = Fixture::new();
+        fixture.link("root", "root-link");
+        fs::create_dir(fixture.path("root/sub")).expect("the fixture dir should be creatable");
+        let boundary = Boundary::resolve(&fixture.absolute("root-link"));
+        let real = beneath_real_root(&fixture, "sub/supdoc.lock");
+        fs::rename(fixture.path("root/sub"), fixture.path("root/sub-old"))
+            .expect("the fixture dir should be movable");
+        fixture.link("../outside", "root/sub");
+
+        let escape = boundary
+            .admit_resolved(&real)
+            .expect_err("a parent swapped for a symlink out should be refused");
+
+        assert!(
+            is_real_escape(&escape),
+            "expected Escape::Real, got {escape:?}"
+        );
+        assert!(
+            fixture.names("outside").is_empty(),
+            "nothing should be written outside"
         );
     }
 

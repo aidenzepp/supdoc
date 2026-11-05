@@ -401,7 +401,7 @@ impl Planned {
     /// Phase one: rewrites the source files, then moves the lock entries of rewritten links and
     /// writes the lockfile if any moved.
     fn write(&self, root: &AbsolutePath, rerun: &str) -> Written {
-        let FixResult { applied, skipped } = apply_fixes(&self.plan, root, rerun);
+        let FixResult { applied, skipped } = apply_fixes(&self.plan, self.config.boundary(), rerun);
         let mut lock = self.lock.clone();
         let mut moved = move_lock_entries(
             &mut lock,
