@@ -550,3 +550,76 @@ fn a_project_that_disables_every_rule_itself_keeps_that_choice() {
 
     assert_eq!(outcome, disable_all_outcome());
 }
+
+/// A git project whose `.rumdl.toml` disables the rules [`TRAILING`] breaks, with the same block
+/// and a plain doc holding it in `inner/docs`, and `inner/.git` a symlink to `target` (relative to
+/// `inner`).
+fn project_with_git_link(target: &str) -> Project {
+    let project = git_project(
+        ".rumdl.toml",
+        "[global]\ndisable = [\"MD009\", \"MD041\"]\n",
+        TRAILING,
+    );
+    project.write(
+        "inner/docs/blocks.md",
+        &format!("# Blocks\n\n```markdown\n{TRAILING}\n```\n"),
+    );
+    project.write("inner/docs/probe.md", &format!("{TRAILING}\n"));
+    std::os::unix::fs::symlink(target, project.path("inner/.git"))
+        .expect("the .git link should be creatable");
+    project
+}
+
+/// Whether the real rumdl in `dir`, run from `project`'s root, passes `inner/docs/probe.md`.
+fn rumdl_passes_probe(project: &Project, dir: &Path) -> bool {
+    std::process::Command::new(dir.join("rumdl"))
+        .args(["check", "--no-cache", "inner/docs/probe.md"])
+        .current_dir(project.path("."))
+        .output()
+        .expect("the real rumdl should run")
+        .status
+        .success()
+}
+
+#[test]
+fn a_dangling_git_link_does_not_stop_the_config_search() {
+    let Some(dir) = real_tool_dir(
+        "rumdl",
+        "a_dangling_git_link_does_not_stop_the_config_search",
+    ) else {
+        return;
+    };
+    let project = project_with_git_link("../nowhere");
+
+    let json = real_run(&project, &dir, &[], 0);
+
+    assert!(
+        rumdl_passes_probe(&project, &dir),
+        "rumdl stopped at the dangling link"
+    );
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 2, "{json}");
+    assert_eq!(finding_kinds(&json), Vec::<String>::new(), "{json}");
+}
+
+#[test]
+fn a_git_link_to_a_directory_still_stops_the_config_search() {
+    let Some(dir) = real_tool_dir(
+        "rumdl",
+        "a_git_link_to_a_directory_still_stops_the_config_search",
+    ) else {
+        return;
+    };
+    let project = project_with_git_link("../.git");
+
+    let json = real_run(&project, &dir, &[], 1);
+
+    assert!(
+        !rumdl_passes_probe(&project, &dir),
+        "rumdl walked past the live link"
+    );
+    assert_eq!(
+        finding_kinds(&json),
+        ["code-block-unformatted", "code-block-lint"],
+        "{json}"
+    );
+}

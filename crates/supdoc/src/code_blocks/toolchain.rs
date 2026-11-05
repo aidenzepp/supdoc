@@ -44,14 +44,42 @@ pub(crate) enum Toolchain {
 }
 
 /// Why rustup's answer for a root that pins nothing can't be used.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Unresolved {
     /// The `rustup` on `PATH` is inside the checkout, so the checkout chose it.
     InsideRoot,
-    /// `rustup show active-toolchain` failed, timed out, printed past its cap, or named a path,
-    /// a custom toolchain or nothing supdoc accepts as a channel.
-    Unnamed,
+    /// `rustup show active-toolchain` ran but named no channel supdoc can pin.
+    Rustup {
+        /// Why, as rustup's answer or its error shows it.
+        cause: Cause,
+        /// What rustup said: its first stderr line, or for a path or custom toolchain the name
+        /// it printed, at most [`SAID_WIDTH`] characters. Empty when it said nothing.
+        said: String,
+    },
 }
+
+/// Why `rustup show active-toolchain` named no channel supdoc can pin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Cause {
+    /// It named a path or a custom toolchain, as a `path` key in a toolchain file above the root
+    /// or a `rustup toolchain link` makes it.
+    PathOrCustom,
+    /// The toolchain it chose isn't installed, and supdoc never lets rustup install one.
+    NotInstalled,
+    /// A toolchain file it read, above the root, doesn't parse.
+    Unparseable,
+    /// Nothing chooses a toolchain and rustup has no default.
+    NoDefault,
+    /// It couldn't start, failed for another reason, or printed nothing supdoc can read.
+    Failed,
+    /// It ran past the tool timeout and was killed.
+    TimedOut,
+    /// It printed past the tool output cap and was killed.
+    OverCap,
+}
+
+/// The most characters of rustup's words an [`Unresolved::Rustup`] keeps.
+const SAID_WIDTH: usize = 200;
 
 /// Why the root's toolchain file was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,7 +130,7 @@ pub(crate) fn read(root: &Path) -> Toolchain {
 /// first, run once from the root with `env` plus `RUSTUP_AUTO_INSTALL=0`, under `timeout` and the
 /// tool output cap. A `rustup` inside the checkout isn't run, and an answer [`is_valid_channel`]
 /// rejects, such as the path a parent's `path` key names, is [`Toolchain::Unresolved`], as is
-/// any failure.
+/// any failure, each with its [`Cause`] (see [`judge`]).
 ///
 /// Effect: reads file metadata along `PATH`, resolves symlinks, and runs `rustup`, killing it at
 /// the timeout.
@@ -124,14 +152,74 @@ pub(crate) fn active(env: &ToolEnv, root: &Path, timeout: Option<Duration>) -> T
         cwd: Cwd::Root,
         cap: runner::CAP,
     };
-    runner::run(&call, env, root)
-        .ok()
-        .filter(|ran| ran.success)
-        .and_then(|ran| active_channel(&ran.stdout))
-        .map_or(
-            Toolchain::Unresolved(Unresolved::Unnamed),
-            Toolchain::Channel,
-        )
+    judge(runner::run(&call, env, root))
+}
+
+/// The toolchain `outcome`, a run of `rustup show active-toolchain`, names: the channel its first
+/// field names when it succeeded and [`is_valid_channel`] accepts it, else
+/// [`Toolchain::Unresolved`] with the [`Cause`] its answer, its first stderr line or its failure
+/// shows. A failure whose words name no cause supdoc knows is [`Cause::Failed`].
+fn judge(outcome: Result<runner::Ran, runner::Failure>) -> Toolchain {
+    let (cause, said) = match outcome {
+        Err(runner::Failure::TimedOut) => (Cause::TimedOut, String::new()),
+        Err(runner::Failure::OverCap { .. }) => (Cause::OverCap, String::new()),
+        Err(runner::Failure::Spawn(error)) => {
+            (Cause::Failed, first_line(error.to_string().as_bytes()))
+        }
+        Ok(ran) if ran.success => {
+            if let Some(channel) = active_channel(&ran.stdout) {
+                return Toolchain::Channel(channel);
+            }
+            let named = first_line(&ran.stdout);
+            if std::str::from_utf8(&ran.stdout).is_ok() && !named.is_empty() {
+                let name = named
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
+                (Cause::PathOrCustom, name)
+            } else {
+                (Cause::Failed, first_line(&ran.stderr))
+            }
+        }
+        Ok(ran) => {
+            let said = first_line(&ran.stderr);
+            (cause_in(&said), said)
+        }
+    };
+    Toolchain::Unresolved(Unresolved::Rustup { cause, said })
+}
+
+/// The cause the words of a failed rustup, `said`, name: the phrases rustup prints for each.
+fn cause_in(said: &str) -> Cause {
+    let said = said.to_ascii_lowercase();
+    if said.contains("is not installed") {
+        Cause::NotInstalled
+    } else if said.contains("could not parse") || said.contains("error parsing") {
+        Cause::Unparseable
+    } else if said.contains("no default") {
+        Cause::NoDefault
+    } else if said.contains("invalid toolchain")
+        || said.contains("path toolchain")
+        || said.contains("custom toolchain")
+    {
+        Cause::PathOrCustom
+    } else {
+        Cause::Failed
+    }
+}
+
+/// The first non-blank line of `bytes`, trimmed, read lossily as UTF-8 and cut to
+/// [`SAID_WIDTH`] characters. Empty when there is none.
+fn first_line(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .chars()
+        .take(SAID_WIDTH)
+        .collect()
 }
 
 /// The channel `stdout`, what `rustup show active-toolchain` printed, names in its first field,
@@ -403,11 +491,157 @@ fn is_host_triple(triple: &str) -> bool {
 mod tests {
     use std::ffi::OsString;
 
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::time::Duration;
+
     use super::{
-        Refusal, Toolchain, active_channel, cargo_edition, edition_in, is_valid_channel, parse,
-        read,
+        Cause, Refusal, Toolchain, Unresolved, active, active_channel, cargo_edition, edition_in,
+        is_valid_channel, judge, parse, read,
     };
+    use crate::code_blocks::runner::{Failure, Ran};
+    use crate::code_blocks::tools::ToolEnv;
     use crate::config::code_blocks::Edition;
+
+    /// The [`Ran`] of a rustup that exited `success` after printing `stdout` and `stderr`.
+    fn finished(success: bool, stdout: &str, stderr: &str) -> Ran {
+        Ran {
+            success,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    /// The unresolved toolchain with `cause` and rustup's words `said`.
+    fn unresolved(cause: Cause, said: &str) -> Toolchain {
+        Toolchain::Unresolved(Unresolved::Rustup {
+            cause,
+            said: said.to_owned(),
+        })
+    }
+
+    #[test]
+    fn each_rustup_failure_carries_its_own_cause_and_rustups_first_stderr_line() {
+        let ran = |success, stdout, stderr| Ok(finished(success, stdout, stderr));
+        let not_installed = "error: override toolchain '1.60.0-aarch64-apple-darwin' is not \
+                             installed: the toolchain file at '/w/rust-toolchain.toml' specifies an \
+                             uninstalled toolchain";
+        let unparseable = "error: could not parse override file: '/w/rust-toolchain.toml': error \
+                           parsing override file: TOML parse error at line 1, column 5";
+        let no_default = "error: rustup could not choose a version of rustc to run, because one \
+                          wasn't specified explicitly, and no default is configured.";
+        for (outcome, expected) in [
+            (
+                ran(
+                    false,
+                    "",
+                    &format!("{not_installed}\nhelp: run rustup toolchain install\n"),
+                ),
+                unresolved(Cause::NotInstalled, not_installed),
+            ),
+            (
+                ran(false, "", &format!("\n{unparseable}\n  |\n1 | not [toml\n")),
+                unresolved(Cause::Unparseable, unparseable),
+            ),
+            (
+                ran(false, "", &format!("{no_default}\n")),
+                unresolved(Cause::NoDefault, no_default),
+            ),
+            (
+                ran(
+                    false,
+                    "",
+                    "error: invalid toolchain: the path '/opt/x' has no bin/ directory\n",
+                ),
+                unresolved(
+                    Cause::PathOrCustom,
+                    "error: invalid toolchain: the path '/opt/x' has no bin/ directory",
+                ),
+            ),
+            (
+                ran(
+                    true,
+                    "/w/evil (overridden by '/w/rust-toolchain.toml')\n",
+                    "",
+                ),
+                unresolved(Cause::PathOrCustom, "/w/evil"),
+            ),
+            (
+                ran(true, "my-toolchain (default)\n", ""),
+                unresolved(Cause::PathOrCustom, "my-toolchain"),
+            ),
+            (
+                ran(false, "", "error: something new\n"),
+                unresolved(Cause::Failed, "error: something new"),
+            ),
+            (ran(false, "", ""), unresolved(Cause::Failed, "")),
+            (
+                ran(true, "", "warning: odd\n"),
+                unresolved(Cause::Failed, "warning: odd"),
+            ),
+            (Err(Failure::TimedOut), unresolved(Cause::TimedOut, "")),
+            (
+                Err(Failure::OverCap {
+                    stream: "stdout",
+                    cap: 1024,
+                }),
+                unresolved(Cause::OverCap, ""),
+            ),
+            (
+                ran(true, "stable-aarch64-apple-darwin (default)\n", ""),
+                Toolchain::Channel("stable-aarch64-apple-darwin".to_owned()),
+            ),
+        ] {
+            assert_eq!(judge(outcome), expected);
+        }
+    }
+
+    #[test]
+    fn rustups_quoted_line_is_cut_to_two_hundred_characters() {
+        let long = format!("error: {}\n", "x".repeat(400));
+
+        let Toolchain::Unresolved(Unresolved::Rustup { said, .. }) =
+            judge(Ok(finished(false, "", &long)))
+        else {
+            panic!("a failed rustup should be unresolved");
+        };
+
+        assert_eq!(said.chars().count(), 200, "{said}");
+    }
+
+    /// A directory holding a stub `rustup` whose body is `body`, and the environment with it alone
+    /// on `PATH`.
+    fn rustup_stub(body: &str) -> (tempfile::TempDir, ToolEnv) {
+        let bin = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let stub = bin.path().join("rustup");
+        std::fs::write(&stub, format!("#!/bin/sh\n{body}")).expect("the stub should be writable");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+            .expect("the stub should be made executable");
+        let path = bin.path().as_os_str().to_owned();
+        let env = ToolEnv::from_vars(|name| (name == "PATH").then(|| path.clone()));
+        (bin, env)
+    }
+
+    #[test]
+    fn a_rustup_that_runs_past_the_timeout_is_unresolved() {
+        let root = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let (_bin, env) = rustup_stub("exec /bin/sleep 30\n");
+
+        let toolchain = active(&env, root.path(), Some(Duration::from_millis(200)));
+
+        assert_eq!(toolchain, unresolved(Cause::TimedOut, ""));
+    }
+
+    #[test]
+    fn a_rustup_that_prints_past_the_cap_is_unresolved() {
+        let root = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let (_bin, env) = rustup_stub(
+            "/bin/dd if=/dev/zero bs=1048577 count=1 2>/dev/null\nexec /bin/sleep 30\n",
+        );
+
+        let toolchain = active(&env, root.path(), Some(Duration::from_secs(20)));
+
+        assert_eq!(toolchain, unresolved(Cause::OverCap, ""));
+    }
 
     #[test]
     fn channels_with_dates_and_host_triples_are_valid() {
