@@ -18,7 +18,7 @@ use super::format::{ParseError, Positions};
 use super::fragment::{Kind, Support};
 use super::lint;
 use super::runner::{Failure, Ran};
-use super::{biome, go, python, rumdl, rust, shell};
+use super::{biome, go, python, rumdl, rust, shell, tombi};
 
 /// The variables a tool gets from supdoc's own environment, and no others.
 const PASSED: [&str; 5] = [
@@ -234,6 +234,10 @@ impl ToolCartridge {
     }
 }
 
+/// The command that installs a tombi supdoc's checks are verified against (see
+/// [`tombi::VERIFIED`]).
+pub(crate) const TOMBI_INSTALL: &str = "pipx install 'tombi==1.10.*'";
+
 /// The values every cartridge's mode accepts today.
 const FULL_OR_OFF: &[&str] = &["full", "off"];
 
@@ -446,7 +450,7 @@ fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'sta
 }
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 16] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 18] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -671,6 +675,38 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 16] = [
         positions: own_positions,
         argv: rumdl_args,
         reader: Reader::Lint(rumdl::lint_verdict),
+    },
+    ToolCartridge {
+        name: "tombi-format",
+        language: Language::Toml,
+        binary: "tombi",
+        tier: Tier::Static,
+        install: TOMBI_INSTALL,
+        // tombi reads only supdoc's private copy, named by its hash in the args and env.
+        config_files: &[],
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        holds: every_tag,
+        vars: &[],
+        positions: own_positions,
+        argv: tombi_format_args,
+        reader: Reader::Format(tombi::parse_error),
+    },
+    ToolCartridge {
+        name: "tombi-lint",
+        language: Language::Toml,
+        binary: "tombi",
+        tier: Tier::Static,
+        install: TOMBI_INSTALL,
+        // tombi reads only supdoc's private copy, named by its hash in the args and env.
+        config_files: &[],
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        holds: every_tag,
+        vars: &[],
+        positions: own_positions,
+        argv: tombi_lint_args,
+        reader: Reader::Lint(tombi::lint_verdict),
     },
     ToolCartridge {
         name: "gofmt",
@@ -967,6 +1003,37 @@ fn rumdl_args(invocation: &Invocation<'_>) -> Vec<OsString> {
     .collect()
 }
 
+/// `tombi format`'s arguments: offline, so no schema is fetched, quiet, then the block on stdin
+/// under its virtual path. tombi gets its config through `XDG_CONFIG_HOME` (see [`tombi`]), not
+/// a flag.
+fn tombi_format_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    vec![
+        OsString::from("format"),
+        OsString::from("--offline"),
+        OsString::from("--quiet"),
+        OsString::from("--stdin-filename"),
+        virtual_path(invocation.doc, invocation.index, "toml"),
+        OsString::from("-"),
+    ]
+}
+
+/// `tombi lint`'s arguments: offline, JSON diagnostics on stdout (its summary stays on stderr,
+/// which tells a run that linted nothing, see [`tombi::linted_nothing`]), then the block on stdin
+/// under its virtual path.
+fn tombi_lint_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    vec![
+        OsString::from("lint"),
+        OsString::from("--offline"),
+        OsString::from("--diagnostics-format"),
+        OsString::from("json"),
+        OsString::from("--diagnostics-file"),
+        OsString::from("/dev/stdout"),
+        OsString::from("--stdin-filename"),
+        virtual_path(invocation.doc, invocation.index, "toml"),
+        OsString::from("-"),
+    ]
+}
+
 /// The lints clippy leaves off for a block, which a snippet breaks for lack of context, as
 /// `-A` flags after the project's own so they win.
 const CLIPPY_RELAXED: [&str; 4] = [
@@ -1166,6 +1233,8 @@ mod tests {
                 "biome-lint Json Lint biome Static",
                 "rumdl-format Markdown Format rumdl Static",
                 "rumdl Markdown Lint rumdl Static",
+                "tombi-format Toml Format tombi Static",
+                "tombi-lint Toml Lint tombi Static",
                 "gofmt Go Format gofmt Static",
             ]
         );

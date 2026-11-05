@@ -70,6 +70,7 @@ top-level keys, and never change which files links are read from. A language's t
   typescript    formatter biome-format, linter biome-lint
   javascript    formatter biome-format, linter biome-lint
   json          formatter biome-format, linter biome-lint; tag a block with comments jsonc
+  toml          formatter tombi-format, linter tombi-lint
   markdown      formatter rumdl-format, linter rumdl
   go            formatter gofmt, no linter yet; tag a block go or golang
 

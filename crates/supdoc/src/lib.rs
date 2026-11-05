@@ -232,6 +232,8 @@ pub(crate) mod code_blocks {
     mod biome;
     /// Markdown's format and lint steps, run by rumdl.
     mod rumdl;
+    /// TOML's format and lint steps, run by tombi.
+    mod tombi;
 
     /// Go's format step, run by gofmt.
     mod go;

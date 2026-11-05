@@ -43,6 +43,7 @@ use super::states::{
     self, Excerpt, NotChecked, StepState, Steps, block_fragment, state_of, tag_of,
     unsupported_reason,
 };
+use super::tombi;
 use super::toolchain::{self, Refusal, Toolchain};
 use super::tools::{self, Found, Invocation, Step, Tier, ToolCartridge, ToolEnv, find};
 use super::uses::{self, UseState, Written};
@@ -112,6 +113,9 @@ pub(crate) struct BlockRecord {
     /// The config and virtual path biome is given for it. `None` until the tools are looked up, and for
     /// any other tool.
     given: Option<biome::Given>,
+    /// What tombi is given for it: the private directory it runs in, holding its config. `None`
+    /// for every other tool.
+    tombi: Option<tombi::Project>,
     /// What the format step needs, kept while the block is pending.
     pending: Option<Pending>,
 }
@@ -230,16 +234,7 @@ pub(crate) fn evaluate(
         findings.extend(fragment_unsupported(block, &steps));
         let checked = language.as_deref().and_then(Language::from_tag);
         let (tool, linter) = selected_tools(code_blocks, &mut steps, checked, &state, granted);
-        let pending = (state == BlockState::NotChecked(NotChecked::Pending))
-            .then(|| {
-                let file = block.fence.file.as_str();
-                reread(&mut doc, file, read);
-                doc.as_ref()?
-                    .1
-                    .as_ref()
-                    .and_then(|text| Pending::of(block, text))
-            })
-            .flatten();
+        let pending = pending_of(&state, block, &mut doc, read);
         records.push(BlockRecord {
             at: block.fence.clone(),
             reason: first_reason(&state, &steps, language.as_deref(), tool),
@@ -248,6 +243,7 @@ pub(crate) fn evaluate(
             dialect: code_blocks.dialect(),
             edition: block_edition(block).or_else(|| code_blocks.edition()),
             given: None,
+            tombi: None,
             language,
             state,
             steps,
@@ -311,6 +307,7 @@ impl Evaluation {
         let build_timeout = self.build_timeout;
         let timeout = self.timeout;
         let mut configs = ToolConfigs::default();
+        configs.tombi.timeout = timeout;
         let mut toolchain_warned = false;
         let mut slots: Vec<Slot> = Vec::new();
         let mut jobs: Vec<Job> = Vec::new();
@@ -343,6 +340,8 @@ impl Evaluation {
             if !configs.give(record, tool, (env, root), &mut slots) {
                 continue;
             }
+            // Giving a TOML block its config can take a step off it (see `TombiConfigs::give`).
+            let linter = record.linter;
             let (runs, refused) = found_runs(
                 [record.tool, linter],
                 &mut looked_up,
@@ -425,11 +424,7 @@ impl Evaluation {
     /// [`Self::settle_pending`].
     fn settle(&mut self, slots: Vec<Slot>, jobs: &[Job], ran: Vec<Option<StepsRan>>) {
         let mut ran = ran.into_iter();
-        let mut linted_nothing_warned = false;
-        let mut indent_unknown_warned = false;
-        let mut width_unknown_warned = false;
-        let mut reshaped_warned = false;
-        let mut printed_nothing_warned = false;
+        let mut warnings = NotRunWarnings::default();
         for slot in slots {
             let (job, run) = match slot {
                 Slot::Found(finding) => {
@@ -452,24 +447,11 @@ impl Evaluation {
                     record.steps.format = StepState::Ran;
                     outcomes.push((verdict.state(), Some(run.tool)));
                 }
-                (Some(Err(reason)), Some(_)) => {
-                    if reason == FRAME_INDENT_UNKNOWN && !indent_unknown_warned {
-                        indent_unknown_warned = true;
-                        self.findings.push(indent_unknown(&record.at));
-                    }
-                    if reason == FRAME_WIDTH_UNKNOWN && !width_unknown_warned {
-                        width_unknown_warned = true;
-                        self.findings.push(width_unknown(&record.at));
-                    }
-                    if reason == FRAME_RESHAPED && !reshaped_warned {
-                        reshaped_warned = true;
-                        self.findings.push(frame_reshaped(&record.at));
-                    }
-                    if reason == format::PRINTED_NOTHING && !printed_nothing_warned {
-                        printed_nothing_warned = true;
-                        self.findings.push(printed_nothing(&record.at));
-                    }
-                    record.steps.format = StepState::Unrunnable { reason };
+                (Some(Err(not_run)), Some(_)) => {
+                    self.findings.extend(warnings.first(&not_run, &record.at));
+                    record.steps.format = StepState::Unrunnable {
+                        reason: not_run.reason,
+                    };
                 }
                 _ => {}
             }
@@ -479,12 +461,11 @@ impl Evaluation {
                     record.steps.lint = StepState::Ran;
                     outcomes.push((lint_state(&verdict), Some(run.tool)));
                 }
-                (Some(Err(reason)), Some(_)) => {
-                    if reason == BIOME_LINTED_NOTHING && !linted_nothing_warned {
-                        linted_nothing_warned = true;
-                        self.findings.push(linted_nothing(&record.at));
-                    }
-                    record.steps.lint = StepState::Unrunnable { reason };
+                (Some(Err(not_run)), Some(_)) => {
+                    self.findings.extend(warnings.first(&not_run, &record.at));
+                    record.steps.lint = StepState::Unrunnable {
+                        reason: not_run.reason,
+                    };
                 }
                 _ => {}
             }
@@ -756,10 +737,57 @@ struct StepsRan {
 }
 
 /// What a lint step gave: its verdict and findings, or why supdoc couldn't run it safely.
-type LintRan = Result<(lint::Verdict, Vec<Finding>), &'static str>;
+type LintRan = Result<(lint::Verdict, Vec<Finding>), NotRun>;
 
 /// What a format step gave: its verdict and findings, or why supdoc couldn't run it.
-type FormatRan = Result<(format::Verdict, Vec<Finding>), &'static str>;
+type FormatRan = Result<(format::Verdict, Vec<Finding>), NotRun>;
+
+/// Why a step didn't run: its state's reason, and what the tool said about it, when the run's
+/// warning quotes that.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NotRun {
+    /// The step's reason.
+    reason: &'static str,
+    /// The tool's own words on it, for the run's warning.
+    said: Option<String>,
+}
+
+/// The run's warnings for steps that didn't run, each given once, at the first block its reason
+/// comes up for.
+#[derive(Debug, Default)]
+struct NotRunWarnings {
+    /// The reasons a warning has been given for.
+    given: Vec<&'static str>,
+}
+
+impl NotRunWarnings {
+    /// The warning for `not_run`, at `at`, the first time its reason comes up in the run. `None`
+    /// after that, and for a reason that has no warning of its own.
+    fn first(&mut self, not_run: &NotRun, at: &Location) -> Option<Finding> {
+        if self.given.contains(&not_run.reason) {
+            return None;
+        }
+        let said = not_run.said.as_deref();
+        let warning = match not_run.reason {
+            TOMBI_CONFIG_SKIPPED => config_skipped(at, said),
+            TOMBI_STEP_SKIPPED => step_skipped(at, said),
+            FRAME_INDENT_UNKNOWN => indent_unknown(at),
+            FRAME_WIDTH_UNKNOWN => width_unknown(at),
+            format::PRINTED_NOTHING => printed_nothing(at),
+            FRAME_RESHAPED => frame_reshaped(at),
+            BIOME_LINTED_NOTHING => linted_nothing(at),
+            _ => return None,
+        };
+        self.given.push(not_run.reason);
+        Some(warning)
+    }
+}
+
+impl From<&'static str> for NotRun {
+    fn from(reason: &'static str) -> Self {
+        Self { reason, said: None }
+    }
+}
 
 /// Whether a format step that gave `format` let the block parse, so its lint step may run: not
 /// when the formatter couldn't parse it, nor when a frame line showed it isn't its kind.
@@ -853,6 +881,24 @@ fn not_trusted(records: &[BlockRecord]) -> Option<Finding> {
     Some(finding.with_location(at.clone()))
 }
 
+/// What the format step needs for `block`, its doc read through `doc` with `read`: `None` unless
+/// `state` is pending, or when the doc can't be read.
+fn pending_of<'doc>(
+    state: &BlockState,
+    block: &'doc CodeBlock,
+    doc: &mut Option<(&'doc str, Option<Arc<FixDoc>>)>,
+    read: impl Fn(&str) -> Option<Arc<FixDoc>>,
+) -> Option<Pending> {
+    if *state != BlockState::NotChecked(NotChecked::Pending) {
+        return None;
+    }
+    reread(doc, block.fence.file.as_str(), read);
+    doc.as_ref()?
+        .1
+        .as_ref()
+        .and_then(|text| Pending::of(block, text))
+}
+
 /// Points `doc` at `file`, read with `read`, unless it already holds it.
 fn reread<'doc>(
     doc: &mut Option<(&'doc str, Option<Arc<FixDoc>>)>,
@@ -871,12 +917,14 @@ struct ToolConfigs {
     biome: BiomeConfigs,
     /// rumdl's.
     rumdl: RumdlConfigs,
+    /// tombi's.
+    tombi: TombiConfigs,
 }
 
 impl ToolConfigs {
-    /// Gives `record` the config its tool gets, as [`BiomeConfigs::give`] and
-    /// [`RumdlConfigs::give`] do. Whether the block goes on to its tools: not when its config was
-    /// refused.
+    /// Gives `record` the config its tool gets, as [`BiomeConfigs::give`],
+    /// [`RumdlConfigs::give`] and [`TombiConfigs::give`] do. Whether the block goes on to its
+    /// tools: not when it or its config was refused.
     fn give(
         &mut self,
         record: &mut BlockRecord,
@@ -886,6 +934,7 @@ impl ToolConfigs {
     ) -> bool {
         self.biome.give(record, tool, place, slots).is_ok()
             && self.rumdl.give(record, tool, place, slots).is_ok()
+            && self.tombi.give(record, tool, place, slots)
     }
 }
 
@@ -1071,6 +1120,225 @@ fn rumdl_refusal(refusal: &rumdl::Refusal, at: &Location) -> (String, Finding) {
 
 /// Why rumdl didn't run when supdoc had no private directory to keep its config in.
 const RUMDL_NO_PRIVATE_DIR: &str = "rumdl needs a private directory under `XDG_CACHE_HOME` or `HOME` for its config, and there is none";
+
+/// The tombi config found for each doc directory, and the refusals already warned about.
+#[derive(Debug, Default)]
+struct TombiConfigs {
+    /// Each doc directory's result, in the order they were asked for.
+    found: Vec<(PathBuf, Result<tombi::Project, tombi::Refusal>)>,
+    /// The refusals a warning has been added for.
+    warned: Vec<tombi::Refusal>,
+    /// How long `tombi --version` may run: the run's tool timeout.
+    timeout: Option<Duration>,
+    /// The tombi version once read (see [`tombi::version_of`]), and whether its warning has been
+    /// given. `None` until a block needs it.
+    version: Option<(Result<String, String>, bool)>,
+}
+
+impl TombiConfigs {
+    /// Gives `record`, a TOML block, the config tombi gets for its doc, found once per directory,
+    /// and the place its doc is mirrored to. A block holding a `#:schema` directive is never given
+    /// to tombi (see [`tombi::names_schema`]): it is settled as not checked with a
+    /// `code-block-not-checked` warning. A refused config settles the block as not checked too,
+    /// with its one warning per refusal added to `slots`. Whether the block goes on to its tools.
+    ///
+    /// Effect: reads the config and may create supdoc's private directory and file for it.
+    fn give(
+        &mut self,
+        record: &mut BlockRecord,
+        tool: &ToolCartridge,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> bool {
+        if tool.language != Language::Toml {
+            return true;
+        }
+        let names_schema = record
+            .pending
+            .as_ref()
+            .is_some_and(|pending| tombi::names_schema(&pending.input));
+        if names_schema {
+            slots.push(Slot::Found(schema_warning(&record.at)));
+            record.state = BlockState::NotChecked(NotChecked::SchemaFile);
+            record.reason =
+                record
+                    .state
+                    .reason(&record.steps, record.language.as_deref(), Some(tool.name));
+            return false;
+        }
+        if !refuse_directive(record, slots) {
+            return false;
+        }
+        let doc = root.join(record.at.file.as_str());
+        let dir = doc.parent().unwrap_or(root).to_path_buf();
+        let found = if let Some((_, found)) = self.found.iter().find(|(known, _)| *known == dir) {
+            found.clone()
+        } else {
+            let found = tombi::project(env, root, &doc);
+            self.found.push((dir, found.clone()));
+            found
+        };
+        match found {
+            Ok(project) => {
+                record.given = Some(biome::Given {
+                    mirror: Some(project.doc_as_seen(&doc)),
+                    flags: Vec::new(),
+                    config: None,
+                    names: Some(project.names()),
+                });
+                record.tombi = Some(project);
+                self.verified(record, (env, root), slots)
+            }
+            Err(refusal) => {
+                let (reason, warning) = tombi_refusal(&refusal, &record.at);
+                if !self.warned.contains(&refusal) {
+                    self.warned.push(refusal);
+                    slots.push(Slot::Found(warning));
+                }
+                record.state = BlockState::NotChecked(NotChecked::ToolConfig);
+                record.reason = Some(reason);
+                false
+            }
+        }
+    }
+}
+
+/// Takes both steps off `record`'s TOML block when it holds a `#:tombi` directive (see
+/// [`tombi::has_directive`]): neither runs, each with [`TOMBI_DIRECTIVE`] as its reason, and one
+/// `code-block-not-checked` warning for the block goes to `slots`. Whether the block goes on to
+/// its tools: not when it holds one.
+fn refuse_directive(record: &mut BlockRecord, slots: &mut Vec<Slot>) -> bool {
+    let holds = record
+        .pending
+        .as_ref()
+        .is_some_and(|pending| tombi::has_directive(&pending.input));
+    if !holds {
+        return true;
+    }
+    let unrun = StepState::Unrunnable {
+        reason: TOMBI_DIRECTIVE,
+    };
+    if record.tool.take().is_some() {
+        record.steps.format = unrun.clone();
+    }
+    if record.linter.take().is_some() {
+        record.steps.lint = unrun;
+    }
+    slots.push(Slot::Found(
+        Finding::new(
+            NOT_CHECKED,
+            Severity::Warning,
+            "the block holds a `#:tombi` directive, which supdoc doesn't give to tombi, so its \
+             steps didn't run",
+        )
+        .with_help(
+            "remove the `#:tombi` directive: switch a step off with `format(off: <why>)` or \
+             `lint(off: <why>)`, and set `toml-version` in the project's tombi config",
+        )
+        .with_location(record.at.clone()),
+    ));
+    false
+}
+
+/// Why a TOML block's steps didn't run when it holds a `#:tombi` directive.
+const TOMBI_DIRECTIVE: &str =
+    "the block holds a `#:tombi` directive, which supdoc doesn't give to tombi";
+
+impl TombiConfigs {
+    /// Whether the tombi on `PATH` is a version supdoc is verified against (see
+    /// [`tombi::VERIFIED`]), read once per run. When it isn't, or can't be read, neither of
+    /// `record`'s steps runs, each with [`TOMBI_UNVERIFIED`] as its reason, and the run's one
+    /// warning goes to `slots`. A tombi that isn't on `PATH`, or is inside the checkout, is left
+    /// to the usual lookup.
+    ///
+    /// Effect: runs `tombi --version` the first time.
+    fn verified(
+        &mut self,
+        record: &mut BlockRecord,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> bool {
+        let Found::OnPath(program) = find("tombi", env, root) else {
+            return true;
+        };
+        let timeout = self.timeout;
+        let (version, warned) = self
+            .version
+            .get_or_insert_with(|| (tombi::version_of(&program, env, root, timeout), false));
+        let Err(shown) = version else {
+            return true;
+        };
+        if !*warned {
+            *warned = true;
+            slots.push(Slot::Found(
+                Finding::new(
+                    NOT_CHECKED,
+                    Severity::Warning,
+                    format!(
+                        "tombi {shown} isn't a version supdoc's checks are verified against ({}); \
+                         its TOML blocks' steps didn't run",
+                        tombi::VERIFIED.join(", ")
+                    ),
+                )
+                .with_help(format!(
+                    "install a verified tombi: `{}`",
+                    tools::TOMBI_INSTALL
+                ))
+                .with_location(record.at.clone()),
+            ));
+        }
+        let unrun = StepState::Unrunnable {
+            reason: TOMBI_UNVERIFIED,
+        };
+        if record.tool.take().is_some() {
+            record.steps.format = unrun.clone();
+        }
+        if record.linter.take().is_some() {
+            record.steps.lint = unrun;
+        }
+        false
+    }
+}
+
+/// Why a TOML block's steps didn't run when the tombi on `PATH` isn't a verified version.
+const TOMBI_UNVERIFIED: &str = "the tombi on `PATH` isn't a version supdoc is verified against";
+
+/// The `code-block-not-checked` warning, at `at`, for a TOML block holding a `#:schema`
+/// directive.
+fn schema_warning(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "the block names a schema file with `#:schema`, which tombi would read wherever it is, so \
+         it isn't checked",
+    )
+    .with_help("remove the `#:schema` line from the block, or mark it `ignore(<why>)`")
+    .with_location(at.clone())
+}
+
+/// The state reason and the `code-block-not-checked` warning, at `at`, for a block tombi isn't
+/// given because of `refusal`.
+fn tombi_refusal(refusal: &tombi::Refusal, at: &Location) -> (String, Finding) {
+    let (reason, message, help) = match refusal {
+        tombi::Refusal::Config { file, why, help } => (
+            format!("tombi config `{file}` {why}"),
+            format!("the project's `{file}` {why}, so its TOML blocks aren't checked"),
+            format!("in `{file}`: {help}, or mark the blocks `ignore(<why>)`"),
+        ),
+        tombi::Refusal::NoPrivateDir => (
+            TOMBI_NO_PRIVATE_DIR.to_owned(),
+            format!("{TOMBI_NO_PRIVATE_DIR}, so its blocks aren't checked"),
+            "set `XDG_CACHE_HOME` or `HOME` to a directory outside the project".to_owned(),
+        ),
+    };
+    let finding = Finding::new(NOT_CHECKED, Severity::Warning, message)
+        .with_help(help)
+        .with_location(at.clone());
+    (reason, finding)
+}
+
+/// Why tombi didn't run when supdoc had no private directory to keep its config in.
+const TOMBI_NO_PRIVATE_DIR: &str = "tombi needs a private directory under `XDG_CACHE_HOME` or `HOME` for its config, and there is none";
 
 /// Why clippy didn't run on a block when [`runner::neutral_dir`] found no private working
 /// directory: its metadata would have nowhere private to go.
@@ -1778,7 +2046,7 @@ fn run_formatter(
         None => None,
         Some(frame) => match framing(tool, frame, rust, given) {
             Ok(framing) => Some((frame, framing)),
-            Err(reason) => return Some(Err(reason)),
+            Err(reason) => return Some(Err(reason.into())),
         },
     };
     let checked =
@@ -1812,8 +2080,10 @@ fn run_formatter(
         fragment: record.fragment,
     });
     let vars = rust.map(|rust| rust.toolchain.env()).unwrap_or_default();
+    let tombi_vars = record.tombi.as_ref().map(tombi::Project::vars);
     let extra: Vec<(&str, &OsStr)> = vars
         .iter()
+        .chain(tombi_vars.iter().flatten())
         .map(|(name, value)| (*name, value.as_os_str()))
         .chain(tool.vars())
         .collect();
@@ -1830,34 +2100,33 @@ fn run_formatter(
         doc: &doc,
         project: None,
     };
-    let verdict = cached_run(
+    let judged = cached_run(
         &run,
         session,
-        |call| runner::run(call, session.env, session.root),
+        |call| run_in_place(call, record, session),
         |result| {
+            if let Some(not_run) = config_skipped_by(record, tool, &result) {
+                return Err(not_run);
+            }
             let named = result.map(|ran| Ran {
                 stderr: given.map_or_else(|| ran.stderr.clone(), |given| given.named(&ran.stderr)),
                 ..ran
             });
-            match &framed {
+            Ok(match &framed {
                 Some((frame, framing)) => framing.judge(tool, *frame, &pending.input, named),
                 None => format::judge(tool, input, named),
-            }
+            })
         },
-        format::Verdict::cacheable,
+        |judged| judged.as_ref().is_ok_and(format::Verdict::cacheable),
     );
-    if verdict == format::Verdict::PrintedNothing {
-        return Some(Err(format::PRINTED_NOTHING));
-    }
-    let at = match &verdict {
-        format::Verdict::NotKind {
-            line: Some(line), ..
-        } => body_place(*line, pending).unwrap_or_else(|| info_place(record, pending)),
-        format::Verdict::NotKind { line: None, .. }
-        | format::Verdict::FrameReformatted(_)
-        | format::Verdict::Uncompared(_) => info_place(record, pending),
-        _ => parse_place(&verdict, pending).unwrap_or_else(|| record.at.clone()),
+    let verdict = match judged {
+        Ok(format::Verdict::PrintedNothing) => {
+            return Some(Err(format::PRINTED_NOTHING.into()));
+        }
+        Ok(verdict) => verdict,
+        Err(not_run) => return Some(Err(not_run)),
     };
+    let at = verdict_place(&verdict, record, pending);
     let finding = format::finding(&verdict, tool, &at, timeout)
         .map(|finding| jsonc_hint(finding, &verdict, record, &pending.input));
     let findings = match (&verdict, finding) {
@@ -1867,6 +2136,21 @@ fn run_formatter(
         (_, finding) => finding.into_iter().collect(),
     };
     Some(Ok((verdict, findings)))
+}
+
+/// Where a format step's `verdict` on `record`'s block is reported: a frame-level failure at
+/// the block's info string, a line the verdict names at its doc line, and anything else at the
+/// block's opening fence.
+fn verdict_place(verdict: &format::Verdict, record: &BlockRecord, pending: &Pending) -> Location {
+    match verdict {
+        format::Verdict::NotKind {
+            line: Some(line), ..
+        } => body_place(*line, pending).unwrap_or_else(|| info_place(record, pending)),
+        format::Verdict::NotKind { line: None, .. }
+        | format::Verdict::FrameReformatted(_)
+        | format::Verdict::Uncompared(_) => info_place(record, pending),
+        _ => parse_place(verdict, pending).unwrap_or_else(|| record.at.clone()),
+    }
 }
 
 /// The doc line a parse failure names in `pending`'s block. `None` for any other verdict, or a
@@ -1956,7 +2240,13 @@ fn run_linter(
     let frame = Frame::of(tool, record.fragment);
     let input = lint::checked(frame, &pending.input);
     let input = input.as_ref();
-    let extra = tool.vars();
+    let tombi_vars = record.tombi.as_ref().map(tombi::Project::vars);
+    let extra: Vec<(&str, &OsStr)> = tombi_vars
+        .iter()
+        .flatten()
+        .map(|(name, value)| (*name, value.as_os_str()))
+        .chain(tool.vars())
+        .collect();
     let run = cache::Run {
         tool,
         program,
@@ -1969,19 +2259,28 @@ fn run_linter(
     let biome = given.filter(|_| tool.name == BIOME_LINT);
     let spawn = |call: &Call<'_>| match biome {
         Some(given) => biome_lint(tool, call, &invocation, given, input, session),
-        None => runner::run(call, session.env, session.root),
+        None => run_in_place(call, record, session),
     };
-    let judge = |result: Result<Ran, runner::Failure>| match result {
-        Ok(ran) if biome.is_some() && biome::linted_nothing(&ran.stdout) => {
-            Err(BIOME_LINTED_NOTHING)
+    let named = given.filter(|_| record.tombi.is_some());
+    let judge = |result: Result<Ran, runner::Failure>| {
+        if let Some(not_run) = config_skipped_by(record, tool, &result) {
+            return Err(not_run);
         }
-        result => Ok(tool.lint_verdict(input, frame.is_some(), result)),
+        match named_by(named, result) {
+            Ok(ran) if biome.is_some() && biome::linted_nothing(&ran.stdout) => {
+                Err(BIOME_LINTED_NOTHING.into())
+            }
+            Ok(ran) if tool.name == TOMBI_LINT && tombi::linted_nothing(&ran) => {
+                Err(TOMBI_LINTED_NOTHING.into())
+            }
+            result => Ok(tool.lint_verdict(input, frame.is_some(), result)),
+        }
     };
     let verdict = match cached_run(&run, session, spawn, judge, |judged| {
         judged.as_ref().is_ok_and(lint::Verdict::cacheable)
     }) {
         Ok(verdict) => verdict,
-        Err(reason) => return Some(Err(reason)),
+        Err(not_run) => return Some(Err(not_run)),
     };
     let read = lint::Read {
         tool,
@@ -2019,6 +2318,12 @@ const BIOME_LINT: &str = "biome-lint";
 /// in the project's config still left the block out, so the run says nothing about it.
 pub(super) const BIOME_LINTED_NOTHING: &str =
     "biome lint checked no file: the project's biome config leaves the block out";
+
+/// The name of tombi's lint cartridge.
+const TOMBI_LINT: &str = "tombi-lint";
+
+/// Why tombi lint's step didn't run on a block when tombi didn't report linting it.
+const TOMBI_LINTED_NOTHING: &str = "tombi lint didn't report checking the block";
 
 /// Runs `call`, `tool` being biome lint, on the block `invocation` describes, written with
 /// `given`'s config to a fresh [`biome::LintFile`] beside the neutral directory, since biome
@@ -2094,7 +2399,7 @@ fn run_clippy(
 ) -> LintRan {
     let neutral = runner::neutral_dir(session.env, session.root);
     if neutral == Path::new("/") {
-        return Err(NO_PRIVATE_DIR);
+        return Err(NO_PRIVATE_DIR.into());
     }
     let doc = session.root.join(record.at.file.as_str());
     let edition = rust.edition_of(record);
@@ -2177,6 +2482,114 @@ fn run_clippy(
         !session.linked.flags.is_empty(),
     );
     Ok((verdict, findings))
+}
+
+/// Why `tool`'s step on `record`'s block didn't really run, from tombi's run `result` at any exit
+/// status: tombi said it couldn't load a config (so it ran on rules the project didn't set), or
+/// that it skipped the step (see [`tombi::skip`]). The reason quotes what it said, without the
+/// path. `None` for any other run, and for a block tombi isn't given.
+fn config_skipped_by(
+    record: &BlockRecord,
+    tool: &ToolCartridge,
+    result: &Result<Ran, runner::Failure>,
+) -> Option<NotRun> {
+    let _given = record.tombi.as_ref()?;
+    let ran = result.as_ref().ok()?;
+    Some(match tombi::skip(tool.step(), &ran.stderr)? {
+        tombi::Skip::Config(said) => NotRun {
+            reason: TOMBI_CONFIG_SKIPPED,
+            said: Some(said),
+        },
+        tombi::Skip::Step(said) => NotRun {
+            reason: TOMBI_STEP_SKIPPED,
+            said: Some(said),
+        },
+    })
+}
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose tombi step
+/// tombi said it skipped, quoting what it `said`.
+fn step_skipped(at: &Location, said: Option<&str>) -> Finding {
+    let said = said.map_or_else(String::new, |said| format!(" (it said: {said} ...)"));
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        format!("tombi skipped a step of the block{said}, so that step didn't run"),
+    )
+    .with_help(
+        "remove what makes tombi skip the block, or mark the block `format(off: <why>)` or \
+         `lint(off: <why>)`",
+    )
+    .with_location(at.clone())
+}
+
+/// Why a TOML block's step didn't run when tombi said it skipped it.
+const TOMBI_STEP_SKIPPED: &str = "tombi skipped the step";
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first block tombi didn't run with
+/// the project's config, quoting what tombi `said`.
+fn config_skipped(at: &Location, said: Option<&str>) -> Finding {
+    let said = said.map_or_else(String::new, |said| format!(": {said}"));
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        format!(
+            "tombi couldn't load the project's config{said}, so its TOML blocks' steps didn't run"
+        ),
+    )
+    .with_help(
+        "run `tombi lint` in the project to see what in its config tombi rejects, and fix it, or \
+         mark the blocks `ignore(<why>)`",
+    )
+    .with_location(at.clone())
+}
+
+/// Why a TOML block's steps didn't run when tombi couldn't load the copy of the project's config.
+const TOMBI_CONFIG_SKIPPED: &str = "tombi couldn't load the project's config";
+
+/// Runs `call` for `record`'s block with `session`'s env: from the private directory tombi is
+/// given when the block has one (see [`runner::Cwd::Private`]), otherwise from where `call` says.
+///
+/// Effect: runs the tool.
+///
+/// # Errors
+///
+/// [`runner::Failure`] as [`runner::run`] gives it.
+fn run_in_place(
+    call: &Call<'_>,
+    record: &BlockRecord,
+    session: &Session<'_>,
+) -> Result<Ran, runner::Failure> {
+    match &record.tombi {
+        Some(project) => runner::run(
+            &Call {
+                cwd: runner::Cwd::Private(&project.config_home),
+                ..*call
+            },
+            session.env,
+            session.root,
+        ),
+        None => runner::run(call, session.env, session.root),
+    }
+}
+
+/// `result` with each private path in its stderr named as `given` says (see
+/// [`biome::Given::named`]); `result` as it is without `given`.
+///
+/// # Errors
+///
+/// `result`'s own failure, unchanged.
+fn named_by(
+    given: Option<&biome::Given>,
+    result: Result<Ran, runner::Failure>,
+) -> Result<Ran, runner::Failure> {
+    match given {
+        Some(given) => result.map(|ran| Ran {
+            stderr: given.named(&ran.stderr),
+            ..ran
+        }),
+        None => result,
+    }
 }
 
 /// `judge` applied to `run`, read from `session`'s cache when its key is there, otherwise run
@@ -3010,6 +3423,7 @@ mod tests {
                 dialect: Dialect::default(),
                 edition: None,
                 given: None,
+                tombi: None,
                 pending: Pending::of(block, &doc),
             })
             .collect()
@@ -4082,7 +4496,7 @@ mod tests {
 
         /// The verdict and findings of a run that ran.
         fn ran(run: FormatRan) -> (Verdict, Vec<Finding>) {
-            run.unwrap_or_else(|reason| panic!("the format step should run: {reason}"))
+            run.unwrap_or_else(|not_run| panic!("the format step should run: {not_run:?}"))
         }
 
         #[test]
@@ -4154,7 +4568,7 @@ mod tests {
                 Verdict::FrameReformatted(Kind::Statements),
                 Vec::new()
             )))));
-            assert!(parses(Some(&Err(FRAME_INDENT_UNKNOWN))));
+            assert!(parses(Some(&Err(FRAME_INDENT_UNKNOWN.into()))));
         }
 
         #[test]
@@ -4166,7 +4580,7 @@ mod tests {
 
             let run = format_run(&stub, root.path(), &doc("let x = 1;\n"));
 
-            assert_eq!(run, Err(FRAME_INDENT_UNKNOWN));
+            assert_eq!(run, Err(FRAME_INDENT_UNKNOWN.into()));
         }
 
         /// The `--config` value framed rustfmt runs with under the rustfmt config `toml`.
@@ -4335,7 +4749,7 @@ mod tests {
 
             let run = format_run(&stub, root.path(), &doc("let x = 1;\n"));
 
-            assert_eq!(run, Err(FRAME_RESHAPED), "the stub never runs");
+            assert_eq!(run, Err(FRAME_RESHAPED.into()), "the stub never runs");
             let text = doc("let x = 1;\n") + &doc("let y = 2;\n");
             let rustfmt = formatter(Language::Rust).expect("Rust has a formatter");
             let mut evaluation = Evaluation {
@@ -4355,7 +4769,7 @@ mod tests {
                 .collect();
             let unrun = || {
                 Some(StepsRan {
-                    format: Some(Err(FRAME_RESHAPED)),
+                    format: Some(Err(FRAME_RESHAPED.into())),
                     lint: None,
                 })
             };
@@ -4572,7 +4986,7 @@ mod tests {
                 .collect();
             let unrun = || {
                 Some(StepsRan {
-                    format: Some(Err(FRAME_INDENT_UNKNOWN)),
+                    format: Some(Err(FRAME_INDENT_UNKNOWN.into())),
                     lint: None,
                 })
             };

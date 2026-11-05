@@ -92,6 +92,8 @@ mod code_blocks_python;
 #[cfg(test)]
 mod code_blocks_rust;
 #[cfg(test)]
+mod code_blocks_toml;
+#[cfg(test)]
 mod code_blocks_ts;
 #[cfg(test)]
 mod commands;
