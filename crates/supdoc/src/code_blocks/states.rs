@@ -9,7 +9,8 @@ use crate::config::code_blocks::{CodeBlocks, Language, Mode};
 
 use super::block::CodeBlock;
 use super::evaluate::{CLIPPY_NEEDS_TRUST, CLIPPY_TRUST_OFF};
-use super::info::{StepValue, reasoned, step_attribute};
+use super::fragment::Kind;
+use super::info::{StepValue, fragment_kind, reasoned, step_attribute};
 use super::tools::{self, Step, ToolCartridge, formatter};
 
 /// The one state a code block is in. A block takes the first that applies, in this order:
@@ -28,9 +29,10 @@ use super::tools::{self, Step, ToolCartridge, formatter};
 /// `check` then looks up each pending language's tool: a tool not on `PATH` makes its blocks
 /// [`ToolMissing`](Self::ToolMissing), and one whose real path is inside the checkout makes them
 /// [`NotChecked::ToolInsideRoot`]. A Rust block is refused first when the root's toolchain file
-/// can't be used ([`NotChecked::ToolchainPath`]), the block reads a file or variable at compile
-/// time ([`NotChecked::CompileTimeRead`]), declares an outline module before its linter compiles
-/// it ([`NotChecked::OutlineModule`]), or it is too large to scan for one
+/// can't be used ([`NotChecked::ToolchainPath`]), rustup can't name the toolchain a root with
+/// no such file gets ([`NotChecked::ToolchainUnresolved`]), the block reads a file or variable
+/// at compile time ([`NotChecked::CompileTimeRead`]), declares an outline module before its
+/// linter compiles it ([`NotChecked::OutlineModule`]), or it is too large to scan for one
 /// ([`NotChecked::TooLargeToScan`]). A tool found outside the checkout runs on each block,
 /// which leaves it [`Passed`](Self::Passed) or [`Failed`](Self::Failed).
 ///
@@ -84,8 +86,11 @@ pub(crate) enum NotChecked {
     /// The root's `rust-toolchain(.toml)` names a path, an invalid channel, or lies outside the
     /// root, so no Rust tool runs.
     ToolchainPath,
-    /// The project's tool config extends another config, declares plugins, or can't be handed
-    /// to the tool, so its blocks aren't given to it.
+    /// The root pins no toolchain, and the `rustup` on `PATH` is inside the checkout, or couldn't
+    /// name the toolchain the root gets as a channel, so no Rust tool runs.
+    ToolchainUnresolved,
+    /// The project's tool config extends another config, declares plugins or commands, or can't
+    /// be handed to the tool, so its blocks aren't given to it.
     ToolConfig,
     /// The Rust block reads a file or an environment variable at compile time.
     CompileTimeRead,
@@ -158,6 +163,14 @@ pub(crate) enum StepState {
         /// Why, as a block's reason: "no private working directory for clippy".
         reason: &'static str,
     },
+    /// The step was due on a `fragment(<kind>)` block, but its tool doesn't check that kind.
+    /// Named `not_run` in JSON.
+    Unsupported {
+        /// The tool's name.
+        tool: &'static str,
+        /// The kind the block declares.
+        kind: Kind,
+    },
 }
 
 impl StepState {
@@ -168,7 +181,10 @@ impl StepState {
             Self::Ran => "ran",
             Self::Off { .. } => "off",
             Self::Skipped { .. } => "skipped",
-            Self::NotRun | Self::ToolRefused { .. } | Self::Unrunnable { .. } => "not_run",
+            Self::NotRun
+            | Self::ToolRefused { .. }
+            | Self::Unrunnable { .. }
+            | Self::Unsupported { .. } => "not_run",
         }
     }
 
@@ -188,8 +204,28 @@ impl StepState {
                 inside_root: true,
             } => Some(format!("`{binary}` is inside the checkout")),
             Self::Unrunnable { reason } => Some((*reason).to_owned()),
+            Self::Unsupported { tool, kind } => Some(unsupported_reason(tool, *kind)),
         }
     }
+}
+
+/// Why a step didn't run on a fragment its tool can't check: "rustfmt can't check a statements
+/// fragment".
+#[must_use]
+pub(crate) fn unsupported_reason(tool: &str, kind: Kind) -> String {
+    format!("{tool} can't check {} fragment", kind.with_article())
+}
+
+/// The kind `block` declares with its first `fragment(<kind>)` attribute, if it writes one.
+#[must_use]
+pub(crate) fn block_fragment(block: &CodeBlock) -> Option<Kind> {
+    block
+        .info
+        .as_ref()?
+        .parsed()
+        .attributes
+        .into_iter()
+        .find_map(fragment_kind)
 }
 
 /// What a block's format and lint steps did.
@@ -232,6 +268,7 @@ impl Steps {
             return Self::default();
         }
         let language = tag_of(block).and_then(Language::from_tag);
+        let fragment = block_fragment(block);
         let step = |step: Step| {
             let Some((language, tool)) = language.and_then(|language| {
                 tools::selected(code_blocks, language, step).map(|tool| (language, tool))
@@ -247,7 +284,13 @@ impl Steps {
                     table: format!("[features.code-blocks.{}.{}]", language.table(), tool.name),
                     key: step.key(),
                 },
-                Some(StepValue::Full | StepValue::Other(_)) | None => StepState::NotRun,
+                Some(StepValue::Full | StepValue::Other(_)) | None => match fragment {
+                    Some(kind) if !tool.supports(kind) => StepState::Unsupported {
+                        tool: tool.name,
+                        kind,
+                    },
+                    _ => StepState::NotRun,
+                },
             }
         };
         Self {
@@ -409,6 +452,9 @@ impl BlockState {
                 Some(format!("`{}` is inside the checkout", tool_of(tag, tool)))
             }
             Self::NotChecked(NotChecked::ToolchainPath) => Some("toolchain path".to_owned()),
+            Self::NotChecked(NotChecked::ToolchainUnresolved) => {
+                Some("toolchain unresolved".to_owned())
+            }
             Self::NotChecked(NotChecked::ToolConfig) => Some("tool config".to_owned()),
             Self::NotChecked(NotChecked::CompileTimeRead) => Some("compile-time read".to_owned()),
             Self::NotChecked(NotChecked::TooLargeToScan) => Some("too large to scan".to_owned()),
@@ -464,11 +510,11 @@ pub(crate) struct CodeBlockCounts {
     /// How many format steps didn't run for each short reason, for the summary line. They sum to
     /// `format_not_run`.
     #[serde(skip)]
-    pub(crate) format_not_run_reasons: BTreeMap<&'static str, usize>,
+    pub(crate) format_not_run_reasons: BTreeMap<String, usize>,
     /// How many lint steps didn't run for each short reason, for the summary line. They sum to
     /// `lint_not_run`.
     #[serde(skip)]
-    pub(crate) lint_not_run_reasons: BTreeMap<&'static str, usize>,
+    pub(crate) lint_not_run_reasons: BTreeMap<String, usize>,
     /// Blocks in a language supdoc has no checker for.
     pub(crate) unknown_language: usize,
     /// Blocks whose selected tool isn't installed.
@@ -518,7 +564,7 @@ impl CodeBlockCounts {
                     StepState::Skipped { .. } => *skipped += 1,
                     StepState::Unrunnable { reason } => {
                         *not_run += 1;
-                        *why.entry(short_reason(reason)).or_default() += 1;
+                        *why.entry(short_reason(reason).to_owned()).or_default() += 1;
                     }
                     StepState::ToolRefused { inside_root, .. } => {
                         *not_run += 1;
@@ -527,7 +573,11 @@ impl CodeBlockCounts {
                         } else {
                             "tool missing"
                         };
-                        *why.entry(reason).or_default() += 1;
+                        *why.entry(reason.to_owned()).or_default() += 1;
+                    }
+                    StepState::Unsupported { tool, kind } => {
+                        *not_run += 1;
+                        *why.entry(unsupported_reason(tool, *kind)).or_default() += 1;
                     }
                     StepState::Ran | StepState::NotRun => {}
                 }
@@ -597,8 +647,11 @@ impl CodeBlockCounts {
 }
 
 /// `reasons` with their counts, most first, then by reason.
-fn by_count(reasons: &BTreeMap<&'static str, usize>) -> Vec<(&'static str, usize)> {
-    let mut sorted: Vec<_> = reasons.iter().map(|(why, count)| (*why, *count)).collect();
+fn by_count(reasons: &BTreeMap<String, usize>) -> Vec<(&str, usize)> {
+    let mut sorted: Vec<_> = reasons
+        .iter()
+        .map(|(why, count)| (why.as_str(), *count))
+        .collect();
     sorted.sort_by(|(a_why, a_count), (b_why, b_count)| {
         b_count.cmp(a_count).then_with(|| a_why.cmp(b_why))
     });
@@ -1063,6 +1116,7 @@ mod tests {
             BlockState::NotChecked(NotChecked::NoStepRan),
             BlockState::NotChecked(NotChecked::InputUnreadable),
             BlockState::NotChecked(NotChecked::ToolInsideRoot),
+            BlockState::NotChecked(NotChecked::ToolchainUnresolved),
             BlockState::UnknownLanguage,
             BlockState::ToolMissing,
         ];

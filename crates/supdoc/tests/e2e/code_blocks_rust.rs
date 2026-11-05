@@ -128,6 +128,94 @@ fn rustfmt_without_a_toolchain_file_still_never_auto_installs() {
     assert_eq!(stub.record("argv").lines().count(), 4, "{json}");
 }
 
+/// Writes a stub `rustup` into `dir` that records each run's working directory and arguments to
+/// `rustup-runs`, its environment to `rustup-env`, and answers `printed`, as `rustup show
+/// active-toolchain` does.
+fn stub_rustup(dir: &Path, printed: &str) {
+    let out = dir.display();
+    let script = format!(
+        "#!/bin/sh\necho \"$(pwd) $*\" >> '{out}/rustup-runs'\n/usr/bin/env > '{out}/rustup-env'\n\
+         /bin/cat <<'ANSWER'\n{printed}ANSWER\n"
+    );
+    let path = dir.join("rustup");
+    std::fs::write(&path, script).expect("the stub should be writable");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("the stub should be made executable");
+}
+
+#[test]
+fn a_root_without_a_toolchain_file_pins_the_channel_rustup_names_once_per_run() {
+    let project = project_with_rust_doc(
+        "# Blocks\n\n```rust\nfn main() {}\n```\n\n```rust\nfn f() {}\n```\n",
+    );
+    let stub = Stub::new();
+    stub_rustup(
+        stub.dir.path(),
+        "1.85.0-x86_64-unknown-linux-gnu (overridden by '/w/rust-toolchain.toml')\n",
+    );
+
+    let json = stub.check(&project, 0);
+
+    let root = project
+        .path(".")
+        .canonicalize()
+        .expect("the project root should resolve");
+    assert_eq!(
+        stub.record("rustup-runs"),
+        format!("{} show active-toolchain\n", root.display()),
+        "rustup should run once, from the root"
+    );
+    assert!(
+        stub.record("rustup-env")
+            .lines()
+            .any(|line| line == "RUSTUP_AUTO_INSTALL=0"),
+        "rustup should never install: {}",
+        stub.record("rustup-env")
+    );
+    let env = stub.record("env");
+    assert!(
+        env.lines()
+            .any(|line| line == "RUSTUP_TOOLCHAIN=1.85.0-x86_64-unknown-linux-gnu"),
+        "rustfmt should get rustup's channel: {env}"
+    );
+    assert!(
+        env.lines().any(|line| line == "RUSTUP_AUTO_INSTALL=0"),
+        "{env}"
+    );
+    assert_eq!(stub.record("runs"), "run\nrun\n", "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 2, "{json}");
+}
+
+#[test]
+fn rustup_naming_a_path_toolchain_leaves_every_rust_block_unchecked_with_one_warning() {
+    let project = project_with_rust_doc(
+        "# Blocks\n\n```rust\nfn main() {}\n```\n\n```rust\nfn f() {}\n```\n",
+    );
+    let stub = Stub::new();
+    stub_rustup(
+        stub.dir.path(),
+        "/w/evil (overridden by '/w/rust-toolchain.toml')\n",
+    );
+
+    let json = stub.check(&project, 0);
+
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 3, "{json}");
+    assert_eq!(
+        at(&json, "/data/summary/code_blocks/not_checked"),
+        2,
+        "{json}"
+    );
+    for block in ["/data/code_blocks/0", "/data/code_blocks/1"] {
+        assert_eq!(
+            at(&json, &format!("{block}/reason")),
+            "toolchain unresolved",
+            "{json}"
+        );
+    }
+    assert_eq!(stub.record("runs"), "", "rustfmt should never run");
+}
+
 #[test]
 fn a_toolchain_path_leaves_every_rust_block_unchecked_with_one_warning() {
     let project = project_with_rust_doc(
@@ -418,11 +506,15 @@ fn fix_never_deletes_a_plain_comment_line_inside_a_doc_comment_block() {
     );
 }
 
-/// A directory outside the checkout holding stub `rustfmt` and `clippy-driver`, each appending
-/// one line per run to its own record and `rustfmt` printing its stdin.
+/// A directory outside the checkout holding stub `rustfmt`, `clippy-driver` and `cargo`, each
+/// appending one line per run to its own record and `rustfmt` printing its stdin.
 fn rust_stubs() -> tempfile::TempDir {
     let dir = tempfile::TempDir::new().expect("a temporary directory should be creatable");
-    for (name, tail) in [("rustfmt", "exec /bin/cat\n"), ("clippy-driver", "")] {
+    for (name, tail) in [
+        ("rustfmt", "exec /bin/cat\n"),
+        ("clippy-driver", ""),
+        ("cargo", ""),
+    ] {
         let script = format!(
             "#!/bin/sh\necho run >> '{}/{name}-runs'\n{tail}",
             dir.path().display()
@@ -455,7 +547,7 @@ const TRUST_OFF: &str =
 const AWAITS_AUDIT: &str = "clippy doesn't run yet, even in a trusted project";
 
 /// Runs `supdoc args` on `project` with `stubs` as the only `PATH` entry and `vars` besides,
-/// asserting it exits `exit` and that clippy never started.
+/// asserting it exits `exit` and that neither clippy nor cargo ever started.
 fn check_with_stubs(
     project: &Project,
     stubs: &tempfile::TempDir,
@@ -471,6 +563,12 @@ fn check_with_stubs(
         stub_record(stubs.path(), "clippy-driver-runs"),
         "",
         "no clippy-driver process may start: {}",
+        run.stdout
+    );
+    assert_eq!(
+        stub_record(stubs.path(), "cargo-runs"),
+        "",
+        "no cargo process may start: {}",
         run.stdout
     );
     run

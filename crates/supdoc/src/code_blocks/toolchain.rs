@@ -3,11 +3,19 @@
 //! The rustup proxy would read `rust-toolchain(.toml)` itself and run whatever binary a `path`
 //! key names, or download what a channel names. supdoc reads the root's file instead, passes
 //! only a valid channel name as `RUSTUP_TOOLCHAIN`, and always sets `RUSTUP_AUTO_INSTALL=0`.
+//!
+//! A root with no toolchain file would leave the proxy to search the root's parents, and cargo,
+//! run from the root, could then get another toolchain than clippy-driver, run from a neutral
+//! directory. So supdoc asks rustup once per run which toolchain the root gets, and pins that
+//! channel for every Rust tool (see [`active`]).
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::Read as _;
 use std::path::Path;
+use std::time::Duration;
 
+use super::runner::{self, Call, Cwd};
+use super::tools::{Found, ToolEnv, find};
 use crate::config::code_blocks::Edition;
 
 /// The toolchain files supdoc reads, in rustup's order: `rust-toolchain` wins when both exist.
@@ -19,7 +27,7 @@ const MAX_BYTES: u64 = 64 * 1024;
 /// What the root's toolchain file pins.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Toolchain {
-    /// No toolchain file, or one that names no channel: rustup's default.
+    /// No toolchain file, or one that names no channel, and no `rustup` to ask: rustup's default.
     Default,
     /// A valid channel name, passed as `RUSTUP_TOOLCHAIN`.
     Channel(String),
@@ -30,6 +38,19 @@ pub(crate) enum Toolchain {
         /// The refused file's name in the root: `rust-toolchain` or `rust-toolchain.toml`.
         file: &'static str,
     },
+    /// The root pins nothing and rustup couldn't name its toolchain as a channel; the Rust
+    /// blocks aren't checked.
+    Unresolved(Unresolved),
+}
+
+/// Why rustup's answer for a root that pins nothing can't be used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unresolved {
+    /// The `rustup` on `PATH` is inside the checkout, so the checkout chose it.
+    InsideRoot,
+    /// `rustup show active-toolchain` failed, timed out, printed past its cap, or named a path,
+    /// a custom toolchain or nothing supdoc accepts as a channel.
+    Unnamed,
 }
 
 /// Why the root's toolchain file was refused.
@@ -76,8 +97,55 @@ pub(crate) fn read(root: &Path) -> Toolchain {
     }
 }
 
+/// The toolchain rustup gives `root`, for a root whose own file pins none: [`Toolchain::Default`]
+/// when no `rustup` is on `env`'s `PATH`, else the channel `rustup show active-toolchain` names
+/// first, run once from the root with `env` plus `RUSTUP_AUTO_INSTALL=0`, under `timeout` and the
+/// tool output cap. A `rustup` inside the checkout isn't run, and an answer [`is_valid_channel`]
+/// rejects, such as the path a parent's `path` key names, is [`Toolchain::Unresolved`], as is
+/// any failure.
+///
+/// Effect: reads file metadata along `PATH`, resolves symlinks, and runs `rustup`, killing it at
+/// the timeout.
+#[must_use]
+pub(crate) fn active(env: &ToolEnv, root: &Path, timeout: Option<Duration>) -> Toolchain {
+    let rustup = match find("rustup", env, root) {
+        Found::Missing => return Toolchain::Default,
+        Found::InsideRoot(_) => return Toolchain::Unresolved(Unresolved::InsideRoot),
+        Found::OnPath(rustup) => rustup,
+    };
+    let args = [OsStr::new("show"), OsStr::new("active-toolchain")];
+    let call = Call {
+        program: &rustup,
+        name: "rustup",
+        args: &args,
+        extra: &[("RUSTUP_AUTO_INSTALL", OsStr::new("0"))],
+        stdin: b"",
+        timeout,
+        cwd: Cwd::Root,
+        cap: runner::CAP,
+    };
+    runner::run(&call, env, root)
+        .ok()
+        .filter(|ran| ran.success)
+        .and_then(|ran| active_channel(&ran.stdout))
+        .map_or(
+            Toolchain::Unresolved(Unresolved::Unnamed),
+            Toolchain::Channel,
+        )
+}
+
+/// The channel `stdout`, what `rustup show active-toolchain` printed, names in its first field,
+/// when [`is_valid_channel`] accepts it.
+fn active_channel(stdout: &[u8]) -> Option<String> {
+    let first = std::str::from_utf8(stdout)
+        .ok()?
+        .split_whitespace()
+        .next()?;
+    is_valid_channel(first).then(|| first.to_owned())
+}
+
 /// The edition the root's `Cargo.toml` names: `[workspace.package] edition`, then `[package]
-/// edition`. Read only through an in-root real path, as a regular file of at most 64 KiB, and
+/// edition` (or its legacy name `[project]`'s). Read only through an in-root real path, as a regular file of at most 64 KiB, and
 /// never executed. `None` when there is no such file, it can't be read or parsed, or no edition
 /// in it is one of `2015`, `2018`, `2021` or `2024`.
 ///
@@ -186,7 +254,8 @@ fn lints_in(text: &str) -> Vec<OsString> {
         .collect()
 }
 
-/// The edition `text`, a `Cargo.toml`, names: its workspace package's, then its package's.
+/// The edition `text`, a `Cargo.toml`, names: its workspace package's, then its package's, read
+/// from `[package]` or the legacy `[project]` cargo still reads as it.
 fn edition_in(text: &str) -> Option<Edition> {
     let table = text.parse::<toml::Table>().ok()?;
     let named = |section: Option<&toml::Value>| {
@@ -197,6 +266,7 @@ fn edition_in(text: &str) -> Option<Edition> {
     };
     named(table.get("workspace").and_then(|w| w.get("package")))
         .or_else(|| named(table.get("package")))
+        .or_else(|| named(table.get("project")))
 }
 
 /// The text of `file` when its real path is a regular UTF-8 file under `root`'s real path and
@@ -333,7 +403,10 @@ fn is_host_triple(triple: &str) -> bool {
 mod tests {
     use std::ffi::OsString;
 
-    use super::{Refusal, Toolchain, cargo_edition, edition_in, is_valid_channel, parse, read};
+    use super::{
+        Refusal, Toolchain, active_channel, cargo_edition, edition_in, is_valid_channel, parse,
+        read,
+    };
     use crate::config::code_blocks::Edition;
 
     #[test]
@@ -370,6 +443,32 @@ mod tests {
         ] {
             assert!(!is_valid_channel(name), "{name:?} should be refused");
         }
+    }
+
+    #[test]
+    fn rustups_answer_is_its_first_field_when_that_is_a_channel() {
+        for (printed, channel) in [
+            (
+                "stable-aarch64-apple-darwin (default)\n",
+                Some("stable-aarch64-apple-darwin"),
+            ),
+            (
+                "1.85.0-x86_64-unknown-linux-gnu (overridden by '/w/rust-toolchain.toml')\n",
+                Some("1.85.0-x86_64-unknown-linux-gnu"),
+            ),
+            ("nightly-2025-01-31\n", Some("nightly-2025-01-31")),
+            ("/w/evil (overridden by '/w/rust-toolchain.toml')\n", None),
+            ("my-toolchain (default)\n", None),
+            ("", None),
+            ("\n", None),
+        ] {
+            assert_eq!(
+                active_channel(printed.as_bytes()).as_deref(),
+                channel,
+                "{printed:?}"
+            );
+        }
+        assert_eq!(active_channel(b"stable\xff (default)\n"), None);
     }
 
     #[test]
@@ -453,6 +552,14 @@ mod tests {
         );
         assert_eq!(
             edition_in("[package]\nname = \"x\"\nedition = \"2018\"\n"),
+            Some(Edition::E2018)
+        );
+    }
+
+    #[test]
+    fn a_legacy_project_table_names_the_edition_like_a_package() {
+        assert_eq!(
+            edition_in("[project]\nname = \"x\"\nedition = \"2018\"\n"),
             Some(Edition::E2018)
         );
     }
