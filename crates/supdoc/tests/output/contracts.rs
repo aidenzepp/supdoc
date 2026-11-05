@@ -952,6 +952,17 @@ mod helps {
             &["check"],
         ),
         case(
+            "code-block-fragment-unsupported",
+            |p| {
+                config_with(p, "[features.code-blocks]\n[features.code-blocks.rust]\n");
+                p.write(
+                    "docs/blocks.md",
+                    "# B\n\n```rust fragment(statements)\nlet x = 1;\n```\n",
+                );
+            },
+            &["check"],
+        ),
+        case(
             "code-block-missing-reason",
             |p| {
                 config_with(p, "[features.code-blocks]\n");

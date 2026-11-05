@@ -10,9 +10,10 @@ use std::path::{Path, PathBuf};
 use crate::config::code_blocks::{CodeBlocks, Dialect, Edition, Language};
 
 use super::format::ParseError;
+use super::fragment::{Kind, Support};
 use super::lint;
 use super::runner::{Failure, Ran};
-use super::{biome, python, rust, shell};
+use super::{biome, python, rumdl, rust, shell};
 
 /// The variables a tool gets from supdoc's own environment, and no others.
 const PASSED: [&str; 5] = [
@@ -96,7 +97,8 @@ pub(crate) struct Invocation<'run> {
     /// The shell dialect the block is read as.
     pub(crate) dialect: Dialect,
     /// The flags the project contributes, each found inside the root: rustfmt's and biome's
-    /// `--config-path`, clippy's `[lints]` levels. Empty for every other tool.
+    /// `--config-path`, rumdl's `--config` or `--no-config`, clippy's `[lints]` levels. Empty for
+    /// every other tool.
     pub(crate) project: &'run [OsString],
     /// Where clippy writes the block's metadata. `None` names no path, which is how a cache key
     /// names every run of the same block alike.
@@ -140,6 +142,8 @@ pub(crate) struct ToolCartridge {
     pub(crate) config_files: &'static [&'static str],
     /// The values its step's mode accepts, in config and in a block attribute.
     pub(crate) modes: &'static [&'static str],
+    /// The fragment kinds it checks, and how.
+    pub(crate) fragments: &'static [(Kind, Support)],
     /// Its arguments for a block.
     argv: fn(&Invocation<'_>) -> Vec<OsString>,
     /// How a run is read.
@@ -154,6 +158,12 @@ impl ToolCartridge {
             Reader::Format(_) => Step::Format,
             Reader::Lint(_) => Step::Lint,
         }
+    }
+
+    /// Whether it checks a fragment of `kind`.
+    #[must_use]
+    pub(crate) fn supports(&self, kind: Kind) -> bool {
+        self.fragments.iter().any(|(listed, _)| *listed == kind)
     }
 
     /// Its arguments for the block `invocation` describes.
@@ -187,7 +197,7 @@ impl ToolCartridge {
 const FULL_OR_OFF: &[&str] = &["full", "off"];
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 9] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 11] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -196,6 +206,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 9] = [
         install: "rustup component add rustfmt",
         config_files: &["rustfmt.toml", ".rustfmt.toml"],
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: rustfmt_args,
         reader: Reader::Format(rust::parse_error),
     },
@@ -207,6 +218,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 9] = [
         install: "go install mvdan.cc/sh/v3/cmd/shfmt@latest",
         config_files: &[".editorconfig"],
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: shfmt_args,
         reader: Reader::Format(shell::parse_error),
     },
@@ -218,6 +230,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 9] = [
         install: "pipx install ruff",
         config_files: &["ruff.toml", ".ruff.toml", "pyproject.toml"],
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: ruff_format_args,
         reader: Reader::Format(python::ruff_parse_error),
     },
@@ -229,6 +242,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 9] = [
         install: "pipx install black",
         config_files: &["pyproject.toml"],
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: black_args,
         reader: Reader::Format(python::black_parse_error),
     },
@@ -240,6 +254,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 9] = [
         install: "pipx install ruff",
         config_files: &["ruff.toml", ".ruff.toml", "pyproject.toml"],
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: ruff_args,
         reader: Reader::Lint(python::lint_verdict),
     },
@@ -251,6 +266,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 9] = [
         install: "cabal install ShellCheck",
         config_files: &[".shellcheckrc"],
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: shellcheck_args,
         reader: Reader::Lint(shell::lint_verdict),
     },
@@ -262,6 +278,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 9] = [
         install: "rustup component add clippy",
         config_files: &["clippy.toml", ".clippy.toml", "Cargo.toml"],
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: clippy_args,
         reader: Reader::Lint(rust::lint_verdict),
     },
@@ -273,6 +290,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 9] = [
         install: "npm install --global @biomejs/biome",
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: biome_format_args,
         reader: Reader::Format(biome::parse_error),
     },
@@ -284,9 +302,44 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 9] = [
         install: "npm install --global @biomejs/biome",
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
+        fragments: &[],
         argv: biome_format_args,
         reader: Reader::Format(biome::parse_error),
     },
+    ToolCartridge {
+        name: "rumdl-format",
+        language: Language::Markdown,
+        binary: "rumdl",
+        tier: Tier::Static,
+        install: "pipx install rumdl",
+        config_files: RUMDL_CONFIGS,
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        argv: rumdl_format_args,
+        reader: Reader::Format(rumdl::parse_error),
+    },
+    ToolCartridge {
+        name: "rumdl",
+        language: Language::Markdown,
+        binary: "rumdl",
+        tier: Tier::Static,
+        install: "pipx install rumdl",
+        config_files: RUMDL_CONFIGS,
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        argv: rumdl_args,
+        reader: Reader::Lint(rumdl::lint_verdict),
+    },
+];
+
+/// The files rumdl's results depend on: its config names (see [`rumdl::CONFIG_FILES`]) and the
+/// `.editorconfig` it reads line lengths from.
+const RUMDL_CONFIGS: &[&str] = &[
+    ".rumdl.toml",
+    "rumdl.toml",
+    ".config/rumdl.toml",
+    "pyproject.toml",
+    ".editorconfig",
 ];
 
 /// The config files biome reads, which its cached results are keyed on.
@@ -442,6 +495,65 @@ fn biome_format_args(invocation: &Invocation<'_>) -> Vec<OsString> {
         .chain([stdin_path])
         .chain(invocation.project.iter().cloned())
         .collect()
+}
+
+/// The rules rumdl leaves off for a block: MD041, which wants a file to open with a heading, and
+/// MD051 and MD057, which check a block's links against the doc's real directory and the files
+/// beside it, which the block's text is not. Line length (MD013) is left to the project's config.
+const RUMDL_RELAXED: &str = "--extend-disable=MD041,MD051,MD057";
+
+/// The name rumdl is told its stdin has: a doc that is itself Markdown gives its own path, so a
+/// per-file entry naming the doc matches its blocks; any other doc, such as a Rust source file,
+/// gives `<doc>.<n>.md` (see [`virtual_path`]).
+fn rumdl_stdin_name(invocation: &Invocation<'_>) -> OsString {
+    if invocation
+        .doc
+        .extension()
+        .is_some_and(|extension| extension == "md")
+    {
+        invocation.doc.as_os_str().to_owned()
+    } else {
+        virtual_path(invocation.doc, invocation.index, "md")
+    }
+}
+
+/// `rumdl fmt`'s arguments: no cache, no `exclude` (a project's would skip the block and pass it),
+/// the snippet relaxation, the project's `--config` or `--no-config`, then the block on stdin under its virtual path.
+fn rumdl_format_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    [
+        OsString::from("fmt"),
+        OsString::from("--no-cache"),
+        OsString::from("--no-exclude"),
+    ]
+    .into_iter()
+    .chain([OsString::from(RUMDL_RELAXED)])
+    .chain(invocation.project.iter().cloned())
+    .chain([
+        OsString::from("--stdin-filename"),
+        rumdl_stdin_name(invocation),
+        OsString::from("-"),
+    ])
+    .collect()
+}
+
+/// `rumdl check`'s arguments: no cache, no `exclude`, JSON diagnostics, the snippet relaxation, the project's
+/// `--config` or `--no-config`, then the block on stdin under its virtual path. Never `--fix`.
+fn rumdl_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    [
+        OsString::from("check"),
+        OsString::from("--no-cache"),
+        OsString::from("--no-exclude"),
+        OsString::from("--output-format=json"),
+        OsString::from(RUMDL_RELAXED),
+    ]
+    .into_iter()
+    .chain(invocation.project.iter().cloned())
+    .chain([
+        OsString::from("--stdin"),
+        OsString::from("--stdin-filename"),
+        rumdl_stdin_name(invocation),
+    ])
+    .collect()
 }
 
 /// The lints clippy leaves off for a block, which a snippet breaks for lack of context, as
@@ -683,6 +795,20 @@ mod tests {
                     "biome",
                     Tier::Static
                 ),
+                (
+                    "rumdl-format",
+                    Language::Markdown,
+                    Step::Format,
+                    "rumdl",
+                    Tier::Static
+                ),
+                (
+                    "rumdl",
+                    Language::Markdown,
+                    Step::Lint,
+                    "rumdl",
+                    Tier::Static
+                ),
             ]
         );
     }
@@ -735,6 +861,73 @@ mod tests {
         });
 
         assert_eq!(posix, ["--filename", "/p/docs/a.md.3.sh", "-ln", "posix"]);
+    }
+
+    #[test]
+    fn rumdl_reads_stdin_under_the_virtual_path_with_the_project_config_and_md041_off() {
+        let project = [OsString::from("--no-config")];
+
+        assert_eq!(
+            args_of("rumdl-format", 2, &project),
+            [
+                "fmt",
+                "--no-cache",
+                "--no-exclude",
+                "--extend-disable=MD041,MD051,MD057",
+                "--no-config",
+                "--stdin-filename",
+                "/p/docs/a.md",
+                "-"
+            ]
+        );
+        assert_eq!(
+            args_of("rumdl", 2, &project),
+            [
+                "check",
+                "--no-cache",
+                "--no-exclude",
+                "--output-format=json",
+                "--extend-disable=MD041,MD051,MD057",
+                "--no-config",
+                "--stdin",
+                "--stdin-filename",
+                "/p/docs/a.md"
+            ]
+        );
+    }
+
+    #[test]
+    fn rumdl_is_told_a_markdown_doc_by_its_own_path_and_any_other_doc_by_a_virtual_one() {
+        let name_for = |doc: &str| {
+            cartridge("rumdl-format")
+                .args(&Invocation {
+                    doc: Path::new(doc),
+                    tag: "",
+                    index: 3,
+                    edition: Edition::E2024,
+                    dialect: Dialect::Bash,
+                    project: &[],
+                    emit: None,
+                    externs: &[],
+                })
+                .get(5)
+                .cloned()
+        };
+
+        assert_eq!(name_for("/p/docs/a.md"), Some("/p/docs/a.md".into()));
+        assert_eq!(name_for("/p/src/lib.rs"), Some("/p/src/lib.rs.3.md".into()));
+    }
+
+    #[test]
+    fn rumdls_cached_results_are_keyed_on_every_config_it_can_be_given() {
+        let keyed = cartridge("rumdl").config_files;
+
+        assert!(
+            crate::code_blocks::rumdl::CONFIG_FILES
+                .iter()
+                .all(|name| keyed.contains(name)),
+            "{keyed:?}"
+        );
     }
 
     #[test]

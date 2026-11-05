@@ -27,16 +27,21 @@ use super::block::{CodeBlock, Info};
 use super::cache::{self, Cache};
 use super::excerpt;
 use super::format::{self, FixDoc};
+use super::fragment::Kind;
 use super::info::{
-    KNOWN_ATTRIBUTES, SourceKind, StepValue, is_known_attribute, parenthesized_spelling, reasoned,
-    replacement_for_removed, source_attributes, step_attribute,
+    KNOWN_ATTRIBUTES, SourceKind, StepValue, fragment_kind, is_fragment_word, is_known_attribute,
+    parenthesized_spelling, reasoned, replacement_for_removed, source_attributes, step_attribute,
 };
 use super::lint;
 use super::project::{self, BuildFailed, Plan, Refused};
+use super::rumdl;
 use super::runner::{self, Call, Ran};
 use super::rust::{self, Scan};
 use super::source::{self, SourceText, Unresolved};
-use super::states::{self, Excerpt, NotChecked, StepState, Steps, state_of, tag_of};
+use super::states::{
+    self, Excerpt, NotChecked, StepState, Steps, block_fragment, state_of, tag_of,
+    unsupported_reason,
+};
 use super::toolchain::{self, Refusal, Toolchain};
 use super::tools::{self, Found, Invocation, Step, Tier, ToolCartridge, ToolEnv, find};
 use super::uses::{self, UseState, Written};
@@ -45,6 +50,8 @@ pub(crate) use super::states::{BlockState, CodeBlockCounts};
 
 /// The code for an info-string attribute supdoc doesn't know.
 const UNKNOWN_ATTRIBUTE: &str = "code-block-unknown-attribute";
+/// The code of the warning for a fragment kind the step's tool doesn't check.
+const FRAGMENT_UNSUPPORTED: &str = "code-block-fragment-unsupported";
 
 /// The code for an `ignore`, `lint(off)` or `format(off)` written without a reason.
 const MISSING_REASON: &str = "code-block-missing-reason";
@@ -85,6 +92,8 @@ pub(crate) struct BlockRecord {
     pub(crate) state: BlockState,
     /// What its format and lint steps did.
     pub(crate) steps: Steps,
+    /// The kind its `fragment(<kind>)` attribute declares, if it writes one.
+    pub(crate) fragment: Option<Kind>,
     /// Why it is in that state, when there is a reason.
     pub(crate) reason: Option<String>,
     /// Each `uses(...)` target the block writes, with its state.
@@ -104,6 +113,19 @@ pub(crate) struct BlockRecord {
     given: Option<biome::Given>,
     /// What the format step needs, kept while the block is pending.
     pending: Option<Pending>,
+}
+
+impl BlockRecord {
+    /// Settles each step still due as not run for `reason`, and selects no tool for it.
+    fn hold_steps(&mut self, reason: &'static str) {
+        for step in [&mut self.steps.format, &mut self.steps.lint] {
+            if *step == StepState::NotRun {
+                *step = StepState::Unrunnable { reason };
+            }
+        }
+        self.tool = None;
+        self.linter = None;
+    }
 }
 
 /// A pending block as the format step reads and fixes it.
@@ -182,9 +204,7 @@ pub(crate) fn evaluate(
         let mut outcome = None;
         let mut block_uses = Vec::new();
         if let Some(info) = block.info.as_ref() {
-            findings.extend(unknown_attributes(info));
-            findings.extend(step_values(block, info, code_blocks));
-            findings.extend(missing_reasons(info));
+            findings.extend(attribute_findings(block, info, code_blocks));
             let sources = sources(config, languages, info)?;
             findings.extend(sources.missing);
             block_uses.extend(use_states(
@@ -219,6 +239,7 @@ pub(crate) fn evaluate(
         let state = state_of(block, outcome, |language| code_blocks.checks(language));
         let language = tag_of(block).map(str::to_owned);
         let mut steps = Steps::of(block, &state, code_blocks);
+        findings.extend(fragment_unsupported(block, &steps));
         let checked = language.as_deref().and_then(Language::from_tag);
         let (tool, linter) = selected_tools(code_blocks, &mut steps, checked, &state, granted);
         let pending = (state == BlockState::NotChecked(NotChecked::Pending))
@@ -242,6 +263,7 @@ pub(crate) fn evaluate(
             language,
             state,
             steps,
+            fragment: block_fragment(block),
             uses: block_uses,
             index,
             pending,
@@ -300,7 +322,7 @@ impl Evaluation {
         let mut against: Option<Against> = None;
         let build_timeout = self.build_timeout;
         let timeout = self.timeout;
-        let mut biome_configs = BiomeConfigs::default();
+        let mut configs = ToolConfigs::default();
         let mut toolchain_warned = false;
         let mut slots: Vec<Slot> = Vec::new();
         let mut jobs: Vec<Job> = Vec::new();
@@ -330,10 +352,7 @@ impl Evaluation {
                     continue;
                 }
             }
-            if biome_configs
-                .give(record, tool, (env, root), &mut slots)
-                .is_err()
-            {
+            if !configs.give(record, tool, (env, root), &mut slots) {
                 continue;
             }
             let (runs, refused) = found_runs(
@@ -719,6 +738,33 @@ fn reread<'doc>(
     }
 }
 
+/// The project config each non-Rust tool is given, found once per doc directory.
+#[derive(Debug, Default)]
+struct ToolConfigs {
+    /// biome's.
+    biome: BiomeConfigs,
+    /// rumdl's.
+    rumdl: RumdlConfigs,
+}
+
+impl ToolConfigs {
+    /// Gives `record` the config its tool gets, as [`BiomeConfigs::give`] and
+    /// [`RumdlConfigs::give`] do. Whether the block goes on to its tools: not when its config was
+    /// refused, or when no rule is left to check it.
+    fn give(
+        &mut self,
+        record: &mut BlockRecord,
+        tool: &ToolCartridge,
+        place: (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> bool {
+        if self.biome.give(record, tool, place, slots).is_err() {
+            return false;
+        }
+        matches!(self.rumdl.give(record, tool, place, slots), Ok(Gave::Given))
+    }
+}
+
 /// The biome config flags found for each doc directory, and the refusals already warned about.
 #[derive(Debug, Default)]
 struct BiomeConfigs {
@@ -809,6 +855,110 @@ fn biome_refusal(refusal: &biome::Refusal, at: &Location) -> (String, Finding) {
 
 /// Why biome didn't run when supdoc had no private directory to keep the config it gives biome in.
 const BIOME_NO_PRIVATE_DIR: &str = "biome needs a private directory under `XDG_CACHE_HOME` or `HOME` for the config supdoc gives it, and there is none";
+
+/// The rumdl config flags found for each doc directory, and the refusals already warned about.
+#[derive(Debug, Default)]
+struct RumdlConfigs {
+    /// Each doc directory's result, in the order they were asked for.
+    found: Vec<(PathBuf, Result<rumdl::Project, rumdl::Refusal>)>,
+    /// The refusals a warning has been added for.
+    warned: Vec<rumdl::Refusal>,
+}
+
+impl RumdlConfigs {
+    /// Gives `record`, a Markdown block, the flags rumdl gets for its doc, found once per
+    /// directory. A refusal settles the block as not checked, with its one warning per refusal
+    /// added to `slots`.
+    ///
+    /// Effect: reads the config and may create supdoc's private directory and file for it.
+    ///
+    /// # Errors
+    ///
+    /// The refusal that left the block not checked.
+    fn give(
+        &mut self,
+        record: &mut BlockRecord,
+        tool: &ToolCartridge,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> Result<Gave, rumdl::Refusal> {
+        if tool.language != Language::Markdown {
+            return Ok(Gave::Given);
+        }
+        let doc = root.join(record.at.file.as_str());
+        let dir = doc.parent().unwrap_or(root).to_path_buf();
+        let found = if let Some((_, found)) = self.found.iter().find(|(known, _)| *known == dir) {
+            found.clone()
+        } else {
+            let found = rumdl::project_args(env, root, &doc);
+            self.found.push((dir, found.clone()));
+            found
+        };
+        match found {
+            Ok(project) => {
+                if project.no_rule_left {
+                    record.hold_steps(RUMDL_NO_RULE_LEFT);
+                    return Ok(Gave::Held);
+                }
+                record.given = Some(biome::Given {
+                    mirror: Some(project.doc_as_seen(&doc)),
+                    flags: project.flags,
+                    names: None,
+                });
+                Ok(Gave::Given)
+            }
+            Err(refusal) => {
+                let (reason, warning) = rumdl_refusal(&refusal, &record.at);
+                if !self.warned.contains(&refusal) {
+                    self.warned.push(refusal.clone());
+                    slots.push(Slot::Found(warning));
+                }
+                record.state = BlockState::NotChecked(NotChecked::ToolConfig);
+                record.reason = Some(reason);
+                Err(refusal)
+            }
+        }
+    }
+}
+
+/// What [`RumdlConfigs::give`] did for a block.
+enum Gave {
+    /// The block is ready for its tools.
+    Given,
+    /// Its steps were settled as not run, so no tool is run on it.
+    Held,
+}
+
+/// Why rumdl isn't run on a block whose project config enables only rules supdoc leaves off for
+/// code blocks: nothing would check it, which is not the same as passing it.
+const RUMDL_NO_RULE_LEFT: &str =
+    "the project's rumdl config enables only rules supdoc turns off for code blocks";
+
+/// The state reason and the `code-block-not-checked` warning, at `at`, for a block rumdl isn't
+/// given because of `refusal`.
+fn rumdl_refusal(refusal: &rumdl::Refusal, at: &Location) -> (String, Finding) {
+    let (reason, message, help) = match refusal {
+        rumdl::Refusal::Config { file, why } => (
+            format!("rumdl config `{file}` {why}"),
+            format!("the project's `{file}` {why}, so its Markdown blocks aren't checked"),
+            format!(
+                "remove the `code-block-tools`, `command` and `extends` from `{file}`, or mark the blocks `ignore(<why>)`"
+            ),
+        ),
+        rumdl::Refusal::NoPrivateDir => (
+            RUMDL_NO_PRIVATE_DIR.to_owned(),
+            format!("{RUMDL_NO_PRIVATE_DIR}, so its blocks aren't checked"),
+            "set `XDG_CACHE_HOME` or `HOME` to a directory outside the project".to_owned(),
+        ),
+    };
+    let finding = Finding::new(NOT_CHECKED, Severity::Warning, message)
+        .with_help(help)
+        .with_location(at.clone());
+    (reason, finding)
+}
+
+/// Why rumdl didn't run when supdoc had no private directory to keep its config in.
+const RUMDL_NO_PRIVATE_DIR: &str = "rumdl needs a private directory under `XDG_CACHE_HOME` or `HOME` for its config, and there is none";
 
 /// Why clippy didn't run on a block when [`runner::neutral_dir`] found no private working
 /// directory: its metadata would have nowhere private to go.
@@ -1214,13 +1364,16 @@ fn run_linter(
         return Some(run_clippy(tool, program, record, pending, session, rust));
     }
     let doc = session.root.join(record.at.file.as_str());
+    let given = record.given.as_ref();
     let args = tool.args(&Invocation {
-        doc: &doc,
+        doc: given
+            .and_then(|given| given.mirror.as_deref())
+            .unwrap_or(&doc),
         index: record.index,
         tag: record.language.as_deref().unwrap_or_default(),
         edition: record.edition.unwrap_or(Edition::E2024),
         dialect: record.dialect,
-        project: &[],
+        project: given.map_or(&[], |given| given.flags.as_slice()),
         emit: None,
         externs: &[],
     });
@@ -1711,6 +1864,15 @@ struct Sources {
     from_missing: bool,
 }
 
+/// The warnings about the attributes written in `info`: unknown ones, step values no tool
+/// accepts and missing reasons.
+fn attribute_findings(block: &CodeBlock, info: &Info, code_blocks: &CodeBlocks) -> Vec<Finding> {
+    let mut found = unknown_attributes(info);
+    found.extend(step_values(block, info, code_blocks));
+    found.extend(missing_reasons(info));
+    found
+}
+
 /// One `code-block-unknown-attribute` warning at `info` for a language word holding commas, and
 /// one for each attribute outside the closed list.
 fn unknown_attributes(info: &Info) -> Vec<Finding> {
@@ -1752,13 +1914,82 @@ fn unknown_attributes(info: &Info) -> Vec<Finding> {
                     (None, Some(replacement)) => {
                         format!("`{attribute}` was removed: write `{replacement}` instead")
                     }
+                    (None, None) if is_fragment_word(attribute) => {
+                        format!("write `fragment(<kind>)` with one of {}", Kind::listed())
+                    }
                     (None, None) => {
                         format!("remove `{attribute}` or correct it to one of {KNOWN_ATTRIBUTES}")
                     }
                 },
             )
         });
-    comma.into_iter().chain(unknown).collect()
+    let repeated = parsed
+        .attributes
+        .iter()
+        .filter(|attribute| fragment_kind(attribute).is_some())
+        .skip(1)
+        .map(|attribute| {
+            Finding::new(
+                UNKNOWN_ATTRIBUTE,
+                Severity::Warning,
+                format!(
+                    "the `{}` block's attribute `{attribute}` repeats its first `fragment(...)`",
+                    parsed.language
+                ),
+            )
+            .with_location(info.location.clone())
+            .with_help(format!(
+                "keep one `fragment(<kind>)`, naming one of {}",
+                Kind::listed()
+            ))
+        });
+    comma.into_iter().chain(unknown).chain(repeated).collect()
+}
+
+/// One `code-block-fragment-unsupported` warning at `info` for each of `steps` that didn't run
+/// because its tool doesn't check the block's fragment kind, naming the tools of `language`
+/// that do and how to turn the step off.
+fn fragment_unsupported(block: &CodeBlock, steps: &Steps) -> Vec<Finding> {
+    let Some(info) = block.info.as_ref() else {
+        return Vec::new();
+    };
+    let language = tag_of(block).and_then(Language::from_tag);
+    [(Step::Format, &steps.format), (Step::Lint, &steps.lint)]
+        .into_iter()
+        .filter_map(|(step, state)| {
+            let StepState::Unsupported { tool, kind } = state else {
+                return None;
+            };
+            let checking: Vec<String> = tools::CARTRIDGES
+                .iter()
+                .filter(|other| Some(other.language) == language && other.supports(*kind))
+                .map(|other| format!("`{}`", other.name))
+                .collect();
+            let key = step.key();
+            let off = format!("write `{key}(off: <why>)` to skip this step");
+            let help = if checking.is_empty() {
+                format!("no tool checks a `{}` fragment here: {off}", kind.name())
+            } else {
+                format!(
+                    "{} check a `{}` fragment: select one, or {off}",
+                    checking.join(", "),
+                    kind.name()
+                )
+            };
+            Some(
+                Finding::new(
+                    FRAGMENT_UNSUPPORTED,
+                    Severity::Warning,
+                    format!(
+                        "the {key} step didn't run: {}",
+                        unsupported_reason(tool, *kind)
+                    ),
+                )
+                .with_location(info.location.clone())
+                .with_help(help),
+            )
+        })
+        .collect()
 }
 
 /// One `code-block-unknown-attribute` warning at `info` for each `lint(...)` or `format(...)`
@@ -2037,6 +2268,7 @@ mod tests {
                 language: Some("rust".to_owned()),
                 state: BlockState::NotChecked(NotChecked::Pending),
                 steps: Steps::default(),
+                fragment: None,
                 reason: None,
                 uses: Vec::new(),
                 index: position + 1,

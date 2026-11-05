@@ -181,6 +181,9 @@ pub(crate) mod code_blocks {
     /// A block's info string: its language and attributes.
     pub(crate) mod info;
 
+    /// The fragment kinds a block declares, and how a tool supports one.
+    pub(crate) mod fragment;
+
     /// A code block, and finding the blocks in a file by its language.
     pub(crate) mod block;
 
@@ -222,6 +225,8 @@ pub(crate) mod code_blocks {
 
     /// TypeScript and JavaScript's format step, run by biome.
     mod biome;
+    /// Markdown's format and lint steps, run by rumdl.
+    mod rumdl;
 
     /// Reading the Rust toolchain a project pins.
     mod toolchain;

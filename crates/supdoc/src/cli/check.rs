@@ -15,6 +15,7 @@ use serde::Serialize;
 use crate::check::model::{LinkReport, Report as CheckModel};
 use crate::check::reconcile::{self, check_outcome, reconcile_in};
 use crate::code_blocks::evaluate::{BlockRecord, BlockState, CodeBlockCounts, evaluate};
+use crate::code_blocks::fragment::Kind;
 use crate::code_blocks::tools::ToolEnv;
 use crate::code_blocks::uses::UseState;
 use crate::exit::ExitStatus;
@@ -198,6 +199,10 @@ struct CodeBlockJson {
     /// `tool_missing`: `failed` when a step that ran failed, `passed` when the steps that ran all
     /// passed.
     state: &'static str,
+    /// The kind its `fragment(<kind>)` attribute declares: `statements`, `expression`, `entries`,
+    /// `children`, `members` or `declarations`. Left out for a block that is a whole file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fragment: Option<&'static str>,
     /// What the format step did: `ran`, `off`, `skipped` or `not_run`.
     format: &'static str,
     /// What the lint step did: `ran`, `off`, `skipped` or `not_run`.
@@ -227,6 +232,7 @@ impl From<&BlockRecord> for CodeBlockJson {
             column: record.at.column,
             language: record.language.clone(),
             state: record.state.name(),
+            fragment: record.fragment.map(Kind::name),
             format: record.steps.format.name(),
             lint: record.steps.lint.name(),
             reason: record.reason.clone(),
