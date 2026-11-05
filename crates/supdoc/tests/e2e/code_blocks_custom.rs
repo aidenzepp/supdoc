@@ -758,6 +758,21 @@ fn lint_by_a_custom_command_that_fails_printing_nothing_says_so() {
 }
 
 #[test]
+fn lint_by_a_custom_command_is_never_cached() {
+    let stub = Stub::new("exit 0");
+    let project = lint_project(GNU_STUB, "x = 1");
+
+    let _first = check(&project, &stub, &[trusted()], 0);
+    let _second = check(&project, &stub, &[trusted()], 0);
+
+    assert_eq!(
+        stub.logged("call").len(),
+        2,
+        "each check should spawn the linter again"
+    );
+}
+
+#[test]
 fn lint_by_the_real_ruff_as_a_custom_command_finds_an_unused_import() {
     let Some(dir) = real_tool_dir(
         "ruff",

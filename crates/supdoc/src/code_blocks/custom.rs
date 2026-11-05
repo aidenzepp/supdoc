@@ -174,7 +174,7 @@ pub(crate) fn finding(
             format!("{named} failed on the block: {detail}"),
         )
         .with_help(format!(
-            "fix what it reports, change {}, or mark the block `{}(off: <why>)`",
+            "fix what it reports, change {}, or mark the block `{}(off: <reason>)`",
             key(tool),
             attribute(tool)
         )),
@@ -187,7 +187,7 @@ pub(crate) fn finding(
             ),
         )
         .with_help(format!(
-            "raise the limit with `--code-block-timeout 30s`, or mark the block `{}(off: <why>)`",
+            "raise the limit with `--code-block-timeout 30s`, or mark the block `{}(off: <reason>)`",
             attribute(tool)
         )),
         Verdict::Formatted
@@ -223,7 +223,8 @@ pub(crate) fn names(path: &str, root: &Path) -> Vec<String> {
 /// Judges a custom linter's `result` on a block of `lines` lines whose file it may name as any
 /// of `names` or stdin: exit 0 is clean, whatever it printed. A non-zero exit gives the
 /// diagnostics `diagnostics` reads from its stdout then its stderr, ANSI escapes removed; with
-/// none, or no `diagnostics`, its first [`QUOTED_LINES`] lines of output, stdout then stderr. A
+/// none, or no `diagnostics`, its first [`QUOTED_LINES`] lines of output that aren't blank,
+/// stdout then stderr, or that it printed nothing when every line of both is blank. A
 /// failed start, output past the cap and a timeout are as for every tool.
 #[must_use]
 pub(crate) fn lint_verdict(
@@ -249,8 +250,11 @@ pub(crate) fn lint_verdict(
     if !found.is_empty() {
         return lint::Verdict::Diagnostics(found);
     }
-    let quoted = output().take(QUOTED_LINES).collect::<Vec<_>>().join("\n");
-    lint::Verdict::Unparsed((!quoted.trim().is_empty()).then_some(quoted))
+    let printed: Vec<&str> = output()
+        .filter(|line| !line.trim().is_empty())
+        .take(QUOTED_LINES)
+        .collect();
+    lint::Verdict::Unparsed((!printed.is_empty()).then(|| printed.join("\n")))
 }
 
 /// The diagnostic `line` gives when it reads as `PATH:LINE[:COL]: MESSAGE` for a block of
@@ -340,7 +344,7 @@ pub(crate) fn lint_findings(
             } else {
                 format!(
                     "fix what it reports, add `diagnostics = \"gnu\"` to {} when it prints \
-                     `PATH:LINE:COL: MESSAGE` lines, {off}",
+                     `PATH:LINE[:COL]: MESSAGE` lines, {off}",
                     key(tool)
                 )
             };
@@ -663,8 +667,34 @@ mod tests {
     }
 
     #[test]
+    fn blank_stdout_lines_never_hide_the_stderr_reason_from_the_quote() {
+        let blank = "\n".repeat(25);
+        let progress = "\u{1b}[2K\r\n".repeat(25);
+
+        for (stdout, diagnostics) in [(blank, None), (progress, Some(Diagnostics::Gnu))] {
+            let verdict = lint_verdict(
+                Ok(ran(false, &stdout, "Error: real reason\n")),
+                diagnostics,
+                &block_names(),
+                3,
+            );
+
+            assert_eq!(
+                verdict,
+                lint::Verdict::Unparsed(Some("Error: real reason".to_owned())),
+                "lines blank once ANSI is removed shouldn't push stderr out: {stdout:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_failed_linter_that_printed_nothing_says_so() {
         assert_eq!(gnu_verdict("", " \n"), lint::Verdict::Unparsed(None));
+        assert_eq!(
+            gnu_verdict(&"\u{1b}[2K\r\n".repeat(25), "\n"),
+            lint::Verdict::Unparsed(None),
+            "lines blank once ANSI is removed are nothing printed"
+        );
     }
 
     #[test]
