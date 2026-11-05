@@ -10,6 +10,7 @@ use std::str::FromStr;
 use schemars::JsonSchema;
 use serde::Serialize;
 
+use crate::cartridges::data::KeyPathBudget;
 use crate::config::Config;
 use crate::exit::ExitStatus;
 use crate::finding::{Finding, IndexedText, Severity};
@@ -51,9 +52,14 @@ pub(crate) fn run(
     let command = command_text(args, context);
     let config = load_config(context, output)?;
     let path = locate(&config, context, &args.file)?;
-    let limit = config.limits_in_effect().parse_timeout.value;
-    let file = SourceFile::read(path, Languages::builtin().map_err(CliError::from)?, limit)
-        .map_err(|error| read_failed(&error, config.root(), &args.file))?;
+    let limits = config.limits_in_effect();
+    let file = SourceFile::read(
+        path,
+        Languages::builtin().map_err(CliError::from)?,
+        limits.parse_timeout.value,
+    )
+    .map(|file| file.with_key_paths(KeyPathBudget::from_limits(limits)))
+    .map_err(|error| read_failed(&error, config.root(), &args.file))?;
     let table = file
         .language()
         .symbols(&file)

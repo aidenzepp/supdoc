@@ -14,6 +14,7 @@ use std::time::Instant;
 
 use tree_sitter::{ParseOptions, Parser, Tree};
 
+use crate::cartridges::data::KeyPathBudget;
 use crate::limits::TimeLimit;
 use crate::link::SymbolPath;
 use crate::path::AbsolutePath;
@@ -139,6 +140,8 @@ pub(crate) struct SourceFile {
     /// When reading the file must stop: started before the parse, and checked by every later
     /// parse and query of the file (SEC-1).
     deadline: Deadline,
+    /// The ceilings a data cartridge builds the file's key paths under (SEC-1).
+    key_paths: KeyPathBudget,
 }
 
 impl SourceFile {
@@ -176,6 +179,7 @@ impl SourceFile {
                 tree,
                 language,
                 deadline,
+                key_paths: KeyPathBudget::defaults(),
             }),
             Ok(None) => Err(internal(&path, "tree-sitter returned no tree")),
             Err(stopped) => Err(ReadError::Timeout {
@@ -205,6 +209,21 @@ impl SourceFile {
     #[must_use]
     pub(crate) const fn deadline(&self) -> Deadline {
         self.deadline
+    }
+
+    /// The ceilings a data cartridge builds this file's key paths under: the defaults unless
+    /// [`SourceFile::with_key_paths`] set others.
+    #[must_use]
+    pub(crate) const fn key_paths(&self) -> KeyPathBudget {
+        self.key_paths
+    }
+
+    /// This file with its key paths built under `budget`, the run's `max-key-segments` and
+    /// `max-key-path-size`.
+    #[must_use]
+    pub(crate) const fn with_key_paths(mut self, budget: KeyPathBudget) -> Self {
+        self.key_paths = budget;
+        self
     }
 
     /// This file under `deadline` instead, so a test can stop a query after a parse that ran.

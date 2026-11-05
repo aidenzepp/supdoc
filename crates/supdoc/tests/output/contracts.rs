@@ -535,16 +535,6 @@ mod helps {
             why: "needs a clippy run, which `check` holds until the trust lift; unit-tested in \
                   code_blocks::lint",
         },
-        Unreachable {
-            kind: "read-too-many-keys",
-            why: "needs a data cartridge to read a file, which arrives with P5-L09; unit-tested in \
-                  cartridges::data and read::error",
-        },
-        Unreachable {
-            kind: "read-key-paths-too-large",
-            why: "needs a data cartridge to read a file, which arrives with P5-L09; unit-tested in \
-                  cartridges::data and read::error",
-        },
     ];
 
     /// A code that prints no help on purpose, and why.
@@ -1186,6 +1176,22 @@ mod helps {
                 p.write("docs/guide.md", "[x](../src/big.rs#add)\n");
             },
             &["check"],
+        ),
+        case(
+            "read-too-many-keys",
+            |p| {
+                p.write("Cargo.toml", "[package]\nversion = \"1\"\n");
+                p.write("docs/guide.md", "[x](../Cargo.toml#package.version)\n");
+            },
+            &["--max-key-segments", "2", "check"],
+        ),
+        case(
+            "read-key-paths-too-large",
+            |p| {
+                p.write("Cargo.toml", "[package]\nversion = \"1\"\n");
+                p.write("docs/guide.md", "[x](../Cargo.toml#package.version)\n");
+            },
+            &["--max-key-path-size", "8B", "check"],
         ),
         case(
             "read-timeout",

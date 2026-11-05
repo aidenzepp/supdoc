@@ -30,6 +30,7 @@ static BUILTIN: LazyLock<Result<Languages, CartridgeLoadError>> = LazyLock::new(
         &TYPESCRIPT,
         &TSX,
         &PYTHON,
+        crate::cartridges::toml::cartridge(),
     ]))
 });
 
@@ -386,13 +387,19 @@ mod tests {
     }
 
     #[test]
-    fn builtin_cartridges_all_read_links() {
-        for cartridge in Languages::builtin()
+    fn only_the_data_cartridges_are_target_only() {
+        let target_only: Vec<&str> = Languages::builtin()
             .expect("the built-in cartridges should load")
             .iter()
-        {
-            assert!(cartridge.reads_links(), "{} is target-only", cartridge.id());
-        }
+            .filter(|cartridge| !cartridge.reads_links())
+            .map(|cartridge| cartridge.id().as_str())
+            .collect();
+
+        assert_eq!(
+            target_only,
+            ["toml"],
+            "data files are link targets, never link sources (D2.3)"
+        );
     }
 
     #[test]
