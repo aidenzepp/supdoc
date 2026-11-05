@@ -167,12 +167,15 @@ struct RustcSpan {
     line_start: usize,
     /// Its first column.
     column_start: usize,
+    /// Its last line.
+    line_end: usize,
 }
 
 /// The diagnostics in `clippy-driver --error-format=json`'s `stderr`: each JSON line at level
 /// `error` or `warning`, at its primary span in the block, or at line 0 (the fence) when it has
 /// none there. The summaries rustc closes with, which have neither a code nor a span, are left
-/// out, as is any line that isn't a diagnostic. When any is a missing name
+/// out, as is any line that isn't a diagnostic. An error with no code is a syntax error: rustc
+/// gives every other error and every clippy lint a code. When any is a missing name
 /// ([`lint::missing_name`]), only the missing names remain, one per distinct name at its first
 /// span: the rest are knock-ons of an error that stops clippy's lints.
 fn rustc_diagnostics(stderr: &[u8]) -> Vec<Diagnostic> {
@@ -198,14 +201,18 @@ fn all_rustc_diagnostics(stderr: &[u8]) -> Vec<Diagnostic> {
         .filter(|found| matches!(found.level.as_str(), "error" | "warning"))
         .filter(|found| found.code.is_some() || !found.spans.is_empty())
         .map(|found| {
-            let (line, column) = found
+            let (line, column, end_line) = found
                 .spans
                 .iter()
                 .find(|span| span.is_primary && span.file_name == "<anon>")
-                .map_or((0, 0), |span| (span.line_start, span.column_start));
+                .map_or((0, 0, 0), |span| {
+                    (span.line_start, span.column_start, span.line_end)
+                });
             Diagnostic {
                 line,
                 column,
+                end_line,
+                syntax: found.code.is_none() && found.level == "error",
                 rule: found.code.map_or(found.level, |code| code.code),
                 message: found.message,
             }
@@ -217,7 +224,11 @@ fn all_rustc_diagnostics(stderr: &[u8]) -> Vec<Diagnostic> {
 /// warnings); clean on exit 0 with none; a tool failure on a non-zero exit with none, output
 /// past the cap or a failed start; a timeout is a timeout.
 #[must_use]
-pub(crate) fn lint_verdict(_input: &str, result: Result<Ran, Failure>) -> lint::Verdict {
+pub(crate) fn lint_verdict(
+    _input: &str,
+    _framed: bool,
+    result: Result<Ran, Failure>,
+) -> lint::Verdict {
     match result {
         Ok(ran) => {
             let found = rustc_diagnostics(&ran.stderr);
@@ -1586,6 +1597,7 @@ mod tests {
 
         let verdict = lint_verdict(
             "",
+            false,
             Ok(Ran {
                 success: true,
                 stdout: Vec::new(),
@@ -1599,12 +1611,16 @@ mod tests {
                 Diagnostic {
                     line: 2,
                     column: 13,
+                    end_line: 2,
+                    syntax: false,
                     rule: "clippy::ptr_arg".to_owned(),
                     message: "m".to_owned(),
                 },
                 Diagnostic {
                     line: 0,
                     column: 0,
+                    end_line: 0,
+                    syntax: false,
                     rule: "E0308".to_owned(),
                     message: "m".to_owned(),
                 },
@@ -1615,6 +1631,7 @@ mod tests {
         assert_eq!(
             lint_verdict(
                 "",
+                false,
                 Ok(Ran {
                     success: true,
                     stdout: Vec::new(),
@@ -1623,6 +1640,29 @@ mod tests {
             ),
             Verdict::Clean
         );
+    }
+
+    #[test]
+    fn a_codeless_error_is_a_syntax_error_and_a_coded_error_or_lint_is_not() {
+        let brace = rustc_line("error", None, &span("<anon>", true, 4, 1))
+            .replace("\"m\"", "\"unexpected closing delimiter: `}`\"");
+        let spanning = span("<anon>", true, 2, 5).replace("\"line_end\":2", "\"line_end\":3");
+        let stderr = [
+            brace,
+            rustc_line("error", Some("E0308"), &spanning),
+            rustc_line(
+                "warning",
+                Some("clippy::ptr_arg"),
+                &span("<anon>", true, 1, 1),
+            ),
+        ];
+
+        let read: Vec<(usize, usize, bool)> = diagnostics_of(&stderr)
+            .iter()
+            .map(|found| (found.line, found.end_line, found.syntax))
+            .collect();
+
+        assert_eq!(read, [(4, 4, true), (2, 3, false), (1, 1, false)]);
     }
 
     /// One diagnostic line with `message`, at line 1 of the block.
@@ -1634,6 +1674,7 @@ mod tests {
     fn diagnostics_of(lines: &[String]) -> Vec<Diagnostic> {
         match lint_verdict(
             "",
+            false,
             Ok(Ran {
                 success: false,
                 stdout: Vec::new(),

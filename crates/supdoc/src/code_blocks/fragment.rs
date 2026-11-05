@@ -1,4 +1,10 @@
 //! The fragment kinds a block can declare with `fragment(<kind>)`, and how a tool says it checks one.
+//!
+//! A frame ([`Support::Framed`]) is one fixed pair of lines per tool and kind. Any name a frame
+//! introduces that the block doesn't (a function, a type, a package) is spelled so no author
+//! would write it, such as `__supdoc_fragment`, so a tool's message about the author's code can't
+//! be mistaken for one about the frame. Each unit that adds a frame pair gives it a real-tool e2e
+//! test asserting that no finding holds any frame line or frame-only name.
 
 /// The grammar position a fragment block holds, as `fragment(<kind>)` names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

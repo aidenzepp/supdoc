@@ -1384,7 +1384,7 @@ fn run_linter(
         Ok(ran) if biome.is_some() && biome::linted_nothing(&ran.stdout) => {
             Err(BIOME_LINTED_NOTHING)
         }
-        result => Ok(tool.lint_verdict(input, result)),
+        result => Ok(tool.lint_verdict(input, frame.is_some(), result)),
     };
     let verdict = match cached_run(&run, session, spawn, judge, |judged| {
         judged.as_ref().is_ok_and(lint::Verdict::cacheable)
@@ -1551,7 +1551,7 @@ fn run_clippy(
         &run,
         session,
         spawn,
-        |result| tool.lint_verdict(input, result),
+        |result| tool.lint_verdict(input, frame.is_some(), result),
         lint::Verdict::cacheable,
     );
     let read = lint::Read {

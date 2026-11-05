@@ -83,6 +83,8 @@ struct BiomeDiagnostic {
 struct BiomeLocation {
     /// Its first character.
     start: BiomePosition,
+    /// Its last character, when biome says.
+    end: Option<BiomePosition>,
 }
 
 /// A 1-based line and column in biome's JSON.
@@ -114,14 +116,16 @@ struct BiomeSummary {
 
 /// The diagnostics in `biome lint --reporter=json`'s `stdout`, at every severity: each rule's
 /// named without the `lint/` prefix (`suspicious/noDebugger`), and each about a suppression
-/// comment in the block named by its whole category (`suppressions/unused`). `None` when it
-/// isn't biome's JSON report.
+/// comment in the block named by its whole category (`suppressions/unused`). When the checked
+/// text is `framed`, a `parse` diagnostic is a syntax error named `parse`, since it says whether
+/// the block is the kind the frame holds. `None` when it isn't biome's JSON report.
 ///
 /// # Errors
 ///
-/// What biome said, when a diagnostic's category names neither a rule nor a suppression: biome
-/// reporting on the run, such as a file it skipped, never a finding in the block.
-pub(crate) fn diagnostics(stdout: &[u8]) -> Option<Result<Vec<Diagnostic>, String>> {
+/// What biome said, when a diagnostic's category names neither a rule nor a suppression (nor,
+/// framed, a syntax error): biome reporting on the run, such as a file it skipped, never a
+/// finding in the block.
+pub(crate) fn diagnostics(stdout: &[u8], framed: bool) -> Option<Result<Vec<Diagnostic>, String>> {
     let report: BiomeReport = serde_json::from_slice(stdout).ok()?;
     Some(
         report
@@ -129,6 +133,7 @@ pub(crate) fn diagnostics(stdout: &[u8]) -> Option<Result<Vec<Diagnostic>, Strin
             .into_iter()
             .map(|diagnostic| {
                 let category = &diagnostic.category;
+                let syntax = framed && category == "parse";
                 let rule = category
                     .strip_prefix("lint/")
                     .filter(|rule| !rule.is_empty())
@@ -138,10 +143,18 @@ pub(crate) fn diagnostics(stdout: &[u8]) -> Option<Result<Vec<Diagnostic>, Strin
                             .strip_prefix("suppressions/")
                             .is_some_and(|name| !name.is_empty())
                             .then(|| category.clone())
-                    });
+                    })
+                    .or_else(|| syntax.then(|| category.clone()));
+                let start = &diagnostic.location.start;
                 rule.map(|rule| Diagnostic {
-                    line: diagnostic.location.start.line,
-                    column: diagnostic.location.start.column,
+                    line: start.line,
+                    column: start.column,
+                    end_line: diagnostic
+                        .location
+                        .end
+                        .as_ref()
+                        .map_or(start.line, |end| end.line),
+                    syntax,
                     rule,
                     message: diagnostic.message.clone(),
                 })
@@ -161,14 +174,19 @@ pub(crate) fn diagnostics(stdout: &[u8]) -> Option<Result<Vec<Diagnostic>, Strin
 /// block. A report with none is clean on a zero exit; a diagnostic that names neither, a
 /// non-zero exit without
 /// diagnostics, or output that isn't the report, is a tool failure; a timeout is a timeout.
-/// `input` isn't needed: biome counts columns in characters.
+/// `input` isn't needed: biome counts columns in characters. A `framed` run's syntax error is a
+/// diagnostic (see [`diagnostics`]).
 #[must_use]
-pub(crate) fn lint_verdict(_input: &str, result: Result<Ran, Failure>) -> lint::Verdict {
+pub(crate) fn lint_verdict(
+    _input: &str,
+    framed: bool,
+    result: Result<Ran, Failure>,
+) -> lint::Verdict {
     let ran = match result {
         Ok(ran) => ran,
         Err(failure) => return lint::Verdict::Failed(format::failed(failure)),
     };
-    match diagnostics(&ran.stdout) {
+    match diagnostics(&ran.stdout, framed) {
         Some(Err(detail)) => lint::Verdict::Failed(format::Verdict::ToolFailed(detail)),
         Some(Ok(found)) if !found.is_empty() => lint::Verdict::Diagnostics(found),
         Some(Ok(_)) if ran.success => lint::Verdict::Clean,
@@ -751,17 +769,21 @@ mod tests {
         ],"command":"lint"}"#;
 
         assert_eq!(
-            diagnostics(stdout),
+            diagnostics(stdout, false),
             Some(Ok(vec![
                 Diagnostic {
                     line: 2,
                     column: 1,
+                    end_line: 2,
+                    syntax: false,
                     rule: "suspicious/noDebugger".to_owned(),
                     message: "This is an unexpected use of the debugger statement.".to_owned(),
                 },
                 Diagnostic {
                     line: 3,
                     column: 9,
+                    end_line: 3,
+                    syntax: false,
                     rule: "suspicious/noConfusingLabels".to_owned(),
                     message: "Don't use a label.".to_owned(),
                 },
@@ -774,10 +796,12 @@ mod tests {
         let unused = br#"{"summary":{"changed":0,"unchanged":1},"diagnostics":[{"severity":"warning","message":"Suppression comment has no effect.","category":"suppressions/unused","location":{"path":"x","start":{"line":1,"column":1},"end":{"line":1,"column":46}},"advices":[]}],"command":"lint"}"#;
 
         assert_eq!(
-            diagnostics(unused),
+            diagnostics(unused, false),
             Some(Ok(vec![Diagnostic {
                 line: 1,
                 column: 1,
+                end_line: 1,
+                syntax: false,
                 rule: "suppressions/unused".to_owned(),
                 message: "Suppression comment has no effect.".to_owned(),
             }]))
@@ -796,7 +820,7 @@ mod tests {
             too_large.replace(r#""lint""#, r#""suppressions/""#),
             format!("{rule},{too_large}"),
         ] {
-            let verdict = lint_verdict("", Ok(ran(true, report(&found))));
+            let verdict = lint_verdict("", false, Ok(ran(true, report(&found))));
 
             assert!(
                 matches!(
@@ -807,6 +831,36 @@ mod tests {
                 "{found}: {verdict:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_framed_runs_parse_diagnostic_is_a_syntax_error_through_its_last_line() {
+        let parse = r#"{"severity":"error","message":"expected `,` but instead found `})`","category":"parse","location":{"path":"x","start":{"line":3,"column":1},"end":{"line":4,"column":3}},"advices":[]}"#;
+
+        let verdict = lint_verdict("", true, Ok(ran(false, report(parse))));
+
+        let Verdict::Diagnostics(found) = &verdict else {
+            panic!("a framed parse diagnostic says whether the block is its kind: {verdict:?}");
+        };
+        let read: Vec<(&str, usize, usize, bool)> = found
+            .iter()
+            .map(|found| {
+                (
+                    found.rule.as_str(),
+                    found.line,
+                    found.end_line,
+                    found.syntax,
+                )
+            })
+            .collect();
+        assert_eq!(read, [("parse", 3, 4, true)]);
+        assert!(
+            matches!(
+                lint_verdict("", false, Ok(ran(false, report(parse)))),
+                Verdict::Failed(FormatVerdict::ToolFailed(_))
+            ),
+            "unframed, a parse diagnostic stays a tool failure"
+        );
     }
 
     /// A report holding `diagnostics` (JSON array items) for one checked file.
@@ -839,7 +893,7 @@ mod tests {
             (true, warning),
             (false, info.to_owned()),
         ] {
-            let verdict = lint_verdict("", Ok(ran(exit, report(&found))));
+            let verdict = lint_verdict("", false, Ok(ran(exit, report(&found))));
             assert!(
                 matches!(&verdict, Verdict::Diagnostics(listed) if listed.len() == 1),
                 "exit ok {exit}: {verdict:?}"
@@ -849,7 +903,10 @@ mod tests {
 
     #[test]
     fn a_report_with_no_diagnostics_is_clean_on_a_zero_exit_and_a_tool_failure_otherwise() {
-        assert_eq!(lint_verdict("", Ok(ran(true, report("")))), Verdict::Clean);
+        assert_eq!(
+            lint_verdict("", false, Ok(ran(true, report("")))),
+            Verdict::Clean
+        );
         for (exit, stdout) in [
             (false, report("")),
             (true, b"not json".to_vec()),
@@ -857,7 +914,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    lint_verdict("", Ok(ran(exit, stdout.clone()))),
+                    lint_verdict("", false, Ok(ran(exit, stdout.clone()))),
                     Verdict::Failed(FormatVerdict::ToolFailed(_))
                 ),
                 "exit ok {exit}, stdout {stdout:?}"
@@ -921,8 +978,8 @@ mod tests {
 
     #[test]
     fn output_that_isnt_biomes_json_report_has_no_diagnostics() {
-        assert_eq!(diagnostics(b"The contents aren't fixed.\n"), None);
-        assert_eq!(diagnostics(b"[]"), None);
+        assert_eq!(diagnostics(b"The contents aren't fixed.\n", false), None);
+        assert_eq!(diagnostics(b"[]", false), None);
     }
 
     #[test]

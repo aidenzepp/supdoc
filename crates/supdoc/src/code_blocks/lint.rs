@@ -25,8 +25,8 @@ const MISSING_NAME_CODES: [&str; 9] = [
     "E0405", "E0412", "E0422", "E0425", "E0432", "E0433", "E0463", "E0531", "E0532",
 ];
 
-/// The rules linters name a syntax error with: ruff's `syntax-error` and biome's `parse`.
-const PARSE_RULES: [&str; 2] = ["syntax-error", "parse"];
+/// What a tool-failure detail shows in place of a line of the frame.
+const FRAME_LINE: &str = "<the frame supdoc adds>";
 
 /// The fixed lines a linter sees around a block that declares a kind its tool reads only inside
 /// a frame (see [`super::fragment::Support::Framed`]).
@@ -77,6 +77,39 @@ impl Frame {
     fn lead(self) -> usize {
         self.before.lines().count()
     }
+
+    /// Whether `line`, trimmed, is one of the frame's lines.
+    fn holds(self, line: &str) -> bool {
+        let line = line.trim();
+        !line.is_empty()
+            && self
+                .before
+                .lines()
+                .chain(self.after.lines())
+                .any(|frame| frame.trim() == line)
+    }
+
+    /// `detail`, a tool's report, with each line that is one of the frame's lines replaced by
+    /// [`FRAME_LINE`].
+    fn hidden(self, detail: &str) -> String {
+        detail
+            .lines()
+            .map(|line| if self.holds(line) { FRAME_LINE } else { line })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// `failed`, with no line of the frame shown in its detail.
+    fn hide_in(self, failed: &format::Verdict) -> format::Verdict {
+        match failed {
+            format::Verdict::ToolFailed(detail) => format::Verdict::ToolFailed(self.hidden(detail)),
+            format::Verdict::ParseFailed { detail, line } => format::Verdict::ParseFailed {
+                detail: self.hidden(detail),
+                line: *line,
+            },
+            other => other.clone(),
+        }
+    }
 }
 
 /// The text a linter checks for a block whose body as written is `input`: `input` itself, or
@@ -109,6 +142,11 @@ pub(crate) struct Diagnostic {
     pub(crate) line: usize,
     /// Its 1-based column in that line, counted in characters.
     pub(crate) column: usize,
+    /// Its 1-based last line in the checked text: `line` when the linter gives no end.
+    pub(crate) end_line: usize,
+    /// Whether its linter reports it as a syntax error: the checked text doesn't parse. Each
+    /// reader says how it tells one.
+    pub(crate) syntax: bool,
     /// The rule it breaks, as the linter names it.
     pub(crate) rule: String,
     /// What the linter says about it.
@@ -199,10 +237,11 @@ pub(crate) struct Read<'run> {
 /// under `timeout`. A diagnostic that [`missing_name`] reads is a `code-block-missing-name` error
 /// instead, whose message says whether the project's crate was passed to the tool (`externs`).
 ///
-/// A framed block's diagnostics are shifted past the frame's leading lines. One on a frame line
-/// is never dropped: it is reported at the block's info string, a syntax error as
-/// `code-block-parse` "couldn't parse the block as `<kind>`", any other with the tool's rule and
-/// message. No location, message or help supdoc writes holds frame text.
+/// A framed block's diagnostics are shifted past the frame's leading lines. One that starts or
+/// ends on a frame line is never dropped: it is reported at the block's info string, a syntax
+/// error as `code-block-parse` "couldn't parse the block as `<kind>`", any other with the tool's
+/// rule and supdoc's own message, never the tool's. A framed block's tool failure shows no line
+/// of the frame. No location, message or help holds a frame line.
 #[must_use]
 pub(crate) fn findings(
     verdict: &Verdict,
@@ -218,9 +257,12 @@ pub(crate) fn findings(
     } = *read;
     match verdict {
         Verdict::Clean => Vec::new(),
-        Verdict::Failed(failed) => format::finding(failed, tool, &block.fence, timeout)
-            .into_iter()
-            .collect(),
+        Verdict::Failed(failed) => {
+            let failed = frame.map_or_else(|| failed.clone(), |frame| frame.hide_in(failed));
+            format::finding(&failed, tool, &block.fence, timeout)
+                .into_iter()
+                .collect()
+        }
         Verdict::Diagnostics(found) => {
             let map = LineMap::of(block, text);
             let lines = block.body.len();
@@ -252,26 +294,29 @@ pub(crate) fn findings(
 }
 
 /// `diagnostic` in the block's own coordinates: shifted past `frame`'s leading lines, the block
-/// holding `lines` lines.
+/// holding `lines` lines. A diagnostic at line 0, which names no line, stays there.
 ///
 /// # Errors
 ///
-/// The frame, when `diagnostic` falls on one of its lines.
+/// The frame, when `diagnostic` starts or ends on one of its lines.
 fn unframed(
     diagnostic: &Diagnostic,
     frame: Option<Frame>,
     lines: usize,
 ) -> Result<Diagnostic, Frame> {
-    let Some(frame) = frame else {
+    let Some(frame) = frame.filter(|_| diagnostic.line != 0) else {
         return Ok(diagnostic.clone());
     };
-    let line = diagnostic
-        .line
-        .checked_sub(frame.lead())
-        .filter(|line| (1..=lines).contains(line))
-        .ok_or(frame)?;
+    let shift = |line: usize| {
+        line.checked_sub(frame.lead())
+            .filter(|line| (1..=lines).contains(line))
+            .ok_or(frame)
+    };
+    let line = shift(diagnostic.line)?;
+    let end_line = shift(diagnostic.end_line.max(diagnostic.line))?;
     Ok(Diagnostic {
         line,
+        end_line,
         ..diagnostic.clone()
     })
 }
@@ -286,12 +331,28 @@ fn attribute(block: &CodeBlock) -> Location {
 }
 
 /// The finding, without a location, for `diagnostic` from `tool` on a line of `frame`: a syntax
-/// error says the block isn't `frame`'s kind; any other keeps the tool's rule and message.
+/// error says the block isn't `frame`'s kind; any other names the tool's rule in supdoc's own
+/// words. Neither carries the tool's message, which may quote the frame.
 fn on_frame(tool: &ToolCartridge, frame: Frame, diagnostic: &Diagnostic) -> Finding {
-    if !PARSE_RULES.contains(&diagnostic.rule.as_str()) {
-        return lint_finding(tool, diagnostic);
-    }
     let kind = frame.kind.name();
+    if !diagnostic.syntax {
+        let rule = &diagnostic.rule;
+        return Finding::new(
+            LINT,
+            Severity::Error,
+            format!(
+                "`{}` reports `{rule}` where the block meets the frame supdoc adds around {} \
+                 fragment",
+                tool.name,
+                frame.kind.with_article()
+            ),
+        )
+        .with_help(format!(
+            "fix the code `{rule}` flags at the block's start or end, check that the block is \
+             {} fragment, or mark the block `lint(off: <reason>)`",
+            frame.kind.with_article()
+        ));
+    }
     Finding::new(
         format::PARSE,
         Severity::Error,
@@ -371,6 +432,8 @@ mod tests {
         Diagnostic {
             line,
             column,
+            end_line: line,
+            syntax: false,
             rule: "E711".to_owned(),
             message: "comparison to None".to_owned(),
         }
@@ -474,6 +537,8 @@ mod tests {
         let missing = Diagnostic {
             line: 2,
             column: 1,
+            end_line: 2,
+            syntax: false,
             rule: "E0425".to_owned(),
             message: "cannot find function `nope` in this scope".to_owned(),
         };
@@ -510,6 +575,8 @@ mod tests {
         let other = Diagnostic {
             line: 1,
             column: 1,
+            end_line: 1,
+            syntax: false,
             rule: "E0308".to_owned(),
             message: "mismatched types".to_owned(),
         };
@@ -524,21 +591,42 @@ mod tests {
         assert_eq!(found.first().map(|f| f.code), Some("code-block-lint"));
     }
 
-    /// A frame no block line or tool message in these tests contains.
+    /// The frame ruff never uses, around map entries.
     const ENTRIES: Frame = Frame {
         kind: Kind::Entries,
         before: "({",
         after: "})",
     };
 
-    /// A diagnostic breaking `rule` at `line`, column 1, with a message holding no frame text.
-    fn diagnostic_named(rule: &str, line: usize) -> Diagnostic {
+    /// The frame clippy is planned to use around statements (design §2.6).
+    const STATEMENTS: Frame = Frame {
+        kind: Kind::Statements,
+        before: "fn main() {",
+        after: "}",
+    };
+
+    /// A diagnostic from line `line` to `end_line`, column 1, breaking `rule`, a syntax error
+    /// when `syntax`, saying `message`.
+    fn spanning(
+        line: usize,
+        end_line: usize,
+        rule: &str,
+        syntax: bool,
+        message: &str,
+    ) -> Diagnostic {
         Diagnostic {
             line,
             column: 1,
+            end_line,
+            syntax,
             rule: rule.to_owned(),
-            message: "the tool's message".to_owned(),
+            message: message.to_owned(),
         }
+    }
+
+    /// A one-line diagnostic at `line` breaking `rule`, with a message holding no frame text.
+    fn on_line(line: usize, rule: &str, syntax: bool) -> Diagnostic {
+        spanning(line, line, rule, syntax, "the tool's message")
     }
 
     /// The code and `(line, column)` of each of `found`.
@@ -554,6 +642,43 @@ mod tests {
             })
             .collect()
     }
+
+    /// The findings for `diagnostics` from ruff on `text`'s one block, framed by `frame`.
+    fn framed_findings(text: &str, frame: Frame, diagnostics: Vec<Diagnostic>) -> Vec<Finding> {
+        let block = markdown_block(text);
+        findings(
+            &Verdict::Diagnostics(diagnostics),
+            &read(&block, text, Some(frame)),
+            None,
+            false,
+        )
+    }
+
+    /// Asserts that no message, help or location text of `found` in `text` holds a line of
+    /// `frame`.
+    fn assert_no_frame_line(found: &[Finding], text: &str, frame: Frame) {
+        for finding in found {
+            let at = finding
+                .location
+                .as_ref()
+                .expect("every lint finding should be placed");
+            let shown = [
+                finding.message.as_str(),
+                finding.help.as_deref().unwrap_or_default(),
+                text.get(at.range.clone()).unwrap_or_default(),
+            ];
+            for frame_line in frame.before.lines().chain(frame.after.lines()) {
+                assert!(
+                    shown.iter().all(|part| !part.contains(frame_line)),
+                    "{frame_line:?} in {finding:?}"
+                );
+            }
+            assert!(finding.fix.is_none(), "a lint finding never carries a fix");
+        }
+    }
+
+    /// A doc whose one `ts` block, at doc lines 4 and 5, declares `fragment(entries)`.
+    const TWO_ENTRIES: &str = "# D\n\n```ts fragment(entries)\na: 1,\nb: 2,\n```\n";
 
     #[test]
     fn a_frame_wraps_the_block_in_its_lines() {
@@ -575,30 +700,21 @@ mod tests {
 
     #[test]
     fn a_framed_diagnostic_lands_at_its_doc_line_past_the_frame() {
-        let text = "# D\n\n```ts fragment(entries)\na: 1,\nb: 2,\n```\n";
-        let block = markdown_block(text);
-
-        let found = findings(
-            &Verdict::Diagnostics(vec![diagnostic_named("E711", 3)]),
-            &read(&block, text, Some(ENTRIES)),
-            None,
-            false,
-        );
+        let found = framed_findings(TWO_ENTRIES, ENTRIES, vec![on_line(3, "E711", false)]);
 
         assert_eq!(placed(&found), [("code-block-lint", (5, 1))]);
     }
 
     #[test]
-    fn a_syntax_error_on_a_frame_line_is_a_parse_error_at_the_attribute() {
-        let text = "# D\n\n```ts fragment(entries)\na: 1,\n```\n";
-        let block = markdown_block(text);
+    fn a_diagnostic_naming_no_line_stays_at_the_fence() {
+        let found = framed_findings(TWO_ENTRIES, ENTRIES, vec![on_line(0, "E0308", false)]);
 
-        let found = findings(
-            &Verdict::Diagnostics(vec![diagnostic_named("syntax-error", 3)]),
-            &read(&block, text, Some(ENTRIES)),
-            None,
-            false,
-        );
+        assert_eq!(placed(&found), [("code-block-lint", (3, 1))]);
+    }
+
+    #[test]
+    fn a_syntax_error_on_a_frame_line_is_a_parse_error_at_the_attribute() {
+        let found = framed_findings(TWO_ENTRIES, ENTRIES, vec![on_line(4, "parse", true)]);
 
         let [finding] = found.as_slice() else {
             panic!("a diagnostic on a frame line is never dropped: {found:?}");
@@ -611,58 +727,84 @@ mod tests {
     }
 
     #[test]
-    fn any_other_diagnostic_on_a_frame_line_keeps_the_tools_message_at_the_attribute() {
-        let text = "# D\n\n```ts fragment(entries)\na: 1,\n```\n";
-        let block = markdown_block(text);
+    fn a_frame_line_diagnostic_never_shows_the_tools_message_quoting_the_frame() {
+        let text = "# D\n\n```rust fragment(statements)\nlet x = 1;\n}\n```\n";
+        let brace = spanning(4, 4, "error", false, "unexpected closing delimiter: `}`");
 
-        let found = findings(
-            &Verdict::Diagnostics(vec![diagnostic_named("E711", 1)]),
-            &read(&block, text, Some(ENTRIES)),
-            None,
-            false,
-        );
+        let found = framed_findings(text, STATEMENTS, vec![brace]);
+
+        let [finding] = found.as_slice() else {
+            panic!("a diagnostic on a frame line is never dropped: {found:?}");
+        };
+        assert_eq!(placed(&found), [("code-block-lint", (3, 4))]);
+        assert!(finding.message.contains("`error`"), "{finding:?}");
+        assert!(!finding.message.contains("delimiter"), "{finding:?}");
+        assert_no_frame_line(&found, text, STATEMENTS);
+    }
+
+    #[test]
+    fn any_other_diagnostic_on_a_frame_line_names_its_rule_at_the_attribute() {
+        let found = framed_findings(TWO_ENTRIES, ENTRIES, vec![on_line(1, "E711", false)]);
 
         assert_eq!(placed(&found), [("code-block-lint", (3, 4))]);
+        let message = found.first().map(|finding| finding.message.as_str());
         assert_eq!(
-            found.first().map(|finding| finding.message.as_str()),
-            Some("`ruff` reports `E711`: the tool's message")
+            message,
+            Some(
+                "`ruff` reports `E711` where the block meets the frame supdoc adds around an \
+                 entries fragment"
+            )
         );
     }
 
     #[test]
+    fn a_diagnostic_that_runs_from_the_block_into_the_frame_goes_to_the_attribute() {
+        let found = framed_findings(
+            TWO_ENTRIES,
+            ENTRIES,
+            vec![spanning(3, 4, "E711", false, "the tool's message")],
+        );
+
+        assert_eq!(placed(&found), [("code-block-lint", (3, 4))]);
+    }
+
+    #[test]
     fn no_finding_holds_a_frame_line_whichever_line_a_diagnostic_is_on() {
-        let text = "# D\n\n```ts fragment(entries)\na: 1,\nb: 2,\n```\n";
-        let block = markdown_block(text);
         let checked = ENTRIES.wrap("a: 1,\nb: 2,\n");
         let every_line: Vec<Diagnostic> = (1..=checked.lines().count())
-            .flat_map(|line| ["syntax-error", "E711"].map(|rule| diagnostic_named(rule, line)))
+            .flat_map(|line| {
+                [("parse", true), ("E711", false)].map(|(rule, syntax)| on_line(line, rule, syntax))
+            })
             .collect();
 
+        let found = framed_findings(TWO_ENTRIES, ENTRIES, every_line.clone());
+
+        assert_eq!(found.len(), every_line.len(), "none dropped: {found:?}");
+        assert_no_frame_line(&found, TWO_ENTRIES, ENTRIES);
+    }
+
+    #[test]
+    fn a_framed_tool_failure_shows_no_line_of_the_frame() {
+        let block = markdown_block(TWO_ENTRIES);
+        let stderr = "error: unexpected token\n  ({\na: 1,\n})\nend";
+        let failed = Verdict::Failed(super::format::Verdict::ToolFailed(stderr.to_owned()));
+
         let found = findings(
-            &Verdict::Diagnostics(every_line.clone()),
-            &read(&block, text, Some(ENTRIES)),
+            &failed,
+            &read(&block, TWO_ENTRIES, Some(ENTRIES)),
             None,
             false,
         );
+        let plain = findings(&failed, &read(&block, TWO_ENTRIES, None), None, false);
 
-        assert_eq!(found.len(), every_line.len(), "none dropped: {found:?}");
-        for finding in &found {
-            let at = finding
-                .location
-                .as_ref()
-                .expect("every lint finding should be placed");
-            let shown = [
-                finding.message.as_str(),
-                finding.help.as_deref().unwrap_or_default(),
-                text.get(at.range.clone()).unwrap_or_default(),
-            ];
-            for frame_line in [ENTRIES.before, ENTRIES.after] {
-                assert!(
-                    shown.iter().all(|part| !part.contains(frame_line)),
-                    "{frame_line:?} in {finding:?}"
-                );
-            }
-            assert!(finding.fix.is_none(), "a lint finding never carries a fix");
-        }
+        let message = found.first().map(|finding| finding.message.as_str());
+        let message = message.unwrap_or_default();
+        assert!(
+            message.contains("error: unexpected token\n<the frame supdoc adds>\na: 1,\n<the frame supdoc adds>\nend"),
+            "{message}"
+        );
+        assert_no_frame_line(&found, TWO_ENTRIES, ENTRIES);
+        let unframed = plain.first().map(|finding| finding.message.as_str());
+        assert!(unframed.unwrap_or_default().contains("  ({"), "{plain:?}");
     }
 }
