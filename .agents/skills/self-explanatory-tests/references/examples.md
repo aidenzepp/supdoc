@@ -6,7 +6,7 @@ Use these examples as shapes, not as domain requirements. Preserve the repositor
 
 Production behavior and its unit contract live in the same module:
 
-```rust
+```rust lint(off: needs crate context)
 /// Select the first enabled account.
 #[must_use]
 pub fn select_first_enabled(accounts: &[Account]) -> Option<&Account> {
@@ -161,7 +161,7 @@ The non-interaction protects a dangerous external effect. It is not asserting in
 
 Every direct file under `tests/` is a separate crate root:
 
-```rust
+```rust lint(off: needs crate context)
 #![cfg_attr(
     test,
     allow(

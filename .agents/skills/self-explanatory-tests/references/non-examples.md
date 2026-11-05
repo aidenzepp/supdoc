@@ -44,7 +44,7 @@ This freezes a call count, not the returned task contract. It can fail after har
 
 ## Tests as the Only Invariant
 
-```rust
+```rust lint(off: needs crate context)
 fn reflect(direction: Vec3, incident: Vec3) -> Vec3 {
     debug_assert!(direction.is_normalized());
     // ...
@@ -55,7 +55,7 @@ If every caller and test must remember that `direction` is normalized, the invar
 
 ## Dependency-Injection Container
 
-```rust
+```rust lint(off: needs crate context)
 fn run(context: &ServiceContainer) {
     let clock = context.resolve_clock();
     let repository = context.resolve_repository();
@@ -68,7 +68,7 @@ The real dependencies and required capabilities are hidden behind a generic bag.
 
 ## Trait per Struct
 
-```rust
+```rust lint(off: needs crate context)
 trait UserRepositoryLike {
     fn find(&self, id: UserId) -> Option<User>;
 }

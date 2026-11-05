@@ -8,7 +8,7 @@ The snippets are independent shapes, not one compilable crate. Adapt domain name
 
 A function can mutate and still be honest when the mutation is declared:
 
-```rust
+```rust lint(off: needs crate context)
 fn clear<T>(values: &mut Vec<T>) {
     values.clear();
 }
@@ -24,7 +24,7 @@ Both functions are impure because they mutate. Both are honest because `&mut` ex
 
 By contrast, this function's purpose is to read a hidden environmental input:
 
-```rust
+```rust lint(off: needs crate context)
 fn current_time() -> Instant {
     Instant::now()
 }
@@ -32,7 +32,7 @@ fn current_time() -> Instant {
 
 Under this skill's vocabulary, `current_time` is necessarily dishonest: the clock that determines its result is absent from the signature. Keep this operation at a boundary and pass its result inward:
 
-```rust
+```rust lint(off: needs crate context)
 fn session_status(session: &Session, now: Instant) -> SessionStatus {
     if now >= session.expires_at() {
         SessionStatus::Expired
@@ -56,7 +56,7 @@ The framework boundary remains deliberately dishonest and effectful. The domain 
 
 The name promises required assets, but the implementation silently removes assets found in an ambient loaded-assets registry:
 
-```rust
+```rust lint(off: needs crate context)
 fn required_assets(manifest: &Manifest) -> impl Iterator<Item = &AssetId> {
     manifest
         .required_assets()
@@ -71,7 +71,7 @@ A caller cannot tell that global load state changes the result.
 
 Make the distinction and dependency explicit:
 
-```rust
+```rust lint(off: needs crate context)
 fn required_assets(manifest: &Manifest) -> &[AssetId] {
     manifest.required_assets()
 }
@@ -95,7 +95,7 @@ The caller chooses whether it needs the complete requirement or the currently mi
 
 The algorithm chooses where results go:
 
-```rust
+```rust lint(off: needs crate context)
 fn print_permutations(input: &str) {
     let mut state = PermutationState::new(input);
 
@@ -109,7 +109,7 @@ The permutation logic cannot be reused for a file, network stream, search, or te
 
 ### Bounded materialization when the complete result is the contract
 
-```rust
+```rust lint(off: needs crate context)
 fn all_permutations(input: &str, result_limit: usize) -> Result<Vec<String>, TooManyPermutations> {
     let mut results = Vec::new();
 
@@ -139,7 +139,7 @@ The algorithm is honest, the output destination is explicit, and the materializa
 
 ### Better when materialization is too expensive
 
-```rust
+```rust lint(off: needs crate context)
 fn permutations(input: &str) -> PermutationState<'_> {
     PermutationState::new(input)
 }
@@ -247,7 +247,7 @@ The parameter object describes one timer configuration. Semantic types replace p
 
 ### Overcorrection
 
-```rust
+```rust lint(off: needs crate context)
 fn set_timer(application: &Application) -> Result<TimerHandle, TimerError> {
     // Reads six fields from a much larger object.
 }
@@ -259,7 +259,7 @@ Passing the entire application grants unrelated knowledge and authority. Use a c
 
 ### Non-example
 
-```rust
+```rust lint(off: shows the lint it warns about)
 fn total(values: &Vec<i64>) -> i64 {
     values.iter().sum()
 }
@@ -277,7 +277,7 @@ fn total<'a>(values: impl IntoIterator<Item = &'a i64>) -> i64 {
 
 ### Better when contiguous borrowed storage is required
 
-```rust
+```rust lint(off: needs crate context)
 fn checksum(values: &[u8]) -> Checksum {
     // The algorithm genuinely requires a contiguous byte slice.
 }
@@ -301,7 +301,7 @@ The comment carries a lifecycle invariant the API permits callers to violate.
 
 ### Better Rust typestate
 
-```rust
+```rust lint(off: needs crate context)
 struct UninitializedSystem {
     configuration: Configuration,
 }
@@ -358,7 +358,7 @@ The guard proves that the lock remains held for the call. In many Rust designs, 
 
 ### Non-example
 
-```rust
+```rust lint(off: needs crate context)
 fn reflect(incident: Vec3, normal: Vec3) -> Result<Vec3, ReflectError> {
     if !is_unit_length(normal) {
         return Err(ReflectError::NormalNotNormalized);
@@ -372,7 +372,7 @@ Every reflection call accepts invalid normals and must remember the same validat
 
 ### Better when unit length is a stable domain invariant
 
-```rust
+```rust lint(off: needs crate context)
 fn reflect(incident: Vec3, normal: UnitVec3) -> Vec3 {
     let normal = normal.into_inner();
     incident - 2.0 * incident.dot(normal) * normal
@@ -383,7 +383,7 @@ fn reflect(incident: Vec3, normal: UnitVec3) -> Vec3 {
 
 Do not overstate what the type proves:
 
-```rust
+```rust lint(off: needs crate context)
 fn cross(left: UnitVec3, right: UnitVec3) -> Vec3 {
     left.into_inner().cross(right.into_inner())
 }
@@ -395,7 +395,7 @@ This overload must not return a normalized vector: the magnitude is `sin(theta)`
 
 ### Non-example
 
-```rust
+```rust lint(off: needs crate context)
 fn is_asset_of_type(
     &self,
     asset_name: &str,
@@ -429,7 +429,7 @@ The function alternates between domain intent, name-normalization policy, index 
 
 ### Intermediate improvement
 
-```rust
+```rust lint(off: needs crate context)
 fn find_asset(&self, asset_name: &str) -> Option<&Asset> {
     let normalized = asset_name.to_ascii_lowercase();
     let index = self
@@ -445,7 +445,7 @@ The standard algorithm removes handwritten search mechanics, but insertion and l
 
 ### Better: let the representation own both invariants
 
-```rust
+```rust lint(off: needs crate context)
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -488,7 +488,7 @@ This example intentionally uses an ASCII-only policy. Unicode case folding and n
 
 Framework-owned callbacks have a hidden call site. Keep them as small adapters into application-owned functions:
 
-```rust
+```rust lint(off: needs crate context)
 fn update(app: &mut FrameworkApp, frame: FrameContext) {
     let input = InputSnapshot::from(frame.input());
     let elapsed = frame.elapsed();

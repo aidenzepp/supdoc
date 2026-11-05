@@ -6,7 +6,7 @@ Use this guide when code checks raw input but keeps using the same weak represen
 
 Validation and parsing may perform the same runtime check. Their contracts differ:
 
-```rust
+```rust lint(off: needs crate context)
 fn validate_non_empty<T>(values: &[T]) -> Result<(), Empty>;
 fn parse_non_empty<T>(values: Vec<T>) -> Result<NonEmptyVec<T>, Empty>;
 ```
@@ -26,7 +26,7 @@ Treat parsing as the conversion of less-structured data into more-structured dat
 
 Keep weak data and fallibility at the edge:
 
-```rust
+```rust lint(off: needs crate context)
 fn parse_request(raw: RawRequest) -> Result<Request, RequestError>;
 fn execute(request: Request, state: &mut State) -> ExecutionResult;
 ```
@@ -49,7 +49,7 @@ Keep fields private. Do not implement an infallible conversion from the weak rep
 
 Use a domain value when the fact is intrinsic and should travel:
 
-```rust
+```rust lint(off: needs crate context)
 fn reflect(incident: Vec3, normal: UnitVec3) -> Vec3;
 fn release(&mut self, port: NonPrivilegedPort) -> bool;
 fn lookup(&self, name: &AssetName) -> Option<AssetType>;
@@ -61,7 +61,7 @@ These signatures remove invalid calls and corresponding error paths from trusted
 
 Use a private aggregate when the rule is meaningful only inside the aggregate:
 
-```rust
+```rust lint(off: needs crate context)
 struct DependencyGraph {
     edges: HashMap<NodeId, HashSet<NodeId>>,
 }
@@ -84,7 +84,7 @@ Do not parse these into timeless wrappers that can become stale. Keep the check 
 
 Parsing may establish a canonical representation when equivalence is part of the domain:
 
-```rust
+```rust lint(off: needs crate context)
 impl TryFrom<String> for AssetName {
     type Error = AssetNameError;
 
