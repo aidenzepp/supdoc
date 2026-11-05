@@ -18,7 +18,7 @@ use super::format::{ParseError, Positions};
 use super::fragment::{Kind, Support};
 use super::lint;
 use super::runner::{Failure, Ran};
-use super::{biome, go, python, rumdl, rust, shell, tombi};
+use super::{biome, go, python, rumdl, rust, shell, tombi, yaml};
 
 /// The variables a tool gets from supdoc's own environment, and no others.
 const PASSED: [&str; 5] = [
@@ -450,7 +450,7 @@ fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'sta
 }
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 18] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 19] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -707,6 +707,22 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 18] = [
         positions: own_positions,
         argv: tombi_lint_args,
         reader: Reader::Lint(tombi::lint_verdict),
+    },
+    ToolCartridge {
+        name: "yamlfmt",
+        language: Language::Yaml,
+        binary: "yamlfmt",
+        tier: Tier::Static,
+        install: "go install github.com/google/yamlfmt/cmd/yamlfmt@v0.21.0",
+        // yamlfmt reads only supdoc's private copy, named by its hash in the args.
+        config_files: &[],
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        holds: every_tag,
+        vars: &[],
+        positions: own_positions,
+        argv: yamlfmt_args,
+        reader: Reader::Format(yaml::parse_error),
     },
     ToolCartridge {
         name: "gofmt",
@@ -1003,6 +1019,16 @@ fn rumdl_args(invocation: &Invocation<'_>) -> Vec<OsString> {
     .collect()
 }
 
+/// `yamlfmt`'s arguments: the block on stdin (`-in`), no config from the system config directory,
+/// then the project's `-conf <private copy>` (see [`yaml::project_args`]). yamlfmt takes no stdin
+/// file name, so the doc and the block's index don't appear.
+fn yamlfmt_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    [OsString::from("-in"), OsString::from("-no_global_conf")]
+        .into_iter()
+        .chain(invocation.project.iter().cloned())
+        .collect()
+}
+
 /// `tombi format`'s arguments: offline, so no schema is fetched, quiet, then the block on stdin
 /// under its virtual path. tombi gets its config through `XDG_CONFIG_HOME` (see [`tombi`]), not
 /// a flag.
@@ -1235,6 +1261,7 @@ mod tests {
                 "rumdl Markdown Lint rumdl Static",
                 "tombi-format Toml Format tombi Static",
                 "tombi-lint Toml Lint tombi Static",
+                "yamlfmt Yaml Format yamlfmt Static",
                 "gofmt Go Format gofmt Static",
             ]
         );

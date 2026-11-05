@@ -9,7 +9,7 @@
 //! linking reads.
 //!
 //! A language is on exactly when its table, `[features.code-blocks.rust]`, `.shell`, `.python`,
-//! `.typescript`, `.javascript`, `.json`, `.toml`, `.markdown` or `.go`, is written in some file of the chain; an empty
+//! `.typescript`, `.javascript`, `.json`, `.yaml`, `.toml`, `.markdown` or `.go`, is written in some file of the chain; an empty
 //! table turns it on. The language
 //! table selects tools (`formatter`, `linter`) and holds the language's own settings; each
 //! tool's options, its step's mode, live in the tool's own table,
@@ -24,6 +24,7 @@ mod rust;
 mod shell;
 mod toml;
 mod typescript;
+mod yaml;
 
 use crate::code_blocks::tools::{self, CARTRIDGES, Step, Tier};
 use std::ops::Range;
@@ -41,6 +42,7 @@ pub(crate) use self::shell::Dialect;
 use self::shell::RawShell;
 use self::toml::RawToml;
 use self::typescript::RawTypeScript;
+use self::yaml::RawYaml;
 use super::pattern::{AnchoredPatterns, PatternList};
 
 /// A language supdoc has a `[features.code-blocks]` table for.
@@ -60,6 +62,8 @@ pub(crate) enum Language {
     JavaScript,
     /// JSON: tagged `json`, or `jsonc` for JSON that may hold comments.
     Json,
+    /// YAML: tagged `yaml` or `yml`.
+    Yaml,
     /// TOML: tagged `toml`.
     Toml,
     /// Go: tagged `go` or `golang`.
@@ -78,6 +82,7 @@ impl Language {
             "ts" | "typescript" | "mts" | "cts" | "tsx" => Some(Self::TypeScript),
             "js" | "javascript" | "mjs" | "cjs" | "jsx" => Some(Self::JavaScript),
             "json" | "jsonc" => Some(Self::Json),
+            "yaml" | "yml" => Some(Self::Yaml),
             "toml" => Some(Self::Toml),
             "go" | "golang" => Some(Self::Go),
             _ => None,
@@ -85,7 +90,7 @@ impl Language {
     }
 
     /// The name of its table: `rust`, `shell`, `python`, `typescript`, `javascript`, `json`,
-    /// `toml`, `markdown` or `go`.
+    /// `yaml`, `toml`, `markdown` or `go`.
     #[must_use]
     pub(crate) const fn table(self) -> &'static str {
         match self {
@@ -96,6 +101,7 @@ impl Language {
             Self::TypeScript => "typescript",
             Self::JavaScript => "javascript",
             Self::Json => "json",
+            Self::Yaml => "yaml",
             Self::Toml => "toml",
             Self::Go => "go",
         }
@@ -440,6 +446,8 @@ struct Languages {
     javascript: Table,
     /// `[features.code-blocks.json]`.
     json: Table,
+    /// `[features.code-blocks.yaml]`.
+    yaml: Table,
     /// `[features.code-blocks.toml]`.
     toml: Table,
     /// `[features.code-blocks.go]`.
@@ -484,6 +492,8 @@ pub(crate) struct RawCodeBlocks {
     javascript: Option<RawJavaScript>,
     /// `[features.code-blocks.json]`, when written.
     json: Option<RawJson>,
+    /// `[features.code-blocks.yaml]`, when written.
+    yaml: Option<RawYaml>,
     /// `[features.code-blocks.toml]`, when written.
     toml: Option<RawToml>,
     /// `[features.code-blocks.go]`, when written.
@@ -508,8 +518,8 @@ impl Written {
     ///
     /// # Errors
     ///
-    /// The first tool table, Rust, shell, Python, TypeScript, JavaScript, JSON, TOML, Markdown
-    /// then Go, whose tool the merged chain doesn't select.
+    /// The first tool table, Rust, shell, Python, TypeScript, JavaScript, JSON, YAML, TOML,
+    /// Markdown then Go, whose tool the merged chain doesn't select.
     pub(super) fn resolve(
         self,
         include: &AnchoredPatterns,
@@ -524,6 +534,7 @@ impl Written {
             .or_else(|| languages.typescript.unselected(Language::TypeScript))
             .or_else(|| languages.javascript.unselected(Language::JavaScript))
             .or_else(|| languages.json.unselected(Language::Json))
+            .or_else(|| languages.yaml.unselected(Language::Yaml))
             .or_else(|| languages.toml.unselected(Language::Toml))
             .or_else(|| languages.markdown.unselected(Language::Markdown))
             .or_else(|| languages.go.unselected(Language::Go));
@@ -611,6 +622,7 @@ impl CodeBlocks {
             Language::TypeScript => &self.languages.typescript,
             Language::JavaScript => &self.languages.javascript,
             Language::Json => &self.languages.json,
+            Language::Yaml => &self.languages.yaml,
             Language::Toml => &self.languages.toml,
             Language::Go => &self.languages.go,
         }
@@ -653,6 +665,7 @@ pub(super) fn merge(
         typescript,
         javascript,
         json,
+        yaml,
         toml,
         go,
         ..
@@ -703,6 +716,10 @@ pub(super) fn merge(
                 .languages
                 .json
                 .behind(json.as_ref().map(RawJson::selection), file),
+            yaml: nearer
+                .languages
+                .yaml
+                .behind(yaml.as_ref().map(RawYaml::selection), file),
             toml: nearer
                 .languages
                 .toml
