@@ -217,8 +217,22 @@ impl ToolCartridge {
 const FULL_OR_OFF: &[&str] = &["full", "off"];
 
 /// rustfmt's kinds: a method without its `impl` is an item, so `members` parses as written.
-/// Statements and an expression are not items, and it rejects both.
-const RUSTFMT_FRAGMENTS: &[(Kind, Support)] = &[(Kind::Members, Support::NATIVE)];
+/// Statements and an expression are not items, so it reads both as the body of a function
+/// ([`RUSTFMT_BODY`]).
+const RUSTFMT_FRAGMENTS: &[(Kind, Support)] = &[
+    (Kind::Statements, RUSTFMT_BODY),
+    (Kind::Expression, RUSTFMT_BODY),
+    (Kind::Members, Support::NATIVE),
+];
+
+/// The frame rustfmt reads a function body in, and prints back unchanged: a function no author
+/// would name, with no parameters and no return type, so an expression is its tail.
+const RUSTFMT_BODY: Support = Support::Framed {
+    before: "fn supdoc_fragment() {",
+    after: "}",
+    out_before: "fn supdoc_fragment() {",
+    out_after: "}",
+};
 
 /// shfmt's and shellcheck's kinds: any command list is a program, and one command is a list.
 const SHELL_FRAGMENTS: &[(Kind, Support)] = &[
