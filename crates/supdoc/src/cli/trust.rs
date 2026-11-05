@@ -16,7 +16,7 @@ use crate::config::discover_config;
 use crate::exit::ExitStatus;
 use crate::output::{Output, Report, TextContext};
 use crate::path::AbsolutePath;
-use crate::trust::{AddError, TrustEnv};
+use crate::trust::{self, AddError, TrustEnv};
 
 use super::args::TrustArgs;
 use super::project::{absolute, config_failure, load_config};
@@ -210,8 +210,20 @@ fn no_state() -> CliError {
     )
 }
 
-/// The error when the trust store can't be read or written.
+/// The error when the trust store can't be read or written. When it was refused for a reason
+/// the operator can fix ([`trust::unread_of`]), its help is that reason's fix.
 fn store_failed(error: &io::Error) -> CliError {
+    if let Some(unread) = trust::unread_of(error) {
+        return CliError::new(
+            "cli-trust-store",
+            format!("cannot update the trust store: {}", cause(error)),
+            format!(
+                "{}, then run `supdoc trust` again",
+                sentence_case(&unread.fix())
+            ),
+            ExitStatus::Io,
+        );
+    }
     if error.kind() == io::ErrorKind::InvalidInput {
         return CliError::new(
             "cli-trust-path",
@@ -226,4 +238,128 @@ fn store_failed(error: &io::Error) -> CliError {
         "Check that you can create and write files in `$XDG_STATE_HOME/supdoc` (under `$HOME/.local/state` when it is unset)",
         ExitStatus::Io,
     )
+}
+
+/// `clause` with its first character uppercased, to open a help sentence.
+fn sentence_case(clause: &str) -> String {
+    let mut chars = clause.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+    use std::fs;
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    use std::path::{Path, PathBuf};
+
+    use super::{AddError, TrustEnv, store_failed};
+
+    /// The help of `supdoc trust`'s refusal when adding `root` to the store under `state`, whose
+    /// `supdoc` directory `arrange` sets up first.
+    fn add_refusal_help(state: &Path, arrange: impl FnOnce(&Path)) -> String {
+        let root = state.join("root");
+        fs::create_dir_all(&root).expect("the root should be creatable");
+        let dir = state.join("state").join("supdoc");
+        fs::create_dir_all(&dir).expect("the store's directory should be creatable");
+        arrange(&dir);
+        let env = TrustEnv::from_vars(|name| {
+            (name == "XDG_STATE_HOME").then(|| OsString::from(state.join("state")))
+        });
+        let store = env
+            .store()
+            .expect("an absolute XDG_STATE_HOME should locate the store");
+
+        let Err(AddError::Io(error)) = store.add(&root) else {
+            panic!("adding to a refused store should fail with an I/O refusal");
+        };
+        let refusal = store_failed(&error);
+        assert_eq!(refusal.code(), "cli-trust-store");
+        refusal.help().to_owned()
+    }
+
+    /// A fresh scratch directory, by its real path.
+    fn scratch() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let real = dir
+            .path()
+            .canonicalize()
+            .expect("the scratch directory should resolve");
+        (dir, real)
+    }
+
+    /// The help for a store file that isn't a regular file in its own directory.
+    const NOT_A_FILE_HELP: &str = "Make `supdoc/trusted-roots` under `XDG_STATE_HOME` a regular \
+                                   file in that directory, not a symlink out of it, then run \
+                                   `supdoc trust` again";
+
+    #[test]
+    fn a_store_refused_for_dot_dot_says_to_set_the_variable_without_it() {
+        let (_dir, scratch) = scratch();
+        let root = scratch.join("root");
+        fs::create_dir_all(scratch.join("detour")).expect("the detour should be creatable");
+        fs::create_dir(&root).expect("the root should be creatable");
+        let climbing = scratch.join("detour").join("..").join("state");
+        let env = TrustEnv::from_vars(|name| {
+            (name == "XDG_STATE_HOME").then(|| OsString::from(climbing.clone()))
+        });
+        let store = env
+            .store()
+            .expect("an absolute XDG_STATE_HOME should locate the store");
+
+        let Err(AddError::Io(error)) = store.add(&root) else {
+            panic!("adding through `..` should fail with an I/O refusal");
+        };
+        let refusal = store_failed(&error);
+
+        assert_eq!(refusal.code(), "cli-trust-store");
+        assert_eq!(
+            refusal.help(),
+            "Set `XDG_STATE_HOME` to a path without `..`, then run `supdoc trust` again"
+        );
+    }
+
+    #[test]
+    fn a_store_file_symlinked_outside_says_to_make_it_a_regular_file() {
+        let (_dir, scratch) = scratch();
+        let outside = scratch.join("elsewhere");
+        fs::write(&outside, "").expect("the outside file should be writable");
+
+        let help = add_refusal_help(&scratch, |dir| {
+            symlink(&outside, dir.join("trusted-roots")).expect("the link should be creatable");
+        });
+
+        assert_eq!(help, NOT_A_FILE_HELP);
+    }
+
+    #[test]
+    fn a_store_file_that_is_a_directory_says_to_make_it_a_regular_file() {
+        let (_dir, scratch) = scratch();
+
+        let help = add_refusal_help(&scratch, |dir| {
+            fs::create_dir(dir.join("trusted-roots")).expect("the directory should be creatable");
+        });
+
+        assert_eq!(help, NOT_A_FILE_HELP);
+    }
+
+    #[test]
+    fn an_unreadable_store_file_says_to_make_it_readable() {
+        let (_dir, scratch) = scratch();
+
+        let help = add_refusal_help(&scratch, |dir| {
+            let file = dir.join("trusted-roots");
+            fs::write(&file, "").expect("the store should be writable");
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o000))
+                .expect("the store's mode should be settable");
+        });
+
+        assert_eq!(
+            help,
+            "Make `supdoc/trusted-roots` under `XDG_STATE_HOME` readable by you, then run \
+             `supdoc trust` again"
+        );
+    }
 }
