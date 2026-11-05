@@ -98,6 +98,30 @@ pub(crate) enum ReadError {
         limit: u64,
     },
 
+    /// A YAML file has more lines than the YAML parser can count, so it was refused before the
+    /// parse rather than read as a tree that names the wrong keys or none.
+    TooManyLines {
+        /// The file being read.
+        path: AbsolutePath,
+        /// Its lines, counting every `\r` and every `\n` as a line break, as the parser does.
+        lines: u64,
+        /// The most lines the parser reads.
+        limit: u64,
+    },
+
+    /// A YAML file nests deeper than the YAML parser's scanner can hold, so it was refused before
+    /// the parse, which would overflow the scanner's buffer and abort.
+    TooDeep {
+        /// The file being read.
+        path: AbsolutePath,
+        /// The first line too deep, 1-based, counting every `\r` and every `\n` as a break.
+        line: u64,
+        /// How far that line's indentation and compact indicators reach.
+        column: u64,
+        /// The furthest column the parser handles.
+        limit: u64,
+    },
+
     /// The cartridge for the file's language doesn't load: a supdoc bug that fails the whole run
     /// with exit code 70, never a finding about the file.
     CartridgeLoad {
@@ -131,10 +155,16 @@ pub(crate) const CODE_TOO_MANY_KEYS: &str = "read-too-many-keys";
 /// The code of [`ReadError::KeyPathsTooLarge`], the `max-key-path-size` ceiling.
 pub(crate) const CODE_KEY_PATHS_TOO_LARGE: &str = "read-key-paths-too-large";
 
+/// The code of [`ReadError::TooManyLines`], the YAML parser's line limit.
+pub(crate) const CODE_TOO_MANY_LINES: &str = "read-too-many-lines";
+
+/// The code of [`ReadError::TooDeep`], the YAML scanner's nesting limit.
+pub(crate) const CODE_TOO_DEEP: &str = "read-too-deep";
+
 /// The codes of a read that left a file unchecked: a doc whose links or code blocks weren't read,
 /// or a target whose symbols weren't. A missing file and an unsupported language are left out: a
 /// link to either is an ordinary broken link, which `fix` may still mend.
-pub(crate) const UNCHECKED_CODES: [&str; 8] = [
+pub(crate) const UNCHECKED_CODES: [&str; 10] = [
     "read-not-a-file",
     "read-io",
     "read-not-utf8",
@@ -142,6 +172,8 @@ pub(crate) const UNCHECKED_CODES: [&str; 8] = [
     CODE_TIMEOUT,
     CODE_TOO_MANY_KEYS,
     CODE_KEY_PATHS_TOO_LARGE,
+    CODE_TOO_MANY_LINES,
+    CODE_TOO_DEEP,
     "read-internal",
 ];
 
@@ -260,6 +292,8 @@ impl ReadError {
             Self::Timeout { .. } => CODE_TIMEOUT,
             Self::TooManyKeys { .. } => CODE_TOO_MANY_KEYS,
             Self::KeyPathsTooLarge { .. } => CODE_KEY_PATHS_TOO_LARGE,
+            Self::TooManyLines { .. } => CODE_TOO_MANY_LINES,
+            Self::TooDeep { .. } => CODE_TOO_DEEP,
             Self::CartridgeLoad { .. } => CartridgeLoadError::code(),
             Self::Internal { .. } => "read-internal",
         }
@@ -278,6 +312,8 @@ impl ReadError {
             | Self::Timeout { path, .. }
             | Self::TooManyKeys { path, .. }
             | Self::KeyPathsTooLarge { path, .. }
+            | Self::TooManyLines { path, .. }
+            | Self::TooDeep { path, .. }
             | Self::CartridgeLoad { path, .. }
             | Self::Internal { path, .. } => path,
         }
@@ -313,6 +349,20 @@ impl ReadError {
                 "the key paths of {shown} are more than {} of text, the `max-key-path-size` \
                  limit",
                 SizeLimit::bytes(*limit)
+            ),
+            Self::TooManyLines { lines, limit, .. } => format!(
+                "{shown} is too long for the YAML parser: it has {lines} lines and the parser \
+                 reads at most {limit} (it counts `\\r\\n` as two line breaks)"
+            ),
+            Self::TooDeep {
+                line,
+                column,
+                limit,
+                ..
+            } => format!(
+                "{shown} nests too deeply for the YAML parser: line {line} reaches column \
+                 {column} in its indentation and `- `/`? `/`: ` indicators, and the parser \
+                 handles at most column {limit}"
             ),
             Self::CartridgeLoad { error, .. } => error.to_string(),
             Self::Internal { reason, .. } => {
@@ -380,6 +430,17 @@ impl ReadError {
             (Self::KeyPathsTooLarge { .. }, role) => {
                 format!("{KEY_PATH_SIZE_KNOBS}{}", exclude_advice(role))
             }
+            (Self::TooDeep { .. }, role) => format!(
+                "Flatten the nesting in `{shown}` or split it into smaller YAML files{}. This is \
+                 the parser's own limit (deeper nesting overflows its scanner), so no supdoc \
+                 setting raises it",
+                exclude_advice(role)
+            ),
+            (Self::TooManyLines { .. }, role) => format!(
+                "Split `{shown}` into smaller YAML files{}. This is the parser's own limit, so \
+                 no supdoc setting raises it",
+                exclude_advice(role)
+            ),
             (Self::NotAFile { .. }, ReadRole::Target) => format!(
                 "Point the link at a regular file; `{shown}` is a directory, FIFO, socket or device"
             ),
