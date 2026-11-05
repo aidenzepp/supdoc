@@ -23,6 +23,13 @@
 //! every `\n`, so a `\r\n` file is refused after 16,384 lines. No setting raises the limit,
 //! since the parser can't count further.
 //!
+//! The same scanner writes its stack of indentations into a fixed buffer that a file nested a
+//! little past 250 levels overflows, aborting the process. So a file is also refused before the
+//! parse with `read-too-deep` when any line's structure, its leading blanks plus a run of compact
+//! `- `, `? ` or `: ` indicators, reaches past column 100. Every line counts, the content lines of
+//! a block scalar included, which can refuse a file the scanner would have read: the safe
+//! direction for a guard on memory safety.
+//!
 //! YAML files are link targets only: the cartridge returns no Markdown regions and the walk never
 //! reads them as sources. The walk keeps its own stack and charges every symbol to the file's
 //! key-path budget and deadline, so hostile nesting fails closed (SEC-1). It steps through every
@@ -50,6 +57,16 @@ pub(crate) const EXTENSIONS: &[&str] = &["yaml", "yml"];
 /// The most lines the grammar parses faithfully: its scanner keeps the row in an `int16_t`, so
 /// row 32,768 (0-based) wraps.
 const MAX_LINES: usize = 32_768;
+
+/// The furthest column a line's structure may reach: its leading spaces and tabs plus any run of
+/// compact `-`, `?` or `:` indicators, each followed by a blank or the line's end.
+///
+/// The grammar's scanner keeps a stack of indentations and writes it, 4 bytes an entry after a
+/// 10-byte header, into tree-sitter's 1024-byte serialization buffer. Past 253 entries the write
+/// runs out of bounds and the parse aborts the process. A mapping and a sequence can share one
+/// column (`k:` with `-` under it at the same indent), so the stack holds up to two entries per
+/// column: at column 100 at most about 200, with room to spare; at 127 it overflows.
+const MAX_STRUCTURE_COLUMN: usize = 100;
 
 /// The node kinds whose text can end in a comment that is not part of what the node says.
 const BLOCKS: &[&str] = &[
@@ -93,6 +110,14 @@ impl Cartridge for Yaml {
     }
 
     fn admit(&self, path: &AbsolutePath, text: &str) -> Result<(), ReadError> {
+        if let Some((line, column)) = too_deep(text) {
+            return Err(ReadError::TooDeep {
+                path: path.clone(),
+                line: u64::try_from(line).unwrap_or(u64::MAX),
+                column: u64::try_from(column).unwrap_or(u64::MAX),
+                limit: u64::try_from(MAX_STRUCTURE_COLUMN).unwrap_or(u64::MAX),
+            });
+        }
         let lines = lines(text);
         if lines <= MAX_LINES {
             return Ok(());
@@ -570,6 +595,45 @@ fn lines(text: &str) -> usize {
         .count();
     let tail = !text.is_empty() && !text.ends_with(['\r', '\n']);
     breaks.saturating_add(usize::from(tail))
+}
+
+/// The first line of `text` (1-based) whose structural column passes [`MAX_STRUCTURE_COLUMN`],
+/// and that column; `None` when every line is within it. Lines split at every `\r` and every
+/// `\n`, as the scanner counts rows. A line's structural column is the bytes of its leading
+/// spaces and tabs and of each `-`, `?` or `:` followed by a space, a tab or the line's end,
+/// repeated. Every byte it counts is ASCII, so it is also the scanner's column.
+fn too_deep(text: &str) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let blank_or_end =
+        |at: usize| matches!(bytes.get(at), None | Some(b' ' | b'\t' | b'\r' | b'\n'));
+    let mut at = 0_usize;
+    let mut line = 1_usize;
+    while at < bytes.len() {
+        let start = at;
+        loop {
+            while matches!(bytes.get(at), Some(b' ' | b'\t')) {
+                at = at.saturating_add(1);
+            }
+            match bytes.get(at) {
+                Some(b'-' | b'?' | b':') if blank_or_end(at.saturating_add(1)) => {
+                    at = at.saturating_add(1);
+                }
+                _ => break,
+            }
+        }
+        let column = at.saturating_sub(start);
+        if column > MAX_STRUCTURE_COLUMN {
+            return Some((line, column));
+        }
+        while let Some(&byte) = bytes.get(at) {
+            at = at.saturating_add(1);
+            if matches!(byte, b'\r' | b'\n') {
+                break;
+            }
+        }
+        line = line.saturating_add(1);
+    }
+    None
 }
 
 /// The key a single-quoted scalar spells: the text between its `'`s, each `''` one `'`. `None`
@@ -1085,6 +1149,131 @@ spec:
             assert!(
                 file.is_ok(),
                 "`{name}` of 40,000 lines should read: {file:?}"
+            );
+        }
+    }
+
+    /// Asserts `error` is the depth limit at `line` and `column`.
+    fn assert_too_deep(error: &ReadError, line: u64, column: u64) {
+        assert!(
+            matches!(
+                error,
+                ReadError::TooDeep { line: l, column: c, limit: 100, .. } if *l == line && *c == column
+            ),
+            "expected read-too-deep at line {line}, column {column}, got {error:?}"
+        );
+        assert_eq!(error.code(), "read-too-deep");
+    }
+
+    #[test]
+    fn the_audit_s_602_byte_file_is_refused_before_it_overflows_the_scanner() {
+        let error = refusal(&format!("{}x\n", "- ".repeat(300)));
+
+        assert_too_deep(&error, 1, 600);
+        assert_eq!(
+            error.message_naming(&"evil.yaml"),
+            "evil.yaml nests too deeply for the YAML parser: line 1 reaches column 600 in its \
+             indentation and `- `/`? `/`: ` indicators, and the parser handles at most column 100"
+        );
+    }
+
+    #[test]
+    fn a_structure_reaching_column_100_reads_and_101_is_refused() {
+        let file = parse(&format!("{}x\n", "- ".repeat(50)));
+        assert_eq!(symbols(&file).iter().count(), 50);
+
+        assert_too_deep(&refusal(&format!("{} x\n", "- ".repeat(50))), 1, 101);
+    }
+
+    #[test]
+    fn a_mapping_and_a_sequence_sharing_each_column_pins_the_bound_at_100() {
+        // Two scanner stack entries per column: the overflow comes at column 127, so 128 would
+        // be too loose a bound, and 100 leaves room.
+        let shape = |last: usize| {
+            (0..=last).fold(String::new(), |mut text, indent| {
+                let pad = " ".repeat(indent);
+                let _ = write!(text, "{pad}k:\n{pad}-\n");
+                text
+            })
+        };
+
+        let _read = parse(&shape(49));
+        assert_too_deep(&refusal(&shape(100)), 202, 101);
+    }
+
+    #[test]
+    fn deep_indentation_and_runs_of_indicators_are_refused() {
+        let indented = (0..300).fold(String::new(), |mut text, indent| {
+            let _ = writeln!(text, "{}k:", " ".repeat(indent));
+            text
+        });
+
+        assert_too_deep(&refusal(&indented), 102, 101);
+        assert_too_deep(&refusal(&format!("{}x\n", "? ".repeat(300))), 1, 600);
+        assert_too_deep(&refusal(&format!("{}x\n", ": ".repeat(300))), 1, 600);
+        assert_too_deep(&refusal(&format!("{}x\n", " ".repeat(40_000))), 1, 40_000);
+    }
+
+    #[test]
+    fn wide_lines_and_indicators_after_a_key_are_not_refused() {
+        let wide = [
+            format!("k: {}\n", "x".repeat(40_000)),
+            format!("[{}1]\n", "1, ".repeat(19_999)),
+            format!("k: {}\n", "prose - with: dashes - and: colons ".repeat(10)),
+            format!("k: {}x\n", "- ".repeat(300)),
+        ];
+
+        for text in wide {
+            let _read = parse(&text);
+        }
+    }
+
+    #[test]
+    fn carriage_returns_split_lines_as_the_scanner_counts_rows() {
+        let deep = format!("{}x", "- ".repeat(60));
+
+        assert_too_deep(&refusal(&format!("a: 1\r{deep}\r")), 2, 120);
+        assert_too_deep(&refusal(&format!("a: 1\r\n{deep}\r\n")), 3, 120);
+    }
+
+    #[test]
+    fn the_depth_limit_is_checked_before_the_parse() {
+        let expired: TimeLimit = "1ms".parse().expect("`1ms` should be a time limit");
+        let deadline = Deadline::start(expired);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        assert_too_deep(
+            &refusal_under(&format!("{}x\n", "- ".repeat(300)), deadline),
+            1,
+            600,
+        );
+    }
+
+    #[test]
+    fn other_languages_read_past_the_yaml_depth_limit() {
+        let languages = Languages::builtin().expect("the built-in cartridges should load");
+        let pad = " ".repeat(200);
+        for (name, text) in [
+            ("/repo/deep.toml", format!("[a]\n{pad}b = 1\n")),
+            (
+                "/repo/deep.rs",
+                format!("fn f() {{\n{pad}let _x = 1;\n}}\n"),
+            ),
+        ] {
+            let path = AbsolutePath::new(Path::new(name)).expect("the path should be absolute");
+            let language = languages
+                .for_path(path.as_path())
+                .unwrap_or_else(|| panic!("the registry should claim `{name}`"));
+            let file = SourceFile::from_text_under(
+                path,
+                text,
+                language,
+                Deadline::start(Limits::PARSE_TIMEOUT),
+                KeyPathBudget::defaults(),
+            );
+            assert!(
+                file.is_ok(),
+                "`{name}` indented 200 spaces should read: {file:?}"
             );
         }
     }

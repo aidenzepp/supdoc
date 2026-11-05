@@ -235,6 +235,7 @@ fn read_failed(error: &ReadError, root: &AbsolutePath, typed: &Path) -> CliError
         | ReadError::TooManyKeys { .. }
         | ReadError::KeyPathsTooLarge { .. }
         | ReadError::TooManyLines { .. }
+        | ReadError::TooDeep { .. }
         | ReadError::UnsupportedLanguage { .. } => ExitStatus::Failed,
     };
     let shown = relative_to(root, error.path());

@@ -1205,6 +1205,14 @@ mod helps {
             &["check"],
         ),
         case(
+            "read-too-deep",
+            |p| {
+                p.write("evil.yaml", &format!("{}x\n", "- ".repeat(300)));
+                p.write("docs/guide.md", "[x](../evil.yaml#0)\n");
+            },
+            &["check"],
+        ),
+        case(
             "read-key-paths-too-large",
             |p| {
                 p.write("Cargo.toml", "[package]\nversion = \"1\"\n");

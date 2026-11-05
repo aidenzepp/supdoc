@@ -439,3 +439,44 @@ fn yaml_a_blank_line_added_to_a_keep_chomped_value_fails_only_its_link() {
     assert_eq!(at(&report, "/data/summary/failed"), 1, "{report}");
     assert_eq!(at(&report, "/data/links/0/symbol"), "keep", "{report}");
 }
+
+#[test]
+fn yaml_nested_past_the_scanner_s_limit_is_refused_and_never_aborts() {
+    let project = Project::fixture("bash");
+    project.write("evil.yaml", &format!("{}x\n", "- ".repeat(300)));
+    project.write(
+        "docs/evil.md",
+        "A [deep element](../evil.yaml#0) and [`setup_env`](../src/deploy.sh#setup_env).\n",
+    );
+
+    let check = project.supdoc(&["--json", "check"]).assert_exit(1).json();
+    let update = project.supdoc(&["--json", "update", "--yes"]);
+    let list = project.supdoc(&["--json", "list"]).assert_exit(0).json();
+
+    let kinds: Vec<&str> = array_at(&check, "/data/links")
+        .iter()
+        .filter_map(|link| {
+            link.pointer("/finding/kind")
+                .and_then(serde_json::Value::as_str)
+        })
+        .collect();
+    assert!(kinds.contains(&"read-too-deep"), "{check}");
+    assert!(
+        array_at(&check, "/data/links").iter().any(|link| {
+            link.pointer("/symbol").and_then(serde_json::Value::as_str) == Some("setup_env")
+        }),
+        "the healthy link should still be reported: {check}"
+    );
+    assert!(
+        update.code.is_some_and(|code| code != 134),
+        "update should exit on its own, not abort: {:?}\n{}",
+        update.code,
+        update.stderr
+    );
+    assert!(
+        update.json().to_string().contains("read-too-deep"),
+        "{}",
+        update.stdout
+    );
+    assert!(list.to_string().contains("read-too-deep"), "{list}");
+}
