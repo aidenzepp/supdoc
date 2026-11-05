@@ -19,7 +19,7 @@ use crate::hash::Hash;
 use crate::limits::{Limits, SizeLimit};
 use crate::read::source::{open_without_blocking, read_up_to};
 
-use super::runner::Ran;
+use super::runner::{self, Ran};
 use super::tools::{ToolCartridge, ToolEnv};
 
 /// The version of the rules that decide what a tool reads for a block, such as wrapping. Raised
@@ -79,8 +79,10 @@ pub(crate) struct Run<'run> {
 
 impl Cache {
     /// The cache for `root`, under `env`'s `XDG_CACHE_HOME`, else its `HOME`'s `.cache`, with its
-    /// directory created mode 0700. `None` when neither is an absolute path, when the directory
-    /// would be inside `root`, or when it can't be created: then nothing is cached.
+    /// directory created mode 0700 beneath where that base really lies, as
+    /// [`runner::create_private`] creates the other private directories. `None` when neither is an
+    /// absolute path, when the directory would be inside `root`, when a link beneath the base
+    /// leads out of it, or when it can't be created: then nothing is cached.
     ///
     /// Effect: resolves `root` and the cache base, and creates the cache directory.
     pub(crate) fn open(env: &ToolEnv, root: &Path) -> Option<Self> {
@@ -93,27 +95,31 @@ impl Cache {
             .or_else(|| absolute("HOME").map(|home| home.join(".cache")))?;
         let real_root = root.canonicalize().ok()?;
         let real_base = resolved(&base)?;
-        if real_base.starts_with(&real_root) {
-            return None;
-        }
         let name = Hash::digest(real_root.as_os_str().as_encoded_bytes()).to_string();
         let dir = real_base.join("supdoc").join("code-blocks").join(name);
-        Self::at(dir, MAX_ENTRIES)
+        let existing = dir
+            .ancestors()
+            .find_map(|ancestor| ancestor.canonicalize().ok());
+        if existing.is_none_or(|existing| existing.starts_with(&real_root)) {
+            return None;
+        }
+        Self::at(&real_base, dir, MAX_ENTRIES)
     }
 
-    /// The cache in `dir`, created mode 0700, keeping `limit` entries, with later writes held
-    /// beneath where `dir` really lies now. `None` when `dir` isn't absolute or can't be created.
+    /// The cache in `dir`, keeping `limit` entries, once [`runner::create_private`] creates it
+    /// mode 0700 admitted beneath `base`; later writes are held beneath where `dir` really lies
+    /// then. `None` when either isn't an exact absolute path, when `dir` leaves `base` once its
+    /// links are followed, or when it can't be created.
     ///
-    /// Effect: resolves `dir`, and creates it and its missing parents.
-    fn at(dir: PathBuf, limit: usize) -> Option<Self> {
-        let boundary = Boundary::resolve(&dir);
-        let cache = Self {
+    /// Effect: resolves `base`, and creates `dir` and its missing parents.
+    fn at(base: &Path, dir: PathBuf, limit: usize) -> Option<Self> {
+        let (base, given) = (runner::exact(base)?, runner::exact(&dir)?);
+        let boundary = runner::create_private(&Boundary::resolve(&base), &given)?;
+        Some(Self {
             dir,
             boundary,
             limit,
-        };
-        confine::create_dir_all(&cache.admit(&cache.dir)?, 0o700).ok()?;
-        Some(cache)
+        })
     }
 
     /// The key of `run`, from `root`: the checked text, the tool's name, its real path, size and
@@ -526,7 +532,8 @@ mod tests {
     #[test]
     fn a_stored_run_reads_back_unchanged() {
         let dir = temp();
-        let cache = Cache::at(dir.path().join("cache"), 10).expect("the cache should open");
+        let cache =
+            Cache::at(dir.path(), dir.path().join("cache"), 10).expect("the cache should open");
         let key = key_of(&program(dir.path()), "echo hi\n", dir.path());
 
         cache.put(key, &ran());
@@ -537,7 +544,8 @@ mod tests {
     #[test]
     fn a_missing_entry_is_a_miss() {
         let dir = temp();
-        let cache = Cache::at(dir.path().join("cache"), 10).expect("the cache should open");
+        let cache =
+            Cache::at(dir.path(), dir.path().join("cache"), 10).expect("the cache should open");
         let key = key_of(&program(dir.path()), "echo hi\n", dir.path());
 
         assert_eq!(cache.get(key), None);
@@ -546,7 +554,8 @@ mod tests {
     #[test]
     fn a_corrupt_or_cut_short_entry_is_a_miss() {
         let dir = temp();
-        let cache = Cache::at(dir.path().join("cache"), 10).expect("the cache should open");
+        let cache =
+            Cache::at(dir.path(), dir.path().join("cache"), 10).expect("the cache should open");
         let key = key_of(&program(dir.path()), "echo hi\n", dir.path());
         cache.put(key, &ran());
         let path = cache.entry(key);
@@ -568,7 +577,8 @@ mod tests {
     #[test]
     fn an_entry_under_another_key_is_a_miss() {
         let dir = temp();
-        let cache = Cache::at(dir.path().join("cache"), 10).expect("the cache should open");
+        let cache =
+            Cache::at(dir.path(), dir.path().join("cache"), 10).expect("the cache should open");
         let program = program(dir.path());
         let first = key_of(&program, "echo hi\n", dir.path());
         let second = key_of(&program, "echo bye\n", dir.path());
@@ -634,7 +644,8 @@ mod tests {
     #[test]
     fn stderr_at_the_cap_is_stored_whole() {
         let dir = temp();
-        let cache = Cache::at(dir.path().join("cache"), 10).expect("the cache should open");
+        let cache =
+            Cache::at(dir.path(), dir.path().join("cache"), 10).expect("the cache should open");
         let key = key_of(&program(dir.path()), "x\n", dir.path());
 
         cache.put(key, &loud(STDERR_CAP));
@@ -646,7 +657,8 @@ mod tests {
     #[test]
     fn stderr_one_byte_over_the_cap_is_not_stored() {
         let dir = temp();
-        let cache = Cache::at(dir.path().join("cache"), 10).expect("the cache should open");
+        let cache =
+            Cache::at(dir.path(), dir.path().join("cache"), 10).expect("the cache should open");
         let key = key_of(&program(dir.path()), "x\n", dir.path());
 
         cache.put(key, &loud(STDERR_CAP + 1));
@@ -660,7 +672,8 @@ mod tests {
     #[test]
     fn prune_removes_the_oldest_entries_beyond_the_limit() {
         let dir = temp();
-        let cache = Cache::at(dir.path().join("cache"), 2).expect("the cache should open");
+        let cache =
+            Cache::at(dir.path(), dir.path().join("cache"), 2).expect("the cache should open");
         let program = program(dir.path());
         let keys: Vec<Key> = ["a\n", "b\n", "c\n"]
             .into_iter()
@@ -696,7 +709,8 @@ mod tests {
     fn put_leaves_an_entry_that_is_a_symlink_to_outside_and_its_target_alone() {
         use std::os::unix::fs::symlink;
         let dir = temp();
-        let cache = Cache::at(dir.path().join("cache"), 10).expect("the cache should open");
+        let cache =
+            Cache::at(dir.path(), dir.path().join("cache"), 10).expect("the cache should open");
         let key = key_of(&program(dir.path()), "echo hi\n", dir.path());
         let outside = dir.path().join("outside");
         fs::write(&outside, "outside\n").expect("the outside file should be writable");
@@ -721,7 +735,8 @@ mod tests {
     fn a_cache_directory_replaced_by_a_symlink_to_outside_is_not_written_or_pruned() {
         use std::os::unix::fs::symlink;
         let dir = temp();
-        let cache = Cache::at(dir.path().join("cache"), 1).expect("the cache should open");
+        let cache =
+            Cache::at(dir.path(), dir.path().join("cache"), 1).expect("the cache should open");
         let key = key_of(&program(dir.path()), "echo hi\n", dir.path());
         let outside = dir.path().join("outside");
         fs::create_dir(&outside).expect("the outside directory should be creatable");
@@ -738,6 +753,75 @@ mod tests {
             names(&outside),
             ["a", "b", "c"].map(OsString::from),
             "nothing should be written or removed where the symlink leads"
+        );
+    }
+
+    /// The tool environment with `XDG_CACHE_HOME` set to `base` and nothing else.
+    fn xdg(base: &Path) -> ToolEnv {
+        let base = base.to_path_buf();
+        ToolEnv::from_vars(|name| (name == "XDG_CACHE_HOME").then(|| base.clone().into()))
+    }
+
+    #[test]
+    fn a_link_beneath_the_cache_base_that_leads_out_gives_no_cache_and_creates_nothing_there() {
+        use std::os::unix::fs::symlink;
+        let dir = temp();
+        let root = dir.path().join("root");
+        let base = dir.path().join("base");
+        let outside = dir.path().join("outside");
+        for made in [&root, &base, &outside] {
+            fs::create_dir(made).expect("a fixture directory should be creatable");
+        }
+        symlink(&outside, base.join("supdoc")).expect("the planted link");
+
+        let cache = Cache::open(&xdg(&base), &root);
+
+        assert!(cache.is_none(), "{cache:?}");
+        assert_eq!(
+            names(&outside),
+            Vec::<OsString>::new(),
+            "nothing where the link leads"
+        );
+    }
+
+    #[test]
+    fn a_checkout_beneath_the_cache_base_gives_no_cache_and_creates_nothing_in_it() {
+        let dir = temp();
+        let base = dir.path().join("base");
+        let root = base.join("supdoc");
+        fs::create_dir_all(&root).expect("the root should be creatable");
+
+        let cache = Cache::open(&xdg(&base), &root);
+
+        assert!(cache.is_none(), "{cache:?}");
+        assert_eq!(
+            names(&root),
+            Vec::<OsString>::new(),
+            "nothing in the checkout"
+        );
+    }
+
+    #[test]
+    fn a_cache_base_that_is_a_link_to_another_dir_gives_a_cache_under_where_it_leads() {
+        use std::os::unix::fs::symlink;
+        let dir = temp();
+        let root = dir.path().join("root");
+        let disk = dir.path().join("disk");
+        let base = dir.path().join("base");
+        fs::create_dir(&root).expect("the root should be creatable");
+        fs::create_dir(&disk).expect("the link's target should be creatable");
+        symlink(&disk, &base).expect("the cache base link");
+
+        let cache = Cache::open(&xdg(&base), &root).expect("a linked base should give a cache");
+
+        let real = disk.canonicalize().expect("the disk should resolve");
+        assert!(
+            cache.dir.starts_with(real.join("supdoc/code-blocks")),
+            "{cache:?}"
+        );
+        assert!(
+            cache.dir.is_dir(),
+            "the cache should be created where the base leads"
         );
     }
 
