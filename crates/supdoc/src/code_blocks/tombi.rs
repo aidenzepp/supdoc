@@ -1,13 +1,15 @@
 //! tombi: its JSON diagnostics, its syntax-error report, and the config supdoc gives it.
 //!
 //! tombi takes no config flag. It looks for a project config walking up from the directory it
-//! runs in, then for a user config under `$XDG_CONFIG_HOME/tombi`, and supdoc runs it from an
-//! empty directory of its own. So supdoc walks up from the doc inside the root for the project's
-//! config, refuses one that makes tombi read files the checkout chose or fetch (`schemas`,
-//! `schema.catalog`, `extensions`), drops its `files` table (every block is checked), and writes
-//! what is left into a private `tombi/config.toml`, which tombi reads as its user config through
-//! `XDG_CONFIG_HOME`. The file is written even when the project has no config, empty, so a config
-//! in the home directory or under `/etc` never applies.
+//! runs in, all the way to `/`, then for a user config under `$XDG_CONFIG_HOME/tombi`. So supdoc
+//! walks up from the doc inside the root for the project's config, refuses one that makes tombi
+//! read files the checkout chose or fetch (`schemas`, `schema.catalog`, `extensions`), drops its
+//! `files` table and every `enabled` switch (every block is checked), and writes what is left as
+//! `tombi.toml` in a private directory tombi runs in, so the nearest config tombi finds is always
+//! supdoc's copy. The copy is written even when the project has no config, empty. The directory
+//! above it holds an empty `tombi.toml` of supdoc's too, which tombi finds instead when it can't
+//! read the copy, so no config above supdoc's cache (in the home directory, say) ever applies.
+//! `XDG_CONFIG_HOME` points at the private directory as well, holding the same copy.
 //!
 //! A block's own `#:schema` comment makes tombi read the file it names, wherever it is, so a
 //! block carrying one is never given to tombi (see [`names_schema`]).
@@ -24,7 +26,7 @@ use crate::hash::Hash;
 
 /// The config names tombi looks for in a directory, in its own order. `pyproject.toml` counts
 /// only when it has a `[tool.tombi]` table.
-pub(crate) const CONFIG_FILES: [&str; 4] = [
+const CONFIG_FILES: [&str; 4] = [
     ".tombi.toml",
     "tombi.toml",
     ".config/tombi.toml",
@@ -192,31 +194,51 @@ pub(crate) enum Refusal {
     NoPrivateDir,
 }
 
-/// What tombi is given for the blocks of one doc directory: where its config lives, and where the
-/// doc is told to be.
+/// What tombi is given for the blocks of one doc directory: the private directory it runs in, and
+/// where the doc is told to be.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Project {
-    /// The private directory passed as `XDG_CONFIG_HOME`, holding `tombi/config.toml`.
+    /// The private directory tombi runs in, holding the copy as `tombi.toml` and again as
+    /// `tombi/config.toml`, which is also its `XDG_CONFIG_HOME`.
     pub(crate) config_home: PathBuf,
     /// The directory the project's config resolves its patterns against (see [`pattern_root`]),
-    /// and the private directory holding its copy: `None` when there is no project config.
-    moved: Option<(PathBuf, PathBuf)>,
+    /// or the root when there is no project config.
+    from: PathBuf,
 }
 
 impl Project {
-    /// Where tombi is told `doc` is: its position under the root its config resolves patterns
-    /// against, kept under the private copy's directory, so `[[overrides]]` patterns match as
-    /// they do in the project. `doc` itself when there is no project config. The file need not
-    /// exist.
+    /// Where tombi is told `doc` is: its position under the directory the project's config
+    /// resolves patterns against, kept under the private directory, where the copy is, so
+    /// `[[overrides]]` patterns match as they do in the project. The file need not exist.
     #[must_use]
     pub(crate) fn doc_as_seen(&self, doc: &Path) -> PathBuf {
-        match &self.moved {
-            Some((from, to)) => to.join(
-                doc.strip_prefix(from)
-                    .unwrap_or_else(|_| Path::new(doc.file_name().unwrap_or_default())),
-            ),
-            None => doc.to_path_buf(),
-        }
+        self.config_home.join(
+            doc.strip_prefix(&self.from)
+                .unwrap_or_else(|_| Path::new(doc.file_name().unwrap_or_default())),
+        )
+    }
+
+    /// The variables tombi gets beyond the passed environment: `XDG_CONFIG_HOME`, the private
+    /// directory, and `NO_COLOR`, so its messages carry no colour codes.
+    #[must_use]
+    pub(crate) fn vars(&self) -> [(&'static str, OsString); 2] {
+        [
+            ("XDG_CONFIG_HOME", self.config_home.as_os_str().to_owned()),
+            ("NO_COLOR", OsString::from("1")),
+        ]
+    }
+
+    /// How the private paths tombi prints are named to the user: the private directory, with
+    /// and without a trailing `/`, as the block's virtual name relative to the directory its
+    /// config resolves patterns against.
+    #[must_use]
+    pub(crate) fn names(&self) -> [(PathBuf, PathBuf); 2] {
+        let mut slashed = self.config_home.clone().into_os_string();
+        slashed.push("/");
+        [
+            (PathBuf::from(slashed), PathBuf::new()),
+            (self.config_home.clone(), PathBuf::from(".")),
+        ]
     }
 }
 
@@ -235,8 +257,8 @@ fn pattern_root(config: &Path) -> Option<PathBuf> {
 
 /// The [`Project`] tombi is given for `doc`: the project's config, found walking up from `doc`'s
 /// directory to `root` (see [`candidates`]), its validated table written again as TOML into a
-/// private `tombi/config.toml` under a directory named by the hash of what is written; or that
-/// file empty when there is no config.
+/// private directory named by the hash of what is written (see [`private_config`]); or an empty
+/// copy when there is no config.
 ///
 /// Effect: reads file metadata and the config, resolves symlinks, and may create supdoc's
 /// private directory and the config file in it.
@@ -256,8 +278,8 @@ pub(crate) fn project(env: &ToolEnv, root: &Path, doc: &Path) -> Result<Project,
                 None => Refusal::NoPrivateDir,
                 Some(why) => Refusal::Config { file, why },
             })?;
-            let moved = pattern_root(&candidate).map(|dir| (dir, config_home.join("tombi")));
-            return Ok(Project { config_home, moved });
+            let from = pattern_root(&candidate).unwrap_or_else(|| root.to_path_buf());
+            return Ok(Project { config_home, from });
         }
     }
     let config_home = private_config(env, root, &toml::Table::new()).map_err(|why| match why {
@@ -269,7 +291,7 @@ pub(crate) fn project(env: &ToolEnv, root: &Path, doc: &Path) -> Result<Project,
     })?;
     Ok(Project {
         config_home,
-        moved: None,
+        from: root.to_path_buf(),
     })
 }
 
@@ -347,6 +369,7 @@ fn checked(root: &Path, found: &Path) -> Result<Option<toml::Table>, Refusal> {
         return Err(refuse(why));
     }
     let _dropped = tombi.remove("files");
+    drop_switches(&mut tombi);
     Ok(Some(tombi))
 }
 
@@ -366,6 +389,27 @@ fn unsafe_part(table: &toml::Table) -> Option<&'static str> {
         return Some("declares `extensions`, which make tombi read other files of the project");
     }
     None
+}
+
+/// Removes every key of `table` that switches a step off: `format.enabled` and `lint.enabled`, at
+/// the top and in each `[[overrides]]` entry, so tombi checks every block (a switched-off step
+/// would pass the block, or print nothing for it to format).
+fn drop_switches(table: &mut toml::Table) {
+    let steps = |table: &mut toml::Table| {
+        for step in ["format", "lint"] {
+            if let Some(toml::Value::Table(step)) = table.get_mut(step) {
+                let _dropped = step.remove("enabled");
+            }
+        }
+    };
+    steps(table);
+    if let Some(toml::Value::Array(overrides)) = table.get_mut("overrides") {
+        for entry in overrides {
+            if let toml::Value::Table(entry) = entry {
+                steps(entry);
+            }
+        }
+    }
 }
 
 /// Why a config file couldn't be read as a table.
@@ -417,13 +461,16 @@ fn mentions_tool_tombi(real: &Path) -> Option<bool> {
     Some(String::from_utf8_lossy(&bytes).contains("tool.tombi"))
 }
 
-/// Writes `table` as TOML into `tombi/config.toml` in a private directory named by the hash of
-/// what is written, under supdoc's `tombi-config` directory, and returns that directory: what
-/// tombi is given as `XDG_CONFIG_HOME`. A file already there with the same content is kept;
-/// anything else at the name is replaced by writing a temporary file beside it and renaming it
-/// into place, so concurrent runs never see half a file.
+/// Writes `table` as TOML into a private directory named by the hash of what is written, under
+/// supdoc's `tombi-config` directory, as `tombi.toml` (what tombi finds from its working
+/// directory) and as `tombi/config.toml` (what it finds through `XDG_CONFIG_HOME`), and returns
+/// that directory. `tombi-config` itself gets an empty `tombi.toml`, which tombi finds instead of
+/// any config further up when it can't read the copy. A file already holding the right content is
+/// kept; anything else at the name is replaced by writing a temporary file beside it and renaming
+/// it into place, so concurrent runs never see half a file. The directory is returned by its real
+/// path.
 ///
-/// Effect: creates the directories mode 0700 and the file mode 0600, and may replace a stale file.
+/// Effect: creates the directories mode 0700 and the files mode 0600, and may replace stale ones.
 ///
 /// # Errors
 ///
@@ -433,9 +480,7 @@ fn private_config(
     root: &Path,
     table: &toml::Table,
 ) -> Result<PathBuf, Option<&'static str>> {
-    use std::io::Write as _;
-    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 
     let neutral = runner::neutral_dir(env, root);
     if neutral == Path::new("/") {
@@ -444,12 +489,11 @@ fn private_config(
     let text = toml::to_string(table).map_err(|_| Some("couldn't be written again as TOML"))?;
     let parent = neutral.parent().ok_or(None)?.join("tombi-config");
     let home = parent.join(Hash::digest(text.as_bytes()).to_string());
-    let dir = home.join("tombi");
     let private = |path: &Path| {
         fs::symlink_metadata(path)
             .is_ok_and(|meta| meta.is_dir() && meta.permissions().mode().trailing_zeros() >= 6)
     };
-    for path in [&parent, &home, &dir] {
+    for path in [&parent, &home, &home.join("tombi")] {
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -459,40 +503,52 @@ fn private_config(
             return Err(None);
         }
     }
-    let file = dir.join("config.toml");
-    let current = fs::symlink_metadata(&file)
-        .ok()
-        .filter(fs::Metadata::is_file)
-        .and_then(|_| fs::read_to_string(&file).ok());
-    if current.as_deref() != Some(text.as_str()) {
-        static WRITERS: AtomicUsize = AtomicUsize::new(0);
-        let temp = dir.join(format!(
-            ".config.toml.{}.{}.tmp",
-            std::process::id(),
-            WRITERS.fetch_add(1, Ordering::Relaxed)
-        ));
-        let written = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temp)
-            .and_then(|mut out| out.write_all(text.as_bytes()))
-            .and_then(|()| fs::rename(&temp, &file));
-        if written.is_err() {
-            let _own = fs::remove_file(&temp);
-            return Err(None);
-        }
+    for (file, content) in [
+        (parent.join("tombi.toml"), ""),
+        (home.join("tombi.toml"), text.as_str()),
+        (home.join("tombi/config.toml"), text.as_str()),
+    ] {
+        write_private(&file, content).ok_or(None)?;
     }
-    Ok(home)
+    // Its real path: tombi resolves the working directory's, and matches override patterns
+    // against the doc only when the doc's path, which can't be resolved, starts with it.
+    home.canonicalize().map_err(|_| None)
 }
 
-/// The variable tombi is given its private config by, with `project`'s directory.
-#[must_use]
-pub(crate) fn config_var(project: &Project) -> (&'static str, OsString) {
-    (
-        "XDG_CONFIG_HOME",
-        project.config_home.as_os_str().to_owned(),
-    )
+/// Writes `content` to `file`, mode 0600, unless it already holds exactly that: through a
+/// temporary file in the same directory renamed into place. `None` when it can't.
+///
+/// Effect: may create the temporary file and replace `file`.
+fn write_private(file: &Path, content: &str) -> Option<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static WRITERS: AtomicUsize = AtomicUsize::new(0);
+    let current = fs::symlink_metadata(file)
+        .ok()
+        .filter(fs::Metadata::is_file)
+        .and_then(|_| fs::read_to_string(file).ok());
+    if current.as_deref() == Some(content) {
+        return Some(());
+    }
+    let temp = file.with_file_name(format!(
+        ".tombi.{}.{}.tmp",
+        std::process::id(),
+        WRITERS.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp)
+        .and_then(|mut out| out.write_all(content.as_bytes()))
+        .and_then(|()| fs::rename(&temp, file));
+    if written.is_err() {
+        let _own = fs::remove_file(&temp);
+        return None;
+    }
+    Some(())
 }
 
 #[cfg(test)]
@@ -513,10 +569,16 @@ mod tests {
         ToolEnv::from_vars(|name| (name == "XDG_CACHE_HOME").then(|| cache.as_os_str().to_owned()))
     }
 
-    /// The private `tombi/config.toml` `project` names.
+    /// The private `tombi.toml` `project` names, checked to be the same as its
+    /// `tombi/config.toml`.
     fn config_text(project: &Project) -> String {
-        fs::read_to_string(project.config_home.join("tombi/config.toml"))
-            .expect("the private config should be readable")
+        let read = |name: &str| {
+            fs::read_to_string(project.config_home.join(name))
+                .expect("the private config should be readable")
+        };
+        let copy = read("tombi.toml");
+        assert_eq!(copy, read("tombi/config.toml"), "the two copies differ");
+        copy
     }
 
     #[test]
@@ -634,6 +696,55 @@ mod tests {
     }
 
     #[test]
+    fn every_switch_that_turns_a_step_off_is_dropped_and_other_overrides_kept() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        fs::write(
+            root.path().join("tombi.toml"),
+            "[lint]\nenabled = false\n[[overrides]]\nfiles.include = [\"docs/**\"]\n\
+             format.enabled = false\nlint.enabled = false\nlint.rules.key-empty = \"error\"\n",
+        )
+        .expect("config");
+
+        let given = project(
+            &env_in(cache.path()),
+            root.path(),
+            &root.path().join("docs/a.md"),
+        )
+        .expect("a safe config");
+
+        assert_eq!(
+            config_text(&given),
+            "[lint]\n\n[[overrides]]\n\n[overrides.files]\ninclude = [\"docs/**\"]\n\n\
+             [overrides.format]\n\n[overrides.lint.rules]\nkey-empty = \"error\"\n"
+        );
+    }
+
+    #[test]
+    fn tombis_private_paths_are_named_as_the_blocks_virtual_name() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let doc = root.path().join("docs/a.md");
+        let given = project(&env_in(cache.path()), root.path(), &doc).expect("no config is fine");
+        let printed = format!(
+            "Error: x\n    at {}.1.toml:2:5\n",
+            given.doc_as_seen(&doc).display()
+        );
+        let named = crate::code_blocks::biome::Given {
+            flags: Vec::new(),
+            config: None,
+            mirror: None,
+            names: Some(given.names()),
+        }
+        .named(printed.as_bytes());
+
+        assert_eq!(
+            String::from_utf8_lossy(&named),
+            "Error: x\n    at docs/a.md.1.toml:2:5\n"
+        );
+    }
+
+    #[test]
     fn with_no_config_tombi_still_gets_an_empty_private_one() {
         let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
@@ -642,7 +753,16 @@ mod tests {
         let given = project(&env_in(cache.path()), root.path(), &doc).expect("no config is fine");
 
         assert_eq!(config_text(&given), "");
-        assert_eq!(given.doc_as_seen(&doc), doc);
+        assert_eq!(given.doc_as_seen(&doc), given.config_home.join("docs/a.md"));
+        let guard = given
+            .config_home
+            .parent()
+            .expect("the private directory has a parent")
+            .join("tombi.toml");
+        assert_eq!(
+            fs::read_to_string(guard).expect("the guard config should be readable"),
+            ""
+        );
     }
 
     #[test]
@@ -706,10 +826,7 @@ mod tests {
             pattern_root(&root.path().join("docs/tombi.toml")),
         ];
 
-        assert_eq!(
-            given.doc_as_seen(&doc),
-            given.config_home.join("tombi/docs/a.md")
-        );
+        assert_eq!(given.doc_as_seen(&doc), given.config_home.join("docs/a.md"));
         assert_eq!(
             roots,
             [

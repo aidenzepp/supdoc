@@ -65,7 +65,15 @@ pub(crate) enum Verdict {
     /// The formatter's output around a block of this kind doesn't keep the frame it is expected
     /// to print back, or the block's lines inside it lack the frame's indent.
     FrameReformatted(Kind),
+    /// The formatter exited 0 and printed nothing for a block that isn't blank: it didn't format
+    /// the block (its config can switch formatting off), so the step didn't run. Never a failure
+    /// and never a fix, which would empty the block.
+    PrintedNothing,
 }
+
+/// Why a block's format step didn't run when its formatter exited 0 and printed nothing for it.
+pub(crate) const PRINTED_NOTHING: &str =
+    "the formatter printed nothing for the block, so it didn't format it";
 
 /// Judges a formatter's `result` on a block whose body as written is `input`, run inside
 /// `frame` with each non-empty line led by `indent` (see [`Frame::wrap_indented`]). Output that
@@ -75,7 +83,8 @@ pub(crate) enum Verdict {
 /// is [`Verdict::FrameReformatted`], never a guess. A blank block passes when the output is the
 /// frame alone ([`Frame::alone`]). A syntax error is shifted past the frame's leading lines; one
 /// on a frame line is [`Verdict::NotKind`]. A failure's detail is in the block's coordinates and
-/// shows no line of the frame.
+/// shows no line of the frame. Exit 0 with nothing printed for a block that isn't blank is
+/// [`Verdict::PrintedNothing`].
 #[must_use]
 pub(crate) fn judge_framed(
     tool: &ToolCartridge,
@@ -86,6 +95,9 @@ pub(crate) fn judge_framed(
 ) -> Verdict {
     let lines = input.lines().count();
     match result {
+        Ok(ran) if ran.success && ran.stdout.is_empty() && !input.trim().is_empty() => {
+            Verdict::PrintedNothing
+        }
         Ok(ran) if ran.success => match String::from_utf8(ran.stdout) {
             Err(_) => Verdict::ToolFailed("it printed output that isn't UTF-8".to_owned()),
             Ok(output) if input.trim().is_empty() && frame.alone(&output) => Verdict::Formatted,
@@ -180,6 +192,7 @@ impl Verdict {
                 states::BlockState::Failed(states::Failure::ParseFailed)
             }
             Self::TimedOut => states::BlockState::Failed(states::Failure::ToolTimeout),
+            Self::PrintedNothing => states::BlockState::NotChecked(states::NotChecked::NoStepRan),
         }
     }
 }
@@ -202,11 +215,15 @@ pub(crate) fn input(block: &CodeBlock, text: &str) -> Option<String> {
 /// `tool`'s stderr is its syntax-error report (see [`ToolCartridge::parse_error`]; the runner
 /// gives no exit status beyond success, so each tool is told by its message alone) and places
 /// the error on a line; a report without a location, like any other non-zero exit, is a tool
-/// failure. Stderr after exit 0 is never judged.
+/// failure. Stderr after exit 0 is never judged. Exit 0 with nothing printed for a block that
+/// isn't blank is [`Verdict::PrintedNothing`]: the formatter didn't format it.
 #[must_use]
 pub(crate) fn judge(tool: &ToolCartridge, input: &str, result: Result<Ran, Failure>) -> Verdict {
     match result {
         Ok(ran) if ran.success && ran.stdout == input.as_bytes() => Verdict::Formatted,
+        Ok(ran) if ran.success && ran.stdout.is_empty() && !input.trim().is_empty() => {
+            Verdict::PrintedNothing
+        }
         Ok(ran) if ran.success => String::from_utf8(ran.stdout).map_or_else(
             |_| Verdict::ToolFailed("it printed output that isn't UTF-8".to_owned()),
             Verdict::Unformatted,
@@ -284,7 +301,7 @@ pub(crate) fn finding(
 ) -> Option<Finding> {
     let name = tool.name;
     let finding = match verdict {
-        Verdict::Formatted => return None,
+        Verdict::Formatted | Verdict::PrintedNothing => return None,
         Verdict::Unformatted(_) => Finding::new(
             UNFORMATTED,
             Severity::Error,

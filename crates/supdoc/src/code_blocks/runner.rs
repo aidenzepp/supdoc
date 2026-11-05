@@ -27,11 +27,15 @@ const POLL: Duration = Duration::from_millis(5);
 
 /// Where a tool call runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Cwd {
+pub(crate) enum Cwd<'call> {
     /// The empty supdoc-owned directory [`neutral_dir`] picks, outside the root.
     Neutral,
     /// The project root's real path.
     Root,
+    /// A private directory supdoc made beside [`neutral_dir`] for this tool, such as the one
+    /// holding the config tombi finds by walking up from where it runs. Accepted only when it
+    /// passes [`private_dir`].
+    Private(&'call Path),
 }
 
 /// One tool call: the binary, its arguments and extra variables, the block it reads, where it
@@ -52,7 +56,7 @@ pub(crate) struct Call<'call> {
     /// How long the tool may run. `None` is no limit.
     pub(crate) timeout: Option<Duration>,
     /// The directory the tool runs in.
-    pub(crate) cwd: Cwd,
+    pub(crate) cwd: Cwd<'call>,
     /// The most bytes read from each of stdout and stderr; [`CAP`] for a tool on a block.
     pub(crate) cap: usize,
 }
@@ -204,19 +208,52 @@ pub(crate) fn run(call: &Call<'_>, env: &ToolEnv, root: &Path) -> Result<Ran, Fa
     })
 }
 
-/// The directory a call with `cwd` runs in: [`neutral_dir`] judged against `root`, or `root`'s
-/// real path.
+/// The directory a call with `cwd` runs in: [`neutral_dir`] judged against `root`, `root`'s
+/// real path, or a private directory's real path once [`private_dir`] accepts it.
 ///
-/// Effect: creates the neutral directory, or resolves `root`.
+/// Effect: creates the neutral directory, or resolves `root` or the private directory.
 ///
 /// # Errors
 ///
-/// [`Failure::Spawn`] when `cwd` is [`Cwd::Root`] and `root` doesn't resolve.
-fn working_dir(cwd: Cwd, env: &ToolEnv, root: &Path) -> Result<PathBuf, Failure> {
+/// [`Failure::Spawn`] when `cwd` is [`Cwd::Root`] and `root` doesn't resolve, or is a
+/// [`Cwd::Private`] directory [`private_dir`] refuses.
+fn working_dir(cwd: Cwd<'_>, env: &ToolEnv, root: &Path) -> Result<PathBuf, Failure> {
     match cwd {
         Cwd::Neutral => Ok(neutral_dir(env, root)),
         Cwd::Root => root.canonicalize().map_err(Failure::Spawn),
+        Cwd::Private(dir) => private_dir(env, root, dir).ok_or_else(|| {
+            Failure::Spawn(std::io::Error::other(
+                "its working directory isn't a private directory supdoc made",
+            ))
+        }),
     }
+}
+
+/// The real path of `dir` when supdoc may run a tool there: a directory under the real path of
+/// supdoc's code-block cache directory (the one [`neutral_dir`] sits in), outside `root`, that
+/// only its owner reaches (mode 0700 or narrower) and that the neutral directory's owner owns.
+/// `None` otherwise, and when there is no neutral directory.
+///
+/// Effect: creates the neutral directory and reads metadata along both paths.
+#[must_use]
+pub(crate) fn private_dir(env: &ToolEnv, root: &Path, dir: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    let neutral = neutral_dir(env, root);
+    if neutral == Path::new("/") {
+        return None;
+    }
+    let cache = neutral.canonicalize().ok()?.parent()?.to_path_buf();
+    let real = dir.canonicalize().ok()?;
+    let real_root = root.canonicalize().ok()?;
+    let meta = std::fs::symlink_metadata(&real).ok()?;
+    let owner = std::fs::metadata(&cache).ok()?.uid();
+    let private = real.starts_with(&cache)
+        && real != cache
+        && !real.starts_with(&real_root)
+        && meta.is_dir()
+        && meta.permissions().mode().trailing_zeros() >= 6
+        && meta.uid() == owner;
+    private.then_some(real)
 }
 
 /// Kills `child`, a tool spawned as a termination signal landed, with its process group, then
@@ -321,7 +358,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
-    use super::{CAP, Call, Cwd, Failure, Ran, neutral_dir, run};
+    use super::{CAP, Call, Cwd, Failure, Ran, neutral_dir, private_dir, run};
     use crate::code_blocks::tools::ToolEnv;
 
     /// A fresh directory holding a `root` project, a `home` and a `bin` with the stub `script`.
@@ -389,7 +426,7 @@ mod tests {
         stdin: &[u8],
         extra: &[(&str, &OsStr)],
         timeout: Option<Duration>,
-        cwd: Cwd,
+        cwd: Cwd<'_>,
         cap: usize,
     ) -> Result<Ran, Failure> {
         let call = Call {
@@ -497,6 +534,76 @@ mod tests {
             .expect("the root should resolve");
 
         assert_eq!(cwd, root);
+    }
+
+    /// A 0700 directory `name` beside the fixture's neutral directory, made as supdoc makes one.
+    fn private_beside_neutral(fixture: &Fixture, name: &str) -> PathBuf {
+        use std::os::unix::fs::DirBuilderExt as _;
+        let neutral = neutral_dir(&fixture.env, &fixture.root);
+        let dir = neutral
+            .parent()
+            .expect("the neutral directory has a parent")
+            .join(name);
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .expect("the private directory should be creatable");
+        dir
+    }
+
+    #[test]
+    fn a_private_call_runs_from_its_directory_beside_the_neutral_one() {
+        let fixture = fixture("pwd -P");
+        let dir = private_beside_neutral(&fixture, "tombi-config/abc");
+
+        let ran = run_stub_with(
+            &fixture,
+            b"",
+            &[],
+            Some(Duration::from_secs(5)),
+            Cwd::Private(&dir),
+            CAP,
+        )
+        .expect("pwd should run");
+
+        assert_eq!(
+            PathBuf::from(String::from_utf8_lossy(&ran.stdout).trim()),
+            dir.canonicalize().expect("the directory should resolve")
+        );
+    }
+
+    #[test]
+    fn a_private_directory_outside_the_cache_open_to_others_or_in_the_root_is_refused() {
+        let fixture = fixture("pwd -P");
+        let open = private_beside_neutral(&fixture, "open");
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o755))
+            .expect("the mode should be settable");
+        let elsewhere = fixture
+            .root
+            .parent()
+            .expect("the root has a parent")
+            .join("elsewhere");
+        fs::create_dir_all(&elsewhere).expect("the directory should be creatable");
+        fs::set_permissions(&elsewhere, fs::Permissions::from_mode(0o700))
+            .expect("the mode should be settable");
+
+        for dir in [&open, &elsewhere, &fixture.root] {
+            let ran = run_stub_with(
+                &fixture,
+                b"",
+                &[],
+                Some(Duration::from_secs(5)),
+                Cwd::Private(dir),
+                CAP,
+            );
+
+            assert!(
+                matches!(ran, Err(Failure::Spawn(_))),
+                "{dir:?} was accepted: {ran:?}"
+            );
+            assert_eq!(private_dir(&fixture.env, &fixture.root, dir), None);
+        }
     }
 
     #[test]

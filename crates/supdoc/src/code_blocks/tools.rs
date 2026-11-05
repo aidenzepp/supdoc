@@ -442,7 +442,8 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         binary: "tombi",
         tier: Tier::Static,
         install: "pipx install tombi",
-        config_files: TOMBI_CONFIGS,
+        // tombi reads only supdoc's private copy, named by its hash in the args and env.
+        config_files: &[],
         modes: FULL_OR_OFF,
         fragments: &[],
         argv: tombi_format_args,
@@ -454,17 +455,14 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
         binary: "tombi",
         tier: Tier::Static,
         install: "pipx install tombi",
-        config_files: TOMBI_CONFIGS,
+        // tombi reads only supdoc's private copy, named by its hash in the args and env.
+        config_files: &[],
         modes: FULL_OR_OFF,
         fragments: &[],
         argv: tombi_lint_args,
         reader: Reader::Lint(tombi::lint_verdict),
     },
 ];
-
-/// The config names tombi looks for (see [`tombi::CONFIG_FILES`]), which its cached results are
-/// keyed on.
-const TOMBI_CONFIGS: &[&str] = &tombi::CONFIG_FILES;
 
 /// The files rumdl's results depend on: its config names (see [`rumdl::CONFIG_FILES`]) and the
 /// `.editorconfig` it reads line lengths from.

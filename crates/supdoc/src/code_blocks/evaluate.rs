@@ -113,9 +113,9 @@ pub(crate) struct BlockRecord {
     /// The config and virtual path biome is given for it. `None` until the tools are looked up, and for
     /// any other tool.
     given: Option<biome::Given>,
-    /// The variables its tools get beyond the passed environment for its config: tombi's
-    /// `XDG_CONFIG_HOME`. Empty for every other tool.
-    config_vars: Vec<(&'static str, OsString)>,
+    /// What tombi is given for it: the private directory it runs in, holding its config. `None`
+    /// for every other tool.
+    tombi: Option<tombi::Project>,
     /// What the format step needs, kept while the block is pending.
     pending: Option<Pending>,
 }
@@ -243,7 +243,7 @@ pub(crate) fn evaluate(
             dialect: code_blocks.dialect(),
             edition: block_edition(block).or_else(|| code_blocks.edition()),
             given: None,
-            config_vars: Vec::new(),
+            tombi: None,
             language,
             state,
             steps,
@@ -423,6 +423,7 @@ impl Evaluation {
         let mut ran = ran.into_iter();
         let mut linted_nothing_warned = false;
         let mut indent_unknown_warned = false;
+        let mut printed_nothing_warned = false;
         for slot in slots {
             let (job, run) = match slot {
                 Slot::Found(finding) => {
@@ -449,6 +450,10 @@ impl Evaluation {
                     if reason == FRAME_INDENT_UNKNOWN && !indent_unknown_warned {
                         indent_unknown_warned = true;
                         self.findings.push(indent_unknown(&record.at));
+                    }
+                    if reason == format::PRINTED_NOTHING && !printed_nothing_warned {
+                        printed_nothing_warned = true;
+                        self.findings.push(printed_nothing(&record.at));
                     }
                     record.steps.format = StepState::Unrunnable { reason };
                 }
@@ -606,6 +611,22 @@ fn indent_unknown(at: &Location) -> Finding {
 /// formatter uses, so it couldn't tell the block's lines from the frame's indent.
 pub(super) const FRAME_INDENT_UNKNOWN: &str =
     "supdoc couldn't read the formatter's indent from the project's config";
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose formatter
+/// exited 0 and printed nothing for it, so its format step didn't run.
+fn printed_nothing(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "the formatter printed nothing for this block, so its format step didn't run: the \
+         project's formatter config may switch formatting off for it",
+    )
+    .with_help(
+        "find the setting in the formatter's config that switches formatting off for the doc's \
+         blocks, or mark the blocks `format(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
 
 /// The run's one `code-block-not-checked` warning, at `at`, the first block whose biome lint
 /// step didn't run because biome checked no file.
@@ -1068,9 +1089,9 @@ impl TombiConfigs {
                     mirror: Some(project.doc_as_seen(&doc)),
                     flags: Vec::new(),
                     config: None,
-                    names: None,
+                    names: Some(project.names()),
                 });
-                record.config_vars = vec![tombi::config_var(&project)];
+                record.tombi = Some(project);
                 true
             }
             Err(refusal) => {
@@ -1632,9 +1653,10 @@ fn run_formatter(
         fragment: record.fragment,
     });
     let vars = rust.map(|rust| rust.toolchain.env()).unwrap_or_default();
+    let tombi_vars = record.tombi.as_ref().map(tombi::Project::vars);
     let extra: Vec<(&str, &OsStr)> = vars
         .iter()
-        .chain(&record.config_vars)
+        .chain(tombi_vars.iter().flatten())
         .map(|(name, value)| (*name, value.as_os_str()))
         .collect();
     let held = framed
@@ -1653,7 +1675,7 @@ fn run_formatter(
     let verdict = cached_run(
         &run,
         session,
-        |call| runner::run(call, session.env, session.root),
+        |call| run_in_place(call, record, session),
         |result| {
             let named = result.map(|ran| Ran {
                 stderr: given.map_or_else(|| ran.stderr.clone(), |given| given.named(&ran.stderr)),
@@ -1668,6 +1690,9 @@ fn run_formatter(
         },
         format::Verdict::cacheable,
     );
+    if verdict == format::Verdict::PrintedNothing {
+        return Some(Err(format::PRINTED_NOTHING));
+    }
     let at = match &verdict {
         format::Verdict::NotKind(_) | format::Verdict::FrameReformatted(_) => pending
             .block
@@ -1760,9 +1785,10 @@ fn run_linter(
     let frame = Frame::of(tool, record.fragment);
     let input = lint::checked(frame, &pending.input);
     let input = input.as_ref();
-    let extra: Vec<(&str, &OsStr)> = record
-        .config_vars
+    let tombi_vars = record.tombi.as_ref().map(tombi::Project::vars);
+    let extra: Vec<(&str, &OsStr)> = tombi_vars
         .iter()
+        .flatten()
         .map(|(name, value)| (*name, value.as_os_str()))
         .collect();
     let run = cache::Run {
@@ -1777,9 +1803,10 @@ fn run_linter(
     let biome = given.filter(|_| tool.name == BIOME_LINT);
     let spawn = |call: &Call<'_>| match biome {
         Some(given) => biome_lint(tool, call, &invocation, given, input, session),
-        None => runner::run(call, session.env, session.root),
+        None => run_in_place(call, record, session),
     };
-    let judge = |result: Result<Ran, runner::Failure>| match result {
+    let named = given.filter(|_| record.tombi.is_some());
+    let judge = |result: Result<Ran, runner::Failure>| match named_by(named, result) {
         Ok(ran) if biome.is_some() && biome::linted_nothing(&ran.stdout) => {
             Err(BIOME_LINTED_NOTHING)
         }
@@ -1994,6 +2021,51 @@ fn run_clippy(
         !session.linked.flags.is_empty(),
     );
     Ok((verdict, findings))
+}
+
+/// Runs `call` for `record`'s block with `session`'s env: from the private directory tombi is
+/// given when the block has one (see [`runner::Cwd::Private`]), otherwise from where `call` says.
+///
+/// Effect: runs the tool.
+///
+/// # Errors
+///
+/// [`runner::Failure`] as [`runner::run`] gives it.
+fn run_in_place(
+    call: &Call<'_>,
+    record: &BlockRecord,
+    session: &Session<'_>,
+) -> Result<Ran, runner::Failure> {
+    match &record.tombi {
+        Some(project) => runner::run(
+            &Call {
+                cwd: runner::Cwd::Private(&project.config_home),
+                ..*call
+            },
+            session.env,
+            session.root,
+        ),
+        None => runner::run(call, session.env, session.root),
+    }
+}
+
+/// `result` with each private path in its stderr named as `given` says (see
+/// [`biome::Given::named`]); `result` as it is without `given`.
+///
+/// # Errors
+///
+/// `result`'s own failure, unchanged.
+fn named_by(
+    given: Option<&biome::Given>,
+    result: Result<Ran, runner::Failure>,
+) -> Result<Ran, runner::Failure> {
+    match given {
+        Some(given) => result.map(|ran| Ran {
+            stderr: given.named(&ran.stderr),
+            ..ran
+        }),
+        None => result,
+    }
 }
 
 /// `judge` applied to `run`, read from `session`'s cache when its key is there, otherwise run
@@ -2826,7 +2898,7 @@ mod tests {
                 dialect: Dialect::default(),
                 edition: None,
                 given: None,
-                config_vars: Vec::new(),
+                tombi: None,
                 pending: Pending::of(block, &doc),
             })
             .collect()
