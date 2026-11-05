@@ -742,18 +742,19 @@ fn linted_nothing(at: &Location) -> Finding {
 }
 
 /// The run's one `code-block-not-checked` warning, at `at`, the first Python block whose pylint
-/// step didn't run because a pylint comment in it switches pylint off for the whole block.
+/// step didn't run because a `pylint:` comment in it names something other than message codes
+/// and hyphenated message names (see [`pylint::switches_lint_off`]).
 fn pylint_switched_off(at: &Location) -> Finding {
     Finding::new(
         NOT_CHECKED,
         Severity::Warning,
-        "the block holds a pylint comment that switches pylint off for the whole block \
-         (`skip-file`, `disable=all` or `disable-all`), which supdoc doesn't give to pylint, so its \
+        "the block holds a `pylint:` comment that names something other than message codes or \
+         hyphenated message names, so supdoc can't confirm pylint still lints the block, and its \
          lint step didn't run",
     )
     .with_help(
-        "name the messages the comment switches off, as in `# pylint: disable=invalid-name`, or \
-         switch the step off with `lint(off: <reason>)`",
+        "name each message by its code, such as `W0511` for `fixme`, or by a hyphenated name, \
+         such as `unused-import`; or mark the block `lint(off: <reason>)`",
     )
     .with_location(at.clone())
 }
@@ -2934,13 +2935,15 @@ const PYLINT: &str = "pylint";
 const PYLINT_LINTED_NOTHING: &str =
     "pylint linted no module: the project's pylint config leaves the block out";
 
-/// Why pylint's step didn't run on a block holding a pylint comment that switches every message
-/// off (see [`pylint::switches_lint_off`]).
-const PYLINT_SWITCHED_OFF: &str = "the block holds a pylint comment that switches it off for the \
-                                   whole block; mark it `lint(off: <reason>)` instead";
+/// Why pylint's step didn't run on a block holding a `pylint:` comment supdoc can't tell from
+/// one that switches pylint off for the whole block (see [`pylint::switches_lint_off`]).
+const PYLINT_SWITCHED_OFF: &str = "the block holds a `pylint:` comment that names something other \
+                                   than message codes or hyphenated message names, so supdoc \
+                                   can't confirm pylint still lints it; name messages that way, \
+                                   or mark the block `lint(off: <reason>)`";
 
-/// Whether `tool` is pylint and `record`'s block holds a pylint comment that switches it off for
-/// the whole block (see [`pylint::switches_lint_off`]), so the step doesn't run and pylint is
+/// Whether `tool` is pylint and `record`'s block holds a `pylint:` comment supdoc can't tell
+/// from one that switches it off for the whole block (see [`pylint::switches_lint_off`]), so the step doesn't run and pylint is
 /// never spawned.
 fn switched_off(tool: &ToolCartridge, record: &BlockRecord) -> bool {
     tool.name == PYLINT
@@ -3600,16 +3603,6 @@ fn selected_tools(
     )
 }
 
-/// Where a binary was looked for: `on PATH`, after each of the root's `bins` when it has any, as
-/// `in .venv/bin or on PATH`.
-fn searched(bins: &[&str]) -> String {
-    match bins.split_last() {
-        None => "on PATH".to_owned(),
-        Some((last, [])) => format!("in {last} or on PATH"),
-        Some((last, rest)) => format!("in {}, {last} or on PATH", rest.join(", ")),
-    }
-}
-
 /// The one warning for `binary`, found as `found`, at `at`, the first block that needs it, a
 /// missing one's help saying how to `install` it, its message naming the root's `bins` searched
 /// before `PATH`. `None` when it is on `PATH` outside the root.
@@ -3626,7 +3619,7 @@ fn tool_warning(
             Severity::Warning,
             format!(
                 "`{binary}` isn't {}, so its blocks aren't checked",
-                searched(bins)
+                tools::searched(bins)
             ),
         )
         .with_help(install.to_owned()),

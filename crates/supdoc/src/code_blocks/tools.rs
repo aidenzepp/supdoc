@@ -488,6 +488,27 @@ impl Tool {
     }
 }
 
+/// Where a binary was looked for: `on PATH`, after each of the root's `bins` when it has any, as
+/// `in .venv/bin or on PATH`.
+#[must_use]
+pub(crate) fn searched(bins: &[&str]) -> String {
+    match bins.split_last() {
+        None => "on PATH".to_owned(),
+        Some((last, [])) => format!("in {last} or on PATH"),
+        Some((last, rest)) => format!("in {}, {last} or on PATH", rest.join(", ")),
+    }
+}
+
+/// The root-relative directories searched before `PATH` for the cartridge named or running
+/// `name`: none for any other name.
+#[must_use]
+pub(crate) fn bins_of(name: &str) -> &'static [&'static str] {
+    CARTRIDGES
+        .iter()
+        .find(|cartridge| cartridge.name == name || cartridge.binary == name)
+        .map_or(&[], ToolCartridge::bins)
+}
+
 /// The command that installs a tombi supdoc's checks are verified against (see
 /// [`tombi::VERIFIED`]).
 pub(crate) const TOMBI_INSTALL: &str = "pipx install 'tombi==1.10.*'";

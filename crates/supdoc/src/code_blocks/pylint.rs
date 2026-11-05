@@ -34,9 +34,8 @@ const NOT_CHECKED: &str = "code-block-not-checked";
 /// The paths pylint gives a module it read from stdin under no name of its own.
 const STDIN_PATHS: [&str; 3] = ["<stdin>", "-", "stdin"];
 
-/// What a `pylint:` comment's words may name and still switch off less than the whole block:
-/// its keywords that take messages (`disable-line`, which pylint reads as `disable`, is a
-/// hyphenated word anyway).
+/// The `pylint:` comment keywords that take messages: each switches off no more than the
+/// messages it names.
 const MESSAGE_KEYWORDS: [&str; 5] = [
     "disable",
     "disable-next",
@@ -303,9 +302,12 @@ pub(crate) fn switches_lint_off(block: &str) -> bool {
 }
 
 /// Whether `word`, in a `pylint:` comment, is a keyword that takes messages, a message code or a
-/// hyphenated message name: none switches off more than the messages it names.
+/// hyphenated message name: none switches off more than the messages it names. A word holding
+/// `skip-file` or `disable-all` anywhere, in any case, never is: pylint reads either at the start
+/// of a word as the keyword, and supdoc reads it anywhere, so it can only lose coverage.
 fn names_messages(word: &str) -> bool {
-    if ATOMIC_KEYWORDS.contains(&word) {
+    let lower = word.to_ascii_lowercase();
+    if ATOMIC_KEYWORDS.iter().any(|atomic| lower.contains(atomic)) {
         return false;
     }
     MESSAGE_KEYWORDS.contains(&word) || is_message_id(word) || word.contains('-')
@@ -548,6 +550,13 @@ mod tests {
             "# pylint: disable=fixme\n",
             "# pylint: disable-next=all\n",
             "# pylint: disable=unused-import; then # pylint: disable=all\n",
+            "x = 1  # pylint: skip-file-x\n",
+            "# pylint: skip-file-\n",
+            "# pylint: disable-all-x\n",
+            "# pylint: skip-file-unused-import\n",
+            "# pylint: disable=unused-import,skip-file-x\n",
+            "# pylint: disable=xskip-filex\n",
+            "# pylint: disable=SKIP-FILE-x\n",
         ] {
             assert!(switches_lint_off(block), "{block:?} should switch lint off");
         }

@@ -201,7 +201,10 @@ impl StepState {
             Self::ToolRefused {
                 binary,
                 inside_root: false,
-            } => Some(format!("`{binary}` isn't on PATH")),
+            } => Some(format!(
+                "`{binary}` isn't {}",
+                tools::searched(tools::bins_of(binary))
+            )),
             Self::ToolRefused {
                 binary,
                 inside_root: true,
@@ -475,7 +478,13 @@ impl BlockState {
             Self::UnknownLanguage => {
                 Some(format!("supdoc has no checker for `{}`", tag.unwrap_or("")))
             }
-            Self::ToolMissing => Some(format!("`{}` isn't on PATH", tool_of(tag, tool))),
+            Self::ToolMissing => {
+                let tool = tool_of(tag, tool);
+                Some(format!(
+                    "`{tool}` isn't {}",
+                    tools::searched(tools::bins_of(tool))
+                ))
+            }
         }
     }
 }

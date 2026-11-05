@@ -728,3 +728,75 @@ fn pylint_missing_names_the_venv_bin_dir_it_searched() {
         "{json}"
     );
 }
+
+#[test]
+fn pylint_comment_naming_more_than_messages_is_not_run_with_wording_true_for_each() {
+    for body in [
+        "# pylint: disable=fixme\nx = 1",
+        "x = 1  # pylint: disable=W",
+        "# pylint: skip-file\nx = 1",
+    ] {
+        let project = project_with_python_block(PYLINT, body);
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        pylint_stub(outside.path(), &format!("printf {}", empty_report(1)));
+
+        let json = trusted_pylint_check(&project, outside.path(), cache.path(), 0);
+
+        assert!(
+            pylint_runs(outside.path()).is_empty(),
+            "{body:?}: pylint never starts: {json}"
+        );
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-not-checked"],
+            "{body:?}: {json}"
+        );
+        let message = at(&json, "/findings/0/message")
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_default();
+        assert!(
+            message.contains("can't confirm pylint still lints the block")
+                && !message.contains("whole block"),
+            "{body:?}: the warning claims only what supdoc checks: {message}"
+        );
+        let help = at(&json, "/findings/0/help")
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_default();
+        assert!(
+            help.contains("`W0511` for `fixme`") && help.contains("lint(off: <reason>)"),
+            "{body:?}: {help}"
+        );
+        assert_eq!(
+            at(&json, "/data/code_blocks/0/lint"),
+            "not_run",
+            "{body:?}: {json}"
+        );
+        let reason = at(&json, "/data/code_blocks/0/reason");
+        assert!(
+            reason
+                .as_str()
+                .is_some_and(|reason| reason.contains("can't confirm pylint still lints it")),
+            "{body:?}: {json}"
+        );
+    }
+}
+
+#[test]
+fn pylint_missing_block_reason_names_the_venv_bin_dir_too() {
+    let project = project_with_python_block(PYLINT, "X = 1");
+    let empty = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+
+    let json = trusted_pylint_check(&project, empty.path(), cache.path(), 0);
+
+    let reason = at(&json, "/data/code_blocks/0/reason");
+    assert!(
+        reason
+            .as_str()
+            .is_some_and(|reason| reason.contains("`pylint` isn't in .venv/bin or on PATH")),
+        "{json}"
+    );
+}
