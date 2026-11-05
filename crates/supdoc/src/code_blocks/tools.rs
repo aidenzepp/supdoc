@@ -385,6 +385,30 @@ impl CustomTool {
         self.step
     }
 
+    /// How a message names it: "custom formatter command `<program>`".
+    #[must_use]
+    pub(crate) fn shown(&self) -> String {
+        format!(
+            "{} `{}`",
+            self.kind(),
+            self.command.program().escape_debug()
+        )
+    }
+
+    /// What is wrong when its program wasn't found: "isn't on PATH" for a bare name, else that
+    /// no executable file is at the path, "under the root" for a relative one.
+    #[must_use]
+    pub(crate) fn missing(&self) -> &'static str {
+        let program = self.command.program();
+        if !program.contains('/') {
+            "isn't on PATH"
+        } else if Path::new(program).is_absolute() {
+            "doesn't exist as an executable file"
+        } else {
+            "doesn't exist under the root as an executable file"
+        }
+    }
+
     /// How its messages name it: "custom formatter command" or "custom linter command".
     #[must_use]
     pub(crate) const fn kind(&self) -> &'static str {
@@ -429,13 +453,54 @@ pub(crate) enum Tool {
 }
 
 impl Tool {
-    /// The name its step's reasons and findings give it: a cartridge's config name, or a
-    /// custom command's program.
+    /// Its bare name: a cartridge's config name, or a custom command's program. Messages name a
+    /// tool by [`Self::label`] or [`Self::shown`], which keep a custom command apart from a
+    /// cartridge.
     #[must_use]
     pub(crate) fn name(&self) -> &str {
         match self {
             Self::Cartridge(cartridge) => cartridge.name,
             Self::Custom(custom) => custom.command.program(),
+        }
+    }
+
+    /// How a message names it in passing: a cartridge's config name, or "custom formatter
+    /// command `<program>`", which no cartridge's name can be mistaken for.
+    #[must_use]
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Self::Cartridge(cartridge) => cartridge.name.to_owned(),
+            Self::Custom(custom) => custom.shown(),
+        }
+    }
+
+    /// How a block's reason names it: a cartridge's config name in backticks, or "custom
+    /// formatter command `<program>`".
+    #[must_use]
+    pub(crate) fn shown(&self) -> String {
+        match self {
+            Self::Cartridge(cartridge) => format!("`{}`", cartridge.name),
+            Self::Custom(custom) => custom.shown(),
+        }
+    }
+
+    /// Why its step didn't run when its binary wasn't found: "`<binary>` isn't on PATH", or, for
+    /// a custom command whose program is a path, that no executable file is there.
+    #[must_use]
+    pub(crate) fn missing(&self) -> String {
+        match self {
+            Self::Cartridge(cartridge) => format!("`{}` isn't on PATH", cartridge.binary),
+            Self::Custom(custom) => format!("{} {}", custom.shown(), custom.missing()),
+        }
+    }
+
+    /// Why its step didn't run when the binary found is inside the checkout, which only a
+    /// static-tier cartridge is refused for.
+    #[must_use]
+    pub(crate) fn inside_root(&self) -> String {
+        match self {
+            Self::Cartridge(cartridge) => format!("`{}` is inside the checkout", cartridge.binary),
+            Self::Custom(custom) => format!("{} is inside the checkout", custom.shown()),
         }
     }
 

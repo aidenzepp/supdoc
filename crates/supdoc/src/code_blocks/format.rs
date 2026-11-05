@@ -96,13 +96,13 @@ pub(crate) enum Verdict {
 }
 
 /// Whether `text` is nothing, or only whitespace by Unicode's measure.
-pub(super) fn blank(text: &str) -> bool {
+fn blank(text: &str) -> bool {
     text.chars().all(char::is_whitespace)
 }
 
 /// Whether a formatter's `output` is nothing, or only whitespace: no formatting of a block that
 /// isn't blank. Output that isn't UTF-8 isn't blank.
-pub(super) fn printed_blank(output: &[u8]) -> bool {
+fn printed_blank(output: &[u8]) -> bool {
     std::str::from_utf8(output).is_ok_and(blank)
 }
 
@@ -352,14 +352,7 @@ pub(crate) fn input(block: &CodeBlock, text: &str) -> Option<String> {
 #[must_use]
 pub(crate) fn judge(tool: &ToolCartridge, input: &str, result: Result<Ran, Failure>) -> Verdict {
     match result {
-        Ok(ran) if ran.success && ran.stdout == input.as_bytes() => Verdict::Formatted,
-        Ok(ran) if ran.success && printed_blank(&ran.stdout) && !blank(input) => {
-            Verdict::PrintedNothing
-        }
-        Ok(ran) if ran.success => String::from_utf8(ran.stdout).map_or_else(
-            |_| Verdict::ToolFailed("it printed output that isn't UTF-8".to_owned()),
-            Verdict::Unformatted,
-        ),
+        Ok(ran) if ran.success => printed(input, ran.stdout),
         Ok(ran) => {
             let stderr = String::from_utf8_lossy(&ran.stderr);
             let lines: Vec<&str> = stderr.lines().take(STDERR_LINES).collect();
@@ -396,6 +389,30 @@ pub(crate) fn judge(tool: &ToolCartridge, input: &str, result: Result<Ran, Failu
             Verdict::ToolFailed(exit_detail(&ran.stderr))
         }
         Err(failure) => failed(failure),
+    }
+}
+
+/// What a formatter's `stdout`, after exit 0, says of a block whose body as written is `input`
+/// (line endings normalized to `\n`, ended by one unless empty). The output is read as a fix
+/// writes it ([`fixed_as`]): its CRLF line endings as `\n` and its final line break, if any,
+/// dropped. Output that reads as the block passes, so a fix never leaves the doc as it was;
+/// other output is unformatted and kept in that reading. Nothing or only whitespace for a block
+/// that isn't blank is [`Verdict::PrintedNothing`]; output that isn't UTF-8 is a tool failure.
+#[must_use]
+pub(super) fn printed(input: &str, stdout: Vec<u8>) -> Verdict {
+    if printed_blank(&stdout) && !blank(input) {
+        return Verdict::PrintedNothing;
+    }
+    let Ok(output) = String::from_utf8(stdout) else {
+        return Verdict::ToolFailed("it printed output that isn't UTF-8".to_owned());
+    };
+    let output = output.replace("\r\n", "\n");
+    let same =
+        output.strip_suffix('\n').unwrap_or(&output) == input.strip_suffix('\n').unwrap_or(input);
+    if same {
+        Verdict::Formatted
+    } else {
+        Verdict::Unformatted(output)
     }
 }
 

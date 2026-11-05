@@ -155,8 +155,8 @@ pub(crate) enum StepState {
     /// The step was due, but its tool was refused before it ran: missing from `PATH`, or found
     /// inside the checkout. Named `not_run` in JSON.
     ToolRefused {
-        /// The tool's binary, as its warning names it.
-        binary: String,
+        /// Why, naming the tool as its warning does: "`shfmt` isn't on PATH".
+        why: String,
         /// Whether the binary on `PATH` is inside the checkout, rather than missing.
         inside_root: bool,
     },
@@ -198,14 +198,7 @@ impl StepState {
             Self::Ran | Self::NotRun => None,
             Self::Off { table, key } => Some(format!("`{key} = \"off\"` in `{table}`")),
             Self::Skipped { reason } => reason.clone(),
-            Self::ToolRefused {
-                binary,
-                inside_root: false,
-            } => Some(format!("`{binary}` isn't on PATH")),
-            Self::ToolRefused {
-                binary,
-                inside_root: true,
-            } => Some(format!("`{binary}` is inside the checkout")),
+            Self::ToolRefused { why, .. } => Some(why.clone()),
             Self::Unrunnable { reason } => Some((*reason).to_owned()),
             Self::Unsupported { tool, kind } => Some(unsupported_reason(tool, *kind)),
         }
@@ -293,7 +286,7 @@ impl Steps {
                 },
                 Some(StepValue::Full | StepValue::Other(_)) | None => match fragment {
                     Some(kind) if !tool.supports(kind, tag) => StepState::Unsupported {
-                        tool: tool.name().to_owned(),
+                        tool: tool.label(),
                         kind,
                     },
                     _ => StepState::NotRun,
@@ -408,15 +401,16 @@ impl BlockState {
 
     /// Why the block is in this state, when it has a reason to give. A passed block, or one none
     /// of whose steps ran, whose `steps` didn't all run gives theirs (see [`Steps`]). `tag` is the block's language
-    /// tag and `tool` the name of the tool whose step decided it (the formatter, else the
-    /// linter), when one was; a tool refused before it ran, missing or inside the checkout, is
-    /// named by its binary, as its warning names it.
+    /// tag and `tool` the tool whose step decided it (the formatter, else the linter), when one
+    /// was, named as [`Tool::shown`] names it; a tool refused before it ran, missing or inside
+    /// the checkout, is named by its binary, as its warning names it. With no tool, the
+    /// language's default formatter is named.
     #[must_use]
     pub(crate) fn reason(
         &self,
         steps: &Steps,
         tag: Option<&str>,
-        tool: Option<&str>,
+        tool: Option<&Tool>,
     ) -> Option<String> {
         debug_assert_ne!(
             *self,
@@ -433,19 +427,18 @@ impl BlockState {
             Self::Failed(Failure::SourceMissing) => {
                 Some("an excerpt's source is missing".to_owned())
             }
-            Self::Failed(Failure::Unformatted) => Some(format!(
-                "`{}` would format it differently",
-                tool_of(tag, tool)
-            )),
-            Self::Failed(Failure::ToolFailed) => Some(format!("`{}` failed", tool_of(tag, tool))),
+            Self::Failed(Failure::Unformatted) => {
+                Some(format!("{} would format it differently", shown(tag, tool)))
+            }
+            Self::Failed(Failure::ToolFailed) => Some(format!("{} failed", shown(tag, tool))),
             Self::Failed(Failure::ParseFailed) => {
-                Some(format!("`{}` couldn't parse it", tool_of(tag, tool)))
+                Some(format!("{} couldn't parse it", shown(tag, tool)))
             }
             Self::Failed(Failure::ToolTimeout) => {
-                Some(format!("`{}` passed the time limit", tool_of(tag, tool)))
+                Some(format!("{} passed the time limit", shown(tag, tool)))
             }
             Self::Failed(Failure::Lint) => {
-                Some(format!("`{}` reported lint findings", tool_of(tag, tool)))
+                Some(format!("{} reported lint findings", shown(tag, tool)))
             }
             Self::Stale => Some("the block differs from its source".to_owned()),
             Self::OptedOut { reason } => reason.clone(),
@@ -461,9 +454,10 @@ impl BlockState {
             Self::NotChecked(NotChecked::InputUnreadable) => {
                 Some("supdoc couldn't read the block's text from its doc".to_owned())
             }
-            Self::NotChecked(NotChecked::ToolInsideRoot) => {
-                Some(format!("`{}` is inside the checkout", tool_of(tag, tool)))
-            }
+            Self::NotChecked(NotChecked::ToolInsideRoot) => Some(chosen(tag, tool).map_or_else(
+                || "`its tool` is inside the checkout".to_owned(),
+                |tool| tool.inside_root(),
+            )),
             Self::NotChecked(NotChecked::ToolchainPath) => Some("toolchain path".to_owned()),
             Self::NotChecked(NotChecked::ToolchainUnresolved) => {
                 Some("toolchain unresolved".to_owned())
@@ -478,19 +472,28 @@ impl BlockState {
             Self::UnknownLanguage => {
                 Some(format!("supdoc has no checker for `{}`", tag.unwrap_or("")))
             }
-            Self::ToolMissing => Some(format!("`{}` isn't on PATH", tool_of(tag, tool))),
+            Self::ToolMissing => Some(chosen(tag, tool).map_or_else(
+                || "`its tool` isn't on PATH".to_owned(),
+                |tool| tool.missing(),
+            )),
         }
     }
 }
 
-/// The name of the formatter chosen for the block, else the default for blocks tagged `tag`, or
-/// `its tool`.
-fn tool_of<'a>(tag: Option<&str>, chosen: Option<&'a str>) -> &'a str {
-    chosen.unwrap_or_else(|| {
+/// The tool chosen for the block, else the default formatter for blocks tagged `tag`. `None`
+/// when the language has none.
+fn chosen(tag: Option<&str>, tool: Option<&Tool>) -> Option<Tool> {
+    tool.cloned().or_else(|| {
         tag.and_then(Language::from_tag)
             .and_then(formatter)
-            .map_or("its tool", |tool| tool.name)
+            .map(Tool::Cartridge)
     })
+}
+
+/// How a reason names `tool`, or with none the default formatter of the language tagged `tag`
+/// (see [`chosen`]): "`its tool`" when it has none.
+fn shown(tag: Option<&str>, tool: Option<&Tool>) -> String {
+    chosen(tag, tool).map_or_else(|| "`its tool`".to_owned(), |tool| tool.shown())
 }
 
 /// How many blocks are in each state, and how many steps were off, skipped or due but not run.
@@ -707,11 +710,21 @@ mod tests {
         BlockState, CodeBlockCounts, Excerpt, Failure, NotChecked, StepState, Steps, state_of,
     };
     use crate::code_blocks::block::{CodeBlock, Info};
-    use crate::code_blocks::tools::{CARTRIDGES, Held, Hold, Step, ToolCartridge};
+    use crate::code_blocks::tools::{CARTRIDGES, Held, Hold, Step, Tool, ToolCartridge};
     use crate::config::Config;
     use crate::config::code_blocks::{CodeBlocks, Language};
     use crate::finding::Location;
     use crate::path::AbsolutePath;
+
+    /// The shfmt cartridge, as a reason names a tool.
+    fn shfmt() -> Tool {
+        Tool::Cartridge(
+            CARTRIDGES
+                .iter()
+                .find(|tool| tool.name == "shfmt")
+                .expect("shfmt is a cartridge"),
+        )
+    }
 
     /// clippy's trust words, the reasons its lint step gives when trust holds it back.
     fn clippy_held() -> &'static Held {
@@ -1088,14 +1101,14 @@ mod tests {
     fn format_not_run_gets_one_count_per_reason_most_first_then_by_reason() {
         let missing = Steps {
             format: StepState::ToolRefused {
-                binary: "shfmt".to_owned(),
+                why: "`shfmt` isn't on PATH".to_owned(),
                 inside_root: false,
             },
             lint: StepState::Ran,
         };
         let inside = Steps {
             format: StepState::ToolRefused {
-                binary: "shfmt".to_owned(),
+                why: "`shfmt` is inside the checkout".to_owned(),
                 inside_root: true,
             },
             lint: StepState::Ran,
@@ -1125,12 +1138,12 @@ mod tests {
         let steps = Steps {
             format: StepState::Ran,
             lint: StepState::ToolRefused {
-                binary: "shellcheck".to_owned(),
+                why: "`shellcheck` isn't on PATH".to_owned(),
                 inside_root: false,
             },
         };
 
-        let reason = BlockState::Passed.reason(&steps, Some("sh"), Some("shfmt"));
+        let reason = BlockState::Passed.reason(&steps, Some("sh"), Some(&shfmt()));
 
         assert_eq!(reason.as_deref(), Some("`shellcheck` isn't on PATH"));
         assert_eq!(steps.lint.name(), "not_run");
@@ -1141,12 +1154,12 @@ mod tests {
         let steps = Steps {
             format: StepState::Ran,
             lint: StepState::ToolRefused {
-                binary: "shellcheck".to_owned(),
+                why: "`shellcheck` is inside the checkout".to_owned(),
                 inside_root: true,
             },
         };
 
-        let reason = BlockState::Passed.reason(&steps, Some("sh"), Some("shfmt"));
+        let reason = BlockState::Passed.reason(&steps, Some("sh"), Some(&shfmt()));
 
         assert_eq!(
             reason.as_deref(),
@@ -1161,7 +1174,7 @@ mod tests {
             lint: StepState::NotRun,
         };
 
-        let reason = BlockState::Passed.reason(&steps, Some("sh"), Some("shfmt"));
+        let reason = BlockState::Passed.reason(&steps, Some("sh"), Some(&shfmt()));
 
         assert_eq!(
             reason, None,
@@ -1195,7 +1208,7 @@ mod tests {
         ];
 
         for state in settled {
-            let reason = state.reason(&steps, Some("sh"), Some("shfmt"));
+            let reason = state.reason(&steps, Some("sh"), Some(&shfmt()));
 
             assert!(
                 reason

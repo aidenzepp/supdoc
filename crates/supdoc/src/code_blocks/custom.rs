@@ -49,10 +49,12 @@ pub(crate) fn extension(language: Language, tag: &str) -> &'static str {
 }
 
 /// The `index`th block (1-based) of `doc`, the doc's root-relative path, as a custom command
-/// names it: `<doc>.<index>.<extension>`, beside the doc, relative to the root it runs from.
+/// names it: `<doc>.<index>.<extension>`, beside the doc, relative to the root it runs from. A
+/// path that would start with `-` is written `./<path>`, so it never reads as an option.
 #[must_use]
 pub(crate) fn virtual_path(doc: &str, index: usize, extension: &str) -> String {
-    format!("{doc}.{index}.{extension}")
+    let dot = if doc.starts_with('-') { "./" } else { "" };
+    format!("{dot}{doc}.{index}.{extension}")
 }
 
 /// `arguments` as the command gets them: each `{path}` in any of them replaced by `path`.
@@ -88,22 +90,14 @@ pub(crate) fn find(program: &str, env: &ToolEnv, root: &Path) -> Found {
     }
 }
 
-/// Judges a custom formatter's `result` on a block whose body as written is `input`: equal output
-/// passes; output of nothing or only whitespace for a block that isn't blank means it didn't
-/// format the block; other UTF-8 output is unformatted and kept. A non-zero exit is a tool
-/// failure quoting the first lines of its stderr, ANSI escapes removed: a custom formatter
-/// can't say a block doesn't parse. A timeout is a timeout.
+/// Judges a custom formatter's `result` on a block whose body as written is `input`: its output
+/// after exit 0 is read as every formatter's is ([`format::printed`]). A non-zero exit is a tool
+/// failure quoting the first lines of its stderr, ANSI escapes removed: a custom formatter can't
+/// say a block doesn't parse. A timeout is a timeout.
 #[must_use]
 pub(crate) fn judge(input: &str, result: Result<Ran, Failure>) -> Verdict {
     match result {
-        Ok(ran) if ran.success && ran.stdout == input.as_bytes() => Verdict::Formatted,
-        Ok(ran) if ran.success && format::printed_blank(&ran.stdout) && !format::blank(input) => {
-            Verdict::PrintedNothing
-        }
-        Ok(ran) if ran.success => String::from_utf8(ran.stdout).map_or_else(
-            |_| Verdict::ToolFailed("it printed output that isn't UTF-8".to_owned()),
-            Verdict::Unformatted,
-        ),
+        Ok(ran) if ran.success => format::printed(input, ran.stdout),
         Ok(ran) => {
             let stderr = format::strip_ansi(&String::from_utf8_lossy(&ran.stderr));
             Verdict::ToolFailed(format::exit_detail(stderr.as_bytes()))
@@ -115,11 +109,7 @@ pub(crate) fn judge(input: &str, result: Result<Ran, Failure>) -> Verdict {
 /// How messages name `tool`: "the custom formatter command `<program>`".
 #[must_use]
 pub(crate) fn named(tool: &CustomTool) -> String {
-    format!(
-        "the {} `{}`",
-        tool.kind(),
-        tool.command().program().escape_debug()
-    )
+    format!("the {}", tool.shown())
 }
 
 /// The config key that selects `tool`, for help: "`formatter` in
@@ -193,21 +183,19 @@ pub(crate) fn finding(
 pub(crate) fn missing(code: &'static str, tool: &CustomTool, at: &Location) -> Finding {
     let program = tool.command().program();
     let shown = program.escape_debug();
-    let (why, help) = if program.contains('/') {
-        (
-            "isn't an executable file",
-            format!("make `{shown}` an executable file"),
-        )
+    let help = if program.contains('/') {
+        format!("make `{shown}` an executable file")
     } else {
-        ("isn't on PATH", format!("put `{shown}` on PATH"))
+        format!("put `{shown}` on PATH")
     };
     Finding::new(
         code,
         Severity::Warning,
         format!(
-            "`{shown}`, {} for {}, {why}, so its blocks aren't checked",
-            tool.kind(),
-            key(tool)
+            "{} for {} {}, so its blocks aren't checked",
+            named(tool),
+            key(tool),
+            tool.missing()
         ),
     )
     .with_help(format!("{help}, or change {}", key(tool)))
@@ -291,6 +279,12 @@ mod tests {
                 Ok(ran(true, "x=1\n", "")),
                 Verdict::Unformatted("x=1\n".to_owned()),
             ),
+            (Ok(ran(true, "x = 1", "")), Verdict::Formatted),
+            (Ok(ran(true, "x = 1\r\n", "")), Verdict::Formatted),
+            (
+                Ok(ran(true, "x = 1\r\ny = 2\r\n", "")),
+                Verdict::Unformatted("x = 1\ny = 2\n".to_owned()),
+            ),
             (Ok(ran(true, " \n\t\n", "")), Verdict::PrintedNothing),
             (Err(Failure::TimedOut), Verdict::TimedOut),
         ];
@@ -298,6 +292,18 @@ mod tests {
         for (result, expected) in cases {
             assert_eq!(judge(block, result), expected);
         }
+    }
+
+    #[test]
+    fn a_virtual_path_that_would_read_as_an_option_starts_with_dot_slash() {
+        assert_eq!(
+            (
+                virtual_path("-x.md", 1, "py"),
+                virtual_path("docs/-x.md", 2, "py")
+            ),
+            ("./-x.md.1.py".to_owned(), "docs/-x.md.2.py".to_owned()),
+            "only a path that starts with `-` needs `./`"
+        );
     }
 
     #[test]

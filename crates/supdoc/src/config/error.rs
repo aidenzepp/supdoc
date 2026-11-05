@@ -4,7 +4,7 @@ use std::fmt;
 use std::io::ErrorKind;
 use std::ops::Range;
 
-use super::code_blocks::{Selected, Unselected, Unwired};
+use super::code_blocks::{Selected, Unselected, Unwired, shown};
 use crate::exit::ExitStatus;
 use crate::lock::error::shell_quote;
 use crate::namespace::NamespaceName;
@@ -130,8 +130,8 @@ pub(crate) enum ConfigError {
         table: Unselected,
     },
 
-    /// The merged `extends` chain selects a custom `{ command = [...] }` that is valid in full,
-    /// but custom commands are not wired to run yet. It shares `config-parse`'s code: it is a
+    /// The merged `extends` chain selects a custom linter `{ command = [...] }` that is valid in
+    /// full, but custom linters are not wired to run yet. It shares `config-parse`'s code: it is a
     /// value the config can't use yet, judged once the whole chain is valid.
     CustomCommandNotWired {
         /// The command, the file that wrote it, and the key that selects it.
@@ -212,11 +212,11 @@ impl ConfigError {
             ),
             Self::CustomCommandNotWired { command } => format!(
                 "{}: `{}` in `[features.code-blocks.{}]` is the custom command `{}`, but custom \
-                 commands are not wired yet",
+                 linter commands aren't wired yet",
                 show(&command.file),
                 command.key,
                 command.language,
-                command.program.escape_debug(),
+                shown(&command.program),
             ),
             Self::ExtendsMissing {
                 file,
@@ -433,7 +433,7 @@ fn selected_text(selected: Option<&Selected>) -> String {
         None => "`none`".to_owned(),
         Some(Selected::Known(name)) => format!("`{name}`"),
         Some(Selected::Command { program }) => {
-            format!("the custom command `{}`", program.escape_debug())
+            format!("the custom command `{}`", shown(program))
         }
     }
 }

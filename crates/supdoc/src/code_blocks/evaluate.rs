@@ -340,11 +340,9 @@ impl Evaluation {
                 if let Some((refused, named)) = refused {
                     record.state = BlockState::NotChecked(refused);
                     record.reason = named.or_else(|| {
-                        record.state.reason(
-                            &record.steps,
-                            record.language.as_deref(),
-                            Some(tool.name()),
-                        )
+                        record
+                            .state
+                            .reason(&record.steps, record.language.as_deref(), Some(&tool))
                     });
                     continue;
                 }
@@ -395,11 +393,10 @@ impl Evaluation {
             }
             if let Some((state, tool)) = refused {
                 record.state = state;
-                record.reason = record.state.reason(
-                    &record.steps,
-                    record.language.as_deref(),
-                    Some(tool.binary()),
-                );
+                record.reason =
+                    record
+                        .state
+                        .reason(&record.steps, record.language.as_deref(), Some(&tool));
             }
         }
         let cache = cache.flatten();
@@ -511,11 +508,11 @@ impl Evaluation {
                 record.reason = match tool {
                     // supdoc refused the block itself: the reason names no tool.
                     Some(_) if refused && linted => Some(YAML_CONTROL_REFUSED.to_owned()),
-                    Some(tool) => record.state.reason(
-                        &record.steps,
-                        record.language.as_deref(),
-                        Some(tool.name()),
-                    ),
+                    Some(tool) => {
+                        record
+                            .state
+                            .reason(&record.steps, record.language.as_deref(), Some(tool))
+                    }
                     None => Some(PROJECT_UNBUILT.to_owned()),
                 };
             }
@@ -538,11 +535,9 @@ impl Evaluation {
             } else {
                 NotChecked::NoStepRan
             });
-            record.reason = record.state.reason(
-                &record.steps,
-                record.language.as_deref(),
-                tool.map(Tool::name),
-            );
+            record.reason = record
+                .state
+                .reason(&record.steps, record.language.as_deref(), tool);
         }
     }
 }
@@ -598,7 +593,7 @@ fn first_reason(
     tool: Option<&Tool>,
 ) -> Option<String> {
     (*state != BlockState::NotChecked(NotChecked::Pending))
-        .then(|| state.reason(steps, language, tool.map(Tool::name)))
+        .then(|| state.reason(steps, language, tool))
         .flatten()
 }
 
@@ -625,7 +620,11 @@ fn refuse_unfound(
                 && matches!(known.found, Found::InsideRoot(_))
         });
         *step = StepState::ToolRefused {
-            binary: tool.binary().to_owned(),
+            why: if inside_root {
+                tool.inside_root()
+            } else {
+                tool.missing()
+            },
             inside_root,
         };
     }
@@ -1335,7 +1334,7 @@ impl TombiConfigs {
             record.reason =
                 record
                     .state
-                    .reason(&record.steps, record.language.as_deref(), Some(tool.name()));
+                    .reason(&record.steps, record.language.as_deref(), Some(tool));
             return false;
         }
         if !refuse_directive(record, slots) {
@@ -1912,7 +1911,12 @@ impl Against {
             }
             Self::CargoRefused { inside_root } => {
                 steps.lint = StepState::ToolRefused {
-                    binary: "cargo".to_owned(),
+                    why: if *inside_root {
+                        "`cargo` is inside the checkout"
+                    } else {
+                        "`cargo` isn't on PATH"
+                    }
+                    .to_owned(),
                     inside_root: *inside_root,
                 };
                 None
@@ -3959,7 +3963,7 @@ fn step_values(block: &CodeBlock, info: &Info, code_blocks: &CodeBlocks) -> Vec<
                         })
                         .collect::<Vec<_>>()
                         .join(", "),
-                    tool.name()
+                    tool.label()
                 ),
             };
             Some(
@@ -4982,7 +4986,7 @@ mod tests {
             assert_eq!(
                 record.steps.lint,
                 StepState::ToolRefused {
-                    binary: "cargo".to_owned(),
+                    why: "`cargo` isn't on PATH".to_owned(),
                     inside_root: false
                 },
                 "{record:?}"

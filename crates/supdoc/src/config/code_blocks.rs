@@ -1525,7 +1525,7 @@ mod tests {
                 "`{line}` should be refused with {expected:?}, got {message}"
             );
             assert!(
-                !message.contains("not wired yet"),
+                !message.contains("wired yet"),
                 "an invalid command should be refused for its own rule: {message}"
             );
         }
@@ -1575,7 +1575,7 @@ mod tests {
                 "`{line}` should be refused with {expected:?}, got {message}"
             );
             assert!(
-                !message.contains("not wired yet"),
+                !message.contains("wired yet"),
                 "an invalid command should be refused for its own rule: {message}"
             );
         }
@@ -1794,7 +1794,7 @@ mod tests {
         assert!(
             command
                 .contains("`linter` in `[features.code-blocks.rust]` is the custom command `lint`")
-                && command.contains("not wired yet"),
+                && command.contains("but custom linter commands aren't wired yet"),
             "got {command}"
         );
         assert!(

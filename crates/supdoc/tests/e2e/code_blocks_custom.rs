@@ -244,6 +244,11 @@ fn format_by_a_custom_command_fails_a_block_it_would_change_and_fix_applies_it()
     let json = check(&project, &stub, &[trusted()], 1);
 
     assert_eq!(finding_kinds(&json), ["code-block-unformatted"], "{json}");
+    assert_eq!(
+        at(&json, "/data/code_blocks/0/reason"),
+        "custom formatter command `fmt-stub` would format it differently",
+        "the reason should name the custom command, never a bare tool name: {json}"
+    );
     let path = [("PATH", stub.path()), trusted()];
     let _fixed = project
         .supdoc_in_with(".", &["fix", "--yes"], &path)
@@ -252,6 +257,75 @@ fn format_by_a_custom_command_fails_a_block_it_would_change_and_fix_applies_it()
         project.read("docs/blocks.md"),
         "# Blocks\n\n```py\nx = 1\n```\n",
         "`fix --yes` should write the command's output into the block"
+    );
+    let rechecked = check(&project, &stub, &[trusted()], 0);
+    assert!(finding_kinds(&rechecked).is_empty(), "{rechecked}");
+}
+
+#[test]
+fn format_by_a_custom_command_reads_output_as_the_fix_writes_it() {
+    for printed in ["printf 'x = 1'", "printf 'x = 1\\r\\n'"] {
+        let stub = Stub::new(printed);
+        let project = project_with(STUB, "", "x = 1");
+
+        let json = check(&project, &stub, &[trusted()], 0);
+
+        assert!(
+            finding_kinds(&json).is_empty(),
+            "`{printed}` prints the block without its final newline or with CRLF, which a fix \
+             would write back unchanged, so the block is formatted: {json}"
+        );
+        assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+    }
+}
+
+#[test]
+fn format_by_a_custom_command_gives_a_block_path_that_cant_read_as_an_option() {
+    let stub = Stub::new("/bin/cat \"$stdin\"");
+    let project = project_with(STUB, "", "x = 1");
+    // The one block lives in `-x.md`, so the stub's single stdin file isn't shared.
+    project.write("docs/blocks.md", "# Blocks\n");
+    project.write("-x.md", "# Dash\n\n```py\ny = 2\n```\n");
+
+    let _json = check(&project, &stub, &[trusted()], 0);
+
+    assert!(
+        stub.logged("arg:").contains(&"./-x.md.1.py".to_owned()),
+        "a doc named `-x.md` at the root should be passed as `./-x.md.1.py`: {:?}",
+        stub.logged("arg:")
+    );
+}
+
+#[test]
+fn format_by_a_custom_formatter_leaves_biome_lint_its_config() {
+    let stub = Stub::new("/bin/cat \"$stdin\"");
+    script(
+        &stub.path().join("biome"),
+        &format!(
+            "for arg in \"$@\"; do printf '%s\\n' \"$arg\" >> '{}/biome.log'; done",
+            stub.path().display()
+        ),
+    );
+    let project = Project::fixture("basic");
+    project.record();
+    project.write(
+        "supdoc.config.toml",
+        &format!("[features.code-blocks]\n[features.code-blocks.json]\nformatter = {{ command = {STUB} }}\n"),
+    );
+    project.write("docs/blocks.md", "# Blocks\n\n```json\n{}\n```\n");
+
+    let _json = project
+        .supdoc_in_with(
+            ".",
+            &["check", "--json"],
+            &[("PATH", stub.path()), trusted()],
+        )
+        .json();
+
+    let biome = std::fs::read_to_string(stub.path().join("biome.log")).unwrap_or_default();
+    assert!(
+        biome.lines().any(|arg| arg.starts_with("--config-path=")),
+        "biome lint beside a custom formatter should still get its config: {biome:?}"
     );
 }
 
@@ -303,6 +377,28 @@ fn format_by_a_custom_command_past_the_timeout_is_a_timeout() {
         .json();
 
     assert_eq!(finding_kinds(&json), ["code-block-tool-timeout"], "{json}");
+}
+
+#[test]
+fn format_by_a_missing_custom_script_says_it_doesnt_exist_under_the_root() {
+    let stub = Stub::new("/bin/cat \"$stdin\"");
+    let project = project_with("[\"scripts/none.sh\"]", "", "x = 1");
+
+    let json = check(&project, &stub, &[trusted()], 0);
+
+    let reason = at(&json, "/data/code_blocks/0/reason")
+        .as_str()
+        .unwrap_or_default();
+    let message = finding_text(&json, "code-block-tool-missing", "message");
+    for said in [reason, message.as_str()] {
+        assert!(
+            said.contains("custom formatter command `scripts/none.sh`")
+                && said.contains("doesn't exist under the root")
+                && !said.contains("PATH"),
+            "a missing path program should be named as the custom command and not looked for on \
+             PATH: {said:?}"
+        );
+    }
 }
 
 #[test]
