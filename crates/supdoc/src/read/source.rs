@@ -161,7 +161,7 @@ fn read_up_to(mut reader: impl Read, max_size: SizeLimit) -> io::Result<Vec<u8>>
 ///
 /// Whatever the open reports, such as `NotFound` or `PermissionDenied`.
 #[cfg(unix)]
-fn open_without_blocking(path: &Path) -> io::Result<File> {
+pub(crate) fn open_without_blocking(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt as _;
 
     fs::OpenOptions::new()
@@ -178,7 +178,7 @@ fn open_without_blocking(path: &Path) -> io::Result<File> {
 ///
 /// Whatever the open reports, such as `NotFound` or `PermissionDenied`.
 #[cfg(not(unix))]
-fn open_without_blocking(path: &Path) -> io::Result<File> {
+pub(crate) fn open_without_blocking(path: &Path) -> io::Result<File> {
     File::open(path)
 }
 
