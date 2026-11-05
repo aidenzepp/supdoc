@@ -659,11 +659,15 @@ hash = \"41aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d2\"
 
     #[test]
     fn uses_source_or_target_that_climbs_or_is_absolute_is_rejected() {
-        for (source, target) in [
-            ("../docs/a.md", "src/lib.rs"),
-            ("/docs/a.md", "src/lib.rs"),
-            ("docs/a.md", "../src/lib.rs"),
-            ("docs/a.md", "/src/lib.rs"),
+        for (source, target, says) in [
+            ("../docs/a.md", "src/lib.rs", "uses `..`"),
+            ("/docs/a.md", "src/lib.rs", "is absolute"),
+            (
+                "docs/a.md",
+                "../src/lib.rs",
+                "climbs out of the project root",
+            ),
+            ("docs/a.md", "/src/lib.rs", "is absolute"),
         ] {
             let text = file(&[use_entry(source, target, None, HASH_A)])
                 .replace("version = 1", "version = 2");
@@ -676,8 +680,8 @@ hash = \"41aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d2\"
                 "uses `{source}` -> `{target}` should be rejected"
             );
             assert!(
-                !error.to_string().contains("version"),
-                "uses `{source}` -> `{target}` should be rejected for its path, got: {error}"
+                error.to_string().contains(says),
+                "uses `{source}` -> `{target}` should be rejected saying `{says}`, got: {error}"
             );
         }
     }

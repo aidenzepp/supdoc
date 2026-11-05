@@ -285,19 +285,22 @@ fn trust_project() -> Project {
     project
 }
 
-#[test]
-fn trust_refuses_a_state_home_holding_dot_dot_and_creates_nothing() {
+/// Runs `supdoc trust` and `supdoc trust --revoke` with `variable` set to each hostile value of a
+/// fresh [`HostileHome`], asserting each is refused as `cli-trust-store` (74) naming `variable`,
+/// and that nothing is created in the scratch home.
+fn assert_trust_refused(variable: &str) {
     let project = trust_project();
     let home = HostileHome::new();
     let before = home.tree();
+    let names = format!("`{variable}` holds `..`");
     for value in home.values() {
         for args in [&["trust"][..], &["trust", "--revoke"][..]] {
-            let run = project.supdoc_in_with(".", args, &[("XDG_STATE_HOME", &value)]);
+            let run = project.supdoc_in_with(".", args, &[(variable, &value)]);
 
-            assert_ne!(
-                run.code,
-                Some(0),
-                "`supdoc {}` with XDG_STATE_HOME={} should refuse\nstderr:\n{}",
+            let _ = run.assert_exit(74);
+            assert!(
+                run.stderr.contains("cli-trust-store") && run.stderr.contains(&names),
+                "`supdoc {}` with {variable}={} should refuse the store naming the variable:\n{}",
                 run.args,
                 value.display(),
                 run.stderr
@@ -308,26 +311,20 @@ fn trust_refuses_a_state_home_holding_dot_dot_and_creates_nothing() {
 }
 
 #[test]
-fn trust_refuses_a_home_holding_dot_dot_and_creates_nothing() {
-    let project = trust_project();
-    let home = HostileHome::new();
-    let before = home.tree();
-    for value in home.values() {
-        let run = project.supdoc_in_with(".", &["trust"], &[("HOME", &value)]);
-
-        assert_ne!(
-            run.code,
-            Some(0),
-            "`supdoc trust` with HOME={} should refuse\nstderr:\n{}",
-            value.display(),
-            run.stderr
-        );
-        assert_eq!(home.tree(), before, "`supdoc trust` created a file");
-    }
+fn trust_and_revoke_refuse_a_state_home_holding_dot_dot_and_create_nothing() {
+    assert_trust_refused("XDG_STATE_HOME");
 }
 
 #[test]
-fn check_reads_no_trust_through_a_state_home_holding_dot_dot_and_says_which_variable() {
+fn trust_and_revoke_refuse_a_home_holding_dot_dot_and_create_nothing() {
+    assert_trust_refused("HOME");
+}
+
+/// Runs `check` on a project whose clippy step needs trust, with `variable` set to each hostile
+/// value of a fresh [`HostileHome`], asserting the run says the store wasn't read because
+/// `variable` holds `..` and creates nothing in the scratch home. The result cache gets its own
+/// clean `XDG_CACHE_HOME`, so only the trust store reads the hostile value.
+fn assert_check_reads_no_trust(variable: &str) {
     let project = Project::fixture("basic");
     project.record();
     project.write(
@@ -340,22 +337,37 @@ fn check_reads_no_trust_through_a_state_home_holding_dot_dot_and_says_which_vari
     fs::write(&rustfmt, "#!/bin/sh\nexec /bin/cat\n").expect("the stub should be writable");
     fs::set_permissions(&rustfmt, fs::Permissions::from_mode(0o755))
         .expect("the stub should be made executable");
+    let cache = TempDir::new().expect("a clean cache directory should be creatable");
     let home = HostileHome::new();
     let before = home.tree();
+    let says = format!("the trust store wasn't read, as `{variable}` holds `..`");
     for value in home.values() {
         let run = project.supdoc_in_with(
             ".",
             &["check"],
-            &[("PATH", stub.path()), ("XDG_STATE_HOME", &value)],
+            &[
+                ("PATH", stub.path()),
+                ("XDG_CACHE_HOME", cache.path()),
+                (variable, &value),
+            ],
         );
 
         assert!(
-            run.stdout
-                .contains("the trust store wasn't read, as `XDG_STATE_HOME` holds `..`"),
-            "`supdoc check` with XDG_STATE_HOME={} should name the variable it did not read:\n{}",
+            run.stdout.contains(&says),
+            "`supdoc check` with {variable}={} should say `{says}`:\n{}",
             value.display(),
             run.stdout
         );
         assert_eq!(home.tree(), before, "`supdoc check` created a file");
     }
+}
+
+#[test]
+fn check_reads_no_trust_through_a_state_home_holding_dot_dot_and_says_which_variable() {
+    assert_check_reads_no_trust("XDG_STATE_HOME");
+}
+
+#[test]
+fn check_reads_no_trust_through_a_home_holding_dot_dot_and_says_which_variable() {
+    assert_check_reads_no_trust("HOME");
 }
