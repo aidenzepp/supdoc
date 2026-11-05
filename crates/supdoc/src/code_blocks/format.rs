@@ -988,7 +988,7 @@ fn fences(block: &CodeBlock, text: &str, limit: TimeLimit) -> Option<Vec<Fence>>
     let file = &block.fence.file;
     let language = cartridge_for(file.as_str())?;
     // The path only names the doc in a parse error, which this check discards.
-    let path = AbsolutePath::new(Path::new("/"))?.join_path(Path::new(file.as_str()));
+    let path = AbsolutePath::new(Path::new("/"))?.beneath(file);
     let parsed =
         SourceFile::from_text(path, text.to_owned(), language, Deadline::start(limit)).ok()?;
     let index = LineIndex::new(text);

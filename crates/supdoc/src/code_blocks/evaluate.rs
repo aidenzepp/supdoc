@@ -17,8 +17,10 @@ use crate::config::Config;
 use crate::config::code_blocks::{CodeBlocks, Dialect, Edition, Language};
 use crate::finding::{Finding, Location, Severity};
 use crate::hash::Hash;
+use crate::link::SourcePath;
 use crate::lock::model::Lockfile;
 use crate::output::paths::PathStyle;
+use crate::path::AbsolutePath;
 use crate::read::cartridge::Languages;
 use crate::read::error::CartridgeLoadError;
 use crate::trust::{Grant, Unread};
@@ -187,9 +189,9 @@ pub(crate) fn evaluate(
         return Ok(Evaluation::default());
     };
     let mut findings = Vec::new();
-    let mut doc: Option<(&str, Option<Arc<FixDoc>>)> = None;
+    let mut doc: Option<(&SourcePath, Option<Arc<FixDoc>>)> = None;
     let limits = config.limits_in_effect();
-    let read = |file: &str| {
+    let read = |file: &SourcePath| {
         read_doc(config, file)
             .map(|text| Arc::new(FixDoc::new(Arc::from(text), limits.parse_timeout.value)))
     };
@@ -220,8 +222,7 @@ pub(crate) fn evaluate(
             unresolved_uses.extend(sources.use_missing.then_some(block.fence.file.as_str()));
             outcome = sources.from_missing.then_some(Excerpt::SourceMissing);
             if let Some(parts) = sources.parts {
-                let file = block.fence.file.as_str();
-                reread(&mut doc, file, read);
+                reread(&mut doc, &block.fence.file, read);
                 let stale = doc
                     .as_ref()
                     .and_then(|(_, text)| text.as_ref())
@@ -1245,24 +1246,35 @@ fn trust_words(
 fn pending_of<'doc>(
     state: &BlockState,
     block: &'doc CodeBlock,
-    doc: &mut Option<(&'doc str, Option<Arc<FixDoc>>)>,
-    read: impl Fn(&str) -> Option<Arc<FixDoc>>,
+    doc: &mut Option<(&'doc SourcePath, Option<Arc<FixDoc>>)>,
+    read: impl Fn(&SourcePath) -> Option<Arc<FixDoc>>,
 ) -> Option<Pending> {
     if *state != BlockState::NotChecked(NotChecked::Pending) {
         return None;
     }
-    reread(doc, block.fence.file.as_str(), read);
+    reread(doc, &block.fence.file, read);
     doc.as_ref()?
         .1
         .as_ref()
         .and_then(|text| Pending::of(block, text))
 }
 
+/// Where `file`, a doc relative to the project root, lies beneath `root`, the project root.
+///
+/// `root` is always absolute: it is [`Config::root`]. A relative one would leave `file`
+/// relative, naming no doc beneath it.
+fn doc_beneath(root: &Path, file: &SourcePath) -> PathBuf {
+    AbsolutePath::new(root).map_or_else(
+        || PathBuf::from(file.as_str()),
+        |root| root.beneath(file).as_path().to_path_buf(),
+    )
+}
+
 /// Points `doc` at `file`, read with `read`, unless it already holds it.
 fn reread<'doc>(
-    doc: &mut Option<(&'doc str, Option<Arc<FixDoc>>)>,
-    file: &'doc str,
-    read: impl Fn(&str) -> Option<Arc<FixDoc>>,
+    doc: &mut Option<(&'doc SourcePath, Option<Arc<FixDoc>>)>,
+    file: &'doc SourcePath,
+    read: impl Fn(&SourcePath) -> Option<Arc<FixDoc>>,
 ) {
     if doc.as_ref().is_none_or(|(held, _)| *held != file) {
         *doc = Some((file, read(file)));
@@ -1442,7 +1454,7 @@ impl BiomeConfigs {
         if !tool.runs("biome") {
             return Ok(());
         }
-        let doc = root.join(record.at.file.as_str());
+        let doc = doc_beneath(root, &record.at.file);
         let dir = doc.parent().unwrap_or(root).to_path_buf();
         let found = if let Some((_, found)) = self.found.iter().find(|(known, _)| *known == dir) {
             found.clone()
@@ -1534,7 +1546,7 @@ impl RumdlConfigs {
         if !tool.runs("rumdl") {
             return Ok(());
         }
-        let doc = root.join(record.at.file.as_str());
+        let doc = doc_beneath(root, &record.at.file);
         let dir = doc.parent().unwrap_or(root).to_path_buf();
         let found = if let Some((_, found)) = self.found.iter().find(|(known, _)| *known == dir) {
             found.clone()
@@ -1641,7 +1653,7 @@ impl TombiConfigs {
         if !refuse_directive(record, slots) {
             return false;
         }
-        let doc = root.join(record.at.file.as_str());
+        let doc = doc_beneath(root, &record.at.file);
         let dir = doc.parent().unwrap_or(root).to_path_buf();
         let found = if let Some((_, found)) = self.found.iter().find(|(known, _)| *known == dir) {
             found.clone()
@@ -1846,7 +1858,7 @@ impl YamlfmtConfigs {
         {
             return Ok(());
         }
-        let doc = root.join(record.at.file.as_str());
+        let doc = doc_beneath(root, &record.at.file);
         let dir = doc.parent().unwrap_or(root).to_path_buf();
         let found = if let Some((_, found)) = self.found.iter().find(|(known, _)| *known == dir) {
             found.clone()
@@ -1948,7 +1960,7 @@ impl YamllintConfigs {
         {
             return true;
         }
-        let doc = root.join(record.at.file.as_str());
+        let doc = doc_beneath(root, &record.at.file);
         let dir = doc.parent().unwrap_or(root).to_path_buf();
         let found = if let Some((_, found)) = self.found.iter().find(|(known, _)| *known == dir) {
             found.clone()
@@ -2881,7 +2893,7 @@ fn run_formatter(
                 ))
             });
     let input = checked.as_ref();
-    let doc = root.join(record.at.file.as_str());
+    let doc = doc_beneath(root, &record.at.file);
     let edition = record
         .edition
         .or_else(|| rust.map(|rust| rust.edition))
@@ -3160,7 +3172,7 @@ fn run_linter(
     if let Some(rust) = rust {
         return Some(run_clippy(tool, program, record, pending, session, rust));
     }
-    let doc = session.root.join(record.at.file.as_str());
+    let doc = doc_beneath(session.root, &record.at.file);
     let given = record.given.as_ref();
     let invocation = Invocation {
         doc: given
@@ -3628,7 +3640,7 @@ fn run_clippy(
     if neutral == Path::new("/") {
         return Err(NO_PRIVATE_DIR.into());
     }
-    let doc = session.root.join(record.at.file.as_str());
+    let doc = doc_beneath(session.root, &record.at.file);
     let edition = rust.edition_of(record);
     let invocation = Invocation {
         doc: &doc,
@@ -4298,8 +4310,8 @@ fn scan_warning(scan: &Scan, at: &Location) -> Option<Finding> {
 /// be read; its blocks then get no stale finding.
 ///
 /// Effect: reads the doc.
-fn read_doc(config: &Config, doc: &str) -> Option<String> {
-    std::fs::read_to_string(config.root().join_path(Path::new(doc))).ok()
+fn read_doc(config: &Config, doc: &SourcePath) -> Option<String> {
+    std::fs::read_to_string(config.root().beneath(doc).as_path()).ok()
 }
 
 /// What a block's `from(...)` and `uses(...)` values resolved to.
