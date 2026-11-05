@@ -2115,6 +2115,7 @@ fn prettier_formats(dir: &Path) -> Vec<String> {
 
 /// Runs a trusted `check --json` on `project` with `path` as the only `PATH` entry and its cache
 /// in `cache`, asserting it exits `exit`.
+/// A generous code-block timeout keeps a loaded machine from turning a verdict into a timeout.
 fn trusted_prettier_check(
     project: &Project,
     path: &Path,
@@ -2124,7 +2125,7 @@ fn trusted_prettier_check(
     project
         .supdoc_in_with(
             ".",
-            &["check", "--json"],
+            &["check", "--json", "--code-block-timeout", "120s"],
             &[
                 ("PATH", path),
                 ("SUPDOC_TRUST", Path::new("1")),

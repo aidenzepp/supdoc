@@ -5,7 +5,7 @@ use super::{Choice, Language, Selection, ToolTable, deserialize_choice, deserial
 use crate::code_blocks::tools::Step;
 
 /// The JSON formatters supdoc knows.
-const KNOWN: &[&str] = &["biome-format"];
+const KNOWN: &[&str] = &["biome-format", "prettier"];
 
 /// The JSON linters supdoc knows.
 const LINTERS: &[&str] = &["biome-lint"];
@@ -16,7 +16,8 @@ const LINTERS: &[&str] = &["biome-lint"];
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawJson {
-    /// `"biome-format"`, or a custom `{ command = [...] }`; unset takes the default.
+    /// `"biome-format"`, `"prettier"` or a custom `{ command = [...] }`; unset takes the
+    /// default.
     #[serde(default, deserialize_with = "formatter")]
     pub(super) formatter: Option<Choice>,
     /// `"biome-lint"`, or a custom `{ command = [...], diagnostics = "gnu" }`; unset takes the default.
@@ -28,13 +29,17 @@ pub(crate) struct RawJson {
     /// `[features.code-blocks.json.biome-lint]`, when written.
     #[serde(default, rename = "biome-lint", deserialize_with = "biome_lint")]
     pub(super) biome_lint: Option<ToolTable>,
+    /// `[features.code-blocks.json.prettier]`, when written.
+    #[serde(default, deserialize_with = "prettier")]
+    pub(super) prettier: Option<ToolTable>,
 }
 
 /// Reads `formatter` against JSON's known tools.
 ///
 /// # Errors
 ///
-/// The deserializer's error for any value but `"biome-format"` or a valid custom command.
+/// The deserializer's error for any value but `"biome-format"`, `"prettier"` or a valid custom
+/// command.
 fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D::Error> {
     deserialize_choice(d, Language::Json, Step::Format, KNOWN)
 }
@@ -66,6 +71,15 @@ fn biome_lint<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<ToolTable
     deserialize_tool(d, "biome-lint")
 }
 
+/// Reads `[features.code-blocks.json.prettier]` against its cartridge.
+///
+/// # Errors
+///
+/// The deserializer's error for a key or value the cartridge doesn't accept.
+fn prettier<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<ToolTable>, D::Error> {
+    deserialize_tool(d, "prettier")
+}
+
 impl RawJson {
     /// What this table selects and the tool tables it writes.
     pub(super) fn selection(&self) -> Selection<'_> {
@@ -75,6 +89,7 @@ impl RawJson {
             tools: [
                 ("biome-format", &self.biome_format),
                 ("biome-lint", &self.biome_lint),
+                ("prettier", &self.prettier),
             ]
             .into_iter()
             .filter_map(|(name, table)| Some((name, table.as_ref()?)))
