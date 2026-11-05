@@ -624,7 +624,13 @@ hash = \"41aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d2\"
     fn source_climbing_mid_path_is_rejected() {
         let text = file(&[entry("docs/../../a.md", "src/lib.rs", None, HASH_A)]);
 
-        assert_eq!(parse_error(&text).code(), "lock-parse");
+        let error = parse_error(&text);
+
+        assert_eq!(error.code(), "lock-parse");
+        assert!(
+            error.to_string().contains("uses `..`"),
+            "the source should be rejected as climbing, got: {error}"
+        );
     }
 
     #[test]
@@ -637,10 +643,16 @@ hash = \"41aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d241aa07d2\"
         ] {
             let text = file(&[entry(source, target, None, HASH_A)]);
 
+            let error = parse_error(&text);
+
             assert_eq!(
-                parse_error(&text).code(),
+                error.code(),
                 "lock-parse",
                 "`{source}` -> `{target}` should be rejected"
+            );
+            assert!(
+                error.to_string().contains("is absolute"),
+                "`{source}` -> `{target}` should be rejected as absolute, got: {error}"
             );
         }
     }

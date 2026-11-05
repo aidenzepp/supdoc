@@ -39,8 +39,8 @@ fn lock_with(source: &str, target: &str) -> String {
 }
 
 /// Runs `check` in the web project with `lock` as its lockfile, asserting a `lock-parse` refusal
-/// that shows nothing of the outside secret.
-fn assert_lock_refused(lock: &str) {
+/// that says `says` and shows nothing of the outside secret.
+fn assert_lock_refused(lock: &str, says: &str) {
     let project = web_project();
     fs::write(project.path("services/web/supdoc.lock"), lock)
         .expect("the lockfile should be writable");
@@ -49,8 +49,8 @@ fn assert_lock_refused(lock: &str) {
 
     let _ = run.assert_exit(78);
     assert!(
-        run.stderr.contains("lock-parse"),
-        "the lockfile `{lock}` should be a parse error:\n{}",
+        run.stderr.contains("lock-parse") && run.stderr.contains(says),
+        "the lockfile `{lock}` should be a parse error saying `{says}`:\n{}",
         run.stderr
     );
     assert_no_secret(&run);
@@ -59,7 +59,7 @@ fn assert_lock_refused(lock: &str) {
 #[test]
 fn a_lock_source_that_climbs_is_a_parse_error_and_nothing_is_read() {
     for source in ["../../settings.py", "docs/../../../settings.py"] {
-        assert_lock_refused(&lock_with(source, "src/lib.rs"));
+        assert_lock_refused(&lock_with(source, "src/lib.rs"), "uses `..`");
     }
 }
 
@@ -68,7 +68,7 @@ fn a_lock_source_that_is_absolute_is_a_parse_error_and_nothing_is_read() {
     let project = web_project();
     let outside = project.path("settings.py").display().to_string();
     for source in [outside.as_str(), "//etc/passwd"] {
-        assert_lock_refused(&lock_with(source, "src/lib.rs"));
+        assert_lock_refused(&lock_with(source, "src/lib.rs"), "is absolute");
     }
 }
 
@@ -77,7 +77,7 @@ fn a_lock_target_that_is_absolute_is_a_parse_error_and_nothing_is_read() {
     let project = web_project();
     let outside = project.path("settings.py").display().to_string();
     for target in [outside.as_str(), "//etc/passwd"] {
-        assert_lock_refused(&lock_with("docs/guide.md", target));
+        assert_lock_refused(&lock_with("docs/guide.md", target), "is absolute");
     }
 }
 
