@@ -1621,20 +1621,38 @@ mod tests {
         assert_eq!(compile_time_read(&block), Scan::TooLarge);
     }
 
+    /// The fastest of five scans of `block`, so a moment the machine spends elsewhere drops out.
+    fn fastest_scan(block: &str) -> Duration {
+        (0..5)
+            .map(|_| {
+                let started = Instant::now();
+                let _found = scan(block, Some(Edition::E2024));
+                started.elapsed()
+            })
+            .min()
+            .unwrap_or_default()
+    }
+
     #[test]
     fn pathological_blocks_scan_in_one_linear_pass() {
-        let limit = Duration::from_secs(1);
+        // Measured against ordinary code of the same length on the same machine, not a fixed
+        // time: a scan that went back over the block would take thousands of times as long.
+        const RATIO: u32 = 100;
         for (name, block) in [
             ("200k `#[`", "#[".repeat(200_000)),
             ("100k `env /*`", "env /*".repeat(100_000)),
             ("100k `include /* */`", "include /* */ ".repeat(100_000)),
             ("100k raw strings", "r#\"\"".repeat(100_000)),
         ] {
-            let started = Instant::now();
-            let _found = scan(&block, Some(Edition::E2024));
-            let took = started.elapsed();
+            let ordinary: String = "let x = 1;\n".chars().cycle().take(block.len()).collect();
 
-            assert!(took < limit, "{name} took {took:?}, over {limit:?}");
+            let took = fastest_scan(&block);
+            let baseline = fastest_scan(&ordinary);
+
+            assert!(
+                took < baseline.saturating_mul(RATIO),
+                "{name} took {took:?}, over {RATIO} times the {baseline:?} of ordinary code"
+            );
         }
     }
 

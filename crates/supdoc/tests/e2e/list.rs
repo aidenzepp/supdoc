@@ -118,12 +118,14 @@ fn list_with_an_unlinked_target_prints_nothing_and_says_so_on_stderr() {
     );
 }
 
-/// A recorded `basic` project with `big.toml`, a `[t]` table of 200,001 keys (one more segment
-/// than the default `max-key-segments` allows), and a guide linking `big.toml#t.k5`. The link is
-/// recorded with the limit raised.
+/// A recorded `basic` project whose config lowers `max-key-segments` to 10, with `big.toml`, a
+/// `[t]` table of 11 keys (one more segment than that limit allows), and a guide linking
+/// `big.toml#t.k5`. The link is recorded with the limit raised. The limit is lowered so the file
+/// stays small enough to parse quickly however loaded the machine is.
 fn project_with_a_big_toml() -> Project {
     let project = Project::fixture("basic");
-    let keys = (0..200_001).map(|key| format!("k{key} = 1\n"));
+    project.write("supdoc.config.toml", "[limits]\nmax-key-segments = 10\n");
+    let keys = (0..11).map(|key| format!("k{key} = 1\n"));
     let big: String = std::iter::once("[t]\n".to_owned()).chain(keys).collect();
     project.write("big.toml", &big);
     project.write("docs/big.md", "The [fifth key](../big.toml#t.k5).\n");

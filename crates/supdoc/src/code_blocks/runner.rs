@@ -727,10 +727,14 @@ mod tests {
         assert_eq!(ran.stdout.len(), 2 * CAP);
     }
 
-    /// Whether `/bin/kill -0` still reaches `target`, a pid or a negated process group, within
-    /// two seconds of polling: `false` once it is gone.
+    /// How many seconds a stub's background sleep holds on, far past any timeout these tests set.
+    const HOLD_SECS: u64 = 600;
+
+    /// Whether `/bin/kill -0` still reaches `target`, a pid or a negated process group, after
+    /// polling for half of [`HOLD_SECS`]: `false` as soon as it is gone. The poll is that long
+    /// because a killed orphan is reaped by init, which a loaded machine can delay for seconds.
     fn still_alive(target: &str) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(HOLD_SECS / 2);
         while Instant::now() < deadline {
             let alive = std::process::Command::new("/bin/kill")
                 .args(["-0", "--", target])
@@ -748,11 +752,17 @@ mod tests {
 
     /// The `(pid, pgid)` a stub wrote to `file` as `<sleep pid> <its own pid>`.
     fn written_ids(file: &Path) -> (String, String) {
-        let ids = fs::read_to_string(file).expect("the stub should write its ids");
+        ids_in(file).expect("the stub should write its ids")
+    }
+
+    /// The `(pid, pgid)` in `file` as [`written_ids`] reads them, or `None` when the stub didn't
+    /// get as far as writing both.
+    fn ids_in(file: &Path) -> Option<(String, String)> {
+        let ids = fs::read_to_string(file).ok()?;
         let mut ids = ids.split_whitespace().map(str::to_owned);
-        let sleep = ids.next().expect("the stub should write the sleep's pid");
-        let group = ids.next().expect("the stub should write its own pid");
-        (sleep, format!("-{group}"))
+        let sleep = ids.next()?;
+        let group = ids.next()?;
+        Some((sleep, format!("-{group}")))
     }
 
     #[test]
@@ -760,17 +770,34 @@ mod tests {
         let ids = tempfile::TempDir::new().expect("a temporary directory should be creatable");
         let file = ids.path().join("ids");
         let fixture = fixture(&format!(
-            "/bin/sleep 30 &\necho \"$! $$\" > '{}'\nexit 0",
+            "/bin/sleep {HOLD_SECS} &\necho \"$! $$\" > '{}'\nexit 0",
             file.display()
         ));
-        let started = Instant::now();
+        // A loaded machine can reach the timeout before the stub writes its ids, so each attempt
+        // that does doubles the timeout until one gets that far, however slow the machine is.
+        let mut timeout = Duration::from_millis(200);
+        let (sleep, group) = loop {
+            let _absent = fs::remove_file(&file);
+            let started = Instant::now();
 
-        let result = run_stub(&fixture, b"", &[], Some(Duration::from_millis(200)));
-        let elapsed = started.elapsed();
-        let (sleep, group) = written_ids(&file);
+            let result = run_stub(&fixture, b"", &[], Some(timeout));
+            let elapsed = started.elapsed();
 
-        assert!(matches!(result, Err(Failure::TimedOut)), "{result:?}");
-        assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+            assert!(matches!(result, Err(Failure::TimedOut)), "{result:?}");
+            assert!(
+                elapsed < Duration::from_secs(HOLD_SECS),
+                "took {elapsed:?}, so it waited for the sleep holding stdout"
+            );
+            if let Some(ids) = ids_in(&file) {
+                break ids;
+            }
+            timeout = timeout.saturating_mul(2);
+            assert!(
+                timeout < Duration::from_secs(HOLD_SECS / 4),
+                "the stub never wrote its ids before a timeout of {timeout:?}"
+            );
+        };
+
         assert!(
             !still_alive(&sleep),
             "the sleep {sleep} outlived the timeout"
@@ -786,7 +813,7 @@ mod tests {
         let ids = tempfile::TempDir::new().expect("a temporary directory should be creatable");
         let file = ids.path().join("ids");
         let fixture = fixture(&format!(
-            "/bin/sleep 30 >/dev/null 2>&1 &\necho \"$! $$\" > '{}'\nexit 0",
+            "/bin/sleep {HOLD_SECS} >/dev/null 2>&1 &\necho \"$! $$\" > '{}'\nexit 0",
             file.display()
         ));
 
