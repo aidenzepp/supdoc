@@ -38,7 +38,7 @@ fn stub_tombi(dir: &Path, script: &str) {
 }
 
 /// A stub that refuses (exit 5) a run without `--offline`, a stdin name other than
-/// `<private>/docs/blocks.md.1.toml`, a `tombi.toml` where it runs, `NO_COLOR` or a private
+/// `<private>/docs/blocks.md.1.toml`, a `.tombi.toml` where it runs, `NO_COLOR` or a private
 /// `$XDG_CONFIG_HOME/tombi/config.toml`, appends the
 /// private config to `$XDG_CONFIG_HOME/seen` for the test to read, then has `tombi format`
 /// run `format` and `tombi lint` run `lint`.
@@ -47,7 +47,7 @@ fn stub_for(format: &str, lint: &str) -> String {
         "case \" $* \" in *' --offline '*) ;; *) exit 5;; esac\n\
          for arg in \"$@\"; do last=\"$name\"; name=\"$arg\"; done\n\
          case \"$last\" in */docs/blocks.md.1.toml) ;; *) exit 5;; esac\n\
-         [ -f \"$XDG_CONFIG_HOME/tombi/config.toml\" ] && [ -f tombi.toml ] || exit 5\n\
+         [ -f \"$XDG_CONFIG_HOME/tombi/config.toml\" ] && [ -f .tombi.toml ] || exit 5\n\
          [ \"$NO_COLOR\" = 1 ] || exit 5\n\
          /bin/cat \"$XDG_CONFIG_HOME/tombi/config.toml\" >> \"$XDG_CONFIG_HOME/seen\"\n\
          if [ \"$1\" = lint ]; then\n{lint}\nfi\n\
@@ -260,27 +260,34 @@ fn shell_project(body: &str) -> Project {
 
 #[test]
 fn a_formatter_that_prints_nothing_for_a_block_leaves_its_format_step_unrun_and_fix_it_alone() {
-    let project = shell_project("echo hi");
-    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
-    let path = outside.path().join("shfmt");
-    std::fs::write(&path, "#!/bin/sh\nexit 0\n").expect("the stub should be writable");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-        .expect("the stub should be made executable");
-    let before = project.read("docs/blocks.md");
+    for printed in ["", "printf '\\n'", "printf '  \\n\\n'"] {
+        let project = shell_project("echo hi");
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let path = outside.path().join("shfmt");
+        std::fs::write(&path, format!("#!/bin/sh\n{printed}\nexit 0\n"))
+            .expect("the stub should be writable");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("the stub should be made executable");
+        let before = project.read("docs/blocks.md");
 
-    let json = project
-        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
-        .assert_exit(0)
-        .json();
-    let _fixed = project.supdoc_in_with(".", &["fix", "--yes"], &[("PATH", outside.path())]);
+        let json = project
+            .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+            .assert_exit(0)
+            .json();
+        let _fixed = project.supdoc_in_with(".", &["fix", "--yes"], &[("PATH", outside.path())]);
 
-    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
-    assert_eq!(
-        at(&json, "/data/summary/code_blocks/format_not_run"),
-        1,
-        "{json}"
-    );
-    assert_eq!(project.read("docs/blocks.md"), before);
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-not-checked"],
+            "{printed:?}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/format_not_run"),
+            1,
+            "{printed:?}: {json}"
+        );
+        assert_eq!(project.read("docs/blocks.md"), before, "{printed:?}");
+    }
 }
 
 /// Runs `check --json` with the real tombi in `dir` on `project`, with `vars` added.
@@ -451,4 +458,146 @@ fn toml_the_real_tombi_applies_a_kept_override_to_the_mirrored_doc() {
 
     assert_eq!(finding_kinds(&matching), ["code-block-lint"], "{matching}");
     assert!(finding_kinds(&elsewhere).is_empty(), "{elsewhere}");
+}
+
+/// A `toml_project` holding `body` whose `tombi.toml` is `config`.
+fn configured(config: &str, body: &str) -> Project {
+    let project = toml_project(body);
+    project.write("tombi.toml", config);
+    project
+}
+
+#[test]
+fn toml_a_project_config_tombi_cant_load_leaves_both_steps_unrun() {
+    let Some(dir) = real_tool_dir(
+        "tombi",
+        "toml_a_project_config_tombi_cant_load_leaves_both_steps_unrun",
+    ) else {
+        return;
+    };
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+
+    for config in [
+        "[lint.rules]\nkey-empty = \"error\"\nbogus-rule = \"error\"\n",
+        "[lint.rules]\nkey-empty = 5\n",
+        "[lint.rules]\nkey-empty = \"error\"\n[lint]\ndisabled = true\n",
+    ] {
+        let project = configured(config, "\"\" = 2");
+        for _run in 0..2 {
+            let json = real_check(&project, &dir, &[("XDG_CACHE_HOME", cache.path())]);
+
+            assert_eq!(
+                finding_kinds(&json),
+                ["code-block-not-checked"],
+                "{config}: {json}"
+            );
+            assert!(
+                at(&json, "/findings/0/message").as_str().is_some_and(|m| m
+                    .starts_with("tombi couldn't load the project's config: ")
+                    && !m.contains("tombi-config")),
+                "{config}: {json}"
+            );
+            for count in ["format_not_run", "lint_not_run"] {
+                assert_eq!(
+                    at(&json, &format!("/data/summary/code_blocks/{count}")),
+                    1,
+                    "{config}: {json}"
+                );
+            }
+            assert_eq!(
+                at(&json, "/data/summary/code_blocks/passed"),
+                0,
+                "{config}: {json}"
+            );
+        }
+    }
+}
+
+#[test]
+fn toml_a_config_planted_beside_supdocs_copy_never_applies() {
+    let Some(dir) = real_tool_dir(
+        "tombi",
+        "toml_a_config_planted_beside_supdocs_copy_never_applies",
+    ) else {
+        return;
+    };
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let vars = [("XDG_CACHE_HOME", cache.path())];
+    let first = real_check(&toml_project("a = 1"), &dir, &vars);
+    let configs = cache.path().join("supdoc/code-blocks/tombi-config");
+    let strict = "[lint.rules]\nkey-empty = \"error\"\n";
+    for entry in std::fs::read_dir(&configs).expect("the private configs should exist") {
+        let entry = entry.expect("an entry");
+        if entry.path().is_dir() {
+            std::fs::write(entry.path().join("tombi.toml"), strict).expect("a plant");
+            std::fs::create_dir_all(entry.path().join(".config")).expect("a plant dir");
+            std::fs::write(entry.path().join(".config/tombi.toml"), strict).expect("a plant");
+        }
+    }
+    std::fs::write(configs.join("tombi.toml"), strict).expect("a plant");
+
+    let planted = real_check(&toml_project("\"\" = 3"), &dir, &vars);
+
+    assert_eq!(at(&first, "/data/summary/code_blocks/passed"), 1, "{first}");
+    assert_eq!(
+        at(&planted, "/data/summary/code_blocks/passed"),
+        1,
+        "{planted}"
+    );
+    assert!(finding_kinds(&planted).is_empty(), "{planted}");
+}
+
+#[test]
+fn toml_a_block_that_switches_a_tombi_step_off_has_that_step_unrun() {
+    let Some(dir) = real_tool_dir(
+        "tombi",
+        "toml_a_block_that_switches_a_tombi_step_off_has_that_step_unrun",
+    ) else {
+        return;
+    };
+    let strict = "[lint.rules]\nkey-empty = \"error\"\n";
+    let no_lint = configured(strict, "#:tombi lint.disabled = true\n\n\"\" = 2");
+    let no_format = configured(strict, "#:tombi format.disabled = true\na=1");
+    let before = no_format.read("docs/blocks.md");
+
+    let lint = real_check(&no_lint, &dir, &[]);
+    let format = real_check(&no_format, &dir, &[]);
+    let _fixed = no_format.supdoc_in_with(".", &["fix", "--yes"], &[("PATH", &dir)]);
+
+    assert_eq!(finding_kinds(&lint), ["code-block-not-checked"], "{lint}");
+    assert_eq!(
+        at(&lint, "/data/summary/code_blocks/lint_not_run"),
+        1,
+        "{lint}"
+    );
+    assert_eq!(
+        finding_kinds(&format),
+        ["code-block-not-checked"],
+        "{format}"
+    );
+    assert_eq!(
+        at(&format, "/data/summary/code_blocks/format_not_run"),
+        1,
+        "{format}"
+    );
+    assert_eq!(no_format.read("docs/blocks.md"), before);
+}
+
+#[test]
+fn toml_a_rule_level_tombi_comment_in_the_block_is_honoured() {
+    let Some(dir) = real_tool_dir(
+        "tombi",
+        "toml_a_rule_level_tombi_comment_in_the_block_is_honoured",
+    ) else {
+        return;
+    };
+    let project = configured(
+        "[lint.rules]\nkey-empty = \"error\"\n",
+        "# tombi: lint.rules.key-empty.disabled = true\n\"\" = 2",
+    );
+
+    let json = real_check(&project, &dir, &[]);
+
+    assert!(finding_kinds(&json).is_empty(), "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
 }

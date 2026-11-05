@@ -5,14 +5,17 @@
 //! walks up from the doc inside the root for the project's config, refuses one that makes tombi
 //! read files the checkout chose or fetch (`schemas`, `schema.catalog`, `extensions`), drops its
 //! `files` table and every `enabled` switch (every block is checked), and writes what is left as
-//! `tombi.toml` in a private directory tombi runs in, so the nearest config tombi finds is always
-//! supdoc's copy. The copy is written even when the project has no config, empty. The directory
-//! above it holds an empty `tombi.toml` of supdoc's too, which tombi finds instead when it can't
-//! read the copy, so no config above supdoc's cache (in the home directory, say) ever applies.
+//! `.tombi.toml`, the first name tombi looks for, in a private directory tombi runs in, so the
+//! nearest config tombi finds is always supdoc's copy. The copy is written even when the project
+//! has no config, empty. The directory above it holds an empty `.tombi.toml` of supdoc's too, so
+//! no config above supdoc's cache (in the home directory, say) ever applies. When tombi can't
+//! load the copy it says so on stderr, naming it, and supdoc reports the block's steps not run.
 //! `XDG_CONFIG_HOME` points at the private directory as well, holding the same copy.
 //!
 //! A block's own `#:schema` comment makes tombi read the file it names, wherever it is, so a
-//! block carrying one is never given to tombi (see [`names_schema`]).
+//! block carrying one is never given to tombi (see [`names_schema`]). A block's `#:tombi`
+//! directive that switches a step off leaves that step not run (see [`switched_off`]): supdoc's
+//! own `lint(off: ...)` and `format(off: ...)` are the way to do that.
 
 use std::ffi::OsString;
 use std::fs;
@@ -180,6 +183,27 @@ pub(crate) fn names_schema(block: &str) -> bool {
         .any(|line| line.trim_start().starts_with("#:schema"))
 }
 
+/// The steps a `#:tombi` document directive in `block` switches off, as `(format, lint)`: a line
+/// that, past its indentation, starts with `#:tombi` and sets `disabled` or `enabled` switches off
+/// each step it names, `format` or `lint`, or both when it names neither. A `# tombi:` comment
+/// that sets a rule's level is no switch: it stays in the block for a reader to see.
+#[must_use]
+pub(crate) fn switched_off(block: &str) -> (bool, bool) {
+    block
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("#:tombi"))
+        .filter(|rest| rest.contains("disabled") || rest.contains("enabled"))
+        .fold((false, false), |(format, lint), rest| {
+            let names_format = rest.contains("format");
+            let names_lint = rest.contains("lint");
+            let neither = !names_format && !names_lint;
+            (
+                format || names_format || neither,
+                lint || names_lint || neither,
+            )
+        })
+}
+
 /// Why a block isn't given to tombi.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Refusal {
@@ -198,7 +222,7 @@ pub(crate) enum Refusal {
 /// where the doc is told to be.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Project {
-    /// The private directory tombi runs in, holding the copy as `tombi.toml` and again as
+    /// The private directory tombi runs in, holding the copy as `.tombi.toml` and again as
     /// `tombi/config.toml`, which is also its `XDG_CONFIG_HOME`.
     pub(crate) config_home: PathBuf,
     /// The directory the project's config resolves its patterns against (see [`pattern_root`]),
@@ -216,6 +240,12 @@ impl Project {
             doc.strip_prefix(&self.from)
                 .unwrap_or_else(|_| Path::new(doc.file_name().unwrap_or_default())),
         )
+    }
+
+    /// The copy of the project's config tombi reads: `.tombi.toml` in the private directory.
+    #[must_use]
+    pub(crate) fn copy(&self) -> PathBuf {
+        self.config_home.join(".tombi.toml")
     }
 
     /// The variables tombi gets beyond the passed environment: `XDG_CONFIG_HOME`, the private
@@ -462,9 +492,9 @@ fn mentions_tool_tombi(real: &Path) -> Option<bool> {
 }
 
 /// Writes `table` as TOML into a private directory named by the hash of what is written, under
-/// supdoc's `tombi-config` directory, as `tombi.toml` (what tombi finds from its working
+/// supdoc's `tombi-config` directory, as `.tombi.toml` (what tombi finds from its working
 /// directory) and as `tombi/config.toml` (what it finds through `XDG_CONFIG_HOME`), and returns
-/// that directory. `tombi-config` itself gets an empty `tombi.toml`, which tombi finds instead of
+/// that directory. `tombi-config` itself gets an empty `.tombi.toml`, which tombi finds instead of
 /// any config further up when it can't read the copy. A file already holding the right content is
 /// kept; anything else at the name is replaced by writing a temporary file beside it and renaming
 /// it into place, so concurrent runs never see half a file. The directory is returned by its real
@@ -504,8 +534,8 @@ fn private_config(
         }
     }
     for (file, content) in [
-        (parent.join("tombi.toml"), ""),
-        (home.join("tombi.toml"), text.as_str()),
+        (parent.join(".tombi.toml"), ""),
+        (home.join(".tombi.toml"), text.as_str()),
         (home.join("tombi/config.toml"), text.as_str()),
     ] {
         write_private(&file, content).ok_or(None)?;
@@ -555,7 +585,7 @@ fn write_private(file: &Path, content: &str) -> Option<()> {
 mod tests {
     use super::{
         Project, Refusal, diagnostics, linted_nothing, names_schema, parse_error, pattern_root,
-        project,
+        project, switched_off,
     };
     use crate::code_blocks::format::ParseError;
     use crate::code_blocks::lint::Diagnostic;
@@ -569,14 +599,14 @@ mod tests {
         ToolEnv::from_vars(|name| (name == "XDG_CACHE_HOME").then(|| cache.as_os_str().to_owned()))
     }
 
-    /// The private `tombi.toml` `project` names, checked to be the same as its
+    /// The private `.tombi.toml` `project` names, checked to be the same as its
     /// `tombi/config.toml`.
     fn config_text(project: &Project) -> String {
         let read = |name: &str| {
             fs::read_to_string(project.config_home.join(name))
                 .expect("the private config should be readable")
         };
-        let copy = read("tombi.toml");
+        let copy = read(".tombi.toml");
         assert_eq!(copy, read("tombi/config.toml"), "the two copies differ");
         copy
     }
@@ -630,6 +660,31 @@ mod tests {
         assert!(!linted_nothing(&ran(false, "1 file failed to be linted\n")));
         assert!(linted_nothing(&ran(true, "")));
         assert!(linted_nothing(&ran(true, "0 files linted\n")));
+    }
+
+    #[test]
+    fn a_tombi_directive_switching_a_step_off_is_found_and_a_rule_comment_is_not() {
+        assert_eq!(
+            switched_off("#:tombi lint.disabled = true\na = 1\n"),
+            (false, true)
+        );
+        assert_eq!(
+            switched_off("  #:tombi format.disabled=true\n"),
+            (true, false)
+        );
+        assert_eq!(
+            switched_off("#:tombi lint = { enabled = false }\n"),
+            (false, true)
+        );
+        assert_eq!(switched_off("#:tombi disabled = true\n"), (true, true));
+        assert_eq!(
+            switched_off("# tombi: lint.rules.key-empty.disabled = true\n\"\" = 1\n"),
+            (false, false)
+        );
+        assert_eq!(
+            switched_off("#:tombi toml-version = \"v1.0.0\"\n"),
+            (false, false)
+        );
     }
 
     #[test]
@@ -758,7 +813,7 @@ mod tests {
             .config_home
             .parent()
             .expect("the private directory has a parent")
-            .join("tombi.toml");
+            .join(".tombi.toml");
         assert_eq!(
             fs::read_to_string(guard).expect("the guard config should be readable"),
             ""

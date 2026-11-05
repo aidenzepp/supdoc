@@ -65,10 +65,16 @@ pub(crate) enum Verdict {
     /// The formatter's output around a block of this kind doesn't keep the frame it is expected
     /// to print back, or the block's lines inside it lack the frame's indent.
     FrameReformatted(Kind),
-    /// The formatter exited 0 and printed nothing for a block that isn't blank: it didn't format
-    /// the block (its config can switch formatting off), so the step didn't run. Never a failure
-    /// and never a fix, which would empty the block.
+    /// The formatter exited 0 and printed nothing, or only whitespace, for a block that isn't
+    /// blank: it didn't format the block (its config can switch formatting off), so the step
+    /// didn't run. Never a failure and never a fix, which would empty the block.
     PrintedNothing,
+}
+
+/// Whether a formatter's `output` is nothing, or only whitespace: no formatting of a block that
+/// isn't blank.
+fn blank(output: &[u8]) -> bool {
+    output.iter().all(u8::is_ascii_whitespace)
 }
 
 /// Why a block's format step didn't run when its formatter exited 0 and printed nothing for it.
@@ -95,7 +101,7 @@ pub(crate) fn judge_framed(
 ) -> Verdict {
     let lines = input.lines().count();
     match result {
-        Ok(ran) if ran.success && ran.stdout.is_empty() && !input.trim().is_empty() => {
+        Ok(ran) if ran.success && blank(&ran.stdout) && !input.trim().is_empty() => {
             Verdict::PrintedNothing
         }
         Ok(ran) if ran.success => match String::from_utf8(ran.stdout) {
@@ -221,7 +227,7 @@ pub(crate) fn input(block: &CodeBlock, text: &str) -> Option<String> {
 pub(crate) fn judge(tool: &ToolCartridge, input: &str, result: Result<Ran, Failure>) -> Verdict {
     match result {
         Ok(ran) if ran.success && ran.stdout == input.as_bytes() => Verdict::Formatted,
-        Ok(ran) if ran.success && ran.stdout.is_empty() && !input.trim().is_empty() => {
+        Ok(ran) if ran.success && blank(&ran.stdout) && !input.trim().is_empty() => {
             Verdict::PrintedNothing
         }
         Ok(ran) if ran.success => String::from_utf8(ran.stdout).map_or_else(

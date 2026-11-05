@@ -339,6 +339,8 @@ impl Evaluation {
             if !configs.give(record, tool, (env, root), &mut slots) {
                 continue;
             }
+            // Giving a TOML block its config can take a step off it (see `TombiConfigs::give`).
+            let linter = record.linter;
             let (runs, refused) = found_runs(
                 [record.tool, linter],
                 &mut looked_up,
@@ -424,6 +426,7 @@ impl Evaluation {
         let mut linted_nothing_warned = false;
         let mut indent_unknown_warned = false;
         let mut printed_nothing_warned = false;
+        let mut config_skipped_warned = false;
         for slot in slots {
             let (job, run) = match slot {
                 Slot::Found(finding) => {
@@ -446,7 +449,12 @@ impl Evaluation {
                     record.steps.format = StepState::Ran;
                     outcomes.push((verdict.state(), Some(run.tool)));
                 }
-                (Some(Err(reason)), Some(_)) => {
+                (Some(Err(NotRun { reason, said })), Some(_)) => {
+                    if reason == TOMBI_CONFIG_SKIPPED && !config_skipped_warned {
+                        config_skipped_warned = true;
+                        self.findings
+                            .push(config_skipped(&record.at, said.as_deref()));
+                    }
                     if reason == FRAME_INDENT_UNKNOWN && !indent_unknown_warned {
                         indent_unknown_warned = true;
                         self.findings.push(indent_unknown(&record.at));
@@ -465,7 +473,12 @@ impl Evaluation {
                     record.steps.lint = StepState::Ran;
                     outcomes.push((lint_state(&verdict), Some(run.tool)));
                 }
-                (Some(Err(reason)), Some(_)) => {
+                (Some(Err(NotRun { reason, said })), Some(_)) => {
+                    if reason == TOMBI_CONFIG_SKIPPED && !config_skipped_warned {
+                        config_skipped_warned = true;
+                        self.findings
+                            .push(config_skipped(&record.at, said.as_deref()));
+                    }
                     if reason == BIOME_LINTED_NOTHING && !linted_nothing_warned {
                         linted_nothing_warned = true;
                         self.findings.push(linted_nothing(&record.at));
@@ -697,10 +710,26 @@ struct StepsRan {
 }
 
 /// What a lint step gave: its verdict and findings, or why supdoc couldn't run it safely.
-type LintRan = Result<(lint::Verdict, Vec<Finding>), &'static str>;
+type LintRan = Result<(lint::Verdict, Vec<Finding>), NotRun>;
 
 /// What a format step gave: its verdict and findings, or why supdoc couldn't run it.
-type FormatRan = Result<(format::Verdict, Vec<Finding>), &'static str>;
+type FormatRan = Result<(format::Verdict, Vec<Finding>), NotRun>;
+
+/// Why a step didn't run: its state's reason, and what the tool said about it, when the run's
+/// warning quotes that.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NotRun {
+    /// The step's reason.
+    reason: &'static str,
+    /// The tool's own words on it, for the run's warning.
+    said: Option<String>,
+}
+
+impl From<&'static str> for NotRun {
+    fn from(reason: &'static str) -> Self {
+        Self { reason, said: None }
+    }
+}
 
 /// Whether a format step that gave `format` let the block parse, so its lint step may run: not
 /// when the formatter couldn't parse it, nor when a frame line showed it isn't its kind.
@@ -1074,6 +1103,9 @@ impl TombiConfigs {
                     .reason(&record.steps, record.language.as_deref(), Some(tool.name));
             return false;
         }
+        if !switch_steps_off(record, slots) {
+            return false;
+        }
         let doc = root.join(record.at.file.as_str());
         let dir = doc.parent().unwrap_or(root).to_path_buf();
         let found = if let Some((_, found)) = self.found.iter().find(|(known, _)| *known == dir) {
@@ -1107,6 +1139,60 @@ impl TombiConfigs {
         }
     }
 }
+
+/// Takes off `record`'s TOML block each step a `#:tombi` directive in it switches off (see
+/// [`tombi::switched_off`]): the step doesn't run, with a reason naming supdoc's attribute for
+/// it, and one `code-block-not-checked` warning for the block goes to `slots`. Whether a step is
+/// left to run.
+fn switch_steps_off(record: &mut BlockRecord, slots: &mut Vec<Slot>) -> bool {
+    let (format, lint) = record.pending.as_ref().map_or((false, false), |pending| {
+        tombi::switched_off(&pending.input)
+    });
+    let format = format && record.tool.is_some();
+    let lint = lint && record.linter.is_some();
+    if format {
+        record.tool = None;
+        record.steps.format = StepState::Unrunnable {
+            reason: TOMBI_FORMAT_SWITCHED,
+        };
+    }
+    if lint {
+        record.linter = None;
+        record.steps.lint = StepState::Unrunnable {
+            reason: TOMBI_LINT_SWITCHED,
+        };
+    }
+    if format || lint {
+        let steps = match (format, lint) {
+            (true, true) => "format and lint steps",
+            (true, false) => "format step",
+            _ => "lint step",
+        };
+        slots.push(Slot::Found(
+            Finding::new(
+                NOT_CHECKED,
+                Severity::Warning,
+                format!(
+                    "the block switches tombi's {steps} off with a `#:tombi` directive, so they \
+                     didn't run"
+                ),
+            )
+            .with_help(
+                "remove the `#:tombi` directive and mark the block `format(off: <why>)` or \
+                 `lint(off: <why>)` instead",
+            )
+            .with_location(record.at.clone()),
+        ));
+    }
+    record.tool.is_some() || record.linter.is_some()
+}
+
+/// Why a TOML block's format step didn't run when the block switches tombi's format off.
+const TOMBI_FORMAT_SWITCHED: &str =
+    "the block switches tombi's format off; use `format(off: <why>)`";
+
+/// Why a TOML block's lint step didn't run when the block switches tombi's lint off.
+const TOMBI_LINT_SWITCHED: &str = "the block switches tombi's lint off; use `lint(off: <why>)`";
 
 /// The `code-block-not-checked` warning, at `at`, for a TOML block holding a `#:schema`
 /// directive.
@@ -1624,7 +1710,7 @@ fn run_formatter(
         None => None,
         Some(frame) => match indent_unit(tool, rust, given) {
             Some((indent, held)) => Some((frame, indent, held)),
-            None => return Some(Err(FRAME_INDENT_UNKNOWN)),
+            None => return Some(Err(FRAME_INDENT_UNKNOWN.into())),
         },
     };
     let checked = framed.as_ref().map_or(
@@ -1672,27 +1758,34 @@ fn run_formatter(
         doc: &doc,
         project: None,
     };
-    let verdict = cached_run(
+    let judged = cached_run(
         &run,
         session,
         |call| run_in_place(call, record, session),
         |result| {
+            if let Some(not_run) = config_skipped_by(record, &result) {
+                return Err(not_run);
+            }
             let named = result.map(|ran| Ran {
                 stderr: given.map_or_else(|| ran.stderr.clone(), |given| given.named(&ran.stderr)),
                 ..ran
             });
-            match &framed {
+            Ok(match &framed {
                 Some((frame, indent, _)) => {
                     format::judge_framed(tool, *frame, indent, &pending.input, named)
                 }
                 None => format::judge(tool, input, named),
-            }
+            })
         },
-        format::Verdict::cacheable,
+        |judged| judged.as_ref().is_ok_and(format::Verdict::cacheable),
     );
-    if verdict == format::Verdict::PrintedNothing {
-        return Some(Err(format::PRINTED_NOTHING));
-    }
+    let verdict = match judged {
+        Ok(format::Verdict::PrintedNothing) => {
+            return Some(Err(format::PRINTED_NOTHING.into()));
+        }
+        Ok(verdict) => verdict,
+        Err(not_run) => return Some(Err(not_run)),
+    };
     let at = match &verdict {
         format::Verdict::NotKind(_) | format::Verdict::FrameReformatted(_) => pending
             .block
@@ -1806,20 +1899,25 @@ fn run_linter(
         None => run_in_place(call, record, session),
     };
     let named = given.filter(|_| record.tombi.is_some());
-    let judge = |result: Result<Ran, runner::Failure>| match named_by(named, result) {
-        Ok(ran) if biome.is_some() && biome::linted_nothing(&ran.stdout) => {
-            Err(BIOME_LINTED_NOTHING)
+    let judge = |result: Result<Ran, runner::Failure>| {
+        if let Some(not_run) = config_skipped_by(record, &result) {
+            return Err(not_run);
         }
-        Ok(ran) if tool.name == TOMBI_LINT && tombi::linted_nothing(&ran) => {
-            Err(TOMBI_LINTED_NOTHING)
+        match named_by(named, result) {
+            Ok(ran) if biome.is_some() && biome::linted_nothing(&ran.stdout) => {
+                Err(BIOME_LINTED_NOTHING.into())
+            }
+            Ok(ran) if tool.name == TOMBI_LINT && tombi::linted_nothing(&ran) => {
+                Err(TOMBI_LINTED_NOTHING.into())
+            }
+            result => Ok(tool.lint_verdict(input, frame.is_some(), result)),
         }
-        result => Ok(tool.lint_verdict(input, frame.is_some(), result)),
     };
     let verdict = match cached_run(&run, session, spawn, judge, |judged| {
         judged.as_ref().is_ok_and(lint::Verdict::cacheable)
     }) {
         Ok(verdict) => verdict,
-        Err(reason) => return Some(Err(reason)),
+        Err(not_run) => return Some(Err(not_run)),
     };
     let read = lint::Read {
         tool,
@@ -1938,7 +2036,7 @@ fn run_clippy(
 ) -> LintRan {
     let neutral = runner::neutral_dir(session.env, session.root);
     if neutral == Path::new("/") {
-        return Err(NO_PRIVATE_DIR);
+        return Err(NO_PRIVATE_DIR.into());
     }
     let doc = session.root.join(record.at.file.as_str());
     let edition = rust.edition_of(record);
@@ -2022,6 +2120,56 @@ fn run_clippy(
     );
     Ok((verdict, findings))
 }
+
+/// Why `record`'s block didn't really get tombi's run `result`: tombi exited 0 but its stderr names
+/// the copy of the project's config supdoc wrote, which it says only when it couldn't load it, so
+/// it ran on rules the project didn't set. The reason says so, quoting tombi's first stderr line
+/// with each private path named as the block sees it. `None` for any other run, and for a block
+/// tombi isn't given.
+fn config_skipped_by(
+    record: &BlockRecord,
+    result: &Result<Ran, runner::Failure>,
+) -> Option<NotRun> {
+    let project = record.tombi.as_ref()?;
+    let ran = result.as_ref().ok().filter(|ran| ran.success)?;
+    let stderr = String::from_utf8_lossy(&ran.stderr);
+    let copy = project.copy();
+    if !stderr.contains(&*copy.to_string_lossy()) {
+        return None;
+    }
+    let named = biome::Given {
+        flags: Vec::new(),
+        config: None,
+        mirror: None,
+        names: Some(project.names()),
+    }
+    .named(stderr.lines().next().unwrap_or_default().as_bytes());
+    Some(NotRun {
+        reason: TOMBI_CONFIG_SKIPPED,
+        said: Some(String::from_utf8_lossy(&named).into_owned()),
+    })
+}
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first block tombi didn't run with
+/// the project's config, quoting what tombi `said`.
+fn config_skipped(at: &Location, said: Option<&str>) -> Finding {
+    let said = said.map_or_else(String::new, |said| format!(": {said}"));
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        format!(
+            "tombi couldn't load the project's config{said}, so its TOML blocks' steps didn't run"
+        ),
+    )
+    .with_help(
+        "run `tombi lint` in the project to see what in its config tombi rejects, and fix it, or \
+         mark the blocks `ignore(<why>)`",
+    )
+    .with_location(at.clone())
+}
+
+/// Why a TOML block's steps didn't run when tombi couldn't load the copy of the project's config.
+const TOMBI_CONFIG_SKIPPED: &str = "tombi couldn't load the project's config";
 
 /// Runs `call` for `record`'s block with `session`'s env: from the private directory tombi is
 /// given when the block has one (see [`runner::Cwd::Private`]), otherwise from where `call` says.
@@ -3977,7 +4125,7 @@ mod tests {
 
         /// The verdict and findings of a run that ran.
         fn ran(run: FormatRan) -> (Verdict, Vec<Finding>) {
-            run.unwrap_or_else(|reason| panic!("the format step should run: {reason}"))
+            run.unwrap_or_else(|not_run| panic!("the format step should run: {not_run:?}"))
         }
 
         #[test]
@@ -4040,7 +4188,7 @@ mod tests {
                 Verdict::FrameReformatted(Kind::Statements),
                 Vec::new()
             )))));
-            assert!(parses(Some(&Err(FRAME_INDENT_UNKNOWN))));
+            assert!(parses(Some(&Err(FRAME_INDENT_UNKNOWN.into()))));
         }
 
         #[test]
@@ -4052,7 +4200,7 @@ mod tests {
 
             let run = format_run(&stub, root.path(), &doc("let x = 1;\n"));
 
-            assert_eq!(run, Err(FRAME_INDENT_UNKNOWN));
+            assert_eq!(run, Err(FRAME_INDENT_UNKNOWN.into()));
         }
 
         #[test]
@@ -4174,7 +4322,7 @@ mod tests {
                 .collect();
             let unrun = || {
                 Some(StepsRan {
-                    format: Some(Err(FRAME_INDENT_UNKNOWN)),
+                    format: Some(Err(FRAME_INDENT_UNKNOWN.into())),
                     lint: None,
                 })
             };
