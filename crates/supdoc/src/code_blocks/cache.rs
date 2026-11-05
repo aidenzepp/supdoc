@@ -2,7 +2,7 @@
 //! kept outside the checkout so an unchanged block isn't run again.
 //!
 //! Entries live in `$XDG_CACHE_HOME/supdoc/code-blocks/<sha256 of the real root>/`, or under
-//! `$HOME/.cache` when `XDG_CACHE_HOME` isn't an absolute path. A missing, unreadable, corrupt or
+//! `$HOME/.cache` when `XDG_CACHE_HOME` isn't an absolute path free of `..`. A missing, unreadable, corrupt or
 //! partial entry is a miss, never a pass.
 
 use std::ffi::OsStr;
@@ -78,21 +78,16 @@ pub(crate) struct Run<'run> {
 }
 
 impl Cache {
-    /// The cache for `root`, under `env`'s `XDG_CACHE_HOME`, else its `HOME`'s `.cache`, with its
+    /// The cache for `root`, under the first of `env`'s [`runner::cache_bases`], with its
     /// directory created mode 0700 beneath where that base really lies, as
-    /// [`runner::create_private`] creates the other private directories. `None` when neither is an
-    /// absolute path, when the directory would be inside `root`, when a link beneath the base
-    /// leads out of it, or when it can't be created: then nothing is cached.
+    /// [`runner::create_private`] creates the other private directories. `None` when there is no
+    /// base (each unset, not absolute or holding a `..`), when the directory would be inside
+    /// `root`, when a link beneath the base leads out of it, or when it can't be created: then
+    /// nothing is cached.
     ///
     /// Effect: resolves `root` and the cache base, and creates the cache directory.
     pub(crate) fn open(env: &ToolEnv, root: &Path) -> Option<Self> {
-        let absolute = |name| {
-            env.var(name)
-                .map(PathBuf::from)
-                .filter(|path| path.is_absolute())
-        };
-        let base = absolute("XDG_CACHE_HOME")
-            .or_else(|| absolute("HOME").map(|home| home.join(".cache")))?;
+        let base = runner::cache_bases(env).next()?;
         let real_root = root.canonicalize().ok()?;
         let real_base = resolved(&base)?;
         let name = Hash::digest(real_root.as_os_str().as_encoded_bytes()).to_string();
@@ -823,6 +818,101 @@ mod tests {
             cache.dir.is_dir(),
             "the cache should be created where the base leads"
         );
+    }
+
+    /// A scratch home holding `real` (a plain directory) and `link` (to `elsewhere/inner`), so
+    /// `real/..` and `link/..` both hold a `..`, with those two values.
+    fn hostile_home() -> (tempfile::TempDir, [PathBuf; 2]) {
+        use std::os::unix::fs::symlink;
+        let dir = temp();
+        fs::create_dir(dir.path().join("real")).expect("the plain directory should be creatable");
+        fs::create_dir_all(dir.path().join("elsewhere/inner"))
+            .expect("the link's destination should be creatable");
+        symlink(dir.path().join("elsewhere/inner"), dir.path().join("link"))
+            .expect("the link should be creatable");
+        let values = [
+            dir.path().join("real").join(".."),
+            dir.path().join("link").join(".."),
+        ];
+        (dir, values)
+    }
+
+    /// Every path beneath `dir`, links not followed, to show nothing was created there.
+    fn tree(dir: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(next) = pending.pop() {
+            for entry in fs::read_dir(&next).expect("a scratch directory should be listable") {
+                let path = entry.expect("a scratch entry should be readable").path();
+                if path.symlink_metadata().is_ok_and(|meta| meta.is_dir()) {
+                    pending.push(path.clone());
+                }
+                found.push(path);
+            }
+        }
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn a_cache_base_holding_dot_dot_gives_no_cache_and_creates_nothing() {
+        let (home, values) = hostile_home();
+        let root = temp();
+        let before = tree(home.path());
+
+        for (variable, value) in values
+            .iter()
+            .flat_map(|value| [("XDG_CACHE_HOME", value), ("HOME", value)])
+        {
+            let env = ToolEnv::from_vars(|name| (name == variable).then(|| value.clone().into()));
+
+            let cache = Cache::open(&env, root.path());
+
+            assert!(
+                cache.is_none(),
+                "{variable}={} should give no cache: {cache:?}",
+                value.display()
+            );
+            assert_eq!(
+                tree(home.path()),
+                before,
+                "{variable}={} created a file",
+                value.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_cache_home_holding_dot_dot_falls_back_to_home() {
+        let (scratch, values) = hostile_home();
+        let root = temp();
+        let home = scratch.path().join("home");
+        let env = |xdg: Option<&PathBuf>| {
+            let vars = [
+                ("XDG_CACHE_HOME", xdg.map(|path| path.as_os_str())),
+                ("HOME", Some(home.as_os_str())),
+            ];
+            ToolEnv::from_vars(|name| {
+                vars.iter()
+                    .find(|(key, _)| *key == name)
+                    .and_then(|(_, value)| value.map(OsStr::to_os_string))
+            })
+        };
+
+        let real = scratch
+            .path()
+            .canonicalize()
+            .expect("the scratch home should resolve");
+        for xdg in values.iter().map(Some).chain([None]) {
+            let cache = Cache::open(&env(xdg), root.path())
+                .expect("the home cache should open when XDG_CACHE_HOME is unusable");
+            assert!(
+                cache
+                    .dir
+                    .starts_with(real.join("home/.cache/supdoc/code-blocks")),
+                "XDG_CACHE_HOME={xdg:?}: {cache:?}"
+            );
+        }
     }
 
     #[test]
