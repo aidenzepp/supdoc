@@ -1,5 +1,5 @@
 //! Links into each language's symbols are recorded, pass, and fail when the symbol changes (docref's
-//! TypeScript, Markdown, sub-declaration, JavaScript, Python, Go and Bash tests).
+//! TypeScript, Markdown, sub-declaration, JavaScript, Python, Go and Bash tests, plus TOML).
 
 use crate::support::{Project, array_at, at, links};
 
@@ -223,4 +223,98 @@ fn changing_a_bash_function_body_fails_its_link() {
     assert_eq!(at(&report, "/data/summary/failed"), 1, "{report}");
     assert_eq!(at(&report, "/data/summary/broken"), 0, "{report}");
     assert_eq!(at(&report, "/data/links/0/symbol"), "setup_env", "{report}");
+}
+
+/// A project whose guide links a TOML key: the bash fixture plus a manifest and a guide.
+fn toml_project() -> Project {
+    let project = Project::fixture("bash");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1\"\n",
+    );
+    project.write(
+        "docs/release.md",
+        "The [version](../Cargo.toml#package.version) is bumped each release.\n",
+    );
+    project
+}
+
+#[test]
+fn toml_key_links_are_recorded_and_pass() {
+    let project = toml_project();
+
+    project.record();
+
+    assert!(
+        project
+            .locked_links("supdoc.lock")
+            .contains("Cargo.toml#package.version"),
+        "the TOML key's link should be recorded: {:?}",
+        project.locked_links("supdoc.lock")
+    );
+    let _ = project.supdoc(&["check"]).assert_exit(0);
+}
+
+#[test]
+fn toml_changing_a_key_value_fails_its_link() {
+    let project = toml_project();
+    project.record();
+    project.replace("Cargo.toml", "version = \"0.1.0\"", "version = \"0.2.0\"");
+
+    let report = project.supdoc(&["--json", "check"]).assert_exit(1).json();
+
+    assert_eq!(at(&report, "/data/summary/failed"), 1, "{report}");
+    assert_eq!(at(&report, "/data/summary/broken"), 0, "{report}");
+    assert_eq!(
+        at(&report, "/data/links/0/symbol"),
+        "package.version",
+        "{report}"
+    );
+}
+
+#[test]
+fn toml_target_over_the_key_budget_is_a_broken_link_update_leaves_unrecorded() {
+    // Decided on purpose: a key-path budget failure is a read failure like `read-too-large`, so
+    // `update` refuses to record the link and `list` shows it broken with the limit's code.
+    let project = toml_project();
+
+    let update = project.supdoc(&["--max-key-segments", "2", "update", "--yes"]);
+    let list = project
+        .supdoc(&["--max-key-segments", "2", "--json", "list"])
+        .assert_exit(0)
+        .json();
+
+    let _ = update.assert_exit(0);
+    assert!(
+        update.stdout.contains("read-too-many-keys")
+            && update
+                .stdout
+                .contains("Update can't record a broken link until it is repaired"),
+        "update should name the limit and refuse to record the link: {}",
+        update.stdout
+    );
+    assert!(
+        !project.path("supdoc.lock").exists()
+            || !project
+                .locked_links("supdoc.lock")
+                .contains("Cargo.toml#package.version"),
+        "the over-budget link should not be recorded"
+    );
+    assert_eq!(at(&list, "/data/summary/broken"), 1, "{list}");
+    let broken: Vec<(Option<&str>, Option<&str>)> = array_at(&list, "/data/links")
+        .iter()
+        .filter(|link| link.pointer("/state").and_then(serde_json::Value::as_str) == Some("broken"))
+        .map(|link| {
+            (
+                link.pointer("/target").and_then(serde_json::Value::as_str),
+                link.pointer("/finding/kind")
+                    .and_then(serde_json::Value::as_str),
+            )
+        })
+        .collect();
+    assert_eq!(
+        broken,
+        [(Some("Cargo.toml"), Some("read-too-many-keys"))],
+        "{list}"
+    );
 }

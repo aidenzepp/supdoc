@@ -358,10 +358,10 @@ fn read_walked<'walk>(
     mut on_read: impl FnMut(&WalkedSource, &SourceFile, Vec<RawLink>) -> Result<(), ReadError>,
     mut on_unread: impl FnMut(&WalkedSource, ReadError),
 ) -> Result<(), ScanError> {
-    let limit = config.limits_in_effect().parse_timeout.value;
+    let limits = config.limits_in_effect();
     for walked in sources {
         let read = parsed
-            .read(&walked.path, languages, limit)
+            .read(&walked.path, languages, limits)
             .and_then(|file| {
                 let raws = if walked.wants.links {
                     links(file)?

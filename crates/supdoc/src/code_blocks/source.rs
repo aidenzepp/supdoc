@@ -10,6 +10,7 @@
 
 use std::path::Path;
 
+use crate::cartridges::data::KeyPathBudget;
 use crate::config::Config;
 use crate::finding::{Finding, Location, Severity};
 use crate::hash::Hash;
@@ -198,8 +199,9 @@ fn resolve<T>(
     take: impl FnOnce(&SourceFile, Option<&Symbol>) -> Option<T>,
 ) -> Result<T, Unresolved> {
     let name = kind.name();
-    let limit = config.limits_in_effect().parse_timeout.value;
-    let source = SourceFile::read(located.file.clone(), languages, limit)
+    let limits = config.limits_in_effect();
+    let source = SourceFile::read(located.file.clone(), languages, limits.parse_timeout.value)
+        .map(|file| file.with_key_paths(KeyPathBudget::from_limits(limits)))
         .map_err(|error| read_failed(&error, config.root(), kind))?;
     let shown = relative_to(config.root(), source.path());
     let outside = || {

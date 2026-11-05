@@ -113,11 +113,10 @@ pub(crate) mod cartridges {
     pub(crate) mod bash;
 
     /// The key-path symbol model the JSON, YAML and TOML cartridges share.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the data cartridges call it from P5-L09")
-    )]
     pub(crate) mod data;
+
+    /// TOML, a link target only.
+    pub(crate) mod toml;
 
     /// Markdown.
     pub(crate) mod markdown {
