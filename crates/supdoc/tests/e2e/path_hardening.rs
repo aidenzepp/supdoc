@@ -121,10 +121,18 @@ fn from_that_climbs_is_absolute_or_runs_through_a_symlinked_dir_shows_nothing_ou
             .expect("the outside directory should have a UTF-8 name")
     );
     let absolute = format!("/{}/secret.rs#secret", outside.path().display());
-    for (way, value) in [
-        ("climbing", climb.as_str()),
-        ("absolute", absolute.as_str()),
-        ("symlinked parent", "/src/vendor/secret.rs#secret"),
+    for (way, value, says) in [
+        ("climbing", climb.as_str(), "climbs out of the project root"),
+        (
+            "absolute",
+            absolute.as_str(),
+            "climbs out of the project root",
+        ),
+        (
+            "symlinked parent",
+            "/src/vendor/secret.rs#secret",
+            "is outside the project root",
+        ),
     ] {
         project.write(
             "docs/blocks.md",
@@ -140,6 +148,11 @@ fn from_that_climbs_is_absolute_or_runs_through_a_symlinked_dir_shows_nothing_ou
             source_missing_count(&json),
             1,
             "{way} `from({value})`: {json}"
+        );
+        assert!(
+            text_run.stdout.contains(says),
+            "{way} `from({value})` should say `{says}`:\n{}",
+            text_run.stdout
         );
         for run in [&json_run, &text_run] {
             assert!(
