@@ -458,6 +458,20 @@ const GO_FRAGMENTS: &[(Kind, Support)] = &[
     (Kind::Declarations, Support::NATIVE),
 ];
 
+/// go vet's kinds: it reads only a whole file, so declarations are read behind a package clause
+/// and statements inside a function too, each frame on one line. An expression is no statement
+/// Go accepts alone (its value would be unused), so go vet doesn't list it.
+const GO_VET_FRAGMENTS: &[(Kind, Support)] = &[
+    (Kind::Statements, framed(GO_VET_STATEMENTS, "}")),
+    (Kind::Declarations, framed(GO_VET_PACKAGE, "")),
+];
+
+/// The package clause go vet's frames open with.
+const GO_VET_PACKAGE: &str = "package supdocfragment";
+
+/// The line go vet's statements frame opens with: [`GO_VET_PACKAGE`] and a function.
+const GO_VET_STATEMENTS: &str = "package supdocfragment; func supdocFragment() {";
+
 /// Whether a block tagged `tag` can hold a fragment of `kind`: always, for a tool whose
 /// `fragments` alone say.
 const fn every_tag(_tag: &str, _kind: Kind) -> bool {
@@ -474,7 +488,7 @@ fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'sta
 }
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 20] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -749,6 +763,22 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 20] = [
         reader: Reader::Format(yaml::parse_error),
     },
     ToolCartridge {
+        name: "yamllint",
+        language: Language::Yaml,
+        binary: "yamllint",
+        tier: Tier::Static,
+        install: "pipx install 'yamllint==1.38.0'",
+        // yamllint reads only supdoc's private copy, named by its hash in the args.
+        config_files: &[],
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        holds: every_tag,
+        vars: &[],
+        positions: own_positions,
+        argv: yamllint_args,
+        reader: Reader::Lint(yaml::lint_verdict),
+    },
+    ToolCartridge {
         name: "gofmt",
         language: Language::Go,
         binary: "gofmt",
@@ -772,7 +802,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 20] = [
         // go vet reads only the module supdoc writes for the block (see [`go::VetModule`]).
         config_files: &[],
         modes: FULL_OR_OFF,
-        fragments: &[],
+        fragments: GO_VET_FRAGMENTS,
         holds: every_tag,
         vars: go::VET_VARS,
         positions: own_positions,
@@ -1078,6 +1108,22 @@ fn yamlfmt_args(invocation: &Invocation<'_>) -> Vec<OsString> {
         .collect()
 }
 
+/// `yamllint`'s arguments: diagnostics one per line, a warning failing the run as an error does,
+/// the project's `-c <private copy>` (see [`yaml::lint_args`]), with the snippet relaxation in
+/// it, then the block on stdin. yamllint takes no stdin file name, so the doc and the block's
+/// index don't appear.
+fn yamllint_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    [
+        OsString::from("-f"),
+        OsString::from("parsable"),
+        OsString::from("-s"),
+    ]
+    .into_iter()
+    .chain(invocation.project.iter().cloned())
+    .chain([OsString::from("-")])
+    .collect()
+}
+
 /// `tombi format`'s arguments: offline, so no schema is fetched, quiet, then the block on stdin
 /// under its virtual path. tombi gets its config through `XDG_CONFIG_HOME` (see [`tombi`]), not
 /// a flag.
@@ -1311,6 +1357,7 @@ mod tests {
                 "tombi-format Toml Format tombi Static",
                 "tombi-lint Toml Lint tombi Static",
                 "yamlfmt Yaml Format yamlfmt Static",
+                "yamllint Yaml Lint yamllint Static",
                 "gofmt Go Format gofmt Static",
                 "go-vet Go Lint go Static",
             ]
@@ -1890,7 +1937,8 @@ mod tests {
             .flat_map(|tool| {
                 tool.fragments.iter().filter_map(move |(kind, support)| {
                     let frame = support.frame(*kind)?;
-                    Some((tool, *kind, format!("{} ... {}", frame.before, frame.after)))
+                    let shown = format!("{} ... {}", frame.before, frame.after);
+                    Some((tool, *kind, shown.trim_end().to_owned()))
                 })
             })
             .collect();

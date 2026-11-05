@@ -70,7 +70,7 @@ top-level keys, and never change which files links are read from. A language's t
   typescript    formatter biome-format, linter biome-lint
   javascript    formatter biome-format, linter biome-lint
   json          formatter biome-format, linter biome-lint; tag a block with comments jsonc
-  yaml          formatter yamlfmt
+  yaml          formatter yamlfmt, linter yamllint
   toml          formatter tombi-format, linter tombi-lint
   markdown      formatter rumdl-format, linter rumdl
   go            formatter gofmt, linter go-vet; tag a block go or golang
@@ -80,13 +80,18 @@ lint = \"off\". A table for a tool the language doesn't select is a config error
 
 Each tool reads the block on standard input and its own config files, which can sit outside the \
 project; its errors can quote them. rumdl's config is found from the doc's directory up to the \
-nearest .git inside the root, never above the root; yamlfmt's up to the root. go vet reads none: \
-it checks a block that opens with a package clause as main.go, alone in a module supdoc writes, \
-offline, so a block that imports a package outside Go's standard library isn't vetted.
+nearest .git inside the root, never above the root; yamlfmt's and yamllint's up to the root. \
+go vet reads none: it checks a block that opens with a package clause as main.go, alone in a \
+module supdoc writes, offline, so a block that imports a package outside Go's standard library \
+isn't vetted.
 
 A snippet lacks the code around it, so some rules are off for blocks: biome lint skips \
 noUnusedVariables, noUnusedImports and noUnusedFunctionParameters; rumdl turns off MD041, MD051 \
-and MD057; ruff drops F706, F704 and PLE1142 for a fragment(statements) block.
+and MD057; yamllint turns off document-start; ruff drops F706, F704 and PLE1142 for a \
+fragment(statements) block. A YAML block whose yamllint comments switch every rule \
+off (disable, disable-line or disable-file naming no rule, or naming between them every rule \
+its config leaves on) isn't linted. The scan reads text, not YAML, so such a comment inside a string, or one an enable \
+comment undoes, counts too.
 
 Write attributes after a block's language, separated by spaces:
 
@@ -148,6 +153,8 @@ block standing where the ... is:
   biome-format  members       abstract class SupdocFragment$ { supdocFrame$() { return this; } ... }   (TypeScript blocks)
   biome-format  members       class SupdocFragment$ { supdocFrame$() { return this; } ... }   (JavaScript blocks)
   biome-format  entries       { ... }   (json and jsonc blocks)
+  go-vet        statements    package supdocfragment; func supdocFragment() { ... }
+  go-vet        declarations  package supdocfragment ...
 
 A statements block's leading \"use strict\" or \"use server\" isn't read as a directive, since \
 the frame's first line stands before it. A members frame has no base class, so a constructor \
