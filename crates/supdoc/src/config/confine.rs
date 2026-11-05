@@ -421,13 +421,6 @@ pub(crate) fn remove_dir_all(dir: &Admitted<'_>) -> io::Result<()> {
 /// # Errors
 ///
 /// `AlreadyExists` when anything is at `link`; otherwise fails when the link can't be made.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "`init` links its file into place through it from PH03"
-    )
-)]
 pub(crate) fn hard_link_new(original: &Admitted<'_>, link: &Admitted<'_>) -> io::Result<()> {
     fs::hard_link(&original.path, &link.path)
 }
