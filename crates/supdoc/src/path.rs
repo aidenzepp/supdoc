@@ -71,8 +71,11 @@ impl AbsolutePath {
     }
 
     /// Appends `rel` and normalizes the result, or returns `None` when the result is not under
-    /// `boundary`. For a path that may climb with `..`, such as a doc-relative `from(...)`; the
-    /// check is lexical, so a symlink along the result is not seen.
+    /// `boundary`. For a path that may climb with `..`, such as a doc-relative `from(...)`.
+    ///
+    /// The check is lexical, so a symlink along the result is not seen: a caller that reads or
+    /// writes the result still checks it against the real root (`Config::contains` today, and
+    /// `Boundary::admit` for a write once PH01 lands).
     #[must_use]
     #[cfg_attr(
         not(test),
@@ -147,18 +150,20 @@ mod sealed {
 }
 
 /// A relative path proven to stay beneath any base it is joined to: `/`-separated and not
-/// empty, with no root, no `\`, and no `..`, `.` or empty segment.
+/// empty, with no root, no `\` or `:`, and no `..`, `.` or empty segment. Each segment is
+/// therefore exactly one normal path component on every platform, Windows included, where a
+/// `:` would start a drive prefix or name a file stream.
 ///
 /// Sealed: implemented only for [`SourcePath`](crate::link::SourcePath) and
 /// [`TargetPath`](crate::link::TargetPath), which `crate::link` checks when it builds them, and
-/// for [`FixedPath`].
+/// for [`FixedPath`], which is checked at compile time.
 pub(crate) trait Beneath: sealed::Sealed {
     /// The path, with `/` between its segments.
     fn segments(&self) -> &str;
 }
 
-/// A relative path fixed at compile time, such as `supdoc.lock`. Every value is one of the
-/// constants below, each listed in [`FIXED_PATHS`] so one test checks them all.
+/// A relative path fixed at compile time, such as `supdoc.lock`. Every value is a constant in
+/// [`fixed`], checked when it is compiled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(
     not(test),
@@ -171,38 +176,75 @@ pub(crate) struct FixedPath(&'static str);
     expect(dead_code, reason = "the fixed-name joins move onto it in PH10")
 )]
 impl FixedPath {
-    /// The lockfile in the project root.
-    pub(crate) const LOCK_FILE: Self = Self::new(LOCK_FILE_NAME);
-    /// The config file in a project or namespace directory.
-    pub(crate) const CONFIG_FILE: Self = Self::new(CONFIG_FILE_NAME);
-    /// Where the skill goes beneath the shared agents base: the project root or `HOME`.
-    pub(crate) const AGENTS_SKILL: Self = Self::new(".agents/skills/supdoc/SKILL.md");
-    /// Where the skill goes beneath the project root for Claude Code.
-    pub(crate) const PROJECT_CLAUDE_SKILL: Self = Self::new(".claude/skills/supdoc/SKILL.md");
-    /// Claude Code's config directory beneath `HOME` when `CLAUDE_CONFIG_DIR` is not set.
-    pub(crate) const DEFAULT_CLAUDE_DIR: Self = Self::new(".claude");
-    /// Where the skill goes beneath Claude Code's config directory.
-    pub(crate) const CLAUDE_DIR_SKILL: Self = Self::new("skills/supdoc/SKILL.md");
-
-    /// Wraps `path`. Private, so the constants above are the only values.
+    /// Wraps `path`. Private, so the constants in [`fixed`] are the only values.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `path` is not a valid [`Beneath`] path. Every caller is a `const` item, so the
+    /// panic is a compile error, never a runtime one.
     const fn new(path: &'static str) -> Self {
+        assert!(
+            Self::is_beneath(path),
+            "a fixed path must be a valid `Beneath` path"
+        );
         Self(path)
+    }
+
+    /// Whether `path` follows [`Beneath`]'s rules, as a `const fn` so [`FixedPath::new`] can
+    /// check each constant while it is compiled. It accepts exactly what `crate::link`'s
+    /// runtime check of a source path accepts.
+    const fn is_beneath(path: &str) -> bool {
+        let mut rest = path.as_bytes();
+        let (mut length, mut only_dots) = (0_usize, true);
+        loop {
+            let (byte, tail) = match rest.split_first() {
+                Some((&byte, tail)) => (Some(byte), tail),
+                None => (None, rest),
+            };
+            match byte {
+                None | Some(b'/') => {
+                    if length == 0 || (only_dots && length <= 2) {
+                        return false;
+                    }
+                    if byte.is_none() {
+                        return true;
+                    }
+                    (length, only_dots) = (0, true);
+                }
+                Some(b'\\' | b':') => return false,
+                Some(other) => {
+                    length += 1;
+                    only_dots = only_dots && other == b'.';
+                }
+            }
+            rest = tail;
+        }
     }
 }
 
-/// Every [`FixedPath`] constant, so one test proves each is a valid [`Beneath`] path.
+/// Every [`FixedPath`]. Each is a `const` item, which the compiler evaluates even when nothing
+/// uses it, so a constant that breaks [`Beneath`]'s rules does not compile.
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "only the test that checks each constant reads it")
+    expect(dead_code, reason = "the fixed-name joins move onto these in PH10")
 )]
-pub(crate) const FIXED_PATHS: [FixedPath; 6] = [
-    FixedPath::LOCK_FILE,
-    FixedPath::CONFIG_FILE,
-    FixedPath::AGENTS_SKILL,
-    FixedPath::PROJECT_CLAUDE_SKILL,
-    FixedPath::DEFAULT_CLAUDE_DIR,
-    FixedPath::CLAUDE_DIR_SKILL,
-];
+pub(crate) mod fixed {
+    use super::{CONFIG_FILE_NAME, FixedPath, LOCK_FILE_NAME};
+
+    /// The lockfile in the project root.
+    pub(crate) const LOCK_FILE: FixedPath = FixedPath::new(LOCK_FILE_NAME);
+    /// The config file in a project or namespace directory.
+    pub(crate) const CONFIG_FILE: FixedPath = FixedPath::new(CONFIG_FILE_NAME);
+    /// Where the skill goes beneath the shared agents base: the project root or `HOME`.
+    pub(crate) const AGENTS_SKILL: FixedPath = FixedPath::new(".agents/skills/supdoc/SKILL.md");
+    /// Where the skill goes beneath the project root for Claude Code.
+    pub(crate) const PROJECT_CLAUDE_SKILL: FixedPath =
+        FixedPath::new(".claude/skills/supdoc/SKILL.md");
+    /// Claude Code's config directory beneath `HOME` when `CLAUDE_CONFIG_DIR` is not set.
+    pub(crate) const DEFAULT_CLAUDE_DIR: FixedPath = FixedPath::new(".claude");
+    /// Where the skill goes beneath Claude Code's config directory.
+    pub(crate) const CLAUDE_DIR_SKILL: FixedPath = FixedPath::new("skills/supdoc/SKILL.md");
+}
 
 impl Beneath for FixedPath {
     fn segments(&self) -> &str {
@@ -460,13 +502,80 @@ mod tests {
     #[test]
     fn beneath_a_fixed_path_appends_its_segments_to_the_base() {
         assert_eq!(
-            absolute("/home").beneath(&FixedPath::AGENTS_SKILL),
+            absolute("/home").beneath(&fixed::AGENTS_SKILL),
             absolute("/home/.agents/skills/supdoc/SKILL.md")
         );
         assert_eq!(
-            absolute("/repo").beneath(&FixedPath::LOCK_FILE),
+            absolute("/repo").beneath(&fixed::LOCK_FILE),
             absolute("/repo/supdoc.lock")
         );
+    }
+
+    #[test]
+    fn every_fixed_path_constant_is_a_valid_source_path() {
+        let constants = [
+            fixed::LOCK_FILE,
+            fixed::CONFIG_FILE,
+            fixed::AGENTS_SKILL,
+            fixed::PROJECT_CLAUDE_SKILL,
+            fixed::DEFAULT_CLAUDE_DIR,
+            fixed::CLAUDE_DIR_SKILL,
+        ];
+        for constant in constants {
+            let raw = constant.segments();
+            assert_eq!(
+                raw.parse::<crate::link::SourcePath>()
+                    .as_ref()
+                    .map(crate::link::SourcePath::as_str),
+                Ok(raw),
+                "fixed path `{raw}`"
+            );
+        }
+    }
+
+    #[test]
+    fn the_compile_time_check_accepts_exactly_what_a_source_path_accepts() {
+        let cases = [
+            "a",
+            "a/b",
+            "src/lib.rs",
+            ".agents/x",
+            "...",
+            "..a",
+            "a..",
+            ".a/.b",
+            "",
+            "/",
+            "/a",
+            "a/",
+            "a//b",
+            ".",
+            "..",
+            "./a",
+            "a/.",
+            "a/./b",
+            "../x",
+            "a/..",
+            "a/../b",
+            "a\\b",
+            "\\a",
+            "C:",
+            "C:x",
+            "a:b",
+            "x/C:/y",
+            "a/b:",
+            ":",
+            "é",
+            "a b",
+            "a\0b",
+        ];
+        for raw in cases {
+            assert_eq!(
+                FixedPath::is_beneath(raw),
+                raw.parse::<crate::link::SourcePath>().is_ok(),
+                "`{raw}`: the compile-time check and `SourcePath` disagree"
+            );
+        }
     }
 
     #[test]
