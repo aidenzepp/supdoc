@@ -37,15 +37,15 @@ jobs:
           tools="$RUNNER_TEMP/code-block-tools"
           mkdir -p "$tools/download" "$tools/bin"
           cd "$tools/download"
-          curl --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 -fsSLO https://github.com/mvdan/sh/releases/download/v3.14.1/shfmt_v3.14.1_linux_amd64
-          curl --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 -fsSLO https://github.com/astral-sh/ruff/releases/download/0.17.3/ruff-x86_64-unknown-linux-gnu.tar.gz
-          curl --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 -fsSLO https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.gz
-          curl --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 -fsSLo biome-linux-x64 'https://github.com/biomejs/biome/releases/download/%40biomejs/biome%402.6.5/biome-linux-x64'
-          curl --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 -fsSLO https://github.com/tombi-toml/tombi/releases/download/v1.10.0/tombi-cli-1.10.0-x86_64-unknown-linux-musl.tar.gz
-          curl --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 -fsSLO https://github.com/google/yamlfmt/releases/download/v0.21.0/yamlfmt_0.21.0_Linux_x86_64.tar.gz
-          curl --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 -fsSLO https://github.com/rvben/rumdl/releases/download/v0.3.2/rumdl-v0.3.2-x86_64-unknown-linux-gnu.tar.gz
-          curl --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 -fsSLO https://go.dev/dl/go1.27.3.linux-amd64.tar.gz
-          curl --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 -fsSLO https://nodejs.org/dist/v24.22.2/node-v24.22.2-linux-x64.tar.xz
+          curl --retry 8 --retry-all-errors --retry-max-time 300 -fsSLO https://github.com/mvdan/sh/releases/download/v3.14.1/shfmt_v3.14.1_linux_amd64
+          curl --retry 8 --retry-all-errors --retry-max-time 300 -fsSLO https://github.com/astral-sh/ruff/releases/download/0.17.3/ruff-x86_64-unknown-linux-gnu.tar.gz
+          curl --retry 8 --retry-all-errors --retry-max-time 300 -fsSLO https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.gz
+          curl --retry 8 --retry-all-errors --retry-max-time 300 -fsSLo biome-linux-x64 'https://github.com/biomejs/biome/releases/download/%40biomejs/biome%402.6.5/biome-linux-x64'
+          curl --retry 8 --retry-all-errors --retry-max-time 300 -fsSLO https://github.com/tombi-toml/tombi/releases/download/v1.10.0/tombi-cli-1.10.0-x86_64-unknown-linux-musl.tar.gz
+          curl --retry 8 --retry-all-errors --retry-max-time 300 -fsSLO https://github.com/google/yamlfmt/releases/download/v0.21.0/yamlfmt_0.21.0_Linux_x86_64.tar.gz
+          curl --retry 8 --retry-all-errors --retry-max-time 300 -fsSLO https://github.com/rvben/rumdl/releases/download/v0.3.2/rumdl-v0.3.2-x86_64-unknown-linux-gnu.tar.gz
+          curl --retry 8 --retry-all-errors --retry-max-time 300 -fsSLO https://go.dev/dl/go1.27.3.linux-amd64.tar.gz
+          curl --retry 8 --retry-all-errors --retry-max-time 300 -fsSLO https://nodejs.org/dist/v24.22.2/node-v24.22.2-linux-x64.tar.xz
           grep -v '^#' "$GITHUB_WORKSPACE/ci/tools.sha256" | sha256sum --strict -c -
           install -m 0755 shfmt_v3.14.1_linux_amd64 "$tools/bin/shfmt"
           tar -xzf ruff-x86_64-unknown-linux-gnu.tar.gz
