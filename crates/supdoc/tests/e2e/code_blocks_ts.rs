@@ -1448,13 +1448,28 @@ fn assert_no_frame_in_fixes(json: &serde_json::Value) {
 fn assert_biome_frames(
     dir: &Path,
     biome_json: Option<&str>,
-    (tag, kind): (&str, &str),
+    block: (&str, &str),
     formatted: &str,
     unformatted: &str,
 ) {
-    let what = format!("{tag} {kind}");
-    let passing = format_frame_project(&format_frame_doc(tag, kind, formatted), biome_json);
-    let failing = format_frame_project(&format_frame_doc(tag, kind, unformatted), biome_json);
+    assert_biome_frames_in(dir, biome_json, block, (formatted, unformatted), false);
+}
+
+/// [`assert_biome_frames`] with each doc's lines ended by CRLF when `crlf`.
+fn assert_biome_frames_in(
+    dir: &Path,
+    biome_json: Option<&str>,
+    (tag, kind): (&str, &str),
+    (formatted, unformatted): (&str, &str),
+    crlf: bool,
+) {
+    let what = format!("{tag} {kind} {biome_json:?} crlf={crlf} {formatted:?}");
+    let shape = |doc: String| {
+        if crlf { doc.replace('\n', "\r\n") } else { doc }
+    };
+    let passing = format_frame_project(&shape(format_frame_doc(tag, kind, formatted)), biome_json);
+    let failing =
+        format_frame_project(&shape(format_frame_doc(tag, kind, unformatted)), biome_json);
 
     let passes = passing
         .supdoc_in_with(".", &["check", "--json", "-v"], &[("PATH", dir)])
@@ -1490,7 +1505,7 @@ fn assert_biome_frames(
     assert_no_frame_in_fixes(&fails);
     assert_eq!(
         failing.read("docs/blocks.md"),
-        format_frame_doc(tag, kind, formatted),
+        shape(format_frame_doc(tag, kind, formatted)),
         "{what}: the fix rewrites only the block's own lines"
     );
 }
@@ -1583,6 +1598,152 @@ fn frame_format_keeps_the_projects_indent_and_line_width_inside_the_frame() {
         ("tsx", "children"),
         "<p className=\"lead\">Read the guide.</p>\n<p>Then try the demo below.</p>\n",
         "<p className=\"lead\">Read the guide.</p>\n<p>Then  try the demo below.</p>\n",
+    );
+}
+
+/// The real biome's `--json -v` check of a `tag fragment(<kind>)` block of `body` in a
+/// [`format_frame_project`], asserting it exits `exit` and that no finding shows frame text.
+/// `None` when biome isn't on `PATH`.
+fn format_frame_check(
+    test: &str,
+    biome_json: Option<&str>,
+    (tag, kind, body): (&str, &str, &str),
+    exit: i32,
+) -> Option<serde_json::Value> {
+    let dir = real_tool_dir("biome", test)?;
+    let json = format_frame_project(&format_frame_doc(tag, kind, body), biome_json)
+        .supdoc_in_with(".", &["check", "--json", "-v"], &[("PATH", &dir)])
+        .assert_exit(exit)
+        .json();
+    assert_no_frame_text(&json);
+    assert_no_frame_in_fixes(&json);
+    Some(json)
+}
+
+#[test]
+fn frame_format_a_template_literal_in_children_keeps_every_byte_of_its_lines() {
+    let test = "frame_format_a_template_literal_in_children_keeps_every_byte_of_its_lines";
+    let Some(dir) = real_tool_dir("biome", test) else {
+        return;
+    };
+    let spaces = r#"{"formatter":{"indentStyle":"space","indentWidth":2}}"#;
+
+    for tag in ["tsx", "jsx"] {
+        for config in [None, Some(spaces)] {
+            for crlf in [false, true] {
+                for continuation in ["\tline two", "  line two", "line two"] {
+                    let formatted = format!("<p>{{`line one\n{continuation}`}}</p>\n");
+                    let unformatted = format!("<p  >{{`line one\n{continuation}`}}</p>\n");
+                    assert_biome_frames_in(
+                        &dir,
+                        config,
+                        (tag, "children"),
+                        (&formatted, &unformatted),
+                        crlf,
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn frame_format_a_block_comment_and_an_attribute_string_in_children_come_back_exact() {
+    let test = "frame_format_a_block_comment_and_an_attribute_string_in_children_come_back_exact";
+    let Some(dir) = real_tool_dir("biome", test) else {
+        return;
+    };
+
+    assert_biome_frames(
+        &dir,
+        None,
+        ("tsx", "children"),
+        "{/* first\n   second */}\n<p\n\ttitle=\"a\n\tb\"\n>\n\tx\n</p>\n",
+        "{/* first\n   second */}\n<p   title=\"a\n\tb\">x</p>\n",
+    );
+}
+
+#[test]
+fn frame_format_children_with_no_element_pass_as_written() {
+    let test = "frame_format_children_with_no_element_pass_as_written";
+    for body in ["", "\n", "Hello world\n", "{label}\n", "{props.children}\n"] {
+        let Some(json) = format_frame_check(test, None, ("tsx", "children", body), 0) else {
+            return;
+        };
+        assert_passed(&json, &format!("{body:?}"));
+    }
+    let json = format_frame_check(test, None, ("jsx", "children", "{ label }\n"), 1)
+        .expect("biome was on PATH a moment ago");
+    assert_eq!(
+        kinds_and_lines(&json),
+        [("code-block-unformatted".to_owned(), 5)],
+        "{json}"
+    );
+    assert_eq!(
+        at(&json, "/findings/0/fix/replacement"),
+        "{label}",
+        "{json}"
+    );
+}
+
+#[test]
+fn frame_format_a_syntax_error_in_each_kind_is_one_parse_error_in_supdocs_words() {
+    let test = "frame_format_a_syntax_error_in_each_kind_is_one_parse_error_in_supdocs_words";
+    for (tag, kind, body, line) in [
+        ("ts", "entries", "visible: true;\nlabel: 1,\n", 6),
+        (
+            "ts",
+            "statements",
+            "const a = 1;\nconst b = ;\nreturn a;\n",
+            7,
+        ),
+        ("ts", "members", "label() {\n\treturn 1 +;\n}\n", 7),
+        // biome reads `</p` on into the next line and reports the error there.
+        (
+            "tsx",
+            "children",
+            "<p>one</p>\n<p>two</p\n<p>three</p>\n",
+            8,
+        ),
+    ] {
+        let Some(json) = format_frame_check(test, None, (tag, kind, body), 1) else {
+            return;
+        };
+        assert_eq!(
+            kinds_and_lines(&json),
+            [("code-block-parse".to_owned(), line)],
+            "{kind}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/findings/0/message"),
+            format!("`biome-format` couldn't parse the block as `{kind}`").as_str(),
+            "{kind}: never biome's own message: {json}"
+        );
+    }
+}
+
+#[test]
+fn frame_format_a_line_width_override_is_named_in_the_not_run_warning() {
+    let Some(json) = format_frame_check(
+        "frame_format_a_line_width_override_is_named_in_the_not_run_warning",
+        Some(r#"{"overrides":[{"includes":["**"],"javascript":{"formatter":{"lineWidth":40}}}]}"#),
+        ("ts", "entries", "visible: true,\n"),
+        0,
+    ) else {
+        return;
+    };
+
+    assert_eq!(
+        at(&json, "/data/summary/code_blocks/format_not_run"),
+        1,
+        "{json}"
+    );
+    let message = at(&json, "/findings/0/message")
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        message.contains("line width") && !message.contains("indent the formatter uses"),
+        "{json}"
     );
 }
 

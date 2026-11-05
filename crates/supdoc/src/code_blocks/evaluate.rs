@@ -427,6 +427,7 @@ impl Evaluation {
         let mut ran = ran.into_iter();
         let mut linted_nothing_warned = false;
         let mut indent_unknown_warned = false;
+        let mut width_unknown_warned = false;
         let mut reshaped_warned = false;
         for slot in slots {
             let (job, run) = match slot {
@@ -454,6 +455,10 @@ impl Evaluation {
                     if reason == FRAME_INDENT_UNKNOWN && !indent_unknown_warned {
                         indent_unknown_warned = true;
                         self.findings.push(indent_unknown(&record.at));
+                    }
+                    if reason == FRAME_WIDTH_UNKNOWN && !width_unknown_warned {
+                        width_unknown_warned = true;
+                        self.findings.push(width_unknown(&record.at));
                     }
                     if reason == FRAME_RESHAPED && !reshaped_warned {
                         reshaped_warned = true;
@@ -605,8 +610,25 @@ fn indent_unknown(at: &Location) -> Finding {
     )
     .with_help(
         "set the indent plainly in the formatter's config (rustfmt's `hard_tabs`, `tab_spaces` \
-         and `max_width`; biome's `indentStyle`, `indentWidth` and `lineWidth`, outside \
-         `overrides`), or mark the blocks `format(off: <reason>)`",
+         and `max_width`; biome's `indentStyle` and `indentWidth`, outside `overrides`), or mark \
+         the blocks `format(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first framed block whose format
+/// step didn't run because supdoc couldn't use the line width biome's config gives it.
+fn width_unknown(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "supdoc couldn't use the line width biome formats with: the project's config sets \
+         `lineWidth` in an override, or to a width biome wouldn't take once raised by the \
+         fragment's indent, so the format step didn't run on blocks biome reads inside a frame",
+    )
+    .with_help(
+        "set biome's `lineWidth` outside `overrides`, at most 320 less the indent a frame adds, \
+         or mark the blocks `format(off: <reason>)`",
     )
     .with_location(at.clone())
 }
@@ -637,6 +659,12 @@ pub(super) const FRAME_RESHAPED: &str =
 /// formatter uses, so it couldn't tell the block's lines from the frame's indent.
 pub(super) const FRAME_INDENT_UNKNOWN: &str =
     "supdoc couldn't read the formatter's indent from the project's config";
+
+/// The reason a framed block's format step didn't run: biome's config sets `lineWidth` in an
+/// override, or to a width it wouldn't take once raised by the frame's indent, so supdoc couldn't
+/// hold the block to the project's width.
+pub(super) const FRAME_WIDTH_UNKNOWN: &str =
+    "supdoc couldn't use the line width biome's config sets";
 
 /// The run's one `code-block-not-checked` warning, at `at`, the first block whose biome lint
 /// step didn't run because biome checked no file.
@@ -718,7 +746,7 @@ fn parses(format: Option<&FormatRan>) -> bool {
     !matches!(
         format,
         Some(Ok((
-            format::Verdict::ParseFailed { .. } | format::Verdict::NotKind(_),
+            format::Verdict::ParseFailed { .. } | format::Verdict::NotKind { .. },
             _
         )))
     )
@@ -1509,13 +1537,19 @@ struct BiomeLayout {
 impl BiomeLayout {
     /// biome's arguments for a block that sits `depth` indent units inside a frame: its line
     /// width raised by those units' columns, so the frame's indent never moves where biome wraps
-    /// the block's lines. `None` when that width is above the most biome takes.
-    fn framed_args(&self, depth: usize) -> Option<Vec<OsString>> {
+    /// the block's lines.
+    ///
+    /// # Errors
+    ///
+    /// [`FRAME_WIDTH_UNKNOWN`] when that width is above the most biome takes.
+    fn framed_args(&self, depth: usize) -> Result<Vec<OsString>, &'static str> {
         let width = self
-            .line_width
-            .checked_add(self.columns.checked_mul(depth)?)
-            .filter(|width| *width <= BIOME_MAX_LINE_WIDTH)?;
-        Some(vec![OsString::from(format!(
+            .columns
+            .checked_mul(depth)
+            .and_then(|extra| self.line_width.checked_add(extra))
+            .filter(|width| *width <= BIOME_MAX_LINE_WIDTH)
+            .ok_or(FRAME_WIDTH_UNKNOWN)?;
+        Ok(vec![OsString::from(format!(
             "--javascript-formatter-line-width={width}"
         ))])
     }
@@ -1527,41 +1561,55 @@ const BIOME_MAX_LINE_WIDTH: usize = 320;
 /// The indent and line width biome uses for a `language` block under `given`'s config: its
 /// language section's `formatter.indentStyle`, `indentWidth` and `lineWidth`, else the top-level
 /// `formatter`'s, else biome's defaults (a tab two columns wide, two spaces when the style is
-/// `space`, and 80 columns). No config is biome's defaults. `None` when the config can't be read
-/// or parsed, has an override that sets one of them (which would give some paths another
-/// layout), or holds a value biome wouldn't take.
+/// `space`, and 80 columns). No config is biome's defaults.
+///
+/// # Errors
+///
+/// [`FRAME_INDENT_UNKNOWN`] when the config can't be read or parsed, has an override that sets
+/// the indent (which would give some paths another one), or holds an indent biome wouldn't take;
+/// [`FRAME_WIDTH_UNKNOWN`] when an override sets `lineWidth`, or the width is one biome
+/// wouldn't take.
 ///
 /// Effect: reads the private config file.
-fn biome_layout(language: Language, given: Option<&biome::Given>) -> Option<BiomeLayout> {
+fn biome_layout(
+    language: Language,
+    given: Option<&biome::Given>,
+) -> Result<BiomeLayout, &'static str> {
     let section = match language {
         Language::TypeScript | Language::JavaScript => "javascript",
-        _ => return None,
+        _ => return Err(FRAME_INDENT_UNKNOWN),
     };
     let config: serde_json::Value = match given.and_then(|given| given.config.as_ref()) {
         None => serde_json::Value::Null,
-        Some(path) => serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?,
+        Some(path) => std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .ok_or(FRAME_INDENT_UNKNOWN)?,
     };
-    let layout_keys = ["indentStyle", "indentWidth", "lineWidth"];
-    let sets_layout = |override_: &serde_json::Value| {
-        ["formatter", section].iter().any(|table| {
-            layout_keys.iter().any(|key| {
-                let at = if *table == "formatter" {
-                    format!("/formatter/{key}")
-                } else {
-                    format!("/{table}/formatter/{key}")
-                };
-                override_.pointer(&at).is_some()
+    let overrides = match config.get("overrides") {
+        None => &[][..],
+        Some(serde_json::Value::Array(overrides)) => overrides.as_slice(),
+        Some(_) => return Err(FRAME_INDENT_UNKNOWN),
+    };
+    let overridden = |keys: &[&str]| {
+        overrides.iter().any(|override_| {
+            ["formatter", section].iter().any(|table| {
+                keys.iter().any(|key| {
+                    let at = if *table == "formatter" {
+                        format!("/formatter/{key}")
+                    } else {
+                        format!("/{table}/formatter/{key}")
+                    };
+                    override_.pointer(&at).is_some()
+                })
             })
         })
     };
-    match config.get("overrides") {
-        None => {}
-        Some(serde_json::Value::Array(overrides)) => {
-            if overrides.iter().any(sets_layout) {
-                return None;
-            }
-        }
-        Some(_) => return None,
+    if overridden(&["indentStyle", "indentWidth"]) {
+        return Err(FRAME_INDENT_UNKNOWN);
+    }
+    if overridden(&["lineWidth"]) {
+        return Err(FRAME_WIDTH_UNKNOWN);
     }
     let setting = |key: &str| {
         config
@@ -1572,14 +1620,17 @@ fn biome_layout(language: Language, given: Option<&biome::Given>) -> Option<Biom
         let value = setting(key).map_or(Some(default), serde_json::Value::as_u64)?;
         usize::try_from(value).ok().filter(|value| *value > 0)
     };
-    let columns = number("indentWidth", 2)?;
-    let line_width = number("lineWidth", 80).filter(|width| *width <= BIOME_MAX_LINE_WIDTH)?;
-    let indent = match setting("indentStyle").map_or(Some("tab"), serde_json::Value::as_str)? {
+    let columns = number("indentWidth", 2).ok_or(FRAME_INDENT_UNKNOWN)?;
+    let line_width = number("lineWidth", 80)
+        .filter(|width| *width <= BIOME_MAX_LINE_WIDTH)
+        .ok_or(FRAME_WIDTH_UNKNOWN)?;
+    let style = setting("indentStyle").map_or(Some("tab"), serde_json::Value::as_str);
+    let indent = match style.ok_or(FRAME_INDENT_UNKNOWN)? {
         "tab" => "\t".to_owned(),
         "space" => " ".repeat(columns),
-        _ => return None,
+        _ => return Err(FRAME_INDENT_UNKNOWN),
     };
-    Some(BiomeLayout {
+    Ok(BiomeLayout {
         indent,
         columns,
         line_width,
@@ -1622,9 +1673,10 @@ impl Framing {
 
 /// How `tool` formats a block inside `frame`, read from the project's config for it (`rust`'s
 /// for rustfmt, `given`'s for biome), each tool's line width raised by the indent the frame puts
-/// before the block. [`FRAME_INDENT_UNKNOWN`] for a formatter whose indent or line width supdoc
-/// can't read, and when the config can't be read for it; [`FRAME_RESHAPED`] when rustfmt's
-/// config reshapes the frame.
+/// before the block. [`FRAME_INDENT_UNKNOWN`] for a formatter whose indent supdoc can't read,
+/// and when the config can't be read for it; [`FRAME_WIDTH_UNKNOWN`] for biome's line width set
+/// by an override or one it wouldn't take; [`FRAME_RESHAPED`] when rustfmt's config reshapes the
+/// frame.
 ///
 /// # Errors
 ///
@@ -1647,15 +1699,14 @@ fn framing(
                 widened: layout.tab_spaces,
             }),
         },
-        "biome" => biome_layout(tool.language, given)
-            .and_then(|layout| {
-                Some(Framing {
-                    args: layout.framed_args(format::depth(frame))?,
-                    indent: layout.indent,
-                    widened: 0,
-                })
+        "biome" => {
+            let layout = biome_layout(tool.language, given)?;
+            Ok(Framing {
+                args: layout.framed_args(format::depth(frame))?,
+                indent: layout.indent,
+                widened: 0,
             })
-            .ok_or(FRAME_INDENT_UNKNOWN),
+        }
         _ => Err(FRAME_INDENT_UNKNOWN),
     }
 }
@@ -1709,11 +1760,15 @@ fn run_formatter(
             Err(reason) => return Some(Err(reason)),
         },
     };
-    let checked = framed
-        .as_ref()
-        .map_or(Cow::Borrowed(pending.input.as_str()), |(frame, framing)| {
-            Cow::Owned(frame.wrap_indented(&pending.input, &framing.indent))
-        });
+    let checked =
+        framed
+            .as_ref()
+            .map_or(Cow::Borrowed(pending.input.as_str()), |(frame, framing)| {
+                Cow::Owned(frame.wrap_indented(
+                    &pending.input,
+                    &framing.indent.repeat(format::depth(*frame)),
+                ))
+            });
     let input = checked.as_ref();
     let doc = root.join(record.at.file.as_str());
     let edition = record
@@ -1770,11 +1825,12 @@ fn run_formatter(
         format::Verdict::cacheable,
     );
     let at = match &verdict {
-        format::Verdict::NotKind(_) | format::Verdict::FrameReformatted(_) => pending
-            .block
-            .info
-            .as_ref()
-            .map_or_else(|| record.at.clone(), |info| info.location.clone()),
+        format::Verdict::NotKind {
+            line: Some(line), ..
+        } => body_place(*line, pending).unwrap_or_else(|| info_place(record, pending)),
+        format::Verdict::NotKind { line: None, .. } | format::Verdict::FrameReformatted(_) => {
+            info_place(record, pending)
+        }
         _ => parse_place(&verdict, pending).unwrap_or_else(|| record.at.clone()),
     };
     let finding = format::finding(&verdict, tool, &at, timeout)
@@ -1797,8 +1853,22 @@ fn parse_place(verdict: &format::Verdict, pending: &Pending) -> Option<Location>
     else {
         return None;
     };
+    body_place(*line, pending)
+}
+
+/// The doc location of `pending`'s block body line `line` (0-based), when it has one.
+fn body_place(line: usize, pending: &Pending) -> Option<Location> {
     rust::LineMap::of(&pending.block, pending.doc.text())
-        .and_then(|map| map.doc_line(*line).cloned())
+        .and_then(|map| map.doc_line(line).cloned())
+}
+
+/// Where a finding about `record`'s block as a whole goes: its info string, else the block.
+fn info_place(record: &BlockRecord, pending: &Pending) -> Location {
+    pending
+        .block
+        .info
+        .as_ref()
+        .map_or_else(|| record.at.clone(), |info| info.location.clone())
 }
 
 /// `finding`, with help that names the `jsonc` tag when `verdict` is a parse failure of
@@ -3886,8 +3956,9 @@ mod tests {
         use std::time::Duration;
 
         use super::super::{
-            Evaluation, FRAME_INDENT_UNKNOWN, FRAME_RESHAPED, FormatRan, Job, RustSetup,
-            RustfmtLayout, Session, Slot, StepsRan, ToolRun, biome_layout, parses, run_formatter,
+            Evaluation, FRAME_INDENT_UNKNOWN, FRAME_RESHAPED, FRAME_WIDTH_UNKNOWN, FormatRan, Job,
+            RustSetup, RustfmtLayout, Session, Slot, StepsRan, ToolRun, biome_layout, parses,
+            run_formatter,
         };
         use super::{rust_record, rust_records, temporary};
         use crate::code_blocks::biome::Given;
@@ -4024,7 +4095,13 @@ mod tests {
             let (not_kind, not_kind_findings) = ran(format_run(&on_frame, root.path(), &text));
 
             assert_eq!(lost, Verdict::FrameReformatted(Kind::Statements));
-            assert_eq!(not_kind, Verdict::NotKind(Kind::Statements));
+            assert_eq!(
+                not_kind,
+                Verdict::NotKind {
+                    kind: Kind::Statements,
+                    line: None
+                }
+            );
             for finding in lost_findings.iter().chain(&not_kind_findings) {
                 let at = finding
                     .location
@@ -4041,7 +4118,10 @@ mod tests {
         #[test]
         fn frame_format_a_block_that_isnt_its_kind_holds_back_its_lint_step() {
             assert!(!parses(Some(&Ok((
-                Verdict::NotKind(Kind::Statements),
+                Verdict::NotKind {
+                    kind: Kind::Statements,
+                    line: Some(0)
+                },
                 Vec::new()
             )))));
             assert!(parses(Some(&Ok((
@@ -4298,10 +4378,12 @@ mod tests {
                 }
             };
             let layout = |config: &str| biome_layout(Language::TypeScript, Some(&given(config)));
-            let indent = |config: &str| layout(config).map(|layout| layout.indent);
+            let indent = |config: &str| layout(config).ok().map(|layout| layout.indent);
 
             assert_eq!(
-                biome_layout(Language::TypeScript, None).map(|layout| layout.indent),
+                biome_layout(Language::TypeScript, None)
+                    .ok()
+                    .map(|layout| layout.indent),
                 Some("\t".to_owned())
             );
             assert_eq!(indent("{}").as_deref(), Some("\t"));
@@ -4334,9 +4416,13 @@ mod tests {
             );
             assert_eq!(indent(r#"{"formatter":{"indentStyle":"wide"}}"#), None);
             assert_eq!(
-                indent(r#"{"overrides":[{"javascript":{"formatter":{"lineWidth":40}}}]}"#),
-                None,
+                layout(r#"{"overrides":[{"javascript":{"formatter":{"lineWidth":40}}}]}"#),
+                Err(FRAME_WIDTH_UNKNOWN),
                 "an override that sets a line width would wrap some paths elsewhere"
+            );
+            assert_eq!(
+                layout(r#"{"overrides":[{"formatter":{"indentWidth":3}}]}"#),
+                Err(FRAME_INDENT_UNKNOWN)
             );
         }
 
@@ -4354,6 +4440,7 @@ mod tests {
                 };
                 biome_layout(Language::TypeScript, Some(&given))
                     .and_then(|layout| layout.framed_args(depth))
+                    .ok()
                     .map(|args| {
                         args.iter()
                             .map(|arg| arg.to_string_lossy().into_owned())
@@ -4513,8 +4600,8 @@ mod tests {
         }
 
         #[test]
-        fn frame_format_real_rustfmt_parse_detail_names_the_blocks_position() {
-            let test = "frame_format_real_rustfmt_parse_detail_names_the_blocks_position";
+        fn frame_format_real_rustfmt_parse_error_is_not_the_kind_at_the_blocks_line() {
+            let test = "frame_format_real_rustfmt_parse_error_is_not_the_kind_at_the_blocks_line";
             let Some(rustfmt) = real_rustfmt(test) else {
                 return;
             };
@@ -4526,15 +4613,26 @@ mod tests {
                 &doc("let x = 1\nlet y = 2;\n"),
             ));
 
-            let Verdict::ParseFailed { detail, line } = verdict else {
-                panic!("a missing `;` is a parse failure: {findings:?}");
-            };
-            assert_eq!(line, Some(0));
-            assert!(
-                detail.contains("<stdin>:1:10") && detail.contains("1 | let x = 1"),
-                "{detail}"
+            assert_eq!(
+                verdict,
+                Verdict::NotKind {
+                    kind: Kind::Statements,
+                    line: Some(0)
+                },
+                "{findings:?}"
             );
-            assert!(!detail.contains("supdoc_fragment"), "{detail}");
+            let [finding] = findings.as_slice() else {
+                panic!("one finding: {findings:?}");
+            };
+            assert_eq!(
+                finding.message, "`rustfmt` couldn't parse the block as `statements`",
+                "never rustfmt's own message"
+            );
+            assert_eq!(
+                finding.location.as_ref().map(|at| at.line),
+                Some(4),
+                "at the block line rustfmt named: {finding:?}"
+            );
         }
     }
 }
