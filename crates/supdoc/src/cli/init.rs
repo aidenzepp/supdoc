@@ -229,36 +229,49 @@ const NEW_FILE_MODE: u32 = 0o666;
 /// Returns `cli-init-exists` when `target` exists, and `cli-init-write` when it cannot be written.
 fn write_new(target: &AbsolutePath, context: &Context) -> Result<(), CliError> {
     let boundary = Boundary::resolve(&target.parent().unwrap_or_else(|| target.clone()));
-    write_beneath(&boundary, target, context)
+    write_beneath(&boundary, target, context, || ())
 }
 
 /// [`write_new`] against `boundary`, `target`'s directory as resolved before the write.
+/// `created` runs once the temporary exists, before anything is written to it.
+///
+/// The temporary is admitted again just before it is removed. When that is refused, because the
+/// directory was swapped for a symlink leading out after the create, the temporary is left where
+/// it was created rather than removing whatever the swapped path now names.
 ///
 /// # Errors
 ///
-/// As [`write_new`].
+/// As [`write_new`]; `cli-init-exists` also when the temporary file's name is taken.
 fn write_beneath(
     boundary: &Boundary,
     target: &AbsolutePath,
     context: &Context,
+    created: impl FnOnce(),
 ) -> Result<(), CliError> {
     let failed = |error: io::Error| match error.kind() {
         io::ErrorKind::AlreadyExists => exists(target, context),
         _ => write_failed(target, &error, context),
     };
-    let temporary = temporary_sibling(target)
+    let temporary_path = temporary_sibling(target)
         .ok_or_else(|| failed(io::Error::other("it has no directory to write beside")))?;
+    let temporary_failed = |error: io::Error| match error.kind() {
+        io::ErrorKind::AlreadyExists => temporary_taken(&temporary_path, context),
+        _ => write_failed(target, &error, context),
+    };
     let temporary = boundary
-        .admit(&temporary)
-        .map_err(|escape| failed(refusal(&temporary, &escape)))?;
-    let mut file = confine::create_new(&temporary, NEW_FILE_MODE).map_err(failed)?;
+        .admit(&temporary_path)
+        .map_err(|escape| temporary_failed(refusal(&temporary_path, &escape)))?;
+    let mut file = confine::create_new(&temporary, NEW_FILE_MODE).map_err(temporary_failed)?;
+    created();
     let linked = file
         .write_all(STARTER.as_bytes())
         .and_then(|()| file.flush())
         .and_then(|()| link_into_place(boundary, &temporary, target));
     drop(file);
     // Best effort: this run created the temporary, and the outcome is already decided.
-    drop(confine::remove_file(&temporary));
+    if let Ok(again) = boundary.admit(&temporary_path) {
+        drop(confine::remove_file(&again));
+    }
     linked.map_err(failed)
 }
 
@@ -315,6 +328,23 @@ fn exists(target: &AbsolutePath, context: &Context) -> CliError {
         format!("{} already exists", relative_to(&context.cwd, target)),
         format!(
             "The existing file wasn't changed. Edit it directly, or delete it and run `{}`.",
+            command(context)
+        ),
+        ExitStatus::Failed,
+    )
+}
+
+/// The refusal for a temporary file name already in use, naming it as the notes do.
+fn temporary_taken(temporary: &AbsolutePath, context: &Context) -> CliError {
+    CliError::new(
+        "cli-init-exists",
+        format!(
+            "the temporary file {} already exists",
+            relative_to(&context.cwd, temporary)
+        ),
+        format!(
+            "supdoc writes the config there before linking it into place. Move or delete that \
+             file, then run `{}` again.",
             command(context)
         ),
         ExitStatus::Failed,
@@ -794,7 +824,7 @@ mod tests {
         std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o500))
             .expect("the outside directory should be made read-only");
 
-        let error = write_beneath(&boundary, &target, &context)
+        let error = write_beneath(&boundary, &target, &context, || ())
             .expect_err("init should refuse a directory that now leads outside");
 
         assert_eq!(
@@ -808,6 +838,92 @@ mod tests {
             names_in(&outside).is_empty(),
             "nothing should be created outside: {:?}",
             names_in(&outside)
+        );
+    }
+
+    #[test]
+    fn a_directory_swapped_out_after_the_create_leaves_the_outside_file_of_the_temporarys_name() {
+        let (dir, project) = project_and_outside();
+        let outside = dir.path().join("outside");
+        let docs = project.path().join("docs");
+        std::fs::create_dir(&docs).expect("the docs directory should be created");
+        let (_, context) = context_in(&project, &["-c", "docs/supdoc.config.toml"]);
+        let target = target(&context);
+        let boundary = Boundary::resolve(
+            &target
+                .parent()
+                .expect("the target should have a parent directory"),
+        );
+        let temporary = temporary_sibling(&target)
+            .expect("the temporary sibling of an absolute target should be absolute");
+        let name = temporary
+            .as_path()
+            .file_name()
+            .expect("the temporary should have a file name")
+            .to_string_lossy()
+            .into_owned();
+        let swap = || {
+            std::fs::write(outside.join(&name), "not ours")
+                .expect("the outside file should be written");
+            std::fs::rename(&docs, project.path().join("moved"))
+                .expect("the docs directory should be movable");
+            std::os::unix::fs::symlink(&outside, &docs)
+                .expect("the swapped symlink should be created");
+        };
+
+        let error = write_beneath(&boundary, &target, &context, swap)
+            .expect_err("the link should be refused once the directory leads outside");
+
+        assert_eq!(error.code(), "cli-init-write");
+        assert_eq!(
+            std::fs::read_to_string(outside.join(&name))
+                .expect("the outside file of the temporary's name should survive"),
+            "not ours"
+        );
+        assert_eq!(
+            names_in(&outside),
+            std::slice::from_ref(&name),
+            "no config should be linked in outside"
+        );
+        assert_eq!(
+            names_in(&project.path().join("moved")),
+            [name],
+            "the run's own temporary is left in the moved directory"
+        );
+    }
+
+    #[test]
+    fn a_taken_temporary_name_is_named_in_the_refusal() {
+        let dir = tempfile::tempdir().expect("a temp directory should be created");
+        let (args, context) = context_in(&dir, &[]);
+        let temporary = temporary_sibling(&target(&context))
+            .expect("the temporary sibling of an absolute target should be absolute");
+        std::fs::write(temporary.as_path(), "someone else's")
+            .expect("the occupying file should be written");
+
+        let (result, _, _) = run_captured(&args, &context);
+        let error = result.expect_err("init should refuse a taken temporary name");
+
+        let name = temporary
+            .as_path()
+            .file_name()
+            .expect("the temporary should have a file name")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            (error.code(), error.message()),
+            (
+                "cli-init-exists",
+                format!("the temporary file {name} already exists").as_str()
+            )
+        );
+        assert!(
+            !config_path(&dir).exists(),
+            "no config is written when the temporary name is taken"
+        );
+        assert_eq!(
+            std::fs::read_to_string(temporary.as_path()).expect("the occupying file should remain"),
+            "someone else's"
         );
     }
 
