@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use crate::cartridges::{js, markdown, rust as rust_cartridge, ts, tsx};
+use crate::cartridges::{go, js, markdown, python, rust as rust_cartridge, ts, tsx};
 use crate::finding::{Finding, Fix, LineIndex, Location, Severity};
 use crate::hash::LineEndings;
 use crate::limits::TimeLimit;
@@ -924,22 +924,11 @@ fn keeps_blocks(
     )
 }
 
-/// The blocks of `text`, parsed under `limit` as `block`'s doc is: as Markdown, or for its doc
-/// comments when the doc is a Rust, JavaScript, TypeScript or TSX file. `None` when the parse
-/// fails.
+/// The blocks of `text`, parsed under `limit` with the cartridge [`cartridge_for`] picks for
+/// `block`'s doc, the one its blocks were read with. `None` when the parse fails.
 fn fences(block: &CodeBlock, text: &str, limit: TimeLimit) -> Option<Vec<Fence>> {
     let file = &block.fence.file;
-    let extension = Path::new(file.as_str())
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase);
-    let language: &'static dyn Cartridge = match extension.as_deref() {
-        Some("rs") => rust_cartridge::cartridge().ok()?,
-        Some(extension) if js::EXTENSIONS.contains(&extension) => js::cartridge().ok()?,
-        Some(extension) if ts::EXTENSIONS.contains(&extension) => ts::cartridge().ok()?,
-        Some(extension) if tsx::EXTENSIONS.contains(&extension) => tsx::cartridge().ok()?,
-        _ => markdown::cartridge::cartridge(),
-    };
+    let language = cartridge_for(file.as_str())?;
     // The path only names the doc in a parse error, which this check discards.
     let path = AbsolutePath::new(Path::new("/"))?.join_path(Path::new(file.as_str()));
     let parsed =
@@ -958,6 +947,28 @@ fn fences(block: &CodeBlock, text: &str, limit: TimeLimit) -> Option<Vec<Fence>>
     })
     .collect();
     Some(fences)
+}
+
+/// The cartridge whose blocks [`try_blocks_in`] reads from `file`: its doc-comment language's
+/// when it is a Rust, Python, JavaScript, TypeScript, TSX or Go file, else Markdown. `None` when
+/// that cartridge's queries don't compile.
+fn cartridge_for(file: &str) -> Option<&'static dyn Cartridge> {
+    let extension = Path::new(file)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+    let language: &'static dyn Cartridge = match extension.as_deref() {
+        Some(extension) if rust_cartridge::EXTENSIONS.contains(&extension) => {
+            rust_cartridge::cartridge().ok()?
+        }
+        Some(extension) if python::EXTENSIONS.contains(&extension) => python::cartridge().ok()?,
+        Some(extension) if js::EXTENSIONS.contains(&extension) => js::cartridge().ok()?,
+        Some(extension) if ts::EXTENSIONS.contains(&extension) => ts::cartridge().ok()?,
+        Some(extension) if tsx::EXTENSIONS.contains(&extension) => tsx::cartridge().ok()?,
+        Some(extension) if go::EXTENSIONS.contains(&extension) => go::cartridge().ok()?,
+        _ => markdown::cartridge::cartridge(),
+    };
+    Some(language)
 }
 
 /// The character and length of `block`'s opening fence in `text`: the first run of backticks or
@@ -987,7 +998,9 @@ fn closes(line: &str, marker: char, length: usize) -> bool {
 mod tests {
     use std::sync::Arc;
 
-    use super::{FixDoc, Frame, Verdict, failed, finding, fixed, judge, judge_framed};
+    use super::{
+        FixDoc, Frame, Verdict, cartridge_for, failed, finding, fixed, judge, judge_framed,
+    };
     use crate::cartridges::markdown::cartridge::cartridge;
     use crate::cartridges::rust;
     use crate::code_blocks::block::{CodeBlock, blocks_in};
@@ -999,7 +1012,7 @@ mod tests {
     use crate::finding::{Finding, Location};
     use crate::limits::Limits;
     use crate::path::AbsolutePath;
-    use crate::read::cartridge::{Cartridge, SourceFile};
+    use crate::read::cartridge::{Cartridge, Languages, SourceFile};
 
     /// The one code block in `text`, as the doc `doc` (relative to `/repo`), parsed by `language`.
     fn block_of(doc: &str, text: &str, language: &'static dyn Cartridge) -> CodeBlock {
@@ -1919,6 +1932,39 @@ mod tests {
                 kind: Kind::Statements,
                 line: Some(0),
             }
+        );
+    }
+
+    /// The built-in languages [`try_blocks_in`](crate::code_blocks::block::try_blocks_in) reads
+    /// no blocks from. Every other one is a doc language: Markdown, Rust, Python, JavaScript,
+    /// TypeScript, TSX and Go.
+    const NO_BLOCKS: [&str; 4] = ["bash", "toml", "json", "yaml"];
+
+    #[test]
+    fn the_fix_reparse_reads_every_doc_extension_with_its_own_cartridge() {
+        let mut checked = 0;
+        for cartridge in Languages::builtin()
+            .expect("the built-in cartridges should load")
+            .iter()
+        {
+            let id = cartridge.id();
+            if NO_BLOCKS.contains(&id.as_str()) {
+                continue;
+            }
+            for extension in cartridge.extensions() {
+                let picked = cartridge_for(&format!("src/doc.{extension}"))
+                    .expect("every built-in cartridge's queries should compile");
+                assert_eq!(
+                    picked.id(),
+                    id,
+                    "the fix re-parse should read a `.{extension}` file as blocks were read from it"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 7,
+            "expected every doc language's extensions, checked {checked}"
         );
     }
 }

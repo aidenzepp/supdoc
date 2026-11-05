@@ -331,6 +331,37 @@ fn docstring_fix_keeps_the_docstrings_indentation() {
 }
 
 #[test]
+fn docstring_fix_that_would_close_the_docstring_is_never_written() {
+    let source = "class C:\n    def f(self):\n        \"\"\"F.\n\n        ```python\n        x=1\n        ```\n        \"\"\"\n";
+    let (project, outside) = docstring_project(source);
+    stub(
+        outside.path(),
+        "ruff",
+        "/bin/cat > /dev/null\necho 'x = \"\"\"'",
+    );
+    let path = [("PATH", outside.path())];
+
+    let _fix = project
+        .supdoc_in_with(".", &["fix", "--yes"], &path)
+        .assert_exit(0);
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &path)
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(
+        project.read("src/blocks.py"),
+        source,
+        "a fix ending the docstring would move the closing fence out of it"
+    );
+    assert_eq!(
+        finding_kinds(&json),
+        ["code-block-unformatted", "code-block-fix-unsafe"],
+        "{json}"
+    );
+}
+
+#[test]
 fn docstring_doctest_session_and_literal_block_are_not_checked() {
     let source = "def f():\n    \"\"\"F::\n\n        x=1\n\n    >>> x=1\n    \"\"\"\n";
     let (project, outside) = docstring_project(source);
