@@ -638,17 +638,12 @@ pub(super) const CLIPPY_TRUST_OFF: &str =
 /// Why such a step doesn't run when the project itself lowered the tier.
 const TIER_LOWERED: &str = "`tier = \"static\"` in `[features.code-blocks]`";
 
-/// Why a project-tier step doesn't run even in a trusted checkout: clippy waits for a
-/// re-audit of the scanner in front of it.
-const CLIPPY_AWAITS_AUDIT: &str = "clippy doesn't run yet, even in a trusted project";
-
 /// `tool` as the tiers allow it: `None` for a cartridge above the effective tier, the lower of
 /// the tier `granted` allows (the project tier only for [`Grant::Trusted`]) and `ceiling` (the
 /// project's `tier`). Its `step` then doesn't run, with [`TIER_LOWERED`] as its reason when the
 /// ceiling holds it, [`CLIPPY_TRUST_OFF`] when `SUPDOC_TRUST=0` turned trust off, else
-/// [`CLIPPY_NEEDS_TRUST`]. A project-tier cartridge the effective tier allows still doesn't
-/// run, with [`CLIPPY_AWAITS_AUDIT`], until a later release. The gate sits where the tool is chosen,
-/// before any scan, cache key or spawn.
+/// [`CLIPPY_NEEDS_TRUST`]. A project-tier cartridge runs only in a trusted checkout whose
+/// ceiling allows it. The gate sits where the tool is chosen, before any scan, cache key or spawn.
 fn tier_gate(
     tool: Option<&'static ToolCartridge>,
     step: &mut StepState,
@@ -662,18 +657,15 @@ fn tier_gate(
         Tier::Static
     };
     let effective = allowed.min(ceiling);
-    let reason = if found.tier > effective {
-        if found.tier > ceiling {
-            TIER_LOWERED
-        } else if granted == Grant::TurnedOff {
-            CLIPPY_TRUST_OFF
-        } else {
-            CLIPPY_NEEDS_TRUST
-        }
-    } else if found.tier > Tier::Static {
-        CLIPPY_AWAITS_AUDIT
-    } else {
+    if found.tier <= effective {
         return tool;
+    }
+    let reason = if found.tier > ceiling {
+        TIER_LOWERED
+    } else if granted == Grant::TurnedOff {
+        CLIPPY_TRUST_OFF
+    } else {
+        CLIPPY_NEEDS_TRUST
     };
     *step = StepState::Unrunnable { reason };
     None
@@ -1577,7 +1569,7 @@ fn rust_refusal(
         }
         return Some((NotChecked::ToolchainPath, None));
     }
-    if let Toolchain::Unresolved(unresolved) = rust.toolchain {
+    if let Toolchain::Unresolved(unresolved) = &rust.toolchain {
         if !*warned {
             *warned = true;
             slots.push(Slot::Found(unresolved_warning(unresolved, &record.at)));
@@ -1762,20 +1754,77 @@ fn toolchain_warning(refusal: Refusal, file: &str, at: &Location) -> Finding {
 }
 
 /// The one `code-block-not-checked` warning, at `at`, for a root that pins no toolchain and whose
-/// toolchain rustup couldn't name for `unresolved`, which leaves every Rust block unchecked.
-fn unresolved_warning(unresolved: toolchain::Unresolved, at: &Location) -> Finding {
-    let (why, help) = match unresolved {
-        toolchain::Unresolved::InsideRoot => (
-            "the `rustup` on PATH is inside the checkout",
-            "put a `rustup` from outside the project first on PATH",
+/// toolchain rustup couldn't name for `unresolved`, which leaves every Rust block unchecked. It
+/// names the cause and quotes what rustup said.
+fn unresolved_warning(unresolved: &toolchain::Unresolved, at: &Location) -> Finding {
+    use toolchain::Cause;
+
+    const PIN: &str = "or add a `rust-toolchain.toml` to the project naming a channel such as \
+                       `stable` or `1.85.0`";
+    let (cause, said) = match unresolved {
+        toolchain::Unresolved::InsideRoot => {
+            return unresolved_finding(
+                "the `rustup` on PATH is inside the checkout",
+                "put a `rustup` from outside the project first on PATH".to_owned(),
+                at,
+            );
+        }
+        toolchain::Unresolved::Rustup { cause, said } => (*cause, said.as_str()),
+    };
+    let quoted = if said.is_empty() {
+        String::new()
+    } else {
+        format!(" (rustup said: `{said}`)")
+    };
+    let (why, help) = match cause {
+        Cause::PathOrCustom => (
+            format!(
+                "`rustup show active-toolchain` named a path or custom toolchain, not a \
+                 channel{quoted}, as a `path` key or a custom toolchain above it makes it"
+            ),
+            format!("remove the `path` toolchain or override above the project, {PIN}"),
         ),
-        toolchain::Unresolved::Unnamed => (
-            "`rustup show active-toolchain` didn't name a toolchain channel for it, as a \
-             `path` key or a custom toolchain in a directory above it would make it",
-            "add a `rust-toolchain.toml` to the project naming a channel such as `stable` or \
-             `1.85.0`, or remove the `path` toolchain or override above it",
+        Cause::NotInstalled => (
+            format!(
+                "the toolchain `rustup show active-toolchain` chose isn't installed, and supdoc \
+                 never installs one{quoted}"
+            ),
+            format!("install it with `rustup toolchain install`, {PIN}"),
+        ),
+        Cause::Unparseable => (
+            format!(
+                "`rustup show active-toolchain` couldn't parse a toolchain file above it{quoted}"
+            ),
+            format!("fix or remove that toolchain file, {PIN}"),
+        ),
+        Cause::NoDefault => (
+            format!("rustup has no default toolchain to give it{quoted}"),
+            format!("set one with `rustup default stable`, {PIN}"),
+        ),
+        Cause::Failed => (
+            format!("`rustup show active-toolchain` failed{quoted}"),
+            format!("run `rustup show active-toolchain` in the project to see why, {PIN}"),
+        ),
+        Cause::TimedOut => (
+            "`rustup show active-toolchain` ran past `[limits] code-block-timeout`".to_owned(),
+            format!(
+                "run `rustup show active-toolchain` in the project to see why it hangs, raise \
+                 `code-block-timeout`, {PIN}"
+            ),
+        ),
+        Cause::OverCap => (
+            "`rustup show active-toolchain` printed more than 1 MiB".to_owned(),
+            format!(
+                "run `rustup show active-toolchain` in the project to see what it prints, {PIN}"
+            ),
         ),
     };
+    unresolved_finding(&why, help, at)
+}
+
+/// The `code-block-not-checked` warning, at `at`, for a root that pins no toolchain, rustup
+/// couldn't name one for it because `why`, and `help` says what to change.
+fn unresolved_finding(why: &str, help: String, at: &Location) -> Finding {
     Finding::new(
         NOT_CHECKED,
         Severity::Warning,
@@ -2136,7 +2185,7 @@ mod tests {
     use super::{
         BlockRecord, Evaluation, Linked, LintRan, MANIFEST_AMBIGUOUS, MANIFEST_OUTSIDE,
         MANIFEST_UNREADABLE, MAX_WORKERS, OUTSIDE_WORKSPACE, PROJECT_UNBUILT, Pending, RustSetup,
-        Session, in_parallel, refused_build, run_clippy, rust_refusal,
+        Session, in_parallel, refused_build, run_clippy, rust_refusal, unresolved_warning,
     };
     use crate::cartridges::markdown::cartridge::cartridge as markdown;
     use crate::code_blocks::block::blocks_in;
@@ -2990,6 +3039,93 @@ mod tests {
                 "{stub} should stay empty"
             );
         }
+    }
+
+    #[test]
+    fn each_unresolved_cause_has_its_own_warning_quoting_rustup() {
+        use crate::code_blocks::toolchain::{Cause, Unresolved};
+
+        let root = temporary();
+        let record = rust_records(root.path(), "# D\n\n```rust\npub fn a() {}\n```\n")
+            .pop()
+            .expect("the doc should hold one block");
+        let said = "error: rustup's own words";
+        let rustup = |cause| Unresolved::Rustup {
+            cause,
+            said: said.to_owned(),
+        };
+        let quoted = format!("(rustup said: `{said}`)");
+        for (unresolved, message, help) in [
+            (
+                Unresolved::InsideRoot,
+                "the `rustup` on PATH is inside the checkout".to_owned(),
+                "put a `rustup` from outside the project first on PATH",
+            ),
+            (
+                rustup(Cause::PathOrCustom),
+                format!("named a path or custom toolchain, not a channel {quoted}"),
+                "remove the `path` toolchain or override above the project",
+            ),
+            (
+                rustup(Cause::NotInstalled),
+                format!("isn't installed, and supdoc never installs one {quoted}"),
+                "install it with `rustup toolchain install`",
+            ),
+            (
+                rustup(Cause::Unparseable),
+                format!("couldn't parse a toolchain file above it {quoted}"),
+                "fix or remove that toolchain file",
+            ),
+            (
+                rustup(Cause::NoDefault),
+                format!("rustup has no default toolchain to give it {quoted}"),
+                "set one with `rustup default stable`",
+            ),
+            (
+                rustup(Cause::Failed),
+                format!("`rustup show active-toolchain` failed {quoted}"),
+                "in the project to see why,",
+            ),
+            (
+                rustup(Cause::TimedOut),
+                "ran past `[limits] code-block-timeout`".to_owned(),
+                "raise `code-block-timeout`",
+            ),
+            (
+                rustup(Cause::OverCap),
+                "printed more than 1 MiB".to_owned(),
+                "to see what it prints",
+            ),
+        ] {
+            let warning = unresolved_warning(&unresolved, &record.at);
+            assert_eq!(warning.code, "code-block-not-checked", "{warning:?}");
+            assert!(
+                warning
+                    .message
+                    .starts_with("the project pins no Rust toolchain and ")
+                    && warning.message.contains(&message)
+                    && warning
+                        .message
+                        .ends_with(", so its Rust blocks aren't checked"),
+                "{unresolved:?}: {}",
+                warning.message
+            );
+            let given = warning.help.as_deref().unwrap_or_default();
+            assert!(given.contains(help), "{unresolved:?}: {given}");
+            if unresolved != Unresolved::InsideRoot {
+                assert!(given.contains("`rust-toolchain.toml`"), "{given}");
+            }
+        }
+        let silent = Unresolved::Rustup {
+            cause: Cause::Failed,
+            said: String::new(),
+        };
+        let warning = unresolved_warning(&silent, &record.at);
+        assert!(
+            !warning.message.contains("rustup said"),
+            "nothing to quote: {}",
+            warning.message
+        );
     }
 
     #[test]
