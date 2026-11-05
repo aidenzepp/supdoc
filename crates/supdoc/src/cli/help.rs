@@ -69,10 +69,10 @@ top-level keys, and never change which files links are read from. A language's t
   python        formatter \"ruff-format\" (the default) or \"black\", linter ruff (the default) or \"pylint\"
   typescript    formatter \"biome-format\" (the default) or \"prettier\", linter biome-lint
   javascript    formatter \"biome-format\" (the default) or \"prettier\", linter biome-lint
-  json          formatter biome-format, linter biome-lint; tag a block with comments jsonc
-  yaml          formatter yamlfmt, linter yamllint
+  json          formatter \"biome-format\" (the default) or \"prettier\", linter biome-lint; tag a block with comments jsonc
+  yaml          formatter \"yamlfmt\" (the default) or \"prettier\", linter yamllint
   toml          formatter tombi-format, linter tombi-lint
-  markdown      formatter rumdl-format, linter rumdl
+  markdown      formatter \"rumdl-format\" (the default) or \"prettier\", linter rumdl
   go            formatter gofmt, linter go-vet; tag a block go or golang
 
 Each tool's options live in its own table, such as [features.code-blocks.python.ruff] with \
@@ -251,7 +251,7 @@ the directory to get the space back.
 
 Trust grants three more tools the same reach. pylint, when a Python \
 table selects it, runs from the root, found in the root's .venv/bin before PATH, and imports the \
-blocks' modules. prettier, when a TypeScript or JavaScript table selects it, runs from the root, \
+blocks' modules. prettier, when a TypeScript, JavaScript, JSON, YAML or Markdown table selects it, runs from the root, \
 found in the root's node_modules/.bin before PATH, and loads the project's prettier config and \
 plugins; supdoc runs prettier 3.6.0 or later. A custom formatter or linter command from the config, or from a config it \
 extends, runs as written from the root (see `supdoc check --help`). Untrusted, each is `not \
