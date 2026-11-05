@@ -93,6 +93,9 @@ pub(crate) struct Boundary {
 }
 
 /// A path [`Boundary::admit`] passed: the only argument the write primitives take.
+///
+/// The check holds when it is made, not after: a symlink swapped in between `admit` and the write
+/// can still redirect it. Admit immediately before each write to keep that gap small.
 #[derive(Debug)]
 pub(crate) struct Admitted<'b> {
     /// The path to write, exactly as admitted.
@@ -235,7 +238,7 @@ pub(crate) fn create_dir_all(dir: &Admitted<'_>, mode: u32) -> io::Result<()> {
 /// `AlreadyExists` when anything is at `file`; otherwise fails when it can't be created.
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "private files are created through it from PH04")
+    expect(dead_code, reason = "`init` creates its file through it from PH03")
 )]
 pub(crate) fn create_new(file: &Admitted<'_>, mode: u32) -> io::Result<fs::File> {
     fs::OpenOptions::new()
@@ -276,12 +279,13 @@ pub(crate) fn remove_file(file: &Admitted<'_>) -> io::Result<()> {
 }
 
 /// Removes the directory `dir` and everything in it. Symlinks inside are removed, not followed.
+/// When `dir` is itself a symlink to a directory, only the link is removed, and that succeeds.
 ///
-/// Effect: deletes a directory tree.
+/// Effect: deletes a directory tree, or one symlink.
 ///
 /// # Errors
 ///
-/// Fails when `dir` isn't a directory or something in it can't be removed.
+/// Fails when nothing is at `dir`, it is a file, or something in it can't be removed.
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "private dirs are removed through it from PH05")
@@ -290,7 +294,8 @@ pub(crate) fn remove_dir_all(dir: &Admitted<'_>) -> io::Result<()> {
     fs::remove_dir_all(&dir.path)
 }
 
-/// Creates `link` as a new hard link to `original`. Refuses an existing path at `link`.
+/// Creates `link` as a new hard link to `original`, both admitted, so a file outside the boundary
+/// can't be linked in. Refuses an existing path at `link`.
 ///
 /// Effect: creates a directory entry.
 ///
@@ -299,10 +304,13 @@ pub(crate) fn remove_dir_all(dir: &Admitted<'_>) -> io::Result<()> {
 /// `AlreadyExists` when anything is at `link`; otherwise fails when the link can't be made.
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "private files are linked through it from PH05")
+    expect(
+        dead_code,
+        reason = "`init` links its file into place through it from PH03"
+    )
 )]
-pub(crate) fn hard_link_new(original: &Path, link: &Admitted<'_>) -> io::Result<()> {
-    fs::hard_link(original, &link.path)
+pub(crate) fn hard_link_new(original: &Admitted<'_>, link: &Admitted<'_>) -> io::Result<()> {
+    fs::hard_link(&original.path, &link.path)
 }
 
 #[cfg(test)]
@@ -623,12 +631,15 @@ mod tests {
         let fixture = Fixture::new();
         fixture.write("root/original", "shared");
         let boundary = fixture.boundary();
+        let original = boundary
+            .admit(&fixture.absolute("root/original"))
+            .expect("the in-root original should be admitted");
         let link = boundary
             .admit(&fixture.absolute("root/link"))
             .expect("a new path inside the root should be admitted");
 
-        hard_link_new(&fixture.path("root/original"), &link).expect("the link should be creatable");
-        let again = hard_link_new(&fixture.path("root/original"), &link);
+        hard_link_new(&original, &link).expect("the link should be creatable");
+        let again = hard_link_new(&original, &link);
 
         assert_eq!(
             fs::read_to_string(link.as_path()).expect("the link should be readable"),
@@ -639,5 +650,81 @@ mod tests {
             again.map_err(|error| error.kind()),
             Err(io::ErrorKind::AlreadyExists)
         );
+    }
+
+    #[test]
+    fn admit_refuses_an_outside_file_symlink_into_the_root_as_lexical() {
+        let fixture = Fixture::new();
+        fixture.write("root/file", "inside");
+        fixture.link("../root/file", "outside/leaf");
+
+        let escape = refusal(&fixture, "outside/leaf");
+
+        assert_eq!(escape, Escape::Lexical);
+        assert!(
+            fs::symlink_metadata(fixture.path("outside/leaf"))
+                .expect("the outside link should still exist")
+                .file_type()
+                .is_symlink(),
+            "the outside link should still be a link"
+        );
+        assert_eq!(fixture.names("outside"), names(&["leaf"]));
+    }
+
+    #[test]
+    fn admit_refuses_a_target_under_an_outside_dir_symlink_into_the_root_as_lexical() {
+        let fixture = Fixture::new();
+        fixture.link("../root", "outside/in");
+
+        let escape = refusal(&fixture, "outside/in/x");
+
+        assert_eq!(escape, Escape::Lexical);
+        assert!(
+            fs::symlink_metadata(fixture.path("outside/in"))
+                .expect("the outside link should still exist")
+                .file_type()
+                .is_symlink(),
+            "the outside link should still be a link"
+        );
+        assert_eq!(fixture.names("outside"), names(&["in"]));
+        assert!(
+            fixture.names("root").is_empty(),
+            "nothing should be written in the root"
+        );
+    }
+
+    #[test]
+    fn hard_link_new_cannot_take_an_outside_original() {
+        let fixture = Fixture::new();
+        fixture.write("outside/secret", "outside");
+
+        let escape = refusal(&fixture, "outside/secret");
+
+        assert_eq!(
+            escape,
+            Escape::Lexical,
+            "an outside original is never admitted, so never linked"
+        );
+        assert!(
+            fixture.names("root").is_empty(),
+            "nothing should be linked into the root"
+        );
+    }
+
+    #[test]
+    fn remove_dir_all_on_an_in_root_dir_symlink_removes_only_the_link() {
+        let fixture = Fixture::new();
+        fs::create_dir(fixture.path("root/real")).expect("the fixture dir should be creatable");
+        fixture.write("root/real/kept", "kept");
+        fixture.link("real", "root/alias");
+        let boundary = fixture.boundary();
+        let alias = boundary
+            .admit(&fixture.absolute("root/alias"))
+            .expect("the in-root link should be admitted");
+
+        remove_dir_all(&alias).expect("removing a dir symlink should succeed");
+
+        assert_eq!(fixture.names("root"), names(&["real"]));
+        assert_eq!(fixture.names("root/real"), names(&["kept"]));
     }
 }
