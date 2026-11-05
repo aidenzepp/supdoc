@@ -1925,6 +1925,9 @@ fn scaled(share: u16, scale: f32) -> usize {
 /// The indent and line width biome formats a block with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BiomeLayout {
+    /// The config section biome reads the block's language's settings from: `javascript` or
+    /// `json`, which also names its line-width flag.
+    section: &'static str,
     /// The indent unit: a tab, or `indentWidth` spaces.
     indent: String,
     /// The columns one indent unit takes: `indentWidth`, which is also a tab's width.
@@ -1949,7 +1952,8 @@ impl BiomeLayout {
             .filter(|width| *width <= BIOME_MAX_LINE_WIDTH)
             .ok_or(FRAME_WIDTH_UNKNOWN)?;
         Ok(vec![OsString::from(format!(
-            "--javascript-formatter-line-width={width}"
+            "--{}-formatter-line-width={width}",
+            self.section
         ))])
     }
 }
@@ -1976,6 +1980,7 @@ fn biome_layout(
 ) -> Result<BiomeLayout, &'static str> {
     let section = match language {
         Language::TypeScript | Language::JavaScript => "javascript",
+        Language::Json => "json",
         _ => return Err(FRAME_INDENT_UNKNOWN),
     };
     let config: serde_json::Value = match given.and_then(|given| given.config.as_ref()) {
@@ -2030,6 +2035,7 @@ fn biome_layout(
         _ => return Err(FRAME_INDENT_UNKNOWN),
     };
     Ok(BiomeLayout {
+        section,
         indent,
         columns,
         line_width,

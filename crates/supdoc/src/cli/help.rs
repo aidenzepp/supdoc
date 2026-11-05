@@ -139,11 +139,13 @@ block standing where the ... is:
   biome-lint    children      const supdocFragment$ = <div> ... </div>;   (tsx and jsx blocks only)
   biome-lint    members       abstract class SupdocFragment$ { supdocFrame$() { return this; } ... }   (TypeScript blocks)
   biome-lint    members       class SupdocFragment$ { supdocFrame$() { return this; } ... }   (JavaScript blocks)
+  biome-lint    entries       { ... }   (json and jsonc blocks)
   biome-format  statements    async function supdocFragment$() { await Promise.resolve(); ... }
   biome-format  entries       const supdocFragment$ = { ... };
   biome-format  children      const supdocFragment$ = <div> ... </div>;   (tsx and jsx blocks only)
   biome-format  members       abstract class SupdocFragment$ { supdocFrame$() { return this; } ... }   (TypeScript blocks)
   biome-format  members       class SupdocFragment$ { supdocFrame$() { return this; } ... }   (JavaScript blocks)
+  biome-format  entries       { ... }   (json and jsonc blocks)
 
 A statements block's leading \"use strict\" or \"use server\" isn't read as a directive, since \
 the frame's first line stands before it. A members frame has no base class, so a constructor \
