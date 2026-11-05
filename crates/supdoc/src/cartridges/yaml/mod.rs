@@ -26,9 +26,11 @@
 //! The same scanner writes its stack of indentations into a fixed buffer that a file nested a
 //! little past 250 levels overflows, aborting the process. So a file is also refused before the
 //! parse with `read-too-deep` when any line's structure, its leading blanks plus a run of compact
-//! `- `, `? ` or `: ` indicators, reaches past column 100. Every line counts, the content lines of
-//! a block scalar included, which can refuse a file the scanner would have read: the safe
-//! direction for a guard on memory safety.
+//! `- `, `? ` or `: ` indicators, plus the longest such run later in the line (the scanner nests
+//! on one after a quoted scalar, an alias, a flow collection or a second key), reaches past
+//! column 100. Every line counts, the content lines of a block scalar included, and so does a
+//! long run of indicators inside a quoted value. That can refuse a file the scanner would have
+//! read: the safe direction for a guard on memory safety.
 //!
 //! YAML files are link targets only: the cartridge returns no Markdown regions and the walk never
 //! reads them as sources. The walk keeps its own stack and charges every symbol to the file's
@@ -599,38 +601,62 @@ fn lines(text: &str) -> usize {
 
 /// The first line of `text` (1-based) whose structural column passes [`MAX_STRUCTURE_COLUMN`],
 /// and that column; `None` when every line is within it. Lines split at every `\r` and every
-/// `\n`, as the scanner counts rows. A line's structural column is the bytes of its leading
-/// spaces and tabs and of each `-`, `?` or `:` followed by a space, a tab or the line's end,
-/// repeated. Every byte it counts is ASCII, so it is also the scanner's column.
+/// `\n`, as the scanner counts rows.
+///
+/// A line's structural column is its prefix, the bytes of its leading spaces and tabs and of
+/// each `-`, `?` or `:` followed by a blank or the line's end, repeated, plus the longest run of
+/// such indicators later in the line. An indicator there starts after a blank, and only blanks
+/// separate it from the next. The scanner also nests on a run that follows a quoted scalar, an
+/// alias, a flow collection or a second key on the line (`"a" - - -`, `*a - - -`, `[a] - - -`,
+/// `a: b: - - -`), one entry per indicator. Measuring the run, not the token before it, needs no
+/// YAML lexer and can't be fooled by one; ordinary text, whose indicators sit between words,
+/// never forms a long run. Every byte counted is ASCII, so the column is also the scanner's.
 fn too_deep(text: &str) -> Option<(usize, usize)> {
     let bytes = text.as_bytes();
+    let is_blank = |at: usize| matches!(bytes.get(at), Some(b' ' | b'\t'));
     let blank_or_end =
         |at: usize| matches!(bytes.get(at), None | Some(b' ' | b'\t' | b'\r' | b'\n'));
+    let indicator = |at: usize| {
+        matches!(bytes.get(at), Some(b'-' | b'?' | b':')) && blank_or_end(at.saturating_add(1))
+    };
     let mut at = 0_usize;
     let mut line = 1_usize;
     while at < bytes.len() {
         let start = at;
         loop {
-            while matches!(bytes.get(at), Some(b' ' | b'\t')) {
+            while is_blank(at) {
                 at = at.saturating_add(1);
             }
-            match bytes.get(at) {
-                Some(b'-' | b'?' | b':') if blank_or_end(at.saturating_add(1)) => {
-                    at = at.saturating_add(1);
-                }
-                _ => break,
+            if !indicator(at) {
+                break;
             }
-        }
-        let column = at.saturating_sub(start);
-        if column > MAX_STRUCTURE_COLUMN {
-            return Some((line, column));
-        }
-        while let Some(&byte) = bytes.get(at) {
             at = at.saturating_add(1);
+        }
+        let prefix = at.saturating_sub(start);
+        let mut deepest = prefix;
+        let mut run = None;
+        while let Some(&byte) = bytes.get(at) {
             if matches!(byte, b'\r' | b'\n') {
                 break;
             }
+            if indicator(at) && at.checked_sub(1).is_some_and(is_blank) {
+                let first = *run.get_or_insert(at);
+                at = at.saturating_add(1);
+                while is_blank(at) {
+                    at = at.saturating_add(1);
+                }
+                deepest = deepest.max(prefix.saturating_add(at.saturating_sub(first)));
+                continue;
+            }
+            if !is_blank(at) {
+                run = None;
+            }
+            at = at.saturating_add(1);
         }
+        if deepest > MAX_STRUCTURE_COLUMN {
+            return Some((line, deepest));
+        }
+        at = at.saturating_add(1);
         line = line.saturating_add(1);
     }
     None
@@ -1217,13 +1243,67 @@ spec:
         assert_too_deep(&refusal(&format!("{}x\n", " ".repeat(40_000))), 1, 40_000);
     }
 
+    /// The lines that put a run of 300 block indicators after a token the line-start prefix
+    /// doesn't count, each with the 1-based line it sits on. The unguarded scanner aborts on
+    /// the quoted, alias, flow and second-key shapes; the rest are refused at the same bound.
+    pub(super) fn deep_runs() -> Vec<(String, u64)> {
+        let run = "- ".repeat(300);
+        let mut shapes: Vec<(String, u64)> = [
+            "--- ",
+            "&a ",
+            "!t ",
+            "!!seq ",
+            "\"a\" ",
+            "'a' ",
+            "a: ",
+            "? ",
+            "[a] ",
+            "{a: 1} ",
+            "a: \"b\" ",
+            "a: b: ",
+            "\"a\": \"b\" ",
+            "!t \"a\" ",
+            "a: [x] ",
+        ]
+        .into_iter()
+        .flat_map(|before| [format!("{before}{run}x\n"), format!("- {before}{run}x\n")])
+        .map(|text| (text, 1))
+        .collect();
+        shapes.push((format!("b: &x 1\na: *x {run}x\n"), 2));
+        shapes.push((format!("\"a\" {}x\n", "? ".repeat(300)), 1));
+        shapes.push((format!("\"a\" {}x\n", "-  ".repeat(300)), 1));
+        shapes
+    }
+
     #[test]
-    fn wide_lines_and_indicators_after_a_key_are_not_refused() {
+    fn a_run_of_indicators_after_any_token_is_refused_at_the_same_bound() {
+        for (text, line) in deep_runs() {
+            let error = refusal(&text);
+            assert!(
+                matches!(error, ReadError::TooDeep { line: l, column, limit: 100, .. } if l == line && column > 100),
+                "{text:.40?}… should be read-too-deep on line {line}, got {error:?}"
+            );
+        }
+        assert_too_deep(&refusal(&format!("\"a\" {}x\n", "- ".repeat(300))), 1, 600);
+        assert_too_deep(
+            &refusal(&format!("- \"a\" {}x\n", "- ".repeat(300))),
+            1,
+            602,
+        );
+    }
+
+    #[test]
+    fn wide_lines_and_indicators_between_words_are_not_refused() {
         let wide = [
             format!("k: {}\n", "x".repeat(40_000)),
             format!("[{}1]\n", "1, ".repeat(19_999)),
             format!("k: {}\n", "prose - with: dashes - and: colons ".repeat(10)),
-            format!("k: {}x\n", "- ".repeat(300)),
+            format!(
+                "k: {}\n",
+                "step one - step two : then ? maybe - more ".repeat(10)
+            ),
+            format!("rule: \"{}\"\n", "- ".repeat(40)),
+            format!("- \"a\" {}x\n", "- \"a\" ".repeat(300)),
         ];
 
         for text in wide {

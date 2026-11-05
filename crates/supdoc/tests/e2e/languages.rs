@@ -487,43 +487,78 @@ fn yaml_a_blank_line_added_to_a_keep_chomped_value_fails_only_its_link() {
     assert_eq!(at(&report, "/data/links/0/symbol"), "keep", "{report}");
 }
 
+/// The 602-byte file the audit found, then every shape that puts a run of 300 block indicators
+/// after a token: each aborted an unguarded scanner or reaches the same depth.
+fn deep_yaml_files() -> Vec<String> {
+    let run = "- ".repeat(300);
+    let mut files = vec![format!("{run}x\n")];
+    for before in [
+        "--- ",
+        "&a ",
+        "!t ",
+        "\"a\" ",
+        "'a' ",
+        "a: ",
+        "? ",
+        "[a] ",
+        "{a: 1} ",
+        "a: \"b\" ",
+        "a: b: ",
+        "\"a\": \"b\" ",
+        "!t \"a\" ",
+        "a: [x] ",
+    ] {
+        files.push(format!("{before}{run}x\n"));
+        files.push(format!("- {before}{run}x\n"));
+    }
+    files.push(format!("b: &x 1\na: *x {run}x\n"));
+    files.push(format!("\"a\" {}x\n", "? ".repeat(300)));
+    files
+}
+
 #[test]
 fn yaml_nested_past_the_scanner_s_limit_is_refused_and_never_aborts() {
-    let project = Project::fixture("bash");
-    project.write("evil.yaml", &format!("{}x\n", "- ".repeat(300)));
-    project.write(
-        "docs/evil.md",
-        "A [deep element](../evil.yaml#0) and [`setup_env`](../src/deploy.sh#setup_env).\n",
-    );
+    for file in deep_yaml_files() {
+        let project = Project::fixture("bash");
+        project.write(
+            "docs/evil.md",
+            "A [deep element](../evil.yaml#0) and [`setup_env`](../src/deploy.sh#setup_env).\n",
+        );
+        project.write("evil.yaml", &file);
+        let shown = file.get(..40).unwrap_or(&file);
 
-    let check = project.supdoc(&["--json", "check"]).assert_exit(1).json();
-    let update = project.supdoc(&["--json", "update", "--yes"]);
-    let list = project.supdoc(&["--json", "list"]).assert_exit(0).json();
+        let check = project.supdoc(&["--json", "check"]).assert_exit(1).json();
+        let update = project.supdoc(&["--json", "update", "--yes"]);
+        let list = project.supdoc(&["--json", "list"]).assert_exit(0).json();
 
-    let kinds: Vec<&str> = array_at(&check, "/data/links")
-        .iter()
-        .filter_map(|link| {
-            link.pointer("/finding/kind")
-                .and_then(serde_json::Value::as_str)
-        })
-        .collect();
-    assert!(kinds.contains(&"read-too-deep"), "{check}");
-    assert!(
-        array_at(&check, "/data/links").iter().any(|link| {
-            link.pointer("/symbol").and_then(serde_json::Value::as_str) == Some("setup_env")
-        }),
-        "the healthy link should still be reported: {check}"
-    );
-    assert!(
-        update.code.is_some_and(|code| code != 134),
-        "update should exit on its own, not abort: {:?}\n{}",
-        update.code,
-        update.stderr
-    );
-    assert!(
-        update.json().to_string().contains("read-too-deep"),
-        "{}",
-        update.stdout
-    );
-    assert!(list.to_string().contains("read-too-deep"), "{list}");
+        let kinds: Vec<&str> = array_at(&check, "/data/links")
+            .iter()
+            .filter_map(|link| {
+                link.pointer("/finding/kind")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .collect();
+        assert!(kinds.contains(&"read-too-deep"), "{shown:?}: {check}");
+        assert!(
+            array_at(&check, "/data/links").iter().any(|link| {
+                link.pointer("/symbol").and_then(serde_json::Value::as_str) == Some("setup_env")
+            }),
+            "{shown:?}: the healthy link should still be reported: {check}"
+        );
+        assert!(
+            update.code.is_some_and(|code| code != 134),
+            "{shown:?}: update should exit on its own, not abort: {:?}\n{}",
+            update.code,
+            update.stderr
+        );
+        assert!(
+            update.json().to_string().contains("read-too-deep"),
+            "{shown:?}: {}",
+            update.stdout
+        );
+        assert!(
+            list.to_string().contains("read-too-deep"),
+            "{shown:?}: {list}"
+        );
+    }
 }
