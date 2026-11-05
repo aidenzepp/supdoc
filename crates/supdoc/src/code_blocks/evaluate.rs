@@ -424,6 +424,7 @@ impl Evaluation {
     /// [`Self::settle_pending`].
     fn settle(&mut self, slots: Vec<Slot>, jobs: &[Job], ran: Vec<Option<StepsRan>>) {
         let mut ran = ran.into_iter();
+        let mut linted_nothing_warned = false;
         for slot in slots {
             let (job, run) = match slot {
                 Slot::Found(finding) => {
@@ -452,6 +453,10 @@ impl Evaluation {
                     outcomes.push((lint_state(&verdict), Some(run.tool)));
                 }
                 (Some(Err(reason)), Some(_)) => {
+                    if reason == BIOME_LINTED_NOTHING && !linted_nothing_warned {
+                        linted_nothing_warned = true;
+                        self.findings.push(linted_nothing(&record.at));
+                    }
                     record.steps.lint = StepState::Unrunnable { reason };
                 }
                 _ => {}
@@ -569,6 +574,22 @@ fn refuse_unfound(
             inside_root,
         };
     }
+}
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose biome lint
+/// step didn't run because biome checked no file.
+fn linted_nothing(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "biome lint checked no file for this block, so its TypeScript and JavaScript blocks' lint \
+         step didn't run: the project's biome config leaves them out",
+    )
+    .with_help(
+        "find the setting in the project's biome config that excludes the doc's blocks, or mark \
+         the blocks `lint(off: <reason>)`",
+    )
+    .with_location(at.clone())
 }
 
 /// The state a lint verdict alone puts a block in.
@@ -1359,17 +1380,23 @@ fn run_linter(
         doc: &doc,
         project: None,
     };
-    let spawn = |call: &Call<'_>| match given.filter(|_| tool.name == BIOME_LINT) {
+    let biome = given.filter(|_| tool.name == BIOME_LINT);
+    let spawn = |call: &Call<'_>| match biome {
         Some(given) => biome_lint(tool, call, &invocation, given, &pending.input, session),
         None => runner::run(call, session.env, session.root),
     };
-    let verdict = cached_run(
-        &run,
-        session,
-        spawn,
-        |result| tool.lint_verdict(&pending.input, result),
-        lint::Verdict::cacheable,
-    );
+    let judge = |result: Result<Ran, runner::Failure>| match result {
+        Ok(ran) if biome.is_some() && biome::linted_nothing(&ran.stdout) => {
+            Err(BIOME_LINTED_NOTHING)
+        }
+        result => Ok(tool.lint_verdict(&pending.input, result)),
+    };
+    let verdict = match cached_run(&run, session, spawn, judge, |judged| {
+        judged.as_ref().is_ok_and(lint::Verdict::cacheable)
+    }) {
+        Ok(verdict) => verdict,
+        Err(reason) => return Some(Err(reason)),
+    };
     let findings = lint::findings(
         &verdict,
         tool,
@@ -1383,6 +1410,11 @@ fn run_linter(
 
 /// The linter that reads the block from a private file rather than stdin.
 const BIOME_LINT: &str = "biome-lint";
+
+/// Why biome lint's step counts as not run when its report says it checked no file: something
+/// in the project's config still left the block out, so the run says nothing about it.
+pub(super) const BIOME_LINTED_NOTHING: &str =
+    "biome lint checked no file: the project's biome config leaves the block out";
 
 /// Runs `call`, `tool` being biome lint, on the block `invocation` describes, written with
 /// `given`'s config to a fresh [`biome::LintFile`] beside the neutral directory, since biome
@@ -1425,7 +1457,11 @@ fn biome_lint(
         },
         session.env,
         session.root,
-    );
+    )
+    .map(|ran| Ran {
+        stderr: file.named(&ran.stderr),
+        ..ran
+    });
     drop(file);
     result
 }

@@ -34,10 +34,15 @@ fn ts_project(body: &str) -> Project {
     project_with_block("[features.code-blocks.typescript]\n", "ts", body)
 }
 
-/// Writes an executable `#!/bin/sh` stub named `biome` in `dir` that passes `biome lint` and runs
-/// `script` for anything else, the format step.
+/// Writes an executable `#!/bin/sh` stub named `biome` in `dir` that passes `biome lint` with a
+/// clean report and runs `script` for anything else, the format step.
 fn stub_biome(dir: &Path, script: &str) {
-    stub_biome_lint(dir, &format!("[ \"$1\" = lint ] && exit 0\n{script}"));
+    stub_biome_lint(
+        dir,
+        &format!(
+            "[ \"$1\" = lint ] && echo '{{\"summary\":{{\"changed\":0,\"unchanged\":1}},\"diagnostics\":[]}}' && exit 0\n{script}"
+        ),
+    );
 }
 
 /// Writes an executable `#!/bin/sh` stub named `biome` running `script` in `dir`, for every
@@ -512,7 +517,7 @@ fn lint_stub(records: &Path, report: &str, code: u8) -> String {
 fn lint_a_diagnostic_is_a_code_block_lint_error_at_its_doc_line_from_a_private_file() {
     let project = ts_project("const a = 1;\ndebugger;");
     let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
-    let report = r#"{"summary":{},"diagnostics":[{"severity":"error","message":"This is an unexpected use of the debugger statement.","category":"lint/suspicious/noDebugger","location":{"path":"x","start":{"line":2,"column":1},"end":{"line":2,"column":10}},"advices":[]}],"command":"lint"}"#;
+    let report = r#"{"summary":{"changed":0,"unchanged":1},"diagnostics":[{"severity":"error","message":"This is an unexpected use of the debugger statement.","category":"lint/suspicious/noDebugger","location":{"path":"x","start":{"line":2,"column":1},"end":{"line":2,"column":10}},"advices":[]}],"command":"lint"}"#;
     stub_biome_lint(outside.path(), &lint_stub(outside.path(), report, 1));
 
     let json = project
@@ -568,7 +573,7 @@ fn lint_a_diagnostic_is_a_code_block_lint_error_at_its_doc_line_from_a_private_f
 #[test]
 fn lint_a_clean_block_passes_and_lint_off_in_the_tool_table_never_runs_biome_lint() {
     let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
-    let clean = r#"{"summary":{},"diagnostics":[],"command":"lint"}"#;
+    let clean = r#"{"summary":{"changed":0,"unchanged":1},"diagnostics":[],"command":"lint"}"#;
     stub_biome_lint(outside.path(), &lint_stub(outside.path(), clean, 0));
     let passing = project_with_block("[features.code-blocks.javascript]\n", "js", "f();");
     let off = project_with_block(
@@ -656,5 +661,134 @@ fn lint_the_real_biome_reports_a_debugger_skips_unused_names_and_honors_a_dir_sc
             .as_str()
             .is_some_and(|m| m.contains("suspicious/noDebugger")),
         "{json}"
+    );
+}
+
+/// A JavaScript project whose one block holds `body`, with biome-format off so only lint judges
+/// it, and `config` as its root `biome.json` when given.
+fn lint_only(body: &str, config: Option<&str>) -> Project {
+    let project = project_with_block(
+        "[features.code-blocks.javascript]\n\
+         [features.code-blocks.javascript.biome-format]\nformat = \"off\"\n",
+        "js",
+        body,
+    );
+    if let Some(config) = config {
+        project.write("biome.json", config);
+    }
+    project
+}
+
+/// The kinds of the findings and the block's state when the real biome in `dir` checks `project`.
+fn lint_outcome(project: &Project, dir: &Path) -> (Vec<String>, String) {
+    let json = project
+        .supdoc_in_with(".", &["check", "--json", "-v"], &[("PATH", dir)])
+        .json();
+    let state = at(&json, "/data/code_blocks/0/state")
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    (finding_kinds(&json), state)
+}
+
+#[test]
+fn lint_the_real_biome_fails_a_block_on_any_diagnostic_whatever_its_severity() {
+    let Some(dir) = real_tool_dir(
+        "biome",
+        "lint_the_real_biome_fails_a_block_on_any_diagnostic_whatever_its_severity",
+    ) else {
+        return;
+    };
+    let lint = |body: &str| lint_outcome(&lint_only(body, None), &dir);
+    let failed = (vec!["code-block-lint".to_owned()], "failed".to_owned());
+
+    assert_eq!(
+        lint("a: {\n  f();\n  break a;\n}"),
+        failed,
+        "a confusing label (a warning) fails"
+    );
+    let (kinds, state) = lint("{ a: 1 }");
+    assert!(
+        state == "failed" && !kinds.is_empty() && kinds.iter().all(|k| k == "code-block-lint"),
+        "a useless lone block statement (an info) fails: {kinds:?} {state}"
+    );
+    assert_eq!(lint("debugger;"), failed, "a debugger statement fails");
+    assert_eq!(
+        lint("f();"),
+        (vec![], "passed".to_owned()),
+        "a clean block passes"
+    );
+}
+
+#[test]
+fn lint_the_real_biome_lints_a_block_the_projects_includes_leave_out() {
+    let Some(dir) = real_tool_dir(
+        "biome",
+        "lint_the_real_biome_lints_a_block_the_projects_includes_leave_out",
+    ) else {
+        return;
+    };
+    for config in [
+        r#"{"files":{"includes":["src/**"]}}"#,
+        r#"{"linter":{"includes":["src/**"]}}"#,
+    ] {
+        let outcome = lint_outcome(&lint_only("debugger;", Some(config)), &dir);
+
+        assert_eq!(
+            outcome,
+            (vec!["code-block-lint".to_owned()], "failed".to_owned()),
+            "{config}"
+        );
+    }
+}
+
+#[test]
+fn lint_a_run_that_checked_no_file_is_not_run_with_one_warning_never_a_pass() {
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let nothing = r#"{"summary":{"changed":0,"unchanged":0},"diagnostics":[],"command":"lint"}"#;
+    stub_biome_lint(outside.path(), &lint_stub(outside.path(), nothing, 0));
+    let project = lint_only("f();", None);
+    project.write("docs/more.md", "# More\n\n```js\ng();\n```\n");
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json", "-v"], &[("PATH", outside.path())])
+        .assert_exit(0)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 0, "{json}");
+    for block in array_at(&json, "/data/code_blocks") {
+        assert!(
+            block["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("biome lint checked no file")),
+            "{json}"
+        );
+    }
+}
+
+#[test]
+fn lint_the_real_biome_names_the_projects_config_in_a_config_error() {
+    let Some(dir) = real_tool_dir(
+        "biome",
+        "lint_the_real_biome_names_the_projects_config_in_a_config_error",
+    ) else {
+        return;
+    };
+    let project = lint_only("f();", Some(r#"{"linter":{"bogus":1}}"#));
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", &dir)])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-tool-failed"], "{json}");
+    let message = at(&json, "/findings/0/message")
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        message.contains("/biome.json:1:12") && !message.contains("supdoc/code-blocks"),
+        "the message should name the project's config, not supdoc's private copy: {message}"
     );
 }

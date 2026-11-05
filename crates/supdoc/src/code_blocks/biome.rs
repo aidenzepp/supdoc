@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::Value;
 
-use super::format::ParseError;
+use super::format::{self, ParseError};
 use super::lint::{self, Diagnostic};
 use super::runner::{self, Failure, Ran};
 use super::tools::ToolEnv;
@@ -95,12 +95,24 @@ struct BiomePosition {
 /// The report `biome lint --reporter=json` prints on stdout.
 #[derive(serde::Deserialize)]
 struct BiomeReport {
+    /// What the run did.
+    summary: BiomeSummary,
     /// Every diagnostic, none held back under `--max-diagnostics=none`.
     diagnostics: Vec<BiomeDiagnostic>,
 }
 
+/// The counts in a report's summary that say whether biome looked at the block at all.
+#[derive(serde::Deserialize)]
+struct BiomeSummary {
+    /// Files it checked and would change.
+    changed: u64,
+    /// Files it checked and would leave alone.
+    unchanged: u64,
+}
+
 /// The diagnostics in `biome lint --reporter=json`'s `stdout`, each named by its rule without
-/// the `lint/` prefix (`suspicious/noDebugger`). `None` when it isn't biome's JSON report.
+/// the `lint/` prefix (`suspicious/noDebugger`), at every severity. `None` when it isn't biome's
+/// JSON report.
 #[must_use]
 pub(crate) fn diagnostics(stdout: &[u8]) -> Option<Vec<Diagnostic>> {
     let report: BiomeReport = serde_json::from_slice(stdout).ok()?;
@@ -121,11 +133,59 @@ pub(crate) fn diagnostics(stdout: &[u8]) -> Option<Vec<Diagnostic>> {
     )
 }
 
-/// Judges a `biome lint` run as [`lint::judge`] does, reading its stdout as biome's JSON report.
-/// `input` isn't needed: biome counts columns in characters.
+/// Judges a `biome lint` run on its JSON report, not its exit: any diagnostic, error, warning
+/// or info alike, fails the block, as clippy's warnings fail a Rust block. A report with none is
+/// clean on a zero exit; a non-zero exit without diagnostics, or output that isn't the report, is
+/// a tool failure; a timeout is a timeout. `input` isn't needed: biome counts columns in
+/// characters.
 #[must_use]
 pub(crate) fn lint_verdict(_input: &str, result: Result<Ran, Failure>) -> lint::Verdict {
-    lint::judge(result, diagnostics)
+    let ran = match result {
+        Ok(ran) => ran,
+        Err(failure) => return lint::Verdict::Failed(format::failed(failure)),
+    };
+    match diagnostics(&ran.stdout) {
+        Some(found) if !found.is_empty() => lint::Verdict::Diagnostics(found),
+        Some(_) if ran.success => lint::Verdict::Clean,
+        _ => lint::Verdict::Failed(format::Verdict::ToolFailed(format::exit_detail(
+            &ran.stderr,
+        ))),
+    }
+}
+
+/// Whether `stdout`, biome lint's JSON report, says it checked no file and found nothing: the
+/// block was left out by something supdoc didn't drop from the config, so the run says nothing
+/// about it.
+#[must_use]
+pub(crate) fn linted_nothing(stdout: &[u8]) -> bool {
+    serde_json::from_slice::<BiomeReport>(stdout).is_ok_and(|report| {
+        report.diagnostics.is_empty() && report.summary.changed + report.summary.unchanged == 0
+    })
+}
+
+/// The settings that leave files out of linting, as `(section, key)` at the config's top level:
+/// biome 2's `includes` and the `include` and `ignore` spellings older configs use. The lint
+/// copy drops them, so a block is linted wherever the format step checks it; an override's
+/// `includes` stays, since it only scopes that override's settings.
+const LINT_EXCLUSIONS: [(&str, &str); 6] = [
+    ("files", "includes"),
+    ("files", "include"),
+    ("files", "ignore"),
+    ("linter", "includes"),
+    ("linter", "include"),
+    ("linter", "ignore"),
+];
+
+/// `strict`, the JSON config biome is given, without [`LINT_EXCLUSIONS`]. `None` when it isn't
+/// a JSON object.
+fn without_exclusions(strict: &str) -> Option<String> {
+    let mut config: serde_json::Map<String, Value> = serde_json::from_str(strict).ok()?;
+    for (section, key) in LINT_EXCLUSIONS {
+        if let Some(Value::Object(settings)) = config.get_mut(section) {
+            let _dropped = settings.remove(key);
+        }
+    }
+    serde_json::to_string(&config).ok()
 }
 
 /// One `biome lint` run's private directory, removed when this is dropped: a copy of the config
@@ -138,6 +198,9 @@ pub(crate) struct LintFile {
     dir: PathBuf,
     /// The block's file in it.
     file: PathBuf,
+    /// With a project config: the copy and this directory, with the project's config file and
+    /// directory they stand for in biome's messages.
+    names: Option<[(PathBuf, PathBuf); 2]>,
 }
 
 /// How many [`LintFile`] directories this process has tried to create, which makes each name
@@ -146,9 +209,9 @@ static LINT_RUNS: AtomicUsize = AtomicUsize::new(0);
 
 impl LintFile {
     /// A new directory `biome-lint/<pid>-<n>` beside `neutral`, the tool's working directory,
-    /// mode 0700 inside a 0700 `biome-lint` directory, holding `biome.json` (a copy of the
-    /// config `given` names) and `input` as the `index`th block of `doc`, its extension picked
-    /// by `tag`. Every file is created new, mode 0600. `None` when `neutral` is `/`, `given`
+    /// mode 0700 inside a 0700 `biome-lint` directory, holding `biome.json` (the config `given`
+    /// names, without the [`LINT_EXCLUSIONS`] that would leave the block unlinted) and `input`
+    /// as the `index`th block of `doc`, its extension picked by `tag`. Every file is created new, mode 0600. `None` when `neutral` is `/`, `given`
     /// names no config, or anything can't be created.
     ///
     /// Effect: reads the private config, creates directories and writes two files.
@@ -165,7 +228,7 @@ impl LintFile {
             return None;
         }
         let config = given.config.as_deref()?;
-        let strict = fs::read_to_string(config).ok()?;
+        let strict = without_exclusions(&fs::read_to_string(config).ok()?)?;
         let base = private_dir(&neutral.parent()?.join("biome-lint"))?;
         let dir = (0..16).find_map(|_| {
             let count = LINT_RUNS.fetch_add(1, Ordering::Relaxed);
@@ -176,9 +239,16 @@ impl LintFile {
                 .ok()
                 .map(|()| dir)
         })?;
+        let names = given.names.as_ref().map(|[(_, file), (_, project)]| {
+            [
+                (dir.join("biome.json"), file.clone()),
+                (dir.clone(), project.clone()),
+            ]
+        });
         let mut run = Self {
             dir,
             file: PathBuf::new(),
+            names,
         };
         let placed = given
             .mirror
@@ -207,6 +277,20 @@ impl LintFile {
     #[must_use]
     pub(crate) fn file(&self) -> &Path {
         &self.file
+    }
+
+    /// `stderr` with this run's private paths biome printed named as the project's config file
+    /// and directory they stand for, as [`Given::named`] does for the format step.
+    #[must_use]
+    pub(crate) fn named(&self, stderr: &[u8]) -> Vec<u8> {
+        let Some(names) = &self.names else {
+            return stderr.to_vec();
+        };
+        let mut text = String::from_utf8_lossy(stderr).into_owned();
+        for (private, project) in names {
+            text = text.replace(&*private.to_string_lossy(), &project.to_string_lossy());
+        }
+        text.into_bytes()
     }
 
     /// `--config-path=<the config copy>`, which biome reads instead of the shared private
@@ -614,10 +698,13 @@ fn private_dir(dir: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LintFile, Refusal, diagnostics, extension, parse_error, project_args};
-    use crate::code_blocks::format::ParseError;
-    use crate::code_blocks::lint::Diagnostic;
-    use crate::code_blocks::runner;
+    use super::{
+        LintFile, Refusal, diagnostics, extension, lint_verdict, linted_nothing, parse_error,
+        project_args, without_exclusions, write_new,
+    };
+    use crate::code_blocks::format::{ParseError, Verdict as FormatVerdict};
+    use crate::code_blocks::lint::{Diagnostic, Verdict};
+    use crate::code_blocks::runner::{self, Ran};
     use crate::code_blocks::tools::ToolEnv;
     use std::fs;
     use std::os::unix::fs::PermissionsExt as _;
@@ -625,7 +712,7 @@ mod tests {
 
     #[test]
     fn biomes_json_report_gives_one_diagnostic_each_at_its_1_based_line_and_column() {
-        let stdout = br#"{"summary":{"errors":2},"diagnostics":[
+        let stdout = br#"{"summary":{"changed":0,"unchanged":1,"errors":2},"diagnostics":[
             {"severity":"error","message":"This is an unexpected use of the debugger statement.","category":"lint/suspicious/noDebugger","location":{"path":"/r/a.md.1.js","start":{"line":2,"column":1},"end":{"line":2,"column":10}},"advices":[]},
             {"severity":"error","message":"Expected an expression","category":"parse","location":{"path":"/r/a.md.1.js","start":{"line":3,"column":9},"end":{"line":3,"column":10}},"advices":[]}
         ],"command":"lint"}"#;
@@ -647,6 +734,99 @@ mod tests {
                 },
             ])
         );
+    }
+
+    /// A report holding `diagnostics` (JSON array items) for one checked file.
+    fn report(diagnostics: &str) -> Vec<u8> {
+        format!(
+            r#"{{"summary":{{"changed":0,"unchanged":1}},"diagnostics":[{diagnostics}],"command":"lint"}}"#
+        )
+        .into_bytes()
+    }
+
+    /// A finished run that exited `success` with `stdout`.
+    fn ran(success: bool, stdout: Vec<u8>) -> Ran {
+        Ran {
+            success,
+            stdout,
+            stderr: b"boom\n".to_vec(),
+        }
+    }
+
+    #[test]
+    fn any_diagnostic_fails_the_block_whatever_its_severity_and_biomes_exit() {
+        let info = r#"{"severity":"information","message":"This block statement doesn't serve any purpose.","category":"lint/complexity/noUselessLoneBlockStatements","location":{"path":"x","start":{"line":1,"column":1},"end":{"line":1,"column":9}},"advices":[]}"#;
+        let warning = info.replace("information", "warning").replace(
+            "complexity/noUselessLoneBlockStatements",
+            "suspicious/noConfusingLabels",
+        );
+
+        for (exit, found) in [
+            (true, info.to_owned()),
+            (true, warning),
+            (false, info.to_owned()),
+        ] {
+            let verdict = lint_verdict("", Ok(ran(exit, report(&found))));
+            assert!(
+                matches!(&verdict, Verdict::Diagnostics(listed) if listed.len() == 1),
+                "exit ok {exit}: {verdict:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_report_with_no_diagnostics_is_clean_on_a_zero_exit_and_a_tool_failure_otherwise() {
+        assert_eq!(lint_verdict("", Ok(ran(true, report("")))), Verdict::Clean);
+        for (exit, stdout) in [
+            (false, report("")),
+            (true, b"not json".to_vec()),
+            (false, b"not json".to_vec()),
+        ] {
+            assert!(
+                matches!(
+                    lint_verdict("", Ok(ran(exit, stdout.clone()))),
+                    Verdict::Failed(FormatVerdict::ToolFailed(_))
+                ),
+                "exit ok {exit}, stdout {stdout:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_report_that_checked_no_file_and_found_nothing_linted_nothing() {
+        let nothing = br#"{"summary":{"changed":0,"unchanged":0,"skipped":0},"diagnostics":[],"command":"lint"}"#;
+
+        assert!(linted_nothing(nothing));
+        assert!(!linted_nothing(&report("")), "one file was checked");
+        assert!(!linted_nothing(b"not json"));
+    }
+
+    #[test]
+    fn the_lint_copy_drops_top_level_exclusions_and_keeps_an_overrides_includes() {
+        let strict = r#"{"files":{"includes":["src/**"],"ignore":["x"],"maxSize":9},"linter":{"includes":["src/**"],"enabled":true},"overrides":[{"includes":["docs/**"],"linter":{"enabled":false}}]}"#;
+
+        assert_eq!(
+            without_exclusions(strict).as_deref(),
+            Some(
+                r#"{"files":{"maxSize":9},"linter":{"enabled":true},"overrides":[{"includes":["docs/**"],"linter":{"enabled":false}}]}"#
+            )
+        );
+    }
+
+    #[test]
+    fn a_run_file_already_there_or_planted_as_a_link_is_refused_and_left_untouched() {
+        let dir = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let existing = dir.path().join("a.md.1.ts");
+        let target = dir.path().join("target");
+        let link = dir.path().join("b.md.1.ts");
+        fs::write(&existing, "kept").expect("the planted file");
+        fs::write(&target, "kept").expect("the link's target");
+        std::os::unix::fs::symlink(&target, &link).expect("the planted link");
+
+        assert_eq!(write_new(&existing, "block"), None);
+        assert_eq!(write_new(&link, "block"), None);
+        assert_eq!(fs::read_to_string(&existing).ok().as_deref(), Some("kept"));
+        assert_eq!(fs::read_to_string(&target).ok().as_deref(), Some("kept"));
     }
 
     #[test]
