@@ -10,6 +10,7 @@ use std::path::{Component, Path};
 use std::str::FromStr;
 
 use crate::namespace::{NamespaceName, NamespaceNameError};
+use crate::path::Beneath;
 
 /// Parsing a Markdown link destination into a link target.
 pub(crate) mod destination;
@@ -62,6 +63,12 @@ impl SourcePath {
     }
 }
 
+impl Beneath for SourcePath {
+    fn segments(&self) -> &str {
+        &self.0
+    }
+}
+
 impl TryFrom<String> for SourcePath {
     type Error = LinkPathError;
 
@@ -89,6 +96,12 @@ impl TargetPath {
     /// The path as written, with `/` separators.
     #[must_use]
     pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Beneath for TargetPath {
+    fn segments(&self) -> &str {
         &self.0
     }
 }
@@ -588,6 +601,48 @@ impl fmt::Display for TargetPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::path::{AbsolutePath, FIXED_PATHS};
+
+    /// Fails with the rule `segments` breaks, naming `what` it came from.
+    fn assert_beneath(what: &str, segments: &str) {
+        assert_eq!(
+            check_link_path(segments, |path| LinkPathError::ParentSegment { path }),
+            Ok(()),
+            "{what} `{segments}` should be a valid `Beneath` path"
+        );
+    }
+
+    #[test]
+    fn every_fixed_path_constant_is_a_valid_beneath_path() {
+        for fixed in FIXED_PATHS {
+            assert_beneath("fixed path", fixed.segments());
+        }
+    }
+
+    #[test]
+    fn source_and_target_segments_are_valid_beneath_paths() {
+        for raw in ["a", "docs/guide.md", "a/b/c.rs"] {
+            assert_beneath("source", source(raw).segments());
+            let target: TargetPath = raw
+                .parse()
+                .expect("the fixture target path should be valid");
+            assert_beneath("target", target.segments());
+        }
+    }
+
+    #[test]
+    fn beneath_a_source_or_target_appends_its_segments_to_the_base() {
+        let base =
+            AbsolutePath::new(Path::new("/base")).expect("the fixture base should be absolute");
+        let expected =
+            AbsolutePath::new(Path::new("/base/a/b")).expect("the fixture path should be absolute");
+        let target: TargetPath = "a/b"
+            .parse()
+            .expect("the fixture target path should be valid");
+
+        assert_eq!(base.beneath(&source("a/b")), expected);
+        assert_eq!(base.beneath(&target), expected);
+    }
 
     fn source(raw: &str) -> SourcePath {
         raw.parse()

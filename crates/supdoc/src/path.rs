@@ -4,9 +4,14 @@
 //! normalized, so `.` and `..` never reach code that compares or prefixes paths.
 //! [`RelativePath`] is a path written relative to some file, such as a namespace directory or an
 //! `extends` target in `supdoc.config.toml`.
+//! [`Beneath`] marks a relative path proven never to leave the base it is joined to, and
+//! [`AbsolutePath::beneath`] is the join for it.
 
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
+
+use crate::config::CONFIG_FILE_NAME;
+use crate::lock::model::LOCK_FILE_NAME;
 
 /// An absolute path with `.` and `..` removed lexically (no filesystem access).
 ///
@@ -50,6 +55,32 @@ impl AbsolutePath {
         };
         push_normalized(&mut joined, path);
         Self(joined)
+    }
+
+    /// Appends `rel`, which [`Beneath`] proves has no root, `..` or `.`, so the result is always
+    /// beneath `self`.
+    #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the content joins move onto it from PH08")
+    )]
+    pub(crate) fn beneath(&self, rel: &impl Beneath) -> Self {
+        let mut joined = self.0.clone();
+        joined.extend(rel.segments().split('/'));
+        Self(joined)
+    }
+
+    /// Appends `rel` and normalizes the result, or returns `None` when the result is not under
+    /// `boundary`. For a path that may climb with `..`, such as a doc-relative `from(...)`; the
+    /// check is lexical, so a symlink along the result is not seen.
+    #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the `from(...)` join moves onto it in PH09")
+    )]
+    pub(crate) fn join_within(&self, rel: &RelativePath, boundary: &AbsolutePath) -> Option<Self> {
+        let joined = self.join(rel);
+        joined.strip_prefix(boundary).is_some().then_some(joined)
     }
 
     /// The directory containing this path, or `None` at the filesystem root.
@@ -101,6 +132,81 @@ impl schemars::JsonSchema for AbsolutePath {
 impl AsRef<Path> for AbsolutePath {
     fn as_ref(&self) -> &Path {
         &self.0
+    }
+}
+
+/// Keeps [`Beneath`] closed: [`sealed::Sealed`] can't be named outside this module, so only the
+/// types it is implemented for here can implement [`Beneath`].
+mod sealed {
+    /// The supertrait of [`super::Beneath`] that no type outside `crate::path` can implement.
+    pub(crate) trait Sealed {}
+
+    impl Sealed for crate::link::SourcePath {}
+    impl Sealed for crate::link::TargetPath {}
+    impl Sealed for super::FixedPath {}
+}
+
+/// A relative path proven to stay beneath any base it is joined to: `/`-separated and not
+/// empty, with no root, no `\`, and no `..`, `.` or empty segment.
+///
+/// Sealed: implemented only for [`SourcePath`](crate::link::SourcePath) and
+/// [`TargetPath`](crate::link::TargetPath), which `crate::link` checks when it builds them, and
+/// for [`FixedPath`].
+pub(crate) trait Beneath: sealed::Sealed {
+    /// The path, with `/` between its segments.
+    fn segments(&self) -> &str;
+}
+
+/// A relative path fixed at compile time, such as `supdoc.lock`. Every value is one of the
+/// constants below, each listed in [`FIXED_PATHS`] so one test checks them all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the fixed-name joins move onto it in PH10")
+)]
+pub(crate) struct FixedPath(&'static str);
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the fixed-name joins move onto it in PH10")
+)]
+impl FixedPath {
+    /// The lockfile in the project root.
+    pub(crate) const LOCK_FILE: Self = Self::new(LOCK_FILE_NAME);
+    /// The config file in a project or namespace directory.
+    pub(crate) const CONFIG_FILE: Self = Self::new(CONFIG_FILE_NAME);
+    /// Where the skill goes beneath the shared agents base: the project root or `HOME`.
+    pub(crate) const AGENTS_SKILL: Self = Self::new(".agents/skills/supdoc/SKILL.md");
+    /// Where the skill goes beneath the project root for Claude Code.
+    pub(crate) const PROJECT_CLAUDE_SKILL: Self = Self::new(".claude/skills/supdoc/SKILL.md");
+    /// Claude Code's config directory beneath `HOME` when `CLAUDE_CONFIG_DIR` is not set.
+    pub(crate) const DEFAULT_CLAUDE_DIR: Self = Self::new(".claude");
+    /// Where the skill goes beneath Claude Code's config directory.
+    pub(crate) const CLAUDE_DIR_SKILL: Self = Self::new("skills/supdoc/SKILL.md");
+
+    /// Wraps `path`. Private, so the constants above are the only values.
+    const fn new(path: &'static str) -> Self {
+        Self(path)
+    }
+}
+
+/// Every [`FixedPath`] constant, so one test proves each is a valid [`Beneath`] path.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "only the test that checks each constant reads it")
+)]
+pub(crate) const FIXED_PATHS: [FixedPath; 6] = [
+    FixedPath::LOCK_FILE,
+    FixedPath::CONFIG_FILE,
+    FixedPath::AGENTS_SKILL,
+    FixedPath::PROJECT_CLAUDE_SKILL,
+    FixedPath::DEFAULT_CLAUDE_DIR,
+    FixedPath::CLAUDE_DIR_SKILL,
+];
+
+impl Beneath for FixedPath {
+    fn segments(&self) -> &str {
+        self.0
     }
 }
 
@@ -349,6 +455,44 @@ mod tests {
             absolute("/repo").join_path(Path::new("/elsewhere/../etc/x.toml")),
             absolute("/etc/x.toml")
         );
+    }
+
+    #[test]
+    fn beneath_a_fixed_path_appends_its_segments_to_the_base() {
+        assert_eq!(
+            absolute("/home").beneath(&FixedPath::AGENTS_SKILL),
+            absolute("/home/.agents/skills/supdoc/SKILL.md")
+        );
+        assert_eq!(
+            absolute("/repo").beneath(&FixedPath::LOCK_FILE),
+            absolute("/repo/supdoc.lock")
+        );
+    }
+
+    #[test]
+    fn join_within_keeps_a_climb_that_stays_inside_the_boundary() {
+        assert_eq!(
+            absolute("/repo/docs").join_within(&relative("../src/x.rs"), &absolute("/repo")),
+            Some(absolute("/repo/src/x.rs"))
+        );
+    }
+
+    #[test]
+    fn join_within_refuses_a_climb_past_the_boundary() {
+        let (docs, root) = (absolute("/repo/docs"), absolute("/repo"));
+
+        for raw in [
+            "../..",
+            "../../x",
+            "src/../../../etc/passwd",
+            "../../repo-evil/x",
+        ] {
+            assert_eq!(
+                docs.join_within(&relative(raw), &root),
+                None,
+                "`{raw}` from `/repo/docs` leaves `/repo`"
+            );
+        }
     }
 
     #[test]
