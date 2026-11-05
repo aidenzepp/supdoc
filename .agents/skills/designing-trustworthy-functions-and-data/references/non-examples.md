@@ -90,7 +90,7 @@ An empty token proves nothing if it can be copied, constructed elsewhere, or out
 
 ## Effects Moved Outside Their Consistency Boundary
 
-```rust ignore(statements only: the load, plan and apply calls of a transfer body, shown without its fn)
+```rust fragment(statements) lint(off: needs crate context)
 let accounts = repository.load_accounts(command.from, command.to)?;
 let plan = plan_transfer(&accounts, &command)?;
 repository.apply(plan)?;
@@ -115,7 +115,7 @@ The fields do not form one coherent value. The bag hides excessive responsibilit
 
 ## Primitive and Boolean Soup
 
-```rust ignore(one call-site statement showing positional Booleans)
+```rust fragment(statements) lint(off: needs crate context)
 set_timer("refresh", 5, true, false, true);
 ```
 
@@ -171,7 +171,7 @@ A callback makes the authority explicit but does not make the operation pure. Sp
 
 ## Mocked External Semantics
 
-```rust ignore(statements only: two mock-setup lines from a test body)
+```rust fragment(statements) lint(off: needs crate context)
 let repository = MockRepository::new();
 repository.expect_save().returning(|_| Ok(()));
 ```

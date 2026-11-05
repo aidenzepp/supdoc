@@ -17,17 +17,17 @@ hash = "fc05447785c70fd9b11575f5b1fbb6b487f071336e42e2637bcc4067037389e9"
 [[link]]
 source = ".agents/skills/designing-trustworthy-functions-and-data/SKILL.md"
 target = ".agents/skills/designing-trustworthy-functions-and-data/references/design-transformations.md"
-hash = "03d9d2c2dc3bc994883201d58e632c0683f4626dc18d5e613766d72af9a9792f"
+hash = "2b7fbd99b22360f0f1271076d3431229686b5ee986042113f99644f3927e3fb4"
 
 [[link]]
 source = ".agents/skills/designing-trustworthy-functions-and-data/SKILL.md"
 target = ".agents/skills/designing-trustworthy-functions-and-data/references/examples.md"
-hash = "e31bfb24d65ba5d275a372f3462260ca053579b0df168f291f560225bdbf1bc5"
+hash = "52577e8d56087938cdd8347e32d6cc5cd1fb26369ce34d6c9cb2c946a8968298"
 
 [[link]]
 source = ".agents/skills/designing-trustworthy-functions-and-data/SKILL.md"
 target = ".agents/skills/designing-trustworthy-functions-and-data/references/non-examples.md"
-hash = "b92822249341b3c6f94dd1b19896e674ac36097aa33bf8e32564e42d29c504de"
+hash = "31c408e59f50963dbb05e3fdd6b6d454602691b3499b788b21e0d4c3b93b93bc"
 
 [[link]]
 source = ".agents/skills/designing-trustworthy-functions-and-data/SKILL.md"
@@ -48,27 +48,27 @@ hash = "cac5b6544d4cff416ce227964ae6cadf8ea371156577311bdbdc2f5c2ead297a"
 [[link]]
 source = ".agents/skills/designing-trustworthy-functions-and-data/references/examples.md"
 target = ".agents/skills/designing-trustworthy-functions-and-data/references/design-transformations.md"
-hash = "03d9d2c2dc3bc994883201d58e632c0683f4626dc18d5e613766d72af9a9792f"
+hash = "2b7fbd99b22360f0f1271076d3431229686b5ee986042113f99644f3927e3fb4"
 
 [[link]]
 source = ".agents/skills/designing-trustworthy-functions-and-data/references/non-examples.md"
 target = ".agents/skills/designing-trustworthy-functions-and-data/references/design-transformations.md"
-hash = "03d9d2c2dc3bc994883201d58e632c0683f4626dc18d5e613766d72af9a9792f"
+hash = "2b7fbd99b22360f0f1271076d3431229686b5ee986042113f99644f3927e3fb4"
 
 [[link]]
 source = ".agents/skills/self-explanatory-tests/SKILL.md"
 target = ".agents/skills/self-explanatory-tests/references/design-and-seams.md"
-hash = "8915b40fba05534f4a6b1d9b2d009dd5a0f0df2b80969405a2523296a79a68b4"
+hash = "8c91234b7d1acced2a1fb97f4c416e3caf83d041082fef03bd56d369fc8021f8"
 
 [[link]]
 source = ".agents/skills/self-explanatory-tests/SKILL.md"
 target = ".agents/skills/self-explanatory-tests/references/examples.md"
-hash = "131bfcb4ba87d7b5661d6113b8d13305d5f0a87885665805d865155df59f4821"
+hash = "0dc6fc0ee0be9d18fe6850417c7a71b1aa4e251f94f6aaf1d7f940daeb03cedb"
 
 [[link]]
 source = ".agents/skills/self-explanatory-tests/SKILL.md"
 target = ".agents/skills/self-explanatory-tests/references/non-examples.md"
-hash = "3f6d8d4810eeaec973aef546162233bf9c995855dd6292e365b25eae57cf58d1"
+hash = "356da3e25ca2a2ab93bfb9ca33f4a96d6716ac97661d7942df5d0d1430856e90"
 
 [[link]]
 source = ".agents/skills/self-explanatory-tests/SKILL.md"

@@ -40,7 +40,7 @@ Do not assume a stronger type is automatically safer. First verify the mathemati
 
 If a decision only needs the current time, pass the current time:
 
-```rust ignore(statements only: two lines from a test body that passes a fixed time)
+```rust fragment(statements) lint(off: needs crate context)
 let status = session.status_at(fixed_time);
 assert_eq!(status, SessionStatus::Expired);
 ```
