@@ -464,7 +464,7 @@ mod tests {
 
     use super::{cartridge, unquote};
     use crate::cartridges::data::KeyPathBudget;
-    use crate::limits::{Limits, TimeLimit};
+    use crate::limits::Limits;
     use crate::path::AbsolutePath;
     use crate::read::cartridge::{Cartridge, Deadline, Languages, SourceFile, Symbol, SymbolTable};
     use crate::read::error::ReadError;
@@ -835,17 +835,17 @@ name = "second"
     #[test]
     fn the_deadline_stops_the_walk_inside_a_run_of_children_that_name_nothing() {
         // The comments name nothing, so only the per-child check can stop the walk among them;
-        // without it the walk would run on to `2` and stop there.
-        let comments = "# nothing\n".repeat(500_000);
+        // without it the walk would run on to `2` and stop there. The deadline counts checks
+        // rather than time, so it passes inside the run of 2,000 on any machine.
+        let comments = "# nothing\n".repeat(2_000);
         let text = format!("a = [1,\n{comments}2]\n");
         let last = text.rfind('2').expect("the fixture should end with `2`");
-        let limit: TimeLimit = "1ms".parse().expect("`1ms` should be a time limit");
-        let file = parse(&text).with_deadline(Deadline::start(limit));
+        let file = parse(&text).with_deadline(Deadline::after_checks(1_000));
 
         let error = file
             .language()
             .symbols(&file)
-            .expect_err("half a million comments should outlast a 1 ms deadline");
+            .expect_err("the walk should stop at the thousandth check");
 
         assert!(
             matches!(error, ReadError::Timeout { offset, .. } if offset < last),

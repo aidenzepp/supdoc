@@ -1293,6 +1293,29 @@ spec:
     }
 
     #[test]
+    fn tabs_count_as_blanks_in_the_depth_measure() {
+        let admitted = |text: &str| {
+            let path = AbsolutePath::new(Path::new("/repo/tabs.yaml"))
+                .expect("the fixture path should be absolute");
+            cartridge().admit(&path, text)
+        };
+
+        let indented = admitted(&format!("{}x\n", "\t".repeat(101)))
+            .expect_err("101 tabs of indentation should pass column 100");
+        assert_too_deep(&indented, 1, 101);
+        let separated = admitted(&format!("{}x\n", "-\t".repeat(51)))
+            .expect_err("51 tab-separated indicators should pass column 100");
+        assert_too_deep(&separated, 1, 102);
+        let later = admitted(&format!("\"a\" {}x\n", "-\t".repeat(51)))
+            .expect_err("a later run of 51 tab-separated indicators should pass column 100");
+        assert_too_deep(&later, 1, 102);
+        assert!(
+            admitted(&format!("{}x\n", "-\t".repeat(50))).is_ok(),
+            "50 tab-separated indicators reach column 100 exactly"
+        );
+    }
+
+    #[test]
     fn wide_lines_and_indicators_between_words_are_not_refused() {
         let wide = [
             format!("k: {}\n", "x".repeat(40_000)),
@@ -1405,20 +1428,20 @@ spec:
     #[test]
     fn the_deadline_stops_the_walk_inside_a_run_of_children_that_name_nothing() {
         // The comments name nothing, so only the per-child check can stop the walk among them;
-        // without it the walk would run on to `last` and stop there. 32,000 fit under the line
-        // limit; walking them takes 7-20 ms in a debug build, well past the deadline.
-        let comments = "  # nothing\n".repeat(32_000);
+        // without it the walk would run on to `last` and stop there. The deadline counts checks
+        // rather than time: the walk makes a few dozen before the comments, so it passes at
+        // the thousandth, inside the run of 2,000, on any machine.
+        let comments = "  # nothing\n".repeat(2_000);
         let text = format!("a: [first,\n{comments}  last]\n");
         let last = text
             .rfind("last")
             .expect("the fixture should end with `last`");
-        let limit: TimeLimit = "1ms".parse().expect("`1ms` should be a time limit");
-        let file = parse(&text).with_deadline(Deadline::start(limit));
+        let file = parse(&text).with_deadline(Deadline::after_checks(1_000));
 
         let error = file
             .language()
             .symbols(&file)
-            .expect_err("32,000 comments should outlast a 1 ms deadline");
+            .expect_err("the walk should stop at the thousandth check");
 
         assert!(
             matches!(error, ReadError::Timeout { offset, .. } if offset < last),

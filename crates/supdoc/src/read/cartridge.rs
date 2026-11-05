@@ -297,6 +297,17 @@ pub(crate) struct Deadline {
     limit: TimeLimit,
     /// The moment it passes, or `None` for no limit.
     at: Option<Instant>,
+    /// For a test, how many checks it allows before it passes, counted on the checking thread,
+    /// in place of the clock.
+    #[cfg(test)]
+    checks: Option<usize>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times a deadline made by [`Deadline::after_checks`] has been checked on this
+    /// thread.
+    static CHECKS: Cell<usize> = const { Cell::new(0) };
 }
 
 /// How far a parse or query got before its [`Deadline`] stopped it.
@@ -315,6 +326,21 @@ impl Deadline {
             at: limit
                 .get()
                 .and_then(|duration| Instant::now().checked_add(duration)),
+            #[cfg(test)]
+            checks: None,
+        }
+    }
+
+    /// A deadline that passes at its check after `checks` checks on this thread, so a test can
+    /// stop a read at an exact point however fast the machine is. Resets this thread's count.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn after_checks(checks: usize) -> Self {
+        CHECKS.set(0);
+        Self {
+            limit: crate::limits::Limits::PARSE_TIMEOUT,
+            at: None,
+            checks: Some(checks),
         }
     }
 
@@ -327,6 +353,12 @@ impl Deadline {
     /// Whether it has passed. Effect: reads the clock.
     #[must_use]
     pub(crate) fn passed(self) -> bool {
+        #[cfg(test)]
+        if let Some(checks) = self.checks {
+            let seen = CHECKS.get().saturating_add(1);
+            CHECKS.set(seen);
+            return seen > checks;
+        }
         self.at.is_some_and(|at| Instant::now() >= at)
     }
 
