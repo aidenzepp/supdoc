@@ -458,10 +458,11 @@ fn pylint_runs_from_the_root_with_its_argv_and_spawns_again_on_a_second_run() {
             "--from-stdin",
             path,
             "--output-format=json2",
+            "--persistent=n",
             "--disable=W0611,W0612,C0114,E0602",
         ] = args.as_slice()
         else {
-            panic!("pylint should get its four arguments: {run}");
+            panic!("pylint should get its five arguments, `--persistent=n` among them: {run}");
         };
         assert!(path.ends_with("/docs/blocks.md.1.py"), "{run}");
     }
@@ -483,23 +484,48 @@ fn pylint_in_the_projects_venv_runs_before_one_on_path() {
 
     let json = trusted_pylint_check(&project, outside.path(), cache.path(), 0);
 
-    assert_eq!(pylint_runs(&venv).len(), 1, "{json}");
-    assert!(pylint_runs(outside.path()).is_empty(), "{json}");
+    assert_eq!(
+        pylint_runs(&venv).len(),
+        1,
+        "the root's pylint runs: {json}"
+    );
+    assert!(
+        pylint_runs(outside.path()).is_empty(),
+        "the pylint of the same name on PATH never runs: {json}"
+    );
     assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
 }
 
 #[test]
 fn pylint_skip_file_in_the_block_is_lint_not_run_naming_lint_off() {
     let project = project_with_python_block(PYLINT, "# pylint: skip-file\nx = 1");
+    project.write(
+        "docs/blocks.md",
+        "# Blocks\n\n```py\n# pylint: skip-file\nx = 1\n```\n\n```py\ny = 2  # pylint: disable=all\n```\n",
+    );
     let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
     let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
     pylint_stub(outside.path(), &format!("printf {}", empty_report(1)));
 
     let json = trusted_pylint_check(&project, outside.path(), cache.path(), 0);
 
+    assert_eq!(
+        at(&json, "/data/code_blocks/1/lint"),
+        "not_run",
+        "the second block is switched off too, under the run's one warning: {json}"
+    );
+
     assert!(
         pylint_runs(outside.path()).is_empty(),
         "pylint never starts: {json}"
+    );
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+    assert_eq!(at(&json, "/findings/0/severity"), "warning", "{json}");
+    let help = at(&json, "/findings/0/help");
+    assert!(
+        help.as_str()
+            .is_some_and(|help| help.contains("lint(off: <reason>)")),
+        "{json}"
     );
     assert_eq!(at(&json, "/data/code_blocks/0/lint"), "not_run", "{json}");
     let reason = at(&json, "/data/code_blocks/0/reason");

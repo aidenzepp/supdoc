@@ -1231,13 +1231,14 @@ const RUFF_RELAXED: &str = "F821,F401,F841";
 /// imports and variables, a module docstring (a block is never a module) and undefined names.
 const PYLINT_RELAXED: &str = "W0611,W0612,C0114,E0602";
 
-/// pylint's arguments: the block on stdin under its virtual path, the `json2` report, and the
-/// snippet relaxations disabled.
+/// pylint's arguments: the block on stdin under its virtual path, the `json2` report, no stats
+/// saved under `HOME` (`--persistent=n`), and the snippet relaxations disabled.
 fn pylint_args(invocation: &Invocation<'_>) -> Vec<OsString> {
     vec![
         OsString::from("--from-stdin"),
         virtual_path(invocation.doc, invocation.index, "py"),
         OsString::from("--output-format=json2"),
+        OsString::from("--persistent=n"),
         OsString::from(format!("--disable={PYLINT_RELAXED}")),
     ]
 }
@@ -1694,13 +1695,14 @@ mod tests {
     }
 
     #[test]
-    fn pylint_reads_the_block_from_stdin_under_its_virtual_path_as_json2_with_its_relaxations() {
+    fn pylint_reads_the_block_from_stdin_under_its_virtual_path_as_json2_saving_no_stats() {
         assert_eq!(
             args_of("pylint", 2, &[]),
             [
                 "--from-stdin",
                 "/p/docs/a.md.2.py",
                 "--output-format=json2",
+                "--persistent=n",
                 "--disable=W0611,W0612,C0114,E0602",
             ]
             .map(OsString::from)

@@ -737,6 +737,23 @@ fn linted_nothing(at: &Location) -> Finding {
     .with_location(at.clone())
 }
 
+/// The run's one `code-block-not-checked` warning, at `at`, the first Python block whose pylint
+/// step didn't run because a pylint comment in it switches pylint off for the whole block.
+fn pylint_switched_off(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "the block holds a pylint comment that switches pylint off for the whole block \
+         (`skip-file`, `disable=all` or `disable-all`), which supdoc doesn't give to pylint, so its \
+         lint step didn't run",
+    )
+    .with_help(
+        "name the messages the comment switches off, as in `# pylint: disable=invalid-name`, or \
+         switch the step off with `lint(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
 /// The run's one `code-block-not-checked` warning, at `at`, the first Go block whose `go vet`
 /// step didn't run because it imports a package outside the standard library.
 fn vet_offline(at: &Location) -> Finding {
@@ -883,6 +900,7 @@ impl NotRunWarnings {
             YAML_EMPTY => yaml_empty(at),
             FRAME_RESHAPED => frame_reshaped(at),
             BIOME_LINTED_NOTHING => linted_nothing(at),
+            PYLINT_SWITCHED_OFF => pylint_switched_off(at),
             YAMLLINT_REJECTED => yamllint_rejected(at, said),
             YAMLLINT_LOCALE => yamllint_locale(at, said),
             go::VET_OFFLINE => vet_offline(at),
