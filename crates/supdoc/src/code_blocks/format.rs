@@ -14,7 +14,7 @@ use crate::read::cartridge::{Cartridge, Deadline, SourceFile};
 
 use super::block::{CodeBlock, has_contiguous_body, replacement_for, try_blocks_in};
 use super::excerpt;
-use super::fragment::{Kind, Support};
+use super::fragment::{Frame, Kind};
 use super::project::BuildFailed;
 use super::runner::{Failure, Ran};
 use super::states;
@@ -67,119 +67,28 @@ pub(crate) enum Verdict {
     FrameReformatted(Kind),
 }
 
-/// What a tool-failure detail shows in place of a line of the frame.
-const FRAME_LINE: &str = "<the frame supdoc adds>";
-
-/// The fixed lines a formatter sees around a block that declares a kind its tool reads only
-/// inside a frame (see [`Support::Framed`]), and what it is expected to print back.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Frame {
-    /// The kind the block declares.
-    kind: Kind,
-    /// The lines the formatter sees before the block.
-    before: &'static str,
-    /// The lines the formatter sees after the block.
-    after: &'static str,
-    /// The lines its output must begin with.
-    out_before: &'static str,
-    /// The lines its output must end with.
-    out_after: &'static str,
-    /// The indent unit it puts before each non-empty line of the block.
-    indent: &'static str,
-}
-
-impl Frame {
-    /// The frame `tool` puts around a block of `kind`. `None` for a block checked as a whole
-    /// file, and for a kind the tool reads as written or doesn't list.
-    #[must_use]
-    pub(crate) fn of(tool: &ToolCartridge, kind: Option<Kind>) -> Option<Self> {
-        let kind = kind?;
-        let (_, support) = tool.fragments.iter().find(|(listed, _)| *listed == kind)?;
-        match *support {
-            Support::Native { .. } => None,
-            Support::Framed {
-                before,
-                after,
-                out_before,
-                out_after,
-                indent,
-            } => Some(Self {
-                kind,
-                before,
-                after,
-                out_before,
-                out_after,
-                indent,
-            }),
-        }
-    }
-
-    /// The block's lines in `output`, the formatter's stdout, each ended by LF: the lines between
-    /// `out_before` and `out_after`, each non-empty one with its leading `indent` removed. `None`
-    /// when `output` doesn't begin with `out_before` and end with `out_after`, or a non-empty
-    /// line between them doesn't start with `indent`.
-    #[must_use]
-    fn inner(self, output: &str) -> Option<String> {
-        let lines: Vec<&str> = output.lines().collect();
-        let head: Vec<&str> = self.out_before.lines().collect();
-        let tail: Vec<&str> = self.out_after.lines().collect();
-        let body = lines
-            .strip_prefix(head.as_slice())?
-            .strip_suffix(tail.as_slice())?;
-        let mut inner = String::with_capacity(output.len());
-        for line in body {
-            if !line.is_empty() {
-                inner.push_str(line.strip_prefix(self.indent)?);
-            }
-            inner.push('\n');
-        }
-        Some(inner)
-    }
-
-    /// Whether `line`, a line of a tool's report, shows one of the frame's lines: trimmed, or
-    /// after a source-listing gutter such as rustfmt's `2 | `.
-    fn holds(self, line: &str) -> bool {
-        let shown = [
-            line.trim(),
-            line.split_once('|').map_or("", |(_, code)| code.trim()),
-        ];
-        self.before
-            .lines()
-            .chain(self.after.lines())
-            .map(str::trim)
-            .filter(|frame| !frame.is_empty())
-            .any(|frame| shown.contains(&frame))
-    }
-
-    /// `detail`, a tool's report, with each line that shows one of the frame's lines replaced by
-    /// [`FRAME_LINE`].
-    fn hidden(self, detail: &str) -> String {
-        detail
-            .lines()
-            .map(|line| if self.holds(line) { FRAME_LINE } else { line })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-}
-
 /// Judges a formatter's `result` on a block whose body as written is `input`, run inside
-/// `frame`. Output that begins with the frame's `out_before`, ends with its `out_after` and
-/// indents every non-empty line between them by its `indent` is read for those lines, the indent
-/// removed, and they are compared with `input` as [`judge`] compares a whole block's output;
-/// output that doesn't keep the frame is [`Verdict::FrameReformatted`], never a guess. A syntax
-/// error is shifted past the frame's leading lines; one on a frame line is
-/// [`Verdict::NotKind`]. A tool failure's detail shows no line of the frame.
+/// `frame` with each non-empty line led by `indent` (see [`Frame::wrap_indented`]). Output that
+/// begins with the frame's `out_before`, ends with its `out_after` and leads every non-empty line
+/// between them with `indent` is read for those lines, `indent` removed, and they are compared
+/// with `input` as [`judge`] compares a whole block's output; output that doesn't keep the frame
+/// is [`Verdict::FrameReformatted`], never a guess. A blank block passes when the output is the
+/// frame alone ([`Frame::alone`]). A syntax error is shifted past the frame's leading lines; one
+/// on a frame line is [`Verdict::NotKind`]. A failure's detail shows no line of the frame.
 #[must_use]
 pub(crate) fn judge_framed(
     tool: &ToolCartridge,
     frame: Frame,
+    indent: &str,
     input: &str,
     result: Result<Ran, Failure>,
 ) -> Verdict {
+    let lines = input.lines().count();
     match result {
         Ok(ran) if ran.success => match String::from_utf8(ran.stdout) {
             Err(_) => Verdict::ToolFailed("it printed output that isn't UTF-8".to_owned()),
-            Ok(output) => match frame.inner(&output) {
+            Ok(output) if input.trim().is_empty() && frame.alone(&output) => Verdict::Formatted,
+            Ok(output) => match frame.inner(&output, indent) {
                 None => Verdict::FrameReformatted(frame.kind),
                 Some(inner) if inner == input => Verdict::Formatted,
                 Some(inner) => Verdict::Unformatted(inner),
@@ -190,15 +99,28 @@ pub(crate) fn judge_framed(
                 detail,
                 line: Some(line),
             } => line
-                .checked_sub(frame.before.lines().count())
-                .filter(|line| *line < input.lines().count())
+                .checked_sub(frame.lead())
+                .filter(|line| *line < lines)
                 .map_or(Verdict::NotKind(frame.kind), |line| Verdict::ParseFailed {
-                    detail: frame.hidden(&detail),
+                    detail: frame.hidden(&detail, lines),
                     line: Some(line),
                 }),
-            Verdict::ToolFailed(detail) => Verdict::ToolFailed(frame.hidden(&detail)),
-            other => other,
+            failed => hidden(frame, &failed, lines),
         },
+    }
+}
+
+/// `failed`, a verdict on a block of `lines` lines run inside `frame`, with no line of its detail
+/// referring to the frame (see [`Frame::hidden`]).
+#[must_use]
+pub(crate) fn hidden(frame: Frame, failed: &Verdict, lines: usize) -> Verdict {
+    match failed {
+        Verdict::ToolFailed(detail) => Verdict::ToolFailed(frame.hidden(detail, lines)),
+        Verdict::ParseFailed { detail, line } => Verdict::ParseFailed {
+            detail: frame.hidden(detail, lines),
+            line: *line,
+        },
+        other => other.clone(),
     }
 }
 
@@ -1097,8 +1019,10 @@ mod tests {
         after: "}",
         out_before: "fn main() {",
         out_after: "}",
-        indent: "    ",
     };
+
+    /// rustfmt's default indent unit.
+    const FOUR: &str = "    ";
 
     /// biome's entries frame, whose closing line the formatter ends with `;`.
     const ENTRIES: Frame = Frame {
@@ -1107,7 +1031,6 @@ mod tests {
         after: "})",
         out_before: "({",
         out_after: "});",
-        indent: "\t",
     };
 
     #[test]
@@ -1118,6 +1041,7 @@ mod tests {
             judge_framed(
                 rustfmt(),
                 STATEMENTS,
+                FOUR,
                 "if x {\n    y();\n}\n\nz();\n",
                 Ok(printed(nested))
             ),
@@ -1127,6 +1051,7 @@ mod tests {
             judge_framed(
                 rustfmt(),
                 STATEMENTS,
+                FOUR,
                 "let x=1;\n",
                 Ok(printed("fn main() {\n    let x = 1;\n}\n"))
             ),
@@ -1136,6 +1061,7 @@ mod tests {
             judge_framed(
                 rustfmt(),
                 ENTRIES,
+                "\t",
                 "a: 1\n",
                 Ok(printed("({\n\ta: 1,\n});\n"))
             ),
@@ -1154,7 +1080,13 @@ mod tests {
 
         for output in outputs {
             assert_eq!(
-                judge_framed(rustfmt(), STATEMENTS, "let x = 1;\n", Ok(printed(output))),
+                judge_framed(
+                    rustfmt(),
+                    STATEMENTS,
+                    FOUR,
+                    "let x = 1;\n",
+                    Ok(printed(output))
+                ),
                 Verdict::FrameReformatted(Kind::Statements),
                 "output {output:?} should not pass as the frame"
             );
@@ -1163,6 +1095,7 @@ mod tests {
             judge_framed(
                 rustfmt(),
                 ENTRIES,
+                "\t",
                 "a: 1,\n",
                 Ok(printed("({\n\ta: 1,\n})\n"))
             ),
@@ -1178,7 +1111,13 @@ mod tests {
         let body = "let x = 1;\nlet y = 2\n";
 
         assert_eq!(
-            judge_framed(rustfmt(), STATEMENTS, body, Ok(exited(false, "", inside))),
+            judge_framed(
+                rustfmt(),
+                STATEMENTS,
+                FOUR,
+                body,
+                Ok(exited(false, "", inside))
+            ),
             Verdict::ParseFailed {
                 detail: "error: expected `;`\n --> <stdin>:3:9\n  |\n<the frame supdoc adds>"
                     .to_owned(),
@@ -1186,15 +1125,22 @@ mod tests {
             }
         );
         assert_eq!(
-            judge_framed(rustfmt(), STATEMENTS, body, Ok(exited(false, "", on_frame))),
+            judge_framed(
+                rustfmt(),
+                STATEMENTS,
+                FOUR,
+                body,
+                Ok(exited(false, "", on_frame))
+            ),
             Verdict::NotKind(Kind::Statements)
         );
         assert_eq!(
             judge_framed(
                 rustfmt(),
                 STATEMENTS,
+                FOUR,
                 body,
-                Ok(exited(false, "", "}\nboom\n"))
+                Ok(exited(false, "", "4 | }\nboom\n"))
             ),
             Verdict::ToolFailed("<the frame supdoc adds>\nboom".to_owned())
         );
@@ -1243,9 +1189,13 @@ mod tests {
         let text = "# G\n\n```rust fragment(statements)\nlet x=1;\n```\n";
         let block = block_of("docs/guide.md", text, cartridge());
         let output = "fn main() {\n    let x = 1;\n}\n";
-        let Verdict::Unformatted(inner) =
-            judge_framed(rustfmt(), STATEMENTS, "let x=1;\n", Ok(printed(output)))
-        else {
+        let Verdict::Unformatted(inner) = judge_framed(
+            rustfmt(),
+            STATEMENTS,
+            FOUR,
+            "let x=1;\n",
+            Ok(printed(output)),
+        ) else {
             panic!("a changed statement should be unformatted");
         };
         let unformatted = finding(
@@ -1262,6 +1212,67 @@ mod tests {
         assert_eq!(
             applied(text, &findings),
             "# G\n\n```rust fragment(statements)\nlet x = 1;\n```\n"
+        );
+    }
+
+    #[test]
+    fn frame_format_a_dropped_leading_or_trailing_frame_line_is_frame_reformatted() {
+        for output in ["    let x = 1;\n}\n", "fn main() {\n    let x = 1;\n"] {
+            assert_eq!(
+                judge_framed(
+                    rustfmt(),
+                    STATEMENTS,
+                    FOUR,
+                    "let x = 1;\n",
+                    Ok(printed(output))
+                ),
+                Verdict::FrameReformatted(Kind::Statements),
+                "output {output:?} keeps the indent but drops a frame line"
+            );
+        }
+    }
+
+    #[test]
+    fn frame_format_a_blank_block_passes_when_the_output_is_the_frame_alone() {
+        for (frame, indent, output) in [
+            (STATEMENTS, FOUR, "fn main() {}\n"),
+            (STATEMENTS, FOUR, "fn main() {\n}\n"),
+            (ENTRIES, "\t", "({});\n"),
+        ] {
+            for input in ["", "\n", "\n\n"] {
+                assert_eq!(
+                    judge_framed(rustfmt(), frame, indent, input, Ok(printed(output))),
+                    Verdict::Formatted,
+                    "blank block {input:?} with output {output:?}"
+                );
+            }
+        }
+        assert_eq!(
+            judge_framed(
+                rustfmt(),
+                STATEMENTS,
+                FOUR,
+                "let x = 1;\n",
+                Ok(printed("fn main() {}\n"))
+            ),
+            Verdict::FrameReformatted(Kind::Statements),
+            "a block with code is never the frame alone"
+        );
+    }
+
+    #[test]
+    fn frame_format_a_line_the_formatter_copies_verbatim_comes_back_exact() {
+        let input = "let s = \"a\n    b\";\nlet j = r#\"{\n}\"#;\n";
+        let sent = STATEMENTS.wrap_indented(input, FOUR);
+
+        assert_eq!(
+            sent,
+            "fn main() {\n    let s = \"a\n        b\";\n    let j = r#\"{\n    }\"#;\n}\n"
+        );
+        assert_eq!(
+            judge_framed(rustfmt(), STATEMENTS, FOUR, input, Ok(printed(&sent))),
+            Verdict::Formatted,
+            "a formatter that copies the literal's lines verbatim leaves the block as written"
         );
     }
 }
