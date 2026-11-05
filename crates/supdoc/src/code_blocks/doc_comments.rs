@@ -5,6 +5,7 @@
 //! grammar and maps every offset it reports to the file, so a block's prefix is the line's
 //! indentation and marker. A container never rewrites a line's bytes after its prefix.
 
+mod jsdoc;
 mod python;
 mod rust;
 
@@ -18,6 +19,7 @@ use crate::read::error::ReadError;
 use super::block::{BodyLine, CodeBlock};
 use super::markdown;
 
+pub(super) use jsdoc::blocks as jsdoc_blocks;
 pub(super) use python::blocks as python_blocks;
 pub(super) use rust::blocks;
 

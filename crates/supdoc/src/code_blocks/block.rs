@@ -73,7 +73,8 @@ fn is_rust_file(file: &str) -> bool {
 
 /// Every code block in `file`, in file order, located by `locate`, which turns a byte range of
 /// the file into a [`Location`]. Markdown files hold blocks, and so do the `///` and `//!` doc
-/// comments of Rust files and the docstrings of Python files.
+/// comments of Rust files, the docstrings of Python files and the `/** */` comments of
+/// JavaScript, TypeScript and TSX files.
 #[cfg(test)]
 #[must_use]
 pub(crate) fn blocks_in(
@@ -98,6 +99,7 @@ pub(crate) fn try_blocks_in(
         "markdown" => markdown::try_blocks(file, locate),
         "rust" => doc_comments::blocks(file, locate),
         "python" => doc_comments::python_blocks(file, locate),
+        "javascript" | "typescript" | "tsx" => doc_comments::jsdoc_blocks(file, locate),
         _ => Ok(Vec::new()),
     }
 }
@@ -171,7 +173,7 @@ fn empty_body_replacement(
     let marker = closing
         .get(indent..)
         .and_then(|rest| {
-            ["///", "//!"]
+            ["///", "//!", "*"]
                 .into_iter()
                 .find(|marker| rest.starts_with(marker))
         })
@@ -184,9 +186,10 @@ fn empty_body_replacement(
     Some((start..start, replacement))
 }
 
-/// Whether `prefix` is a doc-comment marker with no space after it, as on a blank doc line.
+/// Whether `prefix` is a doc-comment marker with no space after it, as on a blank doc line: a
+/// Rust `///` or `//!`, or the `*` of a `/** */` line.
 fn is_bare_marker(prefix: &str) -> bool {
-    prefix.ends_with("///") || prefix.ends_with("//!")
+    prefix.ends_with("///") || prefix.ends_with("//!") || prefix.ends_with('*')
 }
 
 /// `body`'s lines, each led by `prefix` (trimmed on a blank line), joined by `newline`. A line's
