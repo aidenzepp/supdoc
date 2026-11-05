@@ -1603,11 +1603,13 @@ fn rust_refusal(
         )),
         Scan::Read(rust::Found::QualifiedMacro(name)) => Some((
             NotChecked::CompileTimeRead,
-            Some(format!("compile-time read: path-qualified `{name}` macro")),
+            Some(format!(
+                "macro `{name}` called through a path isn't on supdoc's list"
+            )),
         )),
         Scan::Read(rust::Found::UnlistedMacro(name)) => Some((
             NotChecked::CompileTimeRead,
-            Some(format!("compile-time read: `{name}` macro")),
+            Some(format!("macro `{name}` isn't on supdoc's list")),
         )),
         Scan::Read(rust::Found::Attribute(name)) if !name.is_empty() => Some((
             NotChecked::CompileTimeRead,
