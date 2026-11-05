@@ -95,7 +95,10 @@ the current text in.
   fragment(KIND)
       The block is part of a larger construct: statements, expression, entries, children, \
 members or declarations. A step whose tool can't check that kind doesn't run, with a \
-code-block-fragment-unsupported warning.
+code-block-fragment-unsupported warning. Some tools read a kind only inside a frame supdoc adds \
+around the block, which no finding or fix shows:
+      rustfmt       statements, expression: fn supdoc_fragment() { ... }, its max_width \
+raised by one indent
   ignore(reason)
       Check nothing in this block.
   format(off: reason), lint(off: reason)

@@ -1,10 +1,10 @@
-//! Checking blocks that declare `fragment(<kind>)`: kinds a tool doesn't list, and the kinds the
-//! static cartridges check natively.
+//! Checking blocks that declare `fragment(<kind>)`: kinds a tool doesn't list, the kinds the
+//! static cartridges check natively, and the kinds rustfmt reads inside a frame.
 
 #![cfg(test)]
 
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::support::{Project, array_at, at, real_tool_dir};
 
@@ -38,7 +38,7 @@ fn check(project: &Project) -> serde_json::Value {
 
 #[test]
 fn a_kind_no_tool_lists_leaves_both_steps_not_run_with_one_warning_each() {
-    let json = check(&project_with_info("fragment(statements)"));
+    let json = check(&project_with_info("fragment(entries)"));
 
     assert_eq!(
         finding_kinds(&json),
@@ -46,12 +46,12 @@ fn a_kind_no_tool_lists_leaves_both_steps_not_run_with_one_warning_each() {
         "{json}"
     );
     let block = at(&json, "/data/code_blocks/0");
-    assert_eq!(block["fragment"], "statements", "{json}");
+    assert_eq!(block["fragment"], "entries", "{json}");
     assert_eq!(block["format"], "not_run", "{json}");
     assert_eq!(block["lint"], "not_run", "{json}");
     assert_eq!(
         block["reason"],
-        "rustfmt can't check a statements fragment; clippy can't check a statements fragment",
+        "rustfmt can't check an entries fragment; clippy can't check an entries fragment",
         "{json}"
     );
     assert_eq!(
@@ -68,13 +68,13 @@ fn a_kind_no_tool_lists_leaves_both_steps_not_run_with_one_warning_each() {
 
 #[test]
 fn the_summary_line_counts_the_step_under_its_own_reason() {
-    let output = project_with_info("fragment(expression)")
+    let output = project_with_info("fragment(entries)")
         .supdoc(&["check"])
         .stdout
         .clone();
 
     assert!(
-        output.contains("format not run (rustfmt can't check an expression fragment)"),
+        output.contains("format not run (rustfmt can't check an entries fragment)"),
         "{output}"
     );
 }
@@ -238,8 +238,8 @@ fn native_rustfmt_checks_a_members_fragment() {
 }
 
 #[test]
-fn native_rustfmt_still_cant_check_statements_or_an_expression() {
-    for kind in ["statements", "expression"] {
+fn native_rustfmt_cant_check_entries_children_or_declarations() {
+    for kind in ["entries", "children", "declarations"] {
         let project = project_with_block(
             RUST_FORMAT_ONLY,
             "rust",
@@ -353,22 +353,10 @@ fn native_ruff_leaves_off_the_function_body_rules_only_for_statements() {
 
 #[test]
 fn native_real_rustfmt_formats_a_method_without_its_impl() {
-    let Some(dir) = real_tool_dir(
-        "rustfmt",
-        "native_real_rustfmt_formats_a_method_without_its_impl",
-    ) else {
+    let Some(env) = real_rustfmt("native_real_rustfmt_formats_a_method_without_its_impl") else {
         return;
     };
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let rustup = std::env::var_os("RUSTUP_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| home.as_ref().map(|home| home.join(".rustup")));
-    let cargo = std::env::var_os("CARGO_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| home.as_ref().map(|home| home.join(".cargo")));
-    let mut vars: Vec<(&str, &Path)> = vec![("PATH", &dir)];
-    vars.extend(rustup.as_deref().map(|path| ("RUSTUP_HOME", path)));
-    vars.extend(cargo.as_deref().map(|path| ("CARGO_HOME", path)));
+    let vars = borrowed(&env);
     let formatted = project_with_block(RUST_FORMAT_ONLY, "rust", "fragment(members)", RUST_METHOD);
     let unformatted = project_with_block(
         RUST_FORMAT_ONLY,
@@ -448,4 +436,176 @@ fn native_real_black_formats_a_top_level_return_as_statements() {
     let json = check_with_path(&project, Path::new(&path), 0);
 
     assert_passed_with_every_step_run(&json);
+}
+
+/// The variables a run of the real rustfmt needs, for the test named `test`: `PATH` holding only
+/// rustfmt's directory, and rustup's and cargo's homes, which rustup's proxy reads. `None` when
+/// rustfmt is not on `PATH` (see [`real_tool_dir`]).
+fn real_rustfmt(test: &str) -> Option<Vec<(&'static str, PathBuf)>> {
+    let dir = real_tool_dir("rustfmt", test)?;
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let rustup = std::env::var_os("RUSTUP_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home.as_ref().map(|home| home.join(".rustup")));
+    let cargo = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home.as_ref().map(|home| home.join(".cargo")));
+    let mut env = vec![("PATH", dir)];
+    env.extend(rustup.map(|path| ("RUSTUP_HOME", path)));
+    env.extend(cargo.map(|path| ("CARGO_HOME", path)));
+    Some(env)
+}
+
+/// `env` as [`Project::supdoc_in_with`] takes it.
+fn borrowed<'env>(env: &'env [(&'static str, PathBuf)]) -> Vec<(&'static str, &'env Path)> {
+    env.iter()
+        .map(|(name, path)| (*name, path.as_path()))
+        .collect()
+}
+
+/// The frame rustfmt reads `statements` and `expression` blocks in, and the name only it holds.
+const RUSTFMT_FRAME: [&str; 2] = ["fn supdoc_fragment() {", "supdoc_fragment"];
+
+/// A doc with prose around one Rust block declaring `fragment(<kind>)` and holding `body`.
+fn framed_doc(kind: &str, body: &str) -> String {
+    format!("# Blocks\n\nBefore `x`.\n\n```rust fragment({kind})\n{body}```\n\nAfter `y`.\n")
+}
+
+/// A recorded `basic` project with rustfmt alone on, and `doc` at `docs/blocks.md`.
+fn rustfmt_project(doc: &str) -> Project {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write(
+        "supdoc.config.toml",
+        &format!("[features.code-blocks]\n{RUST_FORMAT_ONLY}"),
+    );
+    project.write("docs/blocks.md", doc);
+    project
+}
+
+/// Asserts that no finding of `json` shows a line or name of rustfmt's frame in its message,
+/// help, location or fix.
+fn assert_no_frame_text(json: &serde_json::Value) {
+    for finding in array_at(json, "/findings") {
+        for field in ["message", "help", "location", "fix"] {
+            let text = finding[field].to_string();
+            for frame in RUSTFMT_FRAME {
+                assert!(!text.contains(frame), "{field} shows {frame:?}: {finding}");
+            }
+        }
+    }
+}
+
+/// Checks `formatted` and `unformatted`, each the body of a `fragment(<kind>)` block, with the
+/// real rustfmt in `env`: the formatted one passes, the unformatted one fails
+/// `code-block-unformatted` with a fix, and `fix --yes` turns its doc into the formatted one's,
+/// byte for byte. No finding shows the frame.
+fn assert_rustfmt_frames(
+    env: &[(&'static str, PathBuf)],
+    kind: &str,
+    formatted: &str,
+    unformatted: &str,
+) {
+    let vars = borrowed(env);
+    let passing = rustfmt_project(&framed_doc(kind, formatted));
+    let failing = rustfmt_project(&framed_doc(kind, unformatted));
+
+    let passes = passing
+        .supdoc_in_with(".", &["check", "--json"], &vars)
+        .assert_exit(0)
+        .json();
+    let fails = failing
+        .supdoc_in_with(".", &["check", "--json"], &vars)
+        .assert_exit(1)
+        .json();
+    let _fix = failing
+        .supdoc_in_with(".", &["fix", "--yes"], &vars)
+        .assert_exit(0);
+
+    assert_passed_with_every_step_run(&passes);
+    assert_eq!(
+        finding_kinds(&fails),
+        ["code-block-unformatted"],
+        "{kind}: {fails}"
+    );
+    assert!(
+        at(&fails, "/findings/0/fix/replacement").is_string(),
+        "{kind}: {fails}"
+    );
+    assert_no_frame_text(&fails);
+    assert_eq!(
+        failing.read("docs/blocks.md"),
+        framed_doc(kind, formatted),
+        "{kind}: the fix rewrites only the block's own lines"
+    );
+}
+
+#[test]
+fn rustfmt_formats_the_repro_block_as_statements() {
+    let Some(env) = real_rustfmt("rustfmt_formats_the_repro_block_as_statements") else {
+        return;
+    };
+
+    assert_rustfmt_frames(
+        &env,
+        "statements",
+        "let limit = parse_limit(\"8\")?;\nassert_eq!(limit, 8);\n",
+        "let limit=parse_limit(\"8\")?;\nassert_eq!(limit,8);\n",
+    );
+}
+
+#[test]
+fn frame_format_real_rustfmt_checks_statements_and_keeps_a_literal_exact() {
+    let test = "frame_format_real_rustfmt_checks_statements_and_keeps_a_literal_exact";
+    let Some(env) = real_rustfmt(test) else {
+        return;
+    };
+
+    assert_rustfmt_frames(
+        &env,
+        "statements",
+        "let s = \"a\n    b\";\nif s.is_empty() {\n    return;\n}\n",
+        "let  s = \"a\n    b\";\nif s.is_empty() { return; }\n",
+    );
+}
+
+#[test]
+fn frame_format_real_rustfmt_checks_an_expression() {
+    let Some(env) = real_rustfmt("frame_format_real_rustfmt_checks_an_expression") else {
+        return;
+    };
+
+    assert_rustfmt_frames(
+        &env,
+        "expression",
+        "parse_limit(\"8\").unwrap_or(0) + 1\n",
+        "parse_limit( \"8\" ).unwrap_or(0)+1\n",
+    );
+}
+
+#[test]
+fn frame_format_real_rustfmt_holds_a_line_to_the_projects_max_width() {
+    let test = "frame_format_real_rustfmt_holds_a_line_to_the_projects_max_width";
+    let Some(env) = real_rustfmt(test) else {
+        return;
+    };
+    let vars = borrowed(&env);
+    let at_width = "let total = compute(alpha, beta, gamma);\n";
+    let over_width = "let total = compute(alpha, beta, gammas);\n";
+    assert_eq!(at_width.trim_end().len(), 40, "the passing line is 40 wide");
+    let check_at_40 = |body: &str, exit: i32| {
+        let project = rustfmt_project(&framed_doc("statements", body));
+        project.write("rustfmt.toml", "max_width = 40\n");
+        project
+            .supdoc_in_with(".", &["check", "--json"], &vars)
+            .assert_exit(exit)
+            .json()
+    };
+
+    let passes = check_at_40(at_width, 0);
+    let fails = check_at_40(over_width, 1);
+
+    assert_passed_with_every_step_run(&passes);
+    assert_eq!(finding_kinds(&fails), ["code-block-unformatted"], "{fails}");
+    assert_no_frame_text(&fails);
 }

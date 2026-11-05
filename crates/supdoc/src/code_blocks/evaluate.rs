@@ -599,8 +599,8 @@ fn indent_unknown(at: &Location) -> Finding {
          format step didn't run on blocks it reads inside a frame",
     )
     .with_help(
-        "set the indent plainly in the formatter's config (rustfmt's `hard_tabs` and \
-         `tab_spaces`; biome's `indentStyle` and `indentWidth`, outside `overrides`), or mark \
+        "set the indent plainly in the formatter's config (rustfmt's `hard_tabs`, `tab_spaces` \
+         and `max_width`; biome's `indentStyle` and `indentWidth`, outside `overrides`), or mark \
          the blocks `format(off: <reason>)`",
     )
     .with_location(at.clone())
@@ -1252,8 +1252,9 @@ struct RustSetup {
     lints: Vec<OsString>,
     /// `CLIPPY_CONF_DIR` for an in-root clippy config, or nothing.
     clippy_conf: Option<OsString>,
-    /// The indent rustfmt's config gives it: `None` when the config can't be read for it.
-    indent: Option<RustfmtIndent>,
+    /// The indent and width rustfmt's config gives it: `None` when the config can't be read for
+    /// them.
+    layout: Option<RustfmtLayout>,
 }
 
 impl RustSetup {
@@ -1272,7 +1273,7 @@ impl RustSetup {
         let config = rust::config_args(root);
         Self {
             toolchain,
-            indent: RustfmtIndent::read(&config),
+            layout: RustfmtLayout::read(&config),
             config,
             edition: toolchain::cargo_edition(root).unwrap_or(Edition::E2024),
             lints: toolchain::cargo_lints(root),
@@ -1286,25 +1287,28 @@ impl RustSetup {
     }
 }
 
-/// The indent settings rustfmt formats with.
+/// The indent and width settings rustfmt formats with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RustfmtIndent {
+struct RustfmtLayout {
     /// `hard_tabs`: indent with a tab.
     hard_tabs: bool,
     /// `tab_spaces`: the spaces in one indent, and a tab's width under `hard_tabs`.
     tab_spaces: usize,
+    /// `max_width`: the widest a line may be.
+    max_width: usize,
 }
 
-impl RustfmtIndent {
+impl RustfmtLayout {
     /// rustfmt's own defaults.
     const DEFAULT: Self = Self {
         hard_tabs: false,
         tab_spaces: 4,
+        max_width: 100,
     };
 
     /// The settings `config`, rustfmt's `--config-path` arguments, give it: its defaults with no
-    /// config. `None` when the config file can't be read or parsed, or either key holds a value
-    /// rustfmt wouldn't take.
+    /// config. `None` when the config file can't be read or parsed, or any of the keys holds a
+    /// value rustfmt wouldn't take.
     ///
     /// Effect: reads the config file.
     fn read(config: &[OsString]) -> Option<Self> {
@@ -1319,15 +1323,16 @@ impl RustfmtIndent {
         let hard_tabs = table
             .get("hard_tabs")
             .map_or(Some(false), toml::Value::as_bool)?;
-        let tab_spaces = match table.get("tab_spaces") {
-            None => Self::DEFAULT.tab_spaces,
+        let width = |key: &str, default: usize| match table.get(key) {
+            None => Some(default),
             Some(value) => usize::try_from(value.as_integer()?)
                 .ok()
-                .filter(|width| *width > 0)?,
+                .filter(|width| *width > 0),
         };
         Some(Self {
             hard_tabs,
-            tab_spaces,
+            tab_spaces: width("tab_spaces", Self::DEFAULT.tab_spaces)?,
+            max_width: width("max_width", Self::DEFAULT.max_width)?,
         })
     }
 
@@ -1340,14 +1345,18 @@ impl RustfmtIndent {
         }
     }
 
-    /// The arguments that make rustfmt use these settings whatever config it finds on its own,
-    /// such as one above its working directory or in the user's home.
-    fn args(self) -> [OsString; 2] {
+    /// The arguments that make rustfmt use these settings, on a block whose every line it reads
+    /// led by one indent unit, whatever config it finds on its own, such as one above its working
+    /// directory or in the user's home: `max_width` grows by the unit's width (a tab's is
+    /// `tab_spaces`), so a block line fits exactly when it fits the project's width as written.
+    fn framed_args(self) -> [OsString; 2] {
         [
             OsString::from("--config"),
             OsString::from(format!(
-                "hard_tabs={},tab_spaces={}",
-                self.hard_tabs, self.tab_spaces
+                "hard_tabs={},tab_spaces={},max_width={}",
+                self.hard_tabs,
+                self.tab_spaces,
+                self.max_width.saturating_add(self.tab_spaces)
             )),
         ]
     }
@@ -1421,8 +1430,8 @@ fn indent_unit(
 ) -> Option<(String, Vec<OsString>)> {
     match tool.binary {
         "rustfmt" => rust?
-            .indent
-            .map(|indent| (indent.unit(), indent.args().to_vec())),
+            .layout
+            .map(|layout| (layout.unit(), layout.framed_args().to_vec())),
         "biome" => biome_indent(tool.language, given).map(|unit| (unit, Vec::new())),
         _ => None,
     }
@@ -3659,19 +3668,11 @@ mod tests {
         use super::{rust_record, rust_records, temporary};
         use crate::code_blocks::biome::Given;
         use crate::code_blocks::format::Verdict;
-        use crate::code_blocks::fragment::{Kind, Support};
+        use crate::code_blocks::fragment::{Frame, Kind};
         use crate::code_blocks::states::StepState;
         use crate::code_blocks::tools::{ToolEnv, formatter};
         use crate::config::code_blocks::Language;
         use crate::finding::Finding;
-
-        /// rustfmt's statements frame, as fragments-design §2.6 lists it for P5-FR10.
-        const STATEMENTS: Support = Support::Framed {
-            before: "fn main() {",
-            after: "}",
-            out_before: "fn main() {",
-            out_after: "}",
-        };
 
         /// A doc whose one Rust block declares `fragment(statements)` and holds `body`.
         fn doc(body: &str) -> String {
@@ -3708,7 +3709,8 @@ mod tests {
             };
             let rust = RustSetup::read(&env, root, Some(Duration::from_secs(120)));
             let rustfmt = formatter(Language::Rust).expect("Rust has a formatter");
-            let frame = STATEMENTS.frame(Kind::Statements);
+            let frame = Frame::of(rustfmt, Some(Kind::Statements));
+            assert!(frame.is_some(), "rustfmt reads statements inside a frame");
             run_formatter(rustfmt, program, &record, frame, &session, Some(&rust))
                 .expect("the block's body should be in its doc")
         }
@@ -4030,7 +4032,7 @@ mod tests {
                 detail.contains("<stdin>:1:10") && detail.contains("1 | let x = 1"),
                 "{detail}"
             );
-            assert!(!detail.contains("fn main"), "{detail}");
+            assert!(!detail.contains("supdoc_fragment"), "{detail}");
         }
     }
 }
