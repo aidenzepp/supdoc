@@ -800,6 +800,26 @@ fn eslint_switched_off(at: &Location) -> Finding {
 }
 
 /// The run's one `code-block-not-checked` warning, at `at`, the first block whose eslint step
+/// didn't run because no rule of the project's eslint config applies to block files matching
+/// `pattern`, such as `docs/*.ts`.
+fn eslint_no_rules(at: &Location, pattern: Option<&str>) -> Finding {
+    let pattern = pattern.unwrap_or("the block's file");
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        format!(
+            "no eslint rule applies to {pattern}, so its blocks' lint step didn't run: the \
+             project's eslint config sets no rule to warn or error for them"
+        ),
+    )
+    .with_help(
+        "supdoc names each block `<doc>.<n>.<extension>` beside its doc: set rules in a config \
+         object whose `files` match those names, or mark the blocks `lint(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose eslint step
 /// didn't run because eslint said it ignored the block's file.
 fn eslint_ignored(at: &Location) -> Finding {
     Finding::new(
@@ -999,6 +1019,7 @@ impl NotRunWarnings {
             PRETTIER_SWITCHED_OFF => prettier_switched_off(at),
             ESLINT_SWITCHED_OFF => eslint_switched_off(at),
             ESLINT_IGNORED => eslint_ignored(at),
+            ESLINT_NO_RULES => eslint_no_rules(at, said),
             YAMLLINT_REJECTED => yamllint_rejected(at, said),
             YAMLLINT_LOCALE => yamllint_locale(at, said),
             go::VET_OFFLINE => vet_offline(at),
@@ -3102,6 +3123,10 @@ fn run_linter(
         Ok(release) => release,
         Err(not_run) => return Some(Err(not_run)),
     };
+    let unruled = match eslint_rules(tool, program, &invocation, record, session) {
+        Ok(unruled) => unruled,
+        Err(not_run) => return Some(Err(not_run)),
+    };
     let fingerprint = release.as_ref().map(go::GoVersion::fingerprint);
     let run = cache::Run {
         tool,
@@ -3140,8 +3165,8 @@ fn run_linter(
             }),
         }
     };
-    let verdict = if let Some(forbidden) = forbidden_by_yaml(tool, input) {
-        forbidden
+    let verdict = if let Some(early) = forbidden_by_yaml(tool, input).or(unruled) {
+        early
     } else {
         match cached_run(&run, session, spawn, judge, |judged| {
             judged.as_ref().is_ok_and(lint::Verdict::cacheable)
@@ -3293,6 +3318,11 @@ const ESLINT: &str = "eslint";
 const ESLINT_IGNORED: &str = "eslint ignored the block's file: the project's eslint config \
                               ignores it or has no config object matching it";
 
+/// Why eslint's step didn't run on a block when no rule of the project's eslint config applies to
+/// its file.
+const ESLINT_NO_RULES: &str = "no eslint rule applies to the block's file: the project's eslint \
+                               config sets none to warn or error for it";
+
 /// Why eslint's step didn't run on a block holding an `eslint-disable` comment supdoc can't tell
 /// from one that switches eslint off for all of it (see [`eslint::switches_lint_off`]).
 const ESLINT_SWITCHED_OFF: &str = "the block holds an `eslint-disable` comment that names no \
@@ -3365,6 +3395,53 @@ fn go_release(
             reason: go::VET_VERSION,
             said: Some(said),
         })
+}
+
+/// Whether eslint, when `tool` is it, at `program`, may lint `record`'s block, `invocation`'s:
+/// some rule of the project's config applies to the block's virtual path (see
+/// [`eslint::rules_apply`]). `Ok(None)` when it may, or `tool` is any other linter; the lint
+/// step's failure when eslint couldn't say.
+///
+/// # Errors
+///
+/// [`ESLINT_NO_RULES`], naming the block files' pattern, when no rule applies.
+///
+/// Effect: runs `eslint --print-config` the first time for the block's directory and extension.
+fn eslint_rules(
+    tool: &ToolCartridge,
+    program: &Path,
+    invocation: &Invocation<'_>,
+    record: &BlockRecord,
+    session: &Session<'_>,
+) -> Result<Option<lint::Verdict>, NotRun> {
+    if tool.name != ESLINT {
+        return Ok(None);
+    }
+    let extension = biome::extension(invocation.tag);
+    let path = tools::virtual_path(invocation.doc, record.index, extension);
+    match eslint::rules_apply(
+        program,
+        session.env,
+        session.root,
+        session.timeout,
+        Path::new(&path),
+    ) {
+        Ok(true) => Ok(None),
+        Ok(false) => {
+            let dir = Path::new(record.at.file.as_str())
+                .parent()
+                .map(|dir| dir.to_string_lossy().into_owned())
+                .filter(|dir| !dir.is_empty());
+            Err(NotRun {
+                reason: ESLINT_NO_RULES,
+                said: Some(dir.map_or_else(
+                    || format!("*.{extension}"),
+                    |dir| format!("{dir}/*.{extension}"),
+                )),
+            })
+        }
+        Err(failed) => Ok(Some(lint::Verdict::Failed(failed))),
+    }
 }
 
 /// Runs `call`, `go vet`'s, on the block `input`, written as `main.go` beside a `go.mod` of

@@ -2625,14 +2625,21 @@ const ESLINT_CONFIG: &str = "module.exports = [{ files: [\"**/*.ts\", \"**/*.js\
                              } }];\n";
 
 /// Writes an `eslint` stub in `dir` that appends its working directory and arguments to
-/// `<dir>/eslint-runs`, one line per call, then runs `script`.
+/// `<dir>/eslint-runs`, one line per call, then prints a config setting `no-var` for
+/// `--print-config` and runs `script` for any other call.
 fn eslint_stub(dir: &Path, script: &str) {
+    eslint_stub_configured(dir, "echo '{\"rules\":{\"no-var\":[2]}}'", script);
+}
+
+/// [`eslint_stub`], running `config` for `--print-config` instead.
+fn eslint_stub_configured(dir: &Path, config: &str, script: &str) {
     let record = dir.join("eslint-runs");
     let path = dir.join("eslint");
     std::fs::write(
         &path,
         format!(
-            "#!/bin/sh\necho \"$(pwd -P) $*\" >> '{}'\n{script}\n",
+            "#!/bin/sh\necho \"$(pwd -P) $*\" >> '{}'\n\
+             if [ \"$1\" = --print-config ]; then\n{config}\nexit 0\nfi\n{script}\n",
             record.display()
         ),
     )
@@ -2644,12 +2651,28 @@ fn eslint_stub(dir: &Path, script: &str) {
 /// The script of an eslint stub that reads the block and reports it clean.
 const ESLINT_CLEAN: &str = "/bin/cat > /dev/null\necho '[{\"filePath\":\"x\",\"messages\":[]}]'";
 
-/// The lines `eslint_stub` in `dir` recorded: one per call.
+/// The lines `eslint_stub` in `dir` recorded: one per call, `--print-config` included.
 fn eslint_runs(dir: &Path) -> Vec<String> {
     std::fs::read_to_string(dir.join("eslint-runs"))
         .unwrap_or_default()
         .lines()
         .map(str::to_owned)
+        .collect()
+}
+
+/// The calls among [`eslint_runs`] in `dir` that lint a block: every one but `--print-config`.
+fn eslint_lints(dir: &Path) -> Vec<String> {
+    eslint_runs(dir)
+        .into_iter()
+        .filter(|run| !run.contains(" --print-config "))
+        .collect()
+}
+
+/// The `--print-config` calls among [`eslint_runs`] in `dir`.
+fn eslint_configs(dir: &Path) -> Vec<String> {
+    eslint_runs(dir)
+        .into_iter()
+        .filter(|run| run.contains(" --print-config "))
         .collect()
 }
 
@@ -2667,7 +2690,24 @@ fn eslint_runs_from_the_root_with_its_flags_and_spawns_again_on_a_second_run() {
         .path(".")
         .canonicalize()
         .expect("the project root should resolve");
-    let runs = eslint_runs(outside.path());
+    let configs = eslint_configs(outside.path());
+    assert_eq!(
+        configs.len(),
+        2,
+        "each run asks for the block file's config once: {configs:?}"
+    );
+    for config in &configs {
+        let Some((cwd, path)) = config.split_once(" --print-config ") else {
+            panic!("the record names a cwd and args: {config}");
+        };
+        assert_eq!(
+            Path::new(cwd),
+            root,
+            "--print-config runs from the root: {config}"
+        );
+        assert!(path.ends_with("/docs/blocks.md.1.ts"), "{config}");
+    }
+    let runs = eslint_lints(outside.path());
     assert_eq!(
         runs.len(),
         2,
@@ -2702,7 +2742,7 @@ fn eslint_in_the_projects_node_modules_runs_before_one_on_path() {
 
     let json = trusted_prettier_check(&project, outside.path(), cache.path(), 0);
 
-    let runs = eslint_runs(&bin);
+    let runs = eslint_lints(&bin);
     assert_eq!(runs.len(), 1, "the root's eslint runs: {json}");
     assert!(
         runs.first()
@@ -2732,7 +2772,7 @@ fn eslint_disable_naming_no_rule_is_lint_not_run_naming_lint_off() {
     let json = trusted_prettier_check(&project, outside.path(), cache.path(), 0);
 
     assert_eq!(
-        eslint_runs(outside.path()).len(),
+        eslint_lints(outside.path()).len(),
         1,
         "eslint runs only on the block naming its rule: {json}"
     );
@@ -2901,10 +2941,17 @@ fn eslint_the_real_one_without_a_usable_config_is_a_tool_failure() {
         return;
     };
     let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
-    for config in [
-        None,
-        Some(
-            "module.exports = [{ files: [\"**/*.ts\"], rules: { \"no-such-rule\": \"error\" } }];\n",
+    for (config, cause) in [
+        (None, "ESLint couldn't find an eslint.config.* file."),
+        (
+            Some(
+                "module.exports = [{ files: [\"**/*.ts\"], rules: { \"no-such-rule\": \"error\" } }];\n",
+            ),
+            "Could not find \"no-such-rule\"",
+        ),
+        (
+            Some("throw new Error(\"the config threw\");\n"),
+            "the config threw",
         ),
     ] {
         let project = eslint_project("var a = 1;");
@@ -2918,6 +2965,218 @@ fn eslint_the_real_one_without_a_usable_config_is_a_tool_failure() {
             finding_kinds(&json),
             ["code-block-tool-failed"],
             "{config:?}: {json}"
+        );
+        let message = at(&json, "/findings/0/message");
+        assert!(
+            message
+                .as_str()
+                .is_some_and(|message| message.contains(cause)
+                    && !message.contains("Oops!")
+                    && !message.contains("ESLint: ")),
+            "the finding names the cause, not eslint's banner: {json}"
+        );
+    }
+}
+
+#[test]
+fn eslint_output_that_isnt_its_report_is_a_tool_failure_never_a_pass() {
+    let warning = r#"[{"filePath":"x","messages":[{"ruleId":"eqeqeq","severity":1,"message":"Expected '==='.","line":1,"column":7}]}]"#;
+    let one = r#"{"filePath":"x","messages":[]}"#;
+    for stdout in [
+        format!("config loaded\n{warning}\n"),
+        "not json\n".to_owned(),
+        "[]\n".to_owned(),
+        "[{\"filePath\":\"x\"}]\n".to_owned(),
+        format!("[{one},{one}]\n"),
+        format!("{}{}\n", "[".repeat(100_000), "]".repeat(100_000)),
+    ] {
+        let project = eslint_project("let a = 1;\nif (a == 2) {}");
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let printed = outside.path().join("printed");
+        std::fs::write(&printed, &stdout).expect("the stub's output should be writable");
+        eslint_stub(
+            outside.path(),
+            &format!(
+                "/bin/cat > /dev/null\n/bin/cat '{}'\nexit 0",
+                printed.display()
+            ),
+        );
+
+        let json = trusted_prettier_check(&project, outside.path(), cache.path(), 1);
+
+        let shown = stdout.get(..40).unwrap_or(&stdout);
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-tool-failed"],
+            "{shown}: {json}"
+        );
+        assert!(
+            at(&json, "/findings/0/message")
+                .as_str()
+                .is_some_and(|message| message.contains("wasn't its JSON report")),
+            "{shown}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/passed"),
+            0,
+            "{shown}: {json}"
+        );
+    }
+}
+
+#[test]
+fn eslint_print_config_output_that_isnt_a_config_is_a_tool_failure_and_never_lints() {
+    let project = eslint_project("const a = 1;");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    eslint_stub_configured(
+        outside.path(),
+        "echo 'config loaded'\necho '{\"rules\":{\"no-var\":[2]}}'",
+        ESLINT_CLEAN,
+    );
+
+    let json = trusted_prettier_check(&project, outside.path(), cache.path(), 1);
+
+    assert_eq!(finding_kinds(&json), ["code-block-tool-failed"], "{json}");
+    assert!(
+        at(&json, "/findings/0/message")
+            .as_str()
+            .is_some_and(|message| message.contains("--print-config")),
+        "{json}"
+    );
+    assert!(eslint_lints(outside.path()).is_empty(), "{json}");
+}
+
+#[test]
+fn eslint_with_no_rule_for_the_blocks_files_is_lint_not_run_with_one_warning() {
+    let project = eslint_project("const a = 1;");
+    project.write(
+        "docs/blocks.md",
+        "# Blocks\n\n```ts\nconst a = 1;\n```\n\n```ts\nconst b = 2;\n```\n",
+    );
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    eslint_stub_configured(
+        outside.path(),
+        "echo '{\"rules\":{\"no-var\":[0],\"semi\":\"off\"}}'",
+        ESLINT_CLEAN,
+    );
+
+    let json = trusted_prettier_check(&project, outside.path(), cache.path(), 0);
+
+    assert_eq!(
+        eslint_configs(outside.path()).len(),
+        1,
+        "the config is asked for once per doc directory and extension: {json}"
+    );
+    assert!(eslint_lints(outside.path()).is_empty(), "{json}");
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+    assert!(
+        at(&json, "/findings/0/message")
+            .as_str()
+            .is_some_and(|message| message.starts_with("no eslint rule applies to docs/*.ts")),
+        "{json}"
+    );
+    for block in 0..2 {
+        assert_eq!(
+            at(&json, &format!("/data/code_blocks/{block}/lint")),
+            "not_run",
+            "block {block}: {json}"
+        );
+    }
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 0, "{json}");
+}
+
+#[test]
+fn eslint_the_real_one_never_passes_a_flagged_block_whatever_its_config_prints() {
+    let Some(dir) = real_tool_dir(
+        "eslint",
+        "eslint_the_real_one_never_passes_a_flagged_block_whatever_its_config_prints",
+    ) else {
+        return;
+    };
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    for config in [
+        "console.log(\"config loaded\");\n\
+         module.exports = [{ files: [\"**/*.ts\"], rules: { eqeqeq: \"warn\" } }];\n",
+        "console.log(\"config loaded\");\n\
+         module.exports = [{ ignores: [\"docs/**\"] }, { files: [\"**/*.ts\"], rules: { eqeqeq: \"warn\" } }];\n",
+        "const loud = { create() { console.log(\"rule ran\"); return {}; } };\n\
+         module.exports = [{ files: [\"**/*.ts\"], plugins: { p: { rules: { loud } } }, \
+         rules: { \"p/loud\": \"warn\", eqeqeq: \"warn\" } }];\n",
+    ] {
+        let project = eslint_project("let a = 1;\nif (a == 2) {}");
+        project.write("eslint.config.js", config);
+
+        let json = project
+            .supdoc_in_with(
+                ".",
+                &["check", "--json"],
+                &[
+                    ("PATH", dir.as_path()),
+                    ("SUPDOC_TRUST", Path::new("1")),
+                    ("XDG_CACHE_HOME", cache.path()),
+                ],
+            )
+            .json();
+
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/passed"),
+            0,
+            "{config}: {json}"
+        );
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-tool-failed"],
+            "{config}: {json}"
+        );
+    }
+}
+
+#[test]
+fn eslint_the_real_one_with_no_rule_for_the_blocks_files_is_lint_not_run() {
+    let Some(dir) = real_tool_dir(
+        "eslint",
+        "eslint_the_real_one_with_no_rule_for_the_blocks_files_is_lint_not_run",
+    ) else {
+        return;
+    };
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    for (table, tag, config, pattern) in [
+        (
+            "javascript",
+            "js",
+            "module.exports = [{ files: [\"src/**/*.js\"], rules: { \"no-var\": \"error\" } }];\n",
+            "docs/*.js",
+        ),
+        (
+            "typescript",
+            "ts",
+            "module.exports = [{ files: [\"**/*.ts\"] }];\n",
+            "docs/*.ts",
+        ),
+    ] {
+        let project = project_with_block(&eslint_tables(table), tag, "var a = 1;");
+        project.write("eslint.config.js", config);
+
+        let json = trusted_prettier_check(&project, &dir, cache.path(), 0);
+
+        assert_eq!(
+            at(&json, "/data/code_blocks/0/lint"),
+            "not_run",
+            "{tag}: {json}"
+        );
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-not-checked"],
+            "{tag}: {json}"
+        );
+        assert!(
+            at(&json, "/findings/0/message").as_str().is_some_and(
+                |message| message.starts_with(&format!("no eslint rule applies to {pattern}"))
+            ),
+            "{tag}: {json}"
         );
     }
 }

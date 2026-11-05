@@ -19,11 +19,26 @@
 //! config ignores, or that no config object's `files` match, gives one message with
 //! `"ruleId":null,"fatal":false,"severity":1` and no line, `File ignored because of a matching
 //! ignore pattern. ...` or `File ignored because no matching configuration was supplied.`, exit
-//! 0. A missing or broken config prints a stack trace to stderr, nothing to stdout, and exits 2.
+//! 0. A missing or broken config prints a banner (`Oops! Something went wrong! :(`, `ESLint:
+//! 10.14.0`) and then its cause to stderr, nothing to stdout, and exits 2. A `console.log` in the
+//! project's config or a plugin prints to stdout before the report, at any exit, so stdout that
+//! isn't exactly one file's result is never read as one.
+//!
+//! eslint lints a file that config objects match but that no rule applies to, reporting nothing.
+//! supdoc asks `eslint --print-config <virtual path>` first (see [`rules_apply`]), which prints
+//! the resolved config as JSON, its `rules` normalized to arrays led by a severity (`{"no-var":
+//! [2], "eqeqeq": [1, "always"]}`), or `undefined` for a path the config ignores. A plugin
+//! processor that turns a block into no code at all still lints nothing and reports nothing: that
+//! residual can't be seen from the config.
+
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
 
 use super::format;
 use super::lint::{self, Diagnostic};
-use super::runner::{Failure, Ran};
+use super::runner::{self, Failure, Ran};
+use super::tools::ToolEnv;
 
 /// The start of the message eslint gives instead of linting a file its config leaves out.
 const IGNORED: &str = "File ignored";
@@ -42,6 +57,149 @@ const DISABLE: &str = "eslint-disable";
 
 /// The verdict on a run eslint failed in without reporting a message.
 const FAILED_SILENTLY: &str = "eslint exited non-zero and reported no message";
+
+/// The verdict on a run whose stdout isn't eslint's report on the one block.
+const NOT_REPORT: &str = "its output wasn't its JSON report on the block, so supdoc can't read \
+                          what it found; something else printed to stdout, such as a \
+                          `console.log` in the project's eslint config or a plugin";
+
+/// The verdict on a `--print-config` run whose stdout isn't the block's config.
+const NOT_CONFIG: &str = "`eslint --print-config` printed something other than the block's \
+                          config as JSON, so supdoc can't tell which rules apply to it; something \
+                          else printed to stdout, such as a `console.log` in the project's eslint \
+                          config or a plugin";
+
+/// The lines eslint prints before the cause of a failure.
+const BANNER: [&str; 2] = ["Oops! Something went wrong!", "ESLint: "];
+
+/// What `--print-config` printed for each block file supdoc asked about in the process, by eslint
+/// binary, doc directory and extension (see [`rules_apply`]).
+static ASKED: Mutex<Vec<(Asked, Result<bool, format::Verdict>)>> = Mutex::new(Vec::new());
+
+/// What a `--print-config` answer is kept under: the eslint binary, the block file's directory
+/// and its extension.
+type Asked = (PathBuf, PathBuf, String);
+
+/// The config eslint prints for a file with `--print-config`.
+#[derive(serde::Deserialize)]
+struct Printed {
+    /// Each rule's setting, as eslint normalizes it: an array led by its severity.
+    #[serde(default)]
+    rules: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Whether `setting`, a rule's in a printed config, sets it to warn or error: a severity `1`,
+/// `2`, `"warn"` or `"error"`, alone or leading an array.
+fn enabled(setting: &serde_json::Value) -> bool {
+    let severity = setting
+        .as_array()
+        .map_or(Some(setting), |array| array.first());
+    match severity {
+        Some(serde_json::Value::Number(level)) => level.as_u64().is_some_and(|level| level > 0),
+        Some(serde_json::Value::String(level)) => {
+            matches!(level.as_str(), "warn" | "error" | "1" | "2")
+        }
+        _ => false,
+    }
+}
+
+/// Whether any rule of the project's eslint config applies to the block file at `path`, asked of
+/// `program` with `--print-config` from `root` with `env` under `timeout`, once per directory and
+/// extension in the process. A path the config ignores answers `true`: the lint run reports it
+/// ignored (see [`linted_nothing`]).
+///
+/// # Errors
+///
+/// The failure of a run that timed out, failed or printed anything but the config: a tool
+/// failure in supdoc's words, as the lint step reports it.
+///
+/// Effect: runs `eslint --print-config` the first time for each directory and extension.
+pub(crate) fn rules_apply(
+    program: &Path,
+    env: &ToolEnv,
+    root: &Path,
+    timeout: Option<Duration>,
+    path: &Path,
+) -> Result<bool, format::Verdict> {
+    let key = (
+        program.to_path_buf(),
+        path.parent().unwrap_or(root).to_path_buf(),
+        path.extension()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let mut asked = ASKED.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((_, answer)) = asked.iter().find(|(known, _)| *known == key) {
+        return answer.clone();
+    }
+    let answer = ask_rules(program, env, root, timeout, path);
+    asked.push((key, answer.clone()));
+    answer
+}
+
+/// `eslint --print-config`'s answer for `path`, as [`rules_apply`] reads it, asked afresh.
+///
+/// # Errors
+///
+/// As [`rules_apply`].
+///
+/// Effect: runs the binary.
+fn ask_rules(
+    program: &Path,
+    env: &ToolEnv,
+    root: &Path,
+    timeout: Option<Duration>,
+    path: &Path,
+) -> Result<bool, format::Verdict> {
+    let call = runner::Call {
+        program,
+        name: "eslint",
+        args: &[std::ffi::OsStr::new("--print-config"), path.as_os_str()],
+        extra: &[],
+        stdin: b"",
+        timeout,
+        cwd: runner::Cwd::Root,
+        cap: runner::CAP,
+    };
+    let ran = runner::run(&call, env, root).map_err(format::failed)?;
+    let not_config = || format::Verdict::ToolFailed(NOT_CONFIG.to_owned());
+    if !ran.success {
+        return Err(cause(&ran.stderr).map_or_else(not_config, format::Verdict::ToolFailed));
+    }
+    let printed = String::from_utf8_lossy(&ran.stdout);
+    if printed.trim() == "undefined" {
+        return Ok(true);
+    }
+    let printed: Printed = serde_json::from_str(&printed).map_err(|_| not_config())?;
+    Ok(printed.rules.values().any(enabled))
+}
+
+/// The cause eslint printed for a failure in `stderr`: its first lines after the banner (see
+/// [`BANNER`]), without ANSI escapes. `None` when nothing follows the banner.
+fn cause(stderr: &[u8]) -> Option<String> {
+    let stderr = format::strip_ansi(&String::from_utf8_lossy(stderr));
+    let rest: Vec<&str> = stderr
+        .lines()
+        .filter(|line| {
+            let line = line.trim();
+            !line.is_empty() && !BANNER.iter().any(|banner| line.starts_with(banner))
+        })
+        .collect();
+    if rest.is_empty() {
+        return None;
+    }
+    Some(format::exit_detail(rest.join("\n").as_bytes()))
+}
+
+/// What supdoc says about a run whose stdout isn't eslint's report: the cause eslint printed for
+/// a failure (see [`cause`]), else that its output wasn't the report.
+fn unread(ran: &Ran) -> String {
+    (!ran.success)
+        .then(|| cause(&ran.stderr))
+        .flatten()
+        .unwrap_or_else(|| NOT_REPORT.to_owned())
+}
 
 /// One file's result in eslint's `--format json` report.
 #[derive(serde::Deserialize)]
@@ -100,15 +258,13 @@ impl Message {
     }
 }
 
-/// Every message in the report in `stdout`. `None` when it isn't eslint's `json` report.
+/// The messages of the report in `stdout`. `None` unless stdout is exactly eslint's `json`
+/// report on one file, as `--stdin` gives: anything printed besides it, no result or more than
+/// one, a result without `messages`, or JSON nested past `serde_json`'s depth limit.
 fn messages(stdout: &[u8]) -> Option<Vec<Message>> {
     let results: Vec<FileResult> = serde_json::from_slice(stdout).ok()?;
-    Some(
-        results
-            .into_iter()
-            .flat_map(|result| result.messages)
-            .collect(),
-    )
+    let [result] = <[FileResult; 1]>::try_from(results).ok()?;
+    Some(result.messages)
 }
 
 /// Whether eslint's report in `stdout` says it ignored the block, so the run says nothing about
@@ -121,8 +277,9 @@ pub(crate) fn linted_nothing(stdout: &[u8]) -> bool {
 /// Judges an eslint run. A fatal message is a parse failure at its line, as a formatter's is;
 /// every other message, warning or error, is a diagnostic, but for the relaxed rules (see
 /// [`RELAXED`]); a report with none left is clean whatever the exit. A non-zero exit with no
-/// message at all is a tool failure, and output that isn't the report is judged as
-/// [`lint::judge`] judges it: a config error exits 2 with nothing on stdout. eslint checks no
+/// message at all is a tool failure, as is stdout that isn't exactly the report (see
+/// [`messages`]) whatever the exit, quoting eslint's cause for a failure (a config error exits 2
+/// with nothing on stdout) and otherwise saying the output wasn't the report. eslint checks no
 /// fragments, so no run is framed.
 #[must_use]
 pub(crate) fn lint_verdict(
@@ -135,7 +292,7 @@ pub(crate) fn lint_verdict(
         Err(failure) => return lint::judge(Err(failure), |_| None),
     };
     let Some(messages) = messages(&ran.stdout) else {
-        return lint::judge(Ok(ran), |_| None);
+        return lint::Verdict::Failed(format::Verdict::ToolFailed(unread(&ran)));
     };
     if messages.is_empty() && !ran.success {
         return lint::Verdict::Failed(format::Verdict::ToolFailed(FAILED_SILENTLY.to_owned()));
@@ -198,7 +355,10 @@ fn names_rules(list: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{FAILED_SILENTLY, lint_verdict, linted_nothing, switches_lint_off};
+    use super::{
+        FAILED_SILENTLY, NOT_REPORT, cause, enabled, lint_verdict, linted_nothing,
+        switches_lint_off,
+    };
     use crate::code_blocks::format;
     use crate::code_blocks::lint::{Diagnostic, Verdict};
     use crate::code_blocks::runner::Ran;
@@ -217,6 +377,15 @@ mod tests {
             r#"{{"ruleId":"{rule}","severity":{severity},"message":"{text}","line":{},"column":{},"messageId":"x","endLine":{},"endColumn":11}}"#,
             at.0, at.1, at.0
         )
+    }
+
+    /// A finished run that exited `code`, printed `stdout` and nothing to stderr.
+    fn ran_quietly(code: i32, stdout: Vec<u8>) -> Ran {
+        Ran {
+            success: code == 0,
+            stdout,
+            stderr: Vec::new(),
+        }
     }
 
     /// A finished run that exited `code` and printed `stdout`.
@@ -336,6 +505,98 @@ mod tests {
             lint_verdict("", false, Ok(ran(0, report("")))),
             Verdict::Clean
         );
+    }
+
+    #[test]
+    fn stdout_that_isnt_exactly_one_files_report_fails_whatever_the_exit() {
+        let warning = String::from_utf8(report(&message("eqeqeq", 1, "Expected '==='.", (2, 7))))
+            .expect("the report is UTF-8");
+        let ignored = String::from_utf8(report(
+            r#"{"ruleId":null,"fatal":false,"severity":1,"message":"File ignored because of a matching ignore pattern."}"#,
+        ))
+        .expect("the report is UTF-8");
+        let one = warning
+            .strip_prefix('[')
+            .and_then(|it| it.strip_suffix(']'))
+            .expect("the report is an array");
+        for stdout in [
+            format!("config loaded\n{warning}"),
+            format!("config loaded\n{ignored}"),
+            format!("{warning}\nrule ran"),
+            "not json".to_owned(),
+            "[]".to_owned(),
+            r#"[{"filePath":"x"}]"#.to_owned(),
+            format!("[{one},{one}]"),
+            format!("{}{}", "[".repeat(100_000), "]".repeat(100_000)),
+        ] {
+            for code in [0, 1] {
+                assert_eq!(
+                    lint_verdict(
+                        "",
+                        false,
+                        Ok(ran_quietly(code, stdout.clone().into_bytes()))
+                    ),
+                    Verdict::Failed(format::Verdict::ToolFailed(NOT_REPORT.to_owned())),
+                    "exit {code}: {}",
+                    stdout.get(..60).unwrap_or(&stdout)
+                );
+            }
+            assert!(
+                !linted_nothing(stdout.as_bytes()),
+                "{}",
+                stdout.get(..60).unwrap_or(&stdout)
+            );
+        }
+    }
+
+    #[test]
+    fn a_failures_cause_is_quoted_without_eslints_banner() {
+        let stderr = b"\nOops! Something went wrong! :(\n\nESLint: 10.14.0\n\n\x1b[31mTypeError: Key \"rules\": Key \"nope\": Could not find \"nope\" in plugin \"@\".\x1b[0m\n    at throwRuleNotFoundError (config.js:119:16)\n";
+
+        assert_eq!(
+            cause(stderr).as_deref(),
+            Some(
+                "TypeError: Key \"rules\": Key \"nope\": Could not find \"nope\" in plugin \"@\".\n    at throwRuleNotFoundError (config.js:119:16)"
+            )
+        );
+        assert_eq!(
+            cause(b"\nOops! Something went wrong! :(\n\nESLint: 10.14.0\n"),
+            None
+        );
+        assert_eq!(
+            lint_verdict(
+                "",
+                false,
+                Ok(Ran {
+                    success: false,
+                    stdout: Vec::new(),
+                    stderr: stderr.to_vec(),
+                })
+            ),
+            Verdict::Failed(format::Verdict::ToolFailed(
+                cause(stderr).expect("the stderr names a cause")
+            ))
+        );
+    }
+
+    #[test]
+    fn a_rule_set_to_warn_or_error_is_enabled_and_off_is_not() {
+        for (setting, on) in [
+            ("[2]", true),
+            ("[1, \"always\"]", true),
+            ("\"error\"", true),
+            ("[\"warn\"]", true),
+            ("2", true),
+            ("[0, {\"typeof\": false}]", false),
+            ("\"off\"", false),
+            ("0", false),
+            ("[]", false),
+            ("{}", false),
+        ] {
+            let value: serde_json::Value =
+                serde_json::from_str(setting).expect("the fixture setting is JSON");
+            assert_eq!(enabled(&value), on, "{setting}");
+        }
     }
 
     #[test]
