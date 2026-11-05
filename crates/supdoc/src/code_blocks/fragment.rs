@@ -86,7 +86,8 @@ pub(crate) enum Support {
     },
     /// The tool reads the kind only inside a fixed frame: `before` and `after` are the lines it
     /// sees around the block, never shown, written or chosen from the block's content.
-    /// `out_before` and `out_after` are the frame lines a formatter is expected to print back.
+    /// `out_before` and `out_after` are the frame lines a formatter is expected to print back, and
+    /// `indent` the one indent unit it puts before each of the block's lines between them.
     #[cfg_attr(
         not(test),
         expect(
@@ -103,6 +104,9 @@ pub(crate) enum Support {
         out_before: &'static str,
         /// The lines a formatter prints for `after`.
         out_after: &'static str,
+        /// The indent unit a formatter puts before each non-empty line of the block, removed
+        /// before the block is compared: four spaces for rustfmt, a tab for biome.
+        indent: &'static str,
     },
 }
 
@@ -149,6 +153,7 @@ mod tests {
             after: "})",
             out_before: "({",
             out_after: "});",
+            indent: "\t",
         };
 
         assert_eq!(framed.frame(), Some(("({", "})")));

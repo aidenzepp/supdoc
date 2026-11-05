@@ -14,6 +14,7 @@ use crate::read::cartridge::{Cartridge, Deadline, SourceFile};
 
 use super::block::{CodeBlock, has_contiguous_body, replacement_for, try_blocks_in};
 use super::excerpt;
+use super::fragment::{Kind, Support};
 use super::project::BuildFailed;
 use super::runner::{Failure, Ran};
 use super::states;
@@ -58,6 +59,147 @@ pub(crate) enum Verdict {
     },
     /// The formatter passed its timeout.
     TimedOut,
+    /// The formatter reported a syntax error on a line of the frame around a block of this kind:
+    /// the block isn't that kind.
+    NotKind(Kind),
+    /// The formatter's output around a block of this kind doesn't keep the frame it is expected
+    /// to print back, or the block's lines inside it lack the frame's indent.
+    FrameReformatted(Kind),
+}
+
+/// What a tool-failure detail shows in place of a line of the frame.
+const FRAME_LINE: &str = "<the frame supdoc adds>";
+
+/// The fixed lines a formatter sees around a block that declares a kind its tool reads only
+/// inside a frame (see [`Support::Framed`]), and what it is expected to print back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Frame {
+    /// The kind the block declares.
+    kind: Kind,
+    /// The lines the formatter sees before the block.
+    before: &'static str,
+    /// The lines the formatter sees after the block.
+    after: &'static str,
+    /// The lines its output must begin with.
+    out_before: &'static str,
+    /// The lines its output must end with.
+    out_after: &'static str,
+    /// The indent unit it puts before each non-empty line of the block.
+    indent: &'static str,
+}
+
+impl Frame {
+    /// The frame `tool` puts around a block of `kind`. `None` for a block checked as a whole
+    /// file, and for a kind the tool reads as written or doesn't list.
+    #[must_use]
+    pub(crate) fn of(tool: &ToolCartridge, kind: Option<Kind>) -> Option<Self> {
+        let kind = kind?;
+        let (_, support) = tool.fragments.iter().find(|(listed, _)| *listed == kind)?;
+        match *support {
+            Support::Native { .. } => None,
+            Support::Framed {
+                before,
+                after,
+                out_before,
+                out_after,
+                indent,
+            } => Some(Self {
+                kind,
+                before,
+                after,
+                out_before,
+                out_after,
+                indent,
+            }),
+        }
+    }
+
+    /// The block's lines in `output`, the formatter's stdout, each ended by LF: the lines between
+    /// `out_before` and `out_after`, each non-empty one with its leading `indent` removed. `None`
+    /// when `output` doesn't begin with `out_before` and end with `out_after`, or a non-empty
+    /// line between them doesn't start with `indent`.
+    #[must_use]
+    fn inner(self, output: &str) -> Option<String> {
+        let lines: Vec<&str> = output.lines().collect();
+        let head: Vec<&str> = self.out_before.lines().collect();
+        let tail: Vec<&str> = self.out_after.lines().collect();
+        let body = lines
+            .strip_prefix(head.as_slice())?
+            .strip_suffix(tail.as_slice())?;
+        let mut inner = String::with_capacity(output.len());
+        for line in body {
+            if !line.is_empty() {
+                inner.push_str(line.strip_prefix(self.indent)?);
+            }
+            inner.push('\n');
+        }
+        Some(inner)
+    }
+
+    /// Whether `line`, a line of a tool's report, shows one of the frame's lines: trimmed, or
+    /// after a source-listing gutter such as rustfmt's `2 | `.
+    fn holds(self, line: &str) -> bool {
+        let shown = [
+            line.trim(),
+            line.split_once('|').map_or("", |(_, code)| code.trim()),
+        ];
+        self.before
+            .lines()
+            .chain(self.after.lines())
+            .map(str::trim)
+            .filter(|frame| !frame.is_empty())
+            .any(|frame| shown.contains(&frame))
+    }
+
+    /// `detail`, a tool's report, with each line that shows one of the frame's lines replaced by
+    /// [`FRAME_LINE`].
+    fn hidden(self, detail: &str) -> String {
+        detail
+            .lines()
+            .map(|line| if self.holds(line) { FRAME_LINE } else { line })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// Judges a formatter's `result` on a block whose body as written is `input`, run inside
+/// `frame`. Output that begins with the frame's `out_before`, ends with its `out_after` and
+/// indents every non-empty line between them by its `indent` is read for those lines, the indent
+/// removed, and they are compared with `input` as [`judge`] compares a whole block's output;
+/// output that doesn't keep the frame is [`Verdict::FrameReformatted`], never a guess. A syntax
+/// error is shifted past the frame's leading lines; one on a frame line is
+/// [`Verdict::NotKind`]. A tool failure's detail shows no line of the frame.
+#[must_use]
+pub(crate) fn judge_framed(
+    tool: &ToolCartridge,
+    frame: Frame,
+    input: &str,
+    result: Result<Ran, Failure>,
+) -> Verdict {
+    match result {
+        Ok(ran) if ran.success => match String::from_utf8(ran.stdout) {
+            Err(_) => Verdict::ToolFailed("it printed output that isn't UTF-8".to_owned()),
+            Ok(output) => match frame.inner(&output) {
+                None => Verdict::FrameReformatted(frame.kind),
+                Some(inner) if inner == input => Verdict::Formatted,
+                Some(inner) => Verdict::Unformatted(inner),
+            },
+        },
+        result => match judge(tool, input, result) {
+            Verdict::ParseFailed {
+                detail,
+                line: Some(line),
+            } => line
+                .checked_sub(frame.before.lines().count())
+                .filter(|line| *line < input.lines().count())
+                .map_or(Verdict::NotKind(frame.kind), |line| Verdict::ParseFailed {
+                    detail: frame.hidden(&detail),
+                    line: Some(line),
+                }),
+            Verdict::ToolFailed(detail) => Verdict::ToolFailed(frame.hidden(&detail)),
+            other => other,
+        },
+    }
 }
 
 /// A syntax error a formatter reported: the line it named, when it named one.
@@ -93,7 +235,11 @@ impl Verdict {
     pub(crate) const fn cacheable(&self) -> bool {
         matches!(
             self,
-            Self::Formatted | Self::Unformatted(_) | Self::ParseFailed { .. }
+            Self::Formatted
+                | Self::Unformatted(_)
+                | Self::ParseFailed { .. }
+                | Self::NotKind(_)
+                | Self::FrameReformatted(_)
         )
     }
 
@@ -103,8 +249,12 @@ impl Verdict {
         match self {
             Self::Formatted => states::BlockState::Passed,
             Self::Unformatted(_) => states::BlockState::Failed(states::Failure::Unformatted),
-            Self::ToolFailed(_) => states::BlockState::Failed(states::Failure::ToolFailed),
-            Self::ParseFailed { .. } => states::BlockState::Failed(states::Failure::ParseFailed),
+            Self::ToolFailed(_) | Self::FrameReformatted(_) => {
+                states::BlockState::Failed(states::Failure::ToolFailed)
+            }
+            Self::ParseFailed { .. } | Self::NotKind(_) => {
+                states::BlockState::Failed(states::Failure::ParseFailed)
+            }
             Self::TimedOut => states::BlockState::Failed(states::Failure::ToolTimeout),
         }
     }
@@ -247,6 +397,26 @@ pub(crate) fn finding(
         .with_help(
             "raise the limit with `--code-block-timeout 30s`, or mark the block `ignore(<why>)`",
         ),
+        Verdict::NotKind(kind) => Finding::new(
+            PARSE,
+            Severity::Error,
+            format!("`{name}` couldn't parse the block as `{}`", kind.name()),
+        )
+        .with_help(format!(
+            "fix the code so it reads as {} fragment, name the kind it is in `fragment(<kind>)`, \
+             or mark the block `format(off: <reason>)`",
+            kind.with_article()
+        )),
+        Verdict::FrameReformatted(kind) => Finding::new(
+            TOOL_FAILED,
+            Severity::Error,
+            format!("`{name}` reformatted the fragment's frame"),
+        )
+        .with_help(format!(
+            "check that the block is {} fragment, name the kind it is in `fragment(<kind>)`, \
+             or mark the block `format(off: <reason>)`",
+            kind.with_article()
+        )),
     };
     Some(finding.with_location(at.clone()))
 }
@@ -568,10 +738,11 @@ fn closes(line: &str, marker: char, length: usize) -> bool {
 mod tests {
     use std::sync::Arc;
 
-    use super::{FixDoc, Verdict, failed, finding, fixed, judge};
+    use super::{FixDoc, Frame, Verdict, failed, finding, fixed, judge, judge_framed};
     use crate::cartridges::markdown::cartridge::cartridge;
     use crate::cartridges::rust;
     use crate::code_blocks::block::{CodeBlock, blocks_in};
+    use crate::code_blocks::fragment::Kind;
     use crate::code_blocks::runner::Failure;
     use crate::code_blocks::runner::Ran;
     use crate::code_blocks::tools::formatter;
@@ -916,6 +1087,181 @@ mod tests {
         assert_eq!(
             applied(text, &findings),
             "> ```sh\n> if true; then\n> \t:\n> fi\n> ```\n"
+        );
+    }
+
+    /// rustfmt's statements frame, as a frame-pair unit would list it.
+    const STATEMENTS: Frame = Frame {
+        kind: Kind::Statements,
+        before: "fn main() {",
+        after: "}",
+        out_before: "fn main() {",
+        out_after: "}",
+        indent: "    ",
+    };
+
+    /// biome's entries frame, whose closing line the formatter ends with `;`.
+    const ENTRIES: Frame = Frame {
+        kind: Kind::Entries,
+        before: "({",
+        after: "})",
+        out_before: "({",
+        out_after: "});",
+        indent: "\t",
+    };
+
+    #[test]
+    fn frame_format_output_keeping_the_frame_is_compared_on_its_inner_lines() {
+        let nested = "fn main() {\n    if x {\n        y();\n    }\n\n    z();\n}\n";
+
+        assert_eq!(
+            judge_framed(
+                rustfmt(),
+                STATEMENTS,
+                "if x {\n    y();\n}\n\nz();\n",
+                Ok(printed(nested))
+            ),
+            Verdict::Formatted
+        );
+        assert_eq!(
+            judge_framed(
+                rustfmt(),
+                STATEMENTS,
+                "let x=1;\n",
+                Ok(printed("fn main() {\n    let x = 1;\n}\n"))
+            ),
+            Verdict::Unformatted("let x = 1;\n".to_owned())
+        );
+        assert_eq!(
+            judge_framed(
+                rustfmt(),
+                ENTRIES,
+                "a: 1\n",
+                Ok(printed("({\n\ta: 1,\n});\n"))
+            ),
+            Verdict::Unformatted("a: 1,\n".to_owned())
+        );
+    }
+
+    #[test]
+    fn frame_format_output_losing_the_frame_or_its_indent_is_frame_reformatted() {
+        let outputs = [
+            "let x = 1;\n",
+            "fn main() {\nlet x = 1;\n}\n",
+            "fn main() {\n    let x = 1;\n}\nfn f() {}\n",
+            "fn main() { let x = 1; }\n",
+        ];
+
+        for output in outputs {
+            assert_eq!(
+                judge_framed(rustfmt(), STATEMENTS, "let x = 1;\n", Ok(printed(output))),
+                Verdict::FrameReformatted(Kind::Statements),
+                "output {output:?} should not pass as the frame"
+            );
+        }
+        assert_eq!(
+            judge_framed(
+                rustfmt(),
+                ENTRIES,
+                "a: 1,\n",
+                Ok(printed("({\n\ta: 1,\n})\n"))
+            ),
+            Verdict::FrameReformatted(Kind::Entries),
+            "biome's frame must end with the `}});` it prints"
+        );
+    }
+
+    #[test]
+    fn frame_format_a_parse_error_shifts_past_the_frame_and_one_on_it_is_not_the_kind() {
+        let inside = "error: expected `;`\n --> <stdin>:3:9\n  |\n1 | fn main() {\n";
+        let on_frame = "error: unexpected closing delimiter\n --> <stdin>:4:1\n";
+        let body = "let x = 1;\nlet y = 2\n";
+
+        assert_eq!(
+            judge_framed(rustfmt(), STATEMENTS, body, Ok(exited(false, "", inside))),
+            Verdict::ParseFailed {
+                detail: "error: expected `;`\n --> <stdin>:3:9\n  |\n<the frame supdoc adds>"
+                    .to_owned(),
+                line: Some(1),
+            }
+        );
+        assert_eq!(
+            judge_framed(rustfmt(), STATEMENTS, body, Ok(exited(false, "", on_frame))),
+            Verdict::NotKind(Kind::Statements)
+        );
+        assert_eq!(
+            judge_framed(
+                rustfmt(),
+                STATEMENTS,
+                body,
+                Ok(exited(false, "", "}\nboom\n"))
+            ),
+            Verdict::ToolFailed("<the frame supdoc adds>\nboom".to_owned())
+        );
+    }
+
+    #[test]
+    fn frame_format_findings_name_the_kind_and_never_the_frame() {
+        let at = block_of(
+            "docs/guide.md",
+            "```rust fragment(statements)\nx\n```\n",
+            cartridge(),
+        )
+        .fence;
+        let findings = [
+            Verdict::NotKind(Kind::Statements),
+            Verdict::FrameReformatted(Kind::Statements),
+        ]
+        .map(|verdict| finding(&verdict, rustfmt(), &at, None).expect("a failure has a finding"));
+
+        assert_eq!(
+            findings
+                .each_ref()
+                .map(|finding| (finding.code, finding.message.as_str())),
+            [
+                (
+                    "code-block-parse",
+                    "`rustfmt` couldn't parse the block as `statements`"
+                ),
+                (
+                    "code-block-tool-failed",
+                    "`rustfmt` reformatted the fragment's frame"
+                ),
+            ]
+        );
+        for finding in &findings {
+            let help = finding.help.as_deref().unwrap_or_default();
+            assert!(
+                !finding.message.contains("fn main") && !help.contains("fn main"),
+                "{finding:?} should hold no frame line"
+            );
+        }
+    }
+
+    #[test]
+    fn frame_format_the_fix_rewrites_only_the_authors_lines() {
+        let text = "# G\n\n```rust fragment(statements)\nlet x=1;\n```\n";
+        let block = block_of("docs/guide.md", text, cartridge());
+        let output = "fn main() {\n    let x = 1;\n}\n";
+        let Verdict::Unformatted(inner) =
+            judge_framed(rustfmt(), STATEMENTS, "let x=1;\n", Ok(printed(output)))
+        else {
+            panic!("a changed statement should be unformatted");
+        };
+        let unformatted = finding(
+            &Verdict::Unformatted(inner.clone()),
+            rustfmt(),
+            &block.fence,
+            None,
+        )
+        .expect("an unformatted block has a finding");
+        let doc = FixDoc::new(Arc::from(text), Limits::PARSE_TIMEOUT);
+
+        let findings = fixed(unformatted, &block, &doc, &inner, rustfmt());
+
+        assert_eq!(
+            applied(text, &findings),
+            "# G\n\n```rust fragment(statements)\nlet x = 1;\n```\n"
         );
     }
 }

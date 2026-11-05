@@ -527,7 +527,13 @@ fn run_jobs(
             let rust = rust.filter(|_| run.tool.language == Language::Rust);
             run_formatter(run.tool, &run.program, record, session, rust)
         });
-        let parses = !matches!(format, Some((format::Verdict::ParseFailed { .. }, _)));
+        let parses = !matches!(
+            format,
+            Some((
+                format::Verdict::ParseFailed { .. } | format::Verdict::NotKind(_),
+                _
+            ))
+        );
         let lint = job.lint.as_ref().filter(|_| parses).and_then(|run| {
             let rust = rust.filter(|_| run.tool.language == Language::Rust);
             run_linter(run.tool, &run.program, record, session, rust)
@@ -1251,6 +1257,10 @@ struct Session<'run> {
 /// block early. `None` when its input couldn't be read, so it stays pending. A run whose verdict
 /// [`format::Verdict::cacheable`] allows is stored in the cache.
 ///
+/// A block of a kind `tool` reads only inside a frame is formatted inside it and judged by
+/// [`format::judge_framed`], so its fix holds only the author's lines; a frame-level failure is
+/// reported at the block's info string.
+///
 /// Effect: reads the cache, runs the tool, killing it at the timeout, and writes the cache.
 fn run_formatter(
     tool: &ToolCartridge,
@@ -1261,7 +1271,9 @@ fn run_formatter(
 ) -> Option<(format::Verdict, Vec<Finding>)> {
     let Session { root, timeout, .. } = *session;
     let pending = record.pending.as_ref()?;
-    let input = pending.input.as_str();
+    let frame = format::Frame::of(tool, record.fragment);
+    let checked = lint::checked(lint::Frame::of(tool, record.fragment), &pending.input);
+    let input = checked.as_ref();
     let doc = root.join(record.at.file.as_str());
     let edition = record
         .edition
@@ -1307,7 +1319,10 @@ fn run_formatter(
                 stderr: given.map_or_else(|| ran.stderr.clone(), |given| given.named(&ran.stderr)),
                 ..ran
             });
-            format::judge(tool, input, named)
+            match frame {
+                Some(frame) => format::judge_framed(tool, frame, &pending.input, named),
+                None => format::judge(tool, input, named),
+            }
         },
         format::Verdict::cacheable,
     );
@@ -1317,6 +1332,11 @@ fn run_formatter(
         } => rust::LineMap::of(&pending.block, pending.doc.text())
             .and_then(|map| map.doc_line(*line).cloned())
             .unwrap_or_else(|| record.at.clone()),
+        format::Verdict::NotKind(_) | format::Verdict::FrameReformatted(_) => pending
+            .block
+            .info
+            .as_ref()
+            .map_or_else(|| record.at.clone(), |info| info.location.clone()),
         _ => record.at.clone(),
     };
     let finding = format::finding(&verdict, tool, &at, timeout);
