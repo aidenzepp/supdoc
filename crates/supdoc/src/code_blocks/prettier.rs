@@ -21,9 +21,30 @@
 //! `rangeEnd` (`rangeEnd: 0`) leaves the block as written too, and an `overrides` entry setting
 //! `parser` (`markdown` for `*.md.*.ts`) reads it as another language, which passed `const a=1;`
 //! unchanged; `--range-start=0 --range-end=Infinity` and a `--parser` on the command line override
-//! them. `typescript` formats a `.tsx` path's JSX, and `babel` a `.jsx` path's.
+//! them. `typescript` formats a `.tsx` path's JSX, and `babel` a `.jsx` path's. A stdin path with
+//! a `node_modules` segment is printed back unchanged even under `--ignore-path=`;
+//! `--with-node-modules` formats it. A config's `insertPragma: true` adds `/** @format */` to
+//! every block, so each one fails; `--no-insert-pragma` overrides it.
+//!
+//! prettier warns `Ignored unknown option` for a flag it doesn't know and goes on, so a release
+//! older than [`FLOOR`] would take `--no-check-ignore-pragma` as nothing (3.5.3 does) and could
+//! print a block back as a pass. supdoc reads `prettier --version` once per run and runs no older
+//! one.
+
+use std::ffi::OsStr;
+use std::path::Path;
+use std::time::Duration;
 
 use super::format::ParseError;
+use super::runner;
+use super::tools::ToolEnv;
+
+/// The first prettier release that accepts every flag supdoc gives it: `--no-check-ignore-pragma`
+/// is the newest (probed: 3.5.3 ignores it as unknown, 3.6.0 takes it).
+pub(crate) const FLOOR: [u64; 3] = [3, 6, 0];
+
+/// How a prettier whose version can't be read is named.
+const UNREADABLE: &str = "(whose version supdoc couldn't read)";
 
 /// The marker of prettier's syntax-error line.
 const SYNTAX_ERROR: &str = "SyntaxError: ";
@@ -39,6 +60,64 @@ pub(crate) fn parser(extension: &str) -> &'static str {
     match extension {
         "ts" | "tsx" | "mts" | "cts" => "typescript",
         _ => "babel",
+    }
+}
+
+/// The version `prettier --version` printed in `stdout`, a plain `<major>.<minor>.<patch>`, when
+/// it is [`FLOOR`] or later.
+///
+/// # Errors
+///
+/// How to name the version to the user: the version it printed when it is older, or, when its
+/// output isn't a plain version, that.
+pub(crate) fn verified(stdout: &[u8]) -> Result<String, String> {
+    let text = String::from_utf8_lossy(stdout);
+    let version = text.trim();
+    let parts: Vec<u64> = version
+        .split('.')
+        .map(|part| {
+            part.bytes()
+                .all(|b| b.is_ascii_digit())
+                .then(|| part.parse::<u64>().ok())
+                .flatten()
+        })
+        .collect::<Option<_>>()
+        .filter(|parts: &Vec<u64>| parts.len() == 3)
+        .ok_or_else(|| UNREADABLE.to_owned())?;
+    if parts.as_slice() >= FLOOR.as_slice() {
+        Ok(version.to_owned())
+    } else {
+        Err(version.to_owned())
+    }
+}
+
+/// [`verified`] on what `program`, a prettier binary, prints for `--version`, run from `root` as
+/// prettier's steps are (see [`runner::run`]) under `timeout`.
+///
+/// Effect: runs the binary.
+///
+/// # Errors
+///
+/// As [`verified`]'s, and the unreadable version when the run fails or exits unsuccessfully.
+pub(crate) fn version_of(
+    program: &Path,
+    env: &ToolEnv,
+    root: &Path,
+    timeout: Option<Duration>,
+) -> Result<String, String> {
+    let call = runner::Call {
+        program,
+        name: "prettier",
+        args: &[OsStr::new("--version")],
+        extra: &[],
+        stdin: b"",
+        timeout,
+        cwd: runner::Cwd::Root,
+        cap: runner::CAP,
+    };
+    match runner::run(&call, env, root) {
+        Ok(ran) if ran.success => verified(&ran.stdout),
+        _ => Err(UNREADABLE.to_owned()),
     }
 }
 
@@ -68,7 +147,7 @@ pub(crate) fn switches_format_off(block: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_error, parser, switches_format_off};
+    use super::{parse_error, parser, switches_format_off, verified};
     use crate::code_blocks::format::ParseError;
 
     #[test]
@@ -84,6 +163,47 @@ mod tests {
             ("cjs", "babel"),
         ] {
             assert_eq!(parser(extension), expected, "{extension}");
+        }
+    }
+
+    #[test]
+    fn a_plain_version_at_or_past_the_floor_is_verified() {
+        for stdout in ["3.6.0\n", "3.9.10\n", "4.0.0", "10.0.0\n"] {
+            assert_eq!(
+                verified(stdout.as_bytes()),
+                Ok(stdout.trim().to_owned()),
+                "{stdout:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_older_version_is_named_and_refused() {
+        for stdout in ["3.5.3\n", "2.8.8\n", "3.0.0"] {
+            assert_eq!(
+                verified(stdout.as_bytes()),
+                Err(stdout.trim().to_owned()),
+                "{stdout:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn output_that_isnt_a_plain_version_is_refused_as_unreadable() {
+        for stdout in [
+            "",
+            "garbage\n",
+            "3.6\n",
+            "3.6.0-beta.1\n",
+            "v3.9.10\n",
+            "3.9.10\nmore\n",
+            "+3.9.10",
+        ] {
+            assert_eq!(
+                verified(stdout.as_bytes()),
+                Err("(whose version supdoc couldn't read)".to_owned()),
+                "{stdout:?}"
+            );
         }
     }
 

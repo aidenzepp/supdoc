@@ -1439,16 +1439,20 @@ fn pylint_args(invocation: &Invocation<'_>) -> Vec<OsString> {
 }
 
 /// prettier's arguments, each overriding what the project's config could set to make it print the
-/// block back unformatted (see [`prettier`]): no ignore file read, no pragma required or honored,
-/// the whole block as the range, and the parser the tag names (see [`prettier::parser`]), never
-/// one an `overrides` entry picks. Then the block on stdin under its virtual path, its extension
-/// from the tag as biome's (see [`biome::extension`]).
+/// block back unformatted (see [`prettier`]): no ignore file read, a doc under `node_modules`
+/// formatted like any other, no pragma required, honored or inserted (a block is a snippet, never
+/// a file that takes one), the whole block as the range, and the parser the tag names (see
+/// [`prettier::parser`]), never one an `overrides` entry picks. Then the block on stdin under its
+/// virtual path, its extension from the tag as biome's (see [`biome::extension`]). Each flag is
+/// one prettier [`prettier::FLOOR`] accepts.
 fn prettier_args(invocation: &Invocation<'_>) -> Vec<OsString> {
     let extension = biome::extension(invocation.tag);
     vec![
         OsString::from("--ignore-path="),
+        OsString::from("--with-node-modules"),
         OsString::from("--no-require-pragma"),
         OsString::from("--no-check-ignore-pragma"),
+        OsString::from("--no-insert-pragma"),
         OsString::from("--range-start=0"),
         OsString::from("--range-end=Infinity"),
         OsString::from(format!("--parser={}", prettier::parser(extension))),
@@ -1949,8 +1953,10 @@ mod tests {
                 args,
                 [
                     "--ignore-path=",
+                    "--with-node-modules",
                     "--no-require-pragma",
                     "--no-check-ignore-pragma",
+                    "--no-insert-pragma",
                     "--range-start=0",
                     "--range-end=Infinity",
                     parser,

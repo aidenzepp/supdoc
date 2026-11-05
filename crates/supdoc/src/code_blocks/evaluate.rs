@@ -322,6 +322,7 @@ impl Evaluation {
         let mut configs = ToolConfigs::default();
         configs.tombi.timeout = timeout;
         configs.yamllint.timeout = timeout;
+        configs.prettier.timeout = timeout;
         let mut toolchain_warned = false;
         let mut slots: Vec<Slot> = Vec::new();
         let mut jobs: Vec<Job> = Vec::new();
@@ -1151,6 +1152,8 @@ struct ToolConfigs {
     yamlfmt: YamlfmtConfigs,
     /// yamllint's.
     yamllint: YamllintConfigs,
+    /// prettier's version.
+    prettier: PrettierVersion,
 }
 
 impl ToolConfigs {
@@ -1173,8 +1176,87 @@ impl ToolConfigs {
             && running("tombi").is_none_or(|tool| self.tombi.give(record, tool, place, slots))
             && self.yamlfmt.give(record, place, slots).is_ok()
             && self.yamllint.give(record, place, slots)
+            && self.prettier.verified(record, place, slots)
     }
 }
+
+/// The version of the prettier a run's blocks use, read once.
+#[derive(Debug, Default)]
+struct PrettierVersion {
+    /// How long `prettier --version` may run: the run's tool timeout.
+    timeout: Option<Duration>,
+    /// The version once read (see [`prettier::version_of`]), and whether its warning has been
+    /// given. `None` until a block needs it.
+    version: Option<(Result<String, String>, bool)>,
+}
+
+impl PrettierVersion {
+    /// Whether the prettier `record`'s format step would run is [`prettier::FLOOR`] or later,
+    /// read once per run from where its steps run. When it isn't, or can't be read, the step
+    /// doesn't run, with [`PRETTIER_UNVERIFIED`] as its reason, and the run's one warning goes to
+    /// `slots`. A block whose formatter isn't prettier, or whose prettier isn't found, is left to
+    /// the usual lookup. Whether the block goes on to its tools: its linter still runs.
+    ///
+    /// Effect: runs `prettier --version` the first time.
+    fn verified(
+        &mut self,
+        record: &mut BlockRecord,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> bool {
+        let Some(tool) = record
+            .tool
+            .as_ref()
+            .and_then(Tool::cartridge)
+            .filter(|tool| tool.name == PRETTIER)
+        else {
+            return true;
+        };
+        let (Found::OnPath(program) | Found::InsideRoot(program)) =
+            tools::find_in(tool.binary, tool.bins(), env, root)
+        else {
+            return true;
+        };
+        let timeout = self.timeout;
+        let (version, warned) = self
+            .version
+            .get_or_insert_with(|| (prettier::version_of(&program, env, root, timeout), false));
+        let Err(shown) = version else {
+            return true;
+        };
+        if !*warned {
+            *warned = true;
+            let floor = prettier::FLOOR.map(|part| part.to_string()).join(".");
+            slots.push(Slot::Found(
+                Finding::new(
+                    NOT_CHECKED,
+                    Severity::Warning,
+                    format!(
+                        "prettier {shown} isn't {floor} or later, the first release that accepts \
+                         every flag supdoc gives it, so its blocks' format steps didn't run"
+                    ),
+                )
+                .with_help(format!(
+                    "install prettier {floor} or later: `{}`, or into the project's \
+                     node_modules/.bin",
+                    tool.install
+                ))
+                .with_location(record.at.clone()),
+            ));
+        }
+        record.tool = None;
+        record.steps.format = StepState::Unrunnable {
+            reason: PRETTIER_UNVERIFIED,
+        };
+        record.linter.is_some()
+    }
+}
+
+/// Why prettier's step didn't run when its version is older than [`prettier::FLOOR`] or can't
+/// be read.
+const PRETTIER_UNVERIFIED: &str = "the prettier found is older than 3.6.0, the first release \
+                                   that accepts every flag supdoc gives it, or its version \
+                                   couldn't be read";
 
 /// The biome config flags found for each doc directory, and the refusals already warned about.
 #[derive(Debug, Default)]
@@ -2694,7 +2776,7 @@ fn run_formatter(
                 return Err(not_run);
             }
             let named = result.map(|ran| Ran {
-                stderr: given.map_or_else(|| ran.stderr.clone(), |given| given.named(&ran.stderr)),
+                stderr: shown_stderr(tool, given, &ran.stderr),
                 ..ran
             });
             Ok(match &framed {
@@ -2724,6 +2806,18 @@ fn run_formatter(
         (_, finding) => finding.into_iter().collect(),
     };
     Some(Ok((verdict, findings)))
+}
+
+/// `stderr`, a run of `tool`'s, as a finding quotes it: its biome mirror paths named as the doc
+/// when `given` mirrors the doc (see [`biome::Given::named`]), and without ANSI escapes for a
+/// project-tier tool, whose stderr can quote the project's own colored text.
+fn shown_stderr(tool: &ToolCartridge, given: Option<&biome::Given>, stderr: &[u8]) -> Vec<u8> {
+    let stderr = given.map_or_else(|| stderr.to_vec(), |given| given.named(stderr));
+    if tool.tier() == Tier::Project {
+        format::strip_ansi(&String::from_utf8_lossy(&stderr)).into_bytes()
+    } else {
+        stderr
+    }
 }
 
 /// Runs `tool`, a custom formatter found at `program`, on `record`'s block from `session`'s root
