@@ -658,8 +658,8 @@ fn frame_format_real_rustfmt_decides_widths_as_the_projects_rustfmt_does() {
 }
 
 #[test]
-fn frame_format_real_rustfmt_hides_a_frame_line_its_parse_error_quotes() {
-    let test = "frame_format_real_rustfmt_hides_a_frame_line_its_parse_error_quotes";
+fn frame_format_real_rustfmt_reports_a_parse_error_in_supdocs_words() {
+    let test = "frame_format_real_rustfmt_reports_a_parse_error_in_supdocs_words";
     let Some(env) = real_rustfmt(test) else {
         return;
     };
@@ -672,12 +672,10 @@ fn frame_format_real_rustfmt_hides_a_frame_line_its_parse_error_quotes() {
         .json();
 
     assert_eq!(finding_kinds(&json), ["code-block-parse"], "{json}");
-    let message = at(&json, "/findings/0/message")
-        .as_str()
-        .unwrap_or_default();
-    assert!(
-        message.contains("<the frame supdoc adds>"),
-        "the error should refer to a frame line: {json}"
+    assert_eq!(
+        at(&json, "/findings/0/message"),
+        "`rustfmt` couldn't parse the block as `statements`",
+        "never rustfmt's own message, which quotes the frame: {json}"
     );
     assert_no_frame_text(&json);
 }
