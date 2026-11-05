@@ -344,3 +344,149 @@ fn the_real_yamlfmts_syntax_error_is_code_block_parse_at_its_doc_line() {
         "{json}"
     );
 }
+
+#[test]
+fn a_formatter_rewrite_that_changes_the_yaml_is_never_a_fix() {
+    let project = project_with_block("{<n>, ...}");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    yamlfmt_stub(
+        outside.path(),
+        "/bin/cat > /dev/null; printf \"{<n>: '', '...': ''}\\n\"",
+    );
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(
+        finding_kinds(&json),
+        ["code-block-unformatted", "code-block-fix-unsafe"],
+        "{json}"
+    );
+    assert!(json.pointer("/findings/0/fix").is_none(), "{json}");
+}
+
+#[test]
+fn a_formatter_rewrite_of_layout_only_is_a_fix() {
+    let project = project_with_block("a:     [x,   y]");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    yamlfmt_stub(
+        outside.path(),
+        "/bin/cat > /dev/null; printf 'a: [x, y]\\n'",
+    );
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-unformatted"], "{json}");
+    assert_eq!(
+        at(&json, "/findings/0/fix/replacement").as_str(),
+        Some("a: [x, y]"),
+        "{json}"
+    );
+}
+
+#[test]
+fn a_block_of_only_a_document_marker_is_not_run_with_its_own_reason() {
+    let project = project_with_block("---");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    yamlfmt_stub(outside.path(), "/bin/cat > /dev/null; printf '\\n'");
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(0)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+    let message = at(&json, "/findings/0/message");
+    assert!(
+        message.as_str().is_some_and(|message| {
+            message.contains("only document markers") && !message.contains("config")
+        }),
+        "{json}"
+    );
+}
+
+#[test]
+fn a_config_with_a_second_document_leaves_the_block_not_checked() {
+    let project = project_with_block("a:\n  b: 1");
+    project.write(".yamlfmt", "include:\n- a\n---\nformatter:\n  indent: 4\n");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    yamlfmt_stub(outside.path(), "exit 9");
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(0)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+    assert!(
+        at(&json, "/findings/0/message")
+            .as_str()
+            .is_some_and(|message| message.contains("line 3")),
+        "{json}"
+    );
+}
+
+#[test]
+fn a_config_count_with_a_leading_zero_leaves_the_block_not_checked() {
+    let project = project_with_block("a:\n  b: 1");
+    project.write(".yamlfmt", "formatter:\n  indent: 010\n");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    yamlfmt_stub(outside.path(), "exit 9");
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(0)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+}
+
+/// A `yaml` block whose value nests `depth` flow sequences, spaced so yamlfmt reformats it.
+fn deeply_nested(depth: usize) -> String {
+    format!("a: {}1{}", "[ ".repeat(depth), " ]".repeat(depth))
+}
+
+#[test]
+fn the_real_yamlfmts_fix_of_a_deeply_nested_block_is_refused_never_a_crash() {
+    let Some(dir) = real_tool_dir(
+        "yamlfmt",
+        "the_real_yamlfmts_fix_of_a_deeply_nested_block_is_refused_never_a_crash",
+    ) else {
+        return;
+    };
+    for depth in [2_000, 5_000, 9_000] {
+        let project = project_with_block(&deeply_nested(depth));
+
+        let json = real_run(&project, &dir, &[], 1);
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-unformatted", "code-block-fix-unsafe"],
+            "{depth} levels: {json}"
+        );
+    }
+}
+
+#[test]
+fn the_real_yamlfmts_dropped_yaml_directive_is_never_a_fix() {
+    let Some(dir) = real_tool_dir(
+        "yamlfmt",
+        "the_real_yamlfmts_dropped_yaml_directive_is_never_a_fix",
+    ) else {
+        return;
+    };
+    let project = project_with_block("%YAML 1.1\n---\na: yes");
+
+    let json = real_run(&project, &dir, &[], 1);
+
+    assert_eq!(
+        finding_kinds(&json),
+        ["code-block-unformatted", "code-block-fix-unsafe"],
+        "{json}"
+    );
+}

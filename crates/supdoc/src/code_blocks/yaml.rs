@@ -246,7 +246,8 @@ struct Setting {
 ///
 /// # Errors
 ///
-/// Why the config can't be given to yamlfmt: YAML outside that shape, a key supdoc doesn't know
+/// Why the config can't be given to yamlfmt: YAML outside that shape (a second document included,
+/// which yamlfmt wouldn't read), a key supdoc doesn't know
 /// yamlfmt 0.21.0 to read, a key written twice, a value of the wrong kind, or formatter settings
 /// beside `type: kyaml`, which takes none.
 pub(crate) fn read_config(text: &str) -> Result<String, String> {
@@ -283,7 +284,7 @@ pub(crate) fn read_config(text: &str) -> Result<String, String> {
         if DROPPED.contains(&key) {
             while lines
                 .peek()
-                .is_some_and(|(_, next)| is_blank(next) || next.starts_with([' ', '\t', '-']))
+                .is_some_and(|(_, next)| is_blank(next) || continues(next))
             {
                 let _skipped = lines.next();
             }
@@ -369,6 +370,17 @@ fn formatter_block<'text>(
     Ok(settings)
 }
 
+/// Whether `line` continues the value of the top-level key above it: it is indented, or it is a
+/// sequence item (`-` then a blank or the line's end). A document marker (`---`, `...`) never
+/// does, so a second document reaches the refusal of YAML outside the config's shape.
+fn continues(line: &str) -> bool {
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    line.starts_with([' ', '\t'])
+        || line == "-"
+        || line.starts_with("- ")
+        || line.starts_with("-\t")
+}
+
 /// Whether `line` says nothing: empty, spaces, or a comment.
 fn is_blank(line: &str) -> bool {
     let rest = line.trim_start_matches([' ', '\t']);
@@ -430,9 +442,18 @@ fn checked(setting: &Setting) -> Result<String, String> {
         return value
             .parse::<u16>()
             .ok()
-            .filter(|_| !setting.quoted && value.bytes().all(|b| b.is_ascii_digit()))
+            .filter(|_| {
+                let decimal = value.bytes().all(|b| b.is_ascii_digit());
+                // yamlfmt reads `010` as octal 8: only the plain spelling means what supdoc writes.
+                let canonical = value == "0" || !value.starts_with('0');
+                !setting.quoted && decimal && canonical
+            })
             .map(|count| count.to_string())
-            .ok_or_else(|| format!("sets `{key}` to `{value}`, not a count up to 65535"));
+            .ok_or_else(|| {
+                format!(
+                    "sets `{key}` to `{value}`, not a count up to 65535 written in plain decimal digits"
+                )
+            });
     }
     if let Some((_, words)) = CHOICES.iter().find(|(name, _)| *name == key) {
         return if words.contains(&value) {
@@ -513,11 +534,18 @@ fn private_config(env: &ToolEnv, root: &Path, text: &str) -> Option<PathBuf> {
     Some(file)
 }
 
+/// The most mappings and sequences a block's YAML may nest for [`same_structure`] to compare it,
+/// the YAML cartridge's own bound on nesting. Flow collections (`[[[...]]]`) pass the cartridge's
+/// guards at any depth, so the walk counts them itself.
+const MAX_NESTING: usize = 100;
+
 /// Whether `before` and `after` parse, each within `limit`, to the same YAML structure: the same
-/// documents, mappings, sequences, keys, anchors, aliases, tags and scalars, comments and layout
-/// aside. A scalar keeps whether it was plain or quoted, and a missing value reads as `null`, so
-/// `{a}` and `{a: ''}` differ. False when either doesn't parse, or [`yaml_cartridge`]'s guards on
-/// the grammar refuse it, so a fix it can't check is never applied.
+/// documents, directives, mappings, sequences, keys, anchors, aliases, tags and scalars, comments
+/// and layout aside. A scalar keeps whether it was plain or quoted, and a missing value, an empty
+/// sequence item included, reads as `null`, so `{a}` and `{a: ''}` differ. False when either
+/// doesn't parse, [`yaml_cartridge`]'s guards on the grammar refuse it, it nests more than
+/// [`MAX_NESTING`] collections, or comparing it passes `limit`, so a fix it can't check is never
+/// applied.
 #[must_use]
 pub(crate) fn same_structure(before: &str, after: &str, limit: TimeLimit) -> bool {
     match (shape(before, limit), shape(after, limit)) {
@@ -526,8 +554,21 @@ pub(crate) fn same_structure(before: &str, after: &str, limit: TimeLimit) -> boo
     }
 }
 
-/// The structure of `text` as [`same_structure`] compares it, `None` when it doesn't parse
-/// cleanly within `limit`.
+/// One piece of work in [`shape`]'s walk: a node to write, at its collection nesting depth, or
+/// text to append once the nodes pushed after it are written.
+enum Work<'tree> {
+    /// A node, with how many collections enclose it.
+    Node(Node<'tree>, usize),
+    /// Text that closes or separates what came before.
+    Text(&'static str),
+}
+
+/// The structure of `text` as [`same_structure`] compares it. `None` when it doesn't parse
+/// cleanly within `limit`, nests more than [`MAX_NESTING`] collections, or the walk passes the
+/// parse's deadline.
+///
+/// The walk keeps its own stack, so hostile nesting fails closed instead of overflowing the
+/// thread's.
 fn shape(text: &str, limit: TimeLimit) -> Option<String> {
     // The path only names the text in a parse error, which this check discards.
     let path = AbsolutePath::new(Path::new("/block.yaml"))?;
@@ -538,19 +579,54 @@ fn shape(text: &str, limit: TimeLimit) -> Option<String> {
         Deadline::start(limit),
     )
     .ok()?;
+    let deadline = parsed.deadline();
     let root = parsed.tree().root_node();
     if root.has_error() {
         return None;
     }
     let mut out = String::new();
-    write_shape(root, text, &mut out);
+    let mut stack = vec![Work::Node(root, 0)];
+    while let Some(work) = stack.pop() {
+        if deadline.passed() {
+            return None;
+        }
+        match work {
+            Work::Text(close) => out.push_str(close),
+            Work::Node(node, depth) => {
+                let pushed = write_node(node, depth, text, &mut out)?;
+                stack.extend(pushed.into_iter().rev());
+            }
+        }
+    }
     Some(out)
 }
 
-/// Appends the structure of `node`, a node of `text`, to `out`.
-fn write_shape(node: Node<'_>, text: &str, out: &mut String) {
+/// Writes the part of `node`'s structure that comes before its children to `out`, and returns
+/// the work that follows, in order: its children and the text between and after them. `None`
+/// when `node` is a collection past [`MAX_NESTING`].
+fn write_node<'tree>(
+    node: Node<'tree>,
+    depth: usize,
+    text: &str,
+    out: &mut String,
+) -> Option<Vec<Work<'tree>>> {
     let source = node.utf8_text(text.as_bytes()).unwrap_or_default();
-    match node.kind() {
+    let kind = node.kind();
+    let mut cursor = node.walk();
+    let children: Vec<Node<'tree>> = node
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() != "comment")
+        .collect();
+    let nests = matches!(
+        kind,
+        "block_mapping" | "flow_mapping" | "block_sequence" | "flow_sequence"
+    );
+    let inner = depth + usize::from(nests);
+    if inner > MAX_NESTING {
+        return None;
+    }
+    let mut then = Vec::new();
+    match kind {
         "comment" => {}
         "plain_scalar" => {
             let folded = fold(source);
@@ -576,54 +652,56 @@ fn write_shape(node: Node<'_>, text: &str, out: &mut String) {
             let _infallible = write!(out, "q{}:{folded};", folded.len());
         }
         "block_scalar" => {
-            let body = dedent(source);
+            let body = block_body(source, text.get(node.end_byte()..).unwrap_or_default());
             let _infallible = write!(out, "b{}:{body};", body.len());
         }
         "anchor" | "alias" | "tag" => {
-            let _infallible = write!(out, "{}{}:{source};", node.kind(), source.len());
+            let _infallible = write!(out, "{kind}{}:{source};", source.len());
+        }
+        "yaml_directive" | "tag_directive" | "reserved_directive" => {
+            let words = source.split_whitespace().collect::<Vec<_>>().join(" ");
+            let _infallible = write!(out, "%{}:{words};", words.len());
         }
         "block_mapping_pair" | "flow_pair" => {
             out.push('(');
-            match node.child_by_field_name("key") {
-                Some(key) => write_shape(key, text, out),
-                None => out.push_str("null;"),
-            }
-            out.push('=');
-            match node.child_by_field_name("value") {
-                Some(value) => write_shape(value, text, out),
-                None => out.push_str("null;"),
-            }
-            out.push(')');
+            let part = |field| {
+                node.child_by_field_name(field)
+                    .map_or(Work::Text("null;"), |part| Work::Node(part, inner))
+            };
+            then.extend([part("key"), Work::Text("="), part("value"), Work::Text(")")]);
         }
         "flow_mapping" => {
             out.push('{');
-            let mut cursor = node.walk();
-            for child in node.named_children(&mut cursor) {
+            for child in children {
                 if child.kind() == "flow_node" {
-                    out.push('(');
-                    write_shape(child, text, out);
-                    out.push_str("=null;)");
+                    then.extend([
+                        Work::Text("("),
+                        Work::Node(child, inner),
+                        Work::Text("=null;)"),
+                    ]);
                 } else {
-                    write_shape(child, text, out);
+                    then.push(Work::Node(child, inner));
                 }
             }
-            out.push('}');
+            then.push(Work::Text("}"));
         }
-        kind => {
+        _ => {
             let (open, close) = match kind {
                 "block_mapping" => ("{", "}"),
                 "block_sequence" | "flow_sequence" => ("[", "]"),
+                "block_sequence_item" => ("-", ";"),
                 "document" => ("<", ">"),
                 _ => ("", ""),
             };
             out.push_str(open);
-            let mut cursor = node.walk();
-            for child in node.named_children(&mut cursor) {
-                write_shape(child, text, out);
+            if kind == "block_sequence_item" && children.is_empty() {
+                out.push_str("null;");
             }
-            out.push_str(close);
+            then.extend(children.into_iter().map(|child| Work::Node(child, inner)));
+            then.push(Work::Text(close));
         }
     }
+    Some(then)
 }
 
 /// A flow scalar's text with its line breaks folded as YAML folds them: the blanks around each
@@ -660,9 +738,11 @@ fn fold(source: &str) -> String {
     folded
 }
 
-/// A block scalar's text with its header line kept and the indent its content lines share
-/// removed, so a re-indented block scalar reads the same.
-fn dedent(source: &str) -> String {
+/// A block scalar's text, `source`, with its header line kept and the indent its content lines
+/// share removed, so a re-indented block scalar reads the same. Trailing blank lines are part of
+/// a keep (`+`) scalar's value, so for one the blank lines in `after`, the text that follows the
+/// node, are counted in too; any other scalar's are dropped.
+fn block_body(source: &str, after: &str) -> String {
     let mut lines = source.split('\n');
     let header = lines.next().unwrap_or_default().trim_end();
     let body: Vec<&str> = lines.map(|line| line.trim_end_matches('\r')).collect();
@@ -680,12 +760,44 @@ fn dedent(source: &str) -> String {
                 .unwrap_or_else(|| line.trim_start_matches(' ')),
         );
     }
-    out.trim_end().to_owned()
+    let mut out = out.trim_end().to_owned();
+    if header.contains('+') {
+        let kept = source
+            .split('\n')
+            .rev()
+            .take_while(|line| line.trim().is_empty())
+            .count()
+            .saturating_sub(1)
+            + after
+                .split('\n')
+                .skip(1)
+                .take_while(|line| line.trim().is_empty())
+                .count();
+        let _infallible = write!(out, "+{kept}");
+    }
+    out
+}
+
+/// Whether `input`, a YAML block, holds no content yamlfmt keeps: only blank lines, document
+/// markers (`---`, `...`) and directives (`%YAML`). yamlfmt prints nothing for such a block.
+#[must_use]
+pub(crate) fn holds_no_yaml(input: &str) -> bool {
+    input.lines().all(|line| {
+        let line = line.trim();
+        line.is_empty()
+            || line.starts_with('%')
+            || ["---", "..."]
+                .iter()
+                .any(|marker| line.strip_prefix(marker).is_some_and(str::is_empty))
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CONFIG_FILES, Refusal, parse_error, project_args, read_config, same_structure};
+    use super::{
+        CONFIG_FILES, MAX_NESTING, Refusal, holds_no_yaml, parse_error, project_args, read_config,
+        same_structure,
+    };
     use crate::code_blocks::format::ParseError;
     use crate::code_blocks::tools::ToolEnv;
     use crate::limits::TimeLimit;
@@ -750,6 +862,13 @@ mod tests {
             ("bogus: 1\n", "sets `bogus`"),
             ("formatter:\n  bogus: 1\n", "sets `formatter.bogus`"),
             ("formatter:\n  indent: two\n", "not a count"),
+            ("formatter:\n  indent: 010\n", "plain decimal"),
+            ("formatter:\n  max_line_length: 0x50\n", "plain decimal"),
+            ("formatter:\n  pad_line_comments: +1\n", "plain decimal"),
+            ("formatter:\n  array_indent: 2e0\n", "plain decimal"),
+            ("formatter:\n  indent: 00\n", "plain decimal"),
+            ("include:\n- a\n---\nformatter:\n  indent: 4\n", "line 3"),
+            ("exclude: [a]\n...\n", "line 2"),
             ("formatter:\n  eof_newline: yes\n", "not `true` or `false`"),
             ("formatter:\n  type: fancy\n", "not one of"),
             (
@@ -876,5 +995,81 @@ mod tests {
         ));
         assert!(!same_structure("a: 1\n", "a: 2\n", limit()));
         assert!(!same_structure("a: [1\n", "a: [1]\n", limit()));
+    }
+
+    #[test]
+    fn a_zero_count_is_kept() {
+        assert_eq!(
+            read_config("formatter:\n  max_line_length: 0\n").as_deref(),
+            Ok("formatter:\n  max_line_length: 0\n")
+        );
+    }
+
+    /// `depth` nested flow sequences (`[[...1...]]`) or mappings (`{a: {a: ...1...}}`).
+    fn nested(depth: usize, mapping: bool) -> String {
+        if mapping {
+            format!("{}1{}\n", "{a: ".repeat(depth), "}".repeat(depth))
+        } else {
+            format!("a: {}1{}\n", "[ ".repeat(depth), " ]".repeat(depth))
+        }
+    }
+
+    #[test]
+    fn nesting_past_the_bound_is_never_the_same_structure_and_never_recurses() {
+        for depth in [MAX_NESTING + 1, 5_000, 100_000] {
+            for mapping in [false, true] {
+                let deep = nested(depth, mapping);
+                assert!(
+                    !same_structure(&deep, "a: 1\n", limit()),
+                    "{depth} levels (mapping: {mapping}) should be refused"
+                );
+            }
+        }
+        let within = nested(MAX_NESTING - 1, false);
+        assert!(same_structure(&within, &within, limit()));
+    }
+
+    #[test]
+    fn a_dropped_directive_changes_the_structure() {
+        assert!(!same_structure(
+            "%YAML 1.1\n---\na: yes\n",
+            "a: yes\n",
+            limit()
+        ));
+        assert!(same_structure(
+            "%YAML   1.1\n---\na: yes\n",
+            "%YAML 1.1\n---\na:   yes\n",
+            limit()
+        ));
+    }
+
+    #[test]
+    fn an_empty_sequence_item_is_null_and_a_keep_scalars_trailing_lines_count() {
+        assert!(!same_structure("-\n- a\n", "- a\n", limit()));
+        assert!(!same_structure("-\n-\n", "[]\n", limit()));
+        assert!(!same_structure(
+            "k: |+\n  a\n\n\nj: 1\n",
+            "k: |+\n  a\nj: 1\n",
+            limit()
+        ));
+        assert!(same_structure(
+            "k: |+\n    a\n\nj: 1\n",
+            "k: |+\n  a\n\nj: 1\n",
+            limit()
+        ));
+        assert!(same_structure(
+            "k: |\n  a\n\nj: 1\n",
+            "k: |\n  a\nj: 1\n",
+            limit()
+        ));
+    }
+
+    #[test]
+    fn a_block_of_only_markers_and_directives_holds_no_yaml() {
+        assert!(holds_no_yaml("---\n"));
+        assert!(holds_no_yaml("%YAML 1.2\n---\n...\n\n"));
+        assert!(!holds_no_yaml("--- a\n"));
+        assert!(!holds_no_yaml("# c\n---\n"));
+        assert!(!holds_no_yaml("a: 1\n"));
     }
 }

@@ -429,6 +429,7 @@ impl Evaluation {
         let mut linted_nothing_warned = false;
         let mut indent_unknown_warned = false;
         let mut printed_nothing_warned = false;
+        let mut yaml_empty_warned = false;
         let mut reshaped_warned = false;
         for slot in slots {
             let (job, run) = match slot {
@@ -460,6 +461,10 @@ impl Evaluation {
                     if reason == format::PRINTED_NOTHING && !printed_nothing_warned {
                         printed_nothing_warned = true;
                         self.findings.push(printed_nothing(&record.at));
+                    }
+                    if reason == YAML_EMPTY && !yaml_empty_warned {
+                        yaml_empty_warned = true;
+                        self.findings.push(yaml_empty(&record.at));
                     }
                     if reason == FRAME_RESHAPED && !reshaped_warned {
                         reshaped_warned = true;
@@ -643,6 +648,23 @@ pub(super) const FRAME_RESHAPED: &str =
 /// formatter uses, so it couldn't tell the block's lines from the frame's indent.
 pub(super) const FRAME_INDENT_UNKNOWN: &str =
     "supdoc couldn't read the formatter's indent from the project's config";
+
+/// Why a YAML block's format step didn't run when it holds only document markers and
+/// directives, for which yamlfmt prints nothing.
+const YAML_EMPTY: &str = "the block holds no YAML content, so yamlfmt printed nothing for it";
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first YAML block holding only
+/// document markers and directives, so yamlfmt printed nothing and its format step didn't run.
+fn yaml_empty(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "this YAML block holds only document markers or directives, so yamlfmt printed nothing \
+         for it and its format step didn't run",
+    )
+    .with_help("write the YAML the block stands for, or mark the block `format(off: <reason>)`")
+    .with_location(at.clone())
+}
 
 /// The run's one `code-block-not-checked` warning, at `at`, the first block whose formatter
 /// exited 0 and printed nothing for it, so its format step didn't run.
@@ -1843,6 +1865,9 @@ fn run_formatter(
         format::Verdict::cacheable,
     );
     if verdict == format::Verdict::PrintedNothing {
+        if tool.language == Language::Yaml && yaml::holds_no_yaml(&pending.input) {
+            return Some(Err(YAML_EMPTY));
+        }
         return Some(Err(format::PRINTED_NOTHING));
     }
     let at = match &verdict {
