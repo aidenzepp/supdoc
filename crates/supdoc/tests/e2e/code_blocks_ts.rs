@@ -1,4 +1,4 @@
-//! Checking TypeScript and JavaScript code blocks, formatted by biome.
+//! Checking TypeScript and JavaScript code blocks, formatted by biome or prettier.
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
@@ -2046,6 +2046,276 @@ fn example_fix_that_would_start_a_block_tag_or_close_the_comment_is_never_writte
                 .iter()
                 .all(|finding| finding.get("fix").is_none()),
             "{output}: no finding should offer the fix: {json}"
+        );
+    }
+}
+
+/// The config that selects prettier for `table`'s blocks, with biome lint's step off so prettier
+/// is the block's one tool.
+fn prettier_tables(table: &str) -> String {
+    format!(
+        "[features.code-blocks.{table}]\nformatter = \"prettier\"\n\
+         [features.code-blocks.{table}.biome-lint]\nlint = \"off\"\n"
+    )
+}
+
+/// A project whose one `ts` block, holding `body`, prettier formats.
+fn prettier_project(body: &str) -> Project {
+    project_with_block(&prettier_tables("typescript"), "ts", body)
+}
+
+/// Writes a `prettier` stub in `dir` that appends its working directory and arguments to
+/// `<dir>/prettier-runs`, one line per run, then runs `script`.
+fn prettier_stub(dir: &Path, script: &str) {
+    let record = dir.join("prettier-runs");
+    let path = dir.join("prettier");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\necho \"$(pwd -P) $*\" >> '{}'\n{script}\n",
+            record.display()
+        ),
+    )
+    .expect("the stub should be writable");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("the stub should be made executable");
+}
+
+/// The lines `prettier_stub` in `dir` recorded: one per run.
+fn prettier_runs(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("prettier-runs"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Runs a trusted `check --json` on `project` with `path` as the only `PATH` entry and its cache
+/// in `cache`, asserting it exits `exit`.
+fn trusted_prettier_check(
+    project: &Project,
+    path: &Path,
+    cache: &Path,
+    exit: i32,
+) -> serde_json::Value {
+    project
+        .supdoc_in_with(
+            ".",
+            &["check", "--json"],
+            &[
+                ("PATH", path),
+                ("SUPDOC_TRUST", Path::new("1")),
+                ("XDG_CACHE_HOME", cache),
+            ],
+        )
+        .assert_exit(exit)
+        .json()
+}
+
+#[test]
+fn prettier_runs_from_the_root_reading_no_ignore_file_and_spawns_again_on_a_second_run() {
+    let project = prettier_project("const a = 1;");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    prettier_stub(outside.path(), "/bin/cat");
+
+    let first = trusted_prettier_check(&project, outside.path(), cache.path(), 0);
+    let second = trusted_prettier_check(&project, outside.path(), cache.path(), 0);
+
+    let root = project
+        .path(".")
+        .canonicalize()
+        .expect("the project root should resolve");
+    let runs = prettier_runs(outside.path());
+    assert_eq!(
+        runs.len(),
+        2,
+        "prettier is never cached, so each run spawns it: {runs:?}"
+    );
+    for run in &runs {
+        let (cwd, args) = run
+            .split_once(' ')
+            .expect("the record names a cwd and args");
+        assert_eq!(Path::new(cwd), root, "prettier runs from the root: {run}");
+        let args: Vec<&str> = args.split(' ').collect();
+        let ["--ignore-path=", "--stdin-filepath", path] = args.as_slice() else {
+            panic!("prettier should read no ignore file and get the block's path: {run}");
+        };
+        assert!(path.ends_with("/docs/blocks.md.1.ts"), "{run}");
+    }
+    for json in [first, second] {
+        assert!(finding_kinds(&json).is_empty(), "{json}");
+        assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+    }
+}
+
+#[test]
+fn prettier_in_the_projects_node_modules_runs_before_one_on_path() {
+    let project = project_with_block(&prettier_tables("javascript"), "js", "const a = 1;");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let bin = project.path("node_modules/.bin");
+    std::fs::create_dir_all(&bin).expect("the node_modules bin directory should be creatable");
+    prettier_stub(&bin, "/bin/cat");
+    prettier_stub(outside.path(), "exit 9");
+
+    let json = trusted_prettier_check(&project, outside.path(), cache.path(), 0);
+
+    let runs = prettier_runs(&bin);
+    assert_eq!(runs.len(), 1, "the root's prettier runs: {json}");
+    assert!(
+        runs.first()
+            .is_some_and(|run| run.ends_with("/docs/blocks.md.1.js")),
+        "a js block gets a .js path: {runs:?}"
+    );
+    assert!(
+        prettier_runs(outside.path()).is_empty(),
+        "the prettier of the same name on PATH never runs: {json}"
+    );
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+}
+
+#[test]
+fn prettier_ignore_in_the_block_is_format_not_run_naming_format_off() {
+    let project = prettier_project("const a = 1;");
+    project.write(
+        "docs/blocks.md",
+        "# Blocks\n\n```ts\n// prettier-ignore\nconst  a = 1\n```\n\n\
+         ```ts\nconst b = [/* prettier-ignore */ 1,2];\n```\n",
+    );
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    prettier_stub(outside.path(), "/bin/cat");
+
+    let json = trusted_prettier_check(&project, outside.path(), cache.path(), 0);
+
+    assert!(
+        prettier_runs(outside.path()).is_empty(),
+        "prettier never starts: {json}"
+    );
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+    assert_eq!(at(&json, "/findings/0/severity"), "warning", "{json}");
+    let help = at(&json, "/findings/0/help");
+    assert!(
+        help.as_str()
+            .is_some_and(|help| help.contains("format(off: <reason>)")),
+        "{json}"
+    );
+    for block in 0..2 {
+        assert_eq!(
+            at(&json, &format!("/data/code_blocks/{block}/format")),
+            "not_run",
+            "block {block}: {json}"
+        );
+        let reason = at(&json, &format!("/data/code_blocks/{block}/reason"));
+        assert!(
+            reason
+                .as_str()
+                .is_some_and(|reason| reason.contains("format(off: <reason>)")),
+            "block {block}: {json}"
+        );
+    }
+}
+
+#[test]
+fn prettier_untrusted_is_format_not_run_naming_trust() {
+    let project = prettier_project("const   a = 1");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    prettier_stub(outside.path(), "/bin/cat");
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(0)
+        .json();
+
+    assert!(
+        prettier_runs(outside.path()).is_empty(),
+        "prettier never starts without trust: {json}"
+    );
+    assert_eq!(finding_kinds(&json), ["code-block-not-trusted"], "{json}");
+    let message = at(&json, "/findings/0/message");
+    assert!(
+        message
+            .as_str()
+            .is_some_and(|message| message.contains("prettier didn't run on TypeScript blocks")),
+        "{json}"
+    );
+    assert_eq!(at(&json, "/data/code_blocks/0/format"), "not_run", "{json}");
+    let reason = at(&json, "/data/code_blocks/0/reason");
+    assert!(
+        reason.as_str().is_some_and(|reason| reason.starts_with(
+            "prettier runs on TypeScript blocks only in the project tier, which needs `supdoc trust`"
+        )),
+        "{json}"
+    );
+}
+
+#[test]
+fn prettier_the_real_one_passes_a_formatted_block_and_fails_another_in_ts_and_js() {
+    let Some(dir) = real_tool_dir(
+        "prettier",
+        "prettier_the_real_one_passes_a_formatted_block_and_fails_another_in_ts_and_js",
+    ) else {
+        return;
+    };
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    for (table, tag) in [("typescript", "ts"), ("javascript", "js")] {
+        let formatted = project_with_block(&prettier_tables(table), tag, "const a = 1;");
+        let unformatted = project_with_block(&prettier_tables(table), tag, "const   a = 1");
+
+        let passes = trusted_prettier_check(&formatted, &dir, cache.path(), 0);
+        let fails = trusted_prettier_check(&unformatted, &dir, cache.path(), 1);
+
+        assert_eq!(
+            at(&passes, "/data/summary/code_blocks/passed"),
+            1,
+            "{tag}: {passes}"
+        );
+        assert_eq!(
+            finding_kinds(&fails),
+            ["code-block-unformatted"],
+            "{tag}: {fails}"
+        );
+    }
+}
+
+#[test]
+fn prettier_the_real_ones_syntax_error_is_a_parse_error_at_its_doc_line() {
+    let Some(dir) = real_tool_dir(
+        "prettier",
+        "prettier_the_real_ones_syntax_error_is_a_parse_error_at_its_doc_line",
+    ) else {
+        return;
+    };
+    let project = prettier_project("const a = {\n  b: 1,,\n};");
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+
+    let json = trusted_prettier_check(&project, &dir, cache.path(), 1);
+
+    assert_eq!(finding_kinds(&json), ["code-block-parse"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 5, "{json}");
+}
+
+#[test]
+fn prettier_the_real_one_fails_a_misformatted_block_the_projects_ignore_files_cover() {
+    let Some(dir) = real_tool_dir(
+        "prettier",
+        "prettier_the_real_one_fails_a_misformatted_block_the_projects_ignore_files_cover",
+    ) else {
+        return;
+    };
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    for ignore in [".gitignore", ".prettierignore"] {
+        let project = prettier_project("const   a = 1");
+        // Covers the block's virtual path, never the doc itself, which supdoc would then skip.
+        project.write(ignore, "docs/blocks.md.*\n");
+
+        let json = trusted_prettier_check(&project, &dir, cache.path(), 1);
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-unformatted"],
+            "{ignore} never turns the block into a pass: {json}"
         );
     }
 }

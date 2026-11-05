@@ -36,6 +36,7 @@ use super::info::{
     parenthesized_spelling, reasoned, replacement_for_removed, source_attributes, step_attribute,
 };
 use super::lint;
+use super::prettier;
 use super::project::{self, BuildFailed, Plan, Refused};
 use super::pylint;
 use super::rumdl;
@@ -571,6 +572,9 @@ fn run_jobs(
         let record = records.get(job.record)?;
         let format = job.format.as_ref().and_then(|run| match &run.tool {
             Tool::Custom(custom) => run_custom_formatter(custom, &run.program, record, session),
+            Tool::Cartridge(tool) if format_switched_off(tool, record) => {
+                Some(Err(PRETTIER_SWITCHED_OFF.into()))
+            }
             Tool::Cartridge(tool) => {
                 let rust = rust.filter(|_| run.tool.is("rustfmt"));
                 let frame = Frame::of(tool, record.fragment);
@@ -772,6 +776,22 @@ fn pylint_switched_off(at: &Location) -> Finding {
     .with_location(at.clone())
 }
 
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose prettier step
+/// didn't run because it holds `prettier-ignore` (see [`prettier::switches_format_off`]).
+fn prettier_switched_off(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "the block holds `prettier-ignore`, which leaves part of it as written, so supdoc can't \
+         confirm prettier formats the block, and its format step didn't run",
+    )
+    .with_help(
+        "drop the `prettier-ignore` comment, or mark the block `format(off: <reason>)` to leave \
+         it unformatted",
+    )
+    .with_location(at.clone())
+}
+
 /// The run's one `code-block-not-checked` warning, at `at`, the first Go block whose `go vet`
 /// step didn't run because it imports a package outside the standard library.
 fn vet_offline(at: &Location) -> Finding {
@@ -935,6 +955,7 @@ impl NotRunWarnings {
             FRAME_RESHAPED => frame_reshaped(at),
             BIOME_LINTED_NOTHING => linted_nothing(at),
             PYLINT_SWITCHED_OFF => pylint_switched_off(at),
+            PRETTIER_SWITCHED_OFF => prettier_switched_off(at),
             YAMLLINT_REJECTED => yamllint_rejected(at, said),
             YAMLLINT_LOCALE => yamllint_locale(at, said),
             go::VET_OFFLINE => vet_offline(at),
@@ -3044,6 +3065,25 @@ const PYLINT_SWITCHED_OFF: &str = "the block holds a `pylint:` comment that name
                                    than message codes or hyphenated message names, so supdoc \
                                    can't confirm pylint still lints it; name messages that way, \
                                    or mark the block `lint(off: <reason>)`";
+
+/// The name of prettier's cartridges.
+const PRETTIER: &str = "prettier";
+
+/// Why prettier's step didn't run on a block holding `prettier-ignore` (see
+/// [`prettier::switches_format_off`]).
+const PRETTIER_SWITCHED_OFF: &str = "the block holds `prettier-ignore`, so supdoc can't confirm \
+                                     prettier formats all of it; drop the comment, or mark the \
+                                     block `format(off: <reason>)`";
+
+/// Whether `tool` is prettier and `record`'s block holds `prettier-ignore` (see
+/// [`prettier::switches_format_off`]), so the step doesn't run and prettier is never spawned.
+fn format_switched_off(tool: &ToolCartridge, record: &BlockRecord) -> bool {
+    tool.name == PRETTIER
+        && record
+            .pending
+            .as_ref()
+            .is_some_and(|pending| prettier::switches_format_off(&pending.input))
+}
 
 /// Whether `tool` is pylint and `record`'s block holds a `pylint:` comment supdoc can't tell
 /// from one that switches it off for the whole block (see [`pylint::switches_lint_off`]), so the step doesn't run and pylint is
