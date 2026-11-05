@@ -78,6 +78,26 @@ pub(crate) enum Support {
         /// The rules left off for this kind.
         relax: &'static [&'static str],
     },
+    /// The tool reads the kind only inside a fixed frame: `before` and `after` are the lines it
+    /// sees around the block, never shown, written or chosen from the block's content.
+    /// `out_before` and `out_after` are the frame lines a formatter is expected to print back.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the first frame pair (P5-FR10 to FR15) constructs it"
+        )
+    )]
+    Framed {
+        /// The lines the tool sees before the block.
+        before: &'static str,
+        /// The lines the tool sees after the block.
+        after: &'static str,
+        /// The lines a formatter prints for `before`.
+        out_before: &'static str,
+        /// The lines a formatter prints for `after`.
+        out_after: &'static str,
+    },
 }
 
 impl Support {
@@ -89,6 +109,17 @@ impl Support {
     pub(crate) const fn relax(self) -> &'static [&'static str] {
         match self {
             Self::Native { relax } => relax,
+            Self::Framed { .. } => &[],
+        }
+    }
+
+    /// The lines the tool sees before and after a block of this kind: `None` when it reads the
+    /// kind as written.
+    #[must_use]
+    pub(crate) const fn frame(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::Native { .. } => None,
+            Self::Framed { before, after, .. } => Some((before, after)),
         }
     }
 }
@@ -103,5 +134,19 @@ mod tests {
         assert_eq!(Kind::Statements.with_article(), "a statements");
         assert_eq!(Kind::Entries.with_article(), "an entries");
         assert_eq!(Kind::Children.with_article(), "a children");
+    }
+
+    #[test]
+    fn only_a_framed_kind_has_frame_lines_and_none_relaxed() {
+        let framed = Support::Framed {
+            before: "({",
+            after: "})",
+            out_before: "({",
+            out_after: "});",
+        };
+
+        assert_eq!(framed.frame(), Some(("({", "})")));
+        assert_eq!(framed.relax(), &[] as &[&str]);
+        assert_eq!(Support::NATIVE.frame(), None);
     }
 }

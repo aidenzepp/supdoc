@@ -1363,25 +1363,28 @@ fn run_linter(
     };
     let args = tool.args(&invocation);
     let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
+    let frame = lint::Frame::of(tool, record.fragment);
+    let input = lint::checked(frame, &pending.input);
+    let input = input.as_ref();
     let run = cache::Run {
         tool,
         program,
         args: &args,
         extra: &[],
-        input: &pending.input,
+        input,
         doc: &doc,
         project: None,
     };
     let biome = given.filter(|_| tool.name == BIOME_LINT);
     let spawn = |call: &Call<'_>| match biome {
-        Some(given) => biome_lint(tool, call, &invocation, given, &pending.input, session),
+        Some(given) => biome_lint(tool, call, &invocation, given, input, session),
         None => runner::run(call, session.env, session.root),
     };
     let judge = |result: Result<Ran, runner::Failure>| match result {
         Ok(ran) if biome.is_some() && biome::linted_nothing(&ran.stdout) => {
             Err(BIOME_LINTED_NOTHING)
         }
-        result => Ok(tool.lint_verdict(&pending.input, result)),
+        result => Ok(tool.lint_verdict(input, result)),
     };
     let verdict = match cached_run(&run, session, spawn, judge, |judged| {
         judged.as_ref().is_ok_and(lint::Verdict::cacheable)
@@ -1389,14 +1392,13 @@ fn run_linter(
         Ok(verdict) => verdict,
         Err(reason) => return Some(Err(reason)),
     };
-    let findings = lint::findings(
-        &verdict,
+    let read = lint::Read {
         tool,
-        &pending.block,
-        pending.doc.text(),
-        session.timeout,
-        false,
-    );
+        block: &pending.block,
+        text: pending.doc.text(),
+        frame,
+    };
+    let findings = lint::findings(&verdict, &read, session.timeout, false);
     Some(Ok((verdict, findings)))
 }
 
@@ -1509,12 +1511,15 @@ fn run_clippy(
         .iter()
         .map(|(name, value)| (*name, value.as_os_str()))
         .collect();
+    let frame = lint::Frame::of(tool, record.fragment);
+    let input = lint::checked(frame, &pending.input);
+    let input = input.as_ref();
     let run = cache::Run {
         tool,
         program,
         args: &key_args,
         extra: &extra,
-        input: &pending.input,
+        input,
         doc: &doc,
         project: session.linked.fingerprint,
     };
@@ -1546,14 +1551,18 @@ fn run_clippy(
         &run,
         session,
         spawn,
-        |result| tool.lint_verdict(&pending.input, result),
+        |result| tool.lint_verdict(input, result),
         lint::Verdict::cacheable,
     );
+    let read = lint::Read {
+        tool,
+        block: &pending.block,
+        text: pending.doc.text(),
+        frame,
+    };
     let findings = lint::findings(
         &verdict,
-        tool,
-        &pending.block,
-        pending.doc.text(),
+        &read,
         session.timeout,
         !session.linked.flags.is_empty(),
     );
