@@ -19,6 +19,7 @@ use super::format;
 use super::runner::{self, Call, Cwd};
 use super::toolchain::{self, Refusal};
 use super::tools::ToolEnv;
+use crate::config::confine::Boundary;
 
 /// The most bytes supdoc reads from each of cargo's stdout and stderr during the build: its
 /// artifact JSON grows with the dependency count.
@@ -293,34 +294,31 @@ pub(crate) fn target_dir(env: &ToolEnv, root: &Path) -> Option<TargetDir> {
     candidates
         .into_iter()
         .flatten()
-        .map(|cache| cache.join("supdoc/code-blocks/target").join(&hash))
-        .find(|dir| private(dir, &real_root))
-        .map(TargetDir)
+        .map(|cache| (cache.join("supdoc/code-blocks/target").join(&hash), cache))
+        .find(|(dir, cache)| private(cache, dir, &real_root))
+        .map(|(dir, _)| TargetDir(dir))
 }
 
-/// Whether `dir`, created mode 0700 when missing, is a directory only its owner reaches, outside
-/// `real_root`. Nothing is created unless the deepest existing ancestor of `dir` is outside it.
+/// Whether `dir`, created mode 0700 with its missing parents admitted beneath `cache`, is a
+/// directory only its owner reaches, outside `real_root`. Nothing is created unless the deepest
+/// existing ancestor of `dir` is outside it.
 ///
 /// Effect: reads metadata along `dir`, then creates the directory.
-fn private(dir: &Path, real_root: &Path) -> bool {
-    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+fn private(cache: &Path, dir: &Path, real_root: &Path) -> bool {
     let existing = dir
         .ancestors()
         .find_map(|ancestor| ancestor.canonicalize().ok());
     if existing.is_none_or(|existing| existing.starts_with(real_root)) {
         return false;
     }
-    let _created = std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir);
-    let Ok(meta) = std::fs::symlink_metadata(dir) else {
+    let (Some(cache), Some(given)) = (runner::exact(cache), runner::exact(dir)) else {
         return false;
     };
-    let Ok(real) = dir.canonicalize() else {
+    if runner::create_private(&Boundary::resolve(&cache), &given).is_none() {
         return false;
-    };
-    meta.is_dir() && meta.permissions().mode().trailing_zeros() >= 6 && !real.starts_with(real_root)
+    }
+    dir.canonicalize()
+        .is_ok_and(|real| !real.starts_with(real_root))
 }
 
 /// `bytes` as lowercase hex.
@@ -1697,5 +1695,75 @@ mod tests {
             ))
         );
         assert_eq!(BUILD_CAP, 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn a_cache_directory_swapped_for_a_link_out_gives_no_target_dir_and_creates_nothing_there() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let outside = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        std::os::unix::fs::symlink(outside.path(), cache.path().join("supdoc"))
+            .expect("the planted link");
+        let path = cache.path().to_path_buf();
+        let env =
+            ToolEnv::from_vars(|name| (name == "XDG_CACHE_HOME").then(|| path.clone().into()));
+
+        let target = target_dir(&env, root.path());
+
+        assert_eq!(target, None);
+        let left: Vec<_> = fs::read_dir(outside.path())
+            .expect("the outside dir should be listable")
+            .collect();
+        assert!(
+            left.is_empty(),
+            "nothing should be created outside: {left:?}"
+        );
+    }
+
+    #[test]
+    fn a_cache_base_holding_dot_dot_after_a_link_gives_no_target_dir_and_creates_nothing() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let place = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let deep = place.path().join("elsewhere/deep");
+        fs::create_dir_all(&deep).expect("the link's target");
+        std::os::unix::fs::symlink(&deep, place.path().join("link")).expect("the planted link");
+        let base = place.path().join("link/..");
+        let env =
+            ToolEnv::from_vars(|name| (name == "XDG_CACHE_HOME").then(|| base.clone().into()));
+
+        let target = target_dir(&env, root.path());
+
+        assert_eq!(target, None);
+        for at in [
+            place.path().join("supdoc"),
+            place.path().join("elsewhere/supdoc"),
+        ] {
+            assert!(!at.exists(), "nothing should be created at {at:?}");
+        }
+    }
+
+    #[test]
+    fn a_cache_base_that_is_a_link_to_another_dir_gives_a_target_dir_under_where_it_leads() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let place = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let disk = place.path().join("disk");
+        fs::create_dir(&disk).expect("the link's target");
+        let base = place.path().join("cache");
+        std::os::unix::fs::symlink(&disk, &base).expect("the cache base link");
+        let path = base.clone();
+        let env =
+            ToolEnv::from_vars(|name| (name == "XDG_CACHE_HOME").then(|| path.clone().into()));
+
+        let target = target_dir(&env, root.path()).expect("a linked cache base is usable");
+
+        assert!(
+            target
+                .path()
+                .starts_with(base.join("supdoc/code-blocks/target"))
+        );
+        assert!(
+            disk.join("supdoc/code-blocks/target").is_dir(),
+            "the target dir should be created where the base leads"
+        );
     }
 }

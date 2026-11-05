@@ -6,12 +6,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::config::code_blocks::Edition;
+use crate::config::confine::{self, Boundary};
 use crate::finding::{IndexedText, Location};
+use crate::path::AbsolutePath;
 
 use super::block::CodeBlock;
 use super::format::{self, ParseError, first_line};
 use super::lint::{self, Diagnostic};
-use super::runner::{Failure, Ran};
+use super::runner::{self, Failure, Ran};
 
 /// The macros that read a file or an environment variable at compile time.
 const COMPILE_TIME_READS: [&str; 5] = [
@@ -90,6 +92,8 @@ pub(crate) fn clippy_conf_dir(root: &Path) -> Option<OsString> {
 /// timeout and unwinding alike.
 #[derive(Debug)]
 pub(crate) struct EmitDir {
+    /// The shared `emit` directory `path` sits in, which removing `path` is admitted against.
+    base: Boundary,
     /// The directory, owned by this run alone.
     path: PathBuf,
 }
@@ -99,27 +103,25 @@ static EMITS: AtomicUsize = AtomicUsize::new(0);
 
 impl EmitDir {
     /// A new directory `emit/<pid>-<n>` beside `neutral`, the tool's working directory, created
-    /// mode 0700 inside a 0700 `emit` directory. `None` when `neutral` doesn't resolve or the
-    /// directory can't be created.
+    /// mode 0700 inside a 0700 `emit` directory, each admitted beneath the directory it goes in.
+    /// `None` when `neutral` doesn't resolve, a directory isn't admitted, or it can't be created.
     ///
     /// Effect: creates directories.
     #[must_use]
     pub(crate) fn create(neutral: &Path) -> Option<Self> {
-        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
-        let parent = neutral.canonicalize().ok()?.parent()?.join("emit");
-        let _created = std::fs::DirBuilder::new().mode(0o700).create(&parent);
-        let meta = std::fs::symlink_metadata(&parent).ok()?;
-        if !meta.is_dir() || meta.permissions().mode().trailing_zeros() < 6 {
-            return None;
-        }
+        let cache = runner::exact(neutral.canonicalize().ok()?.parent()?)?;
+        let parent = AbsolutePath::new(&cache.as_path().join("emit"))?;
+        let base = runner::create_private(&Boundary::resolve(&cache), &parent)?;
         (0..16).find_map(|_| {
             let count = EMITS.fetch_add(1, Ordering::Relaxed);
-            let path = parent.join(format!("{}-{count}", std::process::id()));
-            std::fs::DirBuilder::new()
-                .mode(0o700)
-                .create(&path)
-                .ok()
-                .map(|()| Self { path })
+            let path = parent
+                .as_path()
+                .join(format!("{}-{count}", std::process::id()));
+            confine::create_dir(&base.admit(&path).ok()?, 0o700).ok()?;
+            Some(Self {
+                base: base.clone(),
+                path,
+            })
         })
     }
 
@@ -131,8 +133,11 @@ impl EmitDir {
 }
 
 impl Drop for EmitDir {
+    /// Removes the run's directory, once it is admitted beneath the shared `emit` directory.
     fn drop(&mut self) {
-        let _removed = std::fs::remove_dir_all(&self.path);
+        if let Ok(dir) = self.base.admit(&self.path) {
+            let _removed = confine::remove_dir_all(&dir);
+        }
     }
 }
 
@@ -2794,5 +2799,30 @@ warning: rustfmt has failed to format. See previous 1 errors.
             unwidened(b"\xff --> <stdin>:2:2:105", 4, 4),
             b"\xff --> <stdin>:2:2:105"
         );
+    }
+
+    #[test]
+    fn dropping_an_emit_dir_whose_emit_directory_became_a_link_removes_nothing_it_leads_to() {
+        let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let neutral = cache.path().join("cwd");
+        std::fs::create_dir(&neutral).expect("the cwd should be creatable");
+        let emit = EmitDir::create(&neutral).expect("the emit dir should be creatable");
+        let dir = emit
+            .file()
+            .parent()
+            .expect("the file is in the dir")
+            .to_path_buf();
+        let base = dir.parent().expect("the dir is in emit").to_path_buf();
+        let name = dir.file_name().expect("the run's name");
+        let kept = outside.path().join(name).join("kept");
+        std::fs::create_dir_all(outside.path().join(name)).expect("the outside twin");
+        std::fs::write(&kept, "kept").expect("the outside file");
+        std::fs::rename(&base, cache.path().join("emit-moved")).expect("the move");
+        std::os::unix::fs::symlink(outside.path(), &base).expect("the planted link");
+
+        drop(emit);
+
+        assert_eq!(std::fs::read_to_string(&kept).ok().as_deref(), Some("kept"));
     }
 }

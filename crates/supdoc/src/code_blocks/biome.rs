@@ -315,7 +315,7 @@ impl LintFile {
         }
         let config = given.config.as_deref()?;
         let strict = without_exclusions(&fs::read_to_string(config).ok()?)?;
-        let cache = exact(neutral.parent()?)?;
+        let cache = runner::exact(neutral.parent()?)?;
         let base_dir = AbsolutePath::new(&cache.as_path().join("biome-lint"))?;
         let base = private_dir(&Boundary::resolve(&cache), &base_dir)?;
         let dir = (0..16).find_map(|_| {
@@ -396,12 +396,6 @@ impl Drop for LintFile {
             let _removed = confine::remove_dir_all(&dir);
         }
     }
-}
-
-/// `path` as an [`AbsolutePath`] when normalizing doesn't move it: it is absolute and holds no
-/// `..`, so the boundary built from it names the place that was checked. `None` otherwise.
-fn exact(path: &Path) -> Option<AbsolutePath> {
-    AbsolutePath::new(path).filter(|exact| exact.as_path() == path)
 }
 
 /// Creates `dir` mode 0700, admitted beneath `parent`, when nothing is there yet, so the run that
@@ -769,7 +763,7 @@ fn write_private(env: &ToolEnv, root: &Path, strict: &str) -> Option<PathBuf> {
     if neutral == Path::new("/") {
         return None;
     }
-    let cache = exact(neutral.parent()?)?;
+    let cache = runner::exact(neutral.parent()?)?;
     let base_dir = AbsolutePath::new(&cache.as_path().join("biome-config"))?;
     let base = private_dir(&Boundary::resolve(&cache), &base_dir)?;
     let name = Sha256::digest(strict.as_bytes())
