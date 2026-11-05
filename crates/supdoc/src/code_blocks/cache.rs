@@ -17,7 +17,6 @@ use sha2::{Digest, Sha256};
 use crate::config::confine::{self, Admitted, Boundary};
 use crate::hash::Hash;
 use crate::limits::{Limits, SizeLimit};
-use crate::path::AbsolutePath;
 use crate::read::source::{open_without_blocking, read_up_to};
 
 use super::runner::Ran;
@@ -107,7 +106,7 @@ impl Cache {
     ///
     /// Effect: resolves `dir`, and creates it and its missing parents.
     fn at(dir: PathBuf, limit: usize) -> Option<Self> {
-        let boundary = Boundary::resolve(&AbsolutePath::new(&dir)?);
+        let boundary = Boundary::resolve(&dir);
         let cache = Self {
             dir,
             boundary,
@@ -241,7 +240,7 @@ impl Cache {
     ///
     /// Effect: reads file metadata and symlinks along `path`.
     fn admit(&self, path: &Path) -> Option<Admitted<'_>> {
-        self.boundary.admit(&AbsolutePath::new(path)?).ok()
+        self.boundary.admit(path).ok()
     }
 }
 

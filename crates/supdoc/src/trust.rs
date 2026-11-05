@@ -13,11 +13,11 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Write as _};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::config::confine::{self, Admitted, Boundary};
-use crate::path::{AbsolutePath, holds_git};
+use crate::path::holds_git;
 use crate::scan::git::{common_dir, first_line};
 
 /// Tells concurrent writers' temporary files apart within one process.
@@ -46,7 +46,8 @@ impl TrustEnv {
 
     /// The trust store: `trusted-roots` under `XDG_STATE_HOME`'s `supdoc`, else under `HOME`'s
     /// `.local/state/supdoc`. `None` when neither is an absolute path. Every later write stays
-    /// beneath where that directory really lies now.
+    /// beneath where that directory really lies now, and is refused when the variable holds a
+    /// `..` ([`Boundary::resolve`]).
     ///
     /// Effect: reads file metadata and symlinks along the store's directory.
     pub(crate) fn store(&self) -> Option<Store> {
@@ -56,13 +57,17 @@ impl TrustEnv {
                 .map(PathBuf::from)
                 .filter(|path| path.is_absolute())
         };
-        let base = absolute(&self.state_home)
-            .or_else(|| absolute(&self.home).map(|home| home.join(".local").join("state")))?;
+        let (base, variable) = absolute(&self.state_home)
+            .map(|state| (state, "XDG_STATE_HOME"))
+            .or_else(|| {
+                absolute(&self.home).map(|home| (home.join(".local").join("state"), "HOME"))
+            })?;
         let dir = base.join("supdoc");
         Some(Store {
-            boundary: Boundary::resolve(&AbsolutePath::new(&dir)?),
+            boundary: Boundary::resolve(&dir),
             file: dir.join("trusted-roots"),
             home: absolute(&self.home),
+            variable,
         })
     }
 }
@@ -134,11 +139,13 @@ pub(crate) struct Store {
     /// The store's directory, where it really lay when the store was located: every create,
     /// write, rename and remove is admitted against it.
     boundary: Boundary,
+    /// The variable the store's directory comes from, `XDG_STATE_HOME` or `HOME`, for messages.
+    variable: &'static str,
 }
 
 impl PartialEq for Store {
-    /// Stores are equal when they name the same file and `HOME`. The boundary is left out: it is
-    /// the file's directory, resolved when each store was located.
+    /// Stores are equal when they name the same file and `HOME`. The boundary and the variable
+    /// are left out: they follow from the file's directory when each store was located.
     fn eq(&self, other: &Self) -> bool {
         self.file == other.file && self.home == other.home
     }
@@ -221,7 +228,7 @@ impl Store {
         let path = self.admit(&dir.join("trusted-roots.lock"))?;
         let file = match confine::create_new(&path, 0o600) {
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                fs::OpenOptions::new().write(true).open(path.as_path())?
+                confine::open_existing(&self.admit(path.as_path())?)?
             }
             created => created?,
         };
@@ -237,20 +244,29 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Fails with [`io::ErrorKind::PermissionDenied`] when `path` lies outside the store's
-    /// directory, such as when that directory has been replaced by a symlink to elsewhere.
+    /// Fails with [`io::ErrorKind::PermissionDenied`] when the variable the store's directory
+    /// comes from holds a `..`, or `path` lies outside the store's directory, such as when that
+    /// directory has been replaced by a symlink to elsewhere.
     fn admit(&self, path: &Path) -> io::Result<Admitted<'_>> {
-        AbsolutePath::new(path)
-            .and_then(|target| self.boundary.admit(&target).ok())
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    format!(
-                        "`{}` lies outside the trust store's directory once symlinks are followed",
-                        path.display()
-                    ),
+        self.boundary.admit(path).map_err(|_| {
+            let climbs = self
+                .file
+                .components()
+                .any(|component| component == Component::ParentDir);
+            let reason = if climbs {
+                format!(
+                    "`{}` holds `..`, which the trust store's path must not contain: set it to a \
+                     path without `..`",
+                    self.variable
                 )
-            })
+            } else {
+                format!(
+                    "`{}` lies outside the trust store's directory once symlinks are followed",
+                    path.display()
+                )
+            };
+            io::Error::new(io::ErrorKind::PermissionDenied, reason)
+        })
     }
 
     /// The store's directory.
@@ -992,6 +1008,76 @@ mod tests {
         assert!(
             written.is_empty(),
             "nothing should be written where the symlink leads: {written:?}"
+        );
+    }
+
+    #[test]
+    fn a_state_home_with_dot_dot_after_a_symlink_refuses_to_revoke_rather_than_report_it_done() {
+        let scratch = Scratch::new();
+        let project = scratch.mkdir("proj");
+        let deep = scratch.mkdir("deep/x");
+        let kernel_store = scratch.mkdir("deep/state/supdoc").join("trusted-roots");
+        fs::write(&kernel_store, format!("{}\n", project.display()))
+            .expect("the store should be writable");
+        symlink(&deep, scratch.real().join("link")).expect("the link should be creatable");
+        let env = TrustEnv {
+            state_home: Some(scratch.real().join("link/../state").into()),
+            ..scratch.env(None)
+        };
+        let store = env
+            .store()
+            .expect("an absolute XDG_STATE_HOME should locate the store");
+
+        let revoked = store.revoke(&project);
+        let added = store.add(&scratch.mkdir("other"));
+
+        let error = revoked.expect_err("revoking through `..` should fail, never report done");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            crate::cli::cause(&error),
+            "`XDG_STATE_HOME` holds `..`, which the trust store's path must not contain: set it \
+             to a path without `..`"
+        );
+        assert!(matches!(added, Err(AddError::Io(_))), "{added:?}");
+        assert_eq!(granted(&project, &env), Ok(Grant::Trusted));
+        assert_eq!(
+            fs::read_to_string(&kernel_store).expect("the store should be readable"),
+            format!("{}\n", project.display())
+        );
+        assert!(!scratch.real().join("state").exists());
+    }
+
+    #[test]
+    fn a_refusal_names_the_store_path_with_its_case_kept() {
+        let scratch = Scratch::new();
+        let root = scratch.mkdir("root");
+        let outside = scratch.mkdir("outside").join("roots");
+        let dir = scratch.mkdir("MixedCase/state/supdoc");
+        symlink(&outside, dir.join("trusted-roots"))
+            .expect("the store symlink should be creatable");
+        let env = TrustEnv {
+            state_home: Some(scratch.real().join("MixedCase/state").into()),
+            ..scratch.env(None)
+        };
+        let store = env
+            .store()
+            .expect("an absolute XDG_STATE_HOME should locate the store");
+
+        let error = match store.add(&root) {
+            Err(AddError::Io(error)) => error,
+            other => panic!("a store symlinked outside should be refused: {other:?}"),
+        };
+
+        assert_eq!(
+            crate::cli::cause(&error),
+            format!(
+                "`{}` lies outside the trust store's directory once symlinks are followed",
+                dir.join("trusted-roots").display()
+            )
+        );
+        assert!(
+            !outside.exists(),
+            "nothing should be written where the symlink leads"
         );
     }
 
