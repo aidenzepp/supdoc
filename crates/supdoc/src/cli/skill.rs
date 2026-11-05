@@ -1318,6 +1318,28 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn install_file_refuses_a_directory_symlinked_out_after_the_boundary_was_resolved() {
+        let root = tempfile::tempdir().expect("a project directory should be created");
+        let outside = tempfile::tempdir().expect("an outside directory should be created");
+        let base = AbsolutePath::new(root.path()).expect("a temp directory should be absolute");
+        let boundary = Boundary::resolve(&base);
+        symlink(outside.path(), &root.path().join(".agents"));
+
+        let installed = install_file(&boundary, &beneath(&base, AGENTS_SKILL), SKILL.as_bytes());
+
+        assert!(
+            installed.is_err(),
+            "a copy a symlink leads out of the boundary should not be written"
+        );
+        assert_eq!(
+            tree(outside.path()),
+            Vec::<PathBuf>::new(),
+            "nothing should be created outside"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn skill_install_global_still_writes_through_a_symlinked_home_directory() {
         let world = World::new();
         let shared = tempfile::tempdir().expect("a shared temp directory should be created");
