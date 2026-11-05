@@ -85,8 +85,8 @@ pub(crate) enum NotChecked {
     /// The root's `rust-toolchain(.toml)` names a path, an invalid channel, or lies outside the
     /// root, so no Rust tool runs.
     ToolchainPath,
-    /// The project's tool config extends another config, declares plugins, or can't be handed
-    /// to the tool, so its blocks aren't given to it.
+    /// The project's tool config extends another config, declares plugins or commands, or can't
+    /// be handed to the tool, so its blocks aren't given to it.
     ToolConfig,
     /// The Rust block reads a file or an environment variable at compile time.
     CompileTimeRead,

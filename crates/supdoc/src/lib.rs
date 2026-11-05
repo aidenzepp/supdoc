@@ -225,6 +225,8 @@ pub(crate) mod code_blocks {
 
     /// TypeScript and JavaScript's format step, run by biome.
     mod biome;
+    /// Markdown's format and lint steps, run by rumdl.
+    mod rumdl;
 
     /// Reading the Rust toolchain a project pins.
     mod toolchain;

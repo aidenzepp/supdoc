@@ -34,6 +34,7 @@ use super::info::{
 };
 use super::lint;
 use super::project::{self, BuildFailed, Plan, Refused};
+use super::rumdl;
 use super::runner::{self, Call, Ran};
 use super::rust::{self, Scan};
 use super::source::{self, SourceText, Unresolved};
@@ -112,6 +113,19 @@ pub(crate) struct BlockRecord {
     given: Option<biome::Given>,
     /// What the format step needs, kept while the block is pending.
     pending: Option<Pending>,
+}
+
+impl BlockRecord {
+    /// Settles each step still due as not run for `reason`, and selects no tool for it.
+    fn hold_steps(&mut self, reason: &'static str) {
+        for step in [&mut self.steps.format, &mut self.steps.lint] {
+            if *step == StepState::NotRun {
+                *step = StepState::Unrunnable { reason };
+            }
+        }
+        self.tool = None;
+        self.linter = None;
+    }
 }
 
 /// A pending block as the format step reads and fixes it.
@@ -307,7 +321,7 @@ impl Evaluation {
         let mut rust_setup: Option<RustSetup> = None;
         let mut against: Option<Against> = None;
         let build_timeout = self.build_timeout;
-        let mut biome_configs = BiomeConfigs::default();
+        let mut configs = ToolConfigs::default();
         let mut toolchain_warned = false;
         let mut slots: Vec<Slot> = Vec::new();
         let mut jobs: Vec<Job> = Vec::new();
@@ -337,10 +351,7 @@ impl Evaluation {
                     continue;
                 }
             }
-            if biome_configs
-                .give(record, tool, (env, root), &mut slots)
-                .is_err()
-            {
+            if !configs.give(record, tool, (env, root), &mut slots) {
                 continue;
             }
             let (runs, refused) = found_runs(
@@ -726,6 +737,33 @@ fn reread<'doc>(
     }
 }
 
+/// The project config each non-Rust tool is given, found once per doc directory.
+#[derive(Debug, Default)]
+struct ToolConfigs {
+    /// biome's.
+    biome: BiomeConfigs,
+    /// rumdl's.
+    rumdl: RumdlConfigs,
+}
+
+impl ToolConfigs {
+    /// Gives `record` the config its tool gets, as [`BiomeConfigs::give`] and
+    /// [`RumdlConfigs::give`] do. Whether the block goes on to its tools: not when its config was
+    /// refused, or when no rule is left to check it.
+    fn give(
+        &mut self,
+        record: &mut BlockRecord,
+        tool: &ToolCartridge,
+        place: (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> bool {
+        if self.biome.give(record, tool, place, slots).is_err() {
+            return false;
+        }
+        matches!(self.rumdl.give(record, tool, place, slots), Ok(Gave::Given))
+    }
+}
+
 /// The biome config flags found for each doc directory, and the refusals already warned about.
 #[derive(Debug, Default)]
 struct BiomeConfigs {
@@ -816,6 +854,110 @@ fn biome_refusal(refusal: &biome::Refusal, at: &Location) -> (String, Finding) {
 
 /// Why biome didn't run when supdoc had no private directory to keep the config it gives biome in.
 const BIOME_NO_PRIVATE_DIR: &str = "biome needs a private directory under `XDG_CACHE_HOME` or `HOME` for the config supdoc gives it, and there is none";
+
+/// The rumdl config flags found for each doc directory, and the refusals already warned about.
+#[derive(Debug, Default)]
+struct RumdlConfigs {
+    /// Each doc directory's result, in the order they were asked for.
+    found: Vec<(PathBuf, Result<rumdl::Project, rumdl::Refusal>)>,
+    /// The refusals a warning has been added for.
+    warned: Vec<rumdl::Refusal>,
+}
+
+impl RumdlConfigs {
+    /// Gives `record`, a Markdown block, the flags rumdl gets for its doc, found once per
+    /// directory. A refusal settles the block as not checked, with its one warning per refusal
+    /// added to `slots`.
+    ///
+    /// Effect: reads the config and may create supdoc's private directory and file for it.
+    ///
+    /// # Errors
+    ///
+    /// The refusal that left the block not checked.
+    fn give(
+        &mut self,
+        record: &mut BlockRecord,
+        tool: &ToolCartridge,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> Result<Gave, rumdl::Refusal> {
+        if tool.language != Language::Markdown {
+            return Ok(Gave::Given);
+        }
+        let doc = root.join(record.at.file.as_str());
+        let dir = doc.parent().unwrap_or(root).to_path_buf();
+        let found = if let Some((_, found)) = self.found.iter().find(|(known, _)| *known == dir) {
+            found.clone()
+        } else {
+            let found = rumdl::project_args(env, root, &doc);
+            self.found.push((dir, found.clone()));
+            found
+        };
+        match found {
+            Ok(project) => {
+                if project.no_rule_left {
+                    record.hold_steps(RUMDL_NO_RULE_LEFT);
+                    return Ok(Gave::Held);
+                }
+                record.given = Some(biome::Given {
+                    mirror: Some(project.doc_as_seen(&doc)),
+                    flags: project.flags,
+                    names: None,
+                });
+                Ok(Gave::Given)
+            }
+            Err(refusal) => {
+                let (reason, warning) = rumdl_refusal(&refusal, &record.at);
+                if !self.warned.contains(&refusal) {
+                    self.warned.push(refusal.clone());
+                    slots.push(Slot::Found(warning));
+                }
+                record.state = BlockState::NotChecked(NotChecked::ToolConfig);
+                record.reason = Some(reason);
+                Err(refusal)
+            }
+        }
+    }
+}
+
+/// What [`RumdlConfigs::give`] did for a block.
+enum Gave {
+    /// The block is ready for its tools.
+    Given,
+    /// Its steps were settled as not run, so no tool is run on it.
+    Held,
+}
+
+/// Why rumdl isn't run on a block whose project config enables only rules supdoc leaves off for
+/// code blocks: nothing would check it, which is not the same as passing it.
+const RUMDL_NO_RULE_LEFT: &str =
+    "the project's rumdl config enables only rules supdoc turns off for code blocks";
+
+/// The state reason and the `code-block-not-checked` warning, at `at`, for a block rumdl isn't
+/// given because of `refusal`.
+fn rumdl_refusal(refusal: &rumdl::Refusal, at: &Location) -> (String, Finding) {
+    let (reason, message, help) = match refusal {
+        rumdl::Refusal::Config { file, why } => (
+            format!("rumdl config `{file}` {why}"),
+            format!("the project's `{file}` {why}, so its Markdown blocks aren't checked"),
+            format!(
+                "remove the `code-block-tools`, `command` and `extends` from `{file}`, or mark the blocks `ignore(<why>)`"
+            ),
+        ),
+        rumdl::Refusal::NoPrivateDir => (
+            RUMDL_NO_PRIVATE_DIR.to_owned(),
+            format!("{RUMDL_NO_PRIVATE_DIR}, so its blocks aren't checked"),
+            "set `XDG_CACHE_HOME` or `HOME` to a directory outside the project".to_owned(),
+        ),
+    };
+    let finding = Finding::new(NOT_CHECKED, Severity::Warning, message)
+        .with_help(help)
+        .with_location(at.clone());
+    (reason, finding)
+}
+
+/// Why rumdl didn't run when supdoc had no private directory to keep its config in.
+const RUMDL_NO_PRIVATE_DIR: &str = "rumdl needs a private directory under `XDG_CACHE_HOME` or `HOME` for its config, and there is none";
 
 /// Why clippy didn't run on a block when [`runner::neutral_dir`] found no private working
 /// directory: its metadata would have nowhere private to go.
@@ -1214,13 +1356,16 @@ fn run_linter(
         return Some(run_clippy(tool, program, record, pending, session, rust));
     }
     let doc = session.root.join(record.at.file.as_str());
+    let given = record.given.as_ref();
     let args = tool.args(&Invocation {
-        doc: &doc,
+        doc: given
+            .and_then(|given| given.mirror.as_deref())
+            .unwrap_or(&doc),
         index: record.index,
         tag: record.language.as_deref().unwrap_or_default(),
         edition: record.edition.unwrap_or(Edition::E2024),
         dialect: record.dialect,
-        project: &[],
+        project: given.map_or(&[], |given| given.flags.as_slice()),
         emit: None,
         externs: &[],
     });
