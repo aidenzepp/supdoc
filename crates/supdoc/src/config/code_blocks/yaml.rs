@@ -5,7 +5,7 @@ use super::{Choice, Language, Selection, ToolTable, deserialize_choice, deserial
 use crate::code_blocks::tools::Step;
 
 /// The YAML formatters supdoc knows.
-const KNOWN: &[&str] = &["yamlfmt"];
+const KNOWN: &[&str] = &["yamlfmt", "prettier"];
 
 /// The YAML linters supdoc knows.
 const LINTERS: &[&str] = &["yamllint"];
@@ -16,7 +16,8 @@ const LINTERS: &[&str] = &["yamllint"];
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawYaml {
-    /// `"yamlfmt"`, or a custom `{ command = [...] }`; unset takes the default.
+    /// `"yamlfmt"`, `"prettier"` or a custom `{ command = [...] }`; unset takes the
+    /// default.
     #[serde(default, deserialize_with = "formatter")]
     pub(super) formatter: Option<Choice>,
     /// `"yamllint"`, or a custom `{ command = [...], diagnostics = "gnu" }`; unset takes the default.
@@ -28,13 +29,17 @@ pub(crate) struct RawYaml {
     /// `[features.code-blocks.yaml.yamllint]`, when written.
     #[serde(default, deserialize_with = "yamllint")]
     pub(super) yamllint: Option<ToolTable>,
+    /// `[features.code-blocks.yaml.prettier]`, when written.
+    #[serde(default, deserialize_with = "prettier")]
+    pub(super) prettier: Option<ToolTable>,
 }
 
 /// Reads `formatter` against YAML's known tools.
 ///
 /// # Errors
 ///
-/// The deserializer's error for any value but `"yamlfmt"` or a valid custom command.
+/// The deserializer's error for any value but `"yamlfmt"`, `"prettier"` or a valid custom
+/// command.
 fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D::Error> {
     deserialize_choice(d, Language::Yaml, Step::Format, KNOWN)
 }
@@ -66,16 +71,29 @@ fn yamllint<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<ToolTable>,
     deserialize_tool(d, "yamllint")
 }
 
+/// Reads `[features.code-blocks.yaml.prettier]` against its cartridge.
+///
+/// # Errors
+///
+/// The deserializer's error for a key or value the cartridge doesn't accept.
+fn prettier<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<ToolTable>, D::Error> {
+    deserialize_tool(d, "prettier")
+}
+
 impl RawYaml {
     /// What this table selects and the tool tables it writes.
     pub(super) fn selection(&self) -> Selection<'_> {
         Selection {
             formatter: self.formatter.as_ref(),
             linter: self.linter.as_ref(),
-            tools: [("yamlfmt", &self.yamlfmt), ("yamllint", &self.yamllint)]
-                .into_iter()
-                .filter_map(|(name, table)| Some((name, table.as_ref()?)))
-                .collect(),
+            tools: [
+                ("yamlfmt", &self.yamlfmt),
+                ("yamllint", &self.yamllint),
+                ("prettier", &self.prettier),
+            ]
+            .into_iter()
+            .filter_map(|(name, table)| Some((name, table.as_ref()?)))
+            .collect(),
         }
     }
 }
