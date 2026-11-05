@@ -68,9 +68,9 @@ pub(crate) fn parse_error(stderr: &str) -> Option<ParseError> {
 /// One diagnostic of `biome lint --reporter=json`.
 #[derive(serde::Deserialize)]
 struct BiomeDiagnostic {
-    /// Its rule, as `lint/<group>/<rule>`, or a category that names no rule: `parse` for a
-    /// syntax error, or a bare `lint` for a file biome didn't lint, such as one over
-    /// `files.maxSize`.
+    /// Its rule, as `lint/<group>/<rule>`, a suppression comment's problem, as
+    /// `suppressions/<name>`, or a category that names neither: `parse` for a syntax error, or a
+    /// bare `lint` for a file biome didn't lint, such as one over `files.maxSize`.
     category: String,
     /// What biome says.
     message: String,
@@ -112,14 +112,15 @@ struct BiomeSummary {
     unchanged: u64,
 }
 
-/// The diagnostics in `biome lint --reporter=json`'s `stdout`, each named by its rule without
-/// the `lint/` prefix (`suspicious/noDebugger`), at every severity. `None` when it isn't biome's
-/// JSON report.
+/// The diagnostics in `biome lint --reporter=json`'s `stdout`, at every severity: each rule's
+/// named without the `lint/` prefix (`suspicious/noDebugger`), and each about a suppression
+/// comment in the block named by its whole category (`suppressions/unused`). `None` when it
+/// isn't biome's JSON report.
 ///
 /// # Errors
 ///
-/// What biome said, when a diagnostic's category names no rule: biome reporting on the run,
-/// such as a file it skipped, never a finding in the block.
+/// What biome said, when a diagnostic's category names neither a rule nor a suppression: biome
+/// reporting on the run, such as a file it skipped, never a finding in the block.
 pub(crate) fn diagnostics(stdout: &[u8]) -> Option<Result<Vec<Diagnostic>, String>> {
     let report: BiomeReport = serde_json::from_slice(stdout).ok()?;
     Some(
@@ -127,11 +128,17 @@ pub(crate) fn diagnostics(stdout: &[u8]) -> Option<Result<Vec<Diagnostic>, Strin
             .diagnostics
             .into_iter()
             .map(|diagnostic| {
-                let rule = diagnostic
-                    .category
+                let category = &diagnostic.category;
+                let rule = category
                     .strip_prefix("lint/")
                     .filter(|rule| !rule.is_empty())
-                    .map(str::to_owned);
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        category
+                            .strip_prefix("suppressions/")
+                            .is_some_and(|name| !name.is_empty())
+                            .then(|| category.clone())
+                    });
                 rule.map(|rule| Diagnostic {
                     line: diagnostic.location.start.line,
                     column: diagnostic.location.start.column,
@@ -149,9 +156,10 @@ pub(crate) fn diagnostics(stdout: &[u8]) -> Option<Result<Vec<Diagnostic>, Strin
     )
 }
 
-/// Judges a `biome lint` run on its JSON report, not its exit: any rule's diagnostic, error,
-/// warning or info alike, fails the block, as clippy's warnings fail a Rust block. A report with
-/// none is clean on a zero exit; a diagnostic that names no rule, a non-zero exit without
+/// Judges a `biome lint` run on its JSON report, not its exit: any rule's or suppression's
+/// diagnostic, error, warning or info alike, fails the block, as clippy's warnings fail a Rust
+/// block. A report with none is clean on a zero exit; a diagnostic that names neither, a
+/// non-zero exit without
 /// diagnostics, or output that isn't the report, is a tool failure; a timeout is a timeout.
 /// `input` isn't needed: biome counts columns in characters.
 #[must_use]
@@ -762,6 +770,21 @@ mod tests {
     }
 
     #[test]
+    fn a_suppression_comments_diagnostic_is_a_finding_named_by_its_category() {
+        let unused = br#"{"summary":{"changed":0,"unchanged":1},"diagnostics":[{"severity":"warning","message":"Suppression comment has no effect.","category":"suppressions/unused","location":{"path":"x","start":{"line":1,"column":1},"end":{"line":1,"column":46}},"advices":[]}],"command":"lint"}"#;
+
+        assert_eq!(
+            diagnostics(unused),
+            Some(Ok(vec![Diagnostic {
+                line: 1,
+                column: 1,
+                rule: "suppressions/unused".to_owned(),
+                message: "Suppression comment has no effect.".to_owned(),
+            }]))
+        );
+    }
+
+    #[test]
     fn a_diagnostic_whose_category_names_no_rule_is_a_tool_failure_never_a_finding() {
         let rule = r#"{"severity":"error","message":"This is an unexpected use of the debugger statement.","category":"lint/suspicious/noDebugger","location":{"path":"x","start":{"line":1,"column":1},"end":{"line":1,"column":10}},"advices":[]}"#;
         let too_large = r#"{"severity":"warning","message":"The size of the file is 10 B, which exceeds the configured maximum of 4 B for this project.","category":"lint","location":{"path":"x","start":{"line":0,"column":0},"end":{"line":0,"column":0}},"advices":[]}"#;
@@ -770,6 +793,7 @@ mod tests {
             too_large.to_owned(),
             too_large.replace(r#""lint""#, r#""lint/""#),
             too_large.replace(r#""lint""#, r#""parse""#),
+            too_large.replace(r#""lint""#, r#""suppressions/""#),
             format!("{rule},{too_large}"),
         ] {
             let verdict = lint_verdict("", Ok(ran(true, report(&found))));
