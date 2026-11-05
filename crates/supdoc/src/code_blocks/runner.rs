@@ -294,28 +294,31 @@ fn kill_group(pgid: u32) {
         .status();
 }
 
-/// The working directory a tool runs in: `cwd` under `$XDG_CACHE_HOME/supdoc/code-blocks`, or
-/// under `$HOME/.cache/supdoc/code-blocks`, created mode 0700. `/` when neither is usable: not
-/// absolute, holding a `..` (which the kernel resolves after symlinks but a lexical join folds
-/// away, so a check and a later write could name two places), inside `root`, not a directory only
-/// its owner reaches, or not empty.
+/// The cache bases `env` names, in order: `$XDG_CACHE_HOME`, then `$HOME/.cache`. A value that
+/// isn't absolute or holds a `..` is dropped: the kernel resolves a `..` after symlinks but a
+/// lexical join folds it away, so a check and a later write could name two places.
+pub(crate) fn cache_bases(env: &ToolEnv) -> impl Iterator<Item = PathBuf> {
+    let var = |name: &str| {
+        env.var(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute() && !holds_parent(path))
+    };
+    [
+        var("XDG_CACHE_HOME"),
+        var("HOME").map(|home| home.join(".cache")),
+    ]
+    .into_iter()
+    .flatten()
+}
+
+/// The working directory a tool runs in: `cwd` under the first of [`cache_bases`] where it is
+/// usable, beneath `supdoc/code-blocks`, created mode 0700. `/` when none is usable: inside
+/// `root`, not a directory only its owner reaches, or not empty.
 ///
 /// Effect: creates the directory and reads its metadata and entries.
 #[must_use]
 pub(crate) fn neutral_dir(env: &ToolEnv, root: &Path) -> PathBuf {
-    let var = |name: &str| {
-        env.vars()
-            .find(|(key, _)| *key == name)
-            .map(|(_, value)| PathBuf::from(value))
-            .filter(|path| path.is_absolute() && !holds_parent(path))
-    };
-    let candidates = [
-        var("XDG_CACHE_HOME"),
-        var("HOME").map(|home| home.join(".cache")),
-    ];
-    candidates
-        .into_iter()
-        .flatten()
+    cache_bases(env)
         .map(|cache| (cache.join("supdoc/code-blocks/cwd"), cache))
         .find(|(dir, cache)| usable(cache, dir, root))
         .map_or_else(|| PathBuf::from("/"), |(dir, _)| dir)
