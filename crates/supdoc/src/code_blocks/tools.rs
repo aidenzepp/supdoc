@@ -23,7 +23,7 @@ use super::format::{ParseError, Positions};
 use super::fragment::{Kind, Support};
 use super::lint;
 use super::runner::{Cwd, Failure, Ran};
-use super::{biome, go, pylint, python, rumdl, rust, shell, tombi, yaml};
+use super::{biome, go, prettier, pylint, python, rumdl, rust, shell, tombi, yaml};
 
 /// The variables a tool gets from supdoc's own environment, and no others.
 const PASSED: [&str; 5] = [
@@ -875,7 +875,7 @@ fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'sta
 }
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 22] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 24] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -1236,6 +1236,68 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 22] = [
         argv: pylint_args,
         reader: Reader::Lint(pylint::lint_verdict),
     },
+    ToolCartridge {
+        name: "prettier",
+        language: Language::TypeScript,
+        binary: "prettier",
+        loads: Loads::Project {
+            held: Held {
+                // Each language's reasons are its own, so a held step leads back to its row.
+                needs_trust: "prettier runs on TypeScript blocks only in the project tier, which \
+                              needs `supdoc trust`",
+                trust_off: "prettier runs on TypeScript blocks only in the project tier, and \
+                            `SUPDOC_TRUST=0` turns trust off for this run",
+                short: "prettier needs trust",
+                didnt_run: "prettier didn't run on TypeScript blocks: its config and plugins are \
+                            the project's code",
+                off: "`format = \"off\"` in `[features.code-blocks.typescript.prettier]`",
+            },
+            // It reads the project's config and loads its plugins as its command line would.
+            cwd: Cwd::Root,
+            bins: &["node_modules/.bin"],
+        },
+        install: "npm install --global prettier@3.9.10",
+        // Never cached (see [`ToolCartridge::cacheable`]), so no config file keys its results.
+        config_files: &[],
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        holds: every_tag,
+        vars: &[],
+        positions: own_positions,
+        argv: prettier_args,
+        reader: Reader::Format(prettier::parse_error),
+    },
+    ToolCartridge {
+        name: "prettier",
+        language: Language::JavaScript,
+        binary: "prettier",
+        loads: Loads::Project {
+            held: Held {
+                // Each language's reasons are its own, so a held step leads back to its row.
+                needs_trust: "prettier runs on JavaScript blocks only in the project tier, which \
+                              needs `supdoc trust`",
+                trust_off: "prettier runs on JavaScript blocks only in the project tier, and \
+                            `SUPDOC_TRUST=0` turns trust off for this run",
+                short: "prettier needs trust",
+                didnt_run: "prettier didn't run on JavaScript blocks: its config and plugins are \
+                            the project's code",
+                off: "`format = \"off\"` in `[features.code-blocks.javascript.prettier]`",
+            },
+            // It reads the project's config and loads its plugins as its command line would.
+            cwd: Cwd::Root,
+            bins: &["node_modules/.bin"],
+        },
+        install: "npm install --global prettier@3.9.10",
+        // Never cached (see [`ToolCartridge::cacheable`]), so no config file keys its results.
+        config_files: &[],
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        holds: every_tag,
+        vars: &[],
+        positions: own_positions,
+        argv: prettier_args,
+        reader: Reader::Format(prettier::parse_error),
+    },
 ];
 
 /// The files rumdl's results depend on: its config names (see [`rumdl::CONFIG_FILES`]) and the
@@ -1373,6 +1435,29 @@ fn pylint_args(invocation: &Invocation<'_>) -> Vec<OsString> {
         OsString::from("--output-format=json2"),
         OsString::from("--persistent=n"),
         OsString::from(format!("--disable={PYLINT_RELAXED}")),
+    ]
+}
+
+/// prettier's arguments, each overriding what the project's config could set to make it print the
+/// block back unformatted (see [`prettier`]): no ignore file read, a doc under `node_modules`
+/// formatted like any other, no pragma required, honored or inserted (a block is a snippet, never
+/// a file that takes one), the whole block as the range, and the parser the tag names (see
+/// [`prettier::parser`]), never one an `overrides` entry picks. Then the block on stdin under its
+/// virtual path, its extension from the tag as biome's (see [`biome::extension`]). Each flag is
+/// one prettier [`prettier::FLOOR`] accepts.
+fn prettier_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    let extension = biome::extension(invocation.tag);
+    vec![
+        OsString::from("--ignore-path="),
+        OsString::from("--with-node-modules"),
+        OsString::from("--no-require-pragma"),
+        OsString::from("--no-check-ignore-pragma"),
+        OsString::from("--no-insert-pragma"),
+        OsString::from("--range-start=0"),
+        OsString::from("--range-end=Infinity"),
+        OsString::from(format!("--parser={}", prettier::parser(extension))),
+        OsString::from("--stdin-filepath"),
+        virtual_path(invocation.doc, invocation.index, extension),
     ]
 }
 
@@ -1823,6 +1908,8 @@ mod tests {
                 "gofmt Go Format gofmt Static",
                 "go-vet Go Lint go Static",
                 "pylint Python Lint pylint Project",
+                "prettier TypeScript Format prettier Project",
+                "prettier JavaScript Format prettier Project",
             ]
         );
     }
@@ -1840,6 +1927,46 @@ mod tests {
             ]
             .map(OsString::from)
         );
+    }
+
+    #[test]
+    fn prettier_overrides_ignore_pragma_range_and_parser_and_gets_the_blocks_virtual_path() {
+        for (tag, parser, path) in [
+            ("ts", "--parser=typescript", "/p/docs/a.md.3.ts"),
+            ("tsx", "--parser=typescript", "/p/docs/a.md.3.tsx"),
+            ("javascript", "--parser=babel", "/p/docs/a.md.3.js"),
+            ("mjs", "--parser=babel", "/p/docs/a.md.3.mjs"),
+        ] {
+            let args = cartridge("prettier").args(&Invocation {
+                doc: Path::new("/p/docs/a.md"),
+                tag,
+                index: 3,
+                edition: Edition::E2024,
+                dialect: Dialect::Bash,
+                project: &[],
+                emit: None,
+                externs: &[],
+                fragment: None,
+            });
+
+            assert_eq!(
+                args,
+                [
+                    "--ignore-path=",
+                    "--with-node-modules",
+                    "--no-require-pragma",
+                    "--no-check-ignore-pragma",
+                    "--no-insert-pragma",
+                    "--range-start=0",
+                    "--range-end=Infinity",
+                    parser,
+                    "--stdin-filepath",
+                    path
+                ]
+                .map(OsString::from),
+                "{tag}"
+            );
+        }
     }
 
     #[test]
@@ -2305,12 +2432,12 @@ mod tests {
     }
 
     #[test]
-    fn only_pylint_searches_a_bin_dir_and_runs_from_the_root_so_only_it_is_never_cached() {
+    fn only_pylint_and_prettier_search_a_bin_dir_and_run_from_the_root_so_are_never_cached() {
         for tool in &CARTRIDGES {
-            let (bins, cwd): (&[&str], _) = if tool.name == "pylint" {
-                (&[".venv/bin"], Cwd::Root)
-            } else {
-                (&[], Cwd::Neutral)
+            let (bins, cwd): (&[&str], _) = match tool.name {
+                "pylint" => (&[".venv/bin"], Cwd::Root),
+                "prettier" => (&["node_modules/.bin"], Cwd::Root),
+                _ => (&[], Cwd::Neutral),
             };
             assert_eq!(tool.bins(), bins, "{}", tool.name);
             assert_eq!(tool.cwd(), cwd, "{}", tool.name);

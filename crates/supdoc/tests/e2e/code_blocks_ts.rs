@@ -1,4 +1,4 @@
-//! Checking TypeScript and JavaScript code blocks, formatted by biome.
+//! Checking TypeScript and JavaScript code blocks, formatted by biome or prettier.
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
@@ -2048,4 +2048,558 @@ fn example_fix_that_would_start_a_block_tag_or_close_the_comment_is_never_writte
             "{output}: no finding should offer the fix: {json}"
         );
     }
+}
+
+/// The config that selects prettier for `table`'s blocks, with biome lint's step off so prettier
+/// is the block's one tool.
+fn prettier_tables(table: &str) -> String {
+    format!(
+        "[features.code-blocks.{table}]\nformatter = \"prettier\"\n\
+         [features.code-blocks.{table}.biome-lint]\nlint = \"off\"\n"
+    )
+}
+
+/// A project whose one `ts` block, holding `body`, prettier formats.
+fn prettier_project(body: &str) -> Project {
+    project_with_block(&prettier_tables("typescript"), "ts", body)
+}
+
+/// Writes a `prettier` stub in `dir` that appends its working directory and arguments to
+/// `<dir>/prettier-runs`, one line per call, `--version` included, then prints `3.9.10` for
+/// `--version` and runs `script` for any other call.
+fn prettier_stub(dir: &Path, script: &str) {
+    prettier_stub_versioned(dir, "echo 3.9.10", script);
+}
+
+/// [`prettier_stub`], running `version` for `--version` instead.
+fn prettier_stub_versioned(dir: &Path, version: &str, script: &str) {
+    let record = dir.join("prettier-runs");
+    let path = dir.join("prettier");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\necho \"$(pwd -P) $*\" >> '{}'\n\
+             if [ \"$1\" = --version ]; then\n{version}\nexit 0\nfi\n{script}\n",
+            record.display()
+        ),
+    )
+    .expect("the stub should be writable");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("the stub should be made executable");
+}
+
+/// The lines `prettier_stub` in `dir` recorded: one per call, `--version` included.
+fn prettier_runs(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("prettier-runs"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The `--version` calls among [`prettier_runs`] in `dir`.
+fn prettier_versions(dir: &Path) -> Vec<String> {
+    prettier_runs(dir)
+        .into_iter()
+        .filter(|run| run.ends_with(" --version"))
+        .collect()
+}
+
+/// The calls among [`prettier_runs`] in `dir` that format a block: every one but `--version`.
+fn prettier_formats(dir: &Path) -> Vec<String> {
+    prettier_runs(dir)
+        .into_iter()
+        .filter(|run| !run.ends_with(" --version"))
+        .collect()
+}
+
+/// Runs a trusted `check --json` on `project` with `path` as the only `PATH` entry and its cache
+/// in `cache`, asserting it exits `exit`.
+fn trusted_prettier_check(
+    project: &Project,
+    path: &Path,
+    cache: &Path,
+    exit: i32,
+) -> serde_json::Value {
+    project
+        .supdoc_in_with(
+            ".",
+            &["check", "--json"],
+            &[
+                ("PATH", path),
+                ("SUPDOC_TRUST", Path::new("1")),
+                ("XDG_CACHE_HOME", cache),
+            ],
+        )
+        .assert_exit(exit)
+        .json()
+}
+
+#[test]
+fn prettier_runs_from_the_root_with_its_overrides_and_spawns_again_on_a_second_run() {
+    let project = prettier_project("const a = 1;");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    prettier_stub(outside.path(), "/bin/cat");
+
+    let first = trusted_prettier_check(&project, outside.path(), cache.path(), 0);
+    let second = trusted_prettier_check(&project, outside.path(), cache.path(), 0);
+
+    let root = project
+        .path(".")
+        .canonicalize()
+        .expect("the project root should resolve");
+    let versions = prettier_versions(outside.path());
+    assert_eq!(
+        versions.len(),
+        2,
+        "each run reads the version once: {versions:?}"
+    );
+    for version in &versions {
+        assert_eq!(
+            version.strip_suffix(" --version").map(Path::new),
+            Some(root.as_path()),
+            "the version is read from the root: {version}"
+        );
+    }
+    let runs = prettier_formats(outside.path());
+    assert_eq!(
+        runs.len(),
+        2,
+        "prettier is never cached, so each run spawns it: {runs:?}"
+    );
+    for run in &runs {
+        let (cwd, args) = run
+            .split_once(' ')
+            .expect("the record names a cwd and args");
+        assert_eq!(Path::new(cwd), root, "prettier runs from the root: {run}");
+        let args: Vec<&str> = args.split(' ').collect();
+        let [
+            "--ignore-path=",
+            "--with-node-modules",
+            "--no-require-pragma",
+            "--no-check-ignore-pragma",
+            "--no-insert-pragma",
+            "--range-start=0",
+            "--range-end=Infinity",
+            "--parser=typescript",
+            "--stdin-filepath",
+            path,
+        ] = args.as_slice()
+        else {
+            panic!("prettier should get its overrides and the block's path: {run}");
+        };
+        assert!(path.ends_with("/docs/blocks.md.1.ts"), "{run}");
+    }
+    for json in [first, second] {
+        assert!(finding_kinds(&json).is_empty(), "{json}");
+        assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+    }
+}
+
+#[test]
+fn prettier_in_the_projects_node_modules_runs_before_one_on_path() {
+    let project = project_with_block(&prettier_tables("javascript"), "js", "const a = 1;");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let bin = project.path("node_modules/.bin");
+    std::fs::create_dir_all(&bin).expect("the node_modules bin directory should be creatable");
+    prettier_stub(&bin, "/bin/cat");
+    prettier_stub(outside.path(), "exit 9");
+
+    let json = trusted_prettier_check(&project, outside.path(), cache.path(), 0);
+
+    assert_eq!(
+        prettier_versions(&bin).len(),
+        1,
+        "the version is read once, from the prettier that formats: {json}"
+    );
+    let runs = prettier_formats(&bin);
+    assert_eq!(runs.len(), 1, "the root's prettier runs: {json}");
+    assert!(
+        runs.first()
+            .is_some_and(|run| run.ends_with("/docs/blocks.md.1.js")),
+        "a js block gets a .js path: {runs:?}"
+    );
+    assert!(
+        prettier_runs(outside.path()).is_empty(),
+        "the prettier of the same name on PATH never runs, not even for --version: {json}"
+    );
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+}
+
+#[test]
+fn prettier_ignore_in_the_block_is_format_not_run_naming_format_off() {
+    let project = prettier_project("const a = 1;");
+    project.write(
+        "docs/blocks.md",
+        "# Blocks\n\n```ts\n// prettier-ignore\nconst  a = 1\n```\n\n\
+         ```ts\nconst b = [/* prettier-ignore */ 1,2];\n```\n",
+    );
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    prettier_stub(outside.path(), "/bin/cat");
+
+    let json = trusted_prettier_check(&project, outside.path(), cache.path(), 0);
+
+    assert!(
+        prettier_formats(outside.path()).is_empty(),
+        "prettier never formats a block: {json}"
+    );
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+    assert_eq!(at(&json, "/findings/0/severity"), "warning", "{json}");
+    let help = at(&json, "/findings/0/help");
+    assert!(
+        help.as_str()
+            .is_some_and(|help| help.contains("format(off: <reason>)")),
+        "{json}"
+    );
+    for block in 0..2 {
+        assert_eq!(
+            at(&json, &format!("/data/code_blocks/{block}/format")),
+            "not_run",
+            "block {block}: {json}"
+        );
+        let reason = at(&json, &format!("/data/code_blocks/{block}/reason"));
+        assert!(
+            reason
+                .as_str()
+                .is_some_and(|reason| reason.contains("format(off: <reason>)")),
+            "block {block}: {json}"
+        );
+    }
+}
+
+/// A project whose one misformatted `ts` block prettier formats, after `tier` (a line under
+/// `[features.code-blocks]`, or empty), with a prettier stub in its `node_modules/.bin` and
+/// another in `outside`, so a call of either is recorded.
+fn planted_prettier_project(tier: &str, outside: &Path) -> Project {
+    let project = project_with_block(
+        &format!("{tier}{}", prettier_tables("typescript")),
+        "ts",
+        "const   a = 1",
+    );
+    let bin = project.path("node_modules/.bin");
+    std::fs::create_dir_all(&bin).expect("the node_modules bin directory should be creatable");
+    prettier_stub(&bin, "/bin/cat");
+    prettier_stub(outside, "/bin/cat");
+    project
+}
+
+/// Asserts neither prettier stub of `project`'s [`planted_prettier_project`] ran, not even for
+/// `--version`, and its block's format step didn't run.
+fn assert_no_prettier_call(project: &Project, outside: &Path, json: &serde_json::Value) {
+    assert!(
+        prettier_runs(&project.path("node_modules/.bin")).is_empty()
+            && prettier_runs(outside).is_empty(),
+        "prettier never starts, not even for --version: {json}"
+    );
+    assert_eq!(at(json, "/data/code_blocks/0/format"), "not_run", "{json}");
+}
+
+#[test]
+fn prettier_untrusted_is_format_not_run_naming_trust() {
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let project = planted_prettier_project("", outside.path());
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(0)
+        .json();
+
+    assert_no_prettier_call(&project, outside.path(), &json);
+    assert_eq!(finding_kinds(&json), ["code-block-not-trusted"], "{json}");
+    let message = at(&json, "/findings/0/message");
+    assert!(
+        message
+            .as_str()
+            .is_some_and(|message| message.contains("prettier didn't run on TypeScript blocks")),
+        "{json}"
+    );
+    let reason = at(&json, "/data/code_blocks/0/reason");
+    assert!(
+        reason.as_str().is_some_and(|reason| reason.starts_with(
+            "prettier runs on TypeScript blocks only in the project tier, which needs `supdoc trust`"
+        )),
+        "{json}"
+    );
+}
+
+#[test]
+fn prettier_with_trust_turned_off_or_the_static_tier_never_starts() {
+    for (tier, trust) in [("", "0"), ("tier = \"static\"\n", "1")] {
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let project = planted_prettier_project(tier, outside.path());
+
+        let json = project
+            .supdoc_in_with(
+                ".",
+                &["check", "--json"],
+                &[("PATH", outside.path()), ("SUPDOC_TRUST", Path::new(trust))],
+            )
+            .assert_exit(0)
+            .json();
+
+        assert_no_prettier_call(&project, outside.path(), &json);
+    }
+}
+
+#[test]
+fn prettier_the_real_one_passes_a_formatted_block_and_fails_another_in_ts_and_js() {
+    let Some(dir) = real_tool_dir(
+        "prettier",
+        "prettier_the_real_one_passes_a_formatted_block_and_fails_another_in_ts_and_js",
+    ) else {
+        return;
+    };
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    for (table, tag) in [("typescript", "ts"), ("javascript", "js")] {
+        let formatted = project_with_block(&prettier_tables(table), tag, "const a = 1;");
+        let unformatted = project_with_block(&prettier_tables(table), tag, "const   a = 1");
+
+        let passes = trusted_prettier_check(&formatted, &dir, cache.path(), 0);
+        let fails = trusted_prettier_check(&unformatted, &dir, cache.path(), 1);
+
+        assert_eq!(
+            at(&passes, "/data/summary/code_blocks/passed"),
+            1,
+            "{tag}: {passes}"
+        );
+        assert_eq!(
+            finding_kinds(&fails),
+            ["code-block-unformatted"],
+            "{tag}: {fails}"
+        );
+    }
+}
+
+#[test]
+fn prettier_the_real_ones_syntax_error_is_a_parse_error_at_its_doc_line() {
+    let Some(dir) = real_tool_dir(
+        "prettier",
+        "prettier_the_real_ones_syntax_error_is_a_parse_error_at_its_doc_line",
+    ) else {
+        return;
+    };
+    let project = prettier_project("const a = {\n  b: 1,,\n};");
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+
+    let json = trusted_prettier_check(&project, &dir, cache.path(), 1);
+
+    assert_eq!(finding_kinds(&json), ["code-block-parse"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 5, "{json}");
+}
+
+#[test]
+fn prettier_the_real_one_fails_a_misformatted_block_the_projects_ignore_files_cover() {
+    let Some(dir) = real_tool_dir(
+        "prettier",
+        "prettier_the_real_one_fails_a_misformatted_block_the_projects_ignore_files_cover",
+    ) else {
+        return;
+    };
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    for ignore in [".gitignore", ".prettierignore"] {
+        let project = prettier_project("const   a = 1");
+        // Covers the block's virtual path, never the doc itself, which supdoc would then skip.
+        project.write(ignore, "docs/blocks.md.*\n");
+
+        let json = trusted_prettier_check(&project, &dir, cache.path(), 1);
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-unformatted"],
+            "{ignore} never turns the block into a pass: {json}"
+        );
+    }
+}
+
+#[test]
+fn prettier_the_real_one_fails_a_misformatted_block_whatever_the_configs_pragma_options() {
+    let Some(dir) = real_tool_dir(
+        "prettier",
+        "prettier_the_real_one_fails_a_misformatted_block_whatever_the_configs_pragma_options",
+    ) else {
+        return;
+    };
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    for (config, body) in [
+        ("{\"requirePragma\": true}", "const   a = 1"),
+        (
+            "{\"checkIgnorePragma\": true}",
+            "/** @noprettier */\nconst   a = 1",
+        ),
+        (
+            "{\"checkIgnorePragma\": true}",
+            "/** @NoFormat */\nconst   a = 1",
+        ),
+    ] {
+        let project = prettier_project(body);
+        project.write(".prettierrc", config);
+
+        let json = trusted_prettier_check(&project, &dir, cache.path(), 1);
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-unformatted"],
+            "{config} never turns {body:?} into a pass: {json}"
+        );
+    }
+}
+
+#[test]
+fn prettier_the_real_one_fails_a_misformatted_block_whatever_the_configs_range_or_parser() {
+    let Some(dir) = real_tool_dir(
+        "prettier",
+        "prettier_the_real_one_fails_a_misformatted_block_whatever_the_configs_range_or_parser",
+    ) else {
+        return;
+    };
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    for (table, tag, config) in [
+        ("typescript", "ts", "{\"rangeEnd\": 0}"),
+        (
+            "typescript",
+            "ts",
+            "{\"overrides\": [{\"files\": \"*.md.*.ts\", \"options\": {\"parser\": \"markdown\"}}]}",
+        ),
+        (
+            "javascript",
+            "js",
+            "{\"overrides\": [{\"files\": \"*.md.*.js\", \"options\": {\"parser\": \"markdown\"}}]}",
+        ),
+    ] {
+        let project = project_with_block(&prettier_tables(table), tag, "const a=1;");
+        project.write(".prettierrc", config);
+
+        let json = trusted_prettier_check(&project, &dir, cache.path(), 1);
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-unformatted"],
+            "{config} never turns a {tag} block into a pass: {json}"
+        );
+    }
+}
+
+#[test]
+fn prettier_older_than_the_floor_or_unreadable_is_format_not_run_with_one_warning() {
+    for (version, named) in [
+        ("echo 3.5.3", "prettier 3.5.3 isn't 3.6.0 or later"),
+        (
+            "printf '\\033[31mgarbage out\\033[0m\\n'",
+            "supdoc couldn't read prettier's version: `prettier --version` printed `garbage out`, \
+             so",
+        ),
+        (
+            "exit 3",
+            "supdoc couldn't read prettier's version: `prettier --version` exited unsuccessfully",
+        ),
+    ] {
+        let project = prettier_project("const   a = 1");
+        project.write(
+            "docs/blocks.md",
+            "# Blocks\n\n```ts\nconst   a = 1\n```\n\n```ts\nconst   b = 2\n```\n",
+        );
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        prettier_stub_versioned(outside.path(), version, "/bin/cat");
+
+        let json = trusted_prettier_check(&project, outside.path(), cache.path(), 0);
+
+        assert!(
+            prettier_formats(outside.path()).is_empty(),
+            "{version}: prettier never formats a block: {json}"
+        );
+        assert_eq!(
+            prettier_versions(outside.path()).len(),
+            1,
+            "{version}: the version is read once for the run: {json}"
+        );
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-not-checked"],
+            "{version}: one warning for the run: {json}"
+        );
+        let message = at(&json, "/findings/0/message");
+        assert!(
+            message
+                .as_str()
+                .is_some_and(|message| message.starts_with(named)),
+            "{version}: {json}"
+        );
+        for block in 0..2 {
+            assert_eq!(
+                at(&json, &format!("/data/code_blocks/{block}/format")),
+                "not_run",
+                "{version}, block {block}: {json}"
+            );
+        }
+        assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 0, "{json}");
+    }
+}
+
+#[test]
+fn prettier_stderr_reaches_the_finding_without_its_ansi_escapes() {
+    let project = prettier_project("const a = 1;");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    prettier_stub(
+        outside.path(),
+        "/bin/cat >/dev/null\nprintf '[error] \\033[31mboom\\033[0m in the config\\n' >&2\nexit 2",
+    );
+
+    let json = trusted_prettier_check(&project, outside.path(), cache.path(), 1);
+
+    assert_eq!(finding_kinds(&json), ["code-block-tool-failed"], "{json}");
+    let message = at(&json, "/findings/0/message");
+    assert!(
+        message.as_str().is_some_and(|message| {
+            message.contains("[error] boom in the config") && !message.contains('\u{1b}')
+        }),
+        "{json}"
+    );
+}
+
+#[test]
+fn prettier_the_real_one_fails_a_misformatted_block_in_a_doc_under_node_modules() {
+    let Some(dir) = real_tool_dir(
+        "prettier",
+        "prettier_the_real_one_fails_a_misformatted_block_in_a_doc_under_node_modules",
+    ) else {
+        return;
+    };
+    let project = prettier_project("const a = 1;");
+    project.write(
+        "node_modules/pkg/README.md",
+        "# Pkg\n\n```ts\nconst   a = 1\n```\n",
+    );
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+
+    let json = trusted_prettier_check(&project, &dir, cache.path(), 1);
+
+    assert_eq!(finding_kinds(&json), ["code-block-unformatted"], "{json}");
+    assert_eq!(
+        at(&json, "/findings/0/location/file"),
+        "node_modules/pkg/README.md",
+        "{json}"
+    );
+}
+
+#[test]
+fn prettier_the_real_one_passes_a_formatted_block_whatever_the_configs_insert_pragma() {
+    let Some(dir) = real_tool_dir(
+        "prettier",
+        "prettier_the_real_one_passes_a_formatted_block_whatever_the_configs_insert_pragma",
+    ) else {
+        return;
+    };
+    let project = prettier_project("const a = 1;");
+    project.write(".prettierrc", "{\"insertPragma\": true}");
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+
+    let json = trusted_prettier_check(&project, &dir, cache.path(), 0);
+
+    assert!(finding_kinds(&json).is_empty(), "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
 }
