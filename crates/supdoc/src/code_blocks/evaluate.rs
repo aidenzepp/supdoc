@@ -1189,14 +1189,14 @@ struct PrettierVersion {
     timeout: Option<Duration>,
     /// The version once read (see [`prettier::version_of`]), and whether its warning has been
     /// given. `None` until a block needs it.
-    version: Option<(Result<String, String>, bool)>,
+    version: Option<(Result<String, prettier::Unverified>, bool)>,
 }
 
 impl PrettierVersion {
     /// Whether the prettier `record`'s format step would run is [`prettier::FLOOR`] or later,
     /// read once per run from where its steps run. When it isn't, or can't be read, the step
-    /// doesn't run, with [`PRETTIER_UNVERIFIED`] as its reason, and the run's one warning goes to
-    /// `slots`. A block whose formatter isn't prettier, or whose prettier isn't found, is left to
+    /// doesn't run, with [`PRETTIER_OLDER`] or [`PRETTIER_UNREADABLE`] as its reason, and the
+    /// run's one warning (see [`prettier_unverified`]) goes to `slots`. A block whose formatter isn't prettier, or whose prettier isn't found, is left to
     /// the usual lookup. Whether the block goes on to its tools: its linter still runs.
     ///
     /// Effect: runs `prettier --version` the first time.
@@ -1223,42 +1223,67 @@ impl PrettierVersion {
         let (version, warned) = self
             .version
             .get_or_insert_with(|| (prettier::version_of(&program, env, root, timeout), false));
-        let Err(shown) = version else {
+        let Err(unverified) = version else {
             return true;
         };
         if !*warned {
             *warned = true;
-            let floor = prettier::FLOOR.map(|part| part.to_string()).join(".");
-            slots.push(Slot::Found(
-                Finding::new(
-                    NOT_CHECKED,
-                    Severity::Warning,
-                    format!(
-                        "prettier {shown} isn't {floor} or later, the first release that accepts \
-                         every flag supdoc gives it, so its blocks' format steps didn't run"
-                    ),
-                )
-                .with_help(format!(
-                    "install prettier {floor} or later: `{}`, or into the project's \
-                     node_modules/.bin",
-                    tool.install
-                ))
-                .with_location(record.at.clone()),
-            ));
+            slots.push(Slot::Found(prettier_unverified(
+                unverified,
+                tool.install,
+                &record.at,
+            )));
         }
         record.tool = None;
         record.steps.format = StepState::Unrunnable {
-            reason: PRETTIER_UNVERIFIED,
+            reason: match unverified {
+                prettier::Unverified::Older(_) => PRETTIER_OLDER,
+                prettier::Unverified::Unreadable(_) => PRETTIER_UNREADABLE,
+            },
         };
         record.linter.is_some()
     }
 }
 
-/// Why prettier's step didn't run when its version is older than [`prettier::FLOOR`] or can't
-/// be read.
-const PRETTIER_UNVERIFIED: &str = "the prettier found is older than 3.6.0, the first release \
-                                   that accepts every flag supdoc gives it, or its version \
-                                   couldn't be read";
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose prettier step
+/// didn't run because `unverified`: the release prettier named is older than
+/// [`prettier::FLOOR`], with help to `install` a later one, or supdoc couldn't read it.
+fn prettier_unverified(unverified: &prettier::Unverified, install: &str, at: &Location) -> Finding {
+    let floor = prettier::FLOOR.map(|part| part.to_string()).join(".");
+    let (message, help) = match unverified {
+        prettier::Unverified::Older(version) => (
+            format!(
+                "prettier {version} isn't {floor} or later, the first release that accepts every \
+                 flag supdoc gives it, so its blocks' format steps didn't run"
+            ),
+            format!(
+                "install prettier {floor} or later: `{install}`, or into the project's \
+                 node_modules/.bin"
+            ),
+        ),
+        prettier::Unverified::Unreadable(said) => (
+            format!(
+                "supdoc couldn't read prettier's version: `prettier --version` {}, so its \
+                 blocks' format steps didn't run",
+                said.strip_prefix("it ").unwrap_or(said)
+            ),
+            format!(
+                "check that `prettier --version`, run from the project root, prints a release \
+                 such as {floor} and exits successfully"
+            ),
+        ),
+    };
+    Finding::new(NOT_CHECKED, Severity::Warning, message)
+        .with_help(help)
+        .with_location(at.clone())
+}
+
+/// Why prettier's step didn't run when the release it named is older than [`prettier::FLOOR`].
+const PRETTIER_OLDER: &str = "the prettier found is older than 3.6.0, the first release that \
+                              accepts every flag supdoc gives it";
+
+/// Why prettier's step didn't run when supdoc couldn't read its version.
+const PRETTIER_UNREADABLE: &str = "supdoc couldn't read the version of the prettier found";
 
 /// The biome config flags found for each doc directory, and the refusals already warned about.
 #[derive(Debug, Default)]

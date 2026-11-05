@@ -35,7 +35,7 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::time::Duration;
 
-use super::format::ParseError;
+use super::format::{self, ParseError};
 use super::runner;
 use super::tools::ToolEnv;
 
@@ -43,8 +43,8 @@ use super::tools::ToolEnv;
 /// is the newest (probed: 3.5.3 ignores it as unknown, 3.6.0 takes it).
 pub(crate) const FLOOR: [u64; 3] = [3, 6, 0];
 
-/// How a prettier whose version can't be read is named.
-const UNREADABLE: &str = "(whose version supdoc couldn't read)";
+/// The most characters of what `prettier --version` printed that a warning quotes.
+const QUOTED: usize = 60;
 
 /// The marker of prettier's syntax-error line.
 const SYNTAX_ERROR: &str = "SyntaxError: ";
@@ -63,14 +63,24 @@ pub(crate) fn parser(extension: &str) -> &'static str {
     }
 }
 
+/// Why supdoc won't run the prettier it found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Unverified {
+    /// `--version` printed a plain release older than [`FLOOR`]: that release.
+    Older(String),
+    /// supdoc couldn't read the release: what happened, as "it printed `...`" or "it passed the
+    /// time limit", ready to follow "supdoc couldn't read prettier's version: ".
+    Unreadable(String),
+}
+
 /// The version `prettier --version` printed in `stdout`, a plain `<major>.<minor>.<patch>`, when
 /// it is [`FLOOR`] or later.
 ///
 /// # Errors
 ///
-/// How to name the version to the user: the version it printed when it is older, or, when its
-/// output isn't a plain version, that.
-pub(crate) fn verified(stdout: &[u8]) -> Result<String, String> {
+/// [`Unverified::Older`] for an older plain release; [`Unverified::Unreadable`] quoting the
+/// output's first line, ANSI-stripped and cut to [`QUOTED`] characters, when it isn't one.
+pub(crate) fn verified(stdout: &[u8]) -> Result<String, Unverified> {
     let text = String::from_utf8_lossy(stdout);
     let version = text.trim();
     let parts: Vec<u64> = version
@@ -83,12 +93,32 @@ pub(crate) fn verified(stdout: &[u8]) -> Result<String, String> {
         })
         .collect::<Option<_>>()
         .filter(|parts: &Vec<u64>| parts.len() == 3)
-        .ok_or_else(|| UNREADABLE.to_owned())?;
+        .ok_or_else(|| Unverified::Unreadable(printed(&text)))?;
     if parts.as_slice() >= FLOOR.as_slice() {
         Ok(version.to_owned())
     } else {
-        Err(version.to_owned())
+        Err(Unverified::Older(version.to_owned()))
     }
+}
+
+/// What `text`, `--version`'s output, said, for [`Unverified::Unreadable`]: "it printed
+/// nothing", or "it printed `<first line>`", ANSI-stripped, without control characters or
+/// backticks, cut to [`QUOTED`] characters with `...`.
+fn printed(text: &str) -> String {
+    let plain = format::strip_ansi(text);
+    let line = plain.trim().lines().next().unwrap_or_default();
+    let clean: String = line
+        .chars()
+        .filter(|c| !c.is_control() && *c != '`')
+        .collect();
+    if clean.is_empty() {
+        return "it printed nothing".to_owned();
+    }
+    let mut quoted: String = clean.chars().take(QUOTED).collect();
+    if clean.chars().nth(QUOTED).is_some() {
+        quoted.push_str("...");
+    }
+    format!("it printed `{quoted}`")
 }
 
 /// [`verified`] on what `program`, a prettier binary, prints for `--version`, run from `root` as
@@ -98,13 +128,14 @@ pub(crate) fn verified(stdout: &[u8]) -> Result<String, String> {
 ///
 /// # Errors
 ///
-/// As [`verified`]'s, and the unreadable version when the run fails or exits unsuccessfully.
+/// As [`verified`]'s, and [`Unverified::Unreadable`] naming how the run failed when it
+/// couldn't start, passed the time limit or its output cap, or exited unsuccessfully.
 pub(crate) fn version_of(
     program: &Path,
     env: &ToolEnv,
     root: &Path,
     timeout: Option<Duration>,
-) -> Result<String, String> {
+) -> Result<String, Unverified> {
     let call = runner::Call {
         program,
         name: "prettier",
@@ -115,9 +146,13 @@ pub(crate) fn version_of(
         cwd: runner::Cwd::Root,
         cap: runner::CAP,
     };
+    let failed = |how: &str| Err(Unverified::Unreadable(how.to_owned()));
     match runner::run(&call, env, root) {
         Ok(ran) if ran.success => verified(&ran.stdout),
-        _ => Err(UNREADABLE.to_owned()),
+        Ok(_) => failed("it exited unsuccessfully"),
+        Err(runner::Failure::TimedOut) => failed("it passed the time limit"),
+        Err(runner::Failure::OverCap { .. }) => failed("it printed more than supdoc reads"),
+        Err(runner::Failure::Spawn(_)) => failed("it couldn't start"),
     }
 }
 
@@ -147,7 +182,7 @@ pub(crate) fn switches_format_off(block: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_error, parser, switches_format_off, verified};
+    use super::{Unverified, parse_error, parser, switches_format_off, verified};
     use crate::code_blocks::format::ParseError;
 
     #[test]
@@ -178,33 +213,47 @@ mod tests {
     }
 
     #[test]
-    fn an_older_version_is_named_and_refused() {
+    fn an_older_version_is_named_as_older() {
         for stdout in ["3.5.3\n", "2.8.8\n", "3.0.0"] {
             assert_eq!(
                 verified(stdout.as_bytes()),
-                Err(stdout.trim().to_owned()),
+                Err(Unverified::Older(stdout.trim().to_owned())),
                 "{stdout:?}"
             );
         }
     }
 
     #[test]
-    fn output_that_isnt_a_plain_version_is_refused_as_unreadable() {
-        for stdout in [
-            "",
-            "garbage\n",
-            "3.6\n",
-            "3.6.0-beta.1\n",
-            "v3.9.10\n",
-            "3.9.10\nmore\n",
-            "+3.9.10",
+    fn output_that_isnt_a_plain_version_is_unreadable_quoting_its_first_line() {
+        for (stdout, said) in [
+            ("", "it printed nothing"),
+            ("  \n", "it printed nothing"),
+            ("garbage\n", "it printed `garbage`"),
+            ("3.6\n", "it printed `3.6`"),
+            ("3.6.0-beta.1\n", "it printed `3.6.0-beta.1`"),
+            ("v3.9.10\n", "it printed `v3.9.10`"),
+            ("3.9.10\nmore\n", "it printed `3.9.10`"),
+            ("\u{1b}[31mred`tick`\u{7}\n", "it printed `redtick`"),
         ] {
             assert_eq!(
                 verified(stdout.as_bytes()),
-                Err("(whose version supdoc couldn't read)".to_owned()),
+                Err(Unverified::Unreadable(said.to_owned())),
                 "{stdout:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_long_unreadable_output_is_cut_with_an_ellipsis() {
+        let long = "x".repeat(100);
+
+        assert_eq!(
+            verified(long.as_bytes()),
+            Err(Unverified::Unreadable(format!(
+                "it printed `{}...`",
+                "x".repeat(60)
+            )))
+        );
     }
 
     #[test]

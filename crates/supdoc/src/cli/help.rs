@@ -249,9 +249,11 @@ $XDG_CACHE_HOME when it's set), never inside the checkout. Each trusted checkout
 its worktrees, gets a full build there, which can take as much disk as the project's own. Delete \
 the directory to get the space back.
 
-Trust grants two more tools the same reach. pylint, when a Python \
+Trust grants three more tools the same reach. pylint, when a Python \
 table selects it, runs from the root, found in the root's .venv/bin before PATH, and imports the \
-blocks' modules. A custom formatter or linter command from the config, or from a config it \
+blocks' modules. prettier, when a TypeScript or JavaScript table selects it, runs from the root, \
+found in the root's node_modules/.bin before PATH, and loads the project's prettier config and \
+plugins; supdoc runs prettier 3.6.0 or later. A custom formatter or linter command from the config, or from a config it \
 extends, runs as written from the root (see `supdoc check --help`). Untrusted, each is `not \
 run` with a code-block-not-trusted warning naming it.
 

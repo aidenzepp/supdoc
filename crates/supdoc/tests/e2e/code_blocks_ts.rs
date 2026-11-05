@@ -2064,9 +2064,9 @@ fn prettier_project(body: &str) -> Project {
     project_with_block(&prettier_tables("typescript"), "ts", body)
 }
 
-/// Writes a `prettier` stub in `dir` that prints `3.9.10` for `--version`, and for any other call
-/// appends its working directory and arguments to `<dir>/prettier-runs`, one line per run, then
-/// runs `script`.
+/// Writes a `prettier` stub in `dir` that appends its working directory and arguments to
+/// `<dir>/prettier-runs`, one line per call, `--version` included, then prints `3.9.10` for
+/// `--version` and runs `script` for any other call.
 fn prettier_stub(dir: &Path, script: &str) {
     prettier_stub_versioned(dir, "echo 3.9.10", script);
 }
@@ -2078,8 +2078,8 @@ fn prettier_stub_versioned(dir: &Path, version: &str, script: &str) {
     std::fs::write(
         &path,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = --version ]; then\n{version}\nexit 0\nfi\n\
-             echo \"$(pwd -P) $*\" >> '{}'\n{script}\n",
+            "#!/bin/sh\necho \"$(pwd -P) $*\" >> '{}'\n\
+             if [ \"$1\" = --version ]; then\n{version}\nexit 0\nfi\n{script}\n",
             record.display()
         ),
     )
@@ -2088,12 +2088,28 @@ fn prettier_stub_versioned(dir: &Path, version: &str, script: &str) {
         .expect("the stub should be made executable");
 }
 
-/// The lines `prettier_stub` in `dir` recorded: one per run.
+/// The lines `prettier_stub` in `dir` recorded: one per call, `--version` included.
 fn prettier_runs(dir: &Path) -> Vec<String> {
     std::fs::read_to_string(dir.join("prettier-runs"))
         .unwrap_or_default()
         .lines()
         .map(str::to_owned)
+        .collect()
+}
+
+/// The `--version` calls among [`prettier_runs`] in `dir`.
+fn prettier_versions(dir: &Path) -> Vec<String> {
+    prettier_runs(dir)
+        .into_iter()
+        .filter(|run| run.ends_with(" --version"))
+        .collect()
+}
+
+/// The calls among [`prettier_runs`] in `dir` that format a block: every one but `--version`.
+fn prettier_formats(dir: &Path) -> Vec<String> {
+    prettier_runs(dir)
+        .into_iter()
+        .filter(|run| !run.ends_with(" --version"))
         .collect()
 }
 
@@ -2133,7 +2149,20 @@ fn prettier_runs_from_the_root_with_its_overrides_and_spawns_again_on_a_second_r
         .path(".")
         .canonicalize()
         .expect("the project root should resolve");
-    let runs = prettier_runs(outside.path());
+    let versions = prettier_versions(outside.path());
+    assert_eq!(
+        versions.len(),
+        2,
+        "each run reads the version once: {versions:?}"
+    );
+    for version in &versions {
+        assert_eq!(
+            version.strip_suffix(" --version").map(Path::new),
+            Some(root.as_path()),
+            "the version is read from the root: {version}"
+        );
+    }
+    let runs = prettier_formats(outside.path());
     assert_eq!(
         runs.len(),
         2,
@@ -2180,7 +2209,12 @@ fn prettier_in_the_projects_node_modules_runs_before_one_on_path() {
 
     let json = trusted_prettier_check(&project, outside.path(), cache.path(), 0);
 
-    let runs = prettier_runs(&bin);
+    assert_eq!(
+        prettier_versions(&bin).len(),
+        1,
+        "the version is read once, from the prettier that formats: {json}"
+    );
+    let runs = prettier_formats(&bin);
     assert_eq!(runs.len(), 1, "the root's prettier runs: {json}");
     assert!(
         runs.first()
@@ -2189,7 +2223,7 @@ fn prettier_in_the_projects_node_modules_runs_before_one_on_path() {
     );
     assert!(
         prettier_runs(outside.path()).is_empty(),
-        "the prettier of the same name on PATH never runs: {json}"
+        "the prettier of the same name on PATH never runs, not even for --version: {json}"
     );
     assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
 }
@@ -2209,8 +2243,8 @@ fn prettier_ignore_in_the_block_is_format_not_run_naming_format_off() {
     let json = trusted_prettier_check(&project, outside.path(), cache.path(), 0);
 
     assert!(
-        prettier_runs(outside.path()).is_empty(),
-        "prettier never starts: {json}"
+        prettier_formats(outside.path()).is_empty(),
+        "prettier never formats a block: {json}"
     );
     assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
     assert_eq!(at(&json, "/findings/0/severity"), "warning", "{json}");
@@ -2236,21 +2270,44 @@ fn prettier_ignore_in_the_block_is_format_not_run_naming_format_off() {
     }
 }
 
+/// A project whose one misformatted `ts` block prettier formats, after `tier` (a line under
+/// `[features.code-blocks]`, or empty), with a prettier stub in its `node_modules/.bin` and
+/// another in `outside`, so a call of either is recorded.
+fn planted_prettier_project(tier: &str, outside: &Path) -> Project {
+    let project = project_with_block(
+        &format!("{tier}{}", prettier_tables("typescript")),
+        "ts",
+        "const   a = 1",
+    );
+    let bin = project.path("node_modules/.bin");
+    std::fs::create_dir_all(&bin).expect("the node_modules bin directory should be creatable");
+    prettier_stub(&bin, "/bin/cat");
+    prettier_stub(outside, "/bin/cat");
+    project
+}
+
+/// Asserts neither prettier stub of `project`'s [`planted_prettier_project`] ran, not even for
+/// `--version`, and its block's format step didn't run.
+fn assert_no_prettier_call(project: &Project, outside: &Path, json: &serde_json::Value) {
+    assert!(
+        prettier_runs(&project.path("node_modules/.bin")).is_empty()
+            && prettier_runs(outside).is_empty(),
+        "prettier never starts, not even for --version: {json}"
+    );
+    assert_eq!(at(json, "/data/code_blocks/0/format"), "not_run", "{json}");
+}
+
 #[test]
 fn prettier_untrusted_is_format_not_run_naming_trust() {
-    let project = prettier_project("const   a = 1");
     let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
-    prettier_stub(outside.path(), "/bin/cat");
+    let project = planted_prettier_project("", outside.path());
 
     let json = project
         .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
         .assert_exit(0)
         .json();
 
-    assert!(
-        prettier_runs(outside.path()).is_empty(),
-        "prettier never starts without trust: {json}"
-    );
+    assert_no_prettier_call(&project, outside.path(), &json);
     assert_eq!(finding_kinds(&json), ["code-block-not-trusted"], "{json}");
     let message = at(&json, "/findings/0/message");
     assert!(
@@ -2259,7 +2316,6 @@ fn prettier_untrusted_is_format_not_run_naming_trust() {
             .is_some_and(|message| message.contains("prettier didn't run on TypeScript blocks")),
         "{json}"
     );
-    assert_eq!(at(&json, "/data/code_blocks/0/format"), "not_run", "{json}");
     let reason = at(&json, "/data/code_blocks/0/reason");
     assert!(
         reason.as_str().is_some_and(|reason| reason.starts_with(
@@ -2267,6 +2323,25 @@ fn prettier_untrusted_is_format_not_run_naming_trust() {
         )),
         "{json}"
     );
+}
+
+#[test]
+fn prettier_with_trust_turned_off_or_the_static_tier_never_starts() {
+    for (tier, trust) in [("", "0"), ("tier = \"static\"\n", "1")] {
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let project = planted_prettier_project(tier, outside.path());
+
+        let json = project
+            .supdoc_in_with(
+                ".",
+                &["check", "--json"],
+                &[("PATH", outside.path()), ("SUPDOC_TRUST", Path::new(trust))],
+            )
+            .assert_exit(0)
+            .json();
+
+        assert_no_prettier_call(&project, outside.path(), &json);
+    }
 }
 
 #[test]
@@ -2412,8 +2487,13 @@ fn prettier_older_than_the_floor_or_unreadable_is_format_not_run_with_one_warnin
     for (version, named) in [
         ("echo 3.5.3", "prettier 3.5.3 isn't 3.6.0 or later"),
         (
-            "echo 'garbage out'",
-            "prettier (whose version supdoc couldn't read) isn't 3.6.0 or later",
+            "printf '\\033[31mgarbage out\\033[0m\\n'",
+            "supdoc couldn't read prettier's version: `prettier --version` printed `garbage out`, \
+             so",
+        ),
+        (
+            "exit 3",
+            "supdoc couldn't read prettier's version: `prettier --version` exited unsuccessfully",
         ),
     ] {
         let project = prettier_project("const   a = 1");
@@ -2428,8 +2508,13 @@ fn prettier_older_than_the_floor_or_unreadable_is_format_not_run_with_one_warnin
         let json = trusted_prettier_check(&project, outside.path(), cache.path(), 0);
 
         assert!(
-            prettier_runs(outside.path()).is_empty(),
+            prettier_formats(outside.path()).is_empty(),
             "{version}: prettier never formats a block: {json}"
+        );
+        assert_eq!(
+            prettier_versions(outside.path()).len(),
+            1,
+            "{version}: the version is read once for the run: {json}"
         );
         assert_eq!(
             finding_kinds(&json),
