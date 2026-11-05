@@ -177,9 +177,14 @@ struct RustcSpan {
 /// out, as is any line that isn't a diagnostic. An error with no code is a syntax error: rustc
 /// gives every other error and every clippy lint a code. When any is a missing name
 /// ([`lint::missing_name`]), only the missing names remain, one per distinct name at its first
-/// span: the rest are knock-ons of an error that stops clippy's lints.
-fn rustc_diagnostics(stderr: &[u8]) -> Vec<Diagnostic> {
+/// span: the rest are knock-ons of an error that stops clippy's lints. In a run over a framed
+/// block (`framed`), a syntax error wins over both: when any is reported, only the syntax errors
+/// remain, since rustc recovers past many of them and reports names the broken code then misses.
+fn rustc_diagnostics(stderr: &[u8], framed: bool) -> Vec<Diagnostic> {
     let found = all_rustc_diagnostics(stderr);
+    if framed && found.iter().any(|found| found.syntax) {
+        return found.into_iter().filter(|found| found.syntax).collect();
+    }
     if found
         .iter()
         .all(|found| lint::missing_name(found).is_none())
@@ -220,22 +225,144 @@ fn all_rustc_diagnostics(stderr: &[u8]) -> Vec<Diagnostic> {
         .collect()
 }
 
+/// The name each of clippy's frames declares that a block doesn't (see `CLIPPY_FRAGMENTS` in
+/// [`super::tools`]), by the start of the line the frame opens with, each with what a message
+/// about a block in that frame says in its place: the members frame's struct, which the block's
+/// methods know as `Self`, and the statements and expression frames' function.
+const FRAME_NAMES: [(&str, &str, &str); 2] = [
+    (
+        "struct SupdocFragment; impl SupdocFragment {",
+        "SupdocFragment",
+        "Self",
+    ),
+    (
+        "fn supdoc_fragment(",
+        "supdoc_fragment",
+        "<the function supdoc adds>",
+    ),
+];
+
+/// The name the frame `checked` opens with declares, and what a message says in its place.
+/// `None` when `checked`, the text clippy read, opens with none of clippy's frames.
+fn frame_name(checked: &str) -> Option<(&'static str, &'static str)> {
+    let first = checked.lines().next()?;
+    FRAME_NAMES
+        .iter()
+        .find(|(opens, ..)| first.starts_with(opens))
+        .map(|(_, name, shown)| (*name, *shown))
+}
+
+/// `text` with each whole identifier `name` replaced by `shown`. An occurrence led or followed
+/// by an identifier character is part of another name, such as `supdoc_fragment_total`, and
+/// stays.
+fn replace_identifier(text: &str, name: &str, shown: &str) -> String {
+    let in_identifier = |c: char| c.is_alphanumeric() || c == '_';
+    let mut replaced = String::with_capacity(text.len());
+    let mut copied = 0;
+    for (at, _) in text.match_indices(name) {
+        let end = at + name.len();
+        let before = text.get(..at).and_then(|head| head.chars().next_back());
+        let after = text.get(end..).and_then(|tail| tail.chars().next());
+        if before.is_some_and(in_identifier) || after.is_some_and(in_identifier) {
+            continue;
+        }
+        replaced.push_str(text.get(copied..at).unwrap_or_default());
+        replaced.push_str(shown);
+        copied = end;
+    }
+    replaced.push_str(text.get(copied..).unwrap_or_default());
+    replaced
+}
+
+/// `text`, a message clippy wrote about a block in a frame that declares `name` (see
+/// [`frame_name`]), with that name, as a whole identifier, replaced by what it stands for to the
+/// block. `text` as it is when the frame declares no name.
+fn without_frame_name(text: &str, name: Option<(&str, &str)>) -> String {
+    name.map_or_else(
+        || text.to_owned(),
+        |(name, shown)| replace_identifier(text, name, shown),
+    )
+}
+
+/// Whether `line`, from a rendered diagnostic, is one of rustc's suggestion lines: a line number
+/// then `~`, `+` or `-` in place of the gutter's `|`, quoting the source as a fix would change
+/// it.
+fn suggestion_line(line: &str) -> bool {
+    let line = line.trim_start();
+    let digits = line.len() - line.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    digits > 0
+        && line.get(digits..).is_some_and(|rest| {
+            let rest = rest.trim_start_matches(' ');
+            rest.starts_with(['~', '+', '-'])
+                && rest
+                    .get(1..)
+                    .is_none_or(|tail| tail.is_empty() || tail.starts_with(' '))
+        })
+}
+
+/// `stderr` of `clippy-driver --error-format=json` as a person reads it: each diagnostic's
+/// `rendered` text in place of its JSON line, any other line as it is. A frame line shows in a
+/// rendered source listing as a line of its own, where [`super::fragment::Frame::hidden`] finds
+/// it, never inside an escaped JSON string. rustc's suggestion lines ([`suggestion_line`]) are
+/// left out: they quote frame lines changed, which no frame line matches.
+fn rendered(stderr: &[u8]) -> Vec<u8> {
+    /// The one field of a diagnostic this reads.
+    #[derive(serde::Deserialize)]
+    struct Rendered {
+        /// The diagnostic as rustc prints it without `--error-format=json`.
+        rendered: String,
+    }
+    stderr
+        .split(|byte| *byte == b'\n')
+        .map(|line| {
+            serde_json::from_slice::<Rendered>(line).map_or_else(
+                |_| line.to_vec(),
+                |found| {
+                    found
+                        .rendered
+                        .trim_end()
+                        .lines()
+                        .filter(|line| !suggestion_line(line))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                        .into_bytes()
+                },
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(&b'\n')
+}
+
 /// Judges a clippy run: its diagnostics on stderr, whatever its exit (clippy exits 0 on
 /// warnings); clean on exit 0 with none; a tool failure on a non-zero exit with none, output
 /// past the cap or a failed start; a timeout is a timeout.
+///
+/// When `input`, the checked text, frames the block (`framed`), a syntax error wins over every
+/// other diagnostic (see [`rustc_diagnostics`]), no diagnostic message names the name the frame
+/// declares ([`frame_name`]), and a tool failure's detail is the rendered text of stderr's
+/// diagnostics, that name replaced, so the lint step can hide its frame lines.
 #[must_use]
 pub(crate) fn lint_verdict(
-    _input: &str,
-    _framed: bool,
+    input: &str,
+    framed: bool,
     result: Result<Ran, Failure>,
 ) -> lint::Verdict {
+    let name = frame_name(input).filter(|_| framed);
     match result {
         Ok(ran) => {
-            let found = rustc_diagnostics(&ran.stderr);
+            let mut found = rustc_diagnostics(&ran.stderr, framed);
+            for diagnostic in &mut found {
+                diagnostic.message = without_frame_name(&diagnostic.message, name);
+            }
             if !found.is_empty() {
                 lint::Verdict::Diagnostics(found)
             } else if ran.success {
                 lint::Verdict::Clean
+            } else if framed {
+                let detail = format::exit_detail(&rendered(&ran.stderr));
+                lint::Verdict::Failed(format::Verdict::ToolFailed(without_frame_name(
+                    &detail, name,
+                )))
             } else {
                 lint::Verdict::Failed(format::Verdict::ToolFailed(format::exit_detail(
                     &ran.stderr,
@@ -1328,7 +1455,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        EmitDir, FRONTMATTER, Found, LineMap, MAX_SCAN_BYTES, Scan, Token, Tokens,
+        EmitDir, FRAME_NAMES, FRONTMATTER, Found, LineMap, MAX_SCAN_BYTES, Scan, Token, Tokens,
         attribute_edition, before_compiling, clippy_conf_dir, compile_time_read, config_args,
         lint_verdict, parse_error, scan, unwidened,
     };
@@ -1765,6 +1892,176 @@ mod tests {
         ) {
             Verdict::Diagnostics(found) => found,
             other => panic!("expected diagnostics, got {other:?}"),
+        }
+    }
+
+    /// The text clippy reads for a members block, and for a statements block.
+    const MEMBERS: &str = "struct SupdocFragment; impl SupdocFragment {\nfn f(&self) {}\n}\n";
+    const STATEMENTS: &str = "fn supdoc_fragment() {\nlet a = 1;\n}\n";
+    const EXPRESSION: &str = "fn supdoc_fragment() -> impl Sized {\nSupdocFragment\n}\n";
+
+    /// clippy's verdict on a framed run over `checked` that exited `success` and printed
+    /// `stderr`.
+    fn framed_verdict(checked: &str, success: bool, stderr: &str) -> Verdict {
+        lint_verdict(
+            checked,
+            true,
+            Ok(Ran {
+                success,
+                stdout: Vec::new(),
+                stderr: stderr.as_bytes().to_vec(),
+            }),
+        )
+    }
+
+    /// The messages of a framed run over `checked` that printed the diagnostic `lines`.
+    fn framed_messages(checked: &str, lines: &[String]) -> Vec<String> {
+        match framed_verdict(checked, false, &lines.concat()) {
+            Verdict::Diagnostics(found) => found.into_iter().map(|found| found.message).collect(),
+            other => panic!("expected diagnostics, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_frame_name_kept_out_of_messages_is_one_its_clippy_frame_declares() {
+        let clippy = crate::code_blocks::tools::CARTRIDGES
+            .iter()
+            .find(|tool| tool.name == "clippy")
+            .expect("the cartridges should include clippy");
+        let frames: Vec<&str> = clippy
+            .fragments
+            .iter()
+            .filter_map(|(kind, support)| support.frame(*kind))
+            .map(|frame| frame.before)
+            .collect();
+
+        for (opens, name, _) in FRAME_NAMES {
+            assert!(
+                frames
+                    .iter()
+                    .any(|frame| frame.starts_with(opens) && frame.contains(name)),
+                "no frame opens with {opens:?} and declares {name}: {frames:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_members_message_names_the_frames_struct_as_self() {
+        let line = named_line(
+            "error",
+            "E0609",
+            "\"no field `w` on type `&SupdocFragment`\"",
+        );
+
+        assert_eq!(
+            framed_messages(MEMBERS, &[line]),
+            ["no field `w` on type `&Self`"]
+        );
+    }
+
+    #[test]
+    fn a_name_that_holds_a_frame_name_stays_as_written() {
+        let lines = [
+            named_line(
+                "error",
+                "E0425",
+                "\"cannot find value `supdoc_fragment_total` in this scope\"",
+            ),
+            named_line(
+                "error",
+                "E0433",
+                "\"failed to resolve: use of undeclared type `SupdocFragmentConfig`\"",
+            ),
+        ];
+
+        assert_eq!(
+            framed_messages(STATEMENTS, &lines),
+            [
+                "cannot find value `supdoc_fragment_total` in this scope",
+                "failed to resolve: use of undeclared type `SupdocFragmentConfig`",
+            ]
+        );
+        assert_eq!(
+            framed_messages(MEMBERS, &lines[1..]),
+            ["failed to resolve: use of undeclared type `SupdocFragmentConfig`"],
+            "the members frame's struct is a whole name, never a prefix"
+        );
+    }
+
+    #[test]
+    fn a_name_the_frame_in_use_doesnt_declare_stays_as_written() {
+        let line = named_line(
+            "error",
+            "E0425",
+            "\"cannot find value `SupdocFragment` in this scope\"",
+        );
+
+        assert_eq!(
+            framed_messages(EXPRESSION, &[line]),
+            ["cannot find value `SupdocFragment` in this scope"],
+            "the expression frame declares a function, never the members frame's struct"
+        );
+    }
+
+    #[test]
+    fn a_framed_syntax_error_wins_over_the_missing_names_rustc_recovers_into() {
+        let syntax = rustc_line("error", None, &span("<anon>", true, 2, 10))
+            .replace("\"m\"", "\"expected `;`, found `missing`\"");
+        let missing = named_line(
+            "error",
+            "E0425",
+            "\"cannot find function `missing` in this scope\"",
+        );
+        let lines = [syntax, missing];
+
+        let Verdict::Diagnostics(framed) = framed_verdict(STATEMENTS, false, &lines.concat())
+        else {
+            panic!("a syntax error is a diagnostic");
+        };
+        let unframed = diagnostics_of(&lines);
+
+        let syntax_only: Vec<(usize, bool)> = framed
+            .iter()
+            .map(|found| (found.line, found.syntax))
+            .collect();
+        assert_eq!(syntax_only, [(2, true)], "{framed:?}");
+        assert_eq!(
+            unframed.len(),
+            1,
+            "an unframed run keeps its missing names alone: {unframed:?}"
+        );
+        assert!(!unframed.iter().any(|found| found.syntax), "{unframed:?}");
+    }
+
+    #[test]
+    fn a_framed_tool_failure_shows_the_rendered_text_without_frame_names_or_suggestions() {
+        let rendered = "error: internal compiler error\\n --> <anon>:1:1\\n1 | fn \
+                        supdoc_fragment() {\\n1 ~ fn supdoc_fragment() -> Result<(), E> {\\n4 + \
+                        Ok(())\\n";
+        let stderr = format!("{{\"rendered\":\"{rendered}\"}}\nthread 'rustc' panicked\n");
+
+        let Verdict::Failed(super::format::Verdict::ToolFailed(detail)) =
+            framed_verdict(STATEMENTS, false, &stderr)
+        else {
+            panic!("a run with no diagnostic that failed is a tool failure");
+        };
+
+        assert_eq!(
+            detail,
+            "error: internal compiler error\n --> <anon>:1:1\n1 | fn <the function supdoc adds>() {\n\
+             thread 'rustc' panicked",
+            "each JSON line becomes its rendered lines, where the lint step finds frame lines, \
+             and a suggestion line, which no frame line matches, is left out"
+        );
+    }
+
+    #[test]
+    fn a_suggestion_line_has_a_line_number_then_a_change_marker() {
+        for line in ["1 ~ fn f() {", "4 +     Ok(())", "12 - x", "  3 ~"] {
+            assert!(super::suggestion_line(line), "{line:?}");
+        }
+        for line in ["1 | fn f() {", "  |", "1 ~x", "~ 1", "error: 1 + 2"] {
+            assert!(!super::suggestion_line(line), "{line:?}");
         }
     }
 
