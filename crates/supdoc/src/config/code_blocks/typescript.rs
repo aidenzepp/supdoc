@@ -7,7 +7,7 @@ use crate::code_blocks::tools::Step;
 const KNOWN: &[&str] = &["biome-format", "prettier"];
 
 /// The TypeScript linters supdoc knows.
-const LINTERS: &[&str] = &["biome-lint"];
+const LINTERS: &[&str] = &["biome-lint", "eslint"];
 
 /// The `[features.code-blocks.typescript]` table, exactly as written. Its keys are `formatter` and
 /// `linter`, plus one options table per tool; any other key is refused as `config-parse`, and an
@@ -19,7 +19,8 @@ pub(crate) struct RawTypeScript {
     /// default.
     #[serde(default, deserialize_with = "formatter")]
     pub(super) formatter: Option<Choice>,
-    /// `"biome-lint"`, or a custom `{ command = [...], diagnostics = "gnu" }`; unset takes the default.
+    /// `"biome-lint"`, `"eslint"` or a custom `{ command = [...], diagnostics = "gnu" }`; unset
+    /// takes the default.
     #[serde(default, deserialize_with = "linter")]
     pub(super) linter: Option<Choice>,
     /// `[features.code-blocks.typescript.biome-format]`, when written.
@@ -31,6 +32,9 @@ pub(crate) struct RawTypeScript {
     /// `[features.code-blocks.typescript.prettier]`, when written.
     #[serde(default, deserialize_with = "prettier")]
     pub(super) prettier: Option<ToolTable>,
+    /// `[features.code-blocks.typescript.eslint]`, when written.
+    #[serde(default, deserialize_with = "eslint")]
+    pub(super) eslint: Option<ToolTable>,
 }
 
 /// Reads `formatter` against TypeScript's known tools.
@@ -47,7 +51,8 @@ fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D
 ///
 /// # Errors
 ///
-/// The deserializer's error for any value but `"biome-lint"` or a valid custom command.
+/// The deserializer's error for any value but `"biome-lint"`, `"eslint"` or a valid custom
+/// command.
 fn linter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D::Error> {
     deserialize_choice(d, Language::TypeScript, Step::Lint, LINTERS)
 }
@@ -79,6 +84,15 @@ fn prettier<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<ToolTable>,
     deserialize_tool(d, "prettier")
 }
 
+/// Reads `[features.code-blocks.typescript.eslint]` against its cartridge.
+///
+/// # Errors
+///
+/// The deserializer's error for a key or value the cartridge doesn't accept.
+fn eslint<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<ToolTable>, D::Error> {
+    deserialize_tool(d, "eslint")
+}
+
 impl RawTypeScript {
     /// What this table selects and the tool tables it writes.
     pub(super) fn selection(&self) -> Selection<'_> {
@@ -89,6 +103,7 @@ impl RawTypeScript {
                 ("biome-format", &self.biome_format),
                 ("biome-lint", &self.biome_lint),
                 ("prettier", &self.prettier),
+                ("eslint", &self.eslint),
             ]
             .into_iter()
             .filter_map(|(name, table)| Some((name, table.as_ref()?)))

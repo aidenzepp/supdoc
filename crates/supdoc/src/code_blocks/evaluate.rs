@@ -27,6 +27,7 @@ use super::biome;
 use super::block::{CodeBlock, Info};
 use super::cache::{self, Cache};
 use super::custom;
+use super::eslint;
 use super::excerpt;
 use super::format::{self, FixDoc};
 use super::fragment::{Frame, Kind};
@@ -590,8 +591,8 @@ fn run_jobs(
             .and_then(|run| match &run.tool {
                 Tool::Custom(custom) => run_custom_linter(custom, &run.program, record, session),
                 Tool::Cartridge(tool) => {
-                    if switched_off(tool, record) {
-                        return Some(Err(PYLINT_SWITCHED_OFF.into()));
+                    if let Some(reason) = switched_off(tool, record) {
+                        return Some(Err(reason.into()));
                     }
                     let rust = rust.filter(|_| run.tool.is("clippy"));
                     run_linter(tool, &run.program, record, session, rust)
@@ -781,6 +782,39 @@ fn pylint_switched_off(at: &Location) -> Finding {
     .with_location(at.clone())
 }
 
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose eslint step
+/// didn't run because an `eslint-disable` comment in it names no rule, or more than rule names
+/// (see [`eslint::switches_lint_off`]).
+fn eslint_switched_off(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "the block holds an `eslint-disable` comment that names no rule, or something other than \
+         rule names, so supdoc can't confirm eslint lints all of it, and its lint step didn't run",
+    )
+    .with_help(
+        "name each rule the comment switches off, such as `/* eslint-disable no-var */`, or mark \
+         the block `lint(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose eslint step
+/// didn't run because eslint said it ignored the block's file.
+fn eslint_ignored(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "eslint ignored the block's file, so its lint step didn't run: the project's eslint \
+         config ignores the doc's blocks or has no config object whose `files` match them",
+    )
+    .with_help(
+        "supdoc names each block `<doc>.<n>.<extension>` beside its doc: match those names in \
+         the eslint config's `files`, or mark the blocks `lint(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
 /// The run's one `code-block-not-checked` warning, at `at`, the first block whose prettier step
 /// didn't run because it holds `prettier-ignore` (see [`prettier::switches_format_off`]).
 fn prettier_switched_off(at: &Location) -> Finding {
@@ -963,6 +997,8 @@ impl NotRunWarnings {
             BIOME_LINTED_NOTHING => linted_nothing(at),
             PYLINT_SWITCHED_OFF => pylint_switched_off(at),
             PRETTIER_SWITCHED_OFF => prettier_switched_off(at),
+            ESLINT_SWITCHED_OFF => eslint_switched_off(at),
+            ESLINT_IGNORED => eslint_ignored(at),
             YAMLLINT_REJECTED => yamllint_rejected(at, said),
             YAMLLINT_LOCALE => yamllint_locale(at, said),
             go::VET_OFFLINE => vet_offline(at),
@@ -3250,20 +3286,40 @@ fn format_switched_off(tool: &ToolCartridge, record: &BlockRecord) -> bool {
             .is_some_and(|pending| prettier::switches_format_off(&pending.input))
 }
 
-/// Whether `tool` is pylint and `record`'s block holds a `pylint:` comment supdoc can't tell
-/// from one that switches it off for the whole block (see [`pylint::switches_lint_off`]), so the step doesn't run and pylint is
-/// never spawned.
-fn switched_off(tool: &ToolCartridge, record: &BlockRecord) -> bool {
-    tool.name == PYLINT
-        && record
-            .pending
-            .as_ref()
-            .is_some_and(|pending| pylint::switches_lint_off(&pending.input))
+/// The name of eslint's cartridges.
+const ESLINT: &str = "eslint";
+
+/// Why eslint's step didn't run on a block when eslint said it ignored the block's file.
+const ESLINT_IGNORED: &str = "eslint ignored the block's file: the project's eslint config \
+                              ignores it or has no config object matching it";
+
+/// Why eslint's step didn't run on a block holding an `eslint-disable` comment supdoc can't tell
+/// from one that switches eslint off for all of it (see [`eslint::switches_lint_off`]).
+const ESLINT_SWITCHED_OFF: &str = "the block holds an `eslint-disable` comment that names no \
+                                   rule, or more than rule names, so supdoc can't confirm eslint \
+                                   lints all of it; name the rules, or mark the block \
+                                   `lint(off: <reason>)`";
+
+/// Why `tool`'s lint step doesn't run on `record`'s block, so the tool is never spawned: it is
+/// pylint and the block holds a `pylint:` comment supdoc can't tell from one that switches it
+/// off for the whole block (see [`pylint::switches_lint_off`]), or it is eslint and the block
+/// holds such an `eslint-disable` comment (see [`eslint::switches_lint_off`]). `None` otherwise.
+fn switched_off(tool: &ToolCartridge, record: &BlockRecord) -> Option<&'static str> {
+    let (switches_off, reason): (fn(&str) -> bool, _) = match tool.name {
+        PYLINT => (pylint::switches_lint_off, PYLINT_SWITCHED_OFF),
+        ESLINT => (eslint::switches_lint_off, ESLINT_SWITCHED_OFF),
+        _ => return None,
+    };
+    record
+        .pending
+        .as_ref()
+        .is_some_and(|pending| switches_off(&pending.input))
+        .then_some(reason)
 }
 
 /// Why `tool`'s finished run `ran` says nothing about its block, so its step counts as not run:
 /// biome lint, given the block as a file (`biome_file`), checked no file; tombi lint didn't
-/// report linting it; pylint linted no module; or go vet couldn't load the block `input` (see
+/// report linting it; pylint linted no module; eslint ignored the block's file; or go vet couldn't load the block `input` (see
 /// [`go::vet_not_run`]). `None` otherwise.
 fn said_nothing(
     tool: &ToolCartridge,
@@ -3277,6 +3333,7 @@ fn said_nothing(
         }
         TOMBI_LINT => tombi::linted_nothing(ran).then_some(TOMBI_LINTED_NOTHING),
         PYLINT => pylint::linted_nothing(&ran.stdout).then_some(PYLINT_LINTED_NOTHING),
+        ESLINT => eslint::linted_nothing(&ran.stdout).then_some(ESLINT_IGNORED),
         GO_VET => go::vet_not_run(input, ran),
         _ => None,
     }

@@ -2603,3 +2603,321 @@ fn prettier_the_real_one_passes_a_formatted_block_whatever_the_configs_insert_pr
     assert!(finding_kinds(&json).is_empty(), "{json}");
     assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
 }
+
+/// The config that selects eslint for `table`'s blocks, with biome-format's step off so eslint
+/// is the block's one tool.
+fn eslint_tables(table: &str) -> String {
+    format!(
+        "[features.code-blocks.{table}]\nlinter = \"eslint\"\n\
+         [features.code-blocks.{table}.biome-format]\nformat = \"off\"\n"
+    )
+}
+
+/// A project whose one `ts` block, holding `body`, eslint lints.
+fn eslint_project(body: &str) -> Project {
+    project_with_block(&eslint_tables("typescript"), "ts", body)
+}
+
+/// A plain eslint config, importing nothing, that sets `no-var` as an error, `eqeqeq` as a
+/// warning and `no-unused-vars` as an error, for every block file supdoc names.
+const ESLINT_CONFIG: &str = "module.exports = [{ files: [\"**/*.ts\", \"**/*.js\"], rules: { \
+                             \"no-var\": \"error\", eqeqeq: \"warn\", \"no-unused-vars\": \"error\" \
+                             } }];\n";
+
+/// Writes an `eslint` stub in `dir` that appends its working directory and arguments to
+/// `<dir>/eslint-runs`, one line per call, then runs `script`.
+fn eslint_stub(dir: &Path, script: &str) {
+    let record = dir.join("eslint-runs");
+    let path = dir.join("eslint");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\necho \"$(pwd -P) $*\" >> '{}'\n{script}\n",
+            record.display()
+        ),
+    )
+    .expect("the stub should be writable");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("the stub should be made executable");
+}
+
+/// The script of an eslint stub that reads the block and reports it clean.
+const ESLINT_CLEAN: &str = "/bin/cat > /dev/null\necho '[{\"filePath\":\"x\",\"messages\":[]}]'";
+
+/// The lines `eslint_stub` in `dir` recorded: one per call.
+fn eslint_runs(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("eslint-runs"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn eslint_runs_from_the_root_with_its_flags_and_spawns_again_on_a_second_run() {
+    let project = eslint_project("const a = 1;");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    eslint_stub(outside.path(), ESLINT_CLEAN);
+
+    let first = trusted_prettier_check(&project, outside.path(), cache.path(), 0);
+    let second = trusted_prettier_check(&project, outside.path(), cache.path(), 0);
+
+    let root = project
+        .path(".")
+        .canonicalize()
+        .expect("the project root should resolve");
+    let runs = eslint_runs(outside.path());
+    assert_eq!(
+        runs.len(),
+        2,
+        "eslint is never cached, so each run spawns it: {runs:?}"
+    );
+    for run in &runs {
+        let (cwd, args) = run
+            .split_once(' ')
+            .expect("the record names a cwd and args");
+        assert_eq!(Path::new(cwd), root, "eslint runs from the root: {run}");
+        let args: Vec<&str> = args.split(' ').collect();
+        let ["--stdin", "--stdin-filename", path, "--format", "json"] = args.as_slice() else {
+            panic!("eslint should get stdin, the block's path and json: {run}");
+        };
+        assert!(path.ends_with("/docs/blocks.md.1.ts"), "{run}");
+    }
+    for json in [first, second] {
+        assert!(finding_kinds(&json).is_empty(), "{json}");
+        assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+    }
+}
+
+#[test]
+fn eslint_in_the_projects_node_modules_runs_before_one_on_path() {
+    let project = project_with_block(&eslint_tables("javascript"), "js", "const a = 1;");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let bin = project.path("node_modules/.bin");
+    std::fs::create_dir_all(&bin).expect("the node_modules bin directory should be creatable");
+    eslint_stub(&bin, ESLINT_CLEAN);
+    eslint_stub(outside.path(), "exit 9");
+
+    let json = trusted_prettier_check(&project, outside.path(), cache.path(), 0);
+
+    let runs = eslint_runs(&bin);
+    assert_eq!(runs.len(), 1, "the root's eslint runs: {json}");
+    assert!(
+        runs.first()
+            .is_some_and(|run| run.contains("/docs/blocks.md.1.js ")),
+        "a js block gets a .js path: {runs:?}"
+    );
+    assert!(
+        eslint_runs(outside.path()).is_empty(),
+        "the eslint of the same name on PATH never runs: {json}"
+    );
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+}
+
+#[test]
+fn eslint_disable_naming_no_rule_is_lint_not_run_naming_lint_off() {
+    let project = eslint_project("const a = 1;");
+    project.write(
+        "docs/blocks.md",
+        "# Blocks\n\n```ts\n/* eslint-disable */\nvar a = 1;\n```\n\n\
+         ```ts\nvar b = 1; // eslint-disable-line -- why\n```\n\n\
+         ```ts\nvar c = 1; // eslint-disable-line no-var\n```\n",
+    );
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    eslint_stub(outside.path(), ESLINT_CLEAN);
+
+    let json = trusted_prettier_check(&project, outside.path(), cache.path(), 0);
+
+    assert_eq!(
+        eslint_runs(outside.path()).len(),
+        1,
+        "eslint runs only on the block naming its rule: {json}"
+    );
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+    assert_eq!(at(&json, "/findings/0/severity"), "warning", "{json}");
+    assert!(
+        at(&json, "/findings/0/help")
+            .as_str()
+            .is_some_and(|help| help.contains("lint(off: <reason>)")),
+        "{json}"
+    );
+    for block in 0..2 {
+        assert_eq!(
+            at(&json, &format!("/data/code_blocks/{block}/lint")),
+            "not_run",
+            "block {block}: {json}"
+        );
+        let reason = at(&json, &format!("/data/code_blocks/{block}/reason"));
+        assert!(
+            reason
+                .as_str()
+                .is_some_and(|reason| reason.contains("lint(off: <reason>)")),
+            "block {block}: {json}"
+        );
+    }
+}
+
+#[test]
+fn eslint_untrusted_or_with_trust_turned_off_is_lint_not_run_and_never_starts() {
+    for trust in [None, Some("0")] {
+        let project = eslint_project("var a = 1;");
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let bin = project.path("node_modules/.bin");
+        std::fs::create_dir_all(&bin).expect("the node_modules bin directory should be creatable");
+        eslint_stub(&bin, ESLINT_CLEAN);
+        eslint_stub(outside.path(), ESLINT_CLEAN);
+        let mut env = vec![("PATH", outside.path())];
+        env.extend(trust.map(|trust| ("SUPDOC_TRUST", Path::new(trust))));
+
+        let json = project
+            .supdoc_in_with(".", &["check", "--json"], &env)
+            .assert_exit(0)
+            .json();
+
+        assert!(
+            eslint_runs(&bin).is_empty() && eslint_runs(outside.path()).is_empty(),
+            "eslint never starts: {json}"
+        );
+        assert_eq!(at(&json, "/data/code_blocks/0/lint"), "not_run", "{json}");
+        assert_eq!(finding_kinds(&json), ["code-block-not-trusted"], "{json}");
+        assert!(
+            at(&json, "/findings/0/message")
+                .as_str()
+                .is_some_and(|message| message.contains("eslint didn't run on TypeScript blocks")),
+            "{json}"
+        );
+        assert!(
+            at(&json, "/data/code_blocks/0/reason")
+                .as_str()
+                .is_some_and(|reason| reason
+                    .contains("eslint runs on TypeScript blocks only in the project tier")),
+            "{json}"
+        );
+    }
+}
+
+#[test]
+fn eslint_the_real_one_fails_warnings_and_errors_at_their_doc_lines_and_skips_unused_names() {
+    let Some(dir) = real_tool_dir(
+        "eslint",
+        "eslint_the_real_one_fails_warnings_and_errors_at_their_doc_lines_and_skips_unused_names",
+    ) else {
+        return;
+    };
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    for (table, tag) in [("typescript", "ts"), ("javascript", "js")] {
+        let clean = project_with_block(&eslint_tables(table), tag, "let unused;\nconst b = 1;");
+        clean.write("eslint.config.js", ESLINT_CONFIG);
+        let flagged = project_with_block(
+            &eslint_tables(table),
+            tag,
+            "const a = 1;\nvar b = a;\nif (b == 2) {\n  b = 3;\n}",
+        );
+        flagged.write("eslint.config.js", ESLINT_CONFIG);
+
+        let passes = trusted_prettier_check(&clean, &dir, cache.path(), 0);
+        let fails = trusted_prettier_check(&flagged, &dir, cache.path(), 1);
+
+        assert!(finding_kinds(&passes).is_empty(), "{tag}: {passes}");
+        assert_eq!(
+            at(&passes, "/data/summary/code_blocks/passed"),
+            1,
+            "{tag}: {passes}"
+        );
+        assert_eq!(
+            kinds_and_lines(&fails),
+            [
+                ("code-block-lint".to_owned(), 5),
+                ("code-block-lint".to_owned(), 6)
+            ],
+            "{tag}: the error and the warning both fail: {fails}"
+        );
+    }
+}
+
+#[test]
+fn eslint_the_real_ones_parse_error_is_a_parse_error_at_its_doc_line() {
+    let Some(dir) = real_tool_dir(
+        "eslint",
+        "eslint_the_real_ones_parse_error_is_a_parse_error_at_its_doc_line",
+    ) else {
+        return;
+    };
+    let project = eslint_project("const a = 1;\nconst = ;");
+    project.write("eslint.config.js", ESLINT_CONFIG);
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+
+    let json = trusted_prettier_check(&project, &dir, cache.path(), 1);
+
+    assert_eq!(finding_kinds(&json), ["code-block-parse"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 5, "{json}");
+}
+
+#[test]
+fn eslint_the_real_one_ignoring_the_block_is_lint_not_run_never_a_pass() {
+    let Some(dir) = real_tool_dir(
+        "eslint",
+        "eslint_the_real_one_ignoring_the_block_is_lint_not_run_never_a_pass",
+    ) else {
+        return;
+    };
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    for config in [
+        "module.exports = [{ ignores: [\"docs/**\"] }, { rules: { \"no-var\": \"error\" } }];\n",
+        "module.exports = [{ files: [\"src/**/*.ts\"], rules: { \"no-var\": \"error\" } }];\n",
+    ] {
+        let project = eslint_project("var a = 1;");
+        project.write("eslint.config.js", config);
+
+        let json = trusted_prettier_check(&project, &dir, cache.path(), 0);
+
+        assert_eq!(
+            at(&json, "/data/code_blocks/0/lint"),
+            "not_run",
+            "{config}: {json}"
+        );
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-not-checked"],
+            "{config}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/passed"),
+            0,
+            "{config}: {json}"
+        );
+    }
+}
+
+#[test]
+fn eslint_the_real_one_without_a_usable_config_is_a_tool_failure() {
+    let Some(dir) = real_tool_dir(
+        "eslint",
+        "eslint_the_real_one_without_a_usable_config_is_a_tool_failure",
+    ) else {
+        return;
+    };
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    for config in [
+        None,
+        Some(
+            "module.exports = [{ files: [\"**/*.ts\"], rules: { \"no-such-rule\": \"error\" } }];\n",
+        ),
+    ] {
+        let project = eslint_project("var a = 1;");
+        if let Some(config) = config {
+            project.write("eslint.config.js", config);
+        }
+
+        let json = trusted_prettier_check(&project, &dir, cache.path(), 1);
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-tool-failed"],
+            "{config:?}: {json}"
+        );
+    }
+}
