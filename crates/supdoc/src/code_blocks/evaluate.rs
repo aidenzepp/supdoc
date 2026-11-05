@@ -583,16 +583,20 @@ fn run_jobs(
             }
         });
         let parses = parses(format.as_ref());
-        let lint = job.lint.as_ref().filter(|_| parses).and_then(|run| {
-            let Some(tool) = run.tool.cartridge() else {
-                return Some(Err(CUSTOM_LINTER_NOT_WIRED.into()));
-            };
-            if switched_off(tool, record) {
-                return Some(Err(PYLINT_SWITCHED_OFF.into()));
-            }
-            let rust = rust.filter(|_| run.tool.is("clippy"));
-            run_linter(tool, &run.program, record, session, rust)
-        });
+        let lint = job
+            .lint
+            .as_ref()
+            .filter(|_| parses)
+            .and_then(|run| match &run.tool {
+                Tool::Custom(custom) => run_custom_linter(custom, &run.program, record, session),
+                Tool::Cartridge(tool) => {
+                    if switched_off(tool, record) {
+                        return Some(Err(PYLINT_SWITCHED_OFF.into()));
+                    }
+                    let rust = rust.filter(|_| run.tool.is("clippy"));
+                    run_linter(tool, &run.program, record, session, rust)
+                }
+            });
         Some(StepsRan { format, lint })
     })
 }
@@ -850,7 +854,9 @@ fn vet_excluded(at: &Location) -> Finding {
 fn lint_state(verdict: &lint::Verdict) -> BlockState {
     match verdict {
         lint::Verdict::Clean => BlockState::Passed,
-        lint::Verdict::Diagnostics(_) => BlockState::Failed(states::Failure::Lint),
+        lint::Verdict::Diagnostics(_) | lint::Verdict::Unparsed(_) => {
+            BlockState::Failed(states::Failure::Lint)
+        }
         lint::Verdict::Failed(failed) => failed.state(),
     }
 }
@@ -986,10 +992,6 @@ fn parses(format: Option<&FormatRan>) -> bool {
         )))
     )
 }
-
-/// Why a custom linter's step doesn't run yet: config refuses one before any block is read, so no
-/// run reaches this.
-const CUSTOM_LINTER_NOT_WIRED: &str = "custom linter commands are not wired to run yet";
 
 /// Why such a step doesn't run when the project itself lowered the tier.
 const TIER_LOWERED: &str = "`tier = \"static\"` in `[features.code-blocks]`";
@@ -2834,6 +2836,68 @@ fn run_custom_formatter(
     session: &Session<'_>,
 ) -> Option<FormatRan> {
     let pending = record.pending.as_ref()?;
+    let (_, ran) = run_custom(tool, program, record, pending, session);
+    let verdict = custom::judge(&pending.input, ran);
+    if verdict == format::Verdict::PrintedNothing {
+        return Some(Err(format::PRINTED_NOTHING.into()));
+    }
+    let finding = custom::finding(&verdict, tool, &record.at, session.timeout);
+    let findings = match (&verdict, finding) {
+        (format::Verdict::Unformatted(output), Some(unformatted)) => format::fixed_as(
+            unformatted,
+            &pending.block,
+            &pending.doc,
+            output,
+            &custom::named(tool),
+            false,
+        ),
+        (_, finding) => finding.into_iter().collect(),
+    };
+    Some(Ok((verdict, findings)))
+}
+
+/// Runs `tool`, a custom linter found at `program`, on `record`'s block from `session`'s root
+/// (see [`custom`]), never through the cache: its verdict and findings. `None` when the block's
+/// input couldn't be read, so it stays pending.
+///
+/// Effect: runs the command, killing it at the timeout, and resolves the root's real path.
+fn run_custom_linter(
+    tool: &CustomTool,
+    program: &Path,
+    record: &BlockRecord,
+    session: &Session<'_>,
+) -> Option<LintRan> {
+    let pending = record.pending.as_ref()?;
+    let (path, ran) = run_custom(tool, program, record, pending, session);
+    let names = custom::names(&path, session.root);
+    let verdict = custom::lint_verdict(
+        ran,
+        tool.command().diagnostics(),
+        &names,
+        pending.block.body.len(),
+    );
+    let findings = custom::lint_findings(
+        &verdict,
+        tool,
+        &pending.block,
+        pending.doc.text(),
+        session.timeout,
+    );
+    Some(Ok((verdict, findings)))
+}
+
+/// Runs `tool`, a custom command found at `program`, on `pending`, `record`'s block, as
+/// [`custom`] says: argv as written with `{path}` replaced, the block on stdin, from `session`'s
+/// root with [`custom::VARS`]. The block's root-relative virtual path, and the run.
+///
+/// Effect: runs the command, killing it at the timeout.
+fn run_custom(
+    tool: &CustomTool,
+    program: &Path,
+    record: &BlockRecord,
+    pending: &Pending,
+    session: &Session<'_>,
+) -> (String, Result<Ran, runner::Failure>) {
     let tag = record.language.as_deref().unwrap_or_default();
     let path = custom::virtual_path(
         record.at.file.as_str(),
@@ -2856,26 +2920,8 @@ fn run_custom_formatter(
         cwd: runner::Cwd::Root,
         cap: runner::CAP,
     };
-    let verdict = custom::judge(
-        &pending.input,
-        runner::run(&call, session.env, session.root),
-    );
-    if verdict == format::Verdict::PrintedNothing {
-        return Some(Err(format::PRINTED_NOTHING.into()));
-    }
-    let finding = custom::finding(&verdict, tool, &record.at, session.timeout);
-    let findings = match (&verdict, finding) {
-        (format::Verdict::Unformatted(output), Some(unformatted)) => format::fixed_as(
-            unformatted,
-            &pending.block,
-            &pending.doc,
-            output,
-            &custom::named(tool),
-            false,
-        ),
-        (_, finding) => finding.into_iter().collect(),
-    };
-    Some(Ok((verdict, findings)))
+    let ran = runner::run(&call, session.env, session.root);
+    (path, ran)
 }
 
 /// Where a format step's `verdict` on `record`'s block is reported: a frame-level failure at

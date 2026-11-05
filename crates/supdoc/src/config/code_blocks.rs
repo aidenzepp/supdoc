@@ -147,13 +147,7 @@ pub(crate) struct CustomCommand {
     arguments: Vec<String>,
     /// How a linter's output is read: `Some` for `diagnostics = "gnu"`. Always `None` for a
     /// formatter.
-    #[expect(
-        dead_code,
-        reason = "read when custom linters are wired to run, in P5-CC04"
-    )]
     diagnostics: Option<Diagnostics>,
-    /// Where the value is, in the file that wrote it.
-    span: Range<usize>,
 }
 
 impl CustomCommand {
@@ -167,6 +161,13 @@ impl CustomCommand {
     #[must_use]
     pub(crate) fn arguments(&self) -> &[String] {
         &self.arguments
+    }
+
+    /// How a linter's output is read: `Some` for `diagnostics = "gnu"`, `None` for a formatter
+    /// or a linter without the key.
+    #[must_use]
+    pub(crate) const fn diagnostics(&self) -> Option<Diagnostics> {
+        self.diagnostics
     }
 }
 
@@ -289,7 +290,7 @@ fn command_argv(key: &str, value: ::toml::Value) -> Result<(String, Vec<String>)
     Ok((program, argv.collect()))
 }
 
-/// Reads a custom `{ command = [...] }` for `step`, from the keys of its table, at `span`.
+/// Reads a custom `{ command = [...] }` for `step`, from the keys of its table.
 ///
 /// # Errors
 ///
@@ -298,7 +299,6 @@ fn command_argv(key: &str, value: ::toml::Value) -> Result<(String, Vec<String>)
 fn custom_command(
     step: Step,
     entries: Vec<(String, ::toml::Value)>,
-    span: Range<usize>,
 ) -> Result<CustomCommand, String> {
     let (key, keys) = match step {
         Step::Format => ("formatter", "`command`"),
@@ -353,7 +353,6 @@ fn custom_command(
         program,
         arguments,
         diagnostics,
-        span,
     })
 }
 
@@ -381,7 +380,6 @@ fn deserialize_choice<'de, D: serde::Deserializer<'de>>(
         language: Language,
         step: Step,
         known: &'static [&'static str],
-        span: Range<usize>,
     }
     impl Reader {
         /// `formatter` or `linter`.
@@ -434,21 +432,17 @@ fn deserialize_choice<'de, D: serde::Deserializer<'de>>(
             while let Some(entry) = map.next_entry::<String, ::toml::Value>()? {
                 entries.push(entry);
             }
-            custom_command(self.step, entries, self.span)
+            custom_command(self.step, entries)
                 .map(Choice::Command)
                 .map_err(A::Error::custom)
         }
     }
 
-    let written = ::toml::Spanned::<::toml::Value>::deserialize(deserializer)?;
-    let span = written.span();
-    written
-        .into_inner()
+    ::toml::Value::deserialize(deserializer)?
         .deserialize_any(Reader {
             language,
             step,
             known,
-            span,
         })
         .map(Some)
         .map_err(|error| D::Error::custom(error.message()))
@@ -571,21 +565,6 @@ pub(crate) enum Selected {
     },
 }
 
-/// A custom command the merged chain selects, refused until custom commands are wired to run.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Unwired {
-    /// The file that wrote the command.
-    pub(crate) file: AbsolutePath,
-    /// Where the command is in `file`.
-    pub(crate) span: Range<usize>,
-    /// The language's table name, such as `rust` or `typescript`.
-    pub(crate) language: &'static str,
-    /// The key that selects it, `formatter` or `linter`.
-    pub(crate) key: &'static str,
-    /// Its program, `command`'s first element.
-    pub(crate) program: String,
-}
-
 /// Refuses the removed `[features.code-blocks] lint` key, naming where a linter's mode lives now.
 ///
 /// # Errors
@@ -643,34 +622,15 @@ fn tool_list(known: &[&str]) -> String {
         .join(", ")
 }
 
-/// A `formatter` or `linter` value and the file that wrote it.
-#[derive(Debug, Clone)]
-struct Chosen {
-    /// The value.
-    choice: Choice,
-    /// The file that wrote it.
-    file: AbsolutePath,
-}
-
-impl Chosen {
-    /// `choice`, written in `file`.
-    fn new(choice: &Choice, file: &AbsolutePath) -> Self {
-        Self {
-            choice: choice.clone(),
-            file: file.clone(),
-        }
-    }
-}
-
 /// What some file in the chain wrote for one language.
 #[derive(Debug, Clone, Default)]
 struct Table {
     /// The language's table is written.
     written: bool,
     /// The nearest `formatter` written, whole: a nearer value replaces a farther one entirely.
-    formatter: Option<Chosen>,
+    formatter: Option<Choice>,
     /// The nearest `linter` written, whole: a nearer value replaces a farther one entirely.
-    linter: Option<Chosen>,
+    linter: Option<Choice>,
     /// The nearest mode written for each tool, by the tool's name.
     modes: Vec<(&'static str, Mode)>,
     /// Every tool table written in any layer, nearest first: the tool's name, the file that
@@ -697,12 +657,8 @@ impl Table {
         }
         Self {
             written: true,
-            formatter: self
-                .formatter
-                .or_else(|| selection.formatter.map(|choice| Chosen::new(choice, file))),
-            linter: self
-                .linter
-                .or_else(|| selection.linter.map(|choice| Chosen::new(choice, file))),
+            formatter: self.formatter.or_else(|| selection.formatter.cloned()),
+            linter: self.linter.or_else(|| selection.linter.cloned()),
             modes,
             tables,
         }
@@ -718,7 +674,7 @@ impl Table {
                 Step::Lint => ("linter", self.linter.as_ref()),
             };
             let selected =
-                match written.map(|chosen| &chosen.choice) {
+                match written {
                     None => tools::default_for(language, tool.step())
                         .map(|tool| Selected::Known(tool.name)),
                     Some(Choice::Known(name)) => tools::named(language, tool.step(), name)
@@ -735,22 +691,6 @@ impl Table {
                 key,
                 selected,
             })
-        })
-    }
-
-    /// The custom command this table's merged `linter` selects, if any: custom linters are not
-    /// wired to run yet. A custom formatter runs.
-    fn unwired(&self, language: Language) -> Option<Unwired> {
-        let chosen = self.linter.as_ref()?;
-        let Choice::Command(command) = &chosen.choice else {
-            return None;
-        };
-        Some(Unwired {
-            file: chosen.file.clone(),
-            span: command.span.clone(),
-            language: language.table(),
-            key: "linter",
-            program: command.program.clone(),
         })
     }
 }
@@ -878,9 +818,7 @@ impl Written {
     ///
     /// [`ConfigError::ToolNotSelected`] for the first tool table, Rust, shell, Python,
     /// TypeScript, JavaScript, JSON, YAML, TOML, Markdown then Go, whose tool the merged chain
-    /// doesn't select. Then, once the whole chain is valid, [`ConfigError::CustomCommandNotWired`]
-    /// for the first custom linter it selects, in the same order: custom linters are not wired
-    /// to run yet.
+    /// doesn't select.
     pub(super) fn resolve(
         self,
         include: &AnchoredPatterns,
@@ -892,12 +830,6 @@ impl Written {
             .find_map(|language| languages.table(language).unselected(language))
         {
             return Err(ConfigError::ToolNotSelected { table });
-        }
-        if let Some(command) = Languages::ORDER
-            .into_iter()
-            .find_map(|language| languages.table(language).unwired(language))
-        {
-            return Err(ConfigError::CustomCommandNotWired { command });
         }
         Ok(CodeBlocks {
             include: self.include.unwrap_or_else(|| include.clone()),
@@ -935,16 +867,14 @@ impl CodeBlocks {
     }
 
     /// What `language`'s `formatter` or `linter` key, for `step`, selects: a known tool's name
-    /// or a custom command. `None` selects the language's default tool. It never holds a custom
-    /// linter: [`Written::resolve`] refuses one until custom linters are wired to run.
+    /// or a custom command. `None` selects the language's default tool.
     #[must_use]
     pub(crate) fn choice(&self, language: Language, step: Step) -> Option<&Choice> {
         let table = self.table(language);
-        let chosen = match step {
-            Step::Format => &table.formatter,
-            Step::Lint => &table.linter,
-        };
-        chosen.as_ref().map(|chosen| &chosen.choice)
+        match step {
+            Step::Format => table.formatter.as_ref(),
+            Step::Lint => table.linter.as_ref(),
+        }
     }
 
     /// The mode of `tool`'s step for `language`: the nearest one written in
@@ -1086,7 +1016,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{Choice, Dialect, Edition, Language, Mode, Step, Tier};
+    use super::{Choice, Diagnostics, Dialect, Edition, Language, Mode, Step, Tier};
     use crate::config::Config;
     use crate::exit::ExitStatus;
     use crate::path::AbsolutePath;
@@ -1096,6 +1026,14 @@ mod tests {
         match choice {
             Choice::Known(name) => Some(name),
             Choice::Command(_) => None,
+        }
+    }
+
+    /// The program of the custom command `choice` selects, `None` for a known tool or no choice.
+    fn program(choice: Option<&Choice>) -> Option<&str> {
+        match choice? {
+            Choice::Known(_) => None,
+            Choice::Command(command) => Some(command.program()),
         }
     }
 
@@ -1445,7 +1383,8 @@ mod tests {
     #[test]
     fn a_program_with_control_characters_is_escaped_in_the_message() {
         let error = load_error(
-            "[features.code-blocks.shell]\nlinter = { command = [\"fmt\\u001b[31m\"] }\n",
+            "[features.code-blocks.shell]\nlinter = { command = [\"fmt\\u001b[31m\"] }\n\
+             [features.code-blocks.shell.shellcheck]\nlint = \"off\"\n",
         );
 
         let message = error.to_string();
@@ -1524,10 +1463,6 @@ mod tests {
                 message.contains(expected),
                 "`{line}` should be refused with {expected:?}, got {message}"
             );
-            assert!(
-                !message.contains("wired yet"),
-                "an invalid command should be refused for its own rule: {message}"
-            );
         }
     }
 
@@ -1574,10 +1509,6 @@ mod tests {
                 message.contains(expected),
                 "`{line}` should be refused with {expected:?}, got {message}"
             );
-            assert!(
-                !message.contains("wired yet"),
-                "an invalid command should be refused for its own rule: {message}"
-            );
         }
     }
 
@@ -1605,8 +1536,8 @@ mod tests {
 
         let config = Config::load(&at(&known, "apps/web"))
             .expect("the child's known tools should replace the parent's commands");
-        let error = Config::load(&at(&command, "apps/web"))
-            .expect_err("the child's command should still be refused");
+        let commanded =
+            Config::load(&at(&command, "apps/web")).expect("the child's command should load");
 
         let code_blocks = config.code_blocks().expect("the table is written");
         assert_eq!(
@@ -1621,12 +1552,14 @@ mod tests {
                 .and_then(known_name),
             Some("ruff")
         );
-        assert_eq!(error.code(), "config-parse", "got {error:?}");
-        let message = error.to_string();
-        assert!(
-            message.contains("child-lint") && !message.contains("parent-fmt"),
-            "the child's linter command is refused, and the inherited formatter command is \
-             not: {message}"
+        let commanded = commanded.code_blocks().expect("the table is written");
+        assert_eq!(
+            (
+                program(commanded.choice(Language::Python, Step::Format)),
+                program(commanded.choice(Language::Python, Step::Lint)),
+            ),
+            (Some("parent-fmt"), Some("child-lint")),
+            "the child's linter replaces the parent's, and the formatter is inherited"
         );
         let linter_only = tree(&[
             (
@@ -1640,14 +1573,19 @@ mod tests {
                  [features.code-blocks.python]\nlinter = { command = [\"child-lint\"] }\n",
             ),
         ]);
-        let message = Config::load(&at(&linter_only, "apps/web"))
-            .expect_err("the child's command should still be refused")
-            .to_string();
-        assert!(
-            message.contains("apps/web/supdoc.config.toml")
-                && message.contains("the custom command `child-lint`")
-                && !message.contains("parent-lint"),
-            "the child's whole value should win: {message}"
+        let linter_only =
+            Config::load(&at(&linter_only, "apps/web")).expect("the child's command should load");
+        let choice = linter_only
+            .code_blocks()
+            .expect("the table is written")
+            .choice(Language::Python, Step::Lint);
+        let Some(Choice::Command(command)) = choice else {
+            panic!("the linter should be the child's command, got {choice:?}");
+        };
+        assert_eq!(
+            (command.program(), command.diagnostics()),
+            ("child-lint", None),
+            "the child's whole value should win, its unset `diagnostics` included"
         );
     }
 
@@ -1787,18 +1725,28 @@ mod tests {
     }
 
     #[test]
-    fn a_valid_custom_linter_command_is_read_then_refused_and_true_is_refused() {
-        let command = refused(
-            "rust",
-            "linter = { command = [\"lint\", \"{path}\"], diagnostics = \"gnu\" }",
-        );
+    fn a_valid_custom_linter_command_is_selected_with_its_diagnostics_and_true_is_refused() {
+        let dir = tree(&[(
+            "supdoc.config.toml",
+            "[features.code-blocks.rust]\n\
+             linter = { command = [\"lint\", \"{path}\"], diagnostics = \"gnu\" }\n",
+        )]);
         let removed = refused("rust", "linter = true");
 
-        assert!(
-            command
-                .contains("`linter` in `[features.code-blocks.rust]` is the custom command `lint`")
-                && command.contains("but custom linter commands aren't wired yet"),
-            "got {command}"
+        let config = Config::load(&at(&dir, ".")).expect("a custom linter should load");
+        let code_blocks = config.code_blocks().expect("the table is written");
+        let choice = code_blocks.choice(Language::Rust, Step::Lint);
+        let Some(Choice::Command(command)) = choice else {
+            panic!("the linter should be the custom command, got {choice:?}");
+        };
+        assert_eq!(
+            (
+                command.program(),
+                command.arguments(),
+                command.diagnostics()
+            ),
+            ("lint", &["{path}".to_owned()][..], Some(Diagnostics::Gnu)),
+            "the command and its diagnostics should be held as written"
         );
         assert!(
             removed.contains("`linter = true` is removed"),

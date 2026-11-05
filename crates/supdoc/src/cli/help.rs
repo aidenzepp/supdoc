@@ -78,6 +78,32 @@ top-level keys, and never change which files links are read from. A language's t
 Each tool's options live in its own table, such as [features.code-blocks.python.ruff] with \
 lint = \"off\". A table for a tool the language doesn't select is a config error.
 
+In place of a tool's name, formatter or linter takes a custom command, which runs only in a \
+trusted checkout (see `supdoc trust --help`):
+
+  formatter = { command = [\"tool\", \"--stdin-filename\", \"{path}\", \"-\"] }
+  linter = { command = [\"tool\", \"{path}\"], diagnostics = \"gnu\" }
+
+command is the program then its arguments, at most 64 strings, run as written with no shell. A \
+program without a / is found on PATH; one with a / is relative to the root unless absolute. {path}, the only \
+placeholder, becomes the block's file name: the doc's path relative to the root, the block's \
+number among the doc's fenced blocks and its extension, such as docs/guide.md.2.py. The file \
+isn't written; the block arrives on stdin exactly as written. The command runs from the root \
+with NO_COLOR=1 and only PATH, HOME, RUSTUP_HOME, CARGO_HOME and XDG_CACHE_HOME from your \
+environment, under --code-block-timeout (10s by default) and reading at most 1 MiB from each of \
+stdout and stderr. A command inherited through extends runs like one the project wrote.
+
+A custom formatter exits 0 and prints the formatted block, which `supdoc fix --yes` writes in; \
+any other exit fails code-block-tool-failed, quoting its stderr. A custom linter's exit 0 is \
+clean whatever it printed, and any other exit fails the block. With diagnostics = \"gnu\", each \
+line it prints as PATH:LINE[:COL]: MESSAGE, where PATH is the block's file name, absolute or \
+relative to the root, or <stdin>, - or stdin, and LINE is one of the block's, is one \
+code-block-lint at that doc line. Without it, or when no line reads so, the block gets one \
+code-block-lint at its fence quoting the first 20 lines that aren't blank of what the linter printed, stdout then stderr. \
+A custom command's results are never cached: it runs on every check, since supdoc can't name \
+the files it reads. In a checkout you don't trust, its step is `format not run` or `lint not \
+run`, with a code-block-not-trusted warning naming the command.
+
 Each tool reads the block on standard input and its own config files, which can sit outside the \
 project; its errors can quote them. rumdl's config is found from the doc's directory up to the \
 nearest .git inside the root, never above the root; yamlfmt's and yamllint's up to the root. \
@@ -222,6 +248,12 @@ The build goes into ~/.cache/supdoc/code-blocks/target/<hash of the root> (under
 $XDG_CACHE_HOME when it's set), never inside the checkout. Each trusted checkout, and each of \
 its worktrees, gets a full build there, which can take as much disk as the project's own. Delete \
 the directory to get the space back.
+
+Trust grants two more tools the same reach. pylint, when a Python \
+table selects it, runs from the root, found in the root's .venv/bin before PATH, and imports the \
+blocks' modules. A custom formatter or linter command from the config, or from a config it \
+extends, runs as written from the root (see `supdoc check --help`). Untrusted, each is `not \
+run` with a code-block-not-trusted warning naming it.
 
 Trust is granted only from outside the checkout. `supdoc trust` records the project root in \
 $XDG_STATE_HOME/supdoc/trusted-roots (else ~/.local/state/supdoc/trusted-roots); \
