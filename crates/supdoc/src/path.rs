@@ -60,10 +60,6 @@ impl AbsolutePath {
     /// Appends `rel`, which [`Beneath`] proves has no root, `..` or `.`, so the result is always
     /// beneath `self`.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the content joins move onto it from PH08")
-    )]
     pub(crate) fn beneath(&self, rel: &impl Beneath) -> Self {
         let mut joined = self.0.clone();
         joined.extend(rel.segments().split('/'));

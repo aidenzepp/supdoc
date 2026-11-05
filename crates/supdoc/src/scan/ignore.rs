@@ -246,9 +246,15 @@ impl IgnoreRules {
             .as_deref()
             .zip(top)
             .and_then(|(canonical, top)| {
-                let parents: Vec<&Path> = canonical.ancestors().take(top + 1).skip(1).collect();
+                // Every ancestor of the canonical root is absolute already.
+                let parents: Vec<AbsolutePath> = canonical
+                    .ancestors()
+                    .take(top + 1)
+                    .skip(1)
+                    .filter_map(AbsolutePath::new)
+                    .collect();
                 parents.into_iter().rev().fold(None, |parent, dir| {
-                    Some(Arc::new(Level::above(root.join_path(dir), parent, limit)))
+                    Some(Arc::new(Level::above(dir, parent, limit)))
                 })
             });
         // The global excludes anchor at the top of the git work tree, or at the root with none, so
@@ -315,8 +321,9 @@ impl IgnoreRules {
                 holds_git(dir),
             )
         };
+        // `dir` lies beneath the absolute root, so it is absolute already.
         let level = Arc::new(Level::inside(
-            self.root.join_path(dir),
+            AbsolutePath::new(dir)?,
             parent,
             is_nested_top,
             self.limit,
@@ -390,7 +397,7 @@ impl IgnoreRules {
                 level
                     .symlinked
                     .iter()
-                    .map(|file| level.dir.join_path(Path::new(file.path())))
+                    .filter_map(|file| AbsolutePath::new(&level.dir.as_path().join(file.path())))
             })
             .collect()
     }
@@ -532,14 +539,13 @@ pub(super) fn unreadable_in(
     files: Origin,
     exclude_origin: Origin,
 ) -> Vec<UnreadableFile> {
-    let own = own
-        .unreadable
-        .iter()
-        .map(|&(file, failure)| UnreadableFile {
-            path: dir.join_path(Path::new(file.path())),
+    let own = own.unreadable.iter().filter_map(|&(file, failure)| {
+        Some(UnreadableFile {
+            path: AbsolutePath::new(&dir.as_path().join(file.path()))?,
             origin: files,
             failure,
-        });
+        })
+    });
     let exclude = exclude
         .unreadable
         .iter()

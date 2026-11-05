@@ -331,6 +331,8 @@ fn rewritten_key(key: &LinkKey, code: &str, replacement: &str) -> Option<LinkKey
 #[must_use]
 pub(crate) fn apply_fixes(plan: &FixPlan, boundary: &Boundary, rerun: &str) -> FixResult {
     let root = boundary.dir();
+    // A refused boundary has no directory, so each file stays relative, which `admit` refuses.
+    let base = AbsolutePath::new(root);
     let mut by_file: BTreeMap<&SourcePath, Vec<&PlannedFix>> = BTreeMap::new();
     for planned in plan.fixes() {
         by_file.entry(&planned.fix.file).or_default().push(planned);
@@ -339,7 +341,10 @@ pub(crate) fn apply_fixes(plan: &FixPlan, boundary: &Boundary, rerun: &str) -> F
     let mut result = FixResult::default();
     let mut unwritten = Vec::new();
     for (file, planned) in by_file {
-        let path = root.join(file.as_str());
+        let path = base.as_ref().map_or_else(
+            || PathBuf::from(file.as_str()),
+            |base| base.beneath(file).as_path().to_path_buf(),
+        );
         match rewrite_file(boundary, &path, &planned) {
             Ok(()) => result
                 .applied

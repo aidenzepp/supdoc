@@ -390,7 +390,7 @@ fn locate(config: &Config, target: &Target) -> Located {
         },
     };
     let segments: Vec<&str> = path.as_str().split('/').collect();
-    let file = base.join_path(Path::new(path.as_str()));
+    let file = base.beneath(path);
     if !config.contains(base.as_path()) || !config.contains(file.as_path()) {
         return Located::OutsideRoot;
     }

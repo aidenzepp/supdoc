@@ -1,6 +1,6 @@
 //! How a path is shown in each format.
 
-use std::path::{Component, Path};
+use std::path::Component;
 
 use crate::link::SourcePath;
 use crate::lock::error::shell_quote;
@@ -88,8 +88,7 @@ impl PathStyle {
 
     /// The absolute location of a project-relative source file.
     fn absolute(&self, source: &SourcePath) -> AbsolutePath {
-        // A source path has no `..`, so joining it cannot leave the root.
-        self.root.join_path(Path::new(source.as_str()))
+        self.root.beneath(source)
     }
 }
 

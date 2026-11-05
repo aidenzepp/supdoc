@@ -33,10 +33,10 @@ pub(super) fn explicit_path_warnings(
     listed
         .iter()
         .filter(|path| {
-            let path = config.root().as_path().join(path.as_str());
+            let path = config.root().beneath(*path);
             !unread_dirs
                 .iter()
-                .any(|dir| path.starts_with(dir.path.as_path()))
+                .any(|dir| path.as_path().starts_with(dir.path.as_path()))
         })
         .filter_map(|path| explicit_path_warning(config, languages, rules, sources, path))
         .collect()
@@ -54,7 +54,7 @@ pub(super) fn explicit_path_warning(
     listed: &SourcePath,
 ) -> Option<Finding> {
     let root = config.root();
-    let path = AbsolutePath::new(&root.as_path().join(listed.as_str()))?;
+    let path = root.beneath(listed);
     let kind = fs::symlink_metadata(path.as_path()).ok()?.file_type();
     if let Some(skipped) = skipped_dir(root, listed) {
         return Some(unscanned(listed, &Unscanned::Dir(skipped)));
