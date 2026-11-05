@@ -841,18 +841,18 @@ fn lint_the_real_biome_names_the_projects_config_in_a_config_error() {
 
 /// Every line biome lint's frames put around a block.
 const FRAME_LINES: [&str; 8] = [
-    "async function __supdoc_fragment() {",
-    "const __supdoc_fragment = (",
+    "async function supdocFragment$() {",
+    "const supdocFragment$ = (",
     ");",
-    "const __supdoc_fragment = {",
+    "const supdocFragment$ = {",
     "};",
-    "const __supdoc_fragment = <div>",
+    "const supdocFragment$ = <div>",
     "</div>;",
-    "class __SupdocFragment {",
+    "class SupdocFragment$ {",
 ];
 
 /// Every name only a frame introduces.
-const FRAME_NAMES: [&str; 2] = ["__supdoc_fragment", "__SupdocFragment"];
+const FRAME_NAMES: [&str; 2] = ["supdocFragment$", "SupdocFragment$"];
 
 /// Asserts that no finding in `json` shows frame text in its message, help or location: no frame
 /// line or frame-only name, and no frame token quoted alone, as a tool quotes what it expected
@@ -1145,11 +1145,11 @@ fn frame_lint_a_block_that_isnt_its_kind_is_one_parse_error_without_biomes_messa
 fn frame_lint_a_rule_on_a_frame_line_is_reported_at_the_attributes_in_supdocs_words() {
     let Some(json) = frame_check_with(
         "frame_lint_a_rule_on_a_frame_line_is_reported_at_the_attributes_in_supdocs_words",
-        Some("{\"linter\":{\"rules\":{\"nursery\":{\"noDanglingUnderscore\":\"on\"}}}}"),
+        Some("{\"linter\":{\"rules\":{\"nursery\":{\"useExplicitType\":\"on\"}}}}"),
         (
-            "ts",
-            &format!("fragment(entries) {LINT_ONLY}"),
-            "visible: true,",
+            "tsx",
+            &format!("fragment(children) {LINT_ONLY}"),
+            "<button type=\"button\">Save</button>",
         ),
         1,
     ) else {
@@ -1163,8 +1163,8 @@ fn frame_lint_a_rule_on_a_frame_line_is_reported_at_the_attributes_in_supdocs_wo
     );
     assert_eq!(
         at(&json, "/findings/0/message"),
-        "`biome-lint` reports `nursery/noDanglingUnderscore` where the block meets the frame \
-         supdoc adds around an entries fragment",
+        "`biome-lint` reports `nursery/useExplicitType` where the block meets the frame supdoc \
+         adds around a children fragment",
         "{json}"
     );
 }

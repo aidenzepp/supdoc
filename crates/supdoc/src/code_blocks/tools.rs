@@ -258,18 +258,15 @@ const RUFF_FRAGMENTS: &[(Kind, Support)] = &[
 const BIOME_LINT_FRAGMENTS: &[(Kind, Support)] = &[
     (
         Kind::Statements,
-        framed("async function __supdoc_fragment() {", "}"),
+        framed("async function supdocFragment$() {", "}"),
     ),
-    (
-        Kind::Expression,
-        framed("const __supdoc_fragment = (", ");"),
-    ),
-    (Kind::Entries, framed("const __supdoc_fragment = {", "};")),
+    (Kind::Expression, framed("const supdocFragment$ = (", ");")),
+    (Kind::Entries, framed("const supdocFragment$ = {", "};")),
     (
         Kind::Children,
-        framed("const __supdoc_fragment = <div>", "</div>;"),
+        framed("const supdocFragment$ = <div>", "</div>;"),
     ),
-    (Kind::Members, framed("class __SupdocFragment {", "}")),
+    (Kind::Members, framed("class SupdocFragment$ {", "}")),
 ];
 
 /// A frame of `before` and `after` that a linter reads, which prints nothing back.

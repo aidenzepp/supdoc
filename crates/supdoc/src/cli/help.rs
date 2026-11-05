@@ -100,11 +100,15 @@ any other finding on a frame line is reported at the block's attributes. A block
 the frame itself (a lone } then more code) is checked as written. The frames, each block \
 standing where the ... is, and the rules each leaves off because the frame is their subject:
 
-  biome-lint    statements    async function __supdoc_fragment() { ... }   (suspicious/useAwait off)
-  biome-lint    expression    const __supdoc_fragment = ( ... );
-  biome-lint    entries       const __supdoc_fragment = { ... };
-  biome-lint    children      const __supdoc_fragment = <div> ... </div>;   (tsx and jsx blocks only)
-  biome-lint    members       class __SupdocFragment { ... }   (complexity/noStaticOnlyClass off)
+  biome-lint    statements    async function supdocFragment$() { ... }   (suspicious/useAwait off)
+  biome-lint    expression    const supdocFragment$ = ( ... );
+  biome-lint    entries       const supdocFragment$ = { ... };
+  biome-lint    children      const supdocFragment$ = <div> ... </div>;   (tsx and jsx blocks only)
+  biome-lint    members       class SupdocFragment$ { ... }   (complexity/noStaticOnlyClass off)
+
+A project that turns on rules about the frame's own code, such as biome's opt-in nursery rules \
+wanting an explicit type or a function expression, gets their findings at the block's \
+attributes; switch the step off for such a block with lint(off: reason).
 
 The summary counts each step: a step its tool's table sets to \"off\" is `format off` or `lint \
 off`; one a block marks off is `format skipped` or `lint skipped`; one that was due but didn't \
