@@ -24,6 +24,8 @@ use super::runner::{self, Call, Failure, Ran};
 use sha2::{Digest, Sha256};
 
 use super::tools::ToolEnv;
+use crate::config::confine::{self, Admitted, Boundary};
+use crate::path::AbsolutePath;
 
 /// The variables gofmt gets beyond the tool environment: `GOTOOLCHAIN=local`, so a `go` front
 /// end never downloads a toolchain to run it.
@@ -193,8 +195,10 @@ static VET_RUNS: AtomicUsize = AtomicUsize::new(0);
 /// `go.mod` walk-up stops there.
 #[derive(Debug)]
 pub(crate) struct VetModule {
+    /// The shared `go` directory `dir` sits in, which removing `dir` is admitted against.
+    base: Boundary,
     /// The module directory, owned by this run alone.
-    dir: PathBuf,
+    dir: AbsolutePath,
     /// supdoc's code-block cache directory, which the module and the shared Go directories sit in.
     cache: PathBuf,
     /// The variables naming the directories `go` keeps its state in: `HOME`, `GOPATH` and
@@ -216,46 +220,52 @@ impl VetModule {
     /// A new 0700 module directory `go/<pid>-<n>` beside `neutral`, inside a 0700 `go`
     /// directory, holding `go_mod` as `go.mod`, `input` as `main.go` when given, each created new,
     /// mode 0600, and a 0700 `tmp`, with the 0700 directories `go-home`, `go-path` and `go-build`
-    /// beside it. `None` when `neutral` is `/` or anything can't be created.
+    /// beside it. Every directory and file is admitted beneath the directory it goes in. `None`
+    /// when `neutral` is `/`, a path isn't admitted, or anything can't be created.
     ///
     /// Effect: creates directories and writes up to two files.
     #[must_use]
     fn create(neutral: &Path, go_mod: &str, input: Option<&str>) -> Option<Self> {
-        use std::os::unix::fs::DirBuilderExt as _;
-
         if neutral == Path::new("/") {
             return None;
         }
         let cache = neutral.parent()?.to_path_buf();
-        let shared = |name: &str| private(&cache.join(name));
-        let home = shared("go-home")?;
-        let path = shared("go-path")?;
-        let build = shared("go-build")?;
-        let base = shared("go")?;
+        let owner = Boundary::resolve(&exact(&cache)?);
+        let shared = |name: &str| {
+            let dir = AbsolutePath::new(&cache.join(name))?;
+            private(&owner, &dir).map(|boundary| (dir, boundary))
+        };
+        let (home, _) = shared("go-home")?;
+        let (path, _) = shared("go-path")?;
+        let (build, _) = shared("go-build")?;
+        let (base_dir, base) = shared("go")?;
         let dir = (0..16).find_map(|_| {
             let count = VET_RUNS.fetch_add(1, Ordering::Relaxed);
-            let dir = base.join(format!("{}-{count}", std::process::id()));
-            std::fs::DirBuilder::new()
-                .mode(0o700)
-                .create(&dir)
-                .ok()
-                .map(|()| dir)
+            let dir = base_dir
+                .as_path()
+                .join(format!("{}-{count}", std::process::id()));
+            let dir = AbsolutePath::new(&dir)?;
+            create_fresh(&base, &dir).map(|()| dir)
         })?;
-        let tmp = dir.join("tmp");
+        let own = Boundary::resolve(&dir);
+        let tmp = AbsolutePath::new(&dir.as_path().join("tmp"))?;
+        let go_mod_file = AbsolutePath::new(&dir.as_path().join("go.mod"))?;
+        let main_file = AbsolutePath::new(&dir.as_path().join(MAIN))?;
         let module = Self {
             vars: [
-                ("HOME", home),
-                ("GOPATH", path),
-                ("GOCACHE", build),
-                ("GOTMPDIR", tmp.clone()),
+                ("HOME", home.as_path().to_path_buf()),
+                ("GOPATH", path.as_path().to_path_buf()),
+                ("GOCACHE", build.as_path().to_path_buf()),
+                ("GOTMPDIR", tmp.as_path().to_path_buf()),
             ],
+            base,
             dir,
             cache,
         };
-        let _tmp = private(&tmp)?;
-        write_new(&module.dir.join("go.mod"), go_mod)?;
+        let _tmp = private(&own, &tmp)?;
+        write_new(&own.admit(&go_mod_file).ok()?, go_mod)?;
         if let Some(input) = input {
-            write_new(&module.dir.join(MAIN), input)?;
+            write_new(&own.admit(&main_file).ok()?, input)?;
         }
         Some(module)
     }
@@ -263,7 +273,7 @@ impl VetModule {
     /// The module directory, where `go vet` runs.
     #[must_use]
     pub(crate) fn dir(&self) -> &Path {
-        &self.dir
+        self.dir.as_path()
     }
 
     /// The variables `go` runs with beyond the tool environment: [`VET_VARS`], then `HOME`,
@@ -289,7 +299,7 @@ impl VetModule {
             let real = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
             [real, dir.to_path_buf()]
         };
-        let [module, module_given] = paths(&self.dir);
+        let [module, module_given] = paths(self.dir.as_path());
         let [cache, cache_given] = paths(&self.cache);
         let unname = |bytes: &[u8]| {
             let mut text = String::from_utf8_lossy(bytes).into_owned();
@@ -311,37 +321,48 @@ impl VetModule {
 }
 
 impl Drop for VetModule {
+    /// Removes the module directory, once it is admitted beneath the shared `go` directory.
     fn drop(&mut self) {
-        let _removed = std::fs::remove_dir_all(&self.dir);
+        if let Ok(dir) = self.base.admit(&self.dir) {
+            let _removed = confine::remove_dir_all(&dir);
+        }
     }
 }
 
-/// `dir`, created mode 0700 with its parents when missing, when it is a directory of mode 0700.
+/// `dir` as a boundary, once it is created mode 0700 with its parents when missing, admitted
+/// beneath `parent`, and found to be a directory of mode 0700.
 ///
 /// Effect: creates the directory and reads its metadata.
-fn private(dir: &Path) -> Option<PathBuf> {
-    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
-        .ok()?;
-    let meta = std::fs::symlink_metadata(dir).ok()?;
-    (meta.is_dir() && meta.permissions().mode() & 0o777 == 0o700).then(|| dir.to_path_buf())
+fn private(parent: &Boundary, dir: &AbsolutePath) -> Option<Boundary> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    confine::create_dir_all(&parent.admit(dir).ok()?, 0o700).ok()?;
+    let meta = std::fs::symlink_metadata(dir.as_path()).ok()?;
+    (meta.is_dir() && meta.permissions().mode() & 0o777 == 0o700).then(|| Boundary::resolve(dir))
 }
 
-/// Writes `text` to `path`, which must not exist yet, mode 0600.
+/// `path` as an [`AbsolutePath`] when normalizing doesn't move it: it is absolute and holds no
+/// `..`, so the boundary built from it names the place that was checked. `None` otherwise.
+fn exact(path: &Path) -> Option<AbsolutePath> {
+    AbsolutePath::new(path).filter(|exact| exact.as_path() == path)
+}
+
+/// Creates `dir` mode 0700, admitted beneath `parent`, when nothing is there yet, so the run that
+/// creates it owns it alone. `None` when it isn't admitted, something is there, or it can't be
+/// created.
+///
+/// Effect: creates the directory.
+fn create_fresh(parent: &Boundary, dir: &AbsolutePath) -> Option<()> {
+    confine::create_dir(&parent.admit(dir).ok()?, 0o700).ok()
+}
+
+/// Writes `text` to the admitted `file`, which must not exist yet, mode 0600.
 ///
 /// Effect: creates and writes the file.
-fn write_new(path: &Path, text: &str) -> Option<()> {
+fn write_new(file: &Admitted<'_>, text: &str) -> Option<()> {
     use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
 
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
+    confine::create_new(file, 0o600)
         .ok()?
         .write_all(text.as_bytes())
         .ok()
@@ -740,8 +761,8 @@ fn is_file(input: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        GoVersion, VET_EXCLUDED, VET_OFFLINE, is_file, parse_error, positions, vet_not_run,
-        vet_verdict,
+        GoVersion, VET_EXCLUDED, VET_OFFLINE, VetModule, is_file, parse_error, positions,
+        vet_not_run, vet_verdict,
     };
     use crate::code_blocks::format::{ParseError, Positions, Verdict as FormatVerdict};
     use crate::code_blocks::lint::{Diagnostic, Verdict};
@@ -1046,5 +1067,111 @@ mod tests {
         assert!(!is_file("packages := 1\n"));
         assert!(!is_file("// package p\nx := 1\n"));
         assert!(!is_file(""));
+    }
+
+    #[test]
+    fn dropping_a_module_whose_go_directory_became_a_link_removes_nothing_it_leads_to() {
+        let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let outside = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let neutral = cache.path().join("neutral");
+        let module = VetModule::create(&neutral, "module m\n", Some("package main\n"))
+            .expect("the module's private directory is creatable");
+        let dir = module.dir().to_path_buf();
+        let base = cache.path().join("go");
+        let name = dir.file_name().expect("the module's name");
+        let kept = outside.path().join(name).join("kept");
+        std::fs::create_dir_all(outside.path().join(name)).expect("the outside twin");
+        std::fs::write(&kept, "kept").expect("the outside file");
+        std::fs::rename(&base, cache.path().join("go-moved")).expect("the move");
+        std::os::unix::fs::symlink(outside.path(), &base).expect("the planted link");
+
+        drop(module);
+
+        assert_eq!(std::fs::read_to_string(&kept).ok().as_deref(), Some("kept"));
+    }
+
+    #[test]
+    fn a_go_directory_planted_as_a_dangling_link_out_creates_nothing_where_it_points() {
+        let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let outside = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let missing = outside.path().join("missing");
+        std::os::unix::fs::symlink(&missing, cache.path().join("go-home"))
+            .expect("the planted link");
+
+        let module = VetModule::create(&cache.path().join("neutral"), "module m\n", None);
+
+        assert!(module.is_none(), "{module:?}");
+        assert!(
+            !missing.exists(),
+            "nothing should be created at {missing:?}"
+        );
+    }
+
+    #[test]
+    fn a_module_directory_already_there_is_never_taken_over() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let base = cache.path().join("go");
+        let next = super::VET_RUNS.load(std::sync::atomic::Ordering::Relaxed);
+        let planted: Vec<_> = (next..next + 64)
+            .map(|count| base.join(format!("{}-{count}", std::process::id())))
+            .collect();
+        for dir in &planted {
+            std::fs::create_dir_all(dir).expect("the planted module directory");
+        }
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700))
+            .expect("a private base");
+
+        let module = VetModule::create(&cache.path().join("neutral"), "module m\n", None);
+
+        assert!(module.is_none(), "{module:?}");
+        assert!(
+            planted.iter().all(|dir| std::fs::read_dir(dir)
+                .is_ok_and(|mut entries| entries.next().is_none())),
+            "every planted module directory should be left empty"
+        );
+    }
+
+    #[test]
+    fn a_neutral_path_holding_dot_dot_gets_no_module_and_creates_nothing() {
+        let place = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let deep = place.path().join("elsewhere/deep");
+        std::fs::create_dir_all(&deep).expect("the link's target");
+        std::os::unix::fs::symlink(&deep, place.path().join("link")).expect("the planted link");
+        let neutral = place.path().join("link/../cache/cwd");
+
+        let module = VetModule::create(&neutral, "module m\n", None);
+
+        assert!(module.is_none(), "{module:?}");
+        for at in [
+            place.path().join("cache"),
+            place.path().join("elsewhere/cache"),
+        ] {
+            assert!(!at.exists(), "nothing should be created at {at:?}");
+        }
+    }
+
+    #[test]
+    fn a_module_holds_go_mod_and_the_block_and_is_removed_when_dropped() {
+        let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let neutral = cache.path().join("neutral");
+
+        let module = VetModule::create(&neutral, "module m\n", Some("package main\n"))
+            .expect("the module's private directory is creatable");
+
+        let dir = module.dir().to_path_buf();
+        assert!(dir.starts_with(cache.path().join("go")), "{dir:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("go.mod")).ok().as_deref(),
+            Some("module m\n")
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("main.go")).ok().as_deref(),
+            Some("package main\n")
+        );
+        assert!(dir.join("tmp").is_dir(), "{dir:?}");
+        drop(module);
+        assert!(!dir.exists(), "the module should be gone: {dir:?}");
     }
 }
