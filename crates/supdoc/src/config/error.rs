@@ -509,12 +509,24 @@ fn removed_key_help(message: &str) -> Option<String> {
     ))
 }
 
-/// The help for a `[limits]` value that isn't `0` or a number with a unit, from the message
-/// [`crate::limits::LimitError`] wrote or the one serde wrote for a value of another type, such as
-/// a float. `None` for any other message.
+/// The help for a `[limits]` value that isn't `0`, a number with a unit, or (for a count) a
+/// whole number, from the message [`crate::limits::LimitError`] wrote or the one serde wrote for
+/// a value of another type, such as a float. `None` for any other message.
 fn limit_help(message: &str) -> Option<String> {
     const DURATION: &str = "a duration such as `parse-timeout = \"10s\"` (also `ms` or `m`)";
     const SIZE: &str = "a size such as `max-lock-size = \"16MiB\"` (also `B` or `KiB`)";
+    if message.contains("` is not a count; give a whole number")
+        || (message.starts_with("invalid type:")
+            && message.ends_with(
+                "expected a whole number with no unit, such as 200000, or 0 for no limit",
+            ))
+    {
+        return Some(
+            "Write the count as a whole number with no unit, such as \
+             `max-key-segments = 200000`. `0` means no limit"
+                .to_owned(),
+        );
+    }
     let form = if message.contains("` is not a duration; give a unit") {
         DURATION.to_owned()
     } else if message.contains("` is not a size; give a unit") {
@@ -559,3 +571,40 @@ impl fmt::Display for ConfigError {
 }
 
 impl std::error::Error for ConfigError {}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_help;
+    use crate::config::raw::RawConfig;
+
+    /// The help a config whose `[limits]` sets `max-key-segments` to `value` gets.
+    fn key_segments_help(value: &str) -> Option<String> {
+        let text = format!("[limits]\nmax-key-segments = {value}\n");
+        let error = toml::from_str::<RawConfig>(&text)
+            .expect_err("the fixture's max-key-segments should be refused");
+        parse_help(error.message())
+    }
+
+    #[test]
+    fn a_bad_count_limit_gets_the_count_form_whatever_its_spelling() {
+        for value in [
+            "\"5KiB\"",
+            "-1",
+            "1.5",
+            "true",
+            "\"many\"",
+            "99999999999999999999",
+        ] {
+            let help = key_segments_help(value);
+
+            assert_eq!(
+                help.as_deref(),
+                Some(
+                    "Write the count as a whole number with no unit, such as \
+                     `max-key-segments = 200000`. `0` means no limit"
+                ),
+                "`max-key-segments = {value}` should get the count form"
+            );
+        }
+    }
+}

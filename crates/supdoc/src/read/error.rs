@@ -7,7 +7,7 @@
 
 use std::fmt::{self, Display, Formatter};
 
-use crate::limits::TimeLimit;
+use crate::limits::{SizeLimit, TimeLimit};
 use crate::link::SymbolPath;
 use crate::lock::error::shell_quote;
 use crate::path::AbsolutePath;
@@ -290,8 +290,9 @@ impl ReadError {
                 "{shown} has more than {limit} key-path segments, the `max-key-segments` limit"
             ),
             Self::KeyPathsTooLarge { limit, .. } => format!(
-                "the key paths of {shown} are more than {limit} bytes of text, the \
-                 `max-key-path-size` limit"
+                "the key paths of {shown} are more than {} of text, the `max-key-path-size` \
+                 limit",
+                SizeLimit::bytes(*limit)
             ),
             Self::CartridgeLoad { error, .. } => error.to_string(),
             Self::Internal { reason, .. } => {
@@ -654,6 +655,10 @@ mod tests {
         assert_eq!(keys.code(), "read-too-many-keys");
         assert_eq!(size.code(), "read-key-paths-too-large");
         assert!(keys.to_string().contains("200000"), "{keys}");
+        assert!(
+            size.to_string().contains("more than 32MiB of text"),
+            "the byte limit should print as the other byte limits do: {size}"
+        );
         for (error, knobs) in [
             (
                 &keys,

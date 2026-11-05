@@ -444,30 +444,96 @@ fn the_real_rumdl_applies_per_file_ignores_when_the_cache_home_is_inside_a_git_r
     assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
 }
 
+/// The block's state, format and lint, the passed count and the findings of a real-rumdl check of
+/// a block rumdl would otherwise fail, with `.rumdl.toml` holding `config`.
+fn outcome_under(dir: &Path, config: &str) -> serde_json::Value {
+    let project = project_with_block("", "## T\n\n\n\ntext   ");
+    project.write(".rumdl.toml", config);
+    let json = real_run(&project, dir, &[], 0);
+    serde_json::json!({
+        "state": at(&json, "/data/code_blocks/0/state"),
+        "format": at(&json, "/data/code_blocks/0/format"),
+        "lint": at(&json, "/data/code_blocks/0/lint"),
+        "passed": at(&json, "/data/summary/code_blocks/passed"),
+        "findings": finding_kinds(&json),
+    })
+}
+
+/// What a project that disables every rule itself gets: both steps run, the block passes, and
+/// nothing is reported.
+fn disable_all_outcome() -> serde_json::Value {
+    serde_json::json!({
+        "state": "passed",
+        "format": "ran",
+        "lint": "ran",
+        "passed": 1,
+        "findings": [],
+    })
+}
+
 #[test]
-fn a_config_enabling_only_the_rules_supdoc_relaxes_is_not_run_and_never_a_pass() {
+fn a_config_enabling_only_the_rules_supdoc_relaxes_passes_as_disabling_every_rule_does() {
     let Some(dir) = real_tool_dir(
         "rumdl",
-        "a_config_enabling_only_the_rules_supdoc_relaxes_is_not_run_and_never_a_pass",
+        "a_config_enabling_only_the_rules_supdoc_relaxes_passes_as_disabling_every_rule_does",
     ) else {
         return;
     };
-    let project = project_with_block("", "## T\n\n\n\ntext   ");
-    project.write(".rumdl.toml", "[global]\nenable = [\"MD041\"]\n");
 
-    let json = real_run(&project, &dir, &[], 0);
+    let outcome = outcome_under(&dir, "[global]\nenable = [\"MD041\"]\n");
 
-    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 0, "{json}");
+    assert_eq!(outcome, disable_all_outcome());
+}
+
+#[test]
+fn a_config_whose_own_extend_disable_leaves_only_relaxed_rules_passes_alike() {
+    let Some(dir) = real_tool_dir(
+        "rumdl",
+        "a_config_whose_own_extend_disable_leaves_only_relaxed_rules_passes_alike",
+    ) else {
+        return;
+    };
+
+    let outcome = outcome_under(
+        &dir,
+        "[global]\nenable = [\"MD041\", \"MD009\"]\nextend-disable = [\"MD009\"]\n",
+    );
+
+    assert_eq!(outcome, disable_all_outcome());
+}
+
+#[test]
+fn a_nested_repository_does_not_take_the_outer_repositorys_config() {
+    let Some(dir) = real_tool_dir(
+        "rumdl",
+        "a_nested_repository_does_not_take_the_outer_repositorys_config",
+    ) else {
+        return;
+    };
+    let outer = git_project(
+        ".rumdl.toml",
+        "[global]\ndisable = [\"MD009\", \"MD041\"]\n",
+        TRAILING,
+    );
+    outer.write("inner/.git/HEAD", "ref: refs/heads/main\n");
+    outer.write(
+        "inner/docs/blocks.md",
+        &format!("# Blocks\n\n```markdown\n{TRAILING}\n```\n"),
+    );
+
+    let json = real_run(&outer, &dir, &[], 1);
+
+    assert_eq!(at(&json, "/data/code_blocks/0/state"), "passed", "{json}");
     assert_eq!(
-        at(&json, "/data/code_blocks/0/state"),
-        "not_checked",
+        finding_kinds(&json),
+        ["code-block-unformatted", "code-block-lint"],
         "{json}"
     );
-    assert_eq!(at(&json, "/data/code_blocks/0/lint"), "not_run", "{json}");
     assert!(
-        at(&json, "/data/code_blocks/0/reason")
-            .as_str()
-            .is_some_and(|reason| reason.contains("enables only rules supdoc turns off")),
+        array_at(&json, "/findings")
+            .iter()
+            .all(|finding| finding.pointer("/location/file")
+                == Some(&serde_json::json!("inner/docs/blocks.md"))),
         "{json}"
     );
 }
@@ -480,10 +546,7 @@ fn a_project_that_disables_every_rule_itself_keeps_that_choice() {
     ) else {
         return;
     };
-    let project = project_with_block("", "## T\n\n\n\ntext   ");
-    project.write(".rumdl.toml", "[global]\ndisable = [\"all\"]\n");
+    let outcome = outcome_under(&dir, "[global]\ndisable = [\"all\"]\n");
 
-    let json = real_run(&project, &dir, &[], 0);
-
-    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+    assert_eq!(outcome, disable_all_outcome());
 }

@@ -15,10 +15,11 @@ use std::fs;
 use std::ops::Range;
 use std::path::Path;
 
+use crate::cartridges::data::KeyPathBudget;
 use crate::config::Config;
 use crate::finding::{Finding, Fix, Location, Severity, Snippet};
 use crate::hash::HashSettings;
-use crate::limits::TimeLimit;
+use crate::limits::Limits;
 use crate::link::{LinkKey, Target};
 use crate::output::paths::relative_to;
 use crate::path::AbsolutePath;
@@ -67,17 +68,18 @@ impl Parsed {
         &mut self,
         path: &AbsolutePath,
         languages: &Languages,
-        limit: TimeLimit,
+        limits: &Limits,
     ) -> Result<&SourceFile, ReadError> {
         match self.files.entry(path.clone()) {
             Entry::Occupied(parsed) => Ok(parsed.into_mut()),
             Entry::Vacant(slot) => {
-                let file =
-                    SourceFile::read(path.clone(), languages, limit).inspect_err(|error| {
+                let file = SourceFile::read(path.clone(), languages, limits.parse_timeout.value)
+                    .inspect_err(|error| {
                         if let ReadError::CartridgeLoad { error, .. } = error {
                             let _first = self.cartridge_failure.get_or_insert(*error);
                         }
-                    })?;
+                    })?
+                    .with_key_paths(KeyPathBudget::from_limits(limits));
                 #[cfg(test)]
                 {
                     self.parses += 1;
@@ -286,8 +288,7 @@ fn target_states(
         }
         Located::File(path) => path,
     };
-    let limit = config.limits_in_effect().parse_timeout.value;
-    let file = match parsed.read(&path, languages, limit) {
+    let file = match parsed.read(&path, languages, config.limits_in_effect()) {
         Ok(file) => file,
         Err(error) => {
             return broken_by(&|first| read_failed(&error, config.root(), first));

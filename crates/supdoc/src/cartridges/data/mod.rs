@@ -25,6 +25,7 @@ use crate::read::cartridge::{Deadline, SourceFile, Stopped, Symbol, SymbolTable}
 use crate::read::error::ReadError;
 
 /// The default ceiling on the bytes of path text one data file's symbol table may hold: 32 MiB.
+#[cfg(test)]
 pub(crate) const DEFAULT_KEY_PATH_BYTES: usize = 32 * 1024 * 1024;
 
 /// The ceilings one data file's symbol table is built under.
@@ -41,16 +42,28 @@ impl KeyPathBudget {
     /// The ceilings `limits` sets; a ceiling of `0` (no limit) is as large as a count can be.
     #[must_use]
     pub(crate) fn from_limits(limits: &Limits) -> Self {
-        let count = |ceiling: Option<u64>| {
-            ceiling.map_or(usize::MAX, |value| {
-                usize::try_from(value).unwrap_or(usize::MAX)
-            })
-        };
         Self {
             segments: count(limits.max_key_segments.value.get()),
             bytes: count(limits.max_key_path_size.value.get()),
         }
     }
+
+    /// The ceilings when nothing sets them: `max-key-segments` and `max-key-path-size` at their
+    /// defaults.
+    #[must_use]
+    pub(crate) fn defaults() -> Self {
+        Self {
+            segments: count(Limits::MAX_KEY_SEGMENTS.get()),
+            bytes: count(Limits::MAX_KEY_PATH_SIZE.get()),
+        }
+    }
+}
+
+/// `ceiling` as a count; no ceiling, or one past what a count can hold, is the largest count.
+fn count(ceiling: Option<u64>) -> usize {
+    ceiling.map_or(usize::MAX, |value| {
+        usize::try_from(value).unwrap_or(usize::MAX)
+    })
 }
 
 /// One escaped path segment and its length in bytes, so charging it costs O(1).
@@ -85,7 +98,7 @@ pub(crate) fn key_name(key: &str) -> Option<KeyName> {
 ///
 /// A decimal number is never empty and holds no `.`, so this is never `None`.
 #[must_use]
-fn index_name(index: usize) -> Option<KeyName> {
+pub(crate) fn index_name(index: usize) -> Option<KeyName> {
     KeyName::new(index.to_string())
 }
 
@@ -134,6 +147,13 @@ impl KeyPathError {
 
 /// What one node of a data file is, as [`KeyPaths::walk`] sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the YAML and JSON cartridges walk with it from P5-L10"
+    )
+)]
 pub(crate) enum Shape<N> {
     /// A mapping: its members in file order.
     Mapping(Vec<Member<N>>),
@@ -145,6 +165,13 @@ pub(crate) enum Shape<N> {
 
 /// One key of a mapping and its value.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the YAML and JSON cartridges walk with it from P5-L10"
+    )
+)]
 pub(crate) struct Member<N> {
     /// The key's text, decoded from its quoting; `None` when the key is not a scalar.
     pub(crate) key: Option<String>,
@@ -156,6 +183,13 @@ pub(crate) struct Member<N> {
 
 /// One element of a sequence.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the YAML and JSON cartridges walk with it from P5-L10"
+    )
+)]
 pub(crate) struct Element<N> {
     /// The symbol's byte range in the file.
     pub(crate) span: Range<usize>,
@@ -164,6 +198,13 @@ pub(crate) struct Element<N> {
 }
 
 /// A symbol named and charged but not yet made, waiting on the walk's stack.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the YAML and JSON cartridges walk with it from P5-L10"
+    )
+)]
 struct Pending<N> {
     /// The symbol it goes under, or `None` at the root.
     parent: Option<KeyId>,
@@ -285,6 +326,13 @@ impl KeyPaths {
     /// # Errors
     ///
     /// As [`KeyPaths::key`], at the first symbol that fails.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the YAML and JSON cartridges walk with it from P5-L10"
+        )
+    )]
     pub(crate) fn walk<N>(
         &mut self,
         parent: Option<KeyId>,
@@ -310,6 +358,13 @@ impl KeyPaths {
     /// # Errors
     ///
     /// As [`KeyPaths::key`], at the first member that fails; nothing of `shape` is queued then.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the YAML and JSON cartridges walk with it from P5-L10"
+        )
+    )]
     fn queue<N>(
         &mut self,
         pending: &mut Vec<Pending<N>>,
@@ -345,6 +400,13 @@ impl KeyPaths {
     /// # Errors
     ///
     /// As [`KeyPaths::key`].
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the YAML and JSON cartridges walk with it from P5-L10"
+        )
+    )]
     fn pending<N>(
         &mut self,
         parent: Option<KeyId>,
@@ -464,7 +526,8 @@ mod tests {
         pub(super) static CHARGED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
-    /// The default budgets the design names: `[limits] max-key-segments` and 32 MiB of path text.
+    /// A budget no fixture here reaches unless it means to: 1,000,000 segments, five times the
+    /// 200,000 `max-key-segments` default, and the default 32 MiB of path text.
     const BUDGET: KeyPathBudget = KeyPathBudget {
         segments: 1_000_000,
         bytes: DEFAULT_KEY_PATH_BYTES,

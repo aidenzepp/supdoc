@@ -70,13 +70,27 @@ impl Kind {
 
 /// How a tool checks a fragment of one kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[expect(
-    dead_code,
-    reason = "the first cartridge to list a fragment kind constructs it in P5-FR03"
-)]
 pub(crate) enum Support {
-    /// The tool parses the kind as written.
-    Native,
+    /// The tool parses the kind as written. `relax` names the rules that fire only because the
+    /// enclosing construct is missing, such as ruff's `F706` (`return` outside a function) for
+    /// `statements`; the tool leaves them off for a block of this kind.
+    Native {
+        /// The rules left off for this kind.
+        relax: &'static [&'static str],
+    },
+}
+
+impl Support {
+    /// Native support with nothing relaxed.
+    pub(crate) const NATIVE: Self = Self::Native { relax: &[] };
+
+    /// The rules left off for a block of this kind.
+    #[must_use]
+    pub(crate) const fn relax(self) -> &'static [&'static str] {
+        match self {
+            Self::Native { relax } => relax,
+        }
+    }
 }
 
 #[cfg(test)]
