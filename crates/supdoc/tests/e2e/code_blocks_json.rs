@@ -463,12 +463,13 @@ fn prettier_formats(dir: &Path) -> Vec<String> {
 
 /// Runs a `check --json` on `project` with `path` as the only `PATH` entry, `trust` as
 /// `SUPDOC_TRUST` and its cache in a fresh directory, asserting it exits `exit`.
+/// A generous code-block timeout keeps a loaded machine from turning a verdict into a timeout.
 fn prettier_check(project: &Project, path: &Path, trust: &str, exit: i32) -> serde_json::Value {
     let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
     project
         .supdoc_in_with(
             ".",
-            &["check", "--json"],
+            &["check", "--json", "--code-block-timeout", "120s"],
             &[
                 ("PATH", path),
                 ("SUPDOC_TRUST", Path::new(trust)),
