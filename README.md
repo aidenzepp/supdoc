@@ -98,6 +98,11 @@ Threat model, for a checkout you don't trust:
     downloads a toolchain, never uses a tool installed inside the checkout, and skips Rust blocks that read
     files or environment variables at compile time (`include_str!`, `env!` and the like). Each tool still
     reads its own config files, which can sit outside the project, and its errors can quote them.
+  - **Markdown blocks** go to rumdl with the project's rumdl config, found from the doc's directory up to
+    the nearest `.git` inside the root. MD041, MD051 and MD057 are off for blocks, so a config that enables
+    only those leaves no rule and its blocks pass, as with `disable = ["all"]`. A rumdl config above the
+    root is not read, so rumdl run in the project may judge a block differently: put the config inside the
+    root.
   - **A checkout you trust:** tools that compile or load code from the checkout belong to the project tier.
     clippy is the only one today, and it doesn't run yet even in a trusted checkout: it waits for a later
     audit of the scanner in front of it, and its step counts as `lint not run`. supdoc trusts a checkout only

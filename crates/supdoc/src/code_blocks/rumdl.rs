@@ -2,11 +2,12 @@
 //!
 //! rumdl finds its config from the directory it runs in, never from the block's virtual path,
 //! and supdoc runs it from an empty directory of its own. So supdoc walks up from the doc inside
-//! the root, and refuses a config that could make rumdl run a command or read a file the result
-//! cache doesn't key on: a `code-block-tools` section, a `command`, or an `extends`. A config it
-//! accepts isn't passed as the project wrote it: supdoc writes the table it validated again into
-//! a private file and passes that by `--config`. With no config found, rumdl gets `--no-config`,
-//! so a config in the home directory never applies.
+//! the root, stopping at the nearest `.git` as rumdl does, and refuses a config that could make
+//! rumdl run a command or read a file the result cache doesn't key on: a `code-block-tools`
+//! section, a `command`, or an `extends`. A config it accepts isn't passed as the project wrote
+//! it: supdoc writes the table it validated again into a private file and passes that by
+//! `--config`. With no config found, rumdl gets `--no-config`, so a config in the home directory
+//! never applies.
 
 use std::ffi::OsString;
 use std::fs;
@@ -101,26 +102,6 @@ pub(crate) enum Refusal {
     NoPrivateDir,
 }
 
-/// The rules supdoc leaves off for a block, by code and by name, each written as
-/// [`plain_rule`] writes a rule's name.
-const RELAXED_RULES: [&str; 7] = [
-    "md041",
-    "firstlineheading",
-    "firstlineh1",
-    "md051",
-    "linkfragments",
-    "md057",
-    "existingrelativelinks",
-];
-
-/// `rule` lowercase with no `-` or `_`, so every spelling of a rule's name compares alike.
-fn plain_rule(rule: &str) -> String {
-    rule.chars()
-        .filter(|c| !matches!(c, '-' | '_'))
-        .map(|c| c.to_ascii_lowercase())
-        .collect()
-}
-
 /// What rumdl is given for the blocks of one doc directory: its flags, and where the project's
 /// config now lives.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,9 +112,6 @@ pub(crate) struct Project {
     /// [`pattern_root`]), and the private directory holding its copy: `None` when there is no
     /// config.
     moved: Option<(PathBuf, PathBuf)>,
-    /// Whether the project enables rules, all of which supdoc leaves off for a block: no rule
-    /// would check it.
-    pub(crate) no_rule_left: bool,
 }
 
 impl Project {
@@ -181,7 +159,8 @@ fn pattern_root(config: &Path) -> Option<PathBuf> {
 }
 
 /// The [`Project`] rumdl is given for `doc`: the project's config, found walking up from `doc`'s
-/// directory to `root`, or `--no-config` when there is none.
+/// directory to the nearest `.git` inside `root` (see [`candidates`]), or `--no-config` when
+/// there is none.
 ///
 /// The config is read and checked, and then not passed as the project wrote it: its validated
 /// table is written again as TOML into a private directory named by the hash of its content,
@@ -209,7 +188,6 @@ pub(crate) fn project_args(env: &ToolEnv, root: &Path, doc: &Path) -> Result<Pro
             flag.push(private.join("rumdl.toml"));
             return Ok(Project {
                 flags: vec![flag],
-                no_rule_left: only_relaxed_rules(&table),
                 moved: pattern_root(&candidate).map(|dir| (dir, private)),
             });
         }
@@ -217,7 +195,6 @@ pub(crate) fn project_args(env: &ToolEnv, root: &Path, doc: &Path) -> Result<Pro
     Ok(Project {
         flags: vec![OsString::from("--no-config")],
         moved: None,
-        no_rule_left: false,
     })
 }
 
@@ -229,15 +206,22 @@ fn relative(root: &Path, path: &Path) -> String {
         .to_string()
 }
 
-/// The config files in `doc`'s directory and the ancestors of it inside `root`, nearest first.
+/// The config files in `doc`'s directory and its ancestors, nearest first, up to and including
+/// the first that holds a `.git` (a directory or a file), and never above `root`: rumdl itself
+/// stops its search at a repository's root, so a nested repository doesn't take an outer config.
 fn candidates(root: &Path, doc: &Path) -> impl Iterator<Item = PathBuf> {
-    let dirs = doc
+    let mut dirs = Vec::new();
+    for dir in doc
         .parent()
         .into_iter()
         .flat_map(Path::ancestors)
         .take_while(|dir| dir.starts_with(root))
-        .map(Path::to_path_buf)
-        .collect::<Vec<_>>();
+    {
+        dirs.push(dir.to_path_buf());
+        if fs::symlink_metadata(dir.join(".git")).is_ok() {
+            break;
+        }
+    }
     dirs.into_iter()
         .flat_map(|dir| CONFIG_FILES.map(|name| dir.join(name)))
         .filter(|candidate| fs::symlink_metadata(candidate).is_ok())
@@ -294,33 +278,6 @@ fn checked(root: &Path, found: &Path) -> Result<Option<toml::Table>, Refusal> {
         Some(why) => Err(refuse(why)),
         None => Ok(Some(rumdl)),
     }
-}
-
-/// Whether the config enables rules by name, and every one of them is a rule supdoc leaves off
-/// for a block, so no rule would check it. A config that enables nothing by name (it enables all
-/// the default rules, or by its own choice none) is not that.
-fn only_relaxed_rules(table: &toml::Table) -> bool {
-    let key_is = |key: &str, name: &str| key.to_ascii_lowercase().replace('_', "-") == name;
-    let names = |name: &str| -> Vec<String> {
-        let global = table
-            .iter()
-            .filter(|(key, _)| key_is(key, "global"))
-            .filter_map(|(_, value)| value.as_table());
-        std::iter::once(table)
-            .chain(global)
-            .flat_map(|scope| scope.iter().filter(|(key, _)| key_is(key, name)))
-            .filter_map(|(_, value)| value.as_array())
-            .flatten()
-            .filter_map(toml::Value::as_str)
-            .map(plain_rule)
-            .collect()
-    };
-    let enabled = names("enable");
-    !enabled.is_empty()
-        && enabled
-            .iter()
-            .chain(&names("extend-enable"))
-            .all(|rule| RELAXED_RULES.contains(&rule.as_str()))
 }
 
 /// Why a config file couldn't be read as a table.
@@ -474,7 +431,7 @@ fn nested(value: &toml::Value) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Project, Refusal, diagnostics, only_relaxed_rules, pattern_root, project_args, unsafe_part,
+        Project, Refusal, candidates, diagnostics, pattern_root, project_args, unsafe_part,
     };
     use crate::code_blocks::lint::Diagnostic;
     use crate::code_blocks::tools::ToolEnv;
@@ -737,22 +694,20 @@ mod tests {
     }
 
     #[test]
-    fn a_config_enabling_only_rules_supdoc_relaxes_leaves_no_rule() {
-        let left = |config: &str| {
-            only_relaxed_rules(&config.parse().expect("the fixture config should be TOML"))
-        };
+    fn the_config_search_stops_at_the_nearest_git_inside_the_root() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let at = |relative: &str| root.path().join(relative);
+        fs::create_dir_all(at("inner/docs")).expect("the fixture dirs");
+        fs::create_dir_all(at("inner/.git")).expect("a git dir");
+        fs::write(at(".rumdl.toml"), "[global]\n").expect("outer config");
+        let doc = at("inner/docs/a.md");
 
-        assert!(left("[global]\nenable = [\"MD041\"]\n"));
-        assert!(left(
-            "enable = [\"first-line-heading\", \"MD051\", \"existing_relative_links\"]\n"
-        ));
-        assert!(!left("[global]\nenable = [\"MD041\", \"MD013\"]\n"));
-        assert!(!left(
-            "[global]\nenable = [\"MD041\"]\nextend-enable = [\"MD009\"]\n"
-        ));
-        assert!(!left("[global]\nenable = []\n"));
-        assert!(!left("[global]\ndisable = [\"all\"]\n"));
-        assert!(!left("[global]\nline-length = 20\n"));
+        let hidden: Vec<_> = candidates(root.path(), &doc).collect();
+        fs::write(at("inner/.rumdl.toml"), "[global]\n").expect("config beside .git");
+        let beside: Vec<_> = candidates(root.path(), &doc).collect();
+
+        assert_eq!(hidden, Vec::<PathBuf>::new());
+        assert_eq!(beside, [at("inner/.rumdl.toml")]);
     }
 
     #[test]
