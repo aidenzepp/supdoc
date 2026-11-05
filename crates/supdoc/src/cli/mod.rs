@@ -230,9 +230,15 @@ impl From<&CartridgeLoadError> for CliError {
     }
 }
 
-/// `error`'s reason in lowercase, without the operating system's error-code suffix.
+/// `error`'s reason with its first character lowercased, so it reads on after a colon, without
+/// the operating system's error-code suffix. The rest keeps its case, so a path in it stays
+/// exact.
 pub(crate) fn cause(error: &std::io::Error) -> String {
-    without_os_code(&error.to_string()).to_lowercase()
+    let reason = without_os_code(&error.to_string()).to_owned();
+    let mut chars = reason.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_lowercase().chain(chars).collect()
+    })
 }
 
 /// `text` without a trailing ` (os ...)` code such as the one `io::Error` appends.
@@ -283,5 +289,31 @@ pub(crate) fn run(
             skill::run(args, skill_dirs, context, output)
         }
         Command::Upgrade(args) => upgrade::run(args, context, output),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::cause;
+
+    #[test]
+    fn cause_lowercases_only_the_first_character_so_a_path_keeps_its_case() {
+        let refusal = io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "`/Scratch/MixedCase/trusted-roots` lies outside",
+        );
+
+        assert_eq!(
+            (
+                cause(&refusal),
+                cause(&io::Error::from_raw_os_error(libc::ENOENT))
+            ),
+            (
+                "`/Scratch/MixedCase/trusted-roots` lies outside".to_owned(),
+                "no such file or directory".to_owned()
+            )
+        );
     }
 }

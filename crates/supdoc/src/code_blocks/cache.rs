@@ -8,13 +8,13 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{Read, Write as _};
-use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 
 use sha2::{Digest, Sha256};
 
+use crate::config::confine::{self, Admitted, Boundary};
 use crate::hash::Hash;
 use crate::limits::{Limits, SizeLimit};
 use crate::read::source::{open_without_blocking, read_up_to};
@@ -46,6 +46,9 @@ static WRITES: AtomicU64 = AtomicU64::new(0);
 pub(crate) struct Cache {
     /// The directory holding the root's entries.
     dir: PathBuf,
+    /// `dir`, where it really lay when the cache opened: every create, write, rename and remove
+    /// is admitted against it.
+    boundary: Boundary,
     /// How many entries it keeps.
     limit: usize,
 }
@@ -98,17 +101,19 @@ impl Cache {
         Self::at(dir, MAX_ENTRIES)
     }
 
-    /// The cache in `dir`, created mode 0700, keeping `limit` entries. `None` when `dir` can't be
-    /// created.
+    /// The cache in `dir`, created mode 0700, keeping `limit` entries, with later writes held
+    /// beneath where `dir` really lies now. `None` when `dir` isn't absolute or can't be created.
     ///
-    /// Effect: creates `dir` and its missing parents.
+    /// Effect: resolves `dir`, and creates it and its missing parents.
     fn at(dir: PathBuf, limit: usize) -> Option<Self> {
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&dir)
-            .ok()?;
-        Some(Self { dir, limit })
+        let boundary = Boundary::resolve(&dir);
+        let cache = Self {
+            dir,
+            boundary,
+            limit,
+        };
+        confine::create_dir_all(&cache.admit(&cache.dir)?, 0o700).ok()?;
+        Some(cache)
     }
 
     /// The key of `run`, from `root`: the checked text, the tool's name, its real path, size and
@@ -182,11 +187,19 @@ impl Cache {
         let temporary = self
             .dir
             .join(format!(".tmp-{}-{count}", std::process::id()));
-        let written = fs::File::create(&temporary)
-            .and_then(|mut file| file.write_all(&encode(key, ran)))
-            .and_then(|()| fs::rename(&temporary, self.entry(key)));
-        if written.is_err() {
-            let _gone = fs::remove_file(&temporary);
+        let Some(created) = self.admit(&temporary) else {
+            return;
+        };
+        let Ok(mut file) = confine::create_new(&created, 0o666) else {
+            return;
+        };
+        let stored = file.write_all(&encode(key, ran)).is_ok()
+            && self
+                .admit(&temporary)
+                .zip(self.admit(&self.entry(key)))
+                .is_some_and(|(from, to)| confine::rename_into(&from, &to).is_ok());
+        if !stored && let Some(temporary) = self.admit(&temporary) {
+            let _gone = confine::remove_file(&temporary);
         }
     }
 
@@ -210,13 +223,24 @@ impl Cache {
         };
         files.sort();
         for (_, path) in files.into_iter().take(excess) {
-            let _gone = fs::remove_file(path);
+            if let Some(entry) = self.admit(&path) {
+                let _gone = confine::remove_file(&entry);
+            }
         }
     }
 
     /// The path of `key`'s entry.
     fn entry(&self, key: Key) -> PathBuf {
         self.dir.join(key.0.to_string())
+    }
+
+    /// `path`, once [`Boundary::admit`] finds it inside the cache directory both as written and
+    /// once every symlink along it is followed; `None` when it doesn't. Call it immediately before
+    /// the write it guards.
+    ///
+    /// Effect: reads file metadata and symlinks along `path`.
+    fn admit(&self, path: &Path) -> Option<Admitted<'_>> {
+        self.boundary.admit(path).ok()
     }
 }
 
@@ -656,6 +680,65 @@ mod tests {
 
         let kept: Vec<bool> = keys.iter().map(|key| cache.get(*key).is_some()).collect();
         assert_eq!(kept, [false, true, true]);
+    }
+
+    /// The names directly inside `dir`, sorted.
+    fn names(dir: &Path) -> Vec<OsString> {
+        let mut names: Vec<OsString> = fs::read_dir(dir)
+            .expect("the directory should be listable")
+            .map(|entry| entry.expect("an entry should be readable").file_name())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn put_leaves_an_entry_that_is_a_symlink_to_outside_and_its_target_alone() {
+        use std::os::unix::fs::symlink;
+        let dir = temp();
+        let cache = Cache::at(dir.path().join("cache"), 10).expect("the cache should open");
+        let key = key_of(&program(dir.path()), "echo hi\n", dir.path());
+        let outside = dir.path().join("outside");
+        fs::write(&outside, "outside\n").expect("the outside file should be writable");
+        symlink(&outside, cache.entry(key)).expect("the entry symlink should be creatable");
+
+        cache.put(key, &ran());
+
+        assert_eq!(
+            fs::read_to_string(&outside).expect("the outside file should be readable"),
+            "outside\n"
+        );
+        assert!(
+            fs::symlink_metadata(cache.entry(key))
+                .expect("the entry should still exist")
+                .is_symlink(),
+            "the symlinked entry should not be replaced"
+        );
+        assert_eq!(names(&cache.dir), [OsString::from(key.0.to_string())]);
+    }
+
+    #[test]
+    fn a_cache_directory_replaced_by_a_symlink_to_outside_is_not_written_or_pruned() {
+        use std::os::unix::fs::symlink;
+        let dir = temp();
+        let cache = Cache::at(dir.path().join("cache"), 1).expect("the cache should open");
+        let key = key_of(&program(dir.path()), "echo hi\n", dir.path());
+        let outside = dir.path().join("outside");
+        fs::create_dir(&outside).expect("the outside directory should be creatable");
+        for name in ["a", "b", "c"] {
+            fs::write(outside.join(name), name).expect("an outside file should be writable");
+        }
+        fs::rename(&cache.dir, dir.path().join("moved")).expect("the cache should move aside");
+        symlink(&outside, &cache.dir).expect("the swapped-in symlink should be creatable");
+
+        cache.put(key, &ran());
+        cache.prune();
+
+        assert_eq!(
+            names(&outside),
+            ["a", "b", "c"].map(OsString::from),
+            "nothing should be written or removed where the symlink leads"
+        );
     }
 
     #[test]

@@ -151,7 +151,7 @@ pub(crate) fn run(
     let use_changes = plan_uses(&lock, &mut next, &current, in_scope);
     let next = (plan.next.is_some() || !use_changes.is_empty()).then_some(next);
     if applied && let Some(next) = &next {
-        next.write(&lock_path(config.root()))
+        next.write(&lock_path(config.root()), config.boundary())
             .map_err(|error| lock_failure(&error, config.root(), &context.cwd))?;
     }
 
@@ -742,7 +742,7 @@ mod tests {
             assert!(!lock.is_empty(), "the fixture should have a link to record");
             let path =
                 AbsolutePath::new(&self.lock_file()).expect("the lockfile path should be absolute");
-            lock.write(&path)
+            lock.write(&path, config.boundary())
                 .expect("the fixture lockfile should be written");
         }
 

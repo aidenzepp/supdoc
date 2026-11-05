@@ -208,7 +208,6 @@ impl Config {
     /// The project root as a write boundary: every write inside the project passes its
     /// [`Boundary::admit`] first.
     #[must_use]
-    #[expect(dead_code, reason = "project writes admit through it from PH02")]
     pub(crate) fn boundary(&self) -> &Boundary {
         &self.boundary
     }
