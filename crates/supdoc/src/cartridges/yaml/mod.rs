@@ -1133,7 +1133,10 @@ spec:
         let languages = Languages::builtin().expect("the built-in cartridges should load");
         for (name, text) in [
             ("/repo/big.toml", keys(40_000, "\n").replace(':', " =")),
-            ("/repo/big.rs", "// line\n".repeat(40_000)),
+            (
+                "/repo/big.json",
+                format!("[\n{}1\n]\n", "1,\n".repeat(39_997)),
+            ),
         ] {
             let path = AbsolutePath::new(Path::new(name)).expect("the path should be absolute");
             let language = languages
@@ -1255,10 +1258,7 @@ spec:
         let pad = " ".repeat(200);
         for (name, text) in [
             ("/repo/deep.toml", format!("[a]\n{pad}b = 1\n")),
-            (
-                "/repo/deep.rs",
-                format!("fn f() {{\n{pad}let _x = 1;\n}}\n"),
-            ),
+            ("/repo/deep.json", format!("{{\n{pad}\"b\": 1\n}}\n")),
         ] {
             let path = AbsolutePath::new(Path::new(name)).expect("the path should be absolute");
             let language = languages

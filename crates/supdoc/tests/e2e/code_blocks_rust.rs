@@ -1065,6 +1065,55 @@ fn clippy_never_compiles_a_block_with_an_attribute_off_the_allowlist() {
     );
 }
 
+#[test]
+fn a_trusted_block_refused_by_the_scan_names_why() {
+    let cases = [
+        (
+            "fn f() { my_macro!(); }",
+            "macro `my_macro` isn't on supdoc's list",
+        ),
+        // A macro off the list reads as unlisted whether or not it's called through a path.
+        (
+            "fn f() -> i32 { proj::twice!(3) }",
+            "macro `twice` isn't on supdoc's list",
+        ),
+        (
+            "fn f() { proj::println!(\"x\"); }",
+            "macro `println` called through a path isn't on supdoc's list",
+        ),
+        (
+            "const S: &str = include_str!(\"/etc/passwd\");",
+            "compile-time read",
+        ),
+    ];
+    for (body, reason) in cases {
+        let project =
+            project_with_rust_config(FORMAT_OFF, &format!("# Blocks\n\n```rust\n{body}\n```\n"));
+        project.write("Cargo.toml", PROJ);
+        let stubs = rust_stubs();
+
+        let json = check_with_stubs(
+            &project,
+            &stubs,
+            &["check", "--json", "-v"],
+            &[("SUPDOC_TRUST", Path::new("1"))],
+            0,
+        )
+        .json();
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-not-checked"],
+            "{body}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/code_blocks/0/reason"),
+            reason,
+            "{body}: {json}"
+        );
+    }
+}
+
 /// A doc of two Rust blocks clippy and cargo would see once trusted.
 const TWO_BLOCKS: &str = "# Blocks\n\n```rust\npub fn a() {}\n```\n\n```rust\npub fn b() {}\n```\n";
 

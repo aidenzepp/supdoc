@@ -1,6 +1,6 @@
 //! Links into each language's symbols are recorded, pass, and fail when the symbol changes (docref's
-//! TypeScript, Markdown, sub-declaration, JavaScript, Python, Go and Bash tests, plus TOML and
-//! YAML).
+//! TypeScript, Markdown, sub-declaration, JavaScript, Python, Go and Bash tests, plus TOML, JSON
+//! and YAML).
 
 use std::fmt::Write as _;
 
@@ -320,6 +320,53 @@ fn toml_target_over_the_key_budget_is_a_broken_link_update_leaves_unrecorded() {
         [(Some("Cargo.toml"), Some("read-too-many-keys"))],
         "{list}"
     );
+}
+
+/// A project whose guide links JSON keys: the bash fixture plus a package manifest and a guide.
+fn json_project() -> Project {
+    let project = Project::fixture("bash");
+    project.write(
+        "package.json",
+        "{\n  \"scripts\": {\n    \"build\": \"tsc -p .\"\n  },\n  \"exports\": {\n    \"./utils\": \"./dist/utils.js\"\n  }\n}\n",
+    );
+    project.write(
+        "docs/build.md",
+        "Run [the build](../package.json#scripts.build); import [utils](../package.json#exports.~1/utils).\n",
+    );
+    project
+}
+
+#[test]
+fn json_key_links_are_recorded_and_pass() {
+    let project = json_project();
+
+    project.record();
+
+    let locked = project.locked_links("supdoc.lock");
+    assert!(
+        locked.contains("package.json#scripts.build")
+            && locked.contains("package.json#exports.~1/utils"),
+        "both JSON keys' links should be recorded: {locked:?}"
+    );
+    let _ = project.supdoc(&["check"]).assert_exit(0);
+}
+
+#[test]
+fn json_changing_a_key_value_fails_its_link() {
+    let project = json_project();
+    project.record();
+    project.replace("package.json", "tsc -p .", "tsc -b");
+
+    let report = project.supdoc(&["--json", "check"]).assert_exit(1).json();
+
+    assert_eq!(at(&report, "/data/summary/failed"), 1, "{report}");
+    assert_eq!(at(&report, "/data/summary/broken"), 0, "{report}");
+    let failed: Vec<&str> = array_at(&report, "/data/links")
+        .iter()
+        .filter(|link| link.pointer("/state").and_then(serde_json::Value::as_str) == Some("failed"))
+        .filter_map(|link| link.pointer("/symbol").and_then(serde_json::Value::as_str))
+        .collect();
+    assert_eq!(failed, ["scripts.build"], "{report}");
 }
 
 /// A project whose guide links a workflow step and a key in the second of two Kubernetes objects.

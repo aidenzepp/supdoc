@@ -138,9 +138,9 @@ impl<'tree> Frame<'tree> {
     }
 
     /// The next child after the last one taken that names something here: a `pair` in a body of
-    /// pairs, a value in an array. `None` once there are none. The cursor moves one sibling at a
-    /// time, so nothing is allocated, and every child passed over is checked against the
-    /// deadline.
+    /// pairs, a value in an array, never a placeholder the parser inserted to recover from an
+    /// error. `None` once there are none. The cursor moves one sibling at a time, so nothing is
+    /// allocated, and every child passed over is checked against the deadline.
     ///
     /// # Errors
     ///
@@ -162,7 +162,7 @@ impl<'tree> Frame<'tree> {
                 Children::Pairs => child.kind() == "pair",
                 Children::Elements { .. } => VALUE_KINDS.contains(&child.kind()),
             };
-            if child.is_named() && wanted {
+            if child.is_named() && is_written(child) && wanted {
                 return Ok(Some(child));
             }
         }
@@ -401,11 +401,17 @@ fn first_key(node: Node<'_>) -> Option<Node<'_>> {
         .find(|child| is_key(*child))
 }
 
-/// The value of `pair`: the first value node after its key.
+/// Whether `node` is written in the file, rather than a placeholder the parser inserted to recover
+/// from an error: `x = }` gets an `integer` that holds nothing but a missing token.
+fn is_written(node: Node<'_>) -> bool {
+    !node.is_missing() && node.start_byte() < node.end_byte()
+}
+
+/// The value of `pair`: the first written value node after its key.
 fn value_after<'tree>(pair: Node<'tree>, key: Node<'tree>) -> Option<Node<'tree>> {
     let mut cursor = pair.walk();
     pair.named_children(&mut cursor)
-        .filter(|child| child.start_byte() >= key.end_byte())
+        .filter(|child| child.start_byte() >= key.end_byte() && is_written(*child))
         .find(|child| VALUE_KINDS.contains(&child.kind()))
 }
 
@@ -845,6 +851,21 @@ name = "second"
             matches!(error, ReadError::Timeout { offset, .. } if offset < last),
             "the walk should stop among the comments, before byte {last}: {error:?}"
         );
+    }
+
+    #[test]
+    fn a_trailing_comma_or_a_dangling_key_names_no_placeholder() {
+        for (text, want) in [
+            ("a = [1, 2, ]\n", &["a", "a.0", "a.1"][..]),
+            ("t = { x = 1, }\n", &["t", "t.x"][..]),
+            ("a = [1, 2, , ]\n", &["a", "a.0", "a.1"][..]),
+            ("b =\nc = 1\n", &["c"][..]),
+            ("t = { x = }\n", &["t"][..]),
+        ] {
+            let file = parse(text);
+
+            assert_eq!(paths(&symbols(&file)), want, "{text:?}");
+        }
     }
 
     #[test]
