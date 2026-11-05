@@ -993,3 +993,79 @@ fn frame_reads_a_block_that_isnt_its_kind_as_one_parse_error_without_gos_message
     );
     assert_no_frame_text(&json);
 }
+
+/// A recorded `basic` project with the go table, go vet off, and `source` at `src/p.go`.
+fn doc_project(source: &str) -> Project {
+    let project = project_with_block("go", "x := 1");
+    project.write("docs/blocks.md", "# Blocks\n");
+    project.write("src/p.go", source);
+    project
+}
+
+/// A doc comment on a func holding one `go` block whose body is `body`, and an indented Go code
+/// block that is text.
+fn doc_source(body: &str) -> String {
+    format!(
+        "package p\n\n// Add adds.\n//\n//\tx:=1\n//\n// ```go\n// {body}\n// ```\nfunc Add() {{}}\n"
+    )
+}
+
+#[test]
+fn doc_comment_block_is_checked_at_its_file_line_and_fixed_behind_its_marker() {
+    let project = doc_project(&doc_source("x:=1"));
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    gofmt_stub(outside.path(), "/bin/cat >/dev/null\necho 'x := 1'");
+
+    let json = check(&project, outside.path(), 1);
+    let _fix = project
+        .supdoc_in_with(".", &["fix", "--yes"], &[("PATH", outside.path())])
+        .assert_exit(0);
+
+    assert_eq!(finding_kinds(&json), ["code-block-unformatted"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 7, "{json}");
+    assert_eq!(
+        at(&json, "/data/summary/code_blocks/failed"),
+        1,
+        "only the fenced block is a block, not the indented one: {json}"
+    );
+    assert_eq!(
+        project.read("src/p.go"),
+        doc_source("x := 1"),
+        "the fix should rewrite the block's line behind its `// ` marker"
+    );
+}
+
+#[test]
+fn doc_a_comment_apart_from_its_declaration_holds_no_block() {
+    let source = "package p\n\n// ```go\n// x:=1\n// ```\n\nfunc Add() {}\n";
+    let project = doc_project(source);
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    gofmt_stub(outside.path(), "/bin/cat >/dev/null\necho 'x := 1'");
+
+    let json = check(&project, outside.path(), 0);
+
+    assert!(finding_kinds(&json).is_empty(), "{json}");
+}
+
+#[test]
+fn doc_the_real_gofmt_checks_and_fixes_a_doc_comments_block() {
+    let Some(dir) = real_gofmt("doc_the_real_gofmt_checks_and_fixes_a_doc_comments_block") else {
+        return;
+    };
+    let formatted = doc_project(&doc_source("x := 1"));
+    let unformatted = doc_project(&doc_source("x:=1"));
+
+    let passes = check(&formatted, &dir, 0);
+    let fails = check(&unformatted, &dir, 1);
+    let _fix = unformatted
+        .supdoc_in_with(".", &["fix", "--yes"], &[("PATH", &dir)])
+        .assert_exit(0);
+
+    assert_eq!(
+        at(&passes, "/data/summary/code_blocks/passed"),
+        1,
+        "{passes}"
+    );
+    assert_eq!(finding_kinds(&fails), ["code-block-unformatted"], "{fails}");
+    assert_eq!(unformatted.read("src/p.go"), doc_source("x := 1"));
+}
