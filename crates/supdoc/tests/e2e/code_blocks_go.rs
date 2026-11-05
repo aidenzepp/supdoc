@@ -1036,6 +1036,30 @@ fn doc_comment_block_is_checked_at_its_file_line_and_fixed_behind_its_marker() {
 }
 
 #[test]
+fn doc_fix_that_would_close_a_block_comment_is_never_written() {
+    let source = "package p\n\n/*\nAdd adds.\n\n```go\nx:=1\n```\n*/\nfunc Add() {}\n";
+    let project = doc_project(source);
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    gofmt_stub(outside.path(), "/bin/cat >/dev/null\necho 'x := 1 */'");
+
+    let _fix = project
+        .supdoc_in_with(".", &["fix", "--yes"], &[("PATH", outside.path())])
+        .assert_exit(0);
+    let json = check(&project, outside.path(), 1);
+
+    assert_eq!(
+        project.read("src/p.go"),
+        source,
+        "a fix ending the comment would move the closing fence out of it"
+    );
+    assert_eq!(
+        finding_kinds(&json),
+        ["code-block-unformatted", "code-block-fix-unsafe"],
+        "{json}"
+    );
+}
+
+#[test]
 fn doc_a_comment_apart_from_its_declaration_holds_no_block() {
     let source = "package p\n\n// ```go\n// x:=1\n// ```\n\nfunc Add() {}\n";
     let project = doc_project(source);
