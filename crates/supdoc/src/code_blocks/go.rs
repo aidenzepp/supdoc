@@ -12,12 +12,18 @@
 //! `/*line` directive in the block renames every position gofmt reports, so such a block's error
 //! sits at its fence.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
 
 use super::format::{self, ParseError, Positions, first_line};
 use super::lint::{self, Diagnostic};
-use super::runner::{Failure, Ran};
+use super::runner::{self, Call, Failure, Ran};
+use sha2::{Digest, Sha256};
+
+use super::tools::ToolEnv;
 
 /// The variables gofmt gets beyond the tool environment: `GOTOOLCHAIN=local`, so a `go` front
 /// end never downloads a toolchain to run it.
@@ -25,21 +31,28 @@ pub(crate) const VARS: &[(&str, &str)] = &[("GOTOOLCHAIN", "local")];
 
 /// The variables `go vet` gets beyond the tool environment, so the `go` command loads nothing the
 /// checkout or the user chose and fetches nothing: no cgo, no toolchain download, no module proxy,
-/// no workspace, no `go env` file, and module mode that never reads a vendor directory. The
-/// per-run directories it uses ([`VetModule::vars`]) are set when it runs.
+/// no workspace, no `go env` file, and module mode that never reads a vendor directory nor looks
+/// up a module, even through a proxy. The per-run directories it uses ([`VetModule::vars`]) are
+/// set when it runs.
 pub(crate) const VET_VARS: &[(&str, &str)] = &[
     ("CGO_ENABLED", "0"),
     ("GOTOOLCHAIN", "local"),
     ("GOPROXY", "off"),
     ("GOWORK", "off"),
     ("GOENV", "off"),
-    ("GOFLAGS", "-mod=mod"),
+    ("GOFLAGS", "-mod=readonly"),
 ];
 
-/// The `go.mod` supdoc writes beside the block: a module path under `.invalid`, which no lookup
-/// resolves, and the language version a block is read at. A Go older than it refuses the module,
-/// which is a tool failure.
-const GO_MOD: &str = "module supdoc.invalid/block\n\ngo 1.23\n";
+/// The module path of the `go.mod` supdoc writes: under `.invalid`, which no lookup resolves.
+const MODULE: &str = "supdoc.invalid/block";
+
+/// The line `go` prints when the block's build constraints leave out its one file, the
+/// directory following.
+const EXCLUDED: &str = "package supdoc.invalid/block: build constraints exclude all Go files in ";
+
+/// Why `go vet`'s step didn't run on any Go block when `go env GOVERSION` named no release supdoc
+/// can write as the module's `go` line: a block is read at the toolchain's own language version.
+pub(crate) const VET_VERSION: &str = "supdoc couldn't read which Go release `go` is";
 
 /// The block's file in the module.
 const MAIN: &str = "main.go";
@@ -54,43 +67,157 @@ pub(crate) const VET_OFFLINE: &str =
 pub(crate) const VET_EXCLUDED: &str =
     "`go vet` checked no file: the block's build constraints leave it out";
 
-/// What `go`'s stderr says about an import it can't load: a module it would have to fetch, a
-/// path that is in no module and not in the standard library, or a relative path.
-const UNLOADABLE_IMPORT: [&str; 4] = [
-    "cannot find module providing package",
-    "no required module provides package",
-    "is not in std",
-    "relative import paths are not supported",
-];
+/// A Go release as `go env GOVERSION` names it, `go1.<minor>` or `go1.<minor>.<patch>`, held
+/// as the `go` line it is written as: `1.<minor>[.<patch>]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GoVersion(String);
+
+impl GoVersion {
+    /// The release `text` names, exactly `go1.<minor>` or `go1.<minor>.<patch>` with decimal
+    /// numbers. `None` for anything else: a `devel` build, a release candidate, a suffix.
+    #[must_use]
+    pub(crate) fn parse(text: &str) -> Option<Self> {
+        let numbers = text.strip_prefix("go1.")?;
+        let parts: Vec<&str> = numbers.split('.').collect();
+        let decimal = |part: &&str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+        (parts.len() <= 2 && parts.iter().all(decimal)).then(|| Self(format!("1.{numbers}")))
+    }
+
+    /// The `go.mod` this release reads a block at: [`MODULE`], and the release as its `go`
+    /// line, so `GOTOOLCHAIN=local` never asks for another toolchain.
+    fn go_mod(&self) -> String {
+        format!("module {MODULE}\n\ngo {}\n", self.0)
+    }
+
+    /// The release's digest, which a cached `go vet` result is keyed on, so a block is checked
+    /// again under another release.
+    #[must_use]
+    pub(crate) fn fingerprint(&self) -> [u8; 32] {
+        <Sha256 as Digest>::digest(self.0.as_bytes()).into()
+    }
+}
+
+/// The release each `go` binary this process asked named, by its real path: asked once per run.
+static RELEASES: Mutex<Vec<(PathBuf, Result<GoVersion, String>)>> = Mutex::new(Vec::new());
+
+/// The release `program`, a `go` binary, names in `go env GOVERSION`: asked once per process, in
+/// a private module of its own with [`VET_VARS`], under `timeout`.
+///
+/// # Errors
+///
+/// What `go` printed, or how its run failed, when that names no release [`GoVersion::parse`]
+/// reads.
+///
+/// Effect: creates and removes a private directory, and runs `go env GOVERSION` the first time.
+pub(crate) fn release(
+    program: &Path,
+    env: &ToolEnv,
+    root: &Path,
+    timeout: Option<Duration>,
+) -> Result<GoVersion, String> {
+    let mut known = RELEASES.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((_, found)) = known.iter().find(|(path, _)| path == program) {
+        return found.clone();
+    }
+    let found = ask_release(program, env, root, timeout);
+    known.push((program.to_path_buf(), found.clone()));
+    found
+}
+
+/// `go env GOVERSION`'s answer, as [`release`] reads it, asked afresh.
+///
+/// # Errors
+///
+/// As [`release`].
+///
+/// Effect: creates and removes a private directory, and runs `go`.
+fn ask_release(
+    program: &Path,
+    env: &ToolEnv,
+    root: &Path,
+    timeout: Option<Duration>,
+) -> Result<GoVersion, String> {
+    const ASKED: &str = "`go env GOVERSION`";
+    let neutral = runner::neutral_dir(env, root);
+    let module = VetModule::create(&neutral, &format!("module {MODULE}\n"), None)
+        .ok_or_else(|| format!("supdoc couldn't create a private directory to run {ASKED} in"))?;
+    let extra = module.extra();
+    let args = [OsStr::new("env"), OsStr::new("GOVERSION")];
+    let call = Call {
+        program,
+        name: "go",
+        args: &args,
+        extra: &extra,
+        stdin: &[],
+        timeout,
+        cwd: runner::Cwd::Private(module.dir()),
+        cap: 4096,
+    };
+    match runner::run(&call, env, root).map(|ran| module.unnamed(&ran)) {
+        Ok(ran) if ran.success => {
+            let printed = String::from_utf8_lossy(&ran.stdout);
+            let printed = printed.trim_end();
+            GoVersion::parse(printed).ok_or_else(|| {
+                let shown: String = printed
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(80)
+                    .collect();
+                format!("{ASKED} printed `{shown}`, not `go1.<minor>` or `go1.<minor>.<patch>`")
+            })
+        }
+        Ok(ran) => Err(format!(
+            "{ASKED} failed: {}",
+            format::exit_detail(&ran.stderr)
+        )),
+        Err(Failure::TimedOut) => Err(format!("{ASKED} ran past the time limit")),
+        Err(Failure::OverCap { stream, .. }) => {
+            Err(format!("{ASKED} printed too much to {stream}"))
+        }
+        Err(Failure::Spawn(error)) => Err(format!("{ASKED} couldn't start: {error}")),
+    }
+}
 
 /// How many [`VetModule`] directories this process has tried to create, which makes each name
 /// unique.
 static VET_RUNS: AtomicUsize = AtomicUsize::new(0);
 
-/// One `go vet` run's module, removed when this is dropped: a directory `go/<pid>-<n>` beside the
-/// neutral directory holding the `go.mod` supdoc writes and the block as `main.go`, never a file
-/// of the checkout. `go vet` runs in it, so the `go.mod` walk-up stops there.
+/// One `go` run's module, removed when this is dropped: a directory `go/<pid>-<n>` beside the
+/// neutral directory holding the `go.mod` supdoc writes, the block as `main.go` and a `tmp`
+/// directory for `go`'s own work files, never a file of the checkout. `go` runs in it, so the
+/// `go.mod` walk-up stops there.
 #[derive(Debug)]
 pub(crate) struct VetModule {
     /// The module directory, owned by this run alone.
     dir: PathBuf,
     /// supdoc's code-block cache directory, which the module and the shared Go directories sit in.
     cache: PathBuf,
-    /// The variables naming the shared directories `go` keeps its state in: `HOME`, `GOPATH`
-    /// and `GOCACHE`, each a 0700 directory beside the module, so no user config, module cache
-    /// or telemetry setting reaches the run.
-    vars: [(&'static str, PathBuf); 3],
+    /// The variables naming the directories `go` keeps its state in: `HOME`, `GOPATH` and
+    /// `GOCACHE`, each a shared 0700 directory beside the module, so no user config, module
+    /// cache or telemetry setting reaches the run, and `GOTMPDIR`, the module's own 0700 `tmp`,
+    /// so a work directory a killed `go` leaves behind goes with the module.
+    vars: [(&'static str, PathBuf); 4],
 }
 
 impl VetModule {
-    /// A new 0700 module directory `go/<pid>-<n>` beside `neutral`, inside a 0700 `go`
-    /// directory, holding `go.mod` and `input` as `main.go`, each created new, mode 0600, with the
-    /// 0700 directories `go-home`, `go-path` and `go-build` beside it. `None` when `neutral` is
-    /// `/` or anything can't be created.
+    /// A new module for the block `input`, read at `release`: see [`VetModule::create`].
     ///
     /// Effect: creates directories and writes two files.
     #[must_use]
-    pub(crate) fn create(neutral: &Path, input: &str) -> Option<Self> {
+    pub(crate) fn for_block(neutral: &Path, release: &GoVersion, input: &str) -> Option<Self> {
+        Self::create(neutral, &release.go_mod(), Some(input))
+    }
+
+    /// A new 0700 module directory `go/<pid>-<n>` beside `neutral`, inside a 0700 `go`
+    /// directory, holding `go_mod` as `go.mod`, `input` as `main.go` when given, each created new,
+    /// mode 0600, and a 0700 `tmp`, with the 0700 directories `go-home`, `go-path` and `go-build`
+    /// beside it. `None` when `neutral` is `/` or anything can't be created.
+    ///
+    /// Effect: creates directories and writes up to two files.
+    #[must_use]
+    fn create(neutral: &Path, go_mod: &str, input: Option<&str>) -> Option<Self> {
         use std::os::unix::fs::DirBuilderExt as _;
 
         if neutral == Path::new("/") {
@@ -98,11 +225,9 @@ impl VetModule {
         }
         let cache = neutral.parent()?.to_path_buf();
         let shared = |name: &str| private(&cache.join(name));
-        let vars = [
-            ("HOME", shared("go-home")?),
-            ("GOPATH", shared("go-path")?),
-            ("GOCACHE", shared("go-build")?),
-        ];
+        let home = shared("go-home")?;
+        let path = shared("go-path")?;
+        let build = shared("go-build")?;
         let base = shared("go")?;
         let dir = (0..16).find_map(|_| {
             let count = VET_RUNS.fetch_add(1, Ordering::Relaxed);
@@ -113,9 +238,22 @@ impl VetModule {
                 .ok()
                 .map(|()| dir)
         })?;
-        let module = Self { dir, cache, vars };
-        write_new(&module.dir.join("go.mod"), GO_MOD)?;
-        write_new(&module.dir.join(MAIN), input)?;
+        let tmp = dir.join("tmp");
+        let module = Self {
+            vars: [
+                ("HOME", home),
+                ("GOPATH", path),
+                ("GOCACHE", build),
+                ("GOTMPDIR", tmp.clone()),
+            ],
+            dir,
+            cache,
+        };
+        let _tmp = private(&tmp)?;
+        write_new(&module.dir.join("go.mod"), go_mod)?;
+        if let Some(input) = input {
+            write_new(&module.dir.join(MAIN), input)?;
+        }
         Some(module)
     }
 
@@ -125,10 +263,19 @@ impl VetModule {
         &self.dir
     }
 
-    /// `HOME`, `GOPATH` and `GOCACHE`, each naming its shared directory.
+    /// The variables `go` runs with beyond the tool environment: [`VET_VARS`], then `HOME`,
+    /// `GOPATH`, `GOCACHE` and `GOTMPDIR`, each naming its private directory.
     #[must_use]
-    pub(crate) fn vars(&self) -> &[(&'static str, PathBuf)] {
-        &self.vars
+    pub(crate) fn extra(&self) -> Vec<(&'static str, &OsStr)> {
+        VET_VARS
+            .iter()
+            .map(|(name, value)| (*name, OsStr::new(*value)))
+            .chain(
+                self.vars
+                    .iter()
+                    .map(|(name, value)| (*name, value.as_os_str())),
+            )
+            .collect()
     }
 
     /// `ran` with every private path `go` printed taken out: the module directory's files by
@@ -198,23 +345,44 @@ fn write_new(path: &Path, text: &str) -> Option<()> {
 }
 
 /// Why a finished `go vet` run says nothing about its block, so its step counts as not run:
-/// [`VET_OFFLINE`] or [`VET_EXCLUDED`]. `None` for any other run.
+/// [`VET_EXCLUDED`] when `go` printed its line for a module whose one file is left out, or
+/// [`VET_OFFLINE`] when it printed, at the block's own file, that it can't load an import. Only
+/// `go`'s own line shapes count: text quoted in a type checker's `vet: ` line never does. `None`
+/// for any other run.
 #[must_use]
 pub(crate) fn vet_not_run(ran: &Ran) -> Option<&'static str> {
     if ran.success {
         return None;
     }
-    let stderr = String::from_utf8_lossy(&ran.stderr);
-    if stderr.contains("build constraints exclude all Go files") {
-        Some(VET_EXCLUDED)
-    } else if UNLOADABLE_IMPORT
-        .iter()
-        .any(|marker| stderr.contains(marker))
-    {
-        Some(VET_OFFLINE)
-    } else {
-        None
-    }
+    String::from_utf8_lossy(&ran.stderr)
+        .lines()
+        .map(str::trim_start)
+        .find_map(|line| {
+            if line.starts_with(EXCLUDED) {
+                return Some(VET_EXCLUDED);
+            }
+            let (posn, message) = line.split_once(": ")?;
+            let (file, ..) = position(posn)?;
+            (file == MAIN && unloadable(message)).then_some(VET_OFFLINE)
+        })
+}
+
+/// Whether `message`, at an import in the block's file, is `go` saying it can't load that
+/// import: a module it would have to look up, a path in no module and not in the standard
+/// library, or a relative path.
+fn unloadable(message: &str) -> bool {
+    let not_in_std = message
+        .strip_prefix("package ")
+        .and_then(|rest| rest.split_once(' '))
+        .is_some_and(|(_, rest)| rest.starts_with("is not in std"));
+    let relative = message.starts_with('"')
+        && message.split_once("\" ").is_some_and(|(_, rest)| {
+            rest.starts_with("is relative, but relative import paths are not supported")
+        });
+    message.starts_with("cannot find module providing package ")
+        || message.starts_with("no required module provides package ")
+        || not_in_std
+        || relative
 }
 
 /// `go vet`'s verdict on `result`, a run over the block `input`. A block with no `package` clause
@@ -322,20 +490,19 @@ fn place(posn: &str, renamed: bool) -> (usize, usize) {
     }
 }
 
-/// The errors `go vet` printed for a Go file, each `[vet: ]<file>:<line>:<column>: <message>`,
-/// a syntax error's marked so, and its `(and N more errors)` dropped. One in a file other than
-/// the block's, renamed by a directive, sits at the fence.
+/// The errors `go vet` printed for the block, each `[vet: ]<file>:<line>[:<column>]: <message>`
+/// after any indent, a syntax error's marked so, and its `(and N more errors)` dropped. Without
+/// a directive only the block's own file counts; after a `//line` or `/*line` directive, which
+/// renames positions to any file it names, every error sits at the fence.
 fn errors(stderr: &str, renamed: bool) -> Vec<Diagnostic> {
     stderr
         .lines()
         .filter_map(|line| {
+            let line = line.trim_start();
             let line = line.strip_prefix("vet: ").unwrap_or(line);
             let (posn, message) = line.split_once(": ")?;
             let (file, ..) = position(posn)?;
-            if Path::new(file)
-                .extension()
-                .is_none_or(|extension| extension != "go")
-            {
+            if !renamed && file != MAIN {
                 return None;
             }
             let (line, column) = place(posn, renamed);
@@ -417,7 +584,8 @@ fn is_file(input: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        VET_EXCLUDED, VET_OFFLINE, is_file, parse_error, positions, vet_not_run, vet_verdict,
+        GoVersion, VET_EXCLUDED, VET_OFFLINE, is_file, parse_error, positions, vet_not_run,
+        vet_verdict,
     };
     use crate::code_blocks::format::{ParseError, Positions, Verdict as FormatVerdict};
     use crate::code_blocks::lint::{Diagnostic, Verdict};
@@ -525,11 +693,82 @@ mod tests {
     }
 
     #[test]
+    fn a_release_is_go1_minor_or_go1_minor_patch_and_nothing_else() {
+        assert_eq!(
+            GoVersion::parse("go1.27.3").map(|release| release.go_mod()),
+            Some("module supdoc.invalid/block\n\ngo 1.27.3\n".to_owned())
+        );
+        assert_eq!(
+            GoVersion::parse("go1.27").map(|release| release.go_mod()),
+            Some("module supdoc.invalid/block\n\ngo 1.27\n".to_owned())
+        );
+        for refused in [
+            "",
+            "go1",
+            "go1.",
+            "go1.27.",
+            "go1.27.3.1",
+            "go1.27rc1",
+            "devel go1.28-abc",
+            "go1.27.3 X:boringcrypto",
+            "go2.0",
+            "go1.-1",
+            "go1.27\nx",
+            " go1.27",
+        ] {
+            assert_eq!(GoVersion::parse(refused), None, "`{refused}`");
+        }
+    }
+
+    #[test]
+    fn two_releases_have_different_fingerprints() {
+        let fingerprint = |text| GoVersion::parse(text).map(|release| release.fingerprint());
+        assert_ne!(fingerprint("go1.27.3"), fingerprint("go1.27.2"));
+    }
+
+    #[test]
+    fn a_type_checkers_line_quoting_gos_words_is_never_a_reason_not_to_run() {
+        for words in [
+            "is not in std",
+            "cannot find module providing package x",
+            "package supdoc.invalid/block: build constraints exclude all Go files in .",
+        ] {
+            let stderr = format!(
+                "# supdoc.invalid/block\nvet: ./main.go:3:13: cannot use \"{words}\" as int value\n"
+            );
+            assert_eq!(vet_not_run(&ran(false, "", &stderr)), None, "`{words}`");
+        }
+    }
+
+    #[test]
+    fn an_indented_error_and_one_renamed_to_any_file_are_read() {
+        let internal = "package supdoc.invalid/block\n\tmain.go:3:8: use of internal package \
+                        internal/abi not allowed\n";
+        let renamed = "# m\nvet: /etc/passwd:3: cannot use \"s\" as int value\n";
+        let lines =
+            |input: &str, stderr: &str| match vet_verdict(input, false, Ok(ran(false, "", stderr)))
+            {
+                Verdict::Diagnostics(found) => found
+                    .iter()
+                    .map(|d| (d.line, d.rule.clone()))
+                    .collect::<Vec<_>>(),
+                other => panic!("the run should give diagnostics: {other:?}"),
+            };
+
+        assert_eq!(lines(FILE, internal), [(3, "typecheck".to_owned())]);
+        assert_eq!(
+            lines("package p\n//line /etc/passwd:1\n", renamed),
+            [(0, "typecheck".to_owned())]
+        );
+    }
+
+    #[test]
     fn an_unloadable_import_or_excluded_file_is_not_run_and_any_other_failure_is_judged() {
         let offline = "main.go:3:8: cannot find module providing package example.com/x: module \
                        lookup disabled by GOPROXY=off\n";
         let unknown = "main.go:3:8: package foo/bar is not in std (/go/src/foo/bar)\n";
-        let excluded = "package m: build constraints exclude all Go files in .\n";
+        let excluded =
+            "package supdoc.invalid/block: build constraints exclude all Go files in .\n";
 
         assert_eq!(vet_not_run(&ran(false, "", offline)), Some(VET_OFFLINE));
         assert_eq!(vet_not_run(&ran(false, "", unknown)), Some(VET_OFFLINE));
