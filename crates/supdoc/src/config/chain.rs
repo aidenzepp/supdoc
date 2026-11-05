@@ -19,6 +19,7 @@ use crate::namespace::NamespaceName;
 use crate::path::{AbsolutePath, RelativePath, holds_git, is_regular_file};
 
 use super::code_blocks;
+use super::confine::{Boundary, real_location};
 use super::pattern::{AnchoredPatterns, PatternList};
 use super::raw::RawConfig;
 use super::{CONFIG_FILE_NAME, Config, ConfigError, Namespace, NamespaceEscape, config_entry};
@@ -416,11 +417,11 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Result<Config, Co
         }
         files.push(file);
     }
-    let real_root = super::real_root(&root);
+    let boundary = Boundary::resolve(&root);
     let namespaces = written
         .into_iter()
         .map(|(name, (dir, defined_in, span))| {
-            let namespace = confined(&root, &real_root, &name, dir, (defined_in, span))?;
+            let namespace = confined(&root, &boundary, &name, dir, (defined_in, span))?;
             Ok((name, namespace))
         })
         .collect::<Result<_, ConfigError>>()?;
@@ -431,7 +432,7 @@ pub(super) fn merge(root: AbsolutePath, layers: Vec<Layer>) -> Result<Config, Co
         .transpose()?;
     Ok(Config {
         root,
-        real_root,
+        boundary,
         files,
         include,
         exclude,
@@ -458,24 +459,27 @@ fn nearest<T>(slot: &mut Option<(T, AbsolutePath)>, value: Option<T>, file: &Abs
 ///
 /// # Errors
 ///
-/// `NamespaceOutsideRoot` when `dir` lies outside `real_root`, or where it lies can't be worked out.
+/// `NamespaceOutsideRoot` when `dir` lies outside `boundary`, or where it lies can't be worked out.
 /// `written` is the config that defined the namespace and the byte range of its value there.
 fn confined(
     root: &AbsolutePath,
-    real_root: &Path,
+    boundary: &Boundary,
     name: &NamespaceName,
     dir: AbsolutePath,
     written: (AbsolutePath, Range<usize>),
 ) -> Result<Namespace, ConfigError> {
     let (defined_in, span) = written;
-    let real = super::confine::real_location(dir.as_path());
-    let escape = match real {
-        Some(real) if real.starts_with(real_root) => return Ok(Namespace { dir, defined_in }),
+    if boundary.contains(dir.as_path()) {
+        return Ok(Namespace { dir, defined_in });
+    }
+    let escape = if dir.strip_prefix(root).is_none() {
         // Written outside the root: that is the problem, whatever lies beyond it.
-        _ if dir.strip_prefix(root).is_none() => NamespaceEscape::AsWritten,
-        None => NamespaceEscape::Unresolvable,
+        NamespaceEscape::AsWritten
+    } else if real_location(dir.as_path()).is_none() {
+        NamespaceEscape::Unresolvable
+    } else {
         // Written inside the root, so only a symlink along it can lead out.
-        Some(_) => NamespaceEscape::ThroughSymlink,
+        NamespaceEscape::ThroughSymlink
     };
     Err(ConfigError::NamespaceOutsideRoot {
         file: defined_in,

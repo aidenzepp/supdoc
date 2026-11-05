@@ -10,13 +10,14 @@ use std::path::{Component, Path};
 use std::str::FromStr;
 
 use crate::namespace::{NamespaceName, NamespaceNameError};
+use crate::path::Beneath;
 
 /// Parsing a Markdown link destination into a link target.
 pub(crate) mod destination;
 
 /// A file that contains links (a doc **or a code file**), relative to the project root.
 ///
-/// `/`-separated, not empty, with no `.`, `..` or empty segments.
+/// `/`-separated, not empty, with no `.`, `..` or empty segments and no `\` or `:`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize)]
 #[serde(try_from = "String")]
 pub(crate) struct SourcePath(String);
@@ -62,11 +63,21 @@ impl SourcePath {
     }
 }
 
+impl Beneath for SourcePath {
+    fn segments(&self) -> &str {
+        &self.0
+    }
+}
+
 impl TryFrom<String> for SourcePath {
     type Error = LinkPathError;
 
     fn try_from(path: String) -> Result<Self, Self::Error> {
-        check_link_path(&path, |path| LinkPathError::ParentSegment { path })?;
+        check_link_path(
+            &path,
+            |path| LinkPathError::ParentSegment { path },
+            |path| LinkPathError::SourceColon { path },
+        )?;
         Ok(Self(path))
     }
 }
@@ -93,14 +104,21 @@ impl TargetPath {
     }
 }
 
+impl Beneath for TargetPath {
+    fn segments(&self) -> &str {
+        &self.0
+    }
+}
+
 impl TryFrom<String> for TargetPath {
     type Error = LinkPathError;
 
     fn try_from(path: String) -> Result<Self, Self::Error> {
-        check_link_path(&path, |path| LinkPathError::TargetClimbs { path })?;
-        if path.contains(':') {
-            return Err(LinkPathError::Colon { path });
-        }
+        check_link_path(
+            &path,
+            |path| LinkPathError::TargetClimbs { path },
+            |path| LinkPathError::Colon { path },
+        )?;
         Ok(Self(path))
     }
 }
@@ -113,13 +131,22 @@ impl FromStr for TargetPath {
     }
 }
 
-/// Checks the shared rules for a project-relative, `/`-separated link path. A `..` segment is
-/// refused with `climbs`, so sources and targets each name their own reason.
+/// Checks the shared rules for a project-relative, `/`-separated link path, so each segment is
+/// exactly one normal path component on every platform. A `..` segment is refused with
+/// `climbs` and a `:` with `colon`, so sources and targets each name their own reason. A `:`
+/// would start a drive prefix or name a file stream on Windows; link syntax that uses `:`
+/// (`ns:path`, URLs, `#:~:text=`) is split off before a path reaches this check.
+///
+/// [`crate::path`]'s compile-time check of fixed paths accepts exactly what this accepts.
 ///
 /// # Errors
 ///
 /// Returns the first rule `path` breaks.
-fn check_link_path(path: &str, climbs: fn(String) -> LinkPathError) -> Result<(), LinkPathError> {
+fn check_link_path(
+    path: &str,
+    climbs: fn(String) -> LinkPathError,
+    colon: fn(String) -> LinkPathError,
+) -> Result<(), LinkPathError> {
     let error = |make: fn(String) -> LinkPathError| Err(make(path.to_owned()));
     if path.is_empty() {
         return Err(LinkPathError::Empty);
@@ -137,6 +164,9 @@ fn check_link_path(path: &str, climbs: fn(String) -> LinkPathError) -> Result<()
             ".." => return error(climbs),
             _ => {}
         }
+    }
+    if path.contains(':') {
+        return error(colon);
     }
     Ok(())
 }
@@ -200,6 +230,14 @@ pub(crate) enum LinkPathError {
         "`{path}` contains `:`; rename the file or directory, because `:` is reserved for namespace prefixes"
     )]
     Colon {
+        /// The rejected path.
+        path: String,
+    },
+    /// A source path contains `:`, which starts a drive prefix or names a file stream on Windows.
+    #[error(
+        "`{path}` contains `:`; rename the file or directory, because a `:` in a path names a drive or a file stream on Windows"
+    )]
+    SourceColon {
         /// The rejected path.
         path: String,
     },
@@ -588,6 +626,93 @@ impl fmt::Display for TargetPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::path::AbsolutePath;
+
+    /// Fails with the rule `segments` breaks, naming `what` it came from.
+    fn assert_beneath(what: &str, segments: &str) {
+        assert_eq!(
+            check_link_path(
+                segments,
+                |path| LinkPathError::ParentSegment { path },
+                |path| LinkPathError::SourceColon { path },
+            ),
+            Ok(()),
+            "{what} `{segments}` should be a valid `Beneath` path"
+        );
+    }
+
+    #[test]
+    fn source_path_refuses_a_colon_in_any_segment() {
+        for raw in ["C:x", "C:", "a:b", "x/C:/y", "docs/a:b.md"] {
+            assert_eq!(
+                raw.parse::<SourcePath>(),
+                Err(LinkPathError::SourceColon {
+                    path: raw.to_owned()
+                }),
+                "source `{raw}`"
+            );
+            assert!(
+                SourcePath::from_relative(Path::new(raw)).is_err(),
+                "source `{raw}` built from a filesystem path should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn target_path_still_names_a_colon_with_the_target_message() {
+        for raw in ["C:x", "a:b", "x/C:/y"] {
+            assert_eq!(
+                raw.parse::<TargetPath>(),
+                Err(LinkPathError::Colon {
+                    path: raw.to_owned()
+                }),
+                "target path `{raw}`"
+            );
+        }
+    }
+
+    #[test]
+    fn a_namespace_prefix_still_splits_off_before_the_colon_rule() {
+        let namespaced: Target = "auth:src/lib.rs"
+            .parse()
+            .expect("a namespaced target should parse");
+        let linked: LinkRef = "auth:src/lib.rs#Config.validate"
+            .parse()
+            .expect("a namespaced link with a symbol should parse");
+
+        assert_eq!(
+            namespaced.namespace().map(NamespaceName::as_str),
+            Some("auth")
+        );
+        assert_eq!(namespaced.path().as_str(), "src/lib.rs");
+        assert_eq!(linked.target, namespaced);
+        assert_eq!(linked.to_string(), "auth:src/lib.rs#Config.validate");
+    }
+
+    #[test]
+    fn source_and_target_segments_are_valid_beneath_paths() {
+        for raw in ["a", "docs/guide.md", "a/b/c.rs"] {
+            assert_beneath("source", source(raw).segments());
+            let target: TargetPath = raw
+                .parse()
+                .expect("the fixture target path should be valid");
+            assert_beneath("target", target.segments());
+        }
+    }
+
+    #[test]
+    fn beneath_a_source_or_target_appends_its_segments_to_the_base() {
+        let base =
+            AbsolutePath::new(Path::new("/base")).expect("the fixture base should be absolute");
+        let expected =
+            AbsolutePath::new(Path::new("/base/a/b")).expect("the fixture path should be absolute");
+        let target: TargetPath = "a/b"
+            .parse()
+            .expect("the fixture target path should be valid");
+
+        assert_eq!(base.beneath(&source("a/b")), expected);
+        assert_eq!(base.beneath(&target), expected);
+    }
 
     fn source(raw: &str) -> SourcePath {
         raw.parse()
