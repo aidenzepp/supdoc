@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use crate::cartridges::{markdown, rust as rust_cartridge};
+use crate::cartridges::{js, markdown, rust as rust_cartridge, ts, tsx};
 use crate::finding::{Finding, Fix, LineIndex, Location, Severity};
 use crate::hash::LineEndings;
 use crate::limits::TimeLimit;
@@ -36,6 +36,10 @@ const TOOL_TIMEOUT: &str = "code-block-tool-timeout";
 
 /// The code for formatter output `fix` refuses to write, because it would escape the block.
 const FIX_UNSAFE: &str = "code-block-fix-unsafe";
+
+/// The block tag an unfenced block's fence starts with: an `@example` section with no fence in a
+/// `/** */` comment.
+const EXAMPLE: &str = "@example";
 
 /// How many spaces may lead a line that still closes a fence.
 const MAX_FENCE_INDENT: usize = 3;
@@ -636,7 +640,7 @@ pub(crate) fn fixed(
         let keeps = input(block, doc.text())
             .is_some_and(|before| yaml::same_structure(&before, &after, doc.limit));
         if !keeps {
-            let unsafe_fix = refused(block, &Refusal::ChangesYaml, &what, marker);
+            let unsafe_fix = refused(block, &Refusal::ChangesYaml, &what, Some(marker));
             return vec![unformatted, unsafe_fix];
         }
     }
@@ -709,6 +713,11 @@ enum Refusal {
     SkipsLines,
     /// The YAML the fix writes doesn't parse to the same structure as the block's.
     ChangesYaml,
+    /// A line of an unfenced `@example` block would start with `@` or hold `*/`, which would end
+    /// its section or its comment.
+    EndsExample,
+    /// An unfenced `@example` block starts on its tag's line, which the fix would rewrite.
+    SharesTagLine,
 }
 
 /// The fix that makes `block`'s body in `doc` read `body`, which holds no final line ending,
@@ -723,18 +732,44 @@ enum Refusal {
 /// found, no longer holds the same fenced blocks, each opening with the same line and spanning
 /// the same text. Also when either parse fails, and when a line that isn't part of the block lies
 /// between its body lines (a `//` line in a doc comment), which the fix would delete.
+///
+/// An `@example` block with no fence has no fence to close. Its fix is refused instead when a
+/// line of `body` would start with `@` or hold `*/`, ending its section or its comment, and when
+/// the block starts on its tag's line, which [`replacement_for`] would rewrite.
 #[must_use]
 pub(crate) fn safe_fix(block: &CodeBlock, doc: &FixDoc, body: &str, what: &str) -> Guarded {
     let text = doc.text();
-    let Some((marker, length)) = fence_of(block, text) else {
-        return Guarded::Unplaced;
+    let fence = if is_unfenced(block, text) {
+        None
+    } else {
+        let Some(fence) = fence_of(block, text) else {
+            return Guarded::Unplaced;
+        };
+        Some(fence)
     };
-    let refuse = |refusal| Guarded::Refused(refused(block, &refusal, what, marker));
+    let refuse = |refusal| {
+        Guarded::Refused(refused(
+            block,
+            &refusal,
+            what,
+            fence.map(|(marker, _)| marker),
+        ))
+    };
     if has_control_character(body) {
         return refuse(Refusal::ControlCharacter);
     }
-    if body.lines().any(|line| closes(line, marker, length)) {
-        return refuse(Refusal::ClosesFence);
+    if let Some((marker, length)) = fence {
+        if body.lines().any(|line| closes(line, marker, length)) {
+            return refuse(Refusal::ClosesFence);
+        }
+    } else if body.lines().any(ends_example) {
+        return refuse(Refusal::EndsExample);
+    } else if block
+        .body
+        .first()
+        .is_some_and(|line| line.prefix.start <= block.fence.range.start)
+    {
+        return refuse(Refusal::SharesTagLine);
     }
     if !has_contiguous_body(block, text) {
         return refuse(Refusal::SkipsLines);
@@ -758,12 +793,18 @@ pub(crate) fn safe_fix(block: &CodeBlock, doc: &FixDoc, body: &str, what: &str) 
 }
 
 /// The `code-block-fix-unsafe` warning at `block` for `refusal` of `what`, the block's new body,
-/// whose fence is a run of `marker`.
-fn refused(block: &CodeBlock, refusal: &Refusal, what: &str, marker: char) -> Finding {
-    let lengthen = format!(
+/// whose fence is a run of `marker`, or which is an unfenced `@example` block when `marker` is
+/// `None`.
+fn refused(block: &CodeBlock, refusal: &Refusal, what: &str, marker: Option<char>) -> Finding {
+    let as_fence = "write the example as a fenced block, or edit it by hand".to_owned();
+    let lengthen = marker.map_or_else(|| as_fence.clone(), |marker| format!(
         "lengthen the block's fences past the longest run of `{marker}` in {what}, or mark the block `ignore(<why>)`"
-    );
-    let by_hand = "edit the block by hand, or mark it `ignore(<why>)`".to_owned();
+    ));
+    let by_hand = if marker.is_some() {
+        "edit the block by hand, or mark it `ignore(<why>)`".to_owned()
+    } else {
+        as_fence.clone()
+    };
     let (why, help) = match refusal {
         Refusal::ControlCharacter => (
             "has a control character other than a tab or a line ending",
@@ -787,6 +828,14 @@ fn refused(block: &CodeBlock, refusal: &Refusal, what: &str, marker: char) -> Fi
             "says something else in YAML, not only lays it out differently",
             "edit the block by hand, or mark it `format(off: <why>)`".to_owned(),
         ),
+        Refusal::EndsExample => (
+            "has a line that starts with `@` or holds `*/`, which would end its `@example` section or its comment",
+            as_fence,
+        ),
+        Refusal::SharesTagLine => (
+            "would rewrite its `@example` tag's line, where the block starts",
+            "move the example's code to the line after `@example`, or edit it by hand".to_owned(),
+        ),
     };
     Finding::new(
         FIX_UNSAFE,
@@ -795,6 +844,19 @@ fn refused(block: &CodeBlock, refusal: &Refusal, what: &str, marker: char) -> Fi
     )
     .with_help(help)
     .with_location(block.fence.clone())
+}
+
+/// Whether `block` in `text` is an `@example` section with no fence: its fence starts at the
+/// tag, not at a run of backticks or tildes.
+fn is_unfenced(block: &CodeBlock, text: &str) -> bool {
+    text.get(block.fence.range.start..)
+        .is_some_and(|rest| rest.starts_with(EXAMPLE))
+}
+
+/// Whether `line` of an unfenced `@example` block's new body would end it: its text starts with
+/// `@`, a block tag, or holds `*/`, which closes the comment.
+fn ends_example(line: &str) -> bool {
+    line.trim_start_matches([' ', '\t']).starts_with('@') || line.contains("*/")
 }
 
 /// Whether `body` holds a C0 control character other than tab and LF, counting a CR only when
@@ -852,17 +914,21 @@ fn keeps_blocks(
     )
 }
 
-/// The fenced blocks of `text`, parsed under `limit` as `block`'s doc is: as Markdown, or for
-/// its doc comments when the doc is a Rust file. `None` when the parse fails.
+/// The blocks of `text`, parsed under `limit` as `block`'s doc is: as Markdown, or for its doc
+/// comments when the doc is a Rust, JavaScript, TypeScript or TSX file. `None` when the parse
+/// fails.
 fn fences(block: &CodeBlock, text: &str, limit: TimeLimit) -> Option<Vec<Fence>> {
     let file = &block.fence.file;
-    let language: &'static dyn Cartridge = if Path::new(file.as_str())
+    let extension = Path::new(file.as_str())
         .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
-    {
-        rust_cartridge::cartridge().ok()?
-    } else {
-        markdown::cartridge::cartridge()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+    let language: &'static dyn Cartridge = match extension.as_deref() {
+        Some("rs") => rust_cartridge::cartridge().ok()?,
+        Some(extension) if js::EXTENSIONS.contains(&extension) => js::cartridge().ok()?,
+        Some(extension) if ts::EXTENSIONS.contains(&extension) => ts::cartridge().ok()?,
+        Some(extension) if tsx::EXTENSIONS.contains(&extension) => tsx::cartridge().ok()?,
+        _ => markdown::cartridge::cartridge(),
     };
     // The path only names the doc in a parse error, which this check discards.
     let path = AbsolutePath::new(Path::new("/"))?.join_path(Path::new(file.as_str()));
@@ -1181,6 +1247,50 @@ mod tests {
         let findings = fixed_with(text, "echo hi\r\n");
 
         assert_eq!(applied(text, &findings), "```sh\necho hi\n```\n");
+    }
+
+    /// What `shfmt` printing `output` makes of the one block in `text`, a TypeScript file.
+    fn fixed_in_ts(text: &str, output: &str) -> Vec<Finding> {
+        let ts = crate::cartridges::ts::cartridge()
+            .expect("the built-in TypeScript queries should compile");
+        fixed_in(&block_of("src/lib.ts", text, ts), text, output)
+    }
+
+    #[test]
+    fn an_unfenced_example_gets_a_fix_behind_its_gutter() {
+        let text = "/**\n * @example\n * old\n * @returns x\n */\n";
+
+        let findings = fixed_in_ts(text, "a\nb\n");
+
+        assert_eq!(
+            findings.len(),
+            1,
+            "a safe fix adds no warning: {findings:?}"
+        );
+        assert_eq!(
+            applied(text, &findings),
+            "/**\n * @example\n * a\n * b\n * @returns x\n */\n"
+        );
+    }
+
+    #[test]
+    fn an_unfenced_examples_fix_is_refused_when_a_line_would_end_it() {
+        let text = "/**\n * @example\n * old\n */\n";
+
+        for output in ["  @tag\n", "a */ b\n"] {
+            let findings = fixed_in_ts(text, output);
+
+            refused(&findings, output);
+        }
+    }
+
+    #[test]
+    fn an_unfenced_example_starting_on_its_tag_line_gets_no_fix() {
+        let text = "/**\n * @example old\n * more\n */\n";
+
+        let findings = fixed_in_ts(text, "a\nb\n");
+
+        refused(&findings, "the fix would rewrite the `@example` line");
     }
 
     #[test]
