@@ -305,7 +305,8 @@ impl Store {
     /// root's. A listed root counts for that only while it still resolves to itself: the store
     /// holds real paths, so one that resolves elsewhere has been replaced since it was listed. A
     /// root too broad to trust ([`Store::broad`]) is never trusted by either rule, and a listed one
-    /// counts for nothing. A missing or unreadable store trusts nothing.
+    /// counts for nothing. A missing or unreadable store trusts nothing, nor does one that
+    /// [`Store::read`] refuses, such as when the variable its directory comes from holds a `..`.
     ///
     /// Effect: reads the store, resolves `root` and `HOME`, and reads the `.git` files and git
     /// directories of `root` and of each listed root.
@@ -334,15 +335,19 @@ impl Store {
     }
 
     /// The listed roots, in order: each line that is an absolute path. None when the file is
-    /// missing.
+    /// missing. The store is admitted ([`Store::admit`]) before it is read, so reads refuse
+    /// exactly what writes refuse.
     ///
-    /// Effect: reads the store.
+    /// Effect: reads file metadata and symlinks along the store's path, then the store.
     ///
     /// # Errors
     ///
-    /// Fails when the store exists but can't be read.
+    /// Fails with [`io::ErrorKind::PermissionDenied`] when the variable the store's directory
+    /// comes from holds a `..` or the store lies outside its directory, and otherwise when the
+    /// store exists but can't be read.
     fn read(&self) -> io::Result<Vec<PathBuf>> {
-        let bytes = match fs::read(&self.file) {
+        let file = self.admit(&self.file)?;
+        let bytes = match fs::read(file.as_path()) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error),
@@ -563,6 +568,34 @@ mod tests {
         assert!(scratch.store().add(&listed).expect("adding should work"));
 
         assert_eq!(granted(&other, &scratch.env(None)), Ok(Grant::Untrusted));
+    }
+
+    #[test]
+    fn a_store_listing_the_root_reached_through_a_parent_component_grants_nothing() {
+        let scratch = Scratch::new();
+        let root = scratch.mkdir("root");
+        let dir = scratch.mkdir("state").join("supdoc");
+        fs::create_dir_all(&dir).expect("the store's directory should be creatable");
+        let mut listed = root.into_os_string();
+        listed.push("\n");
+        fs::write(dir.join("trusted-roots"), listed.as_bytes())
+            .expect("the store should be writable by hand");
+        let root = scratch.real().join("root");
+        let climbing = TrustEnv {
+            state_home: Some(scratch.mkdir("detour").join("..").join("state").into()),
+            ..scratch.env(None)
+        };
+
+        assert_eq!(
+            granted(&root, &scratch.env(None)),
+            Ok(Grant::Trusted),
+            "the same store reached without `..` should trust the root"
+        );
+        assert_eq!(
+            granted(&root, &climbing),
+            Ok(Grant::Untrusted),
+            "a store reached through `..` should grant nothing"
+        );
     }
 
     #[test]
@@ -1039,7 +1072,11 @@ mod tests {
              to a path without `..`"
         );
         assert!(matches!(added, Err(AddError::Io(_))), "{added:?}");
-        assert_eq!(granted(&project, &env), Ok(Grant::Trusted));
+        assert_eq!(
+            granted(&project, &env),
+            Ok(Grant::Untrusted),
+            "reading through `..` should grant nothing, as writing through it is refused"
+        );
         assert_eq!(
             fs::read_to_string(&kernel_store).expect("the store should be readable"),
             format!("{}\n", project.display())
