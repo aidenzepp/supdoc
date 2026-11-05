@@ -424,6 +424,7 @@ impl Evaluation {
     /// [`Self::settle_pending`].
     fn settle(&mut self, slots: Vec<Slot>, jobs: &[Job], ran: Vec<Option<StepsRan>>) {
         let mut ran = ran.into_iter();
+        let mut linted_nothing_warned = false;
         for slot in slots {
             let (job, run) = match slot {
                 Slot::Found(finding) => {
@@ -452,6 +453,10 @@ impl Evaluation {
                     outcomes.push((lint_state(&verdict), Some(run.tool)));
                 }
                 (Some(Err(reason)), Some(_)) => {
+                    if reason == BIOME_LINTED_NOTHING && !linted_nothing_warned {
+                        linted_nothing_warned = true;
+                        self.findings.push(linted_nothing(&record.at));
+                    }
                     record.steps.lint = StepState::Unrunnable { reason };
                 }
                 _ => {}
@@ -569,6 +574,22 @@ fn refuse_unfound(
             inside_root,
         };
     }
+}
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose biome lint
+/// step didn't run because biome checked no file.
+fn linted_nothing(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "biome lint checked no file for this block, so its TypeScript and JavaScript blocks' lint \
+         step didn't run: the project's biome config leaves them out",
+    )
+    .with_help(
+        "find the setting in the project's biome config that excludes the doc's blocks, or mark \
+         the blocks `lint(off: <reason>)`",
+    )
+    .with_location(at.clone())
 }
 
 /// The state a lint verdict alone puts a block in.
@@ -876,6 +897,7 @@ impl RumdlConfigs {
                 record.given = Some(biome::Given {
                     mirror: Some(project.doc_as_seen(&doc)),
                     flags: project.flags,
+                    config: None,
                     names: None,
                 });
                 Ok(())
@@ -1326,7 +1348,7 @@ fn run_linter(
     }
     let doc = session.root.join(record.at.file.as_str());
     let given = record.given.as_ref();
-    let args = tool.args(&Invocation {
+    let invocation = Invocation {
         doc: given
             .and_then(|given| given.mirror.as_deref())
             .unwrap_or(&doc),
@@ -1338,7 +1360,8 @@ fn run_linter(
         emit: None,
         externs: &[],
         fragment: record.fragment,
-    });
+    };
+    let args = tool.args(&invocation);
     let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
     let run = cache::Run {
         tool,
@@ -1349,13 +1372,23 @@ fn run_linter(
         doc: &doc,
         project: None,
     };
-    let verdict = cached_run(
-        &run,
-        session,
-        |call| runner::run(call, session.env, session.root),
-        |result| tool.lint_verdict(&pending.input, result),
-        lint::Verdict::cacheable,
-    );
+    let biome = given.filter(|_| tool.name == BIOME_LINT);
+    let spawn = |call: &Call<'_>| match biome {
+        Some(given) => biome_lint(tool, call, &invocation, given, &pending.input, session),
+        None => runner::run(call, session.env, session.root),
+    };
+    let judge = |result: Result<Ran, runner::Failure>| match result {
+        Ok(ran) if biome.is_some() && biome::linted_nothing(&ran.stdout) => {
+            Err(BIOME_LINTED_NOTHING)
+        }
+        result => Ok(tool.lint_verdict(&pending.input, result)),
+    };
+    let verdict = match cached_run(&run, session, spawn, judge, |judged| {
+        judged.as_ref().is_ok_and(lint::Verdict::cacheable)
+    }) {
+        Ok(verdict) => verdict,
+        Err(reason) => return Some(Err(reason)),
+    };
     let findings = lint::findings(
         &verdict,
         tool,
@@ -1365,6 +1398,64 @@ fn run_linter(
         false,
     );
     Some(Ok((verdict, findings)))
+}
+
+/// The linter that reads the block from a private file rather than stdin.
+const BIOME_LINT: &str = "biome-lint";
+
+/// Why biome lint's step counts as not run when its report says it checked no file: something
+/// in the project's config still left the block out, so the run says nothing about it.
+pub(super) const BIOME_LINTED_NOTHING: &str =
+    "biome lint checked no file: the project's biome config leaves the block out";
+
+/// Runs `call`, `tool` being biome lint, on the block `invocation` describes, written with
+/// `given`'s config to a fresh [`biome::LintFile`] beside the neutral directory, since biome
+/// lint reports nothing for a block on stdin. The directory is removed after the run whatever
+/// its outcome.
+///
+/// # Errors
+///
+/// The run's failure, or a failed start when there is no private directory to write the block
+/// to.
+///
+/// Effect: creates and removes the private directory, and runs biome, killing it at the
+/// timeout.
+fn biome_lint(
+    tool: &ToolCartridge,
+    call: &Call<'_>,
+    invocation: &Invocation<'_>,
+    given: &biome::Given,
+    input: &str,
+    session: &Session<'_>,
+) -> Result<Ran, runner::Failure> {
+    let neutral = runner::neutral_dir(session.env, session.root);
+    let place = (invocation.doc, invocation.index, invocation.tag);
+    let file = biome::LintFile::create(&neutral, given, place, input).ok_or_else(|| {
+        runner::Failure::Spawn(std::io::Error::other(
+            "supdoc couldn't create a private directory for the block biome lints",
+        ))
+    })?;
+    let project = [file.config_flag()];
+    let args = tool.args(&Invocation {
+        project: &project,
+        emit: Some(file.file()),
+        ..*invocation
+    });
+    let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
+    let result = runner::run(
+        &Call {
+            args: &args,
+            ..*call
+        },
+        session.env,
+        session.root,
+    )
+    .map(|ran| Ran {
+        stderr: file.named(&ran.stderr),
+        ..ran
+    });
+    drop(file);
+    result
 }
 
 /// Runs `tool`, clippy found at `program`, on `record`'s Rust block, read as `pending`, as
