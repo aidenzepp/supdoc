@@ -26,6 +26,9 @@ struct Json1 {
 struct Comment {
     /// Its 1-based line.
     line: usize,
+    /// Its 1-based last line.
+    #[serde(rename = "endLine")]
+    end_line: Option<usize>,
     /// Its 1-based column, with each tab advancing to the next multiple of [`TAB_STOP`].
     column: usize,
     /// The check's number, which shellcheck names `SC<code>`.
@@ -35,7 +38,8 @@ struct Comment {
 }
 
 /// The diagnostics in `shellcheck --format=json1`'s `stdout` for `input`, the checked text, each
-/// column counted in characters. `None` when it isn't a json1 report.
+/// column counted in characters. `None` when it isn't a json1 report. None is read as a syntax
+/// error: shellcheck's parser codes share their range with checks that aren't.
 #[must_use]
 pub(crate) fn diagnostics(stdout: &[u8], input: &str) -> Option<Vec<Diagnostic>> {
     let report: Json1 = serde_json::from_slice(stdout).ok()?;
@@ -45,6 +49,8 @@ pub(crate) fn diagnostics(stdout: &[u8], input: &str) -> Option<Vec<Diagnostic>>
             .into_iter()
             .map(|comment| Diagnostic {
                 line: comment.line,
+                end_line: comment.end_line.unwrap_or(comment.line),
+                syntax: false,
                 column: input
                     .lines()
                     .nth(comment.line.saturating_sub(1))
@@ -80,7 +86,11 @@ fn char_column(line: &str, column: usize) -> usize {
 /// Judges a `shellcheck` run on `input` as [`lint::judge`] does, reading its stdout as a json1
 /// report: a non-zero exit with at least one diagnostic gives those diagnostics.
 #[must_use]
-pub(crate) fn lint_verdict(input: &str, result: Result<Ran, Failure>) -> lint::Verdict {
+pub(crate) fn lint_verdict(
+    input: &str,
+    _framed: bool,
+    result: Result<Ran, Failure>,
+) -> lint::Verdict {
     lint::judge(result, |stdout| diagnostics(stdout, input))
 }
 
@@ -116,13 +126,15 @@ mod tests {
 
     #[test]
     fn json1_gives_each_comments_sc_rule_line_and_column() {
-        let stdout = br#"{"comments":[{"file":"-","line":2,"endLine":2,"column":6,"endColumn":8,"level":"info","code":2086,"message":"Double quote to prevent globbing and word splitting.","fix":null}]}"#;
+        let stdout = br#"{"comments":[{"file":"-","line":2,"endLine":3,"column":6,"endColumn":8,"level":"info","code":2086,"message":"Double quote to prevent globbing and word splitting.","fix":null}]}"#;
 
         assert_eq!(
             diagnostics(stdout, "x=1\necho $x\n"),
             Some(vec![Diagnostic {
                 line: 2,
                 column: 6,
+                end_line: 3,
+                syntax: false,
                 rule: "SC2086".to_owned(),
                 message: "Double quote to prevent globbing and word splitting.".to_owned(),
             }])
@@ -158,15 +170,15 @@ mod tests {
         let comment = br#"{"comments":[{"line":1,"column":1,"code":2148,"message":"m"}]}"#;
 
         assert!(matches!(
-            lint_verdict("echo\n", ran(comment)),
+            lint_verdict("echo\n", false, ran(comment)),
             Verdict::Diagnostics(found) if found.len() == 1
         ));
         assert!(matches!(
-            lint_verdict("echo\n", ran(br#"{"comments":[]}"#)),
+            lint_verdict("echo\n", false, ran(br#"{"comments":[]}"#)),
             Verdict::Failed(format::Verdict::ToolFailed(_))
         ));
         assert!(matches!(
-            lint_verdict("echo\n", ran(b"")),
+            lint_verdict("echo\n", false, ran(b"")),
             Verdict::Failed(format::Verdict::ToolFailed(_))
         ));
     }

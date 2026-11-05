@@ -14,6 +14,8 @@ struct RuffEntry {
     message: String,
     /// Where it starts.
     location: RuffLocation,
+    /// Where it ends, when ruff says.
+    end_location: Option<RuffLocation>,
 }
 
 /// A 1-based line and character column in ruff's JSON.
@@ -26,7 +28,8 @@ struct RuffLocation {
 }
 
 /// The diagnostics in `ruff check --output-format=json`'s `stdout`. `None` when it isn't that
-/// JSON array. A syntax error, which ruff reports without a code, is named `syntax-error`.
+/// JSON array. A syntax error, which ruff reports without a code, is named `syntax-error` and is
+/// the only diagnostic read as one.
 #[must_use]
 pub(crate) fn diagnostics(stdout: &[u8]) -> Option<Vec<Diagnostic>> {
     let entries: Vec<RuffEntry> = serde_json::from_slice(stdout).ok()?;
@@ -36,6 +39,8 @@ pub(crate) fn diagnostics(stdout: &[u8]) -> Option<Vec<Diagnostic>> {
             .map(|entry| Diagnostic {
                 line: entry.location.row,
                 column: entry.location.column,
+                end_line: entry.end_location.map_or(entry.location.row, |end| end.row),
+                syntax: entry.code.is_none(),
                 rule: entry.code.unwrap_or_else(|| "syntax-error".to_owned()),
                 message: entry.message,
             })
@@ -44,9 +49,13 @@ pub(crate) fn diagnostics(stdout: &[u8]) -> Option<Vec<Diagnostic>> {
 }
 
 /// Judges a `ruff check` run as [`lint::judge`] does, reading its stdout as ruff's JSON array.
-/// `input` isn't needed: ruff counts columns in characters.
+/// `input` isn't needed: ruff counts columns in characters, and reads a framed block alike.
 #[must_use]
-pub(crate) fn lint_verdict(_input: &str, result: Result<Ran, Failure>) -> lint::Verdict {
+pub(crate) fn lint_verdict(
+    _input: &str,
+    _framed: bool,
+    result: Result<Ran, Failure>,
+) -> lint::Verdict {
     lint::judge(result, diagnostics)
 }
 
@@ -100,8 +109,8 @@ mod tests {
     }
 
     #[test]
-    fn ruffs_json_gives_each_diagnostics_rule_line_and_column() {
-        let stdout = br#"[{"code":"E711","message":"Comparison to `None`","location":{"row":2,"column":6},"end_location":{"row":2,"column":10},"filename":"/p/a.md.1.py","fix":null,"url":null,"noqa_row":2},
+    fn ruffs_json_gives_each_diagnostics_rule_lines_and_column_and_a_codeless_one_is_syntax() {
+        let stdout = br#"[{"code":"E711","message":"Comparison to `None`","location":{"row":2,"column":6},"end_location":{"row":3,"column":2},"filename":"/p/a.md.1.py","fix":null,"url":null,"noqa_row":2},
             {"code":null,"message":"Expected an expression","location":{"row":3,"column":1},"end_location":{"row":3,"column":2},"filename":"/p/a.md.1.py","fix":null,"url":null,"noqa_row":null}]"#;
 
         assert_eq!(
@@ -110,12 +119,16 @@ mod tests {
                 Diagnostic {
                     line: 2,
                     column: 6,
+                    end_line: 3,
+                    syntax: false,
                     rule: "E711".to_owned(),
                     message: "Comparison to `None`".to_owned(),
                 },
                 Diagnostic {
                     line: 3,
                     column: 1,
+                    end_line: 3,
+                    syntax: true,
                     rule: "syntax-error".to_owned(),
                     message: "Expected an expression".to_owned(),
                 },

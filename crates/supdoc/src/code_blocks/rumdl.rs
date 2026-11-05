@@ -59,7 +59,7 @@ struct Entry {
 }
 
 /// The diagnostics in `rumdl check --output-format json`'s `stdout`. `None` when it isn't that
-/// JSON array.
+/// JSON array. None is a syntax error: every text is Markdown.
 #[must_use]
 pub(crate) fn diagnostics(stdout: &[u8]) -> Option<Vec<Diagnostic>> {
     let entries: Vec<Entry> = serde_json::from_slice(stdout).ok()?;
@@ -69,6 +69,8 @@ pub(crate) fn diagnostics(stdout: &[u8]) -> Option<Vec<Diagnostic>> {
             .map(|entry| Diagnostic {
                 line: entry.line,
                 column: entry.column,
+                end_line: entry.line,
+                syntax: false,
                 rule: entry.rule,
                 message: entry.message,
             })
@@ -78,7 +80,11 @@ pub(crate) fn diagnostics(stdout: &[u8]) -> Option<Vec<Diagnostic>> {
 
 /// Judges a `rumdl check` run as [`lint::judge`] does, reading its stdout as rumdl's JSON array.
 #[must_use]
-pub(crate) fn lint_verdict(_input: &str, result: Result<Ran, Failure>) -> lint::Verdict {
+pub(crate) fn lint_verdict(
+    _input: &str,
+    _framed: bool,
+    result: Result<Ran, Failure>,
+) -> lint::Verdict {
     lint::judge(result, diagnostics)
 }
 
@@ -459,6 +465,8 @@ mod tests {
             Some(vec![Diagnostic {
                 line: 3,
                 column: 21,
+                end_line: 3,
+                syntax: false,
                 rule: "MD013".to_owned(),
                 message: "Line length 49 exceeds 20 characters".to_owned(),
             }])

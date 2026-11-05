@@ -121,8 +121,9 @@ pub(crate) enum Reader {
     /// A formatter: its syntax-error report in stderr, `None` for any other stderr. The format
     /// step compares its stdout with the block (see [`super::format::judge`]).
     Format(fn(&str) -> Option<ParseError>),
-    /// A linter: its verdict on a run over the checked text.
-    Lint(fn(&str, Result<Ran, Failure>) -> lint::Verdict),
+    /// A linter: its verdict on a run over the checked text, told whether that text frames the
+    /// block.
+    Lint(fn(&str, bool, Result<Ran, Failure>) -> lint::Verdict),
 }
 
 /// One tool supdoc knows how to call safely: everything the pipeline needs to look it up, run it
@@ -188,12 +189,17 @@ impl ToolCartridge {
         }
     }
 
-    /// Its lint verdict on `result`, a run over `input`. A formatter reports no diagnostics, so
-    /// it is judged on its exit alone.
+    /// Its lint verdict on `result`, a run over `input`, which frames the block when `framed`.
+    /// A formatter reports no diagnostics, so it is judged on its exit alone.
     #[must_use]
-    pub(crate) fn lint_verdict(&self, input: &str, result: Result<Ran, Failure>) -> lint::Verdict {
+    pub(crate) fn lint_verdict(
+        &self,
+        input: &str,
+        framed: bool,
+        result: Result<Ran, Failure>,
+    ) -> lint::Verdict {
         match self.reader {
-            Reader::Lint(read) => read(input, result),
+            Reader::Lint(read) => read(input, framed, result),
             Reader::Format(_) => lint::judge(result, |_| None),
         }
     }
