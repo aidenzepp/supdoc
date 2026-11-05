@@ -25,8 +25,21 @@
 //! file of its own, so it reads none of those. supdoc finds the project's `.yamllint` itself and
 //! writes again only what it checked (see [`read_lint_config`]): no `extends` but yamllint's
 //! built-in configs, no `ignore` or `ignore-from-file` anywhere, `yaml-files` dropped, and
-//! `document-start` off, since a block is never a whole file. A block whose own comment switches
-//! every rule off (see [`switches_lint_off`]) isn't given to yamllint.
+//! `document-start` off, since a block is never a whole file. A config holding a character
+//! PyYAML reads as a line break where supdoc reads none, or any control but tab, is refused before
+//! it is read, and every value that isn't a plain word, number or boolean is written back in
+//! double quotes with everything outside printable ASCII escaped, so the copy says exactly what
+//! supdoc checked. An empty config, or one that leaves no rule on, is refused: it would switch the
+//! step off. yamllint runs in an empty private directory, and must print `yamllint 1.38.0` for
+//! `--version` (see [`version_of`]); when it rejects the copy anyway, its words, which can quote
+//! the config, are never shown.
+//!
+//! A block whose own comments switch every rule off (see [`switches_lint_off`]) isn't given to
+//! yamllint, and neither is one holding a control character YAML forbids (see
+//! [`forbidden_char`]): yamllint reads a NUL as a sign of UTF-16 text and would skip its own
+//! checks. The comment scan is conservative: it reads text, not YAML, so a comment inside a
+//! multi-line scalar, or one an `enable` comment undoes, still switches the step off. That loses
+//! coverage, never gives a pass.
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
@@ -893,6 +906,35 @@ const LINT_RULES: [&str; 23] = [
 /// other value as a file's path.
 const BUILT_IN: [&str; 2] = ["default", "relaxed"];
 
+/// The rules yamllint 1.38.0's built-in `default` config turns on.
+const DEFAULT_ON: [&str; 17] = [
+    "anchors",
+    "braces",
+    "brackets",
+    "colons",
+    "commas",
+    "comments",
+    "comments-indentation",
+    "document-start",
+    "empty-lines",
+    "hyphens",
+    "indentation",
+    "key-duplicates",
+    "line-length",
+    "new-line-at-end-of-file",
+    "new-lines",
+    "trailing-spaces",
+    "truthy",
+];
+
+/// The rules yamllint 1.38.0's built-in `relaxed` config turns off of [`DEFAULT_ON`].
+const RELAXED_OFF: [&str; 4] = [
+    "comments",
+    "comments-indentation",
+    "document-start",
+    "truthy",
+];
+
 /// The rule yamllint leaves off for a block, which a snippet breaks by being part of a file: a
 /// block is never a whole file, so it needn't open with `---`.
 pub(crate) const LINT_RELAXED: &str = "document-start";
@@ -900,22 +942,35 @@ pub(crate) const LINT_RELAXED: &str = "document-start";
 /// The config yamllint is given when the project has none: its defaults.
 const LINT_DEFAULT: &str = "extends: default\n";
 
-/// The flags yamllint is given for the blocks of `doc`: `-c <private file>`, holding the project's
+/// What yamllint is given for the blocks of one doc directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Lint {
+    /// `-c <private file>`.
+    pub(crate) flags: Vec<OsString>,
+    /// The empty private directory yamllint runs in, beside its config.
+    pub(crate) cwd: PathBuf,
+    /// The project's config relative to the root, as named to the user; empty when there is
+    /// none and yamllint gets its defaults.
+    pub(crate) file: String,
+}
+
+/// What yamllint is given for the blocks of `doc`: `-c <private file>`, holding the project's
 /// config as supdoc read it (see [`read_lint_config`]), found walking up from `doc`'s directory to
-/// `root`, or yamllint's defaults when there is none, with [`LINT_RELAXED`] off either way. With
-/// `-c`, yamllint reads no other config: none in the directory it runs in or above it, and none
-/// through `YAMLLINT_CONFIG_FILE` or `XDG_CONFIG_HOME`.
+/// `root`, or yamllint's defaults when there is none, with [`LINT_RELAXED`] off either way; and an
+/// empty private directory to run in. With `-c`, yamllint reads no other config: none in the
+/// directory it runs in or above it, and none through `YAMLLINT_CONFIG_FILE` or
+/// `XDG_CONFIG_HOME`.
 ///
 /// Effect: reads file metadata and the config, resolves symlinks, and may create supdoc's
-/// private directory and the config file in it.
+/// private directories and the config file in them.
 ///
 /// # Errors
 ///
 /// [`Refusal::Config`] when the config is a link out of the root, isn't a readable UTF-8 file of
 /// at most 256 KiB, or says something [`read_lint_config`] refuses; [`Refusal::NoPrivateDir`]
-/// when there is nowhere private to put it.
-pub(crate) fn lint_args(env: &ToolEnv, root: &Path, doc: &Path) -> Result<Vec<OsString>, Refusal> {
-    let text = match found_lint_config(root, doc) {
+/// when there is nowhere private to put it or to run yamllint.
+pub(crate) fn lint_args(env: &ToolEnv, root: &Path, doc: &Path) -> Result<Lint, Refusal> {
+    let (text, file) = match found_lint_config(root, doc) {
         Some(found) => {
             let file = relative(root, &found);
             let refuse = |why: String| Refusal::Config {
@@ -923,16 +978,45 @@ pub(crate) fn lint_args(env: &ToolEnv, root: &Path, doc: &Path) -> Result<Vec<Os
                 why,
             };
             let written = read_text(root, &found).map_err(|why| refuse(why.to_owned()))?;
-            read_lint_config(&written).map_err(refuse)?
+            (read_lint_config(&written).map_err(refuse)?, file)
         }
-        None => read_lint_config(LINT_DEFAULT).map_err(|why| Refusal::Config {
-            file: String::new(),
-            why,
-        })?,
+        None => (
+            read_lint_config(LINT_DEFAULT).map_err(|why| Refusal::Config {
+                file: String::new(),
+                why,
+            })?,
+            String::new(),
+        ),
     };
     let private = private_file(env, root, ("yamllint-config", "config.yaml"), &text)
         .ok_or(Refusal::NoPrivateDir)?;
-    Ok(vec![OsString::from("-c"), private.into_os_string()])
+    let cwd = private
+        .parent()
+        .and_then(|dir| empty_private_dir(&dir.join("cwd")))
+        .ok_or(Refusal::NoPrivateDir)?;
+    Ok(Lint {
+        flags: vec![OsString::from("-c"), private.into_os_string()],
+        cwd,
+        file,
+    })
+}
+
+/// `dir`, created mode 0700 when missing, when it is a directory only its owner reaches and holds
+/// nothing. `None` otherwise.
+///
+/// Effect: may create the directory.
+fn empty_private_dir(dir: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .ok()?;
+    let meta = fs::symlink_metadata(dir).ok()?;
+    let private = meta.is_dir() && meta.permissions().mode().trailing_zeros() >= 6;
+    let empty = fs::read_dir(dir).ok()?.next().is_none();
+    (private && empty).then(|| dir.to_path_buf())
 }
 
 /// The config yamllint would read for `doc` were it run in `doc`'s directory: the first of
@@ -1004,7 +1088,21 @@ pub(crate) fn read_lint_config(text: &str) -> Result<String, String> {
              block of `option: value` lines"
         )
     };
-    let lines = lint_lines(text).map_err(outside)?;
+    let text = text
+        .strip_prefix('\u{feff}')
+        .unwrap_or(text)
+        .replace("\r\n", "\n");
+    if let Some((line, c)) = unreadable_char(&text) {
+        return Err(format!(
+            "holds U+{:04X} on line {line}, a character yamllint reads as a line break or refuses; \
+             supdoc reads none in a yamllint config",
+            u32::from(c)
+        ));
+    }
+    let lines = lint_lines(&text).map_err(outside)?;
+    if lines.is_empty() {
+        return Err("is empty, which yamllint refuses as a config that isn't a mapping".to_owned());
+    }
     let mut extends: Option<String> = None;
     let mut locale: Option<(String, bool)> = None;
     let mut rules: Vec<(String, RuleValue)> = Vec::new();
@@ -1067,11 +1165,56 @@ pub(crate) fn read_lint_config(text: &str) -> Result<String, String> {
             }
         }
     }
+    if !leaves_a_rule_on(extends.as_deref(), &rules) {
+        return Err(
+            "leaves no yamllint rule on for a block, which switches its lint step off".to_owned(),
+        );
+    }
     Ok(write_lint_config(
         extends.as_deref(),
         locale.as_ref(),
         &rules,
     ))
+}
+
+/// The first character of `text`, with its 1-based line, that yamllint would read other than as
+/// supdoc reads it, or refuse: a C0 or C1 control other than tab and line feed (a carriage return
+/// included, once `\r\n` line ends are read as `\n`), the line breaks U+2028 and U+2029, a byte
+/// order mark past the start, and the non-characters U+FFFE and U+FFFF.
+fn unreadable_char(text: &str) -> Option<(usize, char)> {
+    text.split('\n').enumerate().find_map(|(at, line)| {
+        line.chars()
+            .find(|&c| {
+                (c.is_control() && c != '\t')
+                    || matches!(
+                        c,
+                        '\u{2028}' | '\u{2029}' | '\u{feff}' | '\u{fffe}' | '\u{ffff}'
+                    )
+            })
+            .map(|c| (at + 1, c))
+    })
+}
+
+/// Whether a config that `extends` and sets `rules` leaves any rule on once [`LINT_RELAXED`] is
+/// off: a rule `extends` turns on, unless `rules` disables it, or one `rules` enables or gives
+/// options, which turns it on.
+fn leaves_a_rule_on(extends: Option<&str>, rules: &[(String, RuleValue)]) -> bool {
+    let base: Vec<&str> = match extends {
+        Some("default") => DEFAULT_ON.to_vec(),
+        Some("relaxed") => DEFAULT_ON
+            .into_iter()
+            .filter(|rule| !RELAXED_OFF.contains(rule))
+            .collect(),
+        _ => Vec::new(),
+    };
+    LINT_RULES
+        .iter()
+        .filter(|rule| **rule != LINT_RELAXED)
+        .any(|rule| match rules.iter().find(|(set, _)| set == rule) {
+            Some((_, RuleValue::Switch(switch))) => *switch == "enable",
+            Some((_, RuleValue::Options(_))) => true,
+            None => base.contains(rule),
+        })
 }
 
 /// The lines of `text` that say something, each with its number and indent, after one leading
@@ -1281,13 +1424,30 @@ fn flow_list(rest: &str) -> Option<Vec<(String, bool)>> {
     }
 }
 
-/// `value` as supdoc writes it: a plain one as written, a quoted one in single quotes.
+/// `value` as supdoc writes it: a plain one made only of ASCII letters, digits and `_`, `.`, `+`
+/// and `-` (a word, a number or a boolean) as written, so it keeps its type; any other in double
+/// quotes, every character outside printable ASCII escaped, so the copy holds no line break or
+/// key that supdoc didn't read.
 fn written((value, quoted): (&str, bool)) -> String {
-    if quoted {
-        format!("'{}'", value.replace('\'', "''"))
-    } else {
-        value.to_owned()
+    let token = !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'+' | b'-'));
+    if token && !quoted {
+        return value.to_owned();
     }
+    let mut out = String::from('"');
+    for c in value.chars() {
+        let _infallible = match c {
+            '"' => write!(out, "\\\""),
+            '\\' => write!(out, "\\\\"),
+            ' '..='~' => write!(out, "{c}"),
+            c if u32::from(c) <= 0xffff => write!(out, "\\u{:04x}", u32::from(c)),
+            c => write!(out, "\\U{:08x}", u32::from(c)),
+        };
+    }
+    out.push('"');
+    out
 }
 
 /// The config [`read_lint_config`] read, written again.
@@ -1336,26 +1496,114 @@ fn write_lint_config(
     out
 }
 
-/// Whether `block` holds a yamllint comment that switches every rule off for the rest of the
-/// block or a line, or the whole block: `# yamllint disable`, `disable-line` or `disable-file`
-/// naming no rule. Found as text, wherever a `#` starts it, so one in a string counts too; one
-/// naming its rules (`# yamllint disable rule:truthy`) doesn't. supdoc's own `lint(off: ...)` is
-/// the way to switch the step off.
+/// Whether `block` holds yamllint comments that switch every rule off for the rest of the
+/// block, a line or the whole block: `# yamllint disable`, `disable-line` or `disable-file` naming
+/// no rule, or such comments naming between them every rule yamllint 1.38.0 has. supdoc's own
+/// `lint(off: ...)` is the way to switch the step off.
+///
+/// The scan is conservative, so a near miss counts as switching the step off, never as a pass: it
+/// reads text, not YAML, so a comment inside a string or a multi-line scalar counts, as does one
+/// an `enable` comment undoes, and `disable-file` counts on any line, not only the first; it splits
+/// words on every character Python's `str.isspace` takes as whitespace (U+001C to U+001F
+/// included), and finds a comment wherever a `#` starts it.
 #[must_use]
 pub(crate) fn switches_lint_off(block: &str) -> bool {
-    block.lines().any(|line| {
-        line.match_indices('#').any(|(at, _)| {
+    let mut named: Vec<&str> = Vec::new();
+    for line in block.split('\n') {
+        for (at, _) in line.match_indices('#') {
             let words: Vec<&str> = line
                 .get(at + 1..)
                 .unwrap_or_default()
-                .split_whitespace()
+                .split(python_space)
+                .filter(|word| !word.is_empty())
                 .collect();
-            matches!(
-                words.as_slice(),
-                ["yamllint", "disable" | "disable-line" | "disable-file"]
-            )
-        })
+            match words.as_slice() {
+                ["yamllint", "disable" | "disable-line" | "disable-file"] => return true,
+                [
+                    "yamllint",
+                    "disable" | "disable-line" | "disable-file",
+                    rules @ ..,
+                ] => {
+                    named.extend(rules.iter().filter_map(|rule| rule.strip_prefix("rule:")));
+                }
+                _ => {}
+            }
+        }
+    }
+    LINT_RULES.iter().all(|rule| named.contains(rule))
+}
+
+/// Whether Python's `str.isspace` takes `c` as whitespace: Unicode's white space, and the
+/// separators U+001C to U+001F.
+fn python_space(c: char) -> bool {
+    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
+}
+
+/// The first control character in `block` that YAML doesn't allow, other than tab, line feed and
+/// carriage return, with its 0-based line: a NUL included, which yamllint would read as a sign of
+/// UTF-16 or UTF-32 text. `None` when there is none.
+#[must_use]
+pub(crate) fn forbidden_char(block: &str) -> Option<(usize, char)> {
+    block.split('\n').enumerate().find_map(|(at, line)| {
+        line.chars()
+            .find(|&c| c.is_control() && !matches!(c, '\t' | '\r'))
+            .map(|c| (at, c))
     })
+}
+
+/// What `yamllint --version` prints for the yamllint supdoc's checks are verified against.
+pub(crate) const VERIFIED: &str = "yamllint 1.38.0";
+
+/// How a yamllint whose version can't be read is named.
+const UNREADABLE: &str = "(whose version supdoc couldn't read)";
+
+/// What `program`, a yamllint, printed for `--version`, run in `cwd` as any tool is (see
+/// [`runner::run`]) under `timeout`, when it is [`VERIFIED`].
+///
+/// Effect: runs the binary.
+///
+/// # Errors
+///
+/// How to name what it printed to the user: its first line, controls dropped and cut at 60
+/// characters, in backticks; or that it couldn't be read, when the run failed or printed nothing.
+pub(crate) fn version_of(
+    program: &Path,
+    env: &ToolEnv,
+    (root, cwd): (&Path, &Path),
+    timeout: Option<std::time::Duration>,
+) -> Result<(), String> {
+    let call = runner::Call {
+        program,
+        name: "yamllint",
+        args: &[std::ffi::OsStr::new("--version")],
+        extra: &[],
+        stdin: b"",
+        timeout,
+        cwd: runner::Cwd::Private(cwd),
+        cap: runner::CAP,
+    };
+    let ran = match runner::run(&call, env, root) {
+        Ok(ran) if ran.success => ran,
+        _ => return Err(UNREADABLE.to_owned()),
+    };
+    let text = String::from_utf8_lossy(&ran.stdout);
+    let first = text.lines().next().unwrap_or_default().trim();
+    if first == VERIFIED {
+        return Ok(());
+    }
+    let shown: String = first.chars().filter(|c| !c.is_control()).take(60).collect();
+    if shown.is_empty() {
+        Err(UNREADABLE.to_owned())
+    } else {
+        Err(format!("`{}`", shown.replace('`', "'")))
+    }
+}
+
+/// Whether a yamllint run that failed with `stderr` rejected the config supdoc gave it: it says
+/// `invalid config`, which begins every config error yamllint 1.38.0 reports.
+#[must_use]
+pub(crate) fn rejected_config(stderr: &[u8]) -> bool {
+    String::from_utf8_lossy(stderr).contains("invalid config")
 }
 
 /// One diagnostic of `yamllint -f parsable`: `stdin:<line>:<column>: [<level>] <message>
@@ -1424,9 +1672,9 @@ pub(crate) fn lint_verdict(
 #[cfg(test)]
 mod tests {
     use super::{
-        CONFIG_FILES, LINT_CONFIG_FILES, MAX_NESTING, Refusal, holds_no_yaml, lint_args,
-        lint_diagnostics, lint_verdict, parse_error, project_args, read_config, read_lint_config,
-        same_structure, shape, switches_lint_off,
+        CONFIG_FILES, LINT_CONFIG_FILES, LINT_RULES, MAX_NESTING, Refusal, forbidden_char,
+        holds_no_yaml, lint_args, lint_diagnostics, lint_verdict, parse_error, project_args,
+        read_config, read_lint_config, rejected_config, same_structure, shape, switches_lint_off,
     };
     use crate::code_blocks::format::{self, ParseError};
     use crate::code_blocks::lint::{self, Diagnostic};
@@ -1855,22 +2103,107 @@ mod tests {
             written.as_deref(),
             Ok(
                 "extends: relaxed\nlocale: en_US.UTF-8\nrules:\n  line-length:\n    max: 120\n    \
-                level: warning\n  truthy:\n    allowed-values:\n      - 'true'\n      - 'false'\n      \
+                level: warning\n  truthy:\n    allowed-values:\n      - \"true\"\n      - \"false\"\n      \
                 - on\n  key-ordering: disable\n  quoted-strings:\n    extra-allowed:\n      \
-                - '^http://'\n      - 'it''s'\n    extra-required: []\n  document-start: disable\n"
+                - \"^http://\"\n      - \"it's\"\n    extra-required: []\n  document-start: disable\n"
             )
         );
     }
 
     #[test]
-    fn no_lint_config_is_yamllints_defaults_and_one_without_extends_stays_without() {
+    fn a_lint_config_without_extends_stays_without_and_the_defaults_extend_default() {
         assert_eq!(
-            read_lint_config("").as_deref(),
-            Ok("rules:\n  document-start: disable\n")
+            read_lint_config("rules:\n  truthy: enable\n").as_deref(),
+            Ok("rules:\n  truthy: enable\n  document-start: disable\n")
         );
         assert_eq!(
             read_lint_config("extends: default\n").as_deref(),
             Ok(LINT_DEFAULTS)
+        );
+    }
+
+    #[test]
+    fn an_empty_lint_config_or_one_that_leaves_no_rule_on_is_refused() {
+        let every_rule_off = |extends: &str| {
+            let rules = LINT_RULES
+                .iter()
+                .map(|rule| format!("  {rule}: disable\n"))
+                .collect::<Vec<_>>()
+                .concat();
+            format!("{extends}rules:\n{rules}")
+        };
+        for (config, says) in [
+            (String::new(), "is empty"),
+            ("# nothing\n---\n".to_owned(), "is empty"),
+            ("rules:\n".to_owned(), "no yamllint rule on"),
+            (
+                "rules:\n  document-start: enable\n".to_owned(),
+                "no yamllint rule on",
+            ),
+            (every_rule_off(""), "no yamllint rule on"),
+            (every_rule_off("extends: default\n"), "no yamllint rule on"),
+            (every_rule_off("extends: relaxed\n"), "no yamllint rule on"),
+        ] {
+            let refused = read_lint_config(&config).expect_err(&config);
+            assert!(refused.contains(says), "{config:?} gave {refused:?}");
+        }
+        let one_left = every_rule_off("extends: default\n")
+            .replace("  truthy: disable\n", "  truthy:\n    level: warning\n");
+        assert!(read_lint_config(&one_left).is_ok(), "{one_left:?}");
+    }
+
+    #[test]
+    fn a_line_break_pyyaml_reads_where_supdoc_reads_none_is_refused_at_every_value_site() {
+        let sites = [
+            "rules:\n  line-length:\n    max: 80{c}extends: /etc/passwd\n",
+            "rules:\n  truthy:\n    allowed-values:\n      - 'true'{c}ignore-from-file: x\n",
+            "rules:\n  truthy:\n    allowed-values: [a{c}ignore-from-file: x]\n",
+            "extends: default\nlocale: C{c}extends: ../../x\n",
+            "extends: default\nrules:\n  truthy:\n    level: 'warning{c}'\n",
+        ];
+        for c in ['\r', '\u{85}', '\u{2028}', '\u{2029}'] {
+            for site in sites {
+                let config = site.replace("{c}", &c.to_string());
+                let refused = read_lint_config(&config).expect_err(&config);
+                assert!(
+                    refused.contains(&format!("U+{:04X}", u32::from(c))),
+                    "{config:?} gave {refused:?}"
+                );
+            }
+        }
+        for config in [
+            "extends: default\nlocale: C\u{1}\n",
+            "extends: default\nlocale: C\u{7f}\n",
+            "extends: default\n\u{feff}rules:\n  truthy: enable\n",
+            "extends: default\nlocale: \"C\u{fffe}\"\n",
+        ] {
+            assert!(read_lint_config(config).is_err(), "{config:?}");
+        }
+    }
+
+    #[test]
+    fn crlf_line_ends_and_a_leading_byte_order_mark_are_read_as_plain_lines() {
+        assert_eq!(
+            read_lint_config("\u{feff}extends: default\r\nrules:\r\n  truthy: enable\r\n")
+                .as_deref(),
+            Ok("extends: default\nrules:\n  truthy: enable\n  document-start: disable\n")
+        );
+    }
+
+    #[test]
+    fn every_value_but_a_plain_word_number_or_boolean_is_written_quoted_and_escaped() {
+        let written = read_lint_config(
+            "extends: default\nlocale: 'fr_FR'\nrules:\n  quoted-strings:\n    \
+             extra-allowed: [\"caf\u{e9}\", 'a\"b', ^x$, \"\u{1f600}\"]\n    required: false\n",
+        );
+
+        assert_eq!(
+            written.as_deref(),
+            Ok(
+                "extends: default\nlocale: \"fr_FR\"\nrules:\n  quoted-strings:\n    \
+                extra-allowed:\n      - \"caf\\u00e9\"\n      - \"a\\\"b\"\n      - \"^x$\"\n      \
+                - \"\\U0001f600\"\n    required: false\n  document-start: disable\n"
+            )
         );
     }
 
@@ -1931,7 +2264,7 @@ mod tests {
         fs::write(root.path().join(".yamllint"), "bogus: 1\n").expect("root config");
         fs::write(
             root.path().join("docs").join(LINT_CONFIG_FILES[1]),
-            "rules:\n  truthy: disable\n",
+            "rules:\n  truthy: enable\n",
         )
         .expect("nearer config");
         fs::write(
@@ -1940,10 +2273,10 @@ mod tests {
         )
         .expect("a later name beside it");
 
-        let flags = lint_args(&env, root.path(), &root.path().join("docs/deep/a.md"))
+        let lint = lint_args(&env, root.path(), &root.path().join("docs/deep/a.md"))
             .expect("the nearer config should be accepted");
-        let [flag, conf] = flags.as_slice() else {
-            panic!("expected `-c <path>`, got {flags:?}");
+        let [flag, conf] = lint.flags.as_slice() else {
+            panic!("expected `-c <path>`, got {:?}", lint.flags);
         };
 
         assert_eq!(flag, "-c", "the first flag should be -c");
@@ -1951,7 +2284,20 @@ mod tests {
         assert!(conf.starts_with(cache.path()), "{conf:?} should be private");
         assert_eq!(
             fs::read_to_string(&conf).expect("the private copy"),
-            "rules:\n  truthy: disable\n  document-start: disable\n"
+            "rules:\n  truthy: enable\n  document-start: disable\n"
+        );
+        assert_eq!(lint.file, "docs/.yamllint.yaml");
+        assert!(
+            lint.cwd.starts_with(cache.path()),
+            "{:?} should be private",
+            lint.cwd
+        );
+        assert_eq!(
+            fs::read_dir(&lint.cwd)
+                .map(|mut dir| dir.next().is_none())
+                .ok(),
+            Some(true),
+            "yamllint's working directory should be empty"
         );
         assert!(matches!(
             lint_args(&env, root.path(), &root.path().join("a.md")),
@@ -1964,14 +2310,15 @@ mod tests {
         let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
 
-        let flags = lint_args(
+        let lint = lint_args(
             &env_in(cache.path()),
             root.path(),
             &root.path().join("docs/a.md"),
         )
         .expect("no config is fine");
 
-        let conf = PathBuf::from(flags.get(1).expect("`-c <path>` should name the copy"));
+        assert_eq!(lint.file, "", "no project config is named");
+        let conf = PathBuf::from(lint.flags.get(1).expect("`-c <path>` should name the copy"));
         assert!(conf.starts_with(cache.path()), "{conf:?} should be private");
         assert_eq!(fs::read_to_string(&conf).expect("the copy"), LINT_DEFAULTS);
         assert_eq!(
@@ -2012,9 +2359,36 @@ mod tests {
             "a: 1\n# yamllint disable\nb:   2\n",
             "a:   1  # yamllint disable-line\n",
             "a: 1 #  yamllint   disable \n",
+            "#\u{1c}yamllint disable-file\na:   1\n",
+            "# yamllint disable-file\u{1f}\n",
+            "#\u{a0}yamllint\u{2003}disable\n",
+            "a: |\n  # yamllint disable\n",
+            "# yamllint disable\n# yamllint enable\na:   1\n",
         ] {
             assert!(switches_lint_off(block), "{block:?}");
         }
+        let named = |rules: &[&str]| -> String {
+            rules
+                .iter()
+                .map(|rule| format!(" rule:{rule}"))
+                .collect::<Vec<_>>()
+                .concat()
+        };
+        let (first, rest) = LINT_RULES.split_at(10);
+        assert!(switches_lint_off(&format!(
+            "# yamllint disable{}\n",
+            named(&LINT_RULES)
+        )));
+        assert!(switches_lint_off(&format!(
+            "# yamllint disable{}\na: 1 # yamllint disable-line{}\n",
+            named(first),
+            named(rest)
+        )));
+        assert!(!switches_lint_off(&format!(
+            "# yamllint disable{}\n",
+            named(rest)
+        )));
+
         for block in [
             "a: 1\n",
             "a: 1  # yamllint disable-line rule:colons\n",
@@ -2024,5 +2398,24 @@ mod tests {
         ] {
             assert!(!switches_lint_off(block), "{block:?}");
         }
+    }
+
+    #[test]
+    fn a_control_yaml_forbids_is_found_with_its_line_and_tab_and_carriage_return_are_not() {
+        assert_eq!(forbidden_char("a: 1\nb: \u{0}2\n"), Some((1, '\u{0}')));
+        assert_eq!(
+            forbidden_char("#\u{1c}yamllint disable-file\n"),
+            Some((0, '\u{1c}'))
+        );
+        assert_eq!(forbidden_char("a: \u{85}\n"), Some((0, '\u{85}')));
+        assert_eq!(forbidden_char("a:\t1\r\nb: 2\n"), None);
+    }
+
+    #[test]
+    fn only_yamllints_invalid_config_report_is_a_rejected_config() {
+        assert!(rejected_config(
+            b"invalid config: rule \"truthy\": should be either \"enable\", \"disable\" or a dict\n"
+        ));
+        assert!(!rejected_config(b"Traceback (most recent call last):\n"));
     }
 }

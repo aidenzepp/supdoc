@@ -117,9 +117,9 @@ pub(crate) struct BlockRecord {
     /// What tombi is given for it: the private directory it runs in, holding its config. `None`
     /// for every other tool.
     tombi: Option<tombi::Project>,
-    /// yamllint's `-c <private copy>` for it (see [`yaml::lint_args`]). `None` for every other
-    /// tool.
-    yamllint: Option<Vec<OsString>>,
+    /// What yamllint is given for it: its `-c <private copy>` and the private directory it runs
+    /// in (see [`yaml::lint_args`]). `None` for every other tool.
+    yamllint: Option<yaml::Lint>,
     /// What the format step needs, kept while the block is pending.
     pending: Option<Pending>,
 }
@@ -313,6 +313,7 @@ impl Evaluation {
         let timeout = self.timeout;
         let mut configs = ToolConfigs::default();
         configs.tombi.timeout = timeout;
+        configs.yamllint.timeout = timeout;
         let mut toolchain_warned = false;
         let mut slots: Vec<Slot> = Vec::new();
         let mut jobs: Vec<Job> = Vec::new();
@@ -799,6 +800,7 @@ impl NotRunWarnings {
             YAML_EMPTY => yaml_empty(at),
             FRAME_RESHAPED => frame_reshaped(at),
             BIOME_LINTED_NOTHING => linted_nothing(at),
+            YAMLLINT_REJECTED => yamllint_rejected(at, said),
             _ => return None,
         };
         self.given.push(not_run.reason);
@@ -1381,8 +1383,9 @@ struct YamlfmtConfigs {
 
 impl YamlfmtConfigs {
     /// Gives `record`, a YAML block, the `-conf` flag yamlfmt gets for its doc, found once per
-    /// directory. A refusal settles the block as not checked, with its one warning per refusal
-    /// added to `slots`.
+    /// directory. A refusal takes the format step off, with its one warning per refusal added to
+    /// `slots`; a block left with no lint step either is settled as not checked, for that
+    /// refusal.
     ///
     /// Effect: reads the config and may create supdoc's private directory and file for it.
     ///
@@ -1425,6 +1428,14 @@ impl YamlfmtConfigs {
                     self.warned.push(refusal.clone());
                     slots.push(Slot::Found(warning));
                 }
+                if record.linter.is_some() {
+                    // yamllint still lints the block, as a refused yamllint config leaves yamlfmt.
+                    record.tool = None;
+                    record.steps.format = StepState::Unrunnable {
+                        reason: YAMLFMT_REFUSED,
+                    };
+                    return Ok(());
+                }
                 record.state = BlockState::NotChecked(NotChecked::ToolConfig);
                 record.reason = Some(reason);
                 Err(refusal)
@@ -1439,14 +1450,14 @@ fn yamlfmt_refusal(refusal: &yaml::Refusal, at: &Location) -> (String, Finding) 
     let (reason, message, help) = match refusal {
         yaml::Refusal::Config { file, why } => (
             format!("yamlfmt config `{file}` {why}"),
-            format!("the project's `{file}` {why}, so its YAML blocks aren't checked"),
+            format!("the project's `{file}` {why}, so its YAML blocks aren't formatted"),
             format!(
-                "keep only `line_ending` and a `formatter` block of yamlfmt 0.21.0's settings in `{file}`, one config per directory, or mark the blocks `ignore(<why>)`"
+                "keep only `line_ending` and a `formatter` block of yamlfmt 0.21.0's settings in `{file}`, one config per directory, or mark the blocks `format(off: <why>)`"
             ),
         ),
         yaml::Refusal::NoPrivateDir => (
             YAMLFMT_NO_PRIVATE_DIR.to_owned(),
-            format!("{YAMLFMT_NO_PRIVATE_DIR}, so its blocks aren't checked"),
+            format!("{YAMLFMT_NO_PRIVATE_DIR}, so its blocks aren't formatted"),
             "set `XDG_CACHE_HOME` or `HOME` to a directory outside the project".to_owned(),
         ),
     };
@@ -1460,9 +1471,14 @@ fn yamlfmt_refusal(refusal: &yaml::Refusal, at: &Location) -> (String, Finding) 
 #[derive(Debug, Default)]
 struct YamllintConfigs {
     /// Each doc directory's result, in the order they were asked for.
-    found: Vec<(PathBuf, Result<Vec<OsString>, yaml::Refusal>)>,
+    found: Vec<(PathBuf, Result<yaml::Lint, yaml::Refusal>)>,
     /// The refusals a warning has been added for.
     warned: Vec<yaml::Refusal>,
+    /// How long `yamllint --version` may run: the run's tool timeout.
+    timeout: Option<Duration>,
+    /// Whether the yamllint on `PATH` is [`yaml::VERIFIED`], once read, and whether its warning
+    /// has been given. `None` until a block needs it.
+    version: Option<(Result<(), String>, bool)>,
 }
 
 impl YamllintConfigs {
@@ -1470,8 +1486,10 @@ impl YamllintConfigs {
     /// doc, found once per directory. A block holding a yamllint comment that switches every rule
     /// off (see [`yaml::switches_lint_off`]) has its lint step taken off, with one
     /// `code-block-not-checked` warning for the block; a refused config takes the lint step off
-    /// each block of its directory, with one warning per refusal. Either way the format step still
-    /// runs. Whether the block goes on to its tools: not when no step is left.
+    /// each block of its directory, with one warning per refusal; and a yamllint on `PATH` that
+    /// isn't [`yaml::VERIFIED`] takes it off every block, with one warning for the run. Either way
+    /// the format step still runs. Whether the block goes on to its tools: not when no step is
+    /// left.
     ///
     /// Effect: reads the config and may create supdoc's private directory and file for it.
     fn give(
@@ -1513,9 +1531,10 @@ impl YamllintConfigs {
             found
         };
         match found {
-            Ok(flags) => {
-                record.yamllint = Some(flags);
-                true
+            Ok(lint) => {
+                let verified = self.verified(&lint.cwd, record, (env, root), slots);
+                record.yamllint = Some(lint);
+                verified || take_lint_off(record, YAMLLINT_UNVERIFIED)
             }
             Err(refusal) => {
                 if !self.warned.contains(&refusal) {
@@ -1526,6 +1545,88 @@ impl YamllintConfigs {
             }
         }
     }
+
+    /// Whether the yamllint on `PATH` prints exactly [`yaml::VERIFIED`] for `--version`, run in
+    /// `cwd`, read once per run. When it doesn't, the run's one warning, at `record`, goes to
+    /// `slots`. A yamllint that isn't on `PATH`, or is inside the checkout, is left to the usual
+    /// lookup.
+    ///
+    /// Effect: runs `yamllint --version` the first time.
+    fn verified(
+        &mut self,
+        cwd: &Path,
+        record: &BlockRecord,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> bool {
+        let Found::OnPath(program) = find(YAMLLINT, env, root) else {
+            return true;
+        };
+        let timeout = self.timeout;
+        let (version, warned) = self
+            .version
+            .get_or_insert_with(|| (yaml::version_of(&program, env, (root, cwd), timeout), false));
+        let Err(shown) = version else {
+            return true;
+        };
+        if !*warned {
+            *warned = true;
+            slots.push(Slot::Found(
+                Finding::new(
+                    NOT_CHECKED,
+                    Severity::Warning,
+                    format!(
+                        "the yamllint on `PATH` printed {shown} for `--version`, not `{}`, the \
+                         version supdoc's checks are verified against; its YAML blocks' lint \
+                         steps didn't run",
+                        yaml::VERIFIED
+                    ),
+                )
+                .with_help(format!(
+                    "install the verified yamllint: `{YAMLLINT_INSTALL}`"
+                ))
+                .with_location(record.at.clone()),
+            ));
+        }
+        false
+    }
+}
+
+/// The command that installs the yamllint supdoc's checks are verified against.
+const YAMLLINT_INSTALL: &str = "pipx install 'yamllint==1.38.0'";
+
+/// Why a YAML block's lint step didn't run when the yamllint on `PATH` isn't the verified one.
+const YAMLLINT_UNVERIFIED: &str =
+    "the yamllint on `PATH` isn't the version supdoc is verified against";
+
+/// Why a YAML block's lint step didn't run when yamllint rejected the config supdoc gave it.
+pub(super) const YAMLLINT_REJECTED: &str = "yamllint rejected the config supdoc gave it";
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose lint step
+/// yamllint didn't run because it rejected the config supdoc wrote from `file` (relative to the
+/// root; yamllint's defaults when empty). yamllint's own words are never shown: they can quote the
+/// config's text.
+fn yamllint_rejected(at: &Location, file: Option<&str>) -> Finding {
+    let (what, help) = match file.filter(|file| !file.is_empty()) {
+        Some(file) => (
+            format!("the config supdoc wrote from the project's `{file}`"),
+            format!(
+                "check the rules and options in `{file}` against yamllint 1.38.0's, or mark the \
+                 blocks `lint(off: <why>)`"
+            ),
+        ),
+        None => (
+            "yamllint's defaults".to_owned(),
+            "reinstall the verified yamllint, or mark the blocks `lint(off: <why>)`".to_owned(),
+        ),
+    };
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        format!("yamllint rejected {what}, so its YAML blocks' lint steps didn't run"),
+    )
+    .with_help(help)
+    .with_location(at.clone())
 }
 
 /// Takes the lint step off `record` with `reason`. Whether a step is left to run.
@@ -1569,6 +1670,10 @@ fn yamllint_refusal(refusal: &yaml::Refusal, at: &Location) -> Finding {
 
 /// Why yamllint didn't run when supdoc had no private directory to keep its config in.
 const YAMLLINT_NO_PRIVATE_DIR: &str = "yamllint needs a private directory under `XDG_CACHE_HOME` or `HOME` for its config, and there is none";
+
+/// Why a YAML block's format step didn't run when supdoc couldn't give yamlfmt the project's
+/// config.
+const YAMLFMT_REFUSED: &str = "supdoc couldn't give yamlfmt the project's config";
 
 /// Why yamlfmt didn't run when supdoc had no private directory to keep its config in.
 const YAMLFMT_NO_PRIVATE_DIR: &str = "yamlfmt needs a private directory under `XDG_CACHE_HOME` or `HOME` for its config, and there is none";
@@ -2466,10 +2571,7 @@ fn run_linter(
         tag: record.language.as_deref().unwrap_or_default(),
         edition: record.edition.unwrap_or(Edition::E2024),
         dialect: record.dialect,
-        project: match &record.yamllint {
-            Some(flags) if tool.name == YAMLLINT => flags.as_slice(),
-            _ => given.map_or(&[], |given| given.flags.as_slice()),
-        },
+        project: project_flags(record, tool),
         emit: None,
         externs: &[],
         fragment: record.fragment,
@@ -2515,11 +2617,15 @@ fn run_linter(
             result => Ok(tool.lint_verdict(input, frame.is_some(), result)),
         }
     };
-    let verdict = match cached_run(&run, session, spawn, judge, |judged| {
-        judged.as_ref().is_ok_and(lint::Verdict::cacheable)
-    }) {
-        Ok(verdict) => verdict,
-        Err(not_run) => return Some(Err(not_run)),
+    let verdict = if let Some(forbidden) = forbidden_by_yaml(tool, input) {
+        forbidden
+    } else {
+        match cached_run(&run, session, spawn, judge, |judged| {
+            judged.as_ref().is_ok_and(lint::Verdict::cacheable)
+        }) {
+            Ok(verdict) => verdict,
+            Err(not_run) => return Some(Err(not_run)),
+        }
     };
     let read = lint::Read {
         tool,
@@ -2548,6 +2654,43 @@ fn run_linter(
         _ => findings,
     };
     Some(Ok((verdict, findings)))
+}
+
+/// The flags `record`'s project gives `tool`: yamllint's `-c <private copy>` for yamllint, the
+/// flags of [`biome::Given`] for any other tool, none without either.
+fn project_flags<'record>(
+    record: &'record BlockRecord,
+    tool: &ToolCartridge,
+) -> &'record [OsString] {
+    match (&record.yamllint, &record.given) {
+        (Some(lint), _) if tool.name == YAMLLINT => &lint.flags,
+        (_, Some(given)) => &given.flags,
+        (_, None) => &[],
+    }
+}
+
+/// Whether `ran`, a failed yamllint run that reported no diagnostics, says yamllint rejected the
+/// config supdoc gave it (see [`yaml::rejected_config`]).
+fn rejected_by_yamllint(ran: &Ran) -> bool {
+    !ran.success
+        && yaml::lint_diagnostics(&ran.stdout).is_none_or(|found| found.is_empty())
+        && yaml::rejected_config(&ran.stderr)
+}
+
+/// The parse failure yamllint's lint step gives `input` without running when it holds a control
+/// character YAML forbids (see [`yaml::forbidden_char`]): yamllint would read a NUL as a sign of
+/// UTF-16 or UTF-32 text. `None` for every other tool and input.
+fn forbidden_by_yaml(tool: &ToolCartridge, input: &str) -> Option<lint::Verdict> {
+    let (line, c) = (tool.name == YAMLLINT)
+        .then(|| yaml::forbidden_char(input))
+        .flatten()?;
+    Some(lint::Verdict::Failed(format::Verdict::ParseFailed {
+        detail: format!(
+            "the block holds U+{:04X}, a control character YAML doesn't allow",
+            u32::from(c)
+        ),
+        line: Some(line),
+    }))
 }
 
 /// The linter that reads the block from a private file rather than stdin.
@@ -2726,14 +2869,22 @@ fn run_clippy(
 /// Why `tool`'s step on `record`'s block didn't really run, from tombi's run `result` at any exit
 /// status: tombi said it couldn't load a config (so it ran on rules the project didn't set), or
 /// that it skipped the step (see [`tombi::skip`]). The reason quotes what it said, without the
-/// path. `None` for any other run, and for a block tombi isn't given.
+/// path. Or, from yamllint's run, that it rejected the config supdoc gave it (see
+/// [`rejected_by_yamllint`]): the reason names the project's config, never what yamllint said.
+/// `None` for any other run, and for a block neither tool is given.
 fn config_skipped_by(
     record: &BlockRecord,
     tool: &ToolCartridge,
     result: &Result<Ran, runner::Failure>,
 ) -> Option<NotRun> {
-    let _given = record.tombi.as_ref()?;
     let ran = result.as_ref().ok()?;
+    if let Some(lint) = record.yamllint.as_ref().filter(|_| tool.name == YAMLLINT) {
+        return rejected_by_yamllint(ran).then(|| NotRun {
+            reason: YAMLLINT_REJECTED,
+            said: Some(lint.file.clone()),
+        });
+    }
+    let _given = record.tombi.as_ref()?;
     Some(match tombi::skip(tool.step(), &ran.stderr)? {
         tombi::Skip::Config(said) => NotRun {
             reason: TOMBI_CONFIG_SKIPPED,
@@ -2799,10 +2950,15 @@ fn run_in_place(
     record: &BlockRecord,
     session: &Session<'_>,
 ) -> Result<Ran, runner::Failure> {
-    match &record.tombi {
-        Some(project) => runner::run(
+    let private = match (&record.tombi, &record.yamllint) {
+        (Some(project), _) => Some(project.config_home.as_path()),
+        (None, Some(lint)) if call.name == YAMLLINT => Some(lint.cwd.as_path()),
+        (None, _) => None,
+    };
+    match private {
+        Some(dir) => runner::run(
             &Call {
-                cwd: runner::Cwd::Private(&project.config_home),
+                cwd: runner::Cwd::Private(dir),
                 ..*call
             },
             session.env,

@@ -85,7 +85,10 @@ nearest .git inside the root, never above the root; yamlfmt's and yamllint's up 
 A snippet lacks the code around it, so some rules are off for blocks: biome lint skips \
 noUnusedVariables, noUnusedImports and noUnusedFunctionParameters; rumdl turns off MD041, MD051 \
 and MD057; yamllint turns off document-start; ruff drops F706, F704 and PLE1142 for a \
-fragment(statements) block.
+fragment(statements) block. A YAML block whose yamllint comments switch every rule \
+off (disable, disable-line or disable-file naming no rule, or naming every rule between them) \
+isn't linted. The scan reads text, not YAML, so such a comment inside a string, or one an enable \
+comment undoes, counts too.
 
 Write attributes after a block's language, separated by spaces:
 
