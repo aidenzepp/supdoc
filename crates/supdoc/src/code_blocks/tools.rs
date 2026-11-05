@@ -5,9 +5,13 @@
 //! config.
 //!
 //! In a checkout supdoc doesn't trust, only [`Tier::Static`] tools run, and each gets the block on
-//! standard input, so it opens no other source file. A tool installed inside the checkout is never
-//! used. Each tool still reads its own config files, which can sit outside the project, and its
-//! errors can quote them.
+//! standard input, so it opens no other source file. A static tool installed inside the checkout
+//! is never used. Each tool still reads its own config files, which can sit outside the project,
+//! and its errors can quote them.
+//!
+//! A [`Tier::Project`] tool runs only once the operator trusts the checkout, so it may be one the
+//! checkout installed: it may be found inside the root, in its own bin directories before `PATH`,
+//! and may run from the root.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -18,7 +22,7 @@ use crate::config::code_blocks::{CodeBlocks, CustomCommand, Dialect, Edition, La
 use super::format::{ParseError, Positions};
 use super::fragment::{Kind, Support};
 use super::lint;
-use super::runner::{Failure, Ran};
+use super::runner::{Cwd, Failure, Ran};
 use super::{biome, go, python, rumdl, rust, shell, tombi, yaml};
 
 /// The variables a tool gets from supdoc's own environment, and no others.
@@ -90,13 +94,25 @@ pub(crate) enum Tier {
 }
 
 /// What a cartridge loads: its [`Tier`], and for a tool above [`Tier::Static`] what supdoc says
-/// when trust holds it back, so a project-tier tool can't be declared without those words.
+/// when trust holds it back, so a project-tier tool can't be declared without those words. Only a
+/// project-tier tool may run from the root or be found inside it, so a static one can't declare
+/// either.
 #[derive(Debug)]
 enum Loads {
-    /// Only the block on stdin and plain-data config: [`Tier::Static`].
+    /// Only the block on stdin and plain-data config: [`Tier::Static`]. It runs from the neutral
+    /// directory, and a binary the checkout chose is refused.
     Static,
-    /// Project code: [`Tier::Project`], held back by trust with these words.
-    Project(Held),
+    /// Project code: [`Tier::Project`].
+    Project {
+        /// What supdoc says when trust holds it back.
+        held: Held,
+        /// Where it runs: [`Cwd::Root`] for a tool that reads the project as its own command
+        /// line would.
+        cwd: Cwd<'static>,
+        /// The directories, relative to the root, searched for its binary before `PATH`, such as
+        /// `node_modules/.bin`: where the project installs its own copy.
+        bins: &'static [&'static str],
+    },
 }
 
 /// What supdoc says about a project-tier tool's step that trust held back. Each string names the
@@ -232,7 +248,26 @@ impl ToolCartridge {
     pub(crate) const fn tier(&self) -> Tier {
         match self.loads {
             Loads::Static => Tier::Static,
-            Loads::Project(_) => Tier::Project,
+            Loads::Project { .. } => Tier::Project,
+        }
+    }
+
+    /// Where it runs: [`Cwd::Neutral`] for a [`Tier::Static`] tool.
+    #[must_use]
+    pub(crate) const fn cwd(&self) -> Cwd<'static> {
+        match self.loads {
+            Loads::Static => Cwd::Neutral,
+            Loads::Project { cwd, .. } => cwd,
+        }
+    }
+
+    /// The root-relative directories searched for its binary before `PATH`: none for a
+    /// [`Tier::Static`] tool.
+    #[must_use]
+    pub(crate) const fn bins(&self) -> &'static [&'static str] {
+        match self.loads {
+            Loads::Static => &[],
+            Loads::Project { bins, .. } => bins,
         }
     }
 
@@ -242,7 +277,7 @@ impl ToolCartridge {
     pub(crate) const fn held(&self) -> Option<&Held> {
         match &self.loads {
             Loads::Static => None,
-            Loads::Project(held) => Some(held),
+            Loads::Project { held, .. } => Some(held),
         }
     }
 
@@ -361,6 +396,16 @@ impl Tool {
         match self {
             Self::Cartridge(cartridge) => cartridge.binary,
             Self::Custom(custom) => custom.command.program(),
+        }
+    }
+
+    /// The root-relative directories searched for its binary before `PATH`: a cartridge's, and
+    /// none for a custom command.
+    #[must_use]
+    pub(crate) const fn bins(&self) -> &'static [&'static str] {
+        match self {
+            Self::Cartridge(cartridge) => cartridge.bins(),
+            Self::Custom(_) => &[],
         }
     }
 
@@ -785,14 +830,19 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
         name: "clippy",
         language: Language::Rust,
         binary: "clippy-driver",
-        loads: Loads::Project(Held {
-            needs_trust: "clippy runs only in the project tier, which needs `supdoc trust`",
-            trust_off: "clippy runs only in the project tier, and `SUPDOC_TRUST=0` turns trust off \
-                        for this run",
-            short: "clippy needs trust",
-            didnt_run: "clippy didn't run on Rust blocks: it compiles them",
-            off: "`lint = \"off\"` in `[features.code-blocks.rust.clippy]`",
-        }),
+        loads: Loads::Project {
+            held: Held {
+                needs_trust: "clippy runs only in the project tier, which needs `supdoc trust`",
+                trust_off: "clippy runs only in the project tier, and `SUPDOC_TRUST=0` turns \
+                            trust off for this run",
+                short: "clippy needs trust",
+                didnt_run: "clippy didn't run on Rust blocks: it compiles them",
+                off: "`lint = \"off\"` in `[features.code-blocks.rust.clippy]`",
+            },
+            // No cwd lookup: the block compiles alone or against supdoc's build of the crate.
+            cwd: Cwd::Neutral,
+            bins: &[],
+        },
         install: "rustup component add clippy",
         config_files: &["clippy.toml", ".clippy.toml", "Cargo.toml"],
         modes: FULL_OR_OFF,
@@ -1403,9 +1453,11 @@ fn clippy_args(invocation: &Invocation<'_>) -> Vec<OsString> {
 pub(crate) enum Found {
     /// On `PATH`, outside the project root, at the real path held: the path a tool is run by.
     OnPath(PathBuf),
-    /// On `PATH`, but its real path is inside the project root, so the checkout chose it.
+    /// Chosen by the checkout, at the real path held: in one of the root's own bin directories,
+    /// wherever it resolves, or on `PATH` at a real path inside the root. Only a
+    /// [`Tier::Project`] tool runs one.
     InsideRoot(PathBuf),
-    /// Not on `PATH`.
+    /// In none of the root's bin directories and not on `PATH`.
     Missing,
 }
 
@@ -1414,6 +1466,24 @@ pub(crate) enum Found {
 /// Effect: reads file metadata along `PATH` and resolves symlinks.
 #[must_use]
 pub(crate) fn find(binary: &str, env: &ToolEnv, root: &Path) -> Found {
+    find_in(binary, &[], env, root)
+}
+
+/// Looks `binary` up in `bins`, directories relative to `root`, in order, then as [`find`] does.
+/// A match in `bins` is the checkout's choice wherever it resolves.
+///
+/// Effect: reads file metadata in `bins` and along `PATH`, and resolves symlinks.
+#[must_use]
+pub(crate) fn find_in(binary: &str, bins: &[&str], env: &ToolEnv, root: &Path) -> Found {
+    let local = bins.iter().map(|dir| root.join(dir)).find_map(|dir| {
+        let candidate = dir.join(binary);
+        is_executable_file(&candidate)
+            .then(|| candidate.canonicalize().ok())
+            .flatten()
+    });
+    if let Some(real) = local {
+        return Found::InsideRoot(real);
+    }
     let Some(real) = env.path().and_then(|path| first_on_path(binary, path)) else {
         return Found::Missing;
     };
@@ -1498,8 +1568,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        CARTRIDGES, Found, Hold, Invocation, Tier, ToolCartridge, ToolEnv, find, hold, search_dirs,
-        under_same_file,
+        CARTRIDGES, Cwd, Found, Hold, Invocation, Tier, ToolCartridge, ToolEnv, find, find_in,
+        hold, search_dirs, under_same_file,
     };
     use crate::code_blocks::fragment::{Frame, Kind};
     use crate::config::code_blocks::{Dialect, Edition, Language};
@@ -1992,6 +2062,54 @@ mod tests {
         fs::create_dir_all(&root).expect("the root should be creatable");
         fs::create_dir_all(&outside).expect("the outside directory should be creatable");
         (dir, root, outside)
+    }
+
+    #[test]
+    fn a_root_bin_dir_is_searched_before_path_and_its_match_is_the_checkouts_choice() {
+        let (_dir, root, outside) = dirs();
+        stub(&root.join("node_modules/.bin"), "prettier");
+        stub(&outside, "prettier");
+        let env = env_with_path(&[&outside]);
+
+        let found = find_in("prettier", &["node_modules/.bin"], &env, &root);
+        let real = root
+            .join("node_modules/.bin/prettier")
+            .canonicalize()
+            .expect("the stub should resolve");
+        assert_eq!(found, Found::InsideRoot(real), "the bin dir comes first");
+        assert!(
+            matches!(find("prettier", &env, &root), Found::OnPath(_)),
+            "without bin dirs only PATH is searched"
+        );
+    }
+
+    #[test]
+    fn a_root_bin_dir_entry_linked_outside_is_still_the_checkouts_choice() {
+        let (_dir, root, outside) = dirs();
+        stub(&outside, "eslint");
+        let bin = root.join("node_modules/.bin");
+        fs::create_dir_all(&bin).expect("the bin dir should be creatable");
+        symlink(outside.join("eslint"), bin.join("eslint")).expect("the symlink should be made");
+
+        let found = find_in("eslint", &["node_modules/.bin"], &env_with_path(&[]), &root);
+        assert!(matches!(found, Found::InsideRoot(_)), "{found:?}");
+    }
+
+    #[test]
+    fn a_tool_in_no_bin_dir_falls_back_to_path() {
+        let (_dir, root, outside) = dirs();
+        stub(&outside, "pylint");
+
+        let found = find_in("pylint", &[".venv/bin"], &env_with_path(&[&outside]), &root);
+        assert!(matches!(found, Found::OnPath(_)), "{found:?}");
+    }
+
+    #[test]
+    fn no_cartridge_searches_a_bin_dir_and_each_runs_from_the_neutral_directory() {
+        for tool in &CARTRIDGES {
+            assert_eq!(tool.bins(), &[] as &[&str], "{}", tool.name);
+            assert_eq!(tool.cwd(), Cwd::Neutral, "{}", tool.name);
+        }
     }
 
     #[test]

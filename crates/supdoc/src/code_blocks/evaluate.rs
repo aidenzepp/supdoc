@@ -307,7 +307,7 @@ impl Evaluation {
     /// per block not in it, killing it at the timeout.
     pub(crate) fn look_up_tools(&mut self, env: &ToolEnv, root: &Path) {
         let mut cache: Option<Option<Cache>> = None;
-        let mut looked_up: Vec<(String, Found)> = Vec::new();
+        let mut looked_up: Vec<Lookup> = Vec::new();
         let mut rust_setup: Option<RustSetup> = None;
         let mut against: Option<Against> = None;
         let build_timeout = self.build_timeout;
@@ -595,7 +595,7 @@ fn refuse_unfound(
     steps: &mut Steps,
     tools: [Option<Tool>; 2],
     ran: [bool; 2],
-    looked_up: &[(String, Found)],
+    looked_up: &[Lookup],
 ) {
     for ((step, tool), ran) in [&mut steps.format, &mut steps.lint]
         .into_iter()
@@ -605,8 +605,10 @@ fn refuse_unfound(
         let Some(tool) = tool.filter(|_| !ran) else {
             continue;
         };
-        let inside_root = looked_up.iter().any(|(binary, found)| {
-            binary == tool.binary() && matches!(found, Found::InsideRoot(_))
+        let inside_root = looked_up.iter().any(|known| {
+            known.binary == tool.binary()
+                && known.bins == tool.bins()
+                && matches!(known.found, Found::InsideRoot(_))
         });
         *step = StepState::ToolRefused {
             binary: tool.binary().to_owned(),
@@ -3238,7 +3240,7 @@ fn named_by(
 }
 
 /// `judge` applied to `run`, read from `session`'s cache when its key is there, otherwise run
-/// through `spawn` (which runs the call from the neutral directory with the session's env) under
+/// through `spawn` (which runs the call from where the tool runs, with the session's env) under
 /// its timeout, and stored in the cache when `cacheable` allows the verdict.
 ///
 /// Effect: reads the cache, runs the tool through `spawn`, and writes the cache.
@@ -3266,7 +3268,7 @@ fn cached_run<V>(
         extra: run.extra,
         stdin: run.input.as_bytes(),
         timeout,
-        cwd: runner::Cwd::Neutral,
+        cwd: run.tool.cwd(),
         cap: runner::CAP,
     };
     let result = spawn(&call);
@@ -3388,15 +3390,30 @@ fn rust_refusal(
     }
 }
 
-/// Looks up each of `tools` on `env`'s `PATH` (once per binary, remembered in `looked_up`, so two
-/// tools sharing one binary, such as `ruff-format` and `ruff`, warn once), adding to `slots` the
-/// warning for one not found outside `root`, at `at`. Each found tool's run, in
-/// `tools`' order, and the state for the first one that wasn't, with that tool.
+/// One binary's lookup, remembered for the run: where it was found from its tool's bin
+/// directories, and whether its one warning was given.
+struct Lookup {
+    /// The binary looked up.
+    binary: String,
+    /// The root-relative directories searched before `PATH`.
+    bins: &'static [&'static str],
+    /// Where it was found.
+    found: Found,
+    /// Whether the run's one warning for the binary was given.
+    warned: bool,
+}
+
+/// Looks up each of `tools` in its bin directories and on `env`'s `PATH` (once per binary and
+/// directories, remembered in `looked_up`), adding to `slots` the warning for one that can't run,
+/// at `at`, once per binary, so two tools sharing one binary, such as `ruff-format` and `ruff`,
+/// warn once. A tool found inside `root` runs only when it is [`Tier::Project`], which the tier
+/// gate let through. Each found tool's run, in `tools`' order, and the state for the first one
+/// that can't run, with that tool.
 ///
-/// Effect: reads file metadata along `PATH` and resolves symlinks.
+/// Effect: reads file metadata in the bin directories and along `PATH`, and resolves symlinks.
 fn found_runs(
     tools: [Option<Tool>; 2],
-    looked_up: &mut Vec<(String, Found)>,
+    looked_up: &mut Vec<Lookup>,
     slots: &mut Vec<Slot>,
     env: &ToolEnv,
     root: &Path,
@@ -3408,27 +3425,47 @@ fn found_runs(
         let Some(tool) = tool else {
             continue;
         };
-        let binary = tool.binary();
-        let found = if let Some((_, found)) = looked_up.iter().find(|(known, _)| known == binary) {
-            found.clone()
-        } else {
-            let found = find(binary, env, root);
-            let install = match tool.cartridge() {
-                Some(cartridge) => format!("install it with `{}`", cartridge.install),
-                None => format!("put `{binary}` on PATH"),
-            };
-            slots.extend(tool_warning(binary, &install, &found, at).map(Slot::Found));
-            looked_up.push((binary.to_owned(), found.clone()));
+        let (binary, bins) = (tool.binary(), tool.bins());
+        let known = looked_up
+            .iter()
+            .find(|known| known.binary == binary && known.bins == bins)
+            .map(|known| known.found.clone());
+        let found = known.unwrap_or_else(|| {
+            let found = tools::find_in(binary, bins, env, root);
+            looked_up.push(Lookup {
+                binary: binary.to_owned(),
+                bins,
+                found: found.clone(),
+                warned: false,
+            });
             found
-        };
-        let state = match found {
+        });
+        let state = match found.clone() {
             Found::OnPath(program) => {
+                *run = Some(ToolRun { tool, program });
+                continue;
+            }
+            Found::InsideRoot(program) if tool.tier() == Tier::Project => {
                 *run = Some(ToolRun { tool, program });
                 continue;
             }
             Found::Missing => BlockState::ToolMissing,
             Found::InsideRoot(_) => BlockState::NotChecked(NotChecked::ToolInsideRoot),
         };
+        if !looked_up
+            .iter()
+            .any(|known| known.binary == binary && known.warned)
+        {
+            let install = match tool.cartridge() {
+                Some(cartridge) => format!("install it with `{}`", cartridge.install),
+                None => format!("put `{binary}` on PATH"),
+            };
+            slots.extend(tool_warning(binary, &install, &found, at).map(Slot::Found));
+            looked_up
+                .iter_mut()
+                .filter(|known| known.binary == binary && known.bins == bins)
+                .for_each(|known| known.warned = true);
+        }
         let _first = refused.get_or_insert((state, tool));
     }
     (runs, refused)

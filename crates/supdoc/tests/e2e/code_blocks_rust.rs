@@ -703,6 +703,90 @@ fn a_root_in_the_trust_store_is_trusted_like_supdoc_trust_1() {
     trusted_check_with_stubs(&project, &stubs, &[("XDG_STATE_HOME", state.path())]);
 }
 
+/// A tool found inside the checkout: only a trusted project-tier one runs.
+mod containment {
+    use std::path::{Path, PathBuf};
+
+    use super::{
+        CLIPPY_BAIT, FORMAT_OFF, clippy_project, finding_kinds, project_with_rust_doc, rust_stubs,
+        stub_record,
+    };
+    use crate::support::{Project, at};
+
+    /// Moves the stub `name` from `stubs` into `project`'s `bin/`, where it still records its runs in
+    /// `stubs`, and returns that directory.
+    fn stub_inside(project: &Project, stubs: &tempfile::TempDir, name: &str) -> PathBuf {
+        let bin = project.path("bin");
+        std::fs::create_dir_all(&bin).expect("the in-root bin dir should be creatable");
+        let _bytes = std::fs::copy(stubs.path().join(name), bin.join(name))
+            .expect("the stub should be copyable");
+        std::fs::remove_file(stubs.path().join(name))
+            .expect("the outside stub should be removable");
+        bin
+    }
+
+    #[test]
+    fn a_trusted_project_tier_tool_inside_the_checkout_runs() {
+        let project = clippy_project(FORMAT_OFF);
+        let stubs = rust_stubs();
+        let bin = stub_inside(&project, &stubs, "clippy-driver");
+        let path = std::env::join_paths([bin.as_path(), stubs.path()]).expect("PATH should join");
+
+        let json = project
+            .supdoc_in_with(
+                ".",
+                &["check", "--json", "-v"],
+                &[("PATH", Path::new(&path)), ("SUPDOC_TRUST", Path::new("1"))],
+            )
+            .assert_exit(0)
+            .json();
+
+        assert_eq!(finding_kinds(&json), Vec::<String>::new(), "{json}");
+        assert_eq!(
+            stub_record(stubs.path(), "clippy-driver-runs"),
+            "run\nrun\n",
+            "the in-root clippy-driver should run once per block: {json}"
+        );
+        for block in ["/data/code_blocks/0", "/data/code_blocks/1"] {
+            assert_eq!(at(&json, &format!("{block}/lint")), "ran", "{json}");
+        }
+    }
+
+    #[test]
+    fn a_static_tier_tool_inside_the_checkout_is_not_checked_in_every_grant() {
+        let project = project_with_rust_doc(CLIPPY_BAIT);
+        let stubs = rust_stubs();
+        let bin = stub_inside(&project, &stubs, "rustfmt");
+
+        for trust in [None, Some("0"), Some("1")] {
+            let mut vars = vec![("PATH", bin.as_path())];
+            vars.extend(trust.map(|trust| ("SUPDOC_TRUST", Path::new(trust))));
+            let json = project
+                .supdoc_in_with(".", &["check", "--json"], &vars)
+                .assert_exit(0)
+                .json();
+
+            assert_eq!(
+                finding_kinds(&json),
+                ["code-block-not-checked"],
+                "SUPDOC_TRUST={trust:?}: {json}"
+            );
+            for block in ["/data/code_blocks/0", "/data/code_blocks/1"] {
+                assert_eq!(
+                    at(&json, &format!("{block}/reason")),
+                    "`rustfmt` is inside the checkout",
+                    "SUPDOC_TRUST={trust:?}: {json}"
+                );
+            }
+        }
+        assert_eq!(
+            stub_record(stubs.path(), "rustfmt-runs"),
+            "",
+            "no in-root rustfmt may start"
+        );
+    }
+}
+
 #[test]
 fn supdoc_trust_0_turns_off_a_listed_roots_trust_and_says_so_in_the_reason_and_warning() {
     let project = clippy_project("");
