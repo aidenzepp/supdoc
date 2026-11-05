@@ -296,8 +296,8 @@ fn not_its_kind(tool: &ToolCartridge, frame: Frame) -> Finding {
         ),
     )
     .with_help(format!(
-        "fix the code so it reads as {} fragment, name the kind it is in `fragment(<kind>)`, \
-         or mark the block `lint(off: <reason>)`",
+        "fix the code so it reads as {} fragment, write the lines around the code in the block \
+         and drop `fragment(...)`, or mark the block `lint(off: <reason>)`",
         frame.kind.with_article()
     ))
 }

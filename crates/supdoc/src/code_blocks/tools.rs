@@ -270,21 +270,13 @@ const RUFF_FRAGMENTS: &[(Kind, Support)] = &[
 /// an expression in parentheses (an assignment included), and map entries and a markup
 /// element's children (only in a `tsx` or `jsx` block, see [`biome::holds`]) as the value of a
 /// `const`, children in a `<div>`, never a `<>`, which biome calls unnecessary around one child.
-/// biome lint prints no code, so the output lines are the input's.
+/// biome lint prints no code, so the output lines are the input's. A JavaScript block reads
+/// these; a TypeScript block reads [`BIOME_LINT_TS_FRAGMENTS`].
 const BIOME_LINT_FRAGMENTS: &[(Kind, Support)] = &[
-    (
-        Kind::Statements,
-        framed(
-            "async function supdocFragment$() { await Promise.resolve();",
-            "}",
-        ),
-    ),
-    (Kind::Expression, framed("(", ")")),
-    (Kind::Entries, framed("const supdocFragment$ = {", "};")),
-    (
-        Kind::Children,
-        framed("const supdocFragment$ = <div>", "</div>;"),
-    ),
+    BIOME_LINT_STATEMENTS,
+    BIOME_LINT_EXPRESSION,
+    BIOME_LINT_ENTRIES,
+    BIOME_LINT_CHILDREN,
     (
         Kind::Members,
         framed(
@@ -293,6 +285,45 @@ const BIOME_LINT_FRAGMENTS: &[(Kind, Support)] = &[
         ),
     ),
 ];
+
+/// [`BIOME_LINT_FRAGMENTS`] for a TypeScript block, whose members frame is an `abstract`
+/// class so an abstract member reads as written. JavaScript has no abstract class, so a
+/// JavaScript block keeps the plain one.
+const BIOME_LINT_TS_FRAGMENTS: &[(Kind, Support)] = &[
+    BIOME_LINT_STATEMENTS,
+    BIOME_LINT_EXPRESSION,
+    BIOME_LINT_ENTRIES,
+    BIOME_LINT_CHILDREN,
+    (
+        Kind::Members,
+        framed(
+            "abstract class SupdocFragment$ { supdocFrame$() { return this; }",
+            "}",
+        ),
+    ),
+];
+
+/// biome lint's statements frame, in both languages.
+const BIOME_LINT_STATEMENTS: (Kind, Support) = (
+    Kind::Statements,
+    framed(
+        "async function supdocFragment$() { await Promise.resolve();",
+        "}",
+    ),
+);
+
+/// biome lint's expression frame, in both languages.
+const BIOME_LINT_EXPRESSION: (Kind, Support) = (Kind::Expression, framed("(", ")"));
+
+/// biome lint's entries frame, in both languages.
+const BIOME_LINT_ENTRIES: (Kind, Support) =
+    (Kind::Entries, framed("const supdocFragment$ = {", "};"));
+
+/// biome lint's children frame, in both languages.
+const BIOME_LINT_CHILDREN: (Kind, Support) = (
+    Kind::Children,
+    framed("const supdocFragment$ = <div>", "</div>;"),
+);
 
 /// A frame of `before` and `after` that a linter reads, which prints nothing back.
 const fn framed(before: &'static str, after: &'static str) -> Support {
@@ -459,7 +490,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 15] = [
         install: "npm install --global @biomejs/biome",
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
-        fragments: BIOME_LINT_FRAGMENTS,
+        fragments: BIOME_LINT_TS_FRAGMENTS,
         holds: biome::holds,
         argv: biome_lint_args,
         reader: Reader::Lint(biome::lint_verdict),
@@ -1510,17 +1541,55 @@ mod tests {
         assert!(under_same_file(&real, &alias));
     }
 
+    /// A frame row of `check --help`: its tool, its kind, its frame and the language its
+    /// marker names, `None` for a row every one of the tool's languages reads.
+    struct HelpRow<'a> {
+        tool: &'a str,
+        kind: &'a str,
+        frame: &'a str,
+        language: Option<Language>,
+        line: &'a str,
+    }
+
+    impl HelpRow<'_> {
+        /// Whether this row lists `frame` as `tool`'s frame for `kind`.
+        fn lists(&self, tool: &ToolCartridge, kind: Kind, frame: &str) -> bool {
+            self.tool == tool.name
+                && self.kind == kind.name()
+                && self.frame == frame
+                && self
+                    .language
+                    .is_none_or(|language| language == tool.language)
+        }
+    }
+
     #[test]
     fn check_help_lists_exactly_the_frames_the_tools_read() {
-        let rows: Vec<(&str, &str, &str)> = crate::cli::help::CHECK_LONG_ABOUT
+        let rows: Vec<HelpRow<'_>> = crate::cli::help::CHECK_LONG_ABOUT
             .lines()
             .filter_map(|line| {
                 let mut words = line.split_whitespace();
                 let (tool, kind) = (words.next()?, words.next()?);
+                let rest = line.trim_start().strip_prefix(tool)?.trim_start();
+                let mut columns = rest
+                    .strip_prefix(kind)?
+                    .split("  ")
+                    .map(str::trim)
+                    .filter(|column| !column.is_empty());
+                let (frame, marker) = (columns.next()?, columns.next().unwrap_or_default());
+                let language = [Language::TypeScript, Language::JavaScript]
+                    .into_iter()
+                    .find(|language| marker.to_lowercase().contains(language.table()));
                 (line.starts_with("  ")
                     && CARTRIDGES.iter().any(|known| known.name == tool)
                     && Kind::from_name(kind).is_some())
-                .then_some((tool, kind, line))
+                .then_some(HelpRow {
+                    tool,
+                    kind,
+                    frame,
+                    language,
+                    line,
+                })
             })
             .collect();
         let frames: Vec<(&ToolCartridge, Kind, String)> = CARTRIDGES
@@ -1534,24 +1603,21 @@ mod tests {
             .collect();
 
         for (tool, kind, shown) in &frames {
-            let row = rows
-                .iter()
-                .find(|(name, listed, _)| *name == tool.name && *listed == kind.name())
-                .map(|(_, _, line)| *line);
             assert!(
-                row.is_some_and(|line| line.contains(shown.as_str())),
-                "`check --help` should list {}'s {} frame as `{shown}`: {row:?}",
+                rows.iter().any(|row| row.lists(tool, *kind, shown)),
+                "`check --help` should list {} for {}'s {} frame as `{shown}`",
                 tool.name,
+                tool.language.table(),
                 kind.name()
             );
         }
-        for (name, listed, line) in &rows {
-            let frame = frames.iter().find(|(tool, kind, shown)| {
-                tool.name == *name && kind.name() == *listed && line.contains(shown.as_str())
-            });
+        for row in &rows {
             assert!(
-                frame.is_some(),
-                "`check --help` lists a frame no tool reads: {line}"
+                frames
+                    .iter()
+                    .any(|(tool, kind, shown)| row.lists(tool, *kind, shown)),
+                "`check --help` lists a frame no tool reads: {}",
+                row.line
             );
         }
     }
