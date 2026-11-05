@@ -373,3 +373,224 @@ fn docstring_doctest_session_and_literal_block_are_not_checked() {
 
     assert!(finding_kinds(&json).is_empty(), "{json}");
 }
+
+/// The config that selects pylint, with ruff format's step off so pylint is the block's one tool.
+const PYLINT: &str =
+    "linter = \"pylint\"\n[features.code-blocks.python.ruff-format]\nformat = \"off\"\n";
+
+/// The reason a block gives when pylint was held because the checkout isn't trusted.
+const PYLINT_NEEDS_TRUST: &str = "pylint runs only in the project tier, which needs `supdoc trust`";
+
+/// A pylint report with no message that linted `modules` modules, as a shell `printf` argument.
+fn empty_report(modules: usize) -> String {
+    format!("'{{\"messages\": [], \"statistics\": {{\"modulesLinted\": {modules}}}}}'")
+}
+
+/// Writes a `pylint` stub in `dir` that appends its working directory and arguments to
+/// `<dir>/pylint-runs`, one line per run, then runs `script`.
+fn pylint_stub(dir: &Path, script: &str) {
+    let record = dir.join("pylint-runs");
+    stub(
+        dir,
+        "pylint",
+        &format!("echo \"$(pwd -P) $*\" >> '{}'\n{script}", record.display()),
+    );
+}
+
+/// The lines `pylint_stub` in `dir` recorded: one per run.
+fn pylint_runs(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("pylint-runs"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Runs a trusted `check --json` on `project` with `path` as the only `PATH` entry and its cache
+/// in `cache`, asserting it exits `exit`.
+fn trusted_pylint_check(
+    project: &Project,
+    path: &Path,
+    cache: &Path,
+    exit: i32,
+) -> serde_json::Value {
+    project
+        .supdoc_in_with(
+            ".",
+            &["check", "--json"],
+            &[
+                ("PATH", path),
+                ("SUPDOC_TRUST", Path::new("1")),
+                ("XDG_CACHE_HOME", cache),
+            ],
+        )
+        .assert_exit(exit)
+        .json()
+}
+
+#[test]
+fn pylint_runs_from_the_root_with_its_argv_and_spawns_again_on_a_second_run() {
+    let project = project_with_python_block(PYLINT, "x = 1");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    pylint_stub(outside.path(), &format!("printf {}", empty_report(1)));
+
+    let first = trusted_pylint_check(&project, outside.path(), cache.path(), 0);
+    let second = trusted_pylint_check(&project, outside.path(), cache.path(), 0);
+
+    let root = project
+        .path(".")
+        .canonicalize()
+        .expect("the project root should resolve");
+    let runs = pylint_runs(outside.path());
+    assert_eq!(
+        runs.len(),
+        2,
+        "pylint is never cached, so each run spawns it: {runs:?}"
+    );
+    for run in &runs {
+        let (cwd, args) = run
+            .split_once(' ')
+            .expect("the record names a cwd and args");
+        assert_eq!(Path::new(cwd), root, "pylint runs from the root: {run}");
+        let args: Vec<&str> = args.split(' ').collect();
+        let [
+            "--from-stdin",
+            path,
+            "--output-format=json2",
+            "--disable=W0611,W0612,C0114,E0602",
+        ] = args.as_slice()
+        else {
+            panic!("pylint should get its four arguments: {run}");
+        };
+        assert!(path.ends_with("/docs/blocks.md.1.py"), "{run}");
+    }
+    for json in [first, second] {
+        assert!(finding_kinds(&json).is_empty(), "{json}");
+        assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+    }
+}
+
+#[test]
+fn pylint_in_the_projects_venv_runs_before_one_on_path() {
+    let project = project_with_python_block(PYLINT, "x = 1");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let venv = project.path(".venv/bin");
+    std::fs::create_dir_all(&venv).expect("the venv bin directory should be creatable");
+    pylint_stub(&venv, &format!("printf {}", empty_report(1)));
+    pylint_stub(outside.path(), "exit 9");
+
+    let json = trusted_pylint_check(&project, outside.path(), cache.path(), 0);
+
+    assert_eq!(pylint_runs(&venv).len(), 1, "{json}");
+    assert!(pylint_runs(outside.path()).is_empty(), "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+}
+
+#[test]
+fn pylint_skip_file_in_the_block_is_lint_not_run_naming_lint_off() {
+    let project = project_with_python_block(PYLINT, "# pylint: skip-file\nx = 1");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    pylint_stub(outside.path(), &format!("printf {}", empty_report(1)));
+
+    let json = trusted_pylint_check(&project, outside.path(), cache.path(), 0);
+
+    assert!(
+        pylint_runs(outside.path()).is_empty(),
+        "pylint never starts: {json}"
+    );
+    assert_eq!(at(&json, "/data/code_blocks/0/lint"), "not_run", "{json}");
+    let reason = at(&json, "/data/code_blocks/0/reason");
+    assert!(
+        reason
+            .as_str()
+            .is_some_and(|reason| reason.contains("lint(off: <reason>)")),
+        "{json}"
+    );
+}
+
+#[test]
+fn pylint_that_linted_no_module_is_lint_not_run() {
+    let project = project_with_python_block(PYLINT, "x = 1");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    pylint_stub(outside.path(), &format!("printf {}", empty_report(0)));
+
+    let json = trusted_pylint_check(&project, outside.path(), cache.path(), 0);
+
+    assert!(finding_kinds(&json).is_empty(), "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/lint"), "not_run", "{json}");
+    let reason = at(&json, "/data/code_blocks/0/reason");
+    assert!(
+        reason.as_str().is_some_and(|reason| reason.ends_with(
+            "pylint linted no module: the project's pylint config leaves the block out"
+        )),
+        "{json}"
+    );
+}
+
+#[test]
+fn pylint_trusted_reports_a_finding_at_its_doc_line() {
+    let Some(dir) = real_tool_dir("pylint", "pylint_trusted_reports_a_finding_at_its_doc_line")
+    else {
+        return;
+    };
+    let project = project_with_python_block(PYLINT, "X = 1\nif X == None:\n    pass");
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+
+    let json = trusted_pylint_check(&project, &dir, cache.path(), 1);
+
+    assert_eq!(finding_kinds(&json), ["code-block-lint"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 5, "{json}");
+    assert_eq!(at(&json, "/findings/0/location/column"), 4, "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/lint"), "ran", "{json}");
+}
+
+#[test]
+fn pylint_syntax_error_is_a_parse_error_at_its_doc_line() {
+    let Some(dir) = real_tool_dir(
+        "pylint",
+        "pylint_syntax_error_is_a_parse_error_at_its_doc_line",
+    ) else {
+        return;
+    };
+    let project = project_with_python_block(PYLINT, "X = 1\ndef f(:\n    pass");
+    let cache = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+
+    let json = trusted_pylint_check(&project, &dir, cache.path(), 1);
+
+    assert_eq!(finding_kinds(&json), ["code-block-parse"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 5, "{json}");
+}
+
+#[test]
+fn pylint_untrusted_is_lint_not_run_naming_trust() {
+    let Some(dir) = real_tool_dir("pylint", "pylint_untrusted_is_lint_not_run_naming_trust") else {
+        return;
+    };
+    let project = project_with_python_block(PYLINT, "X = 1\nif X == None:\n    pass");
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", &dir)])
+        .assert_exit(0)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-not-trusted"], "{json}");
+    let message = at(&json, "/findings/0/message");
+    assert!(
+        message
+            .as_str()
+            .is_some_and(|message| message.contains("pylint didn't run")),
+        "{json}"
+    );
+    assert_eq!(at(&json, "/data/code_blocks/0/lint"), "not_run", "{json}");
+    let reason = at(&json, "/data/code_blocks/0/reason");
+    assert!(
+        reason
+            .as_str()
+            .is_some_and(|reason| reason.ends_with(PYLINT_NEEDS_TRUST)),
+        "{json}"
+    );
+}

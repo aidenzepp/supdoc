@@ -228,6 +228,9 @@ pub(crate) mod code_blocks {
     /// Python's format and lint steps.
     mod python;
 
+    /// pylint's lint step, a project-tier Python linter.
+    mod pylint;
+
     /// TypeScript, JavaScript and JSON's format and lint steps, run by biome.
     mod biome;
     /// Markdown's format and lint steps, run by rumdl.

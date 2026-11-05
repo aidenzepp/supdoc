@@ -66,7 +66,7 @@ top-level keys, and never change which files links are read from. A language's t
 
   rust          formatter rustfmt, linter clippy, edition \"2015\" to \"2024\"
   shell         formatter shfmt, linter shellcheck, dialect \"bash\", \"posix\" or \"mksh\"
-  python        formatter \"ruff-format\" (the default) or \"black\", linter ruff
+  python        formatter \"ruff-format\" (the default) or \"black\", linter ruff (the default) or \"pylint\"
   typescript    formatter biome-format, linter biome-lint
   javascript    formatter biome-format, linter biome-lint
   json          formatter biome-format, linter biome-lint; tag a block with comments jsonc

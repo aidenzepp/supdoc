@@ -36,6 +36,7 @@ use super::info::{
 };
 use super::lint;
 use super::project::{self, BuildFailed, Plan, Refused};
+use super::pylint;
 use super::rumdl;
 use super::runner::{self, Call, Ran};
 use super::rust::{self, Scan};
@@ -568,6 +569,9 @@ fn run_jobs(
             let Some(tool) = run.tool.cartridge() else {
                 return Some(Err(CUSTOM_NOT_WIRED.into()));
             };
+            if switched_off(tool, record) {
+                return Some(Err(PYLINT_SWITCHED_OFF.into()));
+            }
             let rust = rust.filter(|_| run.tool.is("clippy"));
             run_linter(tool, &run.program, record, session, rust)
         });
@@ -2858,10 +2862,33 @@ const TOMBI_LINT: &str = "tombi-lint";
 /// Why tombi lint's step didn't run on a block when tombi didn't report linting it.
 const TOMBI_LINTED_NOTHING: &str = "tombi lint didn't report checking the block";
 
+/// The name of pylint's cartridge.
+const PYLINT: &str = "pylint";
+
+/// Why pylint's step didn't run on a block when its report says it linted no module.
+const PYLINT_LINTED_NOTHING: &str =
+    "pylint linted no module: the project's pylint config leaves the block out";
+
+/// Why pylint's step didn't run on a block holding a pylint comment that switches every message
+/// off (see [`pylint::switches_lint_off`]).
+const PYLINT_SWITCHED_OFF: &str = "the block holds a pylint comment that switches it off for the \
+                                   whole block; mark it `lint(off: <reason>)` instead";
+
+/// Whether `tool` is pylint and `record`'s block holds a pylint comment that switches it off for
+/// the whole block (see [`pylint::switches_lint_off`]), so the step doesn't run and pylint is
+/// never spawned.
+fn switched_off(tool: &ToolCartridge, record: &BlockRecord) -> bool {
+    tool.name == PYLINT
+        && record
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pylint::switches_lint_off(&pending.input))
+}
+
 /// Why `tool`'s finished run `ran` says nothing about its block, so its step counts as not run:
 /// biome lint, given the block as a file (`biome_file`), checked no file; tombi lint didn't
-/// report linting it; or go vet couldn't load the block `input` (see [`go::vet_not_run`]).
-/// `None` otherwise.
+/// report linting it; pylint linted no module; or go vet couldn't load the block `input` (see
+/// [`go::vet_not_run`]). `None` otherwise.
 fn said_nothing(
     tool: &ToolCartridge,
     biome_file: bool,
@@ -2873,6 +2900,7 @@ fn said_nothing(
             biome::linted_nothing(&ran.stdout).then_some(BIOME_LINTED_NOTHING)
         }
         TOMBI_LINT => tombi::linted_nothing(ran).then_some(TOMBI_LINTED_NOTHING),
+        PYLINT => pylint::linted_nothing(&ran.stdout).then_some(PYLINT_LINTED_NOTHING),
         GO_VET => go::vet_not_run(input, ran),
         _ => None,
     }
@@ -3241,7 +3269,8 @@ fn named_by(
 
 /// `judge` applied to `run`, read from `session`'s cache when its key is there, otherwise run
 /// through `spawn` (which runs the call from where the tool runs, with the session's env) under
-/// its timeout, and stored in the cache when `cacheable` allows the verdict.
+/// its timeout, and stored in the cache when `cacheable` allows the verdict. A tool whose runs
+/// are never cached (see [`ToolCartridge::cacheable`]) is always spawned.
 ///
 /// Effect: reads the cache, runs the tool through `spawn`, and writes the cache.
 fn cached_run<V>(
@@ -3257,7 +3286,9 @@ fn cached_run<V>(
         cache,
         ..
     } = *session;
-    let key = cache.and_then(|_| Cache::key(run, root));
+    let key = cache
+        .filter(|_| run.tool.cacheable())
+        .and_then(|_| Cache::key(run, root));
     if let Some(ran) = cache.zip(key).and_then(|(cache, key)| cache.get(key)) {
         return judge(Ok(ran));
     }
