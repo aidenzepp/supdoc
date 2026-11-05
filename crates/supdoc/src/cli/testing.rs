@@ -139,6 +139,7 @@ impl Session {
             global: cli.global.clone(),
             cwd,
             global_excludes: GlobalExcludes::none(),
+            trust: crate::trust::TrustEnv::default(),
         };
         Self {
             cli,

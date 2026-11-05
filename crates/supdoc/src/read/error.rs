@@ -144,10 +144,11 @@ pub(crate) enum ReadError {
 /// The code of [`ReadError::Timeout`]. Every command that meets it exits 1.
 pub(crate) const CODE_TIMEOUT: &str = "read-timeout";
 
-/// How to raise the per-file read ceiling: its key, variable and flag, and the value that lifts it.
-const TIMEOUT_KNOBS: &str = "Raise the per-read limit with `parse-timeout` under `[limits]` in \
-     `supdoc.config.toml`, `SUPDOC_PARSE_TIMEOUT` or `--parse-timeout` (such as `30s`, or `0` for \
-     no limit)";
+/// How to raise the per-file read ceiling: its flag and variable, the value that lifts it, and its
+/// config key, which raises it only in a trusted checkout.
+const TIMEOUT_KNOBS: &str = "Raise the per-read limit with `--parse-timeout` or \
+     `SUPDOC_PARSE_TIMEOUT` (such as `30s`, or `0` for no limit). `parse-timeout` under `[limits]` \
+     in `supdoc.config.toml` raises it only in a checkout you trust (`supdoc trust`)";
 
 /// The code of [`ReadError::TooManyKeys`], the `max-key-segments` ceiling.
 pub(crate) const CODE_TOO_MANY_KEYS: &str = "read-too-many-keys";
@@ -177,22 +178,23 @@ pub(crate) const UNCHECKED_CODES: [&str; 10] = [
     "read-internal",
 ];
 
-/// How to raise the key-path segment ceiling: its key, variable and flag, and the value that
-/// lifts it.
-const SEGMENT_KNOBS: &str = "Raise the limit with `max-key-segments` under `[limits]` in \
-     `supdoc.config.toml`, `SUPDOC_MAX_KEY_SEGMENTS` or `--max-key-segments` (such as `500000`, \
-     or `0` for no limit)";
+/// How to raise the key-path segment ceiling: its flag and variable, the value that lifts it, and
+/// its config key, which raises it only in a trusted checkout.
+const SEGMENT_KNOBS: &str = "Raise the limit with `--max-key-segments` or \
+     `SUPDOC_MAX_KEY_SEGMENTS` (such as `500000`, or `0` for no limit). `max-key-segments` under \
+     `[limits]` in `supdoc.config.toml` raises it only in a checkout you trust (`supdoc trust`)";
 
-/// How to raise the key-path text ceiling: its key, variable and flag, and the value that lifts
-/// it.
-const KEY_PATH_SIZE_KNOBS: &str = "Raise the limit with `max-key-path-size` under `[limits]` in \
-     `supdoc.config.toml`, `SUPDOC_MAX_KEY_PATH_SIZE` or `--max-key-path-size` (such as `64MiB`, \
-     or `0` for no limit)";
+/// How to raise the key-path text ceiling: its flag and variable, the value that lifts it, and its
+/// config key, which raises it only in a trusted checkout.
+const KEY_PATH_SIZE_KNOBS: &str = "Raise the limit with `--max-key-path-size` or \
+     `SUPDOC_MAX_KEY_PATH_SIZE` (such as `64MiB`, or `0` for no limit). `max-key-path-size` under \
+     `[limits]` in `supdoc.config.toml` raises it only in a checkout you trust (`supdoc trust`)";
 
-/// How to raise the file size ceiling: its key, variable and flag, and the value that lifts it.
-const FILE_SIZE_KNOBS: &str = "Raise the limit with `max-file-size` under `[limits]` in \
-     `supdoc.config.toml`, `SUPDOC_MAX_FILE_SIZE` or `--max-file-size` (such as `32MiB`, or `0` \
-     for no limit)";
+/// How to raise the file size ceiling: its flag and variable, the value that lifts it, and its
+/// config key, which raises it only in a trusted checkout.
+const FILE_SIZE_KNOBS: &str = "Raise the limit with `--max-file-size` or `SUPDOC_MAX_FILE_SIZE` \
+     (such as `32MiB`, or `0` for no limit). `max-file-size` under `[limits]` in \
+     `supdoc.config.toml` raises it only in a checkout you trust (`supdoc trust`)";
 
 /// What to do about a read the filesystem refused with `kind`: only a permission error is fixed
 /// by `chmod`.

@@ -5,6 +5,10 @@
 //! in the `extends` chain, which beats the built-in default. `0` means no limit. Every other value
 //! carries a unit (`ms`, `s`, `m` for time; `B`, `KiB`, `MiB` for size), so `10` is refused rather
 //! than guessed as seconds or bytes.
+//!
+//! A config may lower a ceiling in any checkout, but raises it (or lifts it with `0`) only in a
+//! checkout the operator trusts: the checkout chose that file, so it can't free itself of a
+//! ceiling. Otherwise the default applies and the [`Setting`] records the value held back.
 
 use std::fmt;
 use std::str::FromStr;
@@ -137,6 +141,40 @@ impl fmt::Display for CountLimit {
             None => f.write_str("0"),
             Some(count) => write!(f, "{count}"),
         }
+    }
+}
+
+/// A ceiling that can be compared with its default by what it measures, not by how it is written.
+trait Ceiling: Copy {
+    /// Whether `self` allows more than `default`. No limit counts as infinite, so `0` raises any
+    /// finite default, and `16384KiB` doesn't raise `16MiB`.
+    fn raises(self, default: Self) -> bool;
+}
+
+/// Whether the ceiling `value` allows more than `default`, where `None` is no limit.
+fn raises<T: Ord>(value: Option<T>, default: Option<T>) -> bool {
+    match (value, default) {
+        (None, Some(_)) => true,
+        (Some(value), Some(default)) => value > default,
+        (_, None) => false,
+    }
+}
+
+impl Ceiling for TimeLimit {
+    fn raises(self, default: Self) -> bool {
+        raises(self.0, default.0)
+    }
+}
+
+impl Ceiling for SizeLimit {
+    fn raises(self, default: Self) -> bool {
+        raises(self.0, default.0)
+    }
+}
+
+impl Ceiling for CountLimit {
+    fn raises(self, default: Self) -> bool {
+        raises(self.0, default.0)
     }
 }
 
@@ -361,6 +399,27 @@ pub(crate) struct Setting<T> {
     pub(crate) value: T,
     /// Where it came from.
     pub(crate) source: Source,
+    /// The config's raise of this ceiling, when the checkout isn't trusted and so the default
+    /// applies instead. `None` whenever the config's value took effect or no config set one.
+    pub(crate) held_back: Option<HeldBack<T>>,
+}
+
+/// A config value that would raise a ceiling, held back because the checkout isn't trusted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HeldBack<T> {
+    /// The value the config sets.
+    pub(crate) value: T,
+    /// The config file that sets it.
+    pub(crate) file: AbsolutePath,
+}
+
+/// Whether a config value that raises a ceiling above its default takes effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Raises {
+    /// The checkout isn't trusted: the default applies, and the raise is recorded as held back.
+    Held,
+    /// The operator trusts the checkout: the raise takes effect.
+    Honored,
 }
 
 /// Every ceiling in effect.
@@ -420,60 +479,103 @@ impl Limits {
     /// The default key-path text ceiling: 32 MiB.
     pub(crate) const MAX_KEY_PATH_SIZE: SizeLimit = SizeLimit(Some(32 * MIB));
 
-    /// Each ceiling from the command line, else the config, else its default.
+    /// Each ceiling from the command line, else the config, else its default, with every config
+    /// raise held back: the result for a checkout that isn't trusted.
     #[must_use]
     pub(crate) fn resolve(command_line: &CommandLineLimits, config: &ConfigLimits) -> Self {
+        Self::resolve_with(command_line, config, Raises::Held)
+    }
+
+    /// Each ceiling from the command line, else the config, else its default. A config value above
+    /// its default takes effect only when `raises` is [`Raises::Honored`]; the command line is
+    /// never held back.
+    #[must_use]
+    pub(crate) fn resolve_with(
+        command_line: &CommandLineLimits,
+        config: &ConfigLimits,
+        raises: Raises,
+    ) -> Self {
         Self {
             parse_timeout: pick(
                 command_line.parse_timeout,
                 config.parse_timeout.as_ref(),
                 Self::PARSE_TIMEOUT,
+                raises,
             ),
             code_block_timeout: pick(
                 command_line.code_block_timeout,
                 config.code_block_timeout.as_ref(),
                 Self::CODE_BLOCK_TIMEOUT,
+                raises,
             ),
             code_block_build_timeout: pick(
                 command_line.code_block_build_timeout,
                 config.code_block_build_timeout.as_ref(),
                 Self::CODE_BLOCK_BUILD_TIMEOUT,
+                raises,
             ),
             max_file_size: pick(
                 command_line.max_file_size,
                 config.max_file_size.as_ref(),
                 Self::MAX_FILE_SIZE,
+                raises,
             ),
             max_lock_size: pick(
                 command_line.max_lock_size,
                 config.max_lock_size.as_ref(),
                 Self::MAX_LOCK_SIZE,
+                raises,
             ),
-            max_config_size: pick(command_line.max_config_size, None, Self::MAX_CONFIG_SIZE),
+            max_config_size: pick(
+                command_line.max_config_size,
+                None,
+                Self::MAX_CONFIG_SIZE,
+                raises,
+            ),
             max_ignore_size: pick(
                 command_line.max_ignore_size,
                 config.max_ignore_size.as_ref(),
                 Self::MAX_IGNORE_SIZE,
+                raises,
             ),
             max_key_segments: pick(
                 command_line.max_key_segments,
                 config.max_key_segments.as_ref(),
                 Self::MAX_KEY_SEGMENTS,
+                raises,
             ),
             max_key_path_size: pick(
                 command_line.max_key_path_size,
                 config.max_key_path_size.as_ref(),
                 Self::MAX_KEY_PATH_SIZE,
+                raises,
             ),
         }
     }
+
+    /// Whether a config raise of any ceiling was held back, so trusting the checkout would change
+    /// a ceiling.
+    #[must_use]
+    pub(crate) fn holds_back(&self) -> bool {
+        self.parse_timeout.held_back.is_some()
+            || self.code_block_timeout.held_back.is_some()
+            || self.code_block_build_timeout.held_back.is_some()
+            || self.max_file_size.held_back.is_some()
+            || self.max_lock_size.held_back.is_some()
+            || self.max_config_size.held_back.is_some()
+            || self.max_ignore_size.held_back.is_some()
+            || self.max_key_segments.held_back.is_some()
+            || self.max_key_path_size.held_back.is_some()
+    }
 }
 
-/// The first of `given`, `config` and `default` that exists, with where it came from.
-fn pick<T: Copy>(
+/// The first of `given`, `config` and `default` that exists, with where it came from. A `config`
+/// value above `default` is held back unless `raises` honors it.
+fn pick<T: Ceiling>(
     given: Option<Given<T>>,
     config: Option<&(T, AbsolutePath)>,
     default: T,
+    raises: Raises,
 ) -> Setting<T> {
     match (given, config) {
         (Some(given), _) => Setting {
@@ -483,14 +585,25 @@ fn pick<T: Copy>(
             } else {
                 Source::Flag
             },
+            held_back: None,
+        },
+        (None, Some((value, file))) if value.raises(default) && raises == Raises::Held => Setting {
+            value: default,
+            source: Source::Default,
+            held_back: Some(HeldBack {
+                value: *value,
+                file: file.clone(),
+            }),
         },
         (None, Some((value, file))) => Setting {
             value: *value,
             source: Source::Config(file.clone()),
+            held_back: None,
         },
         (None, None) => Setting {
             value: default,
             source: Source::Default,
+            held_back: None,
         },
     }
 }
@@ -584,7 +697,7 @@ mod tests {
         let file = AbsolutePath::new(Path::new(std::path::MAIN_SEPARATOR_STR))
             .expect("the root should be absolute");
         let config = ConfigLimits {
-            code_block_timeout: Some((time("20s").expect("20s"), file.clone())),
+            code_block_timeout: Some((time("3s").expect("3s"), file.clone())),
             ..ConfigLimits::default()
         };
         let from_config = Limits::resolve(&CommandLineLimits::default(), &config);
@@ -710,5 +823,218 @@ mod tests {
         assert_eq!(defaults.max_key_segments.value.to_string(), "200000");
         assert_eq!(defaults.max_key_path_size.value.to_string(), "32MiB");
         assert_eq!(defaults.max_key_segments.source, Source::Default);
+    }
+
+    /// The eight config-settable keys, in `config show` order.
+    const CONFIG_KEYS: [&str; 8] = [
+        "parse-timeout",
+        "code-block-timeout",
+        "code-block-build-timeout",
+        "max-file-size",
+        "max-lock-size",
+        "max-ignore-size",
+        "max-key-segments",
+        "max-key-path-size",
+    ];
+
+    /// A config file to attribute config values to.
+    fn config_file() -> AbsolutePath {
+        AbsolutePath::new(Path::new(std::path::MAIN_SEPARATOR_STR))
+            .expect("the root should be absolute")
+    }
+
+    /// A config that sets every key in [`CONFIG_KEYS`] to the value at the same index.
+    fn config_setting(values: [&str; 8]) -> ConfigLimits {
+        let [
+            parse,
+            block,
+            build,
+            file_size,
+            lock,
+            ignore,
+            segments,
+            key_path,
+        ] = values;
+        let time = |text| Some((time(text).expect("a duration"), config_file()));
+        let size = |text| Some((size(text).expect("a size"), config_file()));
+        ConfigLimits {
+            parse_timeout: time(parse),
+            code_block_timeout: time(block),
+            code_block_build_timeout: time(build),
+            max_file_size: size(file_size),
+            max_lock_size: size(lock),
+            max_ignore_size: size(ignore),
+            max_key_segments: Some((segments.parse().expect("a count"), config_file())),
+            max_key_path_size: size(key_path),
+        }
+    }
+
+    /// One config-settable key as resolved: its value, source and held-back value, as text.
+    type Row = (&'static str, String, Source, Option<String>);
+
+    /// The row of `setting` under `key`.
+    fn row<T: fmt::Display>(key: &'static str, setting: &Setting<T>) -> Row {
+        (
+            key,
+            setting.value.to_string(),
+            setting.source.clone(),
+            setting
+                .held_back
+                .as_ref()
+                .map(|held| held.value.to_string()),
+        )
+    }
+
+    /// Every config-settable key of `limits`, in [`CONFIG_KEYS`] order.
+    fn rows(limits: &Limits) -> Vec<Row> {
+        vec![
+            row(CONFIG_KEYS[0], &limits.parse_timeout),
+            row(CONFIG_KEYS[1], &limits.code_block_timeout),
+            row(CONFIG_KEYS[2], &limits.code_block_build_timeout),
+            row(CONFIG_KEYS[3], &limits.max_file_size),
+            row(CONFIG_KEYS[4], &limits.max_lock_size),
+            row(CONFIG_KEYS[5], &limits.max_ignore_size),
+            row(CONFIG_KEYS[6], &limits.max_key_segments),
+            row(CONFIG_KEYS[7], &limits.max_key_path_size),
+        ]
+    }
+
+    /// Every key's default, as text, in [`CONFIG_KEYS`] order.
+    const DEFAULTS: [&str; 8] = [
+        "10s", "10s", "10m", "16MiB", "16MiB", "256KiB", "200000", "32MiB",
+    ];
+
+    /// Each key one step above its default.
+    const ABOVE: [&str; 8] = [
+        "11s", "11s", "11m", "17MiB", "17MiB", "257KiB", "200001", "33MiB",
+    ];
+
+    /// Each key one step below its default.
+    const BELOW: [&str; 8] = [
+        "9s", "9s", "9m", "15MiB", "15MiB", "255KiB", "199999", "31MiB",
+    ];
+
+    /// Each key at its default, spelled in a smaller unit where it has one.
+    const EQUAL: [&str; 8] = [
+        "10000ms", "10000ms", "600s", "16384KiB", "16384KiB", "262144B", "200000", "32768KiB",
+    ];
+
+    /// Every key held back: the default in effect, with `held` recorded.
+    fn held(held: [&str; 8]) -> Vec<Row> {
+        CONFIG_KEYS
+            .iter()
+            .zip(DEFAULTS.iter().zip(held))
+            .map(|(key, (default, held))| {
+                (
+                    *key,
+                    (*default).to_owned(),
+                    Source::Default,
+                    Some(held.to_owned()),
+                )
+            })
+            .collect()
+    }
+
+    /// Every key from the config, at `values` as printed, with nothing held back.
+    fn honored(values: [&str; 8]) -> Vec<Row> {
+        CONFIG_KEYS
+            .iter()
+            .zip(values)
+            .map(|(key, value)| (*key, value.to_owned(), Source::Config(config_file()), None))
+            .collect()
+    }
+
+    #[test]
+    fn an_untrusted_config_lowers_every_ceiling_but_raises_or_lifts_none() {
+        let untrusted = |values| {
+            rows(&Limits::resolve(
+                &CommandLineLimits::default(),
+                &config_setting(values),
+            ))
+        };
+
+        assert_eq!(untrusted(["0"; 8]), held(["0"; 8]), "0 lifts nothing");
+        assert_eq!(untrusted(ABOVE), held(ABOVE), "a raise is held back");
+        assert_eq!(untrusted(BELOW), honored(BELOW), "a lower ceiling applies");
+        assert_eq!(
+            untrusted(EQUAL),
+            honored(DEFAULTS),
+            "the default spelled in another unit is not a raise"
+        );
+    }
+
+    #[test]
+    fn a_trusted_config_raises_and_lifts_every_ceiling() {
+        let trusted = |values| {
+            rows(&Limits::resolve_with(
+                &CommandLineLimits::default(),
+                &config_setting(values),
+                Raises::Honored,
+            ))
+        };
+
+        assert_eq!(trusted(["0"; 8]), honored(["0"; 8]));
+        assert_eq!(trusted(ABOVE), honored(ABOVE));
+        assert_eq!(trusted(BELOW), honored(BELOW));
+    }
+
+    #[test]
+    fn env_and_flag_beat_a_held_back_config_with_nothing_held_back() {
+        let given = |from_env| {
+            let time = |text| {
+                Some(Given {
+                    value: time(text).expect("a duration"),
+                    from_env,
+                })
+            };
+            let size = |text| {
+                Some(Given {
+                    value: size(text).expect("a size"),
+                    from_env,
+                })
+            };
+            CommandLineLimits {
+                parse_timeout: time("1s"),
+                code_block_timeout: time("1s"),
+                code_block_build_timeout: time("0"),
+                max_file_size: size("0"),
+                max_lock_size: size("1MiB"),
+                max_config_size: None,
+                max_ignore_size: size("0"),
+                max_key_segments: Some(Given {
+                    value: CountLimit(None),
+                    from_env,
+                }),
+                max_key_path_size: size("64MiB"),
+            }
+        };
+        for raises in [Raises::Held, Raises::Honored] {
+            for from_env in [true, false] {
+                let limits =
+                    Limits::resolve_with(&given(from_env), &config_setting(["0"; 8]), raises);
+                let source = if from_env { Source::Env } else { Source::Flag };
+                let expected: Vec<Row> = CONFIG_KEYS
+                    .iter()
+                    .zip(["1s", "1s", "0", "0", "1MiB", "0", "0", "64MiB"])
+                    .map(|(key, value)| (*key, value.to_owned(), source.clone(), None))
+                    .collect();
+                assert_eq!(rows(&limits), expected, "{raises:?}, from_env {from_env}");
+                assert!(!limits.holds_back(), "{raises:?}, from_env {from_env}");
+            }
+        }
+    }
+
+    #[test]
+    fn holds_back_says_whether_any_raise_was_held_back() {
+        let none = Limits::resolve(&CommandLineLimits::default(), &config_setting(BELOW));
+        assert!(!none.holds_back(), "lowering holds nothing back");
+        for (index, key) in CONFIG_KEYS.iter().enumerate() {
+            let mut values = BELOW;
+            *values.get_mut(index).expect("one value per key") = "0";
+
+            let one = Limits::resolve(&CommandLineLimits::default(), &config_setting(values));
+
+            assert!(one.holds_back(), "a lifted {key} alone is held back");
+        }
     }
 }

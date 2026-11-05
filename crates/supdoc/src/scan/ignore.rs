@@ -750,8 +750,9 @@ pub(crate) const CODE_IGNORE_TOO_LARGE: &str = "ignore-too-large";
 pub(super) fn too_large_ignore_file(named: &str, size: u64, limit: u64, nested: bool) -> Finding {
     let raised = size_text(size.saturating_add(1).next_power_of_two());
     let raise = format!(
-        "raise the limit with `[limits] max-ignore-size = \"{raised}\"` in {CONFIG_FILE_NAME}, \
-         `SUPDOC_MAX_IGNORE_SIZE={raised}` or `--max-ignore-size {raised}`"
+        "raise the limit with `--max-ignore-size {raised}` or `SUPDOC_MAX_IGNORE_SIZE={raised}` \
+         (`[limits] max-ignore-size = \"{raised}\"` in {CONFIG_FILE_NAME} raises it only in a \
+         checkout you trust)"
     );
     let next = if nested {
         format!("{raise}, or add its directory to `exclude`")

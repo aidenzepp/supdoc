@@ -52,14 +52,13 @@ use super::{CliError, Context, Outcome};
 pub(crate) fn run(
     args: &CheckArgs,
     tools: &ToolEnv,
-    trust: &TrustEnv,
     context: &Context,
     output: &mut Output,
 ) -> Result<Outcome, CliError> {
     let config = load_config(context, output)?;
     let scope = scope(&OperatorPath::each(&args.paths), &config, context)?;
     let lock = read_lock(&config, &context.cwd)?;
-    let granted = granted_tier(config.root().as_path(), trust)?;
+    let granted = granted_tier(config.root().as_path(), &context.trust)?;
     let languages = Languages::builtin().map_err(CliError::from)?;
     let (mut scan, untracked) = crate::scan::assemble::run_with_untracked(
         &config,
@@ -582,13 +581,13 @@ mod tests {
     /// `check`.
     fn check_with_trust(cwd: AbsolutePath, args: &[&str], trust: &TrustEnv) -> Run {
         let mut session = Session::new(cwd, args);
+        session.context.trust = trust.clone();
         let Command::Check(check_args) = &session.cli.command else {
             panic!("`supdoc {}` should be a check command", args.join(" "));
         };
         let result = run(
             check_args,
             &ToolEnv::default(),
-            trust,
             &session.context,
             &mut session.output,
         );

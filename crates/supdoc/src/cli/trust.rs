@@ -16,10 +16,10 @@ use crate::config::discover_config;
 use crate::exit::ExitStatus;
 use crate::output::{Output, Report, TextContext};
 use crate::path::AbsolutePath;
-use crate::trust::{self, AddError, TrustEnv};
+use crate::trust::{self, AddError};
 
 use super::args::{OperatorPath, TrustArgs};
-use super::project::{absolute, config_failure, load_config};
+use super::project::{absolute, config_failure, load_config_held};
 use super::{CliError, Context, Outcome, cause};
 
 /// What `supdoc trust` did to the root.
@@ -76,7 +76,8 @@ pub(crate) fn schema() -> schemars::Schema {
     schemars::schema_for!(crate::output::json::Envelope<'static, TrustReport>)
 }
 
-/// Runs `supdoc trust`, listing the root in `trust`'s store, or with `--revoke` removing it.
+/// Runs `supdoc trust`, listing the root in the store of `context`'s trust variables, or with
+/// `--revoke` removing it.
 /// `SUPDOC_TRUST` is never consulted.
 ///
 /// With no `PATH` the root is the directory of the config `check` would load (`-c` is validated as
@@ -93,7 +94,6 @@ pub(crate) fn schema() -> schemars::Schema {
 /// the config search fails, and `cli-output-failed` when the report cannot be written.
 pub(crate) fn run(
     args: &TrustArgs,
-    trust: &TrustEnv,
     context: &Context,
     output: &mut Output,
 ) -> Result<Outcome, CliError> {
@@ -101,7 +101,7 @@ pub(crate) fn run(
         Some(path) => explicit_root(path, args.revoke, context)?,
         None => project_root(context, output)?,
     };
-    let store = trust.store().ok_or_else(no_state)?;
+    let store = context.trust.store().ok_or_else(no_state)?;
     let (action, shown) = if args.revoke {
         match store
             .revoke(root.as_path())
@@ -167,7 +167,7 @@ fn explicit_root(path: &Path, revoke: bool, context: &Context) -> Result<Absolut
 /// `cli-trust-no-config` when there is no config.
 fn project_root(context: &Context, output: &mut Output) -> Result<AbsolutePath, CliError> {
     if context.global.config.is_some() {
-        return Ok(load_config(context, output)?.root().clone());
+        return Ok(load_config_held(context, output)?.root().clone());
     }
     discover_config(&context.cwd)
         .map_err(|error| config_failure(&error, context, output))?
@@ -255,7 +255,8 @@ mod tests {
     use std::os::unix::fs::{PermissionsExt as _, symlink};
     use std::path::{Path, PathBuf};
 
-    use super::{AddError, TrustEnv, store_failed};
+    use super::{AddError, store_failed};
+    use crate::trust::TrustEnv;
 
     /// The help of `supdoc trust`'s refusal when adding `root` to the store under `state`, whose
     /// `supdoc` directory `arrange` sets up first.

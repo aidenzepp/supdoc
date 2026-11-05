@@ -52,10 +52,10 @@ fn code_block_timeout_takes_flag_then_variable_then_config_then_default() {
 
     project.write(
         "supdoc.config.toml",
-        "[limits]\ncode-block-timeout = \"30s\"\n",
+        "[limits]\ncode-block-timeout = \"3s\"\n",
     );
     let json = show(&base, &[]);
-    assert_eq!(at(&json, "/data/limits/code_block_timeout/value"), "30s");
+    assert_eq!(at(&json, "/data/limits/code_block_timeout/value"), "3s");
     assert_eq!(
         at(&json, "/data/limits/code_block_timeout/source"),
         "config"
@@ -942,5 +942,174 @@ fn max_file_size_long_help_gives_the_measured_memory_cost_and_short_help_does_no
         short.stdout.contains("--max-file-size") && !short.stdout.contains("about 235 MiB"),
         "`-h` keeps the one-line help:\n{}",
         short.stdout
+    );
+}
+
+/// The default `max-file-size` plus 1 MiB.
+const OVER_DEFAULT_FILE_SIZE: u64 = 17 * 1024 * 1024;
+
+/// The `basic` fixture, recorded, with `config` as its `supdoc.config.toml` and `docs/huge.md`: one
+/// link, then zeros to [`OVER_DEFAULT_FILE_SIZE`] bytes, written sparse so it costs no disk.
+fn project_with_huge_doc(config: &str) -> Project {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write("supdoc.config.toml", config);
+    project.write("docs/huge.md", "[lib](../src/lib.rs)\n");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(project.path("docs/huge.md"))
+        .and_then(|file| file.set_len(OVER_DEFAULT_FILE_SIZE))
+        .expect("docs/huge.md should grow to 17 MiB");
+    project
+}
+
+/// Whether `run` refused `docs/huge.md` as `read-too-large`.
+fn refused_huge(run: &crate::support::Run) -> bool {
+    let output = all_output(run);
+    output.contains("read-too-large") && output.contains("docs/huge.md")
+}
+
+/// Whether `run` checked links to its summary without refusing `docs/huge.md`.
+fn read_huge(run: &crate::support::Run) -> bool {
+    !refused_huge(run) && run.stdout.contains("Links ")
+}
+
+/// A trust store under `state` that lists `project`'s root by its real path.
+fn trusting(state: &Path, project: &Project) {
+    let root = project
+        .path(".")
+        .canonicalize()
+        .expect("the project root should resolve");
+    std::fs::create_dir_all(state.join("supdoc")).expect("the store directory should be creatable");
+    std::fs::write(
+        state.join("supdoc/trusted-roots"),
+        format!("{}\n", root.display()),
+    )
+    .expect("the trust store should be writable");
+}
+
+#[test]
+fn an_untrusted_config_cannot_lift_max_file_size_and_the_help_says_how_to() {
+    let project = project_with_huge_doc("[limits]\nmax-file-size = \"0\"\n");
+
+    let run = project.supdoc(&["check"]);
+
+    let output = all_output(&run);
+    let _ = run.assert_exit(0);
+    assert!(
+        refused_huge(&run),
+        "the config's 0 must not lift the cap:\n{output}"
+    );
+    assert!(
+        output.contains("`--max-file-size` or `SUPDOC_MAX_FILE_SIZE`")
+            && output.contains("raises it only in a checkout you trust (`supdoc trust`)"),
+        "the help names the flag and variable first, then the trusted config key:\n{output}"
+    );
+}
+
+#[test]
+fn a_trusted_checkout_lifts_max_file_size_from_config() {
+    let project = project_with_huge_doc("[limits]\nmax-file-size = \"0\"\n");
+    let state = tempfile::TempDir::new().expect("a state directory should be creatable");
+
+    let by_variable = project.supdoc_in_with(".", &["check"], &[("SUPDOC_TRUST", Path::new("1"))]);
+    assert!(read_huge(&by_variable), "{}", all_output(&by_variable));
+
+    trusting(state.path(), &project);
+    let by_store = project.supdoc_in_with(".", &["check"], &[("XDG_STATE_HOME", state.path())]);
+    assert!(read_huge(&by_store), "{}", all_output(&by_store));
+
+    let turned_off = project.supdoc_in_with(
+        ".",
+        &["check"],
+        &[
+            ("XDG_STATE_HOME", state.path()),
+            ("SUPDOC_TRUST", Path::new("0")),
+        ],
+    );
+    assert!(
+        refused_huge(&turned_off),
+        "SUPDOC_TRUST=0 turns the store's trust off:\n{}",
+        all_output(&turned_off)
+    );
+}
+
+#[test]
+fn the_variable_lifts_max_file_size_in_an_untrusted_checkout() {
+    let project = project_with_huge_doc("[limits]\nmax-file-size = \"0\"\n");
+
+    let run = project.supdoc_in_with(".", &["check"], &[("SUPDOC_MAX_FILE_SIZE", Path::new("0"))]);
+
+    assert!(read_huge(&run), "{}", all_output(&run));
+}
+
+#[test]
+fn an_untrusted_config_still_lowers_max_file_size() {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write("supdoc.config.toml", "[limits]\nmax-file-size = \"2KiB\"\n");
+    project.write(
+        "docs/big.md",
+        &format!("[lib](../src/lib.rs)\n{}\n", "x".repeat(4096)),
+    );
+
+    let run = project.supdoc(&["check"]);
+
+    let output = all_output(&run);
+    let _ = run.assert_exit(0);
+    assert!(
+        output.contains("read-too-large") && output.contains("docs/big.md"),
+        "{output}"
+    );
+}
+
+#[test]
+fn config_show_reports_a_held_back_raise_in_text_and_json() {
+    let project = Project::fixture("basic");
+    project.write("supdoc.config.toml", "[limits]\nparse-timeout = \"0\"\n");
+
+    let json = project
+        .supdoc(&["config", "show", "--json"])
+        .assert_exit(0)
+        .json();
+    let text = project.supdoc(&["config", "show"]);
+
+    assert_eq!(at(&json, "/data/limits/parse_timeout/value"), "10s");
+    assert_eq!(at(&json, "/data/limits/parse_timeout/source"), "default");
+    assert_eq!(
+        at(&json, "/data/limits/parse_timeout/held_back"),
+        &serde_json::json!({"from": "supdoc.config.toml", "value": "0"})
+    );
+    assert!(
+        json.pointer("/data/limits/max_file_size/held_back")
+            .is_none(),
+        "held_back is absent when nothing was held back"
+    );
+    assert!(
+        text.assert_exit(0).stdout.contains(
+            "parse-timeout   10s  (default; supdoc.config.toml sets 0, which applies only in a \
+             trusted checkout)"
+        ),
+        "{}",
+        text.stdout
+    );
+}
+
+#[test]
+fn a_bad_trust_value_matters_only_when_the_config_raises_a_ceiling() {
+    let project = Project::fixture("basic");
+    project.record();
+    let bad = [("SUPDOC_TRUST", Path::new("yes"))];
+
+    project.write("supdoc.config.toml", "[limits]\nparse-timeout = \"5s\"\n");
+    let _ = project.supdoc_in_with(".", &["list"], &bad).assert_exit(0);
+
+    project.write("supdoc.config.toml", "[limits]\nparse-timeout = \"30s\"\n");
+    let raised = project.supdoc_in_with(".", &["list"], &bad);
+    let _ = raised.assert_exit(2);
+    assert!(
+        all_output(&raised).contains("SUPDOC_TRUST"),
+        "{}",
+        all_output(&raised)
     );
 }
