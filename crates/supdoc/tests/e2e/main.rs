@@ -122,6 +122,8 @@ mod list_containment;
 #[cfg(test)]
 mod namespaces;
 #[cfg(test)]
+mod path_hardening;
+#[cfg(test)]
 mod paths;
 #[cfg(test)]
 mod resolve;
