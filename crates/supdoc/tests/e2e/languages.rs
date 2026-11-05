@@ -1,5 +1,8 @@
 //! Links into each language's symbols are recorded, pass, and fail when the symbol changes (docref's
-//! TypeScript, Markdown, sub-declaration, JavaScript, Python, Go and Bash tests, plus TOML).
+//! TypeScript, Markdown, sub-declaration, JavaScript, Python, Go and Bash tests, plus TOML, JSON
+//! and YAML).
+
+use std::fmt::Write as _;
 
 use crate::support::{Project, array_at, at, links};
 
@@ -364,4 +367,198 @@ fn json_changing_a_key_value_fails_its_link() {
         .filter_map(|link| link.pointer("/symbol").and_then(serde_json::Value::as_str))
         .collect();
     assert_eq!(failed, ["scripts.build"], "{report}");
+}
+
+/// A project whose guide links a workflow step and a key in the second of two Kubernetes objects.
+fn yaml_project() -> Project {
+    let project = Project::fixture("bash");
+    project.write(
+        ".github/workflows/ci.yml",
+        "on: push\njobs:\n  test:\n    steps:\n      - uses: actions/checkout@v4\n      - name: Test\n        run: cargo test\n",
+    );
+    project.write(
+        "deploy/web.yaml",
+        "kind: Service\n---\nkind: Deployment\nspec:\n  replicas: 3\n",
+    );
+    project.write(
+        "docs/ci.md",
+        "CI [runs the tests](../.github/workflows/ci.yml#jobs.test.steps.1) on \
+         [three replicas](../deploy/web.yaml#1.spec.replicas).\n",
+    );
+    project
+}
+
+#[test]
+fn yaml_key_and_step_links_are_recorded_and_pass() {
+    let project = yaml_project();
+
+    project.record();
+
+    let locked = project.locked_links("supdoc.lock");
+    for link in [
+        ".github/workflows/ci.yml#jobs.test.steps.1",
+        "deploy/web.yaml#1.spec.replicas",
+    ] {
+        assert!(
+            locked.contains(link),
+            "`{link}` should be recorded: {locked:?}"
+        );
+    }
+    let _ = project.supdoc(&["check"]).assert_exit(0);
+}
+
+#[test]
+fn yaml_changing_a_step_fails_its_link() {
+    let project = yaml_project();
+    project.record();
+    project.replace(
+        ".github/workflows/ci.yml",
+        "run: cargo test",
+        "run: cargo nextest run",
+    );
+
+    let report = project.supdoc(&["--json", "check"]).assert_exit(1).json();
+
+    assert_eq!(at(&report, "/data/summary/failed"), 1, "{report}");
+    assert_eq!(at(&report, "/data/summary/broken"), 0, "{report}");
+    assert_eq!(
+        at(&report, "/data/links/0/symbol"),
+        "jobs.test.steps.1",
+        "{report}"
+    );
+}
+
+#[test]
+fn yaml_past_the_parser_s_line_limit_is_refused_never_not_found() {
+    let project = Project::fixture("bash");
+    let keys = (0..40_000).fold(String::new(), |mut text, key| {
+        let _ = writeln!(text, "k{key}: 1");
+        text
+    });
+    project.write("big.yaml", &keys);
+    project.write(
+        "docs/big.md",
+        "A [key](../big.yaml#k5) and [the file](../big.yaml).\n",
+    );
+
+    let list = project.supdoc(&["--json", "list"]).assert_exit(0).json();
+
+    let kinds: Vec<(Option<&str>, Option<&str>)> = array_at(&list, "/data/links")
+        .iter()
+        .filter(|link| {
+            link.pointer("/target").and_then(serde_json::Value::as_str) == Some("big.yaml")
+        })
+        .map(|link| {
+            (
+                link.pointer("/state").and_then(serde_json::Value::as_str),
+                link.pointer("/finding/kind")
+                    .and_then(serde_json::Value::as_str),
+            )
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            (Some("broken"), Some("read-too-many-lines")),
+            (Some("broken"), Some("read-too-many-lines")),
+        ],
+        "{list}"
+    );
+}
+
+#[test]
+fn yaml_a_blank_line_added_to_a_keep_chomped_value_fails_only_its_link() {
+    let project = Project::fixture("bash");
+    project.write(
+        "scripts.yaml",
+        "keep: |+\n  echo keep\n\nclip: |\n  echo clip\n\nend: 1\n",
+    );
+    project.write(
+        "docs/scripts.md",
+        "[keep](../scripts.yaml#keep) and [clip](../scripts.yaml#clip).\n",
+    );
+    project.record();
+    project.replace("scripts.yaml", "echo keep\n\n", "echo keep\n\n\n");
+    project.replace("scripts.yaml", "echo clip\n\n", "echo clip\n\n\n");
+
+    let report = project.supdoc(&["--json", "check"]).assert_exit(1).json();
+
+    assert_eq!(at(&report, "/data/summary/failed"), 1, "{report}");
+    assert_eq!(at(&report, "/data/links/0/symbol"), "keep", "{report}");
+}
+
+/// The 602-byte file the audit found, then every shape that puts a run of 300 block indicators
+/// after a token: each aborted an unguarded scanner or reaches the same depth.
+fn deep_yaml_files() -> Vec<String> {
+    let run = "- ".repeat(300);
+    let mut files = vec![format!("{run}x\n")];
+    for before in [
+        "--- ",
+        "&a ",
+        "!t ",
+        "\"a\" ",
+        "'a' ",
+        "a: ",
+        "? ",
+        "[a] ",
+        "{a: 1} ",
+        "a: \"b\" ",
+        "a: b: ",
+        "\"a\": \"b\" ",
+        "!t \"a\" ",
+        "a: [x] ",
+    ] {
+        files.push(format!("{before}{run}x\n"));
+        files.push(format!("- {before}{run}x\n"));
+    }
+    files.push(format!("b: &x 1\na: *x {run}x\n"));
+    files.push(format!("\"a\" {}x\n", "? ".repeat(300)));
+    files
+}
+
+#[test]
+fn yaml_nested_past_the_scanner_s_limit_is_refused_and_never_aborts() {
+    for file in deep_yaml_files() {
+        let project = Project::fixture("bash");
+        project.write(
+            "docs/evil.md",
+            "A [deep element](../evil.yaml#0) and [`setup_env`](../src/deploy.sh#setup_env).\n",
+        );
+        project.write("evil.yaml", &file);
+        let shown = file.get(..40).unwrap_or(&file);
+
+        let check = project.supdoc(&["--json", "check"]).assert_exit(1).json();
+        let update = project.supdoc(&["--json", "update", "--yes"]);
+        let list = project.supdoc(&["--json", "list"]).assert_exit(0).json();
+
+        let kinds: Vec<&str> = array_at(&check, "/data/links")
+            .iter()
+            .filter_map(|link| {
+                link.pointer("/finding/kind")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .collect();
+        assert!(kinds.contains(&"read-too-deep"), "{shown:?}: {check}");
+        assert!(
+            array_at(&check, "/data/links").iter().any(|link| {
+                link.pointer("/symbol").and_then(serde_json::Value::as_str) == Some("setup_env")
+            }),
+            "{shown:?}: the healthy link should still be reported: {check}"
+        );
+        assert!(
+            update.code.is_some_and(|code| code != 134),
+            "{shown:?}: update should exit on its own, not abort: {:?}\n{}",
+            update.code,
+            update.stderr
+        );
+        assert!(
+            update.json().to_string().contains("read-too-deep"),
+            "{shown:?}: {}",
+            update.stdout
+        );
+        assert!(
+            list.to_string().contains("read-too-deep"),
+            "{shown:?}: {list}"
+        );
+    }
 }

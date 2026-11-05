@@ -158,3 +158,53 @@ fn list_reports_the_key_segment_limit_instead_of_matching_the_typed_text() {
     });
     assert_eq!(at(&error, "/kind"), "read-too-many-keys", "{}", run.stderr);
 }
+
+/// The kind of the one JSON error a failed `supdoc --json list` run printed on stderr.
+fn list_error_kind(project: &Project, args: &[&str]) -> String {
+    let command: Vec<&str> = ["--json"].iter().chain(args).copied().collect();
+    let run = project.supdoc(&command);
+    let _ = run.assert_exit(1);
+    let error: serde_json::Value = serde_json::from_str(&run.stderr).unwrap_or_else(|error| {
+        panic!(
+            "list should print one JSON error on stderr ({error}):\n{}",
+            run.stderr
+        )
+    });
+    at(&error, "/kind")
+        .as_str()
+        .unwrap_or_else(|| panic!("the error should have a kind: {error}"))
+        .to_owned()
+}
+
+#[test]
+fn list_reports_a_yaml_file_past_the_line_limit_instead_of_listing_nothing() {
+    let project = Project::fixture("basic");
+    project.write("big.yaml", &"k: 1\n".repeat(32_769));
+
+    assert_eq!(
+        list_error_kind(&project, &["list", "big.yaml#k"]),
+        "read-too-many-lines"
+    );
+}
+
+#[test]
+fn list_reports_a_yaml_file_nested_too_deep_instead_of_listing_nothing() {
+    let project = Project::fixture("basic");
+    project.write("evil.yaml", &format!("{}x\n", "- ".repeat(300)));
+
+    assert_eq!(
+        list_error_kind(&project, &["list", "evil.yaml#0"]),
+        "read-too-deep"
+    );
+}
+
+#[test]
+fn list_reports_a_file_over_the_size_limit_instead_of_listing_nothing() {
+    let project = Project::fixture("basic");
+    project.write("big.toml", "[t]\nk = \"a value longer than the limit\"\n");
+
+    assert_eq!(
+        list_error_kind(&project, &["--max-file-size", "8B", "list", "big.toml#t.k"]),
+        "read-too-large"
+    );
+}
