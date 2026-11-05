@@ -42,6 +42,7 @@ use super::states::{
     self, Excerpt, NotChecked, StepState, Steps, block_fragment, state_of, tag_of,
     unsupported_reason,
 };
+use super::tombi;
 use super::toolchain::{self, Refusal, Toolchain};
 use super::tools::{self, Found, Invocation, Step, Tier, ToolCartridge, ToolEnv, find};
 use super::uses::{self, UseState, Written};
@@ -111,6 +112,9 @@ pub(crate) struct BlockRecord {
     /// The config and virtual path biome is given for it. `None` until the tools are looked up, and for
     /// any other tool.
     given: Option<biome::Given>,
+    /// The variables its tools get beyond the passed environment for its config: tombi's
+    /// `XDG_CONFIG_HOME`. Empty for every other tool.
+    config_vars: Vec<(&'static str, OsString)>,
     /// What the format step needs, kept while the block is pending.
     pending: Option<Pending>,
 }
@@ -229,16 +233,7 @@ pub(crate) fn evaluate(
         findings.extend(fragment_unsupported(block, &steps));
         let checked = language.as_deref().and_then(Language::from_tag);
         let (tool, linter) = selected_tools(code_blocks, &mut steps, checked, &state, granted);
-        let pending = (state == BlockState::NotChecked(NotChecked::Pending))
-            .then(|| {
-                let file = block.fence.file.as_str();
-                reread(&mut doc, file, read);
-                doc.as_ref()?
-                    .1
-                    .as_ref()
-                    .and_then(|text| Pending::of(block, text))
-            })
-            .flatten();
+        let pending = pending_of(&state, block, &mut doc, read);
         records.push(BlockRecord {
             at: block.fence.clone(),
             reason: first_reason(&state, &steps, language.as_deref(), tool),
@@ -247,6 +242,7 @@ pub(crate) fn evaluate(
             dialect: code_blocks.dialect(),
             edition: block_edition(block).or_else(|| code_blocks.edition()),
             given: None,
+            config_vars: Vec::new(),
             language,
             state,
             steps,
@@ -727,6 +723,24 @@ fn not_trusted(records: &[BlockRecord]) -> Option<Finding> {
     Some(finding.with_location(at.clone()))
 }
 
+/// What the format step needs for `block`, its doc read through `doc` with `read`: `None` unless
+/// `state` is pending, or when the doc can't be read.
+fn pending_of<'doc>(
+    state: &BlockState,
+    block: &'doc CodeBlock,
+    doc: &mut Option<(&'doc str, Option<Arc<FixDoc>>)>,
+    read: impl Fn(&str) -> Option<Arc<FixDoc>>,
+) -> Option<Pending> {
+    if *state != BlockState::NotChecked(NotChecked::Pending) {
+        return None;
+    }
+    reread(doc, block.fence.file.as_str(), read);
+    doc.as_ref()?
+        .1
+        .as_ref()
+        .and_then(|text| Pending::of(block, text))
+}
+
 /// Points `doc` at `file`, read with `read`, unless it already holds it.
 fn reread<'doc>(
     doc: &mut Option<(&'doc str, Option<Arc<FixDoc>>)>,
@@ -745,12 +759,14 @@ struct ToolConfigs {
     biome: BiomeConfigs,
     /// rumdl's.
     rumdl: RumdlConfigs,
+    /// tombi's.
+    tombi: TombiConfigs,
 }
 
 impl ToolConfigs {
-    /// Gives `record` the config its tool gets, as [`BiomeConfigs::give`] and
-    /// [`RumdlConfigs::give`] do. Whether the block goes on to its tools: not when its config was
-    /// refused.
+    /// Gives `record` the config its tool gets, as [`BiomeConfigs::give`],
+    /// [`RumdlConfigs::give`] and [`TombiConfigs::give`] do. Whether the block goes on to its
+    /// tools: not when it or its config was refused.
     fn give(
         &mut self,
         record: &mut BlockRecord,
@@ -760,6 +776,7 @@ impl ToolConfigs {
     ) -> bool {
         self.biome.give(record, tool, place, slots).is_ok()
             && self.rumdl.give(record, tool, place, slots).is_ok()
+            && self.tombi.give(record, tool, place, slots)
     }
 }
 
@@ -945,6 +962,119 @@ fn rumdl_refusal(refusal: &rumdl::Refusal, at: &Location) -> (String, Finding) {
 
 /// Why rumdl didn't run when supdoc had no private directory to keep its config in.
 const RUMDL_NO_PRIVATE_DIR: &str = "rumdl needs a private directory under `XDG_CACHE_HOME` or `HOME` for its config, and there is none";
+
+/// The tombi config found for each doc directory, and the refusals already warned about.
+#[derive(Debug, Default)]
+struct TombiConfigs {
+    /// Each doc directory's result, in the order they were asked for.
+    found: Vec<(PathBuf, Result<tombi::Project, tombi::Refusal>)>,
+    /// The refusals a warning has been added for.
+    warned: Vec<tombi::Refusal>,
+}
+
+impl TombiConfigs {
+    /// Gives `record`, a TOML block, the config tombi gets for its doc, found once per directory,
+    /// and the place its doc is mirrored to. A block holding a `#:schema` directive is never given
+    /// to tombi (see [`tombi::names_schema`]): it is settled as not checked with a
+    /// `code-block-not-checked` warning. A refused config settles the block as not checked too,
+    /// with its one warning per refusal added to `slots`. Whether the block goes on to its tools.
+    ///
+    /// Effect: reads the config and may create supdoc's private directory and file for it.
+    fn give(
+        &mut self,
+        record: &mut BlockRecord,
+        tool: &ToolCartridge,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> bool {
+        if tool.language != Language::Toml {
+            return true;
+        }
+        let names_schema = record
+            .pending
+            .as_ref()
+            .is_some_and(|pending| tombi::names_schema(&pending.input));
+        if names_schema {
+            slots.push(Slot::Found(schema_warning(&record.at)));
+            record.state = BlockState::NotChecked(NotChecked::SchemaFile);
+            record.reason =
+                record
+                    .state
+                    .reason(&record.steps, record.language.as_deref(), Some(tool.name));
+            return false;
+        }
+        let doc = root.join(record.at.file.as_str());
+        let dir = doc.parent().unwrap_or(root).to_path_buf();
+        let found = if let Some((_, found)) = self.found.iter().find(|(known, _)| *known == dir) {
+            found.clone()
+        } else {
+            let found = tombi::project(env, root, &doc);
+            self.found.push((dir, found.clone()));
+            found
+        };
+        match found {
+            Ok(project) => {
+                record.given = Some(biome::Given {
+                    mirror: Some(project.doc_as_seen(&doc)),
+                    flags: Vec::new(),
+                    config: None,
+                    names: None,
+                });
+                record.config_vars = vec![tombi::config_var(&project)];
+                true
+            }
+            Err(refusal) => {
+                let (reason, warning) = tombi_refusal(&refusal, &record.at);
+                if !self.warned.contains(&refusal) {
+                    self.warned.push(refusal);
+                    slots.push(Slot::Found(warning));
+                }
+                record.state = BlockState::NotChecked(NotChecked::ToolConfig);
+                record.reason = Some(reason);
+                false
+            }
+        }
+    }
+}
+
+/// The `code-block-not-checked` warning, at `at`, for a TOML block holding a `#:schema`
+/// directive.
+fn schema_warning(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "the block names a schema file with `#:schema`, which tombi would read wherever it is, so \
+         it isn't checked",
+    )
+    .with_help("remove the `#:schema` line from the block, or mark it `ignore(<why>)`")
+    .with_location(at.clone())
+}
+
+/// The state reason and the `code-block-not-checked` warning, at `at`, for a block tombi isn't
+/// given because of `refusal`.
+fn tombi_refusal(refusal: &tombi::Refusal, at: &Location) -> (String, Finding) {
+    let (reason, message, help) = match refusal {
+        tombi::Refusal::Config { file, why } => (
+            format!("tombi config `{file}` {why}"),
+            format!("the project's `{file}` {why}, so its TOML blocks aren't checked"),
+            format!(
+                "remove the `schemas`, `schema.catalog` and `extensions` from `{file}`, or mark the blocks `ignore(<why>)`"
+            ),
+        ),
+        tombi::Refusal::NoPrivateDir => (
+            TOMBI_NO_PRIVATE_DIR.to_owned(),
+            format!("{TOMBI_NO_PRIVATE_DIR}, so its blocks aren't checked"),
+            "set `XDG_CACHE_HOME` or `HOME` to a directory outside the project".to_owned(),
+        ),
+    };
+    let finding = Finding::new(NOT_CHECKED, Severity::Warning, message)
+        .with_help(help)
+        .with_location(at.clone());
+    (reason, finding)
+}
+
+/// Why tombi didn't run when supdoc had no private directory to keep its config in.
+const TOMBI_NO_PRIVATE_DIR: &str = "tombi needs a private directory under `XDG_CACHE_HOME` or `HOME` for its config, and there is none";
 
 /// Why clippy didn't run on a block when [`runner::neutral_dir`] found no private working
 /// directory: its metadata would have nowhere private to go.
@@ -1290,6 +1420,7 @@ fn run_formatter(
     let vars = rust.map(|rust| rust.toolchain.env()).unwrap_or_default();
     let extra: Vec<(&str, &OsStr)> = vars
         .iter()
+        .chain(&record.config_vars)
         .map(|(name, value)| (*name, value.as_os_str()))
         .collect();
     let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
@@ -1400,11 +1531,16 @@ fn run_linter(
     let frame = lint::Frame::of(tool, record.fragment);
     let input = lint::checked(frame, &pending.input);
     let input = input.as_ref();
+    let extra: Vec<(&str, &OsStr)> = record
+        .config_vars
+        .iter()
+        .map(|(name, value)| (*name, value.as_os_str()))
+        .collect();
     let run = cache::Run {
         tool,
         program,
         args: &args,
-        extra: &[],
+        extra: &extra,
         input,
         doc: &doc,
         project: None,
@@ -1417,6 +1553,9 @@ fn run_linter(
     let judge = |result: Result<Ran, runner::Failure>| match result {
         Ok(ran) if biome.is_some() && biome::linted_nothing(&ran.stdout) => {
             Err(BIOME_LINTED_NOTHING)
+        }
+        Ok(ran) if tool.name == TOMBI_LINT && tombi::linted_nothing(&ran) => {
+            Err(TOMBI_LINTED_NOTHING)
         }
         result => Ok(tool.lint_verdict(input, frame.is_some(), result)),
     };
@@ -1462,6 +1601,12 @@ const BIOME_LINT: &str = "biome-lint";
 /// in the project's config still left the block out, so the run says nothing about it.
 pub(super) const BIOME_LINTED_NOTHING: &str =
     "biome lint checked no file: the project's biome config leaves the block out";
+
+/// The name of tombi's lint cartridge.
+const TOMBI_LINT: &str = "tombi-lint";
+
+/// Why tombi lint's step didn't run on a block when tombi didn't report linting it.
+const TOMBI_LINTED_NOTHING: &str = "tombi lint didn't report checking the block";
 
 /// Runs `call`, `tool` being biome lint, on the block `invocation` describes, written with
 /// `given`'s config to a fresh [`biome::LintFile`] beside the neutral directory, since biome
@@ -2452,6 +2597,7 @@ mod tests {
                 dialect: Dialect::default(),
                 edition: None,
                 given: None,
+                config_vars: Vec::new(),
                 pending: Pending::of(block, &doc),
             })
             .collect()

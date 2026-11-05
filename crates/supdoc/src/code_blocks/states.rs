@@ -33,8 +33,9 @@ use super::tools::{self, Step, ToolCartridge, formatter};
 /// no such file gets ([`NotChecked::ToolchainUnresolved`]), the block reads a file or variable
 /// at compile time ([`NotChecked::CompileTimeRead`]), declares an outline module before its
 /// linter compiles it ([`NotChecked::OutlineModule`]), or it is too large to scan for one
-/// ([`NotChecked::TooLargeToScan`]). A tool found outside the checkout runs on each block,
-/// which leaves it [`Passed`](Self::Passed) or [`Failed`](Self::Failed).
+/// ([`NotChecked::TooLargeToScan`]). A TOML block is refused when it names a schema file
+/// tombi would read ([`NotChecked::SchemaFile`]). A tool found outside the checkout runs on each
+/// block, which leaves it [`Passed`](Self::Passed) or [`Failed`](Self::Failed).
 ///
 /// A block's [`Steps`] record what its format and lint steps did. Once a step runs, the state is
 /// the outcome over the steps that ran: [`Failed`](Self::Failed) when any failed, otherwise
@@ -99,6 +100,9 @@ pub(crate) enum NotChecked {
     /// The Rust block declares an outline module (`mod name;`), which rustc would read from a
     /// file outside the block when its linter compiled it.
     OutlineModule,
+    /// The TOML block holds a `#:schema` directive, which would make tombi read the file it
+    /// names, wherever it is.
+    SchemaFile,
 }
 
 /// Why a block failed.
@@ -459,6 +463,9 @@ impl BlockState {
             Self::NotChecked(NotChecked::CompileTimeRead) => Some("compile-time read".to_owned()),
             Self::NotChecked(NotChecked::TooLargeToScan) => Some("too large to scan".to_owned()),
             Self::NotChecked(NotChecked::OutlineModule) => Some("outline module".to_owned()),
+            Self::NotChecked(NotChecked::SchemaFile) => {
+                Some("the block names a schema file".to_owned())
+            }
             Self::UnknownLanguage => {
                 Some(format!("supdoc has no checker for `{}`", tag.unwrap_or("")))
             }
@@ -816,7 +823,7 @@ mod tests {
 
     #[test]
     fn any_other_tag_is_an_unknown_language() {
-        for tag in ["zsh", "rust,ignore", "toml"] {
+        for tag in ["zsh", "rust,ignore", "ini"] {
             assert_eq!(
                 state(&block("docs/a.md", Some(tag))),
                 BlockState::UnknownLanguage,
@@ -1117,6 +1124,7 @@ mod tests {
             BlockState::NotChecked(NotChecked::InputUnreadable),
             BlockState::NotChecked(NotChecked::ToolInsideRoot),
             BlockState::NotChecked(NotChecked::ToolchainUnresolved),
+            BlockState::NotChecked(NotChecked::SchemaFile),
             BlockState::UnknownLanguage,
             BlockState::ToolMissing,
         ];

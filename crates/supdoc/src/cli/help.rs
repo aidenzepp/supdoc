@@ -51,6 +51,7 @@ top-level keys, and never change which files links are read from. A language's t
   typescript    formatter biome-format, linter biome-lint
   javascript    formatter biome-format, linter biome-lint
   json          formatter biome-format, linter biome-lint; tag a block with comments jsonc
+  toml          formatter tombi-format, linter tombi-lint
   markdown      formatter rumdl-format, linter rumdl
 
 Each tool's options live in its own table, such as [features.code-blocks.python.ruff] with \

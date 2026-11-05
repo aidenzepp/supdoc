@@ -18,7 +18,7 @@ use super::format::ParseError;
 use super::fragment::{Kind, Support};
 use super::lint;
 use super::runner::{Failure, Ran};
-use super::{biome, python, rumdl, rust, shell};
+use super::{biome, python, rumdl, rust, shell, tombi};
 
 /// The variables a tool gets from supdoc's own environment, and no others.
 const PASSED: [&str; 5] = [
@@ -255,7 +255,7 @@ fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'sta
 }
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 15] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 17] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -436,7 +436,35 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 15] = [
         argv: rumdl_args,
         reader: Reader::Lint(rumdl::lint_verdict),
     },
+    ToolCartridge {
+        name: "tombi-format",
+        language: Language::Toml,
+        binary: "tombi",
+        tier: Tier::Static,
+        install: "pipx install tombi",
+        config_files: TOMBI_CONFIGS,
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        argv: tombi_format_args,
+        reader: Reader::Format(tombi::parse_error),
+    },
+    ToolCartridge {
+        name: "tombi-lint",
+        language: Language::Toml,
+        binary: "tombi",
+        tier: Tier::Static,
+        install: "pipx install tombi",
+        config_files: TOMBI_CONFIGS,
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        argv: tombi_lint_args,
+        reader: Reader::Lint(tombi::lint_verdict),
+    },
 ];
+
+/// The config names tombi looks for (see [`tombi::CONFIG_FILES`]), which its cached results are
+/// keyed on.
+const TOMBI_CONFIGS: &[&str] = &tombi::CONFIG_FILES;
 
 /// The files rumdl's results depend on: its config names (see [`rumdl::CONFIG_FILES`]) and the
 /// `.editorconfig` it reads line lengths from.
@@ -710,6 +738,37 @@ fn rumdl_args(invocation: &Invocation<'_>) -> Vec<OsString> {
     .collect()
 }
 
+/// `tombi format`'s arguments: offline, so no schema is fetched, quiet, then the block on stdin
+/// under its virtual path. tombi gets its config through `XDG_CONFIG_HOME` (see [`tombi`]), not
+/// a flag.
+fn tombi_format_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    vec![
+        OsString::from("format"),
+        OsString::from("--offline"),
+        OsString::from("--quiet"),
+        OsString::from("--stdin-filename"),
+        virtual_path(invocation.doc, invocation.index, "toml"),
+        OsString::from("-"),
+    ]
+}
+
+/// `tombi lint`'s arguments: offline, JSON diagnostics on stdout (its summary stays on stderr,
+/// which tells a run that linted nothing, see [`tombi::linted_nothing`]), then the block on stdin
+/// under its virtual path.
+fn tombi_lint_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    vec![
+        OsString::from("lint"),
+        OsString::from("--offline"),
+        OsString::from("--diagnostics-format"),
+        OsString::from("json"),
+        OsString::from("--diagnostics-file"),
+        OsString::from("/dev/stdout"),
+        OsString::from("--stdin-filename"),
+        virtual_path(invocation.doc, invocation.index, "toml"),
+        OsString::from("-"),
+    ]
+}
+
 /// The lints clippy leaves off for a block, which a snippet breaks for lack of context, as
 /// `-A` flags after the project's own so they win.
 const CLIPPY_RELAXED: [&str; 4] = [
@@ -908,6 +967,8 @@ mod tests {
                 "biome-lint Json Lint biome Static",
                 "rumdl-format Markdown Format rumdl Static",
                 "rumdl Markdown Lint rumdl Static",
+                "tombi-format Toml Format tombi Static",
+                "tombi-lint Toml Lint tombi Static",
             ]
         );
     }

@@ -923,6 +923,17 @@ mod helps {
             needs_permissions: false,
         },
         case(
+            "code-block-not-checked",
+            |p| {
+                config_with(p, "[features.code-blocks]\n[features.code-blocks.toml]\n");
+                p.write(
+                    "docs/blocks.md",
+                    "# B\n\n```toml\n#:schema ../s.json\na = 1\n```\n",
+                );
+            },
+            &["check"],
+        ),
+        case(
             "code-block-unknown-attribute",
             |p| {
                 config_with(p, "[features.code-blocks]\n");
@@ -994,10 +1005,7 @@ mod helps {
             "code-block-unknown-attribute",
             |p| {
                 config_with(p, "[features.code-blocks]\n");
-                p.write(
-                    "docs/blocks.md",
-                    "# B\n\n```toml format(full)\na = 1\n```\n",
-                );
+                p.write("docs/blocks.md", "# B\n\n```ini format(full)\na = 1\n```\n");
             },
             &["check"],
         ),
