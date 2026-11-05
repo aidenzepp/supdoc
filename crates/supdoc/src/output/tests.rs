@@ -143,7 +143,7 @@ fn github_lines_escape_percent_newline_colon_comma() {
 
     let text = "see [x](a.rs#b)\n";
     let finding = finding_on(
-        "docs/a,b: c.md",
+        "docs/a,b%c.md",
         text,
         "[x](a.rs#b)",
         "link-failed",
@@ -155,7 +155,7 @@ fn github_lines_escape_percent_newline_colon_comma() {
 
     assert_eq!(
         line,
-        "::error file=docs/a%2Cb%3A c.md,line=1,col=5,title=supdoc link-failed::50%25 changed\\nsecond line. Run `supdoc update --yes`"
+        "::error file=docs/a%2Cb%25c.md,line=1,col=5,title=supdoc link-failed::50%25 changed\\nsecond line. Run `supdoc update --yes`"
     );
     assert_eq!(line.lines().count(), 1, "an annotation is exactly one line");
 }
