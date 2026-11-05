@@ -1,4 +1,20 @@
 //! Where a path really lies once symlinks are followed, so supdoc can stay inside the project root.
+//!
+//! Outside the root, supdoc reads only its own inputs: a `supdoc.config.toml` reached through
+//! `extends`, or a project config symlinked to an outside file of that name, whose lines can appear
+//! in config errors; the ignore files in the directories above the root, up to the top of its git
+//! work tree; the global excludes file; and a `.git/info/exclude` reached through a `.git` symlink,
+//! a symlinked `.git/info` or `info/exclude`, or a `.git` file's `gitdir` and `commondir`. To find
+//! the global excludes file it reads the git config files that can name it: `~/.gitconfig` and
+//! `$XDG_CONFIG_HOME/git/config` (or the file `GIT_CONFIG_GLOBAL` names), and `/etc/gitconfig` (or
+//! the file `GIT_CONFIG_SYSTEM` names). It never quotes a rule line from an ignore file outside the
+//! root, or a line from a git config. It reads, hashes, lists symbols from and quotes no other file
+//! outside the root, linked files included; a tool it runs on a code block may still read its own
+//! config files there.
+//!
+//! It doesn't promise to hide whether a path outside the root exists: an out-and-back symlink can
+//! change which error or exit code appears. That is accepted, since a pull request on ordinary
+//! `pull_request` CI can already run commands.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
