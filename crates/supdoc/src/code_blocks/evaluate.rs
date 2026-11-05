@@ -117,6 +117,9 @@ pub(crate) struct BlockRecord {
     /// What tombi is given for it: the private directory it runs in, holding its config. `None`
     /// for every other tool.
     tombi: Option<tombi::Project>,
+    /// yamllint's `-c <private copy>` for it (see [`yaml::lint_args`]). `None` for every other
+    /// tool.
+    yamllint: Option<Vec<OsString>>,
     /// What the format step needs, kept while the block is pending.
     pending: Option<Pending>,
 }
@@ -245,6 +248,7 @@ pub(crate) fn evaluate(
             edition: block_edition(block).or_else(|| code_blocks.edition()),
             given: None,
             tombi: None,
+            yamllint: None,
             language,
             state,
             steps,
@@ -940,12 +944,15 @@ struct ToolConfigs {
     tombi: TombiConfigs,
     /// yamlfmt's.
     yamlfmt: YamlfmtConfigs,
+    /// yamllint's.
+    yamllint: YamllintConfigs,
 }
 
 impl ToolConfigs {
     /// Gives `record` the config its tool gets, as [`BiomeConfigs::give`],
-    /// [`RumdlConfigs::give`], [`TombiConfigs::give`] and [`YamlfmtConfigs::give`] do. Whether
-    /// the block goes on to its tools: not when it or its config was refused.
+    /// [`RumdlConfigs::give`], [`TombiConfigs::give`], [`YamlfmtConfigs::give`] and
+    /// [`YamllintConfigs::give`] do. Whether the block goes on to its tools: not when it or its
+    /// config was refused.
     fn give(
         &mut self,
         record: &mut BlockRecord,
@@ -957,6 +964,7 @@ impl ToolConfigs {
             && self.rumdl.give(record, tool, place, slots).is_ok()
             && self.tombi.give(record, tool, place, slots)
             && self.yamlfmt.give(record, tool, place, slots).is_ok()
+            && self.yamllint.give(record, place, slots)
     }
 }
 
@@ -1388,7 +1396,8 @@ impl YamlfmtConfigs {
         (env, root): (&ToolEnv, &Path),
         slots: &mut Vec<Slot>,
     ) -> Result<(), yaml::Refusal> {
-        if tool.language != Language::Yaml {
+        // A block whose format step is off goes to yamllint alone, whatever yamlfmt's config says.
+        if tool.language != Language::Yaml || record.tool.is_none() {
             return Ok(());
         }
         let doc = root.join(record.at.file.as_str());
@@ -1446,6 +1455,120 @@ fn yamlfmt_refusal(refusal: &yaml::Refusal, at: &Location) -> (String, Finding) 
         .with_location(at.clone());
     (reason, finding)
 }
+
+/// The yamllint config flags found for each doc directory, and the refusals already warned about.
+#[derive(Debug, Default)]
+struct YamllintConfigs {
+    /// Each doc directory's result, in the order they were asked for.
+    found: Vec<(PathBuf, Result<Vec<OsString>, yaml::Refusal>)>,
+    /// The refusals a warning has been added for.
+    warned: Vec<yaml::Refusal>,
+}
+
+impl YamllintConfigs {
+    /// Gives `record`, a YAML block whose linter is yamllint, the `-c` flag yamllint gets for its
+    /// doc, found once per directory. A block holding a yamllint comment that switches every rule
+    /// off (see [`yaml::switches_lint_off`]) has its lint step taken off, with one
+    /// `code-block-not-checked` warning for the block; a refused config takes the lint step off
+    /// each block of its directory, with one warning per refusal. Either way the format step still
+    /// runs. Whether the block goes on to its tools: not when no step is left.
+    ///
+    /// Effect: reads the config and may create supdoc's private directory and file for it.
+    fn give(
+        &mut self,
+        record: &mut BlockRecord,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> bool {
+        if record.linter.is_none_or(|linter| linter.name != YAMLLINT) {
+            return true;
+        }
+        let switched_off = record
+            .pending
+            .as_ref()
+            .is_some_and(|pending| yaml::switches_lint_off(&pending.input));
+        if switched_off {
+            slots.push(Slot::Found(
+                Finding::new(
+                    NOT_CHECKED,
+                    Severity::Warning,
+                    "the block holds a yamllint comment that switches every rule off, which \
+                     supdoc doesn't give to yamllint, so its lint step didn't run",
+                )
+                .with_help(
+                    "name the rules the comment switches off, as in `# yamllint disable-line \
+                     rule:truthy`, or switch the step off with `lint(off: <why>)`",
+                )
+                .with_location(record.at.clone()),
+            ));
+            return take_lint_off(record, YAMLLINT_SWITCHED_OFF);
+        }
+        let doc = root.join(record.at.file.as_str());
+        let dir = doc.parent().unwrap_or(root).to_path_buf();
+        let found = if let Some((_, found)) = self.found.iter().find(|(known, _)| *known == dir) {
+            found.clone()
+        } else {
+            let found = yaml::lint_args(env, root, &doc);
+            self.found.push((dir, found.clone()));
+            found
+        };
+        match found {
+            Ok(flags) => {
+                record.yamllint = Some(flags);
+                true
+            }
+            Err(refusal) => {
+                if !self.warned.contains(&refusal) {
+                    slots.push(Slot::Found(yamllint_refusal(&refusal, &record.at)));
+                    self.warned.push(refusal);
+                }
+                take_lint_off(record, YAMLLINT_REFUSED)
+            }
+        }
+    }
+}
+
+/// Takes the lint step off `record` with `reason`. Whether a step is left to run.
+fn take_lint_off(record: &mut BlockRecord, reason: &'static str) -> bool {
+    let _taken = record.linter.take();
+    record.steps.lint = StepState::Unrunnable { reason };
+    record.tool.is_some()
+}
+
+/// The name of yamllint's cartridge.
+const YAMLLINT: &str = "yamllint";
+
+/// Why a YAML block's lint step didn't run when it holds a yamllint comment switching every rule
+/// off.
+const YAMLLINT_SWITCHED_OFF: &str =
+    "the block holds a yamllint comment that switches every rule off";
+
+/// Why a YAML block's lint step didn't run when supdoc couldn't give yamllint its config.
+const YAMLLINT_REFUSED: &str = "supdoc couldn't give yamllint the project's config";
+
+/// The `code-block-not-checked` warning, at `at`, for the blocks yamllint isn't given because of
+/// `refusal`.
+fn yamllint_refusal(refusal: &yaml::Refusal, at: &Location) -> Finding {
+    let (message, help) = match refusal {
+        yaml::Refusal::Config { file, why } => (
+            format!("the project's `{file}` {why}, so its YAML blocks aren't linted"),
+            format!(
+                "keep `extends: default` or `relaxed`, `locale` and a `rules:` block of yamllint \
+                 1.38.0's rules in `{file}`, with no `ignore`, or mark the blocks `lint(off: <why>)`"
+            ),
+        ),
+        yaml::Refusal::NoPrivateDir => (
+            format!("{YAMLLINT_NO_PRIVATE_DIR}, so its blocks aren't linted"),
+            "set `XDG_CACHE_HOME` or `HOME` to a directory outside the project".to_owned(),
+        ),
+    };
+    Finding::new(NOT_CHECKED, Severity::Warning, message)
+        .with_help(help)
+        .with_location(at.clone())
+}
+
+/// Why yamllint didn't run when supdoc had no private directory to keep its config in.
+const YAMLLINT_NO_PRIVATE_DIR: &str = "yamllint needs a private directory under `XDG_CACHE_HOME` or `HOME` for its config, and there is none";
 
 /// Why yamlfmt didn't run when supdoc had no private directory to keep its config in.
 const YAMLFMT_NO_PRIVATE_DIR: &str = "yamlfmt needs a private directory under `XDG_CACHE_HOME` or `HOME` for its config, and there is none";
@@ -2343,7 +2466,10 @@ fn run_linter(
         tag: record.language.as_deref().unwrap_or_default(),
         edition: record.edition.unwrap_or(Edition::E2024),
         dialect: record.dialect,
-        project: given.map_or(&[], |given| given.flags.as_slice()),
+        project: match &record.yamllint {
+            Some(flags) if tool.name == YAMLLINT => flags.as_slice(),
+            _ => given.map_or(&[], |given| given.flags.as_slice()),
+        },
         emit: None,
         externs: &[],
         fragment: record.fragment,
@@ -3537,6 +3663,7 @@ mod tests {
                 edition: None,
                 given: None,
                 tombi: None,
+                yamllint: None,
                 pending: Pending::of(block, &doc),
             })
             .collect()

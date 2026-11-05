@@ -450,7 +450,7 @@ fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'sta
 }
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 19] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 20] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -723,6 +723,22 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 19] = [
         positions: own_positions,
         argv: yamlfmt_args,
         reader: Reader::Format(yaml::parse_error),
+    },
+    ToolCartridge {
+        name: "yamllint",
+        language: Language::Yaml,
+        binary: "yamllint",
+        tier: Tier::Static,
+        install: "pipx install 'yamllint==1.38.0'",
+        // yamllint reads only supdoc's private copy, named by its hash in the args.
+        config_files: &[],
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        holds: every_tag,
+        vars: &[],
+        positions: own_positions,
+        argv: yamllint_args,
+        reader: Reader::Lint(yaml::lint_verdict),
     },
     ToolCartridge {
         name: "gofmt",
@@ -1029,6 +1045,22 @@ fn yamlfmt_args(invocation: &Invocation<'_>) -> Vec<OsString> {
         .collect()
 }
 
+/// `yamllint`'s arguments: diagnostics one per line, a warning failing the run as an error does,
+/// the project's `-c <private copy>` (see [`yaml::lint_args`]), with the snippet relaxation in
+/// it, then the block on stdin. yamllint takes no stdin file name, so the doc and the block's
+/// index don't appear.
+fn yamllint_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    [
+        OsString::from("-f"),
+        OsString::from("parsable"),
+        OsString::from("-s"),
+    ]
+    .into_iter()
+    .chain(invocation.project.iter().cloned())
+    .chain([OsString::from("-")])
+    .collect()
+}
+
 /// `tombi format`'s arguments: offline, so no schema is fetched, quiet, then the block on stdin
 /// under its virtual path. tombi gets its config through `XDG_CONFIG_HOME` (see [`tombi`]), not
 /// a flag.
@@ -1262,6 +1294,7 @@ mod tests {
                 "tombi-format Toml Format tombi Static",
                 "tombi-lint Toml Lint tombi Static",
                 "yamlfmt Yaml Format yamlfmt Static",
+                "yamllint Yaml Lint yamllint Static",
                 "gofmt Go Format gofmt Static",
             ]
         );
