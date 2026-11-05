@@ -44,6 +44,9 @@ impl ExcludeFile {
 /// Its rules may be quoted only when `.git`, `.git/info` and the exclude file are a real
 /// directory, directory and file, no symlink among them, so the file lies inside `dir`.
 ///
+/// A `commondir` file whose line no path can hold has no rules and is reported as unreadable,
+/// naming that file.
+///
 /// Effect: reads file metadata in `dir`, a `.git` file and its `commondir`, and the exclude file.
 pub(super) fn git_exclude(dir: &Path, limit: SizeLimit) -> ExcludeFile {
     let dot_git = dir.join(".git");
@@ -51,10 +54,16 @@ pub(super) fn git_exclude(dir: &Path, limit: SizeLimit) -> ExcludeFile {
         return ExcludeFile::none();
     };
     let git_dir = if metadata.is_file() {
-        let Some(common) = common_dir(dir, &dot_git) else {
-            return ExcludeFile::none();
-        };
-        common
+        match shared_dir(dir, &dot_git) {
+            Shared::Dir(common) => common,
+            Shared::Absent => return ExcludeFile::none(),
+            Shared::UnusablePointer(commondir) => {
+                return ExcludeFile {
+                    unreadable: Some((commondir, ReadFailure::Partial)),
+                    ..ExcludeFile::none()
+                };
+            }
+        }
     } else if is_git_dir(&dot_git) {
         dot_git.clone()
     } else {
@@ -80,17 +89,50 @@ pub(super) fn git_exclude(dir: &Path, limit: SizeLimit) -> ExcludeFile {
 /// no `gitdir: ` line, or a `commondir` file is there but unreadable, empty or not a regular file,
 /// so no exclude file applies.
 ///
+/// Also `None` when the `commondir` line holds a NUL byte, which no path can.
+///
 /// Effect: reads `dot_git` and the `commondir` file.
 pub(crate) fn common_dir(dir: &Path, dot_git: &Path) -> Option<PathBuf> {
-    let line = first_line(dot_git)?;
-    let git_dir = Pointer::new(line.strip_prefix("gitdir: ")?)?.resolve_from(dir);
+    match shared_dir(dir, dot_git) {
+        Shared::Dir(common) => Some(common),
+        Shared::Absent | Shared::UnusablePointer(_) => None,
+    }
+}
+
+/// What [`shared_dir`] found for a `.git` file.
+enum Shared {
+    /// The shared git directory.
+    Dir(PathBuf),
+    /// No shared git directory, as [`common_dir`] describes its `None`.
+    Absent,
+    /// The `commondir` file at this path was read, but its line holds a NUL byte, so it names no
+    /// path.
+    UnusablePointer(PathBuf),
+}
+
+/// The shared git directory of the worktree whose `.git` file in `dir` is `dot_git`, as
+/// [`common_dir`] finds it, telling a `commondir` line that names no path apart from no shared
+/// directory at all.
+///
+/// Effect: reads `dot_git` and the `commondir` file.
+fn shared_dir(dir: &Path, dot_git: &Path) -> Shared {
+    let Some(git_dir) = first_line(dot_git)
+        .and_then(|line| Some(Pointer::new(line.strip_prefix("gitdir: ")?)?.resolve_from(dir)))
+    else {
+        return Shared::Absent;
+    };
     let commondir = git_dir.join("commondir");
     if fs::symlink_metadata(&commondir).is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
     {
-        return Some(git_dir);
+        return Shared::Dir(git_dir);
     }
-    let common = first_line(&commondir)?;
-    Some(Pointer::new(&common)?.resolve_from(&git_dir))
+    let Some(common) = first_line(&commondir) else {
+        return Shared::Absent;
+    };
+    match Pointer::new(&common) {
+        Some(pointer) => Shared::Dir(pointer.resolve_from(&git_dir)),
+        None => Shared::UnusablePointer(commondir),
+    }
 }
 
 /// The most bytes a `.git` file's or `commondir`'s first line may hold before its line ending:
