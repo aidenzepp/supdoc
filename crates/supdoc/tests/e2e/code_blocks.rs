@@ -1381,11 +1381,11 @@ fn lint_select_lint_off_attribute_counts_lint_skipped_with_its_reason() {
 }
 
 #[test]
-fn lint_select_an_unknown_linter_or_a_command_table_exits_78() {
+fn lint_select_an_unknown_linter_or_a_malformed_command_exits_78() {
     for line in [
         "[features.code-blocks.python]\nlinter = \"flake8\"",
         "[features.code-blocks.rust]\nlinter = \"shellcheck\"",
-        "[features.code-blocks.shell]\nlinter = { command = [\"shellcheck\"] }",
+        "[features.code-blocks.shell]\nlinter = { command = \"shellcheck\" }",
     ] {
         let project = project_with_shell_blocks();
         project.write(

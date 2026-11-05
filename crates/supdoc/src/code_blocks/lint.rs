@@ -14,7 +14,7 @@ use super::rust::LineMap;
 use super::tools::ToolCartridge;
 
 /// The code for a linter's diagnostic on a block.
-const LINT: &str = "code-block-lint";
+pub(crate) const LINT: &str = "code-block-lint";
 
 /// The code for a name a block uses but neither it nor the project's crate defines.
 const MISSING_NAME: &str = "code-block-missing-name";
@@ -76,6 +76,9 @@ pub(crate) enum Verdict {
     /// The linter failed or passed its timeout: [`format::Verdict::ToolFailed`] or
     /// [`format::Verdict::TimedOut`].
     Failed(format::Verdict),
+    /// A custom linter exited non-zero and no line it printed reads as a diagnostic: the first
+    /// lines of its output, `None` when it printed nothing. Only a custom linter gives this.
+    Unparsed(Option<String>),
 }
 
 impl Verdict {
@@ -173,7 +176,8 @@ pub(crate) fn findings(
         frame,
     } = *read;
     match verdict {
-        Verdict::Clean => Vec::new(),
+        // Only a custom linter's output is unparsed, and its own findings read that.
+        Verdict::Clean | Verdict::Unparsed(_) => Vec::new(),
         Verdict::Failed(failed) => {
             let failed = frame.map_or_else(
                 || failed.clone(),

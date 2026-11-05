@@ -1,5 +1,5 @@
-//! Custom `{ command = [...] }` formatters: held back in an untrusted checkout, run as written
-//! from the root in a trusted one.
+//! Custom `{ command = [...] }` formatters and linters: held back in an untrusted checkout, run
+//! as written from the root in a trusted one.
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
@@ -496,4 +496,345 @@ fn format_by_the_real_ruff_as_a_custom_command_passes_and_fails() {
         "{passes}"
     );
     assert_eq!(finding_kinds(&fails), ["code-block-unformatted"], "{fails}");
+}
+
+/// A recorded `basic` project whose Python blocks are linted by `linter` (a TOML inline table)
+/// and ruff-format's format step off, and one `py` block holding `body` in `docs/blocks.md`: its fence is doc
+/// line 3, its first code line doc line 4.
+fn lint_project(linter: &str, body: &str) -> Project {
+    let project = Project::fixture("basic");
+    project.record();
+    project.write(
+        "supdoc.config.toml",
+        &format!(
+            "[features.code-blocks]\n[features.code-blocks.python]\nlinter = {linter}\n\
+             [features.code-blocks.python.ruff-format]\nformat = \"off\"\n"
+        ),
+    );
+    project.write(
+        "docs/blocks.md",
+        &format!("# Blocks\n\n```py\n{body}\n```\n"),
+    );
+    project
+}
+
+/// The stub's command as a GNU linter, as config writes it.
+const GNU_STUB: &str = "{ command = [\"fmt-stub\", \"{path}\"], diagnostics = \"gnu\" }";
+
+/// The `(line, column, message)` of each loose `code-block-lint` finding.
+fn lints(json: &serde_json::Value) -> Vec<(u64, u64, String)> {
+    array_at(json, "/findings")
+        .iter()
+        .filter(|finding| finding["kind"] == "code-block-lint")
+        .map(|finding| {
+            (
+                finding
+                    .pointer("/location/line")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default(),
+                finding
+                    .pointer("/location/column")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default(),
+                finding["message"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn lint_by_a_custom_command_is_held_without_trust_and_never_spawns() {
+    for (vars, cause) in [
+        (&[][..], "`supdoc trust`"),
+        (&[("SUPDOC_TRUST", Path::new("0"))][..], "`SUPDOC_TRUST=0`"),
+    ] {
+        let stub = Stub::new("exit 1");
+        let project = lint_project(GNU_STUB, "x = 1");
+
+        let json = check(&project, &stub, vars, 0);
+
+        let reason = at(&json, "/data/code_blocks/0/reason")
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            reason.contains("custom linter command") && reason.contains(cause),
+            "the reason should name the custom linter command and {cause}: {json}"
+        );
+        assert_eq!(finding_kinds(&json), ["code-block-not-trusted"], "{json}");
+        assert_eq!(stub.log(), None, "an untrusted command must never spawn");
+    }
+}
+
+#[test]
+fn lint_and_format_by_custom_commands_without_trust_is_not_checked_needing_trust() {
+    let stub = Stub::new("exit 1");
+    let project = lint_project(GNU_STUB, "x = 1");
+    project.write(
+        "supdoc.config.toml",
+        &format!(
+            "[features.code-blocks]\n[features.code-blocks.python]\n\
+             formatter = {{ command = {STUB} }}\nlinter = {GNU_STUB}\n"
+        ),
+    );
+
+    let json = check(&project, &stub, &[], 0);
+
+    assert_eq!(
+        at(&json, "/data/code_blocks/0/state"),
+        "not_checked",
+        "{json}"
+    );
+    let reason = at(&json, "/data/code_blocks/0/reason")
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        [
+            "custom formatter command",
+            "custom linter command",
+            "`supdoc trust`"
+        ]
+        .iter()
+        .all(|said| reason.contains(said)),
+        "a block whose only due steps are custom should say each needs trust: {reason:?}"
+    );
+    assert_eq!(stub.log(), None, "an untrusted command must never spawn");
+}
+
+#[test]
+fn lint_by_a_custom_command_doesnt_run_under_tier_static() {
+    let stub = Stub::new("exit 1");
+    let project = lint_project(GNU_STUB, "x = 1");
+    project.replace(
+        "supdoc.config.toml",
+        "[features.code-blocks]\n",
+        "[features.code-blocks]\ntier = \"static\"\n",
+    );
+
+    let json = check(&project, &stub, &[trusted()], 0);
+
+    assert!(finding_kinds(&json).is_empty(), "{json}");
+    assert_eq!(
+        at(&json, "/data/code_blocks/0/state"),
+        "not_checked",
+        "{json}"
+    );
+    assert_eq!(
+        stub.log(),
+        None,
+        "a lowered tier must never spawn the command"
+    );
+}
+
+#[test]
+fn lint_by_a_custom_command_that_exits_zero_passes_whatever_it_prints() {
+    let stub = Stub::new("printf 'docs/blocks.md.1.py:1:1: error: x\\n'; printf 'warn\\n' >&2");
+    let project = lint_project(GNU_STUB, "x = 1");
+
+    let json = check(&project, &stub, &[trusted()], 0);
+
+    assert!(finding_kinds(&json).is_empty(), "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+    assert_eq!(
+        stub.logged("arg:"),
+        ["docs/blocks.md.1.py"],
+        "the linter should get the root-relative virtual path"
+    );
+}
+
+#[test]
+fn lint_gnu_lines_land_at_their_block_lines_doc_line_and_column() {
+    let cases = [
+        ("printf 'docs/blocks.md.1.py:2:5: error: x\\n'", (5, 5)),
+        (
+            "printf '%s/docs/blocks.md.1.py:2:5: error: x\\n' \"$(pwd -P)\"",
+            (5, 5),
+        ),
+        ("printf '<stdin>:1:1: error: x\\n'", (4, 1)),
+        ("printf -- '-:2:3: error: x\\n' >&2", (5, 3)),
+        ("printf 'stdin:1:2: error: x\\n'", (4, 2)),
+        ("printf 'docs/blocks.md.1.py:2: error: x\\n'", (5, 1)),
+    ];
+
+    for (print, (line, column)) in cases {
+        let stub = Stub::new(&format!("{print}; exit 1"));
+        let project = lint_project(GNU_STUB, "x = 1\ny = 2");
+
+        let json = check(&project, &stub, &[trusted()], 1);
+
+        assert_eq!(
+            lints(&json),
+            [(
+                line,
+                column,
+                "the custom linter command `fmt-stub` reports: error: x".to_owned()
+            )],
+            "`{print}` should give one lint at doc line {line}, column {column}: {json}"
+        );
+        assert_eq!(finding_kinds(&json), ["code-block-lint"], "{json}");
+        assert_eq!(at(&json, "/data/code_blocks/0/state"), "failed", "{json}");
+    }
+}
+
+#[test]
+fn lint_gnu_lines_fail_the_block_whatever_severity_word_they_carry() {
+    let stub = Stub::new(
+        "printf '<stdin>:1:1: note: a\\n<stdin>:1:2: warning: b\\n<stdin>:1:3: info c\\n'; exit 1",
+    );
+    let project = lint_project(GNU_STUB, "x = 1");
+
+    let json = check(&project, &stub, &[trusted()], 1);
+
+    assert_eq!(
+        finding_kinds(&json),
+        ["code-block-lint", "code-block-lint", "code-block-lint"],
+        "{json}"
+    );
+    assert_eq!(at(&json, "/data/code_blocks/0/state"), "failed", "{json}");
+}
+
+#[test]
+fn lint_lines_off_the_block_or_for_another_file_fall_back_to_one_lint_at_the_fence() {
+    let printed = "docs/blocks.md.1.py:9:1: error: far\nother.py:1:1: error: o\ndocs/blocks.md.1.py:1:1:tight";
+    let stub = Stub::new(&format!(
+        "printf '{}\\n'; exit 1",
+        printed.replace('\n', "\\n")
+    ));
+    let project = lint_project(GNU_STUB, "x = 1");
+
+    let json = check(&project, &stub, &[trusted()], 1);
+
+    let found = lints(&json);
+    assert_eq!(found.len(), 1, "{json}");
+    let (line, _, message) = found.first().expect("there should be one lint");
+    assert_eq!(*line, 3, "the fallback should be at the fence: {json}");
+    assert!(
+        message.ends_with(&format!(":\n{printed}")),
+        "the fallback should quote what the linter printed: {message:?}"
+    );
+}
+
+#[test]
+fn lint_without_diagnostics_quotes_twenty_plain_lines_stdout_then_stderr() {
+    let stub = Stub::new(
+        "i=1; while [ $i -le 15 ]; do echo \"out $i\"; i=$((i+1)); done; \
+         i=1; while [ $i -le 10 ]; do printf '\\033[31merr %s\\033[0m\\n' $i >&2; i=$((i+1)); done; exit 1",
+    );
+    let project = lint_project("{ command = [\"fmt-stub\"] }", "x = 1");
+
+    let json = check(&project, &stub, &[trusted()], 1);
+
+    let found = lints(&json);
+    assert_eq!(found.len(), 1, "{json}");
+    let (line, _, message) = found.first().expect("there should be one lint");
+    let expected: Vec<String> = (1..=15)
+        .map(|n| format!("out {n}"))
+        .chain((1..=5).map(|n| format!("err {n}")))
+        .collect();
+    assert_eq!(*line, 3, "the fallback should be at the fence: {json}");
+    assert!(
+        message.ends_with(&format!(":\n{}", expected.join("\n"))) && !message.contains('\u{1b}'),
+        "the fallback should quote 15 stdout then 5 stderr lines without ANSI: {message:?}"
+    );
+}
+
+#[test]
+fn lint_by_a_custom_command_that_fails_printing_nothing_says_so() {
+    let stub = Stub::new("exit 3");
+    let project = lint_project(GNU_STUB, "x = 1");
+
+    let json = check(&project, &stub, &[trusted()], 1);
+
+    assert_eq!(
+        lints(&json),
+        [(
+            3,
+            1,
+            "the custom linter command `fmt-stub` exited with a non-zero status on the block and \
+             printed nothing"
+                .to_owned()
+        )],
+        "{json}"
+    );
+}
+
+#[test]
+fn lint_by_a_custom_command_is_never_cached() {
+    let stub = Stub::new("exit 0");
+    let project = lint_project(GNU_STUB, "x = 1");
+
+    let _first = check(&project, &stub, &[trusted()], 0);
+    let _second = check(&project, &stub, &[trusted()], 0);
+
+    assert_eq!(
+        stub.logged("call").len(),
+        2,
+        "each check should spawn the linter again"
+    );
+}
+
+#[test]
+fn lint_by_the_real_ruff_as_a_custom_command_finds_an_unused_import() {
+    let Some(dir) = real_tool_dir(
+        "ruff",
+        "lint_by_the_real_ruff_as_a_custom_command_finds_an_unused_import",
+    ) else {
+        return;
+    };
+    let project = lint_project(
+        "{ command = [\"ruff\", \"check\", \"--no-cache\", \"--output-format=concise\", \
+         \"--stdin-filename\", \"{path}\", \"-\"], diagnostics = \"gnu\" }",
+        "x = 1\nimport os",
+    );
+
+    let json = project
+        .supdoc_in_with(
+            ".",
+            &["check", "--json"],
+            &[("PATH", dir.as_path()), trusted()],
+        )
+        .assert_exit(1)
+        .json();
+
+    let found = lints(&json);
+    assert_eq!(found.len(), 1, "{json}");
+    let (line, column, message) = found.first().expect("there should be one lint");
+    assert_eq!((*line, *column), (5, 8), "{json}");
+    assert!(message.contains("F401"), "{message:?}");
+}
+
+#[test]
+fn lint_by_the_real_shellcheck_as_a_custom_command_maps_gcc_lines() {
+    let Some(dir) = real_tool_dir(
+        "shellcheck",
+        "lint_by_the_real_shellcheck_as_a_custom_command_maps_gcc_lines",
+    ) else {
+        return;
+    };
+    let project = Project::fixture("basic");
+    project.record();
+    project.write(
+        "supdoc.config.toml",
+        "[features.code-blocks]\n[features.code-blocks.shell]\n\
+         linter = { command = [\"shellcheck\", \"--format=gcc\", \"-\"], diagnostics = \"gnu\" }\n\
+         [features.code-blocks.shell.shfmt]\nformat = \"off\"\n",
+    );
+    project.write(
+        "docs/blocks.md",
+        "# Blocks\n\n```sh\n#!/bin/sh\necho $1\n```\n",
+    );
+
+    let json = project
+        .supdoc_in_with(
+            ".",
+            &["check", "--json"],
+            &[("PATH", dir.as_path()), trusted()],
+        )
+        .assert_exit(1)
+        .json();
+
+    let found = lints(&json);
+    assert_eq!(found.len(), 1, "{json}");
+    let (line, column, message) = found.first().expect("there should be one lint");
+    assert_eq!((*line, *column), (5, 6), "{json}");
+    assert!(message.contains("SC2086"), "{message:?}");
 }

@@ -4,7 +4,7 @@ use std::fmt;
 use std::io::ErrorKind;
 use std::ops::Range;
 
-use super::code_blocks::{Selected, Unselected, Unwired, shown};
+use super::code_blocks::{Selected, Unselected, shown};
 use crate::exit::ExitStatus;
 use crate::lock::error::shell_quote;
 use crate::namespace::NamespaceName;
@@ -130,14 +130,6 @@ pub(crate) enum ConfigError {
         table: Unselected,
     },
 
-    /// The merged `extends` chain selects a custom linter `{ command = [...] }` that is valid in
-    /// full, but custom linters are not wired to run yet. It shares `config-parse`'s code: it is a
-    /// value the config can't use yet, judged once the whole chain is valid.
-    CustomCommandNotWired {
-        /// The command, the file that wrote it, and the key that selects it.
-        command: Unwired,
-    },
-
     /// A chain of `extends` comes back to a file it already visited.
     ExtendsLoop {
         /// The files in the loop, in order. The last is the first again.
@@ -167,9 +159,7 @@ impl ConfigError {
             Self::NotFound { .. } => "config-not-found",
             Self::Read { .. } => "config-read",
             Self::TooLarge { .. } => "config-too-large",
-            Self::Parse { .. }
-            | Self::ToolNotSelected { .. }
-            | Self::CustomCommandNotWired { .. } => "config-parse",
+            Self::Parse { .. } | Self::ToolNotSelected { .. } => "config-parse",
             Self::ExtendsMissing { .. } => "config-extends-missing",
             Self::ExtendsDirectory { .. } => "config-extends-directory",
             Self::ExtendsLoop { .. } => "config-extends-loop",
@@ -209,14 +199,6 @@ impl ConfigError {
                 table.language,
                 table.key,
                 selected_text(table.selected.as_ref()),
-            ),
-            Self::CustomCommandNotWired { command } => format!(
-                "{}: `{}` in `[features.code-blocks.{}]` is the custom command `{}`, but custom \
-                 linter commands aren't wired yet",
-                show(&command.file),
-                command.key,
-                command.language,
-                shown(&command.program),
             ),
             Self::ExtendsMissing {
                 file,
@@ -347,12 +329,6 @@ impl ConfigError {
                     },
                 ),
             }),
-            Self::CustomCommandNotWired { command } => Some(format!(
-                "Remove `{key}` from `[features.code-blocks.{language}]` to use the default tool, \
-                 or set it to a known tool's name",
-                key = command.key,
-                language = command.language,
-            )),
             Self::ExtendsMissing { resolved, .. } => {
                 let resolved = shell_quote(&show(resolved));
                 Some(format!(
@@ -414,7 +390,6 @@ impl ConfigError {
             | Self::TooLarge { .. }
             | Self::Parse { .. }
             | Self::ToolNotSelected { .. }
-            | Self::CustomCommandNotWired { .. }
             | Self::ExtendsMissing { .. }
             | Self::ExtendsDirectory { .. }
             | Self::ExtendsLoop { .. }
