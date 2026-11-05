@@ -743,6 +743,52 @@ fn lint_the_real_biome_lints_a_block_the_projects_includes_leave_out() {
 }
 
 #[test]
+fn lint_the_real_biome_lints_a_block_in_a_project_with_a_vcs_integration() {
+    let Some(dir) = real_tool_dir(
+        "biome",
+        "lint_the_real_biome_lints_a_block_in_a_project_with_a_vcs_integration",
+    ) else {
+        return;
+    };
+    let config = r#"{"vcs":{"enabled":true,"clientKind":"git","useIgnoreFile":true,"root":"."}}"#;
+    let lint = |body: &str| lint_outcome(&lint_only(body, Some(config)), &dir);
+
+    assert_eq!(
+        lint("f();"),
+        (vec![], "passed".to_owned()),
+        "a clean block passes"
+    );
+    assert_eq!(
+        lint("debugger;"),
+        (vec!["code-block-lint".to_owned()], "failed".to_owned()),
+        "a debugger statement fails"
+    );
+}
+
+#[test]
+fn lint_the_real_biome_lints_a_block_larger_than_the_projects_max_size() {
+    let Some(dir) = real_tool_dir(
+        "biome",
+        "lint_the_real_biome_lints_a_block_larger_than_the_projects_max_size",
+    ) else {
+        return;
+    };
+    let config = r#"{"files":{"maxSize":1}}"#;
+    let lint = |body: &str| lint_outcome(&lint_only(body, Some(config)), &dir);
+
+    assert_eq!(
+        lint("f();"),
+        (vec![], "passed".to_owned()),
+        "a clean block passes"
+    );
+    assert_eq!(
+        lint("debugger;"),
+        (vec!["code-block-lint".to_owned()], "failed".to_owned()),
+        "a debugger statement fails"
+    );
+}
+
+#[test]
 fn lint_a_run_that_checked_no_file_is_not_run_with_one_warning_never_a_pass() {
     let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
     let nothing = r#"{"summary":{"changed":0,"unchanged":0},"diagnostics":[],"command":"lint"}"#;

@@ -68,7 +68,9 @@ pub(crate) fn parse_error(stderr: &str) -> Option<ParseError> {
 /// One diagnostic of `biome lint --reporter=json`.
 #[derive(serde::Deserialize)]
 struct BiomeDiagnostic {
-    /// Its rule, as `lint/<group>/<rule>`, or `parse` for a syntax error.
+    /// Its rule, as `lint/<group>/<rule>`, or a category that names no rule: `parse` for a
+    /// syntax error, or a bare `lint` for a file biome didn't lint, such as one over
+    /// `files.maxSize`.
     category: String,
     /// What biome says.
     message: String,
@@ -113,31 +115,45 @@ struct BiomeSummary {
 /// The diagnostics in `biome lint --reporter=json`'s `stdout`, each named by its rule without
 /// the `lint/` prefix (`suspicious/noDebugger`), at every severity. `None` when it isn't biome's
 /// JSON report.
-#[must_use]
-pub(crate) fn diagnostics(stdout: &[u8]) -> Option<Vec<Diagnostic>> {
+///
+/// # Errors
+///
+/// What biome said, when a diagnostic's category names no rule: biome reporting on the run,
+/// such as a file it skipped, never a finding in the block.
+pub(crate) fn diagnostics(stdout: &[u8]) -> Option<Result<Vec<Diagnostic>, String>> {
     let report: BiomeReport = serde_json::from_slice(stdout).ok()?;
     Some(
         report
             .diagnostics
             .into_iter()
-            .map(|diagnostic| Diagnostic {
-                line: diagnostic.location.start.line,
-                column: diagnostic.location.start.column,
-                rule: diagnostic
+            .map(|diagnostic| {
+                let rule = diagnostic
                     .category
                     .strip_prefix("lint/")
-                    .map_or_else(|| diagnostic.category.clone(), str::to_owned),
-                message: diagnostic.message,
+                    .filter(|rule| !rule.is_empty())
+                    .map(str::to_owned);
+                rule.map(|rule| Diagnostic {
+                    line: diagnostic.location.start.line,
+                    column: diagnostic.location.start.column,
+                    rule,
+                    message: diagnostic.message.clone(),
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "biome lint reported a `{}` diagnostic that names no rule: {}",
+                        diagnostic.category, diagnostic.message
+                    )
+                })
             })
             .collect(),
     )
 }
 
-/// Judges a `biome lint` run on its JSON report, not its exit: any diagnostic, error, warning
-/// or info alike, fails the block, as clippy's warnings fail a Rust block. A report with none is
-/// clean on a zero exit; a non-zero exit without diagnostics, or output that isn't the report, is
-/// a tool failure; a timeout is a timeout. `input` isn't needed: biome counts columns in
-/// characters.
+/// Judges a `biome lint` run on its JSON report, not its exit: any rule's diagnostic, error,
+/// warning or info alike, fails the block, as clippy's warnings fail a Rust block. A report with
+/// none is clean on a zero exit; a diagnostic that names no rule, a non-zero exit without
+/// diagnostics, or output that isn't the report, is a tool failure; a timeout is a timeout.
+/// `input` isn't needed: biome counts columns in characters.
 #[must_use]
 pub(crate) fn lint_verdict(_input: &str, result: Result<Ran, Failure>) -> lint::Verdict {
     let ran = match result {
@@ -145,8 +161,9 @@ pub(crate) fn lint_verdict(_input: &str, result: Result<Ran, Failure>) -> lint::
         Err(failure) => return lint::Verdict::Failed(format::failed(failure)),
     };
     match diagnostics(&ran.stdout) {
-        Some(found) if !found.is_empty() => lint::Verdict::Diagnostics(found),
-        Some(_) if ran.success => lint::Verdict::Clean,
+        Some(Err(detail)) => lint::Verdict::Failed(format::Verdict::ToolFailed(detail)),
+        Some(Ok(found)) if !found.is_empty() => lint::Verdict::Diagnostics(found),
+        Some(Ok(_)) if ran.success => lint::Verdict::Clean,
         _ => lint::Verdict::Failed(format::Verdict::ToolFailed(format::exit_detail(
             &ran.stderr,
         ))),
@@ -164,26 +181,33 @@ pub(crate) fn linted_nothing(stdout: &[u8]) -> bool {
 }
 
 /// The settings that leave files out of linting, as `(section, key)` at the config's top level:
-/// biome 2's `includes` and the `include` and `ignore` spellings older configs use. The lint
-/// copy drops them, so a block is linted wherever the format step checks it; an override's
-/// `includes` stays, since it only scopes that override's settings.
-const LINT_EXCLUSIONS: [(&str, &str); 6] = [
+/// biome 2's `includes` and the `include` and `ignore` spellings older configs use, and
+/// `files.maxSize`, which skips a file larger than it. The lint copy drops them, so a block is
+/// linted wherever the format step checks it; an override's `includes` stays, since it only
+/// scopes that override's settings.
+const LINT_EXCLUSIONS: [(&str, &str); 7] = [
     ("files", "includes"),
     ("files", "include"),
     ("files", "ignore"),
+    ("files", "maxSize"),
     ("linter", "includes"),
     ("linter", "include"),
     ("linter", "ignore"),
 ];
 
-/// `strict`, the JSON config biome is given, without [`LINT_EXCLUSIONS`]. `None` when it isn't
-/// a JSON object.
+/// `strict`, the JSON config biome is given, without [`LINT_EXCLUSIONS`] and with `vcs.enabled`
+/// set to `false` when it has a `vcs` section: the block's directory is no checkout, so a VCS
+/// integration has no ignore file to honor and makes biome fail. `None` when it isn't a JSON
+/// object.
 fn without_exclusions(strict: &str) -> Option<String> {
     let mut config: serde_json::Map<String, Value> = serde_json::from_str(strict).ok()?;
     for (section, key) in LINT_EXCLUSIONS {
         if let Some(Value::Object(settings)) = config.get_mut(section) {
             let _dropped = settings.remove(key);
         }
+    }
+    if let Some(Value::Object(vcs)) = config.get_mut("vcs") {
+        let _previous = vcs.insert("enabled".to_owned(), Value::Bool(false));
     }
     serde_json::to_string(&config).ok()
 }
@@ -211,8 +235,9 @@ impl LintFile {
     /// A new directory `biome-lint/<pid>-<n>` beside `neutral`, the tool's working directory,
     /// mode 0700 inside a 0700 `biome-lint` directory, holding `biome.json` (the config `given`
     /// names, without the [`LINT_EXCLUSIONS`] that would leave the block unlinted) and `input`
-    /// as the `index`th block of `doc`, its extension picked by `tag`. Every file is created new, mode 0600. `None` when `neutral` is `/`, `given`
-    /// names no config, or anything can't be created.
+    /// as the `index`th block of `doc`, its extension picked by `tag`. Every file is created
+    /// new, mode 0600. `None` when `neutral` is `/`, `given` names no config, or anything can't
+    /// be created.
     ///
     /// Effect: reads the private config, creates directories and writes two files.
     #[must_use]
@@ -714,12 +739,12 @@ mod tests {
     fn biomes_json_report_gives_one_diagnostic_each_at_its_1_based_line_and_column() {
         let stdout = br#"{"summary":{"changed":0,"unchanged":1,"errors":2},"diagnostics":[
             {"severity":"error","message":"This is an unexpected use of the debugger statement.","category":"lint/suspicious/noDebugger","location":{"path":"/r/a.md.1.js","start":{"line":2,"column":1},"end":{"line":2,"column":10}},"advices":[]},
-            {"severity":"error","message":"Expected an expression","category":"parse","location":{"path":"/r/a.md.1.js","start":{"line":3,"column":9},"end":{"line":3,"column":10}},"advices":[]}
+            {"severity":"warning","message":"Don't use a label.","category":"lint/suspicious/noConfusingLabels","location":{"path":"/r/a.md.1.js","start":{"line":3,"column":9},"end":{"line":3,"column":10}},"advices":[]}
         ],"command":"lint"}"#;
 
         assert_eq!(
             diagnostics(stdout),
-            Some(vec![
+            Some(Ok(vec![
                 Diagnostic {
                     line: 2,
                     column: 1,
@@ -729,11 +754,35 @@ mod tests {
                 Diagnostic {
                     line: 3,
                     column: 9,
-                    rule: "parse".to_owned(),
-                    message: "Expected an expression".to_owned(),
+                    rule: "suspicious/noConfusingLabels".to_owned(),
+                    message: "Don't use a label.".to_owned(),
                 },
-            ])
+            ]))
         );
+    }
+
+    #[test]
+    fn a_diagnostic_whose_category_names_no_rule_is_a_tool_failure_never_a_finding() {
+        let rule = r#"{"severity":"error","message":"This is an unexpected use of the debugger statement.","category":"lint/suspicious/noDebugger","location":{"path":"x","start":{"line":1,"column":1},"end":{"line":1,"column":10}},"advices":[]}"#;
+        let too_large = r#"{"severity":"warning","message":"The size of the file is 10 B, which exceeds the configured maximum of 4 B for this project.","category":"lint","location":{"path":"x","start":{"line":0,"column":0},"end":{"line":0,"column":0}},"advices":[]}"#;
+
+        for found in [
+            too_large.to_owned(),
+            too_large.replace(r#""lint""#, r#""lint/""#),
+            too_large.replace(r#""lint""#, r#""parse""#),
+            format!("{rule},{too_large}"),
+        ] {
+            let verdict = lint_verdict("", Ok(ran(true, report(&found))));
+
+            assert!(
+                matches!(
+                    &verdict,
+                    Verdict::Failed(FormatVerdict::ToolFailed(detail))
+                        if detail.contains("names no rule") && detail.contains("exceeds")
+                ),
+                "{found}: {verdict:?}"
+            );
+        }
     }
 
     /// A report holding `diagnostics` (JSON array items) for one checked file.
@@ -803,14 +852,31 @@ mod tests {
 
     #[test]
     fn the_lint_copy_drops_top_level_exclusions_and_keeps_an_overrides_includes() {
-        let strict = r#"{"files":{"includes":["src/**"],"ignore":["x"],"maxSize":9},"linter":{"includes":["src/**"],"enabled":true},"overrides":[{"includes":["docs/**"],"linter":{"enabled":false}}]}"#;
+        let strict = r#"{"files":{"includes":["src/**"],"ignore":["x"],"maxSize":9,"ignoreUnknown":true},"linter":{"includes":["src/**"],"enabled":true},"overrides":[{"includes":["docs/**"],"linter":{"enabled":false}}]}"#;
 
         assert_eq!(
             without_exclusions(strict).as_deref(),
             Some(
-                r#"{"files":{"maxSize":9},"linter":{"enabled":true},"overrides":[{"includes":["docs/**"],"linter":{"enabled":false}}]}"#
+                r#"{"files":{"ignoreUnknown":true},"linter":{"enabled":true},"overrides":[{"includes":["docs/**"],"linter":{"enabled":false}}]}"#
             )
         );
+    }
+
+    #[test]
+    fn the_lint_copy_turns_a_vcs_integration_off_and_adds_none_where_there_was_none() {
+        let vcs = r#"{"vcs":{"enabled":true,"clientKind":"git","useIgnoreFile":true,"root":"/r"}}"#;
+
+        assert_eq!(
+            without_exclusions(vcs).as_deref(),
+            Some(
+                r#"{"vcs":{"clientKind":"git","enabled":false,"root":"/r","useIgnoreFile":true}}"#
+            )
+        );
+        assert_eq!(
+            without_exclusions(r#"{"vcs":{}}"#).as_deref(),
+            Some(r#"{"vcs":{"enabled":false}}"#)
+        );
+        assert_eq!(without_exclusions("{}").as_deref(), Some("{}"));
     }
 
     #[test]
