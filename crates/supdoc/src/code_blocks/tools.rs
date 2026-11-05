@@ -255,7 +255,7 @@ fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'sta
 }
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 13] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 15] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -365,6 +365,18 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 13] = [
         reader: Reader::Format(biome::parse_error),
     },
     ToolCartridge {
+        name: "biome-format",
+        language: Language::Json,
+        binary: "biome",
+        tier: Tier::Static,
+        install: "npm install --global @biomejs/biome",
+        config_files: BIOME_CONFIGS,
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        argv: biome_format_args,
+        reader: Reader::Format(biome::parse_error),
+    },
+    ToolCartridge {
         name: "biome-lint",
         language: Language::TypeScript,
         binary: "biome",
@@ -379,6 +391,18 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 13] = [
     ToolCartridge {
         name: "biome-lint",
         language: Language::JavaScript,
+        binary: "biome",
+        tier: Tier::Static,
+        install: "npm install --global @biomejs/biome",
+        config_files: BIOME_CONFIGS,
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        argv: biome_lint_args,
+        reader: Reader::Lint(biome::lint_verdict),
+    },
+    ToolCartridge {
+        name: "biome-lint",
+        language: Language::Json,
         binary: "biome",
         tier: Tier::Static,
         install: "npm install --global @biomejs/biome",
@@ -878,8 +902,10 @@ mod tests {
                 "clippy Rust Lint clippy-driver Project",
                 "biome-format TypeScript Format biome Static",
                 "biome-format JavaScript Format biome Static",
+                "biome-format Json Format biome Static",
                 "biome-lint TypeScript Lint biome Static",
                 "biome-lint JavaScript Lint biome Static",
+                "biome-lint Json Lint biome Static",
                 "rumdl-format Markdown Format rumdl Static",
                 "rumdl Markdown Lint rumdl Static",
             ]

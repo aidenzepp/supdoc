@@ -38,6 +38,25 @@ store and the result cache. It never quotes an ignore rule or git config line fr
 It doesn't hide whether a path outside the root exists: an out-and-back symlink can change which \
 error or exit code appears.
 
+DATA LINKS
+
+JSON, YAML and TOML files are link targets, never scanned for links. A link names a key by its \
+path, such as package.json#scripts.test or ci.yml#jobs.test.steps.1:
+
+  - `.` joins keys from the root, and a number names an array element, counting from 0.
+  - Write `~` in a key as `~0` and `.` as `~1`, so a key a.b is a~1b. The fragment is \
+percent-decoded first, so write a key's % as %25.
+  - A YAML file of several non-empty documents names each by its index first, such as \
+deploy.yaml#1.spec.replicas. An alias is never expanded.
+  - Two keys with the same path make a link to it ambiguous.
+
+A data file whose key paths hold more segments than max-key-segments, or more text than \
+max-key-path-size, fails read-too-many-keys or read-key-paths-too-large. A package-lock.json over \
+about 3 MB exceeds the default max-key-segments: raise it under [limits], with \
+SUPDOC_MAX_KEY_SEGMENTS or with --max-key-segments. A YAML file past 32,768 lines, where a \\r\\n \
+counts as two, fails read-too-many-lines, and one nested past column 100 fails read-too-deep; no \
+setting raises either.
+
 CODE BLOCKS
 
 Code blocks are checked only when the config has a [features.code-blocks] table; an empty table \
@@ -50,6 +69,7 @@ top-level keys, and never change which files links are read from. A language's t
   python        formatter \"ruff-format\" (the default) or \"black\", linter ruff
   typescript    formatter biome-format, linter biome-lint
   javascript    formatter biome-format, linter biome-lint
+  json          formatter biome-format, linter biome-lint; tag a block with comments jsonc
   markdown      formatter rumdl-format, linter rumdl
 
 Each tool's options live in its own table, such as [features.code-blocks.python.ruff] with \
@@ -57,8 +77,11 @@ lint = \"off\". A table for a tool the language doesn't select is a config error
 
 Each tool reads the block on standard input and its own config files, which can sit outside the \
 project; its errors can quote them. rumdl's config is found from the doc's directory up to the \
-nearest .git inside the root, never above the root, and MD041, MD051 and MD057 are off for \
-blocks.
+nearest .git inside the root, never above the root.
+
+A snippet lacks the code around it, so some rules are off for blocks: biome lint skips \
+noUnusedVariables, noUnusedImports and noUnusedFunctionParameters; rumdl turns off MD041, MD051 \
+and MD057; ruff drops F706, F704 and PLE1142 for a fragment(statements) block.
 
 Write attributes after a block's language, separated by spaces:
 
