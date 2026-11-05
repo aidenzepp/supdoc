@@ -6,7 +6,7 @@ For paired before-and-after Rust refactors, read [design-transformations.md](des
 
 ## Dishonest Hidden Ambient State
 
-```rust
+```rust lint(off: needs crate context)
 fn populate(world: &mut ParticleWorld, count: usize) {
     let velocity = GLOBAL_RNG.random();
     // ...
@@ -18,7 +18,7 @@ Passing an RNG explicitly would make the effect honest, not pure.
 
 ## Service Locator Disguised as Injection
 
-```rust
+```rust lint(off: needs crate context)
 fn populate(context: &AppContext, world: &mut ParticleWorld) {
     let rng = context.services.randomness.global_rng();
     // ...
@@ -43,7 +43,7 @@ These traits manufacture mocks rather than express real substitution or external
 
 ## A False Type-Level Guarantee
 
-```rust
+```rust lint(off: needs crate context)
 fn cross(left: UnitVec3, right: UnitVec3) -> UnitVec3 {
     // Incorrect: the cross product has magnitude sin(theta).
 }
@@ -53,7 +53,7 @@ Parallel unit vectors produce zero. A strong return type would certify a mathema
 
 ## Validate and Forget
 
-```rust
+```rust lint(off: needs crate context)
 fn validate_port(port: u16) -> Result<(), InvalidPort> {
     if port < 1_024 {
         return Err(InvalidPort { port });
@@ -100,7 +100,7 @@ Another writer may change the accounts between the check and the write. Purity h
 
 ## Parameter Bag Instead of a Concept
 
-```rust
+```rust lint(off: needs crate context)
 struct DoEverythingOptions {
     user_id: String,
     raw_sql: String,
@@ -123,7 +123,7 @@ The call site does not communicate units or boolean meaning. Use semantic types 
 
 ## Mechanical Helper Explosion
 
-```rust
+```rust lint(off: needs crate context)
 fn get_name(user: &User) -> &str {
     &user.name
 }
@@ -137,7 +137,7 @@ The helpers add navigation without adding vocabulary, policy, safety, reuse, or 
 
 ## Wrapper Ladder
 
-```rust
+```rust lint(off: needs crate context)
 fn handle(request: Request) -> Result<Response, Error> {
     process_request(request)
 }
@@ -151,7 +151,7 @@ Pass-through layers make local reasoning worse unless they translate a boundary,
 
 ## Weakest Syntax, Missing Semantics
 
-```rust
+```rust lint(off: needs crate context)
 fn repeatedly_partition(values: impl Iterator<Item = Item>) {
     // The algorithm actually needs multiple passes and stable indexing.
 }
@@ -161,7 +161,7 @@ The weakest type that compiles is not automatically the most truthful. Ask for a
 
 ## Callback as Accidental Authority
 
-```rust
+```rust lint(off: needs crate context)
 fn for_each_item(items: &[Item], callback: impl FnMut(&Item)) {
     // The callback may block, re-enter, retain references, or perform I/O.
 }
