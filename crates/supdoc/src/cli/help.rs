@@ -4,24 +4,75 @@
 //! Each one starts with that same summary line, so the two never disagree about what the command
 //! is. These texts are the reference for behavior a user sees: the README points here.
 
-/// `supdoc check --help`: the gate, and how it checks code blocks.
+/// `supdoc check --help`: the gate, the files it reads, and how it checks code blocks.
 pub(crate) const CHECK_LONG_ABOUT: &str = "\
 Check links against supdoc.lock (read-only)
 
-Exits 1 when a link needs attention: its target changed since the lock recorded it, it no longer \
-resolves, or it has no lock entry yet. With --deny-warnings, warnings such as obsolete lock \
-entries also fail.
+Exits 1 when a link or a code block needs attention: a linked target changed since the lock \
+recorded it, a link no longer resolves or has no lock entry yet, or a code block is stale, \
+unformatted, or fails its format or lint step. With --deny-warnings, warnings also fail, such as an obsolete \
+lock entry or a code-block-not-trusted warning. check writes nothing in the project. With code \
+blocks on, it keeps a result cache in $XDG_CACHE_HOME/supdoc/code-blocks (else \
+~/.cache/supdoc/code-blocks).
+
+FILES
+
+check reads the files your .gitignore, .ignore and git exclude files leave, as git does, with \
+these differences:
+
+  - Rules match case-sensitively, whatever core.ignorecase says.
+  - core.excludesFile is read only from the user and system git config, never from a \
+repository's own config.
+  - A .ignore rule outranks every .gitignore rule, and .ignore files still apply past a nested \
+repository's top, where .gitignore rules stop.
+  - A rule above the project root that ignores the root, or a directory on the way to it, isn't \
+applied: running supdoc in a directory checks it. A rule above the root that matches the files \
+themselves, such as *.gen.md, still applies.
+  - A rule ignores a file even when git tracks it. git's index isn't read.
+  - Outside any git repository, no ignore file above the root is read. The global excludes file \
+still applies.
+
+Outside the root, supdoc reads only its own inputs: its config chain, ignore files, the git config \
+that names the global excludes file, the .git and commondir of a linked worktree, the trust \
+store and the result cache. It never quotes an ignore rule or git config line from there. \
+It doesn't hide whether a path outside the root exists: an out-and-back symlink can change which \
+error or exit code appears.
+
+CODE BLOCKS
 
 Code blocks are checked only when the config has a [features.code-blocks] table; an empty table \
-turns it on. A language's table, such as [features.code-blocks.shell], turns that language on, \
-and each tool's options live in the tool's own table, such as [features.code-blocks.python.ruff]. \
+turns it on. Its include and exclude keys choose which files' blocks are read, default to the \
+top-level keys, and never change which files links are read from. A language's table, such as \
+[features.code-blocks.rust], turns that language on and holds these keys:
+
+  rust          formatter rustfmt, linter clippy, edition \"2015\" to \"2024\"
+  shell         formatter shfmt, linter shellcheck, dialect \"bash\", \"posix\" or \"mksh\"
+  python        formatter \"ruff-format\" (the default) or \"black\", linter ruff
+  typescript    formatter biome-format, linter biome-lint
+  javascript    formatter biome-format, linter biome-lint
+  markdown      formatter rumdl-format, linter rumdl
+
+Each tool's options live in its own table, such as [features.code-blocks.python.ruff] with \
+lint = \"off\". A table for a tool the language doesn't select is a config error.
+
+Each tool reads the block on standard input and its own config files, which can sit outside the \
+project; its errors can quote them. rumdl's config is found from the doc's directory up to the \
+nearest .git inside the root, never above the root, and MD041, MD051 and MD057 are off for \
+blocks.
+
 Write attributes after a block's language, separated by spaces:
 
   from(PATH#SYMBOL)
-      The block is exactly that symbol's text. It fails code-block-stale when it drifts, and \
-`supdoc fix --yes` copies the current text in. Repeat it to join several symbols.
+      The block is exactly that symbol's text. PATH is relative to the doc, and a dotted symbol \
+names a member, such as src/limits.rs#Limits.resolve. Repeat it to show several symbols, joined \
+by one blank line. A block that drifts fails code-block-stale, and `supdoc fix --yes` copies \
+the current text in.
   uses(PATH#SYMBOL)
       A hand-written block that depends on the symbol, tracked in supdoc.lock like a link.
+  fragment(KIND)
+      The block is part of a larger construct: statements, expression, entries, children, \
+members or declarations. A step whose tool can't check that kind doesn't run, with a \
+code-block-fragment-unsupported warning.
   ignore(reason)
       Check nothing in this block.
   format(off: reason), lint(off: reason)
@@ -30,7 +81,16 @@ Write attributes after a block's language, separated by spaces:
       Run that step even though its tool's table turns it off.
 
 Attributes are always parenthesized, never key=value, and a comma doesn't separate them. An \
-ignore or off without a reason still applies, with a code-block-missing-reason warning.
+attribute a block's tools don't take warns code-block-unknown-attribute. An ignore or off without \
+a reason still applies, with a code-block-missing-reason warning. GitHub, markdown-it, Docusaurus, \
+mdBook and TypeDoc hide attributes; Mintlify shows the text after the language as the block's \
+title.
+
+supdoc checks what is written and never skips a block on its own. The exception is a Rust block \
+that reads a file or an environment variable at compile time (include_str!, env!), or, before \
+clippy compiles it, one that calls a macro off supdoc's list: it isn't checked, with a \
+code-block-not-checked warning. In a trusted checkout, a Rust block that names an item it \
+doesn't define fails code-block-missing-name, once per name.
 
 The summary counts each step: a step its tool's table sets to \"off\" is `format off` or `lint \
 off`; one a block marks off is `format skipped` or `lint skipped`; one that was due but didn't \
@@ -64,7 +124,8 @@ runs `cargo check --lib --locked --offline` on the root's Cargo.toml, so the pro
 scripts and proc macros run. That is what trust grants. cargo reads your cargo config as it does \
 when you run it in the root, and builds the path dependencies, workspace members and [patch] \
 paths the root names. supdoc never writes Cargo.lock and never downloads a crate: run `cargo \
-generate-lockfile` or `cargo fetch` first. cargo and clippy get a cleared environment, so \
+generate-lockfile` or `cargo fetch` first. A root package that would join a workspace outside the root \
+isn't built. cargo and clippy get a cleared environment, so \
 secrets in your environment don't reach them; files your user can read still can.
 
 The build goes into ~/.cache/supdoc/code-blocks/target/<hash of the root> (under \
@@ -96,7 +157,8 @@ jobs.";
 pub(crate) const SCHEMA_LONG_ABOUT: &str = "\
 Print the JSON Schema of a command's --json output (read-only)
 
-Every --json document carries schema_version. Adding an optional field, or a new value of an \
+Every --json result carries schema_version. An error document, the error entry of `supdoc \
+schema`, doesn't. Adding an optional field, or a new value of an \
 existing enum (states, actions, kinds, JSONL record types), keeps it; removing or renaming \
 anything bumps it. A consumer must tolerate values it doesn't know.";
 
