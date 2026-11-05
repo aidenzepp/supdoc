@@ -1,6 +1,7 @@
 //! The per-block pipeline that `check` runs: judges each code block and returns its findings
 //! and the count of blocks in each state.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::num::NonZeroUsize;
@@ -27,7 +28,7 @@ use super::block::{CodeBlock, Info};
 use super::cache::{self, Cache};
 use super::excerpt;
 use super::format::{self, FixDoc};
-use super::fragment::Kind;
+use super::fragment::{Frame, Kind};
 use super::info::{
     KNOWN_ATTRIBUTES, SourceKind, StepValue, fragment_kind, is_fragment_word, is_known_attribute,
     parenthesized_spelling, reasoned, replacement_for_removed, source_attributes, step_attribute,
@@ -425,6 +426,7 @@ impl Evaluation {
     fn settle(&mut self, slots: Vec<Slot>, jobs: &[Job], ran: Vec<Option<StepsRan>>) {
         let mut ran = ran.into_iter();
         let mut linted_nothing_warned = false;
+        let mut indent_unknown_warned = false;
         for slot in slots {
             let (job, run) = match slot {
                 Slot::Found(finding) => {
@@ -441,10 +443,20 @@ impl Evaluation {
             };
             // Each outcome with the tool that decided it, `None` for the project build.
             let mut outcomes: Vec<(BlockState, Option<&ToolCartridge>)> = Vec::new();
-            if let (Some((verdict, findings)), Some(run)) = (format, job.format.as_ref()) {
-                self.findings.extend(findings);
-                record.steps.format = StepState::Ran;
-                outcomes.push((verdict.state(), Some(run.tool)));
+            match (format, job.format.as_ref()) {
+                (Some(Ok((verdict, findings))), Some(run)) => {
+                    self.findings.extend(findings);
+                    record.steps.format = StepState::Ran;
+                    outcomes.push((verdict.state(), Some(run.tool)));
+                }
+                (Some(Err(reason)), Some(_)) => {
+                    if reason == FRAME_INDENT_UNKNOWN && !indent_unknown_warned {
+                        indent_unknown_warned = true;
+                        self.findings.push(indent_unknown(&record.at));
+                    }
+                    record.steps.format = StepState::Unrunnable { reason };
+                }
+                _ => {}
             }
             match (lint, job.lint.as_ref()) {
                 (Some(Ok((verdict, findings))), Some(run)) => {
@@ -525,9 +537,10 @@ fn run_jobs(
         let record = records.get(job.record)?;
         let format = job.format.as_ref().and_then(|run| {
             let rust = rust.filter(|_| run.tool.language == Language::Rust);
-            run_formatter(run.tool, &run.program, record, session, rust)
+            let frame = Frame::of(run.tool, record.fragment);
+            run_formatter(run.tool, &run.program, record, frame, session, rust)
         });
-        let parses = !matches!(format, Some((format::Verdict::ParseFailed { .. }, _)));
+        let parses = parses(format.as_ref());
         let lint = job.lint.as_ref().filter(|_| parses).and_then(|run| {
             let rust = rust.filter(|_| run.tool.language == Language::Rust);
             run_linter(run.tool, &run.program, record, session, rust)
@@ -575,6 +588,28 @@ fn refuse_unfound(
         };
     }
 }
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first framed block whose format
+/// step didn't run because supdoc couldn't read its formatter's indent from the project's config.
+fn indent_unknown(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "supdoc couldn't read the indent the formatter uses from the project's config, so the \
+         format step didn't run on blocks it reads inside a frame",
+    )
+    .with_help(
+        "set the indent plainly in the formatter's config (rustfmt's `hard_tabs` and \
+         `tab_spaces`; biome's `indentStyle` and `indentWidth`, outside `overrides`), or mark \
+         the blocks `format(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
+/// The reason a framed block's format step didn't run: supdoc couldn't read the indent its
+/// formatter uses, so it couldn't tell the block's lines from the frame's indent.
+pub(super) const FRAME_INDENT_UNKNOWN: &str =
+    "supdoc couldn't read the formatter's indent from the project's config";
 
 /// The run's one `code-block-not-checked` warning, at `at`, the first block whose biome lint
 /// step didn't run because biome checked no file.
@@ -638,14 +673,29 @@ struct ToolRun {
 /// What a [`Job`]'s steps gave: each step's verdict and findings, `None` for a step that didn't
 /// run.
 struct StepsRan {
-    /// The format step's.
-    format: Option<(format::Verdict, Vec<Finding>)>,
+    /// The format step's, or why it couldn't run.
+    format: Option<FormatRan>,
     /// The lint step's, or why it couldn't run.
     lint: Option<LintRan>,
 }
 
 /// What a lint step gave: its verdict and findings, or why supdoc couldn't run it safely.
 type LintRan = Result<(lint::Verdict, Vec<Finding>), &'static str>;
+
+/// What a format step gave: its verdict and findings, or why supdoc couldn't run it.
+type FormatRan = Result<(format::Verdict, Vec<Finding>), &'static str>;
+
+/// Whether a format step that gave `format` let the block parse, so its lint step may run: not
+/// when the formatter couldn't parse it, nor when a frame line showed it isn't its kind.
+fn parses(format: Option<&FormatRan>) -> bool {
+    !matches!(
+        format,
+        Some(Ok((
+            format::Verdict::ParseFailed { .. } | format::Verdict::NotKind(_),
+            _
+        )))
+    )
+}
 
 /// Why a step whose cartridge is above the effective tier doesn't run when the operator hasn't
 /// granted trust: clippy compiles the block, so it belongs to the project tier.
@@ -1202,6 +1252,8 @@ struct RustSetup {
     lints: Vec<OsString>,
     /// `CLIPPY_CONF_DIR` for an in-root clippy config, or nothing.
     clippy_conf: Option<OsString>,
+    /// The indent rustfmt's config gives it: `None` when the config can't be read for it.
+    indent: Option<RustfmtIndent>,
 }
 
 impl RustSetup {
@@ -1217,9 +1269,11 @@ impl RustSetup {
             Toolchain::Default => toolchain::active(env, root, timeout),
             pinned => pinned,
         };
+        let config = rust::config_args(root);
         Self {
             toolchain,
-            config: rust::config_args(root),
+            indent: RustfmtIndent::read(&config),
+            config,
             edition: toolchain::cargo_edition(root).unwrap_or(Edition::E2024),
             lints: toolchain::cargo_lints(root),
             clippy_conf: rust::clippy_conf_dir(root),
@@ -1229,6 +1283,148 @@ impl RustSetup {
     /// The edition for `record`'s block: its own attribute's, else the project's.
     fn edition_of(&self, record: &BlockRecord) -> Edition {
         record.edition.unwrap_or(self.edition)
+    }
+}
+
+/// The indent settings rustfmt formats with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RustfmtIndent {
+    /// `hard_tabs`: indent with a tab.
+    hard_tabs: bool,
+    /// `tab_spaces`: the spaces in one indent, and a tab's width under `hard_tabs`.
+    tab_spaces: usize,
+}
+
+impl RustfmtIndent {
+    /// rustfmt's own defaults.
+    const DEFAULT: Self = Self {
+        hard_tabs: false,
+        tab_spaces: 4,
+    };
+
+    /// The settings `config`, rustfmt's `--config-path` arguments, give it: its defaults with no
+    /// config. `None` when the config file can't be read or parsed, or either key holds a value
+    /// rustfmt wouldn't take.
+    ///
+    /// Effect: reads the config file.
+    fn read(config: &[OsString]) -> Option<Self> {
+        let Some(path) = config
+            .iter()
+            .skip_while(|arg| *arg != "--config-path")
+            .nth(1)
+        else {
+            return Some(Self::DEFAULT);
+        };
+        let table: toml::Table = std::fs::read_to_string(path).ok()?.parse().ok()?;
+        let hard_tabs = table
+            .get("hard_tabs")
+            .map_or(Some(false), toml::Value::as_bool)?;
+        let tab_spaces = match table.get("tab_spaces") {
+            None => Self::DEFAULT.tab_spaces,
+            Some(value) => usize::try_from(value.as_integer()?)
+                .ok()
+                .filter(|width| *width > 0)?,
+        };
+        Some(Self {
+            hard_tabs,
+            tab_spaces,
+        })
+    }
+
+    /// The indent unit: a tab under `hard_tabs`, else `tab_spaces` spaces.
+    fn unit(self) -> String {
+        if self.hard_tabs {
+            "\t".to_owned()
+        } else {
+            " ".repeat(self.tab_spaces)
+        }
+    }
+
+    /// The arguments that make rustfmt use these settings whatever config it finds on its own,
+    /// such as one above its working directory or in the user's home.
+    fn args(self) -> [OsString; 2] {
+        [
+            OsString::from("--config"),
+            OsString::from(format!(
+                "hard_tabs={},tab_spaces={}",
+                self.hard_tabs, self.tab_spaces
+            )),
+        ]
+    }
+}
+
+/// The indent unit biome uses for a `language` block under `given`'s config: its language
+/// section's `formatter.indentStyle` and `indentWidth`, else the top-level `formatter`'s, else
+/// biome's defaults (a tab; two spaces when the style is `space`). No config is biome's defaults.
+/// `None` when the config can't be read or parsed, has an override that sets an indent (which
+/// would give some paths another one), or holds a value biome wouldn't take.
+///
+/// Effect: reads the private config file.
+fn biome_indent(language: Language, given: Option<&biome::Given>) -> Option<String> {
+    let section = match language {
+        Language::TypeScript | Language::JavaScript => "javascript",
+        _ => return None,
+    };
+    let Some(path) = given.and_then(|given| given.config.as_ref()) else {
+        return Some("\t".to_owned());
+    };
+    let config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let indent_keys = ["indentStyle", "indentWidth"];
+    let sets_indent = |override_: &serde_json::Value| {
+        ["formatter", section].iter().any(|table| {
+            indent_keys.iter().any(|key| {
+                let at = if *table == "formatter" {
+                    format!("/formatter/{key}")
+                } else {
+                    format!("/{table}/formatter/{key}")
+                };
+                override_.pointer(&at).is_some()
+            })
+        })
+    };
+    match config.get("overrides") {
+        None => {}
+        Some(serde_json::Value::Array(overrides)) => {
+            if overrides.iter().any(sets_indent) {
+                return None;
+            }
+        }
+        Some(_) => return None,
+    }
+    let setting = |key: &str| {
+        config
+            .pointer(&format!("/{section}/formatter/{key}"))
+            .or_else(|| config.pointer(&format!("/formatter/{key}")))
+    };
+    match setting("indentStyle").map_or(Some("tab"), serde_json::Value::as_str)? {
+        "tab" => Some("\t".to_owned()),
+        "space" => {
+            let width = setting("indentWidth").map_or(Some(2), serde_json::Value::as_u64)?;
+            let width = usize::try_from(width).ok().filter(|width| *width > 0)?;
+            Some(" ".repeat(width))
+        }
+        _ => None,
+    }
+}
+
+/// The indent unit `tool` puts before each line of a block it formats inside a frame, read
+/// from the project's config for it (`rust`'s for rustfmt, `given`'s for biome), with the
+/// arguments that hold the tool to it. `None` for a formatter whose indent supdoc can't read,
+/// and when the config can't be read for it.
+///
+/// Effect: reads biome's private config file.
+fn indent_unit(
+    tool: &ToolCartridge,
+    rust: Option<&RustSetup>,
+    given: Option<&biome::Given>,
+) -> Option<(String, Vec<OsString>)> {
+    match tool.binary {
+        "rustfmt" => rust?
+            .indent
+            .map(|indent| (indent.unit(), indent.args().to_vec())),
+        "biome" => biome_indent(tool.language, given).map(|unit| (unit, Vec::new())),
+        _ => None,
     }
 }
 
@@ -1255,23 +1451,41 @@ struct Session<'run> {
 /// block early. `None` when its input couldn't be read, so it stays pending. A run whose verdict
 /// [`format::Verdict::cacheable`] allows is stored in the cache.
 ///
+/// A block `tool` reads only inside `frame` (its [`Frame::of`]) is formatted inside it, each
+/// line indented by the unit the project's config gives the formatter ([`indent_unit`]), and
+/// judged by [`format::judge_framed`], so its fix holds only the author's lines; a frame-level
+/// failure is reported at the block's info string. When that unit can't be read, the step
+/// doesn't run, with [`FRAME_INDENT_UNKNOWN`] as its reason.
+///
 /// Effect: reads the cache, runs the tool, killing it at the timeout, and writes the cache.
 fn run_formatter(
     tool: &ToolCartridge,
     program: &Path,
     record: &BlockRecord,
+    frame: Option<Frame>,
     session: &Session<'_>,
     rust: Option<&RustSetup>,
-) -> Option<(format::Verdict, Vec<Finding>)> {
+) -> Option<FormatRan> {
     let Session { root, timeout, .. } = *session;
     let pending = record.pending.as_ref()?;
-    let input = pending.input.as_str();
+    let given = record.given.as_ref();
+    let framed = match frame {
+        None => None,
+        Some(frame) => match indent_unit(tool, rust, given) {
+            Some((indent, held)) => Some((frame, indent, held)),
+            None => return Some(Err(FRAME_INDENT_UNKNOWN)),
+        },
+    };
+    let checked = framed.as_ref().map_or(
+        Cow::Borrowed(pending.input.as_str()),
+        |(frame, indent, _)| Cow::Owned(frame.wrap_indented(&pending.input, indent)),
+    );
+    let input = checked.as_ref();
     let doc = root.join(record.at.file.as_str());
     let edition = record
         .edition
         .or_else(|| rust.map(|rust| rust.edition))
         .unwrap_or(Edition::E2024);
-    let given = record.given.as_ref();
     let args = tool.args(&Invocation {
         doc: given
             .and_then(|given| given.mirror.as_deref())
@@ -1292,7 +1506,10 @@ fn run_formatter(
         .iter()
         .map(|(name, value)| (*name, value.as_os_str()))
         .collect();
-    let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
+    let held = framed
+        .as_ref()
+        .map_or(&[][..], |(_, _, held)| held.as_slice());
+    let args: Vec<&OsStr> = args.iter().chain(held).map(OsString::as_os_str).collect();
     let run = cache::Run {
         tool,
         program,
@@ -1311,11 +1528,23 @@ fn run_formatter(
                 stderr: given.map_or_else(|| ran.stderr.clone(), |given| given.named(&ran.stderr)),
                 ..ran
             });
-            format::judge(tool, input, named)
+            match &framed {
+                Some((frame, indent, _)) => {
+                    format::judge_framed(tool, *frame, indent, &pending.input, named)
+                }
+                None => format::judge(tool, input, named),
+            }
         },
         format::Verdict::cacheable,
     );
-    let at = parse_place(&verdict, pending).unwrap_or_else(|| record.at.clone());
+    let at = match &verdict {
+        format::Verdict::NotKind(_) | format::Verdict::FrameReformatted(_) => pending
+            .block
+            .info
+            .as_ref()
+            .map_or_else(|| record.at.clone(), |info| info.location.clone()),
+        _ => parse_place(&verdict, pending).unwrap_or_else(|| record.at.clone()),
+    };
     let finding = format::finding(&verdict, tool, &at, timeout)
         .map(|finding| jsonc_hint(finding, &verdict, record, &pending.input));
     let findings = match (&verdict, finding) {
@@ -1324,7 +1553,7 @@ fn run_formatter(
         }
         (_, finding) => finding.into_iter().collect(),
     };
-    Some((verdict, findings))
+    Some(Ok((verdict, findings)))
 }
 
 /// The doc line a parse failure names in `pending`'s block. `None` for any other verdict, or a
@@ -1397,7 +1626,7 @@ fn run_linter(
     };
     let args = tool.args(&invocation);
     let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
-    let frame = lint::Frame::of(tool, record.fragment);
+    let frame = Frame::of(tool, record.fragment);
     let input = lint::checked(frame, &pending.input);
     let input = input.as_ref();
     let run = cache::Run {
@@ -1564,7 +1793,7 @@ fn run_clippy(
         .iter()
         .map(|(name, value)| (*name, value.as_os_str()))
         .collect();
-    let frame = lint::Frame::of(tool, record.fragment);
+    let frame = Frame::of(tool, record.fragment);
     let input = lint::checked(frame, &pending.input);
     let input = input.as_ref();
     let run = cache::Run {
@@ -3415,5 +3644,393 @@ mod tests {
         );
         assert_eq!(linking.runs("cargo-runs"), [] as [String; 0]);
         assert_eq!(linking.runs("clippy-runs"), [] as [String; 0]);
+    }
+
+    /// The format step on a block of a kind its formatter reads only inside a frame.
+    mod frame_format {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::path::{Path, PathBuf};
+        use std::time::Duration;
+
+        use super::super::{
+            Evaluation, FRAME_INDENT_UNKNOWN, FormatRan, Job, RustSetup, Session, Slot, StepsRan,
+            ToolRun, biome_indent, parses, run_formatter,
+        };
+        use super::{rust_record, rust_records, temporary};
+        use crate::code_blocks::biome::Given;
+        use crate::code_blocks::format::Verdict;
+        use crate::code_blocks::fragment::{Kind, Support};
+        use crate::code_blocks::states::StepState;
+        use crate::code_blocks::tools::{ToolEnv, formatter};
+        use crate::config::code_blocks::Language;
+        use crate::finding::Finding;
+
+        /// rustfmt's statements frame, as fragments-design §2.6 lists it for P5-FR10.
+        const STATEMENTS: Support = Support::Framed {
+            before: "fn main() {",
+            after: "}",
+            out_before: "fn main() {",
+            out_after: "}",
+        };
+
+        /// A doc whose one Rust block declares `fragment(statements)` and holds `body`.
+        fn doc(body: &str) -> String {
+            format!("# D\n\n```rust fragment(statements)\n{body}```\n")
+        }
+
+        /// [`run_formatter`] with `program` as framed rustfmt on the one block of `text` under
+        /// `root`, with the test process's environment.
+        fn format_run(program: &Path, root: &Path, text: &str) -> FormatRan {
+            format_run_cached(program, root, text, None)
+        }
+
+        /// [`format_run`], with `XDG_CACHE_HOME`, which holds the tools' neutral working
+        /// directory, at `cache` when given.
+        fn format_run_cached(
+            program: &Path,
+            root: &Path,
+            text: &str,
+            cache: Option<&Path>,
+        ) -> FormatRan {
+            let mut record = rust_record(root, text);
+            record.fragment = Some(Kind::Statements);
+            record.linter = None;
+            let env = ToolEnv::from_vars(|name| match cache {
+                Some(cache) if name == "XDG_CACHE_HOME" => Some(cache.as_os_str().to_owned()),
+                _ => std::env::var_os(name),
+            });
+            let session = Session {
+                env: &env,
+                root,
+                timeout: Some(Duration::from_secs(120)),
+                cache: None,
+                linked: super::Linked::default(),
+            };
+            let rust = RustSetup::read(&env, root, Some(Duration::from_secs(120)));
+            let rustfmt = formatter(Language::Rust).expect("Rust has a formatter");
+            let frame = STATEMENTS.frame(Kind::Statements);
+            run_formatter(rustfmt, program, &record, frame, &session, Some(&rust))
+                .expect("the block's body should be in its doc")
+        }
+
+        /// A stub formatter at `<dir>/rustfmt` running `body`.
+        fn stub(dir: &Path, body: &str) -> PathBuf {
+            let path = dir.join("rustfmt");
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n"))
+                .expect("the stub should be writable");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("the stub should be executable");
+            path
+        }
+
+        /// `text` with the one fix in `findings` applied.
+        fn applied(text: &str, findings: &[Finding]) -> String {
+            let fix = findings
+                .iter()
+                .find_map(|finding| finding.fix.as_deref())
+                .expect("one finding should carry the fix");
+            let mut out = text.to_owned();
+            out.replace_range(fix.range.clone(), &fix.replacement);
+            out
+        }
+
+        /// The real rustfmt on `PATH`, for the test named `test`. `None` skips the test when it
+        /// is missing, unless `SUPDOC_REQUIRE_REAL_TOOLS` is set (CI sets it).
+        fn real_rustfmt(test: &str) -> Option<PathBuf> {
+            let found = std::env::var_os("PATH")
+                .iter()
+                .flat_map(std::env::split_paths)
+                .map(|dir| dir.join("rustfmt"))
+                .find(|path| path.is_absolute() && path.is_file());
+            let required = std::env::var_os("SUPDOC_REQUIRE_REAL_TOOLS")
+                .is_some_and(|value| !value.is_empty());
+            assert!(
+                found.is_some() || !required,
+                "{test} needs the real `rustfmt` on PATH because SUPDOC_REQUIRE_REAL_TOOLS is set"
+            );
+            let note = match &found {
+                Some(path) => format!("REAL TOOL {test}: runs {}\n", path.display()),
+                None => format!("SKIPPED {test}: rustfmt is not on PATH\n"),
+            };
+            let _ignored = std::io::Write::write_all(&mut std::io::stderr(), note.as_bytes());
+            found
+        }
+
+        /// The verdict and findings of a run that ran.
+        fn ran(run: FormatRan) -> (Verdict, Vec<Finding>) {
+            run.unwrap_or_else(|reason| panic!("the format step should run: {reason}"))
+        }
+
+        #[test]
+        fn frame_format_the_formatter_reads_the_block_indented_inside_the_frame() {
+            let root = temporary();
+            let stub = stub(root.path(), "exec /bin/cat");
+
+            let (verdict, findings) = ran(format_run(&stub, root.path(), &doc("let x = 1;\n")));
+
+            assert_eq!(verdict, Verdict::Formatted, "{findings:?}");
+            assert!(findings.is_empty(), "{findings:?}");
+        }
+
+        #[test]
+        fn frame_format_the_fix_from_a_framed_run_holds_only_the_authors_lines() {
+            let root = temporary();
+            let stub = stub(root.path(), "exec /usr/bin/sed 's/x=1/x = 1/'");
+            let text = doc("let x=1;\n");
+
+            let (verdict, findings) = ran(format_run(&stub, root.path(), &text));
+
+            assert_eq!(verdict, Verdict::Unformatted("let x = 1;\n".to_owned()));
+            assert_eq!(applied(&text, &findings), doc("let x = 1;\n"));
+        }
+
+        #[test]
+        fn frame_format_a_frame_failure_is_reported_at_the_info_string() {
+            let root = temporary();
+            let text = doc("let x = 1;\n");
+            let lost = stub(root.path(), "/bin/cat >/dev/null; echo garbage");
+            let (lost, lost_findings) = ran(format_run(&lost, root.path(), &text));
+            let on_frame = stub(
+                root.path(),
+                "/bin/cat >/dev/null; printf 'error: expected item\\n --> <stdin>:1:1\\n' >&2; exit 1",
+            );
+            let (not_kind, not_kind_findings) = ran(format_run(&on_frame, root.path(), &text));
+
+            assert_eq!(lost, Verdict::FrameReformatted(Kind::Statements));
+            assert_eq!(not_kind, Verdict::NotKind(Kind::Statements));
+            for finding in lost_findings.iter().chain(&not_kind_findings) {
+                let at = finding
+                    .location
+                    .as_ref()
+                    .expect("the finding has a location");
+                assert_eq!(
+                    (at.line, at.column),
+                    (3, 4),
+                    "{finding:?} should be at the info string, not the fence at column 1"
+                );
+            }
+        }
+
+        #[test]
+        fn frame_format_a_block_that_isnt_its_kind_holds_back_its_lint_step() {
+            assert!(!parses(Some(&Ok((
+                Verdict::NotKind(Kind::Statements),
+                Vec::new()
+            )))));
+            assert!(parses(Some(&Ok((
+                Verdict::FrameReformatted(Kind::Statements),
+                Vec::new()
+            )))));
+            assert!(parses(Some(&Err(FRAME_INDENT_UNKNOWN))));
+        }
+
+        #[test]
+        fn frame_format_an_unreadable_indent_leaves_the_step_not_run() {
+            let root = temporary();
+            std::fs::write(root.path().join("rustfmt.toml"), "tab_spaces = \"two\"\n")
+                .expect("the config should be writable");
+            let stub = stub(root.path(), "exit 9");
+
+            let run = format_run(&stub, root.path(), &doc("let x = 1;\n"));
+
+            assert_eq!(run, Err(FRAME_INDENT_UNKNOWN));
+        }
+
+        #[test]
+        fn frame_format_biome_indent_follows_its_config_and_refuses_overrides() {
+            let dir = temporary();
+            let given = |config: &str| {
+                let path = dir.path().join("biome.json");
+                std::fs::write(&path, config).expect("the config should be writable");
+                Given {
+                    flags: Vec::new(),
+                    config: Some(path),
+                    mirror: None,
+                    names: None,
+                }
+            };
+            let indent = |config: &str| biome_indent(Language::TypeScript, Some(&given(config)));
+
+            assert_eq!(
+                biome_indent(Language::TypeScript, None).as_deref(),
+                Some("\t")
+            );
+            assert_eq!(indent("{}").as_deref(), Some("\t"));
+            assert_eq!(
+                indent(r#"{"formatter":{"indentStyle":"space"}}"#).as_deref(),
+                Some("  ")
+            );
+            assert_eq!(
+                indent(
+                    r#"{"formatter":{"indentStyle":"tab"},
+                        "javascript":{"formatter":{"indentStyle":"space","indentWidth":4}}}"#
+                )
+                .as_deref(),
+                Some("    ")
+            );
+            assert_eq!(indent(r#"{"overrides":[]}"#).as_deref(), Some("\t"));
+            assert_eq!(
+                indent(r#"{"overrides":[{"includes":["**/*.ts"],"linter":{"enabled":false}}]}"#)
+                    .as_deref(),
+                Some("\t"),
+                "an override that sets no indent leaves the top-level one"
+            );
+            assert_eq!(
+                indent(r#"{"overrides":[{"formatter":{"indentWidth":3}}]}"#),
+                None
+            );
+            assert_eq!(
+                indent(r#"{"overrides":[{"javascript":{"formatter":{"indentStyle":"space"}}}]}"#),
+                None
+            );
+            assert_eq!(indent(r#"{"formatter":{"indentStyle":"wide"}}"#), None);
+        }
+
+        #[test]
+        fn frame_format_real_rustfmt_keeps_a_literals_lines_exact() {
+            let test = "frame_format_real_rustfmt_keeps_a_literals_lines_exact";
+            let Some(rustfmt) = real_rustfmt(test) else {
+                return;
+            };
+            let root = temporary();
+            let continued = doc("let s = \"a\n    b\";\n");
+            let raw = doc("let j = r#\"{\n    \"a\": 1\n}\"#;\n");
+            let spaced = doc("let  s = \"a\n    b\";\n");
+
+            let (continued, continued_findings) =
+                ran(format_run(&rustfmt, root.path(), &continued));
+            let (raw, raw_findings) = ran(format_run(&rustfmt, root.path(), &raw));
+            let (_, spaced_findings) = ran(format_run(&rustfmt, root.path(), &spaced));
+
+            assert_eq!(continued, Verdict::Formatted, "{continued_findings:?}");
+            assert_eq!(raw, Verdict::Formatted, "{raw_findings:?}");
+            assert_eq!(
+                applied(&spaced, &spaced_findings),
+                doc("let s = \"a\n    b\";\n"),
+                "the fix changes the spacing and never the string's value"
+            );
+        }
+
+        #[test]
+        fn frame_format_real_rustfmt_uses_the_projects_indent() {
+            let test = "frame_format_real_rustfmt_uses_the_projects_indent";
+            let Some(rustfmt) = real_rustfmt(test) else {
+                return;
+            };
+            for (config, body) in [
+                ("tab_spaces = 2\n", "if x {\n  y();\n}\n"),
+                ("hard_tabs = true\n", "if x {\n\ty();\n}\n"),
+                ("tab_spaces = 8\n", "if x {\n        y();\n}\n"),
+            ] {
+                let root = temporary();
+                std::fs::write(root.path().join("rustfmt.toml"), config)
+                    .expect("the config should be writable");
+
+                let (verdict, findings) = ran(format_run(&rustfmt, root.path(), &doc(body)));
+
+                assert_eq!(verdict, Verdict::Formatted, "{config}: {findings:?}");
+                assert!(findings.is_empty(), "{config}: {findings:?}");
+            }
+        }
+
+        #[test]
+        fn frame_format_an_unreadable_indent_warns_once_and_leaves_each_step_not_run() {
+            let root = temporary();
+            let text = doc("let x = 1;\n") + &doc("let y = 2;\n");
+            let rustfmt = formatter(Language::Rust).expect("Rust has a formatter");
+            let mut evaluation = Evaluation {
+                records: rust_records(root.path(), &text),
+                ..Evaluation::default()
+            };
+            let jobs: Vec<Job> = (0..2)
+                .map(|record| Job {
+                    record,
+                    format: Some(ToolRun {
+                        tool: rustfmt,
+                        program: PathBuf::from("/bin/rustfmt"),
+                    }),
+                    lint: None,
+                    unbuilt: None,
+                })
+                .collect();
+            let unrun = || {
+                Some(StepsRan {
+                    format: Some(Err(FRAME_INDENT_UNKNOWN)),
+                    lint: None,
+                })
+            };
+
+            evaluation.settle(
+                vec![Slot::Run(0), Slot::Run(1)],
+                &jobs,
+                vec![unrun(), unrun()],
+            );
+
+            let warnings: Vec<_> = evaluation
+                .findings
+                .iter()
+                .map(|finding| finding.code)
+                .collect();
+            assert_eq!(warnings, ["code-block-not-checked"]);
+            for record in &evaluation.records {
+                assert_eq!(
+                    record.steps.format,
+                    StepState::Unrunnable {
+                        reason: FRAME_INDENT_UNKNOWN
+                    }
+                );
+            }
+        }
+
+        #[test]
+        fn frame_format_real_rustfmt_keeps_supdocs_indent_over_a_config_it_finds() {
+            let test = "frame_format_real_rustfmt_keeps_supdocs_indent_over_a_config_it_finds";
+            let Some(rustfmt) = real_rustfmt(test) else {
+                return;
+            };
+            let root = temporary();
+            let cache = temporary();
+            std::fs::write(cache.path().join("rustfmt.toml"), "tab_spaces = 8\n")
+                .expect("the config should be writable");
+            let nested = doc("if x {\n    y();\n}\n");
+
+            let (verdict, findings) = ran(format_run_cached(
+                &rustfmt,
+                root.path(),
+                &nested,
+                Some(cache.path()),
+            ));
+
+            assert_eq!(verdict, Verdict::Formatted, "{findings:?}");
+            assert!(
+                findings.is_empty(),
+                "the fix never adds indent: {findings:?}"
+            );
+        }
+
+        #[test]
+        fn frame_format_real_rustfmt_parse_detail_names_the_blocks_position() {
+            let test = "frame_format_real_rustfmt_parse_detail_names_the_blocks_position";
+            let Some(rustfmt) = real_rustfmt(test) else {
+                return;
+            };
+            let root = temporary();
+
+            let (verdict, findings) = ran(format_run(
+                &rustfmt,
+                root.path(),
+                &doc("let x = 1\nlet y = 2;\n"),
+            ));
+
+            let Verdict::ParseFailed { detail, line } = verdict else {
+                panic!("a missing `;` is a parse failure: {findings:?}");
+            };
+            assert_eq!(line, Some(0));
+            assert!(
+                detail.contains("<stdin>:1:10") && detail.contains("1 | let x = 1"),
+                "{detail}"
+            );
+            assert!(!detail.contains("fn main"), "{detail}");
+        }
     }
 }
