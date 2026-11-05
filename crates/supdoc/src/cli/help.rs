@@ -94,14 +94,17 @@ doesn't define fails code-block-missing-name, once per name.
 
 A tool reads some fragment kinds only inside a frame: fixed lines before and after the block, \
 the same for every block of that kind and never chosen from its content. No finding shows a \
-frame line, a fix never writes one, and a finding on a frame line is reported at the block's \
-attributes. The frames, each block standing where the ... is:
+frame line and a fix never writes one. A block the tool can't parse inside its frame fails \
+code-block-parse \"couldn't parse the block as KIND\", once, never with the tool's own message; \
+any other finding on a frame line is reported at the block's attributes. A block that closes \
+the frame itself (a lone } then more code) is checked as written. The frames, each block \
+standing where the ... is, and the rules each leaves off because the frame is their subject:
 
-  biome-lint    statements    function __supdoc_fragment() { ... }
-  biome-lint    expression    ( ... )
-  biome-lint    entries       ({ ... })
-  biome-lint    children      <> ... </>   (tsx and jsx blocks only; complexity/noUselessFragments off)
-  biome-lint    members       class __SupdocFragment { ... }
+  biome-lint    statements    async function __supdoc_fragment() { ... }   (suspicious/useAwait off)
+  biome-lint    expression    const __supdoc_fragment = ( ... );
+  biome-lint    entries       const __supdoc_fragment = { ... };
+  biome-lint    children      const __supdoc_fragment = <div> ... </div>;   (tsx and jsx blocks only)
+  biome-lint    members       class __SupdocFragment { ... }   (complexity/noStaticOnlyClass off)
 
 The summary counts each step: a step its tool's table sets to \"off\" is `format off` or `lint \
 off`; one a block marks off is `format skipped` or `lint skipped`; one that was due but didn't \

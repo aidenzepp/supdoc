@@ -237,10 +237,12 @@ pub(crate) struct Read<'run> {
 /// under `timeout`. A diagnostic that [`missing_name`] reads is a `code-block-missing-name` error
 /// instead, whose message says whether the project's crate was passed to the tool (`externs`).
 ///
-/// A framed block's diagnostics are shifted past the frame's leading lines. One that starts or
-/// ends on a frame line is never dropped: it is reported at the block's info string, a syntax
-/// error as `code-block-parse` "couldn't parse the block as `<kind>`", any other with the tool's
-/// rule and supdoc's own message, never the tool's. A framed block's tool failure shows no line
+/// A framed block's diagnostics are shifted past the frame's leading lines. Its syntax errors,
+/// wherever they land, are one `code-block-parse` "couldn't parse the block as `<kind>`", at the
+/// first one's doc line, or at the block's info string when that is a frame line; the tool's
+/// syntax messages are never shown, since they name what the frame expected. Any other
+/// diagnostic that starts or ends on a frame line is never dropped: it is reported at the info
+/// string with the tool's rule and supdoc's own message, never the tool's. A framed block's tool failure shows no line
 /// of the frame. No location, message or help holds a frame line.
 #[must_use]
 pub(crate) fn findings(
@@ -266,8 +268,20 @@ pub(crate) fn findings(
         Verdict::Diagnostics(found) => {
             let map = LineMap::of(block, text);
             let lines = block.body.len();
-            found
+            let place_in_block = |diagnostic: &Diagnostic| {
+                map.as_ref()
+                    .and_then(|map| place(diagnostic, map, text))
+                    .unwrap_or_else(|| block.fence.clone())
+            };
+            let not_its_kind = frame.and_then(|frame| {
+                let first = found.iter().find(|diagnostic| diagnostic.syntax)?;
+                let at = unframed(first, Some(frame), lines)
+                    .map_or_else(|_| attribute(block), |inside| place_in_block(&inside));
+                Some(not_its_kind(tool, frame).with_location(at))
+            });
+            let rest = found
                 .iter()
+                .filter(|diagnostic| frame.is_none() || !diagnostic.syntax)
                 .map(|diagnostic| {
                     let diagnostic = match unframed(diagnostic, frame, lines) {
                         Ok(diagnostic) => diagnostic,
@@ -277,18 +291,15 @@ pub(crate) fn findings(
                         }
                     };
                     let diagnostic = &diagnostic;
-                    let at = map
-                        .as_ref()
-                        .and_then(|map| place(diagnostic, map, text))
-                        .unwrap_or_else(|| block.fence.clone());
+                    let at = place_in_block(diagnostic);
                     missing_name(diagnostic)
                         .map_or_else(
                             || lint_finding(tool, diagnostic),
                             |name| missing_name_finding(name, externs),
                         )
                         .with_location(at)
-                })
-                .collect()
+                });
+            not_its_kind.into_iter().chain(rest).collect()
         }
     }
 }
@@ -330,33 +341,39 @@ fn attribute(block: &CodeBlock) -> Location {
         .map_or_else(|| block.fence.clone(), |info| info.location.clone())
 }
 
-/// The finding, without a location, for `diagnostic` from `tool` on a line of `frame`: a syntax
-/// error says the block isn't `frame`'s kind; any other names the tool's rule in supdoc's own
-/// words. Neither carries the tool's message, which may quote the frame.
+/// The finding, without a location, for `diagnostic`, a rule's (never a syntax error, see
+/// [`not_its_kind`]), from `tool` on a line of `frame`: the tool's rule in supdoc's own words,
+/// never the tool's message, which may quote the frame.
 fn on_frame(tool: &ToolCartridge, frame: Frame, diagnostic: &Diagnostic) -> Finding {
-    let kind = frame.kind.name();
-    if !diagnostic.syntax {
-        let rule = &diagnostic.rule;
-        return Finding::new(
-            LINT,
-            Severity::Error,
-            format!(
-                "`{}` reports `{rule}` where the block meets the frame supdoc adds around {} \
-                 fragment",
-                tool.name,
-                frame.kind.with_article()
-            ),
-        )
-        .with_help(format!(
-            "fix the code `{rule}` flags at the block's start or end, check that the block is \
-             {} fragment, or mark the block `lint(off: <reason>)`",
+    let rule = &diagnostic.rule;
+    Finding::new(
+        LINT,
+        Severity::Error,
+        format!(
+            "`{}` reports `{rule}` where the block meets the frame supdoc adds around {} fragment",
+            tool.name,
             frame.kind.with_article()
-        ));
-    }
+        ),
+    )
+    .with_help(format!(
+        "fix the code `{rule}` flags at the block's start or end, check that the block is {} \
+         fragment, or mark the block `lint(off: <reason>)`",
+        frame.kind.with_article()
+    ))
+}
+
+/// The `code-block-parse` error, without a location, for a framed block the tool couldn't
+/// parse: it isn't `frame`'s kind. It never carries the tool's message, which names what the
+/// frame expected (a `)` the author never wrote, a function that isn't `async`).
+fn not_its_kind(tool: &ToolCartridge, frame: Frame) -> Finding {
     Finding::new(
         format::PARSE,
         Severity::Error,
-        format!("`{}` couldn't parse the block as `{kind}`", tool.name),
+        format!(
+            "`{}` couldn't parse the block as `{}`",
+            tool.name,
+            frame.kind.name()
+        ),
     )
     .with_help(format!(
         "fix the code so it reads as {} fragment, name the kind it is in `fragment(<kind>)`, \
@@ -779,8 +796,37 @@ mod tests {
 
         let found = framed_findings(TWO_ENTRIES, ENTRIES, every_line.clone());
 
-        assert_eq!(found.len(), every_line.len(), "none dropped: {found:?}");
+        let rules = every_line.iter().filter(|found| !found.syntax).count();
+        assert_eq!(
+            found.len(),
+            rules + 1,
+            "every rule's kept, the syntax errors one finding: {found:?}"
+        );
         assert_no_frame_line(&found, TWO_ENTRIES, ENTRIES);
+    }
+
+    #[test]
+    fn a_framed_blocks_syntax_errors_are_one_parse_error_at_the_first_ones_doc_line() {
+        let found = framed_findings(
+            TWO_ENTRIES,
+            ENTRIES,
+            vec![
+                spanning(3, 3, "parse", true, "expected `)` but instead found `;`"),
+                on_line(4, "parse", true),
+                on_line(3, "E711", false),
+            ],
+        );
+
+        assert_eq!(
+            placed(&found),
+            [("code-block-parse", (5, 1)), ("code-block-lint", (5, 1))]
+        );
+        let message = found.first().map(|finding| finding.message.as_str());
+        assert_eq!(
+            message,
+            Some("`ruff` couldn't parse the block as `entries`"),
+            "the tool's syntax message, which names the frame's `)`, is never shown"
+        );
     }
 
     #[test]
