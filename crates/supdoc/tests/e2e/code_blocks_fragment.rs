@@ -609,3 +609,75 @@ fn frame_format_real_rustfmt_holds_a_line_to_the_projects_max_width() {
     assert_eq!(finding_kinds(&fails), ["code-block-unformatted"], "{fails}");
     assert_no_frame_text(&fails);
 }
+
+/// A call whose arguments are 62 columns wide: past rustfmt's 60-column `fn_call_width` for a
+/// project at width 100 to 104, though within the wider width a frame's indent adds.
+fn wide_call() -> String {
+    format!("foo({}, y1);\n", "x".repeat(58))
+}
+
+#[test]
+fn frame_format_real_rustfmt_decides_widths_as_the_projects_rustfmt_does() {
+    let test = "frame_format_real_rustfmt_decides_widths_as_the_projects_rustfmt_does";
+    let Some(env) = real_rustfmt(test) else {
+        return;
+    };
+    let vars = borrowed(&env);
+    let long = "x".repeat(58);
+    for (config, indent) in [
+        ("max_width = 102\n", "    "),
+        ("tab_spaces = 8\n", "        "),
+    ] {
+        // The project's rustfmt prints the call one argument per line, unframed.
+        let vertical = format!("foo(\n{indent}{long},\n{indent}y1,\n);\n");
+        let horizontal = wide_call();
+        let check = |body: &str, exit: i32| {
+            let project = rustfmt_project(&framed_doc("statements", body));
+            project.write("rustfmt.toml", config);
+            project
+                .supdoc_in_with(".", &["check", "--json"], &vars)
+                .assert_exit(exit)
+                .json()
+        };
+
+        let passes = check(&vertical, 0);
+        let fails = check(&horizontal, 1);
+
+        assert_passed_with_every_step_run(&passes);
+        assert_eq!(
+            finding_kinds(&fails),
+            ["code-block-unformatted"],
+            "{config}: {fails}"
+        );
+        assert_eq!(
+            at(&fails, "/findings/0/fix/replacement").as_str(),
+            vertical.strip_suffix('\n'),
+            "{config}: the fix is the project's own layout"
+        );
+    }
+}
+
+#[test]
+fn frame_format_real_rustfmt_hides_a_frame_line_its_parse_error_quotes() {
+    let test = "frame_format_real_rustfmt_hides_a_frame_line_its_parse_error_quotes";
+    let Some(env) = real_rustfmt(test) else {
+        return;
+    };
+    // The unclosed `(` makes rustfmt quote the frame's `{` as the delimiter it meant to close.
+    let project = rustfmt_project(&framed_doc("statements", "let x = (1;\n"));
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &borrowed(&env))
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-parse"], "{json}");
+    let message = at(&json, "/findings/0/message")
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        message.contains("<the frame supdoc adds>"),
+        "the error should refer to a frame line: {json}"
+    );
+    assert_no_frame_text(&json);
+}

@@ -141,6 +141,12 @@ A project that turns on rules about the frame's own code, such as biome's opt-in
 wanting an explicit type or a function expression, gets their findings at the block's \
 attributes; switch the step off for such a block with lint(off: reason).
 
+rustfmt formats a framed block with its max_width raised by one indent and every width it \
+derives from max_width held to the project's, so it lays out the block as the project's own \
+rustfmt would. A nightly rustfmt whose config sets brace_style, fn_single_line or \
+blank_lines_lower_bound away from its default would reshape the frame, so those blocks' format \
+step doesn't run, with a code-block-not-checked warning.
+
 The summary counts each step: a step its tool's table sets to \"off\" is `format off` or `lint \
 off`; one a block marks off is `format skipped` or `lint skipped`; one that was due but didn't \
 run, such as clippy in a checkout you don't trust, is `lint not run` with its reason, never a \
