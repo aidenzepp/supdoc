@@ -105,7 +105,7 @@ pub(crate) struct GlobalArgs {
     pub(crate) limits: LimitFlags,
 }
 
-/// The `--parse-timeout`, `--code-block-timeout`, `--code-block-build-timeout`, `--max-lock-size`, `--max-config-size`, `--max-ignore-size`, `--max-key-segments` and `--max-key-path-size` flags.
+/// The `--parse-timeout`, `--code-block-timeout`, `--code-block-build-timeout`, `--max-file-size`, `--max-lock-size`, `--max-config-size`, `--max-ignore-size`, `--max-key-segments` and `--max-key-path-size` flags.
 ///
 /// Written by hand rather than derived, so each value keeps whether its flag or its `SUPDOC_*`
 /// variable gave it, which `config show` reports.
@@ -113,7 +113,7 @@ pub(crate) struct GlobalArgs {
 pub(crate) struct LimitFlags(pub CommandLineLimits);
 
 /// The clap id, flag, variable, value name, help and default of each limit flag.
-const LIMIT_FLAGS: [(&str, &str, &str, &str); 8] = [
+const LIMIT_FLAGS: [(&str, &str, &str, &str); 9] = [
     (
         "parse-timeout",
         "SUPDOC_PARSE_TIMEOUT",
@@ -131,6 +131,12 @@ const LIMIT_FLAGS: [(&str, &str, &str, &str); 8] = [
         "SUPDOC_CODE_BLOCK_BUILD_TIMEOUT",
         "DURATION",
         "Stop building the project for a code block's lint after this long, such as 10m or 90s; 0 for no limit",
+    ),
+    (
+        "max-file-size",
+        "SUPDOC_MAX_FILE_SIZE",
+        "SIZE",
+        "Refuse to read a doc or linked file larger than this, such as 16MiB; 0 for no limit",
     ),
     (
         "max-lock-size",
@@ -164,13 +170,27 @@ const LIMIT_FLAGS: [(&str, &str, &str, &str); 8] = [
     ),
 ];
 
+/// What `--help` adds under `--max-file-size`: the measured worst-case memory of parsing a file,
+/// from release builds on hostile shapes (HR-PARSE rulings), so a job that reads untrusted files
+/// knows to lower the cap.
+const MAX_FILE_SIZE_MEMORY: &str = "Worst-case peak memory per MiB of file, measured on release \
+builds with hostile shapes (deep nesting, wide arrays):
+- YAML: about 740 MiB on one line, 315 MiB across lines
+- JavaScript, TypeScript: about 390 MiB
+- JSON: about 235 MiB
+- TOML: about 185 MiB
+Ordinary files cost far less, and languages not listed weren't measured. The parse timeout doesn't \
+bound memory. If supdoc reads files from untrusted contributors, lower this (for example to 1MiB) \
+with the flag or SUPDOC_MAX_FILE_SIZE in that job.";
+
 impl LimitFlags {
     /// The default each flag's help shows, in [`LIMIT_FLAGS`] order.
-    fn defaults() -> [String; 8] {
+    fn defaults() -> [String; 9] {
         [
             Limits::PARSE_TIMEOUT.to_string(),
             Limits::CODE_BLOCK_TIMEOUT.to_string(),
             Limits::CODE_BLOCK_BUILD_TIMEOUT.to_string(),
+            Limits::MAX_FILE_SIZE.to_string(),
             Limits::MAX_LOCK_SIZE.to_string(),
             Limits::MAX_CONFIG_SIZE.to_string(),
             Limits::MAX_IGNORE_SIZE.to_string(),
@@ -196,6 +216,7 @@ impl clap::FromArgMatches for LimitFlags {
             parse_timeout: given(matches, "parse-timeout"),
             code_block_timeout: given(matches, "code-block-timeout"),
             code_block_build_timeout: given(matches, "code-block-build-timeout"),
+            max_file_size: given(matches, "max-file-size"),
             max_lock_size: given(matches, "max-lock-size"),
             max_config_size: given(matches, "max-config-size"),
             max_ignore_size: given(matches, "max-ignore-size"),
@@ -215,13 +236,19 @@ impl Args for LimitFlags {
         LIMIT_FLAGS.into_iter().zip(Self::defaults()).fold(
             command,
             |command, ((id, env, value_name, help), default)| {
+                let help = format!("{help} [default: {default}]");
                 let arg = clap::Arg::new(id)
                     .long(id)
                     .global(true)
                     .env(env)
                     .value_name(value_name)
-                    .help(format!("{help} [default: {default}]"))
+                    .help(help.clone())
                     .help_heading("Limits");
+                let arg = if id == "max-file-size" {
+                    arg.long_help(format!("{help}\n\n{MAX_FILE_SIZE_MEMORY}"))
+                } else {
+                    arg
+                };
                 command.arg(match value_name {
                     "DURATION" => arg.value_parser(TimeLimit::from_str),
                     "COUNT" => arg.value_parser(CountLimit::from_str),

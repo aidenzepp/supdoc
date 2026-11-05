@@ -33,7 +33,7 @@ use crate::output::text::{render_finding, visible};
 use crate::output::{Output, PathStyle, RecordArray, Report, TextContext, preview_note};
 use crate::path::AbsolutePath;
 use crate::read::cartridge::Languages;
-use crate::read::error::CODE_TIMEOUT;
+use crate::read::error::{CODE_TIMEOUT, UNCHECKED_CODES};
 use crate::scan::model::{Scan, Scope, TargetState};
 use crate::scan::walk::GlobalExcludes;
 use crate::state::LinkState;
@@ -115,9 +115,10 @@ struct Planned {
     check_command: String,
     /// The command that runs this fix again without `--yes`, keeping this run's `[PATH]` and `-c`.
     fix_command: String,
-    /// One `read-timeout` per file that outlasted `parse-timeout`. Its links were never checked
-    /// for fixes, so the run fails rather than saying there is nothing to fix.
-    timeouts: Vec<Finding>,
+    /// One read error per file that couldn't be read: too large, timed out, not UTF-8 or
+    /// unreadable. Its links were never checked for fixes, so the run fails rather than saying
+    /// there is nothing to fix.
+    unread: Vec<Finding>,
 }
 
 impl Planned {
@@ -172,9 +173,9 @@ impl Planned {
                 scope.contains(&key.source) && matches!(link.target, TargetState::Broken { .. })
             })
             .count();
-        // Every link into a timed-out target carries the same finding; one per file is enough.
+        // Every link into an unread target carries the same finding; one per file is enough.
         let mut files = BTreeSet::new();
-        let timeouts: Vec<Finding> = timed_out(&scan)
+        let unread: Vec<Finding> = unread(&scan)
             .filter(|finding| files.insert(finding.message.clone()))
             .cloned()
             .collect();
@@ -194,7 +195,7 @@ impl Planned {
             stale,
             check_command,
             fix_command,
-            timeouts,
+            unread,
         })
     }
 
@@ -258,11 +259,11 @@ impl Planned {
         let report = FixReport {
             applied: false,
             fixes,
-            findings: self.timeouts,
+            findings: self.unread,
         };
-        let timed_out = !report.findings.is_empty();
+        let unread = !report.findings.is_empty();
         output
-            .report(&report, !timed_out)
+            .report(&report, !unread)
             .map_err(|error| CliError::output_failed("the fix report", &error))?;
         let planned = if report.fixes.is_empty() {
             None
@@ -271,19 +272,19 @@ impl Planned {
             let file_count = count(report.files(), "file", "files");
             Some(format!("{fix_count} in {file_count}. {apply_note}"))
         };
-        let note = match (timed_out, planned) {
+        let note = match (unread, planned) {
             (true, Some(planned)) => format!(
                 "{} {planned}",
-                timeout_note(report.findings.len(), &self.fix_command)
+                unread_note(&report.findings, &self.fix_command)
             ),
-            (true, None) => timeout_note(report.findings.len(), &self.fix_command),
+            (true, None) => unread_note(&report.findings, &self.fix_command),
             (false, Some(planned)) => planned,
             (false, None) => nothing_to_fix(self.broken, self.stale, &self.check_command),
         };
         output
             .note(&note)
             .map_err(|error| CliError::output_failed("the fix report", &error))?;
-        Ok(if timed_out {
+        Ok(if unread {
             Outcome::Failing
         } else {
             Outcome::Clean
@@ -324,18 +325,18 @@ impl Planned {
 
         let write_failed = count_skipped(&written.skipped, SkippedKind::WriteFailed);
         let file_changed = count_skipped(&written.skipped, SkippedKind::FileChanged) > 0;
-        let timeout_count = self.timeouts.len();
-        let timed_out = timeout_count > 0;
+        let unread_note = (!self.unread.is_empty()).then(|| unread_note(&self.unread, &rerun));
+        let unread = unread_note.is_some();
         let report = FixReport {
             applied: true,
             fixes,
             findings: self
-                .timeouts
+                .unread
                 .into_iter()
                 .chain(written.skipped.into_iter().map(|skipped| skipped.finding))
                 .collect(),
         };
-        let ok = write_failed == 0 && !file_changed && written.lock_failure.is_none() && !timed_out;
+        let ok = write_failed == 0 && !file_changed && written.lock_failure.is_none() && !unread;
         output
             .report(&report, ok)
             .map_err(|error| CliError::output_failed("the fix report", &error))?;
@@ -360,8 +361,8 @@ impl Planned {
                 let update = command_line(context, "update", &fixed_files, &["--yes"]);
                 format!("Fixed {what} in {file_count}. Run `{update}` to record them.")
             })
-        } else if timed_out {
-            Some(timeout_note(timeout_count, &rerun))
+        } else if unread {
+            unread_note
         } else if self.plan.fixes().is_empty() {
             Some(nothing_to_fix(self.broken, self.stale, &self.check_command))
         } else {
@@ -390,7 +391,7 @@ impl Planned {
                 !report.fixes.is_empty(),
                 &rerun,
             ))
-        } else if file_changed || timed_out {
+        } else if file_changed || unread {
             Ok(Outcome::Failing)
         } else {
             Ok(Outcome::Clean)
@@ -580,14 +581,34 @@ fn count(n: usize, one: &str, many: &str) -> String {
     }
 }
 
-/// The note for a run in which `files` files outlasted `parse-timeout`, so their links got no
-/// fixes. `rerun` is the command that runs the fix again.
-fn timeout_note(files: usize, rerun: &str) -> String {
-    let files = count(files, "file", "files");
-    format!(
-        "Reading {files} took longer than `parse-timeout` allows per read, so links there got no \
-         fixes; raise the limit and run `{rerun}` again."
-    )
+/// The note for a run in which the files `unread` report couldn't be read, so links there got no
+/// fixes. A run whose every file timed out names `parse-timeout`; `rerun` is this run's command.
+fn unread_note(unread: &[Finding], rerun: &str) -> String {
+    let files = count(unread.len(), "file", "files");
+    if unread.iter().all(|finding| finding.code == CODE_TIMEOUT) {
+        format!(
+            "Reading {files} took longer than `parse-timeout` allows per read, so links there got \
+             no fixes; raise the limit and run `{rerun}` again."
+        )
+    } else {
+        format!(
+            "supdoc couldn't read {files}, so links there got no fixes; resolve the errors above \
+             and run `{rerun}` again."
+        )
+    }
+}
+
+/// Every read error in `scan` that left a file unchecked ([`UNCHECKED_CODES`]): a doc whose links
+/// or code blocks weren't read, then each link into a target that wasn't.
+fn unread(scan: &Scan) -> impl Iterator<Item = &Finding> {
+    let targets = scan.links.values().filter_map(|link| match &link.target {
+        TargetState::Broken { finding } => Some(finding),
+        TargetState::Present { .. } => None,
+    });
+    scan.findings
+        .iter()
+        .chain(targets)
+        .filter(|finding| UNCHECKED_CODES.contains(&finding.code))
 }
 
 /// Every `read-timeout` in `scan`: a source whose links weren't read, then each link into a

@@ -208,20 +208,17 @@ fn resolve_non_utf8_file_exits_1_with_read_not_utf8() {
 }
 
 #[test]
-fn resolve_file_over_16_mib_exits_1_with_read_too_large() {
+fn resolve_file_over_max_file_size_exits_1_with_read_too_large() {
     let project = Project::fixture("basic");
-    let big = std::fs::File::create(project.path("src/big.rs"))
-        .expect("the big file should be creatable");
-    big.set_len(16 * 1024 * 1024 + 1)
-        .expect("the big file should be extendable");
+    project.write("src/big.rs", &format!("// {}\n", "x".repeat(2048)));
 
-    let run = project.supdoc(&["--json", "resolve", "src/big.rs"]);
+    let run = project.supdoc(&["--json", "--max-file-size", "1KiB", "resolve", "src/big.rs"]);
 
     let _ = run.assert_exit(1);
     assert_eq!(
         at(&error_json(&run), "/kind"),
         "read-too-large",
-        "a file over 16 MiB should be refused; stderr: {}",
+        "a file over `max-file-size` should be refused; stderr: {}",
         run.stderr
     );
 }
