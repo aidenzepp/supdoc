@@ -106,10 +106,6 @@ pub(crate) struct Admitted<'b> {
 
 /// Why [`Boundary::admit`] refused a path, so each caller can keep its own error code and message.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "write sites admit through it from PH02")
-)]
 pub(crate) enum Escape {
     /// The path isn't beneath the boundary as written: it climbs out with `..` or names an
     /// absolute path elsewhere.
@@ -159,10 +155,6 @@ impl Boundary {
     ///
     /// [`Escape::Lexical`] when `target` isn't beneath the boundary as given. [`Escape::Real`] when
     /// it is, but its real location lies outside the boundary's or can't be worked out.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "write sites admit through it from PH02")
-    )]
     pub(crate) fn admit(&self, target: &AbsolutePath) -> Result<Admitted<'_>, Escape> {
         if target.strip_prefix(&self.given).is_none() {
             return Err(Escape::Lexical);
@@ -217,10 +209,6 @@ pub(crate) fn write_atomically(
 /// # Errors
 ///
 /// Fails when a directory can't be created, or `dir` exists and isn't a directory.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "private dirs are created through it from PH05")
-)]
 pub(crate) fn create_dir_all(dir: &Admitted<'_>, mode: u32) -> io::Result<()> {
     fs::DirBuilder::new()
         .recursive(true)
@@ -236,10 +224,6 @@ pub(crate) fn create_dir_all(dir: &Admitted<'_>, mode: u32) -> io::Result<()> {
 /// # Errors
 ///
 /// `AlreadyExists` when anything is at `file`; otherwise fails when it can't be created.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "`init` creates its file through it from PH03")
-)]
 pub(crate) fn create_new(file: &Admitted<'_>, mode: u32) -> io::Result<fs::File> {
     fs::OpenOptions::new()
         .write(true)
@@ -270,10 +254,6 @@ pub(crate) fn rename_into(from: &Admitted<'_>, to: &Admitted<'_>) -> io::Result<
 /// # Errors
 ///
 /// Fails when nothing is there, it is a directory, or it can't be removed.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "write sites delete through it from PH04")
-)]
 pub(crate) fn remove_file(file: &Admitted<'_>) -> io::Result<()> {
     fs::remove_file(&file.path)
 }
@@ -286,10 +266,6 @@ pub(crate) fn remove_file(file: &Admitted<'_>) -> io::Result<()> {
 /// # Errors
 ///
 /// Fails when nothing is at `dir`, it is a file, or something in it can't be removed.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "private dirs are removed through it from PH05")
-)]
 pub(crate) fn remove_dir_all(dir: &Admitted<'_>) -> io::Result<()> {
     fs::remove_dir_all(&dir.path)
 }

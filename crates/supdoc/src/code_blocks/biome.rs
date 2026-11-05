@@ -20,6 +20,8 @@ use super::fragment::Kind;
 use super::lint::{self, Diagnostic};
 use super::runner::{self, Failure, Ran};
 use super::tools::ToolEnv;
+use crate::config::confine::{self, Admitted, Boundary};
+use crate::path::AbsolutePath;
 
 /// The config names biome looks for in a directory, in its own order.
 const CONFIG_FILES: [&str; 4] = ["biome.json", "biome.jsonc", ".biome.json", ".biome.jsonc"];
@@ -275,8 +277,10 @@ fn without_exclusions(strict: &str) -> Option<String> {
 /// config's relative globs match it as they would the doc's own blocks.
 #[derive(Debug)]
 pub(crate) struct LintFile {
+    /// The `biome-lint` directory `dir` sits in, which removing `dir` is admitted against.
+    base: Boundary,
     /// The directory, owned by this run alone.
-    dir: PathBuf,
+    dir: AbsolutePath,
     /// The block's file in it.
     file: PathBuf,
     /// With a project config: the copy and this directory, with the project's config file and
@@ -293,8 +297,10 @@ impl LintFile {
     /// mode 0700 inside a 0700 `biome-lint` directory, holding `biome.json` (the config `given`
     /// names, without the [`LINT_EXCLUSIONS`] that would leave the block unlinted) and `input`
     /// as the `index`th block of `doc`, its extension picked by `tag`. Every file is created
-    /// new, mode 0600. `None` when `neutral` is `/`, `given` names no config, or anything can't
-    /// be created.
+    /// new, mode 0600. Every directory and file is admitted beneath the private directory it
+    /// goes in, so a mirrored place that climbs out of the run's directory creates nothing.
+    /// `None` when `neutral` is `/`, `given` names no config, a path isn't admitted, or anything
+    /// can't be created.
     ///
     /// Effect: reads the private config, creates directories and writes two files.
     #[must_use]
@@ -304,30 +310,32 @@ impl LintFile {
         (doc, index, tag): (&Path, usize, &str),
         input: &str,
     ) -> Option<Self> {
-        use std::os::unix::fs::DirBuilderExt as _;
-
         if neutral == Path::new("/") {
             return None;
         }
         let config = given.config.as_deref()?;
         let strict = without_exclusions(&fs::read_to_string(config).ok()?)?;
-        let base = private_dir(&neutral.parent()?.join("biome-lint"))?;
+        let cache = AbsolutePath::new(neutral.parent()?)?;
+        let base_dir = AbsolutePath::new(&cache.as_path().join("biome-lint"))?;
+        let base = private_dir(&Boundary::resolve(&cache), &base_dir)?;
         let dir = (0..16).find_map(|_| {
             let count = LINT_RUNS.fetch_add(1, Ordering::Relaxed);
-            let dir = base.join(format!("{}-{count}", std::process::id()));
-            fs::DirBuilder::new()
-                .mode(0o700)
-                .create(&dir)
-                .ok()
-                .map(|()| dir)
+            let dir = base_dir
+                .as_path()
+                .join(format!("{}-{count}", std::process::id()));
+            let dir = AbsolutePath::new(&dir)?;
+            create_fresh(&base, &dir).map(|()| dir)
         })?;
+        let own = Boundary::resolve(&dir);
+        let copy = AbsolutePath::new(&dir.as_path().join("biome.json"))?;
         let names = given.names.as_ref().map(|[(_, file), (_, project)]| {
             [
-                (dir.join("biome.json"), file.clone()),
-                (dir.clone(), project.clone()),
+                (copy.as_path().to_path_buf(), file.clone()),
+                (dir.as_path().to_path_buf(), project.clone()),
             ]
         });
         let mut run = Self {
+            base,
             dir,
             file: PathBuf::new(),
             names,
@@ -343,15 +351,11 @@ impl LintFile {
             );
         let mut name = placed.file_name()?.to_os_string();
         name.push(format!(".{index}.{}", extension(tag)));
-        let file = run.dir.join(placed.with_file_name(name));
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(file.parent()?)
-            .ok()?;
-        write_new(&run.dir.join("biome.json"), &strict)?;
-        write_new(&file, input)?;
-        run.file = file;
+        let file = AbsolutePath::new(&run.dir.as_path().join(placed.with_file_name(name)))?;
+        confine::create_dir_all(&own.admit(&file.parent()?).ok()?, 0o700).ok()?;
+        write_admitted(&own.admit(&copy).ok()?, &strict)?;
+        write_admitted(&own.admit(&file).ok()?, input)?;
+        run.file = file.as_path().to_path_buf();
         Some(run)
     }
 
@@ -380,32 +384,50 @@ impl LintFile {
     #[must_use]
     pub(crate) fn config_flag(&self) -> OsString {
         let mut flag = OsString::from("--config-path=");
-        flag.push(self.dir.join("biome.json"));
+        flag.push(self.dir.as_path().join("biome.json"));
         flag
     }
 }
 
 impl Drop for LintFile {
+    /// Removes the run's directory, once it is admitted beneath `biome-lint`.
     fn drop(&mut self) {
-        let _removed = fs::remove_dir_all(&self.dir);
+        if let Ok(dir) = self.base.admit(&self.dir) {
+            let _removed = confine::remove_dir_all(&dir);
+        }
     }
 }
 
-/// Writes `text` to `path`, which must not exist yet, mode 0600.
+/// Creates `dir` mode 0700, admitted beneath `parent`, when nothing is there yet, so the run that
+/// creates it owns it alone. `None` when it isn't admitted, something is there, or it can't be
+/// created.
+///
+/// Effect: reads `dir`'s metadata and creates it.
+fn create_fresh(parent: &Boundary, dir: &AbsolutePath) -> Option<()> {
+    let admitted = parent.admit(dir).ok()?;
+    if fs::symlink_metadata(dir.as_path()).is_ok() {
+        return None;
+    }
+    confine::create_dir_all(&admitted, 0o700).ok()
+}
+
+/// Writes `text` to the admitted `file`, which must not exist yet, mode 0600.
 ///
 /// Effect: creates and writes the file.
-fn write_new(path: &Path, text: &str) -> Option<()> {
+fn write_admitted(file: &Admitted<'_>, text: &str) -> Option<()> {
     use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
 
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
+    confine::create_new(file, 0o600)
         .ok()?
         .write_all(text.as_bytes())
         .ok()
+}
+
+/// Writes `text` to `path`, admitted beneath its own directory, as [`write_admitted`] does.
+#[cfg(test)]
+fn write_new(path: &Path, text: &str) -> Option<()> {
+    let file = AbsolutePath::new(path)?;
+    write_admitted(&Boundary::resolve(&file.parent()?).admit(&file).ok()?, text)
 }
 
 /// Why a block isn't given to biome.
@@ -740,49 +762,45 @@ fn without_trailing_commas(text: &str) -> String {
 fn write_private(env: &ToolEnv, root: &Path, strict: &str) -> Option<PathBuf> {
     use sha2::{Digest as _, Sha256};
     use std::fmt::Write as _;
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
 
     let neutral = runner::neutral_dir(env, root);
     if neutral == Path::new("/") {
         return None;
     }
-    let base = private_dir(&neutral.parent()?.join("biome-config"))?;
+    let cache = AbsolutePath::new(neutral.parent()?)?;
+    let base_dir = AbsolutePath::new(&cache.as_path().join("biome-config"))?;
+    let base = private_dir(&Boundary::resolve(&cache), &base_dir)?;
     let name = Sha256::digest(strict.as_bytes())
         .iter()
         .fold(String::new(), |mut name, byte| {
             let _written = write!(name, "{byte:02x}");
             name
         });
-    let dir = private_dir(&base.join(name))?;
-    let file = dir.join("biome.json");
-    if fs::symlink_metadata(&file).is_ok_and(|meta| meta.is_file())
-        && fs::read_to_string(&file).is_ok_and(|text| text == strict)
+    let dir_path = AbsolutePath::new(&base_dir.as_path().join(name))?;
+    let dir = private_dir(&base, &dir_path)?;
+    let file = AbsolutePath::new(&dir_path.as_path().join("biome.json"))?;
+    if fs::symlink_metadata(file.as_path()).is_ok_and(|meta| meta.is_file())
+        && fs::read_to_string(file.as_path()).is_ok_and(|text| text == strict)
     {
-        return Some(file);
+        return Some(file.as_path().to_path_buf());
     }
-    let _stale = fs::remove_file(&file);
-    let mut out = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&file)
-        .ok()?;
-    out.write_all(strict.as_bytes()).ok()?;
-    Some(file)
+    if let Ok(stale) = dir.admit(&file) {
+        let _stale = confine::remove_file(&stale);
+    }
+    write_admitted(&dir.admit(&file).ok()?, strict)?;
+    Some(file.as_path().to_path_buf())
 }
 
-/// `dir`, created mode 0700 when missing, when it is a real directory (not a link) only its
-/// owner reaches.
-fn private_dir(dir: &Path) -> Option<PathBuf> {
-    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
-        .ok()?;
-    let meta = fs::symlink_metadata(dir).ok()?;
-    (meta.is_dir() && meta.permissions().mode() & 0o777 == 0o700).then(|| dir.to_path_buf())
+/// `dir` as a boundary, once it is created mode 0700 when missing, admitted beneath `parent`,
+/// and found to be a real directory (not a link) only its owner reaches.
+///
+/// Effect: creates the directory and reads its metadata.
+fn private_dir(parent: &Boundary, dir: &AbsolutePath) -> Option<Boundary> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    confine::create_dir_all(&parent.admit(dir).ok()?, 0o700).ok()?;
+    let meta = fs::symlink_metadata(dir.as_path()).ok()?;
+    (meta.is_dir() && meta.permissions().mode() & 0o777 == 0o700).then(|| Boundary::resolve(dir))
 }
 
 #[cfg(test)]
@@ -1122,6 +1140,89 @@ mod tests {
         assert_eq!(run.config_flag(), flag);
         drop(run);
         assert!(!dir.exists(), "the run's directory should be gone: {dir:?}");
+    }
+
+    #[test]
+    fn a_mirror_climbing_out_of_the_runs_directory_creates_no_lint_file_and_nothing_outside() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let home = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        fs::write(root.path().join("biome.json"), "{}").expect("the config");
+        let env = ToolEnv::from_vars(|name| (name == "HOME").then(|| home.path().into()));
+        let doc = root.path().join("a.md");
+        let given = project_args(&env, root.path(), &doc).expect("a plain config is given");
+        let neutral = runner::neutral_dir(&env, root.path());
+        let private = given
+            .config
+            .as_deref()
+            .and_then(Path::parent)
+            .expect("the config copy sits in a private directory");
+        let climbing = super::Given {
+            mirror: Some(private.join("../../escape/a.md")),
+            ..given
+        };
+        let escape = neutral
+            .parent()
+            .expect("the neutral directory has a parent")
+            .join("escape");
+
+        let run = LintFile::create(&neutral, &climbing, (&doc, 1, "ts"), "let a = 1;\n");
+
+        assert!(run.is_none(), "{run:?}");
+        assert!(!escape.exists(), "nothing should be created at {escape:?}");
+    }
+
+    #[test]
+    fn a_lint_directory_planted_as_a_dangling_link_out_creates_nothing_where_it_points() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let home = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let outside = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let env = ToolEnv::from_vars(|name| (name == "HOME").then(|| home.path().into()));
+        let doc = root.path().join("a.md");
+        let given = project_args(&env, root.path(), &doc).expect("no config gives an empty one");
+        let neutral = runner::neutral_dir(&env, root.path());
+        let missing = outside.path().join("missing");
+        std::os::unix::fs::symlink(&missing, neutral.with_file_name("biome-lint"))
+            .expect("the planted link");
+
+        let run = LintFile::create(&neutral, &given, (&doc, 1, "js"), "f();\n");
+
+        assert!(run.is_none(), "{run:?}");
+        assert!(
+            !missing.exists(),
+            "nothing should be created at {missing:?}"
+        );
+    }
+
+    #[test]
+    fn dropping_a_lint_file_whose_lint_directory_became_a_link_removes_nothing_it_leads_to() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let home = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let outside = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let env = ToolEnv::from_vars(|name| (name == "HOME").then(|| home.path().into()));
+        let doc = root.path().join("a.md");
+        let given = project_args(&env, root.path(), &doc).expect("no config gives an empty one");
+        let neutral = runner::neutral_dir(&env, root.path());
+        let run = LintFile::create(&neutral, &given, (&doc, 1, "js"), "f();\n")
+            .expect("the run's private directory is creatable");
+        let dir = run
+            .file()
+            .parent()
+            .expect("the run's directory")
+            .to_path_buf();
+        let base = dir
+            .parent()
+            .expect("the biome-lint directory")
+            .to_path_buf();
+        let name = dir.file_name().expect("the run's name");
+        let kept = outside.path().join(name).join("kept");
+        fs::create_dir_all(outside.path().join(name)).expect("the outside twin");
+        fs::write(&kept, "kept").expect("the outside file");
+        fs::rename(&base, base.with_file_name("biome-lint-moved")).expect("the move");
+        std::os::unix::fs::symlink(outside.path(), &base).expect("the planted link");
+
+        drop(run);
+
+        assert_eq!(fs::read_to_string(&kept).ok().as_deref(), Some("kept"));
     }
 
     #[test]
