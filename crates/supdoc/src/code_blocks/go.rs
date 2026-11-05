@@ -230,7 +230,7 @@ impl VetModule {
             return None;
         }
         let cache = neutral.parent()?.to_path_buf();
-        let owner = Boundary::resolve(&exact(&cache)?);
+        let owner = Boundary::resolve(&runner::exact(&cache)?);
         let shared = |name: &str| {
             let dir = AbsolutePath::new(&cache.join(name))?;
             private(&owner, &dir).map(|boundary| (dir, boundary))
@@ -339,12 +339,6 @@ fn private(parent: &Boundary, dir: &AbsolutePath) -> Option<Boundary> {
     confine::create_dir_all(&parent.admit(dir).ok()?, 0o700).ok()?;
     let meta = std::fs::symlink_metadata(dir.as_path()).ok()?;
     (meta.is_dir() && meta.permissions().mode() & 0o777 == 0o700).then(|| Boundary::resolve(dir))
-}
-
-/// `path` as an [`AbsolutePath`] when normalizing doesn't move it: it is absolute and holds no
-/// `..`, so the boundary built from it names the place that was checked. `None` otherwise.
-fn exact(path: &Path) -> Option<AbsolutePath> {
-    AbsolutePath::new(path).filter(|exact| exact.as_path() == path)
 }
 
 /// Creates `dir` mode 0700, admitted beneath `parent`, when nothing is there yet, so the run that

@@ -965,4 +965,25 @@ mod tests {
         assert_eq!(written, None);
         assert_eq!(fs::read_to_string(&pointee).ok().as_deref(), Some("kept"));
     }
+
+    #[test]
+    fn a_cache_base_that_is_a_link_to_another_dir_gives_a_neutral_directory_under_where_it_leads() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let place = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let disk = place.path().join("disk");
+        fs::create_dir(&disk).expect("the link's target");
+        let base = place.path().join("cache");
+        std::os::unix::fs::symlink(&disk, &base).expect("the cache base link");
+        let path = base.clone();
+        let env =
+            ToolEnv::from_vars(|name| (name == "XDG_CACHE_HOME").then(|| path.clone().into()));
+
+        let neutral = neutral_dir(&env, root.path());
+
+        assert_eq!(neutral, base.join("supdoc/code-blocks/cwd"));
+        assert!(
+            disk.join("supdoc/code-blocks/cwd").is_dir(),
+            "the neutral directory should be created where the base leads"
+        );
+    }
 }
