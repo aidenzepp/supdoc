@@ -306,12 +306,14 @@ impl Steps {
 
     /// Why a block's steps didn't all run, for a block whose state gives no better reason: each
     /// step's reason when it is off, skipped, refused or couldn't run, format then lint, joined by
-    /// `; `, so one step's reason never hides the other's. `None` when every due step ran.
+    /// `; `, so one step's reason never hides the other's. Both steps sharing a reason give it
+    /// once. `None` when every due step ran.
     fn reason(&self) -> Option<String> {
-        let reasons: Vec<String> = [self.format.why(), self.lint.why()]
+        let mut reasons: Vec<String> = [self.format.why(), self.lint.why()]
             .into_iter()
             .flatten()
             .collect();
+        reasons.dedup();
         (!reasons.is_empty()).then(|| reasons.join("; "))
     }
 }
@@ -1165,6 +1167,25 @@ mod tests {
         assert_eq!(
             reason.as_deref(),
             Some("`format = \"off\"` in `[features.code-blocks.rust.rustfmt]`; clippy needs trust")
+        );
+    }
+
+    #[test]
+    fn a_reason_both_steps_share_is_given_once() {
+        let unrun = StepState::Unrunnable {
+            reason: "tombi couldn't load the project's config",
+        };
+        let steps = Steps {
+            format: unrun.clone(),
+            lint: unrun,
+        };
+
+        let reason =
+            BlockState::NotChecked(NotChecked::NoStepRan).reason(&steps, Some("toml"), None);
+
+        assert_eq!(
+            reason.as_deref(),
+            Some("tombi couldn't load the project's config")
         );
     }
 }

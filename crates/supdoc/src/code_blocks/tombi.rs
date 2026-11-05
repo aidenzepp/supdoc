@@ -9,13 +9,15 @@
 //! nearest config tombi finds is always supdoc's copy. The copy is written even when the project
 //! has no config, empty. The directory above it holds an empty `.tombi.toml` of supdoc's too, so
 //! no config above supdoc's cache (in the home directory, say) ever applies. When tombi can't
-//! load the copy it says so on stderr, naming it, and supdoc reports the block's steps not run.
+//! load a config it says so on stderr (see [`skip`]), and supdoc reports the block's steps not
+//! run.
 //! `XDG_CONFIG_HOME` points at the private directory as well, holding the same copy.
 //!
 //! A block's own `#:schema` comment makes tombi read the file it names, wherever it is, so a
-//! block carrying one is never given to tombi (see [`names_schema`]). A block's `#:tombi`
-//! directive that switches a step off leaves that step not run (see [`switched_off`]): supdoc's
-//! own `lint(off: ...)` and `format(off: ...)` are the way to do that.
+//! block carrying one is never given to tombi (see [`names_schema`]). A block holding a
+//! `#:tombi` directive isn't given to tombi either (see [`has_directive`]): such a directive can
+//! switch a step off, and the rest of what it may say belongs in the project's tombi config.
+//! supdoc's own `lint(off: ...)` and `format(off: ...)` are the way to switch a step off.
 
 use std::ffi::OsString;
 use std::fs;
@@ -24,7 +26,7 @@ use std::path::{Path, PathBuf};
 use super::format::{self, ParseError};
 use super::lint::{self, Diagnostic};
 use super::runner::{self, Failure, Ran};
-use super::tools::ToolEnv;
+use super::tools::{Step, ToolEnv};
 use crate::hash::Hash;
 
 /// The config names tombi looks for in a directory, in its own order. `pyproject.toml` counts
@@ -183,26 +185,58 @@ pub(crate) fn names_schema(block: &str) -> bool {
         .any(|line| line.trim_start().starts_with("#:schema"))
 }
 
-/// The steps a `#:tombi` document directive in `block` switches off, as `(format, lint)`: a line
-/// that, past its indentation, starts with `#:tombi` and sets `disabled` or `enabled` switches off
-/// each step it names, `format` or `lint`, or both when it names neither. A `# tombi:` comment
-/// that sets a rule's level is no switch: it stays in the block for a reader to see.
+/// Whether `block` holds a `#:tombi` document directive anywhere. Found as text, never parsed:
+/// tombi decodes escapes in a directive's keys (`lint."\u0064isabled"`), so only the marker
+/// itself is a test no spelling slips past. A `# tombi:` rule comment doesn't hold it.
 #[must_use]
-pub(crate) fn switched_off(block: &str) -> (bool, bool) {
-    block
-        .lines()
-        .filter_map(|line| line.trim_start().strip_prefix("#:tombi"))
-        .filter(|rest| rest.contains("disabled") || rest.contains("enabled"))
-        .fold((false, false), |(format, lint), rest| {
-            let names_format = rest.contains("format");
-            let names_lint = rest.contains("lint");
-            let neither = !names_format && !names_lint;
-            (
-                format || names_format || neither,
-                lint || names_lint || neither,
-            )
-        })
+pub(crate) fn has_directive(block: &str) -> bool {
+    block.contains("#:tombi")
 }
+
+/// What tombi's stderr for one step's run says it didn't do, colour stripped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Skip {
+    /// It couldn't load a config, so it ran on rules the project didn't set: what it said, cut
+    /// before the config's path.
+    Config(String),
+    /// It skipped the step for the block: what it said, cut before the block's path.
+    Step(String),
+}
+
+/// What tombi said it skipped, at any exit status, in the `stderr` of a run of `step`: any line
+/// holding `failed to parse config file` is [`Skip::Config`] (supdoc makes every config tombi can
+/// find, so any of them failing means the project's settings didn't apply); for lint a line
+/// holding `skip linting for `, for format one holding `skip formatting for `, is
+/// [`Skip::Step`]. Each is cut just after those words, so no path is echoed. `None` for any other
+/// stderr.
+#[must_use]
+pub(crate) fn skip(step: Step, stderr: &[u8]) -> Option<Skip> {
+    const CONFIG: &str = "failed to parse config file";
+    let plain = strip_ansi(&String::from_utf8_lossy(stderr));
+    let cut = |line: &str, words: &str| {
+        line.find(words)
+            .and_then(|at| line.get(..at + words.len()))
+            .map(|said| said.trim().to_owned())
+    };
+    if let Some(said) = plain.lines().find_map(|line| cut(line, CONFIG)) {
+        return Some(Skip::Config(said));
+    }
+    let skipping = match step {
+        Step::Lint => "skip linting for",
+        Step::Format => "skip formatting for",
+    };
+    plain
+        .lines()
+        .find(|line| line.contains(&format!("{skipping} ")))
+        .and_then(|line| cut(line, skipping))
+        .map(Skip::Step)
+}
+
+/// The help for a project config supdoc can't read or write again.
+const FIX_FILE: &str = "make it a readable TOML file of at most 256 KiB inside the project";
+
+/// The help for a project config that names files or fetches.
+const REMOVE_KEYS: &str = "remove its `schemas`, `schema.catalog` and `extensions`";
 
 /// Why a block isn't given to tombi.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,6 +247,8 @@ pub(crate) enum Refusal {
         file: String,
         /// What is wrong with it.
         why: &'static str,
+        /// How to put it right.
+        help: &'static str,
     },
     /// supdoc has no private directory to keep tombi's config in.
     NoPrivateDir,
@@ -240,12 +276,6 @@ impl Project {
             doc.strip_prefix(&self.from)
                 .unwrap_or_else(|_| Path::new(doc.file_name().unwrap_or_default())),
         )
-    }
-
-    /// The copy of the project's config tombi reads: `.tombi.toml` in the private directory.
-    #[must_use]
-    pub(crate) fn copy(&self) -> PathBuf {
-        self.config_home.join(".tombi.toml")
     }
 
     /// The variables tombi gets beyond the passed environment: `XDG_CONFIG_HOME`, the private
@@ -306,7 +336,11 @@ pub(crate) fn project(env: &ToolEnv, root: &Path, doc: &Path) -> Result<Project,
             let file = relative(root, &candidate);
             let config_home = private_config(env, root, &table).map_err(|why| match why {
                 None => Refusal::NoPrivateDir,
-                Some(why) => Refusal::Config { file, why },
+                Some(why) => Refusal::Config {
+                    file,
+                    why,
+                    help: FIX_FILE,
+                },
             })?;
             let from = pattern_root(&candidate).unwrap_or_else(|| root.to_path_buf());
             return Ok(Project { config_home, from });
@@ -317,6 +351,7 @@ pub(crate) fn project(env: &ToolEnv, root: &Path, doc: &Path) -> Result<Project,
         Some(why) => Refusal::Config {
             file: String::new(),
             why,
+            help: FIX_FILE,
         },
     })?;
     Ok(Project {
@@ -359,6 +394,7 @@ fn checked(root: &Path, found: &Path) -> Result<Option<toml::Table>, Refusal> {
     let refuse = |why| Refusal::Config {
         file: file.clone(),
         why,
+        help: FIX_FILE,
     };
     let is_pyproject = found
         .file_name()
@@ -396,7 +432,11 @@ fn checked(root: &Path, found: &Path) -> Result<Option<toml::Table>, Refusal> {
         table
     };
     if let Some(why) = unsafe_part(&tombi) {
-        return Err(refuse(why));
+        return Err(Refusal::Config {
+            file,
+            why,
+            help: REMOVE_KEYS,
+        });
     }
     let _dropped = tombi.remove("files");
     drop_switches(&mut tombi);
@@ -584,13 +624,13 @@ fn write_private(file: &Path, content: &str) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Project, Refusal, diagnostics, linted_nothing, names_schema, parse_error, pattern_root,
-        project, switched_off,
+        Project, Refusal, Skip, diagnostics, has_directive, linted_nothing, names_schema,
+        parse_error, pattern_root, project, skip,
     };
     use crate::code_blocks::format::ParseError;
     use crate::code_blocks::lint::Diagnostic;
     use crate::code_blocks::runner::Ran;
-    use crate::code_blocks::tools::ToolEnv;
+    use crate::code_blocks::tools::{Step, ToolEnv};
     use std::fs;
     use std::path::Path;
 
@@ -663,28 +703,56 @@ mod tests {
     }
 
     #[test]
-    fn a_tombi_directive_switching_a_step_off_is_found_and_a_rule_comment_is_not() {
+    fn any_tombi_directive_is_found_however_it_is_spelled_and_a_rule_comment_is_not() {
+        for block in [
+            "#:tombi lint.\"disabled\" = true\n",
+            "#:tombi format = { \"disabled\" = true }\n",
+            "#:tombi lint.\"\\u0064isabled\" = true\n",
+            "#:tombi toml-version = \"v1.1.0\"\n",
+            "a = 1 #:tombi x\n",
+        ] {
+            assert!(has_directive(block), "{block:?}");
+        }
+        assert!(!has_directive(
+            "# tombi: lint.rules.key-empty.disabled = true\n\"\" = 1\n"
+        ));
+    }
+
+    #[test]
+    fn a_config_tombi_couldnt_parse_is_a_skip_at_any_exit_and_quotes_no_path() {
+        for stderr in [
+            "Warning: failed to parse config file \"/c/q\\\"x/.tombi.toml\"\n",
+            "Warning: failed to parse config file \"/c/a\tb/.tombi.toml\"\n1 file linted successfully\n",
+            "\u{1b}[1;33mWarning\u{1b}[0m: failed to parse config file \"/c/jose\u{301}/.tombi.toml\"\n",
+        ] {
+            for step in [Step::Lint, Step::Format] {
+                assert_eq!(
+                    skip(step, stderr.as_bytes()),
+                    Some(Skip::Config(
+                        "Warning: failed to parse config file".to_owned()
+                    )),
+                    "{stderr:?}"
+                );
+            }
+        }
+        assert_eq!(skip(Step::Lint, b"1 file linted successfully\n"), None);
+    }
+
+    #[test]
+    fn a_step_tombi_says_it_skipped_is_a_skip_of_that_step_only() {
+        let lint = b"Info: skip linting for \"x.toml\" due to lint.disable\n";
+        let format = b"Info: skip formatting for \"x.toml\" due to format.disable\n";
+
         assert_eq!(
-            switched_off("#:tombi lint.disabled = true\na = 1\n"),
-            (false, true)
+            skip(Step::Lint, lint),
+            Some(Skip::Step("Info: skip linting for".to_owned()))
         );
         assert_eq!(
-            switched_off("  #:tombi format.disabled=true\n"),
-            (true, false)
+            skip(Step::Format, format),
+            Some(Skip::Step("Info: skip formatting for".to_owned()))
         );
-        assert_eq!(
-            switched_off("#:tombi lint = { enabled = false }\n"),
-            (false, true)
-        );
-        assert_eq!(switched_off("#:tombi disabled = true\n"), (true, true));
-        assert_eq!(
-            switched_off("# tombi: lint.rules.key-empty.disabled = true\n\"\" = 1\n"),
-            (false, false)
-        );
-        assert_eq!(
-            switched_off("#:tombi toml-version = \"v1.0.0\"\n"),
-            (false, false)
-        );
+        assert_eq!(skip(Step::Format, lint), None);
+        assert_eq!(skip(Step::Lint, format), None);
     }
 
     #[test]
@@ -721,6 +789,25 @@ mod tests {
             matches!(refused, Err(Refusal::Config { ref file, .. }) if file == "tombi.toml"),
             "got {refused:?}"
         );
+    }
+
+    #[test]
+    fn each_refused_config_gets_help_for_what_is_wrong_with_it() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let env = env_in(cache.path());
+        let doc = root.path().join("a.md");
+        let config = root.path().join("tombi.toml");
+        let help_for = |text: &str| {
+            fs::write(&config, text).expect("config");
+            match project(&env, root.path(), &doc) {
+                Err(Refusal::Config { help, .. }) => help,
+                other => panic!("{text:?} wasn't refused: {other:?}"),
+            }
+        };
+
+        assert!(!help_for("not = [toml").contains("schemas"));
+        assert!(help_for("schemas = []\n").contains("schemas"));
     }
 
     #[test]

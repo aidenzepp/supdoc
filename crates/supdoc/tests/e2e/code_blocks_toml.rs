@@ -547,40 +547,113 @@ fn toml_a_config_planted_beside_supdocs_copy_never_applies() {
     assert!(finding_kinds(&planted).is_empty(), "{planted}");
 }
 
+/// Asserts `json` reports its one TOML block with neither step run, `not_checked`, no pass, and
+/// one finding: a `code-block-not-checked` warning whose message holds `says`.
+fn assert_unrun(json: &serde_json::Value, says: &str, case: &str) {
+    assert_eq!(
+        finding_kinds(json),
+        ["code-block-not-checked"],
+        "{case}: {json}"
+    );
+    assert!(
+        at(json, "/findings/0/message")
+            .as_str()
+            .is_some_and(|message| message.contains(says)),
+        "{case}: {json}"
+    );
+    for count in ["format_not_run", "lint_not_run", "not_checked"] {
+        assert_eq!(
+            at(json, &format!("/data/summary/code_blocks/{count}")),
+            1,
+            "{case}: {count}: {json}"
+        );
+    }
+    assert_eq!(
+        at(json, "/data/summary/code_blocks/passed"),
+        0,
+        "{case}: {json}"
+    );
+    let reason = at(json, "/data/code_blocks/0/reason")
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let parts: Vec<&str> = reason.split("; ").collect();
+    let mut unique = parts.clone();
+    unique.dedup();
+    assert_eq!(parts, unique, "{case}: the reason repeats itself: {reason}");
+}
+
 #[test]
-fn toml_a_block_that_switches_a_tombi_step_off_has_that_step_unrun() {
+fn toml_a_block_holding_a_tombi_directive_runs_neither_step() {
     let Some(dir) = real_tool_dir(
         "tombi",
-        "toml_a_block_that_switches_a_tombi_step_off_has_that_step_unrun",
+        "toml_a_block_holding_a_tombi_directive_runs_neither_step",
     ) else {
         return;
     };
     let strict = "[lint.rules]\nkey-empty = \"error\"\n";
-    let no_lint = configured(strict, "#:tombi lint.disabled = true\n\n\"\" = 2");
-    let no_format = configured(strict, "#:tombi format.disabled = true\na=1");
-    let before = no_format.read("docs/blocks.md");
 
-    let lint = real_check(&no_lint, &dir, &[]);
-    let format = real_check(&no_format, &dir, &[]);
-    let _fixed = no_format.supdoc_in_with(".", &["fix", "--yes"], &[("PATH", &dir)]);
+    for block in [
+        "#:tombi lint.disabled = true\n\n\"\" = 2",
+        "#:tombi format.disabled = true\na=1",
+        "#:tombi lint.\"\\u0064isabled\" = true\n\n\"\" = 2",
+        "#:tombi format.\"\\u0064isabled\" = true\na =   2",
+        "#:tombi format = { \"dis\\u0061bled\" = true }\na =   2",
+        "#:tombi toml-version = \"v1.1.0\"\na = 1",
+    ] {
+        let project = configured(strict, block);
+        let before = project.read("docs/blocks.md");
 
-    assert_eq!(finding_kinds(&lint), ["code-block-not-checked"], "{lint}");
-    assert_eq!(
-        at(&lint, "/data/summary/code_blocks/lint_not_run"),
-        1,
-        "{lint}"
+        let json = real_check(&project, &dir, &[]);
+        let _fixed = project.supdoc_in_with(".", &["fix", "--yes"], &[("PATH", &dir)]);
+
+        assert_unrun(&json, "`#:tombi` directive", block);
+        assert_eq!(project.read("docs/blocks.md"), before, "{block}");
+    }
+}
+
+#[test]
+fn toml_a_rejected_config_is_caught_whatever_the_cache_path_holds() {
+    let Some(dir) = real_tool_dir(
+        "tombi",
+        "toml_a_rejected_config_is_caught_whatever_the_cache_path_holds",
+    ) else {
+        return;
+    };
+    let scratch = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+
+    for name in ["a\"b", "jose\u{301}", "a\\b", "a\tb", "नमस्ते"] {
+        let home = scratch.path().join(name);
+        std::fs::create_dir_all(&home).expect("the scratch home");
+        let project = configured(
+            "bogus_key = 1\n[lint.rules]\nkey-empty = \"error\"\n",
+            "\"\" = 2",
+        );
+        for _run in 0..2 {
+            let json = real_check(&project, &dir, &[("HOME", &home)]);
+
+            assert_unrun(&json, "couldn't load the project's config", name);
+        }
+    }
+}
+
+#[test]
+fn toml_a_rejected_config_is_caught_before_tombi_reads_the_block_on_its_fallback() {
+    let Some(dir) = real_tool_dir(
+        "tombi",
+        "toml_a_rejected_config_is_caught_before_tombi_reads_the_block_on_its_fallback",
+    ) else {
+        return;
+    };
+    let project = configured("toml-version = \"v1.1.0\"\nbogus = 1\n", "a = \"\\e\"");
+
+    let json = real_check(&project, &dir, &[]);
+
+    assert_unrun(
+        &json,
+        "couldn't load the project's config",
+        "v1.1.0 + bogus",
     );
-    assert_eq!(
-        finding_kinds(&format),
-        ["code-block-not-checked"],
-        "{format}"
-    );
-    assert_eq!(
-        at(&format, "/data/summary/code_blocks/format_not_run"),
-        1,
-        "{format}"
-    );
-    assert_eq!(no_format.read("docs/blocks.md"), before);
 }
 
 #[test]
