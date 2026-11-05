@@ -4256,7 +4256,8 @@ fn unresolved_warning(unresolved: &toolchain::Unresolved, at: &Location) -> Find
             "`rustup show active-toolchain` ran past `[limits] code-block-timeout`".to_owned(),
             format!(
                 "run `rustup show active-toolchain` in the project to see why it hangs, raise \
-                 `--code-block-timeout` or `SUPDOC_CODE_BLOCK_TIMEOUT`, {PIN}"
+                 `--code-block-timeout` or `SUPDOC_CODE_BLOCK_TIMEOUT` (`code-block-timeout` \
+                 under `[limits]` raises it only in a checkout you trust), {PIN}"
             ),
         ),
         Cause::OverCap => (
@@ -5705,7 +5706,8 @@ mod tests {
             (
                 rustup(Cause::TimedOut),
                 "ran past `[limits] code-block-timeout`".to_owned(),
-                "raise `--code-block-timeout` or `SUPDOC_CODE_BLOCK_TIMEOUT`",
+                "raise `--code-block-timeout` or `SUPDOC_CODE_BLOCK_TIMEOUT` \
+                 (`code-block-timeout` under `[limits]` raises it only in a checkout you trust),",
             ),
             (
                 rustup(Cause::OverCap),
