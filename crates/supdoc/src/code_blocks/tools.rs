@@ -474,7 +474,7 @@ fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'sta
 }
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 19] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 20] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -763,6 +763,22 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 19] = [
         argv: gofmt_args,
         reader: Reader::Format(go::parse_error),
     },
+    ToolCartridge {
+        name: "go-vet",
+        language: Language::Go,
+        binary: "go",
+        tier: Tier::Static,
+        install: "install Go from https://go.dev/dl/",
+        // go vet reads only the module supdoc writes for the block (see [`go::VetModule`]).
+        config_files: &[],
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        holds: every_tag,
+        vars: go::VET_VARS,
+        positions: own_positions,
+        argv: go_vet_args,
+        reader: Reader::Lint(go::vet_verdict),
+    },
 ];
 
 /// The files rumdl's results depend on: its config names (see [`rumdl::CONFIG_FILES`]) and the
@@ -853,6 +869,15 @@ fn shfmt_args(invocation: &Invocation<'_>) -> Vec<OsString> {
 /// no config file and no stdin file name, so neither the doc nor the project reaches it.
 fn gofmt_args(_invocation: &Invocation<'_>) -> Vec<OsString> {
     Vec::new()
+}
+
+/// `go vet`'s arguments: `vet -json .`, the package in the module supdoc writes for the block,
+/// where it runs (see [`go::VetModule`]). The doc and the project never reach it.
+fn go_vet_args(_invocation: &Invocation<'_>) -> Vec<OsString> {
+    ["vet", "-json", "."]
+        .into_iter()
+        .map(OsString::from)
+        .collect()
 }
 
 /// `ruff format`'s arguments: the block on stdin under its virtual path, no cache.
@@ -1287,6 +1312,7 @@ mod tests {
                 "tombi-lint Toml Lint tombi Static",
                 "yamlfmt Yaml Format yamlfmt Static",
                 "gofmt Go Format gofmt Static",
+                "go-vet Go Lint go Static",
             ]
         );
     }
