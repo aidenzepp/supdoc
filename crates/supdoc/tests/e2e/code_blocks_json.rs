@@ -16,11 +16,17 @@ fn finding_kinds(json: &serde_json::Value) -> Vec<String> {
 /// A recorded `basic` project with a `json` table and one block tagged `tag` holding `body` in
 /// `docs/blocks.md`.
 fn json_project(tag: &str, body: &str) -> Project {
+    project_with("[features.code-blocks.json]\n", tag, body)
+}
+
+/// A recorded `basic` project with `tables` written under `[features.code-blocks]` and one block
+/// tagged `tag` holding `body` in `docs/blocks.md`.
+fn project_with(tables: &str, tag: &str, body: &str) -> Project {
     let project = Project::fixture("basic");
     project.record();
     project.write(
         "supdoc.config.toml",
-        "[features.code-blocks]\n[features.code-blocks.json]\n",
+        &format!("[features.code-blocks]\n{tables}"),
     );
     project.write(
         "docs/blocks.md",
@@ -96,7 +102,27 @@ fn json_a_comment_in_a_json_block_is_a_parse_error_whose_help_names_jsonc() {
     assert!(
         at(&json, "/findings/0/help")
             .as_str()
-            .is_some_and(|help| help.contains("tag a block that holds comments `jsonc`")),
+            .is_some_and(|help| help.contains("tag it `jsonc`")),
+        "{json}"
+    );
+}
+
+#[test]
+fn json_a_trailing_comma_is_a_parse_error_whose_help_never_names_jsonc() {
+    let project = json_project("json", "{\n  \"a\": 1,\n}");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    stub_biome(outside.path(), &stub_for("json", PARSE_ERROR, CLEAN));
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-parse"], "{json}");
+    assert!(
+        at(&json, "/findings/0/help")
+            .as_str()
+            .is_some_and(|help| !help.contains("jsonc")),
         "{json}"
     );
 }
@@ -141,6 +167,122 @@ fn json_a_lint_diagnostic_is_a_code_block_lint_error_at_its_doc_line() {
             .is_some_and(|m| m.contains("`biome-lint` reports `suspicious/noDuplicateObjectKeys`")),
         "{json}"
     );
+}
+
+/// A project whose `json` table turns biome's format step off, so only the lint step reads the
+/// block tagged `json` holding `body`.
+fn lint_only(body: &str) -> Project {
+    project_with(
+        "[features.code-blocks.json]\n[features.code-blocks.json.biome-format]\nformat = \"off\"\n",
+        "json",
+        body,
+    )
+}
+
+/// biome lint's report of one syntax error, `message`, at line 2 column 3 of the block.
+fn parse_report(message: &str) -> String {
+    format!(
+        r#"{{"summary":{{"changed":0,"unchanged":1}},"diagnostics":[{{"severity":"error","message":"{message}","category":"parse","location":{{"path":"x","start":{{"line":2,"column":3}}}},"advices":[]}}]}}"#
+    )
+}
+
+#[test]
+fn json_lint_a_syntax_error_is_a_parse_error_at_its_doc_line_and_names_jsonc_for_a_comment() {
+    for (body, message, hint) in [
+        (
+            "{\n  // c\n  \"a\": 1\n}",
+            "Expected a property but instead found '// c'.",
+            true,
+        ),
+        (
+            "{\n  \"a\": 1,\n}",
+            "Expected a property but instead found '}'.",
+            false,
+        ),
+    ] {
+        let project = lint_only(body);
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        stub_biome(
+            outside.path(),
+            &stub_for("json", "exit 7", &parse_report(message)),
+        );
+
+        let json = project
+            .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+            .assert_exit(1)
+            .json();
+
+        assert_eq!(finding_kinds(&json), ["code-block-parse"], "{body}: {json}");
+        assert_eq!(at(&json, "/findings/0/location/line"), 5, "{body}: {json}");
+        assert_eq!(
+            at(&json, "/findings/0/help")
+                .as_str()
+                .is_some_and(|help| help.contains("`jsonc`")),
+            hint,
+            "{body}: {json}"
+        );
+    }
+}
+
+#[test]
+fn json_the_real_biome_lint_reads_a_syntax_error_as_a_parse_error_naming_jsonc_for_a_comment() {
+    let Some(dir) = real_tool_dir(
+        "biome",
+        "json_the_real_biome_lint_reads_a_syntax_error_as_a_parse_error_naming_jsonc_for_a_comment",
+    ) else {
+        return;
+    };
+    for (body, line, hint) in [
+        ("{\n  // c\n  \"a\": 1\n}", 5, true),
+        ("{\n  \"a\": 1,\n}", 6, false),
+    ] {
+        let json = lint_only(body)
+            .supdoc_in_with(".", &["check", "--json"], &[("PATH", &dir)])
+            .assert_exit(1)
+            .json();
+
+        assert_eq!(finding_kinds(&json), ["code-block-parse"], "{body}: {json}");
+        assert_eq!(
+            at(&json, "/findings/0/location/line"),
+            line,
+            "biome names the comment, or the `}}` after a trailing comma: {body}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/findings/0/help")
+                .as_str()
+                .is_some_and(|help| help.contains("`jsonc`")),
+            hint,
+            "{body}: {json}"
+        );
+    }
+}
+
+#[test]
+fn json_the_real_biome_format_names_jsonc_for_a_comment_and_not_for_a_trailing_comma() {
+    let Some(dir) = real_tool_dir(
+        "biome",
+        "json_the_real_biome_format_names_jsonc_for_a_comment_and_not_for_a_trailing_comma",
+    ) else {
+        return;
+    };
+    for (body, hint) in [
+        ("{\n  \"a\": 1 /* c */\n}", true),
+        ("{\n  \"a\": 1,\n}", false),
+    ] {
+        let json = json_project("json", body)
+            .supdoc_in_with(".", &["check", "--json"], &[("PATH", &dir)])
+            .assert_exit(1)
+            .json();
+
+        assert_eq!(finding_kinds(&json), ["code-block-parse"], "{body}: {json}");
+        assert_eq!(
+            at(&json, "/findings/0/help")
+                .as_str()
+                .is_some_and(|help| help.contains("`jsonc`")),
+            hint,
+            "{body}: {json}"
+        );
+    }
 }
 
 #[test]

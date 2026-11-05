@@ -228,7 +228,7 @@ pub(crate) mod code_blocks {
     /// Python's format and lint steps.
     mod python;
 
-    /// TypeScript and JavaScript's format step, run by biome.
+    /// TypeScript, JavaScript and JSON's format and lint steps, run by biome.
     mod biome;
     /// Markdown's format and lint steps, run by rumdl.
     mod rumdl;
