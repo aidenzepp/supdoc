@@ -220,22 +220,76 @@ fn all_rustc_diagnostics(stderr: &[u8]) -> Vec<Diagnostic> {
         .collect()
 }
 
+/// The names clippy's frames declare that a block doesn't (see `CLIPPY_FRAGMENTS` in
+/// [`super::tools`]), each with what a message about a framed block says in its place: the
+/// statements and expression frames' function, and the members frame's struct, which the block's
+/// methods know as `Self`.
+const FRAME_NAMES: [(&str, &str); 2] = [
+    ("SupdocFragment", "Self"),
+    ("supdoc_fragment", "<the function supdoc adds>"),
+];
+
+/// `text`, a message clippy wrote about a framed block, with each of the frame's names in
+/// [`FRAME_NAMES`] replaced by what it stands for to the block.
+fn without_frame_names(text: &str) -> String {
+    FRAME_NAMES
+        .iter()
+        .fold(text.to_owned(), |text, (name, shown)| {
+            text.replace(name, shown)
+        })
+}
+
+/// `stderr` of `clippy-driver --error-format=json` as a person reads it: each diagnostic's
+/// `rendered` text in place of its JSON line, any other line as it is. A frame line shows in a
+/// rendered source listing as a line of its own, where [`super::fragment::Frame::hidden`] finds
+/// it, never inside an escaped JSON string.
+fn rendered(stderr: &[u8]) -> Vec<u8> {
+    /// The one field of a diagnostic this reads.
+    #[derive(serde::Deserialize)]
+    struct Rendered {
+        /// The diagnostic as rustc prints it without `--error-format=json`.
+        rendered: String,
+    }
+    stderr
+        .split(|byte| *byte == b'\n')
+        .map(|line| {
+            serde_json::from_slice::<Rendered>(line).map_or_else(
+                |_| line.to_vec(),
+                |found| found.rendered.trim_end().as_bytes().to_vec(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(&b'\n')
+}
+
 /// Judges a clippy run: its diagnostics on stderr, whatever its exit (clippy exits 0 on
 /// warnings); clean on exit 0 with none; a tool failure on a non-zero exit with none, output
 /// past the cap or a failed start; a timeout is a timeout.
+///
+/// When the checked text frames the block (`framed`), no diagnostic message names a name only
+/// the frame declares ([`FRAME_NAMES`]), and a tool failure's detail is the rendered text of
+/// stderr's diagnostics, frame names replaced, so the lint step can hide its frame lines.
 #[must_use]
 pub(crate) fn lint_verdict(
     _input: &str,
-    _framed: bool,
+    framed: bool,
     result: Result<Ran, Failure>,
 ) -> lint::Verdict {
     match result {
         Ok(ran) => {
-            let found = rustc_diagnostics(&ran.stderr);
+            let mut found = rustc_diagnostics(&ran.stderr);
+            if framed {
+                for diagnostic in &mut found {
+                    diagnostic.message = without_frame_names(&diagnostic.message);
+                }
+            }
             if !found.is_empty() {
                 lint::Verdict::Diagnostics(found)
             } else if ran.success {
                 lint::Verdict::Clean
+            } else if framed {
+                let detail = format::exit_detail(&rendered(&ran.stderr));
+                lint::Verdict::Failed(format::Verdict::ToolFailed(without_frame_names(&detail)))
             } else {
                 lint::Verdict::Failed(format::Verdict::ToolFailed(format::exit_detail(
                     &ran.stderr,
@@ -1328,7 +1382,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        EmitDir, FRONTMATTER, Found, LineMap, MAX_SCAN_BYTES, Scan, Token, Tokens,
+        EmitDir, FRAME_NAMES, FRONTMATTER, Found, LineMap, MAX_SCAN_BYTES, Scan, Token, Tokens,
         attribute_edition, before_compiling, clippy_conf_dir, compile_time_read, config_args,
         lint_verdict, parse_error, scan, unwidened,
     };
@@ -1766,6 +1820,73 @@ mod tests {
             Verdict::Diagnostics(found) => found,
             other => panic!("expected diagnostics, got {other:?}"),
         }
+    }
+
+    /// clippy's verdict on a framed run that exited `success` and printed `stderr`.
+    fn framed_verdict(success: bool, stderr: &str) -> Verdict {
+        lint_verdict(
+            "",
+            true,
+            Ok(Ran {
+                success,
+                stdout: Vec::new(),
+                stderr: stderr.as_bytes().to_vec(),
+            }),
+        )
+    }
+
+    #[test]
+    fn every_frame_name_kept_out_of_messages_is_one_a_clippy_frame_declares() {
+        let clippy = crate::code_blocks::tools::CARTRIDGES
+            .iter()
+            .find(|tool| tool.name == "clippy")
+            .expect("the cartridges should include clippy");
+        let frames: String = clippy
+            .fragments
+            .iter()
+            .filter_map(|(kind, support)| support.frame(*kind))
+            .map(|frame| frame.before)
+            .collect();
+
+        for (name, _) in FRAME_NAMES {
+            assert!(frames.contains(name), "{name} isn't in a frame: {frames}");
+        }
+    }
+
+    #[test]
+    fn a_framed_message_names_the_frames_struct_as_self() {
+        let line = named_line(
+            "error",
+            "E0609",
+            "\"no field `w` on type `&SupdocFragment`\"",
+        );
+
+        let Verdict::Diagnostics(found) = framed_verdict(false, &line) else {
+            panic!("a field error is a diagnostic");
+        };
+
+        let messages: Vec<&str> = found.iter().map(|found| found.message.as_str()).collect();
+        assert_eq!(messages, ["no field `w` on type `&Self`"]);
+    }
+
+    #[test]
+    fn a_framed_tool_failure_shows_the_rendered_text_without_frame_names() {
+        let rendered =
+            "error: internal compiler error\\n --> <anon>:1:1\\n1 | fn supdoc_fragment() {\\n";
+        let stderr = format!("{{\"rendered\":\"{rendered}\"}}\nthread 'rustc' panicked\n");
+
+        let Verdict::Failed(super::format::Verdict::ToolFailed(detail)) =
+            framed_verdict(false, &stderr)
+        else {
+            panic!("a run with no diagnostic that failed is a tool failure");
+        };
+
+        assert_eq!(
+            detail,
+            "error: internal compiler error\n --> <anon>:1:1\n1 | fn <the function supdoc adds>() {\n\
+             thread 'rustc' panicked",
+            "each JSON line becomes its rendered lines, where the lint step finds frame lines"
+        );
     }
 
     #[test]

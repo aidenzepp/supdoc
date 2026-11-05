@@ -259,6 +259,26 @@ const RUSTFMT_BODY: Support = Support::Framed {
     out_after: "}",
 };
 
+/// clippy's kinds, each read inside a frame that draws no lint of its own under clippy's default
+/// lints, so no lint is ever left off for a whole block. The block compiles as a library, where
+/// the frame's private items are never reported unused. Statements are the body of a function
+/// with no parameters and no return type, so a `?` in them is a true error, never one the
+/// block's content chose a `Result` for. An expression is the tail of a function returning
+/// `impl Sized`, so a value of any type reads as written. Members are the `impl` of a unit
+/// struct the frame declares, so a field read on `self` is a true error. clippy prints no code.
+/// The frame's names are the ones [`super::rust::lint_verdict`] keeps out of clippy's messages.
+const CLIPPY_FRAGMENTS: &[(Kind, Support)] = &[
+    (Kind::Statements, framed("fn supdoc_fragment() {", "}")),
+    (
+        Kind::Expression,
+        framed("fn supdoc_fragment() -> impl Sized {", "}"),
+    ),
+    (
+        Kind::Members,
+        framed("struct SupdocFragment; impl SupdocFragment {", "}"),
+    ),
+];
+
 /// shfmt's and shellcheck's kinds: any command list is a program, and one command is a list.
 const SHELL_FRAGMENTS: &[(Kind, Support)] = &[
     (Kind::Statements, Support::NATIVE),
@@ -549,7 +569,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 19] = [
         install: "rustup component add clippy",
         config_files: &["clippy.toml", ".clippy.toml", "Cargo.toml"],
         modes: FULL_OR_OFF,
-        fragments: &[],
+        fragments: CLIPPY_FRAGMENTS,
         holds: every_tag,
         vars: &[],
         positions: own_positions,

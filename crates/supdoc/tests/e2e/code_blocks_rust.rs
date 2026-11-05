@@ -1465,3 +1465,136 @@ fn trusted_crate_below_a_parent_channel_pin_builds_and_lints_with_one_toolchain(
     );
     assert_eq!(at(&json, "/data/code_blocks/0/state"), "passed", "{json}");
 }
+
+/// Every line and name of clippy's frames that a block doesn't write.
+const CLIPPY_FRAME: [&str; 5] = [
+    "fn supdoc_fragment() {",
+    "-> impl Sized {",
+    "struct SupdocFragment;",
+    "supdoc_fragment",
+    "SupdocFragment",
+];
+
+/// Asserts that no finding of `json` shows a line or name of clippy's frames in its message,
+/// help, location or fix.
+fn assert_no_clippy_frame_text(json: &serde_json::Value) {
+    for finding in array_at(json, "/findings") {
+        for field in ["message", "help", "location", "fix"] {
+            let text = finding[field].to_string();
+            for frame in CLIPPY_FRAME {
+                assert!(!text.contains(frame), "{field} shows {frame:?}: {finding}");
+            }
+        }
+    }
+}
+
+/// Each finding of `json` as its code and doc line, in order.
+fn kinds_and_lines(json: &serde_json::Value) -> Vec<(String, u64)> {
+    array_at(json, "/findings")
+        .iter()
+        .map(|finding| {
+            (
+                finding["kind"].as_str().unwrap_or_default().to_owned(),
+                finding
+                    .pointer("/location/line")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn frame_lint_real_clippy_passes_statements_an_expression_and_members_naming_the_crate() {
+    let doc = "# Probe\n\n\
+               ```rust fragment(statements)\nlet total = proj::total(&[1, 2]);\n\
+               assert_eq!(total, 3);\n```\n\n\
+               ```rust fragment(expression)\nproj::total(&[1, 2]) * 2\n```\n\n\
+               ```rust fragment(members)\nfn doubled(&self, v: &[i32]) -> i32 {\n    \
+               proj::total(v) * 2\n}\n```\n";
+    let Some(json) = trusted_probe_check(
+        "frame_lint_real_clippy_passes_statements_an_expression_and_members",
+        PROBE_LIB,
+        doc,
+        None,
+        0,
+    ) else {
+        return;
+    };
+
+    assert_eq!(finding_kinds(&json), Vec::<String>::new(), "{json}");
+    for block in 0..3 {
+        assert_eq!(
+            at(&json, &format!("/data/code_blocks/{block}/lint")),
+            "ran",
+            "{json}"
+        );
+        assert_eq!(
+            at(&json, &format!("/data/code_blocks/{block}/state")),
+            "passed",
+            "{json}"
+        );
+    }
+}
+
+#[test]
+fn frame_lint_real_clippy_reports_each_framed_block_at_its_own_line_without_frame_text() {
+    let doc = "# Probe\n\n\
+               ```rust fragment(statements)\nlet v: Vec<i32> = Vec::new();\n\
+               let empty = v.len() == 0;\nassert!(empty);\n```\n\n\
+               ```rust fragment(members)\nfn area(&self) -> i32 {\n    self.w\n}\n```\n\n\
+               ```rust fragment(statements)\nlet n: i32 = \"1\".parse()?;\nassert_eq!(n, 1);\n```\n\n\
+               ```rust fragment(statements)\nlet x = ;\n```\n\n\
+               ```rust fragment(statements)\nlet a = 1;\nmissing(a);\n```\n";
+    let Some(json) = trusted_probe_check(
+        "frame_lint_real_clippy_reports_each_framed_block",
+        PROBE_LIB,
+        doc,
+        None,
+        1,
+    ) else {
+        return;
+    };
+
+    assert_eq!(
+        kinds_and_lines(&json),
+        [
+            ("code-block-lint".to_owned(), 5),
+            ("code-block-lint".to_owned(), 11),
+            ("code-block-lint".to_owned(), 16),
+            ("code-block-parse".to_owned(), 21),
+            ("code-block-missing-name".to_owned(), 26),
+        ],
+        "{json}"
+    );
+    let messages = messages_of(&json, "code-block-lint");
+    assert!(
+        messages
+            .first()
+            .is_some_and(|message| message.contains("clippy::len_zero")),
+        "{messages:?}"
+    );
+    assert!(
+        messages
+            .get(1)
+            .is_some_and(|message| message.contains("no field `w` on type `&Self`")),
+        "a members block's methods know the frame's struct as `Self`: {messages:?}"
+    );
+    assert!(
+        messages
+            .get(2)
+            .is_some_and(|message| message.contains("`E0277`")),
+        "a `?` in statements is a true error, the frame returning `()`: {messages:?}"
+    );
+    assert_eq!(
+        messages_of(&json, "code-block-parse"),
+        ["`clippy` couldn't parse the block as `statements`"],
+        "{json}"
+    );
+    assert_eq!(
+        messages_of(&json, "code-block-missing-name"),
+        ["`missing` isn't defined in this block or the project's crate"],
+        "{json}"
+    );
+    assert_no_clippy_frame_text(&json);
+}

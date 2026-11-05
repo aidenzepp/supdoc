@@ -94,7 +94,7 @@ fn turning_both_steps_off_skips_them_and_the_warning_goes() {
 #[test]
 fn turning_one_step_off_leaves_the_warning_for_the_other() {
     let json = check(&project_with_info(
-        "fragment(members) format(off: no fragment support)",
+        "fragment(entries) format(off: no fragment support)",
     ));
 
     assert_eq!(
