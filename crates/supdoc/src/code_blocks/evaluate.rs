@@ -37,6 +37,7 @@ use super::info::{
 };
 use super::lint;
 use super::project::{self, BuildFailed, Plan, Refused};
+use super::pylint;
 use super::rumdl;
 use super::runner::{self, Call, Ran};
 use super::rust::{self, Scan};
@@ -470,7 +471,11 @@ impl Evaluation {
             let mut refused = false;
             match (lint, job.lint.as_ref()) {
                 (Some(Ok((verdict, findings))), Some(run)) => {
-                    self.findings.extend(findings);
+                    self.findings.extend(
+                        findings
+                            .into_iter()
+                            .filter_map(|found| warnings.once(found)),
+                    );
                     refused = matches!(
                         verdict,
                         lint::Verdict::Failed(format::Verdict::Refused { .. })
@@ -580,6 +585,9 @@ fn run_jobs(
             .and_then(|run| match &run.tool {
                 Tool::Custom(custom) => run_custom_linter(custom, &run.program, record, session),
                 Tool::Cartridge(tool) => {
+                    if switched_off(tool, record) {
+                        return Some(Err(PYLINT_SWITCHED_OFF.into()));
+                    }
                     let rust = rust.filter(|_| run.tool.is("clippy"));
                     run_linter(tool, &run.program, record, session, rust)
                 }
@@ -750,6 +758,24 @@ fn linted_nothing(at: &Location) -> Finding {
     .with_location(at.clone())
 }
 
+/// The run's one `code-block-not-checked` warning, at `at`, the first Python block whose pylint
+/// step didn't run because a `pylint:` comment in it names something other than message codes
+/// and hyphenated message names (see [`pylint::switches_lint_off`]).
+fn pylint_switched_off(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "the block holds a `pylint:` comment that names something other than message codes or \
+         hyphenated message names, so supdoc can't confirm pylint still lints the block, and its \
+         lint step didn't run",
+    )
+    .with_help(
+        "name each message by its code, such as `W0511` for `fixme`, or by a hyphenated name, \
+         such as `unused-import`; or mark the block `lint(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
 /// The run's one `code-block-not-checked` warning, at `at`, the first Go block whose `go vet`
 /// step didn't run because it imports a package outside the standard library.
 fn vet_offline(at: &Location) -> Finding {
@@ -879,9 +905,25 @@ struct NotRun {
 struct NotRunWarnings {
     /// The reasons a warning has been given for.
     given: Vec<&'static str>,
+    /// The messages of the `code-block-not-checked` warnings lint steps have given.
+    said: Vec<String>,
 }
 
 impl NotRunWarnings {
+    /// `found`, a lint step's finding, unless it is a `code-block-not-checked` warning whose
+    /// message the run has already given, such as pylint's about the project's config, which
+    /// every block's run repeats.
+    fn once(&mut self, found: Finding) -> Option<Finding> {
+        if found.code != NOT_CHECKED {
+            return Some(found);
+        }
+        if self.said.contains(&found.message) {
+            return None;
+        }
+        self.said.push(found.message.clone());
+        Some(found)
+    }
+
     /// The warning for `not_run`, at `at`, the first time its reason comes up in the run. `None`
     /// after that, and for a reason that has no warning of its own.
     fn first(&mut self, not_run: &NotRun, at: &Location) -> Option<Finding> {
@@ -898,6 +940,7 @@ impl NotRunWarnings {
             YAML_EMPTY => yaml_empty(at),
             FRAME_RESHAPED => frame_reshaped(at),
             BIOME_LINTED_NOTHING => linted_nothing(at),
+            PYLINT_SWITCHED_OFF => pylint_switched_off(at),
             YAMLLINT_REJECTED => yamllint_rejected(at, said),
             YAMLLINT_LOCALE => yamllint_locale(at, said),
             go::VET_OFFLINE => vet_offline(at),
@@ -1983,7 +2026,9 @@ fn link_against(
         };
     };
     let found = find("cargo", env, root);
-    slots.extend(tool_warning("cargo", "install Rust with rustup", &found, at).map(Slot::Found));
+    slots.extend(
+        tool_warning("cargo", ("install Rust with rustup", &[]), &found, at).map(Slot::Found),
+    );
     let cargo = match found {
         Found::OnPath(cargo) => cargo,
         Found::Missing => return Against::CargoRefused { inside_root: false },
@@ -2864,6 +2909,9 @@ fn run_linter(
     };
     let args = tool.args(&invocation);
     let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
+    let block =
+        (tool.name == PYLINT).then(|| tools::virtual_path(invocation.doc, record.index, "py"));
+    let mut notes = Vec::new();
     let frame = Frame::of(tool, record.fragment);
     let input = lint::checked(frame, &pending.input);
     let input = input.as_ref();
@@ -2903,7 +2951,17 @@ fn run_linter(
             Ok(ran) if let Some(reason) = said_nothing(tool, biome.is_some(), input, &ran) => {
                 Err(reason.into())
             }
-            result => Ok(tool.lint_verdict(input, frame.is_some(), result)),
+            result => Ok(match &block {
+                Some(path) => pylint::judge(
+                    result,
+                    Some(pylint::Block {
+                        path: Path::new(path),
+                        root: session.root,
+                    }),
+                    &mut notes,
+                ),
+                None => tool.lint_verdict(input, frame.is_some(), result),
+            }),
         }
     };
     let verdict = if let Some(forbidden) = forbidden_by_yaml(tool, input) {
@@ -2923,26 +2981,38 @@ fn run_linter(
         frame,
     };
     let findings = lint::findings(&verdict, &read, session.timeout, false);
-    let findings = match &verdict {
-        lint::Verdict::Failed(failed) => {
-            let at = frame
-                .is_none()
-                .then(|| parse_place(failed, pending))
-                .flatten();
-            findings
-                .into_iter()
-                .map(|finding| {
-                    let finding = jsonc_hint(finding, failed, record, &pending.input);
-                    match &at {
-                        Some(at) => finding.with_location(at.clone()),
-                        None => finding,
-                    }
-                })
-                .collect()
-        }
-        _ => findings,
-    };
+    let mut findings = placed(findings, &verdict, record, pending, frame);
+    findings.extend(pylint::config_warning(&notes, &record.at));
     Some(Ok((verdict, findings)))
+}
+
+/// `findings` for `verdict` on `record`'s block, which `frame` framed: a failure's at the doc
+/// line its parse error names, when it names one in an unframed block, each with its JSONC hint
+/// (see [`jsonc_hint`]); any other verdict's as they are.
+fn placed(
+    findings: Vec<Finding>,
+    verdict: &lint::Verdict,
+    record: &BlockRecord,
+    pending: &Pending,
+    frame: Option<Frame>,
+) -> Vec<Finding> {
+    let lint::Verdict::Failed(failed) = verdict else {
+        return findings;
+    };
+    let at = frame
+        .is_none()
+        .then(|| parse_place(failed, pending))
+        .flatten();
+    findings
+        .into_iter()
+        .map(|finding| {
+            let finding = jsonc_hint(finding, failed, record, &pending.input);
+            match &at {
+                Some(at) => finding.with_location(at.clone()),
+                None => finding,
+            }
+        })
+        .collect()
 }
 
 /// The flags `record`'s project gives `tool`: yamllint's `-c <private copy>` for yamllint, the
@@ -3007,10 +3077,35 @@ const TOMBI_LINT: &str = "tombi-lint";
 /// Why tombi lint's step didn't run on a block when tombi didn't report linting it.
 const TOMBI_LINTED_NOTHING: &str = "tombi lint didn't report checking the block";
 
+/// The name of pylint's cartridge.
+const PYLINT: &str = "pylint";
+
+/// Why pylint's step didn't run on a block when its report says it linted no module.
+const PYLINT_LINTED_NOTHING: &str =
+    "pylint linted no module: the project's pylint config leaves the block out";
+
+/// Why pylint's step didn't run on a block holding a `pylint:` comment supdoc can't tell from
+/// one that switches pylint off for the whole block (see [`pylint::switches_lint_off`]).
+const PYLINT_SWITCHED_OFF: &str = "the block holds a `pylint:` comment that names something other \
+                                   than message codes or hyphenated message names, so supdoc \
+                                   can't confirm pylint still lints it; name messages that way, \
+                                   or mark the block `lint(off: <reason>)`";
+
+/// Whether `tool` is pylint and `record`'s block holds a `pylint:` comment supdoc can't tell
+/// from one that switches it off for the whole block (see [`pylint::switches_lint_off`]), so the step doesn't run and pylint is
+/// never spawned.
+fn switched_off(tool: &ToolCartridge, record: &BlockRecord) -> bool {
+    tool.name == PYLINT
+        && record
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pylint::switches_lint_off(&pending.input))
+}
+
 /// Why `tool`'s finished run `ran` says nothing about its block, so its step counts as not run:
 /// biome lint, given the block as a file (`biome_file`), checked no file; tombi lint didn't
-/// report linting it; or go vet couldn't load the block `input` (see [`go::vet_not_run`]).
-/// `None` otherwise.
+/// report linting it; pylint linted no module; or go vet couldn't load the block `input` (see
+/// [`go::vet_not_run`]). `None` otherwise.
 fn said_nothing(
     tool: &ToolCartridge,
     biome_file: bool,
@@ -3022,6 +3117,7 @@ fn said_nothing(
             biome::linted_nothing(&ran.stdout).then_some(BIOME_LINTED_NOTHING)
         }
         TOMBI_LINT => tombi::linted_nothing(ran).then_some(TOMBI_LINTED_NOTHING),
+        PYLINT => pylint::linted_nothing(&ran.stdout).then_some(PYLINT_LINTED_NOTHING),
         GO_VET => go::vet_not_run(input, ran),
         _ => None,
     }
@@ -3390,7 +3486,8 @@ fn named_by(
 
 /// `judge` applied to `run`, read from `session`'s cache when its key is there, otherwise run
 /// through `spawn` (which runs the call from where the tool runs, with the session's env) under
-/// its timeout, and stored in the cache when `cacheable` allows the verdict.
+/// its timeout, and stored in the cache when `cacheable` allows the verdict. A tool whose runs
+/// are never cached (see [`ToolCartridge::cacheable`]) is always spawned.
 ///
 /// Effect: reads the cache, runs the tool through `spawn`, and writes the cache.
 fn cached_run<V>(
@@ -3406,7 +3503,9 @@ fn cached_run<V>(
         cache,
         ..
     } = *session;
-    let key = cache.and_then(|_| Cache::key(run, root));
+    let key = cache
+        .filter(|_| run.tool.cacheable())
+        .and_then(|_| Cache::key(run, root));
     if let Some(ran) = cache.zip(key).and_then(|(cache, key)| cache.get(key)) {
         return judge(Ok(ran));
     }
@@ -3611,8 +3710,16 @@ fn found_runs(
             let warning = match &tool {
                 Tool::Custom(custom) => Some(custom::missing(TOOL_MISSING, custom, at)),
                 Tool::Cartridge(cartridge) => {
-                    let install = format!("install it with `{}`", cartridge.install);
-                    tool_warning(binary, &install, &found, at)
+                    let install = if bins.is_empty() {
+                        format!("install it with `{}`", cartridge.install)
+                    } else {
+                        format!(
+                            "install it with `{}`, or into the project's {}",
+                            cartridge.install,
+                            bins.join(" or ")
+                        )
+                    };
+                    tool_warning(binary, (&install, bins), &found, at)
                 }
             };
             slots.extend(warning.map(Slot::Found));
@@ -3655,14 +3762,23 @@ fn selected_tools(
 }
 
 /// The one warning for `binary`, found as `found`, at `at`, the first block that needs it, a
-/// missing one's help saying how to `install` it. `None` when it is on `PATH` outside the root.
-fn tool_warning(binary: &str, install: &str, found: &Found, at: &Location) -> Option<Finding> {
+/// missing one's help saying how to `install` it, its message naming the root's `bins` searched
+/// before `PATH`. `None` when it is on `PATH` outside the root.
+fn tool_warning(
+    binary: &str,
+    (install, bins): (&str, &[&str]),
+    found: &Found,
+    at: &Location,
+) -> Option<Finding> {
     let finding = match found {
         Found::OnPath(_) => return None,
         Found::Missing => Finding::new(
             TOOL_MISSING,
             Severity::Warning,
-            format!("`{binary}` isn't on PATH, so its blocks aren't checked"),
+            format!(
+                "`{binary}` isn't {}, so its blocks aren't checked",
+                tools::searched(bins)
+            ),
         )
         .with_help(install.to_owned()),
         Found::InsideRoot(real) => Finding::new(

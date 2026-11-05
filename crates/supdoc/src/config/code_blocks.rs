@@ -1709,9 +1709,12 @@ mod tests {
 
     #[test]
     fn an_unknown_linter_name_is_refused_naming_the_known_tools() {
-        let message = refused("python", "linter = \"pylint\"");
+        let message = refused("python", "linter = \"flake8\"");
 
-        assert!(message.contains("`ruff`"), "got {message}");
+        assert!(
+            message.contains("`ruff`") && message.contains("`pylint`"),
+            "got {message}"
+        );
     }
 
     #[test]

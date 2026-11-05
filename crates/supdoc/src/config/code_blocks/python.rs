@@ -7,7 +7,7 @@ use crate::code_blocks::tools::Step;
 const KNOWN: &[&str] = &["ruff-format", "black"];
 
 /// The Python linters supdoc knows.
-const LINTERS: &[&str] = &["ruff"];
+const LINTERS: &[&str] = &["ruff", "pylint"];
 
 /// The `[features.code-blocks.python]` table, exactly as written. Its keys are `formatter` and
 /// `linter`, plus one options table per tool; any other key is refused as `config-parse`, and an
@@ -18,7 +18,8 @@ pub(crate) struct RawPython {
     /// `"ruff-format"`, `"black"` or a custom `{ command = [...] }`; unset takes the default.
     #[serde(default, deserialize_with = "formatter")]
     pub(super) formatter: Option<Choice>,
-    /// `"ruff"`, or a custom `{ command = [...], diagnostics = "gnu" }`; unset takes the default.
+    /// `"ruff"`, `"pylint"` or a custom `{ command = [...], diagnostics = "gnu" }`; unset takes
+    /// the default.
     #[serde(default, deserialize_with = "linter")]
     pub(super) linter: Option<Choice>,
     /// `[features.code-blocks.python.ruff-format]`, when written.
@@ -30,6 +31,9 @@ pub(crate) struct RawPython {
     /// `[features.code-blocks.python.ruff]`, when written.
     #[serde(default, deserialize_with = "ruff")]
     pub(super) ruff: Option<ToolTable>,
+    /// `[features.code-blocks.python.pylint]`, when written.
+    #[serde(default, deserialize_with = "pylint")]
+    pub(super) pylint: Option<ToolTable>,
 }
 
 /// Reads `formatter` against Python's known tools.
@@ -45,7 +49,7 @@ fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D
 ///
 /// # Errors
 ///
-/// The deserializer's error for any value but `"ruff"` or a valid custom command.
+/// The deserializer's error for any value but `"ruff"`, `"pylint"` or a valid custom command.
 fn linter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D::Error> {
     deserialize_choice(d, Language::Python, Step::Lint, LINTERS)
 }
@@ -77,6 +81,15 @@ fn ruff<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<ToolTable>, D::
     deserialize_tool(d, "ruff")
 }
 
+/// Reads `[features.code-blocks.python.pylint]` against its cartridge.
+///
+/// # Errors
+///
+/// The deserializer's error for a key or value the cartridge doesn't accept.
+fn pylint<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<ToolTable>, D::Error> {
+    deserialize_tool(d, "pylint")
+}
+
 impl RawPython {
     /// What this table selects and the tool tables it writes.
     pub(super) fn selection(&self) -> Selection<'_> {
@@ -87,6 +100,7 @@ impl RawPython {
                 ("ruff-format", &self.ruff_format),
                 ("black", &self.black),
                 ("ruff", &self.ruff),
+                ("pylint", &self.pylint),
             ]
             .into_iter()
             .filter_map(|(name, table)| Some((name, table.as_ref()?)))

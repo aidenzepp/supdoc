@@ -23,7 +23,7 @@ use super::format::{ParseError, Positions};
 use super::fragment::{Kind, Support};
 use super::lint;
 use super::runner::{Cwd, Failure, Ran};
-use super::{biome, go, python, rumdl, rust, shell, tombi, yaml};
+use super::{biome, go, pylint, python, rumdl, rust, shell, tombi, yaml};
 
 /// The variables a tool gets from supdoc's own environment, and no others.
 const PASSED: [&str; 5] = [
@@ -271,6 +271,13 @@ impl ToolCartridge {
         }
     }
 
+    /// Whether its runs may be cached. Not for a tool run from the root: it reads the project as
+    /// its own command line would, files no cache key names.
+    #[must_use]
+    pub(crate) const fn cacheable(&self) -> bool {
+        !matches!(self.cwd(), Cwd::Root)
+    }
+
     /// What supdoc says when trust holds it back. `None` for a [`Tier::Static`] tool, which trust
     /// never holds.
     #[must_use]
@@ -484,12 +491,17 @@ impl Tool {
         }
     }
 
-    /// Why its step didn't run when its binary wasn't found: "`<binary>` isn't on PATH", or, for
+    /// Why its step didn't run when its binary wasn't found: "`<binary>` isn't on PATH" (naming any
+    /// bin dirs searched first, see [`searched`]), or, for
     /// a custom command whose program is a path, that no executable file is there.
     #[must_use]
     pub(crate) fn missing(&self) -> String {
         match self {
-            Self::Cartridge(cartridge) => format!("`{}` isn't on PATH", cartridge.binary),
+            Self::Cartridge(cartridge) => format!(
+                "`{}` isn't {}",
+                cartridge.binary,
+                searched(cartridge.bins())
+            ),
             Self::Custom(custom) => format!("{} {}", custom.shown(), custom.missing()),
         }
     }
@@ -595,6 +607,17 @@ impl Tool {
     pub(crate) fn runs(&self, binary: &str) -> bool {
         self.cartridge()
             .is_some_and(|cartridge| cartridge.binary == binary)
+    }
+}
+
+/// Where a binary was looked for: `on PATH`, after each of the root's `bins` when it has any, as
+/// `in .venv/bin or on PATH`.
+#[must_use]
+pub(crate) fn searched(bins: &[&str]) -> String {
+    match bins.split_last() {
+        None => "on PATH".to_owned(),
+        Some((last, [])) => format!("in {last} or on PATH"),
+        Some((last, rest)) => format!("in {}, {last} or on PATH", rest.join(", ")),
     }
 }
 
@@ -852,7 +875,7 @@ fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'sta
 }
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 22] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -1185,6 +1208,34 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 21] = [
         argv: go_vet_args,
         reader: Reader::Lint(go::vet_verdict),
     },
+    ToolCartridge {
+        name: "pylint",
+        language: Language::Python,
+        binary: "pylint",
+        loads: Loads::Project {
+            held: Held {
+                needs_trust: "pylint runs only in the project tier, which needs `supdoc trust`",
+                trust_off: "pylint runs only in the project tier, and `SUPDOC_TRUST=0` turns \
+                            trust off for this run",
+                short: "pylint needs trust",
+                didnt_run: "pylint didn't run on Python blocks: it imports their modules",
+                off: "`lint = \"off\"` in `[features.code-blocks.python.pylint]`",
+            },
+            // It reads the project's config and imports its modules as its command line would.
+            cwd: Cwd::Root,
+            bins: &[".venv/bin"],
+        },
+        install: "pipx install 'pylint==4.1.3'",
+        // Never cached (see [`ToolCartridge::cacheable`]), so no config file keys its results.
+        config_files: &[],
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        holds: every_tag,
+        vars: &[],
+        positions: own_positions,
+        argv: pylint_args,
+        reader: Reader::Lint(pylint::lint_verdict),
+    },
 ];
 
 /// The files rumdl's results depend on: its config names (see [`rumdl::CONFIG_FILES`]) and the
@@ -1241,7 +1292,7 @@ pub(crate) fn named(language: Language, step: Step, name: &str) -> Option<&'stat
 /// The `index`th block (1-based) of `doc`, the doc's absolute path, as a tool sees it:
 /// `<doc dir>/<doc file name>.<index>.<extension>`, so the tool finds its config walking up from
 /// the doc's real directory while the block itself arrives on stdin.
-fn virtual_path(doc: &Path, index: usize, extension: &str) -> OsString {
+pub(crate) fn virtual_path(doc: &Path, index: usize, extension: &str) -> OsString {
     let mut name = doc.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".{index}.{extension}"));
     doc.with_file_name(name).into_os_string()
@@ -1308,6 +1359,22 @@ fn black_args(invocation: &Invocation<'_>) -> Vec<OsString> {
 /// The rules `ruff check` leaves off for a block, which a snippet breaks for lack of context:
 /// undefined names, unused imports and unused variables.
 const RUFF_RELAXED: &str = "F821,F401,F841";
+
+/// The rules pylint leaves off for a block, which a snippet breaks for lack of context: unused
+/// imports and variables, a module docstring (a block is never a module) and undefined names.
+const PYLINT_RELAXED: &str = "W0611,W0612,C0114,E0602";
+
+/// pylint's arguments: the block on stdin under its virtual path, the `json2` report, no stats
+/// saved under `HOME` (`--persistent=n`), and the snippet relaxations disabled.
+fn pylint_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    vec![
+        OsString::from("--from-stdin"),
+        virtual_path(invocation.doc, invocation.index, "py"),
+        OsString::from("--output-format=json2"),
+        OsString::from("--persistent=n"),
+        OsString::from(format!("--disable={PYLINT_RELAXED}")),
+    ]
+}
 
 /// `ruff check`'s arguments: the block on stdin under its virtual path, JSON diagnostics, no
 /// cache, the snippet relaxations and the block's fragment relaxations ignored, and never
@@ -1755,7 +1822,23 @@ mod tests {
                 "yamllint Yaml Lint yamllint Static",
                 "gofmt Go Format gofmt Static",
                 "go-vet Go Lint go Static",
+                "pylint Python Lint pylint Project",
             ]
+        );
+    }
+
+    #[test]
+    fn pylint_reads_the_block_from_stdin_under_its_virtual_path_as_json2_saving_no_stats() {
+        assert_eq!(
+            args_of("pylint", 2, &[]),
+            [
+                "--from-stdin",
+                "/p/docs/a.md.2.py",
+                "--output-format=json2",
+                "--persistent=n",
+                "--disable=W0611,W0612,C0114,E0602",
+            ]
+            .map(OsString::from)
         );
     }
 
@@ -2222,10 +2305,16 @@ mod tests {
     }
 
     #[test]
-    fn no_cartridge_searches_a_bin_dir_and_each_runs_from_the_neutral_directory() {
+    fn only_pylint_searches_a_bin_dir_and_runs_from_the_root_so_only_it_is_never_cached() {
         for tool in &CARTRIDGES {
-            assert_eq!(tool.bins(), &[] as &[&str], "{}", tool.name);
-            assert_eq!(tool.cwd(), Cwd::Neutral, "{}", tool.name);
+            let (bins, cwd): (&[&str], _) = if tool.name == "pylint" {
+                (&[".venv/bin"], Cwd::Root)
+            } else {
+                (&[], Cwd::Neutral)
+            };
+            assert_eq!(tool.bins(), bins, "{}", tool.name);
+            assert_eq!(tool.cwd(), cwd, "{}", tool.name);
+            assert_eq!(tool.cacheable(), cwd != Cwd::Root, "{}", tool.name);
         }
     }
 
