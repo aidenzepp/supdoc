@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use serde_json::Value;
 
 use super::format::{self, ParseError};
+use super::fragment::Kind;
 use super::lint::{self, Diagnostic};
 use super::runner::{self, Failure, Ran};
 use super::tools::ToolEnv;
@@ -46,6 +47,14 @@ pub(crate) fn extension(tag: &str) -> &'static str {
         "jsonc" => "jsonc",
         _ => "ts",
     }
+}
+
+/// Whether a block tagged `tag` can hold a fragment of `kind`: a markup element's children only
+/// in a JSX flavor (`tsx`, `jsx`), since a `ts` or `js` file holds no markup; any other kind
+/// whatever the tag.
+#[must_use]
+pub(crate) fn holds(tag: &str, kind: Kind) -> bool {
+    kind != Kind::Children || matches!(extension(tag), "tsx" | "jsx")
 }
 
 /// `biome format`'s syntax-error report in `stderr`: a header line `<path>:L:C parse ━━━` whose
@@ -122,8 +131,10 @@ struct BiomeSummary {
 
 /// The diagnostics in `biome lint --reporter=json`'s `stdout`, at every severity: each rule's
 /// named without the `lint/` prefix (`suspicious/noDebugger`), each about a suppression comment
-/// in the block named by its whole category (`suppressions/unused`), and each `parse` diagnostic
-/// a syntax error named `parse`. `None` when it isn't biome's JSON report.
+/// in the block named by its whole category (`suppressions/unused`), and each syntax error named
+/// by its whole category: `parse` when the text doesn't parse, `syntax/<group>/<rule>` when it
+/// parses but breaks a rule of the language (`super()` outside a derived class's constructor, a
+/// duplicate private member). `None` when it isn't biome's JSON report.
 ///
 /// # Errors
 ///
@@ -138,7 +149,10 @@ pub(crate) fn diagnostics(stdout: &[u8]) -> Option<Result<Vec<Diagnostic>, Strin
             .into_iter()
             .map(|diagnostic| {
                 let category = &diagnostic.category;
-                let syntax = category == "parse";
+                let syntax = category == "parse"
+                    || category
+                        .strip_prefix("syntax/")
+                        .is_some_and(|rule| !rule.is_empty());
                 let rule = category
                     .strip_prefix("lint/")
                     .filter(|rule| !rule.is_empty())
@@ -877,6 +891,33 @@ mod tests {
             })
             .collect();
         assert_eq!(read, [("parse", 3, 4, true)]);
+    }
+
+    #[test]
+    fn a_syntax_category_is_a_syntax_error_like_parse_framed_or_not() {
+        let syntax = r#"{"severity":"error","message":"super() is only valid in derived class constructors","category":"syntax/correctness/noSuperWithoutExtends","location":{"path":"x","start":{"line":3,"column":2}},"advices":[]}"#;
+
+        let framed = lint_verdict("", true, Ok(ran(false, report(syntax))));
+        let unframed = lint_verdict("", false, Ok(ran(false, report(syntax))));
+
+        let Verdict::Diagnostics(found) = &framed else {
+            panic!("a framed syntax error says whether the block is its kind: {framed:?}");
+        };
+        assert_eq!(
+            found
+                .iter()
+                .map(|found| (found.rule.as_str(), found.syntax))
+                .collect::<Vec<_>>(),
+            [("syntax/correctness/noSuperWithoutExtends", true)]
+        );
+        assert_eq!(
+            unframed,
+            Verdict::Failed(FormatVerdict::ParseFailed {
+                detail: "super() is only valid in derived class constructors".to_owned(),
+                line: Some(2),
+            }),
+            "unframed, it is a parse failure at its line, never a tool failure"
+        );
     }
 
     #[test]

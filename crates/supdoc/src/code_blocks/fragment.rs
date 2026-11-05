@@ -2,8 +2,10 @@
 //!
 //! A frame ([`Support::Framed`]) is one fixed pair of lines per tool and kind. Any name a frame
 //! introduces that the block doesn't (a function, a type, a package) is spelled so no author
-//! would write it, such as `__supdoc_fragment`, so a tool's message about the author's code can't
-//! be mistaken for one about the frame. Each unit that adds a frame pair gives it a real-tool e2e
+//! would write it, such as `supdocFragment$`, so a tool's message about the author's code can't
+//! be mistaken for one about the frame. The spelling also draws no rule of the tool's own: no
+//! leading underscore, which biome's `noDanglingUnderscore` flags, and a case its naming rules
+//! accept. Each unit that adds a frame pair gives it a real-tool e2e
 //! test asserting that no finding holds any frame line or frame-only name.
 
 use super::tools::ToolCartridge;
@@ -89,13 +91,6 @@ pub(crate) enum Support {
     /// The tool reads the kind only inside a fixed frame: `before` and `after` are the lines it
     /// sees around the block, never shown, written or chosen from the block's content.
     /// `out_before` and `out_after` are the frame lines a formatter is expected to print back.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the first frame pair (P5-FR10 to FR15) constructs it"
-        )
-    )]
     Framed {
         /// The lines the tool sees before the block.
         before: &'static str,
