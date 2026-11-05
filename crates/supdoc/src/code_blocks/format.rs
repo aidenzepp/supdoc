@@ -202,7 +202,8 @@ pub(crate) fn input(block: &CodeBlock, text: &str) -> Option<String> {
 /// `tool`'s stderr is its syntax-error report (see [`ToolCartridge::parse_error`]; the runner
 /// gives no exit status beyond success, so each tool is told by its message alone) and places
 /// the error on a line; a report without a location, like any other non-zero exit, is a tool
-/// failure. Stderr after exit 0 is never judged.
+/// failure. A report whose positions aren't the block's own ([`ToolCartridge::places`]) is a parse
+/// failure with no line, its positions dropped. Stderr after exit 0 is never judged.
 #[must_use]
 pub(crate) fn judge(tool: &ToolCartridge, input: &str, result: Result<Ran, Failure>) -> Verdict {
     match result {
@@ -214,10 +215,18 @@ pub(crate) fn judge(tool: &ToolCartridge, input: &str, result: Result<Ran, Failu
         Ok(ran) => {
             let stderr = String::from_utf8_lossy(&ran.stderr);
             let lines: Vec<&str> = stderr.lines().take(STDERR_LINES).collect();
-            let located = tool
-                .parse_error(&stderr)
-                .filter(|error| error.line.is_some());
-            if let Some(error) = located {
+            let error = tool.parse_error(&stderr);
+            if error.is_some() && !tool.places(input) {
+                return Verdict::ParseFailed {
+                    detail: lines
+                        .iter()
+                        .map(|line| unplaced(line))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    line: None,
+                };
+            }
+            if let Some(error) = error.filter(|error| error.line.is_some()) {
                 return Verdict::ParseFailed {
                     detail: lines.join("\n"),
                     line: error.line,
@@ -227,6 +236,21 @@ pub(crate) fn judge(tool: &ToolCartridge, input: &str, result: Result<Ran, Failu
         }
         Err(failure) => failed(failure),
     }
+}
+
+/// `line` of a syntax-error report without its leading `<name>:L:C: ` position, which counts a
+/// text other than the block's. A line with no such position is kept whole.
+fn unplaced(line: &str) -> &str {
+    line.split_once(": ")
+        .filter(|(at, _)| {
+            let mut parts = at.rsplitn(3, ':');
+            let column = parts.next().unwrap_or_default();
+            let row = parts.next().unwrap_or_default();
+            [column, row]
+                .iter()
+                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .map_or(line, |(_, message)| message)
 }
 
 /// What a tool's non-zero exit says, from its `stderr`: the first lines, or that it printed

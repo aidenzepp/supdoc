@@ -428,6 +428,7 @@ impl Evaluation {
         let mut linted_nothing_warned = false;
         let mut indent_unknown_warned = false;
         let mut reshaped_warned = false;
+        let mut formatted_nothing_warned = false;
         for slot in slots {
             let (job, run) = match slot {
                 Slot::Found(finding) => {
@@ -458,6 +459,10 @@ impl Evaluation {
                     if reason == FRAME_RESHAPED && !reshaped_warned {
                         reshaped_warned = true;
                         self.findings.push(frame_reshaped(&record.at));
+                    }
+                    if reason == FORMATTED_NOTHING && !formatted_nothing_warned {
+                        formatted_nothing_warned = true;
+                        self.findings.push(formatted_nothing(&record.at));
                     }
                     record.steps.format = StepState::Unrunnable { reason };
                 }
@@ -637,6 +642,28 @@ pub(super) const FRAME_RESHAPED: &str =
 /// formatter uses, so it couldn't tell the block's lines from the frame's indent.
 pub(super) const FRAME_INDENT_UNKNOWN: &str =
     "supdoc couldn't read the formatter's indent from the project's config";
+
+/// Why a format step counts as not run when its formatter exited cleanly but printed nothing, or
+/// only whitespace, for a block that holds code: the run says nothing about the block, so it is
+/// neither a pass nor a fix.
+pub(super) const FORMATTED_NOTHING: &str =
+    "the formatter printed nothing for a block that holds code";
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose format step
+/// didn't run because its formatter printed nothing.
+fn formatted_nothing(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "the formatter exited cleanly but printed nothing for this block, so its format step \
+         didn't run, and no block whose formatter printed nothing passes or is fixed",
+    )
+    .with_help(
+        "check that the formatter on PATH works on standard input, or mark the block \
+         `format(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
 
 /// The run's one `code-block-not-checked` warning, at `at`, the first block whose biome lint
 /// step didn't run because biome checked no file.
@@ -1699,6 +1726,7 @@ fn run_formatter(
     let extra: Vec<(&str, &OsStr)> = vars
         .iter()
         .map(|(name, value)| (*name, value.as_os_str()))
+        .chain(tool.vars())
         .collect();
     let held = framed
         .as_ref()
@@ -1729,6 +1757,11 @@ fn run_formatter(
         },
         format::Verdict::cacheable,
     );
+    if matches!(&verdict, format::Verdict::Unformatted(output) if output.trim().is_empty())
+        && !pending.input.trim().is_empty()
+    {
+        return Some(Err(FORMATTED_NOTHING));
+    }
     let at = match &verdict {
         format::Verdict::NotKind(_) | format::Verdict::FrameReformatted(_) => pending
             .block
@@ -1821,11 +1854,12 @@ fn run_linter(
     let frame = Frame::of(tool, record.fragment);
     let input = lint::checked(frame, &pending.input);
     let input = input.as_ref();
+    let extra = tool.vars();
     let run = cache::Run {
         tool,
         program,
         args: &args,
-        extra: &[],
+        extra: &extra,
         input,
         doc: &doc,
         project: None,

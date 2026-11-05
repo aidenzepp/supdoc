@@ -9,12 +9,13 @@
 //! linking reads.
 //!
 //! A language is on exactly when its table, `[features.code-blocks.rust]`, `.shell`, `.python`,
-//! `.typescript`, `.javascript`, `.json` or `.markdown`, is written in some file of the chain; an empty
+//! `.typescript`, `.javascript`, `.json`, `.markdown` or `.go`, is written in some file of the chain; an empty
 //! table turns it on. The language
 //! table selects tools (`formatter`, `linter`) and holds the language's own settings; each
 //! tool's options, its step's mode, live in the tool's own table,
 //! `[features.code-blocks.<language>.<tool>]`, validated by its cartridge.
 
+mod go;
 mod javascript;
 mod json;
 mod markdown;
@@ -28,6 +29,7 @@ use std::ops::Range;
 
 use crate::path::AbsolutePath;
 
+use self::go::RawGo;
 use self::javascript::RawJavaScript;
 use self::json::RawJson;
 use self::markdown::RawMarkdown;
@@ -56,6 +58,8 @@ pub(crate) enum Language {
     JavaScript,
     /// JSON: tagged `json`, or `jsonc` for JSON that may hold comments.
     Json,
+    /// Go: tagged `go` or `golang`.
+    Go,
 }
 
 impl Language {
@@ -70,12 +74,13 @@ impl Language {
             "ts" | "typescript" | "mts" | "cts" | "tsx" => Some(Self::TypeScript),
             "js" | "javascript" | "mjs" | "cjs" | "jsx" => Some(Self::JavaScript),
             "json" | "jsonc" => Some(Self::Json),
+            "go" | "golang" => Some(Self::Go),
             _ => None,
         }
     }
 
-    /// The name of its table: `rust`, `shell`, `python`, `typescript`, `javascript`, `json` or
-    /// `markdown`.
+    /// The name of its table: `rust`, `shell`, `python`, `typescript`, `javascript`, `json`,
+    /// `markdown` or `go`.
     #[must_use]
     pub(crate) const fn table(self) -> &'static str {
         match self {
@@ -86,6 +91,7 @@ impl Language {
             Self::TypeScript => "typescript",
             Self::JavaScript => "javascript",
             Self::Json => "json",
+            Self::Go => "go",
         }
     }
 }
@@ -428,6 +434,8 @@ struct Languages {
     javascript: Table,
     /// `[features.code-blocks.json]`.
     json: Table,
+    /// `[features.code-blocks.go]`.
+    go: Table,
     /// The nearest shell `dialect` written.
     dialect: Option<Dialect>,
     /// The nearest Rust `edition` written.
@@ -468,6 +476,8 @@ pub(crate) struct RawCodeBlocks {
     javascript: Option<RawJavaScript>,
     /// `[features.code-blocks.json]`, when written.
     json: Option<RawJson>,
+    /// `[features.code-blocks.go]`, when written.
+    go: Option<RawGo>,
 }
 
 /// The table's keys merged across the chain, before the top-level defaults fill the gaps.
@@ -488,9 +498,8 @@ impl Written {
     ///
     /// # Errors
     ///
-    /// The first tool table, Rust, shell, Python, TypeScript, JavaScript, JSON then Markdown, whose
-    /// tool
-    /// the merged chain doesn't select.
+    /// The first tool table, Rust, shell, Python, TypeScript, JavaScript, JSON, Markdown then Go,
+    /// whose tool the merged chain doesn't select.
     pub(super) fn resolve(
         self,
         include: &AnchoredPatterns,
@@ -505,7 +514,8 @@ impl Written {
             .or_else(|| languages.typescript.unselected(Language::TypeScript))
             .or_else(|| languages.javascript.unselected(Language::JavaScript))
             .or_else(|| languages.json.unselected(Language::Json))
-            .or_else(|| languages.markdown.unselected(Language::Markdown));
+            .or_else(|| languages.markdown.unselected(Language::Markdown))
+            .or_else(|| languages.go.unselected(Language::Go));
         if let Some(unselected) = unselected {
             return Err(unselected);
         }
@@ -590,6 +600,7 @@ impl CodeBlocks {
             Language::TypeScript => &self.languages.typescript,
             Language::JavaScript => &self.languages.javascript,
             Language::Json => &self.languages.json,
+            Language::Go => &self.languages.go,
         }
     }
 
@@ -630,6 +641,7 @@ pub(super) fn merge(
         typescript,
         javascript,
         json,
+        go,
         ..
     }) = raw
     else {
@@ -678,6 +690,10 @@ pub(super) fn merge(
                 .languages
                 .json
                 .behind(json.as_ref().map(RawJson::selection), file),
+            go: nearer
+                .languages
+                .go
+                .behind(go.as_ref().map(RawGo::selection), file),
         },
     })
 }
