@@ -237,7 +237,7 @@ pub(crate) mod code_blocks {
     /// YAML's format step, run by yamlfmt.
     mod yaml;
 
-    /// Go's format step, run by gofmt.
+    /// Go's format and lint steps, run by gofmt and go vet.
     mod go;
 
     /// Reading the Rust toolchain a project pins.

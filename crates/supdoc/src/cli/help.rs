@@ -73,14 +73,16 @@ top-level keys, and never change which files links are read from. A language's t
   yaml          formatter yamlfmt
   toml          formatter tombi-format, linter tombi-lint
   markdown      formatter rumdl-format, linter rumdl
-  go            formatter gofmt, no linter yet; tag a block go or golang
+  go            formatter gofmt, linter go-vet; tag a block go or golang
 
 Each tool's options live in its own table, such as [features.code-blocks.python.ruff] with \
 lint = \"off\". A table for a tool the language doesn't select is a config error.
 
 Each tool reads the block on standard input and its own config files, which can sit outside the \
 project; its errors can quote them. rumdl's config is found from the doc's directory up to the \
-nearest .git inside the root, never above the root; yamlfmt's up to the root.
+nearest .git inside the root, never above the root; yamlfmt's up to the root. go vet reads none: \
+it checks a block that opens with a package clause as main.go, alone in a module supdoc writes, \
+offline, so a block that imports a package outside Go's standard library isn't vetted.
 
 A snippet lacks the code around it, so some rules are off for blocks: biome lint skips \
 noUnusedVariables, noUnusedImports and noUnusedFunctionParameters; rumdl turns off MD041, MD051 \
