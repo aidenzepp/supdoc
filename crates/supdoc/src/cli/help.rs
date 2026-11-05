@@ -72,7 +72,7 @@ the current text in.
   fragment(KIND)
       The block is part of a larger construct: statements, expression, entries, children, \
 members or declarations. A step whose tool can't check that kind doesn't run, with a \
-code-block-fragment-unsupported warning.
+code-block-fragment-unsupported warning. Some tools read a kind only inside a frame (below).
   ignore(reason)
       Check nothing in this block.
   format(off: reason), lint(off: reason)
@@ -91,6 +91,17 @@ that reads a file or an environment variable at compile time (include_str!, env!
 clippy compiles it, one that calls a macro off supdoc's list: it isn't checked, with a \
 code-block-not-checked warning. In a trusted checkout, a Rust block that names an item it \
 doesn't define fails code-block-missing-name, once per name.
+
+A tool reads some fragment kinds only inside a frame: fixed lines before and after the block, \
+the same for every block of that kind and never chosen from its content. No finding shows a \
+frame line, a fix never writes one, and a finding on a frame line is reported at the block's \
+attributes. The frames, each block standing where the ... is:
+
+  biome-lint    statements    function __supdoc_fragment() { ... }
+  biome-lint    expression    ( ... )
+  biome-lint    entries       ({ ... })
+  biome-lint    children      <> ... </>   (tsx and jsx blocks only; complexity/noUselessFragments off)
+  biome-lint    members       class __SupdocFragment { ... }
 
 The summary counts each step: a step its tool's table sets to \"off\" is `format off` or `lint \
 off`; one a block marks off is `format skipped` or `lint skipped`; one that was due but didn't \

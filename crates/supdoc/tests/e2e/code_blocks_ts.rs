@@ -838,3 +838,233 @@ fn lint_the_real_biome_names_the_projects_config_in_a_config_error() {
         "the message should name the project's config, not supdoc's private copy: {message}"
     );
 }
+
+/// Every line biome lint's frames put around a block, and every name only a frame introduces.
+const FRAME_TEXT: [&str; 8] = [
+    "function __supdoc_fragment() {",
+    "class __SupdocFragment {",
+    "__supdoc_fragment",
+    "__SupdocFragment",
+    "({",
+    "})",
+    "<>",
+    "</>",
+];
+
+/// Asserts that no finding in `json` shows frame text in its message, help or location: no
+/// multi-character frame line or frame-only name anywhere, and no line that is exactly a
+/// one-character frame line (the expression frame's `(` and `)`).
+fn assert_no_frame_text(json: &serde_json::Value) {
+    for finding in array_at(json, "/findings") {
+        for field in ["message", "help", "location"] {
+            let text = match &finding[field] {
+                serde_json::Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            for frame in FRAME_TEXT {
+                assert!(!text.contains(frame), "{field} shows `{frame}`: {finding}");
+            }
+            assert!(
+                !text.lines().any(|line| matches!(line.trim(), "(" | ")")),
+                "{field} shows the expression frame: {finding}"
+            );
+        }
+    }
+}
+
+/// The real biome's `--json -v` check of a `tag` block written with `info` and holding `body`,
+/// asserting it exits `exit` and that no finding shows frame text. `None` when biome isn't on
+/// `PATH`.
+fn frame_check(
+    test: &str,
+    tag: &str,
+    info: &str,
+    body: &str,
+    exit: i32,
+) -> Option<serde_json::Value> {
+    let dir = real_tool_dir("biome", test)?;
+    let project = project_with_block(
+        "[features.code-blocks.typescript]\n[features.code-blocks.javascript]\n",
+        &format!("{tag} {info}"),
+        body,
+    );
+    let json = project
+        .supdoc_in_with(".", &["check", "--json", "-v"], &[("PATH", &dir)])
+        .assert_exit(exit)
+        .json();
+    assert_no_frame_text(&json);
+    Some(json)
+}
+
+/// The info every frame test writes after its tag: biome format reads no fragment yet (P5-FR12).
+const LINT_ONLY: &str = "format(off: biome format frames come in P5-FR12)";
+
+/// The codes and lines of `json`'s findings, in order.
+fn kinds_and_lines(json: &serde_json::Value) -> Vec<(String, u64)> {
+    array_at(json, "/findings")
+        .iter()
+        .map(|finding| {
+            (
+                finding["kind"].as_str().unwrap_or_default().to_owned(),
+                finding
+                    .pointer("/location/line")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn frame_lint_entries_draw_no_confusing_label_that_the_bare_block_draws() {
+    let test = "frame_lint_entries_draw_no_confusing_label_that_the_bare_block_draws";
+    let Some(framed) = frame_check(
+        test,
+        "ts",
+        &format!("fragment(entries) {LINT_ONLY}"),
+        "visible: true,\nlabel: \"Save\"",
+        0,
+    ) else {
+        return;
+    };
+    assert_eq!(
+        at(&framed, "/data/summary/code_blocks/passed"),
+        1,
+        "{framed}"
+    );
+
+    let bare = frame_check(test, "ts", LINT_ONLY, "visible: true", 1)
+        .expect("biome was on PATH a moment ago");
+    assert!(bare.to_string().contains("noConfusingLabels"), "{bare}");
+}
+
+#[test]
+fn frame_lint_children_draw_use_button_type_at_their_doc_lines() {
+    let Some(json) = frame_check(
+        "frame_lint_children_draw_use_button_type_at_their_doc_lines",
+        "tsx",
+        &format!("fragment(children) {LINT_ONLY}"),
+        "<button>Save</button>\n<button>Cancel</button>",
+        1,
+    ) else {
+        return;
+    };
+
+    let found = kinds_and_lines(&json);
+    assert_eq!(found.len(), 2, "{json}");
+    assert_eq!(
+        found.iter().map(|(_, line)| *line).collect::<Vec<_>>(),
+        [4, 5],
+        "{json}"
+    );
+    assert!(
+        array_at(&json, "/findings")
+            .iter()
+            .all(|finding| finding.to_string().contains("useButtonType")),
+        "{json}"
+    );
+}
+
+#[test]
+fn frame_lint_one_child_is_not_a_useless_fragment() {
+    let Some(json) = frame_check(
+        "frame_lint_one_child_is_not_a_useless_fragment",
+        "jsx",
+        &format!("fragment(children) {LINT_ONLY}"),
+        "<button type=\"button\">Save</button>",
+        0,
+    ) else {
+        return;
+    };
+
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+}
+
+#[test]
+fn frame_lint_children_in_a_ts_block_are_unsupported() {
+    let Some(json) = frame_check(
+        "frame_lint_children_in_a_ts_block_are_unsupported",
+        "ts",
+        &format!("fragment(children) {LINT_ONLY}"),
+        "<button>Save</button>",
+        0,
+    ) else {
+        return;
+    };
+
+    assert_eq!(
+        kinds_and_lines(&json),
+        [("code-block-fragment-unsupported".to_owned(), 3)],
+        "{json}"
+    );
+    assert_eq!(
+        at(&json, "/data/summary/code_blocks/lint_not_run"),
+        1,
+        "{json}"
+    );
+}
+
+#[test]
+fn frame_lint_statements_members_and_expressions_pass_as_written() {
+    let test = "frame_lint_statements_members_and_expressions_pass_as_written";
+    for (tag, kind, body) in [
+        ("ts", "statements", "const total = 1 + 2;\nreturn total;"),
+        ("ts", "members", "resolve(): number {\n\treturn 1;\n}"),
+        ("ts", "expression", "{ type: \"spring\", stiffness: 100 }"),
+        ("js", "expression", "items.map((item) => item.id)"),
+    ] {
+        let Some(json) = frame_check(test, tag, &format!("fragment({kind}) {LINT_ONLY}"), body, 0)
+        else {
+            return;
+        };
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/passed"),
+            1,
+            "{tag} {kind}: {json}"
+        );
+    }
+}
+
+#[test]
+fn frame_lint_finds_a_rule_inside_the_block_at_its_doc_line() {
+    let Some(json) = frame_check(
+        "frame_lint_finds_a_rule_inside_the_block_at_its_doc_line",
+        "ts",
+        &format!("fragment(statements) {LINT_ONLY}"),
+        "const total = 1;\ndebugger;\nreturn total;",
+        1,
+    ) else {
+        return;
+    };
+
+    assert_eq!(kinds_and_lines(&json).len(), 1, "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 5, "{json}");
+    assert!(
+        at(&json, "/findings/0").to_string().contains("noDebugger"),
+        "{json}"
+    );
+}
+
+#[test]
+fn frame_lint_a_block_that_isnt_its_kind_fails_at_its_attributes() {
+    let Some(json) = frame_check(
+        "frame_lint_a_block_that_isnt_its_kind_fails_at_its_attributes",
+        "ts",
+        &format!("fragment(entries) {LINT_ONLY}"),
+        "visible: true;",
+        1,
+    ) else {
+        return;
+    };
+
+    let found = kinds_and_lines(&json);
+    assert!(
+        found.contains(&("code-block-parse".to_owned(), 3)),
+        "a parse error running into the frame lands at the attributes: {json}"
+    );
+    assert!(
+        json.to_string()
+            .contains("couldn't parse the block as `entries`"),
+        "{json}"
+    );
+}

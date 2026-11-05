@@ -156,6 +156,9 @@ pub(crate) struct ToolCartridge {
     pub(crate) modes: &'static [&'static str],
     /// The fragment kinds it checks, and how.
     pub(crate) fragments: &'static [(Kind, Support)],
+    /// Whether a block tagged `tag` can hold a fragment of `kind` at all, whatever `fragments`
+    /// lists: biome reads a markup element's children only in a JSX flavor.
+    holds: fn(&str, Kind) -> bool,
     /// Its arguments for a block.
     argv: fn(&Invocation<'_>) -> Vec<OsString>,
     /// How a run is read.
@@ -172,10 +175,10 @@ impl ToolCartridge {
         }
     }
 
-    /// Whether it checks a fragment of `kind`.
+    /// Whether it checks a fragment of `kind` in a block tagged `tag`.
     #[must_use]
-    pub(crate) fn supports(&self, kind: Kind) -> bool {
-        self.fragments.iter().any(|(listed, _)| *listed == kind)
+    pub(crate) fn supports(&self, kind: Kind, tag: &str) -> bool {
+        self.fragments.iter().any(|(listed, _)| *listed == kind) && (self.holds)(tag, kind)
     }
 
     /// Its arguments for the block `invocation` describes.
@@ -245,6 +248,38 @@ const RUFF_FRAGMENTS: &[(Kind, Support)] = &[
     (Kind::Members, Support::NATIVE),
 ];
 
+/// biome lint's kinds, each read inside a frame: map entries as an object literal's, a markup
+/// element's children as a JSX fragment's (only in a `tsx` or `jsx` block, see
+/// [`biome::holds`]), statements as a function's body, members as a class's, and an expression
+/// in parentheses, so one that starts with `{` is an object literal rather than a block. biome
+/// lint prints no code, so the output lines are the input's.
+const BIOME_LINT_FRAGMENTS: &[(Kind, Support)] = &[
+    (
+        Kind::Statements,
+        framed("function __supdoc_fragment() {", "}"),
+    ),
+    (Kind::Expression, framed("(", ")")),
+    (Kind::Entries, framed("({", "})")),
+    (Kind::Children, framed("<>", "</>")),
+    (Kind::Members, framed("class __SupdocFragment {", "}")),
+];
+
+/// A frame of `before` and `after` that a linter reads, which prints nothing back.
+const fn framed(before: &'static str, after: &'static str) -> Support {
+    Support::Framed {
+        before,
+        after,
+        out_before: before,
+        out_after: after,
+    }
+}
+
+/// Whether a block tagged `tag` can hold a fragment of `kind`: always, for a tool whose
+/// `fragments` alone say.
+const fn every_tag(_tag: &str, _kind: Kind) -> bool {
+    true
+}
+
 /// The rules `fragments` leaves off for a block of `kind`: none for a whole file or a kind it
 /// doesn't list.
 fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'static str] {
@@ -265,6 +300,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 13] = [
         config_files: &["rustfmt.toml", ".rustfmt.toml"],
         modes: FULL_OR_OFF,
         fragments: RUSTFMT_FRAGMENTS,
+        holds: every_tag,
         argv: rustfmt_args,
         reader: Reader::Format(rust::parse_error),
     },
@@ -277,6 +313,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 13] = [
         config_files: &[".editorconfig"],
         modes: FULL_OR_OFF,
         fragments: SHELL_FRAGMENTS,
+        holds: every_tag,
         argv: shfmt_args,
         reader: Reader::Format(shell::parse_error),
     },
@@ -289,6 +326,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 13] = [
         config_files: &["ruff.toml", ".ruff.toml", "pyproject.toml"],
         modes: FULL_OR_OFF,
         fragments: PYTHON_FORMAT_FRAGMENTS,
+        holds: every_tag,
         argv: ruff_format_args,
         reader: Reader::Format(python::ruff_parse_error),
     },
@@ -301,6 +339,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 13] = [
         config_files: &["pyproject.toml"],
         modes: FULL_OR_OFF,
         fragments: PYTHON_FORMAT_FRAGMENTS,
+        holds: every_tag,
         argv: black_args,
         reader: Reader::Format(python::black_parse_error),
     },
@@ -313,6 +352,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 13] = [
         config_files: &["ruff.toml", ".ruff.toml", "pyproject.toml"],
         modes: FULL_OR_OFF,
         fragments: RUFF_FRAGMENTS,
+        holds: every_tag,
         argv: ruff_args,
         reader: Reader::Lint(python::lint_verdict),
     },
@@ -325,6 +365,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 13] = [
         config_files: &[".shellcheckrc"],
         modes: FULL_OR_OFF,
         fragments: SHELL_FRAGMENTS,
+        holds: every_tag,
         argv: shellcheck_args,
         reader: Reader::Lint(shell::lint_verdict),
     },
@@ -337,6 +378,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 13] = [
         config_files: &["clippy.toml", ".clippy.toml", "Cargo.toml"],
         modes: FULL_OR_OFF,
         fragments: &[],
+        holds: every_tag,
         argv: clippy_args,
         reader: Reader::Lint(rust::lint_verdict),
     },
@@ -349,6 +391,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 13] = [
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
         fragments: &[],
+        holds: biome::holds,
         argv: biome_format_args,
         reader: Reader::Format(biome::parse_error),
     },
@@ -361,6 +404,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 13] = [
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
         fragments: &[],
+        holds: biome::holds,
         argv: biome_format_args,
         reader: Reader::Format(biome::parse_error),
     },
@@ -372,7 +416,8 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 13] = [
         install: "npm install --global @biomejs/biome",
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
-        fragments: &[],
+        fragments: BIOME_LINT_FRAGMENTS,
+        holds: biome::holds,
         argv: biome_lint_args,
         reader: Reader::Lint(biome::lint_verdict),
     },
@@ -384,7 +429,8 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 13] = [
         install: "npm install --global @biomejs/biome",
         config_files: BIOME_CONFIGS,
         modes: FULL_OR_OFF,
-        fragments: &[],
+        fragments: BIOME_LINT_FRAGMENTS,
+        holds: biome::holds,
         argv: biome_lint_args,
         reader: Reader::Lint(biome::lint_verdict),
     },
@@ -397,6 +443,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 13] = [
         config_files: RUMDL_CONFIGS,
         modes: FULL_OR_OFF,
         fragments: &[],
+        holds: every_tag,
         argv: rumdl_format_args,
         reader: Reader::Format(rumdl::parse_error),
     },
@@ -409,6 +456,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 13] = [
         config_files: RUMDL_CONFIGS,
         modes: FULL_OR_OFF,
         fragments: &[],
+        holds: every_tag,
         argv: rumdl_args,
         reader: Reader::Lint(rumdl::lint_verdict),
     },
@@ -592,6 +640,20 @@ const BIOME_RELAXED: [&str; 3] = [
     "correctness/noUnusedFunctionParameters",
 ];
 
+/// The rules `biome lint` leaves off for a block of a framed kind, which fire only because of
+/// the frame: a `children` block of one element is that element alone in its `<>` frame, which
+/// `complexity/noUselessFragments` calls unnecessary.
+const BIOME_FRAME_RELAXED: &[(Kind, &[&str])] =
+    &[(Kind::Children, &["complexity/noUselessFragments"])];
+
+/// The rules [`BIOME_FRAME_RELAXED`] leaves off for a block of `kind`: none for a whole file.
+fn biome_frame_relaxed(kind: Option<Kind>) -> &'static [&'static str] {
+    BIOME_FRAME_RELAXED
+        .iter()
+        .find(|(listed, _)| Some(*listed) == kind)
+        .map_or(&[], |(_, rules)| rules)
+}
+
 /// `biome lint`'s arguments: no colors, JSON diagnostics with none held back, a block biome's
 /// config doesn't include passing rather than failing, the snippet relaxations skipped, the
 /// project's `--config-path`, then the block's file. biome lint reports nothing for a block on
@@ -620,6 +682,7 @@ fn biome_lint_args(invocation: &Invocation<'_>) -> Vec<OsString> {
     .chain(
         BIOME_RELAXED
             .iter()
+            .chain(biome_frame_relaxed(invocation.fragment))
             .map(|rule| OsString::from(format!("--skip={rule}"))),
     )
     .chain(invocation.project.iter().cloned())
@@ -824,7 +887,8 @@ mod tests {
     use super::{
         CARTRIDGES, Found, Invocation, ToolCartridge, ToolEnv, find, search_dirs, under_same_file,
     };
-    use crate::config::code_blocks::{Dialect, Edition};
+    use crate::code_blocks::fragment::Kind;
+    use crate::config::code_blocks::{Dialect, Edition, Language};
 
     /// The cartridge named `name`.
     fn cartridge(name: &str) -> &'static ToolCartridge {
@@ -1401,5 +1465,62 @@ mod tests {
             "the alias should not be a path prefix"
         );
         assert!(under_same_file(&real, &alias));
+    }
+
+    #[test]
+    fn check_help_lists_every_frame_a_tool_reads() {
+        let help = crate::cli::help::CHECK_LONG_ABOUT;
+        for tool in &CARTRIDGES {
+            for (kind, support) in tool.fragments {
+                let Some((before, after)) = support.frame() else {
+                    continue;
+                };
+                let shown = format!("{before} ... {after}");
+                assert!(
+                    help.lines().any(|line| {
+                        line.contains(tool.name)
+                            && line.contains(kind.name())
+                            && line.contains(&shown)
+                    }),
+                    "`check --help` should list {}'s {} frame as `{shown}`",
+                    tool.name,
+                    kind.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn biome_lint_reads_children_only_in_a_jsx_flavor() {
+        let lint = CARTRIDGES
+            .iter()
+            .find(|tool| tool.name == "biome-lint" && tool.language == Language::TypeScript)
+            .expect("the cartridges should include biome-lint for TypeScript");
+
+        assert!(lint.supports(Kind::Children, "tsx"));
+        assert!(!lint.supports(Kind::Children, "ts"));
+        assert!(lint.supports(Kind::Entries, "ts"));
+    }
+
+    #[test]
+    fn biome_lint_leaves_off_the_useless_fragment_rule_only_for_children() {
+        let args_for = |fragment| {
+            cartridge("biome-lint").args(&Invocation {
+                doc: Path::new("/p/docs/a.md"),
+                tag: "tsx",
+                index: 1,
+                edition: Edition::E2024,
+                dialect: Dialect::Bash,
+                project: &[],
+                emit: None,
+                externs: &[],
+                fragment,
+            })
+        };
+        let skip = OsString::from("--skip=complexity/noUselessFragments");
+
+        assert!(args_for(Some(Kind::Children)).contains(&skip));
+        assert!(!args_for(Some(Kind::Entries)).contains(&skip));
+        assert!(!args_for(None).contains(&skip));
     }
 }

@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use serde_json::Value;
 
 use super::format::{self, ParseError};
+use super::fragment::Kind;
 use super::lint::{self, Diagnostic};
 use super::runner::{self, Failure, Ran};
 use super::tools::ToolEnv;
@@ -43,6 +44,14 @@ pub(crate) fn extension(tag: &str) -> &'static str {
         "js" | "javascript" => "js",
         _ => "ts",
     }
+}
+
+/// Whether a block tagged `tag` can hold a fragment of `kind`: a markup element's children only
+/// in a JSX flavor (`tsx`, `jsx`), since a `ts` or `js` file holds no markup; any other kind
+/// whatever the tag.
+#[must_use]
+pub(crate) fn holds(tag: &str, kind: Kind) -> bool {
+    kind != Kind::Children || matches!(extension(tag), "tsx" | "jsx")
 }
 
 /// `biome format`'s syntax-error report in `stderr`: a header line `<path>:L:C parse ━━━` whose

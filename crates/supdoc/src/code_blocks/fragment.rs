@@ -87,13 +87,6 @@ pub(crate) enum Support {
     /// The tool reads the kind only inside a fixed frame: `before` and `after` are the lines it
     /// sees around the block, never shown, written or chosen from the block's content.
     /// `out_before` and `out_after` are the frame lines a formatter is expected to print back.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the first frame pair (P5-FR10 to FR15) constructs it"
-        )
-    )]
     Framed {
         /// The lines the tool sees before the block.
         before: &'static str,
