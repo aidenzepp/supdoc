@@ -7,7 +7,7 @@
 
 use std::ffi::OsStr;
 use std::fs;
-use std::io::Write as _;
+use std::io::{Read, Write as _};
 use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,6 +16,8 @@ use std::time::UNIX_EPOCH;
 use sha2::{Digest, Sha256};
 
 use crate::hash::Hash;
+use crate::limits::{Limits, SizeLimit};
+use crate::read::source::{open_without_blocking, read_up_to};
 
 use super::runner::Ran;
 use super::tools::{ToolCartridge, ToolEnv};
@@ -221,7 +223,7 @@ impl Cache {
 /// What a config candidate adds to a key: `absent`, the sha256 of its content when it is
 /// `in_root` and its real path is inside `real_root`, else only its existence, size and
 /// modification time: a file outside the root is never read. `None` when an in-root file exists
-/// but can't be read.
+/// but can't be hashed ([`content_digest`]).
 ///
 /// Effect: reads `candidate`'s metadata, and its content when it is inside the root.
 fn config_state(candidate: &Path, in_root: bool, real_root: &Path) -> Option<Vec<u8>> {
@@ -233,8 +235,7 @@ fn config_state(candidate: &Path, in_root: bool, real_root: &Path) -> Option<Vec
             .canonicalize()
             .is_ok_and(|real| real.starts_with(real_root));
     if contained {
-        let text = fs::read(candidate).ok()?;
-        return Some(Sha256::digest(&text).to_vec());
+        return content_digest(candidate);
     }
     let modified = meta
         .modified()
@@ -245,6 +246,38 @@ fn config_state(candidate: &Path, in_root: bool, real_root: &Path) -> Option<Vec
     state.extend_from_slice(&meta.len().to_le_bytes());
     state.extend_from_slice(&modified.to_le_bytes());
     Some(state)
+}
+
+/// The sha256 of the regular file at `path`. `None` when it can't be opened or read, isn't a
+/// regular file, or holds more than [`Limits::MAX_FILE_SIZE`] bytes ([`digest_of`]): the block
+/// then runs uncached. The fixed ceiling, not the operator's `max-file-size`, bounds it, since going over
+/// only costs caching and `0` there must not make the hash unbounded. The open never waits on a
+/// FIFO, and the read never takes more than one byte past the ceiling.
+///
+/// Effect: opens `path` and reads at most one byte past the ceiling of it.
+fn content_digest(path: &Path) -> Option<Vec<u8>> {
+    let file = open_without_blocking(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    digest_of(file, meta.len(), Limits::MAX_FILE_SIZE)
+}
+
+/// The sha256 of what `reader` holds, read through [`read_up_to`]. `None` when `len`, its declared
+/// size, or the bytes it actually hands out pass `max_size`, when `max_size` is no limit, or when
+/// the read fails. An oversize `len` is refused before any byte is read, and the read never takes
+/// more than one byte past `max_size`, so a source that grows can't make it go on.
+///
+/// Effect: reads at most one byte past `max_size` of `reader`.
+fn digest_of(reader: impl Read, len: u64, max_size: SizeLimit) -> Option<Vec<u8>> {
+    let limit = max_size.get()?;
+    if len > limit {
+        return None;
+    }
+    let bytes = read_up_to(reader, max_size).ok()?;
+    let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    (read <= limit).then(|| Sha256::digest(&bytes).to_vec())
 }
 
 /// `path` with its longest existing ancestor resolved and the rest joined on. `None` when no
@@ -309,13 +342,116 @@ fn decode(bytes: &[u8], key: Key) -> Option<Ran> {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
 
     use super::*;
     use crate::code_blocks::tools::CARTRIDGES;
+    use crate::read::source::Counted;
 
     /// A temporary directory for one test.
     fn temp() -> tempfile::TempDir {
         tempfile::TempDir::new().expect("a temporary directory should be creatable")
+    }
+
+    /// The `config_state` of `candidate`, a file in `root`, run on a thread so a blocking open
+    /// fails the test instead of hanging it.
+    fn in_root_state(candidate: &Path, root: &Path) -> Option<Vec<u8>> {
+        let real_root = root.canonicalize().expect("the root should canonicalize");
+        let (sender, receiver) = mpsc::channel();
+        let read = candidate.to_path_buf();
+        let _detached =
+            thread::spawn(move || drop(sender.send(config_state(&read, true, &real_root))));
+        let result = receiver.recv_timeout(Duration::from_secs(3));
+        if result.is_err() {
+            // Unblock a reader stuck in open, so the thread ends.
+            drop(fs::OpenOptions::new().write(true).open(candidate));
+        }
+        result.expect("reading a config candidate should return, not block")
+    }
+
+    #[test]
+    fn a_declared_size_over_the_ceiling_is_refused_before_any_byte_is_read() {
+        let (source, handed_out) = Counted::new(4096);
+
+        assert_eq!(digest_of(source, 101, SizeLimit::bytes(100)), None);
+        assert_eq!(
+            handed_out.get(),
+            0,
+            "an oversize file should not be read at all"
+        );
+    }
+
+    #[test]
+    fn a_source_that_outgrows_its_declared_size_stops_one_byte_past_the_ceiling() {
+        let (source, handed_out) = Counted::new(4096);
+
+        assert_eq!(digest_of(source, 0, SizeLimit::bytes(100)), None);
+        assert_eq!(
+            handed_out.get(),
+            101,
+            "the hash should read at most the ceiling + 1 bytes, not the whole source"
+        );
+    }
+
+    #[test]
+    fn a_source_at_the_ceiling_is_hashed_whole() {
+        let (source, _) = Counted::new(100);
+
+        assert_eq!(
+            digest_of(source, 100, SizeLimit::bytes(100)),
+            Some(Sha256::digest([b'x'; 100]).to_vec())
+        );
+    }
+
+    #[test]
+    fn no_ceiling_gives_no_digest_rather_than_an_unbounded_read() {
+        let (source, handed_out) = Counted::new(4096);
+
+        assert_eq!(digest_of(source, 0, SizeLimit::bytes(0)), None);
+        assert_eq!(handed_out.get(), 0);
+    }
+
+    #[test]
+    fn a_fifo_tool_config_in_the_root_has_no_cache_key() {
+        let dir = temp();
+        let fifo = dir.path().join("rustfmt.toml");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo should be runnable");
+        assert!(made.success(), "mkfifo failed for {}", fifo.display());
+
+        assert_eq!(in_root_state(&fifo, dir.path()), None);
+    }
+
+    #[test]
+    fn a_tool_config_over_the_file_ceiling_has_no_cache_key() {
+        let dir = temp();
+        let config = dir.path().join("rustfmt.toml");
+        let limit = Limits::MAX_FILE_SIZE
+            .get()
+            .expect("the file ceiling should be set");
+        fs::File::create(&config)
+            .and_then(|file| file.set_len(limit + 1))
+            .expect("the sparse config should be creatable");
+
+        assert_eq!(in_root_state(&config, dir.path()), None);
+    }
+
+    #[test]
+    fn a_small_tool_config_keys_by_the_sha256_of_its_content() {
+        let dir = temp();
+        let config = dir.path().join("rustfmt.toml");
+        fs::write(&config, "max_width = 80\n").expect("the config should be writable");
+        let whole = fs::read(&config).expect("the config should be readable");
+
+        assert_eq!(
+            in_root_state(&config, dir.path()),
+            Some(Sha256::digest(&whole).to_vec()),
+            "the streamed digest should match hashing the whole file, so existing caches stay valid"
+        );
     }
 
     /// The `shfmt` row.

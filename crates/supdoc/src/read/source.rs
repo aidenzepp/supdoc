@@ -141,7 +141,7 @@ fn read_capped(path: &AbsolutePath, max_size: SizeLimit) -> Result<Vec<u8>, Read
 /// # Errors
 ///
 /// Whatever reading `reader` reports.
-fn read_up_to(mut reader: impl Read, max_size: SizeLimit) -> io::Result<Vec<u8>> {
+pub(crate) fn read_up_to(mut reader: impl Read, max_size: SizeLimit) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     let _read = match max_size.get() {
         Some(limit) => reader
@@ -161,7 +161,7 @@ fn read_up_to(mut reader: impl Read, max_size: SizeLimit) -> io::Result<Vec<u8>>
 ///
 /// Whatever the open reports, such as `NotFound` or `PermissionDenied`.
 #[cfg(unix)]
-fn open_without_blocking(path: &Path) -> io::Result<File> {
+pub(crate) fn open_without_blocking(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt as _;
 
     fs::OpenOptions::new()
@@ -178,7 +178,7 @@ fn open_without_blocking(path: &Path) -> io::Result<File> {
 ///
 /// Whatever the open reports, such as `NotFound` or `PermissionDenied`.
 #[cfg(not(unix))]
-fn open_without_blocking(path: &Path) -> io::Result<File> {
+pub(crate) fn open_without_blocking(path: &Path) -> io::Result<File> {
     File::open(path)
 }
 
@@ -207,6 +207,39 @@ fn unsupported(path: AbsolutePath, real: &Path, languages: &Languages) -> ReadEr
         path,
         extension,
         supported,
+    }
+}
+
+/// A test reader of `len` bytes of `x` that counts how many it has handed out, so a test can
+/// prove a bounded read stops at its bound rather than reading the whole source first.
+#[cfg(test)]
+pub(crate) struct Counted {
+    /// The bytes still to hand out.
+    inner: io::Take<io::Repeat>,
+    /// How many bytes it has handed out so far.
+    handed_out: std::rc::Rc<std::cell::Cell<u64>>,
+}
+
+#[cfg(test)]
+impl Counted {
+    /// A reader of `len` bytes, and the count of bytes it has handed out.
+    pub(crate) fn new(len: u64) -> (Self, std::rc::Rc<std::cell::Cell<u64>>) {
+        let handed_out = std::rc::Rc::new(std::cell::Cell::new(0));
+        let reader = Self {
+            inner: io::repeat(b'x').take(len),
+            handed_out: std::rc::Rc::clone(&handed_out),
+        };
+        (reader, handed_out)
+    }
+}
+
+#[cfg(test)]
+impl Read for Counted {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        self.handed_out
+            .set(self.handed_out.get() + u64::try_from(read).expect("a read fits in u64"));
+        Ok(read)
     }
 }
 
@@ -463,30 +496,9 @@ mod tests {
         assert_eq!(error.code(), "read-too-large");
     }
 
-    /// A reader of `len` bytes that counts how many it has handed out.
-    struct Counted {
-        /// The bytes still to hand out.
-        inner: io::Take<io::Repeat>,
-        /// How many bytes it has handed out so far.
-        handed_out: std::rc::Rc<std::cell::Cell<u64>>,
-    }
-
-    impl Read for Counted {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            let read = self.inner.read(buf)?;
-            self.handed_out
-                .set(self.handed_out.get() + u64::try_from(read).expect("a read fits in u64"));
-            Ok(read)
-        }
-    }
-
     #[test]
     fn a_capped_read_stops_one_byte_past_the_cap_however_much_the_source_holds() {
-        let handed_out = std::rc::Rc::new(std::cell::Cell::new(0));
-        let source = Counted {
-            inner: io::repeat(b'x').take(4096),
-            handed_out: std::rc::Rc::clone(&handed_out),
-        };
+        let (source, handed_out) = Counted::new(4096);
 
         let bytes = read_up_to(source, SizeLimit::bytes(100)).expect("an in-memory read succeeds");
 
