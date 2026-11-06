@@ -290,8 +290,7 @@ fn spawn_tool(call: &Call<'_>, env: &ToolEnv, cwd: PathBuf) -> std::io::Result<C
 ///
 /// Effect: signals the tool's process group, reaps the tool and blocks for good.
 fn end_by_signal(mut child: Child) -> ! {
-    let _gone = child.kill();
-    kill_group(child.id());
+    kill_tool_tree(&mut child);
     let _reaped = child.wait();
     process::wait_to_be_ended()
 }
@@ -301,10 +300,22 @@ fn end_by_signal(mut child: Child) -> ! {
 ///
 /// Effect: signals the tool's process group and waits for the tool itself to exit.
 fn kill(mut child: Child, failure: Failure) -> Failure {
-    let _gone = child.kill();
-    kill_group(child.id());
+    kill_tool_tree(&mut child);
     let _reaped = child.wait();
     failure
+}
+
+/// Kills `child` and its process tree. On Windows the tree kill runs first, while `child` is
+/// alive, because `taskkill /T` walks from a live parent; on Unix the group kill reaches the
+/// group after the leader is gone.
+///
+/// Effect: signals the tool and its process group.
+fn kill_tool_tree(child: &mut Child) {
+    #[cfg(windows)]
+    kill_group(child.id());
+    let _gone = child.kill();
+    #[cfg(unix)]
+    kill_group(child.id());
 }
 
 /// Best effort, kills the tool `pgid` and its descendants. A group already empty is not an error.
