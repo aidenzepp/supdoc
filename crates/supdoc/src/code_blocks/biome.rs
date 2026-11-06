@@ -21,10 +21,7 @@ use super::lint::{self, Diagnostic};
 use super::runner::{self, Failure, Ran};
 use super::tools::ToolEnv;
 use crate::config::confine::{self, Admitted, Boundary};
-use crate::path::{AbsolutePath, Pointer};
-
-/// The config names biome looks for in a directory, in its own order.
-const CONFIG_FILES: [&str; 4] = ["biome.json", "biome.jsonc", ".biome.json", ".biome.jsonc"];
+use crate::path::{self, AbsolutePath, Component, Pointer, fixed};
 
 /// The most bytes of a config supdoc reads.
 const MAX_CONFIG: u64 = 64 * 1024;
@@ -316,18 +313,16 @@ impl LintFile {
         let config = given.config.as_deref()?;
         let strict = without_exclusions(&fs::read_to_string(config).ok()?)?;
         let cache = runner::exact(neutral.parent()?)?;
-        let base_dir = AbsolutePath::new(&cache.as_path().join("biome-lint"))?;
+        let base_dir = cache.beneath(&fixed::BIOME_LINT_DIR);
         let base = private_dir(&Boundary::resolve(&cache), &base_dir)?;
         let dir = (0..16).find_map(|_| {
             let count = LINT_RUNS.fetch_add(1, Ordering::Relaxed);
-            let dir = base_dir
-                .as_path()
-                .join(format!("{}-{count}", std::process::id()));
-            let dir = AbsolutePath::new(&dir)?;
+            let name = Component::new(&format!("{}-{count}", std::process::id()))?;
+            let dir = base_dir.beneath(&name);
             create_fresh(&base, &dir).map(|()| dir)
         })?;
         let own = Boundary::resolve(&dir);
-        let copy = AbsolutePath::new(&dir.as_path().join("biome.json"))?;
+        let copy = dir.beneath(&fixed::BIOME_JSON);
         let names = given.names.as_ref().map(|[(_, file), (_, project)]| {
             [
                 (copy.as_path().to_path_buf(), file.clone()),
@@ -351,7 +346,11 @@ impl LintFile {
             );
         let mut name = placed.file_name()?.to_os_string();
         name.push(format!(".{index}.{}", extension(tag)));
-        let file = AbsolutePath::new(&run.dir.as_path().join(placed.with_file_name(name)))?;
+        let file = AbsolutePath::new(&path::rebase(
+            &placed.with_file_name(name),
+            Path::new(""),
+            run.dir.as_path(),
+        )?)?;
         confine::create_dir_all(&own.admit(&file.parent()?).ok()?, 0o700).ok()?;
         write_admitted(&own.admit(&copy).ok()?, &strict)?;
         write_admitted(&own.admit(&file).ok()?, input)?;
@@ -384,7 +383,7 @@ impl LintFile {
     #[must_use]
     pub(crate) fn config_flag(&self) -> OsString {
         let mut flag = OsString::from("--config-path=");
-        flag.push(self.dir.as_path().join("biome.json"));
+        flag.push(self.dir.beneath(&fixed::BIOME_JSON).as_path());
         flag
     }
 }
@@ -501,7 +500,7 @@ pub(crate) fn project_args(env: &ToolEnv, root: &Path, doc: &Path) -> Result<Giv
     let private_dir = config.parent().map(Path::to_path_buf);
     let mirror = project_dir
         .zip(private_dir.as_ref())
-        .and_then(|(project, private)| Some(private.join(doc.strip_prefix(project).ok()?)));
+        .and_then(|(project, private)| path::rebase(doc, project, private));
     let names = found
         .as_deref()
         .zip(project_dir.zip(private_dir))
@@ -519,7 +518,11 @@ fn find(root: &Path, doc: &Path) -> Option<PathBuf> {
     doc.parent()?
         .ancestors()
         .take_while(|dir| dir.starts_with(root))
-        .flat_map(|dir| CONFIG_FILES.iter().map(move |name| dir.join(name)))
+        .flat_map(|dir| {
+            fixed::BIOME_CONFIG_FILES
+                .iter()
+                .map(move |name| path::beneath(dir, name))
+        })
         .find(|candidate| fs::symlink_metadata(candidate).is_ok())
 }
 
@@ -766,7 +769,7 @@ fn write_private(env: &ToolEnv, root: &Path, strict: &str) -> Option<PathBuf> {
         return None;
     }
     let cache = runner::exact(neutral.parent()?)?;
-    let base_dir = AbsolutePath::new(&cache.as_path().join("biome-config"))?;
+    let base_dir = cache.beneath(&fixed::BIOME_CONFIG_DIR);
     let base = private_dir(&Boundary::resolve(&cache), &base_dir)?;
     let name = Sha256::digest(strict.as_bytes())
         .iter()
@@ -774,9 +777,9 @@ fn write_private(env: &ToolEnv, root: &Path, strict: &str) -> Option<PathBuf> {
             let _written = write!(name, "{byte:02x}");
             name
         });
-    let dir_path = AbsolutePath::new(&base_dir.as_path().join(name))?;
+    let dir_path = base_dir.beneath(&Component::new(&name)?);
     let dir = private_dir(&base, &dir_path)?;
-    let file = AbsolutePath::new(&dir_path.as_path().join("biome.json"))?;
+    let file = dir_path.beneath(&fixed::BIOME_JSON);
     if fs::symlink_metadata(file.as_path()).is_ok_and(|meta| meta.is_file())
         && fs::read_to_string(file.as_path()).is_ok_and(|text| text == strict)
     {
