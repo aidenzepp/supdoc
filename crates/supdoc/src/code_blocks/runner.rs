@@ -303,6 +303,7 @@ fn reaches_only_owner(_meta: &std::fs::Metadata, _cache: &std::fs::Metadata) -> 
 /// Whether `meta` is mode 0700 or narrower.
 #[cfg(unix)]
 fn mode_is_private(meta: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
     meta.permissions().mode().trailing_zeros() >= 6
 }
@@ -471,6 +472,7 @@ mod tests {
     use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::io::ErrorKind;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
@@ -495,6 +497,7 @@ mod tests {
     }
 
     /// Writes `script` as an executable `#!/bin/sh` stub outside a fresh root.
+    #[cfg(unix)]
     fn fixture(script: &str) -> Fixture {
         let dir = tempfile::TempDir::new().expect("a temporary directory should be creatable");
         let root = dir.path().join("root");
@@ -574,6 +577,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn stdin_arrives_byte_exact() {
         let fixture = fixture("cat");
@@ -586,6 +590,7 @@ mod tests {
         assert_eq!(ran.stdout, block);
     }
 
+    #[cfg(unix)]
     #[test]
     fn only_the_tool_env_and_the_extras_reach_the_tool() {
         // `cargo test` sets CARGO_PKG_NAME for this process; the stub must not see it.
@@ -620,7 +625,7 @@ mod tests {
         let place = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let deep = place.path().join("elsewhere/deep");
         fs::create_dir_all(&deep).expect("the link's target");
-        std::os::unix::fs::symlink(&deep, place.path().join("link")).expect("the planted link");
+        crate::cli::testing::symlink(&deep, place.path().join("link")).expect("the planted link");
         let base = place.path().join("link/..");
         let env =
             ToolEnv::from_vars(|name| (name == "XDG_CACHE_HOME").then(|| base.clone().into()));
@@ -642,7 +647,7 @@ mod tests {
         let place = tempfile::TempDir::new().expect("a temp dir should be creatable");
         fs::create_dir(place.path().join("real")).expect("the plain directory");
         fs::create_dir_all(place.path().join("elsewhere/deep")).expect("the link's target");
-        std::os::unix::fs::symlink(
+        crate::cli::testing::symlink(
             place.path().join("elsewhere/deep"),
             place.path().join("link"),
         )
@@ -703,6 +708,7 @@ mod tests {
         assert_eq!(neutral, base.path().join("supdoc/code-blocks/cwd"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_working_directory_is_neutral_and_outside_the_root() {
         let fixture = fixture("pwd -P");
@@ -724,6 +730,7 @@ mod tests {
         assert_eq!(mode & 0o777, 0o700);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_root_call_runs_from_the_roots_real_path() {
         let fixture = fixture("pwd -P");
@@ -747,6 +754,7 @@ mod tests {
     }
 
     /// A 0700 directory `name` beside the fixture's neutral directory, made as supdoc makes one.
+    #[cfg(unix)]
     fn private_beside_neutral(fixture: &Fixture, name: &str) -> PathBuf {
         use std::os::unix::fs::DirBuilderExt as _;
         let neutral = neutral_dir(&fixture.env, &fixture.root);
@@ -762,6 +770,7 @@ mod tests {
         dir
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_private_call_runs_from_its_directory_beside_the_neutral_one() {
         let fixture = fixture("pwd -P");
@@ -783,6 +792,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_private_directory_outside_the_cache_open_to_others_or_in_the_root_is_refused() {
         let fixture = fixture("pwd -P");
@@ -816,6 +826,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_home_inside_the_root_falls_back_to_slash_and_creates_nothing() {
         let fixture = fixture("true");
@@ -826,6 +837,7 @@ mod tests {
         assert!(!home.exists(), "nothing should be created inside the root");
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_tool_runs_with_its_own_name_as_argv0() {
         let fixture = fixture("true");
@@ -846,6 +858,7 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&ran.stdout), "shfmt\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn output_past_the_cap_is_a_failure() {
         let fixture = fixture(&format!("head -c {} /dev/zero", CAP + 1));
@@ -864,6 +877,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn output_at_the_cap_is_kept_whole() {
         let fixture = fixture(&format!("head -c {CAP} /dev/zero"));
@@ -877,6 +891,7 @@ mod tests {
     /// The small cap the call-cap tests set, well under [`CAP`].
     const SMALL_CAP: usize = 2 * 1024;
 
+    #[cfg(unix)]
     #[test]
     fn output_past_a_calls_own_cap_is_a_failure() {
         let fixture = fixture(&format!("head -c {} /dev/zero >&2", SMALL_CAP + 1));
@@ -902,6 +917,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn output_at_a_calls_own_cap_is_kept_whole() {
         let fixture = fixture(&format!("head -c {SMALL_CAP} /dev/zero"));
@@ -919,6 +935,7 @@ mod tests {
         assert_eq!(ran.stdout.len(), SMALL_CAP);
     }
 
+    #[cfg(unix)]
     #[test]
     fn output_under_a_cap_above_the_default_is_kept_whole() {
         // Over the default cap, under the call's: the read limit must follow the call's cap.
@@ -943,6 +960,7 @@ mod tests {
     /// Whether `/bin/kill -0` still reaches `target`, a pid or a negated process group, after
     /// polling for half of [`HOLD_SECS`]: `false` as soon as it is gone. The poll is that long
     /// because a killed orphan is reaped by init, which a loaded machine can delay for seconds.
+    #[cfg(unix)]
     fn still_alive(target: &str) -> bool {
         let deadline = Instant::now() + Duration::from_secs(HOLD_SECS / 2);
         while Instant::now() < deadline {
@@ -975,6 +993,7 @@ mod tests {
         Some((sleep, format!("-{group}")))
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_child_holding_stdout_dies_with_its_group_at_the_timeout() {
         let ids = tempfile::TempDir::new().expect("a temporary directory should be creatable");
@@ -1018,6 +1037,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_child_left_running_after_a_clean_exit_dies_with_its_group() {
         let ids = tempfile::TempDir::new().expect("a temporary directory should be creatable");
@@ -1036,6 +1056,7 @@ mod tests {
         assert!(!still_alive(&group), "the group {group} outlived the tool");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_non_zero_exit_keeps_its_stderr() {
         let fixture = fixture("echo bad >&2\nexit 3");
@@ -1053,7 +1074,7 @@ mod tests {
         let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let outside = tempfile::TempDir::new().expect("a temp dir should be creatable");
-        std::os::unix::fs::symlink(outside.path(), cache.path().join("supdoc"))
+        crate::cli::testing::symlink(outside.path(), cache.path().join("supdoc"))
             .expect("the planted link");
         let path = cache.path().to_path_buf();
         let env =
@@ -1082,7 +1103,7 @@ mod tests {
         let pointee = outside.path().join("kept");
         fs::write(&pointee, "kept").expect("the outside file");
         let file = private.as_path().join("config.toml");
-        std::os::unix::fs::symlink(&pointee, &file).expect("the planted link");
+        crate::cli::testing::symlink(&pointee, &file).expect("the planted link");
 
         let written = write_private(&own, &exact(&file).expect("a plain child"), "replaced");
 
@@ -1097,7 +1118,7 @@ mod tests {
         let disk = place.path().join("disk");
         fs::create_dir(&disk).expect("the link's target");
         let base = place.path().join("cache");
-        std::os::unix::fs::symlink(&disk, &base).expect("the cache base link");
+        crate::cli::testing::symlink(&disk, &base).expect("the cache base link");
         let path = base.clone();
         let env =
             ToolEnv::from_vars(|name| (name == "XDG_CACHE_HOME").then(|| path.clone().into()));

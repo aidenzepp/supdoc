@@ -719,6 +719,7 @@ fn fingerprint(externs: &[(String, PathBuf)]) -> Result<[u8; 32], String> {
 mod tests {
     use std::ffi::{OsStr, OsString};
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
@@ -980,7 +981,7 @@ mod tests {
     #[test]
     fn an_artifact_that_resolves_outside_the_target_dir_is_a_failure() {
         let (dir, target) = target_with_files();
-        std::os::unix::fs::symlink(
+        crate::cli::testing::symlink(
             dir.path().join("outside.rmeta"),
             target.join("debug/deps/liblink.rmeta"),
         )
@@ -1122,7 +1123,7 @@ mod tests {
         let outside = dir.path().join("Cargo.toml");
         fs::write(&outside, "[package]\nname = \"p\"\n")
             .expect("the outside file should be writable");
-        std::os::unix::fs::symlink(&outside, root.join("Cargo.toml"))
+        crate::cli::testing::symlink(&outside, root.join("Cargo.toml"))
             .expect("the symlink should be creatable");
         assert_eq!(
             plan(&root),
@@ -1259,6 +1260,7 @@ mod tests {
         assert_eq!(plan(&root), Plan::Workspace(real_manifest(&root)));
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_ancestor_fifo_is_refused_without_blocking() {
         let (dir, root) = nested_package();
@@ -1401,6 +1403,7 @@ mod tests {
         })
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_target_dir_is_private_and_named_by_the_root() {
         let (dir, root) = root_dir();
@@ -1437,6 +1440,7 @@ mod tests {
     /// Writes `bin/cargo`, a stub that records its argv, environment and real cwd under `record`,
     /// writes an rmeta into `CARGO_TARGET_DIR` and prints the artifact line naming it for the
     /// package at `manifest`.
+    #[cfg(unix)]
     fn recording_cargo(bin: &Path, record: &Path, manifest: &Path) -> PathBuf {
         for path in [record, bin] {
             fs::create_dir_all(path).expect("the fixture directory should be creatable");
@@ -1454,6 +1458,7 @@ mod tests {
 
     /// Shell that writes an rmeta into `CARGO_TARGET_DIR` and prints the artifact line naming it
     /// for the package at `manifest`.
+    #[cfg(unix)]
     fn emit_artifact(manifest: &Path) -> String {
         format!(
             "deps=\"$CARGO_TARGET_DIR/debug/deps\"\n\
@@ -1467,6 +1472,7 @@ mod tests {
     }
 
     /// Writes an executable `sh` script at `path` running `body`.
+    #[cfg(unix)]
     fn stub(path: &Path, body: &str) -> PathBuf {
         fs::write(path, format!("#!/bin/sh\n{body}")).expect("the stub should be writable");
         fs::set_permissions(path, fs::Permissions::from_mode(0o755))
@@ -1474,6 +1480,7 @@ mod tests {
         path.to_path_buf()
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_build_runs_exactly_the_planned_cargo_from_the_root_with_only_its_variables() {
         let (dir, root) = root_dir();
@@ -1576,6 +1583,7 @@ mod tests {
 
     /// Runs [`build`] for a package at `root/Cargo.toml` with a stub cargo running `body` (in
     /// which `{emit}` prints one artifact for that package) under `timeout`.
+    #[cfg(unix)]
     fn stub_build(body: &str, timeout: Duration) -> Result<Build, BuildFailed> {
         let (dir, root) = root_dir();
         let manifest = root.join("Cargo.toml");
@@ -1599,6 +1607,7 @@ mod tests {
         build_retrying(&Plan::Package(manifest), &builder)
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_build_may_print_more_than_the_default_cap_under_its_own() {
         let result = stub_build(
@@ -1612,6 +1621,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_build_past_its_cap_is_a_failure() {
         let result = stub_build(
@@ -1627,6 +1637,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_build_past_its_timeout_timed_out() {
         let result = stub_build("exec sleep 10\n", Duration::from_millis(100));
@@ -1634,6 +1645,7 @@ mod tests {
         assert_eq!(result, Err(BuildFailed::TimedOut));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_target_dir_others_can_reach_is_refused() {
         let (dir, root) = root_dir();
@@ -1660,6 +1672,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_failing_build_carries_cargos_stderr() {
         let (dir, root) = root_dir();
@@ -1702,7 +1715,7 @@ mod tests {
         let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let outside = tempfile::TempDir::new().expect("a temp dir should be creatable");
-        std::os::unix::fs::symlink(outside.path(), cache.path().join("supdoc"))
+        crate::cli::testing::symlink(outside.path(), cache.path().join("supdoc"))
             .expect("the planted link");
         let path = cache.path().to_path_buf();
         let env =
@@ -1726,7 +1739,7 @@ mod tests {
         let place = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let deep = place.path().join("elsewhere/deep");
         fs::create_dir_all(&deep).expect("the link's target");
-        std::os::unix::fs::symlink(&deep, place.path().join("link")).expect("the planted link");
+        crate::cli::testing::symlink(&deep, place.path().join("link")).expect("the planted link");
         let base = place.path().join("link/..");
         let env =
             ToolEnv::from_vars(|name| (name == "XDG_CACHE_HOME").then(|| base.clone().into()));
@@ -1748,7 +1761,7 @@ mod tests {
         let place = tempfile::TempDir::new().expect("a temp dir should be creatable");
         fs::create_dir(place.path().join("real")).expect("the plain directory");
         fs::create_dir_all(place.path().join("elsewhere/deep")).expect("the link's target");
-        std::os::unix::fs::symlink(
+        crate::cli::testing::symlink(
             place.path().join("elsewhere/deep"),
             place.path().join("link"),
         )
@@ -1801,7 +1814,7 @@ mod tests {
         let disk = place.path().join("disk");
         fs::create_dir(&disk).expect("the link's target");
         let base = place.path().join("cache");
-        std::os::unix::fs::symlink(&disk, &base).expect("the cache base link");
+        crate::cli::testing::symlink(&disk, &base).expect("the cache base link");
         let path = base.clone();
         let env =
             ToolEnv::from_vars(|name| (name == "XDG_CACHE_HOME").then(|| path.clone().into()));

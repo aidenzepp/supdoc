@@ -371,8 +371,8 @@ fn read_failed(error: &ReadError, root: &AbsolutePath, kind: SourceKind) -> Unre
 
 #[cfg(test)]
 mod tests {
+    use crate::cli::testing::symlink;
     use std::fs;
-    use std::os::unix::fs::symlink;
     use std::path::Path;
 
     use tempfile::TempDir;
