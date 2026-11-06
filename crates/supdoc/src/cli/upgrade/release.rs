@@ -178,24 +178,36 @@ pub(crate) const fn running_triple() -> Option<Triple> {
     triple_for(arch, os, env)
 }
 
-/// The archive's file name for a version and platform.
-pub(crate) fn asset_name(version: &ReleaseVersion, triple: Triple) -> String {
-    format!("{ARCHIVE_PREFIX}{version}-{triple}{ARCHIVE_SUFFIX}")
+/// Whether `version` is a plain `MAJOR.MINOR.PATCH`, the only shape releases and tags have.
+///
+/// A pre-release (`-rc.1`) or build metadata (`+build`) is not, so it can never name an asset.
+fn is_plain(version: &ReleaseVersion) -> bool {
+    version
+        .to_string()
+        .bytes()
+        .all(|b| b.is_ascii_digit() || b == b'.')
 }
 
-/// The URL of the archive for a version and platform.
-pub(crate) fn asset_url(version: &ReleaseVersion, triple: Triple) -> String {
-    format!(
-        "{RELEASES}/download/v{version}/{}",
-        asset_name(version, triple)
-    )
+/// The archive's file name for a version and platform, or `None` for a version that is not a
+/// plain `MAJOR.MINOR.PATCH`.
+pub(crate) fn asset_name(version: &ReleaseVersion, triple: Triple) -> Option<String> {
+    is_plain(version).then(|| format!("{ARCHIVE_PREFIX}{version}-{triple}{ARCHIVE_SUFFIX}"))
 }
 
-/// The URL of `SHA256SUMS` for a version, or for the latest release when `version` is `None`.
-pub(crate) fn sums_url(version: Option<&ReleaseVersion>) -> String {
+/// The URL of the archive for a version and platform, or `None` for a version that is not a
+/// plain `MAJOR.MINOR.PATCH`.
+pub(crate) fn asset_url(version: &ReleaseVersion, triple: Triple) -> Option<String> {
+    let name = asset_name(version, triple)?;
+    Some(format!("{RELEASES}/download/v{version}/{name}"))
+}
+
+/// The URL of `SHA256SUMS` for a version, or for the latest release when `version` is `None`;
+/// `None` for a version that is not a plain `MAJOR.MINOR.PATCH`.
+pub(crate) fn sums_url(version: Option<&ReleaseVersion>) -> Option<String> {
     match version {
-        Some(version) => format!("{RELEASES}/download/v{version}/{SUMS_NAME}"),
-        None => format!("{RELEASES}/latest/download/{SUMS_NAME}"),
+        Some(version) if !is_plain(version) => None,
+        Some(version) => Some(format!("{RELEASES}/download/v{version}/{SUMS_NAME}")),
+        None => Some(format!("{RELEASES}/latest/download/{SUMS_NAME}")),
     }
 }
 
@@ -234,7 +246,8 @@ pub(crate) enum SumsError {
         /// The offending line.
         line: usize,
     },
-    /// A file name is not `supdoc-X.Y.Z-<triple>.tar.gz` for one of the eight platforms.
+    /// A file name is not exactly `supdoc-MAJOR.MINOR.PATCH-<triple>.tar.gz` for one of the eight
+    /// platforms.
     #[error(
         "SHA256SUMS line {line} names `{name}`, which is not a supdoc-X.Y.Z-<triple>.tar.gz archive"
     )]
@@ -244,7 +257,7 @@ pub(crate) enum SumsError {
         /// The file name on that line.
         name: String,
     },
-    /// A file name appears on more than one line.
+    /// Two lines name the same version and platform.
     #[error("SHA256SUMS lists `{name}` more than once (line {line})")]
     Duplicate {
         /// The second line naming the file.
@@ -280,7 +293,7 @@ impl Sums {
                     line,
                     name: name.to_owned(),
                 })?;
-            if !seen.insert(name) {
+            if !seen.insert((version.to_string(), triple)) {
                 return Err(SumsError::Duplicate {
                     line,
                     name: name.to_owned(),
@@ -333,7 +346,7 @@ fn parse_asset_name(name: &str) -> Option<(ReleaseVersion, Triple)> {
         .strip_suffix(ARCHIVE_SUFFIX)?;
     Triple::ALL.iter().find_map(|&triple| {
         let version = stem.strip_suffix(triple.as_str())?.strip_suffix('-')?;
-        let version = ReleaseVersion::from_str(version).ok()?;
+        let version = ReleaseVersion::from_str(version).ok().filter(is_plain)?;
         Some((version, triple))
     })
 }
@@ -353,6 +366,9 @@ pub(crate) enum ArchiveError {
     /// The expected entry appears more than once.
     #[error("the release archive holds `{0}` more than once")]
     DuplicateBinary(String),
+    /// The version is not a plain `MAJOR.MINOR.PATCH`, so no archive carries it.
+    #[error("`{0}` is not a plain MAJOR.MINOR.PATCH release version")]
+    InexactVersion(String),
     /// The expected entry exists but is not a regular file.
     #[error("the release archive entry `{0}` is not a regular file")]
     NotRegular(String),
@@ -388,6 +404,9 @@ pub(crate) fn extract_binary(
     triple: Triple,
     max_binary: u64,
 ) -> Result<Vec<u8>, ArchiveError> {
+    if !is_plain(version) {
+        return Err(ArchiveError::InexactVersion(version.to_string()));
+    }
     let expected = format!(
         "{ARCHIVE_PREFIX}{version}-{triple}/{}",
         triple.binary_name()
@@ -536,17 +555,29 @@ mod tests {
     fn urls_follow_the_asset_contract() {
         let v = version("0.5.0");
         assert_eq!(
-            asset_url(&v, Triple::Aarch64Apple),
-            "https://github.com/aidenzepp/supdoc/releases/download/v0.5.0/supdoc-0.5.0-aarch64-apple-darwin.tar.gz"
+            asset_url(&v, Triple::Aarch64Apple).as_deref(),
+            Some(
+                "https://github.com/aidenzepp/supdoc/releases/download/v0.5.0/supdoc-0.5.0-aarch64-apple-darwin.tar.gz"
+            )
         );
         assert_eq!(
-            sums_url(Some(&v)),
-            "https://github.com/aidenzepp/supdoc/releases/download/v0.5.0/SHA256SUMS"
+            sums_url(Some(&v)).as_deref(),
+            Some("https://github.com/aidenzepp/supdoc/releases/download/v0.5.0/SHA256SUMS")
         );
         assert_eq!(
-            sums_url(None),
-            "https://github.com/aidenzepp/supdoc/releases/latest/download/SHA256SUMS"
+            sums_url(None).as_deref(),
+            Some("https://github.com/aidenzepp/supdoc/releases/latest/download/SHA256SUMS")
         );
+    }
+
+    #[test]
+    fn builders_refuse_versions_that_are_not_plain_major_minor_patch() {
+        for text in ["0.5.0-rc.1", "0.5.0+build", "0.5.0-rc.1+build"] {
+            let v = version(text);
+            assert_eq!(asset_name(&v, Triple::X86_64Apple), None, "{text} name");
+            assert_eq!(asset_url(&v, Triple::X86_64Apple), None, "{text} url");
+            assert_eq!(sums_url(Some(&v)), None, "{text} sums url");
+        }
     }
 
     fn line(version: &str, triple: Triple) -> String {
@@ -559,10 +590,10 @@ mod tests {
             "{}\n{}\n{}\n",
             line("0.4.0", Triple::X86_64Apple),
             line("0.5.0", Triple::X86_64Apple),
-            line("0.5.0-rc.1", Triple::Aarch64LinuxMusl),
+            line("0.5.1", Triple::Aarch64LinuxMusl),
         );
         let sums = Sums::parse(&text).expect("a well-formed file should parse");
-        assert_eq!(sums.latest_version(), Some(&version("0.5.0")));
+        assert_eq!(sums.latest_version(), Some(&version("0.5.1")));
         let entry = sums
             .entry_for(&version("0.4.0"), Triple::X86_64Apple)
             .expect("the 0.4.0 line should be found");
@@ -607,6 +638,38 @@ mod tests {
                 "blank line",
                 format!("{ok}\n\n{ok}\n"),
                 SumsError::Malformed { line: 2 },
+            ),
+            (
+                "build metadata in the name",
+                format!("{DIGEST}  supdoc-0.5.0+build-x86_64-apple-darwin.tar.gz\n"),
+                SumsError::UnknownName {
+                    line: 1,
+                    name: "supdoc-0.5.0+build-x86_64-apple-darwin.tar.gz".into(),
+                },
+            ),
+            (
+                "pre-release in the name",
+                format!("{DIGEST}  supdoc-0.5.0-rc.1-x86_64-apple-darwin.tar.gz\n"),
+                SumsError::UnknownName {
+                    line: 1,
+                    name: "supdoc-0.5.0-rc.1-x86_64-apple-darwin.tar.gz".into(),
+                },
+            ),
+            (
+                "unknown triple",
+                format!("{DIGEST}  supdoc-0.5.0-riscv64-unknown-linux-gnu.tar.gz\n"),
+                SumsError::UnknownName {
+                    line: 1,
+                    name: "supdoc-0.5.0-riscv64-unknown-linux-gnu.tar.gz".into(),
+                },
+            ),
+            (
+                "same version and triple with a different digest",
+                format!("{ok}\n{}\n", ok.replacen("0123", "4567", 1)),
+                SumsError::Duplicate {
+                    line: 2,
+                    name: "supdoc-0.5.0-x86_64-apple-darwin.tar.gz".into(),
+                },
             ),
             (
                 "unknown name",
@@ -754,6 +817,27 @@ mod tests {
         for (label, bytes, cap) in cases {
             assert!(extract(&bytes, cap).is_err(), "{label} must yield no bytes");
         }
+    }
+
+    #[test]
+    fn a_decompressed_stream_past_the_cap_yields_no_bytes() {
+        let filler = vec![0_u8; 2 * 1024 * 1024];
+        let bytes = archive(&[
+            file("supdoc-0.5.0-x86_64-unknown-linux-gnu/LICENSE", &filler),
+            file(ENTRY, b"binary"),
+        ]);
+        assert!(
+            matches!(extract(&bytes, 100), Err(ArchiveError::Unreadable(_))),
+            "the expanded stream is over max_binary plus the extras allowance"
+        );
+        assert_eq!(extract(&bytes, 2 * 1024 * 1024), Ok(b"binary".to_vec()));
+    }
+
+    #[test]
+    fn inexact_versions_never_extract() {
+        let bytes = archive(&[file(ENTRY, b"x")]);
+        let got = extract_binary(&bytes, &version("0.5.0+b"), Triple::X86_64LinuxGnu, 1024);
+        assert_eq!(got, Err(ArchiveError::InexactVersion("0.5.0+b".into())));
     }
 
     #[test]
