@@ -127,20 +127,73 @@ fn is_live(pgid: u32) -> bool {
         .contains(&pgid)
 }
 
-/// Best effort, sends `SIGKILL` to every live tool process group through `/bin/kill`, once every
-/// spawn in progress has registered its group.
+/// Best effort, kills every live tool process tree, once every spawn in progress has registered
+/// its group.
 ///
 /// Effect: signals each registered process group.
 fn kill_live_groups() {
     for pgid in live_groups_once_spawned() {
-        let _group = Command::new("/bin/kill")
-            .args(["-KILL", "--", &format!("-{pgid}")])
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        kill_tree(pgid);
     }
+}
+
+/// Best effort, kills the tool `pid` leads and its descendants. A tree already gone is not an
+/// error.
+///
+/// On Unix `pid` is a process group id and this sends `SIGKILL` to the group through `/bin/kill`,
+/// which reaches the group's members even after the leader exited.
+/// On Windows it runs `taskkill.exe /T /F /PID`, which follows parent process ids at kill time.
+/// So the tool must still be alive when this runs: once it has exited, its orphaned descendants
+/// are unreachable and this kills nothing. A descendant whose parent already exited is missed
+/// too, and a pid can be reused between a tool's exit and the kill, as a pgid can on Unix.
+///
+/// Effect: runs the kill program and signals the tree.
+pub(crate) fn kill_tree(pid: u32) {
+    #[cfg(unix)]
+    let mut kill = {
+        let mut kill = Command::new("/bin/kill");
+        let _same = kill.args(["-KILL", "--", &format!("-{pid}")]);
+        kill
+    };
+    #[cfg(windows)]
+    let mut kill = {
+        let root = SYSTEM_ROOT.get_or_init(|| system_root(None));
+        let mut kill = Command::new(root.join("System32").join("taskkill.exe"));
+        let _same = kill
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .env("SystemRoot", root);
+        kill
+    };
+    let _tree = kill
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// The Windows directory `taskkill.exe` lives under, set once at the process boundary by
+/// [`record_system_root`].
+#[cfg(windows)]
+static SYSTEM_ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// `system_root` when it is absolute, else `C:\Windows`. Never a `PATH` lookup.
+#[cfg(windows)]
+fn system_root(system_root: Option<&OsStr>) -> std::path::PathBuf {
+    system_root
+        .map(Path::new)
+        .filter(|root| root.is_absolute())
+        .unwrap_or(Path::new("C:\\Windows"))
+        .to_path_buf()
+}
+
+/// Records the Windows directory from the `SystemRoot` variable. Read here, at the process
+/// boundary, and nowhere else.
+///
+/// Effect: sets [`SYSTEM_ROOT`] once.
+#[cfg(windows)]
+fn record_system_root() {
+    let _first = SYSTEM_ROOT.set(system_root(std::env::var_os("SystemRoot").as_deref()));
 }
 
 /// Installs the handler for SIGINT, SIGTERM and SIGHUP: on one thread, kill every live tool group,
@@ -237,6 +290,8 @@ pub(crate) fn wait_to_be_ended() -> ! {
 ///
 /// After a termination signal it never returns: the signal ends the process.
 pub(crate) fn exit_code() -> u8 {
+    #[cfg(windows)]
+    record_system_root();
     handle_termination();
     let code = parse_run_and_report();
     await_termination(&TERMINATING);
