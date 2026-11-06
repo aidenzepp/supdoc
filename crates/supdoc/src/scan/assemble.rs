@@ -609,7 +609,16 @@ fn link_finding(
             "Write the symbol as names joined by `.`, like `Config.validate`".to_owned(),
             None,
         ),
-        LinkError::OutsideRoot { .. } => (
+        LinkError::OutsideRoot {
+            namespace: Some(_), ..
+        } => (
+            targets::CODE_OUTSIDE_ROOT,
+            targets::NAMESPACE_CLIMB_HELP.to_owned(),
+            None,
+        ),
+        LinkError::OutsideRoot {
+            namespace: None, ..
+        } => (
             targets::CODE_OUTSIDE_ROOT,
             targets::OUTSIDE_ROOT_HELP.to_owned(),
             None,
