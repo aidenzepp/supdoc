@@ -143,3 +143,20 @@ jobs:
           status=0
           anc audit . || status=$?
           if [ "$status" -ge 2 ]; then exit "$status"; fi
+
+  windows:
+    name: windows build (inventory, not required)
+    runs-on: windows-2025
+    # Measures the Windows port; failures are bucketed by cause, never gating. Remove once the
+    # port is repaired and this job becomes required.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Build
+        run: cargo build --workspace
+      - name: Test build
+        # Runs even when Build failed, so one log lists every error from both steps.
+        if: always()
+        run: cargo test --workspace --no-run
