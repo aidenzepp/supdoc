@@ -342,7 +342,7 @@ pub(crate) fn write_atomically(
 /// Fails when a directory can't be created, or `dir` exists and isn't a directory.
 #[cfg_attr(
     not(unix),
-    allow(
+    expect(
         unused_variables,
         reason = "`mode` is a Unix permission mode, ignored on Windows"
     )
@@ -355,8 +355,9 @@ pub(crate) fn create_dir_all(dir: &Admitted<'_>, mode: u32) -> io::Result<()> {
     builder.create(&dir.path)
 }
 
-/// Creates the new directory `dir` with `mode` (Unix only; ignored on Windows). Its parent must exist. Refuses an existing path,
-/// and never follows a symlink there, so the caller that creates it owns it alone.
+/// Creates the new directory `dir` with `mode` (Unix only; ignored on Windows). Its parent must
+/// exist. Refuses an existing path, and never follows a symlink there, so the caller that creates
+/// it owns it alone.
 ///
 /// Effect: creates a directory.
 ///
@@ -365,24 +366,20 @@ pub(crate) fn create_dir_all(dir: &Admitted<'_>, mode: u32) -> io::Result<()> {
 /// `AlreadyExists` when anything is at `dir`; otherwise fails when it can't be created.
 #[cfg_attr(
     not(unix),
-    allow(
+    expect(
         unused_variables,
         reason = "`mode` is a Unix permission mode, ignored on Windows"
     )
 )]
 pub(crate) fn create_dir(dir: &Admitted<'_>, mode: u32) -> io::Result<()> {
-    #[cfg_attr(
-        not(unix),
-        allow(unused_mut, reason = "`mode` is applied on Unix only")
-    )]
-    let mut builder = fs::DirBuilder::new();
+    let builder = &mut fs::DirBuilder::new();
     #[cfg(unix)]
     let builder = builder.mode(mode);
     builder.create(&dir.path)
 }
 
-/// Creates the new file `file` with `mode` (Unix only; ignored on Windows), open for writing. Refuses an existing path, and never
-/// follows a symlink there.
+/// Creates the new file `file` with `mode` (Unix only; ignored on Windows), open for writing.
+/// Refuses an existing path, and never follows a symlink there.
 ///
 /// Effect: creates a file.
 ///
@@ -391,7 +388,7 @@ pub(crate) fn create_dir(dir: &Admitted<'_>, mode: u32) -> io::Result<()> {
 /// `AlreadyExists` when anything is at `file`; otherwise fails when it can't be created.
 #[cfg_attr(
     not(unix),
-    allow(
+    expect(
         unused_variables,
         reason = "`mode` is a Unix permission mode, ignored on Windows"
     )
