@@ -198,8 +198,8 @@ struct Scope {
     name: Option<String>,
     /// `@supdoc.scope.arguments`.
     arguments: Option<String>,
-    /// `@supdoc.scope.qualifier`.
-    qualifier: Option<String>,
+    /// `@supdoc.scope.qualifier`, every capture in source order.
+    qualifiers: Vec<String>,
     /// `@supdoc.scope.qualifier.arguments`.
     qualifier_arguments: Option<String>,
 }
@@ -210,14 +210,17 @@ impl Scope {
     fn merge(&mut self, other: Self) {
         self.name = self.name.take().or(other.name);
         self.arguments = self.arguments.take().or(other.arguments);
-        self.qualifier = self.qualifier.take().or(other.qualifier);
+        if self.qualifiers.is_empty() {
+            self.qualifiers = other.qualifiers;
+        }
         self.qualifier_arguments = self
             .qualifier_arguments
             .take()
             .or(other.qualifier_arguments);
     }
 
-    /// The segments this scope adds: its name, then its qualifier. Empty when it has no name.
+    /// The segments this scope adds: its name, then each qualifier in order. Empty when it has no
+    /// name. The qualifier arguments belong to the last qualifier.
     fn segments(self) -> Vec<Segment> {
         let Some(name) = self.name else {
             return Vec::new();
@@ -226,10 +229,15 @@ impl Scope {
             name,
             arguments: self.arguments,
         }];
-        if let Some(qualifier) = self.qualifier {
+        let last = self.qualifiers.len().saturating_sub(1);
+        for (index, qualifier) in self.qualifiers.into_iter().enumerate() {
             segments.push(Segment {
                 name: qualifier,
-                arguments: self.qualifier_arguments,
+                arguments: if index == last {
+                    self.qualifier_arguments.clone()
+                } else {
+                    None
+                },
             });
         }
         segments
@@ -263,7 +271,7 @@ impl<'tree> Captured<'tree> {
             Role::Scope => self.scope_node = Some(node),
             Role::ScopeName => self.scope.name = content(),
             Role::ScopeArguments => self.scope.arguments = compact(),
-            Role::Qualifier => self.scope.qualifier = content(),
+            Role::Qualifier => self.scope.qualifiers.extend(content()),
             Role::QualifierArguments => self.scope.qualifier_arguments = compact(),
             Role::Other => {}
         }
