@@ -1085,7 +1085,7 @@ mod tests {
         std::fs::create_dir_all(outside.path().join(name)).expect("the outside twin");
         std::fs::write(&kept, "kept").expect("the outside file");
         std::fs::rename(&base, cache.path().join("go-moved")).expect("the move");
-        std::os::unix::fs::symlink(outside.path(), &base).expect("the planted link");
+        crate::cli::testing::symlink(outside.path(), &base).expect("the planted link");
 
         drop(module);
 
@@ -1097,7 +1097,7 @@ mod tests {
         let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let outside = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let missing = outside.path().join("missing");
-        std::os::unix::fs::symlink(&missing, cache.path().join("go-home"))
+        crate::cli::testing::symlink(&missing, cache.path().join("go-home"))
             .expect("the planted link");
 
         let module = VetModule::create(&cache.path().join("neutral"), "module m\n", None);
@@ -1109,6 +1109,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_module_directory_already_there_is_never_taken_over() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1140,7 +1141,7 @@ mod tests {
         let place = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let deep = place.path().join("elsewhere/deep");
         std::fs::create_dir_all(&deep).expect("the link's target");
-        std::os::unix::fs::symlink(&deep, place.path().join("link")).expect("the planted link");
+        crate::cli::testing::symlink(&deep, place.path().join("link")).expect("the planted link");
         let neutral = place.path().join("link/../cache/cwd");
 
         let module = VetModule::create(&neutral, "module m\n", None);

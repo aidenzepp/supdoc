@@ -1736,8 +1736,8 @@ mod tests {
     use super::{
         CONFIG_FILES, LINT_CONFIG_FILES, LINT_RULES, MAX_NESTING, Refusal, forbidden_char,
         holds_no_yaml, internal_error, lint_args, lint_config, lint_diagnostics, lint_verdict,
-        locale_failed, parse_error, private_config, project_args, read_config, rejected_config,
-        same_structure, shape, switches_lint_off,
+        locale_failed, parse_error, project_args, read_config, rejected_config, same_structure,
+        shape, switches_lint_off,
     };
     use crate::code_blocks::format::{self, ParseError};
     use crate::code_blocks::lint::{self, Diagnostic};
@@ -1901,7 +1901,7 @@ mod tests {
         let outside = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
         fs::write(outside.path().join("c.yaml"), "").expect("outside config");
-        std::os::unix::fs::symlink(outside.path().join("c.yaml"), root.path().join(".yamlfmt"))
+        crate::cli::testing::symlink(outside.path().join("c.yaml"), root.path().join(".yamlfmt"))
             .expect("the link");
 
         let refused = project_args(
@@ -2401,7 +2401,7 @@ mod tests {
         let elsewhere = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
         fs::write(elsewhere.path().join("config"), "extends: default\n").expect("outside config");
-        std::os::unix::fs::symlink(
+        crate::cli::testing::symlink(
             elsewhere.path().join("config"),
             root.path().join(".yamllint"),
         )
@@ -2582,8 +2582,10 @@ mod tests {
         assert!(!rejected_config(b"Traceback (most recent call last):\n"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_config_directory_swapped_for_a_link_out_gets_no_private_copy_and_creates_nothing_there() {
+        use super::private_config;
         use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
         let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
@@ -2596,7 +2598,7 @@ mod tests {
             .mode(0o700)
             .create(&code_blocks)
             .expect("supdoc's cache directory");
-        std::os::unix::fs::symlink(outside.path(), code_blocks.join("yamlfmt-config"))
+        crate::cli::testing::symlink(outside.path(), code_blocks.join("yamlfmt-config"))
             .expect("the planted link");
         let env = env_in(cache.path());
 

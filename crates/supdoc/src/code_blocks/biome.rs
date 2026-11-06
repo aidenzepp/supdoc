@@ -820,6 +820,7 @@ mod tests {
     use crate::code_blocks::runner::{self, Ran};
     use crate::code_blocks::tools::ToolEnv;
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::Path;
 
@@ -1085,7 +1086,7 @@ mod tests {
         let link = dir.path().join("b.md.1.ts");
         fs::write(&existing, "kept").expect("the planted file");
         fs::write(&target, "kept").expect("the link's target");
-        std::os::unix::fs::symlink(&target, &link).expect("the planted link");
+        crate::cli::testing::symlink(&target, &link).expect("the planted link");
 
         assert_eq!(write_new(&existing, "block"), None);
         assert_eq!(write_new(&link, "block"), None);
@@ -1099,6 +1100,7 @@ mod tests {
         assert_eq!(diagnostics(b"[]"), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_lint_file_mirrors_the_docs_place_under_a_private_config_copy_and_is_removed_when_dropped()
     {
@@ -1187,7 +1189,7 @@ mod tests {
         let given = project_args(&env, root.path(), &doc).expect("no config gives an empty one");
         let neutral = runner::neutral_dir(&env, root.path());
         let missing = outside.path().join("missing");
-        std::os::unix::fs::symlink(&missing, neutral.with_file_name("biome-lint"))
+        crate::cli::testing::symlink(&missing, neutral.with_file_name("biome-lint"))
             .expect("the planted link");
 
         let run = LintFile::create(&neutral, &given, (&doc, 1, "js"), "f();\n");
@@ -1199,6 +1201,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_run_directory_already_there_is_never_taken_over() {
         let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
@@ -1234,7 +1237,7 @@ mod tests {
         let place = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let deep = place.path().join("elsewhere/deep");
         fs::create_dir_all(&deep).expect("the link's target");
-        std::os::unix::fs::symlink(&deep, place.path().join("link")).expect("the planted link");
+        crate::cli::testing::symlink(&deep, place.path().join("link")).expect("the planted link");
         let base = place.path().join("link/..");
         let env =
             ToolEnv::from_vars(|name| (name == "XDG_CACHE_HOME").then(|| base.clone().into()));
@@ -1261,7 +1264,7 @@ mod tests {
         let given = project_args(&env, root.path(), &doc).expect("no config gives an empty one");
         let deep = place.path().join("elsewhere/deep");
         fs::create_dir_all(&deep).expect("the link's target");
-        std::os::unix::fs::symlink(&deep, place.path().join("link")).expect("the planted link");
+        crate::cli::testing::symlink(&deep, place.path().join("link")).expect("the planted link");
         let neutral = place.path().join("link/../cache/cwd");
 
         let run = LintFile::create(&neutral, &given, (&doc, 1, "js"), "f();\n");
@@ -1300,7 +1303,7 @@ mod tests {
         fs::create_dir_all(outside.path().join(name)).expect("the outside twin");
         fs::write(&kept, "kept").expect("the outside file");
         fs::rename(&base, base.with_file_name("biome-lint-moved")).expect("the move");
-        std::os::unix::fs::symlink(outside.path(), &base).expect("the planted link");
+        crate::cli::testing::symlink(outside.path(), &base).expect("the planted link");
 
         drop(run);
 
