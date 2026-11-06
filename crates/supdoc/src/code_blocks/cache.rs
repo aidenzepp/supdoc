@@ -438,6 +438,7 @@ mod tests {
         assert_eq!(handed_out.get(), 0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_fifo_tool_config_in_the_root_has_no_cache_key() {
         let dir = temp();
@@ -702,7 +703,7 @@ mod tests {
 
     #[test]
     fn put_leaves_an_entry_that_is_a_symlink_to_outside_and_its_target_alone() {
-        use std::os::unix::fs::symlink;
+        use crate::cli::testing::symlink;
         let dir = temp();
         let cache =
             Cache::at(dir.path(), dir.path().join("cache"), 10).expect("the cache should open");
@@ -728,7 +729,7 @@ mod tests {
 
     #[test]
     fn a_cache_directory_replaced_by_a_symlink_to_outside_is_not_written_or_pruned() {
-        use std::os::unix::fs::symlink;
+        use crate::cli::testing::symlink;
         let dir = temp();
         let cache =
             Cache::at(dir.path(), dir.path().join("cache"), 1).expect("the cache should open");
@@ -759,7 +760,7 @@ mod tests {
 
     #[test]
     fn a_link_beneath_the_cache_base_that_leads_out_gives_no_cache_and_creates_nothing_there() {
-        use std::os::unix::fs::symlink;
+        use crate::cli::testing::symlink;
         let dir = temp();
         let root = dir.path().join("root");
         let base = dir.path().join("base");
@@ -798,7 +799,7 @@ mod tests {
 
     #[test]
     fn a_cache_base_that_is_a_link_to_another_dir_gives_a_cache_under_where_it_leads() {
-        use std::os::unix::fs::symlink;
+        use crate::cli::testing::symlink;
         let dir = temp();
         let root = dir.path().join("root");
         let disk = dir.path().join("disk");
@@ -823,7 +824,7 @@ mod tests {
     /// A scratch home holding `real` (a plain directory) and `link` (to `elsewhere/inner`), so
     /// `real/..` and `link/..` both hold a `..`, with those two values.
     fn hostile_home() -> (tempfile::TempDir, [PathBuf; 2]) {
-        use std::os::unix::fs::symlink;
+        use crate::cli::testing::symlink;
         let dir = temp();
         fs::create_dir(dir.path().join("real")).expect("the plain directory should be creatable");
         fs::create_dir_all(dir.path().join("elsewhere/inner"))
@@ -915,6 +916,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn open_uses_xdg_then_home_and_creates_the_directory_private() {
         use std::os::unix::fs::PermissionsExt as _;
