@@ -9,7 +9,7 @@
 //! [`Pointer`] is a path read from a file that may point anywhere, such as a `gitdir:` line.
 
 use std::fmt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component as PathComponent, Path, PathBuf};
 
 use crate::config::CONFIG_FILE_NAME;
 use crate::lock::model::LOCK_FILE_NAME;
@@ -50,6 +50,31 @@ impl AbsolutePath {
         let mut joined = self.0.clone();
         joined.extend(rel.segments().split('/'));
         Self(joined)
+    }
+
+    /// Each prefix of `path` strictly beneath `self`, shallowest first and ending with `path`
+    /// itself, or `None` when `path` is not under `self`. Empty when `path` is `self`.
+    ///
+    /// Built from `path`'s own ancestors, so nothing is joined and no component is new: the
+    /// walk that creates or checks each directory on the way down needs no raw join.
+    #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the walks in scan and cli use it from V5-P5 and V5-P6"
+        )
+    )]
+    pub(crate) fn steps_to(&self, path: &Self) -> Option<impl Iterator<Item = Self> + use<>> {
+        let _under = path.strip_prefix(self)?;
+        let mut steps: Vec<Self> = path
+            .0
+            .ancestors()
+            .take_while(|ancestor| *ancestor != self.0)
+            .map(|ancestor| Self(ancestor.to_path_buf()))
+            .collect();
+        steps.reverse();
+        Some(steps.into_iter())
     }
 
     /// Appends `rel` and normalizes the result, or returns `None` when the result is not under
@@ -125,6 +150,7 @@ mod sealed {
     impl Sealed for crate::link::SourcePath {}
     impl Sealed for crate::link::TargetPath {}
     impl Sealed for super::FixedPath {}
+    impl Sealed for super::Component {}
 }
 
 /// A relative path proven to stay beneath any base it is joined to: `/`-separated and not
@@ -133,8 +159,9 @@ mod sealed {
 /// `:` would start a drive prefix or name a file stream.
 ///
 /// Sealed: implemented only for [`SourcePath`](crate::link::SourcePath) and
-/// [`TargetPath`](crate::link::TargetPath), which `crate::link` checks when it builds them, and
-/// for [`FixedPath`], which is checked at compile time.
+/// [`TargetPath`](crate::link::TargetPath), which `crate::link` checks when it builds them, for
+/// [`FixedPath`], which is checked at compile time, and for [`Component`], which is checked when
+/// it is built.
 pub(crate) trait Beneath: sealed::Sealed {
     /// The path, with `/` between its segments.
     fn segments(&self) -> &str;
@@ -192,6 +219,21 @@ impl FixedPath {
     }
 }
 
+impl FixedPath {
+    /// The path as written, for a site that also shows or compares the name.
+    #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the sweep units show and compare names from V5-P2a"
+        )
+    )]
+    pub(crate) const fn as_str(&self) -> &'static str {
+        self.0
+    }
+}
+
 /// Every [`FixedPath`]. Each is a `const` item, which the compiler evaluates even when nothing
 /// uses it, so a constant that breaks [`Beneath`]'s rules does not compile.
 pub(crate) mod fixed {
@@ -210,12 +252,316 @@ pub(crate) mod fixed {
     pub(crate) const DEFAULT_CLAUDE_DIR: FixedPath = FixedPath::new(".claude");
     /// Where the skill goes beneath Claude Code's config directory.
     pub(crate) const CLAUDE_DIR_SKILL: FixedPath = FixedPath::new("skills/supdoc/SKILL.md");
+    /// Cargo's home directory beneath `HOME`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const CARGO_DIR: FixedPath = FixedPath::new(".cargo");
+    /// The installed `supdoc` binary beneath Cargo's home.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const CARGO_BIN_SUPDOC: FixedPath = FixedPath::new("bin/supdoc");
+    /// Cargo's install record beneath its home.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const CRATES2_JSON: FixedPath = FixedPath::new(".crates2.json");
+    /// Biome's private lint directory beneath the cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const BIOME_LINT_DIR: FixedPath = FixedPath::new("biome-lint");
+    /// Biome's private config directory beneath the cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const BIOME_CONFIG_DIR: FixedPath = FixedPath::new("biome-config");
+    /// Biome's config file name.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const BIOME_JSON: FixedPath = FixedPath::new("biome.json");
+    /// Go's private directory beneath the cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const GO: FixedPath = FixedPath::new("go");
+    /// Go's private home directory beneath the cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const GO_HOME: FixedPath = FixedPath::new("go-home");
+    /// Go's private `GOPATH` directory beneath the cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const GO_PATH: FixedPath = FixedPath::new("go-path");
+    /// Go's private build cache directory beneath the cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const GO_BUILD: FixedPath = FixedPath::new("go-build");
+    /// A private scratch directory.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const TMP: FixedPath = FixedPath::new("tmp");
+    /// A Go module file.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const GO_MOD: FixedPath = FixedPath::new("go.mod");
+    /// The Go file a block is written to.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const MAIN_GO: FixedPath = FixedPath::new("main.go");
+    /// supdoc's directory beneath a cache or state base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const SUPDOC: FixedPath = FixedPath::new("supdoc");
+    /// The code-block directory beneath [`SUPDOC`].
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const CODE_BLOCKS: FixedPath = FixedPath::new("code-blocks");
+    /// Cargo's private target directory beneath a cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const CODE_BLOCKS_TARGET: FixedPath = FixedPath::new("supdoc/code-blocks/target");
+    /// The private working directory beneath a cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const CODE_BLOCKS_CWD: FixedPath = FixedPath::new("supdoc/code-blocks/cwd");
+    /// A Cargo manifest.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const CARGO_TOML: FixedPath = FixedPath::new("Cargo.toml");
+    /// A library crate's root file.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const SRC_LIB_RS: FixedPath = FixedPath::new("src/lib.rs");
+    /// The default cache base beneath `HOME`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const DOT_CACHE: FixedPath = FixedPath::new(".cache");
+    /// rumdl's config file name.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const RUMDL_TOML: FixedPath = FixedPath::new("rumdl.toml");
+    /// rumdl's private config directory beneath the cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const RUMDL_CONFIG_DIR: FixedPath = FixedPath::new("rumdl-config");
+    /// A git work tree's marker.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const DOT_GIT: FixedPath = FixedPath::new(".git");
+    /// tombi's config directory name.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const TOMBI: FixedPath = FixedPath::new("tombi");
+    /// tombi's private config directory beneath the cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const TOMBI_CONFIG_DIR: FixedPath = FixedPath::new("tombi-config");
+    /// tombi's private config file name.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const DOT_TOMBI_TOML: FixedPath = FixedPath::new(".tombi.toml");
+    /// A tool's config file name inside its config directory.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const CONFIG_TOML: FixedPath = FixedPath::new("config.toml");
+    /// rustc's private emit directory beneath the cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const EMIT: FixedPath = FixedPath::new("emit");
+    /// The metadata file rustc emits for a block.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const BLOCK_RMETA: FixedPath = FixedPath::new("block.rmeta");
+    /// A private working directory name.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const CWD: FixedPath = FixedPath::new("cwd");
+    /// yamlfmt's private config directory beneath the cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const YAMLFMT_CONFIG_DIR: FixedPath = FixedPath::new("yamlfmt-config");
+    /// yamllint's private config directory beneath the cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const YAMLLINT_CONFIG_DIR: FixedPath = FixedPath::new("yamllint-config");
+    /// yamlfmt's private config file name.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const DOT_YAMLFMT: FixedPath = FixedPath::new(".yamlfmt");
+    /// yamllint's private config file name.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const CONFIG_YAML: FixedPath = FixedPath::new("config.yaml");
+    /// The default state base beneath `HOME`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const LOCAL_STATE: FixedPath = FixedPath::new(".local/state");
+    /// The trust store file.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const TRUSTED_ROOTS: FixedPath = FixedPath::new("trusted-roots");
+    /// The trust store's lock file.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const TRUSTED_ROOTS_LOCK: FixedPath = FixedPath::new("trusted-roots.lock");
+    /// A worktree's back-pointer file.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const GITDIR: FixedPath = FixedPath::new("gitdir");
+    /// A git directory's worktrees directory.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const WORKTREES: FixedPath = FixedPath::new("worktrees");
+    /// A worktree git directory's pointer to the common directory.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const COMMONDIR: FixedPath = FixedPath::new("commondir");
+    /// A git directory's info directory.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const INFO: FixedPath = FixedPath::new("info");
+    /// A git directory's exclude file.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const INFO_EXCLUDE: FixedPath = FixedPath::new("info/exclude");
+    /// An `.ignore` file.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const DOT_IGNORE: FixedPath = FixedPath::new(".ignore");
+    /// A `.gitignore` file.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const DOT_GITIGNORE: FixedPath = FixedPath::new(".gitignore");
+    /// The config names biome looks for in a directory.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const BIOME_CONFIG_FILES: [FixedPath; 4] = [
+        FixedPath::new("biome.json"),
+        FixedPath::new("biome.jsonc"),
+        FixedPath::new(".biome.json"),
+        FixedPath::new(".biome.jsonc"),
+    ];
+    /// The config names rumdl looks for in a directory.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const RUMDL_CONFIG_FILES: [FixedPath; 4] = [
+        FixedPath::new(".rumdl.toml"),
+        FixedPath::new("rumdl.toml"),
+        FixedPath::new(".config/rumdl.toml"),
+        FixedPath::new("pyproject.toml"),
+    ];
+    /// The files rumdl's cached results depend on.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const RUMDL_TOOL_CONFIG_FILES: [FixedPath; 5] = [
+        FixedPath::new(".rumdl.toml"),
+        FixedPath::new("rumdl.toml"),
+        FixedPath::new(".config/rumdl.toml"),
+        FixedPath::new("pyproject.toml"),
+        FixedPath::new(".editorconfig"),
+    ];
+    /// The config names tombi looks for in a directory.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const TOMBI_CONFIG_FILES: [FixedPath; 4] = [
+        FixedPath::new(".tombi.toml"),
+        FixedPath::new("tombi.toml"),
+        FixedPath::new(".config/tombi.toml"),
+        FixedPath::new("pyproject.toml"),
+    ];
+    /// The config names rustfmt looks for in a directory.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const RUST_CONFIG_FILES: [FixedPath; 2] = [
+        FixedPath::new(".rustfmt.toml"),
+        FixedPath::new("rustfmt.toml"),
+    ];
+    /// The config names clippy looks for in a directory.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const CLIPPY_FILES: [FixedPath; 2] = [
+        FixedPath::new(".clippy.toml"),
+        FixedPath::new("clippy.toml"),
+    ];
+    /// The toolchain file names rustup looks for.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const TOOLCHAIN_FILES: [FixedPath; 2] = [
+        FixedPath::new("rust-toolchain"),
+        FixedPath::new("rust-toolchain.toml"),
+    ];
+    /// The config names yamlfmt looks for in a directory.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const YAMLFMT_CONFIG_FILES: [FixedPath; 5] = [
+        FixedPath::new(".yamlfmt"),
+        FixedPath::new("yamlfmt.yml"),
+        FixedPath::new("yamlfmt.yaml"),
+        FixedPath::new(".yamlfmt.yaml"),
+        FixedPath::new(".yamlfmt.yml"),
+    ];
+    /// The config names yamllint looks for in a directory.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const YAMLLINT_CONFIG_FILES: [FixedPath; 3] = [
+        FixedPath::new(".yamllint"),
+        FixedPath::new(".yamllint.yaml"),
+        FixedPath::new(".yamllint.yml"),
+    ];
+    /// The files rustfmt's cached results depend on.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const RUSTFMT_TOOL_CONFIG_FILES: [FixedPath; 2] = [
+        FixedPath::new("rustfmt.toml"),
+        FixedPath::new(".rustfmt.toml"),
+    ];
+    /// The files clippy's cached results depend on.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const CLIPPY_TOOL_CONFIG_FILES: [FixedPath; 3] = [
+        FixedPath::new("clippy.toml"),
+        FixedPath::new(".clippy.toml"),
+        FixedPath::new("Cargo.toml"),
+    ];
+    /// The files ruff's cached results depend on.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const RUFF_TOOL_CONFIG_FILES: [FixedPath; 3] = [
+        FixedPath::new("ruff.toml"),
+        FixedPath::new(".ruff.toml"),
+        FixedPath::new("pyproject.toml"),
+    ];
+    /// The files a pyproject-configured tool's cached results depend on.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const PYPROJECT_TOOL_CONFIG_FILES: [FixedPath; 1] =
+        [FixedPath::new("pyproject.toml")];
+    /// The files an editorconfig-configured tool's cached results depend on.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const EDITORCONFIG_TOOL_CONFIG_FILES: [FixedPath; 1] =
+        [FixedPath::new(".editorconfig")];
+    /// The files shellcheck's cached results depend on.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const SHELLCHECK_TOOL_CONFIG_FILES: [FixedPath; 1] =
+        [FixedPath::new(".shellcheckrc")];
+    /// The local binary directories a Python tool searches.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const VENV_BINS: [FixedPath; 1] = [FixedPath::new(".venv/bin")];
+    /// The local binary directories a Node tool searches.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const NODE_BINS: [FixedPath; 1] = [FixedPath::new("node_modules/.bin")];
 }
 
 impl Beneath for FixedPath {
     fn segments(&self) -> &str {
         self.0
     }
+}
+
+/// One normal path component, checked when it is built: not empty, not `.` or `..`, and free of
+/// `/`, `\\`, `:` and NUL, so it is exactly one component on every platform. For a name computed
+/// at run time: a digest, a cache key, a fresh temp name, a `read_dir` entry or a binary name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Component(String);
+
+impl Component {
+    /// Wraps `name`, or returns `None` when it is not exactly one normal component.
+    #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the sweep units name computed components from V5-P2a"
+        )
+    )]
+    pub(crate) fn new(name: &str) -> Option<Self> {
+        let refused =
+            name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', ':', '\0']);
+        (!refused).then(|| Self(name.to_owned()))
+    }
+}
+
+impl Beneath for Component {
+    fn segments(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The one raw join in this module's typed joins: `base` with `tail` appended, as
+/// [`Path::join`] does. Every typed join below calls it, so the lint that bans raw joins
+/// elsewhere has one function here to mark.
+fn raw_join(base: &Path, tail: &Path) -> PathBuf {
+    base.join(tail)
+}
+
+/// `base` with `rel` appended: beneath `base` as written, because [`Beneath`] proves `rel` has no
+/// root, `..` or `.`. For a base that is not an [`AbsolutePath`]: a `&Path`, a `PathBuf` or a
+/// temporary directory. Refuses nothing, since the type holds the proof.
+#[must_use]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the sweep units join onto plain paths from V5-P2a"
+    )
+)]
+pub(crate) fn beneath(base: &Path, rel: &impl Beneath) -> PathBuf {
+    raw_join(base, Path::new(rel.segments()))
+}
+
+/// `path` moved from under `from` to the same place under `onto`: `onto` joined with what
+/// `path.strip_prefix(from)` leaves. `None` when `path` is not under `from`, or when what is left
+/// is not plain names: a `..`, `.`, root or prefix component would let the result climb out of
+/// `onto`.
+#[must_use]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the sweep units re-root remainders from V5-P2a")
+)]
+pub(crate) fn rebase(path: &Path, from: &Path, onto: &Path) -> Option<PathBuf> {
+    let rest = path.strip_prefix(from).ok()?;
+    rest.components()
+        .all(|part| matches!(part, PathComponent::Normal(_)))
+        .then(|| raw_join(onto, rest))
 }
 
 /// A path read from a file that may legitimately point anywhere: a `gitdir:` line, a `commondir`
@@ -232,6 +578,20 @@ impl Pointer {
     #[must_use]
     pub(crate) fn new(text: &str) -> Option<Self> {
         (!text.contains('\0')).then(|| Self(PathBuf::from(text)))
+    }
+
+    /// Wraps a path the operating system or a library handed back, such as a `read_link` pointee
+    /// or git's `core.excludesFile`, or `None` when it holds a NUL byte, as [`Pointer::new`].
+    #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the sweep units wrap handed-back paths from V5-P3"
+        )
+    )]
+    pub(crate) fn from_path(path: PathBuf) -> Option<Self> {
+        (!path.as_os_str().as_encoded_bytes().contains(&0)).then_some(Self(path))
     }
 
     /// The pointer resolved from the directory `dir`: `dir` joined with it, or the pointer alone
@@ -339,11 +699,11 @@ pub(crate) fn resolve_project_file(path: &AbsolutePath) -> std::io::Result<Proje
 fn push_normalized(base: &mut PathBuf, path: &Path) {
     for component in path.components() {
         match component {
-            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+            PathComponent::Prefix(_) | PathComponent::RootDir | PathComponent::Normal(_) => {
                 base.push(component.as_os_str());
             }
-            Component::CurDir => {}
-            Component::ParentDir => {
+            PathComponent::CurDir => {}
+            PathComponent::ParentDir => {
                 let _popped = base.pop();
             }
         }
@@ -361,6 +721,19 @@ impl RelativePath {
     pub(crate) fn as_path(&self) -> &Path {
         &self.0
     }
+
+    /// `self` with `rel` appended, keeping `self` as written, `..` included.
+    #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the config chain's suggestion joins with it from V5-P5"
+        )
+    )]
+    pub(crate) fn beneath(&self, rel: &impl Beneath) -> Self {
+        Self(raw_join(&self.0, Path::new(rel.segments())))
+    }
 }
 
 impl TryFrom<String> for RelativePath {
@@ -369,9 +742,9 @@ impl TryFrom<String> for RelativePath {
     fn try_from(raw: String) -> Result<Self, Self::Error> {
         let path = PathBuf::from(raw);
         let anchored = path.is_absolute()
-            || path
-                .components()
-                .any(|component| matches!(component, Component::RootDir | Component::Prefix(_)));
+            || path.components().any(|component| {
+                matches!(component, PathComponent::RootDir | PathComponent::Prefix(_))
+            });
         if anchored {
             return Err(RelativePathError { path });
         }
@@ -474,6 +847,130 @@ mod tests {
     }
 
     #[test]
+    fn a_component_refuses_anything_but_one_normal_name() {
+        for refused in ["", ".", "..", "a/b", "a\\b", "a:b", "a\0b"] {
+            assert_eq!(
+                Component::new(refused),
+                None,
+                "{refused:?} is not one component"
+            );
+        }
+        let accepted = Component::new("x-1").expect("`x-1` is one normal component");
+        assert_eq!(accepted.segments(), "x-1");
+    }
+
+    #[test]
+    fn rebase_moves_the_remainder_and_refuses_off_prefix() {
+        assert_eq!(
+            rebase(
+                Path::new("/a/b/c/d"),
+                Path::new("/a/b"),
+                Path::new("/real/b")
+            ),
+            Some(PathBuf::from("/real/b/c/d"))
+        );
+        assert_eq!(
+            rebase(Path::new("/a/b"), Path::new("/a/b"), Path::new("/x")),
+            Some(PathBuf::from("/x"))
+        );
+        assert_eq!(
+            rebase(Path::new("/a/bc"), Path::new("/a/b"), Path::new("/x")),
+            None,
+            "matching is by whole components"
+        );
+    }
+
+    #[test]
+    fn rebase_refuses_a_remainder_that_climbs_or_is_not_plain() {
+        assert_eq!(
+            rebase(
+                Path::new("/a/b/../../etc/passwd"),
+                Path::new("/a/b"),
+                Path::new("/private/b")
+            ),
+            None,
+            "a `..` in the remainder would climb out of `onto`"
+        );
+        assert_eq!(
+            rebase(Path::new("./c"), Path::new(""), Path::new("/x")),
+            None,
+            "a `.` in the remainder is not a plain name"
+        );
+    }
+
+    #[test]
+    fn steps_to_yields_shallowest_first_and_refuses_off_prefix() {
+        let root = absolute("/r");
+        let steps: Vec<AbsolutePath> = root
+            .steps_to(&absolute("/r/a/b/c"))
+            .expect("`/r/a/b/c` is under `/r`")
+            .collect();
+        assert_eq!(
+            steps,
+            [absolute("/r/a"), absolute("/r/a/b"), absolute("/r/a/b/c")]
+        );
+        assert_eq!(
+            root.steps_to(&absolute("/r"))
+                .expect("a path is under itself")
+                .count(),
+            0
+        );
+        assert!(root.steps_to(&absolute("/other/a")).is_none());
+        assert!(root.steps_to(&absolute("/rx/a")).is_none());
+    }
+
+    #[test]
+    fn pointer_from_path_refuses_a_nul_byte() {
+        let pointer = Pointer::from_path(PathBuf::from("../x"))
+            .expect("a path without NUL should be accepted");
+        assert_eq!(
+            pointer.resolve_from(Path::new("/work")),
+            Path::new("/work/../x")
+        );
+        assert_eq!(Pointer::from_path(PathBuf::from("a\0b")), None);
+    }
+
+    #[test]
+    fn relative_path_beneath_appends_and_keeps_dots() {
+        let base = relative("../shared");
+        let joined = base.beneath(&fixed::CONFIG_FILE);
+        assert_eq!(
+            joined.as_path(),
+            Path::new("../shared").join(CONFIG_FILE_NAME)
+        );
+    }
+
+    #[test]
+    fn beneath_free_fn_appends_every_segment() {
+        assert_eq!(
+            beneath(Path::new("/home/u"), &fixed::CARGO_BIN_SUPDOC),
+            Path::new("/home/u/bin/supdoc")
+        );
+        let digest = Component::new("ab12").expect("a hex digest is one component");
+        assert_eq!(beneath(Path::new("/c"), &digest), Path::new("/c/ab12"));
+    }
+
+    #[test]
+    fn fixed_constants_expose_their_text() {
+        assert_eq!(fixed::LOCAL_STATE.as_str(), ".local/state");
+        assert_eq!(fixed::TRUSTED_ROOTS_LOCK.as_str(), "trusted-roots.lock");
+        let names: Vec<&str> = fixed::YAMLFMT_CONFIG_FILES
+            .iter()
+            .map(FixedPath::as_str)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ".yamlfmt",
+                "yamlfmt.yml",
+                "yamlfmt.yaml",
+                ".yamlfmt.yaml",
+                ".yamlfmt.yml"
+            ]
+        );
+    }
+
+    #[test]
     fn an_empty_pointer_resolves_to_the_directory_itself() {
         let pointer =
             Pointer::new("").expect("empty text should be accepted, as `Path::join` does");
@@ -540,6 +1037,83 @@ mod tests {
                     .as_ref()
                     .map(crate::link::SourcePath::as_str),
                 Ok(raw),
+                "fixed path `{raw}`"
+            );
+        }
+    }
+
+    #[test]
+    fn every_new_fixed_constant_is_a_valid_source_path() {
+        let singles = [
+            fixed::CARGO_DIR,
+            fixed::CARGO_BIN_SUPDOC,
+            fixed::CRATES2_JSON,
+            fixed::BIOME_LINT_DIR,
+            fixed::BIOME_CONFIG_DIR,
+            fixed::BIOME_JSON,
+            fixed::GO,
+            fixed::GO_HOME,
+            fixed::GO_PATH,
+            fixed::GO_BUILD,
+            fixed::TMP,
+            fixed::GO_MOD,
+            fixed::MAIN_GO,
+            fixed::SUPDOC,
+            fixed::CODE_BLOCKS,
+            fixed::CODE_BLOCKS_TARGET,
+            fixed::CODE_BLOCKS_CWD,
+            fixed::CARGO_TOML,
+            fixed::SRC_LIB_RS,
+            fixed::DOT_CACHE,
+            fixed::RUMDL_TOML,
+            fixed::RUMDL_CONFIG_DIR,
+            fixed::DOT_GIT,
+            fixed::TOMBI,
+            fixed::TOMBI_CONFIG_DIR,
+            fixed::DOT_TOMBI_TOML,
+            fixed::CONFIG_TOML,
+            fixed::EMIT,
+            fixed::BLOCK_RMETA,
+            fixed::CWD,
+            fixed::YAMLFMT_CONFIG_DIR,
+            fixed::YAMLLINT_CONFIG_DIR,
+            fixed::DOT_YAMLFMT,
+            fixed::CONFIG_YAML,
+            fixed::LOCAL_STATE,
+            fixed::TRUSTED_ROOTS,
+            fixed::TRUSTED_ROOTS_LOCK,
+            fixed::GITDIR,
+            fixed::WORKTREES,
+            fixed::COMMONDIR,
+            fixed::INFO,
+            fixed::INFO_EXCLUDE,
+            fixed::DOT_IGNORE,
+            fixed::DOT_GITIGNORE,
+        ];
+        let lists: [&[FixedPath]; 17] = [
+            &fixed::BIOME_CONFIG_FILES,
+            &fixed::RUMDL_CONFIG_FILES,
+            &fixed::RUMDL_TOOL_CONFIG_FILES,
+            &fixed::TOMBI_CONFIG_FILES,
+            &fixed::RUST_CONFIG_FILES,
+            &fixed::CLIPPY_FILES,
+            &fixed::TOOLCHAIN_FILES,
+            &fixed::YAMLFMT_CONFIG_FILES,
+            &fixed::YAMLLINT_CONFIG_FILES,
+            &fixed::RUSTFMT_TOOL_CONFIG_FILES,
+            &fixed::CLIPPY_TOOL_CONFIG_FILES,
+            &fixed::RUFF_TOOL_CONFIG_FILES,
+            &fixed::PYPROJECT_TOOL_CONFIG_FILES,
+            &fixed::EDITORCONFIG_TOOL_CONFIG_FILES,
+            &fixed::SHELLCHECK_TOOL_CONFIG_FILES,
+            &fixed::VENV_BINS,
+            &fixed::NODE_BINS,
+        ];
+        let all = singles.iter().chain(lists.iter().copied().flatten());
+        for constant in all {
+            let raw = constant.segments();
+            assert!(
+                raw.parse::<crate::link::SourcePath>().is_ok(),
                 "fixed path `{raw}`"
             );
         }
