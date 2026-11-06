@@ -8,17 +8,27 @@
 //! directories above `HOME` are too broad to trust: the store never lists them and ignores them
 //! when listed by hand. No file in the checkout can grant trust: the only files read inside it are
 //! the `.git` file or directory that locates its git directories.
+//!
+//! The store holds each path's bytes as the operating system encodes them. On Unix that is the raw
+//! bytes, whatever they are. On Windows it is UTF-8: a line that isn't UTF-8 is skipped, one
+//! trailing `\r` is dropped, and a root whose real path isn't valid Unicode can't be listed. A
+//! drive root such as `D:\` is too broad to trust, as `/` is on Unix.
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Read as _, Write as _};
-use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+#[cfg(all(unix, test))]
+use std::os::unix::ffi::OsStrExt as _;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt as _;
+#[cfg(all(unix, test))]
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::config::confine::{self, Admitted, Boundary};
 use crate::path::{Pointer, holds_git};
+use crate::read::source::open_without_blocking;
 use crate::scan::git::{common_dir, first_line};
 
 /// Tells concurrent writers' temporary files apart within one process.
@@ -216,7 +226,7 @@ pub(crate) fn unread_of(error: &io::Error) -> Option<Unread> {
 ///
 /// Fails when `SUPDOC_TRUST` is set to anything but `1`, `0` or empty.
 pub(crate) fn granted(root: &Path, env: &TrustEnv) -> Result<Grant, BadTrustValue> {
-    match env.trust.as_deref().map(OsStr::as_bytes) {
+    match env.trust.as_deref().map(OsStr::as_encoded_bytes) {
         Some(b"1") => Ok(Grant::Trusted),
         Some(b"0") => Ok(Grant::TurnedOff),
         None | Some(b"") => Ok(env
@@ -276,14 +286,22 @@ impl Store {
     /// ([`io::ErrorKind::InvalidInput`]), or the store or its lock can't be read or written.
     pub(crate) fn add(&self, root: &Path) -> Result<bool, AddError> {
         let real = root.canonicalize()?;
-        if real.as_os_str().as_bytes().contains(&b'\n') {
+        #[cfg(windows)]
+        if real.to_str().is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the root's real path isn't valid Unicode, which the trust store on Windows can't list",
+            )
+            .into());
+        }
+        if real.as_os_str().as_encoded_bytes().contains(&b'\n') {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "the root's real path holds a newline, which the trust store can't list",
             )
             .into());
         }
-        if self.broad().contains(&real) {
+        if Self::too_broad(&self.broad(), &real) {
             return Err(AddError::Broad(real));
         }
         let _lock = self.lock()?;
@@ -409,6 +427,12 @@ impl Store {
             .collect()
     }
 
+    /// Whether `path` is too broad to trust: it is in `broad` ([`Store::broad`]), or it has no
+    /// parent, as `/` on Unix and a drive root on Windows.
+    fn too_broad(broad: &[PathBuf], path: &Path) -> bool {
+        path.parent().is_none() || broad.contains(&path.to_path_buf())
+    }
+
     /// What the store grants `root`: [`Grant::Trusted`] when its real path is listed, or it sits in a linked worktree
     /// ([`Place::linked`]) whose common git directory and path in its work tree equal a listed
     /// root's. A listed root counts for that only while it still resolves to itself: the store
@@ -424,14 +448,14 @@ impl Store {
             return Grant::Untrusted;
         };
         let broad = self.broad();
-        if broad.contains(&real) {
+        if Self::too_broad(&broad, &real) {
             return Grant::Untrusted;
         }
         let mut roots = match self.read_roots() {
             Ok(roots) => roots,
             Err(unread) => return Grant::Unread(unread),
         };
-        roots.retain(|listed| !broad.contains(listed));
+        roots.retain(|listed| !Self::too_broad(&broad, listed));
         let trusted = roots.contains(&real)
             || Place::linked(&real).is_some_and(|place| {
                 roots.iter().any(|listed| {
@@ -486,11 +510,7 @@ impl Store {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(unreadable(error)),
         }
-        let mut file = match fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(path.as_path())
-        {
+        let mut file = match open_without_blocking(path.as_path()) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(unreadable(error)),
@@ -500,11 +520,7 @@ impl Store {
         }
         let mut bytes = Vec::new();
         let _read = file.read_to_end(&mut bytes).map_err(unreadable)?;
-        Ok(bytes
-            .split(|byte| *byte == b'\n')
-            .map(|line| PathBuf::from(OsString::from_vec(line.to_vec())))
-            .filter(|path| path.is_absolute())
-            .collect())
+        Ok(decode_lines(&bytes))
     }
 
     /// Replaces the store with `roots`, one per line: a temporary file in the same directory,
@@ -529,7 +545,7 @@ impl Store {
         let mut file = confine::create_new(&self.admit(&temp)?, 0o600)?;
         let written = (|| {
             for root in roots {
-                file.write_all(root.as_os_str().as_bytes())?;
+                file.write_all(root.as_os_str().as_encoded_bytes())?;
                 file.write_all(b"\n")?;
             }
             file.sync_all()?;
@@ -543,6 +559,29 @@ impl Store {
         }
         written
     }
+}
+
+/// The absolute paths `bytes` lists, one per line. On Unix each line's bytes are the path,
+/// whatever they are.
+#[cfg(unix)]
+fn decode_lines(bytes: &[u8]) -> Vec<PathBuf> {
+    bytes
+        .split(|byte| *byte == b'\n')
+        .map(|line| PathBuf::from(OsString::from_vec(line.to_vec())))
+        .filter(|path| path.is_absolute())
+        .collect()
+}
+
+/// The absolute paths `bytes` lists, one per line. A line that isn't UTF-8 is skipped, and a
+/// trailing `\r`, which a Windows editor writes before `\n`, is dropped.
+#[cfg(not(unix))]
+fn decode_lines(bytes: &[u8]) -> Vec<PathBuf> {
+    bytes
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| std::str::from_utf8(line.strip_suffix(b"\r").unwrap_or(line)).ok())
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .collect()
 }
 
 /// Where a directory sits in git: its work tree's common git directory (real path) and its path
