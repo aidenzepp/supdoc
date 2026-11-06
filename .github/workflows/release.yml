@@ -189,11 +189,19 @@ jobs:
           tag="${INPUT_TAG:-$GITHUB_REF_NAME}"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             is_draft="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
-            if [ "$is_draft" != "true" ]; then
-              echo "release $tag is already published; refusing to replace its assets" >&2
-              exit 1
+            if [ "$is_draft" = "true" ]; then
+              gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber assets/supdoc-*.tar.gz assets/SHA256SUMS
+            else
+              existing="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+              for f in assets/supdoc-*.tar.gz assets/SHA256SUMS; do
+                name="$(basename "$f")"
+                if printf '%s\n' "$existing" | grep -qxF "$name"; then
+                  echo "release $tag is already published and already has $name; refusing to replace it" >&2
+                  exit 1
+                fi
+              done
+              gh release upload "$tag" --repo "$GITHUB_REPOSITORY" assets/supdoc-*.tar.gz assets/SHA256SUMS
             fi
-            gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber assets/supdoc-*.tar.gz assets/SHA256SUMS
           else
             gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
               --title "supdoc $tag" --notes "" assets/supdoc-*.tar.gz assets/SHA256SUMS
