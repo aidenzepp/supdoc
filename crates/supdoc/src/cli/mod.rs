@@ -293,7 +293,7 @@ pub(crate) fn run(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::io;
 

@@ -459,13 +459,14 @@ fn write_failed(target: &AbsolutePath, error: &io::Error, context: &Context) -> 
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::Path;
 
     use clap::Parser as _;
 
     use crate::cli::args::{Cli, Command};
-    use crate::cli::testing::{Capture, ClosedPipe};
+    use crate::cli::testing::{Capture, ClosedPipe, symlink};
     use crate::config::Config;
     use crate::output::{OutputFormat, OutputSettings, PathStyle, Verbosity};
     use crate::scan::walk::GlobalExcludes;
@@ -838,7 +839,7 @@ mod tests {
     fn a_dangling_symlink_to_outside_at_the_target_is_refused_and_nothing_is_created_outside() {
         let (dir, project) = project_and_outside();
         let outside = dir.path().join("outside");
-        std::os::unix::fs::symlink(outside.join("planted.toml"), config_path(&project))
+        symlink(outside.join("planted.toml"), config_path(&project))
             .expect("the dangling symlink should be created");
         let (args, context) = context_in(&project, &["-c", "./supdoc.config.toml"]);
 
@@ -865,7 +866,7 @@ mod tests {
         let (args, context) = context_in(&project, &["-c", "./supdoc.config.toml"]);
         let temporary = temporary_sibling(&target(&context))
             .expect("the temporary sibling of an absolute target should be absolute");
-        std::os::unix::fs::symlink(outside.join("planted.tmp"), temporary.as_path())
+        symlink(outside.join("planted.tmp"), temporary.as_path())
             .expect("the dangling symlink should be created");
 
         let (result, _, _) = run_captured(&args, &context);
@@ -882,6 +883,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_directory_swapped_for_a_symlink_to_outside_after_resolving_is_refused() {
         let (dir, project) = project_and_outside();
@@ -897,7 +899,7 @@ mod tests {
         );
         std::fs::rename(&docs, project.path().join("moved"))
             .expect("the docs directory should be movable");
-        std::os::unix::fs::symlink(&outside, &docs).expect("the swapped symlink should be created");
+        symlink(&outside, &docs).expect("the swapped symlink should be created");
         // Read-only, so a create that wasn't refused first fails with a different error.
         std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o500))
             .expect("the outside directory should be made read-only");
@@ -945,8 +947,7 @@ mod tests {
                 .expect("the outside file should be written");
             std::fs::rename(&docs, project.path().join("moved"))
                 .expect("the docs directory should be movable");
-            std::os::unix::fs::symlink(&outside, &docs)
-                .expect("the swapped symlink should be created");
+            symlink(&outside, &docs).expect("the swapped symlink should be created");
         };
 
         let error = write_beneath(&boundary, &target, &context, swap)
@@ -1031,7 +1032,7 @@ mod tests {
         std::fs::write(outside.join(name), "planted").expect("the planted file should be written");
         std::fs::rename(&docs, project.path().join("moved"))
             .expect("the docs directory should be movable");
-        std::os::unix::fs::symlink(&outside, &docs).expect("the swapped symlink should be created");
+        symlink(&outside, &docs).expect("the swapped symlink should be created");
 
         let error = link_into_place(&boundary, &temporary, &target, confine::hard_link_new)
             .expect_err("the link should be refused once the directory leads outside");
@@ -1078,7 +1079,9 @@ mod tests {
     fn without_hard_links_the_starter_is_written_in_place() {
         for error in [
             || io::Error::from(io::ErrorKind::Unsupported),
+            #[cfg(unix)]
             || io::Error::from_raw_os_error(libc::ENOTSUP),
+            #[cfg(unix)]
             || io::Error::from_raw_os_error(libc::EOPNOTSUPP),
         ] {
             let (_dir, project, result) = init_with_failing_link(error, None);
@@ -1163,7 +1166,7 @@ mod tests {
         );
         std::fs::rename(&docs, project.path().join("moved"))
             .expect("the docs directory should be movable");
-        std::os::unix::fs::symlink(&outside, &docs).expect("the swapped symlink should be created");
+        symlink(&outside, &docs).expect("the swapped symlink should be created");
 
         let error = create_in_place(&boundary, &target, |_| Ok(()))
             .expect_err("a directory leading outside should be refused");
@@ -1178,6 +1181,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn eperm_counts_as_unsupported_only_on_linux_and_eacces_never_does() {
         let eperm = io::Error::from_raw_os_error(libc::EPERM);
