@@ -350,7 +350,11 @@ namespace A.B.C {
   export const Z = 1;
 }
 namespace A.B.C.D {
-  export const Lost = 1;
+  export const Deep = 1;
+  export function f() {}
+}
+namespace P.Q.R.S.T.U {
+  export function g() {}
 }
 export var legacy = 1;
 export declare function connect(url: string): void;
@@ -381,7 +385,7 @@ function local() {
 }
 ";
 
-    const SHARED_SYMBOLS: [&str; 30] = [
+    const SHARED_SYMBOLS: [&str; 35] = [
         "Outer.Inner",
         "Outer.Inner.X",
         "Outer.Inner.V",
@@ -389,6 +393,11 @@ function local() {
         "Outer.Inner.kept",
         "A.B.C",
         "A.B.C.Z",
+        "A.B.C.D",
+        "A.B.C.D.Deep",
+        "A.B.C.D.f",
+        "P.Q.R.S.T.U",
+        "P.Q.R.S.T.U.g",
         "legacy",
         "connect",
         "VERSION",
