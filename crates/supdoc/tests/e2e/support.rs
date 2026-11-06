@@ -277,3 +277,54 @@ fn copy_tree(from: &Path, to: &Path) {
 pub(crate) fn links(items: &[&str]) -> BTreeSet<String> {
     items.iter().map(|item| (*item).to_owned()).collect()
 }
+
+/// Creates a symlink at `link` pointing to `target`, a file link or a directory link as `target` is.
+///
+/// A relative `target` is resolved against `link`'s parent, as the operating system resolves it.
+/// Unix has one kind of symlink. Windows has two, so the kind follows what `target` is: a
+/// directory gets a directory link, anything else a file link.
+pub(crate) fn symlink(target: impl AsRef<Path>, link: impl AsRef<Path>) -> std::io::Result<()> {
+    let (target, link) = (target.as_ref(), link.as_ref());
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link)
+    }
+    #[cfg(windows)]
+    {
+        let resolved = link
+            .parent()
+            .map_or_else(|| target.to_path_buf(), |parent| parent.join(target));
+        if resolved.is_dir() {
+            std::os::windows::fs::symlink_dir(target, link)
+        } else {
+            std::os::windows::fs::symlink_file(target, link)
+        }
+    }
+}
+
+#[cfg(test)]
+mod symlink_tests {
+    use super::symlink;
+    use std::fs;
+
+    #[test]
+    fn symlink_reads_through_file_and_directory_links() {
+        let dir = tempfile::tempdir().expect("the temporary directory should be creatable");
+        fs::create_dir(dir.path().join("real")).expect("the directory should be creatable");
+        fs::write(dir.path().join("real/note.txt"), "hello").expect("the file should be writable");
+        symlink("real/note.txt", dir.path().join("file-link"))
+            .expect("the file link should be creatable");
+        symlink("real", dir.path().join("dir-link"))
+            .expect("the directory link should be creatable");
+
+        assert_eq!(
+            fs::read_to_string(dir.path().join("file-link")).expect("the file link should read"),
+            "hello"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("dir-link/note.txt"))
+                .expect("the directory link should read"),
+            "hello"
+        );
+    }
+}
