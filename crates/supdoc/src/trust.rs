@@ -11,7 +11,8 @@
 //!
 //! The store holds each path's bytes as the operating system encodes them. On Unix that is the raw
 //! bytes, whatever they are. On Windows it is UTF-8: a line that isn't UTF-8 is skipped, one
-//! trailing `\r` is dropped, and a root whose real path isn't valid Unicode can't be listed. A
+//! trailing `\r` is dropped, and a root whose real path isn't valid Unicode or holds a `\r` can't
+//! be listed. A
 //! drive root such as `D:\` is too broad to trust, as `/` is on Unix.
 
 use std::ffi::{OsStr, OsString};
@@ -281,9 +282,10 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Returns [`AddError::Broad`] when `root`'s real path is too broad ([`Store::broad`]), and
+    /// Returns [`AddError::Broad`] when `root`'s real path is too broad ([`Store::too_broad`]), and
     /// [`AddError::Io`] when `root` can't be resolved, its real path holds a newline
-    /// ([`io::ErrorKind::InvalidInput`]), or the store or its lock can't be read or written.
+    /// ([`io::ErrorKind::InvalidInput`]), on Windows isn't valid Unicode or holds a `\r`
+    /// (both [`io::ErrorKind::InvalidInput`]), or the store or its lock can't be read or written.
     pub(crate) fn add(&self, root: &Path) -> Result<bool, AddError> {
         let real = root.canonicalize()?;
         #[cfg(windows)]
@@ -291,6 +293,14 @@ impl Store {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "the root's real path isn't valid Unicode, which the trust store on Windows can't list",
+            )
+            .into());
+        }
+        #[cfg(windows)]
+        if real.as_os_str().as_encoded_bytes().contains(&b'\r') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the root's real path holds a carriage return, which the trust store on Windows can't list",
             )
             .into());
         }
@@ -437,7 +447,7 @@ impl Store {
     /// ([`Place::linked`]) whose common git directory and path in its work tree equal a listed
     /// root's. A listed root counts for that only while it still resolves to itself: the store
     /// holds real paths, so one that resolves elsewhere has been replaced since it was listed. A
-    /// root too broad to trust ([`Store::broad`]) is never trusted by either rule, and a listed one
+    /// root too broad to trust ([`Store::too_broad`]) is never trusted by either rule, and a listed one
     /// counts for nothing. A store [`Store::read_roots`] refuses grants [`Grant::Unread`]; a
     /// missing one, [`Grant::Untrusted`].
     ///
