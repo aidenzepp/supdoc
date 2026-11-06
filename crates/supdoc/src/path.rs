@@ -236,10 +236,6 @@ impl FixedPath {
 
 /// Every [`FixedPath`]. Each is a `const` item, which the compiler evaluates even when nothing
 /// uses it, so a constant that breaks [`Beneath`]'s rules does not compile.
-#[expect(
-    dead_code,
-    reason = "the sweep units V5-P2a to V5-P6 use each constant"
-)]
 pub(crate) mod fixed {
     use super::{CONFIG_FILE_NAME, FixedPath, LOCK_FILE_NAME};
 
@@ -257,100 +253,139 @@ pub(crate) mod fixed {
     /// Where the skill goes beneath Claude Code's config directory.
     pub(crate) const CLAUDE_DIR_SKILL: FixedPath = FixedPath::new("skills/supdoc/SKILL.md");
     /// Cargo's home directory beneath `HOME`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CARGO_DIR: FixedPath = FixedPath::new(".cargo");
     /// The installed `supdoc` binary beneath Cargo's home.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CARGO_BIN_SUPDOC: FixedPath = FixedPath::new("bin/supdoc");
     /// Cargo's install record beneath its home.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CRATES2_JSON: FixedPath = FixedPath::new(".crates2.json");
     /// Biome's private lint directory beneath the cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const BIOME_LINT_DIR: FixedPath = FixedPath::new("biome-lint");
     /// Biome's private config directory beneath the cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const BIOME_CONFIG_DIR: FixedPath = FixedPath::new("biome-config");
     /// Biome's config file name.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const BIOME_JSON: FixedPath = FixedPath::new("biome.json");
     /// Go's private directory beneath the cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const GO: FixedPath = FixedPath::new("go");
     /// Go's private home directory beneath the cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const GO_HOME: FixedPath = FixedPath::new("go-home");
     /// Go's private `GOPATH` directory beneath the cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const GO_PATH: FixedPath = FixedPath::new("go-path");
     /// Go's private build cache directory beneath the cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const GO_BUILD: FixedPath = FixedPath::new("go-build");
     /// A private scratch directory.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const TMP: FixedPath = FixedPath::new("tmp");
     /// A Go module file.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const GO_MOD: FixedPath = FixedPath::new("go.mod");
     /// The Go file a block is written to.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const MAIN_GO: FixedPath = FixedPath::new("main.go");
     /// supdoc's directory beneath a cache or state base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const SUPDOC: FixedPath = FixedPath::new("supdoc");
     /// The code-block directory beneath [`SUPDOC`].
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CODE_BLOCKS: FixedPath = FixedPath::new("code-blocks");
-    /// The code-block directory beneath a cache base.
-    pub(crate) const SUPDOC_CODE_BLOCKS: FixedPath = FixedPath::new("supdoc/code-blocks");
     /// Cargo's private target directory beneath a cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CODE_BLOCKS_TARGET: FixedPath = FixedPath::new("supdoc/code-blocks/target");
     /// The private working directory beneath a cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CODE_BLOCKS_CWD: FixedPath = FixedPath::new("supdoc/code-blocks/cwd");
     /// A Cargo manifest.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CARGO_TOML: FixedPath = FixedPath::new("Cargo.toml");
     /// A library crate's root file.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const SRC_LIB_RS: FixedPath = FixedPath::new("src/lib.rs");
     /// The default cache base beneath `HOME`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const DOT_CACHE: FixedPath = FixedPath::new(".cache");
     /// rumdl's config file name.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const RUMDL_TOML: FixedPath = FixedPath::new("rumdl.toml");
     /// rumdl's private config directory beneath the cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const RUMDL_CONFIG_DIR: FixedPath = FixedPath::new("rumdl-config");
     /// A git work tree's marker.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const DOT_GIT: FixedPath = FixedPath::new(".git");
     /// tombi's config directory name.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const TOMBI: FixedPath = FixedPath::new("tombi");
     /// tombi's private config directory beneath the cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const TOMBI_CONFIG_DIR: FixedPath = FixedPath::new("tombi-config");
     /// tombi's private config file name.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const DOT_TOMBI_TOML: FixedPath = FixedPath::new(".tombi.toml");
     /// A tool's config file name inside its config directory.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CONFIG_TOML: FixedPath = FixedPath::new("config.toml");
     /// rustc's private emit directory beneath the cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const EMIT: FixedPath = FixedPath::new("emit");
     /// The metadata file rustc emits for a block.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const BLOCK_RMETA: FixedPath = FixedPath::new("block.rmeta");
     /// A private working directory name.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CWD: FixedPath = FixedPath::new("cwd");
     /// yamlfmt's private config directory beneath the cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const YAMLFMT_CONFIG_DIR: FixedPath = FixedPath::new("yamlfmt-config");
     /// yamllint's private config directory beneath the cache base.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const YAMLLINT_CONFIG_DIR: FixedPath = FixedPath::new("yamllint-config");
     /// yamlfmt's private config file name.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const DOT_YAMLFMT: FixedPath = FixedPath::new(".yamlfmt");
     /// yamllint's private config file name.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CONFIG_YAML: FixedPath = FixedPath::new("config.yaml");
     /// The default state base beneath `HOME`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const LOCAL_STATE: FixedPath = FixedPath::new(".local/state");
     /// The trust store file.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const TRUSTED_ROOTS: FixedPath = FixedPath::new("trusted-roots");
     /// The trust store's lock file.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const TRUSTED_ROOTS_LOCK: FixedPath = FixedPath::new("trusted-roots.lock");
     /// A worktree's back-pointer file.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const GITDIR: FixedPath = FixedPath::new("gitdir");
     /// A git directory's worktrees directory.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const WORKTREES: FixedPath = FixedPath::new("worktrees");
     /// A worktree git directory's pointer to the common directory.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const COMMONDIR: FixedPath = FixedPath::new("commondir");
     /// A git directory's info directory.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const INFO: FixedPath = FixedPath::new("info");
     /// A git directory's exclude file.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const INFO_EXCLUDE: FixedPath = FixedPath::new("info/exclude");
     /// An `.ignore` file.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const DOT_IGNORE: FixedPath = FixedPath::new(".ignore");
     /// A `.gitignore` file.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const DOT_GITIGNORE: FixedPath = FixedPath::new(".gitignore");
-    /// A Python virtual environment's binary directory.
-    pub(crate) const VENV_BIN: FixedPath = FixedPath::new(".venv/bin");
-    /// Node's local binary directory.
-    pub(crate) const NODE_MODULES_BIN: FixedPath = FixedPath::new("node_modules/.bin");
     /// The config names biome looks for in a directory.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const BIOME_CONFIG_FILES: [FixedPath; 4] = [
         FixedPath::new("biome.json"),
         FixedPath::new("biome.jsonc"),
@@ -358,6 +393,7 @@ pub(crate) mod fixed {
         FixedPath::new(".biome.jsonc"),
     ];
     /// The config names rumdl looks for in a directory.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const RUMDL_CONFIG_FILES: [FixedPath; 4] = [
         FixedPath::new(".rumdl.toml"),
         FixedPath::new("rumdl.toml"),
@@ -365,6 +401,7 @@ pub(crate) mod fixed {
         FixedPath::new("pyproject.toml"),
     ];
     /// The files rumdl's cached results depend on.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const RUMDL_TOOL_CONFIG_FILES: [FixedPath; 5] = [
         FixedPath::new(".rumdl.toml"),
         FixedPath::new("rumdl.toml"),
@@ -373,6 +410,7 @@ pub(crate) mod fixed {
         FixedPath::new(".editorconfig"),
     ];
     /// The config names tombi looks for in a directory.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const TOMBI_CONFIG_FILES: [FixedPath; 4] = [
         FixedPath::new(".tombi.toml"),
         FixedPath::new("tombi.toml"),
@@ -380,21 +418,25 @@ pub(crate) mod fixed {
         FixedPath::new("pyproject.toml"),
     ];
     /// The config names rustfmt looks for in a directory.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const RUST_CONFIG_FILES: [FixedPath; 2] = [
         FixedPath::new(".rustfmt.toml"),
         FixedPath::new("rustfmt.toml"),
     ];
     /// The config names clippy looks for in a directory.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CLIPPY_FILES: [FixedPath; 2] = [
         FixedPath::new(".clippy.toml"),
         FixedPath::new("clippy.toml"),
     ];
     /// The toolchain file names rustup looks for.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const TOOLCHAIN_FILES: [FixedPath; 2] = [
         FixedPath::new("rust-toolchain"),
         FixedPath::new("rust-toolchain.toml"),
     ];
     /// The config names yamlfmt looks for in a directory.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const YAMLFMT_CONFIG_FILES: [FixedPath; 5] = [
         FixedPath::new(".yamlfmt"),
         FixedPath::new("yamlfmt.yml"),
@@ -403,40 +445,49 @@ pub(crate) mod fixed {
         FixedPath::new(".yamlfmt.yml"),
     ];
     /// The config names yamllint looks for in a directory.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const YAMLLINT_CONFIG_FILES: [FixedPath; 3] = [
         FixedPath::new(".yamllint"),
         FixedPath::new(".yamllint.yaml"),
         FixedPath::new(".yamllint.yml"),
     ];
     /// The files rustfmt's cached results depend on.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const RUSTFMT_TOOL_CONFIG_FILES: [FixedPath; 2] = [
         FixedPath::new("rustfmt.toml"),
         FixedPath::new(".rustfmt.toml"),
     ];
     /// The files clippy's cached results depend on.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CLIPPY_TOOL_CONFIG_FILES: [FixedPath; 3] = [
         FixedPath::new("clippy.toml"),
         FixedPath::new(".clippy.toml"),
         FixedPath::new("Cargo.toml"),
     ];
     /// The files ruff's cached results depend on.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const RUFF_TOOL_CONFIG_FILES: [FixedPath; 3] = [
         FixedPath::new("ruff.toml"),
         FixedPath::new(".ruff.toml"),
         FixedPath::new("pyproject.toml"),
     ];
     /// The files a pyproject-configured tool's cached results depend on.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const PYPROJECT_TOOL_CONFIG_FILES: [FixedPath; 1] =
         [FixedPath::new("pyproject.toml")];
     /// The files an editorconfig-configured tool's cached results depend on.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const EDITORCONFIG_TOOL_CONFIG_FILES: [FixedPath; 1] =
         [FixedPath::new(".editorconfig")];
     /// The files shellcheck's cached results depend on.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const SHELLCHECK_TOOL_CONFIG_FILES: [FixedPath; 1] =
         [FixedPath::new(".shellcheckrc")];
     /// The local binary directories a Python tool searches.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const VENV_BINS: [FixedPath; 1] = [FixedPath::new(".venv/bin")];
     /// The local binary directories a Node tool searches.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const NODE_BINS: [FixedPath; 1] = [FixedPath::new("node_modules/.bin")];
 }
 
@@ -498,19 +549,19 @@ pub(crate) fn beneath(base: &Path, rel: &impl Beneath) -> PathBuf {
 }
 
 /// `path` moved from under `from` to the same place under `onto`: `onto` joined with what
-/// `path.strip_prefix(from)` leaves. `None` only when `path` is not under `from`.
-///
-/// What `strip_prefix` leaves holds no root or prefix, so the result sits beneath `onto` exactly
-/// as `path` sat beneath `from`.
+/// `path.strip_prefix(from)` leaves. `None` when `path` is not under `from`, or when what is left
+/// is not plain names: a `..`, `.`, root or prefix component would let the result climb out of
+/// `onto`.
 #[must_use]
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the sweep units re-root remainders from V5-P2a")
 )]
 pub(crate) fn rebase(path: &Path, from: &Path, onto: &Path) -> Option<PathBuf> {
-    path.strip_prefix(from)
-        .ok()
-        .map(|rest| raw_join(onto, rest))
+    let rest = path.strip_prefix(from).ok()?;
+    rest.components()
+        .all(|part| matches!(part, PathComponent::Normal(_)))
+        .then(|| raw_join(onto, rest))
 }
 
 /// A path read from a file that may legitimately point anywhere: a `gitdir:` line, a `commondir`
@@ -830,6 +881,24 @@ mod tests {
     }
 
     #[test]
+    fn rebase_refuses_a_remainder_that_climbs_or_is_not_plain() {
+        assert_eq!(
+            rebase(
+                Path::new("/a/b/../../etc/passwd"),
+                Path::new("/a/b"),
+                Path::new("/private/b")
+            ),
+            None,
+            "a `..` in the remainder would climb out of `onto`"
+        );
+        assert_eq!(
+            rebase(Path::new("./c"), Path::new(""), Path::new("/x")),
+            None,
+            "a `.` in the remainder is not a plain name"
+        );
+    }
+
+    #[test]
     fn steps_to_yields_shallowest_first_and_refuses_off_prefix() {
         let root = absolute("/r");
         let steps: Vec<AbsolutePath> = root
@@ -968,6 +1037,83 @@ mod tests {
                     .as_ref()
                     .map(crate::link::SourcePath::as_str),
                 Ok(raw),
+                "fixed path `{raw}`"
+            );
+        }
+    }
+
+    #[test]
+    fn every_new_fixed_constant_is_a_valid_source_path() {
+        let singles = [
+            fixed::CARGO_DIR,
+            fixed::CARGO_BIN_SUPDOC,
+            fixed::CRATES2_JSON,
+            fixed::BIOME_LINT_DIR,
+            fixed::BIOME_CONFIG_DIR,
+            fixed::BIOME_JSON,
+            fixed::GO,
+            fixed::GO_HOME,
+            fixed::GO_PATH,
+            fixed::GO_BUILD,
+            fixed::TMP,
+            fixed::GO_MOD,
+            fixed::MAIN_GO,
+            fixed::SUPDOC,
+            fixed::CODE_BLOCKS,
+            fixed::CODE_BLOCKS_TARGET,
+            fixed::CODE_BLOCKS_CWD,
+            fixed::CARGO_TOML,
+            fixed::SRC_LIB_RS,
+            fixed::DOT_CACHE,
+            fixed::RUMDL_TOML,
+            fixed::RUMDL_CONFIG_DIR,
+            fixed::DOT_GIT,
+            fixed::TOMBI,
+            fixed::TOMBI_CONFIG_DIR,
+            fixed::DOT_TOMBI_TOML,
+            fixed::CONFIG_TOML,
+            fixed::EMIT,
+            fixed::BLOCK_RMETA,
+            fixed::CWD,
+            fixed::YAMLFMT_CONFIG_DIR,
+            fixed::YAMLLINT_CONFIG_DIR,
+            fixed::DOT_YAMLFMT,
+            fixed::CONFIG_YAML,
+            fixed::LOCAL_STATE,
+            fixed::TRUSTED_ROOTS,
+            fixed::TRUSTED_ROOTS_LOCK,
+            fixed::GITDIR,
+            fixed::WORKTREES,
+            fixed::COMMONDIR,
+            fixed::INFO,
+            fixed::INFO_EXCLUDE,
+            fixed::DOT_IGNORE,
+            fixed::DOT_GITIGNORE,
+        ];
+        let lists: [&[FixedPath]; 17] = [
+            &fixed::BIOME_CONFIG_FILES,
+            &fixed::RUMDL_CONFIG_FILES,
+            &fixed::RUMDL_TOOL_CONFIG_FILES,
+            &fixed::TOMBI_CONFIG_FILES,
+            &fixed::RUST_CONFIG_FILES,
+            &fixed::CLIPPY_FILES,
+            &fixed::TOOLCHAIN_FILES,
+            &fixed::YAMLFMT_CONFIG_FILES,
+            &fixed::YAMLLINT_CONFIG_FILES,
+            &fixed::RUSTFMT_TOOL_CONFIG_FILES,
+            &fixed::CLIPPY_TOOL_CONFIG_FILES,
+            &fixed::RUFF_TOOL_CONFIG_FILES,
+            &fixed::PYPROJECT_TOOL_CONFIG_FILES,
+            &fixed::EDITORCONFIG_TOOL_CONFIG_FILES,
+            &fixed::SHELLCHECK_TOOL_CONFIG_FILES,
+            &fixed::VENV_BINS,
+            &fixed::NODE_BINS,
+        ];
+        let all = singles.iter().chain(lists.iter().copied().flatten());
+        for constant in all {
+            let raw = constant.segments();
+            assert!(
+                raw.parse::<crate::link::SourcePath>().is_ok(),
                 "fixed path `{raw}`"
             );
         }
