@@ -491,6 +491,7 @@ fn is_host_triple(triple: &str) -> bool {
 mod tests {
     use std::ffi::OsString;
 
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
     use std::time::Duration;
 
@@ -610,6 +611,7 @@ mod tests {
 
     /// A directory holding a stub `rustup` whose body is `body`, and the environment with it alone
     /// on `PATH`.
+    #[cfg(unix)]
     fn rustup_stub(body: &str) -> (tempfile::TempDir, ToolEnv) {
         let bin = tempfile::TempDir::new().expect("a temporary directory should be creatable");
         let stub = bin.path().join("rustup");
@@ -621,6 +623,7 @@ mod tests {
         (bin, env)
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_rustup_that_runs_past_the_timeout_is_unresolved() {
         let root = tempfile::TempDir::new().expect("a temporary directory should be creatable");
@@ -631,6 +634,7 @@ mod tests {
         assert_eq!(toolchain, unresolved(Cause::TimedOut, ""));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_rustup_that_prints_past_the_cap_is_unresolved() {
         let root = tempfile::TempDir::new().expect("a temporary directory should be creatable");
@@ -751,7 +755,7 @@ mod tests {
         let target = outside.path().join("rust-toolchain.toml");
         std::fs::write(&target, "[toolchain]\nchannel = \"stable\"\n")
             .expect("the outside file should be writable");
-        std::os::unix::fs::symlink(&target, root.path().join("rust-toolchain.toml"))
+        crate::cli::testing::symlink(&target, root.path().join("rust-toolchain.toml"))
             .expect("the link should be creatable");
 
         assert_eq!(
@@ -815,7 +819,7 @@ mod tests {
         let target = outside.path().join("Cargo.toml");
         std::fs::write(&target, "[package]\nedition = \"2018\"\n")
             .expect("the outside file should be writable");
-        std::os::unix::fs::symlink(&target, root.path().join("Cargo.toml"))
+        crate::cli::testing::symlink(&target, root.path().join("Cargo.toml"))
             .expect("the link should be creatable");
 
         assert_eq!(cargo_edition(root.path()), None);
