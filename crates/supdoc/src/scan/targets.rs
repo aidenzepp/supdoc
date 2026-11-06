@@ -42,6 +42,10 @@ pub(crate) const CODE_OUTSIDE_ROOT: &str = "link-outside-root";
 pub(crate) const OUTSIDE_ROOT_HELP: &str = "Link to a file inside the project root, or move \
      `supdoc.config.toml` up to a directory that holds both";
 
+/// What to do about a namespaced link that climbs out of its namespace's directory.
+pub(crate) const NAMESPACE_CLIMB_HELP: &str = "Write the link as a path relative to this doc, or \
+     give its directory its own namespace under `[namespaces]`";
+
 /// Files parsed during one run, keyed by path. Owned by one scan, never global.
 #[derive(Debug, Default)]
 pub(crate) struct Parsed {
