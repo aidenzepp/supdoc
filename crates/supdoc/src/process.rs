@@ -7,6 +7,12 @@
 //! group still registered as live is killed, and supdoc then ends as that signal's default action
 //! would have ended it. Once a signal has arrived, supdoc ends by that signal and no other way:
 //! the main thread waits for the re-raise instead of printing anything or returning a code.
+//!
+//! On Windows only SIGINT and SIGTERM are handled, through signal-hook's flag registration and a
+//! thread that polls the flags every [`TERMINATION_POLL`]. SIGHUP does not exist there. Ctrl+Break,
+//! console close, logoff and shutdown are not caught, so Windows ends supdoc by its default action;
+//! tools in their own process group still receive the console close event, so they end too. The
+//! C runtime's default SIGINT action exits with code 3, not 130.
 
 use std::ffi::OsStr;
 use std::io::{self, IsTerminal, Write};
@@ -195,6 +201,7 @@ fn record_system_root() {
 /// goes on with the default signal behavior.
 ///
 /// Effect: registers the signals and starts the signal-handling thread.
+#[cfg(unix)]
 fn handle_termination() {
     use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
     let Ok(mut signals) = signal_hook::iterator::Signals::new([SIGINT, SIGTERM, SIGHUP]) else {
@@ -205,14 +212,53 @@ fn handle_termination() {
         let Some(signal) = signals.forever().next() else {
             return;
         };
-        // Set first, so the main thread can't see a killed tool and end before the re-raise.
-        TERMINATING.store(signal, Ordering::SeqCst);
-        kill_live_groups();
-        // Resets the signal to its default action and raises it, which ends the process. No
-        // fallback is needed: for SIGINT, SIGTERM and SIGHUP, signal-hook 0.4 raises the signal
-        // and aborts if raising fails, so this call never returns.
-        let _ended = signal_hook::low_level::emulate_default_handler(signal);
+        end_by_termination(signal);
     }));
+}
+
+/// Installs the handler for SIGINT and SIGTERM: one thread polls the two flags the signals set,
+/// then kills every live tool group and ends the process as the signal's default action would. If
+/// either signal can't be registered the run goes on with the default signal behavior.
+///
+/// Effect: registers the signals and starts the signal-handling thread.
+#[cfg(windows)]
+fn handle_termination() {
+    use signal_hook::consts::{SIGINT, SIGTERM};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    let interrupt = Arc::new(AtomicBool::new(false));
+    let terminate = Arc::new(AtomicBool::new(false));
+    if signal_hook::flag::register(SIGINT, Arc::clone(&interrupt)).is_err()
+        || signal_hook::flag::register(SIGTERM, Arc::clone(&terminate)).is_err()
+    {
+        return;
+    }
+    drop(std::thread::spawn(move || {
+        let signal = loop {
+            if interrupt.load(Ordering::SeqCst) {
+                break SIGINT;
+            }
+            if terminate.load(Ordering::SeqCst) {
+                break SIGTERM;
+            }
+            std::thread::sleep(TERMINATION_POLL);
+        };
+        end_by_termination(signal);
+    }));
+}
+
+/// Records `signal`, kills every live tool group, then ends the process as the signal's default
+/// action would.
+///
+/// Effect: signals the live tool groups and ends the process.
+fn end_by_termination(signal: i32) {
+    // Set first, so the main thread can't see a killed tool and end before the re-raise.
+    TERMINATING.store(signal, Ordering::SeqCst);
+    kill_live_groups();
+    // Resets the signal to its default action and raises it, which ends the process. No
+    // fallback is needed: for the signals registered here, signal-hook 0.4 raises the signal
+    // and aborts if raising fails, so this call never returns.
+    let _ended = signal_hook::low_level::emulate_default_handler(signal);
 }
 
 /// Whether `flag` records a termination signal, so the process must wait to be ended by it.

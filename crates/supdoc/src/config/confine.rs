@@ -21,10 +21,17 @@
 //! [`Admitted`] path it returns, not a `&Path`, so a write that skips the check doesn't compile.
 //! The check narrows the race between deciding to write and writing to the gap between `admit`
 //! and the call; it doesn't close it.
+//!
+//! The `mode` the create primitives take is a Unix permission mode, applied on Unix only. On
+//! Windows it is ignored: a new file or directory inherits its parent's ACL, and supdoc's private
+//! places sit under the user's own profile or cache directory, whose default ACL admits only the
+//! owner, SYSTEM and Administrators. The limit: a parent directory that is shared gives a shared
+//! ACL, and nothing here narrows it.
 
 use std::fs;
 use std::io::{self, Write as _};
 use std::marker::PhantomData;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -326,46 +333,72 @@ pub(crate) fn write_atomically(
     finished
 }
 
-/// Creates `dir` and any missing parents, each new one with `mode`.
+/// Creates `dir` and any missing parents, each new one with `mode` (Unix only; ignored on Windows).
 ///
 /// Effect: creates directories.
 ///
 /// # Errors
 ///
 /// Fails when a directory can't be created, or `dir` exists and isn't a directory.
+#[cfg_attr(
+    not(unix),
+    expect(
+        unused_variables,
+        reason = "`mode` is a Unix permission mode, ignored on Windows"
+    )
+)]
 pub(crate) fn create_dir_all(dir: &Admitted<'_>, mode: u32) -> io::Result<()> {
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(mode)
-        .create(&dir.path)
+    let mut builder = fs::DirBuilder::new();
+    let builder = builder.recursive(true);
+    #[cfg(unix)]
+    let builder = builder.mode(mode);
+    builder.create(&dir.path)
 }
 
-/// Creates the new directory `dir` with `mode`. Its parent must exist. Refuses an existing path,
-/// and never follows a symlink there, so the caller that creates it owns it alone.
+/// Creates the new directory `dir` with `mode` (Unix only; ignored on Windows). Its parent must
+/// exist. Refuses an existing path, and never follows a symlink there, so the caller that creates
+/// it owns it alone.
 ///
 /// Effect: creates a directory.
 ///
 /// # Errors
 ///
 /// `AlreadyExists` when anything is at `dir`; otherwise fails when it can't be created.
+#[cfg_attr(
+    not(unix),
+    expect(
+        unused_variables,
+        reason = "`mode` is a Unix permission mode, ignored on Windows"
+    )
+)]
 pub(crate) fn create_dir(dir: &Admitted<'_>, mode: u32) -> io::Result<()> {
-    fs::DirBuilder::new().mode(mode).create(&dir.path)
+    let builder = &mut fs::DirBuilder::new();
+    #[cfg(unix)]
+    let builder = builder.mode(mode);
+    builder.create(&dir.path)
 }
 
-/// Creates the new file `file` with `mode`, open for writing. Refuses an existing path, and never
-/// follows a symlink there.
+/// Creates the new file `file` with `mode` (Unix only; ignored on Windows), open for writing.
+/// Refuses an existing path, and never follows a symlink there.
 ///
 /// Effect: creates a file.
 ///
 /// # Errors
 ///
 /// `AlreadyExists` when anything is at `file`; otherwise fails when it can't be created.
+#[cfg_attr(
+    not(unix),
+    expect(
+        unused_variables,
+        reason = "`mode` is a Unix permission mode, ignored on Windows"
+    )
+)]
 pub(crate) fn create_new(file: &Admitted<'_>, mode: u32) -> io::Result<fs::File> {
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(mode)
-        .open(&file.path)
+    let mut options = fs::OpenOptions::new();
+    let options = options.write(true).create_new(true);
+    #[cfg(unix)]
+    let options = options.mode(mode);
+    options.open(&file.path)
 }
 
 /// Renames `from` onto `to`, replacing any file there.
