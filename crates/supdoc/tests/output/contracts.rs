@@ -789,11 +789,18 @@ mod helps {
     }];
 
     /// Codes whose rendered help is pinned word for word, so any rewording is a deliberate update.
-    const PINNED_HELPS: &[(&str, &str)] = &[(
-        "link-outside-root",
-        "Link to a file inside the project root, or move `supdoc.config.toml` up to a directory \
-         that holds both",
-    )];
+    const PINNED_HELPS: &[(&str, &str)] = &[
+        (
+            "link-outside-root",
+            "Link to a file inside the project root, or move `supdoc.config.toml` up to a \
+             directory that holds both",
+        ),
+        (
+            "link-outside-root",
+            "Write the link as a path relative to this doc, or give its directory its own \
+             namespace under `[namespaces]`",
+        ),
+    ];
 
     /// A code whose message a test can build through the library, with the code and help it got.
     struct UnitCase {
@@ -1357,6 +1364,11 @@ mod helps {
         case(
             "link-outside-root",
             |p| p.write("docs/guide.md", "[x](../../../elsewhere.rs#add)\n"),
+            &["check"],
+        ),
+        case(
+            "link-outside-root",
+            |p| p.write("docs/guide.md", "[x](core:../web/x.rs)\n"),
             &["check"],
         ),
         case(
@@ -2134,12 +2146,15 @@ mod helps {
                      list it in HELPLESS with a reason"
                 ));
             }
-            if let Some((_, pinned)) = PINNED_HELPS.iter().find(|(pin, _)| pin == kind)
-                && help.as_deref().is_some_and(|help| help != *pinned)
-            {
+            let pins: Vec<&str> = PINNED_HELPS
+                .iter()
+                .filter(|(pin, _)| pin == kind)
+                .map(|(_, pinned)| *pinned)
+                .collect();
+            if !pins.is_empty() && help.as_deref().is_some_and(|help| !pins.contains(&help)) {
                 problems.push(format!(
-                    "the help of `{kind}` (from `supdoc {args}`) changed; expected {pinned:?}, \
-                     got {help:?}"
+                    "the help of `{kind}` (from `supdoc {args}`) changed; expected one of \
+                     {pins:?}, got {help:?}"
                 ));
             }
             if let Some(problem) = help.as_deref().and_then(help_problem) {
@@ -2148,6 +2163,43 @@ mod helps {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn namespace_climb_and_plain_outside_root_links_get_their_own_help() {
+        let climb = case(
+            "link-outside-root",
+            |p| p.write("docs/guide.md", "[x](core:../web/x.rs)\n"),
+            &["check"],
+        );
+        let plain = case(
+            "link-outside-root",
+            |p| p.write("docs/guide.md", "[x](../../../elsewhere.rs#add)\n"),
+            &["check"],
+        );
+
+        let helps_of = |case: &HelpCase| {
+            let (_, helps, stderr) = run_help_case(case);
+            helps
+                .into_iter()
+                .find_map(|(kind, help)| (kind == "link-outside-root").then_some(help))
+                .unwrap_or_else(|| panic!("the run should print link-outside-root: {stderr}"))
+        };
+
+        assert_eq!(
+            helps_of(&climb).as_deref(),
+            Some(
+                "Write the link as a path relative to this doc, or give its directory its own \
+                 namespace under `[namespaces]`"
+            ),
+        );
+        assert_eq!(
+            helps_of(&plain).as_deref(),
+            Some(
+                "Link to a file inside the project root, or move `supdoc.config.toml` up to a \
+                 directory that holds both"
+            ),
+        );
     }
 
     #[test]
