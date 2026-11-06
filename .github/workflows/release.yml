@@ -1,6 +1,6 @@
 name: Release
 
-# Build, checksum, attest and draft the release assets for the six Unix targets.
+# Build, checksum, attest and draft the release assets for the eight targets.
 # Pull requests that touch this file, Cargo.lock or the toolchain pin run the build and
 # checksum jobs only, with read-only permissions. Attestation and the draft release run
 # only for a `v*` tag push or a `workflow_dispatch` with a `tag` input.
@@ -28,7 +28,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  EXPECTED_ARCHIVES: "6"
+  EXPECTED_ARCHIVES: "8"
 
 jobs:
   build:
@@ -36,6 +36,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
+    defaults:
+      run:
+        shell: bash
     env:
       # rust-toolchain.toml says `stable`; this makes the pinned version win for every cargo and rustc call.
       RUSTUP_TOOLCHAIN: "1.99.1"
@@ -49,6 +52,8 @@ jobs:
           - { target: aarch64-unknown-linux-musl, runner: ubuntu-24.04-arm, musl: true }
           - { target: aarch64-apple-darwin, runner: macos-15, musl: false }
           - { target: x86_64-apple-darwin, runner: macos-15-intel, musl: false }
+          - { target: x86_64-pc-windows-msvc, runner: windows-2025, musl: false }
+          - { target: aarch64-pc-windows-msvc, runner: windows-11-arm, musl: false }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -61,6 +66,19 @@ jobs:
       - name: Install musl-tools
         if: matrix.musl
         run: sudo apt-get update && sudo apt-get install --yes musl-tools
+      - name: Put Visual Studio LLVM on PATH for ring
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        run: |
+          set -euo pipefail
+          for dir in /c/Program\ Files/Microsoft\ Visual\ Studio/2022/*/VC/Tools/Llvm/ARM64/bin /c/Program\ Files/LLVM/bin; do
+            if [ -x "$dir/clang.exe" ]; then
+              cygpath -w "$dir" >> "$GITHUB_PATH"
+              echo "using clang from $dir"
+              exit 0
+            fi
+          done
+          echo "no clang.exe found for ring on windows-11-arm" >&2
+          exit 1
       - name: Build
         env:
           TARGET: ${{ matrix.target }}
@@ -104,7 +122,9 @@ jobs:
           fi
           name="supdoc-${version}-${TARGET}"
           mkdir -p "dist/$name"
-          cp "target/${TARGET}/release/supdoc" LICENSE README.md "dist/$name/"
+          bin=supdoc
+          case "$TARGET" in *-windows-*) bin=supdoc.exe ;; esac
+          cp "target/${TARGET}/release/$bin" LICENSE README.md "dist/$name/"
           tar -C dist -czf "dist/${name}.tar.gz" "$name"
           tar -tzf "dist/${name}.tar.gz"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
