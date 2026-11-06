@@ -203,6 +203,7 @@ pub(crate) fn scope(
     let mut names_root = false;
     for &operator in paths {
         let typed = operator.as_path();
+        ensure_exists_as_typed(operator, cwd)?;
         let path = absolute(cwd, operator);
         ensure_exists(&path, operator, cwd)?;
         let Some(inside) = path.strip_prefix(root) else {
@@ -338,6 +339,29 @@ pub(crate) fn ensure_exists(
     cwd: &AbsolutePath,
 ) -> Result<(), CliError> {
     match path.as_path().symlink_metadata() {
+        Ok(_) => Ok(()),
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+            Err(path_missing(typed, cwd))
+        }
+        Err(error) => Err(path_unreadable(typed.as_path(), &error)),
+    }
+}
+
+/// Succeeds when `typed` exists as typed, with each `..` left in place, as `ls typed` would need.
+///
+/// [`absolute`] folds `..` by text, so `nope/..` would otherwise become the current directory and
+/// pass. The fold stays for what a valid path names; this only refuses a path whose own
+/// components are missing.
+///
+/// # Errors
+///
+/// Returns `cli-path-missing` (2) or `cli-path-unreadable` (74) as [`ensure_exists`] does, for
+/// the unfolded path.
+pub(crate) fn ensure_exists_as_typed(
+    typed: OperatorPath<'_>,
+    cwd: &AbsolutePath,
+) -> Result<(), CliError> {
+    match cwd.as_path().join(typed.as_path()).symlink_metadata() {
         Ok(_) => Ok(()),
         Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
             Err(path_missing(typed, cwd))
