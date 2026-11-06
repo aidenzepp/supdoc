@@ -223,6 +223,9 @@ const NEW_FILE_MODE: u32 = 0o666;
 /// failed write never leaves a partial config behind. Both paths are admitted against `target`'s
 /// directory immediately before each is created, so a symlink there can't lead the write out.
 ///
+/// On a filesystem without hard links the starter is instead written to `target` in place, so a
+/// crash mid-write can leave a partial file there.
+///
 /// # Errors
 ///
 /// Returns `cli-init-exists` when `target` exists, and `cli-init-write` when it cannot be written.
@@ -319,15 +322,24 @@ fn link_into_place(
 /// Whether `error` says the filesystem can't make hard links: `ErrorKind::Unsupported`, or the OS
 /// codes that mean the same (`ENOTSUP`, `EOPNOTSUPP`, and on Linux the `EPERM` that vfat gives).
 fn links_unsupported(error: &io::Error) -> bool {
-    if error.kind() == io::ErrorKind::Unsupported {
-        return true;
-    }
+    error.kind() == io::ErrorKind::Unsupported || raw_code_unsupported(error)
+}
+
+/// The raw-OS-error half of [`links_unsupported`].
+#[cfg(unix)]
+fn raw_code_unsupported(error: &io::Error) -> bool {
     let Some(code) = error.raw_os_error() else {
         return false;
     };
     code == libc::ENOTSUP
         || code == libc::EOPNOTSUPP
         || (cfg!(target_os = "linux") && code == libc::EPERM)
+}
+
+/// Only `ErrorKind::Unsupported` counts on targets without these OS codes.
+#[cfg(not(unix))]
+fn raw_code_unsupported(_error: &io::Error) -> bool {
+    false
 }
 
 /// Creates `target` itself, admitted against `boundary`, and fills it with `write`. Refuses an
@@ -1164,6 +1176,15 @@ mod tests {
             names_in(&outside).is_empty(),
             "nothing should be created outside"
         );
+    }
+
+    #[test]
+    fn eperm_counts_as_unsupported_only_on_linux_and_eacces_never_does() {
+        let eperm = io::Error::from_raw_os_error(libc::EPERM);
+        let eacces = io::Error::from_raw_os_error(libc::EACCES);
+
+        assert_eq!(links_unsupported(&eperm), cfg!(target_os = "linux"));
+        assert!(!links_unsupported(&eacces));
     }
 
     #[test]
