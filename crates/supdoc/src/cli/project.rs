@@ -370,6 +370,26 @@ pub(crate) fn ensure_exists_as_typed(
     }
 }
 
+/// Succeeds unless `typed` names something only because folding its `..` hid a missing component:
+/// it doesn't exist as typed, yet the folded path does, as with `nope/../t.rs`.
+///
+/// A path missing both ways passes, so the caller's own missing, outside-project or
+/// deleted-but-linked handling still decides.
+///
+/// # Errors
+///
+/// Returns what [`ensure_exists_as_typed`] returns, when the folded path exists.
+pub(crate) fn ensure_not_hidden_by_dotdot(
+    typed: OperatorPath<'_>,
+    cwd: &AbsolutePath,
+) -> Result<(), CliError> {
+    if absolute(cwd, typed).as_path().symlink_metadata().is_ok() {
+        ensure_exists_as_typed(typed, cwd)
+    } else {
+        Ok(())
+    }
+}
+
 /// The error for a `[PATH]` that couldn't be looked up, with the system's reason.
 ///
 /// The help names permissions, not `ls`, because listing the parent fails for the same reason.
