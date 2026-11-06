@@ -33,8 +33,8 @@ use super::args::{Limit, ListArgs, OperatorPath, TargetArg};
 use super::check::LinkJson;
 use super::fix::timed_out;
 use super::project::{
-    CODE_PATH_MISSING, absolute, command_line, ensure_exists, load_config, namespaced_missing,
-    path_outside_config, read_lock,
+    CODE_PATH_MISSING, absolute, command_line, ensure_exists, ensure_not_hidden_by_dotdot,
+    load_config, namespaced_missing, path_outside_config, read_lock,
 };
 use super::{CliError, Context, Outcome};
 
@@ -150,7 +150,8 @@ pub(crate) fn schema() -> schemars::Schema {
 /// # Errors
 ///
 /// Returns `cli-path-outside-project` for a plain path outside the project and
-/// `cli-target-invalid` for text that is not a target. Both exit 2.
+/// `cli-target-invalid` for text that is not a target, and `cli-path-missing` for a plain path
+/// that exists only once its `..` are folded. All exit 2.
 fn parse_target(arg: &TargetArg, config: &Config, cwd: &AbsolutePath) -> Result<LinkRef, CliError> {
     let typed = arg.typed();
     let rewritten;
@@ -158,6 +159,7 @@ fn parse_target(arg: &TargetArg, config: &Config, cwd: &AbsolutePath) -> Result<
         typed
     } else {
         let path = arg.file();
+        ensure_not_hidden_by_dotdot(OperatorPath::typed(Path::new(path)), cwd)?;
         let absolute = absolute(cwd, OperatorPath::typed(Path::new(path)));
         let relative = absolute
             .strip_prefix(config.root())

@@ -95,3 +95,39 @@ fn a_missing_path_or_one_under_a_file_stays_missing() {
         }
     }
 }
+
+#[test]
+fn an_operator_path_that_only_exists_after_folding_dotdot_is_missing() {
+    let project = Project::fixture("basic");
+    project.record();
+
+    for args in [
+        ["check", "nope/.."],
+        ["check", "docs/nope/../../docs/guide.md"],
+        ["update", "nope/.."],
+        ["fix", "nope/.."],
+        ["list", "nope/.."],
+        ["list", "nope/../src/lib.rs"],
+    ] {
+        let run = project.supdoc(&["--json", args[0], args[1]]);
+        let _ = run.assert_exit(2);
+        assert_eq!(
+            error_field(&run, "kind"),
+            "cli-path-missing",
+            "`supdoc {}`",
+            run.args
+        );
+        assert_eq!(
+            error_field(&run, "message"),
+            format!("{} does not exist", args[1]),
+            "`supdoc {}` should name the path as typed",
+            run.args
+        );
+    }
+
+    let present = project.supdoc(&["--json", "check", "docs/../docs/guide.md"]);
+    let _ = present.assert_exit(0);
+    let _ = project
+        .supdoc(&["--json", "list", "docs/../src/lib.rs"])
+        .assert_exit(0);
+}

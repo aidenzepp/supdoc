@@ -10,7 +10,7 @@
 //! | `@injection.content` + `injection.language` | With `markdown_inline`: a region where links are read |
 //! | `@supdoc.scope` | A container that adds segments to definitions inside it but isn't addressable (a Rust `impl`) |
 //! | `@supdoc.scope.name` | That segment. Inside a definition pattern, a parent segment containment can't express (a Go receiver) |
-//! | `@supdoc.scope.qualifier` | A second segment after the name (the trait in `impl Trait for Type`) |
+//! | `@supdoc.scope.qualifier` | Segments after the name, in source order when repeated (the trait in `impl Trait for Type`, the middle parts of a TypeScript `namespace A.B.C.D`) |
 //! | `@supdoc.scope.arguments`, `@supdoc.scope.qualifier.arguments` | Type arguments of the name or qualifier, for the full-type alias |
 //!
 //! See [`tag_symbols`] for how a path is built from them.

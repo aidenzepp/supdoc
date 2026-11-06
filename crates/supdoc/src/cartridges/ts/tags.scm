@@ -17,8 +17,10 @@
 (enum_declaration name: (identifier) @name) @definition.class
 
 ; A namespace is named by its dotted path: `namespace Outer.Inner` is `Outer.Inner`, and its
-; members are `Outer.Inner.X`. The path is read as scope segments up to three deep. A deeper path
-; is a nameless scope, so what is inside it is not a symbol rather than a wrongly named one.
+; members are `Outer.Inner.X`. The path is read as the first part (`@supdoc.scope.name`), the
+; middle parts (repeated `@supdoc.scope.qualifier`, in source order) and the last part (`@name`).
+; A query cannot recurse, so there is one pattern per length, up to ten parts. A longer path is a
+; nameless scope, so what is inside it is not a symbol rather than a wrongly named one.
 
 (internal_module name: (identifier) @name) @definition.module
 (internal_module
@@ -27,14 +29,39 @@
     property: (property_identifier) @name)) @definition.module
 (internal_module
   name: (nested_identifier
-    object: (member_expression
-      object: (identifier) @supdoc.scope.name
-      property: (property_identifier) @supdoc.scope.qualifier)
+    object: (member_expression object: (identifier) @supdoc.scope.name property: (property_identifier) @supdoc.scope.qualifier)
     property: (property_identifier) @name)) @definition.module
 (internal_module
   name: (nested_identifier
-    object: (member_expression
-      object: (member_expression)))) @supdoc.scope
+    object: (member_expression object: (member_expression object: (identifier) @supdoc.scope.name property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier)
+    property: (property_identifier) @name)) @definition.module
+(internal_module
+  name: (nested_identifier
+    object: (member_expression object: (member_expression object: (member_expression object: (identifier) @supdoc.scope.name property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier)
+    property: (property_identifier) @name)) @definition.module
+(internal_module
+  name: (nested_identifier
+    object: (member_expression object: (member_expression object: (member_expression object: (member_expression object: (identifier) @supdoc.scope.name property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier)
+    property: (property_identifier) @name)) @definition.module
+(internal_module
+  name: (nested_identifier
+    object: (member_expression object: (member_expression object: (member_expression object: (member_expression object: (member_expression object: (identifier) @supdoc.scope.name property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier)
+    property: (property_identifier) @name)) @definition.module
+(internal_module
+  name: (nested_identifier
+    object: (member_expression object: (member_expression object: (member_expression object: (member_expression object: (member_expression object: (member_expression object: (identifier) @supdoc.scope.name property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier)
+    property: (property_identifier) @name)) @definition.module
+(internal_module
+  name: (nested_identifier
+    object: (member_expression object: (member_expression object: (member_expression object: (member_expression object: (member_expression object: (member_expression object: (member_expression object: (identifier) @supdoc.scope.name property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier)
+    property: (property_identifier) @name)) @definition.module
+(internal_module
+  name: (nested_identifier
+    object: (member_expression object: (member_expression object: (member_expression object: (member_expression object: (member_expression object: (member_expression object: (member_expression object: (member_expression object: (identifier) @supdoc.scope.name property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier) property: (property_identifier) @supdoc.scope.qualifier)
+    property: (property_identifier) @name)) @definition.module
+(internal_module
+  name: (nested_identifier
+    object: (member_expression object: (member_expression object: (member_expression object: (member_expression object: (member_expression object: (member_expression object: (member_expression object: (member_expression object: (member_expression object: (member_expression)))))))))))) @supdoc.scope
 
 ; Bindings, with or without `export` and `declare`, at the top of a file or of a namespace.
 ; Locals inside functions are not symbols. `export const Button = () => <div />` is the usual
