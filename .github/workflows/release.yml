@@ -122,10 +122,12 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           readobj=""
+          host=x64
+          case "$TARGET" in aarch64-*) host=ARM64 ;; esac
           for dir in \
-            "/c/Program Files/Microsoft Visual Studio/2022"/*/VC/Tools/Llvm/*/bin \
-            "/c/Program Files/Microsoft Visual Studio/2026"/*/VC/Tools/Llvm/*/bin \
-            "/c/Program Files/Microsoft Visual Studio/18"/*/VC/Tools/Llvm/*/bin \
+            "/c/Program Files/Microsoft Visual Studio/2022"/*/VC/Tools/Llvm/$host/bin \
+            "/c/Program Files/Microsoft Visual Studio/2026"/*/VC/Tools/Llvm/$host/bin \
+            "/c/Program Files/Microsoft Visual Studio/18"/*/VC/Tools/Llvm/$host/bin \
             "/c/Program Files/LLVM/bin"; do
             if [ -x "$dir/llvm-readobj.exe" ]; then readobj="$dir/llvm-readobj.exe"; break; fi
           done
