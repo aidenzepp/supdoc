@@ -66,11 +66,18 @@ jobs:
       - name: Install musl-tools
         if: matrix.musl
         run: sudo apt-get update && sudo apt-get install --yes musl-tools
-      - name: Put Visual Studio LLVM on PATH for ring
+      # ring needs clang on PATH to build for Windows arm64. Use whichever install the runner image has:
+      # the Visual Studio 2022 or 2026 LLVM component, then a standalone LLVM. Fail if none is present.
+      - name: Put an installed clang on PATH for ring (arm64)
         if: matrix.target == 'aarch64-pc-windows-msvc'
         run: |
           set -euo pipefail
-          for dir in /c/Program\ Files/Microsoft\ Visual\ Studio/2022/*/VC/Tools/Llvm/ARM64/bin /c/Program\ Files/LLVM/bin; do
+          shopt -s nullglob
+          for dir in \
+            "/c/Program Files/Microsoft Visual Studio/2022"/*/VC/Tools/Llvm/ARM64/bin \
+            "/c/Program Files/Microsoft Visual Studio/2026"/*/VC/Tools/Llvm/ARM64/bin \
+            "/c/Program Files/Microsoft Visual Studio/18"/*/VC/Tools/Llvm/ARM64/bin \
+            "/c/Program Files/LLVM/bin"; do
             if [ -x "$dir/clang.exe" ]; then
               cygpath -w "$dir" >> "$GITHUB_PATH"
               echo "using clang from $dir"
@@ -83,6 +90,8 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           USE_MUSL: ${{ matrix.musl }}
+          # Windows binaries link the C runtime statically so they start without the VC++ redistributable.
+          RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static' || '' }}
         run: |
           set -euo pipefail
           if [ "$USE_MUSL" = "true" ]; then
@@ -103,6 +112,36 @@ jobs:
           echo "$out"
           if ! echo "$out" | grep -qE 'statically linked|static-pie linked'; then
             echo "musl binary is not statically linked" >&2
+            exit 1
+          fi
+      - name: Check the Windows binary imports no C runtime DLL
+        if: contains(matrix.target, 'windows')
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          readobj=""
+          for dir in \
+            "/c/Program Files/Microsoft Visual Studio/2022"/*/VC/Tools/Llvm/*/bin \
+            "/c/Program Files/Microsoft Visual Studio/2026"/*/VC/Tools/Llvm/*/bin \
+            "/c/Program Files/Microsoft Visual Studio/18"/*/VC/Tools/Llvm/*/bin \
+            "/c/Program Files/LLVM/bin"; do
+            if [ -x "$dir/llvm-readobj.exe" ]; then readobj="$dir/llvm-readobj.exe"; break; fi
+          done
+          if [ -z "$readobj" ]; then
+            echo "no llvm-readobj.exe found to read the import table" >&2
+            exit 1
+          fi
+          imports="$("$readobj" --coff-imports "target/${TARGET}/release/supdoc.exe" | grep -E '^ *Name:' || true)"
+          echo "imports of supdoc.exe:"
+          echo "$imports"
+          if [ -z "$imports" ]; then
+            echo "read no imports from supdoc.exe; the check cannot be trusted" >&2
+            exit 1
+          fi
+          if echo "$imports" | grep -iE 'vcruntime|ucrtbase|api-ms-win-crt'; then
+            echo "supdoc.exe imports the C runtime dynamically" >&2
             exit 1
           fi
       - name: Package
