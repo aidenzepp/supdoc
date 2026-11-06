@@ -1054,6 +1054,7 @@ impl Report for RenameReport {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    #[cfg(unix)]
     use std::path::PathBuf;
 
     use super::*;

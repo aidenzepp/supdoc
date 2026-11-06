@@ -871,6 +871,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_cargo_home_decision_names_why_none_is_usable() {
         use std::os::unix::ffi::OsStringExt as _;
