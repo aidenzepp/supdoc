@@ -792,13 +792,21 @@ fn write_private(env: &ToolEnv, root: &Path, strict: &str) -> Option<PathBuf> {
 /// `dir` as a boundary, once it is created mode 0700 when missing, admitted beneath `parent`,
 /// and found to be a real directory (not a link) only its owner reaches.
 ///
+/// On Windows the mode check is skipped, as std reads no mode; the directory inherits its
+/// parent's ACL and the real-directory check stays.
+///
 /// Effect: creates the directory and reads its metadata.
 fn private_dir(parent: &Boundary, dir: &AbsolutePath) -> Option<Boundary> {
-    use std::os::unix::fs::PermissionsExt as _;
-
     confine::create_dir_all(&parent.admit(dir).ok()?, 0o700).ok()?;
     let meta = fs::symlink_metadata(dir.as_path()).ok()?;
-    (meta.is_dir() && meta.permissions().mode() & 0o777 == 0o700).then(|| Boundary::resolve(dir))
+    #[cfg(unix)]
+    let exact_mode = {
+        use std::os::unix::fs::PermissionsExt as _;
+        meta.permissions().mode() & 0o777 == 0o700
+    };
+    #[cfg(not(unix))]
+    let exact_mode = true;
+    (meta.is_dir() && exact_mode).then(|| Boundary::resolve(dir))
 }
 
 #[cfg(test)]
