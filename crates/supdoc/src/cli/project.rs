@@ -203,6 +203,7 @@ pub(crate) fn scope(
     let mut names_root = false;
     for &operator in paths {
         let typed = operator.as_path();
+        ensure_exists_as_typed(operator, cwd)?;
         let path = absolute(cwd, operator);
         ensure_exists(&path, operator, cwd)?;
         let Some(inside) = path.strip_prefix(root) else {
@@ -343,6 +344,49 @@ pub(crate) fn ensure_exists(
             Err(path_missing(typed, cwd))
         }
         Err(error) => Err(path_unreadable(typed.as_path(), &error)),
+    }
+}
+
+/// Succeeds when `typed` exists as typed, with each `..` left in place, as `ls typed` would need.
+///
+/// [`absolute`] folds `..` by text, so `nope/..` would otherwise become the current directory and
+/// pass. The fold stays for what a valid path names; this only refuses a path whose own
+/// components are missing.
+///
+/// # Errors
+///
+/// Returns `cli-path-missing` (2) or `cli-path-unreadable` (74) as [`ensure_exists`] does, for
+/// the unfolded path.
+pub(crate) fn ensure_exists_as_typed(
+    typed: OperatorPath<'_>,
+    cwd: &AbsolutePath,
+) -> Result<(), CliError> {
+    match cwd.as_path().join(typed.as_path()).symlink_metadata() {
+        Ok(_) => Ok(()),
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+            Err(path_missing(typed, cwd))
+        }
+        Err(error) => Err(path_unreadable(typed.as_path(), &error)),
+    }
+}
+
+/// Succeeds unless `typed` names something only because folding its `..` hid a missing component:
+/// it doesn't exist as typed, yet the folded path does, as with `nope/../t.rs`.
+///
+/// A path missing both ways passes, so the caller's own missing, outside-project or
+/// deleted-but-linked handling still decides.
+///
+/// # Errors
+///
+/// Returns what [`ensure_exists_as_typed`] returns, when the folded path exists.
+pub(crate) fn ensure_not_hidden_by_dotdot(
+    typed: OperatorPath<'_>,
+    cwd: &AbsolutePath,
+) -> Result<(), CliError> {
+    if absolute(cwd, typed).as_path().symlink_metadata().is_ok() {
+        ensure_exists_as_typed(typed, cwd)
+    } else {
+        Ok(())
     }
 }
 

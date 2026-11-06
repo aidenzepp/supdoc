@@ -223,6 +223,9 @@ const NEW_FILE_MODE: u32 = 0o666;
 /// failed write never leaves a partial config behind. Both paths are admitted against `target`'s
 /// directory immediately before each is created, so a symlink there can't lead the write out.
 ///
+/// On a filesystem without hard links the starter is instead written to `target` in place, so a
+/// crash mid-write can leave a partial file there.
+///
 /// # Errors
 ///
 /// Returns `cli-init-exists` when `target` exists, and `cli-init-write` when it cannot be written.
@@ -247,6 +250,22 @@ fn write_beneath(
     context: &Context,
     created: impl FnOnce(),
 ) -> Result<(), CliError> {
+    write_beneath_with(boundary, target, context, created, confine::hard_link_new)
+}
+
+/// [`write_beneath`] with the step that links the temporary into place supplied, so a filesystem
+/// without hard links can be simulated.
+///
+/// # Errors
+///
+/// As [`write_beneath`].
+fn write_beneath_with(
+    boundary: &Boundary,
+    target: &AbsolutePath,
+    context: &Context,
+    created: impl FnOnce(),
+    link_step: impl FnOnce(&Admitted<'_>, &Admitted<'_>) -> io::Result<()>,
+) -> Result<(), CliError> {
     let failed = |error: io::Error| match error.kind() {
         io::ErrorKind::AlreadyExists => exists(target, context),
         _ => write_failed(target, &error, context),
@@ -265,7 +284,7 @@ fn write_beneath(
     let linked = file
         .write_all(STARTER.as_bytes())
         .and_then(|()| file.flush())
-        .and_then(|()| link_into_place(boundary, &temporary, target));
+        .and_then(|()| link_into_place(boundary, &temporary, target, link_step));
     drop(file);
     // Best effort: this run created the temporary, and the outcome is already decided.
     if let Ok(again) = boundary.admit(&temporary_path) {
@@ -274,21 +293,79 @@ fn write_beneath(
     linked.map_err(failed)
 }
 
-/// Links the written `temporary` to `target`, once `target` is admitted against `boundary`.
+/// Links the written `temporary` to `target`, once `target` is admitted against `boundary`, with
+/// `link_step` making the link. When it fails because the filesystem
+/// has no hard links, the starter is created at `target` directly instead.
 ///
 /// # Errors
 ///
 /// `AlreadyExists` when anything is at `target`; otherwise fails when `target` is refused or the
-/// link can't be made.
+/// link can't be made. The fallback also fails when its write fails.
 fn link_into_place(
     boundary: &Boundary,
     temporary: &Admitted<'_>,
     target: &AbsolutePath,
+    link_step: impl FnOnce(&Admitted<'_>, &Admitted<'_>) -> io::Result<()>,
 ) -> io::Result<()> {
     let link = boundary
         .admit(target)
         .map_err(|escape| refusal(target, &escape))?;
-    confine::hard_link_new(temporary, &link)
+    match link_step(temporary, &link) {
+        Err(error) if links_unsupported(&error) => create_in_place(boundary, target, |file| {
+            file.write_all(STARTER.as_bytes())
+                .and_then(|()| file.flush())
+        }),
+        linked => linked,
+    }
+}
+
+/// Whether `error` says the filesystem can't make hard links: `ErrorKind::Unsupported`, or the OS
+/// codes that mean the same (`ENOTSUP`, `EOPNOTSUPP`, and on Linux the `EPERM` that vfat gives).
+fn links_unsupported(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::Unsupported || raw_code_unsupported(error)
+}
+
+/// The raw-OS-error half of [`links_unsupported`].
+#[cfg(unix)]
+fn raw_code_unsupported(error: &io::Error) -> bool {
+    let Some(code) = error.raw_os_error() else {
+        return false;
+    };
+    code == libc::ENOTSUP
+        || code == libc::EOPNOTSUPP
+        || (cfg!(target_os = "linux") && code == libc::EPERM)
+}
+
+/// Only `ErrorKind::Unsupported` counts on targets without these OS codes.
+#[cfg(not(unix))]
+fn raw_code_unsupported(_error: &io::Error) -> bool {
+    false
+}
+
+/// Creates `target` itself, admitted against `boundary`, and fills it with `write`. Refuses an
+/// existing path. When `write` fails, the file this call created is removed, and only that file.
+///
+/// # Errors
+///
+/// `AlreadyExists` when anything is at `target`; otherwise fails when `target` is refused, can't
+/// be created, or `write` fails.
+fn create_in_place(
+    boundary: &Boundary,
+    target: &AbsolutePath,
+    write: impl FnOnce(&mut std::fs::File) -> io::Result<()>,
+) -> io::Result<()> {
+    let admitted = boundary
+        .admit(target)
+        .map_err(|escape| refusal(target, &escape))?;
+    let mut file = confine::create_new(&admitted, NEW_FILE_MODE)?;
+    let written = write(&mut file);
+    drop(file);
+    if written.is_err()
+        && let Ok(again) = boundary.admit(target)
+    {
+        drop(confine::remove_file(&again));
+    }
+    written
 }
 
 /// The I/O error for a path [`Boundary::admit`] refused, so it reports like a failed create:
@@ -956,7 +1033,7 @@ mod tests {
             .expect("the docs directory should be movable");
         std::os::unix::fs::symlink(&outside, &docs).expect("the swapped symlink should be created");
 
-        let error = link_into_place(&boundary, &temporary, &target)
+        let error = link_into_place(&boundary, &temporary, &target, confine::hard_link_new)
             .expect_err("the link should be refused once the directory leads outside");
 
         assert_eq!(
@@ -967,6 +1044,168 @@ mod tests {
             names_in(&outside),
             [name.to_string_lossy().into_owned()],
             "no config should be linked in outside"
+        );
+    }
+
+    /// A hard-link step that fails with `error`.
+    fn link_fails(
+        error: impl Fn() -> io::Error,
+    ) -> impl FnOnce(&Admitted<'_>, &Admitted<'_>) -> io::Result<()> {
+        move |_, _| Err(error())
+    }
+
+    /// Runs `write_beneath_with` in a fresh project whose hard link fails with `error`.
+    fn init_with_failing_link(
+        error: impl Fn() -> io::Error,
+        existing: Option<&str>,
+    ) -> (tempfile::TempDir, tempfile::TempDir, Result<(), CliError>) {
+        let (dir, project) = project_and_outside();
+        let (_, context) = context_in(&project, &[]);
+        let target = target(&context);
+        if let Some(text) = existing {
+            std::fs::write(target.as_path(), text).expect("the existing config should be written");
+        }
+        let boundary = Boundary::resolve(
+            &target
+                .parent()
+                .expect("the target should have a parent directory"),
+        );
+        let result = write_beneath_with(&boundary, &target, &context, || (), link_fails(error));
+        (dir, project, result)
+    }
+
+    #[test]
+    fn without_hard_links_the_starter_is_written_in_place() {
+        for error in [
+            || io::Error::from(io::ErrorKind::Unsupported),
+            || io::Error::from_raw_os_error(libc::ENOTSUP),
+            || io::Error::from_raw_os_error(libc::EOPNOTSUPP),
+        ] {
+            let (_dir, project, result) = init_with_failing_link(error, None);
+
+            result.expect("the fallback should write the config");
+            assert_eq!(
+                names_in(project.path()),
+                [CONFIG_FILE_NAME],
+                "only the config should remain"
+            );
+            assert_eq!(
+                std::fs::read_to_string(project.path().join(CONFIG_FILE_NAME))
+                    .expect("the config should be readable"),
+                STARTER
+            );
+        }
+    }
+
+    #[test]
+    fn the_fallback_never_replaces_an_existing_config() {
+        let (_dir, project, result) =
+            init_with_failing_link(|| io::Error::from(io::ErrorKind::Unsupported), Some("mine"));
+
+        let error = result.expect_err("an existing config should be refused");
+
+        assert_eq!(error.code(), "cli-init-exists");
+        assert_eq!(
+            std::fs::read_to_string(project.path().join(CONFIG_FILE_NAME))
+                .expect("the config should be readable"),
+            "mine"
+        );
+        assert_eq!(names_in(project.path()), [CONFIG_FILE_NAME]);
+    }
+
+    #[test]
+    fn another_link_error_still_reports_a_write_failure() {
+        let (_dir, project, result) =
+            init_with_failing_link(|| io::Error::from(io::ErrorKind::PermissionDenied), None);
+
+        let error = result.expect_err("a plain link failure should not fall back");
+
+        assert_eq!(error.code(), "cli-init-write");
+        assert!(
+            names_in(project.path()).is_empty(),
+            "nothing should be left behind"
+        );
+    }
+
+    #[test]
+    fn a_failed_fallback_write_removes_only_the_file_it_created() {
+        let (_dir, project) = project_and_outside();
+        let (_, context) = context_in(&project, &[]);
+        let target = target(&context);
+        let boundary = Boundary::resolve(
+            &target
+                .parent()
+                .expect("the target should have a parent directory"),
+        );
+
+        let error = create_in_place(&boundary, &target, |_| Err(io::Error::other("disk full")))
+            .expect_err("the write failure should be reported");
+
+        assert_eq!(error.to_string(), "disk full");
+        assert!(
+            names_in(project.path()).is_empty(),
+            "the half-made config should be removed"
+        );
+    }
+
+    #[test]
+    fn the_fallback_is_admitted_and_refuses_a_directory_swapped_out() {
+        let (dir, project) = project_and_outside();
+        let outside = dir.path().join("outside");
+        let docs = project.path().join("docs");
+        std::fs::create_dir(&docs).expect("the docs directory should be created");
+        let (_, context) = context_in(&project, &["-c", "docs/supdoc.config.toml"]);
+        let target = target(&context);
+        let boundary = Boundary::resolve(
+            &target
+                .parent()
+                .expect("the target should have a parent directory"),
+        );
+        std::fs::rename(&docs, project.path().join("moved"))
+            .expect("the docs directory should be movable");
+        std::os::unix::fs::symlink(&outside, &docs).expect("the swapped symlink should be created");
+
+        let error = create_in_place(&boundary, &target, |_| Ok(()))
+            .expect_err("a directory leading outside should be refused");
+
+        assert_eq!(
+            error.to_string(),
+            "a symlink along it leads out of its directory"
+        );
+        assert!(
+            names_in(&outside).is_empty(),
+            "nothing should be created outside"
+        );
+    }
+
+    #[test]
+    fn eperm_counts_as_unsupported_only_on_linux_and_eacces_never_does() {
+        let eperm = io::Error::from_raw_os_error(libc::EPERM);
+        let eacces = io::Error::from_raw_os_error(libc::EACCES);
+
+        assert_eq!(links_unsupported(&eperm), cfg!(target_os = "linux"));
+        assert!(!links_unsupported(&eacces));
+    }
+
+    #[test]
+    fn a_failed_fallback_leaves_an_existing_config_alone() {
+        let (_dir, project) = project_and_outside();
+        let (_, context) = context_in(&project, &[]);
+        let target = target(&context);
+        std::fs::write(target.as_path(), "mine").expect("the existing config should be written");
+        let boundary = Boundary::resolve(
+            &target
+                .parent()
+                .expect("the target should have a parent directory"),
+        );
+
+        let error = create_in_place(&boundary, &target, |_| Err(io::Error::other("unreached")))
+            .expect_err("an existing config should be refused");
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read_to_string(target.as_path()).expect("the config should be readable"),
+            "mine"
         );
     }
 
