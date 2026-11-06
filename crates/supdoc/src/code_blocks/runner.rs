@@ -8,7 +8,10 @@
 
 use std::ffi::OsStr;
 use std::io::{Read, Write as _};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -23,6 +26,10 @@ use crate::process::{self, LiveGroup, Spawning, TERMINATING};
 /// The most bytes supdoc reads from each of a tool's stdout and stderr, unless its call sets its
 /// own cap.
 pub(crate) const CAP: usize = 1024 * 1024;
+
+/// The Windows process-creation flag that gives a tool its own process group.
+#[cfg(windows)]
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
 /// How often a tool whose streams have closed is polled for its exit.
 const POLL: Duration = Duration::from_millis(5);
@@ -106,19 +113,7 @@ pub(crate) fn run(call: &Call<'_>, env: &ToolEnv, root: &Path) -> Result<Ran, Fa
     // signal thread can't copy the live groups, so it can't miss this tool.
     let spawning = Spawning::begin();
     let deadline = call.timeout.map(|timeout| Instant::now() + timeout);
-    let mut child = Command::new(call.program)
-        .arg0(call.name)
-        .args(call.args)
-        .env_clear()
-        .envs(env.vars())
-        .envs(call.extra.iter().copied())
-        .current_dir(cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-        .map_err(Failure::Spawn)?;
+    let mut child = spawn_tool(call, env, cwd).map_err(Failure::Spawn)?;
     // Held until this function returns, by which point every path has reaped the tool.
     let _live = LiveGroup::register(child.id());
     // Released before any wait on the tool, so the signal thread never waits on one.
@@ -258,6 +253,38 @@ pub(crate) fn private_dir(env: &ToolEnv, root: &Path, dir: &Path) -> Option<Path
     private.then_some(real)
 }
 
+/// Starts the tool `call` names in `cwd`, as the leader of its own process group.
+///
+/// # Errors
+///
+/// The spawn failure, such as a program that does not exist.
+///
+/// Effect: spawns the tool.
+fn spawn_tool(call: &Call<'_>, env: &ToolEnv, cwd: PathBuf) -> std::io::Result<Child> {
+    let mut command = Command::new(call.program);
+    // Unix runs a multi-call binary reached through a symlink as the tool it was looked up as.
+    // Windows has no `arg0`: its proxies are hard links named per tool, so the program path
+    // already carries the tool name.
+    #[cfg(unix)]
+    let _same = command.arg0(call.name);
+    let _same = command
+        .args(call.args)
+        .env_clear()
+        .envs(env.vars())
+        .envs(call.extra.iter().copied())
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // The tool leads its own group, so killing the group reaches its children and the console's
+    // Ctrl+C does not: supdoc kills it.
+    #[cfg(unix)]
+    let _same = command.process_group(0);
+    #[cfg(windows)]
+    let _same = command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    command.spawn()
+}
+
 /// Kills `child`, a tool spawned as a termination signal landed, with its process group, then
 /// waits for the signal to end supdoc.
 ///
@@ -280,18 +307,11 @@ fn kill(mut child: Child, failure: Failure) -> Failure {
     failure
 }
 
-/// Best effort, sends `SIGKILL` to every process in the group `pgid` through `/bin/kill`. A group
-/// already empty is not an error.
+/// Best effort, kills the tool `pgid` and its descendants. A group already empty is not an error.
 ///
 /// Effect: signals the process group.
 fn kill_group(pgid: u32) {
-    let _group = Command::new("/bin/kill")
-        .args(["-KILL", "--", &format!("-{pgid}")])
-        .env_clear()
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    process::kill_tree(pgid);
 }
 
 /// The cache bases `env` names, in order: `$XDG_CACHE_HOME`, then `$HOME/.cache`. A value that
