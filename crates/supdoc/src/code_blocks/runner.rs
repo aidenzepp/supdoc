@@ -236,10 +236,13 @@ fn working_dir(cwd: Cwd<'_>, env: &ToolEnv, root: &Path) -> Result<PathBuf, Fail
 /// only its owner reaches (mode 0700 or narrower) and that the neutral directory's owner owns.
 /// `None` otherwise, and when there is no neutral directory.
 ///
+/// On Windows the mode and owner checks are skipped, as std reads neither; every other check
+/// stays. The cache directory's per-user location is the defence there, so a cache the operator
+/// points at a directory other users can write has no ownership check.
+///
 /// Effect: creates the neutral directory and reads metadata along both paths.
 #[must_use]
 pub(crate) fn private_dir(env: &ToolEnv, root: &Path, dir: &Path) -> Option<PathBuf> {
-    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
     let neutral = neutral_dir(env, root);
     if neutral == Path::new("/") {
         return None;
@@ -248,14 +251,39 @@ pub(crate) fn private_dir(env: &ToolEnv, root: &Path, dir: &Path) -> Option<Path
     let real = dir.canonicalize().ok()?;
     let real_root = root.canonicalize().ok()?;
     let meta = std::fs::symlink_metadata(&real).ok()?;
-    let owner = std::fs::metadata(&cache).ok()?.uid();
+    let owned = reaches_only_owner(&meta, &std::fs::metadata(&cache).ok()?);
     let private = real.starts_with(&cache)
         && real != cache
         && !real.starts_with(&real_root)
         && meta.is_dir()
-        && meta.permissions().mode().trailing_zeros() >= 6
-        && meta.uid() == owner;
+        && owned;
     private.then_some(real)
+}
+
+/// Whether `meta` is mode 0700 or narrower and owned by whoever owns `cache`.
+#[cfg(unix)]
+fn reaches_only_owner(meta: &std::fs::Metadata, cache: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    meta.permissions().mode().trailing_zeros() >= 6 && meta.uid() == cache.uid()
+}
+
+/// Always true: std reads no mode or owner on this platform.
+#[cfg(not(unix))]
+fn reaches_only_owner(_meta: &std::fs::Metadata, _cache: &std::fs::Metadata) -> bool {
+    true
+}
+
+/// Whether `meta` is mode 0700 or narrower.
+#[cfg(unix)]
+fn mode_is_private(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    meta.permissions().mode().trailing_zeros() >= 6
+}
+
+/// Always true: std reads no mode on this platform.
+#[cfg(not(unix))]
+fn mode_is_private(_meta: &std::fs::Metadata) -> bool {
+    true
 }
 
 /// Kills `child`, a tool spawned as a termination signal landed, with its process group, then
@@ -369,14 +397,15 @@ pub(crate) fn exact(path: &Path) -> Option<AbsolutePath> {
 /// `parent`, and found to be a directory (not a link) only its owner reaches. `None` when it isn't
 /// admitted, can't be created, or isn't such a directory.
 ///
+/// On Windows the mode check is skipped, as std reads no mode; the directory inherits its
+/// parent's ACL and the real-directory check stays.
+///
 /// Effect: creates the directory and reads its metadata.
 #[must_use]
 pub(crate) fn create_private(parent: &Boundary, dir: &AbsolutePath) -> Option<Boundary> {
-    use std::os::unix::fs::PermissionsExt as _;
     confine::create_dir_all(&parent.admit(dir).ok()?, 0o700).ok()?;
     let meta = std::fs::symlink_metadata(dir.as_path()).ok()?;
-    (meta.is_dir() && meta.permissions().mode().trailing_zeros() >= 6)
-        .then(|| Boundary::resolve(dir))
+    (meta.is_dir() && mode_is_private(&meta)).then(|| Boundary::resolve(dir))
 }
 
 /// Writes `text` to `file`, admitted beneath the private directory `dir`, mode 0600, unless it is
@@ -384,10 +413,11 @@ pub(crate) fn create_private(parent: &Boundary, dir: &AbsolutePath) -> Option<Bo
 /// file beside it renamed into place, so concurrent runs never see half a file. `None` when it
 /// isn't admitted or can't be written.
 ///
+/// On Windows the file gets no explicit permissions and inherits the private directory's ACL.
+///
 /// Effect: may create a temporary file and replace `file`.
 #[must_use]
 pub(crate) fn write_private(dir: &Boundary, file: &AbsolutePath, text: &str) -> Option<()> {
-    use std::os::unix::fs::PermissionsExt as _;
     let current = std::fs::symlink_metadata(file.as_path())
         .ok()
         .filter(std::fs::Metadata::is_file)
@@ -395,8 +425,14 @@ pub(crate) fn write_private(dir: &Boundary, file: &AbsolutePath, text: &str) -> 
     if current.as_deref() == Some(text) {
         return Some(());
     }
-    let mode = std::fs::Permissions::from_mode(0o600);
-    confine::write_atomically(&dir.admit(file).ok()?, text.as_bytes(), Some(&mode)).ok()
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt as _;
+        Some(std::fs::Permissions::from_mode(0o600))
+    };
+    #[cfg(not(unix))]
+    let mode: Option<std::fs::Permissions> = None;
+    confine::write_atomically(&dir.admit(file).ok()?, text.as_bytes(), mode.as_ref()).ok()
 }
 
 #[cfg(test)]
