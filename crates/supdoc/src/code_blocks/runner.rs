@@ -7,7 +7,7 @@
 //! asks for the project root, and the block reaches it on stdin only.
 
 use std::ffi::OsStr;
-use std::io::{Read, Write as _};
+use std::io::{ErrorKind, Read, Write as _};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
 #[cfg(windows)]
@@ -284,7 +284,40 @@ fn spawn_tool(call: &Call<'_>, env: &ToolEnv, cwd: PathBuf) -> std::io::Result<C
     let _same = command.process_group(0);
     #[cfg(windows)]
     let _same = command.creation_flags(CREATE_NEW_PROCESS_GROUP);
-    command.spawn()
+    retry_busy(|| command.spawn())
+}
+
+/// How many times a spawn that Linux reports busy is tried before its error is returned.
+const BUSY_ATTEMPTS: u32 = 5;
+
+/// The pause between two tries of a busy spawn.
+const BUSY_DELAY: Duration = Duration::from_millis(20);
+
+/// Runs `spawn`, trying again up to [`BUSY_ATTEMPTS`] times in all while it fails with
+/// [`ErrorKind::ExecutableFileBusy`].
+///
+/// On Linux an executable just written can fail to spawn with `ETXTBSY` while another thread's
+/// fork still holds its write descriptor; the hold ends within moments. Any other error returns
+/// at once, and the last busy error returns once the tries run out.
+///
+/// # Errors
+///
+/// The error of the last `spawn`.
+///
+/// Effect: sleeps between tries.
+fn retry_busy<T>(mut spawn: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut attempt = 1;
+    loop {
+        match spawn() {
+            Err(error)
+                if error.kind() == ErrorKind::ExecutableFileBusy && attempt < BUSY_ATTEMPTS =>
+            {
+                attempt += 1;
+                thread::sleep(BUSY_DELAY);
+            }
+            result => return result,
+        }
+    }
 }
 
 /// Whether `meta` is mode 0700 or narrower and owned by whoever owns `cache`.
@@ -484,8 +517,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        CAP, Call, Cwd, Failure, Ran, create_private, exact, neutral_dir, private_dir, run,
-        write_private,
+        BUSY_ATTEMPTS, CAP, Call, Cwd, Failure, Ran, create_private, exact, neutral_dir,
+        private_dir, retry_busy, run, write_private,
     };
     use crate::code_blocks::tools::ToolEnv;
     use crate::config::confine::Boundary;
@@ -533,9 +566,6 @@ mod tests {
         }
     }
 
-    /// How many times [`run_stub`] spawns a stub that Linux reports busy.
-    const BUSY_ATTEMPTS: u32 = 5;
-
     /// Runs the fixture's stub on `stdin` with `extra` and `timeout`, from the neutral directory
     /// with the default cap.
     fn run_stub(
@@ -548,9 +578,6 @@ mod tests {
     }
 
     /// Runs the fixture's stub on `stdin` with `extra`, `timeout`, `cwd` and `cap`.
-    ///
-    /// On Linux a stub just written can fail to spawn with `ETXTBSY` while another test's fork
-    /// still holds the write descriptor, so a busy spawn is retried a few times, 20 ms apart.
     fn run_stub_with(
         fixture: &Fixture,
         stdin: &[u8],
@@ -569,18 +596,52 @@ mod tests {
             cwd,
             cap,
         };
-        let mut attempt = 1;
-        loop {
-            match run(&call, &fixture.env, &fixture.root) {
-                Err(Failure::Spawn(error))
-                    if error.kind() == ErrorKind::ExecutableFileBusy && attempt < BUSY_ATTEMPTS =>
-                {
-                    attempt += 1;
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                result => return result,
-            }
-        }
+        run(&call, &fixture.env, &fixture.root)
+    }
+
+    fn busy() -> std::io::Error {
+        std::io::Error::from(ErrorKind::ExecutableFileBusy)
+    }
+
+    #[test]
+    fn a_busy_spawn_is_retried_until_it_succeeds() {
+        let mut tries = 0;
+
+        let result = retry_busy(|| {
+            tries += 1;
+            if tries <= 2 { Err(busy()) } else { Ok(tries) }
+        });
+
+        assert_eq!(result.expect("the third try succeeds"), 3);
+        assert_eq!(tries, 3, "busy twice then Ok is three tries");
+    }
+
+    #[test]
+    fn a_spawn_busy_past_the_limit_returns_the_busy_error() {
+        let mut tries = 0;
+
+        let result: std::io::Result<()> = retry_busy(|| {
+            tries += 1;
+            Err(busy())
+        });
+
+        let error = result.expect_err("every try is busy");
+        assert_eq!(error.kind(), ErrorKind::ExecutableFileBusy);
+        assert_eq!(tries, BUSY_ATTEMPTS, "the tries stop at the limit");
+    }
+
+    #[test]
+    fn any_other_spawn_error_returns_without_a_retry() {
+        let mut tries = 0;
+
+        let result: std::io::Result<()> = retry_busy(|| {
+            tries += 1;
+            Err(std::io::Error::from(ErrorKind::NotFound))
+        });
+
+        let error = result.expect_err("not found is not retried");
+        assert_eq!(error.kind(), ErrorKind::NotFound);
+        assert_eq!(tries, 1, "a non-busy error is tried once");
     }
 
     #[cfg(unix)]
