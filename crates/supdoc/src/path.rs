@@ -33,6 +33,17 @@ impl AbsolutePath {
         Some(Self(normalized))
     }
 
+    /// A root that only names a path in text, valid on every OS: `/` on Unix and `C:\` on Windows.
+    ///
+    /// It never touches the filesystem and names no real directory. For a path that appears only
+    /// in a discarded parse error or a message sample, where `AbsolutePath::new(Path::new("/"))`
+    /// would be `None` on Windows because `/` has no drive there.
+    #[must_use]
+    pub(crate) fn name_root() -> Self {
+        let root = if cfg!(windows) { r"C:\" } else { "/" };
+        Self(PathBuf::from(root))
+    }
+
     /// Appends `rel` and normalizes the result.
     ///
     /// Infallible: absolute plus relative is always absolute.
@@ -826,6 +837,20 @@ mod tests {
 
     fn relative(raw: &str) -> RelativePath {
         RelativePath::try_from(raw.to_owned()).expect("the fixture path should be relative")
+    }
+
+    #[test]
+    fn the_name_root_is_absolute_and_takes_a_beneath_name_on_every_os() {
+        let root = AbsolutePath::name_root();
+        let named = root.beneath(&Component::new("block.yaml").expect("one normal name"));
+
+        assert!(root.as_path().is_absolute(), "{root:?} is not absolute");
+        assert_eq!(
+            named.strip_prefix(&root),
+            Some(Path::new("block.yaml")),
+            "{named:?} is not beneath {root:?}"
+        );
+        assert_eq!(AbsolutePath::new(root.as_path()), Some(root));
     }
 
     #[test]

@@ -11,7 +11,7 @@ use std::path::Path;
 
 use crate::check::fix::{apply_fixes, plan_fixes};
 use crate::config::Config;
-use crate::path::AbsolutePath;
+use crate::path::{AbsolutePath, Component};
 use crate::read::cartridge::Languages;
 use crate::read::error::{CartridgeLoadError, ReadError, ReadRole};
 use crate::scan::assemble;
@@ -48,7 +48,7 @@ pub const fn bug_exit_code() -> u8 {
 /// `read-internal`: tree-sitter returned no tree for a scanned source.
 #[must_use]
 pub fn read_internal() -> Option<Message> {
-    let path = AbsolutePath::new(Path::new("/project/src/lib.rs"))?;
+    let path = AbsolutePath::name_root().beneath(&Component::new("lib.rs")?);
     let error = ReadError::Internal {
         path,
         reason: "tree-sitter returned no tree",
