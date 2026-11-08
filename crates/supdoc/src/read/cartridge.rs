@@ -701,8 +701,7 @@ mod tests {
 
     #[test]
     fn source_file_parses_text_with_its_cartridge_grammar() {
-        let path = AbsolutePath::new(Path::new("/repo/src/lib.rs"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/src/lib.rs");
 
         let file = SourceFile::from_text(
             path.clone(),

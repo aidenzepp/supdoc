@@ -52,7 +52,6 @@ mod tests {
     use crate::cartridges::rust::region_texts;
     use crate::hash::HashSettings;
     use crate::link::SymbolPath;
-    use crate::path::AbsolutePath;
     use crate::read::cartridge::{SourceFile, Symbol, SymbolTable};
     use crate::read::hash::{hash_file, hash_symbol};
 
@@ -108,8 +107,7 @@ namespace util {
 
     fn parse(text: &str) -> SourceFile {
         let ts = cartridge().expect("the built-in TypeScript queries should compile");
-        let path = AbsolutePath::new(Path::new("/repo/src/lib.ts"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/src/lib.ts");
         SourceFile::parse(path, text.to_owned(), ts).expect("tree-sitter should return a tree")
     }
 
@@ -434,8 +432,7 @@ function local() {
     fn ts_and_tsx_name_one_fixture_identically() {
         let tsx =
             crate::cartridges::tsx::cartridge().expect("the built-in TSX queries should compile");
-        let path = AbsolutePath::new(Path::new("/repo/src/lib.tsx"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/src/lib.tsx");
         let tsx_file = SourceFile::parse(path, SHARED_FIXTURE.to_owned(), tsx)
             .expect("tree-sitter should return a tree");
 

@@ -339,7 +339,6 @@ fn lint_finding(tool: &ToolCartridge, diagnostic: &Diagnostic) -> Finding {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
 
     use super::{Diagnostic, Frame, Read, Verdict, findings, place};
     use crate::cartridges::markdown::cartridge::cartridge as markdown;
@@ -349,7 +348,6 @@ mod tests {
     use crate::code_blocks::rust::LineMap;
     use crate::code_blocks::tools::{CARTRIDGES, ToolCartridge};
     use crate::finding::{Finding, Location};
-    use crate::path::AbsolutePath;
     use crate::read::cartridge::{Cartridge, SourceFile};
 
     fn ruff() -> &'static ToolCartridge {
@@ -382,8 +380,7 @@ mod tests {
 
     /// The one block of `text`, read as `/repo/<source>` with `cartridge`.
     fn only_block(source: &str, text: &str, cartridge: &'static dyn Cartridge) -> CodeBlock {
-        let path = AbsolutePath::new(&Path::new("/repo").join(source))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture(&format!("/repo/{source}"));
         let file = SourceFile::parse(path, text.to_owned(), cartridge)
             .expect("tree-sitter should return a tree");
         let mut blocks = blocks_in(&file, |range| {

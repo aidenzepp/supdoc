@@ -116,6 +116,24 @@ impl AbsolutePath {
     }
 }
 
+/// An absolute fixture path from a Unix-style literal, for tests.
+///
+/// On Windows a `/`-leading literal is rooted at `C:`, so `/repo/x` becomes `C:/repo/x`.
+///
+/// # Panics
+///
+/// Panics when `raw` is not absolute after that rooting.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn fixture(raw: &str) -> AbsolutePath {
+    let rooted = if cfg!(windows) && raw.starts_with('/') {
+        format!("C:{raw}")
+    } else {
+        raw.to_owned()
+    };
+    AbsolutePath::new(Path::new(&rooted)).expect("the fixture path should be absolute")
+}
+
 impl serde::Serialize for AbsolutePath {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_str(&self.0.display())
@@ -803,7 +821,7 @@ mod tests {
     use super::*;
 
     fn absolute(raw: &str) -> AbsolutePath {
-        AbsolutePath::new(Path::new(raw)).expect("the fixture path should be absolute")
+        crate::path::fixture(raw)
     }
 
     fn relative(raw: &str) -> RelativePath {

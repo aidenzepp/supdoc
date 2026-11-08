@@ -215,7 +215,6 @@ mod tests {
     use super::*;
     use crate::hash::HashSettings;
     use crate::link::SymbolPath;
-    use crate::path::AbsolutePath;
     use crate::read::error::ResolveError;
     use crate::read::hash::{hash_file, hash_symbol};
 
@@ -269,8 +268,7 @@ def outer():
 
     fn parse(text: &str) -> SourceFile {
         let python = cartridge().expect("the built-in Python queries should compile");
-        let path = AbsolutePath::new(Path::new("/repo/src/app.py"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/src/app.py");
         SourceFile::parse(path, text.to_owned(), python).expect("tree-sitter should return a tree")
     }
 

@@ -626,7 +626,6 @@ impl fmt::Display for TargetPath {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::path::AbsolutePath;
 
     /// Fails with the rule `segments` breaks, naming `what` it came from.
     fn assert_beneath(what: &str, segments: &str) {
@@ -702,10 +701,8 @@ mod tests {
 
     #[test]
     fn beneath_a_source_or_target_appends_its_segments_to_the_base() {
-        let base =
-            AbsolutePath::new(Path::new("/base")).expect("the fixture base should be absolute");
-        let expected =
-            AbsolutePath::new(Path::new("/base/a/b")).expect("the fixture path should be absolute");
+        let base = crate::path::fixture("/base");
+        let expected = crate::path::fixture("/base/a/b");
         let target: TargetPath = "a/b"
             .parse()
             .expect("the fixture target path should be valid");

@@ -277,8 +277,7 @@ mod tests {
     }
 
     fn rust_path() -> AbsolutePath {
-        AbsolutePath::new(Path::new("/repo/src/deep.rs"))
-            .expect("the fixture path should be absolute")
+        crate::path::fixture("/repo/src/deep.rs")
     }
 
     fn rust() -> &'static dyn Cartridge {
@@ -336,8 +335,7 @@ mod tests {
 
     #[test]
     fn a_passed_deadline_stops_an_inline_markdown_parse() {
-        let path = AbsolutePath::new(Path::new("/repo/docs/long.md"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/docs/long.md");
         let markdown = Languages::builtin()
             .expect("the built-in cartridges should load")
             .for_path(Path::new("long.md"))

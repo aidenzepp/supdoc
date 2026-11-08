@@ -729,7 +729,6 @@ mod tests {
     use super::{cartridge, double_quoted, single_quoted};
     use crate::cartridges::data::KeyPathBudget;
     use crate::limits::{Limits, TimeLimit};
-    use crate::path::AbsolutePath;
     use crate::read::cartridge::{Cartridge, Deadline, Languages, SourceFile, Symbol, SymbolTable};
     use crate::read::error::ReadError;
 
@@ -770,8 +769,7 @@ spec:
 
     /// `text` parsed as `/repo/ci.yml`, its key paths to be built under `budget`.
     fn parse_under(text: &str, budget: KeyPathBudget) -> SourceFile {
-        let path = AbsolutePath::new(Path::new("/repo/ci.yml"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/ci.yml");
         SourceFile::from_text_under(
             path,
             text.to_owned(),
@@ -784,8 +782,7 @@ spec:
 
     /// Why reading `text` as `/repo/big.yaml` under `deadline` is refused.
     fn refusal_under(text: &str, deadline: Deadline) -> ReadError {
-        let path = AbsolutePath::new(Path::new("/repo/big.yaml"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/big.yaml");
         SourceFile::from_text_under(
             path,
             text.to_owned(),
@@ -1043,8 +1040,7 @@ spec:
             let _ = write!(text, "k{key}: 1, ");
             text
         });
-        let path = AbsolutePath::new(Path::new("/repo/wide.yaml"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/wide.yaml");
         let unlimited: TimeLimit = "0s".parse().expect("`0s` should mean no time limit");
         let file = SourceFile::from_text_under(
             path,
@@ -1164,7 +1160,7 @@ spec:
                 format!("[\n{}1\n]\n", "1,\n".repeat(39_997)),
             ),
         ] {
-            let path = AbsolutePath::new(Path::new(name)).expect("the path should be absolute");
+            let path = crate::path::fixture(name);
             let language = languages
                 .for_path(path.as_path())
                 .unwrap_or_else(|| panic!("the registry should claim `{name}`"));
@@ -1295,8 +1291,7 @@ spec:
     #[test]
     fn tabs_count_as_blanks_in_the_depth_measure() {
         let admitted = |text: &str| {
-            let path = AbsolutePath::new(Path::new("/repo/tabs.yaml"))
-                .expect("the fixture path should be absolute");
+            let path = crate::path::fixture("/repo/tabs.yaml");
             cartridge().admit(&path, text)
         };
 
@@ -1363,7 +1358,7 @@ spec:
             ("/repo/deep.toml", format!("[a]\n{pad}b = 1\n")),
             ("/repo/deep.json", format!("{{\n{pad}\"b\": 1\n}}\n")),
         ] {
-            let path = AbsolutePath::new(Path::new(name)).expect("the path should be absolute");
+            let path = crate::path::fixture(name);
             let language = languages
                 .for_path(path.as_path())
                 .unwrap_or_else(|| panic!("the registry should claim `{name}`"));

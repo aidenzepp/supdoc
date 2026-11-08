@@ -610,7 +610,6 @@ fn resolve_failed(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
 
     use super::*;
     use crate::config::Config;
@@ -619,7 +618,7 @@ mod tests {
     use crate::link::SourcePath;
 
     fn absolute(raw: &str) -> AbsolutePath {
-        AbsolutePath::new(Path::new(raw)).expect("the fixture path should be absolute")
+        crate::path::fixture(raw)
     }
 
     /// The first place `docs/a.md` links to `target`.

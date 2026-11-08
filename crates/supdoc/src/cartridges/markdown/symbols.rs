@@ -314,18 +314,15 @@ impl Siblings {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
 
     use super::*;
     use crate::cartridges::markdown::cartridge::cartridge;
     use crate::hash::HashSettings;
-    use crate::path::AbsolutePath;
     use crate::read::cartridge::Deadline;
     use crate::read::hash::hash_symbol;
 
     fn parse(text: &str) -> SourceFile {
-        let path = AbsolutePath::new(Path::new("/repo/docs/guide.md"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/docs/guide.md");
         let markdown = cartridge();
         SourceFile::parse(path, text.to_owned(), markdown)
             .expect("the Markdown grammar should parse any text")

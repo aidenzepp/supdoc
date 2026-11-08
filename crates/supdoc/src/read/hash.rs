@@ -80,11 +80,9 @@ mod crlf;
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
 
     use super::*;
     use crate::link::SymbolPath;
-    use crate::path::AbsolutePath;
     use crate::read::cartridge::Cartridge;
 
     /// The default: each CR directly before an LF is dropped.
@@ -102,8 +100,7 @@ mod tests {
     }
 
     fn parse(text: &str) -> SourceFile {
-        let path = AbsolutePath::new(Path::new("/repo/src/lib.rs"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/src/lib.rs");
         SourceFile::parse(path, text.to_owned(), rust()).expect("tree-sitter should return a tree")
     }
 

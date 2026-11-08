@@ -307,16 +307,13 @@ pub(crate) struct QueryFileError {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
 
     use super::*;
-    use crate::path::AbsolutePath;
 
     fn rust_file(text: &str) -> SourceFile {
         let rust =
             crate::cartridges::rust::cartridge().expect("the built-in Rust queries should compile");
-        let path = AbsolutePath::new(Path::new("/repo/src/lib.rs"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/src/lib.rs");
         SourceFile::parse(path, text.to_owned(), rust).expect("tree-sitter should return a tree")
     }
 
@@ -410,8 +407,7 @@ mod tests {
     fn python_docstrings_after_leading_comments_and_comments_are_regions() {
         let python = crate::cartridges::python::cartridge()
             .expect("the built-in Python queries should compile");
-        let path = AbsolutePath::new(Path::new("/repo/m.py"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/m.py");
         let text = "# top\n\"\"\"Module [a](a.md).\"\"\"\nx = \"# not\"\n\nclass C:\n    # c\n    \"\"\"Class doc.\"\"\"\n    def f(self):\n        \"\"\"Fn doc.\"\"\"\n        y = 'str'\n        return y  # tail\n";
         let file = SourceFile::parse(path, text.to_owned(), python)
             .expect("tree-sitter should return a tree");

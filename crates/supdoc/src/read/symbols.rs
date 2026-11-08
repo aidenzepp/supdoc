@@ -443,12 +443,11 @@ fn shares_last_segment(wanted: &str, candidate: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
 
     use super::*;
 
     fn absolute(raw: &str) -> AbsolutePath {
-        AbsolutePath::new(Path::new(raw)).expect("the fixture path should be absolute")
+        crate::path::fixture(raw)
     }
 
     fn path(raw: &str) -> SymbolPath {

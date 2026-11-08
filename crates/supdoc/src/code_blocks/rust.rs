@@ -1472,14 +1472,12 @@ mod tests {
     use crate::code_blocks::toolchain::cargo_lints;
     use crate::config::code_blocks::Edition;
     use crate::finding::Location;
-    use crate::path::AbsolutePath;
     use crate::read::cartridge::SourceFile;
 
     #[test]
     fn the_line_map_points_each_body_line_at_its_doc_line() {
         let text = "# Doc\n\n- item\n\n  ```rust\n  # fn main() {\n  let x = 1;\n  # }\n  ```\n";
-        let path = AbsolutePath::new(std::path::Path::new("/repo/docs/a.md"))
-            .expect("the fixture path is absolute");
+        let path = crate::path::fixture("/repo/docs/a.md");
         let file = SourceFile::parse(path, text.to_owned(), cartridge())
             .expect("tree-sitter should return a tree");
         let blocks = blocks_in(&file, |range| {

@@ -505,8 +505,7 @@ name = "second"
 
     /// `text` parsed as `/repo/Cargo.toml`, its key paths to be built under `budget`.
     fn parse_under(text: &str, budget: KeyPathBudget) -> SourceFile {
-        let path = AbsolutePath::new(Path::new("/repo/Cargo.toml"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/Cargo.toml");
         SourceFile::from_text_under(
             path,
             text.to_owned(),

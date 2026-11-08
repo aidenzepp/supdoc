@@ -59,7 +59,6 @@ mod tests {
 
     use crate::hash::HashSettings;
     use crate::link::SymbolPath;
-    use crate::path::AbsolutePath;
     use crate::read::cartridge::{Languages, SourceFile};
     use crate::read::hash::hash_symbol;
     use crate::read::links::links;
@@ -73,8 +72,7 @@ mod tests {
             .expect("the built-in cartridges should load")
             .for_path(Path::new(name))
             .unwrap_or_else(|| panic!("the registry should claim `{name}`"));
-        let path = AbsolutePath::new(&Path::new("/repo/docs").join(name))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture(&format!("/repo/docs/{name}"));
         SourceFile::parse(path, GUIDE.to_owned(), language)
             .expect("tree-sitter should return a tree")
     }

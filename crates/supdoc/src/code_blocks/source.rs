@@ -373,7 +373,6 @@ fn read_failed(error: &ReadError, root: &AbsolutePath, kind: SourceKind) -> Unre
 mod tests {
     use crate::cli::testing::symlink;
     use std::fs;
-    use std::path::Path;
 
     use tempfile::TempDir;
 
@@ -622,10 +621,9 @@ mod tests {
                 file: "tags.scm",
                 error: query_error,
             }));
-        let root = AbsolutePath::new(Path::new("/repo")).expect("the fixture root is absolute");
+        let root = crate::path::fixture("/repo");
         let error = ReadError::CartridgeLoad {
-            path: AbsolutePath::new(Path::new("/repo/src/lib.rs"))
-                .expect("the fixture path is absolute"),
+            path: crate::path::fixture("/repo/src/lib.rs"),
             error: CartridgeLoadError::Query(broken),
         };
 

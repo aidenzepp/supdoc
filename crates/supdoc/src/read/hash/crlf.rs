@@ -1,10 +1,7 @@
 //! Witness: under `normalize`, a CRLF file hashes every symbol like its LF twin, in
 //! every built-in cartridge. One test per cartridge, each over a multi-line fixture with comments.
 
-use std::path::Path;
-
 use crate::hash::{HashSettings, LineEndings};
-use crate::path::AbsolutePath;
 use crate::read::cartridge::{Cartridge, Languages, SourceFile};
 use crate::read::hash::hash_symbol;
 
@@ -25,8 +22,7 @@ fn parse(language: &'static dyn Cartridge, text: &str) -> SourceFile {
         .extensions()
         .first()
         .expect("every cartridge should claim an extension");
-    let path = AbsolutePath::new(Path::new(&format!("/repo/fixture.{extension}")))
-        .expect("the fixture path should be absolute");
+    let path = crate::path::fixture(&format!("/repo/fixture.{extension}"));
     SourceFile::parse(path, text.to_owned(), language)
         .unwrap_or_else(|error| panic!("`{}` should parse the fixture: {error}", language.id()))
 }

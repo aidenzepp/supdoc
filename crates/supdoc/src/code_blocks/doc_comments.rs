@@ -128,17 +128,14 @@ fn to_file(run: &Run, block: CodeBlock) -> Option<CodeBlock> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
 
     use super::*;
     use crate::cartridges::rust::cartridge;
     use crate::code_blocks::block::{blocks_in, replacement_for};
-    use crate::path::AbsolutePath;
 
     /// The blocks of `text` parsed as `/repo/src/lib.rs`.
     fn blocks_of(text: &str) -> Vec<CodeBlock> {
-        let path = AbsolutePath::new(Path::new("/repo/src/lib.rs"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/src/lib.rs");
         let rust = cartridge().expect("the built-in Rust queries should compile");
         let file = SourceFile::parse(path, text.to_owned(), rust)
             .expect("tree-sitter should return a tree");
@@ -276,8 +273,7 @@ mod tests {
 
     #[test]
     fn a_failed_markdown_parse_of_a_run_is_an_error_never_zero_blocks() {
-        let path = AbsolutePath::new(Path::new("/repo/src/lib.rs"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/src/lib.rs");
         let failed = Err(ReadError::Timeout {
             path,
             limit: "10s".parse().expect("10s is a valid limit"),

@@ -951,7 +951,7 @@ mod tests {
             "HOME" => Some(OsString::from("/home/me")),
             _ => Some(OsString::from("rel/claude")),
         });
-        let root = AbsolutePath::new(Path::new("/work")).expect("absolute");
+        let root = crate::path::fixture("/work");
 
         assert_eq!(
             dirs.claude_config_dir,

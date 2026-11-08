@@ -1936,9 +1936,8 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
     #[test]
     fn no_unread_refusal_help_suggests_excluding_the_path() {
         const RERUN: &str = "supdoc namespace rename auth identity";
-        let root = AbsolutePath::new(Path::new("/project")).expect("the root should be absolute");
-        let path = AbsolutePath::new(Path::new("/project/docs/a.md"))
-            .expect("the source path should be absolute");
+        let root = crate::path::fixture("/project");
+        let path = crate::path::fixture("/project/docs/a.md");
         let source = SourcePath::from_relative(Path::new("docs/a.md"))
             .expect("docs/a.md is a valid source path");
         let read_errors = [
@@ -1969,8 +1968,7 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
         ];
         let causes = [UnreadCause::Io(io::ErrorKind::PermissionDenied)];
         let dirs = causes.map(|cause| UnreadDir {
-            path: AbsolutePath::new(Path::new("/project/docs"))
-                .expect("the directory should be absolute"),
+            path: crate::path::fixture("/project/docs"),
             cause,
         });
 

@@ -641,12 +641,11 @@ fn quoted(paths: &[SymbolPath]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
 
     use super::*;
 
     fn absolute(raw: &str) -> AbsolutePath {
-        AbsolutePath::new(Path::new(raw)).expect("the fixture path should be absolute")
+        crate::path::fixture(raw)
     }
 
     fn symbol(raw: &str) -> SymbolPath {

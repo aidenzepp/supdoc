@@ -886,14 +886,13 @@ mod tests {
 
     #[test]
     fn a_lock_refused_as_outside_the_root_after_fixing_gets_path_changed_help_not_permissions() {
-        let root = AbsolutePath::new(Path::new("/project")).expect("the root should be absolute");
+        let root = crate::path::fixture("/project");
         let session = Session::new(root.clone(), &["fix", "--yes"]);
         let source: SourcePath = "docs/guide.md"
             .parse()
             .expect("the fixture source should be valid");
         let error = LockError::OutsideRoot {
-            path: AbsolutePath::new(Path::new("/project/supdoc.lock"))
-                .expect("the lockfile path should be absolute"),
+            path: crate::path::fixture("/project/supdoc.lock"),
             after_check: true,
         };
 
