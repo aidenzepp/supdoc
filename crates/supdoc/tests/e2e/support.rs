@@ -291,13 +291,15 @@ pub(crate) fn symlink(target: impl AsRef<Path>, link: impl AsRef<Path>) -> std::
     }
     #[cfg(windows)]
     {
+        // Windows rejects a forward slash in a link target (os error 123).
+        let target = std::path::PathBuf::from(target.to_string_lossy().replace('/', "\\"));
         let resolved = link
             .parent()
-            .map_or_else(|| target.to_path_buf(), |parent| parent.join(target));
+            .map_or_else(|| target.clone(), |parent| parent.join(&target));
         if resolved.is_dir() {
-            std::os::windows::fs::symlink_dir(target, link)
+            std::os::windows::fs::symlink_dir(&target, link)
         } else {
-            std::os::windows::fs::symlink_file(target, link)
+            std::os::windows::fs::symlink_file(&target, link)
         }
     }
 }
