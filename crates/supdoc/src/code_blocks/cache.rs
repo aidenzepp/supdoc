@@ -822,6 +822,20 @@ mod tests {
         );
     }
 
+    /// The variable `cache_bases` falls back to on this OS: `LOCALAPPDATA` on Windows, else `HOME`.
+    fn home_variable() -> &'static str {
+        if cfg!(windows) {
+            "LOCALAPPDATA"
+        } else {
+            "HOME"
+        }
+    }
+
+    /// The cache base a home directory gives: the directory itself on Windows, `.cache` in it elsewhere.
+    fn home_cache() -> &'static str {
+        if cfg!(windows) { "" } else { ".cache" }
+    }
+
     /// A scratch home holding `real` (a plain directory) and `link` (to `elsewhere/inner`), so
     /// `real/..` and `link/..` both hold a `..`, with those two values.
     fn hostile_home() -> (tempfile::TempDir, [PathBuf; 2]) {
@@ -885,14 +899,14 @@ mod tests {
     }
 
     #[test]
-    fn a_cache_home_holding_dot_dot_falls_back_to_home() {
+    fn a_cache_home_holding_dot_dot_falls_back_to_the_platforms_home_cache() {
         let (scratch, values) = hostile_home();
         let root = temp();
         let home = scratch.path().join("home");
         let env = |xdg: Option<&PathBuf>| {
             let vars = [
                 ("XDG_CACHE_HOME", xdg.map(|path| path.as_os_str())),
-                ("HOME", Some(home.as_os_str())),
+                (home_variable(), Some(home.as_os_str())),
             ];
             ToolEnv::from_vars(|name| {
                 vars.iter()
@@ -909,9 +923,11 @@ mod tests {
             let cache = Cache::open(&env(xdg), root.path())
                 .expect("the home cache should open when XDG_CACHE_HOME is unusable");
             assert!(
-                cache
-                    .dir
-                    .starts_with(real.join("home/.cache/supdoc/code-blocks")),
+                cache.dir.starts_with(
+                    real.join("home")
+                        .join(home_cache())
+                        .join("supdoc/code-blocks")
+                ),
                 "XDG_CACHE_HOME={xdg:?}: {cache:?}"
             );
         }

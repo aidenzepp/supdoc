@@ -1290,6 +1290,7 @@ mod tests {
         assert!(scratch.store().add(&repo).expect("adding should work"));
         let env = TrustEnv {
             home: Some(worktree.clone().into()),
+            user_profile: Some(worktree.clone().into()),
             ..scratch.env(None)
         };
 

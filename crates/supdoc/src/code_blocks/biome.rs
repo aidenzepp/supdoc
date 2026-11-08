@@ -827,6 +827,17 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::Path;
 
+    /// The tool environment whose cache base is under `dir`: the variable `cache_bases` reads on
+    /// this OS (`LOCALAPPDATA` on Windows, `HOME` elsewhere) and nothing else.
+    fn cache_env(dir: &Path) -> ToolEnv {
+        let variable = if cfg!(windows) {
+            "LOCALAPPDATA"
+        } else {
+            "HOME"
+        };
+        ToolEnv::from_vars(|name| (name == variable).then(|| dir.into()))
+    }
+
     #[test]
     fn biomes_json_report_gives_one_diagnostic_each_at_its_1_based_line_and_column() {
         let stdout = br#"{"summary":{"changed":0,"unchanged":1,"errors":2},"diagnostics":[
@@ -1111,7 +1122,7 @@ mod tests {
         let home = tempfile::TempDir::new().expect("a temp dir should be creatable");
         fs::create_dir_all(root.path().join("pkg/docs")).expect("the fixture dirs");
         fs::write(root.path().join("pkg/biome.json"), "{\"linter\":{}}").expect("the config");
-        let env = ToolEnv::from_vars(|name| (name == "HOME").then(|| home.path().into()));
+        let env = cache_env(home.path());
         let doc = root.path().join("pkg/docs/a.md");
         let given = project_args(&env, root.path(), &doc).expect("a plain config is given");
         let neutral = runner::neutral_dir(&env, root.path());
@@ -1158,7 +1169,7 @@ mod tests {
         let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let home = tempfile::TempDir::new().expect("a temp dir should be creatable");
         fs::write(root.path().join("biome.json"), "{}").expect("the config");
-        let env = ToolEnv::from_vars(|name| (name == "HOME").then(|| home.path().into()));
+        let env = cache_env(home.path());
         let doc = root.path().join("a.md");
         let given = project_args(&env, root.path(), &doc).expect("a plain config is given");
         let neutral = runner::neutral_dir(&env, root.path());
@@ -1187,7 +1198,7 @@ mod tests {
         let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let home = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let outside = tempfile::TempDir::new().expect("a temp dir should be creatable");
-        let env = ToolEnv::from_vars(|name| (name == "HOME").then(|| home.path().into()));
+        let env = cache_env(home.path());
         let doc = root.path().join("a.md");
         let given = project_args(&env, root.path(), &doc).expect("no config gives an empty one");
         let neutral = runner::neutral_dir(&env, root.path());
@@ -1209,7 +1220,7 @@ mod tests {
     fn a_run_directory_already_there_is_never_taken_over() {
         let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let home = tempfile::TempDir::new().expect("a temp dir should be creatable");
-        let env = ToolEnv::from_vars(|name| (name == "HOME").then(|| home.path().into()));
+        let env = cache_env(home.path());
         let doc = root.path().join("a.md");
         let given = project_args(&env, root.path(), &doc).expect("no config gives an empty one");
         let neutral = runner::neutral_dir(&env, root.path());
@@ -1262,7 +1273,7 @@ mod tests {
         let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let home = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let place = tempfile::TempDir::new().expect("a temp dir should be creatable");
-        let env = ToolEnv::from_vars(|name| (name == "HOME").then(|| home.path().into()));
+        let env = cache_env(home.path());
         let doc = root.path().join("a.md");
         let given = project_args(&env, root.path(), &doc).expect("no config gives an empty one");
         let deep = place.path().join("elsewhere/deep");
@@ -1286,7 +1297,7 @@ mod tests {
         let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let home = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let outside = tempfile::TempDir::new().expect("a temp dir should be creatable");
-        let env = ToolEnv::from_vars(|name| (name == "HOME").then(|| home.path().into()));
+        let env = cache_env(home.path());
         let doc = root.path().join("a.md");
         let given = project_args(&env, root.path(), &doc).expect("no config gives an empty one");
         let neutral = runner::neutral_dir(&env, root.path());
@@ -1317,7 +1328,7 @@ mod tests {
     fn with_no_project_config_the_lint_file_sits_beside_the_empty_config() {
         let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let home = tempfile::TempDir::new().expect("a temp dir should be creatable");
-        let env = ToolEnv::from_vars(|name| (name == "HOME").then(|| home.path().into()));
+        let env = cache_env(home.path());
         let doc = root.path().join("docs/a.md");
         let given = project_args(&env, root.path(), &doc).expect("no config gives an empty one");
         let neutral = runner::neutral_dir(&env, root.path());
@@ -1380,7 +1391,7 @@ mod tests {
         let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let home = tempfile::TempDir::new().expect("a temp dir should be creatable");
         fs::write(root.path().join("biome.jsonc"), config).expect("the config");
-        let env = ToolEnv::from_vars(|name| (name == "HOME").then(|| home.path().into()));
+        let env = cache_env(home.path());
         let args = project_args(&env, root.path(), &root.path().join("a.md"))?;
         let flag = args
             .flags
@@ -1454,7 +1465,7 @@ mod tests {
         )
         .expect("the root config");
         fs::write(root.path().join("docs/biome.jsonc"), "{ // ok\n}").expect("the docs config");
-        let env = ToolEnv::from_vars(|name| (name == "HOME").then(|| home.path().into()));
+        let env = cache_env(home.path());
 
         let passed = project_args(&env, root.path(), &root.path().join("docs/deep/a.md"));
         let refused = project_args(&env, root.path(), &root.path().join("a.md"));
@@ -1497,7 +1508,7 @@ mod tests {
             fs::create_dir_all(path.parent().expect("a parent")).expect("the fixture dirs");
             fs::write(path, text).expect("the fixture file");
         }
-        let env = ToolEnv::from_vars(|name| (name == "HOME").then(|| home.path().into()));
+        let env = cache_env(home.path());
         let given = project_args(&env, root.path(), &root.path().join(doc));
         // The home must outlive the written config's use below.
         std::mem::forget(home);
