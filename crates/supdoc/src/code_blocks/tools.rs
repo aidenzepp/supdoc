@@ -25,13 +25,28 @@ use super::lint;
 use super::runner::{Cwd, Failure, Ran};
 use super::{biome, eslint, go, prettier, pylint, python, rumdl, rust, shell, tombi, yaml};
 
-/// The variables a tool gets from supdoc's own environment, and no others.
+/// The variables a tool gets from supdoc's own environment, and no others. Windows adds
+/// `LOCALAPPDATA` and `USERPROFILE`, where it keeps its cache and its home.
+#[cfg(not(windows))]
 const PASSED: [&str; 5] = [
     "PATH",
     "HOME",
     "RUSTUP_HOME",
     "CARGO_HOME",
     "XDG_CACHE_HOME",
+];
+
+/// The variables a tool gets from supdoc's own environment, and no others. Windows adds
+/// `LOCALAPPDATA` and `USERPROFILE`, where it keeps its cache and its home.
+#[cfg(windows)]
+const PASSED: [&str; 7] = [
+    "PATH",
+    "HOME",
+    "RUSTUP_HOME",
+    "CARGO_HOME",
+    "XDG_CACHE_HOME",
+    "LOCALAPPDATA",
+    "USERPROFILE",
 ];
 
 /// The environment tools get, read once by `main` and passed down like the skill directories.
@@ -42,7 +57,7 @@ pub(crate) struct ToolEnv {
 }
 
 impl ToolEnv {
-    /// Reads `PATH`, `HOME`, `RUSTUP_HOME`, `CARGO_HOME` and `XDG_CACHE_HOME` through `var`.
+    /// Reads each of [`PASSED`] through `var`.
     pub(crate) fn from_vars(var: impl Fn(&str) -> Option<OsString>) -> Self {
         Self {
             vars: PASSED

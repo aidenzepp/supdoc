@@ -87,6 +87,8 @@ clean, 1 failing or refused, 2 usage error, 70 supdoc bug, 74 I/O error, 78 conf
 Each command's `--help` is the reference for its flags. No command writes in the project beyond what the
 table names. With code blocks on, `check` and `fix` keep a result cache, and a trusted build its output,
 under `~/.cache/supdoc` (or `$XDG_CACHE_HOME/supdoc`).
+On Windows both go under `%LOCALAPPDATA%\supdoc` (the cache in `code-blocks`, the trust store as
+`trusted-roots`), and `XDG_CACHE_HOME` and `XDG_STATE_HOME` still win when set.
 
 ## Configuration
 
