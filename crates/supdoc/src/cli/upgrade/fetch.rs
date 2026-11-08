@@ -4,13 +4,15 @@
 //! and [`check_redirect`], so the hosts, the scheme and the redirect count are unit-tested without
 //! a network: HTTPS only, the first request goes to `github.com`, at most [`MAX_REDIRECTS`]
 //! redirects, and each redirect target is `https://` on one of [`REDIRECT_HOSTS`]. The client
-//! never reads a proxy or a base URL from the environment. Debug builds alone honour
-//! `SUPDOC_TEST_RELEASE_DIR`, which serves files from a directory instead of the network.
+//! never reads a proxy or a base URL from the environment. The bytes come from the system `curl`,
+//! run by absolute path with a cleared environment, so the operating system's TLS and trust store
+//! do the handshake. Debug builds alone honour `SUPDOC_TEST_RELEASE_DIR`, which serves files from
+//! a directory instead of the network.
 
-use std::sync::Arc;
-
-use ureq::config::Config;
-use ureq::tls::{Certificate, RootCerts, TlsConfig, TlsProvider};
+use std::ffi::OsString;
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 /// The largest `SHA256SUMS` body, in bytes.
 pub(crate) const MAX_SUMS_BYTES: u64 = 64 * 1024;
@@ -29,6 +31,15 @@ const REDIRECT_HOSTS: [&str; 3] = [
     "github.com",
     "release-assets.githubusercontent.com",
     "objects.githubusercontent.com",
+];
+
+/// Where Unix systems keep `curl`, in the order tried.
+#[cfg(unix)]
+const CURL_CANDIDATES: [&str; 4] = [
+    "/usr/bin/curl",
+    "/bin/curl",
+    "/usr/local/bin/curl",
+    "/opt/homebrew/bin/curl",
 ];
 
 /// The debug-only variable that serves release files from a directory.
@@ -71,9 +82,12 @@ pub(crate) enum FetchError {
         /// The cap.
         limit: u64,
     },
-    /// The system offers no root certificate to verify the server with.
-    #[error("the system has no root certificates to verify the download server with")]
-    NoRoots,
+    /// No `curl` exists at any fixed path.
+    #[error("supdoc upgrade needs curl; download the release asset by hand: {url}")]
+    NoCurl {
+        /// The URL asked for.
+        url: String,
+    },
     /// The transport failed.
     #[error("could not fetch `{url}`: {message}")]
     Transport {
@@ -155,97 +169,170 @@ fn check_redirect(location: &str, redirect_number: usize) -> Result<(), FetchErr
     })
 }
 
+/// The first of `candidates` that `exists` accepts. No `PATH` lookup ever happens.
+fn choose_curl(candidates: &[PathBuf], exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    candidates.iter().find(|path| exists(path)).cloned()
+}
+
+/// The fixed paths `curl` may live at on this operating system.
+fn curl_candidates() -> Vec<PathBuf> {
+    #[cfg(unix)]
+    {
+        CURL_CANDIDATES.iter().map(PathBuf::from).collect()
+    }
+    #[cfg(windows)]
+    {
+        vec![
+            crate::process::recorded_system_root()
+                .join("System32")
+                .join("curl.exe"),
+        ]
+    }
+}
+
+/// The arguments for one request: `-q` first so no `.curlrc` applies, https only, TLS 1.2 or
+/// newer, no redirect followed by curl itself, the size cap, timeouts, and a status line on
+/// stderr after the body.
+fn curl_args(url: &str, cap: u64) -> Vec<OsString> {
+    let mut args: Vec<OsString> = ["-q", "--proto", "=https", "--tlsv1.2", "--fail", "--silent"]
+        .iter()
+        .map(OsString::from)
+        .collect();
+    args.extend(
+        [
+            "--show-error",
+            "--max-redirs",
+            "0",
+            "--max-filesize",
+            &cap.to_string(),
+            "--connect-timeout",
+            "30",
+            "--max-time",
+            "600",
+            "--write-out",
+            "%{stderr}\n%{http_code} %{redirect_url}\n",
+            "--",
+            url,
+        ]
+        .iter()
+        .map(OsString::from),
+    );
+    args
+}
+
+/// The status code and redirect URL from the last line curl wrote to stderr.
+fn parse_status(stderr: &str) -> Option<(u16, String)> {
+    let line = stderr.lines().rev().find(|line| !line.trim().is_empty())?;
+    let (code, location) = line.split_once(' ').unwrap_or((line, ""));
+    Some((code.trim().parse().ok()?, location.trim().to_owned()))
+}
+
+/// What one curl request returned.
+struct Hop {
+    /// The HTTP status code.
+    status: u16,
+    /// The redirect URL, empty when there is none.
+    location: String,
+    /// The body, at most the cap.
+    body: Vec<u8>,
+}
+
+/// Runs curl once for `url` and reads at most `cap` body bytes.
+///
+/// # Errors
+///
+/// Returns [`FetchError::TooLarge`] when the body passes `cap`, and [`FetchError::Transport`]
+/// when curl cannot start, exits with an error, or leaves no status line.
+fn run_curl(curl: &Path, url: &str, cap: u64) -> Result<Hop, FetchError> {
+    let transport = |message: String| FetchError::Transport {
+        url: url.to_owned(),
+        message,
+    };
+    let mut command = Command::new(curl);
+    let _args = command
+        .args(curl_args(url, cap))
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    let _root = command.env("SystemRoot", crate::process::recorded_system_root());
+    let mut child = command
+        .spawn()
+        .map_err(|error| transport(error.to_string()))?;
+    let mut body = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        let _read = stdout
+            .take(cap.saturating_add(1))
+            .read_to_end(&mut body)
+            .map_err(|error| transport(error.to_string()))?;
+    }
+    if u64::try_from(body.len()).map_or(true, |len| len > cap) {
+        let _killed = child.kill();
+        let _reaped = child.wait();
+        return Err(FetchError::TooLarge {
+            url: url.to_owned(),
+            limit: cap,
+        });
+    }
+    let mut stderr = String::new();
+    if let Some(pipe) = child.stderr.take() {
+        let _read = pipe.take(64 * 1024).read_to_string(&mut stderr);
+    }
+    let exit = child.wait().map_err(|error| transport(error.to_string()))?;
+    let status = parse_status(&stderr);
+    if !exit.success() {
+        let detail = stderr
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("curl failed");
+        return Err(transport(format!("{detail} ({exit})")));
+    }
+    let (status, location) =
+        status.ok_or_else(|| transport("curl reported no status".to_owned()))?;
+    Ok(Hop {
+        status,
+        location,
+        body,
+    })
+}
+
 /// The bytes at an `https://github.com/...` URL, following allowed redirects, at most `cap` long.
 ///
 /// # Errors
 ///
 /// Returns a [`FetchError`] when the URL or any redirect breaks the host policy, when the server
-/// answers with anything but 200 or a redirect, when the body passes `cap`, or on a transport
-/// failure.
+/// answers with anything but 200 or a redirect, when the body passes `cap`, when no `curl`
+/// exists, or on a transport failure.
 pub(crate) fn fetch(url: &str, cap: u64) -> Result<Vec<u8>, FetchError> {
     #[cfg(debug_assertions)]
     if let Some(dir) = std::env::var_os(TEST_DIR_VAR) {
-        return fetch_from_dir(std::path::Path::new(&dir), url, cap);
+        return fetch_from_dir(Path::new(&dir), url, cap);
     }
     check_initial(url)?;
-    let agent = agent()?;
+    let curl = choose_curl(&curl_candidates(), Path::exists).ok_or_else(|| FetchError::NoCurl {
+        url: url.to_owned(),
+    })?;
     let mut current = url.to_owned();
     let mut redirects = 0;
     loop {
-        let mut response = agent
-            .get(&current)
-            .call()
-            .map_err(|error| transport(&current, &error))?;
-        let status = response.status().as_u16();
-        if matches!(status, 301 | 302 | 303 | 307 | 308) {
+        let hop = run_curl(&curl, &current, cap)?;
+        if matches!(hop.status, 301 | 302 | 303 | 307 | 308) {
             redirects += 1;
-            let location = response
-                .headers()
-                .get("location")
-                .and_then(|value| value.to_str().ok())
-                .ok_or(FetchError::NoLocation)?
-                .to_owned();
-            check_redirect(&location, redirects)?;
-            current = location;
+            if hop.location.is_empty() {
+                return Err(FetchError::NoLocation);
+            }
+            check_redirect(&hop.location, redirects)?;
+            current = hop.location;
             continue;
         }
-        if status != 200 {
+        if hop.status != 200 {
             return Err(FetchError::Status {
                 url: current,
-                status,
+                status: hop.status,
             });
         }
-        let body = response
-            .body_mut()
-            .with_config()
-            .limit(cap)
-            .read_to_vec()
-            .map_err(|error| match error {
-                ureq::Error::BodyExceedsLimit(_) => FetchError::TooLarge {
-                    url: current.clone(),
-                    limit: cap,
-                },
-                other => transport(&current, &other),
-            })?;
-        return Ok(body);
-    }
-}
-
-/// A client that checks the host policy itself: no redirects of its own, no proxy, https only,
-/// the operating system's root certificates, and ring as the crypto provider.
-///
-/// # Errors
-///
-/// Returns [`FetchError::NoRoots`] when the system has no usable root certificate.
-fn agent() -> Result<ureq::Agent, FetchError> {
-    let roots: Vec<Certificate<'static>> = rustls_native_certs::load_native_certs()
-        .certs
-        .into_iter()
-        .map(|der| Certificate::from_der(der.as_ref()).to_owned())
-        .collect();
-    if roots.is_empty() {
-        return Err(FetchError::NoRoots);
-    }
-    let tls = TlsConfig::builder()
-        .provider(TlsProvider::Rustls)
-        .root_certs(RootCerts::new_with_certs(&roots))
-        .unversioned_rustls_crypto_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .build();
-    let config = Config::builder()
-        .https_only(true)
-        .max_redirects(0)
-        .http_status_as_error(false)
-        .proxy(None)
-        .tls_config(tls)
-        .build();
-    Ok(ureq::Agent::new_with_config(config))
-}
-
-/// Wraps a ureq error with the URL it came from.
-fn transport(url: &str, error: &ureq::Error) -> FetchError {
-    FetchError::Transport {
-        url: url.to_owned(),
-        message: error.to_string(),
+        return Ok(hop.body);
     }
 }
 
@@ -256,9 +343,7 @@ fn transport(url: &str, error: &ureq::Error) -> FetchError {
 /// Returns [`FetchError::TestFile`] for a missing or unreadable file and
 /// [`FetchError::TooLarge`] for one over `cap`.
 #[cfg(debug_assertions)]
-fn fetch_from_dir(dir: &std::path::Path, url: &str, cap: u64) -> Result<Vec<u8>, FetchError> {
-    use std::io::Read as _;
-
+fn fetch_from_dir(dir: &Path, url: &str, cap: u64) -> Result<Vec<u8>, FetchError> {
     let test_file = |message: String| FetchError::TestFile {
         url: url.to_owned(),
         message,
@@ -356,6 +441,56 @@ mod tests {
                 "{target} must be accepted"
             );
         }
+    }
+
+    #[test]
+    fn curl_runs_with_q_first_https_only_no_redirects_and_the_cap() {
+        let args: Vec<String> = curl_args("https://github.com/x", 4096)
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args.first().map(String::as_str), Some("-q"));
+        let pair = |flag: &str, value: &str| {
+            args.windows(2).any(|two| {
+                two.first().map(String::as_str) == Some(flag)
+                    && two.get(1).map(String::as_str) == Some(value)
+            })
+        };
+        assert!(pair("--proto", "=https"), "{args:?}");
+        assert!(pair("--max-redirs", "0"), "{args:?}");
+        assert!(pair("--max-filesize", "4096"), "{args:?}");
+        assert!(args.iter().any(|arg| arg == "--tlsv1.2"), "{args:?}");
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("https://github.com/x")
+        );
+    }
+
+    #[test]
+    fn the_first_existing_curl_candidate_wins_and_none_is_none() {
+        let list = [
+            PathBuf::from("/a/curl"),
+            PathBuf::from("/b/curl"),
+            PathBuf::from("/c/curl"),
+        ];
+        let only = |wanted: &'static [&'static str]| {
+            move |path: &Path| wanted.iter().any(|w| path == Path::new(w))
+        };
+        assert_eq!(
+            choose_curl(&list, only(&["/b/curl", "/c/curl"])),
+            Some(PathBuf::from("/b/curl"))
+        );
+        assert_eq!(choose_curl(&list, only(&[])), None);
+    }
+
+    #[test]
+    fn the_status_line_gives_the_code_and_the_redirect_url() {
+        assert_eq!(
+            parse_status("noise\n302 https://objects.githubusercontent.com/a\n"),
+            Some((302, "https://objects.githubusercontent.com/a".to_owned()))
+        );
+        assert_eq!(parse_status("\n200 \n"), Some((200, String::new())));
+        assert_eq!(parse_status("curl: oops"), None);
     }
 
     #[test]
