@@ -687,13 +687,15 @@ impl Place {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
     use std::process::Command;
     use std::sync::{Barrier, mpsc};
     use std::thread;
     use std::time::Duration;
 
     use super::*;
+    use crate::cli::testing::symlink;
 
     /// A scratch directory holding a real path, with a trust environment rooted in it.
     struct Scratch {
@@ -801,6 +803,7 @@ mod tests {
         assert_eq!(granted(&other, &scratch.env(None)), Ok(Grant::Untrusted));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_store_listing_the_root_reached_through_a_parent_component_grants_nothing() {
         let scratch = Scratch::new();
@@ -869,6 +872,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_socket_store_file_is_not_a_regular_file_and_never_hangs() {
         let scratch = Scratch::new();
@@ -1001,6 +1005,7 @@ mod tests {
         assert_eq!(granted(&forged, &scratch.env(None)), Ok(Grant::Untrusted));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_fifo_at_a_forged_gitdir_is_refused_without_blocking() {
         let scratch = Scratch::new();
@@ -1447,6 +1452,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_store_is_created_0600_in_a_0700_directory() {
         let scratch = Scratch::new();

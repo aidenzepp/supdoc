@@ -252,10 +252,12 @@ fn sentence_case(clause: &str) -> String {
 mod tests {
     use std::ffi::OsString;
     use std::fs;
-    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
 
     use super::{AddError, store_failed};
+    use crate::cli::testing::symlink;
     use crate::trust::TrustEnv;
 
     /// The help of `supdoc trust`'s refusal when adding `root` to the store under `state`, whose
@@ -346,6 +348,7 @@ mod tests {
         assert_eq!(help, NOT_A_FILE_HELP);
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_unreadable_store_file_says_to_make_it_readable() {
         let (_dir, scratch) = scratch();
