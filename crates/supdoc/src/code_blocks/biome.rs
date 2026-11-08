@@ -323,12 +323,13 @@ impl LintFile {
         })?;
         let own = Boundary::resolve(&dir);
         let copy = dir.beneath(&fixed::BIOME_JSON);
-        let names = given.names.as_ref().map(|[(_, file), (_, project)]| {
-            [
+        let names = match given.names.as_deref() {
+            Some([(_, file), (_, project)]) => Some([
                 (copy.as_path().to_path_buf(), file.clone()),
                 (dir.as_path().to_path_buf(), project.clone()),
-            ]
-        });
+            ]),
+            _ => None,
+        };
         let mut run = Self {
             base,
             dir,
@@ -371,11 +372,7 @@ impl LintFile {
         let Some(names) = &self.names else {
             return stderr.to_vec();
         };
-        let mut text = String::from_utf8_lossy(stderr).into_owned();
-        for (private, project) in names {
-            text = text.replace(&*private.to_string_lossy(), &project.to_string_lossy());
-        }
-        text.into_bytes()
+        rename(stderr, names).into_bytes()
     }
 
     /// `--config-path=<the config copy>`, which biome reads instead of the shared private
@@ -455,7 +452,7 @@ pub(crate) struct Given {
     pub(crate) mirror: Option<PathBuf>,
     /// With a project config: how to name the private paths in biome's messages: the private
     /// file and directory, with the project's file and directory they stand for.
-    pub(crate) names: Option<[(PathBuf, PathBuf); 2]>,
+    pub(crate) names: Option<Vec<(PathBuf, PathBuf)>>,
 }
 
 impl Given {
@@ -465,12 +462,42 @@ impl Given {
         let Some(names) = &self.names else {
             return stderr.to_vec();
         };
-        let mut text = String::from_utf8_lossy(stderr).into_owned();
-        for (private, project) in names {
-            text = text.replace(&*private.to_string_lossy(), &project.to_string_lossy());
-        }
-        text.into_bytes()
+        rename(stderr, names).into_bytes()
     }
+}
+
+/// `stderr` with each private path in `names` replaced by the project path it stands for. On
+/// Windows, the rest of a path that followed a matched private path, up to the next space, `:` or
+/// quote, is written with `/`; text outside a matched private path is never rewritten.
+fn rename<'a>(stderr: &[u8], names: impl IntoIterator<Item = &'a (PathBuf, PathBuf)>) -> String {
+    let mut text = String::from_utf8_lossy(stderr).into_owned();
+    for (private, project) in names {
+        let private = private.to_string_lossy();
+        let project = project.to_string_lossy();
+        if private.is_empty() {
+            continue;
+        }
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text.as_str();
+        while let Some((before, after)) = rest.split_once(&*private) {
+            out.push_str(before);
+            out.push_str(&project);
+            rest = after;
+            let tail = rest
+                .find(|c: char| c.is_whitespace() || matches!(c, ':' | '"' | '\''))
+                .unwrap_or(rest.len());
+            let (path, after) = rest.split_at(tail);
+            if cfg!(windows) {
+                out.push_str(&path.replace('\\', "/"));
+            } else {
+                out.push_str(path);
+            }
+            rest = after;
+        }
+        out.push_str(rest);
+        text = out;
+    }
+    text
 }
 
 /// What biome is given for `doc`: the project's config, found walking up from `doc`'s directory
@@ -504,7 +531,9 @@ pub(crate) fn project_args(env: &ToolEnv, root: &Path, doc: &Path) -> Result<Giv
     let names = found
         .as_deref()
         .zip(project_dir.zip(private_dir))
-        .map(|(file, (dir, private))| [(config, file.to_path_buf()), (private, dir.to_path_buf())]);
+        .map(|(file, (dir, private))| {
+            vec![(config, file.to_path_buf()), (private, dir.to_path_buf())]
+        });
     Ok(Given {
         flags: vec![flag],
         config: Some(private_config),
@@ -814,6 +843,7 @@ fn private_dir(parent: &Boundary, dir: &AbsolutePath) -> Option<Boundary> {
 
 #[cfg(test)]
 mod tests {
+
     use super::{
         LintFile, Refusal, diagnostics, extension, holds_comment, lint_verdict, linted_nothing,
         parse_error, project_args, without_exclusions, write_new,
@@ -836,6 +866,25 @@ mod tests {
             "HOME"
         };
         ToolEnv::from_vars(|name| (name == variable).then(|| dir.into()))
+    }
+
+    #[test]
+    fn only_a_path_after_a_matched_private_prefix_is_rewritten() {
+        let names = [(
+            std::path::PathBuf::from("priv"),
+            std::path::PathBuf::from("proj"),
+        )];
+        let sep = std::path::MAIN_SEPARATOR;
+        let printed = format!("at priv{sep}a{sep}b.json:1 and other\\path.json:2");
+
+        let shown = super::rename(printed.as_bytes(), &names);
+
+        let tail = if cfg!(windows) {
+            "/a/b.json".to_owned()
+        } else {
+            format!("{sep}a{sep}b.json")
+        };
+        assert_eq!(shown, format!("at proj{tail}:1 and other\\path.json:2"));
     }
 
     #[test]

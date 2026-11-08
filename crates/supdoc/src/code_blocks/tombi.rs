@@ -338,16 +338,25 @@ impl Project {
     }
 
     /// How the private paths tombi prints are named to the user: the private directory, with
-    /// and without a trailing `/`, as the block's virtual name relative to the directory its
-    /// config resolves patterns against.
+    /// and without a trailing separator (`/`, and the platform's own, which tombi may print on
+    /// Windows), as the block's virtual name relative to the directory its config resolves
+    /// patterns against. A path outside the private directory is never shortened.
     #[must_use]
-    pub(crate) fn names(&self) -> [(PathBuf, PathBuf); 2] {
-        let mut slashed = self.config_home.clone().into_os_string();
-        slashed.push("/");
-        [
-            (PathBuf::from(slashed), PathBuf::new()),
-            (self.config_home.clone(), PathBuf::from(".")),
-        ]
+    pub(crate) fn names(&self) -> Vec<(PathBuf, PathBuf)> {
+        let mut separators = vec!["/"];
+        if std::path::MAIN_SEPARATOR_STR != "/" {
+            separators.push(std::path::MAIN_SEPARATOR_STR);
+        }
+        let mut names: Vec<(PathBuf, PathBuf)> = separators
+            .into_iter()
+            .map(|separator| {
+                let mut slashed = self.config_home.clone().into_os_string();
+                slashed.push(separator);
+                (PathBuf::from(slashed), PathBuf::new())
+            })
+            .collect();
+        names.push((self.config_home.clone(), PathBuf::from(".")));
+        names
     }
 }
 
@@ -896,6 +905,32 @@ mod tests {
             "Error: x\n    at {}.1.toml:2:5\n",
             given.doc_as_seen(&doc).display()
         );
+
+        assert_eq!(
+            named(&given, &printed),
+            "Error: x\n    at docs/a.md.1.toml:2:5\n"
+        );
+    }
+
+    #[test]
+    fn tombi_printing_the_private_path_with_slashes_is_named_the_same() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let doc = root.path().join("docs/a.md");
+        let given = project(&env_in(cache.path()), root.path(), &doc).expect("no config is fine");
+        let printed = format!(
+            "Error: x\n    at {}/docs/a.md.1.toml:2:5\n",
+            given.config_home.display()
+        );
+
+        assert_eq!(
+            named(&given, &printed),
+            "Error: x\n    at docs/a.md.1.toml:2:5\n"
+        );
+    }
+
+    /// `printed` as the user sees it, tombi's private paths named.
+    fn named(given: &Project, printed: &str) -> String {
         let named = crate::code_blocks::biome::Given {
             flags: Vec::new(),
             config: None,
@@ -903,11 +938,7 @@ mod tests {
             names: Some(given.names()),
         }
         .named(printed.as_bytes());
-
-        assert_eq!(
-            String::from_utf8_lossy(&named),
-            "Error: x\n    at docs/a.md.1.toml:2:5\n"
-        );
+        String::from_utf8_lossy(&named).into_owned()
     }
 
     #[test]
