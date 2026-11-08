@@ -25,13 +25,31 @@ use super::lint;
 use super::runner::{Cwd, Failure, Ran};
 use super::{biome, eslint, go, prettier, pylint, python, rumdl, rust, shell, tombi, yaml};
 
-/// The variables a tool gets from supdoc's own environment, and no others.
-const PASSED: [&str; 5] = [
+/// The variables a tool gets from supdoc's own environment, and no others. On Windows the
+/// names a process needs to start join them; on Unix the list is unchanged.
+#[cfg(not(windows))]
+const PASSED: &[&str] = &[
     "PATH",
     "HOME",
     "RUSTUP_HOME",
     "CARGO_HOME",
     "XDG_CACHE_HOME",
+];
+
+/// The variables a tool gets from supdoc's own environment, and no others.
+#[cfg(windows)]
+const PASSED: &[&str] = &[
+    "PATH",
+    "HOME",
+    "RUSTUP_HOME",
+    "CARGO_HOME",
+    "XDG_CACHE_HOME",
+    "SystemRoot",
+    "SystemDrive",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "COMSPEC",
 ];
 
 /// The environment tools get, read once by `main` and passed down like the skill directories.
@@ -42,11 +60,12 @@ pub(crate) struct ToolEnv {
 }
 
 impl ToolEnv {
-    /// Reads `PATH`, `HOME`, `RUSTUP_HOME`, `CARGO_HOME` and `XDG_CACHE_HOME` through `var`.
+    /// Reads each name in [`PASSED`] through `var`.
     pub(crate) fn from_vars(var: impl Fn(&str) -> Option<OsString>) -> Self {
         Self {
             vars: PASSED
-                .into_iter()
+                .iter()
+                .copied()
                 .filter_map(|name| var(name).map(|value| (name, value)))
                 .collect(),
         }
@@ -62,6 +81,11 @@ impl ToolEnv {
     /// `PATH`, when it is set.
     fn path(&self) -> Option<&OsStr> {
         self.var("PATH")
+    }
+
+    /// `PATHEXT`, when it is passed and set: only Windows passes it.
+    fn pathext(&self) -> Option<&OsStr> {
+        self.var("PATHEXT")
     }
 
     /// The passed variable `name`, when it is set.
@@ -1946,15 +1970,19 @@ pub(crate) fn find(binary: &str, env: &ToolEnv, root: &Path) -> Found {
 #[must_use]
 pub(crate) fn find_in(binary: &str, bins: &[&str], env: &ToolEnv, root: &Path) -> Found {
     let local = bins.iter().map(|dir| root.join(dir)).find_map(|dir| {
-        let candidate = dir.join(binary);
-        is_executable_file(&candidate)
-            .then(|| candidate.canonicalize().ok())
-            .flatten()
+        candidate_names(binary, env.pathext())
+            .into_iter()
+            .map(|name| dir.join(name))
+            .find(|candidate| is_executable_file(candidate))
+            .and_then(|candidate| candidate.canonicalize().ok())
     });
     if let Some(real) = local {
         return Found::InsideRoot(real);
     }
-    let Some(real) = env.path().and_then(|path| first_on_path(binary, path)) else {
+    let Some(real) = env
+        .path()
+        .and_then(|path| first_on_path(binary, path, env.pathext()))
+    else {
         return Found::Missing;
     };
     if inside(&real, root) {
@@ -1970,12 +1998,43 @@ fn search_dirs(path: &OsStr) -> impl Iterator<Item = PathBuf> {
     std::env::split_paths(path).filter(|dir| dir.is_absolute())
 }
 
-/// The real path of the first executable regular file named `binary` in [`search_dirs`].
+/// The file names a lookup tries for `binary`, in order. Without `pathext` (every OS but
+/// Windows) that is `binary` alone. With it, a `binary` already ending in one of its extensions
+/// (compared without case) is tried as it is; any other gets each extension appended, in
+/// `pathext` order, so `ruff` finds `ruff.exe` and a `.cmd` shim only when `.CMD` is listed.
+fn candidate_names(binary: &str, pathext: Option<&OsStr>) -> Vec<OsString> {
+    let Some(pathext) = pathext else {
+        return vec![binary.into()];
+    };
+    let pathext = pathext.to_string_lossy();
+    let extensions: Vec<&str> = pathext
+        .split(';')
+        .filter_map(|extension| extension.strip_prefix('.'))
+        .filter(|extension| !extension.is_empty())
+        .collect();
+    let listed = Path::new(binary).extension().is_some_and(|own| {
+        let own = own.to_string_lossy();
+        extensions
+            .iter()
+            .any(|extension| extension.eq_ignore_ascii_case(&own))
+    });
+    if listed {
+        return vec![binary.into()];
+    }
+    extensions
+        .into_iter()
+        .map(|extension| OsString::from(format!("{binary}.{extension}")))
+        .collect()
+}
+
+/// The real path of the first executable regular file named `binary` (or, with `pathext`, one of
+/// its [`candidate_names`]) in [`search_dirs`].
 ///
 /// Effect: reads file metadata and resolves symlinks.
-fn first_on_path(binary: &str, path: &OsStr) -> Option<PathBuf> {
+fn first_on_path(binary: &str, path: &OsStr, pathext: Option<&OsStr>) -> Option<PathBuf> {
+    let names = candidate_names(binary, pathext);
     search_dirs(path)
-        .map(|dir| dir.join(binary))
+        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
         .filter(|candidate| is_executable_file(candidate))
         .find_map(|candidate| candidate.canonicalize().ok())
 }
@@ -2069,6 +2128,69 @@ mod tests {
             externs: &[],
             fragment: None,
         })
+    }
+
+    #[test]
+    fn a_bare_name_gets_each_pathext_extension_in_order() {
+        let names = super::candidate_names("ruff", Some(OsStr::new(".COM;.EXE;.CMD")));
+        assert_eq!(
+            names,
+            ["ruff.COM", "ruff.EXE", "ruff.CMD"].map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn a_name_ending_in_a_listed_extension_is_tried_as_it_is_without_case() {
+        let names = super::candidate_names("biome.cmd", Some(OsStr::new(".EXE;.CMD")));
+        assert_eq!(names, [OsString::from("biome.cmd")]);
+    }
+
+    #[test]
+    fn a_shim_extension_missing_from_pathext_is_never_tried() {
+        let names = super::candidate_names("biome", Some(OsStr::new(".COM;.EXE")));
+        assert!(!names.contains(&OsString::from("biome.cmd")), "{names:?}");
+    }
+
+    #[test]
+    fn without_pathext_only_the_exact_name_is_tried() {
+        assert_eq!(
+            super::candidate_names("ruff", None),
+            [OsString::from("ruff")]
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn off_windows_the_tool_environment_keeps_only_the_five_unix_names() {
+        let env = ToolEnv::from_vars(|_| Some(OsString::from("v")));
+        let names: Vec<&str> = env.vars().map(|(name, _)| name).collect();
+        assert_eq!(
+            names,
+            [
+                "PATH",
+                "HOME",
+                "RUSTUP_HOME",
+                "CARGO_HOME",
+                "XDG_CACHE_HOME"
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_the_tool_environment_also_keeps_the_names_a_process_needs_to_start() {
+        let env = ToolEnv::from_vars(|_| Some(OsString::from("v")));
+        let names: Vec<&str> = env.vars().map(|(name, _)| name).collect();
+        for kept in [
+            "SystemRoot",
+            "SystemDrive",
+            "PATHEXT",
+            "TEMP",
+            "TMP",
+            "COMSPEC",
+        ] {
+            assert!(names.contains(&kept), "{kept} missing from {names:?}");
+        }
     }
 
     #[test]
