@@ -13,7 +13,8 @@ recorded it, a link no longer resolves or has no lock entry yet, or a code block
 unformatted, or fails its format or lint step. With --deny-warnings, warnings also fail, such as an obsolete \
 lock entry or a code-block-not-trusted warning. check writes nothing in the project. With code \
 blocks on, it keeps a result cache in $XDG_CACHE_HOME/supdoc/code-blocks (else \
-~/.cache/supdoc/code-blocks).
+~/.cache/supdoc/code-blocks; on Windows, %LOCALAPPDATA%\\supdoc\\code-blocks, with XDG_CACHE_HOME \
+still winning when set).
 
 FILES
 
@@ -260,7 +261,8 @@ extends, runs as written from the root (see `supdoc check --help`). Untrusted, e
 run` with a code-block-not-trusted warning naming it.
 
 Trust is granted only from outside the checkout. `supdoc trust` records the project root in \
-$XDG_STATE_HOME/supdoc/trusted-roots (else ~/.local/state/supdoc/trusted-roots); \
+$XDG_STATE_HOME/supdoc/trusted-roots (else ~/.local/state/supdoc/trusted-roots; on Windows, \
+%LOCALAPPDATA%\\supdoc\\trusted-roots, with XDG_STATE_HOME still winning when set); \
 SUPDOC_TRUST=1 trusts one run, as in a CI job, and SUPDOC_TRUST=0 turns trust off for one run \
 whatever the store lists. No file in the checkout can turn trust on. `tier = \"static\"` in \
 [features.code-blocks] holds every step to the untrusted list even in a trusted checkout, with no \
