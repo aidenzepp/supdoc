@@ -42,6 +42,14 @@ const CURL_CANDIDATES: [&str; 4] = [
     "/opt/homebrew/bin/curl",
 ];
 
+/// How much of the end of curl's stderr is kept, in bytes. The status line is last and an error
+/// message is short; everything earlier is read and dropped so a chatty curl never blocks on a
+/// full pipe.
+const STDERR_KEEP: usize = 64 * 1024;
+
+/// The oldest curl whose `--write-out` knows `%{stderr}`.
+const MIN_CURL: &str = "7.63.0";
+
 /// The debug-only variable that serves release files from a directory.
 #[cfg(debug_assertions)]
 const TEST_DIR_VAR: &str = "SUPDOC_TEST_RELEASE_DIR";
@@ -190,14 +198,23 @@ fn curl_candidates() -> Vec<PathBuf> {
     }
 }
 
-/// The arguments for one request: `-q` first so no `.curlrc` applies, https only, TLS 1.2 or
+/// The arguments for one request: `-q` first so no `.curlrc` applies, `--globoff` so `[` and `{`
+/// in a URL are not expanded, https only, TLS 1.2 or
 /// newer, no redirect followed by curl itself, the size cap, timeouts, and a status line on
 /// stderr after the body.
 fn curl_args(url: &str, cap: u64) -> Vec<OsString> {
-    let mut args: Vec<OsString> = ["-q", "--proto", "=https", "--tlsv1.2", "--fail", "--silent"]
-        .iter()
-        .map(OsString::from)
-        .collect();
+    let mut args: Vec<OsString> = [
+        "-q",
+        "--globoff",
+        "--proto",
+        "=https",
+        "--tlsv1.2",
+        "--fail",
+        "--silent",
+    ]
+    .iter()
+    .map(OsString::from)
+    .collect();
     args.extend(
         [
             "--show-error",
@@ -237,12 +254,22 @@ struct Hop {
     body: Vec<u8>,
 }
 
+/// Kills and reaps `child` after a failure so nothing is left running.
+fn abort(child: &mut std::process::Child) {
+    let _killed = child.kill();
+    let _reaped = child.wait();
+}
+
 /// Runs curl once for `url` and reads at most `cap` body bytes.
+///
+/// Stdout and stderr are drained at the same time, so a curl that writes a lot to stderr cannot
+/// stall on a full pipe.
 ///
 /// # Errors
 ///
 /// Returns [`FetchError::TooLarge`] when the body passes `cap`, and [`FetchError::Transport`]
-/// when curl cannot start, exits with an error, or leaves no status line.
+/// when curl cannot start, a read fails, curl exits with an error, or it is too old to print the
+/// status line.
 fn run_curl(curl: &Path, url: &str, cap: u64) -> Result<Hop, FetchError> {
     let transport = |message: String| FetchError::Transport {
         url: url.to_owned(),
@@ -260,27 +287,39 @@ fn run_curl(curl: &Path, url: &str, cap: u64) -> Result<Hop, FetchError> {
     let mut child = command
         .spawn()
         .map_err(|error| transport(error.to_string()))?;
+    let stderr_reader = child.stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut kept: Vec<u8> = Vec::new();
+            let mut chunk = [0_u8; 8192];
+            while let Ok(read) = pipe.read(&mut chunk) {
+                let Some(bytes) = chunk.get(..read).filter(|bytes| !bytes.is_empty()) else {
+                    break;
+                };
+                kept.extend_from_slice(bytes);
+                let excess = kept.len().saturating_sub(STDERR_KEEP);
+                drop(kept.drain(..excess));
+            }
+            String::from_utf8_lossy(&kept).into_owned()
+        })
+    });
     let mut body = Vec::new();
-    if let Some(stdout) = child.stdout.take() {
-        let _read = stdout
-            .take(cap.saturating_add(1))
-            .read_to_end(&mut body)
-            .map_err(|error| transport(error.to_string()))?;
+    if let Some(stdout) = child.stdout.take()
+        && let Err(error) = stdout.take(cap.saturating_add(1)).read_to_end(&mut body)
+    {
+        abort(&mut child);
+        return Err(transport(error.to_string()));
     }
     if u64::try_from(body.len()).map_or(true, |len| len > cap) {
-        let _killed = child.kill();
-        let _reaped = child.wait();
+        abort(&mut child);
         return Err(FetchError::TooLarge {
             url: url.to_owned(),
             limit: cap,
         });
     }
-    let mut stderr = String::new();
-    if let Some(pipe) = child.stderr.take() {
-        let _read = pipe.take(64 * 1024).read_to_string(&mut stderr);
-    }
+    let stderr = stderr_reader
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
     let exit = child.wait().map_err(|error| transport(error.to_string()))?;
-    let status = parse_status(&stderr);
     if !exit.success() {
         let detail = stderr
             .lines()
@@ -288,8 +327,11 @@ fn run_curl(curl: &Path, url: &str, cap: u64) -> Result<Hop, FetchError> {
             .unwrap_or("curl failed");
         return Err(transport(format!("{detail} ({exit})")));
     }
-    let (status, location) =
-        status.ok_or_else(|| transport("curl reported no status".to_owned()))?;
+    let (status, location) = parse_status(&stderr).ok_or_else(|| {
+        transport(format!(
+            "curl printed no status line, so it is too old: supdoc needs curl {MIN_CURL} or newer"
+        ))
+    })?;
     Ok(Hop {
         status,
         location,
@@ -313,10 +355,21 @@ pub(crate) fn fetch(url: &str, cap: u64) -> Result<Vec<u8>, FetchError> {
     let curl = choose_curl(&curl_candidates(), Path::exists).ok_or_else(|| FetchError::NoCurl {
         url: url.to_owned(),
     })?;
+    fetch_with(&curl, url, cap)
+}
+
+/// The fetch loop over the curl at `curl`: one request per hop, each redirect checked before the
+/// next request runs.
+///
+/// # Errors
+///
+/// Returns a [`FetchError`] as [`fetch`] does, except for a missing curl.
+fn fetch_with(curl: &Path, url: &str, cap: u64) -> Result<Vec<u8>, FetchError> {
+    check_initial(url)?;
     let mut current = url.to_owned();
     let mut redirects = 0;
     loop {
-        let hop = run_curl(&curl, &current, cap)?;
+        let hop = run_curl(curl, &current, cap)?;
         if matches!(hop.status, 301 | 302 | 303 | 307 | 308) {
             redirects += 1;
             if hop.location.is_empty() {
@@ -450,6 +503,7 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
         assert_eq!(args.first().map(String::as_str), Some("-q"));
+        assert_eq!(args.get(1).map(String::as_str), Some("--globoff"));
         let pair = |flag: &str, value: &str| {
             args.windows(2).any(|two| {
                 two.first().map(String::as_str) == Some(flag)
@@ -493,6 +547,7 @@ mod tests {
         assert_eq!(parse_status("curl: oops"), None);
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     fn the_test_directory_serves_a_file_and_enforces_the_cap() {
         let dir = tempfile::tempdir().expect("the test directory should be created");
@@ -510,5 +565,151 @@ mod tests {
             fetch_from_dir(dir.path(), "https://github.com/a/..", 4),
             Err(FetchError::TestFile { .. })
         ));
+    }
+
+    /// A stub curl for the fetch loop: writes each URL it is asked for to a log, then answers from
+    /// `rules` as (url, status, location, body); `extra` is more `case` arms.
+    #[cfg(unix)]
+    fn stub_curl(dir: &Path, rules: &[(&str, u16, &str, &str)], extra: &str) -> (PathBuf, PathBuf) {
+        use std::fmt::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let log = dir.join("requests.log");
+        let mut script = format!(
+            "#!/bin/sh\nfor a; do u=$a; done\nprintf '%s\\n' \"$u\" >> '{}'\ncase \"$u\" in\n",
+            log.display()
+        );
+        for (url, status, location, body) in rules {
+            let _arm = writeln!(
+                script,
+                "'{url}') printf '%s' '{body}'; printf '\\n%s %s\\n' '{status}' '{location}' >&2 ;;"
+            );
+        }
+        script.push_str(extra);
+        script.push_str("*) printf '\\n404 \\n' >&2; exit 22 ;;\nesac\n");
+        let path = dir.join("curl");
+        std::fs::write(&path, script).expect("the stub curl should be written");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("the stub curl should become executable");
+        (path, log)
+    }
+
+    #[cfg(unix)]
+    fn requests(log: &Path) -> Vec<String> {
+        std::fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_redirect_off_the_list_is_refused_before_its_request_runs() {
+        let dir = tempfile::tempdir().expect("the stub directory should be created");
+        let (curl, log) = stub_curl(
+            dir.path(),
+            &[
+                ("https://github.com/a", 302, "https://evil.example/b", ""),
+                ("https://evil.example/b", 200, "", "pwned"),
+            ],
+            "",
+        );
+        let result = fetch_with(&curl, "https://github.com/a", 100);
+        assert!(
+            matches!(result, Err(FetchError::HostNotAllowed { .. })),
+            "{result:?}"
+        );
+        assert_eq!(requests(&log), ["https://github.com/a"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn five_redirects_then_a_body_succeed_and_a_sixth_redirect_is_refused() {
+        let dir = tempfile::tempdir().expect("the stub directory should be created");
+        let chain = |last: (u16, &'static str, &'static str)| {
+            let urls: Vec<String> = (0..=6)
+                .map(|n| format!("https://github.com/r{n}"))
+                .collect();
+            let rules: Vec<(String, u16, String, String)> = urls
+                .iter()
+                .enumerate()
+                .map(|(n, url)| match (n, urls.get(n + 1)) {
+                    (5, _) => (url.clone(), last.0, last.2.to_owned(), last.1.to_owned()),
+                    (_, Some(next)) => (url.clone(), 302, next.clone(), String::new()),
+                    (_, None) => (url.clone(), 200, String::new(), "end".to_owned()),
+                })
+                .collect();
+            rules
+        };
+        let run = |rules: Vec<(String, u16, String, String)>| {
+            let borrowed: Vec<(&str, u16, &str, &str)> = rules
+                .iter()
+                .map(|(u, c, l, b)| (u.as_str(), *c, l.as_str(), b.as_str()))
+                .collect();
+            let (curl, log) = stub_curl(dir.path(), &borrowed, "");
+            let _gone = std::fs::remove_file(&log);
+            let result = fetch_with(&curl, "https://github.com/r0", 100);
+            (result, requests(&log))
+        };
+        let (ok, seen) = run(chain((200, "five", "")));
+        assert_eq!(ok.expect("five redirects are allowed"), b"five");
+        assert_eq!(seen.len(), 6);
+        let (refused, seen) = run(chain((302, "", "https://github.com/r6")));
+        assert!(
+            matches!(refused, Err(FetchError::TooManyRedirects)),
+            "{refused:?}"
+        );
+        assert_eq!(seen.len(), 6, "the seventh request must not run: {seen:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_body_past_the_cap_is_refused() {
+        let dir = tempfile::tempdir().expect("the stub directory should be created");
+        let (curl, _log) = stub_curl(
+            dir.path(),
+            &[("https://github.com/big", 200, "", "123456789")],
+            "",
+        );
+        assert!(matches!(
+            fetch_with(&curl, "https://github.com/big", 4),
+            Err(FetchError::TooLarge { .. })
+        ));
+        assert_eq!(
+            fetch_with(&curl, "https://github.com/big", 9).expect("a body at the cap is served"),
+            b"123456789"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_curl_that_floods_stderr_does_not_stall_the_fetch() {
+        let dir = tempfile::tempdir().expect("the stub directory should be created");
+        let flood = format!(
+            "'https://github.com/flood') i=0; while [ $i -lt 3000 ]; do printf '%s\\n' '{}' >&2; i=$((i+1)); done; printf 'ok'; printf '\\n200 \\n' >&2 ;;\n",
+            "x".repeat(100)
+        );
+        let (curl, _log) = stub_curl(dir.path(), &[], &flood);
+        assert_eq!(
+            fetch_with(&curl, "https://github.com/flood", 100)
+                .expect("a flood on stderr is drained"),
+            b"ok"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_curl_with_no_status_line_is_called_too_old() {
+        let dir = tempfile::tempdir().expect("the stub directory should be created");
+        let (curl, _log) = stub_curl(
+            dir.path(),
+            &[],
+            "'https://github.com/old') printf 'body' ;;\n",
+        );
+        let error = fetch_with(&curl, "https://github.com/old", 100)
+            .expect_err("a curl without a status line is refused");
+        let text = error.to_string();
+        assert!(text.contains("too old") && text.contains("7.63"), "{text}");
     }
 }
