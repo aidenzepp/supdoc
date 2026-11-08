@@ -7,6 +7,10 @@
 //! runs from `$CARGO_HOME`, so no `.cargo/config.toml` or `rust-toolchain.toml` near the
 //! directory supdoc was started in can redirect it. Without `--yes` the command only previews.
 //! With no version, `cargo search supdoc --limit 1` names the latest release.
+//!
+//! A binary built by the release workflow (it carries `SUPDOC_RELEASE_BINARY=1`) is the other
+//! install this command knows. Its preview reads one `SHA256SUMS` from the GitHub release and
+//! names the archive and digest that would be installed; applying it is not built yet.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -28,6 +32,7 @@ use crate::output::{Output, Report, TextContext, preview_note};
 use super::args::{UpgradeArgs, WriteMode};
 use super::project::command_line;
 use super::{CliError, Context, Outcome, cause};
+use release::{Sums, Triple};
 
 #[cfg_attr(
     not(test),
@@ -255,7 +260,17 @@ enum UpgradeOutcome {
     AlreadyCurrent,
 }
 
-/// `supdoc upgrade`: the versions, and the command that installs the target.
+/// How this supdoc was installed, and so how it would be upgraded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+enum Method {
+    /// `cargo install` from crates.io.
+    Cargo,
+    /// A binary downloaded from a GitHub release.
+    ReleaseBinary,
+}
+
+/// `supdoc upgrade`: the versions, and what installs the target.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct UpgradeReport {
     /// The version that is running.
@@ -264,12 +279,22 @@ pub(crate) struct UpgradeReport {
     target: String,
     /// `upgrade`, `downgrade`, or `same` when the target is the running version.
     direction: Direction,
-    /// The command that installs the target, as an argument vector; empty when nothing would run.
+    /// The command that installs the target, as an argument vector; empty when nothing would run
+    /// and for a release binary.
     command: Vec<String>,
     /// Whether the command ran.
     ran: bool,
     /// How the run ended.
     outcome: UpgradeOutcome,
+    /// How this supdoc was installed: `cargo` or `release-binary`.
+    method: Method,
+    /// The release archive URL the target would come from; only for a release binary that has a
+    /// version to install.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    asset: Option<String>,
+    /// The SHA-256 the archive must have, from `SHA256SUMS`; only with `asset`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sha256: Option<String>,
 }
 
 impl Report for UpgradeReport {
@@ -287,7 +312,13 @@ impl Report for UpgradeReport {
         };
         writeln!(out, "current  {}", visible(&self.current))?;
         writeln!(out, "target   {} ({verb})", visible(&self.target))?;
-        writeln!(out, "command  {}", shell_line(&self.command))
+        match (&self.asset, &self.sha256) {
+            (Some(asset), Some(sha256)) => {
+                writeln!(out, "asset    {}", visible(asset))?;
+                writeln!(out, "sha256   {}", visible(sha256))
+            }
+            _ => writeln!(out, "command  {}", shell_line(&self.command)),
+        }
     }
 }
 
@@ -306,25 +337,97 @@ pub(crate) fn schema() -> schemars::Schema {
     schemars::schema_for!(Envelope<'static, UpgradeReport>)
 }
 
-/// Runs `supdoc upgrade`: previews, or under `--yes` runs, the cargo install of the target.
+/// Runs `supdoc upgrade`: previews, or under `--yes` runs, the install of the target.
 ///
-/// Effect: reads `CARGO_HOME`, `HOME`, the install records and this binary's path; runs
-/// `cargo search` when no version is given, and `cargo install` under `--yes`, both with
-/// `$CARGO_HOME` as the working directory and standard input closed.
+/// A supdoc that cargo installed from crates.io upgrades with cargo. A release binary previews
+/// the archive and digest from the release's `SHA256SUMS`.
+///
+/// Effect: reads `CARGO_HOME`, `HOME`, the install records and this binary's path. The cargo
+/// route runs `cargo search` when no version is given, and `cargo install` under `--yes`, both
+/// with `$CARGO_HOME` as the working directory and standard input closed. The release-binary
+/// route fetches one `SHA256SUMS`.
 ///
 /// # Errors
 ///
-/// Returns `cli-upgrade-not-cargo` (78) when this binary is not the one cargo installed from
-/// crates.io, `cli-upgrade-no-cargo` (74) when `cargo` cannot be started,
+/// Returns `cli-upgrade-not-cargo` (78) when this binary is neither a release binary nor the one
+/// cargo installed from crates.io, `cli-upgrade-no-cargo` (74) when `cargo` cannot be started,
 /// `cli-upgrade-cargo-failed` (1) when cargo exits with a failure, `cli-upgrade-latest-unknown`
-/// (1) when `cargo search` names no version, and `cli-output-failed` when the report cannot be
-/// written.
+/// (1) when `cargo search` names no version, `cli-upgrade-fetch-failed` (74) when `SHA256SUMS`
+/// cannot be fetched or read, `cli-upgrade-no-asset` (1) when the release has no archive for
+/// this platform, `cli-upgrade-binary-not-yet` (1) under `--yes` for a release binary, and
+/// `cli-output-failed` when the report cannot be written.
 pub(crate) fn run(
     args: &UpgradeArgs,
     context: &Context,
     output: &mut Output,
 ) -> Result<Outcome, CliError> {
-    let installed = installed_by_cargo(&Environment::read())?;
+    match detect(&Environment::read(), release_marker())? {
+        Install::Cargo(installed) => run_cargo(args, context, output, &installed),
+        Install::ReleaseBinary => run_release_binary(args, context, output),
+    }
+}
+
+/// How this supdoc was installed.
+#[derive(Debug)]
+enum Install {
+    /// By cargo from crates.io, with cargo's record to prove it.
+    Cargo(CargoInstall),
+    /// As a binary downloaded from a release.
+    ReleaseBinary,
+}
+
+/// Whether this build says it is a release binary: the release workflow sets
+/// `SUPDOC_RELEASE_BINARY=1` at compile time, and debug builds also take a
+/// `SUPDOC_TEST_RELEASE_DIR`, so tests can stand in for the release.
+fn release_marker() -> bool {
+    option_env!("SUPDOC_RELEASE_BINARY") == Some("1") || fetch::test_dir_is_set()
+}
+
+/// Decides how this supdoc was installed. Order: the binary is the one cargo recorded (the cargo
+/// route, checked as before); a location another tool owns (Homebrew, a `target/` build), which
+/// is refused even with the release marker, since supdoc never takes over a file another tool
+/// owns; the release marker; then the unknown-location refusal of [`installed_by_cargo`].
+///
+/// # Errors
+///
+/// Returns `cli-upgrade-not-cargo` as [`installed_by_cargo`] does, for a known owner or, with no
+/// marker, an unknown origin.
+fn detect(environment: &Environment, marker: bool) -> Result<Install, CliError> {
+    if cargo_owns_exe(environment) {
+        return installed_by_cargo(environment).map(Install::Cargo);
+    }
+    if let Some(refusal) = environment.exe.as_deref().and_then(known_location) {
+        return Err(refusal);
+    }
+    if marker {
+        return Ok(Install::ReleaseBinary);
+    }
+    installed_by_cargo(environment).map(Install::Cargo)
+}
+
+/// Whether this binary is the file at `$CARGO_HOME/bin/supdoc`.
+fn cargo_owns_exe(environment: &Environment) -> bool {
+    let (Some(exe), Ok(cargo_home)) = (&environment.exe, &environment.cargo_home) else {
+        return false;
+    };
+    fs::canonicalize(cargo_home.join("bin").join(PACKAGE))
+        .ok()
+        .as_deref()
+        == Some(exe.as_path())
+}
+
+/// The cargo route of [`run`]: previews, or under `--yes` runs, the cargo install of the target.
+///
+/// # Errors
+///
+/// Returns the cargo errors [`run`] lists, and `cli-output-failed` when the report cannot be
+/// written.
+fn run_cargo(
+    args: &UpgradeArgs,
+    context: &Context,
+    output: &mut Output,
+    installed: &CargoInstall,
+) -> Result<Outcome, CliError> {
     let target = match &args.release {
         Some(version) => version.clone(),
         None => latest(&installed.cargo_home)?,
@@ -355,6 +458,9 @@ pub(crate) fn run(
         command,
         ran,
         outcome,
+        method: Method::Cargo,
+        asset: None,
+        sha256: None,
     };
     output
         .report(&report, true)
@@ -373,6 +479,229 @@ pub(crate) fn run(
             .map_err(|error| CliError::output_failed("the upgrade report", &error))?;
     }
     Ok(Outcome::Clean)
+}
+
+/// The first release that has downloadable binaries.
+const FIRST_BINARY_RELEASE: &str = "0.5.0";
+
+/// The release-binary route of [`run`]: reads `SHA256SUMS` and previews the archive and digest.
+///
+/// Effect: one fetch of `SHA256SUMS`, for the latest release or for the version asked for.
+///
+/// # Errors
+///
+/// Returns `cli-upgrade-no-asset` for a platform, version or release without an archive,
+/// `cli-upgrade-fetch-failed` when `SHA256SUMS` cannot be fetched or parsed,
+/// `cli-upgrade-binary-not-yet` under `--yes`, and `cli-output-failed` when the report cannot be
+/// written.
+fn run_release_binary(
+    args: &UpgradeArgs,
+    context: &Context,
+    output: &mut Output,
+) -> Result<Outcome, CliError> {
+    let running = ReleaseVersion::from_str(env!("CARGO_PKG_VERSION"))
+        .map_err(|_| cannot_tell("this binary's own version is not a release version"))?;
+    if let Some(version) = args
+        .release
+        .as_ref()
+        .filter(|version| version.to_string().contains('+'))
+    {
+        return Err(no_asset(
+            format!("`{version}` carries build metadata, which does not name a release"),
+            format!("Write the version as `{}`", version.release()),
+        ));
+    }
+    let same = args
+        .release
+        .as_ref()
+        .is_some_and(|version| running.direction_to(version) == Direction::Same);
+    let (target, found) = match args.release.as_ref().filter(|_| same) {
+        Some(version) => (version.clone(), None),
+        None => find_release_entry(args.release.as_ref())?,
+    };
+    let direction = running.direction_to(&target);
+    let applied = args.confirm.mode() == WriteMode::Apply;
+
+    let (outcome, asset, sha256) = match found {
+        Some((asset, digest)) if direction != Direction::Same => {
+            if applied {
+                return Err(binary_not_yet(&target));
+            }
+            (UpgradeOutcome::Previewed, Some(asset), Some(digest))
+        }
+        _ => (UpgradeOutcome::AlreadyCurrent, None, None),
+    };
+
+    let report = UpgradeReport {
+        current: running.to_string(),
+        target: target.to_string(),
+        direction,
+        command: Vec::new(),
+        ran: false,
+        outcome,
+        method: Method::ReleaseBinary,
+        asset,
+        sha256,
+    };
+    output
+        .report(&report, true)
+        .map_err(|error| CliError::output_failed("the upgrade report", &error))?;
+    if outcome == UpgradeOutcome::Previewed {
+        let note = preview_note(
+            args.confirm.dry_run,
+            &command_line(context, "upgrade", &[target.release()], &["--yes"]),
+        );
+        output
+            .note(&note)
+            .map_err(|error| CliError::output_failed("the upgrade report", &error))?;
+    }
+    Ok(Outcome::Clean)
+}
+
+/// The version to install and, when it differs from the running one, the archive URL and digest
+/// for this platform, from one fetch of `SHA256SUMS`.
+///
+/// Effect: one fetch of `SHA256SUMS`, for the latest release or for `requested`.
+///
+/// # Errors
+///
+/// Returns `cli-upgrade-no-asset` for a platform, version or release without an archive, and
+/// `cli-upgrade-fetch-failed` when `SHA256SUMS` cannot be fetched or parsed.
+fn find_release_entry(
+    requested: Option<&ReleaseVersion>,
+) -> Result<(ReleaseVersion, Option<(String, String)>), CliError> {
+    let triple = release::running_triple().ok_or_else(|| {
+        no_asset(
+            format!(
+                "supdoc has no release binary for this platform ({}-{})",
+                std::env::consts::ARCH,
+                std::env::consts::OS
+            ),
+            "Install it with cargo: `cargo install supdoc --locked`",
+        )
+    })?;
+    let url = release::sums_url(requested).ok_or_else(|| {
+        no_asset(
+            format!(
+                "{} is a pre-release, and releases publish binaries only for plain versions",
+                requested.map_or_else(String::new, ToString::to_string)
+            ),
+            "Name a plain version such as `0.5.0`, or install the pre-release with cargo",
+        )
+    })?;
+    let bytes = fetch::fetch(&url, fetch::MAX_SUMS_BYTES)
+        .map_err(|error| sums_fetch_error(&url, requested, error))?;
+    let text =
+        String::from_utf8(bytes).map_err(|_| fetch_failed(&url, &"the file is not UTF-8"))?;
+    let sums = Sums::parse(&text).map_err(|error| fetch_failed(&url, &error))?;
+    let target = match requested {
+        Some(version) => version.clone(),
+        None => sums
+            .latest_version()
+            .cloned()
+            .ok_or_else(|| fetch_failed(&url, &"it lists no version"))?,
+    };
+    let running = ReleaseVersion::from_str(env!("CARGO_PKG_VERSION"))
+        .map_err(|_| cannot_tell("this binary's own version is not a release version"))?;
+    if running.direction_to(&target) == Direction::Same {
+        return Ok((target, None));
+    }
+    let entry = sums
+        .entry_for(&target, triple)
+        .ok_or_else(|| no_asset_for(&target, triple))?;
+    let asset = release::asset_url(&target, triple).ok_or_else(|| no_asset_for(&target, triple))?;
+    Ok((target, Some((asset, entry.digest.clone()))))
+}
+
+/// The error for a failed fetch of `SHA256SUMS`: a 404 means the release does not exist, so
+/// it is `cli-upgrade-no-asset`; every other failure is `cli-upgrade-fetch-failed`.
+fn sums_fetch_error(
+    url: &str,
+    requested: Option<&ReleaseVersion>,
+    error: fetch::FetchError,
+) -> CliError {
+    match error {
+        fetch::FetchError::Status { status: 404, .. } => no_sums(url, requested),
+        other => fetch_failed(url, &other),
+    }
+}
+
+/// The refusal for a release whose `SHA256SUMS` does not exist (the server answered 404).
+fn no_sums(url: &str, requested: Option<&ReleaseVersion>) -> CliError {
+    let which = requested.map_or_else(
+        || "the latest release".to_owned(),
+        |v| format!("release {v}"),
+    );
+    no_asset(
+        format!(
+            "{which} has no SHA256SUMS at {} (the server answered 404), so it has no binaries",
+            visible(url)
+        ),
+        manual_route(requested),
+    )
+}
+
+/// The manual way to get a version that has no binary for this platform.
+fn manual_route(version: Option<&ReleaseVersion>) -> String {
+    let pin = version.map_or_else(String::new, |v| format!(" --version ={}", v.release()));
+    format!(
+        "Download an archive by hand from the supdoc releases page on GitHub, or install with cargo: `cargo install supdoc --locked{pin}`"
+    )
+}
+
+/// A `cli-upgrade-no-asset` refusal, exit 1.
+fn no_asset(message: String, help: impl Into<String>) -> CliError {
+    CliError::new("cli-upgrade-no-asset", message, help, ExitStatus::Failed)
+}
+
+/// The refusal for a release that has no archive for `triple`.
+fn no_asset_for(target: &ReleaseVersion, triple: Triple) -> CliError {
+    let before_binaries = ReleaseVersion::from_str(FIRST_BINARY_RELEASE)
+        .is_ok_and(|first| first.direction_to(target) == Direction::Downgrade);
+    let manual = manual_route(Some(target));
+    let help = if before_binaries {
+        format!(
+            "Releases before {FIRST_BINARY_RELEASE} have no binaries; run `supdoc upgrade \
+             {FIRST_BINARY_RELEASE}` for the first one. {manual}"
+        )
+    } else {
+        manual
+    };
+    no_asset(
+        format!(
+            "release {target} lists no binary for {triple}",
+            triple = triple.as_str()
+        ),
+        help,
+    )
+}
+
+/// The error for a `SHA256SUMS` that could not be fetched or read.
+fn fetch_failed(url: &str, reason: &dyn fmt::Display) -> CliError {
+    CliError::new(
+        "cli-upgrade-fetch-failed",
+        format!(
+            "could not read the release checksums at {}: {reason}",
+            visible(url)
+        ),
+        "Check your network and that the version has a release, then run `supdoc upgrade` again",
+        ExitStatus::Io,
+    )
+}
+
+/// The error for `--yes` on a release binary, until the install is built.
+fn binary_not_yet(target: &ReleaseVersion) -> CliError {
+    CliError::new(
+        "cli-upgrade-binary-not-yet",
+        "supdoc cannot yet install a release binary over itself",
+        format!(
+            "Preview with `supdoc upgrade {}`, or install with cargo: `cargo install supdoc \
+             --locked --version ={} --force`",
+            target.release(),
+            target.release()
+        ),
+        ExitStatus::Failed,
+    )
 }
 
 /// The command that installs `target`: `=` pins the exact version, so cargo never picks a
@@ -809,6 +1138,24 @@ fn cargo_failed(argv: &[String], status: std::process::ExitStatus, stderr: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_404_for_sha256sums_is_no_asset_and_every_other_failure_is_a_fetch_failure() {
+        let url = "https://github.com/aidenzepp/supdoc/releases/download/v0.0.2/SHA256SUMS";
+        let status = |status| fetch::FetchError::Status {
+            url: url.to_owned(),
+            status,
+        };
+        let transport = fetch::FetchError::Transport {
+            url: url.to_owned(),
+            message: "could not resolve host".to_owned(),
+        };
+        let code = |error| sums_fetch_error(url, None, error).code();
+        assert_eq!(code(status(404)), "cli-upgrade-no-asset");
+        assert_eq!(code(status(403)), "cli-upgrade-fetch-failed");
+        assert_eq!(code(status(500)), "cli-upgrade-fetch-failed");
+        assert_eq!(code(transport), "cli-upgrade-fetch-failed");
+    }
 
     fn version(text: &str) -> ReleaseVersion {
         ReleaseVersion::from_str(text).expect("the test version should parse")

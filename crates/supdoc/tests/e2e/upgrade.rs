@@ -705,3 +705,468 @@ fn a_closed_standard_error_does_not_stop_the_install_under_json() {
         "cargo should have run to its end instead of dying on a closed pipe"
     );
 }
+
+/// The eight release platforms, in the order the fixture lists them.
+const TRIPLES: [&str; 8] = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+];
+
+/// The release platform of the binary under test.
+fn host_triple() -> &'static str {
+    if cfg!(all(target_arch = "x86_64", target_os = "macos")) {
+        "x86_64-apple-darwin"
+    } else if cfg!(all(target_arch = "aarch64", target_os = "macos")) {
+        "aarch64-apple-darwin"
+    } else if cfg!(all(
+        target_arch = "x86_64",
+        target_os = "linux",
+        target_env = "musl"
+    )) {
+        "x86_64-unknown-linux-musl"
+    } else if cfg!(all(
+        target_arch = "aarch64",
+        target_os = "linux",
+        target_env = "musl"
+    )) {
+        "aarch64-unknown-linux-musl"
+    } else if cfg!(all(target_arch = "aarch64", target_os = "linux")) {
+        "aarch64-unknown-linux-gnu"
+    } else {
+        "x86_64-unknown-linux-gnu"
+    }
+}
+
+/// The digest the fixture gives `triple`, the same for every version: a different one per
+/// platform, so a wrong pick shows.
+fn digest_of(triple: &str) -> String {
+    let index = TRIPLES
+        .iter()
+        .position(|candidate| *candidate == triple)
+        .expect("the triple should be one of the eight");
+    format!("{:064x}", index + 1)
+}
+
+/// A `SHA256SUMS` listing every platform for each of `versions`, the host's platform last, so a
+/// pick of the first line shows.
+fn sums_for(versions: &[&str]) -> String {
+    let host = host_triple();
+    let ordered = TRIPLES
+        .iter()
+        .filter(|triple| **triple != host)
+        .chain(TRIPLES.iter().filter(|triple| **triple == host));
+    ordered
+        .flat_map(|triple| {
+            versions.iter().map(move |version| {
+                format!("{}  supdoc-{version}-{triple}.tar.gz\n", digest_of(triple))
+            })
+        })
+        .collect::<Vec<_>>()
+        .concat()
+}
+
+/// A binary outside any cargo home, and a release directory with one folder per version, each
+/// holding a `SHA256SUMS` that lists that version for every platform. A version with no folder
+/// answers 404, as a version with no release does. `latest` lists [`NEWER`].
+fn released() -> Fixture {
+    let fixture = Fixture::empty();
+    fixture.place_binary("dist/supdoc");
+    for version in [NEWER, OLDER] {
+        fixture.write(
+            &format!("releases/{version}/SHA256SUMS"),
+            &sums_for(&[version]),
+        );
+    }
+    fixture.write("releases/latest/SHA256SUMS", &sums_for(&[NEWER]));
+    fixture
+}
+
+impl Fixture {
+    /// Runs `supdoc args` as the downloaded binary, with the test release directory set.
+    fn run_released(&self, args: &[&str]) -> Run {
+        let releases = self.path("releases");
+        self.run_env_at(
+            "dist/supdoc",
+            args,
+            &[(
+                "SUPDOC_TEST_RELEASE_DIR",
+                releases.to_str().expect("the path should be UTF-8"),
+            )],
+        )
+    }
+}
+
+#[test]
+fn a_release_binary_previews_the_archive_and_digest_without_cargo() {
+    let fixture = released();
+
+    let run = fixture.run_released(&["upgrade", NEWER]);
+
+    let _ = run.assert_exit(0);
+    assert!(
+        run.stdout.contains(&format!("current  {RUNNING}")),
+        "{}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains(&format!("target   {NEWER} (upgrade)")),
+        "{}",
+        run.stdout
+    );
+    let triple = host_triple();
+    assert!(
+        run.stdout.contains(&format!(
+            "asset    https://github.com/aidenzepp/supdoc/releases/download/v{NEWER}/supdoc-{NEWER}-{triple}.tar.gz"
+        )),
+        "{}",
+        run.stdout
+    );
+    assert!(
+        run.stdout
+            .contains(&format!("sha256   {}", digest_of(triple))),
+        "the digest should be the host platform's line: {}",
+        run.stdout
+    );
+    assert!(!run.stdout.contains("command"), "{}", run.stdout);
+    assert!(
+        run.stderr
+            .contains(&format!("supdoc upgrade {NEWER} --yes")),
+        "the preview should say how to apply it: {}",
+        run.stderr
+    );
+}
+
+#[test]
+fn a_release_binary_downgrade_preview_says_downgrade() {
+    let fixture = released();
+
+    let run = fixture.run_released(&["upgrade", OLDER]);
+
+    let _ = run.assert_exit(0);
+    assert!(
+        run.stdout
+            .contains(&format!("target   {OLDER} (downgrade)")),
+        "{}",
+        run.stdout
+    );
+    assert!(
+        run.stdout
+            .contains(&format!("supdoc-{OLDER}-{}.tar.gz", host_triple())),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn a_release_binary_with_no_version_takes_the_newest_in_sha256sums() {
+    let fixture = released();
+
+    let run = fixture.run_released(&["upgrade", "--json"]);
+
+    let _ = run.assert_exit(0);
+    let json = run.json();
+    assert_eq!(super::support::at(&json, "/data/target"), NEWER);
+}
+
+#[test]
+fn json_for_a_release_binary_names_the_method_asset_and_digest() {
+    let fixture = released();
+    let triple = host_triple();
+
+    let upgrade = fixture.run_released(&["upgrade", NEWER, "--json"]);
+    let _ = upgrade.assert_exit(0);
+    let upgrade = upgrade.json();
+    let data = super::support::at(&upgrade, "/data");
+    assert_eq!(data["method"], "release-binary");
+    assert_eq!(data["current"], RUNNING);
+    assert_eq!(data["target"], NEWER);
+    assert_eq!(data["direction"], "upgrade");
+    assert_eq!(data["command"], serde_json::json!([]));
+    assert_eq!(data["ran"], false);
+    assert_eq!(data["outcome"], "previewed");
+    assert_eq!(
+        data["asset"],
+        format!(
+            "https://github.com/aidenzepp/supdoc/releases/download/v{NEWER}/supdoc-{NEWER}-{triple}.tar.gz"
+        )
+    );
+    assert_eq!(data["sha256"], digest_of(triple));
+
+    let downgrade = fixture.run_released(&["upgrade", OLDER, "--json"]);
+    let downgrade = downgrade.json();
+    assert_eq!(
+        super::support::at(&downgrade, "/data/direction"),
+        "downgrade"
+    );
+
+    let same = fixture.run_released(&["upgrade", RUNNING, "--json"]);
+    let _ = same.assert_exit(0);
+    let same = same.json();
+    let data = super::support::at(&same, "/data");
+    assert_eq!(data["direction"], "same");
+    assert_eq!(data["outcome"], "already-current");
+    assert_eq!(data["method"], "release-binary");
+    assert!(data.get("asset").is_none(), "{data}");
+    assert!(data.get("sha256").is_none(), "{data}");
+}
+
+#[test]
+fn a_version_with_no_release_is_no_asset_not_a_fetch_failure() {
+    let fixture = released();
+
+    let run = fixture.run_released(&["upgrade", "0.0.2"]);
+
+    let _ = run.assert_exit(1);
+    assert!(
+        run.stderr.contains("cli-upgrade-no-asset"),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains("cli-upgrade-fetch-failed"),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("release 0.0.2 has no SHA256SUMS"),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        run.stderr
+            .contains("Download an archive by hand from the supdoc releases page"),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        run.stderr
+            .contains("cargo install supdoc --locked --version =0.0.2"),
+        "{}",
+        run.stderr
+    );
+    assert!(run.stdout.is_empty(), "{}", run.stdout);
+}
+
+#[test]
+fn an_old_release_without_the_host_platform_names_the_first_release_that_has_binaries() {
+    let fixture = released();
+    fixture.write(
+        "releases/0.0.2/SHA256SUMS",
+        &format!(
+            "{}  supdoc-0.0.2-x86_64-pc-windows-msvc.tar.gz\n",
+            digest_of("x86_64-pc-windows-msvc")
+        ),
+    );
+
+    let run = fixture.run_released(&["upgrade", "0.0.2"]);
+
+    let _ = run.assert_exit(1);
+    assert!(
+        run.stderr.contains("release 0.0.2 lists no binary for"),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        run.stderr
+            .contains("Releases before 0.5.0 have no binaries"),
+        "{}",
+        run.stderr
+    );
+}
+
+#[test]
+fn json_for_a_version_with_no_release_is_the_no_asset_refusal() {
+    let fixture = released();
+
+    let run = fixture.run_released(&["upgrade", "0.0.2", "--json"]);
+
+    let _ = run.assert_exit(1);
+    assert!(
+        run.stdout.contains("\"kind\":\"cli-upgrade-no-asset\"")
+            || run.stderr.contains("\"kind\":\"cli-upgrade-no-asset\""),
+        "stdout: {}\nstderr: {}",
+        run.stdout,
+        run.stderr
+    );
+}
+
+#[test]
+fn an_explicit_running_version_is_already_current_without_any_fetch() {
+    let fixture = released();
+    std::fs::remove_dir_all(fixture.path("releases")).expect("the releases should be removable");
+
+    let run = fixture.run_released(&["upgrade", RUNNING]);
+
+    let _ = run.assert_exit(0);
+    assert_eq!(run.stdout, format!("already on {RUNNING}\n"));
+}
+
+#[test]
+fn build_metadata_does_not_name_a_release() {
+    let fixture = released();
+
+    let run = fixture.run_released(&["upgrade", &format!("{NEWER}+build")]);
+
+    let _ = run.assert_exit(1);
+    assert!(
+        run.stderr
+            .contains("build metadata, which does not name a release"),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        run.stderr
+            .contains(&format!("Write the version as `{NEWER}`")),
+        "{}",
+        run.stderr
+    );
+    assert!(!run.stderr.contains("pre-release"), "{}", run.stderr);
+
+    let pre = fixture.run_released(&["upgrade", &format!("{NEWER}-rc.1")]);
+    let _ = pre.assert_exit(1);
+    assert!(pre.stderr.contains("is a pre-release"), "{}", pre.stderr);
+}
+
+/// A marked binary at `relative` that another tool owns is refused as before.
+fn assert_marked_refused(relative: &str, saw: &str, step: &str) {
+    let fixture = Fixture::empty();
+    fixture.place_binary(relative);
+    fixture.write("releases/99.0.0/SHA256SUMS", &sums_for(&[NEWER]));
+    let releases = fixture.path("releases");
+
+    let run = fixture.run_env_at(
+        relative,
+        &["upgrade", NEWER],
+        &[(
+            "SUPDOC_TEST_RELEASE_DIR",
+            releases.to_str().expect("the path should be UTF-8"),
+        )],
+    );
+
+    let _ = run.assert_exit(78);
+    assert!(run.stderr.contains(saw), "{}", run.stderr);
+    assert!(run.stderr.contains(step), "{}", run.stderr);
+}
+
+#[test]
+fn a_marked_binary_under_homebrew_is_still_refused() {
+    assert_marked_refused(
+        "prefix/Cellar/supdoc/1.0.0/bin/supdoc",
+        "installed by Homebrew",
+        "brew upgrade supdoc",
+    );
+}
+
+#[test]
+fn a_marked_binary_under_target_is_still_refused() {
+    assert_marked_refused(
+        "checkout/target/debug/supdoc",
+        "build from source",
+        "cargo install supdoc --locked",
+    );
+}
+
+#[test]
+fn a_release_without_the_host_platform_is_refused_as_no_asset() {
+    let fixture = released();
+    let others = sums_for(&[NEWER])
+        .lines()
+        .filter(|line| !line.contains(host_triple()))
+        .map(|line| format!("{line}\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    fixture.write("releases/99.0.0/SHA256SUMS", &others);
+
+    let run = fixture.run_released(&["upgrade", NEWER]);
+
+    let _ = run.assert_exit(1);
+    assert!(
+        run.stderr.contains("cli-upgrade-no-asset"),
+        "{}",
+        run.stderr
+    );
+    assert!(run.stderr.contains(host_triple()), "{}", run.stderr);
+    assert!(
+        !run.stderr.contains("Releases before"),
+        "a new release should not blame the old ones: {}",
+        run.stderr
+    );
+}
+
+#[test]
+fn yes_on_a_release_binary_says_it_is_not_built_yet_and_changes_nothing() {
+    let fixture = released();
+    let before = std::fs::read(fixture.path("dist/supdoc")).expect("the binary should read");
+
+    let run = fixture.run_released(&["upgrade", NEWER, "--yes"]);
+
+    let _ = run.assert_exit(1);
+    assert!(
+        run.stderr.contains("cli-upgrade-binary-not-yet"),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(
+        std::fs::read(fixture.path("dist/supdoc")).expect("the binary should read"),
+        before,
+        "the binary must be untouched"
+    );
+}
+
+#[test]
+fn a_missing_or_malformed_sha256sums_is_a_fetch_failure() {
+    let fixture = released();
+    fixture.write("releases/99.0.0/SHA256SUMS", "not a checksum file\n");
+
+    let run = fixture.run_released(&["upgrade", NEWER]);
+
+    let _ = run.assert_exit(74);
+    assert!(
+        run.stderr.contains("cli-upgrade-fetch-failed"),
+        "{}",
+        run.stderr
+    );
+}
+
+#[test]
+fn a_binary_cargo_recorded_keeps_the_cargo_route_even_with_the_release_marker() {
+    let fixture = Fixture::installed("0.0.0");
+    fixture.write("releases/99.0.0/SHA256SUMS", &sums_for(&[NEWER]));
+    let releases = fixture.path("releases");
+
+    let run = fixture.run_env_at(
+        "cargo-home/bin/supdoc",
+        &["upgrade", NEWER, "--json"],
+        &[(
+            "SUPDOC_TEST_RELEASE_DIR",
+            releases.to_str().expect("the path should be UTF-8"),
+        )],
+    );
+
+    let _ = run.assert_exit(0);
+    let json = run.json();
+    let data = super::support::at(&json, "/data");
+    assert_eq!(data["method"], "cargo");
+    assert_eq!(super::support::at(&json, "/data/command/0"), "cargo");
+    assert!(data.get("asset").is_none(), "{data}");
+}
+
+#[test]
+fn without_the_marker_a_downloaded_binary_is_still_refused() {
+    let fixture = released();
+
+    let run = fixture.run_at("dist/supdoc", &["upgrade", NEWER]);
+
+    let _ = run.assert_exit(78);
+    assert!(
+        run.stderr.contains("cli-upgrade-not-cargo"),
+        "{}",
+        run.stderr
+    );
+}
