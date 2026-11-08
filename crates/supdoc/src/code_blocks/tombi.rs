@@ -629,7 +629,7 @@ fn private_config(
 mod tests {
     use super::{
         Project, Refusal, Skip, diagnostics, has_directive, linted_nothing, names_schema,
-        parse_error, pattern_root, private_config, project, skip, verified,
+        parse_error, pattern_root, project, skip, verified,
     };
     use crate::code_blocks::format::ParseError;
     use crate::code_blocks::lint::Diagnostic;
@@ -960,7 +960,7 @@ mod tests {
         let outside = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
         fs::write(outside.path().join("t.toml"), "[format]\n").expect("outside config");
-        std::os::unix::fs::symlink(
+        crate::cli::testing::symlink(
             outside.path().join("t.toml"),
             root.path().join("tombi.toml"),
         )
@@ -1011,8 +1011,10 @@ mod tests {
         assert_eq!(refused, Err(Refusal::NoPrivateDir));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_config_directory_swapped_for_a_link_out_gets_no_private_copy_and_creates_nothing_there() {
+        use super::private_config;
         use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
         let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
@@ -1025,7 +1027,7 @@ mod tests {
             .mode(0o700)
             .create(&code_blocks)
             .expect("supdoc's cache directory");
-        std::os::unix::fs::symlink(outside.path(), code_blocks.join("tombi-config"))
+        crate::cli::testing::symlink(outside.path(), code_blocks.join("tombi-config"))
             .expect("the planted link");
         let env = env_in(cache.path());
 

@@ -1687,7 +1687,7 @@ mod tests {
         let root = tempfile::TempDir::new().expect("a temporary directory should be creatable");
         let target = outside.path().join("rustfmt.toml");
         std::fs::write(&target, "max_width = 80\n").expect("the config should be writable");
-        std::os::unix::fs::symlink(&target, root.path().join(".rustfmt.toml"))
+        crate::cli::testing::symlink(&target, root.path().join(".rustfmt.toml"))
             .expect("the link should be creatable");
 
         assert_eq!(config_args(root.path()), Vec::<std::ffi::OsString>::new());
@@ -1756,7 +1756,7 @@ mod tests {
     fn a_cargo_toml_linked_outside_the_root_gives_no_lints() {
         let outside = root_with_cargo_toml("[lints.clippy]\nptr_arg = \"deny\"\n");
         let root = tempfile::TempDir::new().expect("a temporary directory should be creatable");
-        std::os::unix::fs::symlink(
+        crate::cli::testing::symlink(
             outside.path().join("Cargo.toml"),
             root.path().join("Cargo.toml"),
         )
@@ -1778,7 +1778,7 @@ mod tests {
         let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
         std::fs::write(outside.path().join("clippy.toml"), "")
             .expect("the config should be writable");
-        std::os::unix::fs::symlink(
+        crate::cli::testing::symlink(
             outside.path().join("clippy.toml"),
             root.path().join(".clippy.toml"),
         )
@@ -2819,7 +2819,7 @@ warning: rustfmt has failed to format. See previous 1 errors.
         std::fs::create_dir_all(outside.path().join(name)).expect("the outside twin");
         std::fs::write(&kept, "kept").expect("the outside file");
         std::fs::rename(&base, cache.path().join("emit-moved")).expect("the move");
-        std::os::unix::fs::symlink(outside.path(), &base).expect("the planted link");
+        crate::cli::testing::symlink(outside.path(), &base).expect("the planted link");
 
         drop(emit);
 

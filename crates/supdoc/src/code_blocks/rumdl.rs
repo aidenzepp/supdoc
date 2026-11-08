@@ -413,8 +413,7 @@ fn nested(value: &toml::Value) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Project, Refusal, candidates, diagnostics, pattern_root, private_config, project_args,
-        unsafe_part,
+        Project, Refusal, candidates, diagnostics, pattern_root, project_args, unsafe_part,
     };
     use crate::code_blocks::lint::Diagnostic;
     use crate::code_blocks::tools::ToolEnv;
@@ -554,7 +553,7 @@ mod tests {
         let outside = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
         fs::write(outside.path().join("r.toml"), "[global]\n").expect("outside config");
-        std::os::unix::fs::symlink(
+        crate::cli::testing::symlink(
             outside.path().join("r.toml"),
             root.path().join(".rumdl.toml"),
         )
@@ -702,8 +701,8 @@ mod tests {
         for dir in ["dangling/docs", "live/docs", "target"] {
             fs::create_dir_all(at(dir)).expect("the fixture dirs");
         }
-        std::os::unix::fs::symlink(at("nowhere"), at("dangling/.git")).expect("a dangling link");
-        std::os::unix::fs::symlink(at("target"), at("live/.git")).expect("a link to a dir");
+        crate::cli::testing::symlink(at("nowhere"), at("dangling/.git")).expect("a dangling link");
+        crate::cli::testing::symlink(at("target"), at("live/.git")).expect("a link to a dir");
         fs::write(at(".rumdl.toml"), "[global]\n").expect("outer config");
 
         let dangling: Vec<_> = candidates(root.path(), &at("dangling/docs/a.md")).collect();
@@ -756,8 +755,10 @@ mod tests {
         assert_eq!(refused, Err(Refusal::NoPrivateDir));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_config_directory_swapped_for_a_link_out_gets_no_private_copy_and_creates_nothing_there() {
+        use super::private_config;
         use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
         let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
@@ -770,7 +771,7 @@ mod tests {
             .mode(0o700)
             .create(&code_blocks)
             .expect("supdoc's cache directory");
-        std::os::unix::fs::symlink(outside.path(), code_blocks.join("rumdl-config"))
+        crate::cli::testing::symlink(outside.path(), code_blocks.join("rumdl-config"))
             .expect("the planted link");
         let env = env_in(cache.path());
 

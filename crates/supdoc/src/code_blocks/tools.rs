@@ -25,8 +25,9 @@ use super::lint;
 use super::runner::{Cwd, Failure, Ran};
 use super::{biome, eslint, go, prettier, pylint, python, rumdl, rust, shell, tombi, yaml};
 
-/// The variables a tool gets from supdoc's own environment, and no others. On Windows the
-/// names a process needs to start join them; on Unix the list is unchanged.
+/// The variables a tool gets from supdoc's own environment, and no others. Windows adds the
+/// names a process needs to start (`SystemRoot`, `SystemDrive`, `PATHEXT`, `TEMP`, `TMP`,
+/// `COMSPEC`) and `LOCALAPPDATA` and `USERPROFILE`, where it keeps its cache and its home.
 #[cfg(not(windows))]
 const PASSED: &[&str] = &[
     "PATH",
@@ -36,7 +37,9 @@ const PASSED: &[&str] = &[
     "XDG_CACHE_HOME",
 ];
 
-/// The variables a tool gets from supdoc's own environment, and no others.
+/// The variables a tool gets from supdoc's own environment, and no others. Windows adds the
+/// names a process needs to start (`SystemRoot`, `SystemDrive`, `PATHEXT`, `TEMP`, `TMP`,
+/// `COMSPEC`) and `LOCALAPPDATA` and `USERPROFILE`, where it keeps its cache and its home.
 #[cfg(windows)]
 const PASSED: &[&str] = &[
     "PATH",
@@ -50,6 +53,8 @@ const PASSED: &[&str] = &[
     "TEMP",
     "TMP",
     "COMSPEC",
+    "LOCALAPPDATA",
+    "USERPROFILE",
 ];
 
 /// The environment tools get, read once by `main` and passed down like the skill directories.
@@ -2302,6 +2307,8 @@ mod tests {
             "TEMP",
             "TMP",
             "COMSPEC",
+            "LOCALAPPDATA",
+            "USERPROFILE",
         ] {
             assert!(names.contains(&kept), "{kept} missing from {names:?}");
         }

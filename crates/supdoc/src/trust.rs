@@ -2,7 +2,8 @@
 //!
 //! Trust is granted only from outside the checkout: by `SUPDOC_TRUST=1` for one process, or by
 //! the root's real path in `$XDG_STATE_HOME/supdoc/trusted-roots` (under `$HOME/.local/state` when
-//! `XDG_STATE_HOME` isn't an absolute path), one absolute path per line. `SUPDOC_TRUST=0` turns
+//! `XDG_STATE_HOME` isn't an absolute path; on Windows, under `%LOCALAPPDATA%\supdoc` instead, with
+//! `XDG_STATE_HOME` still winning when set), one absolute path per line. `SUPDOC_TRUST=0` turns
 //! trust off for one process, whatever the store lists. A linked worktree of a listed repository
 //! inherits its trust when it sits at the same path in its work tree. `/`, `HOME` and the
 //! directories above `HOME` are too broad to trust: the store never lists them and ignores them
@@ -42,46 +43,77 @@ pub(crate) struct TrustEnv {
     state_home: Option<OsString>,
     /// `HOME`, when set.
     home: Option<OsString>,
+    /// `LOCALAPPDATA`, when set. Only Windows reads it.
+    local_app_data: Option<OsString>,
+    /// `USERPROFILE`, when set. Only Windows reads it, as the stand-in for `HOME`.
+    user_profile: Option<OsString>,
     /// `SUPDOC_TRUST`, when set.
     trust: Option<OsString>,
 }
 
 impl TrustEnv {
-    /// Reads `XDG_STATE_HOME`, `HOME` and `SUPDOC_TRUST` through `var`.
+    /// Reads `XDG_STATE_HOME`, `HOME`, `LOCALAPPDATA`, `USERPROFILE` and `SUPDOC_TRUST` through
+    /// `var`.
     pub(crate) fn from_vars(var: impl Fn(&str) -> Option<OsString>) -> Self {
         Self {
             state_home: var("XDG_STATE_HOME"),
             home: var("HOME"),
+            local_app_data: var("LOCALAPPDATA"),
+            user_profile: var("USERPROFILE"),
             trust: var("SUPDOC_TRUST"),
         }
     }
 
-    /// The trust store: `trusted-roots` under `XDG_STATE_HOME`'s `supdoc`, else under `HOME`'s
-    /// `.local/state/supdoc`. `None` when neither is an absolute path. Every later write stays
-    /// beneath where that directory really lies now, and is refused when the variable holds a
-    /// `..` ([`Boundary::resolve`]).
+    /// The trust store: `trusted-roots` under `XDG_STATE_HOME`'s `supdoc`, else on Windows under
+    /// `LOCALAPPDATA`'s `supdoc` (a per-user directory, so the store inherits an owner-only ACL),
+    /// else on Unix under `HOME`'s `.local/state/supdoc`. `None` when none is an absolute path.
+    /// Every later write stays beneath where that directory really lies now, and is refused when
+    /// the variable holds a `..` ([`Boundary::resolve`]).
     ///
     /// Effect: reads file metadata and symlinks along the store's directory.
     pub(crate) fn store(&self) -> Option<Store> {
-        let absolute = |value: &Option<OsString>| {
-            value
-                .as_ref()
-                .map(PathBuf::from)
-                .filter(|path| path.is_absolute())
-        };
-        let (base, variable) = absolute(&self.state_home)
+        self.store_on(cfg!(windows))
+    }
+
+    /// [`TrustEnv::store`] as `windows` says: the platform is a parameter so both rules are tested
+    /// on every OS.
+    fn store_on(&self, windows: bool) -> Option<Store> {
+        let home = self.home_on(windows);
+        let (base, variable) = absolute(self.state_home.as_ref())
             .map(|state| (state, "XDG_STATE_HOME"))
             .or_else(|| {
-                absolute(&self.home).map(|home| (home.join(".local").join("state"), "HOME"))
+                if windows {
+                    absolute(self.local_app_data.as_ref()).map(|local| (local, "LOCALAPPDATA"))
+                } else {
+                    home.as_ref()
+                        .map(|home| (home.join(".local").join("state"), "HOME"))
+                }
             })?;
         let dir = base.join("supdoc");
         Some(Store {
             boundary: Boundary::resolve(&dir),
             file: dir.join("trusted-roots"),
-            home: absolute(&self.home),
+            home,
             variable,
         })
     }
+
+    /// The home directory when it is an absolute path: `USERPROFILE` on Windows, `HOME` elsewhere.
+    fn home_on(&self, windows: bool) -> Option<PathBuf> {
+        absolute(
+            if windows {
+                &self.user_profile
+            } else {
+                &self.home
+            }
+            .as_ref(),
+        )
+    }
+}
+
+/// The path `value` holds, when it is absolute.
+fn absolute(value: Option<&OsString>) -> Option<PathBuf> {
+    value.map(PathBuf::from).filter(|path| path.is_absolute())
 }
 
 /// `SUPDOC_TRUST` holds a value other than `1`, `0` or empty.
@@ -110,7 +142,7 @@ pub(crate) enum Grant {
 }
 
 /// Why the trust store wasn't read, with the variable it is located through,
-/// `XDG_STATE_HOME` or `HOME`. Reads refuse what writes refuse, so `supdoc trust` can't fix it.
+/// `XDG_STATE_HOME`, `LOCALAPPDATA` or `HOME`. Reads refuse what writes refuse, so `supdoc trust` can't fix it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Unread {
     /// The variable holds a `..`.
@@ -259,7 +291,7 @@ pub(crate) struct Store {
     /// The store's directory, where it really lay when the store was located: every create,
     /// write, rename and remove is admitted against it.
     boundary: Boundary,
-    /// The variable the store's directory comes from, `XDG_STATE_HOME` or `HOME`, for messages.
+    /// The variable the store's directory comes from, `XDG_STATE_HOME`, `LOCALAPPDATA` or `HOME`, for messages.
     variable: &'static str,
 }
 
@@ -397,7 +429,7 @@ impl Store {
             .map_or(Unread::LeadsOutside(self.variable), Unread::Climbs)
     }
 
-    /// The variable the store's directory comes from, `XDG_STATE_HOME` or `HOME`, when its value
+    /// The variable the store's directory comes from, `XDG_STATE_HOME`, `LOCALAPPDATA` or `HOME`, when its value
     /// holds a `..`: every read and write of the store is then refused.
     pub(crate) fn climbing(&self) -> Option<&'static str> {
         self.file
@@ -699,6 +731,8 @@ mod tests {
             TrustEnv {
                 state_home: Some(self.real().join("state").into()),
                 home: Some(self.home().into()),
+                local_app_data: None,
+                user_profile: Some(self.home().into()),
                 trust: trust.map(OsString::from),
             }
         }
@@ -1075,6 +1109,44 @@ mod tests {
             ))
         );
         assert_eq!(neither.store(), None);
+    }
+
+    #[test]
+    fn windows_locates_the_store_under_localappdata_and_homes_at_userprofile() {
+        let base = std::env::temp_dir();
+        let env = TrustEnv::from_vars(|name| match name {
+            "LOCALAPPDATA" => Some(base.join("local").into()),
+            "USERPROFILE" => Some(base.join("profile").into()),
+            "HOME" => Some(base.join("unix-home").into()),
+            _ => None,
+        });
+
+        let store = env
+            .store_on(true)
+            .expect("an absolute LOCALAPPDATA should locate the store");
+
+        assert_eq!(store.file, base.join("local/supdoc/trusted-roots"));
+        assert_eq!(store.home, Some(base.join("profile")));
+        assert_eq!(store.variable, "LOCALAPPDATA");
+    }
+
+    #[test]
+    fn windows_does_not_fall_back_to_home_without_localappdata() {
+        let base = std::env::temp_dir();
+        let env = TrustEnv::from_vars(|name| (name == "HOME").then(|| base.clone().into()));
+
+        assert_eq!(env.store_on(true), None);
+    }
+
+    #[test]
+    fn windows_ignores_a_relative_localappdata_and_unix_ignores_it_entirely() {
+        let base = std::env::temp_dir();
+        let relative = TrustEnv::from_vars(|name| (name == "LOCALAPPDATA").then(|| "rel".into()));
+        let absolute_only =
+            TrustEnv::from_vars(|name| (name == "LOCALAPPDATA").then(|| base.join("local").into()));
+
+        assert_eq!(relative.store_on(true), None);
+        assert_eq!(absolute_only.store_on(false), None);
     }
 
     #[test]
