@@ -108,17 +108,14 @@ fn run_of(text: &str, body: &str, start: usize) -> (Run, String) {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
 
     use super::*;
     use crate::cartridges::python::cartridge;
     use crate::code_blocks::block::{BodyLine, blocks_in, replacement_for};
-    use crate::path::AbsolutePath;
 
     /// The blocks of `text` parsed as `/repo/src/lib.py`.
     fn blocks_of(text: &str) -> Vec<CodeBlock> {
-        let path = AbsolutePath::new(Path::new("/repo/src/lib.py"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/src/lib.py");
         let python = cartridge().expect("the built-in Python queries should compile");
         let file = SourceFile::parse(path, text.to_owned(), python)
             .expect("tree-sitter should return a tree");

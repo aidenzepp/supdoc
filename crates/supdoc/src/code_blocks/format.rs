@@ -1073,13 +1073,11 @@ mod tests {
     use crate::config::code_blocks::Language;
     use crate::finding::{Finding, Location};
     use crate::limits::Limits;
-    use crate::path::AbsolutePath;
     use crate::read::cartridge::{Cartridge, Languages, SourceFile};
 
     /// The one code block in `text`, as the doc `doc` (relative to `/repo`), parsed by `language`.
     fn block_of(doc: &str, text: &str, language: &'static dyn Cartridge) -> CodeBlock {
-        let path = AbsolutePath::new(&std::path::Path::new("/repo").join(doc))
-            .expect("the fixture path is absolute");
+        let path = crate::path::fixture(&format!("/repo/{doc}"));
         let file = SourceFile::parse(path, text.to_owned(), language)
             .expect("tree-sitter should return a tree");
         let mut blocks = blocks_in(&file, |range| {

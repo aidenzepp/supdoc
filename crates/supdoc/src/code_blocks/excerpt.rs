@@ -156,8 +156,7 @@ mod tests {
 
     /// The one code block in the Markdown `text`, as `docs/guide.md`.
     fn block_of(text: &str) -> CodeBlock {
-        let path = AbsolutePath::new(std::path::Path::new("/repo/docs/guide.md"))
-            .expect("the fixture path is absolute");
+        let path = crate::path::fixture("/repo/docs/guide.md");
         let file = SourceFile::parse(path, text.to_owned(), cartridge())
             .expect("tree-sitter should return a tree");
         let mut blocks = blocks_in(&file, |range| {

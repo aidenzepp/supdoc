@@ -536,7 +536,6 @@ mod tests {
     };
     use crate::limits::{CommandLineLimits, ConfigLimits, Given, Limits};
     use crate::link::SymbolPath;
-    use crate::path::AbsolutePath;
     use crate::read::cartridge::{Deadline, Languages, SourceFile, Stopped, SymbolTable};
     use crate::read::error::{ReadError, ReadRole};
 
@@ -1045,8 +1044,7 @@ mod tests {
 
     #[test]
     fn each_budget_failure_becomes_its_own_read_error_naming_its_knobs() {
-        let path = AbsolutePath::new(std::path::Path::new("/repo/data.json"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/data.json");
         let language = Languages::builtin()
             .expect("the built-in cartridges should load")
             .for_path(std::path::Path::new("lib.rs"))

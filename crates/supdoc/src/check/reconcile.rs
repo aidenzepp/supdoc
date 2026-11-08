@@ -63,8 +63,7 @@ pub(crate) fn reconcile_in(
 /// [`reconcile_in`] for a run at the project root, for tests that don't look at help paths.
 #[cfg(test)]
 pub(crate) fn reconcile_at_root(scan: &Scan, lock: &Lockfile, scope: &Scope) -> Report {
-    let root = crate::path::AbsolutePath::new(std::path::Path::new("/repo"))
-        .expect("the fixture root should be absolute");
+    let root = crate::path::fixture("/repo");
     reconcile_in(scan, lock, scope, &PathStyle::new(root.clone(), root, None))
 }
 
@@ -500,10 +499,8 @@ mod tests {
     fn check_text_shows_the_link_excerpt_for_a_new_link() {
         use crate::output::text::render_finding;
         use crate::output::{PathStyle, TextContext, Verbosity};
-        use crate::path::AbsolutePath;
 
-        let root = AbsolutePath::new(std::path::Path::new("/repo"))
-            .expect("the fixture root should be absolute");
+        let root = crate::path::fixture("/repo");
         let context = TextContext {
             color: false,
             unicode: false,

@@ -268,18 +268,15 @@ fn is_blank(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
 
     use super::*;
     use crate::cartridges::{js, ts, tsx};
     use crate::code_blocks::block::{BodyLine, blocks_in, replacement_for};
-    use crate::path::AbsolutePath;
     use crate::read::query::QueryCartridge;
 
     /// The blocks of `text` parsed as `/repo/src/<name>` with `cartridge`.
     fn blocks_with(name: &str, cartridge: &'static QueryCartridge, text: &str) -> Vec<CodeBlock> {
-        let path = AbsolutePath::new(&Path::new("/repo/src").join(name))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture(&format!("/repo/src/{name}"));
         let file = SourceFile::parse(path, text.to_owned(), cartridge)
             .expect("tree-sitter should return a tree");
         blocks_in(&file, |range| {

@@ -330,8 +330,7 @@ mod tests {
 
     /// `text` parsed as `/repo/package.json`, its key paths to be built under `budget`.
     fn parse_under(text: &str, budget: KeyPathBudget) -> SourceFile {
-        let path = AbsolutePath::new(Path::new("/repo/package.json"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/package.json");
         SourceFile::from_text_under(
             path,
             text.to_owned(),

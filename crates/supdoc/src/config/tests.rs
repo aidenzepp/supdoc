@@ -72,7 +72,7 @@ fn empty_config_scans_everything_under_root() {
     assert_eq!(config.files(), [at(&dir, "supdoc.config.toml")]);
     assert!(config.scans(&at(&dir, "docs/a.md")));
     assert!(config.scans(&at(&dir, "README.md")));
-    assert!(!config.scans(&AbsolutePath::new(Path::new("/elsewhere/a.md")).expect("absolute")));
+    assert!(!config.scans(&crate::path::fixture("/elsewhere/a.md")));
 }
 
 #[test]
@@ -798,8 +798,7 @@ fn every_error_has_a_code_and_message_names_a_file() {
 
 #[test]
 fn namespace_outside_root_help_makes_no_claim_about_what_supdoc_reads() {
-    let file = AbsolutePath::new(std::path::Path::new("/project/supdoc.config.toml"))
-        .expect("the fixture path should be absolute");
+    let file = crate::path::fixture("/project/supdoc.config.toml");
     let error = ConfigError::NamespaceOutsideRoot {
         file: file.clone(),
         name: "shared".parse().expect("the fixture name should be valid"),

@@ -513,10 +513,7 @@ mod tests {
         SettingsMismatch {
             recorded: LineEndings::Exact,
             configured: LineEndings::Normalize,
-            configured_in: configured_in.map(|path| {
-                AbsolutePath::new(std::path::Path::new(path))
-                    .expect("the fixture config path should be absolute")
-            }),
+            configured_in: configured_in.map(crate::path::fixture),
         }
     }
 
@@ -537,8 +534,7 @@ mod tests {
 
     #[test]
     fn settings_mismatch_message_names_the_config_relative_to_the_root() {
-        let root = AbsolutePath::new(std::path::Path::new("/repo"))
-            .expect("the fixture root should be absolute");
+        let root = crate::path::fixture("/repo");
 
         assert_eq!(
             mismatch(Some("/repo/supdoc.config.toml")).message_from(&root),
@@ -548,7 +544,7 @@ mod tests {
     }
 
     fn absolute(raw: &str) -> AbsolutePath {
-        AbsolutePath::new(std::path::Path::new(raw)).expect("the fixture path should be absolute")
+        crate::path::fixture(raw)
     }
 
     #[test]

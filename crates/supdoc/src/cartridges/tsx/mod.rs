@@ -41,13 +41,11 @@ pub(crate) fn cartridge() -> Result<&'static QueryCartridge, &'static QueryFileE
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
 
     use super::*;
     use crate::cartridges::rust::region_texts;
     use crate::hash::HashSettings;
     use crate::link::SymbolPath;
-    use crate::path::AbsolutePath;
     use crate::read::cartridge::{SourceFile, Symbol, SymbolTable};
     use crate::read::hash::{hash_file, hash_symbol};
 
@@ -105,8 +103,7 @@ namespace util {
 
     fn parse(text: &str) -> SourceFile {
         let tsx = cartridge().expect("the built-in TSX queries should compile");
-        let path = AbsolutePath::new(Path::new("/repo/src/app.tsx"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/src/app.tsx");
         SourceFile::parse(path, text.to_owned(), tsx).expect("tree-sitter should return a tree")
     }
 

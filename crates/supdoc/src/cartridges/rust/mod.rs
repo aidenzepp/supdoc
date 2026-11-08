@@ -58,12 +58,10 @@ pub(crate) fn region_texts(file: &crate::read::cartridge::SourceFile) -> Vec<Str
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
 
     use super::*;
     use crate::hash::{Hash, HashSettings};
     use crate::link::SymbolPath;
-    use crate::path::AbsolutePath;
     use crate::read::cartridge::{SourceFile, Symbol, SymbolTable};
     use crate::read::error::ResolveError;
     use crate::read::hash::{hash_file, hash_symbol};
@@ -130,8 +128,7 @@ pub mod util {
 
     fn parse(text: &str) -> SourceFile {
         let rust = cartridge().expect("the built-in Rust queries should compile");
-        let path = AbsolutePath::new(Path::new("/repo/src/lib.rs"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/src/lib.rs");
         SourceFile::parse(path, text.to_owned(), rust).expect("tree-sitter should return a tree")
     }
 

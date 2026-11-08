@@ -20,7 +20,7 @@ use crate::state::LinkState;
 
 /// An absolute path from a literal.
 pub(super) fn absolute(raw: &str) -> AbsolutePath {
-    AbsolutePath::new(std::path::Path::new(raw)).expect("the fixture path should be absolute")
+    crate::path::fixture(raw)
 }
 
 /// A source path from a literal.

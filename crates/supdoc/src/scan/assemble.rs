@@ -1317,7 +1317,7 @@ mod tests {
     #[test]
     fn unreadable_root_help_gives_chmod_with_the_root_and_no_other_directory_advice() {
         let error = ScanError::RootUnreadable {
-            root: AbsolutePath::new(Path::new("/work/my repo")).expect("the path is absolute"),
+            root: crate::path::fixture("/work/my repo"),
             error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
         };
 

@@ -52,7 +52,6 @@ mod tests {
     use crate::cartridges::rust::region_texts;
     use crate::hash::HashSettings;
     use crate::link::SymbolPath;
-    use crate::path::AbsolutePath;
     use crate::read::cartridge::{Languages, SourceFile, Symbol, SymbolTable};
     use crate::read::hash::{hash_file, hash_symbol};
 
@@ -107,8 +106,7 @@ function outer() {
 
     fn parse(text: &str) -> SourceFile {
         let js = cartridge().expect("the built-in JavaScript queries should compile");
-        let path = AbsolutePath::new(Path::new("/repo/src/index.js"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/src/index.js");
         SourceFile::parse(path, text.to_owned(), js).expect("tree-sitter should return a tree")
     }
 

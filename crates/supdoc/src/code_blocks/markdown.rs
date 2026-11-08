@@ -185,18 +185,15 @@ fn line_start(text: &str, offset: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
 
     use super::*;
     use crate::cartridges::markdown::cartridge::cartridge;
     use crate::code_blocks::block::blocks_in;
-    use crate::path::AbsolutePath;
     use crate::read::error::ReadRole;
 
     /// The blocks of `text` parsed as `/repo/docs/guide.md`.
     fn blocks_of(text: &str) -> Vec<CodeBlock> {
-        let path = AbsolutePath::new(Path::new("/repo/docs/guide.md"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/docs/guide.md");
         let file = SourceFile::parse(path, text.to_owned(), cartridge())
             .expect("tree-sitter should return a tree");
         blocks_in(&file, |range| {
@@ -340,8 +337,7 @@ mod tests {
     #[test]
     fn a_failed_replaced_parse_is_an_error_never_zero_blocks() {
         let text = "```sh\necho \0\n```\n";
-        let path = AbsolutePath::new(Path::new("/repo/docs/guide.md"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/docs/guide.md");
         let failed = Err(ReadError::Timeout {
             path,
             limit: "10s".parse().expect("10s is a valid limit"),
@@ -361,8 +357,7 @@ mod tests {
     #[test]
     fn a_timed_out_replaced_parse_names_the_re_parse_and_parse_timeout() {
         let text = "```sh\necho \0\n```\n";
-        let path = AbsolutePath::new(Path::new("/repo/docs/guide.md"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/docs/guide.md");
         let failed = Err(ReadError::Timeout {
             path,
             limit: "10s".parse().expect("10s is a valid limit"),

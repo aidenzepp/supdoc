@@ -474,16 +474,13 @@ fn node_text<'text>(node: Node<'_>, text: &'text str) -> &'text str {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
 
     use super::*;
     use crate::cartridges::markdown::cartridge::cartridge;
-    use crate::path::AbsolutePath;
 
     /// `text` parsed as `/repo/docs/guide.md` with the built-in Markdown cartridge.
     fn markdown_file(text: &str) -> SourceFile {
-        let path = AbsolutePath::new(Path::new("/repo/docs/guide.md"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/docs/guide.md");
         let markdown = cartridge();
         SourceFile::parse(path, text.to_owned(), markdown)
             .expect("tree-sitter should return a tree")
@@ -492,8 +489,7 @@ mod tests {
     fn rust_file(text: &str) -> SourceFile {
         let rust =
             crate::cartridges::rust::cartridge().expect("the built-in Rust queries should compile");
-        let path = AbsolutePath::new(Path::new("/repo/src/server.rs"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/src/server.rs");
         SourceFile::parse(path, text.to_owned(), rust).expect("tree-sitter should return a tree")
     }
 
@@ -519,7 +515,7 @@ mod tests {
     }
 
     fn builtin_file(path: &str, text: &str) -> SourceFile {
-        let path = AbsolutePath::new(Path::new(path)).expect("the fixture path should be absolute");
+        let path = crate::path::fixture(path);
         let language = crate::read::cartridge::Languages::builtin()
             .expect("the built-in cartridges should load")
             .for_path(path.as_path())

@@ -764,7 +764,7 @@ mod tests {
     use super::*;
 
     fn absolute(raw: &str) -> AbsolutePath {
-        AbsolutePath::new(Path::new(raw)).expect("the fixture path should be absolute")
+        crate::path::fixture(raw)
     }
 
     #[test]

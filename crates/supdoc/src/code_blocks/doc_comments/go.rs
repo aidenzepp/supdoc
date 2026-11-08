@@ -167,17 +167,14 @@ fn is_directive(body: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
 
     use super::*;
     use crate::cartridges::go::cartridge;
     use crate::code_blocks::block::{blocks_in, replacement_for};
-    use crate::path::AbsolutePath;
 
     /// The blocks of `text` parsed as `/repo/p.go`.
     fn blocks_of(text: &str) -> Vec<CodeBlock> {
-        let path = AbsolutePath::new(Path::new("/repo/p.go"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/p.go");
         let go = cartridge().expect("the built-in Go queries should compile");
         let file =
             SourceFile::parse(path, text.to_owned(), go).expect("tree-sitter should return a tree");

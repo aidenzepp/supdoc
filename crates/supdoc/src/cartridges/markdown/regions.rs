@@ -40,16 +40,13 @@ pub(crate) fn markdown_regions(file: &SourceFile) -> Vec<MarkdownRegion> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
 
     use super::*;
     use crate::cartridges::markdown::cartridge::cartridge;
-    use crate::path::AbsolutePath;
 
     /// `text` parsed as `/repo/docs/guide.md`.
     fn markdown_file(text: &str) -> SourceFile {
-        let path = AbsolutePath::new(Path::new("/repo/docs/guide.md"))
-            .expect("the fixture path should be absolute");
+        let path = crate::path::fixture("/repo/docs/guide.md");
         let markdown = cartridge();
         SourceFile::parse(path, text.to_owned(), markdown)
             .expect("tree-sitter should return a tree")
