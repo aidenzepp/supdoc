@@ -38,6 +38,12 @@ use super::{CliError, Context, Outcome, cause};
 )]
 mod release;
 
+#[expect(
+    dead_code,
+    reason = "the release-binary path that calls the fetch lands in later units"
+)]
+mod fetch;
+
 /// Shown after `supdoc upgrade --help`.
 pub(crate) const UPGRADE_EXAMPLES: &str = "\
 Examples:
