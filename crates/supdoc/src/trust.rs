@@ -2,7 +2,8 @@
 //!
 //! Trust is granted only from outside the checkout: by `SUPDOC_TRUST=1` for one process, or by
 //! the root's real path in `$XDG_STATE_HOME/supdoc/trusted-roots` (under `$HOME/.local/state` when
-//! `XDG_STATE_HOME` isn't an absolute path), one absolute path per line. `SUPDOC_TRUST=0` turns
+//! `XDG_STATE_HOME` isn't an absolute path; on Windows, under `%LOCALAPPDATA%\supdoc` instead, with
+//! `XDG_STATE_HOME` still winning when set), one absolute path per line. `SUPDOC_TRUST=0` turns
 //! trust off for one process, whatever the store lists. A linked worktree of a listed repository
 //! inherits its trust when it sits at the same path in its work tree. `/`, `HOME` and the
 //! directories above `HOME` are too broad to trust: the store never lists them and ignores them
@@ -1122,6 +1123,14 @@ mod tests {
         assert_eq!(store.file, base.join("local/supdoc/trusted-roots"));
         assert_eq!(store.home, Some(base.join("profile")));
         assert_eq!(store.variable, "LOCALAPPDATA");
+    }
+
+    #[test]
+    fn windows_does_not_fall_back_to_home_without_localappdata() {
+        let base = std::env::temp_dir();
+        let env = TrustEnv::from_vars(|name| (name == "HOME").then(|| base.clone().into()));
+
+        assert_eq!(env.store_on(true), None);
     }
 
     #[test]

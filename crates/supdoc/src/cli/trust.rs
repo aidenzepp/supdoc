@@ -3,7 +3,7 @@
 //!
 //! `PATH` is an existing directory (any path, for `--revoke`), or the project root when omitted: the
 //! directory of the config `check` would load. With no config there is nothing to trust. The trust
-//! store reads only `XDG_STATE_HOME` and `HOME`; `SUPDOC_TRUST` is not consulted, since it grants
+//! store reads only `XDG_STATE_HOME` and `HOME` (on Windows, `LOCALAPPDATA`; `XDG_STATE_HOME` still wins when set); `SUPDOC_TRUST` is not consulted, since it grants
 //! trust to a run and never records it.
 
 use std::io::{self, Write};
@@ -89,7 +89,7 @@ pub(crate) fn schema() -> schemars::Schema {
 /// Returns `cli-trust-path` when a `PATH` to trust isn't an existing directory or its real path
 /// holds a newline, `cli-trust-broad-root` when the root to trust is `/`, `HOME` or a directory
 /// above `HOME` (2), `cli-trust-no-config` when no `PATH` is given and no config is found (78),
-/// `cli-trust-no-state` when neither `XDG_STATE_HOME` nor `HOME` is an absolute path (78),
+/// `cli-trust-no-state` when neither `XDG_STATE_HOME` nor `HOME` (on Windows, `LOCALAPPDATA`) is an absolute path (78),
 /// `cli-trust-store` when the store can't be read or written (74), the config error when `-c` or
 /// the config search fails, and `cli-output-failed` when the report cannot be written.
 pub(crate) fn run(
@@ -204,8 +204,8 @@ fn broad_root(real: &Path) -> CliError {
 fn no_state() -> CliError {
     CliError::new(
         "cli-trust-no-state",
-        "there is no state directory to keep trusted roots in: neither XDG_STATE_HOME nor HOME is an absolute path",
-        "Set HOME, for example `export HOME=/home/you`, or XDG_STATE_HOME to an absolute directory",
+        "there is no state directory to keep trusted roots in: neither XDG_STATE_HOME nor HOME (on Windows, LOCALAPPDATA) is an absolute path",
+        "Set HOME, for example `export HOME=/home/you` (on Windows, LOCALAPPDATA), or XDG_STATE_HOME to an absolute directory",
         ExitStatus::Config,
     )
 }
@@ -235,7 +235,7 @@ fn store_failed(error: &io::Error) -> CliError {
     CliError::new(
         "cli-trust-store",
         format!("cannot update the trust store: {}", cause(error)),
-        "Check that you can create and write files in `$XDG_STATE_HOME/supdoc` (under `$HOME/.local/state` when it is unset)",
+        "Check that you can create and write files in `$XDG_STATE_HOME/supdoc` (under `$HOME/.local/state` when it is unset; on Windows, under `%LOCALAPPDATA%\\supdoc`)",
         ExitStatus::Io,
     )
 }
