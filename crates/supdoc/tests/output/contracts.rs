@@ -696,6 +696,8 @@ mod helps {
         /// with `SUPDOC_TEST_RELEASE_DIR` set to the project's `releases` directory, where a setup
         /// may have put a `SHA256SUMS`.
         ReleaseBinary,
+        /// As [`Via::ReleaseBinary`], with the `dist` directory made read-only after the copy.
+        LockedReleaseBinary,
         /// With `XDG_STATE_HOME` set to a file in the project, so no state directory can be made.
         StateHomeIsFile,
     }
@@ -1915,11 +1917,26 @@ mod helps {
             needs_permissions: false,
         },
         HelpCase {
-            kind: "cli-upgrade-binary-not-yet",
-            setup: |p| p.write("releases/99.0.0/SHA256SUMS", &release_sums("99.0.0")),
+            kind: "cli-upgrade-verify-failed",
+            setup: |p| {
+                p.write("releases/99.0.0/SHA256SUMS", &release_sums("99.0.0"));
+                for triple in RELEASE_TRIPLES {
+                    p.write(
+                        &format!("releases/99.0.0/supdoc-99.0.0-{triple}.tar.gz"),
+                        "not an archive",
+                    );
+                }
+            },
             args: &["upgrade", "99.0.0", "--yes"],
             via: Via::ReleaseBinary,
             needs_permissions: false,
+        },
+        HelpCase {
+            kind: "cli-upgrade-replace-failed",
+            setup: publish_release_archives,
+            args: &["upgrade", "99.0.0", "--yes"],
+            via: Via::LockedReleaseBinary,
+            needs_permissions: true,
         },
         HelpCase {
             kind: "cli-skill-no-home",
@@ -2047,22 +2064,68 @@ mod helps {
         retry_busy(|| command.output())
     }
 
+    /// The eight release platforms.
+    const RELEASE_TRIPLES: [&str; 8] = [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl",
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+    ];
+
+    /// Writes a well-formed `99.0.0` archive for every platform and the `SHA256SUMS` that lists
+    /// their true digests.
+    fn publish_release_archives(project: &Project) {
+        use sha2::{Digest as _, Sha256};
+        use std::fmt::Write as _;
+        let mut sums = String::new();
+        for triple in RELEASE_TRIPLES {
+            let mut tar = tar::Builder::new(Vec::new());
+            let mut header = tar::Header::new_gnu();
+            header.set_size(5);
+            header.set_mode(0o644);
+            header.set_cksum();
+            let entry = format!(
+                "supdoc-99.0.0-{triple}/{}",
+                if triple.contains("windows") {
+                    "supdoc.exe"
+                } else {
+                    "supdoc"
+                }
+            );
+            tar.append_data(&mut header, entry, &b"stub\n"[..])
+                .expect("the entry should append");
+            let tarball = tar.into_inner().expect("the tar should finish");
+            let mut gzip =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            gzip.write_all(&tarball).expect("the tar should compress");
+            let archive = gzip.finish().expect("the gzip should finish");
+            let name = format!("supdoc-99.0.0-{triple}.tar.gz");
+            let path = project.path().join("releases/99.0.0").join(&name);
+            std::fs::create_dir_all(path.parent().expect("an archive has a directory"))
+                .expect("the release directory should be creatable");
+            std::fs::write(&path, &archive).expect("the archive should write");
+            let digest = Sha256::digest(&archive)
+                .iter()
+                .fold(String::new(), |mut hex, byte| {
+                    let _ = write!(hex, "{byte:02x}");
+                    hex
+                });
+            let _ = writeln!(sums, "{digest}  {name}");
+        }
+        project.write("releases/99.0.0/SHA256SUMS", &sums);
+    }
+
     /// A `SHA256SUMS` listing `version` for the eight release platforms.
     fn release_sums(version: &str) -> String {
-        [
-            "x86_64-unknown-linux-gnu",
-            "aarch64-unknown-linux-gnu",
-            "x86_64-unknown-linux-musl",
-            "aarch64-unknown-linux-musl",
-            "x86_64-apple-darwin",
-            "aarch64-apple-darwin",
-            "x86_64-pc-windows-msvc",
-            "aarch64-pc-windows-msvc",
-        ]
-        .iter()
-        .map(|triple| format!("{:064x}  supdoc-{version}-{triple}.tar.gz\n", 1))
-        .collect::<Vec<_>>()
-        .concat()
+        RELEASE_TRIPLES
+            .iter()
+            .map(|triple| format!("{:064x}  supdoc-{version}-{triple}.tar.gz\n", 1))
+            .collect::<Vec<_>>()
+            .concat()
     }
 
     /// Runs `args` with a copy of the binary in a `dist` directory inside `project`, outside any
@@ -2070,6 +2133,7 @@ mod helps {
     fn run_as_release_binary(
         project: &Project,
         args: &[&str],
+        lock_dist: bool,
     ) -> std::io::Result<std::process::Output> {
         let installed = project.path().join("dist/supdoc");
         std::fs::create_dir_all(project.path().join("dist"))
@@ -2078,6 +2142,9 @@ mod helps {
             .expect("the releases directory should be creatable");
         let _bytes = std::fs::copy(env!("CARGO_BIN_EXE_supdoc"), &installed)
             .expect("the binary should copy");
+        if lock_dist {
+            chmod(project, "dist", 0o555);
+        }
         let mut command = std::process::Command::new(&installed);
         let _builder = command
             .args(args)
@@ -2182,7 +2249,8 @@ mod helps {
                 shell(&project, "mkdir gone && cd gone && rmdir ../gone", &args).output()
             }
             Via::CargoInstalled => run_in_cargo_home(&project, &args),
-            Via::ReleaseBinary => run_as_release_binary(&project, &args),
+            Via::ReleaseBinary => run_as_release_binary(&project, &args, false),
+            Via::LockedReleaseBinary => run_as_release_binary(&project, &args, true),
         }
         .expect("the supdoc binary should start");
         unlock(project.path());
