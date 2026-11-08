@@ -2229,6 +2229,33 @@ mod tests {
     }
 
     #[test]
+    fn within_one_directory_extensions_are_tried_in_pathext_order() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let bin = dir.path().canonicalize().expect("bin path");
+        exe(&bin, "tool.CMD");
+        exe(&bin, "tool.EXE");
+        let path = std::env::join_paths([&bin]).expect("path");
+        let found = super::first_on_path("tool", &path, Some(OsStr::new(".EXE;.CMD")))
+            .expect("a tool should be found");
+        assert_eq!(found.file_name(), Some(OsStr::new("tool.EXE")), "{found:?}");
+    }
+
+    #[test]
+    fn lookup_passes_pathext_to_the_path_search() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let root = dir.path().join("root");
+        let bin = dir.path().join("bin");
+        fs::create_dir(&root).expect("root dir");
+        fs::create_dir(&bin).expect("bin dir");
+        exe(&bin, "tool.EXE");
+        let path = std::env::join_paths([bin.canonicalize().expect("bin path")]).expect("path");
+        let found = super::lookup("tool", &[], Some(&path), Some(OsStr::new(".EXE")), &root);
+        assert!(matches!(found, Found::OnPath(_)), "{found:?}");
+        let without = super::lookup("tool", &[], Some(&path), None, &root);
+        assert_eq!(without, Found::Missing);
+    }
+
+    #[test]
     fn a_root_bin_directory_holding_only_tool_exe_is_the_checkouts_choice_when_pathext_is_given() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let root = dir.path().canonicalize().expect("root path");
