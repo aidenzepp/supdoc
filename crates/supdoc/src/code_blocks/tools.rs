@@ -2020,6 +2020,7 @@ pub(super) fn is_executable_file(path: &Path) -> bool {
 /// Whether `meta`'s permissions let someone execute the file.
 #[cfg(unix)]
 fn executable(meta: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
     meta.permissions().mode() & 0o111 != 0
 }
@@ -2032,9 +2033,11 @@ fn executable(_meta: &std::fs::Metadata) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::cli::testing::symlink;
     use std::ffi::{OsStr, OsString};
     use std::fs;
-    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
     use std::path::Path;
 
     use super::{
@@ -2677,6 +2680,7 @@ mod tests {
     }
 
     /// Writes an executable `#!/bin/sh` stub named `name` in `dir`.
+    #[cfg(unix)]
     fn stub(dir: &Path, name: &str) {
         fs::create_dir_all(dir).expect("the stub directory should be creatable");
         let path = dir.join(name);
@@ -2701,6 +2705,7 @@ mod tests {
         (dir, root, outside)
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_root_bin_dir_is_searched_before_path_and_its_match_is_the_checkouts_choice() {
         let (_dir, root, outside) = dirs();
@@ -2720,6 +2725,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_root_bin_dir_entry_linked_outside_is_still_the_checkouts_choice() {
         let (_dir, root, outside) = dirs();
@@ -2732,6 +2738,7 @@ mod tests {
         assert!(matches!(found, Found::InsideRoot(_)), "{found:?}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_tool_in_no_bin_dir_falls_back_to_path() {
         let (_dir, root, outside) = dirs();
@@ -2756,6 +2763,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_relative_entry_is_skipped() {
         let (_dir, root, _outside) = dirs();
@@ -2765,6 +2773,7 @@ mod tests {
         assert_eq!(find("shfmt", &env, &root), Found::Missing);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_file_that_is_not_executable_is_skipped() {
         let (_dir, root, outside) = dirs();
@@ -2776,6 +2785,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_symlink_outside_whose_real_path_is_in_the_root_is_refused() {
         let (_dir, root, outside) = dirs();
@@ -2802,6 +2812,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_first_match_on_path_wins() {
         let (_dir, root, outside) = dirs();
@@ -2837,6 +2848,7 @@ mod tests {
         assert_eq!(dirs, [Path::new("/usr/bin")]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_path_directory_that_is_a_symlink_into_the_root_is_refused() {
         let (_dir, root, outside) = dirs();
@@ -2849,6 +2861,7 @@ mod tests {
         assert!(matches!(found, Found::InsideRoot(_)), "{found:?}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_root_reached_through_a_symlink_is_judged_by_its_real_path() {
         let (dir, root, outside) = dirs();
@@ -2864,6 +2877,7 @@ mod tests {
         assert!(matches!(elsewhere, Found::OnPath(_)), "{elsewhere:?}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_sibling_root_sharing_the_name_prefix_is_not_inside() {
         let (dir, root, _outside) = dirs();
@@ -2875,6 +2889,7 @@ mod tests {
         assert!(matches!(found, Found::OnPath(_)), "{found:?}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_same_inode_alias_of_the_root_is_inside() {
         let (dir, root, _outside) = dirs();

@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 
 use super::tools::ToolEnv;
 use crate::config::confine::{self, Admitted, Boundary};
-use crate::path::AbsolutePath;
+use crate::path::{AbsolutePath, Component, FixedPath, fixed};
 
 /// The variables gofmt gets beyond the tool environment: `GOTOOLCHAIN=local`, so a `go` front
 /// end never downloads a toolchain to run it.
@@ -57,7 +57,7 @@ const EXCLUDED: &str = "package supdoc.invalid/block: build constraints exclude 
 pub(crate) const VET_VERSION: &str = "supdoc couldn't read which Go release `go` is";
 
 /// The block's file in the module.
-const MAIN: &str = "main.go";
+const MAIN: &str = fixed::MAIN_GO.as_str();
 
 /// Why `go vet`'s step didn't run on a block that imports a package outside Go's standard
 /// library: the module has no other package, and nothing is fetched.
@@ -229,28 +229,26 @@ impl VetModule {
         if neutral == Path::new("/") {
             return None;
         }
-        let cache = neutral.parent()?.to_path_buf();
-        let owner = Boundary::resolve(&runner::exact(&cache)?);
-        let shared = |name: &str| {
-            let dir = AbsolutePath::new(&cache.join(name))?;
+        let cache = runner::exact(neutral.parent()?)?;
+        let owner = Boundary::resolve(&cache);
+        let shared = |name: FixedPath| {
+            let dir = cache.beneath(&name);
             private(&owner, &dir).map(|boundary| (dir, boundary))
         };
-        let (home, _) = shared("go-home")?;
-        let (path, _) = shared("go-path")?;
-        let (build, _) = shared("go-build")?;
-        let (base_dir, base) = shared("go")?;
+        let (home, _) = shared(fixed::GO_HOME)?;
+        let (path, _) = shared(fixed::GO_PATH)?;
+        let (build, _) = shared(fixed::GO_BUILD)?;
+        let (base_dir, base) = shared(fixed::GO)?;
         let dir = (0..16).find_map(|_| {
             let count = VET_RUNS.fetch_add(1, Ordering::Relaxed);
-            let dir = base_dir
-                .as_path()
-                .join(format!("{}-{count}", std::process::id()));
-            let dir = AbsolutePath::new(&dir)?;
+            let name = Component::new(&format!("{}-{count}", std::process::id()))?;
+            let dir = base_dir.beneath(&name);
             create_fresh(&base, &dir).map(|()| dir)
         })?;
         let own = Boundary::resolve(&dir);
-        let tmp = AbsolutePath::new(&dir.as_path().join("tmp"))?;
-        let go_mod_file = AbsolutePath::new(&dir.as_path().join("go.mod"))?;
-        let main_file = AbsolutePath::new(&dir.as_path().join(MAIN))?;
+        let tmp = dir.beneath(&fixed::TMP);
+        let go_mod_file = dir.beneath(&fixed::GO_MOD);
+        let main_file = dir.beneath(&fixed::MAIN_GO);
         let module = Self {
             vars: [
                 ("HOME", home.as_path().to_path_buf()),
@@ -260,7 +258,7 @@ impl VetModule {
             ],
             base,
             dir,
-            cache,
+            cache: cache.as_path().to_path_buf(),
         };
         let _tmp = private(&own, &tmp)?;
         write_new(&own.admit(&go_mod_file).ok()?, go_mod)?;

@@ -29,6 +29,15 @@ use super::args::{UpgradeArgs, WriteMode};
 use super::project::command_line;
 use super::{CliError, Context, Outcome, cause};
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the release-binary path that calls the asset model lands in later units"
+    )
+)]
+mod release;
+
 /// Shown after `supdoc upgrade --help`.
 pub(crate) const UPGRADE_EXAMPLES: &str = "\
 Examples:
@@ -871,6 +880,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_cargo_home_decision_names_why_none_is_usable() {
         use std::os::unix::ffi::OsStringExt as _;

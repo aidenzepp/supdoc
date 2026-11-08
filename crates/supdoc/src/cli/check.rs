@@ -536,6 +536,7 @@ impl From<&Location> for LinkLocationJson {
 mod tests {
 
     use std::fs;
+    #[cfg(unix)]
     use std::path::Path;
 
     use super::*;
@@ -709,6 +710,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_unreadable_store_with_a_held_step_warns_once_saying_why() {
         let project = Project::empty();
