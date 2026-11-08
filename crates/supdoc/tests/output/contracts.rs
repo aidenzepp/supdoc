@@ -692,6 +692,10 @@ mod helps {
         /// says cargo installed it from crates.io, with `PATH` set to the project's `bin`
         /// directory, where a setup may have put a fake `cargo`.
         CargoInstalled,
+        /// As a copy of the binary in a `dist` directory inside the project, outside any cargo home,
+        /// with `SUPDOC_TEST_RELEASE_DIR` set to the project's `releases` directory, where a setup
+        /// may have put a `SHA256SUMS`.
+        ReleaseBinary,
         /// With `XDG_STATE_HOME` set to a file in the project, so no state directory can be made.
         StateHomeIsFile,
     }
@@ -1897,6 +1901,27 @@ mod helps {
             needs_permissions: false,
         },
         HelpCase {
+            kind: "cli-upgrade-no-asset",
+            setup: |p| p.write("releases/SHA256SUMS", &release_sums("99.0.0")),
+            args: &["upgrade", "0.0.2"],
+            via: Via::ReleaseBinary,
+            needs_permissions: false,
+        },
+        HelpCase {
+            kind: "cli-upgrade-fetch-failed",
+            setup: |_| {},
+            args: &["upgrade", "99.0.0"],
+            via: Via::ReleaseBinary,
+            needs_permissions: false,
+        },
+        HelpCase {
+            kind: "cli-upgrade-binary-not-yet",
+            setup: |p| p.write("releases/SHA256SUMS", &release_sums("99.0.0")),
+            args: &["upgrade", "99.0.0", "--yes"],
+            via: Via::ReleaseBinary,
+            needs_permissions: false,
+        },
+        HelpCase {
             kind: "cli-skill-no-home",
             setup: |_| {},
             args: &["skill", "install", "--global"],
@@ -2022,6 +2047,48 @@ mod helps {
         retry_busy(|| command.output())
     }
 
+    /// A `SHA256SUMS` listing `version` for the eight release platforms.
+    fn release_sums(version: &str) -> String {
+        [
+            "x86_64-unknown-linux-gnu",
+            "aarch64-unknown-linux-gnu",
+            "x86_64-unknown-linux-musl",
+            "aarch64-unknown-linux-musl",
+            "x86_64-apple-darwin",
+            "aarch64-apple-darwin",
+            "x86_64-pc-windows-msvc",
+            "aarch64-pc-windows-msvc",
+        ]
+        .iter()
+        .map(|triple| format!("{:064x}  supdoc-{version}-{triple}.tar.gz\n", 1))
+        .collect::<Vec<_>>()
+        .concat()
+    }
+
+    /// Runs `args` with a copy of the binary in a `dist` directory inside `project`, outside any
+    /// cargo home, with `SUPDOC_TEST_RELEASE_DIR` set to the project's `releases` directory.
+    fn run_as_release_binary(
+        project: &Project,
+        args: &[&str],
+    ) -> std::io::Result<std::process::Output> {
+        let installed = project.path().join("dist/supdoc");
+        std::fs::create_dir_all(project.path().join("dist"))
+            .expect("the dist directory should be creatable");
+        std::fs::create_dir_all(project.path().join("releases"))
+            .expect("the releases directory should be creatable");
+        let _bytes = std::fs::copy(env!("CARGO_BIN_EXE_supdoc"), &installed)
+            .expect("the binary should copy");
+        let mut command = std::process::Command::new(&installed);
+        let _builder = command
+            .args(args)
+            .current_dir(project.path())
+            .env_clear()
+            .env("HOME", project.path().join("home"))
+            .env("SUPDOC_TEST_RELEASE_DIR", project.path().join("releases"))
+            .stdin(Stdio::null());
+        retry_busy(|| command.output())
+    }
+
     /// Runs `spawn`, retrying up to 5 times, 20 ms apart, while it fails with `ETXTBSY`. On Linux a
     /// binary just copied can refuse to start while another test's fork still holds the write
     /// descriptor; any other result is returned at once.
@@ -2115,6 +2182,7 @@ mod helps {
                 shell(&project, "mkdir gone && cd gone && rmdir ../gone", &args).output()
             }
             Via::CargoInstalled => run_in_cargo_home(&project, &args),
+            Via::ReleaseBinary => run_as_release_binary(&project, &args),
         }
         .expect("the supdoc binary should start");
         unlock(project.path());

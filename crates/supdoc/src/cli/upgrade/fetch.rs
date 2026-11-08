@@ -54,6 +54,19 @@ const MIN_CURL: &str = "7.63.0";
 #[cfg(debug_assertions)]
 const TEST_DIR_VAR: &str = "SUPDOC_TEST_RELEASE_DIR";
 
+/// Whether the debug-only test directory is set, which makes this build stand in for a release
+/// binary. Release builds never are.
+pub(crate) fn test_dir_is_set() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        std::env::var_os(TEST_DIR_VAR).is_some_and(|dir| !dir.is_empty())
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        false
+    }
+}
+
 /// Why a fetch was refused or failed.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum FetchError {
