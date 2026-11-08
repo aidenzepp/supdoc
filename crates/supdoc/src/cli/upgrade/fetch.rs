@@ -222,7 +222,6 @@ fn curl_args(url: &str, cap: u64) -> Vec<OsString> {
         "--proto",
         "=https",
         "--tlsv1.2",
-        "--fail",
         "--silent",
     ]
     .iter()
@@ -333,18 +332,22 @@ fn run_curl(curl: &Path, url: &str, cap: u64) -> Result<Hop, FetchError> {
         .and_then(|reader| reader.join().ok())
         .unwrap_or_default();
     let exit = child.wait().map_err(|error| transport(error.to_string()))?;
-    if !exit.success() {
-        let detail = stderr
-            .lines()
-            .find(|line| !line.trim().is_empty())
-            .unwrap_or("curl failed");
-        return Err(transport(format!("{detail} ({exit})")));
-    }
-    let (status, location) = parse_status(&stderr).ok_or_else(|| {
-        transport(format!(
-            "curl printed no status line, so it is too old: supdoc needs curl {MIN_CURL} or newer"
-        ))
-    })?;
+    let status_line = parse_status(&stderr).filter(|(status, _)| *status != 0);
+    let (status, location) = match status_line {
+        Some((status, location)) if exit.success() || status >= 400 => (status, location),
+        _ if !exit.success() => {
+            let detail = stderr
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("curl failed");
+            return Err(transport(format!("{detail} ({exit})")));
+        }
+        _ => {
+            return Err(transport(format!(
+                "curl printed no status line, so it is too old: supdoc needs curl {MIN_CURL} or newer"
+            )));
+        }
+    };
     Ok(Hop {
         status,
         location,
@@ -392,7 +395,7 @@ fn fetch_with(curl: &Path, url: &str, cap: u64) -> Result<Vec<u8>, FetchError> {
             current = hop.location;
             continue;
         }
-        if hop.status != 200 {
+        if !(200..300).contains(&hop.status) {
             return Err(FetchError::Status {
                 url: current,
                 status: hop.status,
@@ -555,6 +558,10 @@ mod tests {
         assert!(pair("--max-redirs", "0"), "{args:?}");
         assert!(pair("--max-filesize", "4096"), "{args:?}");
         assert!(args.iter().any(|arg| arg == "--tlsv1.2"), "{args:?}");
+        assert!(
+            !args.iter().any(|arg| arg == "--fail"),
+            "--fail hides the status line, so a 404 would read as a transport failure: {args:?}"
+        );
         assert_eq!(
             args.last().map(String::as_str),
             Some("https://github.com/x")
@@ -762,5 +769,47 @@ mod tests {
             .expect_err("a curl without a status line is refused");
         let text = error.to_string();
         assert!(text.contains("too old") && text.contains("7.63"), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_4xx_or_5xx_status_comes_out_as_status_whatever_curl_exits_with() {
+        let dir = tempfile::tempdir().expect("the stub directory should be created");
+        let (curl, _log) = stub_curl(
+            dir.path(),
+            &[
+                ("https://github.com/forbidden", 403, "", "no"),
+                ("https://github.com/broken", 500, "", "oops"),
+            ],
+            "'https://github.com/gone') printf 'Not Found'; printf '\\n404 \\n' >&2; exit 22 ;;\n",
+        );
+        for (name, wanted) in [("gone", 404), ("forbidden", 403), ("broken", 500)] {
+            let url = format!("https://github.com/{name}");
+            let result = fetch_with(&curl, &url, 100);
+            assert!(
+                matches!(result, Err(FetchError::Status { status, .. }) if status == wanted),
+                "{name}: {result:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_curl_that_fails_with_no_http_status_is_a_transport_error() {
+        let dir = tempfile::tempdir().expect("the stub directory should be created");
+        let (curl, _log) = stub_curl(
+            dir.path(),
+            &[],
+            "'https://github.com/down') printf 'curl: (6) Could not resolve host\\n' >&2; exit 6 ;;\n\
+             'https://github.com/zero') printf '\\n000 \\n' >&2; exit 7 ;;\n",
+        );
+        for name in ["down", "zero"] {
+            let url = format!("https://github.com/{name}");
+            let result = fetch_with(&curl, &url, 100);
+            assert!(
+                matches!(result, Err(FetchError::Transport { .. })),
+                "{name}: {result:?}"
+            );
+        }
     }
 }

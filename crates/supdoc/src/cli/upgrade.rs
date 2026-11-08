@@ -589,13 +589,8 @@ fn find_release_entry(
             "Name a plain version such as `0.5.0`, or install the pre-release with cargo",
         )
     })?;
-    let bytes = match fetch::fetch(&url, fetch::MAX_SUMS_BYTES) {
-        Ok(bytes) => bytes,
-        Err(fetch::FetchError::Status { status: 404, .. }) => {
-            return Err(no_sums(&url, requested));
-        }
-        Err(error) => return Err(fetch_failed(&url, &error)),
-    };
+    let bytes = fetch::fetch(&url, fetch::MAX_SUMS_BYTES)
+        .map_err(|error| sums_fetch_error(&url, requested, error))?;
     let text =
         String::from_utf8(bytes).map_err(|_| fetch_failed(&url, &"the file is not UTF-8"))?;
     let sums = Sums::parse(&text).map_err(|error| fetch_failed(&url, &error))?;
@@ -616,6 +611,19 @@ fn find_release_entry(
         .ok_or_else(|| no_asset_for(&target, triple))?;
     let asset = release::asset_url(&target, triple).ok_or_else(|| no_asset_for(&target, triple))?;
     Ok((target, Some((asset, entry.digest.clone()))))
+}
+
+/// The error for a failed fetch of `SHA256SUMS`: a 404 means the release does not exist, so
+/// it is `cli-upgrade-no-asset`; every other failure is `cli-upgrade-fetch-failed`.
+fn sums_fetch_error(
+    url: &str,
+    requested: Option<&ReleaseVersion>,
+    error: fetch::FetchError,
+) -> CliError {
+    match error {
+        fetch::FetchError::Status { status: 404, .. } => no_sums(url, requested),
+        other => fetch_failed(url, &other),
+    }
 }
 
 /// The refusal for a release whose `SHA256SUMS` does not exist (the server answered 404).
@@ -1130,6 +1138,24 @@ fn cargo_failed(argv: &[String], status: std::process::ExitStatus, stderr: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_404_for_sha256sums_is_no_asset_and_every_other_failure_is_a_fetch_failure() {
+        let url = "https://github.com/aidenzepp/supdoc/releases/download/v0.0.2/SHA256SUMS";
+        let status = |status| fetch::FetchError::Status {
+            url: url.to_owned(),
+            status,
+        };
+        let transport = fetch::FetchError::Transport {
+            url: url.to_owned(),
+            message: "could not resolve host".to_owned(),
+        };
+        let code = |error| sums_fetch_error(url, None, error).code();
+        assert_eq!(code(status(404)), "cli-upgrade-no-asset");
+        assert_eq!(code(status(403)), "cli-upgrade-fetch-failed");
+        assert_eq!(code(status(500)), "cli-upgrade-fetch-failed");
+        assert_eq!(code(transport), "cli-upgrade-fetch-failed");
+    }
 
     fn version(text: &str) -> ReleaseVersion {
         ReleaseVersion::from_str(text).expect("the test version should parse")
