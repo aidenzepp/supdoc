@@ -402,24 +402,52 @@ fn fetch_with(curl: &Path, url: &str, cap: u64) -> Result<Vec<u8>, FetchError> {
     }
 }
 
-/// Serves the last path segment of `url` from `dir`, for debug builds under test.
+/// Serves a release file from `dir`, for debug builds under test: `<dir>/<version>/<name>` for
+/// `.../download/v<version>/<name>`, and `<dir>/latest/<name>` for `.../latest/download/<name>`.
+/// A file that is not there answers like the release server does for a missing asset, with
+/// status 404.
 ///
 /// # Errors
 ///
-/// Returns [`FetchError::TestFile`] for a missing or unreadable file and
-/// [`FetchError::TooLarge`] for one over `cap`.
+/// Returns [`FetchError::Status`] (404) for a missing file, [`FetchError::TestFile`] for an
+/// unreadable one or a URL of another shape, and [`FetchError::TooLarge`] for one over `cap`.
 #[cfg(debug_assertions)]
 fn fetch_from_dir(dir: &Path, url: &str, cap: u64) -> Result<Vec<u8>, FetchError> {
     let test_file = |message: String| FetchError::TestFile {
         url: url.to_owned(),
         message,
     };
-    let name = url
-        .rsplit('/')
+    let mut segments = url.rsplit('/');
+    let name = segments
         .next()
-        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
-        .ok_or_else(|| test_file("the URL has no file name".to_owned()))?;
-    let file = std::fs::File::open(dir.join(name)).map_err(|error| test_file(error.to_string()))?;
+        .filter(|name| !name.is_empty() && *name != "." && *name != "..");
+    let (Some(name), Some(first), Some(second)) = (name, segments.next(), segments.next()) else {
+        return Err(test_file(
+            "the URL is not a release download URL".to_owned(),
+        ));
+    };
+    let folder = match (first, second) {
+        ("download", "latest") => "latest".to_owned(),
+        (version, "download") => version.strip_prefix('v').unwrap_or(version).to_owned(),
+        _ => {
+            return Err(test_file(
+                "the URL is not a release download URL".to_owned(),
+            ));
+        }
+    };
+    if folder.is_empty() || folder == "." || folder == ".." || folder.contains(['/', '\\']) {
+        return Err(test_file("the URL names no release folder".to_owned()));
+    }
+    let file = match std::fs::File::open(dir.join(&folder).join(name)) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(FetchError::Status {
+                url: url.to_owned(),
+                status: 404,
+            });
+        }
+        Err(error) => return Err(test_file(error.to_string())),
+    };
     let mut bytes = Vec::new();
     let _read = file
         .take(cap.saturating_add(1))
@@ -564,7 +592,9 @@ mod tests {
     #[test]
     fn the_test_directory_serves_a_file_and_enforces_the_cap() {
         let dir = tempfile::tempdir().expect("the test directory should be created");
-        std::fs::write(dir.path().join("SHA256SUMS"), b"12345").expect("the fixture should write");
+        std::fs::create_dir(dir.path().join("latest")).expect("the folder should be created");
+        std::fs::write(dir.path().join("latest/SHA256SUMS"), b"12345")
+            .expect("the fixture should write");
         let url = "https://github.com/aidenzepp/supdoc/releases/latest/download/SHA256SUMS";
         assert_eq!(
             fetch_from_dir(dir.path(), url, 5).expect("a body at the cap is served"),
@@ -573,6 +603,14 @@ mod tests {
         assert!(matches!(
             fetch_from_dir(dir.path(), url, 4),
             Err(FetchError::TooLarge { .. })
+        ));
+        assert!(matches!(
+            fetch_from_dir(
+                dir.path(),
+                "https://github.com/aidenzepp/supdoc/releases/download/v9.9.9/SHA256SUMS",
+                5
+            ),
+            Err(FetchError::Status { status: 404, .. })
         ));
         assert!(matches!(
             fetch_from_dir(dir.path(), "https://github.com/a/..", 4),
