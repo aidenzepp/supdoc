@@ -86,7 +86,7 @@ writes at once, and `--dry-run` previews it. Every command accepts `--json` and 
 clean, 1 failing or refused, 2 usage error, 70 supdoc bug, 74 I/O error, 78 config or lockfile error.
 Each command's `--help` is the reference for its flags. No command writes in the project beyond what the
 table names. With code blocks on, `check` and `fix` keep a result cache, and a trusted build its output,
-under `~/.cache/supdoc` (or `$XDG_CACHE_HOME/supdoc`); on Windows the cache is under `%LOCALAPPDATA%\supdoc\cache` and the trust store is `%LOCALAPPDATA%\supdoc\trusted-roots`.
+under `~/.cache/supdoc` (or `$XDG_CACHE_HOME/supdoc`); on Windows the cache is under `%LOCALAPPDATA%\supdoc` and the trust store is `%LOCALAPPDATA%\supdoc\trusted-roots`.
 
 ## Configuration
 

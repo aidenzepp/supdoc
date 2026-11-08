@@ -355,7 +355,7 @@ fn kill_group(pgid: u32) {
 }
 
 /// The cache bases `env` names, in order: `$XDG_CACHE_HOME`, then on Windows
-/// `%LOCALAPPDATA%\supdoc\cache` (under a per-user directory), else on Unix `$HOME/.cache`. A value that isn't
+/// `%LOCALAPPDATA%` (a per-user directory), else on Unix `$HOME/.cache`. A value that isn't
 /// absolute or holds a `..` is dropped: the kernel resolves a `..` after symlinks but a lexical
 /// join folds it away, so a check and a later write could name two places.
 pub(crate) fn cache_bases(env: &ToolEnv) -> impl Iterator<Item = PathBuf> {
@@ -368,7 +368,7 @@ pub(crate) fn cache_bases(env: &ToolEnv) -> impl Iterator<Item = PathBuf> {
     [
         var("XDG_CACHE_HOME"),
         if windows {
-            var("LOCALAPPDATA").map(|local| local.join("supdoc").join("cache"))
+            var("LOCALAPPDATA")
         } else {
             var("HOME").map(|home| home.join(".cache"))
         },
@@ -658,7 +658,7 @@ mod tests {
 
         let bases: Vec<_> = super::cache_bases(&env).collect();
 
-        assert_eq!(bases, [base.join("supdoc").join("cache")]);
+        assert_eq!(bases, [base]);
     }
 
     #[cfg(not(windows))]
