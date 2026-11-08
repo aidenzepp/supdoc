@@ -626,7 +626,8 @@ mod tests {
     }
 
     /// A stub curl for the fetch loop: writes each URL it is asked for to a log, then answers from
-    /// `rules` as (url, status, location, body); `extra` is more `case` arms.
+    /// `rules` as (url, status, location, body); `extra` is more `case` arms. Like curl under
+    /// `--fail`, it exits 22 without a status line for a status of 400 or more when asked to.
     #[cfg(unix)]
     fn stub_curl(dir: &Path, rules: &[(&str, u16, &str, &str)], extra: &str) -> (PathBuf, PathBuf) {
         use std::fmt::Write as _;
@@ -634,13 +635,13 @@ mod tests {
 
         let log = dir.join("requests.log");
         let mut script = format!(
-            "#!/bin/sh\nfor a; do u=$a; done\nprintf '%s\\n' \"$u\" >> '{}'\ncase \"$u\" in\n",
+            "#!/bin/sh\nfail=0\nfor a; do u=$a; [ \"$a\" = --fail ] && fail=1; done\nprintf '%s\\n' \"$u\" >> '{}'\ncase \"$u\" in\n",
             log.display()
         );
         for (url, status, location, body) in rules {
             let _arm = writeln!(
                 script,
-                "'{url}') printf '%s' '{body}'; printf '\\n%s %s\\n' '{status}' '{location}' >&2 ;;"
+                "'{url}') [ \"$fail\" = 1 ] && [ {status} -ge 400 ] && exit 22; printf '%s' '{body}'; printf '\\n%s %s\\n' '{status}' '{location}' >&2 ;;"
             );
         }
         script.push_str(extra);
@@ -781,7 +782,7 @@ mod tests {
                 ("https://github.com/forbidden", 403, "", "no"),
                 ("https://github.com/broken", 500, "", "oops"),
             ],
-            "'https://github.com/gone') printf 'Not Found'; printf '\\n404 \\n' >&2; exit 22 ;;\n",
+            "'https://github.com/gone') [ \"$fail\" = 1 ] && exit 22; printf 'Not Found'; printf '\\n404 \\n' >&2; exit 22 ;;\n",
         );
         for (name, wanted) in [("gone", 404), ("forbidden", 403), ("broken", 500)] {
             let url = format!("https://github.com/{name}");
