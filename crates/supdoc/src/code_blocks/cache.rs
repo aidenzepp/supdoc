@@ -2,7 +2,8 @@
 //! kept outside the checkout so an unchanged block isn't run again.
 //!
 //! Entries live in `$XDG_CACHE_HOME/supdoc/code-blocks/<sha256 of the real root>/`, or under
-//! `$HOME/.cache` when `XDG_CACHE_HOME` isn't an absolute path free of `..`. A missing, unreadable, corrupt or
+//! `$HOME/.cache` (on Windows, `%LOCALAPPDATA%`) when `XDG_CACHE_HOME` isn't an absolute path free
+//! of `..`. A missing, unreadable, corrupt or
 //! partial entry is a miss, never a pass.
 
 use std::ffi::OsStr;
