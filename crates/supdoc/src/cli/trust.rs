@@ -298,6 +298,8 @@ mod tests {
                                    file in that directory, not a symlink out of it, then run \
                                    `supdoc trust` again";
 
+    // A verbatim path on Windows doesn't treat `..` as a parent, so the refusal never arises.
+    #[cfg(unix)]
     #[test]
     fn a_store_refused_for_dot_dot_says_to_set_the_variable_without_it() {
         let (_dir, scratch) = scratch();
