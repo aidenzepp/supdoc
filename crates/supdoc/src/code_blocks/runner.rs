@@ -354,10 +354,12 @@ fn kill_group(pgid: u32) {
     process::kill_tree(pgid);
 }
 
-/// The cache bases `env` names, in order: `$XDG_CACHE_HOME`, then `$HOME/.cache`. A value that
-/// isn't absolute or holds a `..` is dropped: the kernel resolves a `..` after symlinks but a
-/// lexical join folds it away, so a check and a later write could name two places.
+/// The cache bases `env` names, in order: `$XDG_CACHE_HOME`, then on Windows
+/// `%LOCALAPPDATA%\supdoc\cache` (under a per-user directory), else on Unix `$HOME/.cache`. A value that isn't
+/// absolute or holds a `..` is dropped: the kernel resolves a `..` after symlinks but a lexical
+/// join folds it away, so a check and a later write could name two places.
 pub(crate) fn cache_bases(env: &ToolEnv) -> impl Iterator<Item = PathBuf> {
+    let windows = cfg!(windows);
     let var = |name: &str| {
         env.var(name)
             .map(PathBuf::from)
@@ -365,7 +367,11 @@ pub(crate) fn cache_bases(env: &ToolEnv) -> impl Iterator<Item = PathBuf> {
     };
     [
         var("XDG_CACHE_HOME"),
-        var("HOME").map(|home| home.join(".cache")),
+        if windows {
+            var("LOCALAPPDATA").map(|local| local.join("supdoc").join("cache"))
+        } else {
+            var("HOME").map(|home| home.join(".cache"))
+        },
     ]
     .into_iter()
     .flatten()
@@ -639,6 +645,34 @@ mod tests {
         ] {
             assert!(!at.exists(), "nothing should be created at {at:?}");
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_cache_base_is_under_localappdata_not_home() {
+        let base = std::env::temp_dir();
+        let env = ToolEnv::from_vars(|name| match name {
+            "LOCALAPPDATA" | "HOME" => Some(base.clone().into()),
+            _ => None,
+        });
+
+        let bases: Vec<_> = super::cache_bases(&env).collect();
+
+        assert_eq!(bases, [base.join("supdoc").join("cache")]);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_cache_base_is_under_home_and_ignores_localappdata() {
+        let base = std::env::temp_dir();
+        let env = ToolEnv::from_vars(|name| match name {
+            "LOCALAPPDATA" | "HOME" => Some(base.clone().into()),
+            _ => None,
+        });
+
+        let bases: Vec<_> = super::cache_bases(&env).collect();
+
+        assert_eq!(bases, [base.join(".cache")]);
     }
 
     /// A scratch place holding `real` (a plain directory), `elsewhere/deep` and `link` (a link
