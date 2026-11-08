@@ -4627,23 +4627,30 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
+    #[cfg(unix)]
+    use super::Evaluation;
+    #[cfg(unix)]
+    use super::PROJECT_UNBUILT;
     use super::{
-        BlockRecord, Evaluation, Linked, LintRan, MANIFEST_AMBIGUOUS, MANIFEST_OUTSIDE,
-        MANIFEST_UNREADABLE, MAX_WORKERS, OUTSIDE_WORKSPACE, PROJECT_UNBUILT, Pending, RustSetup,
-        Session, TIER_LOWERED, in_parallel, not_trusted, refused_build, run_clippy, rust_refusal,
-        tier_gate, trust_warning, unresolved_warning,
+        BlockRecord, Linked, LintRan, MANIFEST_AMBIGUOUS, MANIFEST_OUTSIDE, MANIFEST_UNREADABLE,
+        MAX_WORKERS, OUTSIDE_WORKSPACE, Pending, RustSetup, Session, TIER_LOWERED, in_parallel,
+        not_trusted, refused_build, run_clippy, rust_refusal, tier_gate, trust_warning,
+        unresolved_warning,
     };
     use crate::cartridges::markdown::cartridge::cartridge as markdown;
     use crate::code_blocks::block::blocks_in;
     use crate::code_blocks::format::FixDoc;
     use crate::code_blocks::lint::Verdict;
     use crate::code_blocks::project::{OutsideWorkspace, Refused};
+    #[cfg(unix)]
+    use crate::code_blocks::states::Failure;
+    use crate::code_blocks::states::StepState;
     use crate::code_blocks::states::{BlockState, NotChecked, Steps};
-    use crate::code_blocks::states::{Failure, StepState};
     use crate::code_blocks::toolchain::Refusal;
     use crate::code_blocks::tools::{
         CARTRIDGES, Found, Held, Invocation, Tier, Tool, ToolCartridge, ToolEnv, find,
@@ -5005,6 +5012,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_block_whose_text_could_not_be_read_settles_unreadable_not_pending_or_passed() {
         let (root, bin) = (temporary(), temporary());
@@ -5047,6 +5055,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn run_clippy_gives_the_block_alone_a_private_metadata_path_and_removes_it() {
         let (root, cache, out) = (temporary(), temporary(), temporary());
@@ -5185,6 +5194,7 @@ mod tests {
     /// never holds `path` open for writing. On Linux a descriptor another test thread's fork
     /// inherits in that window makes the stub's later spawn fail with `ETXTBSY`, and the stub
     /// never runs.
+    #[cfg(unix)]
     fn script(path: &Path, body: &str) {
         let mut source = path.as_os_str().to_owned();
         source.push(".body");
@@ -5207,11 +5217,13 @@ mod tests {
     }
 
     /// A project root with a stub `cargo` and `clippy-driver` beside it, each recording its runs.
+    #[cfg(unix)]
     struct Linking {
         /// Holds the root, the stubs, their records and the cache.
         dir: tempfile::TempDir,
     }
 
+    #[cfg(unix)]
     impl Linking {
         /// A root whose `Cargo.toml` is `manifest` (none when `None`) with a `src/lib.rs`, and
         /// stubs where cargo, after `before`, writes `rmeta`'s bytes as the `proj` lib's rmeta
@@ -5369,6 +5381,7 @@ mod tests {
     }
 
     /// The finding codes of `evaluation`, in order.
+    #[cfg(unix)]
     fn codes(evaluation: &Evaluation) -> Vec<&str> {
         evaluation
             .findings
@@ -5378,8 +5391,10 @@ mod tests {
     }
 
     /// A root package with a lib, built on its own.
+    #[cfg(unix)]
     const PROJ: &str = "[package]\nname = \"proj\"\n\n[workspace]\n";
 
+    #[cfg(unix)]
     #[test]
     fn trusted_blocks_link_against_one_project_build_with_its_externs_before_the_lints() {
         let linking = Linking::new(Some(PROJ), "");
@@ -5404,6 +5419,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_changed_project_artifact_changes_the_cache_key() {
         let linking = Linking::new(Some(PROJ), "");
@@ -5426,6 +5442,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_failing_project_build_is_one_tool_failed_error_and_fails_each_block() {
         let linking = Linking::new(Some(PROJ), "echo 'error: lib.rs: boom' >&2\nexit 101");
@@ -5458,6 +5475,7 @@ mod tests {
         assert!(linking.runs("clippy-runs").is_empty(), "clippy never runs");
     }
 
+    #[cfg(unix)]
     #[test]
     fn with_no_cargo_toml_a_block_compiles_alone_and_cargo_never_runs() {
         let linking = Linking::new(None, "");
@@ -5480,6 +5498,7 @@ mod tests {
         assert!(codes(&evaluation).is_empty(), "{:?}", evaluation.findings);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_refused_manifest_leaves_clippy_unrun_with_one_warning() {
         let linking = Linking::new(
@@ -5505,6 +5524,7 @@ mod tests {
         assert_eq!(linking.runs("clippy-runs"), [] as [String; 0]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_missing_cargo_refuses_the_lint_step_with_one_warning() {
         let linking = Linking::new(Some(PROJ), "");
@@ -5574,9 +5594,11 @@ mod tests {
     }
 
     /// A rustup answer naming a channel for a parent's pin.
+    #[cfg(unix)]
     const PARENT_CHANNEL: &str =
         "1.85.0-x86_64-unknown-linux-gnu (overridden by '/w/rust-toolchain.toml')\n";
 
+    #[cfg(unix)]
     #[test]
     fn a_parent_channel_rustup_names_is_pinned_for_cargo_and_clippy_alike() {
         let linking = Linking::new(Some(PROJ), "");
@@ -5604,6 +5626,7 @@ mod tests {
         assert!(codes(&evaluation).is_empty(), "{:?}", evaluation.findings);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_parent_path_toolchain_never_runs_its_cargo_and_leaves_the_blocks_unchecked() {
         let linking = Linking::new(Some(PROJ), "");
@@ -5746,6 +5769,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_failing_or_inside_rustup_leaves_the_blocks_unchecked_and_nothing_cached() {
         let linking = Linking::new(Some(PROJ), "");
@@ -5785,6 +5809,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn no_rustup_pins_nothing_and_the_resolved_channel_keys_the_cache() {
         let linking = Linking::new(Some(PROJ), "");
@@ -5802,6 +5827,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_block_the_strict_scan_refuses_starts_no_project_build() {
         let linking = Linking::new(Some(PROJ), "");
@@ -5820,6 +5846,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_timed_out_build_is_one_timeout_error_fails_each_block_and_caches_nothing() {
         let linking = Linking::new(Some(PROJ), "/bin/sleep 600");
@@ -5849,6 +5876,7 @@ mod tests {
         assert!(codes(&rerun).is_empty(), "{:?}", rerun.findings);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_refused_manifest_keeps_the_format_verdict_and_never_passes_the_lint_step() {
         let linking = Linking::new(
@@ -5891,14 +5919,16 @@ mod tests {
 
     /// The format step on a block of a kind its formatter reads only inside a frame.
     mod frame_format {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt as _;
         use std::path::{Path, PathBuf};
         use std::time::Duration;
 
+        #[cfg(unix)]
+        use super::super::FRAME_RESHAPED;
         use super::super::{
-            Evaluation, FRAME_INDENT_UNKNOWN, FRAME_RESHAPED, FRAME_WIDTH_UNKNOWN, FormatRan, Job,
-            RustSetup, RustfmtLayout, Session, Slot, StepsRan, ToolRun, biome_layout, parses,
-            run_formatter,
+            Evaluation, FRAME_INDENT_UNKNOWN, FRAME_WIDTH_UNKNOWN, FormatRan, Job, RustSetup,
+            RustfmtLayout, Session, Slot, StepsRan, ToolRun, biome_layout, parses, run_formatter,
         };
         use super::{rust_record, rust_records, temporary};
         use crate::code_blocks::biome::Given;
@@ -5952,6 +5982,7 @@ mod tests {
         }
 
         /// A stub formatter at `<dir>/rustfmt` running `body`.
+        #[cfg(unix)]
         fn stub(dir: &Path, body: &str) -> PathBuf {
             let path = dir.join("rustfmt");
             std::fs::write(&path, format!("#!/bin/sh\n{body}\n"))
@@ -5999,6 +6030,7 @@ mod tests {
             run.unwrap_or_else(|not_run| panic!("the format step should run: {not_run:?}"))
         }
 
+        #[cfg(unix)]
         #[test]
         fn frame_format_the_formatter_reads_the_block_indented_inside_the_frame() {
             let root = temporary();
@@ -6010,6 +6042,7 @@ mod tests {
             assert!(findings.is_empty(), "{findings:?}");
         }
 
+        #[cfg(unix)]
         #[test]
         fn frame_format_the_fix_from_a_framed_run_holds_only_the_authors_lines() {
             let root = temporary();
@@ -6022,6 +6055,7 @@ mod tests {
             assert_eq!(applied(&text, &findings), doc("let x = 1;\n"));
         }
 
+        #[cfg(unix)]
         #[test]
         fn frame_format_a_frame_failure_is_reported_at_the_info_string() {
             let root = temporary();
@@ -6071,6 +6105,7 @@ mod tests {
             assert!(parses(Some(&Err(FRAME_INDENT_UNKNOWN.into()))));
         }
 
+        #[cfg(unix)]
         #[test]
         fn frame_format_an_unreadable_indent_leaves_the_step_not_run() {
             let root = temporary();
@@ -6232,6 +6267,7 @@ mod tests {
             }
         }
 
+        #[cfg(unix)]
         #[test]
         fn frame_format_a_nightly_frame_shaping_config_leaves_the_step_not_run_and_warns_once() {
             let root = temporary();
