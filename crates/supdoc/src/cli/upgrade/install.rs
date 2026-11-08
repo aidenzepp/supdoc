@@ -168,3 +168,32 @@ fn set_mode(file: &fs::File) -> io::Result<()> {
 fn set_mode(_file: &fs::File) -> io::Result<()> {
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_rename_removes_the_temp_file_and_keeps_the_target() {
+        let dir = tempfile::tempdir().expect("a scratch directory should be creatable");
+        let exe = dir.path().join("supdoc");
+        fs::create_dir(&exe).expect("the stand-in target should be creatable");
+        fs::write(exe.join("keep"), "old").expect("the stand-in content should write");
+
+        let result = replace_exe(&exe, b"new binary");
+
+        assert!(
+            matches!(result, Err(ReplaceError::Io { .. })),
+            "renaming a file over a non-empty directory should fail: {result:?}"
+        );
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .expect("the directory should list")
+            .map(|entry| entry.expect("the entry should read").file_name())
+            .collect();
+        assert_eq!(names, ["supdoc"], "no temporary file may remain");
+        assert_eq!(
+            fs::read(exe.join("keep")).expect("the old content should read"),
+            b"old"
+        );
+    }
+}
