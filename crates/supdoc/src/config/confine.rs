@@ -461,9 +461,11 @@ pub(crate) fn hard_link_new(original: &Admitted<'_>, link: &Admitted<'_>) -> io:
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
 
     use super::*;
+    use crate::cli::testing::symlink;
     use crate::path::AbsolutePath;
 
     /// A temp dir holding an empty project `root` and an `outside` dir beside it.
@@ -796,6 +798,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn create_dir_all_creates_only_the_admitted_dirs_with_the_mode() {
         let fixture = Fixture::new();
@@ -815,6 +818,7 @@ mod tests {
         assert_eq!(fixture.names("root/a"), names(&["b"]));
     }
 
+    #[cfg(unix)]
     #[test]
     fn create_dir_creates_only_the_admitted_dir_with_the_mode() {
         let fixture = Fixture::new();
@@ -864,6 +868,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn create_new_creates_only_the_admitted_file_and_refuses_an_existing_one() {
         let fixture = Fixture::new();
