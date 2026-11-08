@@ -145,6 +145,21 @@
       ],
       "type": "object"
     },
+    "Method": {
+      "description": "How this supdoc was installed, and so how it would be upgraded.",
+      "oneOf": [
+        {
+          "const": "cargo",
+          "description": "`cargo install` from crates.io.",
+          "type": "string"
+        },
+        {
+          "const": "release-binary",
+          "description": "A binary downloaded from a GitHub release.",
+          "type": "string"
+        }
+      ]
+    },
     "SeverityJson": {
       "description": "A severity as JSON shows it.",
       "oneOf": [
@@ -186,10 +201,17 @@
       ]
     },
     "UpgradeReport": {
-      "description": "`supdoc upgrade`: the versions, and the command that installs the target.",
+      "description": "`supdoc upgrade`: the versions, and what installs the target.",
       "properties": {
+        "asset": {
+          "description": "The release archive URL the target would come from; only for a release binary that has a\nversion to install.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "command": {
-          "description": "The command that installs the target, as an argument vector; empty when nothing would run.",
+          "description": "The command that installs the target, as an argument vector; empty when nothing would run\nand for a release binary.",
           "items": {
             "type": "string"
           },
@@ -203,6 +225,10 @@
           "$ref": "#/$defs/Direction",
           "description": "`upgrade`, `downgrade`, or `same` when the target is the running version."
         },
+        "method": {
+          "$ref": "#/$defs/Method",
+          "description": "How this supdoc was installed: `cargo` or `release-binary`."
+        },
         "outcome": {
           "$ref": "#/$defs/UpgradeOutcome",
           "description": "How the run ended."
@@ -210,6 +236,13 @@
         "ran": {
           "description": "Whether the command ran.",
           "type": "boolean"
+        },
+        "sha256": {
+          "description": "The SHA-256 the archive must have, from `SHA256SUMS`; only with `asset`.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "target": {
           "description": "The version to install.",
@@ -222,7 +255,8 @@
         "direction",
         "command",
         "ran",
-        "outcome"
+        "outcome",
+        "method"
       ],
       "type": "object"
     }

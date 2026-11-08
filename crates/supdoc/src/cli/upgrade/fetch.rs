@@ -54,6 +54,19 @@ const MIN_CURL: &str = "7.63.0";
 #[cfg(debug_assertions)]
 const TEST_DIR_VAR: &str = "SUPDOC_TEST_RELEASE_DIR";
 
+/// Whether the debug-only test directory is set, which makes this build stand in for a release
+/// binary. Release builds never are.
+pub(crate) fn test_dir_is_set() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        std::env::var_os(TEST_DIR_VAR).is_some_and(|dir| !dir.is_empty())
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        false
+    }
+}
+
 /// Why a fetch was refused or failed.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum FetchError {
@@ -209,7 +222,6 @@ fn curl_args(url: &str, cap: u64) -> Vec<OsString> {
         "--proto",
         "=https",
         "--tlsv1.2",
-        "--fail",
         "--silent",
     ]
     .iter()
@@ -320,18 +332,22 @@ fn run_curl(curl: &Path, url: &str, cap: u64) -> Result<Hop, FetchError> {
         .and_then(|reader| reader.join().ok())
         .unwrap_or_default();
     let exit = child.wait().map_err(|error| transport(error.to_string()))?;
-    if !exit.success() {
-        let detail = stderr
-            .lines()
-            .find(|line| !line.trim().is_empty())
-            .unwrap_or("curl failed");
-        return Err(transport(format!("{detail} ({exit})")));
-    }
-    let (status, location) = parse_status(&stderr).ok_or_else(|| {
-        transport(format!(
-            "curl printed no status line, so it is too old: supdoc needs curl {MIN_CURL} or newer"
-        ))
-    })?;
+    let status_line = parse_status(&stderr).filter(|(status, _)| *status != 0);
+    let (status, location) = match status_line {
+        Some((status, location)) if exit.success() || status >= 400 => (status, location),
+        _ if !exit.success() => {
+            let detail = stderr
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("curl failed");
+            return Err(transport(format!("{detail} ({exit})")));
+        }
+        _ => {
+            return Err(transport(format!(
+                "curl printed no status line, so it is too old: supdoc needs curl {MIN_CURL} or newer"
+            )));
+        }
+    };
     Ok(Hop {
         status,
         location,
@@ -379,7 +395,7 @@ fn fetch_with(curl: &Path, url: &str, cap: u64) -> Result<Vec<u8>, FetchError> {
             current = hop.location;
             continue;
         }
-        if hop.status != 200 {
+        if !(200..300).contains(&hop.status) {
             return Err(FetchError::Status {
                 url: current,
                 status: hop.status,
@@ -389,24 +405,52 @@ fn fetch_with(curl: &Path, url: &str, cap: u64) -> Result<Vec<u8>, FetchError> {
     }
 }
 
-/// Serves the last path segment of `url` from `dir`, for debug builds under test.
+/// Serves a release file from `dir`, for debug builds under test: `<dir>/<version>/<name>` for
+/// `.../download/v<version>/<name>`, and `<dir>/latest/<name>` for `.../latest/download/<name>`.
+/// A file that is not there answers like the release server does for a missing asset, with
+/// status 404.
 ///
 /// # Errors
 ///
-/// Returns [`FetchError::TestFile`] for a missing or unreadable file and
-/// [`FetchError::TooLarge`] for one over `cap`.
+/// Returns [`FetchError::Status`] (404) for a missing file, [`FetchError::TestFile`] for an
+/// unreadable one or a URL of another shape, and [`FetchError::TooLarge`] for one over `cap`.
 #[cfg(debug_assertions)]
 fn fetch_from_dir(dir: &Path, url: &str, cap: u64) -> Result<Vec<u8>, FetchError> {
     let test_file = |message: String| FetchError::TestFile {
         url: url.to_owned(),
         message,
     };
-    let name = url
-        .rsplit('/')
+    let mut segments = url.rsplit('/');
+    let name = segments
         .next()
-        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
-        .ok_or_else(|| test_file("the URL has no file name".to_owned()))?;
-    let file = std::fs::File::open(dir.join(name)).map_err(|error| test_file(error.to_string()))?;
+        .filter(|name| !name.is_empty() && *name != "." && *name != "..");
+    let (Some(name), Some(first), Some(second)) = (name, segments.next(), segments.next()) else {
+        return Err(test_file(
+            "the URL is not a release download URL".to_owned(),
+        ));
+    };
+    let folder = match (first, second) {
+        ("download", "latest") => "latest".to_owned(),
+        (version, "download") => version.strip_prefix('v').unwrap_or(version).to_owned(),
+        _ => {
+            return Err(test_file(
+                "the URL is not a release download URL".to_owned(),
+            ));
+        }
+    };
+    if folder.is_empty() || folder == "." || folder == ".." || folder.contains(['/', '\\']) {
+        return Err(test_file("the URL names no release folder".to_owned()));
+    }
+    let file = match std::fs::File::open(dir.join(&folder).join(name)) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(FetchError::Status {
+                url: url.to_owned(),
+                status: 404,
+            });
+        }
+        Err(error) => return Err(test_file(error.to_string())),
+    };
     let mut bytes = Vec::new();
     let _read = file
         .take(cap.saturating_add(1))
@@ -514,6 +558,10 @@ mod tests {
         assert!(pair("--max-redirs", "0"), "{args:?}");
         assert!(pair("--max-filesize", "4096"), "{args:?}");
         assert!(args.iter().any(|arg| arg == "--tlsv1.2"), "{args:?}");
+        assert!(
+            !args.iter().any(|arg| arg == "--fail"),
+            "--fail hides the status line, so a 404 would read as a transport failure: {args:?}"
+        );
         assert_eq!(
             args.last().map(String::as_str),
             Some("https://github.com/x")
@@ -551,7 +599,9 @@ mod tests {
     #[test]
     fn the_test_directory_serves_a_file_and_enforces_the_cap() {
         let dir = tempfile::tempdir().expect("the test directory should be created");
-        std::fs::write(dir.path().join("SHA256SUMS"), b"12345").expect("the fixture should write");
+        std::fs::create_dir(dir.path().join("latest")).expect("the folder should be created");
+        std::fs::write(dir.path().join("latest/SHA256SUMS"), b"12345")
+            .expect("the fixture should write");
         let url = "https://github.com/aidenzepp/supdoc/releases/latest/download/SHA256SUMS";
         assert_eq!(
             fetch_from_dir(dir.path(), url, 5).expect("a body at the cap is served"),
@@ -562,13 +612,22 @@ mod tests {
             Err(FetchError::TooLarge { .. })
         ));
         assert!(matches!(
+            fetch_from_dir(
+                dir.path(),
+                "https://github.com/aidenzepp/supdoc/releases/download/v9.9.9/SHA256SUMS",
+                5
+            ),
+            Err(FetchError::Status { status: 404, .. })
+        ));
+        assert!(matches!(
             fetch_from_dir(dir.path(), "https://github.com/a/..", 4),
             Err(FetchError::TestFile { .. })
         ));
     }
 
     /// A stub curl for the fetch loop: writes each URL it is asked for to a log, then answers from
-    /// `rules` as (url, status, location, body); `extra` is more `case` arms.
+    /// `rules` as (url, status, location, body); `extra` is more `case` arms. Like curl under
+    /// `--fail`, it exits 22 without a status line for a status of 400 or more when asked to.
     #[cfg(unix)]
     fn stub_curl(dir: &Path, rules: &[(&str, u16, &str, &str)], extra: &str) -> (PathBuf, PathBuf) {
         use std::fmt::Write as _;
@@ -576,13 +635,13 @@ mod tests {
 
         let log = dir.join("requests.log");
         let mut script = format!(
-            "#!/bin/sh\nfor a; do u=$a; done\nprintf '%s\\n' \"$u\" >> '{}'\ncase \"$u\" in\n",
+            "#!/bin/sh\nfail=0\nfor a; do u=$a; [ \"$a\" = --fail ] && fail=1; done\nprintf '%s\\n' \"$u\" >> '{}'\ncase \"$u\" in\n",
             log.display()
         );
         for (url, status, location, body) in rules {
             let _arm = writeln!(
                 script,
-                "'{url}') printf '%s' '{body}'; printf '\\n%s %s\\n' '{status}' '{location}' >&2 ;;"
+                "'{url}') [ \"$fail\" = 1 ] && [ {status} -ge 400 ] && exit 22; printf '%s' '{body}'; printf '\\n%s %s\\n' '{status}' '{location}' >&2 ;;"
             );
         }
         script.push_str(extra);
@@ -711,5 +770,47 @@ mod tests {
             .expect_err("a curl without a status line is refused");
         let text = error.to_string();
         assert!(text.contains("too old") && text.contains("7.63"), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_4xx_or_5xx_status_comes_out_as_status_whatever_curl_exits_with() {
+        let dir = tempfile::tempdir().expect("the stub directory should be created");
+        let (curl, _log) = stub_curl(
+            dir.path(),
+            &[
+                ("https://github.com/forbidden", 403, "", "no"),
+                ("https://github.com/broken", 500, "", "oops"),
+            ],
+            "'https://github.com/gone') [ \"$fail\" = 1 ] && exit 22; printf 'Not Found'; printf '\\n404 \\n' >&2; exit 22 ;;\n",
+        );
+        for (name, wanted) in [("gone", 404), ("forbidden", 403), ("broken", 500)] {
+            let url = format!("https://github.com/{name}");
+            let result = fetch_with(&curl, &url, 100);
+            assert!(
+                matches!(result, Err(FetchError::Status { status, .. }) if status == wanted),
+                "{name}: {result:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_curl_that_fails_with_no_http_status_is_a_transport_error() {
+        let dir = tempfile::tempdir().expect("the stub directory should be created");
+        let (curl, _log) = stub_curl(
+            dir.path(),
+            &[],
+            "'https://github.com/down') printf 'curl: (6) Could not resolve host\\n' >&2; exit 6 ;;\n\
+             'https://github.com/zero') printf '\\n000 \\n' >&2; exit 7 ;;\n",
+        );
+        for name in ["down", "zero"] {
+            let url = format!("https://github.com/{name}");
+            let result = fetch_with(&curl, &url, 100);
+            assert!(
+                matches!(result, Err(FetchError::Transport { .. })),
+                "{name}: {result:?}"
+            );
+        }
     }
 }
