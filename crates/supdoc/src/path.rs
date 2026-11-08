@@ -222,13 +222,6 @@ impl FixedPath {
 impl FixedPath {
     /// The path as written, for a site that also shows or compares the name.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the sweep units show and compare names from V5-P2a"
-        )
-    )]
     pub(crate) const fn as_str(&self) -> &'static str {
         self.0
     }
@@ -262,34 +255,24 @@ pub(crate) mod fixed {
     #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CRATES2_JSON: FixedPath = FixedPath::new(".crates2.json");
     /// Biome's private lint directory beneath the cache base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const BIOME_LINT_DIR: FixedPath = FixedPath::new("biome-lint");
     /// Biome's private config directory beneath the cache base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const BIOME_CONFIG_DIR: FixedPath = FixedPath::new("biome-config");
     /// Biome's config file name.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const BIOME_JSON: FixedPath = FixedPath::new("biome.json");
     /// Go's private directory beneath the cache base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const GO: FixedPath = FixedPath::new("go");
     /// Go's private home directory beneath the cache base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const GO_HOME: FixedPath = FixedPath::new("go-home");
     /// Go's private `GOPATH` directory beneath the cache base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const GO_PATH: FixedPath = FixedPath::new("go-path");
     /// Go's private build cache directory beneath the cache base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const GO_BUILD: FixedPath = FixedPath::new("go-build");
     /// A private scratch directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const TMP: FixedPath = FixedPath::new("tmp");
     /// A Go module file.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const GO_MOD: FixedPath = FixedPath::new("go.mod");
     /// The Go file a block is written to.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const MAIN_GO: FixedPath = FixedPath::new("main.go");
     /// supdoc's directory beneath a cache or state base.
     #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
@@ -385,7 +368,6 @@ pub(crate) mod fixed {
     #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const DOT_GITIGNORE: FixedPath = FixedPath::new(".gitignore");
     /// The config names biome looks for in a directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const BIOME_CONFIG_FILES: [FixedPath; 4] = [
         FixedPath::new("biome.json"),
         FixedPath::new("biome.jsonc"),
@@ -506,13 +488,6 @@ pub(crate) struct Component(String);
 impl Component {
     /// Wraps `name`, or returns `None` when it is not exactly one normal component.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the sweep units name computed components from V5-P2a"
-        )
-    )]
     pub(crate) fn new(name: &str) -> Option<Self> {
         let refused =
             name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', ':', '\0']);
@@ -537,13 +512,6 @@ fn raw_join(base: &Path, tail: &Path) -> PathBuf {
 /// root, `..` or `.`. For a base that is not an [`AbsolutePath`]: a `&Path`, a `PathBuf` or a
 /// temporary directory. Refuses nothing, since the type holds the proof.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the sweep units join onto plain paths from V5-P2a"
-    )
-)]
 pub(crate) fn beneath(base: &Path, rel: &impl Beneath) -> PathBuf {
     raw_join(base, Path::new(rel.segments()))
 }
@@ -553,10 +521,6 @@ pub(crate) fn beneath(base: &Path, rel: &impl Beneath) -> PathBuf {
 /// is not plain names: a `..`, `.`, root or prefix component would let the result climb out of
 /// `onto`.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the sweep units re-root remainders from V5-P2a")
-)]
 pub(crate) fn rebase(path: &Path, from: &Path, onto: &Path) -> Option<PathBuf> {
     let rest = path.strip_prefix(from).ok()?;
     rest.components()
