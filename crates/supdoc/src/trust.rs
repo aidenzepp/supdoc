@@ -690,8 +690,11 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
     use std::process::Command;
-    use std::sync::{Barrier, mpsc};
+    use std::sync::Barrier;
+    #[cfg(unix)]
+    use std::sync::mpsc;
     use std::thread;
+    #[cfg(unix)]
     use std::time::Duration;
 
     use super::*;
@@ -750,6 +753,14 @@ mod tests {
         }
     }
 
+    /// The filesystem root of `path`: `/` on Unix, the drive root on Windows.
+    fn filesystem_root(path: &Path) -> PathBuf {
+        path.ancestors()
+            .last()
+            .expect("a path should have an ancestor")
+            .to_path_buf()
+    }
+
     /// Runs `git` with `args` in `dir`, with no user config and a fixed identity.
     fn git(dir: &Path, args: &[&str]) {
         let status = Command::new("git")
@@ -778,10 +789,9 @@ mod tests {
         fs::write(repo.join("sub/file"), "").expect("the repo's file should be writable");
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "--quiet", "-m", "fixture"]);
-        let worktree = scratch.real().join("wt");
-        let worktree_arg = worktree.to_str().expect("the scratch path should be UTF-8");
-        git(&repo, &["worktree", "add", "--quiet", worktree_arg]);
-        (repo, worktree)
+        // A relative path, because git rejects the `\\?\` verbatim form `canonicalize` gives on Windows.
+        git(&repo, &["worktree", "add", "--quiet", "../wt"]);
+        (repo, scratch.real().join("wt"))
     }
 
     #[test]
@@ -849,6 +859,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_fifo_store_file_grants_nothing_without_hanging() {
         let scratch = Scratch::new();
@@ -1092,6 +1103,9 @@ mod tests {
         }
     }
 
+    // Windows has no `HOME` fallback and `/home/someone` isn't absolute there; its relative-variable
+    // rule is `windows_ignores_a_relative_localappdata_and_unix_ignores_it_entirely`.
+    #[cfg(unix)]
     #[test]
     fn a_relative_xdg_state_home_falls_back_to_home() {
         let env = TrustEnv::from_vars(|name| match name {
@@ -1172,9 +1186,11 @@ mod tests {
         )
         .expect("the store directory should be creatable");
         let relative = root
-            .strip_prefix("/")
-            .expect("the root should be absolute")
-            .display();
+            .components()
+            .skip_while(|component| !matches!(component, Component::Normal(_)))
+            .collect::<PathBuf>()
+            .display()
+            .to_string();
         fs::write(&store.file, format!("{relative}\n\nroot\n"))
             .expect("the store should be writable");
 
@@ -1243,7 +1259,8 @@ mod tests {
         let home = scratch.mkdir("home");
         let store = scratch.store();
 
-        for broad in [home.clone(), scratch.real(), PathBuf::from("/")] {
+        let drive_root = filesystem_root(&scratch.real());
+        for broad in [home.clone(), scratch.real(), drive_root] {
             let refused = store.add(&broad);
             assert!(
                 matches!(&refused, Err(AddError::Broad(real)) if *real == broad),
@@ -1259,6 +1276,8 @@ mod tests {
                 .exists(),
             "a refused root should leave no store behind"
         );
+        // A verbatim path on Windows doesn't treat `..` as a parent.
+        #[cfg(unix)]
         assert!(store.add(&home.join("..").join("home")).is_err());
         assert!(
             store
@@ -1274,9 +1293,10 @@ mod tests {
         let mut unset = scratch.store();
         unset.home = None;
 
+        let root = filesystem_root(&scratch.real());
         assert!(matches!(
-            unset.add(Path::new("/")),
-            Err(AddError::Broad(real)) if real == Path::new("/")
+            unset.add(&root),
+            Err(AddError::Broad(real)) if real == root
         ));
         assert_eq!(unset.broad(), [PathBuf::from("/")]);
         assert_eq!(unresolved.broad(), [PathBuf::from("/")]);
@@ -1378,6 +1398,8 @@ mod tests {
         );
     }
 
+    // A verbatim path on Windows doesn't treat `..` as a parent, so there is no `..` after a symlink.
+    #[cfg(unix)]
     #[test]
     fn a_state_home_with_dot_dot_after_a_symlink_refuses_to_revoke_rather_than_report_it_done() {
         let scratch = Scratch::new();
