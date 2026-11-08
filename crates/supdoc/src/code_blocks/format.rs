@@ -992,7 +992,7 @@ fn fences(block: &CodeBlock, text: &str, limit: TimeLimit) -> Option<Vec<Fence>>
     let file = &block.fence.file;
     let language = cartridge_for(file.as_str())?;
     // The path only names the doc in a parse error, which this check discards.
-    let path = AbsolutePath::new(Path::new("/"))?.beneath(file);
+    let path = AbsolutePath::name_root().beneath(file);
     let parsed =
         SourceFile::from_text(path, text.to_owned(), language, Deadline::start(limit)).ok()?;
     let index = LineIndex::new(text);
@@ -1107,6 +1107,16 @@ mod tests {
             ]
             .map(|detail| Verdict::ToolFailed(detail.to_owned()))
         );
+    }
+
+    #[test]
+    fn the_fence_comparison_parses_a_markdown_doc_on_every_os() {
+        let text = "```sh\necho hi\n```\n";
+        let block = block_of("docs/guide.md", text, cartridge());
+
+        let fences = super::fences(&block, text, Limits::PARSE_TIMEOUT);
+
+        assert_eq!(fences.map(|found| found.len()), Some(1));
     }
 
     /// What `shfmt` printing `output` makes of the one block in `text`, a Markdown doc.

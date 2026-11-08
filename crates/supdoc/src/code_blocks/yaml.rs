@@ -57,7 +57,7 @@ use crate::cartridges::yaml as yaml_cartridge;
 use crate::config::confine::Boundary;
 use crate::hash::Hash;
 use crate::limits::TimeLimit;
-use crate::path::AbsolutePath;
+use crate::path::{AbsolutePath, Component};
 use crate::read::cartridge::{Deadline, SourceFile};
 
 /// The config names yamlfmt looks for in a directory. When more than one is there, yamlfmt
@@ -578,7 +578,7 @@ enum Work<'tree> {
 /// thread's.
 fn shape(text: &str, limit: TimeLimit, max_nesting: usize) -> Option<String> {
     // The path only names the text in a parse error, which this check discards.
-    let path = AbsolutePath::new(Path::new("/block.yaml"))?;
+    let path = AbsolutePath::name_root().beneath(&Component::new("block.yaml")?);
     let parsed = SourceFile::from_text(
         path,
         text.to_owned(),
@@ -1749,6 +1749,14 @@ mod tests {
 
     fn limit() -> TimeLimit {
         "10s".parse().expect("10s is a valid limit")
+    }
+
+    #[test]
+    fn the_structure_check_parses_on_every_os() {
+        assert!(
+            shape("a: [1, 2]\n", limit(), MAX_NESTING).is_some(),
+            "valid YAML should have a structure"
+        );
     }
 
     /// A `ToolEnv` whose cache home is `cache`.
