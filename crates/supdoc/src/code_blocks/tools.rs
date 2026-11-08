@@ -1969,8 +1969,21 @@ pub(crate) fn find(binary: &str, env: &ToolEnv, root: &Path) -> Found {
 /// Effect: reads file metadata in `bins` and along `PATH`, and resolves symlinks.
 #[must_use]
 pub(crate) fn find_in(binary: &str, bins: &[&str], env: &ToolEnv, root: &Path) -> Found {
+    lookup(binary, bins, env.path(), env.pathext(), root)
+}
+
+/// [`find_in`] over an explicit `path` and `pathext`.
+///
+/// Effect: reads file metadata in `bins` and along `path`, and resolves symlinks.
+fn lookup(
+    binary: &str,
+    bins: &[&str],
+    path: Option<&OsStr>,
+    pathext: Option<&OsStr>,
+    root: &Path,
+) -> Found {
     let local = bins.iter().map(|dir| root.join(dir)).find_map(|dir| {
-        candidate_names(binary, env.pathext())
+        candidate_names(binary, pathext)
             .into_iter()
             .map(|name| dir.join(name))
             .find(|candidate| is_executable_file(candidate))
@@ -1979,10 +1992,7 @@ pub(crate) fn find_in(binary: &str, bins: &[&str], env: &ToolEnv, root: &Path) -
     if let Some(real) = local {
         return Found::InsideRoot(real);
     }
-    let Some(real) = env
-        .path()
-        .and_then(|path| first_on_path(binary, path, env.pathext()))
-    else {
+    let Some(real) = path.and_then(|path| first_on_path(binary, path, pathext)) else {
         return Found::Missing;
     };
     if inside(&real, root) {
@@ -1999,7 +2009,9 @@ fn search_dirs(path: &OsStr) -> impl Iterator<Item = PathBuf> {
 }
 
 /// The file names a lookup tries for `binary`, in order. Without `pathext` (every OS but
-/// Windows) that is `binary` alone. With it, a `binary` already ending in one of its extensions
+/// Windows) that is `binary` alone. With it, only entries of a dot and one or more ASCII letters
+/// or digits count; any other entry (empty, `.`, or holding a separator, `:` or NUL) is skipped.
+/// Of those, a `binary` already ending in one of its extensions
 /// (compared without case) is tried as it is; any other gets each extension appended, in
 /// `pathext` order, so `ruff` finds `ruff.exe` and a `.cmd` shim only when `.CMD` is listed.
 fn candidate_names(binary: &str, pathext: Option<&OsStr>) -> Vec<OsString> {
@@ -2010,7 +2022,9 @@ fn candidate_names(binary: &str, pathext: Option<&OsStr>) -> Vec<OsString> {
     let extensions: Vec<&str> = pathext
         .split(';')
         .filter_map(|extension| extension.strip_prefix('.'))
-        .filter(|extension| !extension.is_empty())
+        .filter(|extension| {
+            !extension.is_empty() && extension.chars().all(|c| c.is_ascii_alphanumeric())
+        })
         .collect();
     let listed = Path::new(binary).extension().is_some_and(|own| {
         let own = own.to_string_lossy();
@@ -2157,6 +2171,79 @@ mod tests {
             super::candidate_names("ruff", None),
             [OsString::from("ruff")]
         );
+    }
+
+    #[test]
+    fn only_a_dot_and_ascii_letters_or_digits_is_a_pathext_entry() {
+        let names = super::candidate_names(
+            "tool",
+            Some(OsStr::new(
+                ";;.;..;.EXE\\..\\x;.a/b;.C:;.x\0y;.;.ok1;ZIP;.é;.CMD",
+            )),
+        );
+        assert_eq!(names, ["tool.ok1", "tool.CMD"].map(OsString::from));
+        let empties = super::candidate_names("tool", Some(OsStr::new(";;")));
+        assert!(empties.is_empty(), "{empties:?}");
+    }
+
+    /// Creates an executable file `name` in `dir`.
+    fn exe(dir: &Path, name: &str) {
+        let file = dir.join(name);
+        fs::write(&file, "").expect("the file should be written");
+        #[cfg(unix)]
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o755))
+            .expect("the file should become executable");
+    }
+
+    #[test]
+    fn a_path_directory_holding_only_tool_exe_is_found_for_tool_when_pathext_is_given() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let bin = dir.path().join("bin");
+        fs::create_dir(&bin).expect("bin dir");
+        exe(&bin, "tool.EXE");
+        let path = std::env::join_paths([bin.canonicalize().expect("bin path")]).expect("path");
+        let with = super::first_on_path("tool", &path, Some(OsStr::new(".EXE")));
+        assert!(with.is_some(), "found with PATHEXT");
+        assert_eq!(super::first_on_path("tool", &path, None), None);
+    }
+
+    #[test]
+    fn each_directory_tries_every_extension_before_the_next_directory() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let (first, second) = (dir.path().join("a"), dir.path().join("b"));
+        fs::create_dir(&first).expect("a dir");
+        fs::create_dir(&second).expect("b dir");
+        exe(&first, "tool.CMD");
+        exe(&second, "tool.EXE");
+        let path = std::env::join_paths([
+            first.canonicalize().expect("a path"),
+            second.canonicalize().expect("b path"),
+        ])
+        .expect("path");
+        let found = super::first_on_path("tool", &path, Some(OsStr::new(".EXE;.CMD")))
+            .expect("a tool should be found");
+        assert!(
+            found.ends_with("a/tool.CMD") || found.ends_with("a\\tool.CMD"),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_root_bin_directory_holding_only_tool_exe_is_the_checkouts_choice_when_pathext_is_given() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let root = dir.path().canonicalize().expect("root path");
+        fs::create_dir(root.join("node_modules")).expect("bin dir");
+        exe(&root.join("node_modules"), "tool.EXE");
+        let found = super::lookup(
+            "tool",
+            &["node_modules"],
+            None,
+            Some(OsStr::new(".EXE")),
+            &root,
+        );
+        assert!(matches!(found, Found::InsideRoot(_)), "{found:?}");
+        let without = super::lookup("tool", &["node_modules"], None, None, &root);
+        assert_eq!(without, Found::Missing);
     }
 
     #[cfg(not(windows))]

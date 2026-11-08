@@ -82,14 +82,20 @@ pub(crate) fn args(arguments: &[String], path: &str) -> Vec<OsString> {
         .collect()
 }
 
+/// Whether `program` names a file by path rather than a tool to look up on `PATH`: it holds a
+/// `/`, or, when `backslash` (Windows), a `\\`.
+fn names_a_path(program: &str, backslash: bool) -> bool {
+    program.contains('/') || (backslash && program.contains('\\'))
+}
+
 /// Where `program`, a custom command's first element, is: looked up on `env`'s `PATH` when it
-/// holds no `/`, else the file it names, relative to `root` unless absolute. Either may be
+/// holds no path separator (`/`, and on Windows `\\`), else the file it names, relative to `root` unless absolute. Either may be
 /// inside the root, which a trusted checkout allows.
 ///
 /// Effect: reads file metadata along `PATH` or at the named file, and resolves symlinks.
 #[must_use]
 pub(crate) fn find(program: &str, env: &ToolEnv, root: &Path) -> Found {
-    if !program.contains('/') {
+    if !names_a_path(program, cfg!(windows)) {
         return tools::find(program, env, root);
     }
     let Some(named) = Pointer::new(program).map(|pointer| pointer.resolve_from(root)) else {
@@ -366,7 +372,7 @@ pub(crate) fn lint_findings(
 pub(crate) fn missing(code: &'static str, tool: &CustomTool, at: &Location) -> Finding {
     let program = tool.command().program();
     let shown = program.escape_debug();
-    let help = if program.contains('/') {
+    let help = if names_a_path(program, cfg!(windows)) {
         format!("make `{shown}` an executable file")
     } else {
         format!("put `{shown}` on PATH")
@@ -389,7 +395,10 @@ pub(crate) fn missing(code: &'static str, tool: &CustomTool, at: &Location) -> F
 mod tests {
     use std::path::Path;
 
-    use super::{Found, Verdict, args, extension, find, judge, lint_verdict, names, virtual_path};
+    use super::{
+        Found, Verdict, args, extension, find, judge, lint_verdict, names, names_a_path,
+        virtual_path,
+    };
     use crate::code_blocks::lint::{self, Diagnostic};
     use crate::code_blocks::runner::{Failure, Ran};
     use crate::code_blocks::tools::ToolEnv;
@@ -402,6 +411,15 @@ mod tests {
             stdout: stdout.as_bytes().to_vec(),
             stderr: stderr.as_bytes().to_vec(),
         }
+    }
+
+    #[test]
+    fn a_program_is_a_path_by_slash_always_and_by_backslash_only_on_windows() {
+        assert!(names_a_path("bin/x", false));
+        assert!(names_a_path("bin/x", true));
+        assert!(!names_a_path("..\\x", false));
+        assert!(names_a_path("..\\x", true));
+        assert!(!names_a_path("x", true));
     }
 
     #[test]
