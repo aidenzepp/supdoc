@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::confine::{self, Boundary, Escape};
 use crate::hash::Hash;
+use crate::output::text::visible;
 
 use super::ReleaseVersion;
 use super::release::{self, ArchiveError, Triple};
@@ -37,13 +38,13 @@ pub(super) enum VerifyError {
 #[derive(Debug, thiserror::Error)]
 pub(super) enum ReplaceError {
     /// The binary has no directory to write beside.
-    #[error("{} has no parent directory", .0.display())]
+    #[error("{} has no parent directory", shown(.0))]
     NoDirectory(PathBuf),
     /// A path to write lies outside the binary's directory once symlinks are followed.
-    #[error("{} lies outside the binary's directory", .0.display())]
+    #[error("{} lies outside the binary's directory", shown(.0))]
     Outside(PathBuf),
     /// A file operation failed.
-    #[error("{action} {}: {source}", .path.display())]
+    #[error("{action} {}: {source}", shown(path))]
     Io {
         /// What was being done.
         action: &'static str,
@@ -52,6 +53,11 @@ pub(super) enum ReplaceError {
         /// The operating system's error.
         source: io::Error,
     },
+}
+
+/// `path` as text that cannot drive the terminal.
+fn shown(path: &Path) -> String {
+    visible(&path.display().to_string())
 }
 
 /// The binary inside `archive`, once the archive's SHA-256 equals `expected`.

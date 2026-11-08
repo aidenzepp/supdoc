@@ -1,8 +1,9 @@
-//! `supdoc upgrade [VERSION]`: installs a newer or older supdoc with cargo.
+//! `supdoc upgrade [VERSION]`: installs a newer or older supdoc.
 //!
-//! This is supdoc's only network access, and it goes through cargo to crates.io. supdoc runs
-//! `cargo install supdoc --locked --version =<V> --force` and nothing else, only when its own
-//! binary is the one cargo installed from crates.io (`$CARGO_HOME/bin/supdoc`, listed in
+//! This is the only command that uses the network, and only when you run it; nothing checks for
+//! updates on its own. A supdoc that cargo installed from crates.io upgrades through cargo: it
+//! runs `cargo install supdoc --locked --version =<V> --force` and nothing else, when its own
+//! binary is the one cargo installed (`$CARGO_HOME/bin/supdoc`, listed in
 //! `$CARGO_HOME/.crates2.json`). Any other install is refused with the right manual step. Cargo
 //! runs from `$CARGO_HOME`, so no `.cargo/config.toml` or `rust-toolchain.toml` near the
 //! directory supdoc was started in can redirect it. Without `--yes` the command only previews.
@@ -245,7 +246,7 @@ enum Direction {
 enum UpgradeOutcome {
     /// Nothing was run; this is the command that would be.
     Previewed,
-    /// Cargo installed the target.
+    /// The target version was installed.
     Installed,
     /// The target is the running version, so nothing ran.
     AlreadyCurrent,
@@ -273,7 +274,7 @@ pub(crate) struct UpgradeReport {
     /// The command that installs the target, as an argument vector; empty when nothing would run
     /// and for a release binary.
     command: Vec<String>,
-    /// Whether the command ran.
+    /// Whether the upgrade ran, by cargo or by replacing the binary.
     ran: bool,
     /// How the run ended.
     outcome: UpgradeOutcome,
@@ -525,7 +526,7 @@ fn run_release_binary(
     let (outcome, asset, sha256) = match found {
         Some((asset, digest)) if direction != Direction::Same => {
             if applied {
-                install_release(&target, exe, &asset, &digest)?;
+                install_release(&target, exe, &asset, &digest, context)?;
                 (UpgradeOutcome::Installed, Some(asset), Some(digest))
             } else {
                 (UpgradeOutcome::Previewed, Some(asset), Some(digest))
@@ -579,7 +580,9 @@ fn install_release(
     exe: Option<&Path>,
     asset: &str,
     digest: &str,
+    context: &Context,
 ) -> Result<(), CliError> {
+    let retry = command_line(context, "upgrade", &[target.release()], &["--yes"]);
     let exe = exe.ok_or_else(|| cannot_tell("its own path could not be found"))?;
     let triple = release::running_triple().ok_or_else(no_asset_for_platform)?;
     let archive = fetch::fetch(asset, fetch::MAX_ARCHIVE_BYTES).map_err(|error| {
@@ -589,7 +592,7 @@ fn install_release(
                 "could not download the release archive at {}: {error}",
                 visible(asset)
             ),
-            "Check your network, then run `supdoc upgrade --yes` again; nothing was changed",
+            format!("Check your network, then run `{retry}` again; nothing was changed"),
             ExitStatus::Io,
         )
     })?;
@@ -597,8 +600,10 @@ fn install_release(
         CliError::new(
             "cli-upgrade-verify-failed",
             format!("refusing to install {}: {error}", visible(asset)),
-            "The archive was not trusted, so nothing was changed; run `supdoc upgrade --yes` \
-             again, or install with cargo: `cargo install supdoc --locked`",
+            format!(
+                "The archive was not trusted, so nothing was changed; run `{retry}` again, or \
+                 install with cargo: `cargo install supdoc --locked`"
+            ),
             ExitStatus::Failed,
         )
     })?;
@@ -609,8 +614,10 @@ fn install_release(
                 "could not replace {}: {error}",
                 visible(&exe.display().to_string())
             ),
-            "Make the binary's directory writable for your user and run `supdoc upgrade --yes` again; \
-             the old binary was left in place",
+            format!(
+                "Make the binary's directory writable for your user and run `{retry}` again; \
+                 the old binary was left in place"
+            ),
             ExitStatus::Io,
         )
     })
