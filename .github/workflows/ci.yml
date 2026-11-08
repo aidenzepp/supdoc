@@ -145,8 +145,12 @@ jobs:
           if [ "$status" -ge 2 ]; then exit "$status"; fi
 
   windows:
-    name: windows build (inventory, not required)
-    runs-on: windows-2025
+    name: windows build (inventory, not required) (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, windows-11-arm]
     # Measures the Windows port; failures are bucketed by cause, never gating. Remove once the
     # port is repaired and this job becomes required.
     continue-on-error: true
@@ -160,3 +164,7 @@ jobs:
         # Runs even when Build failed, so one log lists every error from both steps.
         if: always()
         run: cargo test --workspace --no-run
+      - name: Test
+        # Runs even when an earlier step failed, so the log inventories failing tests too.
+        if: always()
+        run: cargo test --workspace --no-fail-fast
