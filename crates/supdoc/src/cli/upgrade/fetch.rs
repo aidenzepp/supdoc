@@ -330,11 +330,17 @@ mod tests {
     #[test]
     fn the_sixth_redirect_is_refused_and_the_fifth_is_not() {
         let target = "https://github.com/x";
-        assert!(check_redirect(target, MAX_REDIRECTS).is_ok());
+        assert!(check_redirect(target, 5).is_ok());
         assert!(matches!(
-            check_redirect(target, MAX_REDIRECTS + 1),
+            check_redirect(target, 6),
             Err(FetchError::TooManyRedirects)
         ));
+    }
+
+    #[test]
+    fn the_caps_are_64_kib_for_sums_and_64_mib_for_the_archive() {
+        assert_eq!(MAX_SUMS_BYTES, 65_536);
+        assert_eq!(MAX_ARCHIVE_BYTES, 67_108_864);
     }
 
     #[test]
