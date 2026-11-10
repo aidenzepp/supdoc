@@ -21,111 +21,119 @@
     )
 )]
 
-use std::fmt::Write as _;
+#[cfg(test)]
+mod support {
+    use std::fmt::Write as _;
+    use std::fs;
+    use std::io::Write as _;
+    use std::path::Path;
+    use std::process::{Command, Output};
+
+    use sha2::{Digest as _, Sha256};
+
+    /// The version the fixture release publishes.
+    pub(crate) const NEWER: &str = "99.0.0";
+
+    /// The release platform of the binary under test.
+    const TRIPLE: &str = if cfg!(target_arch = "aarch64") {
+        "aarch64-pc-windows-msvc"
+    } else {
+        "x86_64-pc-windows-msvc"
+    };
+
+    /// The binary under test with `tag` appended, which Windows still runs, so each payload is a
+    /// distinct working `supdoc.exe`.
+    pub(crate) fn payload(tag: &str) -> Vec<u8> {
+        let mut bytes = fs::read(env!("CARGO_BIN_EXE_supdoc")).expect("the binary should read");
+        bytes.extend_from_slice(tag.as_bytes());
+        bytes
+    }
+
+    /// A `.tar.gz` holding `bytes` as `supdoc-NEWER-TRIPLE/supdoc.exe`.
+    fn archive_of(bytes: &[u8]) -> Vec<u8> {
+        let mut tar = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(u64::try_from(bytes.len()).expect("the size should fit"));
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(
+            &mut header,
+            format!("supdoc-{NEWER}-{TRIPLE}/supdoc.exe"),
+            bytes,
+        )
+        .expect("the entry should append");
+        let tarball = tar.into_inner().expect("the tar should finish");
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(&tarball).expect("the tar should compress");
+        gzip.finish().expect("the gzip should finish")
+    }
+
+    /// Publishes `bytes` as the release archive of [`NEWER`] under `releases`.
+    pub(crate) fn publish(releases: &Path, bytes: &[u8]) {
+        let archive = archive_of(bytes);
+        let digest = Sha256::digest(&archive)
+            .iter()
+            .fold(String::new(), |mut hex, byte| {
+                let _ = write!(hex, "{byte:02x}");
+                hex
+            });
+        let folder = releases.join(NEWER);
+        fs::create_dir_all(&folder).expect("the release folder should create");
+        fs::write(
+            folder.join("SHA256SUMS"),
+            format!("{digest}  supdoc-{NEWER}-{TRIPLE}.tar.gz\n"),
+        )
+        .expect("SHA256SUMS should write");
+        fs::write(
+            folder.join(format!("supdoc-{NEWER}-{TRIPLE}.tar.gz")),
+            archive,
+        )
+        .expect("the archive should write");
+    }
+
+    /// A scratch directory holding `bin/supdoc.exe`, a copy of the binary under test, and `releases`.
+    pub(crate) fn installed() -> tempfile::TempDir {
+        let root = tempfile::tempdir().expect("a scratch directory should be creatable");
+        fs::create_dir(root.path().join("bin")).expect("the bin directory should create");
+        let copied = fs::copy(
+            env!("CARGO_BIN_EXE_supdoc"),
+            root.path().join("bin").join("supdoc.exe"),
+        )
+        .expect("the binary should copy");
+        assert_ne!(copied, 0, "the copied binary should not be empty");
+        root
+    }
+
+    /// Runs `args` as the copy in `root`'s `bin`, with the fixture release directory set.
+    pub(crate) fn run(root: &Path, args: &[&str]) -> Output {
+        Command::new(root.join("bin").join("supdoc.exe"))
+            .args(args)
+            .env("SUPDOC_TEST_RELEASE_DIR", root.join("releases"))
+            .output()
+            .expect("the copy should start")
+    }
+
+    /// The names in `dir`, sorted.
+    pub(crate) fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .expect("the directory should list")
+            .map(|entry| {
+                entry
+                    .expect("the entry should read")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+}
+
 use std::fs;
-use std::io::Write as _;
-use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Command;
 
-use sha2::{Digest as _, Sha256};
-
-/// The version the fixture release publishes.
-const NEWER: &str = "99.0.0";
-
-/// The release platform of the binary under test.
-const TRIPLE: &str = if cfg!(target_arch = "aarch64") {
-    "aarch64-pc-windows-msvc"
-} else {
-    "x86_64-pc-windows-msvc"
-};
-
-/// The binary under test with `tag` appended, which Windows still runs, so each payload is a
-/// distinct working `supdoc.exe`.
-fn payload(tag: &str) -> Vec<u8> {
-    let mut bytes = fs::read(env!("CARGO_BIN_EXE_supdoc")).expect("the binary should read");
-    bytes.extend_from_slice(tag.as_bytes());
-    bytes
-}
-
-/// A `.tar.gz` holding `bytes` as `supdoc-NEWER-TRIPLE/supdoc.exe`.
-fn archive_of(bytes: &[u8]) -> Vec<u8> {
-    let mut tar = tar::Builder::new(Vec::new());
-    let mut header = tar::Header::new_gnu();
-    header.set_size(u64::try_from(bytes.len()).expect("the size should fit"));
-    header.set_mode(0o644);
-    header.set_cksum();
-    tar.append_data(
-        &mut header,
-        format!("supdoc-{NEWER}-{TRIPLE}/supdoc.exe"),
-        bytes,
-    )
-    .expect("the entry should append");
-    let tarball = tar.into_inner().expect("the tar should finish");
-    let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    gzip.write_all(&tarball).expect("the tar should compress");
-    gzip.finish().expect("the gzip should finish")
-}
-
-/// Publishes `bytes` as the release archive of [`NEWER`] under `releases`.
-fn publish(releases: &Path, bytes: &[u8]) {
-    let archive = archive_of(bytes);
-    let digest = Sha256::digest(&archive)
-        .iter()
-        .fold(String::new(), |mut hex, byte| {
-            let _ = write!(hex, "{byte:02x}");
-            hex
-        });
-    let folder = releases.join(NEWER);
-    fs::create_dir_all(&folder).expect("the release folder should create");
-    fs::write(
-        folder.join("SHA256SUMS"),
-        format!("{digest}  supdoc-{NEWER}-{TRIPLE}.tar.gz\n"),
-    )
-    .expect("SHA256SUMS should write");
-    fs::write(
-        folder.join(format!("supdoc-{NEWER}-{TRIPLE}.tar.gz")),
-        archive,
-    )
-    .expect("the archive should write");
-}
-
-/// A scratch directory holding `bin/supdoc.exe`, a copy of the binary under test, and `releases`.
-fn installed() -> tempfile::TempDir {
-    let root = tempfile::tempdir().expect("a scratch directory should be creatable");
-    fs::create_dir(root.path().join("bin")).expect("the bin directory should create");
-    let copied = fs::copy(
-        env!("CARGO_BIN_EXE_supdoc"),
-        root.path().join("bin").join("supdoc.exe"),
-    )
-    .expect("the binary should copy");
-    assert_ne!(copied, 0, "the copied binary should not be empty");
-    root
-}
-
-/// Runs `args` as the copy in `root`'s `bin`, with the fixture release directory set.
-fn run(root: &Path, args: &[&str]) -> Output {
-    Command::new(root.join("bin").join("supdoc.exe"))
-        .args(args)
-        .env("SUPDOC_TEST_RELEASE_DIR", root.join("releases"))
-        .output()
-        .expect("the copy should start")
-}
-
-/// The names in `dir`, sorted.
-fn names_in(dir: &Path) -> Vec<String> {
-    let mut names: Vec<String> = fs::read_dir(dir)
-        .expect("the directory should list")
-        .map(|entry| {
-            entry
-                .expect("the entry should read")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect();
-    names.sort();
-    names
-}
+use support::{NEWER, installed, names_in, payload, publish, run};
 
 #[test]
 fn the_running_exe_replaces_itself_and_the_next_upgrade_removes_the_aside_file() {
