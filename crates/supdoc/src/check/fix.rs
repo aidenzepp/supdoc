@@ -6,6 +6,7 @@
 //! the scan is skipped whole and reported; the other files are still fixed. The fixer never
 //! guesses and never overwrites a concurrent edit.
 
+use crate::remedies::{self, Access};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
@@ -508,7 +509,8 @@ fn write_failed(
             error.to_string(),
             if error.kind() == io::ErrorKind::PermissionDenied {
                 format!(
-                    "The file was left as it was. Run `chmod u+w {file}`, then run `{rerun}` again{others}"
+                    "The file was left as it was. Run `{grant}`, then run `{rerun}` again{others}",
+                    grant = remedies::grant_on(Access::Write, &file.to_string(), remedies::WINDOWS)
                 )
             } else {
                 format!(
