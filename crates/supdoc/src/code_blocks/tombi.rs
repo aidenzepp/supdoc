@@ -337,18 +337,45 @@ impl Project {
         ]
     }
 
-    /// How the private paths tombi prints are named to the user: the private directory, with
-    /// and without a trailing `/`, as the block's virtual name relative to the directory its
-    /// config resolves patterns against.
+    /// How the private paths tombi prints are named to the user, longest first so the exact
+    /// file wins over the directory it is in:
+    ///
+    /// - the private file of the `index`th block of `doc`, in the native separators tombi prints,
+    ///   as the block's virtual name written with `/`;
+    /// - the private directory, with a trailing `/` and the platform's own separator, as the
+    ///   directory the config resolves patterns against, then bare as `.`.
+    ///
+    /// On Unix the native separator is `/`, so every entry is the plain form it always was.
     #[must_use]
-    pub(crate) fn names(&self) -> [(PathBuf, PathBuf); 2] {
-        let mut slashed = self.config_home.clone().into_os_string();
-        slashed.push("/");
-        [
-            (PathBuf::from(slashed), PathBuf::new()),
-            (self.config_home.clone(), PathBuf::from(".")),
-        ]
+    pub(crate) fn names(&self, doc: &Path, index: usize) -> Vec<(PathBuf, PathBuf)> {
+        let seen = self.doc_as_seen(doc);
+        let virtual_name = seen.strip_prefix(&self.config_home).unwrap_or(&seen);
+        let shown = format!("{}.{index}.toml", slashed(virtual_name));
+        let mut names = vec![(
+            PathBuf::from(super::tools::virtual_path(&seen, index, "toml")),
+            PathBuf::from(shown),
+        )];
+        let mut separators = vec!["/"];
+        if std::path::MAIN_SEPARATOR_STR != "/" {
+            separators.push(std::path::MAIN_SEPARATOR_STR);
+        }
+        for separator in separators {
+            let mut with = self.config_home.clone().into_os_string();
+            with.push(separator);
+            names.push((PathBuf::from(with), PathBuf::new()));
+        }
+        names.push((self.config_home.clone(), PathBuf::from(".")));
+        names
     }
+}
+
+/// `path` written with `/` between its components on every platform, as a block's virtual name is
+/// shown.
+fn slashed(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// The directory tombi resolves the patterns of the config at `config` against: the directory
@@ -637,6 +664,7 @@ mod tests {
     use crate::code_blocks::tools::{Step, ToolEnv};
     use std::fs;
     use std::path::Path;
+    use std::path::PathBuf;
 
     /// A `ToolEnv` whose cache home is `cache`.
     fn env_in(cache: &Path) -> ToolEnv {
@@ -896,18 +924,91 @@ mod tests {
             "Error: x\n    at {}.1.toml:2:5\n",
             given.doc_as_seen(&doc).display()
         );
-        let named = crate::code_blocks::biome::Given {
+
+        assert_eq!(
+            named(given.names(&doc, 1), &printed),
+            "Error: x\n    at docs/a.md.1.toml:2:5\n"
+        );
+        let first = given.names(&doc, 1).into_iter().next();
+        assert_eq!(
+            first.map(|(_, shown)| shown),
+            Some(PathBuf::from("docs/a.md.1.toml"))
+        );
+    }
+
+    #[test]
+    fn tombi_printing_the_private_path_with_slashes_is_named_the_same() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let doc = root.path().join("docs/a.md");
+        let given = project(&env_in(cache.path()), root.path(), &doc).expect("no config is fine");
+        let printed = format!(
+            "Error: x\n    at {}/docs/a.md.1.toml:2:5\n",
+            given.config_home.display()
+        );
+
+        assert_eq!(
+            named(given.names(&doc, 1), &printed),
+            "Error: x\n    at docs/a.md.1.toml:2:5\n"
+        );
+    }
+
+    /// Names as a Windows run builds them: native `\` in the private paths.
+    fn windows_names() -> Vec<(PathBuf, PathBuf)> {
+        let pair = |private: &str, shown: &str| (PathBuf::from(private), PathBuf::from(shown));
+        vec![
+            pair("P\\docs\\a.md.1.toml", "docs/a.md.1.toml"),
+            pair("P\\docs\\my dir\\a.md.1.toml", "docs/my dir/a.md.1.toml"),
+            pair("P\\", ""),
+            pair("P", "."),
+        ]
+    }
+
+    #[test]
+    fn an_exact_private_file_with_backslashes_maps_to_its_slash_form() {
+        assert_eq!(
+            named(windows_names(), "at P\\docs\\a.md.1.toml:2:5"),
+            "at docs/a.md.1.toml:2:5"
+        );
+    }
+
+    #[test]
+    fn an_exact_private_file_with_a_space_maps_whole() {
+        assert_eq!(
+            named(windows_names(), "at P\\docs\\my dir\\a.md.1.toml:2:5"),
+            "at docs/my dir/a.md.1.toml:2:5"
+        );
+    }
+
+    #[test]
+    fn text_outside_the_private_directory_keeps_its_backslashes() {
+        assert_eq!(
+            named(
+                windows_names(),
+                "see x, other\\b and P\\docs\\a.md.1.toml:1"
+            ),
+            "see x, other\\b and docs/a.md.1.toml:1"
+        );
+    }
+
+    #[test]
+    fn two_occurrences_of_the_private_prefix_in_one_token_are_both_renamed() {
+        assert_eq!(
+            named(windows_names(), "P\\docs\\a.md.1.toml=P\\docs\\a.md.1.toml"),
+            "docs/a.md.1.toml=docs/a.md.1.toml"
+        );
+    }
+
+    /// `printed` as the user sees it, with `names` applied.
+    fn named(names: Vec<(PathBuf, PathBuf)>, printed: &str) -> String {
+        let bytes = crate::code_blocks::biome::Given {
             flags: Vec::new(),
             config: None,
             mirror: None,
-            names: Some(given.names()),
+            names: Some(names),
         }
         .named(printed.as_bytes());
-
-        assert_eq!(
-            String::from_utf8_lossy(&named),
-            "Error: x\n    at docs/a.md.1.toml:2:5\n"
-        );
+        String::from_utf8_lossy(&bytes).into_owned()
     }
 
     #[test]
