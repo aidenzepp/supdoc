@@ -156,21 +156,35 @@ jobs:
           if [ "$status" -ge 2 ]; then exit "$status"; fi
 
   windows:
-    # TEMPORARY flake evidence for V5-BIN2z (#369): 20 iterations per runner of the lib suite
-    # and the rumdl concurrency test. Removed by the next commit.
-    name: windows lib evidence (${{ matrix.os }}, run ${{ matrix.iteration }})
+    name: windows build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [windows-2025, windows-11-arm]
-        iteration: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      - name: Lib tests
-        run: cargo test --workspace --lib --no-fail-fast
-      - name: rumdl concurrency test
+      - name: Build
+        run: cargo build --workspace
+      - name: Clippy
+        # Windows-only code and tests compile here and nowhere else, so their warnings and the
+        # raw-join rule are only caught on this runner.
         if: always()
-        run: cargo test -p supdoc --lib concurrent_first_runs_all_get_the_config
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test build
+        # Runs even when Build failed, so one log lists every error from both steps.
+        if: always()
+        run: cargo test --workspace --no-run
+      - name: Test
+        # Runs even when an earlier step failed, so the log inventories failing tests too.
+        if: always()
+        run: cargo test --workspace --no-fail-fast
+      - name: Windows upgrade replace
+        # Its own step, so the count of this target's tests shows in the log even when the lib
+        # test binary above stops the run.
+        if: always()
+        run: cargo test -p supdoc --test windows_upgrade
