@@ -783,8 +783,9 @@ fn biome_formatter_off(at: &Location) -> Finding {
          as written and its CSS blocks' format step didn't run",
     )
     .with_help(
-        "remove `css.formatter.enabled: false` from the project's biome config, or mark the \
-         blocks `format(off: <reason>)`",
+        "turn the formatter back on in the project's biome config, where the top-level \
+         `formatter.enabled: false`, `css.formatter.enabled: false` or an `overrides` entry \
+         matching the blocks turns it off, or mark the blocks `format(off: <reason>)`",
     )
     .with_location(at.clone())
 }

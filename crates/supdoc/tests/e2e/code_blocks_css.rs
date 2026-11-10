@@ -178,6 +178,16 @@ fn css_a_formatter_the_projects_config_turns_off_is_not_run_never_passed_or_fixe
                 .is_some_and(|m| m.contains("turns the CSS formatter off")),
             "{tag}: {json}"
         );
+        assert!(
+            at(&json, "/findings/0/help").as_str().is_some_and(|help| [
+                "top-level `formatter.enabled: false`",
+                "`css.formatter.enabled: false`",
+                "`overrides` entry",
+            ]
+            .iter()
+            .all(|switch| help.contains(switch))),
+            "{tag}: the help should name every switch that turns biome's formatter off: {json}"
+        );
         assert_eq!(
             at(&json, "/data/summary/code_blocks/passed"),
             0,
@@ -447,5 +457,46 @@ fn css_the_real_biome_with_the_css_formatter_or_linter_off_never_passes_a_block(
                 "{config} {tag}: {json}"
             );
         }
+    }
+}
+
+#[test]
+fn css_the_real_biome_with_the_formatter_off_at_the_top_level_never_passes_or_fixes_a_block() {
+    let Some(dir) = real_biome(
+        "css_the_real_biome_with_the_formatter_off_at_the_top_level_never_passes_or_fixes_a_block",
+    ) else {
+        return;
+    };
+    for tag in ["css", "scss"] {
+        let body = "a{color:red}";
+        let project = project_with(FORMAT_ONLY, tag, body);
+        project.write("biome.json", r#"{"formatter":{"enabled":false}}"#);
+
+        let json = check(&project, &dir, 0);
+        let fixed = project
+            .supdoc_in_with(".", &["fix", "--yes"], &[("PATH", &dir)])
+            .code;
+
+        assert!(fixed.is_some(), "{tag}: fix should exit");
+        assert_eq!(
+            at(&json, "/data/code_blocks/0/format"),
+            "not_run",
+            "{tag}: {json}"
+        );
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-not-checked"],
+            "{tag}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/passed"),
+            0,
+            "{tag}: {json}"
+        );
+        assert_eq!(
+            project.read("docs/blocks.md"),
+            format!("# Blocks\n\n```{tag}\n{body}\n```\n"),
+            "{tag}: a formatter that is off must never rewrite the block"
+        );
     }
 }
