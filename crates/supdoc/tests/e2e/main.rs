@@ -97,6 +97,8 @@ mod code_blocks_fragment;
 #[cfg(test)]
 mod code_blocks_go;
 #[cfg(test)]
+mod code_blocks_html;
+#[cfg(test)]
 mod code_blocks_json;
 #[cfg(test)]
 mod code_blocks_md;
