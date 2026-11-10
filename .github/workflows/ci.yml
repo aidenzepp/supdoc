@@ -109,6 +109,9 @@ jobs:
           # A real-tool test whose tool is missing fails here instead of skipping.
           SUPDOC_REQUIRE_REAL_TOOLS: "1"
         run: cargo test --workspace
+      # The two skill copies must stay byte-identical to SKILL.md: edit SKILL.md, then copy it to both.
+      - name: Check the skill copies match SKILL.md
+        run: cmp SKILL.md .agents/skills/supdoc/SKILL.md && cmp SKILL.md .claude/skills/supdoc/SKILL.md
       - name: Check supdoc's own docs
         env:
           # supdoc's own repo: CI already runs this PR's code, so trusting its config adds no risk.
