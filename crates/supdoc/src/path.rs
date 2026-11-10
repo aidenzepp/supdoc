@@ -501,7 +501,8 @@ impl Beneath for FixedPath {
 
 /// One normal path component, checked when it is built: not empty, not `.` or `..`, and free of
 /// `/`, `\\`, `:` and NUL, so it is exactly one component on every platform. For a name computed
-/// at run time: a digest, a cache key, a fresh temp name, a `read_dir` entry or a binary name.
+/// at run time: a digest, a cache key, a fresh temp name or a `read_dir` entry. A program name a user wrote goes through
+/// [`NativeName`] instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Component(String);
 
@@ -928,6 +929,14 @@ mod tests {
             "{named:?} is not beneath {root:?}"
         );
         assert_eq!(AbsolutePath::new(root.as_path()), Some(root));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_native_name_applies_the_windows_rules_on_windows() {
+        for refused in ["C:x", "a:b", "a\\b"] {
+            assert_eq!(NativeName::new(refused), None, "{refused:?}");
+        }
     }
 
     #[test]

@@ -9,6 +9,16 @@ const FORMATTERS: &[&str] = &["rumdl-format", "prettier"];
 /// The Markdown linters supdoc knows.
 const LINTERS: &[&str] = &["rumdl"];
 
+/// The linter name people ask for that supdoc deliberately does not ship.
+const MARKDOWNLINT_CLI2: &str = "markdownlint-cli2";
+
+/// Why `linter = "markdownlint-cli2"` is refused, and what to write instead.
+const MARKDOWNLINT_CLI2_REFUSED: &str = "`markdownlint-cli2` isn't a supported Markdown linter: \
+    supdoc passes each code block on stdin, and markdownlint-cli2 can't be told that input's \
+    file name, so its per-directory configs and path-scoped overrides or ignores would silently \
+    not apply; use the built-in `linter = \"rumdl\"`, or a custom command, \
+    `linter = { command = [\"markdownlint-cli2\", \"{path}\"] }`, if you accept that limit";
+
 /// The `[features.code-blocks.markdown]` table, exactly as written. Its keys are `formatter` and
 /// `linter`, plus one options table per tool; any other key is refused as `config-parse`, and an
 /// empty table turns the language on.
@@ -47,9 +57,18 @@ fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D
 ///
 /// # Errors
 ///
-/// The deserializer's error for any value but `"rumdl"` or a valid custom command.
+/// The deserializer's error for any value but `"rumdl"` or a valid custom command;
+/// `"markdownlint-cli2"` gets an error saying why it is not built in.
 fn linter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D::Error> {
-    deserialize_choice(d, Language::Markdown, Step::Lint, LINTERS)
+    use serde::Deserialize as _;
+    use serde::de::Error as _;
+
+    let value = ::toml::Value::deserialize(d)?;
+    if value.as_str() == Some(MARKDOWNLINT_CLI2) {
+        return Err(D::Error::custom(MARKDOWNLINT_CLI2_REFUSED));
+    }
+    deserialize_choice(value, Language::Markdown, Step::Lint, LINTERS)
+        .map_err(|error| D::Error::custom(error.message()))
 }
 
 /// Reads `[features.code-blocks.markdown.rumdl-format]` against its cartridge.
