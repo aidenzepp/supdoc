@@ -29,8 +29,8 @@ jobs:
         # Pinned shfmt and ruff binaries, checked against ci/tools.sha256, and black with every
         # dependency hash-pinned in ci/requirements-black.txt. Those files name the sources.
         # shellcheck is pinned the same way, so the runner's own older one is never used.
-        # biome, tombi, yamlfmt, rumdl, hadolint, dockerfmt, sqruff, superhtml, Go and Node are pinned the same way; yamllint and pylint
-        # like black. prettier and eslint come from ci/node-tools/package-lock.json, whose
+        # biome, tombi, yamlfmt, rumdl, hadolint, dockerfmt, sqruff, superhtml, Go and Node are pinned the same way; yamllint, pylint
+        # and mbake like black. prettier and eslint come from ci/node-tools/package-lock.json, whose
         # integrity hashes `npm ci` checks; --ignore-scripts keeps their install scripts from running.
         run: |
           set -euo pipefail
@@ -90,6 +90,10 @@ jobs:
           "$tools/pylint/bin/python" -m pip install --quiet --disable-pip-version-check \
             --require-hashes --only-binary=:all: -r "$GITHUB_WORKSPACE/ci/requirements-pylint.txt"
           ln -s "$tools/pylint/bin/pylint" "$tools/bin/pylint"
+          python3 -m venv "$tools/mbake"
+          "$tools/mbake/bin/python" -m pip install --quiet --disable-pip-version-check \
+            --require-hashes --only-binary=:all: -r "$GITHUB_WORKSPACE/ci/requirements-mbake.txt"
+          ln -s "$tools/mbake/bin/mbake" "$tools/bin/mbake"
           echo "$tools/bin" >> "$GITHUB_PATH"
           echo "$tools/go/bin" >> "$GITHUB_PATH"
           "$tools/bin/shfmt" --version
@@ -112,6 +116,9 @@ jobs:
           PATH="$tools/bin:$PATH" "$tools/bin/prettier" --version
           PATH="$tools/bin:$PATH" "$tools/bin/eslint" --version
           "$tools/bin/pylint" --version
+          # Never `mbake --version`: it asks PyPI for a newer release. Print the pinned version
+          # from pip's metadata instead.
+          "$tools/mbake/bin/python" -m pip show --disable-pip-version-check mbake | grep '^Version:'
       - name: Test
         env:
           # A real-tool test whose tool is missing fails here instead of skipping.

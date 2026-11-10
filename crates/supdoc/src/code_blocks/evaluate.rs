@@ -41,6 +41,7 @@ use super::info::{
     parenthesized_spelling, reasoned, replacement_for_removed, source_attributes, step_attribute,
 };
 use super::lint;
+use super::mbake;
 use super::prettier;
 use super::project::{self, BuildFailed, Plan, Refused};
 use super::pylint;
@@ -1010,6 +1011,40 @@ fn dockerfmt_switched_off(at: &Location) -> Finding {
     .with_location(at.clone())
 }
 
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose mbake step
+/// didn't run because it holds `bake-format` (see [`mbake::not_given`]).
+fn mbake_switched_off(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "the block holds `bake-format`, which can leave lines as written, so supdoc can't confirm \
+         mbake formats the block, and its format step didn't run",
+    )
+    .with_help(
+        "drop the `bake-format` comment, or mark the block `format(off: <reason>)` to leave it \
+         unformatted",
+    )
+    .with_location(at.clone())
+}
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first Makefile block mbake isn't
+/// given because it holds a control or separator character (see [`mbake::not_given`]).
+fn mbake_control(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "this Makefile block holds a carriage return or another control or separator character \
+         (a C0 or C1 control other than tab and line feed, DEL, U+2028, U+2029 or a noncharacter \
+         from U+FDD0 to U+FDEF), which mbake would strip or rewrite, so its format step didn't \
+         run",
+    )
+    .with_help(
+        "end each line with `\\n` and drop any other such character, or mark the block \
+         `format(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
 /// The run's one `code-block-not-checked` warning, at `at`, the first Dockerfile block that
 /// `what` describes, which isn't given to dockerfmt (see [`dockerfmt::not_given`]).
 fn dockerfmt_not_given(at: &Location, what: &str) -> Finding {
@@ -1226,6 +1261,8 @@ impl NotRunWarnings {
             superhtml::REWRITTEN => superhtml_rewritten(at, said),
             dockerfmt::TOO_SHORT => dockerfmt_not_given(at, "is at most one byte long"),
             dockerfmt::SWITCHED_OFF => dockerfmt_switched_off(at),
+            mbake::SWITCHED_OFF => mbake_switched_off(at),
+            mbake::CONTROL => mbake_control(at),
             dockerfmt::NO_INSTRUCTION => {
                 dockerfmt_not_given(at, "holds no instruction, only comments or blank lines")
             }
@@ -1459,6 +1496,8 @@ struct ToolConfigs {
     hadolint: HadolintConfigs,
     /// sqruff's.
     sqruff: SqruffConfigs,
+    /// mbake's.
+    mbake: MbakeConfigs,
     /// yamlfmt's.
     yamlfmt: YamlfmtConfigs,
     /// yamllint's.
@@ -1488,7 +1527,7 @@ impl ToolConfigs {
 
     /// Gives `record` the config its tools get, as [`BiomeConfigs::give`],
     /// [`RumdlConfigs::give`], [`TombiConfigs::give`], [`HadolintConfigs::give`],
-    /// [`SqruffConfigs::give`],
+    /// [`SqruffConfigs::give`], [`MbakeConfigs::give`],
     /// [`YamlfmtConfigs::give`] and
     /// [`YamllintConfigs::give`] do, whichever of its formatter and linter runs the tool, so a
     /// custom formatter beside a cartridge linter leaves the linter its config. Whether the block
@@ -1507,6 +1546,7 @@ impl ToolConfigs {
             && running("tombi").is_none_or(|tool| self.tombi.give(record, tool, place, slots))
             && running("hadolint").is_none_or(|tool| self.hadolint.give(record, tool, place, slots))
             && running("sqruff").is_none_or(|tool| self.sqruff.give(record, tool, place, slots))
+            && running("mbake").is_none_or(|tool| self.mbake.give(record, tool, place, slots))
             && self.yamlfmt.give(record, place, slots).is_ok()
             && self.yamllint.give(record, place, slots)
             && self.prettier.verified(record, place, slots)
@@ -2612,6 +2652,164 @@ fn sqruff_refusal(refusal: &sqruff::Refusal, at: &Location, windows: bool) -> (S
 /// Why sqruff didn't run when supdoc had no private directory to keep its config in.
 fn sqruff_no_private_dir(windows: bool) -> String {
     no_private_dir("sqruff", "for its config", windows)
+}
+
+/// The mbake config found for each doc directory, the refusals already warned about, and the
+/// mbake version once read.
+#[derive(Debug, Default)]
+struct MbakeConfigs {
+    /// Each doc directory's result, in the order they were asked for.
+    found: Vec<(PathBuf, Result<mbake::Project, mbake::Refusal>)>,
+    /// The refusals a warning has been added for.
+    warned: Vec<mbake::Refusal>,
+    /// The mbake version once read (see [`mbake::version_of`]), and whether its warning has been
+    /// given. `None` until a block needs it.
+    version: Option<(Result<String, String>, bool)>,
+}
+
+impl MbakeConfigs {
+    /// Gives `record`, a Makefile block, the `--config` flags mbake gets for its doc, found once
+    /// per directory (see [`mbake::project_args`]), then checks mbake's version (see
+    /// [`Self::verified`]). A refused config takes only the format step off, as an unverified
+    /// mbake does, with its one warning per refusal added to `slots`: a block with another lint
+    /// step goes on to it, and one without is settled as not checked. Whether the block goes on
+    /// to its tools.
+    ///
+    /// Effect: reads the config and may create supdoc's private directory and file for it.
+    fn give(
+        &mut self,
+        record: &mut BlockRecord,
+        tool: &Tool,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> bool {
+        if !tool.runs(MBAKE) {
+            return true;
+        }
+        let doc = doc_beneath(root, &record.at.file);
+        let dir = doc.parent().unwrap_or(root).to_path_buf();
+        let found = if let Some((_, found)) = self.found.iter().find(|(known, _)| *known == dir) {
+            found.clone()
+        } else {
+            let found = mbake::project_args(env, root, &doc);
+            self.found.push((dir, found.clone()));
+            found
+        };
+        match found {
+            Ok(project) => {
+                record.given = Some(biome::Given {
+                    mirror: None,
+                    flags: project.flags,
+                    config: None,
+                    names: None,
+                });
+                self.verified(record, (env, root), slots)
+            }
+            Err(refusal) => {
+                let (reason, warning) = mbake_refusal(&refusal, &record.at, ON_WINDOWS);
+                if !self.warned.contains(&refusal) {
+                    self.warned.push(refusal);
+                    slots.push(Slot::Found(warning));
+                }
+                if record.linter.is_some() {
+                    return take_format_off(record, MBAKE_REFUSED);
+                }
+                record.state = BlockState::NotChecked(NotChecked::ToolConfig);
+                record.reason = Some(reason);
+                false
+            }
+        }
+    }
+
+    /// Whether `record` goes on to its tools once the mbake on `PATH` has been checked against
+    /// the versions supdoc is verified against (see [`mbake::VERIFIED`]), read once per run from
+    /// its package's metadata, never by running it. When it isn't one, or can't be read,
+    /// `record`'s format step doesn't run, with [`MBAKE_UNVERIFIED`] as its reason, and the
+    /// run's one warning goes to `slots`; a lint step by another tool still runs. An mbake that
+    /// isn't on `PATH`, or is inside the checkout, is left to the usual lookup.
+    ///
+    /// Effect: reads mbake's script and its package metadata the first time.
+    fn verified(
+        &mut self,
+        record: &mut BlockRecord,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> bool {
+        let Found::OnPath(program) = find(MBAKE, env, root) else {
+            return true;
+        };
+        let (version, warned) = self
+            .version
+            .get_or_insert_with(|| (mbake::version_of(&program), false));
+        let Err(shown) = version else {
+            return true;
+        };
+        if !*warned {
+            *warned = true;
+            slots.push(Slot::Found(
+                Finding::new(
+                    NOT_CHECKED,
+                    Severity::Warning,
+                    format!(
+                        "mbake {shown} isn't a version supdoc's checks are verified against \
+                         ({}); its Makefile blocks' format steps didn't run",
+                        mbake::VERIFIED.join(", ")
+                    ),
+                )
+                .with_help(format!(
+                    "install a verified mbake: {}",
+                    tools::MBAKE_INSTALL
+                ))
+                .with_location(record.at.clone()),
+            ));
+        }
+        take_format_off(record, MBAKE_UNVERIFIED)
+    }
+}
+
+/// Takes `record`'s format step off with `reason`. Whether the block goes on to its tools: only
+/// when it still has a lint step.
+fn take_format_off(record: &mut BlockRecord, reason: &'static str) -> bool {
+    if record.tool.take().is_some() {
+        record.steps.format = StepState::Unrunnable { reason };
+    }
+    record.linter.is_some()
+}
+
+/// Why a Makefile block's format step didn't run when supdoc couldn't give mbake the project's
+/// config.
+const MBAKE_REFUSED: &str = "supdoc couldn't give mbake the project's config";
+
+/// Why a Makefile block's format step didn't run when the mbake on `PATH` isn't a verified
+/// version.
+const MBAKE_UNVERIFIED: &str = "the mbake on `PATH` isn't a version supdoc is verified against";
+
+/// The state reason and the `code-block-not-checked` warning, at `at`, for a block mbake isn't
+/// given because of `refusal`.
+fn mbake_refusal(refusal: &mbake::Refusal, at: &Location, windows: bool) -> (String, Finding) {
+    let (reason, message, help) = match refusal {
+        mbake::Refusal::Config { file, why } => (
+            format!("mbake config `{file}` {why}"),
+            format!("the project's `{file}` {why}, so its Makefile blocks aren't formatted"),
+            format!(
+                "fix `{file}` as it says, keeping it a TOML file of at most 256 KiB inside the \
+                 project whose `[formatter]` switches are `true` or `false` and whose counts are \
+                 whole numbers, or mark the blocks `ignore(<why>)`"
+            ),
+        ),
+        mbake::Refusal::NoPrivateDir => (
+            no_private_dir(MBAKE, "for its config", windows),
+            format!(
+                "{}, so its blocks aren't checked",
+                no_private_dir(MBAKE, "for its config", windows)
+            ),
+            set_cache_help(windows),
+        ),
+    };
+    let finding = Finding::new(NOT_CHECKED, Severity::Warning, message)
+        .with_help(help)
+        .with_location(at.clone());
+    (reason, finding)
 }
 
 /// The yamlfmt config flags found for each doc directory, and the refusals already warned about.
@@ -3752,8 +3950,8 @@ fn run_formatter(
         session,
         |call| run_in_place(call, record, session),
         |result| {
-            if let Some(not_run) = config_skipped_by(record, tool, &result) {
-                return Err(not_run);
+            if let Some(settled) = settled_before_judging(record, tool, input, &result) {
+                return settled;
             }
             let named = result.map(|ran| Ran {
                 stderr: shown_stderr(tool, given, &ran.stderr),
@@ -4273,6 +4471,9 @@ const PRETTIER_SWITCHED_OFF: &str = "the block holds `prettier-ignore`, so supdo
 /// The name of dockerfmt's cartridge.
 const DOCKERFMT: &str = "dockerfmt";
 
+/// The name of mbake's cartridge.
+const MBAKE: &str = "mbake";
+
 /// The name of superhtml's cartridge.
 const SUPERHTML: &str = "superhtml";
 
@@ -4289,6 +4490,7 @@ fn format_not_given(tool: &ToolCartridge, record: &BlockRecord) -> Option<NotRun
     match tool.name {
         PRETTIER => prettier::switches_format_off(input).then(|| PRETTIER_SWITCHED_OFF.into()),
         DOCKERFMT => dockerfmt::not_given(input).map(Into::into),
+        MBAKE => mbake::not_given(input).map(Into::into),
         SUPERHTML => superhtml::not_given(input).map(|withheld| NotRun {
             reason: withheld.reason(),
             said: match withheld {
@@ -4646,6 +4848,24 @@ fn run_clippy(
         !session.linked.flags.is_empty(),
     );
     Ok((verdict, findings))
+}
+
+/// What `result`, `tool`'s finished format run on the block whose body is `input`, settles
+/// before its output is judged: the step not run, as [`config_skipped_by`] says, or a tool
+/// failure when mbake printed its upgrade notice (see [`mbake::noticed`]), whose stdout is never
+/// the formatted block.
+fn settled_before_judging(
+    record: &BlockRecord,
+    tool: &ToolCartridge,
+    input: &str,
+    result: &Result<Ran, runner::Failure>,
+) -> Option<Result<format::Verdict, NotRun>> {
+    if let Some(not_run) = config_skipped_by(record, tool, result) {
+        return Some(Err(not_run));
+    }
+    let ran = result.as_ref().ok()?;
+    (tool.name == MBAKE && mbake::noticed(input, &ran.stdout))
+        .then(|| Ok(format::Verdict::ToolFailed(mbake::NOTICED.to_owned())))
 }
 
 /// Why `tool`'s step on `record`'s block didn't really run, from tombi's run `result` at any exit

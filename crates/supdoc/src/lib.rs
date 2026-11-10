@@ -256,6 +256,8 @@ pub(crate) mod code_blocks {
     mod dockerfmt;
     /// Dockerfile's lint step, run by hadolint.
     mod hadolint;
+    /// The Makefile's format step, run by mbake.
+    mod mbake;
     /// Markdown's format and lint steps, run by rumdl.
     mod rumdl;
     /// SQL's format and lint steps, run by sqruff.
