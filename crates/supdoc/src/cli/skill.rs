@@ -28,7 +28,7 @@ use crate::output::json::Envelope;
 use crate::output::paths::{relative_or_absolute, relative_to};
 use crate::output::text::{render_finding, visible};
 use crate::output::{Output, RecordArray, Report, TextContext, preview_note};
-use crate::path::{AbsolutePath, fixed};
+use crate::path::{self, AbsolutePath, fixed};
 
 use super::args::{OperatorPath, SkillInstallArgs, SkillTarget, WriteMode};
 use super::project::{absolute, command_line, config_failure};
@@ -348,18 +348,17 @@ fn contain(
     context: &Context,
 ) -> Result<(), CliError> {
     // Every project destination is beneath the root, so there is always a directory chain.
-    let Some(directories) = target.strip_prefix(root).and_then(Path::parent) else {
+    let Some(steps) = target.parent().and_then(|parent| root.steps_to(&parent)) else {
         return Ok(());
     };
-    let mut dir = root.as_path().to_path_buf();
-    for component in directories.components() {
-        dir.push(component);
-        if !boundary.contains(&dir) {
-            let real = real_location(&dir);
+    for step in steps {
+        let dir = step.as_path();
+        if !boundary.contains(dir) {
+            let real = real_location(dir);
             return Err(outside_root(
                 root,
                 target,
-                &dir,
+                dir,
                 real.as_deref(),
                 selected,
                 context,
@@ -665,10 +664,8 @@ fn outside_root(
     let shown = relative_or_absolute(root, target);
     let message = match real {
         Some(real) => {
-            let landing = target
-                .as_path()
-                .strip_prefix(link)
-                .map_or_else(|_| real.to_path_buf(), |rest| real.join(rest));
+            let landing =
+                path::rebase(target.as_path(), link, real).unwrap_or_else(|| real.to_path_buf());
             format!(
                 "{shown} would be written to {}, outside the project root: {shown_link} is a \
                  symlink to {}",

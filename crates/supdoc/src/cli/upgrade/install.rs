@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use crate::config::confine::{self, Boundary, Escape};
 use crate::hash::Hash;
 use crate::output::text::visible;
+use crate::path::{self, Component};
 
 use super::ReleaseVersion;
 use super::release::{self, ArchiveError, Triple};
@@ -149,7 +150,7 @@ fn replace_exe_with(
         .parent()
         .ok_or_else(|| ReplaceError::NoDirectory(exe.to_path_buf()))?;
     let boundary = Boundary::resolve(dir);
-    let temp_path = dir.join(temp_name());
+    let temp_path = beside(dir, &temp_name())?;
     let outside = |path: &Path, _: Escape| ReplaceError::Outside(path.to_path_buf());
     let temp = boundary
         .admit(&temp_path)
@@ -175,7 +176,7 @@ fn replace_exe_with(
             .admit(&temp_path)
             .map_err(|escape| outside(&temp_path, escape))?;
         if aside {
-            let aside_path = dir.join(ASIDE_NAME);
+            let aside_path = beside(dir, ASIDE_NAME)?;
             let aside = boundary
                 .admit(&aside_path)
                 .map_err(|escape| outside(&aside_path, escape))?;
@@ -207,6 +208,18 @@ const TEMP_PREFIX: &str = ".supdoc-upgrade-";
 
 /// The name the running `supdoc.exe` is moved aside to on Windows while its replacement goes in.
 pub(super) const ASIDE_NAME: &str = "supdoc.exe.old";
+
+/// `name` as a file directly in `dir`. Every name this module writes is one plain component, so
+/// the refusal is never reached; it names `dir` as outside rather than writing anywhere else.
+///
+/// # Errors
+///
+/// Returns [`ReplaceError::Outside`] when `name` is not exactly one plain component.
+fn beside(dir: &Path, name: &str) -> Result<PathBuf, ReplaceError> {
+    Component::new(name)
+        .map(|name| path::beneath(dir, &name))
+        .ok_or_else(|| ReplaceError::Outside(dir.to_path_buf()))
+}
 
 /// A name for the temporary file that no earlier run is likely to have used.
 fn temp_name() -> String {
