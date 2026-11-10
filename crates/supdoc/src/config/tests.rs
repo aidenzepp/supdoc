@@ -989,6 +989,7 @@ fn extends_naming_a_missing_config_does_not_tell_the_user_to_name_one() {
 
 /// What a refusal shows, with `project` written as `P` in its message and help so refusals from
 /// different fixture projects compare equal.
+#[cfg(unix)]
 fn refusal_shown(error: &ConfigError, project: &str) -> (&'static str, u8, Option<String>, String) {
     (
         error.code(),

@@ -239,10 +239,6 @@ fn system_root(system_root: Option<&OsStr>) -> std::path::PathBuf {
 
 /// The recorded Windows directory, or `C:\Windows` when none was recorded.
 #[cfg(windows)]
-#[expect(
-    dead_code,
-    reason = "the upgrade fetch that runs curl from System32 is not wired into `run` yet"
-)]
 pub(crate) fn recorded_system_root() -> std::path::PathBuf {
     SYSTEM_ROOT.get_or_init(|| system_root(None)).clone()
 }

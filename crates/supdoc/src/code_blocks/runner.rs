@@ -479,23 +479,25 @@ pub(crate) fn write_private(dir: &Boundary, file: &AbsolutePath, text: &str) -> 
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::io::ErrorKind;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
 
-    use super::{
-        CAP, Call, Cwd, Failure, Ran, create_private, exact, neutral_dir, private_dir, run,
-        write_private,
-    };
+    #[cfg(unix)]
+    use super::{CAP, Call, Cwd, Failure, Ran, run};
+    use super::{create_private, exact, neutral_dir, private_dir, write_private};
     use crate::code_blocks::tools::ToolEnv;
     use crate::config::confine::Boundary;
     use crate::process::{BUSY_ATTEMPTS, retry_busy};
 
     /// A fresh directory holding a `root` project, a `home` and a `bin` with the stub `script`.
+    #[cfg(unix)]
     struct Fixture {
         /// Keeps the directory alive.
         _dir: tempfile::TempDir,
@@ -540,6 +542,7 @@ mod tests {
 
     /// Runs the fixture's stub on `stdin` with `extra` and `timeout`, from the neutral directory
     /// with the default cap.
+    #[cfg(unix)]
     fn run_stub(
         fixture: &Fixture,
         stdin: &[u8],
@@ -550,6 +553,7 @@ mod tests {
     }
 
     /// Runs the fixture's stub on `stdin` with `extra`, `timeout`, `cwd` and `cap`.
+    #[cfg(unix)]
     fn run_stub_with(
         fixture: &Fixture,
         stdin: &[u8],
@@ -1014,6 +1018,7 @@ mod tests {
     }
 
     /// The small cap the call-cap tests set, well under [`CAP`].
+    #[cfg(unix)]
     const SMALL_CAP: usize = 2 * 1024;
 
     #[cfg(unix)]
@@ -1080,6 +1085,7 @@ mod tests {
     }
 
     /// How many seconds a stub's background sleep holds on, far past any timeout these tests set.
+    #[cfg(unix)]
     const HOLD_SECS: u64 = 600;
 
     /// Whether `/bin/kill -0` still reaches `target`, a pid or a negated process group, after
@@ -1104,12 +1110,14 @@ mod tests {
     }
 
     /// The `(pid, pgid)` a stub wrote to `file` as `<sleep pid> <its own pid>`.
+    #[cfg(unix)]
     fn written_ids(file: &Path) -> (String, String) {
         ids_in(file).expect("the stub should write its ids")
     }
 
     /// The `(pid, pgid)` in `file` as [`written_ids`] reads them, or `None` when the stub didn't
     /// get as far as writing both.
+    #[cfg(unix)]
     fn ids_in(file: &Path) -> Option<(String, String)> {
         let ids = fs::read_to_string(file).ok()?;
         let mut ids = ids.split_whitespace().map(str::to_owned);
