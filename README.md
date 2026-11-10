@@ -175,7 +175,7 @@ its per-directory configs and path-scoped overrides or ignores would not apply. 
   a linked file outside the root, and never quotes an ignore rule or git config line from there.
 - `supdoc upgrade` is the only command that uses the network: cargo for a `cargo install`, and the
   system curl over HTTPS to GitHub for a release binary. Nothing checks for updates on its own.
-- Release assets can't be replaced after publishing. A checksum, whether from `upgrade` or by hand, shows
+- From v0.5.0 on, release assets can't be replaced after publishing. A checksum, whether from `upgrade` or by hand, shows
   that the archive matches `SHA256SUMS` from that same release. It doesn't show who built either file;
   `gh attestation verify` checks that. Neither covers the code inside, which you still trust the project
   for.
