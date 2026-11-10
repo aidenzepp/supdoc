@@ -20,6 +20,9 @@ pub(crate) mod exit;
 /// The shared "did you mean" rule: one cutoff, one distance metric, a length prefilter.
 pub(crate) mod suggest;
 
+/// The shell commands a help names to fix a path, for the host's shell.
+pub(crate) mod remedies;
+
 /// Absolute and project-relative paths, normalized lexically.
 pub(crate) mod path;
 

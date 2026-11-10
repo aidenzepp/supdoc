@@ -1,5 +1,6 @@
 //! The ignore engine: which `.ignore`, `.gitignore` and exclude-file rules decide a path.
 
+use crate::remedies::{self, Access};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead as _, Read as _};
@@ -726,9 +727,13 @@ pub(super) fn unreadable_ignore_file(root: &AbsolutePath, file: &UnreadableFile)
     let finding = Finding::new("scan-ignore-file-unreadable", Severity::Warning, message);
     match (file.failure, file.origin) {
         (ReadFailure::Denied, Origin::Inside) => finding.with_help(format!(
-            "The files its rules would hide were checked. Run `chmod u+r {}` so they're skipped, \
+            "The files its rules would hide were checked. Run `{}` so they're skipped, \
              or add them to `exclude` in `{CONFIG_FILE_NAME}`",
-            shell_quote(&relative_to(root, &file.path)),
+            remedies::grant_on(
+                Access::Read,
+                &shell_quote(&relative_to(root, &file.path)),
+                remedies::WINDOWS
+            ),
         )),
         (ReadFailure::Denied, Origin::Exclude | Origin::Above | Origin::Global) => finding
             .with_help(format!(

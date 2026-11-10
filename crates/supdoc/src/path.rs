@@ -269,13 +269,10 @@ pub(crate) mod fixed {
     /// Where the skill goes beneath Claude Code's config directory.
     pub(crate) const CLAUDE_DIR_SKILL: FixedPath = FixedPath::new("skills/supdoc/SKILL.md");
     /// Cargo's home directory beneath `HOME`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CARGO_DIR: FixedPath = FixedPath::new(".cargo");
     /// The installed `supdoc` binary beneath Cargo's home.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CARGO_BIN_SUPDOC: FixedPath = FixedPath::new("bin/supdoc");
     /// Cargo's install record beneath its home.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CRATES2_JSON: FixedPath = FixedPath::new(".crates2.json");
     /// Biome's private lint directory beneath the cache base.
     pub(crate) const BIOME_LINT_DIR: FixedPath = FixedPath::new("biome-lint");
@@ -455,10 +452,8 @@ pub(crate) mod fixed {
     /// The local binary directories a Python tool searches.
     pub(crate) const VENV_BINS: [FixedPath; 1] = [FixedPath::new(".venv/bin")];
     /// Windows' system directory beneath the Windows root.
-    #[cfg(any(windows, test))]
     pub(crate) const SYSTEM32: FixedPath = FixedPath::new("System32");
     /// The Windows `curl` binary name.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CURL_EXE: FixedPath = FixedPath::new("curl.exe");
     /// The Windows `taskkill` binary name.
     #[cfg(any(windows, test))]

@@ -4,6 +4,7 @@
 //! directory. The lockfile is created by the first `update --yes`. An existing file is never
 //! touched.
 
+use crate::remedies;
 use std::io::{self, Write as _};
 
 use schemars::JsonSchema;
@@ -456,7 +457,10 @@ fn write_failed(target: &AbsolutePath, error: &io::Error, context: &Context) -> 
         .unwrap_or_else(|| target.as_path());
     let directory = shell_quote(&directory.to_string_lossy());
     let fix = match error.kind() {
-        io::ErrorKind::NotFound => format!("create the directory with `mkdir -p {directory}`"),
+        io::ErrorKind::NotFound => format!(
+            "create the directory with `{}`",
+            remedies::make_directory(&directory, remedies::WINDOWS)
+        ),
         io::ErrorKind::NotADirectory => {
             format!("a file is in the way of the directory {directory}; move or delete that file")
         }
@@ -794,7 +798,9 @@ mod tests {
         let blocked = blocked.expect_err("a file cannot hold a config");
         let nope = shell_quote(&dir.path().join("nope").to_string_lossy());
         assert!(
-            missing.help().contains(&format!("mkdir -p {nope}")),
+            missing
+                .help()
+                .contains(&remedies::make_directory(&nope, remedies::WINDOWS)),
             "help was: {}",
             missing.help()
         );
@@ -830,7 +836,10 @@ mod tests {
             blocked.help()
         );
         assert!(
-            missing.help().contains("mkdir -p") && !missing.help().contains("in the way"),
+            missing
+                .help()
+                .contains(&remedies::make_directory("", remedies::WINDOWS))
+                && !missing.help().contains("in the way"),
             "help was: {}",
             missing.help()
         );
