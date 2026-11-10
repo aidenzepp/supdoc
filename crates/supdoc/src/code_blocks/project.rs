@@ -20,6 +20,7 @@ use super::runner::{self, Call, Cwd};
 use super::toolchain::{self, Refusal};
 use super::tools::ToolEnv;
 use crate::config::confine::Boundary;
+use crate::path::{self, Component, fixed};
 
 /// The most bytes supdoc reads from each of cargo's stdout and stderr during the build: its
 /// artifact JSON grows with the dependency count.
@@ -144,7 +145,7 @@ impl Plan {
 /// whether `src/lib.rs` is a file, and reads each `Cargo.toml` above the root the same way.
 #[must_use]
 pub(crate) fn plan(root: &Path) -> Plan {
-    let file = root.join("Cargo.toml");
+    let file = path::beneath(root, &fixed::CARGO_TOML);
     if std::fs::symlink_metadata(&file).is_err() {
         return Plan::None;
     }
@@ -201,7 +202,7 @@ pub(crate) fn plan(root: &Path) -> Plan {
 /// Effect: checks whether `src/lib.rs` is a file.
 fn has_lib(table: &toml::Table, root: &Path) -> bool {
     let lib = table.get("lib");
-    if lib.is_none() && !root.join("src/lib.rs").is_file() {
+    if lib.is_none() && !path::beneath(root, &fixed::SRC_LIB_RS).is_file() {
         return false;
     }
     let types = lib
@@ -230,7 +231,7 @@ fn ancestor_workspace(real_root: &Path) -> Option<OutsideWorkspace> {
     real_root
         .ancestors()
         .skip(1)
-        .map(|dir| dir.join("Cargo.toml"))
+        .map(|dir| path::beneath(dir, &fixed::CARGO_TOML))
         .filter(|file| std::fs::symlink_metadata(file).is_ok())
         .find_map(|file| match read_table(&file) {
             Some(table) if !table.contains_key("workspace") => None,
@@ -289,12 +290,16 @@ pub(crate) fn target_dir(env: &ToolEnv, root: &Path) -> Option<TargetDir> {
     };
     let candidates = [
         var("XDG_CACHE_HOME"),
-        var("HOME").map(|home| home.join(".cache")),
+        var("HOME").map(|home| path::beneath(&home, &fixed::DOT_CACHE)),
     ];
+    let hash = Component::new(&hash)?;
     candidates
         .into_iter()
         .flatten()
-        .map(|cache| (cache.join("supdoc/code-blocks/target").join(&hash), cache))
+        .map(|cache| {
+            let dir = path::beneath(&path::beneath(&cache, &fixed::CODE_BLOCKS_TARGET), &hash);
+            (dir, cache)
+        })
         .find(|(dir, cache)| private(cache, dir, &real_root))
         .map(|(dir, _)| TargetDir(dir))
 }
