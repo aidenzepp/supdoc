@@ -15,7 +15,7 @@ use std::time::UNIX_EPOCH;
 
 use sha2::{Digest, Sha256};
 
-use crate::config::confine::{self, Admitted, Boundary};
+use crate::config::confine::{self, Admitted, Boundary, ReadEscape};
 use crate::hash::Hash;
 use crate::limits::{Limits, SizeLimit};
 use crate::path::{self, Component, fixed};
@@ -156,16 +156,15 @@ impl Cache {
             field(value.as_encoded_bytes());
         }
         field(run.project.map_or(&[][..], |fingerprint| &fingerprint[..]));
-        let real_root = root.canonicalize().ok()?;
+        let boundary = Boundary::resolve(root);
+        if boundary.real_inside(root) == Err(ReadEscape::BoundaryUnresolved) {
+            return None;
+        }
         for dir in run.doc.parent().into_iter().flat_map(Path::ancestors) {
             for name in run.tool.config_files {
                 let candidate = crate::path::beneath(dir, name);
                 field(candidate.as_os_str().as_encoded_bytes());
-                field(&config_state(
-                    &candidate,
-                    dir.starts_with(root),
-                    &real_root,
-                )?);
+                field(&config_state(&candidate, dir.starts_with(root), &boundary)?);
             }
         }
         field(run.input.as_bytes());
@@ -259,19 +258,21 @@ impl Cache {
 }
 
 /// What a config candidate adds to a key: `absent`, the sha256 of its content when it is
-/// `in_root` and its real path is inside `real_root`, else only its existence, size and
+/// `in_root` and its real path is inside `boundary`, else only its existence, size and
 /// modification time: a file outside the root is never read. `None` when an in-root file exists
-/// but can't be hashed ([`content_digest`]).
+/// but can't be hashed ([`content_digest`]), or when `boundary` can't be resolved.
 ///
 /// Effect: reads `candidate`'s metadata, and its content when it is inside the root.
-fn config_state(candidate: &Path, in_root: bool, real_root: &Path) -> Option<Vec<u8>> {
+fn config_state(candidate: &Path, in_root: bool, boundary: &Boundary) -> Option<Vec<u8>> {
     let Ok(meta) = fs::metadata(candidate) else {
         return Some(b"absent".to_vec());
     };
     let contained = in_root
-        && candidate
-            .canonicalize()
-            .is_ok_and(|real| real.starts_with(real_root));
+        && match boundary.real_inside(candidate) {
+            Ok(_) => true,
+            Err(ReadEscape::BoundaryUnresolved) => return None,
+            Err(ReadEscape::Unresolved | ReadEscape::Outside { .. }) => false,
+        };
     if contained {
         return content_digest(candidate);
     }
@@ -394,17 +395,34 @@ mod tests {
     /// The `config_state` of `candidate`, a file in `root`, run on a thread so a blocking open
     /// fails the test instead of hanging it.
     fn in_root_state(candidate: &Path, root: &Path) -> Option<Vec<u8>> {
-        let real_root = root.canonicalize().expect("the root should canonicalize");
+        let boundary = Boundary::resolve(root);
         let (sender, receiver) = mpsc::channel();
         let read = candidate.to_path_buf();
         let _detached =
-            thread::spawn(move || drop(sender.send(config_state(&read, true, &real_root))));
+            thread::spawn(move || drop(sender.send(config_state(&read, true, &boundary))));
         let result = receiver.recv_timeout(Duration::from_secs(3));
         if result.is_err() {
             // Unblock a reader stuck in open, so the thread ends.
             drop(fs::OpenOptions::new().write(true).open(candidate));
         }
         result.expect("reading a config candidate should return, not block")
+    }
+
+    #[test]
+    fn an_in_root_config_link_to_outside_is_not_read_and_an_unresolvable_root_stops_the_key() {
+        let dir = temp();
+        let root = dir.path().join("root");
+        fs::create_dir(&root).expect("the root should be creatable");
+        let outside = dir.path().join("outside.toml");
+        fs::write(&outside, "secret").expect("the outside file should be writable");
+        let link = root.join("cfg.toml");
+        crate::cli::testing::symlink(&outside, &link).expect("the link should be creatable");
+
+        let linked = in_root_state(&link, &root).expect("an outside link still has a state");
+        let unresolved = config_state(&link, true, &Boundary::resolve(&dir.path().join("gone")));
+
+        assert!(linked.starts_with(b"outside"), "got {linked:?}");
+        assert_eq!(unresolved, None);
     }
 
     #[test]
@@ -561,6 +579,32 @@ mod tests {
             stdout: b"echo hi\n".to_vec(),
             stderr: b"note\n".to_vec(),
         }
+    }
+
+    #[test]
+    fn a_root_that_stops_resolving_gives_no_key() {
+        let dir = temp();
+        let root = dir.path().join("project");
+        fs::create_dir(&root).expect("the root should be creatable");
+        let program = program(dir.path());
+        let doc = root.join("docs/a.md");
+        let run = Run {
+            tool: shfmt(),
+            program: &program,
+            args: &[],
+            extra: &[],
+            input: "echo hi\n",
+            doc: &doc,
+            project: None,
+        };
+        assert!(
+            Cache::key(&run, &root).is_some(),
+            "a resolving root should give a key"
+        );
+
+        fs::remove_dir(&root).expect("the root should be removable");
+
+        assert_eq!(Cache::key(&run, &root), None);
     }
 
     #[test]

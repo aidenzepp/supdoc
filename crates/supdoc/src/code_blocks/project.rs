@@ -19,7 +19,8 @@ use super::format;
 use super::runner::{self, Call, Cwd};
 use super::toolchain::{self, Refusal};
 use super::tools::ToolEnv;
-use crate::config::confine::Boundary;
+use crate::config::confine::{Boundary, ReadEscape};
+use crate::path::{self, Component, fixed};
 
 /// The most bytes supdoc reads from each of cargo's stdout and stderr during the build: its
 /// artifact JSON grows with the dependency count.
@@ -144,7 +145,7 @@ impl Plan {
 /// whether `src/lib.rs` is a file, and reads each `Cargo.toml` above the root the same way.
 #[must_use]
 pub(crate) fn plan(root: &Path) -> Plan {
-    let file = root.join("Cargo.toml");
+    let file = path::beneath(root, &fixed::CARGO_TOML);
     if std::fs::symlink_metadata(&file).is_err() {
         return Plan::None;
     }
@@ -154,12 +155,16 @@ pub(crate) fn plan(root: &Path) -> Plan {
         Err(refusal) => return refused(refusal),
     };
     // Resolved again for cargo's argv, and judged again in case it moved since the read.
-    let Some((manifest, real_root)) = file.canonicalize().ok().zip(root.canonicalize().ok()) else {
+    let manifest = match Boundary::resolve(root).real_inside(&file) {
+        Ok(manifest) => manifest,
+        Err(ReadEscape::Outside { .. }) => return refused(Refusal::Outside),
+        Err(ReadEscape::BoundaryUnresolved | ReadEscape::Unresolved) => {
+            return refused(Refusal::Unreadable);
+        }
+    };
+    let Ok(real_root) = root.canonicalize() else {
         return refused(Refusal::Unreadable);
     };
-    if !manifest.starts_with(&real_root) {
-        return refused(Refusal::Outside);
-    }
     let outside = |outside| Plan::Refused(Refused::Workspace(outside));
     let Ok(table) = text.parse::<toml::Table>() else {
         // Fails closed should cargo's parser accept what supdoc's doesn't.
@@ -201,7 +206,7 @@ pub(crate) fn plan(root: &Path) -> Plan {
 /// Effect: checks whether `src/lib.rs` is a file.
 fn has_lib(table: &toml::Table, root: &Path) -> bool {
     let lib = table.get("lib");
-    if lib.is_none() && !root.join("src/lib.rs").is_file() {
+    if lib.is_none() && !path::beneath(root, &fixed::SRC_LIB_RS).is_file() {
         return false;
     }
     let types = lib
@@ -230,7 +235,7 @@ fn ancestor_workspace(real_root: &Path) -> Option<OutsideWorkspace> {
     real_root
         .ancestors()
         .skip(1)
-        .map(|dir| dir.join("Cargo.toml"))
+        .map(|dir| path::beneath(dir, &fixed::CARGO_TOML))
         .filter(|file| std::fs::symlink_metadata(file).is_ok())
         .find_map(|file| match read_table(&file) {
             Some(table) if !table.contains_key("workspace") => None,
@@ -289,12 +294,16 @@ pub(crate) fn target_dir(env: &ToolEnv, root: &Path) -> Option<TargetDir> {
     };
     let candidates = [
         var("XDG_CACHE_HOME"),
-        var("HOME").map(|home| home.join(".cache")),
+        var("HOME").map(|home| path::beneath(&home, &fixed::DOT_CACHE)),
     ];
+    let hash = Component::new(&hash)?;
     candidates
         .into_iter()
         .flatten()
-        .map(|cache| (cache.join("supdoc/code-blocks/target").join(&hash), cache))
+        .map(|cache| {
+            let dir = path::beneath(&path::beneath(&cache, &fixed::CODE_BLOCKS_TARGET), &hash);
+            (dir, cache)
+        })
         .find(|(dir, cache)| private(cache, dir, &real_root))
         .map(|(dir, _)| TargetDir(dir))
 }
@@ -631,12 +640,13 @@ fn libs(stdout: &[u8], select: Select<'_>, noise: &mut Noise) -> Result<Vec<Lib>
 /// A detail when `target` doesn't resolve, a file doesn't resolve to a regular file inside it,
 /// there are no libs, or the libs sit in more than one directory.
 fn locate(libs: Vec<Lib>, target: &Path) -> Result<(Vec<(String, PathBuf)>, PathBuf), String> {
-    let real_target = target.canonicalize().map_err(|error| {
-        format!(
+    if let Err(error) = target.canonicalize() {
+        return Err(format!(
             "couldn't resolve supdoc's target directory `{}`: {error}",
             target.display()
-        )
-    })?;
+        ));
+    }
+    let boundary = Boundary::resolve(target);
     let mut externs = Vec::with_capacity(libs.len());
     let mut lib_dirs = BTreeSet::new();
     let mut macro_dirs = BTreeSet::new();
@@ -653,10 +663,10 @@ fn locate(libs: Vec<Lib>, target: &Path) -> Result<(Vec<(String, PathBuf)>, Path
                 file.display()
             )
         };
-        let real = file
-            .canonicalize()
+        let real = boundary
+            .real_inside(&file)
             .ok()
-            .filter(|real| real.starts_with(&real_target) && real.is_file())
+            .filter(|real| real.is_file())
             .ok_or_else(outside)?;
         let dir = real.parent().ok_or_else(outside)?.to_path_buf();
         let _new = if proc_macro {
@@ -1099,6 +1109,18 @@ mod tests {
         let root = dir.path().join("root");
         fs::create_dir_all(root.join("src")).expect("the root should be creatable");
         (dir, root)
+    }
+
+    #[test]
+    fn a_dangling_in_root_manifest_link_is_refused_as_unreadable() {
+        let (_dir, root) = root_dir();
+        crate::cli::testing::symlink(root.join("missing.toml"), root.join("Cargo.toml"))
+            .expect("the symlink should be creatable");
+
+        assert_eq!(
+            plan(&root),
+            Plan::Refused(Refused::Manifest(Refusal::Unreadable))
+        );
     }
 
     #[test]

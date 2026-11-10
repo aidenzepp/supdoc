@@ -299,19 +299,14 @@ pub(crate) mod fixed {
     /// The code-block directory beneath [`SUPDOC`].
     pub(crate) const CODE_BLOCKS: FixedPath = FixedPath::new("code-blocks");
     /// Cargo's private target directory beneath a cache base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CODE_BLOCKS_TARGET: FixedPath = FixedPath::new("supdoc/code-blocks/target");
     /// The private working directory beneath a cache base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CODE_BLOCKS_CWD: FixedPath = FixedPath::new("supdoc/code-blocks/cwd");
     /// A Cargo manifest.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CARGO_TOML: FixedPath = FixedPath::new("Cargo.toml");
     /// A library crate's root file.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const SRC_LIB_RS: FixedPath = FixedPath::new("src/lib.rs");
     /// The default cache base beneath `HOME`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const DOT_CACHE: FixedPath = FixedPath::new(".cache");
     /// rumdl's config file name.
     pub(crate) const RUMDL_TOML: FixedPath = FixedPath::new("rumdl.toml");
@@ -401,7 +396,6 @@ pub(crate) mod fixed {
         FixedPath::new("clippy.toml"),
     ];
     /// The toolchain file names rustup looks for.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const TOOLCHAIN_FILES: [FixedPath; 2] = [
         FixedPath::new("rust-toolchain"),
         FixedPath::new("rust-toolchain.toml"),
@@ -762,13 +756,6 @@ impl RelativePath {
 
     /// `self` with `rel` appended, keeping `self` as written, `..` included.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the config chain's suggestion joins with it from V5-P5"
-        )
-    )]
     pub(crate) fn beneath(&self, rel: &impl Beneath) -> Self {
         Self(raw_join(&self.0, Path::new(rel.segments())))
     }
@@ -1394,7 +1381,7 @@ mod tests {
     fn absolute_path_new_removes_dot_segments() {
         assert_eq!(
             absolute("/repo/./docs/../src/lib.rs").as_path(),
-            Path::new("/repo/src/lib.rs")
+            absolute("/repo/src/lib.rs").as_path()
         );
     }
 
@@ -1402,14 +1389,14 @@ mod tests {
     fn absolute_path_join_removes_dot_segments() {
         let joined = absolute("/repo/apps/web").join(&relative("../../services/./auth"));
 
-        assert_eq!(joined.as_path(), Path::new("/repo/services/auth"));
+        assert_eq!(joined.as_path(), absolute("/repo/services/auth").as_path());
     }
 
     #[test]
     fn absolute_path_parent_dot_dot_stays_at_root() {
         assert_eq!(
             absolute("/repo").join(&relative("../../..")).as_path(),
-            Path::new("/")
+            absolute("/").as_path()
         );
     }
 

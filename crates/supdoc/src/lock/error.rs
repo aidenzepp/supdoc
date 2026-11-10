@@ -1,5 +1,6 @@
 //! Lockfile errors: what failed, a stable code, and what to do next.
 
+use crate::remedies::{self, Access};
 use std::fmt::{self, Display, Formatter};
 use std::io::ErrorKind;
 
@@ -77,15 +78,7 @@ fn is_header_problem(message: &str) -> bool {
 /// `text` as one shell word: unchanged when it holds only characters the shell never treats
 /// specially, otherwise in single quotes, so a help can name a path with spaces and still run.
 pub(crate) fn shell_quote(text: &str) -> String {
-    let plain = !text.is_empty()
-        && text
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "/._-+=:,@%".contains(c));
-    if plain {
-        text.to_owned()
-    } else {
-        format!("'{}'", text.replace('\'', "'\\''"))
-    }
+    remedies::quote(text, remedies::WINDOWS)
 }
 
 impl ParseLockError {
@@ -332,15 +325,19 @@ impl LockError {
 fn read_help(kind: ErrorKind, shown: &str) -> String {
     match kind {
         ErrorKind::PermissionDenied => {
-            format!("Give the current user read access, for example with `chmod u+r {shown}`")
+            format!(
+                "Give the current user read access, for example with `{}`",
+                remedies::grant_on(Access::Read, shown, remedies::WINDOWS)
+            )
         }
         ErrorKind::InvalidData => format!(
             "The file is not UTF-8 text, so supdoc didn't write it. Restore it with `git checkout \
              -- {shown}`, or delete it and run `supdoc update --yes` to record the links again"
         ),
         _ => format!(
-            "Fix the cause above, then run the same command again. `ls -l {shown}` shows the \
-             file's type and permissions"
+            "Fix the cause above, then run the same command again. `{}` shows the \
+             file's type and permissions",
+            remedies::inspect_on(shown, remedies::WINDOWS)
         ),
     }
 }
@@ -350,8 +347,9 @@ fn read_help(kind: ErrorKind, shown: &str) -> String {
 fn write_help(kind: ErrorKind, directory: &str) -> String {
     match kind {
         ErrorKind::PermissionDenied => format!(
-            "Make its directory writable, for example with `chmod u+w {directory}`, then run the \
-             same command again"
+            "Make its directory writable, for example with `{}`, then run the \
+             same command again",
+            remedies::grant_on(Access::Write, directory, remedies::WINDOWS)
         ),
         ErrorKind::StorageFull | ErrorKind::QuotaExceeded => format!(
             "The disk holding `{directory}` is full or over quota. Free some space, then run the \
@@ -366,8 +364,9 @@ fn write_help(kind: ErrorKind, directory: &str) -> String {
              files from `{directory}`, then run the same command again"
         ),
         _ => format!(
-            "Fix the cause above, then run the same command again. `ls -ld {directory}` shows \
-             the directory's permissions"
+            "Fix the cause above, then run the same command again. `{}` shows \
+             the directory's permissions",
+            remedies::inspect_directory(directory, remedies::WINDOWS)
         ),
     }
 }
@@ -525,10 +524,14 @@ mod tests {
 
     #[test]
     fn settings_mismatch_names_the_file_that_set_the_value() {
+        let config = crate::path::fixture("/repo/supdoc.config.toml");
+
         assert_eq!(
             mismatch(Some("/repo/supdoc.config.toml")).to_string(),
-            "supdoc.lock was written with line-endings = \"exact\", but \
-             /repo/supdoc.config.toml sets \"normalize\""
+            format!(
+                "supdoc.lock was written with line-endings = \"exact\", but {} sets \"normalize\"",
+                config.display()
+            )
         );
     }
 
@@ -602,7 +605,10 @@ mod tests {
         let helps = [read.help_from(&cwd), outside.help_from(&cwd)];
 
         assert!(
-            helps[0].contains("`chmod u+r ../supdoc.lock`"),
+            helps[0].contains(&format!(
+                "`{}`",
+                remedies::grant_on(Access::Read, "../supdoc.lock", remedies::WINDOWS)
+            )),
             "the read help should run from docs/: {}",
             helps[0]
         );
@@ -631,7 +637,13 @@ mod tests {
     fn unreadable_lockfile_help_gives_chmod_on_the_file() {
         let help = read_error(ErrorKind::PermissionDenied).help_from(&absolute("/repo/docs"));
 
-        assert!(help.contains("`chmod u+r ../supdoc.lock`"), "got: {help}");
+        assert!(
+            help.contains(&format!(
+                "`{}`",
+                remedies::grant_on(Access::Read, "../supdoc.lock", remedies::WINDOWS)
+            )),
+            "got: {help}"
+        );
     }
 
     #[test]
@@ -649,7 +661,10 @@ mod tests {
         let help = read_error(ErrorKind::Other).help_from(&absolute("/repo"));
 
         assert!(
-            help.contains("`ls -l supdoc.lock`") && !help.contains("chmod"),
+            help.contains(&format!(
+                "`{}`",
+                remedies::inspect_on("supdoc.lock", remedies::WINDOWS)
+            )) && !help.contains("chmod"),
             "got: {help}"
         );
     }
@@ -680,7 +695,10 @@ mod tests {
 
         assert!(
             help.starts_with("The existing lockfile was not changed.")
-                && help.contains("`chmod u+w ..`"),
+                && help.contains(&format!(
+                    "`{}`",
+                    remedies::grant_on(Access::Write, "..", remedies::WINDOWS)
+                )),
             "got: {help}"
         );
     }
@@ -694,7 +712,13 @@ mod tests {
 
         let help = error.help_from(&absolute("/"));
 
-        assert!(help.contains("`chmod u+w 'my repo'`"), "got: {help}");
+        assert!(
+            help.contains(&format!(
+                "`{}`",
+                remedies::grant_on(Access::Write, "'my repo'", remedies::WINDOWS)
+            )),
+            "got: {help}"
+        );
     }
 
     #[test]

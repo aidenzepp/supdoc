@@ -899,7 +899,10 @@ fn set_root_makes_the_json_root_project_relative() {
         .expect("writing to a buffer should succeed");
 
     let envelope = parse(stdout.text().trim_end());
-    assert_eq!(at(&envelope, "/root"), "/repo");
+    assert_eq!(
+        *at(&envelope, "/root"),
+        absolute("/repo").display().to_string()
+    );
 }
 
 #[test]

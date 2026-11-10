@@ -17,9 +17,8 @@ use std::time::Duration;
 use super::runner::{self, Call, Cwd};
 use super::tools::{Found, ToolEnv, find};
 use crate::config::code_blocks::Edition;
-
-/// The toolchain files supdoc reads, in rustup's order: `rust-toolchain` wins when both exist.
-const FILES: [&str; 2] = ["rust-toolchain", "rust-toolchain.toml"];
+use crate::config::confine::{Boundary, ReadEscape};
+use crate::path::{self, fixed};
 
 /// The most of a toolchain file supdoc reads. A longer file is refused.
 const MAX_BYTES: u64 = 64 * 1024;
@@ -113,15 +112,22 @@ impl Toolchain {
 /// Effect: reads the file's metadata, resolves symlinks, and reads at most 64 KiB of it.
 #[must_use]
 pub(crate) fn read(root: &Path) -> Toolchain {
-    let Some(file) = FILES
+    let Some(file) = fixed::TOOLCHAIN_FILES
         .into_iter()
-        .find(|name| std::fs::symlink_metadata(root.join(name)).is_ok())
+        .find(|name| std::fs::symlink_metadata(path::beneath(root, name)).is_ok())
     else {
         return Toolchain::Default;
     };
-    match read_inside(&root.join(file), root) {
-        Ok(text) => parse(&text).unwrap_or_else(|refusal| Toolchain::Refused { refusal, file }),
-        Err(refusal) => Toolchain::Refused { refusal, file },
+    let file_name = file.as_str();
+    match read_inside(&path::beneath(root, &file), root) {
+        Ok(text) => parse(&text).unwrap_or_else(|refusal| Toolchain::Refused {
+            refusal,
+            file: file_name,
+        }),
+        Err(refusal) => Toolchain::Refused {
+            refusal,
+            file: file_name,
+        },
     }
 }
 
@@ -240,7 +246,7 @@ fn active_channel(stdout: &[u8]) -> Option<String> {
 /// Effect: resolves symlinks and reads the file.
 #[must_use]
 pub(crate) fn cargo_edition(root: &Path) -> Option<Edition> {
-    let text = read_inside(&root.join("Cargo.toml"), root).ok()?;
+    let text = read_inside(&path::beneath(root, &fixed::CARGO_TOML), root).ok()?;
     edition_in(&text)
 }
 
@@ -280,7 +286,7 @@ const LINT_GROUPS: [&str; 22] = [
 /// Effect: resolves symlinks and reads the file.
 #[must_use]
 pub(crate) fn cargo_lints(root: &Path) -> Vec<OsString> {
-    read_inside(&root.join("Cargo.toml"), root)
+    read_inside(&path::beneath(root, &fixed::CARGO_TOML), root)
         .map(|text| lints_in(&text))
         .unwrap_or_default()
 }
@@ -368,11 +374,12 @@ fn edition_in(text: &str) -> Option<Edition> {
 /// Effect: resolves symlinks and reads the file.
 pub(super) fn read_inside(file: &Path, root: &Path) -> Result<String, Refusal> {
     let unreadable = |_| Refusal::Unreadable;
-    let real_root = root.canonicalize().map_err(unreadable)?;
-    let real = file.canonicalize().map_err(unreadable)?;
-    if !real.starts_with(&real_root) {
-        return Err(Refusal::Outside);
-    }
+    let real = Boundary::resolve(root)
+        .real_inside(file)
+        .map_err(|escape| match escape {
+            ReadEscape::Outside { .. } => Refusal::Outside,
+            ReadEscape::BoundaryUnresolved | ReadEscape::Unresolved => Refusal::Unreadable,
+        })?;
     if !std::fs::metadata(&real).map_err(unreadable)?.is_file() {
         return Err(Refusal::Unreadable);
     }
@@ -762,6 +769,24 @@ mod tests {
             read(root.path()),
             Toolchain::Refused {
                 refusal: Refusal::Outside,
+                file: "rust-toolchain.toml"
+            }
+        );
+    }
+
+    #[test]
+    fn a_dangling_in_root_toolchain_link_is_unreadable_not_outside() {
+        let root = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        crate::cli::testing::symlink(
+            root.path().join("missing"),
+            root.path().join("rust-toolchain.toml"),
+        )
+        .expect("the link should be creatable");
+
+        assert_eq!(
+            read(root.path()),
+            Toolchain::Refused {
+                refusal: Refusal::Unreadable,
                 file: "rust-toolchain.toml"
             }
         );

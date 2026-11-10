@@ -4,6 +4,7 @@
 //! Only a project root that can't be read or walked stops the run. Every other problem, with one
 //! file or one link, becomes a finding and the scan goes on.
 
+use crate::remedies::{self, Access};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -85,8 +86,12 @@ impl ScanError {
         match self {
             Self::RootUnreadable { root, .. } => format!(
                 "Give the current user read and search access to the project root, for example \
-                 with `chmod u+rx {}`",
-                shell_quote(&root.display().to_string())
+                 with `{}`",
+                remedies::grant_on(
+                    Access::ReadSearch,
+                    &shell_quote(&root.display().to_string()),
+                    remedies::WINDOWS
+                )
             ),
             Self::CartridgeLoad(_) => CartridgeLoadError::help(),
             Self::IgnoreTooLarge { help, .. } => help.clone(),
@@ -1316,14 +1321,25 @@ mod tests {
 
     #[test]
     fn unreadable_root_help_gives_chmod_with_the_root_and_no_other_directory_advice() {
+        let root = crate::path::fixture("/work/my repo");
         let error = ScanError::RootUnreadable {
-            root: crate::path::fixture("/work/my repo"),
+            root: root.clone(),
             error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
         };
 
         let help = error.help();
 
-        assert!(help.contains("`chmod u+rx '/work/my repo'`"), "got: {help}");
+        assert!(
+            help.contains(&format!(
+                "`{}`",
+                remedies::grant_on(
+                    Access::ReadSearch,
+                    &format!("'{}'", root.display()),
+                    remedies::WINDOWS
+                )
+            )),
+            "got: {help}"
+        );
         assert!(!help.contains("another directory"), "got: {help}");
     }
 

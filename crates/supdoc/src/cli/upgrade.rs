@@ -581,26 +581,13 @@ fn install_or_hand_over(
 fn powershell_command(argv: &[String], cargo_home: &Path) -> String {
     let line = argv
         .iter()
-        .map(|word| powershell_quote(word))
+        .map(|word| crate::remedies::powershell_quote(word))
         .collect::<Vec<_>>()
         .join(" ");
     format!(
         "Set-Location {}; {line}",
-        powershell_quote(&cargo_home.display().to_string())
+        crate::remedies::powershell_quote(&cargo_home.display().to_string())
     )
-}
-
-/// `text` as one PowerShell word: bare when plain, else single-quoted with `'` doubled.
-fn powershell_quote(text: &str) -> String {
-    let plain = !text.is_empty()
-        && text
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "/._-+=:,@%".contains(c));
-    if plain {
-        text.to_owned()
-    } else {
-        format!("'{}'", text.replace('\'', "''"))
-    }
 }
 
 /// The finding that `--yes` cannot run cargo on Windows, exit 78 as for any step the user takes.
