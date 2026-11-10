@@ -327,7 +327,7 @@ pub(crate) enum Command {
     /// Install supdoc's agent skill
     #[command(subcommand, after_help = SKILL_EXAMPLES)]
     Skill(SkillCommand),
-    /// Install a newer or older supdoc with cargo (writes; previews unless --yes; to accept code changes, see `update`)
+    /// Install a newer or older supdoc (writes; previews unless --yes; to accept code changes, see `update`)
     #[command(long_about = UPGRADE_LONG_ABOUT, after_help = UPGRADE_EXAMPLES)]
     Upgrade(UpgradeArgs),
     /// Trust a checkout to run its code blocks' tools, or revoke it (writes your state directory)
