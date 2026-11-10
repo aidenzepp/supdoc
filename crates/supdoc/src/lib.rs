@@ -268,6 +268,8 @@ pub(crate) mod code_blocks {
     mod superhtml;
     /// TOML's format and lint steps, run by tombi.
     mod tombi;
+    /// XML's lint step, run by xmllint.
+    mod xmllint;
     /// YAML's format step, run by yamlfmt.
     mod yaml;
 

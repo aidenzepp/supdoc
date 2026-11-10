@@ -9,7 +9,7 @@
 //! linking reads.
 //!
 //! A language is on exactly when its table, `[features.code-blocks.rust]`, `.shell`, `.python`,
-//! `.typescript`, `.javascript`, `.json`, `.css`, `.html`, `.yaml`, `.toml`, `.dockerfile`, `.makefile`, `.sql`, `.markdown` or `.go`, is written in some file of the chain; an empty
+//! `.typescript`, `.javascript`, `.json`, `.css`, `.html`, `.yaml`, `.toml`, `.dockerfile`, `.makefile`, `.sql`, `.xml`, `.markdown` or `.go`, is written in some file of the chain; an empty
 //! table turns it on. The language
 //! table selects tools (`formatter`, `linter`) and holds the language's own settings; each
 //! tool's options, its step's mode, live in the tool's own table,
@@ -29,6 +29,7 @@ mod shell;
 mod sql;
 mod toml;
 mod typescript;
+mod xml;
 mod yaml;
 
 use crate::code_blocks::tools::{self, CARTRIDGES, Step, Tier};
@@ -53,6 +54,7 @@ use self::sql::RawSql;
 pub(crate) use self::sql::SqlDialect;
 use self::toml::RawToml;
 use self::typescript::RawTypeScript;
+use self::xml::RawXml;
 use self::yaml::RawYaml;
 use super::error::ConfigError;
 use super::pattern::{AnchoredPatterns, PatternList};
@@ -89,6 +91,8 @@ pub(crate) enum Language {
     /// SQL: tagged `sql`, or a dialect's own name: `postgresql`, `postgres`, `pgsql`, `tsql`,
     /// `mssql`, `mysql`, `mariadb`, `sqlite`, `bigquery`, `snowflake` or `duckdb`.
     Sql,
+    /// XML: tagged `xml`, `svg`, `xsd`, `xsl`, `xslt` or `xhtml`.
+    Xml,
     /// Go: tagged `go` or `golang`.
     Go,
 }
@@ -115,13 +119,14 @@ impl Language {
             "make" | "makefile" | "Makefile" | "mk" => Some(Self::Makefile),
             "sql" | "postgresql" | "postgres" | "pgsql" | "tsql" | "mssql" | "mysql"
             | "mariadb" | "sqlite" | "bigquery" | "snowflake" | "duckdb" => Some(Self::Sql),
+            "xml" | "svg" | "xsd" | "xsl" | "xslt" | "xhtml" => Some(Self::Xml),
             "go" | "golang" => Some(Self::Go),
             _ => None,
         }
     }
 
     /// The name of its table: `rust`, `shell`, `python`, `typescript`, `javascript`, `json`,
-    /// `css`, `html`, `yaml`, `toml`, `dockerfile`, `makefile`, `sql`, `markdown` or `go`.
+    /// `css`, `html`, `yaml`, `toml`, `dockerfile`, `makefile`, `sql`, `xml`, `markdown` or `go`.
     #[must_use]
     pub(crate) const fn table(self) -> &'static str {
         match self {
@@ -139,6 +144,7 @@ impl Language {
             Self::Dockerfile => "dockerfile",
             Self::Makefile => "makefile",
             Self::Sql => "sql",
+            Self::Xml => "xml",
             Self::Go => "go",
         }
     }
@@ -765,6 +771,8 @@ struct Languages {
     makefile: Table,
     /// `[features.code-blocks.sql]`.
     sql: Table,
+    /// `[features.code-blocks.xml]`.
+    xml: Table,
     /// `[features.code-blocks.go]`.
     go: Table,
     /// The nearest shell `dialect` written.
@@ -777,7 +785,7 @@ struct Languages {
 
 impl Languages {
     /// Every language, in the order the chain's checks report them.
-    const ORDER: [Language; 15] = [
+    const ORDER: [Language; 16] = [
         Language::Rust,
         Language::Shell,
         Language::Python,
@@ -791,6 +799,7 @@ impl Languages {
         Language::Dockerfile,
         Language::Makefile,
         Language::Sql,
+        Language::Xml,
         Language::Markdown,
         Language::Go,
     ];
@@ -812,6 +821,7 @@ impl Languages {
             Language::Dockerfile => &self.dockerfile,
             Language::Makefile => &self.makefile,
             Language::Sql => &self.sql,
+            Language::Xml => &self.xml,
             Language::Go => &self.go,
         }
     }
@@ -865,6 +875,8 @@ pub(crate) struct RawCodeBlocks {
     makefile: Option<RawMakefile>,
     /// `[features.code-blocks.sql]`, when written.
     sql: Option<RawSql>,
+    /// `[features.code-blocks.xml]`, when written.
+    xml: Option<RawXml>,
     /// `[features.code-blocks.go]`, when written.
     go: Option<RawGo>,
 }
@@ -888,7 +900,7 @@ impl Written {
     /// # Errors
     ///
     /// [`ConfigError::ToolNotSelected`] for the first tool table, Rust, shell, Python,
-    /// TypeScript, JavaScript, JSON, CSS, HTML, YAML, TOML, Dockerfile, Makefile, SQL, Markdown then Go, whose tool the merged chain
+    /// TypeScript, JavaScript, JSON, CSS, HTML, YAML, TOML, Dockerfile, Makefile, SQL, XML, Markdown then Go, whose tool the merged chain
     /// doesn't select.
     pub(super) fn resolve(
         self,
@@ -1010,84 +1022,82 @@ pub(super) fn merge(
     file: &AbsolutePath,
     base: &AbsolutePath,
 ) -> Option<Written> {
-    let Some(RawCodeBlocks {
-        include,
-        exclude,
-        tier,
-        rust,
-        shell,
-        python,
-        markdown,
-        typescript,
-        javascript,
-        json,
-        css,
-        html,
-        yaml,
-        toml,
-        dockerfile,
-        makefile,
-        sql,
-        go,
-        ..
-    }) = raw
-    else {
+    let Some(raw) = raw else {
         return nearer;
     };
     let anchor = |list| AnchoredPatterns::written_by(file.clone(), base.clone(), list);
     let nearer = nearer.unwrap_or_default();
-    let near = nearer.languages;
+    let languages = nearer.languages.behind(&raw, file);
     Some(Written {
-        include: nearer.include.or_else(|| include.map(anchor)),
-        exclude: nearer.exclude.or_else(|| exclude.map(anchor)),
-        tier: nearer.tier.or(tier),
-        languages: Languages {
-            edition: near.edition.or(rust.as_ref().and_then(|raw| raw.edition)),
-            rust: near
-                .rust
-                .behind(rust.as_ref().map(RawRust::selection), file),
-            dialect: near.dialect.or(shell.as_ref().and_then(|raw| raw.dialect)),
-            shell: near
-                .shell
-                .behind(shell.as_ref().map(RawShell::selection), file),
-            python: near
-                .python
-                .behind(python.as_ref().map(RawPython::selection), file),
-            markdown: near
-                .markdown
-                .behind(markdown.as_ref().map(RawMarkdown::selection), file),
-            typescript: near
-                .typescript
-                .behind(typescript.as_ref().map(RawTypeScript::selection), file),
-            javascript: near
-                .javascript
-                .behind(javascript.as_ref().map(RawJavaScript::selection), file),
-            json: near
-                .json
-                .behind(json.as_ref().map(RawJson::selection), file),
-            css: near.css.behind(css.as_ref().map(RawCss::selection), file),
-            html: near
-                .html
-                .behind(html.as_ref().map(RawHtml::selection), file),
-            yaml: near
-                .yaml
-                .behind(yaml.as_ref().map(RawYaml::selection), file),
-            toml: near
-                .toml
-                .behind(toml.as_ref().map(RawToml::selection), file),
-            dockerfile: near
-                .dockerfile
-                .behind(dockerfile.as_ref().map(RawDockerfile::selection), file),
-            makefile: near
-                .makefile
-                .behind(makefile.as_ref().map(RawMakefile::selection), file),
-            sql_dialect: near
-                .sql_dialect
-                .or(sql.as_ref().and_then(|raw| raw.dialect)),
-            sql: near.sql.behind(sql.as_ref().map(RawSql::selection), file),
-            go: near.go.behind(go.as_ref().map(RawGo::selection), file),
-        },
+        include: nearer.include.or_else(|| raw.include.map(anchor)),
+        exclude: nearer.exclude.or_else(|| raw.exclude.map(anchor)),
+        tier: nearer.tier.or(raw.tier),
+        languages,
     })
+}
+
+impl Languages {
+    /// These tables with `raw`'s language tables, written in `file`, behind them: the nearer
+    /// value of each key wins.
+    fn behind(self, raw: &RawCodeBlocks, file: &AbsolutePath) -> Self {
+        Self {
+            edition: self
+                .edition
+                .or(raw.rust.as_ref().and_then(|table| table.edition)),
+            rust: self
+                .rust
+                .behind(raw.rust.as_ref().map(RawRust::selection), file),
+            dialect: self
+                .dialect
+                .or(raw.shell.as_ref().and_then(|table| table.dialect)),
+            shell: self
+                .shell
+                .behind(raw.shell.as_ref().map(RawShell::selection), file),
+            python: self
+                .python
+                .behind(raw.python.as_ref().map(RawPython::selection), file),
+            markdown: self
+                .markdown
+                .behind(raw.markdown.as_ref().map(RawMarkdown::selection), file),
+            typescript: self
+                .typescript
+                .behind(raw.typescript.as_ref().map(RawTypeScript::selection), file),
+            javascript: self
+                .javascript
+                .behind(raw.javascript.as_ref().map(RawJavaScript::selection), file),
+            json: self
+                .json
+                .behind(raw.json.as_ref().map(RawJson::selection), file),
+            css: self
+                .css
+                .behind(raw.css.as_ref().map(RawCss::selection), file),
+            html: self
+                .html
+                .behind(raw.html.as_ref().map(RawHtml::selection), file),
+            yaml: self
+                .yaml
+                .behind(raw.yaml.as_ref().map(RawYaml::selection), file),
+            toml: self
+                .toml
+                .behind(raw.toml.as_ref().map(RawToml::selection), file),
+            dockerfile: self
+                .dockerfile
+                .behind(raw.dockerfile.as_ref().map(RawDockerfile::selection), file),
+            makefile: self
+                .makefile
+                .behind(raw.makefile.as_ref().map(RawMakefile::selection), file),
+            sql_dialect: self
+                .sql_dialect
+                .or(raw.sql.as_ref().and_then(|table| table.dialect)),
+            sql: self
+                .sql
+                .behind(raw.sql.as_ref().map(RawSql::selection), file),
+            xml: self
+                .xml
+                .behind(raw.xml.as_ref().map(RawXml::selection), file),
+            go: self.go.behind(raw.go.as_ref().map(RawGo::selection), file),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1447,12 +1457,12 @@ mod tests {
     }
 
     #[test]
-    fn html_and_htm_tags_name_html_and_xhtml_svg_and_vue_name_no_language() {
+    fn html_and_htm_tags_name_html_xhtml_and_svg_name_xml_and_vue_names_no_language() {
         let cases = [
             ("html", Some(Language::Html)),
             ("htm", Some(Language::Html)),
-            ("xhtml", None),
-            ("svg", None),
+            ("xhtml", Some(Language::Xml)),
+            ("svg", Some(Language::Xml)),
             ("vue", None),
             ("HTML", None),
         ];
@@ -1574,6 +1584,56 @@ mod tests {
             assert_eq!(Language::from_tag(tag), expected, "tag `{tag}`");
         }
         assert_eq!(Language::Dockerfile.table(), "dockerfile");
+    }
+
+    #[test]
+    fn the_xml_tags_name_xml_and_near_misses_name_none() {
+        let cases = [
+            ("xml", Some(Language::Xml)),
+            ("svg", Some(Language::Xml)),
+            ("xsd", Some(Language::Xml)),
+            ("xsl", Some(Language::Xml)),
+            ("xslt", Some(Language::Xml)),
+            ("xhtml", Some(Language::Xml)),
+            ("XML", None),
+            ("plist", None),
+            ("rss", None),
+            ("wsdl", None),
+        ];
+        for (tag, expected) in cases {
+            assert_eq!(Language::from_tag(tag), expected, "tag `{tag}`");
+        }
+        assert_eq!(Language::Xml.table(), "xml");
+    }
+
+    #[test]
+    fn an_xml_table_selects_xmllint_and_no_formatter() {
+        let dir = tree(&[(
+            "supdoc.config.toml",
+            "[features.code-blocks.xml]\n[features.code-blocks.xml.xmllint]\nlint = \"full\"\n",
+        )]);
+
+        let config = Config::load(&at(&dir, ".")).expect("the fixture config should load");
+        let code_blocks = config.code_blocks().expect("the table is written");
+
+        assert!(code_blocks.checks(Language::Xml));
+        assert!(code_blocks.choice(Language::Xml, Step::Format).is_none());
+        assert!(crate::code_blocks::tools::default_for(Language::Xml, Step::Format).is_none());
+        assert_eq!(
+            crate::code_blocks::tools::default_for(Language::Xml, Step::Lint).map(|tool| tool.name),
+            Some("xmllint")
+        );
+    }
+
+    #[test]
+    fn a_named_xml_formatter_is_refused_pointing_at_a_custom_command() {
+        let message = refused("xml", "formatter = \"xmllint\"");
+
+        assert!(
+            message.contains("`xmllint` isn't a known xml formatter")
+                && message.contains("none yet: write a custom `{ command = [...] }`"),
+            "got {message}"
+        );
     }
 
     #[test]
