@@ -168,6 +168,7 @@ fn replace_exe_with(
     let finished = (|| {
         file.write_all(binary)
             .map_err(io_error("could not write", temp.as_path()))?;
+        #[cfg(unix)]
         set_mode(&file).map_err(io_error("could not set the mode of", temp.as_path()))?;
         file.sync_all()
             .map_err(io_error("could not sync", temp.as_path()))?;
@@ -334,16 +335,6 @@ fn remove_leftovers_with(
 fn set_mode(file: &fs::File) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
     file.set_permissions(fs::Permissions::from_mode(BINARY_MODE))
-}
-
-/// Windows has no permission bits to set.
-///
-/// # Errors
-///
-/// Never fails.
-#[cfg(not(unix))]
-fn set_mode(_file: &fs::File) -> io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]

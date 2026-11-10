@@ -1166,13 +1166,16 @@ mod tests {
 
     #[test]
     fn without_hard_links_the_starter_is_written_in_place() {
-        for error in [
+        // A slice, not an array literal: off Unix it holds one error, and a loop over a
+        // one-element literal is a lint.
+        let errors: &[fn() -> io::Error] = &[
             || io::Error::from(io::ErrorKind::Unsupported),
             #[cfg(unix)]
             || io::Error::from_raw_os_error(libc::ENOTSUP),
             #[cfg(unix)]
             || io::Error::from_raw_os_error(libc::EOPNOTSUPP),
-        ] {
+        ];
+        for &error in errors {
             let (_dir, project, result) = init_with_failing_link(error, None);
 
             result.expect("the fallback should write the config");
