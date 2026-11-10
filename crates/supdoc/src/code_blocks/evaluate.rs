@@ -330,13 +330,7 @@ impl Evaluation {
         let mut against: Option<Against> = None;
         let build_timeout = self.build_timeout;
         let timeout = self.timeout;
-        let mut configs = ToolConfigs::default();
-        configs.tombi.timeout = timeout;
-        configs.hadolint.timeout = timeout;
-        configs.sqruff.timeout = timeout;
-        configs.yamllint.timeout = timeout;
-        configs.prettier.timeout = timeout;
-        configs.dockerfmt.timeout = timeout;
+        let mut configs = ToolConfigs::with_timeout(timeout);
         let mut toolchain_warned = false;
         let mut slots: Vec<Slot> = Vec::new();
         let mut jobs: Vec<Job> = Vec::new();
@@ -1373,6 +1367,19 @@ struct ToolConfigs {
 }
 
 impl ToolConfigs {
+    /// Nothing found yet, with `timeout` limiting each tool run made to find a config or a
+    /// version: tombi's, hadolint's, sqruff's, yamllint's, prettier's and dockerfmt's.
+    fn with_timeout(timeout: Option<Duration>) -> Self {
+        let mut configs = Self::default();
+        configs.tombi.timeout = timeout;
+        configs.hadolint.timeout = timeout;
+        configs.sqruff.timeout = timeout;
+        configs.yamllint.timeout = timeout;
+        configs.prettier.timeout = timeout;
+        configs.dockerfmt.timeout = timeout;
+        configs
+    }
+
     /// Gives `record` the config its tools get, as [`BiomeConfigs::give`],
     /// [`RumdlConfigs::give`], [`TombiConfigs::give`], [`HadolintConfigs::give`],
     /// [`SqruffConfigs::give`],
