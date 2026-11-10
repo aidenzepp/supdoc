@@ -221,7 +221,11 @@ pub(crate) fn names(path: &str, root: &Path) -> Vec<String> {
     let real = root.canonicalize().ok();
     let mut names = vec![path.to_owned()];
     for root in [Some(root), real.as_deref()].into_iter().flatten() {
-        let absolute = root.join(relative).display().to_string();
+        let Some(absolute) =
+            Pointer::new(relative).map(|pointer| pointer.resolve_from(root).display().to_string())
+        else {
+            continue;
+        };
         if !names.contains(&absolute) {
             names.push(absolute);
         }
