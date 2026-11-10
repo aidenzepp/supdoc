@@ -19,16 +19,7 @@ use super::runner::{self, Failure, Ran};
 use super::tools::ToolEnv;
 use crate::config::confine::Boundary;
 use crate::hash::Hash;
-use crate::path::AbsolutePath;
-
-/// The config names rumdl looks for in a directory, in its own order. `pyproject.toml` counts
-/// only when it has a `[tool.rumdl]` table.
-pub(crate) const CONFIG_FILES: [&str; 4] = [
-    ".rumdl.toml",
-    "rumdl.toml",
-    ".config/rumdl.toml",
-    "pyproject.toml",
-];
+use crate::path::{self, Component, fixed};
 
 /// The most bytes of a config supdoc reads.
 const MAX_CONFIG: u64 = 256 * 1024;
@@ -130,10 +121,7 @@ impl Project {
     #[must_use]
     pub(crate) fn doc_as_seen(&self, doc: &Path) -> PathBuf {
         match &self.moved {
-            Some((from, to)) => to.join(
-                doc.strip_prefix(from)
-                    .unwrap_or_else(|_| Path::new(doc.file_name().unwrap_or_default())),
-            ),
+            Some((from, to)) => seen_under(doc, from, to),
             None => doc.to_path_buf(),
         }
     }
@@ -191,7 +179,7 @@ pub(crate) fn project_args(env: &ToolEnv, root: &Path, doc: &Path) -> Result<Pro
                 Some(why) => Refusal::Config { file, why },
             })?;
             let mut flag = OsString::from("--config=");
-            flag.push(private.join("rumdl.toml"));
+            flag.push(path::beneath(&private, &fixed::RUMDL_TOML));
             return Ok(Project {
                 flags: vec![flag],
                 moved: pattern_root(&candidate).map(|dir| (dir, private)),
@@ -202,6 +190,16 @@ pub(crate) fn project_args(env: &ToolEnv, root: &Path, doc: &Path) -> Result<Pro
         flags: vec![OsString::from("--no-config")],
         moved: None,
     })
+}
+
+/// Where `doc` sits under `to` when it sits under `from`; else its file name under `to`.
+fn seen_under(doc: &Path, from: &Path, to: &Path) -> PathBuf {
+    path::rebase(doc, from, to)
+        .or_else(|| {
+            let name = doc.file_name()?.to_str().and_then(Component::new)?;
+            Some(path::beneath(to, &name))
+        })
+        .unwrap_or_else(|| to.to_path_buf())
 }
 
 /// `path` relative to `root`, as shown to the user.
@@ -229,7 +227,7 @@ fn candidates(root: &Path, doc: &Path) -> impl Iterator<Item = PathBuf> {
         }
     }
     dirs.into_iter()
-        .flat_map(|dir| CONFIG_FILES.map(|name| dir.join(name)))
+        .flat_map(|dir| fixed::RUMDL_CONFIG_FILES.map(|name| path::beneath(&dir, &name)))
         .filter(|candidate| fs::symlink_metadata(candidate).is_ok())
 }
 
@@ -239,7 +237,7 @@ fn candidates(root: &Path, doc: &Path) -> impl Iterator<Item = PathBuf> {
 ///
 /// Effect: reads file metadata.
 fn holds_git(dir: &Path) -> bool {
-    fs::metadata(dir.join(".git")).is_ok()
+    fs::metadata(path::beneath(dir, &fixed::DOT_GIT)).is_ok()
 }
 
 /// The validated rumdl table of the config at `found`; `None` for a `pyproject.toml` that supdoc
@@ -371,11 +369,11 @@ fn private_config(
     }
     let text = toml::to_string(table).map_err(|_| Some("couldn't be written again as TOML"))?;
     let cache = runner::exact(neutral.parent().ok_or(None)?).ok_or(None)?;
-    let child = |dir: &AbsolutePath, name: &str| AbsolutePath::new(&dir.as_path().join(name));
-    let parent = child(&cache, "rumdl-config").ok_or(None)?;
-    let dir = child(&parent, &Hash::digest(text.as_bytes()).to_string()).ok_or(None)?;
-    let git = child(&dir, ".git").ok_or(None)?;
-    let file = child(&dir, "rumdl.toml").ok_or(None)?;
+    let parent = cache.beneath(&fixed::RUMDL_CONFIG_DIR);
+    let digest = Component::new(&Hash::digest(text.as_bytes()).to_string()).ok_or(None)?;
+    let dir = parent.beneath(&digest);
+    let git = dir.beneath(&fixed::DOT_GIT);
+    let file = dir.beneath(&fixed::RUMDL_TOML);
     let parent_boundary =
         runner::create_private(&Boundary::resolve(&cache), &parent).ok_or(None)?;
     let own = runner::create_private(&parent_boundary, &dir).ok_or(None)?;
@@ -423,6 +421,22 @@ mod tests {
 
     fn refusal_of(config: &str) -> Option<&'static str> {
         unsafe_part(&config.parse().expect("the fixture config should be TOML"))
+    }
+
+    #[test]
+    fn a_doc_outside_the_pattern_root_is_seen_by_its_file_name_in_the_private_directory() {
+        let given = Project {
+            flags: Vec::new(),
+            moved: Some((
+                PathBuf::from("/project/docs"),
+                PathBuf::from("/private/dir"),
+            )),
+        };
+
+        assert_eq!(
+            given.doc_as_seen(Path::new("/elsewhere/a.md")),
+            PathBuf::from("/private/dir/a.md")
+        );
     }
 
     #[test]
