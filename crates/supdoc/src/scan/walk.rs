@@ -143,13 +143,19 @@ pub(crate) struct GlobalExcludes {
     /// Kept as git names it, not lexically normalized, so the operating system resolves a `..`
     /// after a symlink as git does.
     pub(super) file: Option<PathBuf>,
+    /// The configured value of `core.excludesFile` when the typed pointer refused it, such as one
+    /// holding a NUL byte. It names no file the walk can open, so the walk only reports it.
+    refused: Option<PathBuf>,
 }
 
 impl GlobalExcludes {
     /// No global excludes file, for runs that must not depend on the user's git config.
     #[must_use]
     pub(crate) const fn none() -> Self {
-        Self { file: None }
+        Self {
+            file: None,
+            refused: None,
+        }
     }
 
     /// The file git reads as the global excludes, found as the walker's own lookup finds it:
@@ -161,16 +167,42 @@ impl GlobalExcludes {
     /// Effect: reads environment variables and the user's and system git config.
     #[must_use]
     pub(crate) fn find(cwd: &AbsolutePath) -> Self {
-        Self {
-            file: ignore::gitignore::gitconfig_excludes_path().map(|file| {
-                // A path the typed pointer refuses, such as one holding a NUL byte, is kept so
-                // opening it fails and the walk warns that the global excludes file is unreadable.
-                match Pointer::from_path(file.clone()) {
-                    Some(pointer) => pointer.resolve_from(cwd.as_path()),
-                    None => cwd.as_path().join(file),
-                }
-            }),
+        let Some(configured) = ignore::gitignore::gitconfig_excludes_path() else {
+            return Self::none();
+        };
+        // A path the typed pointer refuses, such as one holding a NUL byte, names no file to open:
+        // it is kept as configured so the walk warns that the global excludes file is unreadable.
+        match Pointer::from_path(configured.clone()) {
+            Some(pointer) => Self {
+                file: Some(pointer.resolve_from(cwd.as_path())),
+                refused: None,
+            },
+            None => Self {
+                file: None,
+                refused: Some(configured),
+            },
         }
+    }
+
+    /// The `scan-ignore-file-unreadable` warning for a configured global excludes path the typed
+    /// pointer refused, worded as for any ignore file that can't be fully read.
+    fn refused_warning(&self) -> Option<Finding> {
+        let configured = self.refused.as_ref()?;
+        Some(
+            Finding::new(
+                "scan-ignore-file-unreadable",
+                Severity::Warning,
+                format!(
+                    "the global excludes file `{}` could not be fully read, so some of its rules \
+                     may not apply",
+                    configured.display()
+                ),
+            )
+            .with_help(format!(
+                "The files its later rules would hide may have been checked. Make it a regular \
+                 UTF-8 text file, or add those files to `exclude` in `{CONFIG_FILE_NAME}`"
+            )),
+        )
     }
 }
 
@@ -238,6 +270,7 @@ pub(crate) fn walk(
             .iter()
             .map(|file| unreadable_ignore_file(root, file)),
     );
+    findings.extend(excludes.refused_warning());
     findings.extend(explicit_path_warnings(
         config,
         languages,
@@ -1522,7 +1555,10 @@ mod tests {
             &config,
             Languages::builtin().expect("the built-in cartridges should load"),
             &Scope::All,
-            &GlobalExcludes { file: Some(global) },
+            &GlobalExcludes {
+                file: Some(global),
+                refused: None,
+            },
         );
 
         let names: Vec<_> = walked
