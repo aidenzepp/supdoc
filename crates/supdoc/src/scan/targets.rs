@@ -13,7 +13,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::ops::Range;
-use std::path::Path;
 
 use crate::cartridges::data::KeyPathBudget;
 use crate::config::Config;
@@ -22,7 +21,7 @@ use crate::hash::HashSettings;
 use crate::limits::Limits;
 use crate::link::{LinkKey, Target};
 use crate::output::paths::relative_to;
-use crate::path::AbsolutePath;
+use crate::path::{AbsolutePath, Beneath, Component};
 use crate::read::cartridge::{Languages, SourceFile, SymbolTable};
 use crate::read::error::{CartridgeLoadError, ReadError, ReadRole, ResolveError};
 use crate::read::hash::{hash_file, hash_symbol};
@@ -399,11 +398,15 @@ fn locate(config: &Config, target: &Target) -> Located {
         return Located::OutsideRoot;
     }
 
-    if let Some(real) = real_case(config, base.as_path(), &segments) {
-        if !config.contains(&base.as_path().join(real.join("/"))) {
+    if let Some(real) = real_case(config, base, &segments) {
+        let real_file = real
+            .iter()
+            .fold(base.clone(), |directory, name| directory.beneath(name));
+        if !config.contains(real_file.as_path()) {
             return Located::OutsideRoot;
         }
-        return Located::CaseMismatch(real.join("/"));
+        let names: Vec<&str> = real.iter().map(Beneath::segments).collect();
+        return Located::CaseMismatch(names.join("/"));
     }
     if fs::metadata(file.as_path()).is_ok_and(|metadata| metadata.is_dir()) {
         return Located::Directory;
@@ -417,15 +420,15 @@ fn locate(config: &Config, target: &Target) -> Located {
 /// `None` when every name matches exactly, when one is missing or matches several entries
 /// case-insensitively, or when a directory can't be listed or lies outside the project root:
 /// reading the file then reports what is wrong.
-fn real_case(config: &Config, start: &Path, segments: &[&str]) -> Option<Vec<String>> {
-    let mut directory = start.to_path_buf();
+fn real_case(config: &Config, start: &AbsolutePath, segments: &[&str]) -> Option<Vec<Component>> {
+    let mut directory = start.clone();
     let mut real = Vec::with_capacity(segments.len());
     let mut differs = false;
     for segment in segments {
-        if !config.contains(&directory) {
+        if !config.contains(directory.as_path()) {
             return None;
         }
-        let names: Vec<_> = fs::read_dir(&directory)
+        let names: Vec<_> = fs::read_dir(directory.as_path())
             .ok()?
             .filter_map(|entry| Some(entry.ok()?.file_name()))
             .collect();
@@ -446,7 +449,8 @@ fn real_case(config: &Config, start: &Path, segments: &[&str]) -> Option<Vec<Str
             differs = true;
             only.to_owned()
         };
-        directory.push(&name);
+        let name = Component::new(&name)?;
+        directory = directory.beneath(&name);
         real.push(name);
     }
     differs.then_some(real)

@@ -306,17 +306,11 @@ fn resolve_extends(
 ///
 /// Effect: reads the metadata of entries beneath `root` on the way to `path`.
 fn plain(root: &AbsolutePath, path: &AbsolutePath) -> bool {
-    let Some(below) = path.strip_prefix(root) else {
-        return false;
-    };
-    if below.as_os_str().is_empty() {
-        return false;
-    }
-    let mut entry = root.as_path().to_path_buf();
-    below.components().all(|component| {
-        entry.push(component);
-        !fs::symlink_metadata(&entry).is_ok_and(|metadata| metadata.is_symlink())
-    })
+    let steps: Vec<AbsolutePath> = root.steps_to(path).into_iter().flatten().collect();
+    !steps.is_empty()
+        && steps.iter().all(|entry| {
+            !fs::symlink_metadata(entry.as_path()).is_ok_and(|metadata| metadata.is_symlink())
+        })
 }
 
 /// `extends` pointing at the config file inside `directory`, if there is a [`plain`] one.
@@ -334,8 +328,7 @@ fn config_inside(
     if !is_plain_file {
         return None;
     }
-    let suggested = extends.as_path().join(CONFIG_FILE_NAME);
-    RelativePath::try_from(suggested.to_string_lossy().into_owned()).ok()
+    Some(extends.beneath(&fixed::CONFIG_FILE))
 }
 
 /// Combines the layers, child first, into one config rooted at `root`.

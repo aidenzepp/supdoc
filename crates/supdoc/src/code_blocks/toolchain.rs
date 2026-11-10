@@ -17,9 +17,7 @@ use std::time::Duration;
 use super::runner::{self, Call, Cwd};
 use super::tools::{Found, ToolEnv, find};
 use crate::config::code_blocks::Edition;
-
-/// The toolchain files supdoc reads, in rustup's order: `rust-toolchain` wins when both exist.
-const FILES: [&str; 2] = ["rust-toolchain", "rust-toolchain.toml"];
+use crate::path::{self, fixed};
 
 /// The most of a toolchain file supdoc reads. A longer file is refused.
 const MAX_BYTES: u64 = 64 * 1024;
@@ -113,15 +111,22 @@ impl Toolchain {
 /// Effect: reads the file's metadata, resolves symlinks, and reads at most 64 KiB of it.
 #[must_use]
 pub(crate) fn read(root: &Path) -> Toolchain {
-    let Some(file) = FILES
+    let Some(file) = fixed::TOOLCHAIN_FILES
         .into_iter()
-        .find(|name| std::fs::symlink_metadata(root.join(name)).is_ok())
+        .find(|name| std::fs::symlink_metadata(path::beneath(root, name)).is_ok())
     else {
         return Toolchain::Default;
     };
-    match read_inside(&root.join(file), root) {
-        Ok(text) => parse(&text).unwrap_or_else(|refusal| Toolchain::Refused { refusal, file }),
-        Err(refusal) => Toolchain::Refused { refusal, file },
+    let file_name = file.as_str();
+    match read_inside(&path::beneath(root, &file), root) {
+        Ok(text) => parse(&text).unwrap_or_else(|refusal| Toolchain::Refused {
+            refusal,
+            file: file_name,
+        }),
+        Err(refusal) => Toolchain::Refused {
+            refusal,
+            file: file_name,
+        },
     }
 }
 
@@ -240,7 +245,7 @@ fn active_channel(stdout: &[u8]) -> Option<String> {
 /// Effect: resolves symlinks and reads the file.
 #[must_use]
 pub(crate) fn cargo_edition(root: &Path) -> Option<Edition> {
-    let text = read_inside(&root.join("Cargo.toml"), root).ok()?;
+    let text = read_inside(&path::beneath(root, &fixed::CARGO_TOML), root).ok()?;
     edition_in(&text)
 }
 
@@ -280,7 +285,7 @@ const LINT_GROUPS: [&str; 22] = [
 /// Effect: resolves symlinks and reads the file.
 #[must_use]
 pub(crate) fn cargo_lints(root: &Path) -> Vec<OsString> {
-    read_inside(&root.join("Cargo.toml"), root)
+    read_inside(&path::beneath(root, &fixed::CARGO_TOML), root)
         .map(|text| lints_in(&text))
         .unwrap_or_default()
 }

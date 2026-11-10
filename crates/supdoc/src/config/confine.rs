@@ -38,7 +38,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::path::AbsolutePath;
+use crate::path::{AbsolutePath, Pointer, Suffix, rebase, with_suffix};
 
 /// How many dangling symlinks one lookup follows before it gives up, as the OS limits loops.
 const MAX_DANGLING_HOPS: u8 = 40;
@@ -59,11 +59,9 @@ fn real_location_within(path: &Path, hops: u8) -> Option<PathBuf> {
     if let Ok(real) = fs::canonicalize(path) {
         return Some(real);
     }
-    // Climb to the deepest entry that exists, remembering the missing names below it.
+    // Climb to the deepest entry that exists; what lies below it is the missing tail.
     let mut existing = path;
-    let mut missing = Vec::new();
     while fs::symlink_metadata(existing).is_err() {
-        missing.push(normal_name(existing)?);
         existing = existing.parent()?;
     }
     let real_existing = if let Ok(real) = fs::canonicalize(existing) {
@@ -71,26 +69,15 @@ fn real_location_within(path: &Path, hops: u8) -> Option<PathBuf> {
     } else {
         // The entry exists but can't be resolved: a dangling symlink. Follow it by hand.
         let next = hops.checked_sub(1)?;
-        let pointee = fs::read_link(existing).ok()?;
+        let pointee = Pointer::from_path(fs::read_link(existing).ok()?)?;
         let parent = fs::canonicalize(existing.parent()?).ok()?;
-        real_location_within(&parent.join(pointee), next)?
+        real_location_within(&pointee.resolve_from(&parent), next)?
     };
-    Some(
-        missing
-            .iter()
-            .rev()
-            .fold(real_existing, |real, name| real.join(name)),
-    )
-}
-
-/// The last component of `path` when it is an ordinary name, not `..`, `.` or a root.
-fn normal_name(path: &Path) -> Option<&std::ffi::OsStr> {
-    match path.components().next_back()? {
-        Component::Normal(name) => Some(name),
-        Component::Prefix(_) | Component::RootDir | Component::CurDir | Component::ParentDir => {
-            None
-        }
+    if path == existing {
+        return Some(real_existing);
     }
+    // `rebase` refuses a `..` or root in the tail, so a `..` below a missing name is `None`.
+    rebase(path, existing, &real_existing)
 }
 
 /// A directory supdoc may write beneath, with its real location worked out once.
@@ -107,6 +94,13 @@ struct Dir {
     given: PathBuf,
     /// `given` with every symlink followed, or `given` as written when that can't be worked out.
     real: PathBuf,
+    /// `given` with every symlink followed, or `None` when that can't be worked out. Only
+    /// [`Boundary::real_inside`] reads it.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used once its #371 callers land")
+    )]
+    strict: Option<PathBuf>,
 }
 
 /// A path [`Boundary::admit`] passed: the only argument the write primitives take.
@@ -135,6 +129,27 @@ pub(crate) enum Escape {
     },
 }
 
+/// Why [`Boundary::real_inside`] refused a path, with the boundary's failure kept apart from the
+/// path's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used once its #371 callers land")
+)]
+pub(crate) enum ReadEscape {
+    /// The boundary itself was refused by [`Boundary::resolve`] or its real location can't be
+    /// worked out, so no path can be judged against it.
+    BoundaryUnresolved,
+    /// The path's real location can't be worked out: it is missing, a dangling symlink, or a
+    /// symlink loop.
+    Unresolved,
+    /// The path resolves, but outside the boundary.
+    Outside {
+        /// The path's real location.
+        real: PathBuf,
+    },
+}
+
 impl Boundary {
     /// The boundary at `dir`, its real location worked out now.
     ///
@@ -151,6 +166,7 @@ impl Boundary {
         let accepted = plain(dir).then(|| Dir {
             given: dir.to_path_buf(),
             real: real_location(dir).unwrap_or_else(|| dir.to_path_buf()),
+            strict: fs::canonicalize(dir).ok(),
         });
         Self { dir: accepted }
     }
@@ -176,6 +192,36 @@ impl Boundary {
         self.dir
             .as_ref()
             .is_some_and(|dir| real_location(path).is_some_and(|real| real.starts_with(&dir.real)))
+    }
+
+    /// The real location of `path`, once checked to lie inside the boundary: the strict read
+    /// check. It refuses exactly what `canonicalize(root)`, `canonicalize(path)` and `starts_with`
+    /// refuse, so a missing path or a dangling symlink is refused even where
+    /// [`Boundary::contains`] counts it inside.
+    ///
+    /// Effect: reads file metadata and symlinks along the boundary's directory and `path`.
+    ///
+    /// # Errors
+    ///
+    /// [`ReadEscape::BoundaryUnresolved`] when the boundary was refused or its directory can't be
+    /// resolved; [`ReadEscape::Unresolved`] when `path` can't be; [`ReadEscape::Outside`] naming
+    /// where it lies when that is outside the boundary.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used once its #371 callers land")
+    )]
+    pub(crate) fn real_inside(&self, path: &Path) -> Result<PathBuf, ReadEscape> {
+        let root = self
+            .dir
+            .as_ref()
+            .and_then(|dir| dir.strict.as_deref())
+            .ok_or(ReadEscape::BoundaryUnresolved)?;
+        let real = fs::canonicalize(path).map_err(|_| ReadEscape::Unresolved)?;
+        if real.starts_with(root) {
+            Ok(real)
+        } else {
+            Err(ReadEscape::Outside { real })
+        }
     }
 
     /// `target`, once it is checked to lie inside the boundary both as written and once every
@@ -234,13 +280,9 @@ impl Boundary {
         if real.starts_with(&dir.given) {
             return self.admit(real);
         }
-        let named = real
-            .strip_prefix(&dir.real)
-            .ok()
-            .map(|beneath| dir.given.join(beneath))
-            .ok_or_else(|| Escape::Real {
-                real: Some(real.to_path_buf()),
-            })?;
+        let named = rebase(real, &dir.real, &dir.given).ok_or_else(|| Escape::Real {
+            real: Some(real.to_path_buf()),
+        })?;
         self.admit(&named)
     }
 }
@@ -324,13 +366,16 @@ fn temp_path_beside(target: &Path, attempt: u32) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.subsec_nanos());
-    let mut name = target.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(
+    let tail = format!(
         ".{}.{}.{nanos:x}.{attempt}.tmp",
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed),
-    ));
-    target.with_file_name(name)
+    );
+    // A target with no file name is a root or ends in `..`, which no write reaches; it falls
+    // back to the target itself, which `create_new` then refuses.
+    Suffix::new(&tail)
+        .and_then(|tail| with_suffix(target, &tail))
+        .unwrap_or_else(|| target.to_path_buf())
 }
 
 /// Creates a new file at the first free candidate path. `create_new` refuses an existing path
@@ -518,6 +563,21 @@ pub(crate) fn create_new(file: &Admitted<'_>, mode: u32) -> io::Result<fs::File>
 /// Fails when the rename does.
 pub(crate) fn rename_into(from: &Admitted<'_>, to: &Admitted<'_>) -> io::Result<()> {
     fs::rename(&from.path, &to.path)
+}
+
+/// [`rename_into`], rerun briefly on Windows while the target is transiently denied.
+///
+/// Effect: renames a file, sleeping between tries.
+///
+/// # Errors
+///
+/// Fails when the last try does.
+pub(crate) fn rename_into_retrying(from: &Admitted<'_>, to: &Admitted<'_>) -> io::Result<()> {
+    rename_retrying(
+        || fs::rename(&from.path, &to.path),
+        cfg!(windows),
+        thread::sleep,
+    )
 }
 
 /// Opens the existing file `file` for writing, without creating or truncating it.
@@ -1149,6 +1209,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn real_location_of_a_dangling_leaf_symlink_is_its_pointee_byte_for_byte() {
+        let fixture = Fixture::new();
+        let outside = fs::canonicalize(fixture.path("outside"))
+            .expect("the outside dir should be canonicalizable");
+        fixture.link(
+            outside
+                .join("missing")
+                .to_str()
+                .expect("the temp path should be UTF-8"),
+            "root/dangling",
+        );
+
+        let real = real_location(&fixture.path("root/dangling"))
+            .expect("a dangling link to a missing file should still resolve");
+
+        assert_eq!(
+            real.as_os_str(),
+            outside.join("missing").as_os_str(),
+            "the link's own location must add nothing, not even a trailing separator"
+        );
+    }
+
+    #[test]
+    fn write_atomically_replaces_an_existing_file_and_leaves_no_temp_file() {
+        let fixture = Fixture::new();
+        fixture.write("root/out.txt", "old");
+        let boundary = fixture.boundary();
+        let target = boundary
+            .admit(&fixture.absolute("root/out.txt"))
+            .expect("an existing file inside the root should be admitted");
+
+        write_atomically(&target, b"new", None).expect("the replacing write should succeed");
+
+        assert_eq!(
+            fs::read_to_string(target.as_path()).expect("the written file should be readable"),
+            "new"
+        );
+        assert_eq!(
+            fixture.names("root"),
+            names(&["out.txt"]),
+            "no temp file should remain beside the target"
+        );
+    }
+
+    #[test]
+    fn temp_path_beside_keeps_the_directory_and_extends_the_file_name() {
+        let target = Path::new("dir").join("out.txt");
+
+        let temp = temp_path_beside(&target, 3);
+
+        assert_eq!(
+            temp.parent(),
+            target.parent(),
+            "the temp file stays beside the target"
+        );
+        let name = temp
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("the temp name should be UTF-8");
+        assert!(
+            name.starts_with("out.txt.") && name.ends_with(".3.tmp"),
+            "the temp name should extend the target's name and carry the attempt, got {name}"
+        );
+        assert_ne!(temp, target);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temp_path_beside_a_root_falls_back_to_the_root_itself() {
+        assert_eq!(temp_path_beside(Path::new("/"), 0), Path::new("/"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn create_dir_all_creates_only_the_admitted_dirs_with_the_mode() {
@@ -1326,6 +1459,64 @@ mod tests {
         assert_eq!(
             again.map_err(|error| error.kind()),
             Err(io::ErrorKind::AlreadyExists)
+        );
+    }
+
+    #[test]
+    fn real_inside_returns_the_real_path_of_an_inside_file() {
+        let fixture = Fixture::new();
+        fixture.write("root/real.txt", "inside");
+        fixture.link("real.txt", "root/leaf");
+
+        let real = fixture.boundary().real_inside(&fixture.path("root/leaf"));
+
+        assert_eq!(
+            real,
+            Ok(canonical(&fixture, "root/real.txt").as_path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn real_inside_refuses_a_dangling_in_root_symlink_as_unresolved_where_contains_accepts() {
+        let fixture = Fixture::new();
+        fixture.link("missing", "root/leaf");
+        let boundary = fixture.boundary();
+        let leaf = fixture.path("root/leaf");
+
+        assert!(
+            boundary.contains(&leaf),
+            "contains should count a dangling link pointing inside as inside"
+        );
+        assert_eq!(boundary.real_inside(&leaf), Err(ReadEscape::Unresolved));
+    }
+
+    #[test]
+    fn real_inside_refuses_every_path_under_a_missing_root_as_boundary_unresolved() {
+        let fixture = Fixture::new();
+        let boundary = Boundary::resolve(&fixture.path("missing-root"));
+
+        assert_eq!(
+            boundary.real_inside(&fixture.path("root")),
+            Err(ReadEscape::BoundaryUnresolved),
+            "the root failure should win over the path's resolving"
+        );
+    }
+
+    #[test]
+    fn real_inside_names_where_an_in_root_symlink_to_an_outside_file_lands() {
+        let fixture = Fixture::new();
+        fixture.write("outside/secret", "outside");
+        fixture.link("../outside/secret", "root/leaf");
+
+        let escape = fixture.boundary().real_inside(&fixture.path("root/leaf"));
+
+        assert_eq!(
+            escape,
+            Err(ReadEscape::Outside {
+                real: canonical(&fixture, "outside/secret")
+                    .as_path()
+                    .to_path_buf(),
+            })
         );
     }
 
