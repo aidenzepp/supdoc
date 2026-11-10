@@ -237,13 +237,17 @@ impl Boundary {
         if !plain(target) || !target.starts_with(&dir.given) {
             return Err(Escape::Lexical);
         }
-        match real_location(target) {
-            Some(real) if real.starts_with(&dir.real) => Ok(Admitted {
-                path: target.to_path_buf(),
-                boundary: PhantomData,
-            }),
-            real => Err(Escape::Real { real }),
-        }
+        admit_real(
+            target,
+            &dir.real,
+            cfg!(windows),
+            real_location,
+            std::thread::sleep,
+        )
+        .map(|path| Admitted {
+            path,
+            boundary: PhantomData,
+        })
     }
 
     /// [`Boundary::admit`] for `real`, a file whose symlinks were already followed, such as the
@@ -269,6 +273,57 @@ impl Boundary {
         })?;
         self.admit(&named)
     }
+}
+
+/// Checks that `target`'s real location, found by `locate`, lies beneath `real_dir`, and returns
+/// `target` as written. On Windows a real location under the volume's `$Extend\$Deleted` directory
+/// is retried up to [`RENAME_ATTEMPTS`] times, pausing [`RENAME_PAUSE`] between tries; see
+/// [`is_delete_pending`]. Every other outcome is final.
+///
+/// Effect: runs `locate` and sleeps through `pause`.
+///
+/// # Errors
+///
+/// [`Escape::Real`] naming the last real location `locate` returned.
+fn admit_real(
+    target: &Path,
+    real_dir: &Path,
+    windows: bool,
+    mut locate: impl FnMut(&Path) -> Option<PathBuf>,
+    mut pause: impl FnMut(Duration),
+) -> Result<PathBuf, Escape> {
+    let mut tried = 1;
+    loop {
+        match locate(target) {
+            Some(real) if real.starts_with(real_dir) => return Ok(target.to_path_buf()),
+            Some(real) if tried < RENAME_ATTEMPTS && is_delete_pending(&real, windows) => {
+                pause(RENAME_PAUSE);
+                tried += 1;
+            }
+            real => return Err(Escape::Real { real }),
+        }
+    }
+}
+
+/// Whether `real` lies under a volume's `$Extend\$Deleted` directory, where NTFS moves a file
+/// that another thread is mid-replace on, so a path canonicalized then resolves outside its
+/// directory for a moment. Only on Windows. Any drive letter, verbatim (`\\?\`) or not; the
+/// match is on whole components, so a file merely named `$Deleted` doesn't count.
+fn is_delete_pending(real: &Path, windows: bool) -> bool {
+    if !windows {
+        return false;
+    }
+    let text = real.to_string_lossy();
+    let rest = text.strip_prefix(r"\\?\").unwrap_or(&text);
+    let mut parts = rest.split(['\\', '/']);
+    let drive = parts.next().unwrap_or("");
+    matches!(drive.as_bytes(), [letter, b':'] if letter.is_ascii_alphabetic())
+        && parts
+            .next()
+            .is_some_and(|name| name.eq_ignore_ascii_case("$Extend"))
+        && parts
+            .next()
+            .is_some_and(|name| name.eq_ignore_ascii_case("$Deleted"))
 }
 
 /// Whether `path` is absolute and holds no `..`, so the directory it names as written is the one
@@ -872,6 +927,100 @@ mod tests {
             fixture.names("outside").is_empty(),
             "nothing should be written outside"
         );
+    }
+
+    const PENDING: &str = r"\\?\C:\$Extend\$Deleted\007900000014E5647C212B9E";
+
+    fn admit_with_reals(
+        reals: &[Option<&str>],
+        windows: bool,
+    ) -> (Result<PathBuf, Escape>, usize, usize) {
+        let mut seen = 0;
+        let mut pauses = 0;
+        let result = admit_real(
+            Path::new("/in/target"),
+            Path::new("/in"),
+            windows,
+            |_| {
+                let real = reals
+                    .get(seen)
+                    .or(reals.last())
+                    .copied()
+                    .flatten()
+                    .map(PathBuf::from);
+                seen += 1;
+                real
+            },
+            |_| pauses += 1,
+        );
+        (result, seen, pauses)
+    }
+
+    #[test]
+    fn a_delete_pending_real_path_is_retried_on_windows_and_admitted_once_inside() {
+        let (result, locates, pauses) =
+            admit_with_reals(&[Some(PENDING), Some(PENDING), Some("/in/target")], true);
+
+        assert_eq!(result, Ok(PathBuf::from("/in/target")));
+        assert_eq!((locates, pauses), (3, 2), "two pending tries, two pauses");
+    }
+
+    #[test]
+    fn a_delete_pending_real_path_is_refused_after_the_attempt_bound() {
+        let (result, locates, _) = admit_with_reals(&[Some(PENDING)], true);
+
+        assert_eq!(
+            result,
+            Err(Escape::Real {
+                real: Some(PathBuf::from(PENDING))
+            })
+        );
+        assert_eq!(locates, usize::try_from(RENAME_ATTEMPTS).expect("fits"));
+    }
+
+    #[test]
+    fn a_delete_pending_real_path_is_not_retried_off_windows() {
+        let (result, locates, pauses) =
+            admit_with_reals(&[Some(PENDING), Some("/in/target")], false);
+
+        assert!(result.is_err(), "refused at once: {result:?}");
+        assert_eq!((locates, pauses), (1, 0));
+    }
+
+    #[test]
+    fn an_ordinary_outside_real_path_is_refused_at_once_everywhere() {
+        for windows in [true, false] {
+            for real in [Some("/out/target"), Some(r"C:\out\target"), None] {
+                let (result, locates, pauses) =
+                    admit_with_reals(&[real, Some("/in/target")], windows);
+
+                assert!(result.is_err(), "{real:?} refused: {result:?}");
+                assert_eq!((locates, pauses), (1, 0), "{real:?} on windows={windows}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_delete_pending_detector_matches_only_the_extend_deleted_directory() {
+        let cases = [
+            (r"\\?\C:\$Extend\$Deleted\0079", true),
+            (r"c:\$Extend\$Deleted\0079", true),
+            (r"\\?\d:\$extend\$deleted", true),
+            (r"C:\$Extend\$Deleted\a\b", true),
+            (r"C:\work\$Deleted", false),
+            (r"C:\$Deleted\x", false),
+            (r"C:\$Extend\x", false),
+            (r"C:\$Extend\$DeletedMore\x", false),
+            (r"\\?\C:\work\$Extend\$Deleted\x", false),
+            (r"\\?\UNC\host\share\$Extend\$Deleted\x", false),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(is_delete_pending(Path::new(path), true), expected, "{path}");
+            assert!(
+                !is_delete_pending(Path::new(path), false),
+                "{path} off windows"
+            );
+        }
     }
 
     #[test]
