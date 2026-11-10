@@ -323,12 +323,13 @@ impl LintFile {
         })?;
         let own = Boundary::resolve(&dir);
         let copy = dir.beneath(&fixed::BIOME_JSON);
-        let names = given.names.as_ref().map(|[(_, file), (_, project)]| {
-            [
+        let names = match given.names.as_deref() {
+            Some([(_, file), (_, project)]) => Some([
                 (copy.as_path().to_path_buf(), file.clone()),
                 (dir.as_path().to_path_buf(), project.clone()),
-            ]
-        });
+            ]),
+            _ => None,
+        };
         let mut run = Self {
             base,
             dir,
@@ -455,7 +456,7 @@ pub(crate) struct Given {
     pub(crate) mirror: Option<PathBuf>,
     /// With a project config: how to name the private paths in biome's messages: the private
     /// file and directory, with the project's file and directory they stand for.
-    pub(crate) names: Option<[(PathBuf, PathBuf); 2]>,
+    pub(crate) names: Option<Vec<(PathBuf, PathBuf)>>,
 }
 
 impl Given {
@@ -504,7 +505,9 @@ pub(crate) fn project_args(env: &ToolEnv, root: &Path, doc: &Path) -> Result<Giv
     let names = found
         .as_deref()
         .zip(project_dir.zip(private_dir))
-        .map(|(file, (dir, private))| [(config, file.to_path_buf()), (private, dir.to_path_buf())]);
+        .map(|(file, (dir, private))| {
+            vec![(config, file.to_path_buf()), (private, dir.to_path_buf())]
+        });
     Ok(Given {
         flags: vec![flag],
         config: Some(private_config),
@@ -814,6 +817,7 @@ fn private_dir(parent: &Boundary, dir: &AbsolutePath) -> Option<Boundary> {
 
 #[cfg(test)]
 mod tests {
+
     use super::{
         LintFile, Refusal, diagnostics, extension, holds_comment, lint_verdict, linted_nothing,
         parse_error, project_args, without_exclusions, write_new,
