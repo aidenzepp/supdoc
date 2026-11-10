@@ -3,6 +3,7 @@
 use std::fmt;
 use std::io::ErrorKind;
 use std::ops::Range;
+use std::path::Path;
 
 use super::code_blocks::{Selected, Unselected, shown};
 use crate::exit::ExitStatus;
@@ -337,7 +338,7 @@ impl ConfigError {
                 ))
             }
             Self::ExtendsDirectory { suggestion, .. } => Some(match suggestion {
-                Some(file) => format!("Use `extends = \"{file}\"`"),
+                Some(file) => format!("Use `extends = \"{}\"`", slashed(file.as_path())),
                 None => "Point `extends` at a supdoc.config.toml file, not a directory".to_owned(),
             }),
             Self::ExtendsLoop { .. } => Some("Remove `extends` from one of these files".to_owned()),
@@ -398,6 +399,15 @@ impl ConfigError {
             | Self::NamespaceOutsideRoot { .. } => ExitStatus::Config,
         }
     }
+}
+
+/// `path` written with `/` between its components on every platform, so a suggested `extends`
+/// value is a valid TOML basic string and reads the same on Windows as elsewhere.
+fn slashed(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// What an unselected tool table's chain selects instead, as its message names it: a known
