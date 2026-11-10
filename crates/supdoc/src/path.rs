@@ -284,9 +284,6 @@ pub(crate) mod fixed {
     /// Cargo's install record beneath its home.
     #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CRATES2_JSON: FixedPath = FixedPath::new(".crates2.json");
-    /// `taskkill.exe` beneath the Windows directory.
-    #[cfg(windows)]
-    pub(crate) const SYSTEM32_TASKKILL: FixedPath = FixedPath::new("System32/taskkill.exe");
     /// Biome's private lint directory beneath the cache base.
     pub(crate) const BIOME_LINT_DIR: FixedPath = FixedPath::new("biome-lint");
     /// Biome's private config directory beneath the cache base.
@@ -485,13 +482,13 @@ pub(crate) mod fixed {
     /// The local binary directories a Python tool searches.
     pub(crate) const VENV_BINS: [FixedPath; 1] = [FixedPath::new(".venv/bin")];
     /// Windows' system directory beneath the Windows root.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    #[cfg(any(windows, test))]
     pub(crate) const SYSTEM32: FixedPath = FixedPath::new("System32");
     /// The Windows `curl` binary name.
     #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CURL_EXE: FixedPath = FixedPath::new("curl.exe");
     /// The Windows `taskkill` binary name.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    #[cfg(any(windows, test))]
     pub(crate) const TASKKILL_EXE: FixedPath = FixedPath::new("taskkill.exe");
     /// The local binary directories a Node tool searches.
     pub(crate) const NODE_BINS: [FixedPath; 1] = [FixedPath::new("node_modules/.bin")];

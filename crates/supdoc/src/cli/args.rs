@@ -450,7 +450,7 @@ impl<'a> OperatorPath<'a> {
         paths.iter().map(|path| Self(path)).collect()
     }
 
-    /// The path exactly as typed, for messages.
+    /// The path exactly as typed: for messages, and as the input to `path::as_typed`.
     pub(crate) fn as_path(self) -> &'a Path {
         self.0
     }

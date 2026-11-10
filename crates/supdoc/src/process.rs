@@ -200,10 +200,7 @@ pub(crate) fn kill_tree(pid: u32) {
     #[cfg(windows)]
     let mut kill = {
         let root = SYSTEM_ROOT.get_or_init(|| system_root(None));
-        let mut kill = Command::new(crate::path::beneath(
-            root,
-            &crate::path::fixed::SYSTEM32_TASKKILL,
-        ));
+        let mut kill = Command::new(taskkill_path(root));
         let _same = kill
             .args(["/T", "/F", "/PID", &pid.to_string()])
             .env("SystemRoot", root);
@@ -215,6 +212,14 @@ pub(crate) fn kill_tree(pid: u32) {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+}
+
+/// `taskkill.exe` beneath `root`'s `System32`, joined one typed segment at a time so the
+/// separator is the platform's own.
+#[cfg(any(windows, test))]
+fn taskkill_path(root: &std::path::Path) -> std::path::PathBuf {
+    let system32 = crate::path::beneath(root, &crate::path::fixed::SYSTEM32);
+    crate::path::beneath(&system32, &crate::path::fixed::TASKKILL_EXE)
 }
 
 /// The Windows directory `taskkill.exe` lives under, set once at the process boundary by
@@ -546,6 +551,24 @@ mod tests {
     use crate::output::OutputFormat;
 
     use super::*;
+
+    #[test]
+    fn taskkill_is_joined_as_system_root_then_system32_then_the_exe() {
+        let root = std::path::Path::new("root-dir");
+
+        let built = taskkill_path(root);
+
+        let parts: Vec<_> = built.components().collect();
+        let expected: Vec<_> = root
+            .components()
+            .chain(std::path::Path::new("System32").components())
+            .chain(std::path::Path::new("taskkill.exe").components())
+            .collect();
+        assert_eq!(
+            parts, expected,
+            "taskkill should be the root, then System32, then taskkill.exe, with no joined tail"
+        );
+    }
 
     #[test]
     fn a_live_group_is_registered_until_it_is_dropped() {
