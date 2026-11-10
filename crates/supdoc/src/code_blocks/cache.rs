@@ -151,7 +151,7 @@ impl Cache {
         let real_root = root.canonicalize().ok()?;
         for dir in run.doc.parent().into_iter().flat_map(Path::ancestors) {
             for name in run.tool.config_files {
-                let candidate = dir.join(name);
+                let candidate = crate::path::beneath(dir, name);
                 field(candidate.as_os_str().as_encoded_bytes());
                 field(&config_state(
                     &candidate,
