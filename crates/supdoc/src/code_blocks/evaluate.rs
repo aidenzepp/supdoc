@@ -4764,7 +4764,7 @@ mod tests {
     fn tier_warning_comes_once_at_the_first_held_block() {
         let held = clippy_held();
         let mut records = rust_records(
-            Path::new("/project"),
+            crate::path::fixture("/project").as_path(),
             "```rust\nlet a = 1;\n```\n\n```rust\nlet b = 2;\n```\n\n```rust\nlet c = 3;\n```\n",
         );
         for record in records.iter_mut().skip(1) {
@@ -5553,7 +5553,11 @@ mod tests {
 
     #[test]
     fn each_refused_manifest_has_its_own_reason_and_a_warning_with_help() {
-        let at = rust_record(Path::new("/p"), "```rust\npub fn f() {}\n```\n").at;
+        let at = rust_record(
+            crate::path::fixture("/p").as_path(),
+            "```rust\npub fn f() {}\n```\n",
+        )
+        .at;
         let outside = PathBuf::from("/w/Cargo.toml");
         let cases = [
             (
