@@ -2140,6 +2140,15 @@ mod tests {
             .unwrap_or_else(|| panic!("the cartridges should include {name}"))
     }
 
+    /// The virtual path `file` has beside `/p/docs/a.md`, joined as the platform joins it: a tool
+    /// is given a native path, so the separator before `file` is the platform's.
+    fn docs(file: &str) -> String {
+        Path::new("/p/docs")
+            .join(file)
+            .to_string_lossy()
+            .into_owned()
+    }
+
     /// `name`'s arguments for the `index`th block of `/p/docs/a.md`, a 2024 bash block, with
     /// `project`'s flags and no metadata path.
     fn args_of(name: &str, index: usize, project: &[OsString]) -> Vec<OsString> {
@@ -2411,7 +2420,7 @@ mod tests {
             args_of("pylint", 2, &[]),
             [
                 "--from-stdin",
-                "/p/docs/a.md.2.py",
+                &*docs("a.md.2.py"),
                 "--output-format=json2",
                 "--persistent=n",
                 "--disable=W0611,W0612,C0114,E0602",
@@ -2423,10 +2432,10 @@ mod tests {
     #[test]
     fn prettier_overrides_ignore_pragma_range_and_parser_and_gets_the_blocks_virtual_path() {
         for (tag, parser, path) in [
-            ("ts", "--parser=typescript", "/p/docs/a.md.3.ts"),
-            ("tsx", "--parser=typescript", "/p/docs/a.md.3.tsx"),
-            ("javascript", "--parser=babel", "/p/docs/a.md.3.js"),
-            ("mjs", "--parser=babel", "/p/docs/a.md.3.mjs"),
+            ("ts", "--parser=typescript", "a.md.3.ts"),
+            ("tsx", "--parser=typescript", "a.md.3.tsx"),
+            ("javascript", "--parser=babel", "a.md.3.js"),
+            ("mjs", "--parser=babel", "a.md.3.mjs"),
         ] {
             let args = cartridge("prettier").args(&Invocation {
                 doc: Path::new("/p/docs/a.md"),
@@ -2452,7 +2461,7 @@ mod tests {
                     "--range-end=Infinity",
                     parser,
                     "--stdin-filepath",
-                    path
+                    &*docs(path)
                 ]
                 .map(OsString::from),
                 "{tag}"
@@ -2463,41 +2472,16 @@ mod tests {
     #[test]
     fn prettier_reads_json_yaml_and_markdown_blocks_by_the_parser_their_tag_names() {
         for (language, tag, parser, path) in [
-            (
-                Language::Json,
-                "json",
-                "--parser=json",
-                "/p/docs/a.md.3.json",
-            ),
-            (
-                Language::Json,
-                "jsonc",
-                "--parser=jsonc",
-                "/p/docs/a.md.3.jsonc",
-            ),
-            (
-                Language::Yaml,
-                "yaml",
-                "--parser=yaml",
-                "/p/docs/a.md.3.yaml",
-            ),
-            (
-                Language::Yaml,
-                "yml",
-                "--parser=yaml",
-                "/p/docs/a.md.3.yaml",
-            ),
-            (
-                Language::Markdown,
-                "md",
-                "--parser=markdown",
-                "/p/docs/a.md.3.md",
-            ),
+            (Language::Json, "json", "--parser=json", "a.md.3.json"),
+            (Language::Json, "jsonc", "--parser=jsonc", "a.md.3.jsonc"),
+            (Language::Yaml, "yaml", "--parser=yaml", "a.md.3.yaml"),
+            (Language::Yaml, "yml", "--parser=yaml", "a.md.3.yaml"),
+            (Language::Markdown, "md", "--parser=markdown", "a.md.3.md"),
             (
                 Language::Markdown,
                 "markdown",
                 "--parser=markdown",
-                "/p/docs/a.md.3.md",
+                "a.md.3.md",
             ),
         ] {
             let tool = CARTRIDGES
@@ -2528,7 +2512,7 @@ mod tests {
                     "--range-end=Infinity",
                     parser,
                     "--stdin-filepath",
-                    path
+                    &*docs(path)
                 ]
                 .map(OsString::from),
                 "{tag}"
@@ -2539,10 +2523,10 @@ mod tests {
     #[test]
     fn eslint_reads_the_block_from_stdin_under_its_virtual_path_and_reports_json() {
         for (tag, path) in [
-            ("ts", "/p/docs/a.md.3.ts"),
-            ("tsx", "/p/docs/a.md.3.tsx"),
-            ("javascript", "/p/docs/a.md.3.js"),
-            ("cjs", "/p/docs/a.md.3.cjs"),
+            ("ts", "a.md.3.ts"),
+            ("tsx", "a.md.3.tsx"),
+            ("javascript", "a.md.3.js"),
+            ("cjs", "a.md.3.cjs"),
         ] {
             let args = cartridge("eslint").args(&Invocation {
                 doc: Path::new("/p/docs/a.md"),
@@ -2558,7 +2542,14 @@ mod tests {
 
             assert_eq!(
                 args,
-                ["--stdin", "--stdin-filename", path, "--format", "json"].map(OsString::from),
+                [
+                    "--stdin",
+                    "--stdin-filename",
+                    &*docs(path),
+                    "--format",
+                    "json"
+                ]
+                .map(OsString::from),
                 "{tag}"
             );
         }
@@ -2654,7 +2645,7 @@ mod tests {
             fragment: None,
         });
 
-        assert_eq!(posix, ["--filename", "/p/docs/a.md.3.sh", "-ln", "posix"]);
+        assert_eq!(posix, ["--filename", &*docs("a.md.3.sh"), "-ln", "posix"]);
     }
 
     #[test]
@@ -2685,11 +2676,13 @@ mod tests {
             "--config-path=/c/biome.json",
         ];
 
+        let named = docs("a.md.2.tsx");
+
         assert_eq!(
             lint(None),
             flags
                 .iter()
-                .chain(&["/p/docs/a.md.2.tsx"])
+                .chain(&[named.as_str()])
                 .map(OsString::from)
                 .collect::<Vec<_>>(),
             "a cache key names the block by its virtual path"
@@ -2758,7 +2751,10 @@ mod tests {
         };
 
         assert_eq!(name_for("/p/docs/a.md"), Some("/p/docs/a.md".into()));
-        assert_eq!(name_for("/p/src/lib.rs"), Some("/p/src/lib.rs.3.md".into()));
+        assert_eq!(
+            name_for("/p/src/lib.rs"),
+            Some(Path::new("/p/src").join("lib.rs.3.md").into_os_string())
+        );
     }
 
     #[test]
@@ -2781,7 +2777,7 @@ mod tests {
                 "format",
                 "--no-cache",
                 "--stdin-filename",
-                "/p/docs/a.md.2.py",
+                &*docs("a.md.2.py"),
                 "-"
             ]
         );
@@ -2791,7 +2787,7 @@ mod tests {
     fn black_formats_stdin_quietly_under_the_blocks_virtual_path() {
         assert_eq!(
             args_of("black", 1, &[]),
-            ["--quiet", "--stdin-filename", "/p/docs/a.md.1.py", "-"]
+            ["--quiet", "--stdin-filename", &*docs("a.md.1.py"), "-"]
         );
     }
 
@@ -2806,7 +2802,7 @@ mod tests {
                 "--no-cache",
                 "--output-format=json",
                 "--stdin-filename",
-                "/p/docs/a.md.2.py",
+                &*docs("a.md.2.py"),
                 "--ignore",
                 "F821,F401,F841",
                 "-"
@@ -3130,9 +3126,16 @@ mod tests {
 
     #[test]
     fn an_empty_entry_and_dot_are_not_searched() {
-        let dirs: Vec<_> = search_dirs(OsStr::new(":.::./bin:/usr/bin:")).collect();
+        let absolute = if cfg!(windows) {
+            r"C:\usr\bin"
+        } else {
+            "/usr/bin"
+        };
+        let path = std::env::join_paths(["", ".", "", "./bin", absolute, ""])
+            .expect("the fixture PATH should join");
+        let dirs: Vec<_> = search_dirs(&path).collect();
 
-        assert_eq!(dirs, [Path::new("/usr/bin")]);
+        assert_eq!(dirs, [Path::new(absolute)]);
     }
 
     #[cfg(unix)]
