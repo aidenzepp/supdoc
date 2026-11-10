@@ -778,7 +778,7 @@ fn every_error_has_a_code_and_message_names_a_file() {
             name: name("shared"),
             directory: file.clone(),
             span: 0..1,
-            root: file.clone(),
+            root: Box::new(file.clone()),
             escape: NamespaceEscape::AsWritten,
         },
     ];
@@ -804,7 +804,7 @@ fn namespace_outside_root_help_makes_no_claim_about_what_supdoc_reads() {
         name: "shared".parse().expect("the fixture name should be valid"),
         directory: file.clone(),
         span: 0..1,
-        root: file,
+        root: Box::new(file),
         escape: NamespaceEscape::AsWritten,
     };
     let help = error.help().expect("the error should carry a help");
@@ -989,6 +989,7 @@ fn extends_naming_a_missing_config_does_not_tell_the_user_to_name_one() {
 
 /// What a refusal shows, with `project` written as `P` in its message and help so refusals from
 /// different fixture projects compare equal.
+#[cfg(unix)]
 fn refusal_shown(error: &ConfigError, project: &str) -> (&'static str, u8, Option<String>, String) {
     (
         error.code(),

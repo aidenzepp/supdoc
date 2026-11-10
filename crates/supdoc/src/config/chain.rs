@@ -479,7 +479,7 @@ fn confined(
         name: name.clone(),
         directory: dir,
         span,
-        root: root.clone(),
+        root: Box::new(root.clone()),
         escape,
     })
 }

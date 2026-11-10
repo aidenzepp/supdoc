@@ -168,9 +168,16 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Build
         run: cargo build --workspace
+      - name: Clippy
+        # Windows-only code and tests compile here and nowhere else, so their warnings and the
+        # raw-join rule are only caught on this runner.
+        if: always()
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test build
         # Runs even when Build failed, so one log lists every error from both steps.
         if: always()
