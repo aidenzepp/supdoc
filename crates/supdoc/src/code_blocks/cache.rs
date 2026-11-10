@@ -408,6 +408,33 @@ mod tests {
     }
 
     #[test]
+    fn an_existing_path_resolves_to_its_real_path_without_a_trailing_separator() {
+        let dir = temp();
+        let real = dir
+            .path()
+            .canonicalize()
+            .expect("the directory should resolve");
+
+        let resolved_path = resolved(dir.path()).expect("an existing path should resolve");
+
+        assert_eq!(resolved_path.as_os_str(), real.as_os_str());
+    }
+
+    #[test]
+    fn a_missing_tail_is_joined_onto_the_resolved_ancestor() {
+        let dir = temp();
+        let real = dir
+            .path()
+            .canonicalize()
+            .expect("the directory should resolve");
+
+        let resolved_path =
+            resolved(&dir.path().join("a/b")).expect("a missing tail should still resolve");
+
+        assert_eq!(resolved_path, real.join("a/b"));
+    }
+
+    #[test]
     fn a_declared_size_over_the_ceiling_is_refused_before_any_byte_is_read() {
         let (source, handed_out) = Counted::new(4096);
 
