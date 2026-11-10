@@ -113,6 +113,9 @@ jobs:
           # A real-tool test whose tool is missing fails here instead of skipping.
           SUPDOC_REQUIRE_REAL_TOOLS: "1"
         run: cargo test --workspace
+      # The two skill copies must stay byte-identical to SKILL.md: edit SKILL.md, then copy it to both.
+      - name: Check the skill copies match SKILL.md
+        run: cmp SKILL.md .agents/skills/supdoc/SKILL.md && cmp SKILL.md .claude/skills/supdoc/SKILL.md
       - name: Check supdoc's own docs
         env:
           # supdoc's own repo: CI already runs this PR's code, so trusting its config adds no risk.
@@ -156,15 +159,12 @@ jobs:
           if [ "$status" -ge 2 ]; then exit "$status"; fi
 
   windows:
-    name: windows build (inventory, not required) (${{ matrix.os }})
+    name: windows build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [windows-2025, windows-11-arm]
-    # Measures the Windows port; failures are bucketed by cause, never gating. Remove once the
-    # port is repaired and this job becomes required.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
