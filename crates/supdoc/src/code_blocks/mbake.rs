@@ -621,6 +621,29 @@ mod tests {
     }
 
     #[test]
+    fn a_shebang_naming_no_python_is_never_read_as_the_interpreter() {
+        let dir = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let perl = at(dir.path(), "other/bin/perl");
+        let script = put(
+            dir.path(),
+            "own/bin/mbake",
+            &format!("#!{}\n", perl.display()),
+        );
+        write(
+            dir.path(),
+            "other/lib/python3.12/site-packages/mbake-1.4.0.dist-info/METADATA",
+            &metadata("1.4.0"),
+        );
+        write(
+            dir.path(),
+            "own/lib/python3.12/site-packages/mbake-1.5.0.dist-info/METADATA",
+            &metadata("1.5.0"),
+        );
+
+        assert_eq!(version_of(&script), Ok("1.5.0".to_owned()));
+    }
+
+    #[test]
     fn a_dist_packages_or_windows_layout_is_read_too() {
         let dir = tempfile::TempDir::new().expect("a temporary directory should be creatable");
         let debian = put(dir.path(), "usr/local/bin/mbake", "#!/bin/sh\n");
