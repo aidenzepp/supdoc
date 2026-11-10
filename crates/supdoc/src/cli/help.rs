@@ -303,9 +303,10 @@ refused.";
 
 /// `supdoc upgrade --help`: which installs it handles, and its network access.
 pub(crate) const UPGRADE_LONG_ABOUT: &str = "\
-Install a newer or older supdoc with cargo (writes; previews unless --yes; to accept code \
-changes, see `update`)
+Install a newer or older supdoc (writes; previews unless --yes; to accept code changes, see \
+`update`)
 
-Works only when this binary was installed with `cargo install` from crates.io; any other install \
-is refused, naming what supdoc sees and the manual step. This is supdoc's only network access: \
-it runs cargo, which talks to crates.io. No command checks for updates on its own.";
+A supdoc installed with `cargo install` from crates.io upgrades through cargo. A downloaded \
+release binary upgrades by downloading the release archive over HTTPS from GitHub with the \
+system curl, and checks its SHA-256 before replacing the binary. Any other install is refused, \
+naming what supdoc sees and the manual step. No command checks for updates on its own.";
