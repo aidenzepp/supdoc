@@ -81,6 +81,17 @@ pub fn rename_file_changed() -> Message {
     }
 }
 
+/// `cli-upgrade-cargo-manual`: `supdoc upgrade --yes` on Windows names the cargo command instead
+/// of running it.
+#[must_use]
+pub fn upgrade_cargo_manual() -> Message {
+    let error = crate::cli::upgrade::cargo_manual_example(Path::new("C:\\Users\\a\\.cargo"));
+    Message {
+        code: error.code().to_owned(),
+        help: Some(error.help().to_owned()),
+    }
+}
+
 /// `fix-file-changed`: scans and plans fixes for the project at `root`, runs `edit`, then applies
 /// the plan and returns the first skipped file's finding.
 ///
