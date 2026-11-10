@@ -158,28 +158,112 @@ fn dockerfile_a_config_error_on_stderr_is_a_tool_failure_not_a_pass() {
 
 #[test]
 fn dockerfile_a_config_line_supdoc_cant_sort_leaves_the_blocks_unchecked() {
+    for config in [
+        "\"format\": tty\n",
+        "ignored: []\rformat: tty\n",
+        "  ignored: [DL3006]\n",
+    ] {
+        let project = dockerfile_project("dockerfile", "FROM ubuntu");
+        project.write(".hadolint.yml", config);
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        stub_hadolint(outside.path(), "exit 9");
+
+        let json = project
+            .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+            .assert_exit(0)
+            .json();
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-not-checked"],
+            "{config:?}: {json}"
+        );
+        assert!(
+            at(&json, "/findings/0/message")
+                .as_str()
+                .is_some_and(|message| message.contains("`.hadolint.yml`")),
+            "{config:?}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/not_checked"),
+            1,
+            "{config:?}: {json}"
+        );
+    }
+}
+
+/// A [`dockerfile_project`] whose blocks are formatted by the custom command `fmt-stub`, which
+/// leaves `formatted` beside itself and prints the block back unchanged.
+fn custom_formatted_project(dir: &Path) -> Project {
     let project = dockerfile_project("dockerfile", "FROM ubuntu");
-    project.write(".hadolint.yml", "\"format\": tty\n");
-    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
-    stub_hadolint(outside.path(), "exit 9");
-
-    let json = project
-        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
-        .assert_exit(0)
-        .json();
-
-    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
-    assert!(
-        at(&json, "/findings/0/message")
-            .as_str()
-            .is_some_and(|message| message.contains("`.hadolint.yml`")),
-        "{json}"
+    project.write(
+        "supdoc.config.toml",
+        "[features.code-blocks]\n[features.code-blocks.dockerfile]\n\
+         formatter = { command = [\"fmt-stub\"] }\n",
     );
-    assert_eq!(
-        at(&json, "/data/summary/code_blocks/not_checked"),
-        1,
-        "{json}"
-    );
+    let path = dir.join("fmt-stub");
+    std::fs::write(&path, "#!/bin/sh\n: > \"${0%/*}/formatted\"\n/bin/cat\n")
+        .expect("the formatter stub should be writable");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("the formatter stub should be made executable");
+    project
+}
+
+#[test]
+fn dockerfile_an_unverified_hadolint_or_a_refused_config_still_runs_a_custom_formatter() {
+    for (version, config, says) in [
+        (
+            "Haskell Dockerfile Linter 2.16.0",
+            None,
+            "isn't a version supdoc's checks are verified against",
+        ),
+        (
+            "Haskell Dockerfile Linter 2.15.1",
+            Some("  ignored: [DL3006]\n"),
+            "`.hadolint.yaml`",
+        ),
+    ] {
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let project = custom_formatted_project(outside.path());
+        if let Some(config) = config {
+            project.write(".hadolint.yaml", config);
+        }
+        stub_hadolint(outside.path(), &stub_at(version, WARNING_EXIT_0));
+
+        let json = project
+            .supdoc_in_with(
+                ".",
+                &["check", "--json"],
+                &[("PATH", outside.path()), ("SUPDOC_TRUST", Path::new("1"))],
+            )
+            .assert_exit(0)
+            .json();
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-not-checked"],
+            "{version}: {json}"
+        );
+        assert!(
+            at(&json, "/findings/0/message")
+                .as_str()
+                .is_some_and(|message| message.contains(says)),
+            "{version}: {json}"
+        );
+        assert!(
+            outside.path().join("formatted").exists(),
+            "{version}: the custom formatter didn't run: {json}"
+        );
+        assert!(
+            !outside.path().join("seen").exists(),
+            "{version}: the lint step ran"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/lint_not_run"),
+            1,
+            "{version}: {json}"
+        );
+    }
 }
 
 #[test]

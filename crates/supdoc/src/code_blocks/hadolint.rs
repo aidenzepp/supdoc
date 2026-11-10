@@ -5,15 +5,17 @@
 //! passes `--config` with a private file of its own and hadolint searches nowhere. supdoc finds
 //! the project's `.hadolint.yaml` or `.hadolint.yml` itself, walking up from the doc to the root,
 //! and writes again only the top-level keys that say which rules apply and how: `ignored`,
-//! `override`, `trustedRegistries`, `label-schema` and `strict-labels`. Every other key is
+//! `override`, `trustedRegistries`, `label-schema`, `strict-labels` and `disable-ignore-pragma`.
+//! Every other key is
 //! dropped: `format` (a config's `format` beats `-f json` on the command line), `no-color`, and
 //! `no-fail` and `failure-threshold`, which change only hadolint's exit status. supdoc reads the
 //! JSON, never the exit status, so every finding at any level is reported.
 //!
 //! The config is read as text, never parsed as YAML: each top-level key starts a line, and every
 //! indented, blank, comment or `- ` line after it belongs to it. A config with any other kind of
-//! line at the top (a quoted or complex key, a document marker, a flow mapping) is refused, so
-//! nothing reaches hadolint that supdoc didn't sort. hadolint lints with its defaults when it
+//! line at the top (a quoted or complex key, a document marker, a flow mapping, an indented line
+//! before the first key) or a carriage return that doesn't end a line (hadolint breaks lines on
+//! it) is refused, so nothing reaches hadolint that supdoc didn't sort. hadolint lints with its defaults when it
 //! can't read a config, saying so only on stderr: anything on stderr is a tool failure (see
 //! [`lint_verdict`]).
 //!
@@ -36,13 +38,16 @@ use crate::path::{self, Component, fixed};
 const MAX_CONFIG: u64 = 256 * 1024;
 
 /// The top-level keys supdoc keeps from the project's config: the rules hadolint applies and the
-/// levels it gives them. A severity `override` can raise or lower a level, never hide a finding.
-const KEPT: [&str; 5] = [
+/// levels it gives them. A severity `override` can raise or lower a level, never hide a finding;
+/// `disable-ignore-pragma` can only add findings, so dropping it would make supdoc laxer than the
+/// project's own hadolint.
+const KEPT: [&str; 6] = [
     "ignored",
     "override",
     "trustedRegistries",
     "label-schema",
     "strict-labels",
+    "disable-ignore-pragma",
 ];
 
 /// What supdoc's copy holds when the project keeps none of [`KEPT`]: hadolint reads an empty
@@ -299,26 +304,46 @@ fn read_text(root: &Path, found: &Path) -> Result<String, &'static str> {
 }
 
 /// What supdoc writes again of the config `text`: the lines of each top-level key in [`KEPT`],
-/// in order, and nothing of any other key. A top-level key is a line that starts with a plain
-/// name (letters, digits, `-` and `_`) followed by `:` and a space or the line's end; every
-/// following line that is blank, indented, a comment or a `- ` item belongs to it. Comments
-/// before the first key are dropped.
+/// in order, and nothing of any other key, with `\n` ending every line. A top-level key is a line
+/// that starts with a plain name (letters, digits, `-` and `_`) followed by `:` and a space or
+/// the line's end; every following line that is blank, indented, a comment or a `- ` item belongs
+/// to it. Blank and comment lines before the first key are dropped.
 ///
 /// # Errors
 ///
-/// Why supdoc doesn't read the config: a line at the top that is none of those.
+/// Why supdoc doesn't read the config: a carriage return that doesn't end a line (hadolint breaks
+/// lines on it, so it could hide a key in the line before), an indented or `- ` line before the
+/// first key (hadolint may read an indented key as a top-level one), or a line at the top that is
+/// none of those.
 fn kept(text: &str) -> Result<String, &'static str> {
+    let text = text.replace("\r\n", "\n");
+    if text.contains('\r') {
+        return Err(
+            "holds a carriage return that doesn't end a line, which hadolint reads as a line \
+             break: end each line with `\\n` or `\\r\\n`",
+        );
+    }
     let mut copy = String::new();
-    let mut keeping = false;
+    // Whether the current top-level key is kept; `None` before the first key.
+    let mut keeping = None;
     for line in text.lines() {
-        let continues = line.is_empty()
-            || line.starts_with([' ', '\t', '#'])
-            || line == "-"
-            || line.starts_with("- ");
-        if continues {
-            if keeping {
-                copy.push_str(line);
-                copy.push('\n');
+        let trimmed = line.trim_start();
+        let blank_or_comment = trimmed.is_empty() || trimmed.starts_with('#');
+        let continues = line.starts_with([' ', '\t']) || line == "-" || line.starts_with("- ");
+        if blank_or_comment || continues {
+            match keeping {
+                Some(true) => {
+                    copy.push_str(line);
+                    copy.push('\n');
+                }
+                None if !blank_or_comment => {
+                    return Err(
+                        "holds an indented or `- ` line before its first top-level key, which \
+                         hadolint may read as a key of its own: start each top-level key at the \
+                         start of a line",
+                    );
+                }
+                Some(false) | None => {}
             }
             continue;
         }
@@ -326,8 +351,9 @@ fn kept(text: &str) -> Result<String, &'static str> {
             "holds a line supdoc doesn't read as a top-level key: write each key plainly as \
              `<name>: <value>` at the start of a line",
         )?;
-        keeping = KEPT.contains(&key);
-        if keeping {
+        let keep = KEPT.contains(&key);
+        keeping = Some(keep);
+        if keep {
             copy.push_str(line);
             copy.push('\n');
         }
@@ -509,7 +535,48 @@ mod tests {
         assert_eq!(
             copy,
             "ignored:\n- DL3006\n  # why\n  - DL3008\noverride:\n  error: [DL3015]\n\
-             trustedRegistries: [docker.io]\nlabel-schema:\n  author: text\nstrict-labels: true\n"
+             disable-ignore-pragma: true\ntrustedRegistries: [docker.io]\nlabel-schema:\n  \
+             author: text\nstrict-labels: true\n"
+        );
+    }
+
+    #[test]
+    fn a_bare_carriage_return_is_refused_so_it_cant_smuggle_a_dropped_key() {
+        let refused = kept("ignored: []\rformat: tty\n");
+
+        assert!(
+            refused.is_err_and(|why| why.contains("carriage return")),
+            "a lone \\r should be refused"
+        );
+    }
+
+    #[test]
+    fn a_crlf_config_keeps_its_kept_keys_with_plain_line_ends() {
+        assert_eq!(
+            kept("format: tty\r\nignored:\r\n  - DL3006\r\nno-fail: true\r\n"),
+            Ok("ignored:\n  - DL3006\n".to_owned())
+        );
+    }
+
+    #[test]
+    fn an_indented_line_before_the_first_key_is_refused() {
+        for config in [
+            "  ignored: [DL3006]\n",
+            "# header\n\n  ignored: [DL3006]\nformat: tty\n",
+            "- DL3006\n",
+        ] {
+            assert!(
+                kept(config).is_err_and(|why| why.contains("before its first top-level key")),
+                "{config:?} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn indented_comments_and_blanks_before_the_first_key_are_dropped() {
+        assert_eq!(
+            kept("  # a note\n   \nignored: []\n"),
+            Ok("ignored: []\n".to_owned())
         );
     }
 

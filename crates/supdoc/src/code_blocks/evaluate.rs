@@ -1911,8 +1911,10 @@ struct HadolintConfigs {
 impl HadolintConfigs {
     /// Gives `record`, a Dockerfile block, the `--config` flags hadolint gets for its doc, found
     /// once per directory (see [`hadolint::project_args`]), then checks hadolint's version (see
-    /// [`Self::verified`]). A refused config settles the block as not checked, with its one
-    /// warning per refusal added to `slots`. Whether the block goes on to its tools.
+    /// [`Self::verified`]). A refused config takes only the lint step off, as an unverified
+    /// hadolint does, with its one warning per refusal added to `slots`: a block with another
+    /// format step goes on to it, and one without is settled as not checked. Whether the block
+    /// goes on to its tools.
     ///
     /// Effect: reads the config and may create supdoc's private directory and file for it.
     fn give(
@@ -1950,6 +1952,9 @@ impl HadolintConfigs {
                     self.warned.push(refusal);
                     slots.push(Slot::Found(warning));
                 }
+                if formats_without_hadolint(record) {
+                    return take_lint_off(record, HADOLINT_REFUSED);
+                }
                 record.state = BlockState::NotChecked(NotChecked::ToolConfig);
                 record.reason = Some(reason);
                 false
@@ -1957,11 +1962,12 @@ impl HadolintConfigs {
         }
     }
 
-    /// Whether the hadolint on `PATH` is a version supdoc is verified against (see
-    /// [`hadolint::VERIFIED`]), read once per run. When it isn't, or can't be read, `record`'s
-    /// lint step doesn't run, with [`HADOLINT_UNVERIFIED`] as its reason, and the run's one
-    /// warning goes to `slots`. A hadolint that isn't on `PATH`, or is inside the checkout, is
-    /// left to the usual lookup.
+    /// Whether `record` goes on to its tools once the hadolint on `PATH` has been checked against
+    /// the versions supdoc is verified against (see [`hadolint::VERIFIED`]), read once per run.
+    /// When it isn't one, or can't be read, `record`'s lint step doesn't run, with
+    /// [`HADOLINT_UNVERIFIED`] as its reason, and the run's one warning goes to `slots`; a format
+    /// step by another tool still runs. A hadolint that isn't on `PATH`, or is inside the
+    /// checkout, is left to the usual lookup.
     ///
     /// Effect: runs `hadolint --version` the first time.
     fn verified(
@@ -2004,9 +2010,22 @@ impl HadolintConfigs {
                 reason: HADOLINT_UNVERIFIED,
             };
         }
-        false
+        formats_without_hadolint(record)
     }
 }
+
+/// Whether `record` has a format step that hadolint doesn't run, which goes on when hadolint's
+/// lint step is taken off.
+fn formats_without_hadolint(record: &BlockRecord) -> bool {
+    record
+        .tool
+        .as_ref()
+        .is_some_and(|tool| !tool.runs("hadolint"))
+}
+
+/// Why a Dockerfile block's lint step didn't run when supdoc couldn't give hadolint the
+/// project's config.
+const HADOLINT_REFUSED: &str = "supdoc couldn't give hadolint the project's config";
 
 /// Why a Dockerfile block's lint step didn't run when the hadolint on `PATH` isn't a verified
 /// version.
@@ -2023,7 +2042,7 @@ fn hadolint_refusal(
     let (reason, message, help) = match refusal {
         hadolint::Refusal::Config { file, why } => (
             format!("hadolint config `{file}` {why}"),
-            format!("the project's `{file}` {why}, so its Dockerfile blocks aren't checked"),
+            format!("the project's `{file}` {why}, so its Dockerfile blocks aren't linted"),
             format!(
                 "make `{file}` a plain YAML mapping of at most 256 KiB inside the project, or mark \
                  the blocks `ignore(<why>)`"
