@@ -1196,6 +1196,48 @@ fn yes_replaces_the_binary_with_the_archives_and_leaves_nothing_beside_it() {
 }
 
 #[test]
+fn yes_removes_the_files_an_earlier_upgrade_left_and_only_those() {
+    let fixture = released();
+    fixture.publish_stub();
+    let dist = fixture.path("dist");
+    std::fs::write(dist.join(".supdoc-upgrade-123-456"), "stale")
+        .expect("the leftover should write");
+    std::fs::write(dist.join("supdoc.exe.old"), "aside").expect("the aside should write");
+    std::fs::write(dist.join("supdoc-upgrade"), "foreign").expect("the foreign file should write");
+    std::fs::write(dist.join(".supdoc-upgrade"), "foreign").expect("the bare prefix should write");
+    std::fs::create_dir(dist.join(".supdoc-upgrade-dir")).expect("the directory should create");
+    std::fs::write(dist.join("target-of-link"), "keep").expect("the link target should write");
+    std::os::unix::fs::symlink(dist.join("target-of-link"), dist.join(".supdoc-upgrade-x"))
+        .expect("the symlink should be creatable");
+
+    let run = fixture.run_released(&["upgrade", NEWER, "--yes"]);
+
+    let _ = run.assert_exit(0);
+    assert_eq!(
+        names_in(&dist),
+        [
+            ".supdoc-upgrade",
+            ".supdoc-upgrade-dir",
+            ".supdoc-upgrade-x",
+            "supdoc",
+            "supdoc-upgrade",
+            "target-of-link"
+        ]
+    );
+    assert_eq!(
+        std::fs::read(dist.join("target-of-link")).expect("the target should read"),
+        b"keep"
+    );
+    let installed = dist.join("supdoc");
+    assert_eq!(
+        std::fs::read(&installed).expect("the binary should read"),
+        STUB
+    );
+    let ran = retry_busy(|| Command::new(&installed).output()).expect("the stub should run");
+    assert_eq!(String::from_utf8_lossy(&ran.stdout), "stub-installed\n");
+}
+
+#[test]
 fn json_for_an_applied_release_binary_upgrade_says_installed() {
     let fixture = released();
     fixture.publish_stub();

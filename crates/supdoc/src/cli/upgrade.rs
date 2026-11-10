@@ -526,7 +526,11 @@ fn run_release_binary(
     let (outcome, asset, sha256) = match found {
         Some((asset, digest)) if direction != Direction::Same => {
             if applied {
-                install_release(&target, exe, &asset, &digest, context)?;
+                for note in install_release(&target, exe, &asset, &digest, context)? {
+                    output
+                        .note(&note)
+                        .map_err(|error| CliError::output_failed("the upgrade report", &error))?;
+                }
                 (UpgradeOutcome::Installed, Some(asset), Some(digest))
             } else {
                 (UpgradeOutcome::Previewed, Some(asset), Some(digest))
@@ -568,7 +572,10 @@ fn run_release_binary(
 /// Fetches the archive at `asset`, checks it against `digest`, and replaces `exe` with its
 /// binary.
 ///
-/// Effect: one fetch of the archive, then the file changes of [`install::replace_exe`].
+/// Returns the notes about files an earlier upgrade left that could not be removed.
+///
+/// Effect: one fetch of the archive, the removals of [`install::remove_leftovers`], then the
+/// file changes of [`install::replace_exe`].
 ///
 /// # Errors
 ///
@@ -581,7 +588,7 @@ fn install_release(
     asset: &str,
     digest: &str,
     context: &Context,
-) -> Result<(), CliError> {
+) -> Result<Vec<String>, CliError> {
     let retry = command_line(context, "upgrade", &[target.release()], &["--yes"]);
     let exe = exe.ok_or_else(|| cannot_tell("its own path could not be found"))?;
     let triple = release::running_triple().ok_or_else(no_asset_for_platform)?;
@@ -607,6 +614,7 @@ fn install_release(
             ExitStatus::Failed,
         )
     })?;
+    let notes = install::remove_leftovers(exe);
     install::replace_exe(exe, &binary).map_err(|error| {
         CliError::new(
             "cli-upgrade-replace-failed",
@@ -620,7 +628,8 @@ fn install_release(
             ),
             ExitStatus::Io,
         )
-    })
+    })?;
+    Ok(notes)
 }
 
 /// The version to install and, when it differs from the running one, the archive URL and digest
