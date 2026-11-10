@@ -20,7 +20,7 @@ use crate::hash::Hash;
 use crate::link::SourcePath;
 use crate::lock::model::Lockfile;
 use crate::output::paths::PathStyle;
-use crate::path::AbsolutePath;
+use crate::path::{AbsolutePath, FixedPath};
 use crate::read::cartridge::Languages;
 use crate::read::error::CartridgeLoadError;
 use crate::trust::{Grant, Unread};
@@ -4016,7 +4016,7 @@ struct Lookup {
     /// The binary looked up.
     binary: String,
     /// The root-relative directories searched before `PATH`.
-    bins: &'static [&'static str],
+    bins: &'static [FixedPath],
     /// Where it was found.
     found: Found,
     /// Whether the run's one warning for the binary was given.
@@ -4088,7 +4088,10 @@ fn found_runs(
                         format!(
                             "install it with `{}`, or into the project's {}",
                             cartridge.install,
-                            bins.join(" or ")
+                            bins.iter()
+                                .map(FixedPath::as_str)
+                                .collect::<Vec<_>>()
+                                .join(" or ")
                         )
                     };
                     tool_warning(binary, (&install, bins), &found, at)
@@ -4138,7 +4141,7 @@ fn selected_tools(
 /// before `PATH`. `None` when it is on `PATH` outside the root.
 fn tool_warning(
     binary: &str,
-    (install, bins): (&str, &[&str]),
+    (install, bins): (&str, &[FixedPath]),
     found: &Found,
     at: &Location,
 ) -> Option<Finding> {
