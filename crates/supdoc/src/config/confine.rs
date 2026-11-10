@@ -35,7 +35,8 @@ use std::marker::PhantomData;
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::path::AbsolutePath;
 
@@ -304,6 +305,44 @@ fn create_exclusive_temp(
     ))
 }
 
+/// Renames to try in all when another thread is replacing the same target (Windows only).
+const RENAME_ATTEMPTS: u32 = 10;
+
+/// Pause between those renames; ten tries wait at most 180 ms in all.
+const RENAME_PAUSE: Duration = Duration::from_millis(20);
+
+/// Whether a failed rename, `tried` renames in, is worth another go. Only on Windows, where a
+/// rename onto a file that a concurrent replace holds open fails with `PermissionDenied`, and
+/// only while attempts remain. Any other error means the rename can't succeed by waiting.
+fn rename_is_worth_retrying(error: &io::Error, tried: u32, windows: bool) -> bool {
+    windows && tried < RENAME_ATTEMPTS && error.kind() == io::ErrorKind::PermissionDenied
+}
+
+/// Runs `rename`, rerunning it after `pause` while [`rename_is_worth_retrying`] says so, and
+/// returns the last result.
+///
+/// Effect: runs `rename` and sleeps through `pause`.
+///
+/// # Errors
+///
+/// The last error `rename` returned.
+fn rename_retrying(
+    mut rename: impl FnMut() -> io::Result<()>,
+    windows: bool,
+    mut pause: impl FnMut(),
+) -> io::Result<()> {
+    let mut tried = 1;
+    loop {
+        match rename() {
+            Err(error) if rename_is_worth_retrying(&error, tried, windows) => {
+                pause();
+                tried += 1;
+            }
+            result => return result,
+        }
+    }
+}
+
 /// Writes `bytes` to a new file beside `target` and renames it into place, so an interrupted
 /// run never leaves half a file. With `permissions`, the new file gets them before the rename;
 /// without, it keeps the default for a new file. The temporary file is created exclusively, so a
@@ -326,7 +365,13 @@ pub(crate) fn write_atomically(
         .and_then(|()| permissions.map_or(Ok(()), |kept| file.set_permissions(kept.clone())))
         .and_then(|()| file.sync_all());
     drop(file);
-    let finished = written.and_then(|()| fs::rename(&temp, target));
+    let finished = written.and_then(|()| {
+        rename_retrying(
+            || fs::rename(&temp, target),
+            cfg!(windows),
+            || thread::sleep(RENAME_PAUSE),
+        )
+    });
     if finished.is_err() {
         drop(fs::remove_file(&temp));
     }
@@ -771,6 +816,78 @@ mod tests {
             fixture.names("outside").is_empty(),
             "nothing should be written outside"
         );
+    }
+
+    #[test]
+    fn a_denied_rename_is_retried_on_windows_until_it_succeeds() {
+        let mut calls = 0;
+        let mut pauses = 0;
+        let result = rename_retrying(
+            || {
+                calls += 1;
+                if calls < 4 {
+                    Err(io::ErrorKind::PermissionDenied.into())
+                } else {
+                    Ok(())
+                }
+            },
+            true,
+            || pauses += 1,
+        );
+
+        assert!(result.is_ok(), "the fourth rename succeeds: {result:?}");
+        assert_eq!((calls, pauses), (4, 3), "three denials, three pauses");
+    }
+
+    #[test]
+    fn a_denied_rename_stops_after_the_attempt_limit_with_the_same_error() {
+        let mut calls = 0;
+        let result = rename_retrying(
+            || {
+                calls += 1;
+                Err(io::ErrorKind::PermissionDenied.into())
+            },
+            true,
+            || {},
+        );
+
+        assert_eq!(calls, RENAME_ATTEMPTS, "the limit bounds the renames");
+        assert_eq!(
+            result.expect_err("every rename was denied").kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn a_denied_rename_is_not_retried_off_windows() {
+        let mut calls = 0;
+        let result = rename_retrying(
+            || {
+                calls += 1;
+                Err(io::ErrorKind::PermissionDenied.into())
+            },
+            false,
+            || {},
+        );
+
+        assert!(result.is_err(), "the denial is returned");
+        assert_eq!(calls, 1, "Unix renames once");
+    }
+
+    #[test]
+    fn other_rename_errors_are_not_retried_on_windows() {
+        let mut calls = 0;
+        let result = rename_retrying(
+            || {
+                calls += 1;
+                Err(io::ErrorKind::NotFound.into())
+            },
+            true,
+            || {},
+        );
+
+        assert!(result.is_err(), "the error is returned");
+        assert_eq!(calls, 1, "only a denial is worth waiting out");
     }
 
     #[test]
