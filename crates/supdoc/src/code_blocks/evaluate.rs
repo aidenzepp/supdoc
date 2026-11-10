@@ -589,8 +589,8 @@ fn run_jobs(
         let record = records.get(job.record)?;
         let format = job.format.as_ref().and_then(|run| match &run.tool {
             Tool::Custom(custom) => run_custom_formatter(custom, &run.program, record, session),
-            Tool::Cartridge(tool) if let Some(reason) = format_not_given(tool, record) => {
-                Some(Err(reason.into()))
+            Tool::Cartridge(tool) if let Some(not_run) = format_not_given(tool, record) => {
+                Some(Err(not_run))
             }
             Tool::Cartridge(tool) => {
                 let rust = rust.filter(|_| run.tool.is("rustfmt"));
@@ -909,6 +909,27 @@ fn superhtml_blank(at: &Location) -> Finding {
     .with_location(at.clone())
 }
 
+/// The run's one `code-block-not-checked` warning, at `at`, the first HTML block superhtml isn't
+/// given because it holds an element whose content superhtml rewrites (see
+/// [`superhtml::not_given`]): `said` names the element and its doc line.
+fn superhtml_rewritten(at: &Location, said: Option<&str>) -> Finding {
+    let element = said.unwrap_or("an element");
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        format!(
+            "superhtml would change the content of the block's {element}, which HTML keeps as \
+             written, so the block's format step didn't run"
+        ),
+    )
+    .with_help(
+        "superhtml keeps only `<pre>` content as written: it re-indents `<textarea>`, `<xmp>`, \
+         `<listing>` and `<plaintext>` content and each line of a `<script>` or `<style>` body; \
+         mark the block `format(off: <reason>)` to leave it as written",
+    )
+    .with_location(at.clone())
+}
+
 /// The run's one `code-block-not-checked` warning, at `at`, the first Go block whose `go vet`
 /// step didn't run because it imports a package outside the standard library.
 fn vet_offline(at: &Location) -> Finding {
@@ -1103,6 +1124,7 @@ impl NotRunWarnings {
             PYLINT_SWITCHED_OFF => pylint_switched_off(at),
             PRETTIER_SWITCHED_OFF => prettier_switched_off(at),
             superhtml::BLANK => superhtml_blank(at),
+            superhtml::REWRITTEN => superhtml_rewritten(at, said),
             ESLINT_SWITCHED_OFF => eslint_switched_off(at),
             ESLINT_IGNORED => eslint_ignored(at),
             YAMLLINT_REJECTED => yamllint_rejected(at, said),
@@ -4004,13 +4026,26 @@ const SUPERHTML: &str = "superhtml";
 
 /// Why `tool`'s format step doesn't run on `record`'s block, so the tool is never spawned: it is
 /// prettier and the block holds `prettier-ignore` (see [`prettier::switches_format_off`]), or it
-/// is superhtml and the block is one superhtml isn't given (see [`superhtml::not_given`]).
+/// is superhtml and the block is one superhtml isn't given (see [`superhtml::not_given`]),
+/// naming, for an element whose content superhtml rewrites, the element and its doc line.
 /// `None` otherwise.
-fn format_not_given(tool: &ToolCartridge, record: &BlockRecord) -> Option<&'static str> {
-    let input = &record.pending.as_ref()?.input;
+fn format_not_given(tool: &ToolCartridge, record: &BlockRecord) -> Option<NotRun> {
+    let pending = record.pending.as_ref()?;
+    let input = &pending.input;
     match tool.name {
-        PRETTIER => prettier::switches_format_off(input).then_some(PRETTIER_SWITCHED_OFF),
-        SUPERHTML => superhtml::not_given(input),
+        PRETTIER => prettier::switches_format_off(input).then(|| PRETTIER_SWITCHED_OFF.into()),
+        SUPERHTML => superhtml::not_given(input).map(|withheld| NotRun {
+            reason: withheld.reason(),
+            said: match withheld {
+                superhtml::Withheld::Blank => None,
+                superhtml::Withheld::Rewritten { element, line } => {
+                    Some(body_place(line, pending).map_or_else(
+                        || format!("`<{element}>`"),
+                        |place| format!("`<{element}>` on line {}", place.line),
+                    ))
+                }
+            },
+        }),
         _ => None,
     }
 }

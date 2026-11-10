@@ -8,8 +8,13 @@
 //! a doctype or anything else the block holds changes only how superhtml reads it, never what
 //! supdoc writes beyond superhtml's own output for it.
 //!
-//! A block of only whitespace never reaches it (see [`not_given`]): superhtml prints nothing for
-//! it and exits 0, and `fix` would write that nothing over the block.
+//! Two kinds of block never reach it (see [`not_given`]). A block of only whitespace: superhtml
+//! prints nothing for it and exits 0, and `fix` would write that nothing over the block. And a
+//! block holding text superhtml rewrites though HTML keeps it as written: superhtml 0.7.1 keeps
+//! only `<pre>` content verbatim, and re-indents the content of `<textarea>` (the field's value),
+//! `<xmp>`, `<listing>` and `<plaintext>`, and each line of a `<script>` or `<style>` body, which
+//! changes a multi-line template literal or a backslash-continued string. That is a limit of
+//! superhtml's formatter, so supdoc withholds the block rather than judge or write its output.
 
 use std::path::Path;
 
@@ -21,11 +26,116 @@ use super::tools::ToolEnv;
 pub(crate) const BLANK: &str = "the block holds only whitespace, and superhtml prints nothing for \
                                 such input instead of formatting it";
 
+/// Why a block's format step didn't run when superhtml would change the content of an element
+/// it holds (see [`Withheld::Rewritten`]).
+pub(crate) const REWRITTEN: &str = "the block holds an element whose content superhtml rewrites \
+                                    though HTML keeps it as written";
+
+/// Why a block isn't given to superhtml.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Withheld {
+    /// It is empty or holds only whitespace ([`BLANK`]).
+    Blank,
+    /// It holds an element superhtml would change the content of ([`REWRITTEN`]).
+    Rewritten {
+        /// The element's name, lowercase.
+        element: &'static str,
+        /// The block line (0-based) its start tag is on.
+        line: usize,
+    },
+}
+
+impl Withheld {
+    /// The format step's reason for the block.
+    #[must_use]
+    pub(crate) const fn reason(self) -> &'static str {
+        match self {
+            Self::Blank => BLANK,
+            Self::Rewritten { .. } => REWRITTEN,
+        }
+    }
+}
+
+/// The elements whose whole content superhtml re-indents though HTML keeps it as written: a
+/// `<textarea>`'s content is the field's value, and the others render preformatted.
+const VERBATIM: [&str; 4] = ["textarea", "xmp", "listing", "plaintext"];
+
+/// The elements whose body superhtml re-indents line by line: one that spans lines can hold a
+/// string literal whose inner whitespace is its value.
+const INDENTED: [&str; 2] = ["script", "style"];
+
 /// Why `input`, an HTML block as its formatter reads it, isn't given to superhtml: it is empty
-/// or holds only whitespace ([`BLANK`]). `None` when superhtml may run.
+/// or holds only whitespace ([`Withheld::Blank`]), or it holds, first in the block, a start tag
+/// of a [`VERBATIM`] element or of an [`INDENTED`] element whose body spans lines
+/// ([`Withheld::Rewritten`]). `None` when superhtml may run.
+///
+/// The scan is a superset of what superhtml parses as those elements: a start tag counts anywhere
+/// (in a comment, a string, another element's content), in any case, with or without attributes,
+/// closed or not. A body runs from the first `>` after the name to the element's end tag, or to
+/// the end of the block when it has none.
 #[must_use]
-pub(crate) fn not_given(input: &str) -> Option<&'static str> {
-    input.chars().all(char::is_whitespace).then_some(BLANK)
+pub(crate) fn not_given(input: &str) -> Option<Withheld> {
+    if input.chars().all(char::is_whitespace) {
+        return Some(Withheld::Blank);
+    }
+    input.match_indices('<').find_map(|(at, _)| {
+        let after = input.get(at + 1..)?;
+        let line = input.get(..at)?.matches('\n').count();
+        if let Some(element) = opened(after, &VERBATIM) {
+            return Some(Withheld::Rewritten { element, line });
+        }
+        let element = opened(after, &INDENTED)?;
+        let body = after.get(element.len()..)?;
+        spans_lines(body, element).then_some(Withheld::Rewritten { element, line })
+    })
+}
+
+/// The one of `names` whose start tag `after`, the text after a `<`, opens: the name in any ASCII
+/// case, then whitespace, `/`, `>` or the end of the block.
+fn opened(after: &str, names: &[&'static str]) -> Option<&'static str> {
+    names.iter().copied().find(|name| {
+        after
+            .get(..name.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(name))
+            && after
+                .get(name.len()..)
+                .and_then(|rest| rest.chars().next())
+                .is_none_or(|next| next.is_whitespace() || next == '/' || next == '>')
+    })
+}
+
+/// Whether the body of `element`, a `<script>` or `<style>` whose start tag `rest` follows the
+/// name of, spans more than one line. The body starts after the first `>`, or, in a start tag
+/// never closed, right after the name, and ends at the element's end tag ([`end_tag`]), else at
+/// the end of the block. A `<script>` body that holds `<!--` runs to the end of the block: there
+/// a `</script>` may only close a script the comment opens, not the element.
+fn spans_lines(rest: &str, element: &str) -> bool {
+    let body = rest
+        .find('>')
+        .map_or(rest, |open| rest.get(open + 1..).unwrap_or_default());
+    let end = end_tag(body, element).unwrap_or(body.len());
+    let closed = body.get(..end).unwrap_or(body);
+    let body = if element == "script" && closed.contains("<!--") {
+        body
+    } else {
+        closed
+    };
+    body.contains(['\n', '\r'])
+}
+
+/// Where in `body` the first end tag of `element` starts: `</`, the name in any ASCII case, then
+/// a tab, line feed, form feed, space, `/` or `>`, as HTML ends a raw-text body. `None` when it
+/// has none.
+fn end_tag(body: &str, element: &str) -> Option<usize> {
+    body.match_indices("</").map(|(at, _)| at).find(|&at| {
+        let name = body.get(at + 2..).unwrap_or_default();
+        name.get(..element.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(element))
+            && name
+                .get(element.len()..)
+                .and_then(|rest| rest.chars().next())
+                .is_some_and(|next| matches!(next, '\t' | '\n' | '\x0C' | ' ' | '/' | '>'))
+    })
 }
 
 /// What starts each error superhtml prints for a block read on stdin: `<stdin>:<row>:<col>: `.
@@ -119,15 +229,110 @@ pub(crate) fn version_of(
 
 #[cfg(test)]
 mod tests {
-    use super::{BLANK, not_given, parse_error, verified};
+    use super::{BLANK, REWRITTEN, Withheld, not_given, parse_error, verified};
     use crate::code_blocks::format::ParseError;
+
+    /// [`Withheld::Rewritten`] for `element` on block line `line`.
+    const fn rewritten(element: &'static str, line: usize) -> Withheld {
+        Withheld::Rewritten { element, line }
+    }
 
     #[test]
     fn a_block_of_only_whitespace_is_never_given_to_superhtml() {
         for input in ["", "\n", "  \n\t\n", "\r\n"] {
-            assert_eq!(not_given(input), Some(BLANK), "{input:?}");
+            assert_eq!(not_given(input), Some(Withheld::Blank), "{input:?}");
         }
         for input in ["a", "<!-- note -->\n", "<!doctype html>\n", "<p>a</p>\n"] {
+            assert_eq!(not_given(input), None, "{input:?}");
+        }
+        assert_eq!(Withheld::Blank.reason(), BLANK);
+        assert_eq!(rewritten("xmp", 0).reason(), REWRITTEN);
+    }
+
+    #[test]
+    fn a_verbatim_element_start_tag_anywhere_withholds_the_block() {
+        for (input, element, line) in [
+            ("<textarea>  x  </textarea>", "textarea", 0),
+            (
+                "<p>a</p>\n<form>\n<TextArea name=\"m\">\nhi</textarea>",
+                "textarea",
+                2,
+            ),
+            ("<textarea/>", "textarea", 0),
+            ("<textarea", "textarea", 0),
+            ("<textarea\nrows=2>", "textarea", 0),
+            ("<!-- <xmp> -->", "xmp", 0),
+            ("a\nb\n<XMP>a</XMP>", "xmp", 2),
+            ("<listing>\n  a\n</listing>", "listing", 0),
+            ("<plaintext>", "plaintext", 0),
+            (
+                "<p title='a'>\n<script>let s = '<textarea>';</script>",
+                "textarea",
+                1,
+            ),
+        ] {
+            assert_eq!(
+                not_given(input),
+                Some(rewritten(element, line)),
+                "{input:?}"
+            );
+        }
+        for input in [
+            "<textareas>",
+            "<xmpx>a</xmpx>",
+            "</textarea>",
+            "<p>textarea</p>",
+            "<pre>\n  a\n</pre>",
+            "<plain>",
+        ] {
+            assert_eq!(not_given(input), None, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn a_script_or_style_body_spanning_lines_withholds_the_block() {
+        for (input, element, line) in [
+            ("<script>\nconst s = `a\n  b`;\n</script>", "script", 0),
+            (
+                "<div>\n<SCRIPT type=\"module\">\nx()\n</SCRIPT>\n</div>",
+                "script",
+                1,
+            ),
+            (
+                "<style>\n.a::before { content: \"a\\\n  b\"; }\n</style>",
+                "style",
+                0,
+            ),
+            ("<style media=\"print\">a{}\nb{}</style>", "style", 0),
+            ("<script>a()\nb()", "script", 0),
+            ("<script\nsrc=a", "script", 0),
+            ("<script>a()\rb()</script>", "script", 0),
+            ("<script>a() </scripts>\n</script>", "script", 0),
+            ("<script>a() </script\r>\n</script>", "script", 0),
+            (
+                "<script><!--<script></script>\nb()\n--></script>",
+                "script",
+                0,
+            ),
+            ("<script>a()</script>\n<style>\na{}</style>", "style", 1),
+        ] {
+            assert_eq!(
+                not_given(input),
+                Some(rewritten(element, line)),
+                "{input:?}"
+            );
+        }
+        for input in [
+            "<script>a()</script>",
+            "<script src=\"a.js\"></script>\n<p>b</p>",
+            "<style>a{}</style>\n<p>\nb\n</p>",
+            "<script>a()</SCRIPT >\n<p>b</p>",
+            "<script>a()</script/>\n",
+            "<style>a{}</style\n>",
+            "<script",
+            "<scripts>\na\n</scripts>",
+            "<style>a{}<!--</style>\nb",
+        ] {
             assert_eq!(not_given(input), None, "{input:?}");
         }
     }

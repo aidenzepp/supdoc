@@ -279,3 +279,118 @@ fn html_the_real_superhtml_is_never_given_a_blank_block() {
         assert_eq!(project.read("docs/blocks.md"), doc);
     }
 }
+
+/// Blocks holding an element whose content superhtml 0.7.1 rewrites though HTML keeps it as
+/// written, each with the element's name and the doc line its start tag is on, when the body's
+/// first line is the doc's line 4 (see [`html_project`]).
+const REWRITTEN: [(&str, &str, u32); 4] = [
+    (
+        "<form>\n<textarea name=\"msg\">  Dear team,\n    indented line</textarea>\n</form>",
+        "textarea",
+        5,
+    ),
+    (
+        "<script>\nconst banner = `Hello\n  world`;\n</script>",
+        "script",
+        4,
+    ),
+    (
+        "<div>\n<style>\n.a::before { content: \"a\\\n  b\"; }\n</style>\n</div>",
+        "style",
+        5,
+    ),
+    ("<p>a</p>\n\n<xmp>  a   b </xmp>", "xmp", 6),
+];
+
+/// Asserts that `json`, a check of a [`REWRITTEN`] block holding `element` at doc line `line`,
+/// gave only the warning that superhtml would change the element's content, naming its line,
+/// with the format step not run.
+fn assert_withheld(json: &serde_json::Value, element: &str, line: u32) {
+    assert_eq!(
+        finding_kinds(json),
+        ["code-block-not-checked"],
+        "{element}: {json}"
+    );
+    let message = at(json, "/findings/0/message");
+    assert!(
+        message.as_str().is_some_and(|message| {
+            message.contains(&format!("`<{element}>` on line {line},"))
+                && message.contains("superhtml would change the content")
+        }),
+        "{element}: {json}"
+    );
+    assert_eq!(
+        at(json, "/data/summary/code_blocks/format_not_run"),
+        1,
+        "{element}: {json}"
+    );
+}
+
+#[test]
+fn html_a_block_whose_content_superhtml_rewrites_is_never_given_to_it() {
+    for (body, element, line) in REWRITTEN {
+        let project = html_project("html", body);
+        let doc = project.read("docs/blocks.md");
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        stub_superhtml(
+            outside.path(),
+            VERIFIED,
+            "/bin/cat > /dev/null; printf 'x\\n'",
+        );
+
+        let json = project
+            .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+            .assert_exit(0)
+            .json();
+        let _fixed = project.supdoc_in_with(".", &["fix", "--yes"], &[("PATH", outside.path())]);
+
+        assert_withheld(&json, element, line);
+        assert!(
+            !outside.path().join("ran").exists(),
+            "{element}: superhtml was given the block"
+        );
+        assert_eq!(project.read("docs/blocks.md"), doc, "{element}");
+    }
+}
+
+#[test]
+fn html_the_real_superhtml_is_never_given_a_block_whose_content_it_rewrites() {
+    let Some(dir) = real_tool_dir(
+        "superhtml",
+        "html_the_real_superhtml_is_never_given_a_block_whose_content_it_rewrites",
+    ) else {
+        return;
+    };
+    for (body, element, line) in REWRITTEN {
+        let project = html_project("html", body);
+        let doc = project.read("docs/blocks.md");
+
+        let json = check(&project, &dir);
+        let _fixed = project.supdoc_in_with(".", &["fix", "--yes"], &[("PATH", &dir)]);
+
+        assert_withheld(&json, element, line);
+        assert_eq!(project.read("docs/blocks.md"), doc, "{element}");
+    }
+}
+
+#[test]
+fn html_the_real_superhtml_still_formats_a_block_with_a_one_line_script() {
+    let Some(dir) = real_tool_dir(
+        "superhtml",
+        "html_the_real_superhtml_still_formats_a_block_with_a_one_line_script",
+    ) else {
+        return;
+    };
+    let project = html_project("html", "<div>\n<script>let s = 'a';</script>\n</div>");
+
+    let json = check(&project, &dir);
+    let _fixed = project.supdoc_in_with(".", &["fix", "--yes"], &[("PATH", &dir)]);
+    let again = check(&project, &dir);
+
+    assert_eq!(finding_kinds(&json), ["code-block-unformatted"], "{json}");
+    assert_eq!(
+        project.read("docs/blocks.md"),
+        "# Blocks\n\n```html\n<div>\n\t<script>let s = 'a';</script>\n</div>\n```\n"
+    );
+    assert!(finding_kinds(&again).is_empty(), "{again}");
+}
