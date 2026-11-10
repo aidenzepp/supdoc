@@ -172,7 +172,7 @@ mod tests {
         );
         assert_eq!(
             relative_or_absolute(&root, &absolute("/elsewhere/a.md")),
-            "/elsewhere/a.md"
+            absolute("/elsewhere/a.md").display().to_string()
         );
     }
 }

@@ -1406,7 +1406,7 @@ mod tests {
     fn absolute_path_new_removes_dot_segments() {
         assert_eq!(
             absolute("/repo/./docs/../src/lib.rs").as_path(),
-            Path::new("/repo/src/lib.rs")
+            absolute("/repo/src/lib.rs").as_path()
         );
     }
 
@@ -1414,14 +1414,14 @@ mod tests {
     fn absolute_path_join_removes_dot_segments() {
         let joined = absolute("/repo/apps/web").join(&relative("../../services/./auth"));
 
-        assert_eq!(joined.as_path(), Path::new("/repo/services/auth"));
+        assert_eq!(joined.as_path(), absolute("/repo/services/auth").as_path());
     }
 
     #[test]
     fn absolute_path_parent_dot_dot_stays_at_root() {
         assert_eq!(
             absolute("/repo").join(&relative("../../..")).as_path(),
-            Path::new("/")
+            absolute("/").as_path()
         );
     }
 

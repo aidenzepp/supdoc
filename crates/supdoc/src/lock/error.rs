@@ -525,10 +525,14 @@ mod tests {
 
     #[test]
     fn settings_mismatch_names_the_file_that_set_the_value() {
+        let config = crate::path::fixture("/repo/supdoc.config.toml");
+
         assert_eq!(
             mismatch(Some("/repo/supdoc.config.toml")).to_string(),
-            "supdoc.lock was written with line-endings = \"exact\", but \
-             /repo/supdoc.config.toml sets \"normalize\""
+            format!(
+                "supdoc.lock was written with line-endings = \"exact\", but {} sets \"normalize\"",
+                config.display()
+            )
         );
     }
 
