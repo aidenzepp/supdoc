@@ -1731,7 +1731,7 @@ mod tests {
     use super::{
         LINT_RULES, MAX_NESTING, Refusal, forbidden_char, holds_no_yaml, internal_error, lint_args,
         lint_config, lint_diagnostics, lint_verdict, locale_failed, parse_error, project_args,
-        read_config, rejected_config, same_structure, shape, switches_lint_off,
+        read_config, read_text, rejected_config, same_structure, shape, switches_lint_off,
     };
     use crate::code_blocks::format::{self, ParseError};
     use crate::code_blocks::lint::{self, Diagnostic};
@@ -1940,6 +1940,35 @@ mod tests {
         assert!(
             matches!(&refused, Err(Refusal::Config { why, .. }) if why.contains("couldn't be resolved")),
             "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_config_under_a_root_that_doesnt_resolve_is_refused_as_unresolvable() {
+        // found_config finds nothing under such a root, so the guard is reached directly.
+        let dir = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let config = dir.path().join(".yamlfmt");
+        fs::write(&config, "formatter:\n  indent: 4\n").expect("the config");
+        let dangling = dir.path().join("linked");
+        crate::cli::testing::symlink(dir.path().join("gone"), &dangling).expect("the link");
+
+        for root in [dir.path().join("missing"), dangling] {
+            assert_eq!(
+                read_text(&root, &config),
+                Err("couldn't be resolved"),
+                "{}",
+                root.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_config_is_refused_as_unresolvable() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+
+        assert_eq!(
+            read_text(root.path(), &root.path().join(".yamlfmt")),
+            Err("couldn't be resolved")
         );
     }
 

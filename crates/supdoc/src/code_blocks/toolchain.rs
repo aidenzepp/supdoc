@@ -507,7 +507,7 @@ mod tests {
     use super::active;
     use super::{
         Cause, Refusal, Toolchain, Unresolved, active_channel, cargo_edition, edition_in,
-        is_valid_channel, judge, parse, read,
+        is_valid_channel, judge, parse, read, read_inside,
     };
     use crate::code_blocks::runner::{Failure, Ran};
     #[cfg(unix)]
@@ -793,6 +793,36 @@ mod tests {
                 refusal: Refusal::Unreadable,
                 file: "rust-toolchain.toml"
             }
+        );
+    }
+
+    #[test]
+    fn a_file_under_a_root_that_doesnt_resolve_is_unreadable() {
+        // read finds no file under such a root, so the guard is reached directly.
+        let dir = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let file = dir.path().join("rust-toolchain");
+        std::fs::write(&file, "stable\n").expect("the toolchain file should be writable");
+        let dangling = dir.path().join("linked");
+        crate::cli::testing::symlink(dir.path().join("gone"), &dangling)
+            .expect("the link should be creatable");
+
+        for root in [dir.path().join("missing"), dangling] {
+            assert_eq!(
+                read_inside(&file, &root),
+                Err(Refusal::Unreadable),
+                "{}",
+                root.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_file_is_unreadable_not_outside() {
+        let root = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+
+        assert_eq!(
+            read_inside(&root.path().join("rust-toolchain"), root.path()),
+            Err(Refusal::Unreadable)
         );
     }
 
