@@ -445,8 +445,12 @@ pub(crate) fn exact(path: &Path) -> Option<AbsolutePath> {
 /// Effect: creates the directory and reads its metadata.
 #[must_use]
 pub(crate) fn create_private(parent: &Boundary, dir: &AbsolutePath) -> Option<Boundary> {
-    confine::create_dir_all(&parent.admit(dir).ok()?, 0o700).ok()?;
-    let meta = std::fs::symlink_metadata(dir.as_path()).ok()?;
+    let admitted = parent.admit(dir).map_err(|e| eprintln!("DIAG create_private admit {:?}: {e:?}", dir.as_path())).ok()?;
+    confine::create_dir_all(&admitted, 0o700).map_err(|e| diag("create_dir_all", dir.as_path(), &e)).ok()?;
+    let meta = std::fs::symlink_metadata(dir.as_path()).map_err(|e| diag("symlink_metadata", dir.as_path(), &e)).ok()?;
+    if !(meta.is_dir() && mode_is_private(&meta)) {
+        eprintln!("DIAG create_private not a private dir {:?}: is_dir={} private={}", dir.as_path(), meta.is_dir(), mode_is_private(&meta));
+    }
     (meta.is_dir() && mode_is_private(&meta)).then(|| Boundary::resolve(dir))
 }
 
@@ -474,7 +478,17 @@ pub(crate) fn write_private(dir: &Boundary, file: &AbsolutePath, text: &str) -> 
     };
     #[cfg(not(unix))]
     let mode: Option<std::fs::Permissions> = None;
-    confine::write_atomically(&dir.admit(file).ok()?, text.as_bytes(), mode.as_ref()).ok()
+    let admitted = dir.admit(file).map_err(|e| eprintln!("DIAG write_private admit {:?}: {e:?}", file.as_path())).ok()?;
+    confine::write_atomically(&admitted, text.as_bytes(), mode.as_ref()).map_err(|e| diag("write_atomically", file.as_path(), &e)).ok()
+}
+
+/// Prints a dropped `io::Error` in full. Diagnostic only.
+fn diag(call: &str, path: &Path, error: &std::io::Error) {
+    eprintln!(
+        "DIAG {call} failed: kind={:?} raw_os_error={:?} message={error} path={path:?}",
+        error.kind(),
+        error.raw_os_error()
+    );
 }
 
 #[cfg(test)]

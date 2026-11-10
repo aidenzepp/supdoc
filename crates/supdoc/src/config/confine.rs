@@ -372,14 +372,17 @@ pub(crate) fn write_atomically(
     permissions: Option<&fs::Permissions>,
 ) -> io::Result<()> {
     let target = target.path.as_path();
-    let (mut file, temp) = create_exclusive_temp(|attempt| temp_path_beside(target, attempt))?;
+    let (mut file, temp) = create_exclusive_temp(|attempt| temp_path_beside(target, attempt))
+        .inspect_err(|e| eprintln!("DIAG write_atomically create_exclusive_temp: kind={:?} raw={:?} msg={e} target={target:?}", e.kind(), e.raw_os_error()))?;
     let written = file
         .write_all(bytes)
         .and_then(|()| permissions.map_or(Ok(()), |kept| file.set_permissions(kept.clone())))
-        .and_then(|()| file.sync_all());
+        .and_then(|()| file.sync_all())
+        .inspect_err(|e| eprintln!("DIAG write_atomically write/sync: kind={:?} raw={:?} msg={e} temp={temp:?}", e.kind(), e.raw_os_error()));
     drop(file);
     let finished = written
-        .and_then(|()| rename_retrying(|| fs::rename(&temp, target), cfg!(windows), thread::sleep));
+        .and_then(|()| rename_retrying(|| fs::rename(&temp, target), cfg!(windows), thread::sleep))
+        .inspect_err(|e| eprintln!("DIAG write_atomically rename (after retries): kind={:?} raw={:?} msg={e} temp={temp:?} target={target:?}", e.kind(), e.raw_os_error()));
     if finished.is_err() {
         drop(fs::remove_file(&temp));
     }
