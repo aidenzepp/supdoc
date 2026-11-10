@@ -497,6 +497,15 @@ pub(crate) mod fixed {
     /// The local binary directories a Python tool searches.
     #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const VENV_BINS: [FixedPath; 1] = [FixedPath::new(".venv/bin")];
+    /// Windows' system directory beneath the Windows root.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const SYSTEM32: FixedPath = FixedPath::new("System32");
+    /// The Windows `curl` binary name.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const CURL_EXE: FixedPath = FixedPath::new("curl.exe");
+    /// The Windows `taskkill` binary name.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const TASKKILL_EXE: FixedPath = FixedPath::new("taskkill.exe");
     /// The local binary directories a Node tool searches.
     #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const NODE_BINS: [FixedPath; 1] = [FixedPath::new("node_modules/.bin")];
@@ -543,6 +552,58 @@ fn raw_join(base: &Path, tail: &Path) -> PathBuf {
 #[must_use]
 pub(crate) fn beneath(base: &Path, rel: &impl Beneath) -> PathBuf {
     raw_join(base, Path::new(rel.segments()))
+}
+
+/// A checked tail for a file name: not empty, and free of `/`, `\\`, `:`, `..` and NUL, so
+/// appending it to a name never adds a component and never makes the name a traversal. For a
+/// constant or computed extension such as `.1.toml`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Suffix(String);
+
+impl Suffix {
+    /// Wraps `tail`, or returns `None` when it is empty or holds `/`, `\\`, `:`, `..` or NUL.
+    #[must_use]
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) fn new(tail: &str) -> Option<Self> {
+        let refused =
+            tail.is_empty() || tail.contains(['/', '\\', ':', '\0']) || tail.contains("..");
+        (!refused).then(|| Self(tail.to_owned()))
+    }
+}
+
+/// `path` with `suffix` appended to its file name, in the same directory: `a.md` and `.1.toml`
+/// give `a.md.1.toml`. The existing name is not re-checked, so a Unix name holding `:` is kept.
+/// `None` when `path` has no file name, such as a root or one ending in `..`.
+#[must_use]
+#[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+pub(crate) fn with_suffix(path: &Path, suffix: &Suffix) -> Option<PathBuf> {
+    let name = path.file_name()?;
+    let mut joined = name.to_owned();
+    joined.push(&suffix.0);
+    Some(raw_join(path.parent()?, Path::new(&joined)))
+}
+
+/// `path` with its whole file name replaced by `name`, in the same directory. `None` when `path`
+/// has no file name or parent, such as a root.
+#[must_use]
+#[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+pub(crate) fn sibling(path: &Path, name: &Component) -> Option<PathBuf> {
+    let _name = path.file_name()?;
+    Some(raw_join(path.parent()?, Path::new(name.segments())))
+}
+
+/// `path` with its existing file name wrapped by `prefix` and `suffix`, in the same directory:
+/// `a.md` with `.` and `.7.tmp` gives `.a.md.7.tmp`. Both wrappers are [`Suffix`] values, so each
+/// is checked; the existing name is not re-checked, so a Unix name holding `:` is kept. `None` when
+/// `path` has no file name, such as a root or one ending in `..`.
+#[must_use]
+#[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+pub(crate) fn with_affixes(path: &Path, prefix: &Suffix, suffix: &Suffix) -> Option<PathBuf> {
+    let name = path.file_name()?;
+    let mut joined = std::ffi::OsString::from(&prefix.0);
+    joined.push(name);
+    joined.push(&suffix.0);
+    Some(raw_join(path.parent()?, Path::new(&joined)))
 }
 
 /// `path` moved from under `from` to the same place under `onto`: `onto` joined with what
@@ -864,6 +925,108 @@ mod tests {
         }
         let accepted = Component::new("x-1").expect("`x-1` is one normal component");
         assert_eq!(accepted.segments(), "x-1");
+    }
+
+    #[test]
+    fn a_suffix_refuses_a_separator_a_traversal_or_nul() {
+        for refused in ["", "/x", "x/y", "\\x", "..", ".1..toml", ":x", "a\0b"] {
+            assert_eq!(Suffix::new(refused), None, "{refused:?} is not a suffix");
+        }
+        assert!(Suffix::new(".1.toml").is_some());
+    }
+
+    #[test]
+    fn with_suffix_keeps_the_directory_and_extends_the_name() {
+        let suffix = Suffix::new(".1.toml").expect("a plain suffix");
+        assert_eq!(
+            with_suffix(Path::new("/d/e/a.md"), &suffix),
+            Some(PathBuf::from("/d/e/a.md.1.toml"))
+        );
+        assert_eq!(
+            with_suffix(Path::new("a.md"), &suffix),
+            Some(PathBuf::from("a.md.1.toml"))
+        );
+        assert_eq!(with_suffix(Path::new("/"), &suffix), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn with_suffix_keeps_a_colon_in_the_existing_name_on_unix() {
+        let suffix = Suffix::new(".1.toml").expect("a plain suffix");
+        assert_eq!(
+            with_suffix(Path::new("/d/a:b.md"), &suffix),
+            Some(PathBuf::from("/d/a:b.md.1.toml"))
+        );
+    }
+
+    #[test]
+    fn sibling_replaces_the_name_and_refuses_what_a_component_refuses() {
+        let name = Component::new("b.toml").expect("one normal name");
+        assert_eq!(
+            sibling(Path::new("/d/a.md"), &name),
+            Some(PathBuf::from("/d/b.toml"))
+        );
+        assert_eq!(sibling(Path::new("/"), &name), None);
+        for refused in ["", ".", "..", "a/b", "a\\b", "a:b", "a\0b"] {
+            assert_eq!(Component::new(refused), None, "{refused:?} reaches sibling");
+        }
+    }
+
+    #[test]
+    fn sibling_is_none_for_a_path_with_no_file_name() {
+        let name = Component::new("b.toml").expect("one normal name");
+        assert_eq!(sibling(Path::new("/d/.."), &name), None);
+        assert_eq!(sibling(Path::new("/"), &name), None);
+    }
+
+    #[test]
+    fn with_affixes_keeps_the_directory_and_wraps_the_name() {
+        let prefix = Suffix::new(".").expect("a plain prefix");
+        let suffix = Suffix::new(".7.tmp").expect("a plain suffix");
+        assert_eq!(
+            with_affixes(Path::new("/d/e/a.md"), &prefix, &suffix),
+            Some(PathBuf::from("/d/e/.a.md.7.tmp"))
+        );
+        assert_eq!(
+            with_affixes(Path::new("a.md"), &prefix, &suffix),
+            Some(PathBuf::from(".a.md.7.tmp"))
+        );
+    }
+
+    #[test]
+    fn with_affixes_is_none_for_a_path_with_no_file_name() {
+        let wrap = Suffix::new(".x").expect("a plain wrapper");
+        assert_eq!(with_affixes(Path::new("/d/.."), &wrap, &wrap), None);
+        assert_eq!(with_affixes(Path::new("/"), &wrap, &wrap), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn with_affixes_keeps_a_colon_in_the_existing_name_on_unix() {
+        let prefix = Suffix::new(".").expect("a plain prefix");
+        let suffix = Suffix::new(".7.tmp").expect("a plain suffix");
+        assert_eq!(
+            with_affixes(Path::new("/d/a:b.md"), &prefix, &suffix),
+            Some(PathBuf::from("/d/.a:b.md.7.tmp"))
+        );
+    }
+
+    #[test]
+    fn with_affixes_wrappers_refuse_each_bad_input_independently() {
+        for refused in ["", "/", "\\", ":", "..", "\0"] {
+            assert_eq!(
+                Suffix::new(refused),
+                None,
+                "{refused:?} would reach a with_affixes wrapper"
+            );
+        }
+    }
+
+    #[test]
+    fn the_windows_name_constants_expose_their_text() {
+        assert_eq!(fixed::SYSTEM32.as_str(), "System32");
+        assert_eq!(fixed::CURL_EXE.as_str(), "curl.exe");
+        assert_eq!(fixed::TASKKILL_EXE.as_str(), "taskkill.exe");
     }
 
     #[test]
