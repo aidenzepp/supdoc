@@ -23,7 +23,7 @@ use super::format::{ParseError, Positions};
 use super::fragment::{Kind, Support};
 use super::lint;
 use super::runner::{Cwd, Failure, Ran};
-use crate::path::{self, Component, FixedPath, Suffix, fixed};
+use crate::path::{self, FixedPath, NativeName, Suffix, fixed};
 
 use super::{biome, eslint, go, prettier, pylint, python, rumdl, rust, shell, tombi, yaml};
 
@@ -2045,10 +2045,11 @@ fn candidate_names(binary: &str, pathext: Option<&OsStr>) -> Vec<OsString> {
         .collect()
 }
 
-/// `dir` joined with the candidate `name`, or `None` when `name` isn't one plain component.
+/// `dir` joined with the candidate `name`, or `None` when `name` would leave `dir` on this
+/// platform.
 fn in_dir(dir: &Path, name: &OsStr) -> Option<PathBuf> {
-    let name = Component::new(name.to_str()?)?;
-    Some(path::beneath(dir, &name))
+    let name = NativeName::new(name.to_str()?)?;
+    Some(path::within(dir, &name))
 }
 
 /// The real path of the first executable regular file named `binary` (or, with `pathext`, one of
@@ -2249,6 +2250,37 @@ mod tests {
         let found = super::first_on_path("tool", &path, Some(OsStr::new(".EXE;.CMD")))
             .expect("a tool should be found");
         assert_eq!(found.file_name(), Some(OsStr::new("tool.EXE")), "{found:?}");
+    }
+
+    #[test]
+    fn a_name_that_would_leave_the_directory_is_not_looked_up() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let bin = dir.path().join("bin");
+        fs::create_dir(&bin).expect("bin dir");
+        exe(dir.path(), "outside");
+        let path = std::env::join_paths([bin.canonicalize().expect("bin path")]).expect("path");
+        for name in ["../outside", "..", ".", "a/b"] {
+            assert_eq!(super::first_on_path(name, &path, None), None, "{name:?}");
+        }
+        #[cfg(windows)]
+        for name in ["a\\b", "C:x", "a:b"] {
+            assert_eq!(super::first_on_path(name, &path, None), None, "{name:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn on_unix_a_name_with_a_colon_or_backslash_is_found_on_path() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let bin = dir.path().canonicalize().expect("bin path");
+        exe(&bin, "my:fmt");
+        exe(&bin, "a\\b");
+        let path = std::env::join_paths([&bin]).expect("path");
+        for name in ["my:fmt", "a\\b"] {
+            let found = super::first_on_path(name, &path, None)
+                .unwrap_or_else(|| panic!("{name:?} should be found"));
+            assert_eq!(found.file_name(), Some(OsStr::new(name)), "{found:?}");
+        }
     }
 
     #[test]

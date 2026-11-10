@@ -521,6 +521,42 @@ impl Beneath for Component {
     }
 }
 
+/// One file name that stays inside the directory it is joined to on the running platform: not
+/// empty, not `.` or `..`, free of NUL and of the platform's separators (`/` everywhere, `\\`
+/// and `:` too on Windows, where `C:x` would leave the directory and `x:s` names a stream). For
+/// a program name a user wrote, which an OS accepts as one file name even when [`Component`]
+/// would not: `my:fmt` is an ordinary name on Unix.
+///
+/// Not [`Beneath`]: that trait promises one component on every platform.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeName(String);
+
+impl NativeName {
+    /// Wraps `name`, or returns `None` when joining it could leave the directory on this
+    /// platform.
+    #[must_use]
+    pub(crate) fn new(name: &str) -> Option<Self> {
+        (!Self::refused(name, cfg!(windows))).then(|| Self(name.to_owned()))
+    }
+
+    /// Whether `name` is refused on Windows (`windows`) or on a Unix platform.
+    fn refused(name: &str, windows: bool) -> bool {
+        let separators: &[char] = if windows { &['/', '\\', ':'] } else { &['/'] };
+        name.is_empty()
+            || name == "."
+            || name == ".."
+            || name.contains(separators)
+            || name.contains('\0')
+    }
+}
+
+/// `dir` with the platform-native `name` appended, as [`Path::join`] does. Refuses nothing: the
+/// type holds the proof.
+#[must_use]
+pub(crate) fn within(dir: &Path, name: &NativeName) -> PathBuf {
+    raw_join(dir, Path::new(&name.0))
+}
+
 /// The one raw join in this module's typed joins: `base` with `tail` appended, as
 /// [`Path::join`] does. Every typed join below calls it, so the lint that bans raw joins
 /// elsewhere has one function here to mark.
@@ -892,6 +928,39 @@ mod tests {
             "{named:?} is not beneath {root:?}"
         );
         assert_eq!(AbsolutePath::new(root.as_path()), Some(root));
+    }
+
+    #[test]
+    fn a_native_name_refuses_what_leaves_the_directory_on_each_platform() {
+        for refused in ["", ".", "..", "a/b", "a\0b"] {
+            assert!(NativeName::refused(refused, false), "{refused:?} on Unix");
+            assert!(NativeName::refused(refused, true), "{refused:?} on Windows");
+        }
+        for windows_only in ["a\\b", "a:b", "C:x"] {
+            assert!(
+                !NativeName::refused(windows_only, false),
+                "{windows_only:?} on Unix"
+            );
+            assert!(
+                NativeName::refused(windows_only, true),
+                "{windows_only:?} on Windows"
+            );
+        }
+        for accepted in ["my-fmt", "a.b", "..x"] {
+            assert!(
+                !NativeName::refused(accepted, false),
+                "{accepted:?} on Unix"
+            );
+            assert!(
+                !NativeName::refused(accepted, true),
+                "{accepted:?} on Windows"
+            );
+        }
+        assert_eq!(NativeName::new("a/b"), None);
+        assert_eq!(
+            NativeName::new("my-fmt").map(|name| within(Path::new("/d"), &name)),
+            Some(PathBuf::from("/d/my-fmt"))
+        );
     }
 
     #[test]
