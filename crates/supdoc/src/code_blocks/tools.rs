@@ -686,8 +686,8 @@ pub(crate) const HADOLINT_INSTALL: &str = "download hadolint 2.15.1 from https:/
 /// How to install an xmllint supdoc's checks are verified against (see [`xmllint::VERIFIED`]):
 /// xmllint comes with libxml2, which no release supdoc can name ships as a pinned binary, so it is
 /// the system's package.
-pub(crate) const XMLLINT_INSTALL: &str = "install xmllint from libxml2 2.9 with the system's package manager \
-     (`libxml2-utils` on Debian and Ubuntu; macOS ships it in /usr/bin)";
+pub(crate) const XMLLINT_INSTALL: &str = "install xmllint from libxml2 2.9 or 2.15 with the system's package manager \
+     (`libxml2-utils` on current Debian and Ubuntu ships 2.15; macOS ships 2.9 in /usr/bin)";
 
 /// How to install a sqruff supdoc's checks are verified against (see [`sqruff::VERIFIED`]):
 /// sqruff ships a binary per platform with a `.sha256` beside it. The release binary, never the
@@ -2115,7 +2115,7 @@ fn hadolint_args(invocation: &Invocation<'_>) -> Vec<OsString> {
 }
 
 /// `xmllint`'s arguments, always exactly these whatever the invocation: no output tree
-/// (`--noout`), no network (`--nonet`, which libxml2 2.9 still honors), no catalog
+/// (`--noout`), no network (`--nonet`, which libxml2 2.9 and 2.15 still honor), no catalog
 /// (`--nocatalogs`), then `-` for the block on stdin. Never a flag that loads an external DTD or
 /// entity or expands one (`--loaddtd`, `--valid`, `--dtdvalid`, `--noent`, `--dtdattr`,
 /// `--xinclude`, `--c14n*`, `--huge`): without them libxml2 loads no file and no URL the block

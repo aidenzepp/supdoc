@@ -202,7 +202,7 @@ pub(crate) fn lint_verdict(
 /// The libxml2 versions, as `<major>.<minor>`, supdoc's checks are verified against: supdoc reads
 /// xmllint's diagnostic wording, and libxml2 changes it and its loading defaults between minors.
 /// A minor is added only after the XML e2e suite passes against it.
-pub(crate) const VERIFIED: [&str; 1] = ["2.9"];
+pub(crate) const VERIFIED: [&str; 2] = ["2.9", "2.15"];
 
 /// What `xmllint --version` prints before libxml2's version number.
 const VERSION_MARK: &str = "using libxml version ";
@@ -468,8 +468,12 @@ mod tests {
             Ok("2.9.14".to_owned())
         );
         assert_eq!(
-            verified(b"xmllint: using libxml version 21504\n"),
-            Err("2.15.4".to_owned())
+            verified(b"xmllint: using libxml version 21502\n"),
+            Ok("2.15.2".to_owned())
+        );
+        assert_eq!(
+            verified(b"xmllint: using libxml version 21600\n"),
+            Err("2.16.0".to_owned())
         );
         assert_eq!(
             verified(b"xmllint: using libxml version 21000\n"),

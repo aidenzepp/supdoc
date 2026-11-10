@@ -229,7 +229,8 @@ fn xml_only_a_verified_libxml2_minor_runs_the_lint_step() {
     for (version, runs) in [
         ("20913", true),
         ("20914-GITv2.9.14", true),
-        ("21504", false),
+        ("21502", true),
+        ("21600", false),
         ("21000", false),
         ("garbage", false),
     ] {
@@ -256,8 +257,9 @@ fn xml_only_a_verified_libxml2_minor_runs_the_lint_step() {
             assert!(
                 at(&json, "/findings/0/message")
                     .as_str()
-                    .is_some_and(|message| message
-                        .contains("isn't a version supdoc's checks are verified against (2.9)")),
+                    .is_some_and(|message| message.contains(
+                        "isn't a version supdoc's checks are verified against (2.9, 2.15)"
+                    )),
                 "{version}: {json}"
             );
             assert_eq!(
@@ -329,16 +331,19 @@ fn xml_the_real_xmllint_never_passes_an_odd_block() {
     let bodies = ["", "   ", "\u{feff}", "<a>\u{fffd}<", long.as_str()];
     for body in bodies {
         let json = check(&xml_project("xml", body), &dir, &[]);
+        let shown = body.get(..40).unwrap_or(body);
         assert_eq!(
-            at(&json, "/data/summary/code_blocks/passed"),
-            0,
-            "{:?}: {json}",
-            body.get(..40).unwrap_or(body)
+            at(&json, "/data/summary/code_blocks/failed"),
+            1,
+            "{shown:?}: {json}"
         );
+        let kinds = finding_kinds(&json);
         assert!(
-            !finding_kinds(&json).is_empty(),
-            "{:?}: {json}",
-            body.get(..40).unwrap_or(body)
+            !kinds.is_empty()
+                && kinds
+                    .iter()
+                    .all(|kind| kind == "code-block-lint" || kind == "code-block-tool-failed"),
+            "{shown:?}: expected only lint or tool-failed findings, got {kinds:?}: {json}"
         );
     }
 }
@@ -351,13 +356,46 @@ fn xml_the_real_xmllint_never_sees_a_block_naming_a_file() {
     ) else {
         return;
     };
-    let project = xml_project(
-        "xml",
-        "<!DOCTYPE a [<!ENTITY e SYSTEM \"file:///etc/passwd\">]>\n<a>&e;</a>",
-    );
+    let blocks = [
+        (
+            "<!DOCTYPE a [<!ENTITY e SYSTEM \"file:///etc/passwd\">]>\n<a>&e;</a>",
+            "external identifier",
+        ),
+        (
+            "<!DOCTYPE a SYSTEM \"file:///etc/passwd\">\n<a/>",
+            "external identifier",
+        ),
+        (
+            "<!DOCTYPE a PUBLIC \"-//X//DTD A//EN\" \"http://example.com/a.dtd\">\n<a/>",
+            "external identifier",
+        ),
+        (
+            "<!DOCTYPE a [<!ENTITY e \"x\">]>\n<a>&e;</a>",
+            "declares an entity",
+        ),
+        (
+            "<?xml version=\"1.0\" encoding=\"UTF-7\"?>\n+ADw-+ACE-ENTITY e+AD4-<a/>",
+            "encoding other than UTF-8",
+        ),
+    ];
+    for (body, reason) in blocks {
+        let json = check(&xml_project("xml", body), &dir, &[]);
 
-    let json = check(&project, &dir, &[]);
-
-    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
-    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 0, "{json}");
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-not-checked"],
+            "{body:?}: {json}"
+        );
+        assert!(
+            at(&json, "/data/code_blocks/0/reason")
+                .as_str()
+                .is_some_and(|said| said.contains(reason)),
+            "{body:?}: expected a reason naming {reason:?}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/passed"),
+            0,
+            "{body:?}: {json}"
+        );
+    }
 }
