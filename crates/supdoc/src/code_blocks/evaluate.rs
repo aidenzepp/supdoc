@@ -53,6 +53,7 @@ use super::states::{
     self, Excerpt, NotChecked, StepState, Steps, block_fragment, state_of, tag_of,
     unsupported_reason,
 };
+use super::superhtml;
 use super::tombi;
 use super::toolchain::{self, Refusal, Toolchain};
 use super::tools::{
@@ -593,8 +594,8 @@ fn run_jobs(
         let record = records.get(job.record)?;
         let format = job.format.as_ref().and_then(|run| match &run.tool {
             Tool::Custom(custom) => run_custom_formatter(custom, &run.program, record, session),
-            Tool::Cartridge(tool) if let Some(reason) = format_not_given(tool, record) => {
-                Some(Err(reason.into()))
+            Tool::Cartridge(tool) if let Some(not_run) = format_not_given(tool, record) => {
+                Some(Err(not_run))
             }
             Tool::Cartridge(tool) => {
                 let rust = rust.filter(|_| run.tool.is("rustfmt"));
@@ -922,6 +923,41 @@ fn prettier_switched_off(at: &Location) -> Finding {
     .with_location(at.clone())
 }
 
+/// The run's one `code-block-not-checked` warning, at `at`, the first HTML block superhtml isn't
+/// given because it holds only whitespace (see [`superhtml::not_given`]).
+fn superhtml_blank(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "this HTML block holds only whitespace, for which superhtml prints nothing, so its format \
+         step didn't run",
+    )
+    .with_help("write the HTML the block stands for, or mark the block `format(off: <reason>)`")
+    .with_location(at.clone())
+}
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first HTML block superhtml isn't
+/// given because it holds an element whose content superhtml rewrites (see
+/// [`superhtml::not_given`]): `said` names the element and its doc line.
+fn superhtml_rewritten(at: &Location, said: Option<&str>) -> Finding {
+    let element = said.unwrap_or("an element");
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        format!(
+            "superhtml would change the content of the block's {element}, which HTML keeps as \
+             written, so the block's format step didn't run"
+        ),
+    )
+    .with_help(
+        "superhtml keeps only `<pre>` content as written: it re-indents `<textarea>`, `<xmp>`, \
+         `<listing>`, `<plaintext>` and `<noscript>` content and each line of a `<script>` or \
+         `<style>` body, and trims a one-line body's edge whitespace; mark the block \
+         `format(off: <reason>)` to leave it as written",
+    )
+    .with_location(at.clone())
+}
+
 /// The run's one `code-block-not-checked` warning, at `at`, the first block whose dockerfmt step
 /// didn't run because it holds `dockerfmt-ignore` (see [`dockerfmt::not_given`]).
 fn dockerfmt_switched_off(at: &Location) -> Finding {
@@ -1148,6 +1184,8 @@ impl NotRunWarnings {
             BIOME_FORMATTER_OFF => biome_formatter_off(at),
             PYLINT_SWITCHED_OFF => pylint_switched_off(at),
             PRETTIER_SWITCHED_OFF => prettier_switched_off(at),
+            superhtml::BLANK => superhtml_blank(at),
+            superhtml::REWRITTEN => superhtml_rewritten(at, said),
             dockerfmt::TOO_SHORT => dockerfmt_not_given(at, "is at most one byte long"),
             dockerfmt::SWITCHED_OFF => dockerfmt_switched_off(at),
             dockerfmt::NO_INSTRUCTION => {
@@ -1391,11 +1429,13 @@ struct ToolConfigs {
     prettier: PrettierVersion,
     /// dockerfmt's version.
     dockerfmt: DockerfmtVersion,
+    /// superhtml's version.
+    superhtml: SuperhtmlVersion,
 }
 
 impl ToolConfigs {
     /// Nothing found yet, with `timeout` limiting each tool run made to find a config or a
-    /// version: tombi's, hadolint's, sqruff's, yamllint's, prettier's and dockerfmt's.
+    /// version: tombi's, hadolint's, sqruff's, yamllint's, prettier's, dockerfmt's and superhtml's.
     fn with_timeout(timeout: Option<Duration>) -> Self {
         let mut configs = Self::default();
         configs.tombi.timeout = timeout;
@@ -1403,6 +1443,7 @@ impl ToolConfigs {
         configs.sqruff.timeout = timeout;
         configs.yamllint.timeout = timeout;
         configs.prettier.timeout = timeout;
+        configs.superhtml.timeout = timeout;
         configs.dockerfmt.timeout = timeout;
         configs
     }
@@ -1432,6 +1473,7 @@ impl ToolConfigs {
             && self.yamllint.give(record, place, slots)
             && self.prettier.verified(record, place, slots)
             && self.dockerfmt.verified(record, place, slots)
+            && self.superhtml.verified(record, place, slots)
     }
 }
 
@@ -1504,6 +1546,76 @@ impl DockerfmtVersion {
 /// version.
 const DOCKERFMT_UNVERIFIED: &str =
     "the dockerfmt on `PATH` isn't a version supdoc is verified against";
+
+/// The version of the superhtml a run's blocks use, read once.
+#[derive(Debug, Default)]
+struct SuperhtmlVersion {
+    /// How long `superhtml version` may run: the run's tool timeout.
+    timeout: Option<Duration>,
+    /// The version once read (see [`superhtml::version_of`]), and whether its warning has been
+    /// given. `None` until a block needs it.
+    version: Option<(Result<String, String>, bool)>,
+}
+
+impl SuperhtmlVersion {
+    /// Whether `record` goes on to its tools once the superhtml on `PATH` its format step would
+    /// run has been checked against the versions supdoc is verified against (see
+    /// [`superhtml::VERIFIED`]), read once per run. When it isn't one, or can't be read, only the
+    /// format step doesn't run, with [`SUPERHTML_UNVERIFIED`] as its reason, and the run's one
+    /// warning goes to `slots`: a lint step still runs. A block whose formatter isn't superhtml,
+    /// or whose superhtml isn't on `PATH` or is inside the checkout, is left to the usual lookup.
+    ///
+    /// Effect: runs `superhtml version` the first time.
+    fn verified(
+        &mut self,
+        record: &mut BlockRecord,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> bool {
+        if !record.tool.as_ref().is_some_and(|tool| tool.is(SUPERHTML)) {
+            return true;
+        }
+        let Found::OnPath(program) = find(SUPERHTML, env, root) else {
+            return true;
+        };
+        let timeout = self.timeout;
+        let (version, warned) = self
+            .version
+            .get_or_insert_with(|| (superhtml::version_of(&program, env, root, timeout), false));
+        let Err(shown) = version else {
+            return true;
+        };
+        if !*warned {
+            *warned = true;
+            slots.push(Slot::Found(
+                Finding::new(
+                    NOT_CHECKED,
+                    Severity::Warning,
+                    format!(
+                        "superhtml {shown} isn't a version supdoc's checks are verified against \
+                         ({}); its HTML blocks' format steps didn't run",
+                        superhtml::VERIFIED.join(", ")
+                    ),
+                )
+                .with_help(format!(
+                    "install a verified superhtml: {}",
+                    tools::SUPERHTML_INSTALL
+                ))
+                .with_location(record.at.clone()),
+            ));
+        }
+        record.tool = None;
+        record.steps.format = StepState::Unrunnable {
+            reason: SUPERHTML_UNVERIFIED,
+        };
+        record.linter.is_some()
+    }
+}
+
+/// Why an HTML block's format step didn't run when the superhtml on `PATH` isn't a verified
+/// version.
+const SUPERHTML_UNVERIFIED: &str =
+    "the superhtml on `PATH` isn't a version supdoc is verified against";
 
 /// The version of the prettier a run's blocks use, read once.
 #[derive(Debug, Default)]
@@ -4109,17 +4221,35 @@ const PRETTIER_SWITCHED_OFF: &str = "the block holds `prettier-ignore`, so supdo
 /// The name of dockerfmt's cartridge.
 const DOCKERFMT: &str = "dockerfmt";
 
+/// The name of superhtml's cartridge.
+const SUPERHTML: &str = "superhtml";
+
 /// Why `tool`'s format step doesn't run on `record`'s block, so the tool is never spawned: it is
-/// prettier and the block holds `prettier-ignore` (see [`prettier::switches_format_off`]), it
-/// is dockerfmt and the block is one dockerfmt isn't given (see [`dockerfmt::not_given`]), or it
-/// is sqruff and the block's `noqa` comments may switch every rule off for all of it, as for its
-/// lint step (see [`sqruff::switches_lint_off`]). `None` otherwise.
-fn format_not_given(tool: &ToolCartridge, record: &BlockRecord) -> Option<&'static str> {
-    let input = &record.pending.as_ref()?.input;
+/// prettier and the block holds `prettier-ignore` (see [`prettier::switches_format_off`]), it is
+/// dockerfmt and the block is one dockerfmt isn't given (see [`dockerfmt::not_given`]), it is
+/// superhtml and the block is one superhtml isn't given (see [`superhtml::not_given`]), naming,
+/// for an element whose content superhtml rewrites, the element and its doc line, or it is sqruff
+/// and the block's `noqa` comments may switch every rule off for all of it, as for its lint step
+/// (see [`sqruff::switches_lint_off`]). `None` otherwise.
+fn format_not_given(tool: &ToolCartridge, record: &BlockRecord) -> Option<NotRun> {
+    let pending = record.pending.as_ref()?;
+    let input = &pending.input;
     match tool.name {
-        PRETTIER => prettier::switches_format_off(input).then_some(PRETTIER_SWITCHED_OFF),
-        DOCKERFMT => dockerfmt::not_given(input),
-        SQRUFF_FORMAT => sqruff::switches_lint_off(input).then_some(SQRUFF_SWITCHED_OFF),
+        PRETTIER => prettier::switches_format_off(input).then(|| PRETTIER_SWITCHED_OFF.into()),
+        DOCKERFMT => dockerfmt::not_given(input).map(Into::into),
+        SUPERHTML => superhtml::not_given(input).map(|withheld| NotRun {
+            reason: withheld.reason(),
+            said: match withheld {
+                superhtml::Withheld::Blank => None,
+                superhtml::Withheld::Rewritten { element, line } => {
+                    Some(body_place(line, pending).map_or_else(
+                        || format!("`<{element}>`"),
+                        |place| format!("`<{element}>` on line {}", place.line),
+                    ))
+                }
+            },
+        }),
+        SQRUFF_FORMAT => sqruff::switches_lint_off(input).then(|| SQRUFF_SWITCHED_OFF.into()),
         _ => None,
     }
 }

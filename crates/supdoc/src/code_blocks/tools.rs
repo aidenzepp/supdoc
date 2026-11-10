@@ -28,7 +28,7 @@ use crate::path::{self, FixedPath, NativeName, Suffix, fixed};
 
 use super::{
     biome, dockerfmt, eslint, go, hadolint, prettier, pylint, python, rumdl, rust, shell, sqruff,
-    tombi, yaml,
+    superhtml, tombi, yaml,
 };
 
 /// The variables a tool gets from supdoc's own environment, and no others. Windows adds the
@@ -673,6 +673,11 @@ pub(crate) const TOMBI_INSTALL: &str = "pipx install 'tombi==1.10.*'";
 pub(crate) const DOCKERFMT_INSTALL: &str = "download dockerfmt 0.6.0 from https://github.com/reteps/dockerfmt/releases/tag/v0.6.0 \
      and put it on PATH";
 
+/// How to install a superhtml supdoc's checks are verified against (see [`superhtml::VERIFIED`]):
+/// superhtml ships a binary per platform, and no package manager supdoc can name pins its version.
+pub(crate) const SUPERHTML_INSTALL: &str = "download superhtml 0.7.1 from https://github.com/kristoff-it/superhtml/releases/tag/v0.7.1 \
+     and put it on PATH";
+
 /// How to install a hadolint supdoc's checks are verified against (see [`hadolint::VERIFIED`]):
 /// hadolint ships a binary per platform, and no package manager supdoc can name pins its version.
 pub(crate) const HADOLINT_INSTALL: &str = "download hadolint 2.15.1 from https://github.com/hadolint/hadolint/releases/tag/v2.15.1 \
@@ -934,7 +939,7 @@ fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'sta
 }
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 35] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 36] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -1297,6 +1302,22 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 35] = [
         positions: own_positions,
         argv: sqruff_lint_args,
         reader: Reader::Lint(sqruff::lint_verdict),
+    },
+    ToolCartridge {
+        name: "superhtml",
+        language: Language::Html,
+        binary: "superhtml",
+        loads: Loads::Static,
+        install: SUPERHTML_INSTALL,
+        // superhtml reads no config file and no environment variable.
+        config_files: &[],
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        holds: every_tag,
+        vars: &[],
+        positions: own_positions,
+        argv: superhtml_args,
+        reader: Reader::Format(superhtml::parse_error),
     },
     ToolCartridge {
         name: "yamlfmt",
@@ -2028,6 +2049,17 @@ fn dockerfmt_args(_invocation: &Invocation<'_>) -> Vec<OsString> {
     ["-i", "4", "-n"].map(OsString::from).to_vec()
 }
 
+/// `superhtml`'s arguments: format the block on stdin, printing it on stdout, with element and
+/// attribute validation off (`--syntax-only`). Validation changes neither the output nor the exit
+/// status, only what goes to stderr, so with it off every error superhtml prints on a failed run
+/// is one that stopped formatting, and the first one names the line (see
+/// [`superhtml::parse_error`]).
+fn superhtml_args(_invocation: &Invocation<'_>) -> Vec<OsString> {
+    ["fmt", "--stdin", "--syntax-only"]
+        .map(OsString::from)
+        .to_vec()
+}
+
 /// `hadolint`'s arguments: JSON on stdout with no colour, every finding's level counted as
 /// failing, the private config the project contributes (`--config <file>`, see
 /// [`hadolint::project_args`]), then `-` for the block on stdin. supdoc reads the JSON, never the
@@ -2580,6 +2612,7 @@ mod tests {
                 "hadolint Dockerfile Lint hadolint Static",
                 "sqruff-format Sql Format sqruff Static",
                 "sqruff-lint Sql Lint sqruff Static",
+                "superhtml Html Format superhtml Static",
                 "yamlfmt Yaml Format yamlfmt Static",
                 "yamllint Yaml Lint yamllint Static",
                 "gofmt Go Format gofmt Static",
@@ -2601,6 +2634,14 @@ mod tests {
         assert_eq!(
             args_of("dockerfmt", 1, &[]),
             ["-i", "4", "-n"].map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn superhtml_formats_stdin_with_validation_off() {
+        assert_eq!(
+            args_of("superhtml", 1, &[]),
+            ["fmt", "--stdin", "--syntax-only"].map(OsString::from)
         );
     }
 
