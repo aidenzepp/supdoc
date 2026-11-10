@@ -938,7 +938,7 @@ fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'sta
 }
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 35] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 36] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -1164,6 +1164,21 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 35] = [
     ToolCartridge {
         name: "biome-lint",
         language: Language::Css,
+        binary: "biome",
+        loads: Loads::Static,
+        install: "npm install --global @biomejs/biome",
+        config_files: &fixed::BIOME_CONFIG_FILES,
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        holds: every_tag,
+        vars: &[],
+        positions: own_positions,
+        argv: biome_lint_args,
+        reader: Reader::Lint(biome::lint_verdict),
+    },
+    ToolCartridge {
+        name: "biome-lint",
+        language: Language::Html,
         binary: "biome",
         loads: Loads::Static,
         install: "npm install --global @biomejs/biome",
@@ -2564,6 +2579,7 @@ mod tests {
                 "biome-lint JavaScript Lint biome Static",
                 "biome-lint Json Lint biome Static",
                 "biome-lint Css Lint biome Static",
+                "biome-lint Html Lint biome Static",
                 "rumdl-format Markdown Format rumdl Static",
                 "rumdl Markdown Lint rumdl Static",
                 "tombi-format Toml Format tombi Static",

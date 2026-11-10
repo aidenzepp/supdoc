@@ -770,8 +770,8 @@ fn linted_nothing(at: &Location) -> Finding {
     Finding::new(
         NOT_CHECKED,
         Severity::Warning,
-        "biome lint checked no file for this block, so its TypeScript, JavaScript, JSON and CSS \
-         blocks' lint step didn't run: the project's biome config leaves them out",
+        "biome lint checked no file for this block, so its TypeScript, JavaScript, JSON, CSS and \
+         HTML blocks' lint step didn't run: the project's biome config leaves them out",
     )
     .with_help(
         "find the setting in the project's biome config that excludes the doc's blocks, or mark \
@@ -793,6 +793,39 @@ fn biome_formatter_off(at: &Location) -> Finding {
         "turn the formatter back on in the project's biome config, where the top-level \
          `formatter.enabled: false`, `css.formatter.enabled: false` or an `overrides` entry \
          matching the blocks turns it off, or mark the blocks `format(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first HTML block biome lint
+/// couldn't parse (see [`biome::unparsed`]), so its lint step didn't run.
+fn biome_html_unparsed(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "biome can't parse this HTML, such as an element whose optional end tag it omits \
+         (`<li>`, `<p>`, `<td>`), so its lint step didn't run",
+    )
+    .with_help(
+        "superhtml's format step reports the block's syntax errors; write each end tag biome \
+         expects, or mark the block `lint(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first HTML block whose biome
+/// lint step didn't run because a `biome-ignore` comment in it may silence more than the rules
+/// it names (see [`biome::switches_html_lint_off`]).
+fn biome_html_switched_off(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "the block holds a `biome-ignore` comment that names something other than rules, so \
+         supdoc can't confirm biome lints all of it, and its lint step didn't run",
+    )
+    .with_help(
+        "name each rule the comment silences, such as `<!-- biome-ignore lint/a11y/useAltText: \
+         <reason> -->`, or mark the block `lint(off: <reason>)`",
     )
     .with_location(at.clone())
 }
@@ -1155,6 +1188,8 @@ impl NotRunWarnings {
             YAML_EMPTY => yaml_empty(at),
             FRAME_RESHAPED => frame_reshaped(at),
             BIOME_LINTED_NOTHING => linted_nothing(at),
+            BIOME_HTML_UNPARSED => biome_html_unparsed(at),
+            BIOME_HTML_SWITCHED_OFF => biome_html_switched_off(at),
             BIOME_FORMATTER_OFF => biome_formatter_off(at),
             PYLINT_SWITCHED_OFF => pylint_switched_off(at),
             PRETTIER_SWITCHED_OFF => prettier_switched_off(at),
@@ -1795,8 +1830,8 @@ fn biome_refusal(refusal: &biome::Refusal, at: &Location, windows: bool) -> (Str
         biome::Refusal::Config { file, why, help } => (
             format!("biome config `{file}` {why}"),
             format!(
-                "the project's `{file}` {why}, so its TypeScript, JavaScript, JSON and CSS blocks \
-                 aren't checked"
+                "the project's `{file}` {why}, so its TypeScript, JavaScript, JSON, CSS and HTML \
+                 blocks aren't checked"
             ),
             format!("in `{file}`: {help}"),
         ),
@@ -4106,6 +4141,20 @@ fn css_formatter_off(tool: &ToolCartridge, ran: &Ran) -> bool {
 pub(super) const BIOME_LINTED_NOTHING: &str =
     "biome lint checked no file: the project's biome config leaves the block out";
 
+/// Why biome lint's step on an HTML block counts as not run when its report holds a `parse`
+/// diagnostic (see [`biome::unparsed`]): biome refuses valid HTML that omits an optional end tag,
+/// and superhtml's format step already reports the block's syntax errors.
+const BIOME_HTML_UNPARSED: &str = "biome can't parse the HTML block, such as one omitting an \
+                                   optional end tag, so its lint step didn't run";
+
+/// Why biome lint's step doesn't run on an HTML block holding a `biome-ignore` comment supdoc
+/// can't tell from one that silences every rule for the block (see
+/// [`biome::switches_html_lint_off`]).
+const BIOME_HTML_SWITCHED_OFF: &str = "the block holds a `biome-ignore` comment that names \
+                                       something other than rules, so supdoc can't confirm biome \
+                                       lints all of it; name the rules, or mark the block \
+                                       `lint(off: <reason>)`";
+
 /// The name of tombi's lint cartridge.
 const TOMBI_LINT: &str = "tombi-lint";
 
@@ -4190,12 +4239,17 @@ const ESLINT_SWITCHED_OFF: &str = "the block holds an `eslint-disable` comment t
 
 /// Why `tool`'s lint step doesn't run on `record`'s block, so the tool is never spawned: it is
 /// pylint and the block holds a `pylint:` comment supdoc can't tell from one that switches it
-/// off for the whole block (see [`pylint::switches_lint_off`]), or it is eslint and the block
-/// holds such an `eslint-disable` comment (see [`eslint::switches_lint_off`]). `None` otherwise.
+/// off for the whole block (see [`pylint::switches_lint_off`]), it is eslint and the block holds
+/// such an `eslint-disable` comment (see [`eslint::switches_lint_off`]), or it is biome lint on
+/// an HTML block holding such a `biome-ignore` comment (see [`biome::switches_html_lint_off`]).
+/// `None` otherwise.
 fn switched_off(tool: &ToolCartridge, record: &BlockRecord) -> Option<&'static str> {
     let (switches_off, reason): (fn(&str) -> bool, _) = match tool.name {
         PYLINT => (pylint::switches_lint_off, PYLINT_SWITCHED_OFF),
         ESLINT => (eslint::switches_lint_off, ESLINT_SWITCHED_OFF),
+        BIOME_LINT if tool.language == Language::Html => {
+            (biome::switches_html_lint_off, BIOME_HTML_SWITCHED_OFF)
+        }
         _ => return None,
     };
     record
@@ -4206,7 +4260,8 @@ fn switched_off(tool: &ToolCartridge, record: &BlockRecord) -> Option<&'static s
 }
 
 /// Why `tool`'s finished run `ran` says nothing about its block, so its step counts as not run:
-/// biome lint, given the block as a file (`biome_file`), checked no file; tombi lint didn't
+/// biome lint, given the block as a file (`biome_file`), checked no file, or couldn't parse an
+/// HTML block (see [`biome::unparsed`]); tombi lint didn't
 /// report linting it; pylint linted no module; eslint ignored the block's file; or go vet couldn't load the block `input` (see
 /// [`go::vet_not_run`]). `None` otherwise.
 fn said_nothing(
@@ -4217,7 +4272,12 @@ fn said_nothing(
 ) -> Option<&'static str> {
     match tool.name {
         BIOME_LINT if biome_file => {
-            biome::linted_nothing(&ran.stdout).then_some(BIOME_LINTED_NOTHING)
+            if biome::linted_nothing(&ran.stdout) {
+                Some(BIOME_LINTED_NOTHING)
+            } else {
+                (tool.language == Language::Html && biome::unparsed(&ran.stdout))
+                    .then_some(BIOME_HTML_UNPARSED)
+            }
         }
         TOMBI_LINT => tombi::linted_nothing(ran).then_some(TOMBI_LINTED_NOTHING),
         PYLINT => pylint::linted_nothing(&ran.stdout).then_some(PYLINT_LINTED_NOTHING),
