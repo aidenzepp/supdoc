@@ -2,8 +2,8 @@
 //!
 //! It always writes two copies, one for the shared agents directory and one for Claude Code, and
 //! nothing else. The project scope puts them under the project root, the config's directory or
-//! the current directory when there is no config. `--global` puts them under `HOME` and Claude
-//! Code's config directory. Each copy is a real file written atomically. A copy that already
+//! the current directory when there is no config. `--global` puts them under the home directory
+//! (`HOME`, or `USERPROFILE` on Windows) and Claude Code's config directory. Each copy is a real file written atomically. A copy that already
 //! holds the embedded text is left alone; a different one is replaced only under `--yes`. A
 //! project install writes nothing outside the project: it refuses a symlinked directory on the
 //! way to either copy that leads out of the root, and follows one that stays inside. Either
@@ -59,17 +59,26 @@ pub(crate) enum ClaudeConfigDir {
 /// The directories `skill install --global` writes under, read once by `main`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SkillDirs {
-    /// The user's home directory (`HOME`), when set to an absolute path.
+    /// The user's home directory, when its variable is set to an absolute path.
     pub(crate) home: Option<AbsolutePath>,
+    /// The variable `home` was read from: `HOME`, or `USERPROFILE` on Windows.
+    pub(crate) home_var: &'static str,
     /// Claude Code's config directory (`CLAUDE_CONFIG_DIR`).
     pub(crate) claude_config_dir: ClaudeConfigDir,
 }
 
 impl SkillDirs {
-    /// Reads `HOME` and `CLAUDE_CONFIG_DIR` through `var`.
-    ///
-    /// An unset or empty value is absent, and a relative `HOME` counts as unset.
+    /// Reads the home directory and `CLAUDE_CONFIG_DIR` through `var` for the running platform.
     pub(crate) fn from_vars(var: impl Fn(&str) -> Option<OsString>) -> Self {
+        Self::for_platform(var, cfg!(windows))
+    }
+
+    /// Reads `USERPROFILE` when `windows` is set and `HOME` otherwise, and `CLAUDE_CONFIG_DIR`,
+    /// through `var`.
+    ///
+    /// An unset or empty value is absent, and a relative home counts as unset.
+    pub(crate) fn for_platform(var: impl Fn(&str) -> Option<OsString>, windows: bool) -> Self {
+        let home_var = if windows { "USERPROFILE" } else { "HOME" };
         let set = |name: &str| var(name).filter(|value| !value.is_empty());
         let claude_config_dir = match set(CLAUDE_CONFIG_DIR) {
             None => ClaudeConfigDir::Unset,
@@ -77,7 +86,8 @@ impl SkillDirs {
                 .map_or(ClaudeConfigDir::Relative(value), ClaudeConfigDir::Absolute),
         };
         Self {
-            home: set("HOME").and_then(|value| AbsolutePath::new(Path::new(&value))),
+            home: set(home_var).and_then(|value| AbsolutePath::new(Path::new(&value))),
+            home_var,
             claude_config_dir,
         }
     }
@@ -93,7 +103,7 @@ impl SkillDirs {
 /// path through a file, the config read error (74) when it names a directory or its metadata
 /// cannot be read, and the config error (78) when the config entry found while looking for the
 /// project root is a symlink that does not lead to a `supdoc.config.toml`, all before anything is
-/// written or previewed, `cli-skill-no-home` when `--global` is given and `HOME` is not set,
+/// written or previewed, `cli-skill-no-home` when `--global` is given and the home variable is not set,
 /// `cli-skill-outside-root` when a project copy would be written through a symlink out of the
 /// project, or a copy's `SKILL.md` is itself a symlink out of where it belongs, before anything
 /// is written or previewed, or when a path changed after that check, `cli-skill-write` when a copy cannot be
@@ -209,7 +219,7 @@ pub(crate) fn schema() -> schemars::Schema {
 ///
 /// # Errors
 ///
-/// Returns `cli-skill-no-home` when `global` is set and `HOME` is not, and
+/// Returns `cli-skill-no-home` when `global` is set and the home directory is not, and
 /// `cli-skill-relative-claude-dir` when `global` is set and `CLAUDE_CONFIG_DIR` is relative.
 fn destinations(
     global: bool,
@@ -222,7 +232,7 @@ fn destinations(
             (root.clone(), root.beneath(&fixed::PROJECT_CLAUDE_SKILL)),
         ]);
     }
-    let home = dirs.home.as_ref().ok_or_else(no_home)?;
+    let home = dirs.home.as_ref().ok_or_else(|| no_home(dirs.home_var))?;
     let claude_dir = match &dirs.claude_config_dir {
         ClaudeConfigDir::Unset => home.beneath(&fixed::DEFAULT_CLAUDE_DIR),
         ClaudeConfigDir::Absolute(dir) => dir.clone(),
@@ -649,11 +659,18 @@ fn outside_root(
 }
 
 /// The error for `--global` without a home directory.
-fn no_home() -> CliError {
+fn no_home(home_var: &str) -> CliError {
+    let set_it = if home_var == "USERPROFILE" {
+        "set USERPROFILE=C:\\Users\\you"
+    } else {
+        "export HOME=/home/you"
+    };
     CliError::new(
         "cli-skill-no-home",
-        "`--global` installs into your home directory, but HOME is not set",
-        "Set HOME, for example `export HOME=/home/you`, or drop `--global` to install into the project",
+        format!("`--global` installs into your home directory, but {home_var} is not set"),
+        format!(
+            "Set {home_var}, for example `{set_it}`, or drop `--global` to install into the project"
+        ),
         ExitStatus::Usage,
     )
 }
@@ -734,6 +751,14 @@ mod tests {
     /// Where the skill goes beneath Claude Code's config directory.
     const CLAUDE_DIR_SKILL: &str = "skills/supdoc/SKILL.md";
 
+    /// `base` with each `/`-separated segment of `relative` appended, so the result matches the
+    /// paths the command builds on Windows as well, where a joined `a/b` keeps its `/`.
+    fn segments_beneath(base: &Path, relative: &str) -> PathBuf {
+        let mut joined = base.to_path_buf();
+        joined.extend(relative.split('/'));
+        joined
+    }
+
     /// A fresh project directory and a fresh home directory, both empty.
     struct World {
         project: tempfile::TempDir,
@@ -749,11 +774,11 @@ mod tests {
         }
 
         fn project_file(&self, relative: &str) -> PathBuf {
-            self.project.path().join(relative)
+            segments_beneath(self.project.path(), relative)
         }
 
         fn home_file(&self, relative: &str) -> PathBuf {
-            self.home.path().join(relative)
+            segments_beneath(self.home.path(), relative)
         }
 
         /// Runs `supdoc skill install <flags>` in `cwd`, with this world's home and the given
@@ -768,6 +793,7 @@ mod tests {
             };
             let dirs = SkillDirs {
                 home: AbsolutePath::new(self.home.path()),
+                home_var: "HOME",
                 claude_config_dir: claude_dir
                     .and_then(AbsolutePath::new)
                     .map_or(ClaudeConfigDir::Unset, ClaudeConfigDir::Absolute),
@@ -945,12 +971,20 @@ mod tests {
         assert_eq!(error.exit_code(), ExitStatus::Usage.code());
     }
 
+    /// The text of an absolute fixture directory on this OS.
+    fn text(raw: &str) -> OsString {
+        crate::path::fixture(raw).as_path().as_os_str().to_owned()
+    }
+
     #[test]
     fn a_relative_claude_config_dir_is_kept_and_refused_for_global() {
-        let dirs = SkillDirs::from_vars(|name| match name {
-            "HOME" => Some(OsString::from("/home/me")),
-            _ => Some(OsString::from("rel/claude")),
-        });
+        let dirs = SkillDirs::for_platform(
+            |name| match name {
+                "HOME" => Some(text("/home/me")),
+                _ => Some(OsString::from("rel/claude")),
+            },
+            false,
+        );
         let root = crate::path::fixture("/work");
 
         assert_eq!(
@@ -968,6 +1002,54 @@ mod tests {
             destinations(false, &root, &dirs).is_ok(),
             "a project install should ignore CLAUDE_CONFIG_DIR"
         );
+    }
+
+    #[test]
+    fn the_home_directory_comes_from_userprofile_on_windows_and_home_elsewhere() {
+        let vars = |name: &str| match name {
+            "HOME" => Some(text("/unix/home")),
+            "USERPROFILE" => Some(text("/windows/profile")),
+            _ => None,
+        };
+
+        let windows = SkillDirs::for_platform(vars, true);
+        let unix = SkillDirs::for_platform(vars, false);
+
+        assert_eq!(windows.home, Some(crate::path::fixture("/windows/profile")));
+        assert_eq!(windows.home_var, "USERPROFILE");
+        assert_eq!(unix.home, Some(crate::path::fixture("/unix/home")));
+        assert_eq!(unix.home_var, "HOME");
+        let root = crate::path::fixture("/work");
+        let [(_, agents), (_, claude)] =
+            destinations(true, &root, &windows).expect("global destinations from USERPROFILE");
+        assert_eq!(
+            agents,
+            crate::path::fixture("/windows/profile").beneath(&fixed::AGENTS_SKILL)
+        );
+        assert_eq!(
+            claude,
+            crate::path::fixture("/windows/profile")
+                .beneath(&fixed::DEFAULT_CLAUDE_DIR)
+                .beneath(&fixed::CLAUDE_DIR_SKILL)
+        );
+    }
+
+    #[test]
+    fn global_without_a_home_names_the_variable_the_platform_reads() {
+        let root = crate::path::fixture("/work");
+        for (windows, variable) in [(true, "USERPROFILE"), (false, "HOME")] {
+            let dirs = SkillDirs::for_platform(|_| None, windows);
+
+            let error = destinations(true, &root, &dirs).expect_err("--global needs a home");
+
+            assert_eq!(error.code(), "cli-skill-no-home");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("{variable} is not set")),
+                "the message should name {variable}: {error}"
+            );
+        }
     }
 
     #[test]
