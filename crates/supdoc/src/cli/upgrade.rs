@@ -363,10 +363,33 @@ pub(crate) fn run(
     context: &Context,
     output: &mut Output,
 ) -> Result<Outcome, CliError> {
-    let environment = Environment::read();
-    match detect(&environment, release_marker())? {
+    run_in(
+        args,
+        context,
+        output,
+        &Environment::read(),
+        release_marker(),
+        install,
+    )
+}
+
+/// [`run`] in `environment`, with the cargo install started through `spawn`, so a test can run
+/// the Windows route on any host and see that nothing is started.
+///
+/// # Errors
+///
+/// Returns what [`run`] lists.
+fn run_in(
+    args: &UpgradeArgs,
+    context: &Context,
+    output: &mut Output,
+    environment: &Environment,
+    marker: bool,
+    spawn: impl FnOnce(&[String], &Path, bool) -> Result<(), CliError>,
+) -> Result<Outcome, CliError> {
+    match detect(environment, marker)? {
         Install::Cargo(installed) => {
-            run_cargo(args, context, output, &installed, environment.windows)
+            run_cargo(args, context, output, &installed, environment, spawn)
         }
         Install::ReleaseBinary => {
             run_release_binary(args, context, output, environment.exe.as_deref())
@@ -424,7 +447,7 @@ fn cargo_owns_exe(environment: &Environment) -> bool {
 }
 
 /// The cargo route of [`run`]: previews, or under `--yes` runs, the cargo install of the target;
-/// on Windows (`windows`) `--yes` names the command instead of running it.
+/// on Windows (`environment.windows`) `--yes` names the command instead of running it.
 ///
 /// # Errors
 ///
@@ -435,8 +458,10 @@ fn run_cargo(
     context: &Context,
     output: &mut Output,
     installed: &CargoInstall,
-    windows: bool,
+    environment: &Environment,
+    spawn: impl FnOnce(&[String], &Path, bool) -> Result<(), CliError>,
 ) -> Result<Outcome, CliError> {
+    let windows = environment.windows;
     let target = match &args.release {
         Some(version) => version.clone(),
         None => latest(&installed.cargo_home, windows)?,
@@ -454,7 +479,7 @@ fn run_cargo(
                 &words,
                 &installed.cargo_home,
                 context.global.format().is_json(),
-                install,
+                spawn,
             )?;
             (words, true, UpgradeOutcome::Installed)
         } else {
@@ -485,6 +510,7 @@ fn run_cargo(
             args.confirm.dry_run,
             &command_line(context, "upgrade", &[target.release()], &["--yes"]),
             &report.command,
+            &installed.cargo_home,
         )),
     };
     if let Some(note) = note {
@@ -496,14 +522,20 @@ fn run_cargo(
 }
 
 /// The note under a cargo preview: the usual one, or on Windows (`windows`) that `--yes` cannot
-/// run cargo there and the `command` to run from another shell.
-fn cargo_preview_note(windows: bool, dry_run: bool, apply: &str, command: &[String]) -> String {
+/// run cargo there and the `command` to run from `cargo_home` in another shell.
+fn cargo_preview_note(
+    windows: bool,
+    dry_run: bool,
+    apply: &str,
+    command: &[String],
+    cargo_home: &Path,
+) -> String {
     if windows {
         format!(
             "Nothing written. On Windows supdoc cannot run cargo for you, because it cannot \
              replace the running supdoc.exe: run `{}` with cargo from another shell, where \
              supdoc is not running.",
-            shell_line(command)
+            powershell_command(command, cargo_home)
         )
     } else {
         preview_note(dry_run, apply)
@@ -525,15 +557,43 @@ fn install_or_hand_over(
     spawn: impl FnOnce(&[String], &Path, bool) -> Result<(), CliError>,
 ) -> Result<(), CliError> {
     if windows {
-        Err(cargo_manual(argv))
+        Err(cargo_manual(argv, cargo_home))
     } else {
         spawn(argv, cargo_home, json)
     }
 }
 
+/// `argv` as a PowerShell command run from `cargo_home`, as the Unix route runs it, so a
+/// `rust-toolchain.toml` or `.cargo/config.toml` in the current directory cannot change the
+/// toolchain or registry.
+fn powershell_command(argv: &[String], cargo_home: &Path) -> String {
+    let line = argv
+        .iter()
+        .map(|word| powershell_quote(word))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "Set-Location {}; {line}",
+        powershell_quote(&cargo_home.display().to_string())
+    )
+}
+
+/// `text` as one PowerShell word: bare when plain, else single-quoted with `'` doubled.
+fn powershell_quote(text: &str) -> String {
+    let plain = !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+=:,@%".contains(c));
+    if plain {
+        text.to_owned()
+    } else {
+        format!("'{}'", text.replace('\'', "''"))
+    }
+}
+
 /// The finding that `--yes` cannot run cargo on Windows, exit 78 as for any step the user takes.
-fn cargo_manual(argv: &[String]) -> CliError {
-    let command = shell_line(argv);
+fn cargo_manual(argv: &[String], cargo_home: &Path) -> CliError {
+    let command = powershell_command(argv, cargo_home);
     CliError::new(
         "cli-upgrade-cargo-manual",
         format!(
@@ -543,6 +603,18 @@ fn cargo_manual(argv: &[String]) -> CliError {
         format!("Run `{command}` from a shell where supdoc is not running"),
         ExitStatus::Config,
     )
+}
+
+/// The `cli-upgrade-cargo-manual` finding for a fixed target and cargo home, for the test seam.
+pub(crate) fn cargo_manual_example(cargo_home: &Path) -> CliError {
+    let target = ReleaseVersion {
+        text: "9.9.9".to_owned(),
+        major: 9,
+        minor: 9,
+        patch: 9,
+        pre: Vec::new(),
+    };
+    cargo_manual(&install_argv(&target, cargo_home), cargo_home)
 }
 
 /// The first release that has downloadable binaries.
@@ -1546,9 +1618,10 @@ mod tests {
     fn the_windows_finding_prints_the_command_the_unix_route_would_run() {
         let argv = argv_for("9.9.9");
 
-        let finding = cargo_manual(&argv);
+        let finding = cargo_manual(&argv, Path::new("/home/a/.cargo"));
 
-        let command = shell_line(&argv);
+        let command = powershell_command(&argv, Path::new("/home/a/.cargo"));
+        assert!(command.ends_with(&shell_line(&argv)), "{command}");
         assert!(command.contains("--version =9.9.9") && command.contains("--locked"));
         assert!(finding.message().contains(&command), "{finding}");
         assert!(finding.help().contains(&command), "{finding:?}");
@@ -1561,18 +1634,116 @@ mod tests {
         let argv = argv_for("9.9.9");
         let apply = "supdoc upgrade 9.9.9 --yes";
 
-        let windows = cargo_preview_note(true, false, apply, &argv);
-        let unix = cargo_preview_note(false, false, apply, &argv);
-        let unix_dry = cargo_preview_note(false, true, apply, &argv);
+        let home = Path::new("/home/a/.cargo");
+        let windows = cargo_preview_note(true, false, apply, &argv, home);
+        let unix = cargo_preview_note(false, false, apply, &argv, home);
+        let unix_dry = cargo_preview_note(false, true, apply, &argv, home);
 
         assert!(
-            windows.contains(&shell_line(&argv))
+            windows.contains(&powershell_command(&argv, home))
                 && windows.contains("another shell")
                 && !windows.contains(apply),
             "{windows}"
         );
         assert_eq!(unix, preview_note(false, apply));
         assert_eq!(unix_dry, preview_note(true, apply));
+    }
+
+    #[test]
+    fn the_windows_finding_changes_to_the_cargo_home_first_in_powershell_form() {
+        let argv = argv_for("9.9.9");
+
+        let command = powershell_command(&argv, Path::new(r"C:\Users\o'brien\.cargo"));
+
+        assert_eq!(
+            command,
+            format!(
+                "Set-Location 'C:\\Users\\o''brien\\.cargo'; {}",
+                shell_line(&argv)
+            )
+        );
+        assert_eq!(
+            powershell_command(&argv, Path::new("/home/a/.cargo")),
+            format!("Set-Location /home/a/.cargo; {}", shell_line(&argv))
+        );
+    }
+
+    /// Runs `supdoc upgrade 9.9.9 <flag>` as a cargo install in `environment` with a spawn that
+    /// records itself, returning the result, what was printed and whether cargo was started.
+    fn upgrade_in(
+        environment: &Environment,
+        flag: &str,
+    ) -> (Result<Outcome, CliError>, String, bool) {
+        use crate::cli::args::Command;
+        use crate::cli::testing::Session;
+
+        let project = crate::cli::testing::Project::empty();
+        let mut session = Session::new(project.root(), &["upgrade", "9.9.9", flag]);
+        let Command::Upgrade(args) = &session.cli.command else {
+            panic!("`supdoc upgrade` should parse as the upgrade command");
+        };
+        let spawned = std::cell::Cell::new(false);
+        let result = run_in(
+            args,
+            &session.context,
+            &mut session.output,
+            environment,
+            false,
+            |_, _, _| {
+                spawned.set(true);
+                Ok(())
+            },
+        );
+        let run = session.finished(result);
+        (run.result, run.stdout + &run.stderr, spawned.get())
+    }
+
+    #[test]
+    fn a_windows_cargo_install_run_with_yes_hands_over_without_starting_cargo() {
+        let (home, environment) = environment_running(true, "supdoc.exe");
+        write_record(&home, &["supdoc.exe"]);
+
+        let (result, _printed, spawned) = upgrade_in(&environment, "--yes");
+
+        assert!(!spawned, "cargo was started on Windows");
+        assert_eq!(
+            result.expect_err("Windows should hand over").code(),
+            "cli-upgrade-cargo-manual"
+        );
+    }
+
+    #[test]
+    fn a_unix_cargo_install_run_with_yes_starts_cargo() {
+        let (home, environment) = environment_running(false, "supdoc");
+        write_record(&home, &["supdoc"]);
+
+        let (result, _printed, spawned) = upgrade_in(&environment, "--yes");
+
+        assert!(spawned, "cargo was not started off Windows");
+        assert_eq!(
+            result.expect("a spawn that succeeds should finish the upgrade"),
+            Outcome::Clean
+        );
+    }
+
+    #[test]
+    fn a_windows_cargo_install_previews_the_command_for_another_shell() {
+        let (home, environment) = environment_running(true, "supdoc.exe");
+        write_record(&home, &["supdoc.exe"]);
+
+        let (result, printed, spawned) = upgrade_in(&environment, "--dry-run");
+
+        assert_eq!(result.expect("a preview should finish"), Outcome::Clean);
+        assert!(!spawned, "a preview started cargo");
+        assert!(
+            printed.contains("another shell") && printed.contains("Set-Location"),
+            "{printed}"
+        );
+    }
+
+    #[test]
+    fn reading_the_environment_takes_the_platform_from_the_host() {
+        assert_eq!(Environment::read().windows, cfg!(windows));
     }
 
     #[test]

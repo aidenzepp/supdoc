@@ -774,11 +774,6 @@ mod helps {
             why: "a built-in JSON Schema must fail to serialize, which is a supdoc bug",
         },
         Unreachable {
-            kind: "cli-upgrade-cargo-manual",
-            why: "needs a Windows host, where cargo cannot replace the running supdoc.exe; \
-                  unit-tested in cli::upgrade",
-        },
-        Unreachable {
             kind: "code-block-missing-name",
             why: "needs a clippy run, which `check` holds until the trust lift; unit-tested in \
                   code_blocks::lint",
@@ -843,6 +838,13 @@ mod helps {
         UnitCase {
             kind: "fix-file-changed",
             build: file_changed_during_fix,
+        },
+        UnitCase {
+            kind: "cli-upgrade-cargo-manual",
+            build: || {
+                let message = supdoc::testing::upgrade_cargo_manual();
+                (message.code, message.help)
+            },
         },
         UnitCase {
             kind: "cli-rename-file-changed",
