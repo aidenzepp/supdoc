@@ -9,12 +9,13 @@
 //! linking reads.
 //!
 //! A language is on exactly when its table, `[features.code-blocks.rust]`, `.shell`, `.python`,
-//! `.typescript`, `.javascript`, `.json`, `.yaml`, `.toml`, `.markdown` or `.go`, is written in some file of the chain; an empty
+//! `.typescript`, `.javascript`, `.json`, `.css`, `.yaml`, `.toml`, `.markdown` or `.go`, is written in some file of the chain; an empty
 //! table turns it on. The language
 //! table selects tools (`formatter`, `linter`) and holds the language's own settings; each
 //! tool's options, its step's mode, live in the tool's own table,
 //! `[features.code-blocks.<language>.<tool>]`, validated by its cartridge.
 
+mod css;
 mod go;
 mod javascript;
 mod json;
@@ -31,6 +32,7 @@ use std::ops::Range;
 
 use crate::path::AbsolutePath;
 
+use self::css::RawCss;
 use self::go::RawGo;
 use self::javascript::RawJavaScript;
 use self::json::RawJson;
@@ -63,6 +65,8 @@ pub(crate) enum Language {
     JavaScript,
     /// JSON: tagged `json`, or `jsonc` for JSON that may hold comments.
     Json,
+    /// CSS: tagged `css`, or `scss` for SCSS, which biome reads as part of its CSS family.
+    Css,
     /// YAML: tagged `yaml` or `yml`.
     Yaml,
     /// TOML: tagged `toml`.
@@ -83,6 +87,7 @@ impl Language {
             "ts" | "typescript" | "mts" | "cts" | "tsx" => Some(Self::TypeScript),
             "js" | "javascript" | "mjs" | "cjs" | "jsx" => Some(Self::JavaScript),
             "json" | "jsonc" => Some(Self::Json),
+            "css" | "scss" => Some(Self::Css),
             "yaml" | "yml" => Some(Self::Yaml),
             "toml" => Some(Self::Toml),
             "go" | "golang" => Some(Self::Go),
@@ -91,7 +96,7 @@ impl Language {
     }
 
     /// The name of its table: `rust`, `shell`, `python`, `typescript`, `javascript`, `json`,
-    /// `yaml`, `toml`, `markdown` or `go`.
+    /// `css`, `yaml`, `toml`, `markdown` or `go`.
     #[must_use]
     pub(crate) const fn table(self) -> &'static str {
         match self {
@@ -102,6 +107,7 @@ impl Language {
             Self::TypeScript => "typescript",
             Self::JavaScript => "javascript",
             Self::Json => "json",
+            Self::Css => "css",
             Self::Yaml => "yaml",
             Self::Toml => "toml",
             Self::Go => "go",
@@ -712,6 +718,8 @@ struct Languages {
     javascript: Table,
     /// `[features.code-blocks.json]`.
     json: Table,
+    /// `[features.code-blocks.css]`.
+    css: Table,
     /// `[features.code-blocks.yaml]`.
     yaml: Table,
     /// `[features.code-blocks.toml]`.
@@ -726,13 +734,14 @@ struct Languages {
 
 impl Languages {
     /// Every language, in the order the chain's checks report them.
-    const ORDER: [Language; 10] = [
+    const ORDER: [Language; 11] = [
         Language::Rust,
         Language::Shell,
         Language::Python,
         Language::TypeScript,
         Language::JavaScript,
         Language::Json,
+        Language::Css,
         Language::Yaml,
         Language::Toml,
         Language::Markdown,
@@ -749,6 +758,7 @@ impl Languages {
             Language::TypeScript => &self.typescript,
             Language::JavaScript => &self.javascript,
             Language::Json => &self.json,
+            Language::Css => &self.css,
             Language::Yaml => &self.yaml,
             Language::Toml => &self.toml,
             Language::Go => &self.go,
@@ -790,6 +800,8 @@ pub(crate) struct RawCodeBlocks {
     javascript: Option<RawJavaScript>,
     /// `[features.code-blocks.json]`, when written.
     json: Option<RawJson>,
+    /// `[features.code-blocks.css]`, when written.
+    css: Option<RawCss>,
     /// `[features.code-blocks.yaml]`, when written.
     yaml: Option<RawYaml>,
     /// `[features.code-blocks.toml]`, when written.
@@ -817,7 +829,7 @@ impl Written {
     /// # Errors
     ///
     /// [`ConfigError::ToolNotSelected`] for the first tool table, Rust, shell, Python,
-    /// TypeScript, JavaScript, JSON, YAML, TOML, Markdown then Go, whose tool the merged chain
+    /// TypeScript, JavaScript, JSON, CSS, YAML, TOML, Markdown then Go, whose tool the merged chain
     /// doesn't select.
     pub(super) fn resolve(
         self,
@@ -943,6 +955,7 @@ pub(super) fn merge(
         typescript,
         javascript,
         json,
+        css,
         yaml,
         toml,
         go,
@@ -994,6 +1007,10 @@ pub(super) fn merge(
                 .languages
                 .json
                 .behind(json.as_ref().map(RawJson::selection), file),
+            css: nearer
+                .languages
+                .css
+                .behind(css.as_ref().map(RawCss::selection), file),
             yaml: nearer
                 .languages
                 .yaml
@@ -1311,6 +1328,59 @@ mod tests {
         let message = refused("python", "formatter = \"autopep8\"");
 
         assert!(message.contains("`ruff-format`, `black`"), "got {message}");
+    }
+
+    #[test]
+    fn css_and_scss_tags_name_css_and_less_and_sass_name_no_language() {
+        let cases = [
+            ("css", Some(Language::Css)),
+            ("scss", Some(Language::Css)),
+            ("less", None),
+            ("sass", None),
+        ];
+        for (tag, expected) in cases {
+            assert_eq!(Language::from_tag(tag), expected, "tag `{tag}`");
+        }
+        assert_eq!(Language::Css.table(), "css");
+    }
+
+    #[test]
+    fn prettier_is_refused_as_a_css_formatter_naming_biome_format() {
+        let message = refused("css", "formatter = \"prettier\"");
+
+        assert!(
+            message.contains("`prettier` isn't a known css formatter")
+                && message.contains("`biome-format`"),
+            "got {message}"
+        );
+    }
+
+    #[test]
+    fn a_css_table_selects_biome_for_both_steps() {
+        let dir = tree(&[(
+            "supdoc.config.toml",
+            "[features.code-blocks.css]\nformatter = \"biome-format\"\nlinter = \"biome-lint\"\n",
+        )]);
+
+        let config = Config::load(&at(&dir, ".")).expect("the fixture config should load");
+        let code_blocks = config.code_blocks().expect("the table is written");
+
+        assert!(
+            code_blocks.checks(Language::Css),
+            "the css table turns CSS on"
+        );
+        assert_eq!(
+            code_blocks
+                .choice(Language::Css, Step::Format)
+                .and_then(known_name),
+            Some("biome-format")
+        );
+        assert_eq!(
+            code_blocks
+                .choice(Language::Css, Step::Lint)
+                .and_then(known_name),
+            Some("biome-lint")
+        );
     }
 
     #[test]

@@ -86,6 +86,8 @@ fn permissions_restrict_this_user(test: &str) -> bool {
 #[cfg(test)]
 mod code_blocks;
 #[cfg(test)]
+mod code_blocks_css;
+#[cfg(test)]
 mod code_blocks_custom;
 #[cfg(test)]
 mod code_blocks_fix;
