@@ -463,7 +463,7 @@ mod tests {
             )
         }
 
-        /// The walked sources, relative to the root.
+        /// The walked sources, relative to the root, written with `/` on every platform.
         fn sources(&self, scope: &Scope) -> Vec<String> {
             self.walk(scope)
                 .sources
@@ -478,8 +478,10 @@ mod tests {
                     .expect("the temporary directory should be absolute"),
             )
             .expect("a walked source should be under the root")
-            .to_string_lossy()
-            .into_owned()
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/")
         }
     }
 
