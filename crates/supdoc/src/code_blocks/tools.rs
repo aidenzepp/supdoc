@@ -27,8 +27,8 @@ use crate::config::confine::Boundary;
 use crate::path::{self, FixedPath, NativeName, Suffix, fixed};
 
 use super::{
-    biome, dockerfmt, eslint, go, hadolint, mbake, prettier, pylint, python, rumdl, rust, shell,
-    sqruff, superhtml, tombi, yaml,
+    biome, checkmake, dockerfmt, eslint, go, hadolint, mbake, prettier, pylint, python, rumdl,
+    rust, shell, sqruff, superhtml, tombi, yaml,
 };
 
 /// The variables a tool gets from supdoc's own environment, and no others. Windows adds the
@@ -687,6 +687,12 @@ pub(crate) const SUPERHTML_INSTALL: &str = "download superhtml 0.7.1 from https:
 pub(crate) const HADOLINT_INSTALL: &str = "download hadolint 2.15.1 from https://github.com/hadolint/hadolint/releases/tag/v2.15.1 \
      and put it on PATH";
 
+/// How to install a checkmake supdoc's checks are verified against (see
+/// [`checkmake::VERIFIED`]): checkmake ships a binary per platform, and no package manager supdoc
+/// can name pins its version.
+pub(crate) const CHECKMAKE_INSTALL: &str = "download checkmake 0.3.2 from https://github.com/checkmake/checkmake/releases/tag/v0.3.2 \
+     and put it on PATH";
+
 /// How to install a sqruff supdoc's checks are verified against (see [`sqruff::VERIFIED`]):
 /// sqruff ships a binary per platform with a `.sha256` beside it. The release binary, never the
 /// pip package, which carries the jinja and python templaters.
@@ -943,7 +949,7 @@ fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'sta
 }
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 38] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 39] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -1337,6 +1343,22 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 38] = [
         positions: own_positions,
         argv: mbake_args,
         reader: Reader::Format(mbake::parse_error),
+    },
+    ToolCartridge {
+        name: "checkmake",
+        language: Language::Makefile,
+        binary: "checkmake",
+        loads: Loads::Static,
+        install: CHECKMAKE_INSTALL,
+        // checkmake reads only supdoc's private copy, named by its hash in the args.
+        config_files: &[],
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        holds: every_tag,
+        vars: &[],
+        positions: own_positions,
+        argv: checkmake_args,
+        reader: Reader::Lint(checkmake::lint_verdict),
     },
     ToolCartridge {
         name: "superhtml",
@@ -2105,6 +2127,17 @@ fn mbake_args(invocation: &Invocation<'_>) -> Vec<OsString> {
     args
 }
 
+/// `checkmake`'s arguments: JSON on stdout, the private config the project contributes
+/// (`--config <file>`, see [`checkmake::project_args`]), so checkmake searches for no config, then
+/// the private file holding the block (see [`checkmake::BlockFile`]), since checkmake reads no
+/// stdin. Without that file, as a cache key names every run of the same block, no path follows.
+fn checkmake_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    let mut args = vec![OsString::from("-o"), OsString::from("json")];
+    args.extend(invocation.project.iter().cloned());
+    args.extend(invocation.emit.map(|file| file.as_os_str().to_owned()));
+    args
+}
+
 /// `hadolint`'s arguments: JSON on stdout with no colour, every finding's level counted as
 /// failing, the private config the project contributes (`--config <file>`, see
 /// [`hadolint::project_args`]), then `-` for the block on stdin. supdoc reads the JSON, never the
@@ -2659,6 +2692,7 @@ mod tests {
                 "sqruff-format Sql Format sqruff Static",
                 "sqruff-lint Sql Lint sqruff Static",
                 "mbake Makefile Format mbake Static",
+                "checkmake Makefile Lint checkmake Static",
                 "superhtml Html Format superhtml Static",
                 "yamlfmt Yaml Format yamlfmt Static",
                 "yamllint Yaml Lint yamllint Static",
@@ -2699,6 +2733,40 @@ mod tests {
                 "mbake must never be run with `{banned}`"
             );
         }
+    }
+
+    #[test]
+    fn checkmake_reads_its_private_block_file_as_json_with_the_private_config() {
+        let config = ["--config", "/c/checkmake.ini"].map(OsString::from);
+        let block = Path::new("/p/checkmake-lint/1-0/block.mk");
+        let invocation = Invocation {
+            doc: Path::new("/p/docs/a.md"),
+            tag: "",
+            index: 1,
+            edition: Edition::E2024,
+            dialect: Dialect::Bash,
+            project: &config,
+            emit: Some(block),
+            externs: &[],
+            fragment: None,
+        };
+
+        assert_eq!(
+            cartridge("checkmake").args(&invocation),
+            [
+                "-o",
+                "json",
+                "--config",
+                "/c/checkmake.ini",
+                "/p/checkmake-lint/1-0/block.mk",
+            ]
+            .map(OsString::from)
+        );
+        assert_eq!(
+            args_of("checkmake", 1, &config),
+            ["-o", "json", "--config", "/c/checkmake.ini"].map(OsString::from),
+            "a cache key names no private file"
+        );
     }
 
     #[test]
