@@ -592,6 +592,20 @@ pub(crate) fn sibling(path: &Path, name: &Component) -> Option<PathBuf> {
     Some(raw_join(path.parent()?, Path::new(name.segments())))
 }
 
+/// `path` with its existing file name wrapped by `prefix` and `suffix`, in the same directory:
+/// `a.md` with `.` and `.7.tmp` gives `.a.md.7.tmp`. Both wrappers are [`Suffix`] values, so each
+/// is checked; the existing name is not re-checked, so a Unix name holding `:` is kept. `None` when
+/// `path` has no file name, such as a root or one ending in `..`.
+#[must_use]
+#[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+pub(crate) fn with_affixes(path: &Path, prefix: &Suffix, suffix: &Suffix) -> Option<PathBuf> {
+    let name = path.file_name()?;
+    let mut joined = std::ffi::OsString::from(&prefix.0);
+    joined.push(name);
+    joined.push(&suffix.0);
+    Some(raw_join(path.parent()?, Path::new(&joined)))
+}
+
 /// `path` moved from under `from` to the same place under `onto`: `onto` joined with what
 /// `path.strip_prefix(from)` leaves. `None` when `path` is not under `from`, or when what is left
 /// is not plain names: a `..`, `.`, root or prefix component would let the result climb out of
@@ -955,6 +969,56 @@ mod tests {
         assert_eq!(sibling(Path::new("/"), &name), None);
         for refused in ["", ".", "..", "a/b", "a\\b", "a:b", "a\0b"] {
             assert_eq!(Component::new(refused), None, "{refused:?} reaches sibling");
+        }
+    }
+
+    #[test]
+    fn sibling_is_none_for_a_path_with_no_file_name() {
+        let name = Component::new("b.toml").expect("one normal name");
+        assert_eq!(sibling(Path::new("/d/.."), &name), None);
+        assert_eq!(sibling(Path::new("/"), &name), None);
+    }
+
+    #[test]
+    fn with_affixes_keeps_the_directory_and_wraps_the_name() {
+        let prefix = Suffix::new(".").expect("a plain prefix");
+        let suffix = Suffix::new(".7.tmp").expect("a plain suffix");
+        assert_eq!(
+            with_affixes(Path::new("/d/e/a.md"), &prefix, &suffix),
+            Some(PathBuf::from("/d/e/.a.md.7.tmp"))
+        );
+        assert_eq!(
+            with_affixes(Path::new("a.md"), &prefix, &suffix),
+            Some(PathBuf::from(".a.md.7.tmp"))
+        );
+    }
+
+    #[test]
+    fn with_affixes_is_none_for_a_path_with_no_file_name() {
+        let wrap = Suffix::new(".x").expect("a plain wrapper");
+        assert_eq!(with_affixes(Path::new("/d/.."), &wrap, &wrap), None);
+        assert_eq!(with_affixes(Path::new("/"), &wrap, &wrap), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn with_affixes_keeps_a_colon_in_the_existing_name_on_unix() {
+        let prefix = Suffix::new(".").expect("a plain prefix");
+        let suffix = Suffix::new(".7.tmp").expect("a plain suffix");
+        assert_eq!(
+            with_affixes(Path::new("/d/a:b.md"), &prefix, &suffix),
+            Some(PathBuf::from("/d/.a:b.md.7.tmp"))
+        );
+    }
+
+    #[test]
+    fn with_affixes_wrappers_refuse_each_bad_input_independently() {
+        for refused in ["", "/", "\\", ":", "..", "\0"] {
+            assert_eq!(
+                Suffix::new(refused),
+                None,
+                "{refused:?} would reach a with_affixes wrapper"
+            );
         }
     }
 
