@@ -1262,6 +1262,46 @@ fn json_for_an_applied_release_binary_upgrade_says_installed() {
         run.stdout
     );
     assert!(run.stdout.contains(r#""ran":true"#), "{}", run.stdout);
+    let json = run.json();
+    assert_eq!(
+        super::support::at(&json, "/data/notes"),
+        &serde_json::json!([]),
+        "a clean run carries an empty notes array"
+    );
+}
+
+#[test]
+fn a_failed_replace_names_the_leftover_it_could_not_remove_in_text_and_json() {
+    if !crate::permissions_restrict_this_user("a_failed_replace_names_the_leftover") {
+        return;
+    }
+    let fixture = released();
+    fixture.publish_stub();
+    let dist = fixture.path("dist");
+    std::fs::write(dist.join(".supdoc-upgrade-123-456"), "stale")
+        .expect("the leftover should write");
+    std::fs::set_permissions(&dist, std::fs::Permissions::from_mode(0o555))
+        .expect("the directory should lock");
+
+    let text = fixture.run_released(&["upgrade", NEWER, "--yes"]);
+    let json = fixture.run_released(&["--json", "upgrade", NEWER, "--yes"]);
+
+    std::fs::set_permissions(&dist, std::fs::Permissions::from_mode(0o755))
+        .expect("the directory should unlock");
+    let _ = text.assert_exit(74);
+    assert!(
+        text.stderr.contains("cli-upgrade-replace-failed")
+            && text.stderr.contains(".supdoc-upgrade-123-456"),
+        "{}",
+        text.stderr
+    );
+    let _ = json.assert_exit(74);
+    assert!(
+        json.stderr.contains("cli-upgrade-replace-failed")
+            && json.stderr.contains(".supdoc-upgrade-123-456"),
+        "{}",
+        json.stderr
+    );
 }
 
 #[test]
