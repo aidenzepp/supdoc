@@ -733,8 +733,11 @@ fn makefile_checkmake_always_gets_a_private_config_switching_minphony_off() {
 fn makefile_a_config_switching_off_every_rule_or_one_supdoc_cant_read_leaves_the_blocks_unlinted() {
     let every = "[maxbodylength]\ndisabled = true\n[phonydeclared]\ndisabled = true\n\
                  [timestampexpanded]\ndisabled = true\n[uniquetargets]\ndisabled = true\n";
+    let unbounded = "[maxbodylength]\nmaxBodyLength = 999999999\n[phonydeclared]\ndisabled = true\n\
+                     [timestampexpanded]\ndisabled = true\n[uniquetargets]\ndisabled = true\n";
     for (config, said) in [
         (every, "switches off every checkmake rule"),
+        (unbounded, "switches off every checkmake rule"),
         ("[uniquetargets]\ndisabled = TRUE\n", "doesn't accept"),
         (
             "[uniqueTargets]\ndisabled = true\n",
@@ -865,6 +868,47 @@ fn makefile_the_real_checkmake_reports_a_duplicate_target_at_its_doc_line() {
     };
     assert!(duplicate.contains("defined multiple times"), "{json}");
     assert!(timestamp.contains("\"NOW\""), "{json}");
+}
+
+#[test]
+fn makefile_the_real_checkmake_reports_a_repeated_special_target_at_its_doc_line() {
+    let Some(dir) = real_tool_dir(
+        "checkmake",
+        "makefile_the_real_checkmake_reports_a_repeated_special_target_at_its_doc_line",
+    ) else {
+        return;
+    };
+    // checkmake counts a special target's line one past its own: mid-block that is the variable's
+    // line after it, at the block's end the closing fence's.
+    for (body, line) in [
+        (
+            "all:\n\techo\n.SUFFIXES:\nfoo:\n\tx\n.SUFFIXES: .c\nY = 2",
+            9,
+        ),
+        ("all:\n\techo\n.SUFFIXES:\n.SUFFIXES:", 7),
+    ] {
+        let project = lint_project("make", body);
+
+        let json = project
+            .supdoc_in_with(".", &["check", "--json"], &[("PATH", &dir)])
+            .assert_exit(1)
+            .json();
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-lint"],
+            "{body:?}: {json}"
+        );
+        let found = lines_and_messages(&json);
+        let [(found_line, message)] = found.as_slice() else {
+            panic!("{body:?}: one finding: {json}");
+        };
+        assert_eq!(*found_line, line, "{body:?}: {json}");
+        assert!(
+            message.contains("\".SUFFIXES\" defined multiple times"),
+            "{json}"
+        );
+    }
 }
 
 #[test]

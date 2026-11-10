@@ -63,6 +63,11 @@ const LINT_DIR: &str = "checkmake-lint";
 /// The name of the block's file in its run's directory.
 const BLOCK_FILE: &str = "block.mk";
 
+/// The largest `maxBodyLength` that leaves `maxbodylength` on: a larger one checks no recipe a
+/// block holds, so it counts as that rule switched off when supdoc asks whether a config leaves
+/// any rule on, and is otherwise kept as written.
+const MAX_BODY_ON: u64 = 10_000;
+
 /// The most bytes of a config supdoc reads.
 const MAX_CONFIG: u64 = 256 * 1024;
 
@@ -95,26 +100,164 @@ struct Entry {
     line_number: i64,
 }
 
-/// The rule checkmake reports at a variable's line, which it counts one past the variable's own:
-/// a variable takes the scanner's line count (`parser/parser.go:156`, `:168` and `:197` in
-/// checkmake 0.3.2), which runs one ahead of the line read (`parser/scanner.go:52`), where a rule
-/// takes one less (`parser/parser.go:204`).
-const VARIABLE_RULE: &str = "timestampexpanded";
+/// What checkmake 0.3.2's parser reads a line of a block as, when it reads it as anything.
+#[derive(Debug, PartialEq, Eq)]
+enum Item<'a> {
+    /// A variable set with `:=`, `::=`, `:::=`, `=`, `?=`, `!=` or `+=`, by its name.
+    Variable(&'a str),
+    /// A special target such as `.PHONY:` or `.SUFFIXES:`, by its name.
+    Special(&'a str),
+    /// A rule, by its target, its recipe lines after it.
+    Rule(&'a str),
+}
 
-/// The diagnostics in `checkmake -o json`'s `stdout`, sorted by line, then rule, then message,
-/// since checkmake's own order changes from run to run, with a [`VARIABLE_RULE`] finding moved
-/// back to its variable's line. `None` when it isn't that JSON array, or an entry's line isn't 1
-/// or more.
+impl Item<'_> {
+    /// The line checkmake reports for an item on `line`. Its scanner counts one line ahead of the
+    /// line it has read (`parser/scanner.go:52`, `:24`, and the empty first pass of
+    /// `parser/parser.go:97`): a variable (`parser/parser.go:156`, `:168` and `:197`) and a
+    /// special target (`parser/parser.go:110`) take that count, one past their own line, where a
+    /// rule takes one less (`parser/parser.go:204`), its own.
+    const fn reported(&self, line: usize) -> usize {
+        match self {
+            Self::Variable(_) | Self::Special(_) => line + 1,
+            Self::Rule(_) => line,
+        }
+    }
+}
+
+/// The lines of `input` as checkmake's line scanner reads them: split at `\n`, each without one
+/// `\r` before it, with no line after a final `\n`.
+fn scanned(input: &str) -> impl Iterator<Item = &str> {
+    input
+        .split_inclusive('\n')
+        .map(|line| line.strip_suffix('\n').unwrap_or(line))
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+}
+
+/// Whether `byte` is whitespace to Go's regular expressions (`\s`).
+const fn go_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\x0c' | b'\r')
+}
+
+/// The special target `line` starts, as `^(\.[A-Za-z_]+)\s*:` reads it
+/// (`parser/parser.go:82`).
+fn special(line: &str) -> Option<&str> {
+    let name_end = 1 + line
+        .bytes()
+        .skip(1)
+        .take_while(|b| b.is_ascii_alphabetic() || *b == b'_')
+        .count();
+    let rest = line
+        .get(name_end..)?
+        .trim_start_matches(|c: char| c.is_ascii() && go_space(c as u8));
+    (line.starts_with('.') && name_end > 1 && rest.starts_with(':'))
+        .then(|| line.get(..name_end))
+        .flatten()
+}
+
+/// The variable `line` sets, as `parser/parser.go:65`, `:70` and `:77` read it: a name of
+/// `[A-Za-z0-9_.-]`, then `:=`, `::=`, `:::=`, `=`, `?=`, `!=` or `+=`.
+fn variable(line: &str) -> Option<&str> {
+    let name_end = line
+        .bytes()
+        .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+        .count();
+    let rest = line
+        .get(name_end..)?
+        .trim_start_matches(|c: char| c.is_ascii() && go_space(c as u8));
+    let colons = rest.bytes().take_while(|b| *b == b':').count();
+    let operator = match colons {
+        0 => rest.strip_prefix(['?', '!', '+']).unwrap_or(rest),
+        1..=3 => rest.get(colons..)?,
+        _ => return None,
+    };
+    (name_end > 0 && operator.starts_with('='))
+        .then(|| line.get(..name_end))
+        .flatten()
+}
+
+/// The target of the rule `line` starts, as `parser/parser.go:54` reads it: up to its first `:`,
+/// only `[A-Za-z0-9_.%/-$(){}]` and whitespace, and no `=` right after that `:`.
+fn rule(line: &str) -> Option<&str> {
+    let (targets, rest) = line.split_once(':')?;
+    let target_byte =
+        |b: u8| b.is_ascii_alphanumeric() || go_space(b) || b"_.%/-$(){}".contains(&b);
+    (!targets.is_empty() && targets.bytes().all(target_byte) && !rest.starts_with('='))
+        .then(|| targets.trim_matches(|c: char| c.is_ascii() && go_space(c as u8)))
+}
+
+/// Each item checkmake 0.3.2 parses from `input`, with its own 1-based line, as `parser/parser.go`'s
+/// `Parse` (`:97`-`:134`) reads the lines: a comment line is skipped (`:99`); a line starting with
+/// `.` is a special target or nothing (`:102`); any other line is a variable, else a rule that
+/// takes the tab-indented lines after it as its recipe (`:230`), else nothing.
+fn items(input: &str) -> Vec<(usize, Item<'_>)> {
+    let mut found = Vec::new();
+    let mut lines = scanned(input)
+        .enumerate()
+        .map(|(index, line)| (index + 1, line))
+        .peekable();
+    while let Some((number, line)) = lines.next() {
+        if line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('.') {
+            if let Some(name) = special(line) {
+                found.push((number, Item::Special(name)));
+            }
+            continue;
+        }
+        if let Some(name) = variable(line) {
+            found.push((number, Item::Variable(name)));
+        } else if let Some(target) = rule(line) {
+            found.push((number, Item::Rule(target)));
+            while lines.next_if(|(_, body)| body.starts_with('\t')).is_some() {}
+        }
+    }
+    found
+}
+
+/// The block line a finding checkmake reported at `reported` is on: the line of the item that
+/// reports there (see [`Item::reported`]). A variable or special target one line before a rule
+/// reports on the rule's line too; the finding is the variable's when checkmake's message names a
+/// variable (`rules/timestampexpanded/timestampexpanded.go:24`), and the special target's when it
+/// names that target and the rule's target differs, else the rule's. `None` when no item reports
+/// there, so a line never leaves the block.
+fn placed(items: &[(usize, Item<'_>)], reported: usize, message: &str) -> Option<usize> {
+    let mut at = items
+        .iter()
+        .filter(|(line, item)| item.reported(*line) == reported);
+    let (first, second) = (at.next()?, at.next());
+    let Some(second) = second else {
+        return Some(first.0);
+    };
+    let ((late_line, late), (rule_line, rule)) = if matches!(first.1, Item::Rule(_)) {
+        (second, first)
+    } else {
+        (first, second)
+    };
+    let theirs = match (late, rule) {
+        (Item::Variable(_), _) => message.starts_with("Variable "),
+        (Item::Special(name), Item::Rule(target)) => {
+            name != target && message.contains(&format!("\"{name}\""))
+        }
+        _ => false,
+    };
+    Some(if theirs { *late_line } else { *rule_line })
+}
+
+/// The diagnostics in `checkmake -o json`'s `stdout` for the block `input`, each on its item's
+/// own line (see [`placed`]), sorted by line, then rule, then message, since checkmake's own
+/// order changes from run to run. `None` when it isn't that JSON array, or an entry isn't on a
+/// line an item of the block reports at.
 #[must_use]
-pub(crate) fn diagnostics(stdout: &[u8]) -> Option<Vec<Diagnostic>> {
+pub(crate) fn diagnostics(input: &str, stdout: &[u8]) -> Option<Vec<Diagnostic>> {
     let entries: Vec<Entry> = serde_json::from_slice(stdout).ok()?;
+    let items = items(input);
     let mut found = entries
         .into_iter()
         .map(|entry| {
-            let shift = i64::from(entry.rule == VARIABLE_RULE);
-            let line = usize::try_from(entry.line_number.saturating_sub(shift))
-                .ok()
-                .filter(|line| *line > 0)?;
+            let reported = usize::try_from(entry.line_number).ok()?;
+            let line = placed(&items, reported, &entry.violation)?;
             Some(Diagnostic {
                 line,
                 column: 1,
@@ -137,7 +280,7 @@ pub(crate) fn diagnostics(stdout: &[u8]) -> Option<Vec<Diagnostic>> {
 /// fragments, so no run is framed.
 #[must_use]
 pub(crate) fn lint_verdict(
-    _input: &str,
+    input: &str,
     _framed: bool,
     result: Result<Ran, Failure>,
 ) -> lint::Verdict {
@@ -155,7 +298,7 @@ pub(crate) fn lint_verdict(
             failed(format::exit_detail(&ran.stderr))
         };
     }
-    let Some(found) = diagnostics(&ran.stdout).filter(|found| !found.is_empty()) else {
+    let Some(found) = diagnostics(input, &ran.stdout).filter(|found| !found.is_empty()) else {
         return failed(format::exit_detail(&ran.stderr));
     };
     if found.iter().any(|diagnostic| diagnostic.rule == MINPHONY) {
@@ -381,7 +524,8 @@ fn valid(key: &str, value: &str) -> bool {
 /// Why supdoc doesn't read the config: a carriage return that doesn't end a line; an indented
 /// line; a section that isn't a rule's or checkmake's own; a line in a rule's section that isn't
 /// `<option> = <value>` with an option supdoc reads and a value it accepts (see [`valid`]); a
-/// section or option written twice; or every rule in [`RULES`] switched off.
+/// section or option written twice; or every rule in [`RULES`] switched off, by `disabled = true`
+/// or, for `maxbodylength`, a `maxBodyLength` above [`MAX_BODY_ON`].
 fn kept(text: &str) -> Result<String, &'static str> {
     let text = text.replace("\r\n", "\n");
     if text.contains('\r') {
@@ -450,9 +594,14 @@ fn kept(text: &str) -> Result<String, &'static str> {
         written.push((key, value));
     }
     let off = |rule: &str| {
-        sections
-            .iter()
-            .any(|(name, written)| *name == rule && written.contains(&("disabled", "true")))
+        sections.iter().any(|(name, written)| {
+            *name == rule
+                && written.iter().any(|(key, value)| match *key {
+                    "disabled" => *value == "true",
+                    "maxBodyLength" => value.parse::<u64>().is_ok_and(|max| max > MAX_BODY_ON),
+                    _ => false,
+                })
+        })
     };
     if RULES.iter().all(|rule| off(rule)) {
         return Err(
@@ -609,7 +758,7 @@ mod tests {
         );
 
         let verdict = lint_verdict(
-            "",
+            "# a\nb:\n# c\n# d\ne:\n",
             false,
             Ok(ran(false, &stdout, "Error: violations found (3)\n")),
         );
@@ -660,14 +809,115 @@ mod tests {
     }
 
     #[test]
-    fn a_variables_finding_moves_back_to_the_variables_own_line() {
-        let found = diagnostics(format!("[{}]", finding("timestampexpanded", 6)).as_bytes())
-            .expect("the array should be read");
+    fn a_variables_or_special_targets_finding_moves_back_to_its_own_line() {
+        let block = "X = $(shell date)\nall:\n\techo\n.SUFFIXES:\nfoo:\n.SUFFIXES: .c\nY = 2\n";
+        let items = items(block);
 
-        assert_eq!(found.first().map(|diagnostic| diagnostic.line), Some(5));
         assert_eq!(
-            diagnostics(format!("[{}]", finding("timestampexpanded", 1)).as_bytes()),
+            items,
+            [
+                (1, Item::Variable("X")),
+                (2, Item::Rule("all")),
+                (4, Item::Special(".SUFFIXES")),
+                (5, Item::Rule("foo")),
+                (6, Item::Special(".SUFFIXES")),
+                (7, Item::Variable("Y")),
+            ]
+        );
+        let variable =
+            "Variable \"X\" possibly contains a timestamp and should be simply expanded.";
+        assert_eq!(
+            placed(&items, 2, variable),
+            Some(1),
+            "the variable's, on the rule's line"
+        );
+        assert_eq!(
+            placed(&items, 2, "Target \"all\" should be declared PHONY."),
+            Some(2)
+        );
+        assert_eq!(
+            placed(&items, 5, "Target \"foo\" should be declared PHONY."),
+            Some(5)
+        );
+        let repeat = "Target \".SUFFIXES\" defined multiple times (lines 5 and 7).";
+        assert_eq!(
+            placed(&items, 7, repeat),
+            Some(6),
+            "mid-block, before a variable"
+        );
+        assert_eq!(placed(&items, 8, "x"), Some(7));
+    }
+
+    #[test]
+    fn a_special_target_ending_the_block_lands_on_it_and_a_line_no_item_reports_at_is_refused() {
+        let block = "all:\n\techo\n.SUFFIXES:\n.SUFFIXES:\n";
+        let repeat = "Target \".SUFFIXES\" defined multiple times (lines 4 and 5).";
+
+        assert_eq!(
+            placed(&items(block), 5, repeat),
+            Some(4),
+            "not the fence's line"
+        );
+        assert_eq!(
+            placed(&items(block), 2, "x"),
+            None,
+            "a recipe line reports nothing"
+        );
+        assert_eq!(placed(&items(block), 6, "x"), None, "past the block");
+        assert_eq!(
+            diagnostics(
+                block,
+                format!("[{}]", finding("uniquetargets", 6)).as_bytes()
+            ),
             None
+        );
+    }
+
+    #[test]
+    fn a_special_target_before_a_rule_keeps_the_rules_finding_unless_it_names_the_special_target() {
+        let items = items(".SUFFIXES:\n.SUFFIXES:\nall:\n .SUFFIXES:\n");
+        let repeat = "Target \".SUFFIXES\" defined multiple times (lines 2 and 3).";
+
+        assert_eq!(placed(&items, 3, repeat), Some(2));
+        assert_eq!(
+            placed(&items, 3, "Target \"all\" should be declared PHONY."),
+            Some(3)
+        );
+        assert_eq!(
+            placed(&items, 4, repeat),
+            Some(4),
+            "a rule named like the special target"
+        );
+    }
+
+    #[test]
+    fn checkmakes_parser_reads_a_line_as_its_regular_expressions_do() {
+        assert_eq!(special(".PHONY : a"), Some(".PHONY"));
+        assert_eq!(special(".a.b:"), None);
+        assert_eq!(special(".:"), None);
+        for (line, name) in [
+            ("A := 1", "A"),
+            ("A::=1", "A"),
+            ("A:::=1", "A"),
+            ("A=1", "A"),
+            ("a.b ?= 1", "a.b"),
+            ("A != x", "A"),
+            ("A+=1", "A"),
+        ] {
+            assert_eq!(variable(line), Some(name), "{line:?}");
+        }
+        for line in ["A::::=1", "A : = 1", "=1", "A ! = 1", "a b = 1"] {
+            assert_eq!(variable(line), None, "{line:?}");
+        }
+        assert_eq!(rule(" a $(B) : c"), Some("a $(B)"));
+        assert_eq!(rule("a:"), Some("a"));
+        assert_eq!(rule("a:=b"), None);
+        assert_eq!(rule("a,b: c"), None);
+        assert_eq!(rule(":c"), None);
+        assert_eq!(
+            items("# a = 1\nb:\n\tC = 1\n\t# d\n# e:\n\tf:\r\n"),
+            [(2, Item::Rule("b")), (6, Item::Rule("f"))],
+            "a comment ends a recipe, a lone tab line is a rule's, CR before LF is dropped"
         );
     }
 
@@ -676,7 +926,7 @@ mod tests {
         let stdout = format!("[{}]", finding("uniquetargets", 3));
 
         let verdict = lint_verdict(
-            "",
+            "a:\nb:\nc:\n",
             false,
             Ok(ran(false, &stdout, "Error: violations found (2)")),
         );
@@ -692,7 +942,7 @@ mod tests {
         let stdout = format!("[{}]", finding("minphony", 1));
 
         let verdict = lint_verdict(
-            "",
+            "a:\n",
             false,
             Ok(ran(false, &stdout, "Error: violations found (1)")),
         );
@@ -706,15 +956,24 @@ mod tests {
     #[test]
     fn an_entry_whose_line_isnt_positive_or_with_an_unknown_field_isnt_read() {
         assert_eq!(
-            diagnostics(format!("[{}]", finding("uniquetargets", -1)).as_bytes()),
+            diagnostics(
+                "a:\n",
+                format!("[{}]", finding("uniquetargets", -1)).as_bytes()
+            ),
             None
         );
         assert_eq!(
-            diagnostics(format!("[{}]", finding("uniquetargets", 0)).as_bytes()),
+            diagnostics(
+                "a:\n",
+                format!("[{}]", finding("uniquetargets", 0)).as_bytes()
+            ),
             None
         );
         assert_eq!(
-            diagnostics(br#"[{"rule":"a","violation":"b","file_name":"c","line_number":1,"x":1}]"#),
+            diagnostics(
+                "a:\n",
+                br#"[{"rule":"a","violation":"b","file_name":"c","line_number":1,"x":1}]"#
+            ),
             None
         );
     }
@@ -769,6 +1028,23 @@ mod tests {
         let all_but_one = off(RULES.get(1..).unwrap_or_default());
 
         assert!(kept(&every).is_err(), "every rule off should be refused");
+        let unbounded = format!(
+            "{}[maxbodylength]\nmaxBodyLength = 999999999\n",
+            off(RULES.get(1..).unwrap_or_default())
+        );
+        assert!(
+            kept(&unbounded).is_err(),
+            "a body length no recipe reaches is that rule off"
+        );
+        let bounded = format!(
+            "{}[maxbodylength]\nmaxBodyLength = 10000\n",
+            off(RULES.get(1..).unwrap_or_default())
+        );
+        assert_eq!(
+            kept(&bounded).map(|copy| copy.contains("maxBodyLength = 10000")),
+            Ok(true),
+            "the largest body length that leaves the rule on is kept as written"
+        );
         assert!(
             kept(&all_but_one).is_ok(),
             "one rule left on is a lint step"
