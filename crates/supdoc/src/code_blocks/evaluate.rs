@@ -1028,16 +1028,18 @@ fn mbake_switched_off(at: &Location) -> Finding {
 }
 
 /// The run's one `code-block-not-checked` warning, at `at`, the first Makefile block mbake isn't
-/// given because it holds a carriage return (see [`mbake::not_given`]).
-fn mbake_carriage_return(at: &Location) -> Finding {
+/// given because it holds a control or separator character (see [`mbake::not_given`]).
+fn mbake_control(at: &Location) -> Finding {
     Finding::new(
         NOT_CHECKED,
         Severity::Warning,
-        "this Makefile block holds a carriage return, which mbake would strip or rewrite, so its \
-         format step didn't run",
+        "this Makefile block holds a carriage return or another control or separator character \
+         (a C0 or C1 control other than tab and line feed, DEL, U+2028, U+2029 or a noncharacter \
+         from U+FDD0 to U+FDEF), which mbake would strip or rewrite, so its format step didn't \
+         run",
     )
     .with_help(
-        "end each line with `\\n` and drop any other carriage return, or mark the block \
+        "end each line with `\\n` and drop any other such character, or mark the block \
          `format(off: <reason>)`",
     )
     .with_location(at.clone())
@@ -1260,7 +1262,7 @@ impl NotRunWarnings {
             dockerfmt::TOO_SHORT => dockerfmt_not_given(at, "is at most one byte long"),
             dockerfmt::SWITCHED_OFF => dockerfmt_switched_off(at),
             mbake::SWITCHED_OFF => mbake_switched_off(at),
-            mbake::CARRIAGE_RETURN => mbake_carriage_return(at),
+            mbake::CONTROL => mbake_control(at),
             dockerfmt::NO_INSTRUCTION => {
                 dockerfmt_not_given(at, "holds no instruction, only comments or blank lines")
             }
@@ -3948,8 +3950,8 @@ fn run_formatter(
         session,
         |call| run_in_place(call, record, session),
         |result| {
-            if let Some(not_run) = config_skipped_by(record, tool, &result) {
-                return Err(not_run);
+            if let Some(settled) = settled_before_judging(record, tool, input, &result) {
+                return settled;
             }
             let named = result.map(|ran| Ran {
                 stderr: shown_stderr(tool, given, &ran.stderr),
@@ -4846,6 +4848,24 @@ fn run_clippy(
         !session.linked.flags.is_empty(),
     );
     Ok((verdict, findings))
+}
+
+/// What `result`, `tool`'s finished format run on the block whose body is `input`, settles
+/// before its output is judged: the step not run, as [`config_skipped_by`] says, or a tool
+/// failure when mbake printed its upgrade notice (see [`mbake::noticed`]), whose stdout is never
+/// the formatted block.
+fn settled_before_judging(
+    record: &BlockRecord,
+    tool: &ToolCartridge,
+    input: &str,
+    result: &Result<Ran, runner::Failure>,
+) -> Option<Result<format::Verdict, NotRun>> {
+    if let Some(not_run) = config_skipped_by(record, tool, result) {
+        return Some(Err(not_run));
+    }
+    let ran = result.as_ref().ok()?;
+    (tool.name == MBAKE && mbake::noticed(input, &ran.stdout))
+        .then(|| Ok(format::Verdict::ToolFailed(mbake::NOTICED.to_owned())))
 }
 
 /// Why `tool`'s step on `record`'s block didn't really run, from tombi's run `result` at any exit

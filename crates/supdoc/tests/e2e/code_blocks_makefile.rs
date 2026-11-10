@@ -187,6 +187,8 @@ fn makefile_bake_format_in_any_spelling_leaves_the_format_step_not_run() {
         "# bake-format offx\nA=1",
         "A=1\n# bake-format on",
         "all:\n\t@echo hi # bake-format off",
+        "# ba\u{212a}e-format off\nA=1",
+        "# format\u{a0}off\nA=1",
     ] {
         let project = makefile_project("make", body);
         let doc = project.read("docs/blocks.md");
@@ -225,6 +227,63 @@ fn makefile_a_block_holding_a_carriage_return_is_never_given_to_mbake() {
     assert_not_run(&json, "holds a carriage return");
     assert!(stub.runs().is_empty(), "mbake was given the block");
     assert_eq!(project.read("docs/blocks.md"), doc);
+}
+
+#[test]
+fn makefile_a_block_holding_another_control_or_separator_character_is_never_given_to_mbake() {
+    for body in [
+        "A = 1\u{b}\nall:\n\techo a",
+        "A = a\u{2028}b\nB = \u{fdd0}",
+        "A = \u{85}",
+        "A = \u{7f}",
+    ] {
+        let project = makefile_project("make", body);
+        let doc = project.read("docs/blocks.md");
+        let stub = Stub::new(VERIFIED, "/bin/cat > /dev/null; printf 'A = 1\\n'");
+
+        let json = project
+            .supdoc_in_with(".", &["check", "--json"], &[("PATH", &stub.bin())])
+            .assert_exit(0)
+            .json();
+        let _fixed = project.supdoc_in_with(".", &["fix", "--yes"], &[("PATH", &stub.bin())]);
+
+        assert_not_run(&json, "another control or separator character");
+        assert!(
+            stub.runs().is_empty(),
+            "{body:?}: mbake was given the block"
+        );
+        assert_eq!(project.read("docs/blocks.md"), doc, "{body:?}");
+    }
+}
+
+#[test]
+fn makefile_mbakes_upgrade_notice_on_stdout_is_a_tool_failure_not_a_format_result() {
+    for notice in [
+        "printf '\\033[93m[mbake upgrade notice]\\033[0m\\nTo ensure a clean upgrade\\n'; cat",
+        "printf '[mbake upgrade notice]\\n'; cat",
+        "printf '\\033[0m'; cat",
+    ] {
+        let project = makefile_project("make", "A = 1");
+        let doc = project.read("docs/blocks.md");
+        let stub = Stub::new(VERIFIED, notice);
+
+        let json = check(&project, &stub.bin());
+        let _fixed = project.supdoc_in_with(".", &["fix", "--yes"], &[("PATH", &stub.bin())]);
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-tool-failed"],
+            "{notice}: {json}"
+        );
+        assert!(
+            at(&json, "/findings/0/message")
+                .as_str()
+                .is_some_and(|message| message.contains("upgrade notice")),
+            "{notice}: {json}"
+        );
+        assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 0, "{json}");
+        assert_eq!(project.read("docs/blocks.md"), doc, "{notice}");
+    }
 }
 
 #[test]

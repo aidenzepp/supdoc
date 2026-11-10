@@ -16,9 +16,14 @@
 //! the rule errors supdoc reads), and `syntax_check_timeout` (only `--validate` reads it).
 //!
 //! mbake judges no other in-content setting: its one directive is `# bake-format off`, matched by
-//! `^\s*#\s*bake-format\s+off\b` in any case (`mbake/utils/format_disable.py:22-24`), which
-//! leaves the lines after it as written. A block holding it is never given (see [`not_given`]),
-//! nor is one holding a carriage return: mbake strips it on Windows and may rewrite it elsewhere.
+//! `^\s*#\s*bake-format\s+off\b` with Python's Unicode case folding, so the Kelvin sign `K`
+//! (U+212A) spells its `k` (`mbake/utils/format_disable.py:22-24`), which leaves the lines after
+//! it as written. A block holding it is never given (see [`not_given`]), nor is one holding a
+//! control or separator character mbake strips or rewrites, a carriage return among them.
+//!
+//! An old `bake` module anywhere mbake's interpreter can import makes mbake print an upgrade
+//! notice, coloured, on stdout ahead of the formatted Makefile, exit 0 (`mbake/cli.py:28-38`).
+//! Such output is a tool failure, never a format result (see [`noticed`]).
 //!
 //! mbake's version can't be read by running it, so supdoc reads the `METADATA` of the
 //! `mbake-*.dist-info` its interpreter imports, a plain file (see [`version_of`]).
@@ -75,27 +80,68 @@ pub(crate) const SWITCHED_OFF: &str = "the block holds `bake-format`, so supdoc 
                                        mbake formats all of it; drop the comment, or mark the \
                                        block `format(off: <reason>)`";
 
-/// Why a block's format step didn't run when it holds a carriage return.
-pub(crate) const CARRIAGE_RETURN: &str = "the block holds a carriage return, which mbake would \
-                                          strip or rewrite";
+/// Why a block's format step didn't run when it holds a character mbake strips or rewrites (see
+/// [`rewritten`]).
+pub(crate) const CONTROL: &str = "the block holds a carriage return or another control or \
+                                  separator character, which mbake would strip or rewrite";
 
 /// Why `input`, a Makefile block as its formatter reads it, isn't given to mbake: it holds a
-/// carriage return ([`CARRIAGE_RETURN`]), or `bake-format` in any case ([`SWITCHED_OFF`]). `None`
-/// when mbake may run.
+/// character mbake strips or rewrites ([`CONTROL`]), or `bake-format` in any case, or a line
+/// holding `format` beside a character that isn't ASCII ([`SWITCHED_OFF`]). `None` when mbake may
+/// run.
 ///
 /// The `bake-format` scan reads text, not comments, so the words inside a recipe count too, as
 /// does a near miss such as `# bake-format offx` or `#bake-format on`: a near miss switches the
-/// step off, never counts as a pass. An invalid UTF-8 block can't reach here: supdoc reads every
-/// block as UTF-8 text.
+/// step off, never counts as a pass. The scan lowercases as Unicode does, so `baKe-format`
+/// spelled with the Kelvin sign counts; any other non-ASCII spelling Python's folding may match
+/// is caught by the `format` line rule. An invalid UTF-8 block can't reach here: supdoc reads
+/// every block as UTF-8 text.
 #[must_use]
 pub(crate) fn not_given(input: &str) -> Option<&'static str> {
-    if input.contains('\r') {
-        return Some(CARRIAGE_RETURN);
+    if input.chars().any(rewritten) {
+        return Some(CONTROL);
     }
-    input
-        .to_ascii_lowercase()
-        .contains(SWITCH)
-        .then_some(SWITCHED_OFF)
+    let lower = input.to_lowercase();
+    let switched = lower.contains(SWITCH)
+        || lower
+            .lines()
+            .any(|line| line.contains("format") && !line.is_ascii());
+    switched.then_some(SWITCHED_OFF)
+}
+
+/// Whether mbake 1.5 strips or rewrites `c` even on exit 0, so `supdoc fix` would write a change
+/// the author never made: a C0 control other than tab and line feed (a carriage return among
+/// them), DEL, a C1 control, the line and paragraph separators, or a noncharacter from U+FDD0 to
+/// U+FDEF.
+const fn rewritten(c: char) -> bool {
+    matches!(
+        c,
+        '\0'..='\u{8}'
+            | '\u{b}'..='\u{1f}'
+            | '\u{7f}'..='\u{9f}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{fdd0}'..='\u{fdef}'
+    )
+}
+
+/// The text of the upgrade notice mbake prints on stdout beside an old `bake` module
+/// (`mbake/cli.py:32`).
+const NOTICE: &[u8] = b"[mbake upgrade notice]";
+
+/// How a run whose stdout holds the upgrade notice is named as a tool failure.
+pub(crate) const NOTICED: &str = "it printed an upgrade notice into its output, so an old `bake` \
+                                  module is importable beside it; run `pip install \
+                                  --force-reinstall mbake`";
+
+/// Whether `stdout`, mbake's output for the block `input`, holds its upgrade notice: the notice's
+/// text, or an escape byte the block doesn't hold (the notice is coloured). Such output is never
+/// the formatted block.
+#[must_use]
+pub(crate) fn noticed(input: &str, stdout: &[u8]) -> bool {
+    let escape = |bytes: &[u8]| bytes.contains(&0x1b);
+    stdout.windows(NOTICE.len()).any(|window| window == NOTICE)
+        || (escape(stdout) && !escape(input.as_bytes()))
 }
 
 /// The block line mbake's first rule error in `stderr` names: `<n>: Error: ...`, or
@@ -480,13 +526,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_carriage_return_or_bake_format_in_any_spelling_withholds_the_block() {
+    fn a_control_character_or_bake_format_in_any_spelling_withholds_the_block() {
         let cases = [
             ("all:\n\techo hi\n", None),
+            ("all:\n\techo\thi\n", None),
             ("A = 1\n", None),
             ("", None),
-            ("all:\r\n\techo hi\r\n", Some(CARRIAGE_RETURN)),
-            ("a\rb\n", Some(CARRIAGE_RETURN)),
+            ("A = caf\u{e9}\n", None),
+            ("# format \u{e9}\nA = caf\u{e9}\n", Some(SWITCHED_OFF)),
+            ("# ba\u{212a}e-format off\nA=1\n", Some(SWITCHED_OFF)),
+            ("# FORMAT\u{a0}off\n", Some(SWITCHED_OFF)),
+            ("all:\r\n\techo hi\r\n", Some(CONTROL)),
+            ("a\rb\n", Some(CONTROL)),
+            ("A = 1\u{b}\n", Some(CONTROL)),
+            ("A = 1\u{c}\n", Some(CONTROL)),
+            ("A = \0\n", Some(CONTROL)),
+            ("A = \u{1f}\n", Some(CONTROL)),
+            ("A = \u{7f}\n", Some(CONTROL)),
+            ("A = \u{80}\n", Some(CONTROL)),
+            ("A = \u{85}\n", Some(CONTROL)),
+            ("A = \u{9f}\n", Some(CONTROL)),
+            ("A = \u{a0}\n", None),
+            ("A = a\u{2028}b\n", Some(CONTROL)),
+            ("A = a\u{2029}b\n", Some(CONTROL)),
+            ("A = \u{fdd0}\n", Some(CONTROL)),
+            ("A = \u{fdef}\n", Some(CONTROL)),
+            ("A = \u{fdcf}\u{fdf0}\n", None),
             ("# bake-format off\nA=1\n", Some(SWITCHED_OFF)),
             ("#BAKE-FORMAT   Off\nA=1\n", Some(SWITCHED_OFF)),
             ("# bake-format on\n", Some(SWITCHED_OFF)),
@@ -497,6 +562,19 @@ mod tests {
         for (input, expected) in cases {
             assert_eq!(not_given(input), expected, "input {input:?}");
         }
+    }
+
+    #[test]
+    fn the_upgrade_notice_or_an_escape_the_block_lacks_is_noticed() {
+        let notice = b"\x1b[93m[mbake upgrade notice]\x1b[0m\nTo ensure a clean upgrade\nA = 1\n";
+
+        assert!(noticed("A = 1\n", notice));
+        assert!(noticed("A = 1\n", b"[mbake upgrade notice]\nA = 1\n"));
+        assert!(noticed("A = 1\n", b"\x1b[0mA = 1\n"));
+        assert!(!noticed("A = 1\n", b"A = 1\n"));
+        assert!(!noticed("A = \x1b\n", b"A = \x1b\n"));
+        assert!(noticed("A = \x1b\n", b"[mbake upgrade notice]\n"));
+        assert!(!noticed("", b""));
     }
 
     #[test]
