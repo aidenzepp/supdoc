@@ -724,18 +724,24 @@ fn fingerprint(externs: &[(String, PathBuf)]) -> Result<[u8; 32], String> {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::{OsStr, OsString};
+    #[cfg(unix)]
+    use std::ffi::OsStr;
+    use std::ffi::OsString;
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
+    #[cfg(unix)]
     use std::time::Duration;
 
+    #[cfg(unix)]
+    use super::{BUILD_CAP, Build, BuildFailed, Builder, build, private};
     use super::{
-        BUILD_CAP, Build, BuildFailed, Builder, Lib, OutsideWorkspace, Plan, Refused, Select, argv,
-        artifacts, build, locate, plan, private, target_dir,
+        Lib, OutsideWorkspace, Plan, Refused, Select, argv, artifacts, locate, plan, target_dir,
     };
-    use crate::code_blocks::toolchain::{Refusal, Toolchain};
+    use crate::code_blocks::toolchain::Refusal;
+    #[cfg(unix)]
+    use crate::code_blocks::toolchain::Toolchain;
     use crate::code_blocks::tools::ToolEnv;
 
     /// The externs `stdout` names for `select`, before they are located on disk.
@@ -768,10 +774,12 @@ mod tests {
     }
 
     /// How many times [`build_retrying`] spawns a stub that Linux reports busy.
+    #[cfg(unix)]
     const BUSY_ATTEMPTS: u32 = 5;
 
     /// [`build`], retried a few times, 20 ms apart, while a stub just written fails to start: on
     /// Linux another test's fork can still hold its write descriptor (`ETXTBSY`).
+    #[cfg(unix)]
     fn build_retrying(plan: &Plan, builder: &Builder<'_>) -> Result<Build, BuildFailed> {
         let mut attempt = 1;
         loop {
