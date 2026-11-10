@@ -54,7 +54,7 @@ use super::lint::{self, Diagnostic};
 use super::runner::{self, Failure, Ran};
 use super::tools::ToolEnv;
 use crate::cartridges::yaml as yaml_cartridge;
-use crate::config::confine::Boundary;
+use crate::config::confine::{Boundary, ReadEscape};
 use crate::hash::Hash;
 use crate::limits::TimeLimit;
 use crate::path::{self, AbsolutePath, Component, FixedPath, fixed};
@@ -229,11 +229,12 @@ fn found_config(root: &Path, doc: &Path) -> Result<Option<PathBuf>, Refusal> {
 ///
 /// What is wrong with the file.
 fn read_text(root: &Path, found: &Path) -> Result<String, &'static str> {
-    let real_root = root.canonicalize().map_err(|_| "couldn't be resolved")?;
-    let real = found.canonicalize().map_err(|_| "couldn't be resolved")?;
-    if !real.starts_with(&real_root) {
-        return Err("is a link that resolves outside the project");
-    }
+    let real = Boundary::resolve(root)
+        .real_inside(found)
+        .map_err(|escape| match escape {
+            ReadEscape::Outside { .. } => "is a link that resolves outside the project",
+            ReadEscape::BoundaryUnresolved | ReadEscape::Unresolved => "couldn't be resolved",
+        })?;
     let meta = fs::metadata(&real).map_err(|_| "couldn't be read")?;
     if !meta.is_file() || meta.len() > MAX_CONFIG {
         return Err("isn't a regular file of at most 256 KiB");
@@ -1916,6 +1917,28 @@ mod tests {
 
         assert!(
             matches!(&refused, Err(Refusal::Config { why, .. }) if why.contains("outside")),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_dangling_in_root_config_link_is_refused_as_unresolvable() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        crate::cli::testing::symlink(
+            root.path().join("missing.yaml"),
+            root.path().join(".yamlfmt"),
+        )
+        .expect("the link");
+
+        let refused = project_args(
+            &env_in(cache.path()),
+            root.path(),
+            &root.path().join("a.md"),
+        );
+
+        assert!(
+            matches!(&refused, Err(Refusal::Config { why, .. }) if why.contains("couldn't be resolved")),
             "{refused:?}"
         );
     }

@@ -20,7 +20,7 @@ use super::fragment::Kind;
 use super::lint::{self, Diagnostic};
 use super::runner::{self, Failure, Ran};
 use super::tools::ToolEnv;
-use crate::config::confine::{self, Admitted, Boundary};
+use crate::config::confine::{self, Admitted, Boundary, ReadEscape};
 use crate::path::{self, AbsolutePath, Component, Pointer, Suffix, fixed};
 
 /// The most bytes of a config supdoc reads.
@@ -550,14 +550,14 @@ fn checked(root: &Path, found: &Path) -> Result<String, Refusal> {
             "make it a readable UTF-8 file inside the project",
         )
     };
-    let real_root = root.canonicalize().map_err(|_| unreadable())?;
-    let real = found.canonicalize().map_err(|_| unreadable())?;
-    if !real.starts_with(&real_root) {
-        return Err(refuse(
+    let boundary = Boundary::resolve(root);
+    let real = boundary.real_inside(found).map_err(|escape| match escape {
+        ReadEscape::Outside { .. } => refuse(
             "is a link that resolves outside the project",
             "replace it with a regular file inside the project",
-        ));
-    }
+        ),
+        ReadEscape::BoundaryUnresolved | ReadEscape::Unresolved => unreadable(),
+    })?;
     let meta = fs::metadata(&real).map_err(|_| unreadable())?;
     if !meta.is_file() || meta.len() > MAX_CONFIG {
         return Err(refuse(
@@ -586,7 +586,7 @@ fn checked(root: &Path, found: &Path) -> Result<String, Refusal> {
         });
     }
     let dir = found.parent().unwrap_or(root);
-    if let Err((setting, why)) = absolutize(&mut value, "", dir, &real_root) {
+    if let Err((setting, why)) = absolutize(&mut value, "", dir, &boundary) {
         return Err(refuse(
             &format!("sets `{setting}`, which {why}"),
             &format!(
@@ -611,7 +611,7 @@ fn absolutize(
     value: &mut Value,
     parent: &str,
     dir: &Path,
-    root: &Path,
+    boundary: &Boundary,
 ) -> Result<(), (String, &'static str)> {
     match value {
         Value::Object(map) => {
@@ -628,27 +628,34 @@ fn absolutize(
                 }
                 match inner {
                     Value::String(path) if named => {
-                        let real = Pointer::new(path)
-                            .and_then(|pointer| pointer.resolve_from(dir).canonicalize().ok())
+                        let resolved = Pointer::new(path)
+                            .map(|pointer| pointer.resolve_from(dir))
                             .ok_or_else(|| {
                                 (format!("{parent}.{key}"), "names a path that doesn't exist")
                             })?;
-                        if !real.starts_with(root) {
-                            return Err((
-                                format!("{parent}.{key}"),
-                                "names a path outside the project",
-                            ));
-                        }
+                        let real =
+                            boundary
+                                .real_inside(&resolved)
+                                .map_err(|escape| match escape {
+                                    ReadEscape::Outside { .. } => (
+                                        format!("{parent}.{key}"),
+                                        "names a path outside the project",
+                                    ),
+                                    ReadEscape::BoundaryUnresolved | ReadEscape::Unresolved => (
+                                        format!("{parent}.{key}"),
+                                        "names a path that doesn't exist",
+                                    ),
+                                })?;
                         *path = real.to_string_lossy().into_owned();
                     }
-                    other => absolutize(other, key, dir, root)?,
+                    other => absolutize(other, key, dir, boundary)?,
                 }
             }
             Ok(())
         }
         Value::Array(items) => items
             .iter_mut()
-            .try_for_each(|item| absolutize(item, parent, dir, root)),
+            .try_for_each(|item| absolutize(item, parent, dir, boundary)),
         _ => Ok(()),
     }
 }
@@ -1587,6 +1594,67 @@ mod tests {
         assert!(
             matches!(outside, Err(Refusal::Config { ref why, .. }) if why.contains("tailwind.stylesheet")),
             "got {outside:?}"
+        );
+    }
+
+    /// `project_args` for `root`'s `a.md`, with the cache under a fresh home.
+    fn project_in(root: &Path) -> Result<super::Given, Refusal> {
+        let home = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let given = project_args(&cache_env(home.path()), root, &root.join("a.md"));
+        std::mem::forget(home);
+        given
+    }
+
+    #[test]
+    fn a_config_link_out_of_the_root_is_refused_and_a_dangling_one_is_unreadable() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let outside = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        fs::write(outside.path().join("b.json"), "{}").expect("outside config");
+        crate::cli::testing::symlink(
+            outside.path().join("b.json"),
+            root.path().join("biome.json"),
+        )
+        .expect("the link");
+
+        let escaped = project_in(root.path());
+
+        assert!(
+            matches!(escaped, Err(Refusal::Config { ref why, .. }) if why.contains("resolves outside the project")),
+            "got {escaped:?}"
+        );
+        fs::remove_file(root.path().join("biome.json")).expect("the link is removable");
+        crate::cli::testing::symlink(
+            root.path().join("missing.json"),
+            root.path().join("biome.json"),
+        )
+        .expect("the dangling link");
+
+        let dangling = project_in(root.path());
+
+        assert!(
+            matches!(dangling, Err(Refusal::Config { ref why, .. }) if why.contains("couldn't be read")),
+            "got {dangling:?}"
+        );
+    }
+
+    #[test]
+    fn a_stylesheet_link_out_of_the_root_is_refused_as_outside_not_missing() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let outside = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        fs::write(outside.path().join("app.css"), "").expect("outside stylesheet");
+        crate::cli::testing::symlink(outside.path().join("app.css"), root.path().join("app.css"))
+            .expect("the link");
+        fs::write(
+            root.path().join("biome.json"),
+            "{\"tailwind\":{\"stylesheet\":\"./app.css\"}}",
+        )
+        .expect("the config");
+
+        let refused = project_in(root.path());
+
+        assert!(
+            matches!(refused, Err(Refusal::Config { ref why, .. }) if why.contains("names a path outside the project")),
+            "got {refused:?}"
         );
     }
 

@@ -17,6 +17,7 @@ use std::time::Duration;
 use super::runner::{self, Call, Cwd};
 use super::tools::{Found, ToolEnv, find};
 use crate::config::code_blocks::Edition;
+use crate::config::confine::{Boundary, ReadEscape};
 use crate::path::{self, fixed};
 
 /// The most of a toolchain file supdoc reads. A longer file is refused.
@@ -373,11 +374,12 @@ fn edition_in(text: &str) -> Option<Edition> {
 /// Effect: resolves symlinks and reads the file.
 pub(super) fn read_inside(file: &Path, root: &Path) -> Result<String, Refusal> {
     let unreadable = |_| Refusal::Unreadable;
-    let real_root = root.canonicalize().map_err(unreadable)?;
-    let real = file.canonicalize().map_err(unreadable)?;
-    if !real.starts_with(&real_root) {
-        return Err(Refusal::Outside);
-    }
+    let real = Boundary::resolve(root)
+        .real_inside(file)
+        .map_err(|escape| match escape {
+            ReadEscape::Outside { .. } => Refusal::Outside,
+            ReadEscape::BoundaryUnresolved | ReadEscape::Unresolved => Refusal::Unreadable,
+        })?;
     if !std::fs::metadata(&real).map_err(unreadable)?.is_file() {
         return Err(Refusal::Unreadable);
     }
@@ -767,6 +769,24 @@ mod tests {
             read(root.path()),
             Toolchain::Refused {
                 refusal: Refusal::Outside,
+                file: "rust-toolchain.toml"
+            }
+        );
+    }
+
+    #[test]
+    fn a_dangling_in_root_toolchain_link_is_unreadable_not_outside() {
+        let root = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        crate::cli::testing::symlink(
+            root.path().join("missing"),
+            root.path().join("rust-toolchain.toml"),
+        )
+        .expect("the link should be creatable");
+
+        assert_eq!(
+            read(root.path()),
+            Toolchain::Refused {
+                refusal: Refusal::Unreadable,
                 file: "rust-toolchain.toml"
             }
         );

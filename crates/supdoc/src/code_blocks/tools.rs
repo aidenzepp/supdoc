@@ -23,6 +23,7 @@ use super::format::{ParseError, Positions};
 use super::fragment::{Kind, Support};
 use super::lint;
 use super::runner::{Cwd, Failure, Ran};
+use crate::config::confine::Boundary;
 use crate::path::{self, FixedPath, NativeName, Suffix, fixed};
 
 use super::{biome, eslint, go, prettier, pylint, python, rumdl, rust, shell, tombi, yaml};
@@ -2069,8 +2070,7 @@ fn first_on_path(binary: &str, path: &OsStr, pathext: Option<&OsStr>) -> Option<
 ///
 /// Effect: reads the metadata of `root` and of each ancestor of `real`.
 pub(super) fn inside(real: &Path, root: &Path) -> bool {
-    let real_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    real.starts_with(&real_root) || under_same_file(real, root)
+    Boundary::resolve(root).contains(real) || under_same_file(real, root)
 }
 
 /// Whether some ancestor of `real` has the same device and inode as `root`, so a firmlink or
