@@ -39,7 +39,7 @@ pub(crate) const CONFIG_FILE_NAME: &str = "supdoc.config.toml";
 ///
 /// Effect: reads the metadata of one directory entry.
 pub(crate) fn config_entry(dir: &Path) -> Option<std::fs::Metadata> {
-    std::fs::symlink_metadata(dir.join(CONFIG_FILE_NAME))
+    std::fs::symlink_metadata(crate::path::beneath(dir, &crate::path::fixed::CONFIG_FILE))
         .ok()
         .filter(|entry| entry.is_file() || entry.is_symlink())
 }

@@ -70,13 +70,6 @@ impl AbsolutePath {
     /// Built from `path`'s own ancestors, so nothing is joined and no component is new: the
     /// walk that creates or checks each directory on the way down needs no raw join.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the walks in scan and cli use it from V5-P5 and V5-P6"
-        )
-    )]
     pub(crate) fn steps_to(&self, path: &Self) -> Option<impl Iterator<Item = Self> + use<>> {
         let _under = path.strip_prefix(self)?;
         let mut steps: Vec<Self> = path
@@ -309,19 +302,14 @@ pub(crate) mod fixed {
     /// The code-block directory beneath [`SUPDOC`].
     pub(crate) const CODE_BLOCKS: FixedPath = FixedPath::new("code-blocks");
     /// Cargo's private target directory beneath a cache base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CODE_BLOCKS_TARGET: FixedPath = FixedPath::new("supdoc/code-blocks/target");
     /// The private working directory beneath a cache base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CODE_BLOCKS_CWD: FixedPath = FixedPath::new("supdoc/code-blocks/cwd");
     /// A Cargo manifest.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CARGO_TOML: FixedPath = FixedPath::new("Cargo.toml");
     /// A library crate's root file.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const SRC_LIB_RS: FixedPath = FixedPath::new("src/lib.rs");
     /// The default cache base beneath `HOME`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const DOT_CACHE: FixedPath = FixedPath::new(".cache");
     /// rumdl's config file name.
     pub(crate) const RUMDL_TOML: FixedPath = FixedPath::new("rumdl.toml");
@@ -411,7 +399,6 @@ pub(crate) mod fixed {
         FixedPath::new("clippy.toml"),
     ];
     /// The toolchain file names rustup looks for.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const TOOLCHAIN_FILES: [FixedPath; 2] = [
         FixedPath::new("rust-toolchain"),
         FixedPath::new("rust-toolchain.toml"),
@@ -774,13 +761,6 @@ impl RelativePath {
 
     /// `self` with `rel` appended, keeping `self` as written, `..` included.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the config chain's suggestion joins with it from V5-P5"
-        )
-    )]
     pub(crate) fn beneath(&self, rel: &impl Beneath) -> Self {
         Self(raw_join(&self.0, Path::new(rel.segments())))
     }
