@@ -2,10 +2,11 @@
 //!
 //! The lint step runs `sqruff lint` on the block on stdin and reads its JSON report (see
 //! [`lint_verdict`]), with `--parsing-errors` so a block sqruff can't parse is reported, never
-//! passed. sqruff honors `-- noqa` comments, which can hide every finding, a parse error too; a
-//! block they may switch off entirely is never given to sqruff, format or lint (see
-//! [`switches_lint_off`]), and a block holding one is linted a second time with every `noqa`
-//! comment off, so a parse error one hides still fails it (see [`holds_noqa`]).
+//! passed. sqruff honors `noqa` comments, which can hide any finding, a parse error too; a block
+//! holding a `noqa` supdoc can't confirm names only rule codes (one in a block with a `/* */`
+//! comment, or one not followed by `:` and rule codes alone) is never given to sqruff, format or
+//! lint (see [`switches_lint_off`]), and a block holding `noqa` is linted a second time with every
+//! `noqa` comment off, so a parse error one hides still fails it (see [`holds_noqa`]).
 //!
 //! sqruff has no `format` command; supdoc's format step runs `sqruff fix` on the block on stdin
 //! and reads the fixed SQL from stdout. `fix` applies every rule its config turns on, so supdoc
@@ -254,125 +255,46 @@ pub(crate) fn lint_verdict(
     }
 }
 
-/// How a `noqa` comment on one line reads to supdoc.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Noqa {
-    /// It may switch every rule off on its line: no rule list, or one with an entry that isn't a
-    /// plain rule code (see [`rule_code`]), such as `all`, `core`, `*` or an empty entry.
-    Line,
-    /// It may switch every rule off from its line to the block's end: a list naming `disable` or
-    /// `enable` with an entry that isn't a plain rule code, such as `disable=all`.
-    Range,
-    /// It names only plain rule codes, which sqruff alone switches off.
-    Rules,
-}
-
-/// Whether `noqa` comments in `block` may switch sqruff's every rule off for all of it, so a
-/// lint run would pass whatever the block holds, a syntax error too: a block comment holds
-/// `noqa` (see [`block_comment_noqa`]), or every line holding more than whitespace holds a
-/// [`Noqa::Line`] comment or comes at or after a [`Noqa::Range`] one.
+/// Whether `noqa` comments in `block` may switch more of sqruff's rules off than plain rule
+/// codes name, so a lint or fix run could pass what the block holds, a syntax error too. Read
+/// lowercase (ASCII), the block may when it holds `noqa` and either holds `/*` anywhere, or holds
+/// a `noqa` not followed, for the whole rest of its line (up to the next LF), by `:`, an optional
+/// `disable=` or `enable=`, and a comma-separated list of plain rule codes (see [`rule_codes`]),
+/// whitespace allowed around each part and at the line's end.
 ///
-/// A `noqa` is honored only in a line comment whose rule list, on that same line, is plain rule
-/// codes. sqruff reads a `/* */` comment, one spanning lines too, as one directive, its rule
-/// list continued across lines, so any block comment holding `noqa` counts as every rule off.
-///
-/// sqruff 0.44 reads `-- noqa`, `--noqa` and `/* noqa */` with no rule list as every rule off on
-/// that line, its syntax error too, and `-- noqa: disable=all` as every rule off on the lines
-/// after it, up to a `-- noqa: enable=all`. It reads each entry of a rule list, `disable=` and
-/// `enable=` lists too, as a pattern over its rule codes, names and groups
-/// (`IgnoreMask::expand_rule_references` in `crates/lib/src/core/rules/noqa.rs`), so `*`, `????`,
-/// `core` or `layout` may name every rule. This scan matches more: `noqa` in any case anywhere
-/// after a `--`, `/*` or `#` on the line, followed by anything but `:` and a list of plain rule
-/// codes (see [`rule_code`]); and a range from any list naming `disable` or `enable` with any
-/// other entry. It reads no `enable=all`, so a range runs to the block's end. It reads text, not
-/// SQL, so a string counts too, and lines split at LF alone. A near miss keeps the block from
-/// being called linted, never passes it; a block with no `noqa` comment is never switched off.
+/// sqruff 0.44 reads a directive from one comment's text, `/*` and `*/` stripped at its ends,
+/// after its last `--`, trimmed, then `noqa` (`parse_from_comment` in
+/// `crates/lib/src/core/rules/noqa.rs`), and reads each rule-list entry as a pattern over its rule
+/// codes, names and groups, so `all`, `core` or `*` may name every rule and a bare `noqa` masks a
+/// parse error. Every block comment starts with `/*`, so any block comment withholds the block,
+/// however a dialect lexes, nests or quotes it. Without one, every comment ends at LF, so a
+/// directive sqruff reads is the rest of some `noqa`'s line, and when that rest is plain codes
+/// sqruff masks only those rules, never a parse error. The scan reads text, not SQL: a `noqa` in
+/// a string or an identifier counts too, so a near miss withholds the block, never passes it.
 #[must_use]
 pub(crate) fn switches_lint_off(block: &str) -> bool {
-    if block_comment_noqa(block) {
-        return true;
-    }
-    let mut any = false;
-    let mut range = false;
-    let covered = block.split('\n').all(|line| {
-        let found = noqa_comments(line);
-        any |= !found.is_empty();
-        range |= found.contains(&Noqa::Range);
-        range || found.contains(&Noqa::Line) || line.trim().is_empty()
-    });
-    any && covered
+    let block = block.to_ascii_lowercase();
+    block.contains("noqa")
+        && (block.contains("/*")
+            || block.split('\n').any(|line| {
+                line.match_indices("noqa").any(|(at, word)| {
+                    !names_rule_codes(line.get(at + word.len()..).unwrap_or_default())
+                })
+            }))
 }
 
-/// Whether a `/* */` comment in `block` holds `noqa` in any case anywhere inside it, an unclosed
-/// `/*` running to the block's end. The scan reads comments, not lines: an open `/*` carries
-/// across lines, and a `--` inside it is part of it. It matches more than sqruff reads: a `/*`
-/// opens a comment wherever it stands, inside a string or a `--` comment too, and comments nest,
-/// so a `*/` closes only the innermost (as Postgres reads them; a dialect that doesn't nest ends
-/// the comment sooner, inside this one).
-fn block_comment_noqa(block: &str) -> bool {
-    let lower = block.to_ascii_lowercase();
-    let holds_noqa = |comment: Option<&str>| comment.is_some_and(|text| text.contains("noqa"));
-    let mut depth = 0_usize;
-    let mut opened = 0;
-    let mut at = 0;
-    while let Some(rest) = lower.get(at..).filter(|rest| !rest.is_empty()) {
-        if rest.starts_with("/*") {
-            if depth == 0 {
-                opened = at;
-            }
-            depth += 1;
-            at += 2;
-        } else if depth > 0 && rest.starts_with("*/") {
-            depth -= 1;
-            at += 2;
-            if depth == 0 && holds_noqa(lower.get(opened..at)) {
-                return true;
-            }
-        } else {
-            at += rest.chars().next().map_or(1, char::len_utf8);
-        }
-    }
-    depth > 0 && holds_noqa(lower.get(opened..))
-}
-
-/// How each `noqa` in `line` that follows a comment opener (`--`, `/*` or `#`) reads, in order.
-fn noqa_comments(line: &str) -> Vec<Noqa> {
-    let lower = line.to_ascii_lowercase();
-    let Some(opened) = ["--", "/*", "#"]
-        .iter()
-        .filter_map(|opener| lower.find(opener))
-        .min()
-    else {
-        return Vec::new();
-    };
-    let comment = lower.get(opened..).unwrap_or_default();
-    comment
-        .match_indices("noqa")
-        .map(|(at, word)| noqa_kind(comment.get(at + word.len()..).unwrap_or_default()))
-        .collect()
-}
-
-/// How a `noqa` followed by `rest`, lowercase, reads (see [`Noqa`]): a rule list, up to a `*/`,
-/// names rules only when each of its comma-separated entries is a plain rule code; a list naming
-/// `disable` or `enable` is a range, its entries those after the first `=`.
-fn noqa_kind(rest: &str) -> Noqa {
+/// Whether `rest`, what follows a `noqa` to the end of its line, lowercase, is `:`, an optional
+/// `disable=` or `enable=`, and a list of plain rule codes only (see [`rule_codes`]).
+fn names_rule_codes(rest: &str) -> bool {
     let Some(list) = rest.trim_start().strip_prefix(':') else {
-        return Noqa::Line;
+        return false;
     };
-    let list = list.split("*/").next().unwrap_or_default();
-    let ranged = list.contains("disable") || list.contains("enable");
-    let entries = if ranged {
-        list.split_once('=').map_or("", |(_, entries)| entries)
-    } else {
-        list
-    };
-    if rule_codes(entries) {
-        Noqa::Rules
-    } else if ranged {
-        Noqa::Range
-    } else {
-        Noqa::Line
-    }
+    let list = list.trim_start();
+    let list = ["disable=", "enable="]
+        .iter()
+        .find_map(|range| list.strip_prefix(range))
+        .unwrap_or(list);
+    rule_codes(list)
 }
 
 /// Whether `entry` is a plain sqruff rule code: two ASCII letters, then two ASCII digits, such
@@ -1122,11 +1044,11 @@ mod tests {
     }
 
     #[test]
-    fn noqa_on_every_line_or_a_disable_all_range_switches_lint_off() {
+    fn a_noqa_supdoc_cant_confirm_names_only_rule_codes_switches_lint_off() {
         for block in [
             "select 1 -- noqa\n",
             "select a, -- noqa\n\n  b from t --noqa\n",
-            "SELECT TOP 5 * FROM t /* noqa */\n",
+            "select a, -- noqa\nb from t\n",
             "select 1 -- NOQA\n",
             "select 1 -- noqa extra words\n",
             "select 1 -- noqa:\n",
@@ -1134,12 +1056,18 @@ mod tests {
             "select 1 -- noqa: LT01, ALL\n",
             "select 1 # noqa\n",
             "select '-- noqa'\n",
+            "select noqa from t\n",
             "-- noqa: disable=all\nselect  a from t\n",
+            "select 1\n-- noqa: disable=all\n",
             "--noqa:disable=all\nselect 1\n",
             "-- NOQA: Disable = All\nselect 1\n",
+            "-- noqa: disable = LT01\nselect 1\n",
+            "-- noqa: disable=LT01 enable=LT02\nselect 1\n",
             "select 1 -- noqa\n-- noqa: disable=all\nselect 2\n-- noqa: enable=all\nselect 3\n",
             "select 1 -- noqa: LT01 -- noqa\n",
+            "select 1 -- noqa: LT01 */\n",
             "select 1 -- noqa\r\n",
+            "SELECT 1; -- x\r-- noqa: disable=all\nSELECT  b  FROM t;\n",
             "select 1 -- noqa: *\n",
             "select 1 -- noqa: ????\n",
             "select 1 -- noqa: [A-Z]*\n",
@@ -1163,9 +1091,12 @@ mod tests {
     }
 
     #[test]
-    fn any_block_comment_holding_noqa_switches_lint_off() {
+    fn noqa_in_a_block_holding_a_block_comment_switches_lint_off() {
         for block in [
+            "SELECT TOP 5 * FROM t /* noqa */\n",
             "select 1 /* noqa: LT01 */\nselect  2\n",
+            "select 1 /* closed */ -- noqa: LT01\n",
+            "/* one */ /* two */\nselect noqa from t\n",
             "/*\nnoqa: disable=all\n*/\nselect  a from t\n",
             "/* noqa: disable=LT01\n, all */\nselect  a from t\n",
             "select 1;\n/* NOQA",
@@ -1180,35 +1111,254 @@ mod tests {
     }
 
     #[test]
-    fn a_block_comment_without_noqa_leaves_lint_on() {
+    fn noqa_naming_only_rule_codes_or_no_noqa_leaves_lint_on() {
         for block in [
+            "select 1\n",
+            "",
+            "\n\n",
             "/* plain comment */\nselect 1\n",
             "/*\n-- a dash comment inside\n*/\nselect 1\n",
-            "select 1 /* closed */ -- noqa: LT01\n",
-            "/* one */ /* two */\nselect noqa from t\n",
+            "select 1 -- noqa: LT01\n",
+            "select 1 --noqa:LT01\r\n",
+            "select 1 -- noqa: LT01,AL03\n",
+            "select 1 -- noqa: lt01 , al03\n",
+            "-- noqa: disable=LT01\nselect 1\n",
+            "-- noqa:enable=lt01\nselect 1\n",
+            "-- noqa: disable=LT01,AL03\nselect 1\n-- noqa: enable=LT01\n",
+            "select 1 -- no qa\n",
             "select 1 */ -- noqa: LT01\n",
         ] {
             assert!(!switches_lint_off(block), "{block:?} should leave lint on");
         }
     }
 
+    /// Every auditor probe of PR #452 that holds `noqa` (`work/auditor-452/`, `r1/` and `r2/`),
+    /// whether supdoc withholds it, and its body: all are withheld but the two naming plain rule
+    /// codes.
+    const AUDIT_PROBES: [(&str, bool, &str); 48] = [
+        ("pu.sql", true, "select 1;\nselect a from t where -- noqa\n"),
+        (
+            "r1/line1.sql",
+            true,
+            "SELECT  a  FROM t -- noqa\nselect a from t where -- noqa\n",
+        ),
+        (
+            "r1/line10.sql",
+            true,
+            "SELECT  a  FROM t -- noqa: LT01,\nselect a from t where -- noqa: LT01,\n",
+        ),
+        (
+            "r1/line11.sql",
+            false,
+            "SELECT  a  FROM t -- noqa: LT01\nselect a from t where -- noqa: LT01\n",
+        ),
+        (
+            "r1/line2.sql",
+            true,
+            "SELECT  a  FROM t -- noqa: *\nselect a from t where -- noqa: *\n",
+        ),
+        (
+            "r1/line3.sql",
+            true,
+            "SELECT  a  FROM t -- noqa: ????\nselect a from t where -- noqa: ????\n",
+        ),
+        (
+            "r1/line4.sql",
+            true,
+            "SELECT  a  FROM t -- noqa: [A-Z]*\nselect a from t where -- noqa: [A-Z]*\n",
+        ),
+        (
+            "r1/line5.sql",
+            true,
+            "SELECT  a  FROM t -- noqa: core\nselect a from t where -- noqa: core\n",
+        ),
+        (
+            "r1/line6.sql",
+            true,
+            "SELECT  a  FROM t -- noqa: layout\nselect a from t where -- noqa: layout\n",
+        ),
+        (
+            "r1/line7.sql",
+            true,
+            "SELECT  a  FROM t -- noqa: all\nselect a from t where -- noqa: all\n",
+        ),
+        (
+            "r1/line8.sql",
+            true,
+            "SELECT  a  FROM t -- noqa: PRS\nselect a from t where -- noqa: PRS\n",
+        ),
+        (
+            "r1/line9.sql",
+            true,
+            "SELECT  a  FROM t -- noqa: LT01,,AL03\nselect a from t where -- noqa: LT01,,AL03\n",
+        ),
+        ("r1/mal1.sql", true, "select a from t -- noqa?\n"),
+        ("r1/mal2.sql", true, "select a from t -- noqa:\n"),
+        (
+            "r1/ml1.sql",
+            true,
+            "select 1 /*\nnoqa: disable=all\n*/\nSELECT  a  FROM t\nSELECT  b  FROM t\n",
+        ),
+        (
+            "r1/ml2.sql",
+            true,
+            "/*\nnoqa: disable=all\n*/\nSELECT  a  FROM t\nselect a from t where\n",
+        ),
+        ("r1/ml3.sql", true, "SELECT  a  FROM t /*\nnoqa */\n"),
+        (
+            "r1/ml4.sql",
+            true,
+            "/*\nnoqa: disable=all\n*/\nSELECT  a  FROM t\n",
+        ),
+        (
+            "r1/ml5.sql",
+            true,
+            "/* noqa: disable=all\n*/\nSELECT  a  FROM t\n",
+        ),
+        (
+            "r1/ml6.sql",
+            true,
+            "SELECT  a  FROM t; /*\n  noqa: disable=all */\nSELECT  b  FROM t\n",
+        ),
+        (
+            "r1/ml7.sql",
+            true,
+            "/* noqa: disable=LT01\n, all */\nSELECT  a  FROM t\n",
+        ),
+        (
+            "r1/ml8.sql",
+            true,
+            "SELECT  a  FROM t /* noqa: LT01\n, core */\n",
+        ),
+        (
+            "r1/range1.sql",
+            true,
+            "-- noqa: disable=all\nSELECT  a  FROM t\nselect a from t where\n",
+        ),
+        (
+            "r1/range2.sql",
+            true,
+            "-- noqa: disable=*\nSELECT  a  FROM t\nselect a from t where\n",
+        ),
+        (
+            "r1/range3.sql",
+            true,
+            "-- noqa: disable=core\nSELECT  a  FROM t\nselect a from t where\n",
+        ),
+        (
+            "r1/range4.sql",
+            true,
+            "-- noqa: disable=????\nSELECT  a  FROM t\nselect a from t where\n",
+        ),
+        (
+            "r1/range5.sql",
+            true,
+            "-- noqa: disable=LT01,*\nSELECT  a  FROM t\nselect a from t where\n",
+        ),
+        (
+            "r1/range6.sql",
+            true,
+            "-- noqa: disable=layout\nSELECT  a  FROM t\nselect a from t where\n",
+        ),
+        (
+            "r1/range7.sql",
+            true,
+            "-- noqa: disable=\nSELECT  a  FROM t\nselect a from t where\n",
+        ),
+        (
+            "r1/range8.sql",
+            false,
+            "-- noqa: disable=LT01\nSELECT  a  FROM t\nselect a from t where\n",
+        ),
+        ("r1/str.sql", true, "select 'noqa' as a from t\n"),
+        ("r1/up.sql", true, "select a from t -- NOQA\n"),
+        (
+            "r2/ctl_star.sql",
+            true,
+            "SELECT 2*/* noqa: disable=LT01\n, all */ 3 AS y\nSELECT  a  FROM t\n",
+        ),
+        (
+            "r2/ctl_star2.sql",
+            true,
+            "SELECT 2 */* noqa: disable=LT01\n, all */ 3 AS y;\nSELECT  a  FROM t;\n",
+        ),
+        (
+            "r2/dash_in_block.sql",
+            true,
+            "/* x\n-- noqa: disable=all\n*/\nSELECT  a  FROM t\n",
+        ),
+        (
+            "r2/miss_dash.sql",
+            true,
+            "-- see /*\nSELECT */* noqa: disable=LT01\n, all */ FROM t\nSELECT  a  FROM t\n",
+        ),
+        (
+            "r2/miss_dash2.sql",
+            true,
+            "-- see /*\nSELECT 2 */* noqa: disable=LT01\n, all */ 3 AS y;\nSELECT  a  FROM t;\n",
+        ),
+        (
+            "r2/miss_dash3.sql",
+            true,
+            "-- see /*\nSELECT */* noqa: disable=LT01\n, all */\nFROM t;\nSELECT  a  FROM t;\n",
+        ),
+        (
+            "r2/miss_dollar.sql",
+            true,
+            "SELECT $$/*$$ AS x, 2*/* noqa: disable=LT01\n, all */ 3 AS y\nSELECT  a  FROM t\n",
+        ),
+        (
+            "r2/miss_dollar2.sql",
+            true,
+            "SELECT $$/*$$ AS x, 2 */* noqa: disable=LT01\n, all */ 3 AS y;\nSELECT  a  FROM t;\n",
+        ),
+        (
+            "r2/miss_str.sql",
+            true,
+            "SELECT '/*' AS x, 2*/* noqa: disable=LT01\n, all */ 3 AS y\nSELECT  a  FROM t\n",
+        ),
+        (
+            "r2/miss_str2.sql",
+            true,
+            "SELECT '/*' AS x, 2 */* noqa: disable=LT01\n, all */ 3 AS y;\nSELECT  a  FROM t;\n",
+        ),
+        (
+            "r2/miss_str3.sql",
+            true,
+            "SELECT '/*' AS x;\nSELECT */* noqa: disable=LT01\n, all */\nFROM t;\nSELECT  a  FROM t;\n",
+        ),
+        (
+            "r2/ml4.sql",
+            true,
+            "/*\nnoqa: disable=all\n*/\nSELECT  a  FROM t\n",
+        ),
+        (
+            "r2/ml7.sql",
+            true,
+            "/* noqa: disable=LT01\n, all */\nSELECT  a  FROM t\n",
+        ),
+        (
+            "r2/ml8.sql",
+            true,
+            "SELECT  a  FROM t /* noqa: LT01\n, core */\n",
+        ),
+        (
+            "r2/nested.sql",
+            true,
+            "/* a /* b */\nnoqa: disable=all\n*/\nSELECT  a  FROM t\n",
+        ),
+        ("r2/unclosed.sql", true, "SELECT  a  FROM t;\n/* noqa"),
+    ];
+
     #[test]
-    fn noqa_naming_rules_or_missing_from_a_line_leaves_lint_on() {
-        for block in [
-            "select 1\n",
-            "",
-            "\n\n",
-            "select 1 -- noqa: LT01\n",
-            "select 1 -- noqa: LT01,AL03\n",
-            "select 1 -- noqa: lt01 , al03\n",
-            "-- noqa: disable=LT01\nselect 1\n",
-            "-- noqa: disable=LT01,AL03\nselect 1\n-- noqa: enable=LT01\n",
-            "select a, -- noqa\nb from t\n",
-            "select 1\n-- noqa: disable=all\n",
-            "select 1 -- no qa\n",
-            "select noqa from t\n",
-        ] {
-            assert!(!switches_lint_off(block), "{block:?} should leave lint on");
+    fn every_audit_probe_but_the_plain_code_ones_is_withheld() {
+        for (probe, withheld, block) in AUDIT_PROBES {
+            assert_eq!(
+                switches_lint_off(block),
+                withheld,
+                "probe {probe} should be {}",
+                if withheld { "withheld" } else { "linted" }
+            );
         }
     }
 

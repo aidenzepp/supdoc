@@ -367,10 +367,14 @@ fn sql_a_directive_keeps_the_block_from_sqruff_lint_whatever_formats_it() {
 }
 
 #[test]
-fn sql_noqa_on_every_line_or_a_disable_all_range_leaves_both_sqruff_steps_not_run() {
+fn sql_a_noqa_supdoc_cant_confirm_names_only_rule_codes_leaves_both_sqruff_steps_not_run() {
     for body in [
         "SELECT 1; -- noqa",
+        "SELECT a, -- noqa\n  b FROM t;",
         "SELECT a, -- noqa\n  b FROM t; /* noqa */",
+        "SELECT 1; /* noqa: LT01 */",
+        "SELECT 1; -- x\r-- noqa: disable=all\nSELECT  b  FROM t;",
+        "SELECT '/*' AS x;\nSELECT */* noqa: disable=LT01\n, all */\nFROM t;\nSELECT  a  FROM t;",
         "-- noqa: disable=all\nSELECT 1;",
         "SELECT 1; -- NOQA: All",
         "SELECT 1; -- noqa: core",
@@ -392,7 +396,8 @@ fn sql_noqa_on_every_line_or_a_disable_all_range_leaves_both_sqruff_steps_not_ru
         assert!(
             at(&json, "/findings/0/message")
                 .as_str()
-                .is_some_and(|message| message.contains("`noqa`")
+                .is_some_and(|message| message
+                    .contains("holds a `noqa` comment supdoc can't confirm names only rule codes")
                     && message.contains("its sqruff steps didn't run")),
             "{body:?}: {json}"
         );
@@ -413,10 +418,10 @@ fn sql_noqa_on_every_line_or_a_disable_all_range_leaves_both_sqruff_steps_not_ru
 }
 
 #[test]
-fn sql_noqa_naming_rules_or_on_some_lines_still_lints_the_block() {
+fn sql_noqa_naming_only_rule_codes_still_lints_the_block() {
     for body in [
         "SELECT 1; -- noqa: LT01",
-        "SELECT a, -- noqa\n  b FROM t;",
+        "-- noqa: disable=LT01\nSELECT 1;",
         "/* plain comment */\nSELECT 1;",
     ] {
         let project = sql_project("", "sql", body);
@@ -823,10 +828,13 @@ fn sql_the_real_sqruff_still_honors_a_noqa_naming_rule_codes() {
 }
 
 #[test]
-fn sql_the_real_sqruff_fails_a_parse_error_a_bare_noqa_hides() {
-    let Some(dir) = real_sqruff("sql_the_real_sqruff_fails_a_parse_error_a_bare_noqa_hides") else {
+fn sql_the_real_sqruff_never_passes_a_parse_error_behind_a_bare_noqa() {
+    let Some(dir) =
+        real_sqruff("sql_the_real_sqruff_never_passes_a_parse_error_behind_a_bare_noqa")
+    else {
         return;
     };
+    // Linted, the bare noqa would hide the unfinished WHERE and the block would pass.
     for table in [
         "",
         "[features.code-blocks.sql.sqruff-format]\nformat = \"off\"\n",
@@ -835,9 +843,50 @@ fn sql_the_real_sqruff_fails_a_parse_error_a_bare_noqa_hides() {
 
         let json = check(&project, &dir);
 
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-not-checked"],
+            "{table:?}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/lint_not_run"),
+            1,
+            "{table:?}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/passed"),
+            0,
+            "{table:?}: {json}"
+        );
+    }
+}
+
+#[test]
+fn sql_the_real_sqruff_fails_a_parse_error_behind_a_plain_code_noqa() {
+    let Some(dir) = real_sqruff("sql_the_real_sqruff_fails_a_parse_error_behind_a_plain_code_noqa")
+    else {
+        return;
+    };
+    // A noqa naming rule codes is honored, but no rule code masks a parse error: `sqruff fix`
+    // reports it first, and with the format step off lint's `--parsing-errors` does.
+    for (table, kind) in [
+        ("", "code-block-parse"),
+        (
+            "[features.code-blocks.sql.sqruff-format]\nformat = \"off\"\n",
+            "code-block-lint",
+        ),
+    ] {
+        let project = sql_project(
+            table,
+            "sql",
+            "SELECT 1;\nSELECT a FROM t WHERE -- noqa: LT01",
+        );
+
+        let json = check(&project, &dir);
+
         let kinds = finding_kinds(&json);
         assert!(
-            kinds.iter().any(|kind| kind == "code-block-lint"),
+            !kinds.is_empty() && kinds.iter().all(|found| found == kind),
             "{table:?}: {json}"
         );
         assert!(
@@ -855,6 +904,45 @@ fn sql_the_real_sqruff_fails_a_parse_error_a_bare_noqa_hides() {
             at(&json, "/data/summary/code_blocks/passed"),
             0,
             "{table:?}: {json}"
+        );
+    }
+}
+
+#[test]
+fn sql_the_real_sqruff_never_sees_a_string_hidden_block_comment_or_a_cr_joined_noqa() {
+    let Some(dir) = real_sqruff(
+        "sql_the_real_sqruff_never_sees_a_string_hidden_block_comment_or_a_cr_joined_noqa",
+    ) else {
+        return;
+    };
+    // sqruff honors each as every rule off, so linted and fixed the badly spaced block would pass.
+    for body in [
+        "SELECT '/*' AS x;\nSELECT */* noqa: disable=LT01\n, all */\nFROM t;\nSELECT  a  FROM t;",
+        "SELECT 1; -- x\r-- noqa: disable=all\nSELECT  b  FROM t;",
+    ] {
+        let project = sql_project("", "sql", body);
+
+        let json = check(&project, &dir);
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-not-checked"],
+            "{body:?}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/lint_not_run"),
+            1,
+            "{body:?}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/format_not_run"),
+            1,
+            "{body:?}: sqruff fix ran, and it obeys the comment too: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/passed"),
+            0,
+            "{body:?}: {json}"
         );
     }
 }

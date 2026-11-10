@@ -819,24 +819,26 @@ fn pylint_switched_off(at: &Location) -> Finding {
     .with_location(at.clone())
 }
 
-/// Why sqruff's steps, format and lint, didn't run on a block whose `noqa` comments may switch
-/// every rule off for all of it (see [`sqruff::switches_lint_off`]): `sqruff fix` obeys them too.
-const SQRUFF_SWITCHED_OFF: &str = "the block's `noqa` comments may switch every sqruff rule off \
-                                   for all of it";
+/// Why sqruff's steps, format and lint, didn't run on a block holding a `noqa` supdoc can't
+/// confirm names only rule codes (see [`sqruff::switches_lint_off`]): `sqruff fix` obeys `noqa`
+/// too.
+const SQRUFF_SWITCHED_OFF: &str = "the block holds a `noqa` comment supdoc can't confirm names \
+                                   only rule codes";
 
 /// The run's one `code-block-not-checked` warning, at `at`, the first block whose sqruff steps
-/// didn't run because its `noqa` comments may switch every rule off for all of it.
+/// didn't run because it holds a `noqa` comment supdoc can't confirm names only rule codes.
 fn sqruff_switched_off(at: &Location) -> Finding {
     Finding::new(
         NOT_CHECKED,
         Severity::Warning,
-        "the block's `noqa` comments (one naming no rule, or more than rule codes such as `all`, \
-         `core` or `*`, on every line, or such a `disable=` range) may switch every sqruff rule \
-         off for all of it, a syntax error too, so its sqruff steps didn't run",
+        "the block holds a `noqa` comment supdoc can't confirm names only rule codes (a `noqa` in \
+         a block with a `/* */` comment, or one not followed by `: ` and rule codes alone), so \
+         sqruff may switch more rules off, a syntax error's too, and its sqruff steps didn't run",
     )
     .with_help(
-        "name each rule a `-- noqa:` comment switches off by its code, such as `-- noqa: LT05`; \
-         or mark the block `lint(off: <reason>)` and `format(off: <reason>)`",
+        "write each `noqa` as a line comment naming rule codes, such as `-- noqa: LT05`, in a \
+         block with no `/* */` comment; or mark the block `lint(off: <reason>)` and \
+         `format(off: <reason>)`",
     )
     .with_location(at.clone())
 }
@@ -4229,7 +4231,7 @@ const SUPERHTML: &str = "superhtml";
 /// dockerfmt and the block is one dockerfmt isn't given (see [`dockerfmt::not_given`]), it is
 /// superhtml and the block is one superhtml isn't given (see [`superhtml::not_given`]), naming,
 /// for an element whose content superhtml rewrites, the element and its doc line, or it is sqruff
-/// and the block's `noqa` comments may switch every rule off for all of it, as for its lint step
+/// and the block holds a `noqa` supdoc can't confirm names only rule codes, as for its lint step
 /// (see [`sqruff::switches_lint_off`]). `None` otherwise.
 fn format_not_given(tool: &ToolCartridge, record: &BlockRecord) -> Option<NotRun> {
     let pending = record.pending.as_ref()?;
@@ -4276,7 +4278,9 @@ const ESLINT_SWITCHED_OFF: &str = "the block holds an `eslint-disable` comment t
 /// Why `tool`'s lint step doesn't run on `record`'s block, so the tool is never spawned: it is
 /// pylint and the block holds a `pylint:` comment supdoc can't tell from one that switches it
 /// off for the whole block (see [`pylint::switches_lint_off`]), or it is eslint and the block
-/// holds such an `eslint-disable` comment (see [`eslint::switches_lint_off`]). `None` otherwise.
+/// holds such an `eslint-disable` comment (see [`eslint::switches_lint_off`]), or it is sqruff
+/// and the block holds a `noqa` supdoc can't confirm names only rule codes (see
+/// [`sqruff::switches_lint_off`]). `None` otherwise.
 fn switched_off(tool: &ToolCartridge, record: &BlockRecord) -> Option<&'static str> {
     let (switches_off, reason): (fn(&str) -> bool, _) = match tool.name {
         PYLINT => (pylint::switches_lint_off, PYLINT_SWITCHED_OFF),
