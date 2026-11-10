@@ -27,8 +27,8 @@ use crate::config::confine::Boundary;
 use crate::path::{self, FixedPath, NativeName, Suffix, fixed};
 
 use super::{
-    biome, dockerfmt, eslint, go, hadolint, prettier, pylint, python, rumdl, rust, shell, tombi,
-    yaml,
+    biome, dockerfmt, eslint, go, hadolint, prettier, pylint, python, rumdl, rust, shell, sqruff,
+    tombi, yaml,
 };
 
 /// The variables a tool gets from supdoc's own environment, and no others. Windows adds the
@@ -678,6 +678,11 @@ pub(crate) const DOCKERFMT_INSTALL: &str = "download dockerfmt 0.6.0 from https:
 pub(crate) const HADOLINT_INSTALL: &str = "download hadolint 2.15.1 from https://github.com/hadolint/hadolint/releases/tag/v2.15.1 \
      and put it on PATH";
 
+/// How to install a sqruff supdoc's checks are verified against (see [`sqruff::VERIFIED`]):
+/// sqruff ships a binary per platform with a `.sha256` beside it.
+pub(crate) const SQRUFF_INSTALL: &str = "download sqruff 0.44.0 from https://github.com/quarylabs/sqruff/releases/tag/v0.44.0, \
+     check it against its `.sha256`, and put it on PATH";
+
 /// The values every cartridge's mode accepts today.
 const FULL_OR_OFF: &[&str] = &["full", "off"];
 
@@ -928,7 +933,7 @@ fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'sta
 }
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 33] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 34] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -1259,6 +1264,22 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 33] = [
         positions: own_positions,
         argv: hadolint_args,
         reader: Reader::Lint(hadolint::lint_verdict),
+    },
+    ToolCartridge {
+        name: "sqruff-format",
+        language: Language::Sql,
+        binary: "sqruff",
+        loads: Loads::Static,
+        install: SQRUFF_INSTALL,
+        // sqruff reads only supdoc's private copy, named by its hash in the args.
+        config_files: &[],
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        holds: every_tag,
+        vars: &[],
+        positions: own_positions,
+        argv: sqruff_format_args,
+        reader: Reader::Format(sqruff::parse_error),
     },
     ToolCartridge {
         name: "yamlfmt",
@@ -2006,6 +2027,20 @@ fn hadolint_args(invocation: &Invocation<'_>) -> Vec<OsString> {
     args
 }
 
+/// `sqruff fix`'s arguments: the block on stdin (`-`), the fixed SQL on stdout, no config but
+/// the one supdoc names (`--ignore-local-config`), then the private config and the block's
+/// dialect the project contributes (`--config <file> --dialect <name>`, see
+/// [`sqruff::project_args`]). The private config keeps only the layout and capitalisation rules,
+/// so `fix` changes nothing else; the format step compares the output with the block, never the
+/// exit status (see [`super::format::judge`]).
+fn sqruff_format_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    let mut args: Vec<OsString> = ["fix", "-", "--ignore-local-config"]
+        .map(OsString::from)
+        .to_vec();
+    args.extend(invocation.project.iter().cloned());
+    args
+}
+
 /// The lints clippy leaves off for a block, which a snippet breaks for lack of context, as
 /// `-A` flags after the project's own so they win.
 const CLIPPY_RELAXED: [&str; 4] = [
@@ -2500,6 +2535,7 @@ mod tests {
                 "tombi-lint Toml Lint tombi Static",
                 "dockerfmt Dockerfile Format dockerfmt Static",
                 "hadolint Dockerfile Lint hadolint Static",
+                "sqruff-format Sql Format sqruff Static",
                 "yamlfmt Yaml Format yamlfmt Static",
                 "yamllint Yaml Lint yamllint Static",
                 "gofmt Go Format gofmt Static",
@@ -2537,6 +2573,24 @@ mod tests {
                 "--config",
                 "/c/hadolint.yaml",
                 "-",
+            ]
+            .map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn sqruff_fixes_stdin_ignoring_every_local_config_with_the_private_config_and_dialect_last() {
+        let project = ["--config", "/c/sqruff.cfg", "--dialect", "tsql"].map(OsString::from);
+        assert_eq!(
+            args_of("sqruff-format", 1, &project),
+            [
+                "fix",
+                "-",
+                "--ignore-local-config",
+                "--config",
+                "/c/sqruff.cfg",
+                "--dialect",
+                "tsql",
             ]
             .map(OsString::from)
         );
