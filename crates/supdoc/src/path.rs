@@ -304,10 +304,8 @@ pub(crate) mod fixed {
     /// The Go file a block is written to.
     pub(crate) const MAIN_GO: FixedPath = FixedPath::new("main.go");
     /// supdoc's directory beneath a cache or state base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const SUPDOC: FixedPath = FixedPath::new("supdoc");
     /// The code-block directory beneath [`SUPDOC`].
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CODE_BLOCKS: FixedPath = FixedPath::new("code-blocks");
     /// Cargo's private target directory beneath a cache base.
     #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
@@ -339,25 +337,18 @@ pub(crate) mod fixed {
     /// A tool's config file name inside its config directory.
     pub(crate) const CONFIG_TOML: FixedPath = FixedPath::new("config.toml");
     /// rustc's private emit directory beneath the cache base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const EMIT: FixedPath = FixedPath::new("emit");
     /// The metadata file rustc emits for a block.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const BLOCK_RMETA: FixedPath = FixedPath::new("block.rmeta");
     /// A private working directory name.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CWD: FixedPath = FixedPath::new("cwd");
     /// yamlfmt's private config directory beneath the cache base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const YAMLFMT_CONFIG_DIR: FixedPath = FixedPath::new("yamlfmt-config");
     /// yamllint's private config directory beneath the cache base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const YAMLLINT_CONFIG_DIR: FixedPath = FixedPath::new("yamllint-config");
     /// yamlfmt's private config file name.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const DOT_YAMLFMT: FixedPath = FixedPath::new(".yamlfmt");
     /// yamllint's private config file name.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CONFIG_YAML: FixedPath = FixedPath::new("config.yaml");
     /// The default state base beneath `HOME`.
     #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
@@ -419,13 +410,11 @@ pub(crate) mod fixed {
         FixedPath::new("pyproject.toml"),
     ];
     /// The config names rustfmt looks for in a directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const RUST_CONFIG_FILES: [FixedPath; 2] = [
         FixedPath::new(".rustfmt.toml"),
         FixedPath::new("rustfmt.toml"),
     ];
     /// The config names clippy looks for in a directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CLIPPY_FILES: [FixedPath; 2] = [
         FixedPath::new(".clippy.toml"),
         FixedPath::new("clippy.toml"),
@@ -437,7 +426,6 @@ pub(crate) mod fixed {
         FixedPath::new("rust-toolchain.toml"),
     ];
     /// The config names yamlfmt looks for in a directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const YAMLFMT_CONFIG_FILES: [FixedPath; 5] = [
         FixedPath::new(".yamlfmt"),
         FixedPath::new("yamlfmt.yml"),
@@ -446,7 +434,6 @@ pub(crate) mod fixed {
         FixedPath::new(".yamlfmt.yml"),
     ];
     /// The config names yamllint looks for in a directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const YAMLLINT_CONFIG_FILES: [FixedPath; 3] = [
         FixedPath::new(".yamllint"),
         FixedPath::new(".yamllint.yaml"),

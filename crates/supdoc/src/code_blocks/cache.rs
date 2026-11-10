@@ -18,6 +18,7 @@ use sha2::{Digest, Sha256};
 use crate::config::confine::{self, Admitted, Boundary};
 use crate::hash::Hash;
 use crate::limits::{Limits, SizeLimit};
+use crate::path::{self, Component, fixed};
 use crate::read::source::{open_without_blocking, read_up_to};
 
 use super::runner::{self, Ran};
@@ -91,8 +92,15 @@ impl Cache {
         let base = runner::cache_bases(env).next()?;
         let real_root = root.canonicalize().ok()?;
         let real_base = resolved(&base)?;
-        let name = Hash::digest(real_root.as_os_str().as_encoded_bytes()).to_string();
-        let dir = real_base.join("supdoc").join("code-blocks").join(name);
+        let name =
+            Component::new(&Hash::digest(real_root.as_os_str().as_encoded_bytes()).to_string())?;
+        let dir = path::beneath(
+            &path::beneath(
+                &path::beneath(&real_base, &fixed::SUPDOC),
+                &fixed::CODE_BLOCKS,
+            ),
+            &name,
+        );
         let existing = dir
             .ancestors()
             .find_map(|ancestor| ancestor.canonicalize().ok());
@@ -169,7 +177,7 @@ impl Cache {
     ///
     /// Effect: reads the entry.
     pub(crate) fn get(&self, key: Key) -> Option<Ran> {
-        let path = self.entry(key);
+        let path = self.entry(key)?;
         if fs::metadata(&path).ok()?.len() > MAX_ENTRY {
             return None;
         }
@@ -186,9 +194,10 @@ impl Cache {
             return;
         }
         let count = WRITES.fetch_add(1, Ordering::Relaxed);
-        let temporary = self
-            .dir
-            .join(format!(".tmp-{}-{count}", std::process::id()));
+        let Some(name) = Component::new(&format!(".tmp-{}-{count}", std::process::id())) else {
+            return;
+        };
+        let temporary = path::beneath(&self.dir, &name);
         let Some(created) = self.admit(&temporary) else {
             return;
         };
@@ -198,7 +207,7 @@ impl Cache {
         let stored = file.write_all(&encode(key, ran)).is_ok()
             && self
                 .admit(&temporary)
-                .zip(self.admit(&self.entry(key)))
+                .zip(self.entry(key).and_then(|entry| self.admit(&entry)))
                 .is_some_and(|(from, to)| confine::rename_into(&from, &to).is_ok());
         if !stored && let Some(temporary) = self.admit(&temporary) {
             let _gone = confine::remove_file(&temporary);
@@ -231,9 +240,12 @@ impl Cache {
         }
     }
 
-    /// The path of `key`'s entry.
-    fn entry(&self, key: Key) -> PathBuf {
-        self.dir.join(key.0.to_string())
+    /// The path of `key`'s entry, or `None` when its name is not one path component.
+    fn entry(&self, key: Key) -> Option<PathBuf> {
+        Some(path::beneath(
+            &self.dir,
+            &Component::new(&key.0.to_string())?,
+        ))
     }
 
     /// `path`, once [`Boundary::admit`] finds it inside the cache directory both as written and
@@ -311,15 +323,13 @@ fn digest_of(reader: impl Read, len: u64, max_size: SizeLimit) -> Option<Vec<u8>
 ///
 /// Effect: reads metadata and resolves symlinks along `path`.
 fn resolved(path: &Path) -> Option<PathBuf> {
-    let mut rest = Vec::new();
-    let mut existing = path;
-    loop {
-        if let Ok(real) = existing.canonicalize() {
-            return Some(rest.iter().rev().fold(real, |real, part| real.join(part)));
-        }
-        rest.push(existing.file_name()?);
-        existing = existing.parent()?;
+    let (existing, real) = path
+        .ancestors()
+        .find_map(|ancestor| Some((ancestor, ancestor.canonicalize().ok()?)))?;
+    if existing == path {
+        return Some(real);
     }
+    path::rebase(path, existing, &real)
 }
 
 /// `ran`'s entry under `key`: the magic, the key, the exit, both stream lengths, the streams,
@@ -555,7 +565,7 @@ mod tests {
             Cache::at(dir.path(), dir.path().join("cache"), 10).expect("the cache should open");
         let key = key_of(&program(dir.path()), "echo hi\n", dir.path());
         cache.put(key, &ran());
-        let path = cache.entry(key);
+        let path = cache.entry(key).expect("a key names one component");
         let whole = fs::read(&path).expect("the entry should be readable");
 
         let mut flipped = whole.clone();
@@ -581,7 +591,11 @@ mod tests {
         let second = key_of(&program, "echo bye\n", dir.path());
         cache.put(first, &ran());
 
-        fs::rename(cache.entry(first), cache.entry(second)).expect("the entry should move");
+        fs::rename(
+            cache.entry(first).expect("a key names one component"),
+            cache.entry(second).expect("a key names one component"),
+        )
+        .expect("the entry should move");
 
         assert_eq!(cache.get(second), None);
     }
@@ -680,7 +694,7 @@ mod tests {
             cache.put(*key, &ran());
             let file = fs::File::options()
                 .write(true)
-                .open(cache.entry(*key))
+                .open(cache.entry(*key).expect("a key names one component"))
                 .expect("the entry should open");
             let at = UNIX_EPOCH + std::time::Duration::from_secs(1_000 + age as u64);
             file.set_modified(at).expect("the time should be settable");
@@ -711,7 +725,11 @@ mod tests {
         let key = key_of(&program(dir.path()), "echo hi\n", dir.path());
         let outside = dir.path().join("outside");
         fs::write(&outside, "outside\n").expect("the outside file should be writable");
-        symlink(&outside, cache.entry(key)).expect("the entry symlink should be creatable");
+        symlink(
+            &outside,
+            cache.entry(key).expect("a key names one component"),
+        )
+        .expect("the entry symlink should be creatable");
 
         cache.put(key, &ran());
 
@@ -720,7 +738,7 @@ mod tests {
             "outside\n"
         );
         assert!(
-            fs::symlink_metadata(cache.entry(key))
+            fs::symlink_metadata(cache.entry(key).expect("a key names one component"))
                 .expect("the entry should still exist")
                 .is_symlink(),
             "the symlinked entry should not be replaced"
