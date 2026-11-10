@@ -70,13 +70,6 @@ impl AbsolutePath {
     /// Built from `path`'s own ancestors, so nothing is joined and no component is new: the
     /// walk that creates or checks each directory on the way down needs no raw join.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the walks in scan and cli use it from V5-P5 and V5-P6"
-        )
-    )]
     pub(crate) fn steps_to(&self, path: &Self) -> Option<impl Iterator<Item = Self> + use<>> {
         let _under = path.strip_prefix(self)?;
         let mut steps: Vec<Self> = path
@@ -774,13 +767,6 @@ impl RelativePath {
 
     /// `self` with `rel` appended, keeping `self` as written, `..` included.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the config chain's suggestion joins with it from V5-P5"
-        )
-    )]
     pub(crate) fn beneath(&self, rel: &impl Beneath) -> Self {
         Self(raw_join(&self.0, Path::new(rel.segments())))
     }

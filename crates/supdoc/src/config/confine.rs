@@ -38,7 +38,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::path::AbsolutePath;
+use crate::path::{AbsolutePath, Pointer, Suffix, rebase, with_suffix};
 
 /// How many dangling symlinks one lookup follows before it gives up, as the OS limits loops.
 const MAX_DANGLING_HOPS: u8 = 40;
@@ -59,11 +59,9 @@ fn real_location_within(path: &Path, hops: u8) -> Option<PathBuf> {
     if let Ok(real) = fs::canonicalize(path) {
         return Some(real);
     }
-    // Climb to the deepest entry that exists, remembering the missing names below it.
+    // Climb to the deepest entry that exists; what lies below it is the missing tail.
     let mut existing = path;
-    let mut missing = Vec::new();
     while fs::symlink_metadata(existing).is_err() {
-        missing.push(normal_name(existing)?);
         existing = existing.parent()?;
     }
     let real_existing = if let Ok(real) = fs::canonicalize(existing) {
@@ -71,26 +69,15 @@ fn real_location_within(path: &Path, hops: u8) -> Option<PathBuf> {
     } else {
         // The entry exists but can't be resolved: a dangling symlink. Follow it by hand.
         let next = hops.checked_sub(1)?;
-        let pointee = fs::read_link(existing).ok()?;
+        let pointee = Pointer::from_path(fs::read_link(existing).ok()?)?;
         let parent = fs::canonicalize(existing.parent()?).ok()?;
-        real_location_within(&parent.join(pointee), next)?
+        real_location_within(&pointee.resolve_from(&parent), next)?
     };
-    Some(
-        missing
-            .iter()
-            .rev()
-            .fold(real_existing, |real, name| real.join(name)),
-    )
-}
-
-/// The last component of `path` when it is an ordinary name, not `..`, `.` or a root.
-fn normal_name(path: &Path) -> Option<&std::ffi::OsStr> {
-    match path.components().next_back()? {
-        Component::Normal(name) => Some(name),
-        Component::Prefix(_) | Component::RootDir | Component::CurDir | Component::ParentDir => {
-            None
-        }
+    if path == existing {
+        return Some(real_existing);
     }
+    // `rebase` refuses a `..` or root in the tail, so a `..` below a missing name is `None`.
+    rebase(path, existing, &real_existing)
 }
 
 /// A directory supdoc may write beneath, with its real location worked out once.
@@ -230,13 +217,9 @@ impl Boundary {
         if real.starts_with(&dir.given) {
             return self.admit(real);
         }
-        let named = real
-            .strip_prefix(&dir.real)
-            .ok()
-            .map(|beneath| dir.given.join(beneath))
-            .ok_or_else(|| Escape::Real {
-                real: Some(real.to_path_buf()),
-            })?;
+        let named = rebase(real, &dir.real, &dir.given).ok_or_else(|| Escape::Real {
+            real: Some(real.to_path_buf()),
+        })?;
         self.admit(&named)
     }
 }
@@ -269,13 +252,16 @@ fn temp_path_beside(target: &Path, attempt: u32) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.subsec_nanos());
-    let mut name = target.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(
+    let tail = format!(
         ".{}.{}.{nanos:x}.{attempt}.tmp",
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed),
-    ));
-    target.with_file_name(name)
+    );
+    // A target with no file name is a root or ends in `..`, which no write reaches; it falls
+    // back to the target itself, which `create_new` then refuses.
+    Suffix::new(&tail)
+        .and_then(|tail| with_suffix(target, &tail))
+        .unwrap_or_else(|| target.to_path_buf())
 }
 
 /// Creates a new file at the first free candidate path. `create_new` refuses an existing path
@@ -1013,6 +999,79 @@ mod tests {
             fixture.names("outside").is_empty(),
             "nothing should be written outside"
         );
+    }
+
+    #[test]
+    fn real_location_of_a_dangling_leaf_symlink_is_its_pointee_byte_for_byte() {
+        let fixture = Fixture::new();
+        let outside = fs::canonicalize(fixture.path("outside"))
+            .expect("the outside dir should be canonicalizable");
+        fixture.link(
+            outside
+                .join("missing")
+                .to_str()
+                .expect("the temp path should be UTF-8"),
+            "root/dangling",
+        );
+
+        let real = real_location(&fixture.path("root/dangling"))
+            .expect("a dangling link to a missing file should still resolve");
+
+        assert_eq!(
+            real.as_os_str(),
+            outside.join("missing").as_os_str(),
+            "the link's own location must add nothing, not even a trailing separator"
+        );
+    }
+
+    #[test]
+    fn write_atomically_replaces_an_existing_file_and_leaves_no_temp_file() {
+        let fixture = Fixture::new();
+        fixture.write("root/out.txt", "old");
+        let boundary = fixture.boundary();
+        let target = boundary
+            .admit(&fixture.absolute("root/out.txt"))
+            .expect("an existing file inside the root should be admitted");
+
+        write_atomically(&target, b"new", None).expect("the replacing write should succeed");
+
+        assert_eq!(
+            fs::read_to_string(target.as_path()).expect("the written file should be readable"),
+            "new"
+        );
+        assert_eq!(
+            fixture.names("root"),
+            names(&["out.txt"]),
+            "no temp file should remain beside the target"
+        );
+    }
+
+    #[test]
+    fn temp_path_beside_keeps_the_directory_and_extends_the_file_name() {
+        let target = Path::new("dir").join("out.txt");
+
+        let temp = temp_path_beside(&target, 3);
+
+        assert_eq!(
+            temp.parent(),
+            target.parent(),
+            "the temp file stays beside the target"
+        );
+        let name = temp
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("the temp name should be UTF-8");
+        assert!(
+            name.starts_with("out.txt.") && name.ends_with(".3.tmp"),
+            "the temp name should extend the target's name and carry the attempt, got {name}"
+        );
+        assert_ne!(temp, target);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temp_path_beside_a_root_falls_back_to_the_root_itself() {
+        assert_eq!(temp_path_beside(Path::new("/"), 0), Path::new("/"));
     }
 
     #[cfg(unix)]

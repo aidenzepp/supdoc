@@ -178,18 +178,17 @@ pub(super) fn unscanned(listed: &SourcePath, why: &Unscanned) -> Finding {
 
 /// Whether a directory above `listed`, inside `root`, is a symlink.
 pub(super) fn has_symlinked_parent(root: &AbsolutePath, listed: &SourcePath) -> bool {
-    let mut current = root.as_path().to_path_buf();
-    let mut segments = listed.as_str().split('/').peekable();
-    while let Some(segment) = segments.next() {
-        if segments.peek().is_none() {
-            break;
-        }
-        current.push(segment);
-        if fs::symlink_metadata(&current).is_ok_and(|metadata| metadata.is_symlink()) {
-            return true;
-        }
-    }
-    false
+    let Some(parents) = root
+        .beneath(listed)
+        .parent()
+        .and_then(|parent| root.steps_to(&parent))
+    else {
+        return false;
+    };
+    let mut parents = parents;
+    parents.any(|parent| {
+        fs::symlink_metadata(parent.as_path()).is_ok_and(|metadata| metadata.is_symlink())
+    })
 }
 
 /// Where the symlink sits that keeps the walk from an explicitly named path.
@@ -344,19 +343,19 @@ pub(super) fn ignored(listed: &SourcePath, by: &IgnoredBy) -> Finding {
 /// is, which the walk skips whatever the user names. A symlink is never judged here:
 /// the walk doesn't follow it, so it gets the symlink warning.
 pub(super) fn skipped_dir(root: &AbsolutePath, listed: &SourcePath) -> Option<SkippedDir> {
-    let mut current = root.as_path().to_path_buf();
     let mut relative = String::new();
-    for segment in listed.as_str().split('/') {
-        current.push(segment);
+    let steps = root.steps_to(&root.beneath(listed))?;
+    for (segment, step) in listed.as_str().split('/').zip(steps) {
+        let current = step.as_path();
         if !relative.is_empty() {
             relative.push('/');
         }
         relative.push_str(segment);
-        if is_vcs_dir(&current) {
+        if is_vcs_dir(current) {
             return Some(SkippedDir::Vcs(relative));
         }
-        let is_real_dir = fs::symlink_metadata(&current).is_ok_and(|metadata| metadata.is_dir());
-        if is_real_dir && is_nested_project(&current) {
+        let is_real_dir = fs::symlink_metadata(current).is_ok_and(|metadata| metadata.is_dir());
+        if is_real_dir && is_nested_project(current) {
             return Some(SkippedDir::Project(relative));
         }
     }
@@ -379,18 +378,20 @@ pub(super) fn ignore_rule(
     path: &AbsolutePath,
     is_dir: bool,
 ) -> Option<IgnoredBy> {
-    let mut current = root.as_path().to_path_buf();
-    let mut components = path.strip_prefix(root)?.components().peekable();
-    while let Some(component) = components.next() {
-        let is_last = components.peek().is_none();
-        let dir = rules.level(&current);
-        current.push(component);
-        if !is_last && is_symlink(&current) {
+    let mut steps = root.steps_to(path)?.peekable();
+    let mut above = root.clone();
+    while let Some(step) = steps.next() {
+        let is_last = steps.peek().is_none();
+        let dir = rules.level(above.as_path());
+        if !is_last && is_symlink(step.as_path()) {
             return None;
         }
-        if let Match::Ignore(rule) = rules.matched(dir.as_deref(), &current, !is_last || is_dir) {
+        if let Match::Ignore(rule) =
+            rules.matched(dir.as_deref(), step.as_path(), !is_last || is_dir)
+        {
             return Some(rule.describe(root, rules.in_work_tree));
         }
+        above = step;
     }
     None
 }
