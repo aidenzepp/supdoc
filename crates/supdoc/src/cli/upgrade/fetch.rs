@@ -203,12 +203,21 @@ fn curl_candidates() -> Vec<PathBuf> {
     }
     #[cfg(windows)]
     {
-        vec![
-            crate::process::recorded_system_root()
-                .join("System32")
-                .join("curl.exe"),
-        ]
+        vec![curl_under(&crate::process::recorded_system_root())]
     }
+}
+
+/// Where `curl.exe` lives under a Windows directory `system_root`: `System32\curl.exe`, each
+/// name joined on its own so no combined constant carries a separator.
+#[cfg_attr(
+    not(any(windows, test)),
+    expect(dead_code, reason = "only the Windows candidate list calls it")
+)]
+fn curl_under(system_root: &Path) -> PathBuf {
+    crate::path::beneath(
+        &crate::path::beneath(system_root, &crate::path::fixed::SYSTEM32),
+        &crate::path::fixed::CURL_EXE,
+    )
 }
 
 /// The arguments for one request: `-q` first so no `.curlrc` applies, `--globoff` so `[` and `{`
@@ -459,7 +468,16 @@ fn fetch_from_dir(dir: &Path, url: &str, cap: u64) -> Result<Vec<u8>, FetchError
     if folder.is_empty() || folder == "." || folder == ".." || folder.contains(['/', '\\']) {
         return Err(test_file("the URL names no release folder".to_owned()));
     }
-    let file = match std::fs::File::open(dir.join(&folder).join(name)) {
+    let (Some(folder), Some(name)) = (
+        crate::path::NativeName::new(&folder),
+        crate::path::NativeName::new(name),
+    ) else {
+        return Err(test_file("the URL names no release file".to_owned()));
+    };
+    let file = match std::fs::File::open(crate::path::within(
+        &crate::path::within(dir, &folder),
+        &name,
+    )) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(FetchError::Status {
@@ -486,6 +504,16 @@ fn fetch_from_dir(dir: &Path, url: &str, cap: u64) -> Result<Vec<u8>, FetchError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn curl_lives_in_system32_under_the_system_root() {
+        let root = Path::new("windows-root");
+        assert_eq!(
+            curl_under(root),
+            root.join("System32").join("curl.exe"),
+            "System32 and curl.exe are two joins under the root"
+        );
+    }
 
     #[test]
     fn http_is_refused_at_the_start_and_on_a_redirect() {
