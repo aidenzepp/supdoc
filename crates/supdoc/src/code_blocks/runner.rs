@@ -7,7 +7,7 @@
 //! asks for the project root, and the block reaches it on stdin only.
 
 use std::ffi::OsStr;
-use std::io::{ErrorKind, Read, Write as _};
+use std::io::{Read, Write as _};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
 #[cfg(windows)]
@@ -284,53 +284,11 @@ fn spawn_tool(call: &Call<'_>, env: &ToolEnv, cwd: PathBuf) -> std::io::Result<(
     let _same = command.process_group(0);
     #[cfg(windows)]
     let _same = command.creation_flags(CREATE_NEW_PROCESS_GROUP);
-    retry_busy(
+    process::retry_busy(
         Spawning::begin,
         || command.spawn(),
-        || thread::sleep(BUSY_DELAY),
+        || thread::sleep(process::BUSY_DELAY),
     )
-}
-
-/// How many times a spawn that Linux reports busy is tried before its error is returned.
-const BUSY_ATTEMPTS: u32 = 5;
-
-/// The pause between two tries of a busy spawn.
-const BUSY_DELAY: Duration = Duration::from_millis(20);
-
-/// Runs `spawn` under a guard from `begin`, trying again up to [`BUSY_ATTEMPTS`] times in all
-/// while it fails with [`ErrorKind::ExecutableFileBusy`]. A success returns its guard.
-///
-/// On Linux an executable just written can fail to spawn with `ETXTBSY` while another thread's
-/// fork still holds its write descriptor; the hold ends within moments. Each try begins its own
-/// guard, and a busy try drops its guard before `pause` runs, so no guard is alive while this
-/// sleeps. Any other error returns at once, and the last busy error returns once the tries run
-/// out.
-///
-/// # Errors
-///
-/// The error of the last `spawn`.
-///
-/// Effect: calls `pause` between tries.
-fn retry_busy<G, T>(
-    mut begin: impl FnMut() -> G,
-    mut spawn: impl FnMut() -> std::io::Result<T>,
-    mut pause: impl FnMut(),
-) -> std::io::Result<(G, T)> {
-    let mut attempt = 1;
-    loop {
-        let guard = begin();
-        match spawn() {
-            Ok(spawned) => return Ok((guard, spawned)),
-            Err(error)
-                if error.kind() == ErrorKind::ExecutableFileBusy && attempt < BUSY_ATTEMPTS =>
-            {
-                drop(guard);
-                attempt += 1;
-                pause();
-            }
-            Err(error) => return Err(error),
-        }
-    }
 }
 
 /// Whether `meta` is mode 0700 or narrower and owned by whoever owns `cache`.
@@ -530,11 +488,12 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        BUSY_ATTEMPTS, CAP, Call, Cwd, Failure, Ran, create_private, exact, neutral_dir,
-        private_dir, retry_busy, run, write_private,
+        CAP, Call, Cwd, Failure, Ran, create_private, exact, neutral_dir, private_dir, run,
+        write_private,
     };
     use crate::code_blocks::tools::ToolEnv;
     use crate::config::confine::Boundary;
+    use crate::process::{BUSY_ATTEMPTS, retry_busy};
 
     /// A fresh directory holding a `root` project, a `home` and a `bin` with the stub `script`.
     struct Fixture {
