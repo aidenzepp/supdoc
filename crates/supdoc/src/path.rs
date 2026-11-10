@@ -370,6 +370,25 @@ pub(crate) mod fixed {
     /// own `.sqruff`. Its other names (`.sqruff.ini`, `sqruff.toml`, `.sqlfluff`,
     /// `pyproject.toml`) are never read.
     pub(crate) const DOT_SQRUFF: FixedPath = FixedPath::new(".sqruff");
+    /// mbake's private config directory beneath the cache base.
+    pub(crate) const MBAKE_CONFIG_DIR: FixedPath = FixedPath::new("mbake-config");
+    /// mbake's private config file name.
+    pub(crate) const BAKE_TOML: FixedPath = FixedPath::new("bake.toml");
+    /// The one config name supdoc looks for mbake's project config by in a directory: mbake's
+    /// own `.bake.toml`. The user configs mbake reads (`~/.bake.toml`, the XDG one) are never read.
+    pub(crate) const DOT_BAKE_TOML: FixedPath = FixedPath::new(".bake.toml");
+    /// A POSIX Python prefix's library directory, holding one `python3.<minor>` directory per
+    /// interpreter.
+    pub(crate) const LIB: FixedPath = FixedPath::new("lib");
+    /// Where a POSIX Python install keeps its packages, beneath `lib/python3.<minor>`.
+    pub(crate) const SITE_PACKAGES: FixedPath = FixedPath::new("site-packages");
+    /// Where a Debian-patched Python keeps the packages pip installs, beneath
+    /// `lib/python3.<minor>`.
+    pub(crate) const DIST_PACKAGES: FixedPath = FixedPath::new("dist-packages");
+    /// Where a Windows Python install keeps its packages, beneath its prefix.
+    pub(crate) const WINDOWS_SITE_PACKAGES: FixedPath = FixedPath::new("Lib/site-packages");
+    /// A Python package's metadata file, inside its `.dist-info` directory.
+    pub(crate) const METADATA: FixedPath = FixedPath::new("METADATA");
     /// The default state base beneath `HOME`.
     pub(crate) const LOCAL_STATE: FixedPath = FixedPath::new(".local/state");
     /// The trust store file.

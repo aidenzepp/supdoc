@@ -9,7 +9,7 @@
 //! linking reads.
 //!
 //! A language is on exactly when its table, `[features.code-blocks.rust]`, `.shell`, `.python`,
-//! `.typescript`, `.javascript`, `.json`, `.css`, `.html`, `.yaml`, `.toml`, `.dockerfile`, `.sql`, `.markdown` or `.go`, is written in some file of the chain; an empty
+//! `.typescript`, `.javascript`, `.json`, `.css`, `.html`, `.yaml`, `.toml`, `.dockerfile`, `.makefile`, `.sql`, `.markdown` or `.go`, is written in some file of the chain; an empty
 //! table turns it on. The language
 //! table selects tools (`formatter`, `linter`) and holds the language's own settings; each
 //! tool's options, its step's mode, live in the tool's own table,
@@ -21,6 +21,7 @@ mod go;
 mod html;
 mod javascript;
 mod json;
+mod makefile;
 mod markdown;
 mod python;
 mod rust;
@@ -41,6 +42,7 @@ use self::go::RawGo;
 use self::html::RawHtml;
 use self::javascript::RawJavaScript;
 use self::json::RawJson;
+use self::makefile::RawMakefile;
 use self::markdown::RawMarkdown;
 use self::python::RawPython;
 pub(crate) use self::rust::Edition;
@@ -82,6 +84,8 @@ pub(crate) enum Language {
     Toml,
     /// Dockerfile: tagged `dockerfile`, `Dockerfile`, `containerfile` or `Containerfile`.
     Dockerfile,
+    /// Makefile: tagged `make`, `makefile`, `Makefile` or `mk`.
+    Makefile,
     /// SQL: tagged `sql`, or a dialect's own name: `postgresql`, `postgres`, `pgsql`, `tsql`,
     /// `mssql`, `mysql`, `mariadb`, `sqlite`, `bigquery`, `snowflake` or `duckdb`.
     Sql,
@@ -108,6 +112,7 @@ impl Language {
             "dockerfile" | "Dockerfile" | "containerfile" | "Containerfile" => {
                 Some(Self::Dockerfile)
             }
+            "make" | "makefile" | "Makefile" | "mk" => Some(Self::Makefile),
             "sql" | "postgresql" | "postgres" | "pgsql" | "tsql" | "mssql" | "mysql"
             | "mariadb" | "sqlite" | "bigquery" | "snowflake" | "duckdb" => Some(Self::Sql),
             "go" | "golang" => Some(Self::Go),
@@ -116,7 +121,7 @@ impl Language {
     }
 
     /// The name of its table: `rust`, `shell`, `python`, `typescript`, `javascript`, `json`,
-    /// `css`, `html`, `yaml`, `toml`, `dockerfile`, `sql`, `markdown` or `go`.
+    /// `css`, `html`, `yaml`, `toml`, `dockerfile`, `makefile`, `sql`, `markdown` or `go`.
     #[must_use]
     pub(crate) const fn table(self) -> &'static str {
         match self {
@@ -132,6 +137,7 @@ impl Language {
             Self::Yaml => "yaml",
             Self::Toml => "toml",
             Self::Dockerfile => "dockerfile",
+            Self::Makefile => "makefile",
             Self::Sql => "sql",
             Self::Go => "go",
         }
@@ -755,6 +761,8 @@ struct Languages {
     toml: Table,
     /// `[features.code-blocks.dockerfile]`.
     dockerfile: Table,
+    /// `[features.code-blocks.makefile]`.
+    makefile: Table,
     /// `[features.code-blocks.sql]`.
     sql: Table,
     /// `[features.code-blocks.go]`.
@@ -769,7 +777,7 @@ struct Languages {
 
 impl Languages {
     /// Every language, in the order the chain's checks report them.
-    const ORDER: [Language; 14] = [
+    const ORDER: [Language; 15] = [
         Language::Rust,
         Language::Shell,
         Language::Python,
@@ -781,6 +789,7 @@ impl Languages {
         Language::Yaml,
         Language::Toml,
         Language::Dockerfile,
+        Language::Makefile,
         Language::Sql,
         Language::Markdown,
         Language::Go,
@@ -801,6 +810,7 @@ impl Languages {
             Language::Yaml => &self.yaml,
             Language::Toml => &self.toml,
             Language::Dockerfile => &self.dockerfile,
+            Language::Makefile => &self.makefile,
             Language::Sql => &self.sql,
             Language::Go => &self.go,
         }
@@ -851,6 +861,8 @@ pub(crate) struct RawCodeBlocks {
     toml: Option<RawToml>,
     /// `[features.code-blocks.dockerfile]`, when written.
     dockerfile: Option<RawDockerfile>,
+    /// `[features.code-blocks.makefile]`, when written.
+    makefile: Option<RawMakefile>,
     /// `[features.code-blocks.sql]`, when written.
     sql: Option<RawSql>,
     /// `[features.code-blocks.go]`, when written.
@@ -876,7 +888,7 @@ impl Written {
     /// # Errors
     ///
     /// [`ConfigError::ToolNotSelected`] for the first tool table, Rust, shell, Python,
-    /// TypeScript, JavaScript, JSON, CSS, HTML, YAML, TOML, Dockerfile, SQL, Markdown then Go, whose tool the merged chain
+    /// TypeScript, JavaScript, JSON, CSS, HTML, YAML, TOML, Dockerfile, Makefile, SQL, Markdown then Go, whose tool the merged chain
     /// doesn't select.
     pub(super) fn resolve(
         self,
@@ -1014,6 +1026,7 @@ pub(super) fn merge(
         yaml,
         toml,
         dockerfile,
+        makefile,
         sql,
         go,
         ..
@@ -1023,79 +1036,56 @@ pub(super) fn merge(
     };
     let anchor = |list| AnchoredPatterns::written_by(file.clone(), base.clone(), list);
     let nearer = nearer.unwrap_or_default();
+    let near = nearer.languages;
     Some(Written {
         include: nearer.include.or_else(|| include.map(anchor)),
         exclude: nearer.exclude.or_else(|| exclude.map(anchor)),
         tier: nearer.tier.or(tier),
         languages: Languages {
-            edition: nearer
-                .languages
-                .edition
-                .or(rust.as_ref().and_then(|raw| raw.edition)),
-            rust: nearer
-                .languages
+            edition: near.edition.or(rust.as_ref().and_then(|raw| raw.edition)),
+            rust: near
                 .rust
                 .behind(rust.as_ref().map(RawRust::selection), file),
-            dialect: nearer
-                .languages
-                .dialect
-                .or(shell.as_ref().and_then(|raw| raw.dialect)),
-            shell: nearer
-                .languages
+            dialect: near.dialect.or(shell.as_ref().and_then(|raw| raw.dialect)),
+            shell: near
                 .shell
                 .behind(shell.as_ref().map(RawShell::selection), file),
-            python: nearer
-                .languages
+            python: near
                 .python
                 .behind(python.as_ref().map(RawPython::selection), file),
-            markdown: nearer
-                .languages
+            markdown: near
                 .markdown
                 .behind(markdown.as_ref().map(RawMarkdown::selection), file),
-            typescript: nearer
-                .languages
+            typescript: near
                 .typescript
                 .behind(typescript.as_ref().map(RawTypeScript::selection), file),
-            javascript: nearer
-                .languages
+            javascript: near
                 .javascript
                 .behind(javascript.as_ref().map(RawJavaScript::selection), file),
-            json: nearer
-                .languages
+            json: near
                 .json
                 .behind(json.as_ref().map(RawJson::selection), file),
-            css: nearer
-                .languages
-                .css
-                .behind(css.as_ref().map(RawCss::selection), file),
-            html: nearer
-                .languages
+            css: near.css.behind(css.as_ref().map(RawCss::selection), file),
+            html: near
                 .html
                 .behind(html.as_ref().map(RawHtml::selection), file),
-            yaml: nearer
-                .languages
+            yaml: near
                 .yaml
                 .behind(yaml.as_ref().map(RawYaml::selection), file),
-            toml: nearer
-                .languages
+            toml: near
                 .toml
                 .behind(toml.as_ref().map(RawToml::selection), file),
-            dockerfile: nearer
-                .languages
+            dockerfile: near
                 .dockerfile
                 .behind(dockerfile.as_ref().map(RawDockerfile::selection), file),
-            sql_dialect: nearer
-                .languages
+            makefile: near
+                .makefile
+                .behind(makefile.as_ref().map(RawMakefile::selection), file),
+            sql_dialect: near
                 .sql_dialect
                 .or(sql.as_ref().and_then(|raw| raw.dialect)),
-            sql: nearer
-                .languages
-                .sql
-                .behind(sql.as_ref().map(RawSql::selection), file),
-            go: nearer
-                .languages
-                .go
-                .behind(go.as_ref().map(RawGo::selection), file),
+            sql: near.sql.behind(sql.as_ref().map(RawSql::selection), file),
+            go: near.go.behind(go.as_ref().map(RawGo::selection), file),
         },
     })
 }
@@ -1503,6 +1493,60 @@ mod tests {
         );
         assert!(
             linter.contains("`biome-lint` isn't a known html linter")
+                && linter.contains("none yet: write a custom `{ command = [...] }`"),
+            "got {linter}"
+        );
+    }
+
+    #[test]
+    fn the_make_makefile_and_mk_tags_name_makefile_and_mak_bsdmake_and_mf_name_none() {
+        let cases = [
+            ("make", Some(Language::Makefile)),
+            ("makefile", Some(Language::Makefile)),
+            ("Makefile", Some(Language::Makefile)),
+            ("mk", Some(Language::Makefile)),
+            ("mak", None),
+            ("bsdmake", None),
+            ("mf", None),
+            ("MAKEFILE", None),
+        ];
+        for (tag, expected) in cases {
+            assert_eq!(Language::from_tag(tag), expected, "tag `{tag}`");
+        }
+        assert_eq!(Language::Makefile.table(), "makefile");
+    }
+
+    #[test]
+    fn a_makefile_table_defaults_to_mbake_and_no_linter() {
+        let dir = tree(&[(
+            "supdoc.config.toml",
+            "[features.code-blocks.makefile]\n[features.code-blocks.makefile.mbake]\nformat = \"full\"\n",
+        )]);
+
+        let config = Config::load(&at(&dir, ".")).expect("the fixture config should load");
+        let code_blocks = config.code_blocks().expect("the table is written");
+
+        assert!(code_blocks.checks(Language::Makefile));
+        assert_eq!(
+            crate::code_blocks::tools::default_for(Language::Makefile, Step::Format)
+                .map(|tool| tool.name),
+            Some("mbake")
+        );
+        assert!(crate::code_blocks::tools::default_for(Language::Makefile, Step::Lint).is_none());
+    }
+
+    #[test]
+    fn mbake_is_a_known_makefile_formatter_and_a_named_linter_is_refused() {
+        let formatter = refused("makefile", "formatter = \"bake\"");
+        let linter = refused("makefile", "linter = \"checkmake\"");
+
+        assert!(
+            formatter.contains("`bake` isn't a known makefile formatter")
+                && formatter.contains("`mbake`"),
+            "got {formatter}"
+        );
+        assert!(
+            linter.contains("`checkmake` isn't a known makefile linter")
                 && linter.contains("none yet: write a custom `{ command = [...] }`"),
             "got {linter}"
         );
