@@ -9,13 +9,14 @@
 //! linking reads.
 //!
 //! A language is on exactly when its table, `[features.code-blocks.rust]`, `.shell`, `.python`,
-//! `.typescript`, `.javascript`, `.json`, `.css`, `.yaml`, `.toml`, `.markdown` or `.go`, is written in some file of the chain; an empty
+//! `.typescript`, `.javascript`, `.json`, `.css`, `.yaml`, `.toml`, `.dockerfile`, `.markdown` or `.go`, is written in some file of the chain; an empty
 //! table turns it on. The language
 //! table selects tools (`formatter`, `linter`) and holds the language's own settings; each
 //! tool's options, its step's mode, live in the tool's own table,
 //! `[features.code-blocks.<language>.<tool>]`, validated by its cartridge.
 
 mod css;
+mod dockerfile;
 mod go;
 mod javascript;
 mod json;
@@ -33,6 +34,7 @@ use std::ops::Range;
 use crate::path::AbsolutePath;
 
 use self::css::RawCss;
+use self::dockerfile::RawDockerfile;
 use self::go::RawGo;
 use self::javascript::RawJavaScript;
 use self::json::RawJson;
@@ -71,6 +73,8 @@ pub(crate) enum Language {
     Yaml,
     /// TOML: tagged `toml`.
     Toml,
+    /// Dockerfile: tagged `dockerfile`, `Dockerfile`, `containerfile` or `Containerfile`.
+    Dockerfile,
     /// Go: tagged `go` or `golang`.
     Go,
 }
@@ -90,13 +94,16 @@ impl Language {
             "css" | "scss" => Some(Self::Css),
             "yaml" | "yml" => Some(Self::Yaml),
             "toml" => Some(Self::Toml),
+            "dockerfile" | "Dockerfile" | "containerfile" | "Containerfile" => {
+                Some(Self::Dockerfile)
+            }
             "go" | "golang" => Some(Self::Go),
             _ => None,
         }
     }
 
     /// The name of its table: `rust`, `shell`, `python`, `typescript`, `javascript`, `json`,
-    /// `css`, `yaml`, `toml`, `markdown` or `go`.
+    /// `css`, `yaml`, `toml`, `dockerfile`, `markdown` or `go`.
     #[must_use]
     pub(crate) const fn table(self) -> &'static str {
         match self {
@@ -110,6 +117,7 @@ impl Language {
             Self::Css => "css",
             Self::Yaml => "yaml",
             Self::Toml => "toml",
+            Self::Dockerfile => "dockerfile",
             Self::Go => "go",
         }
     }
@@ -619,8 +627,12 @@ pub(super) fn shown(text: &str) -> std::str::EscapeDebug<'_> {
     text.escape_debug()
 }
 
-/// `known` as backticked names joined by `, `.
+/// `known` as backticked names joined by `, `, or that there are none yet and a custom command is
+/// the way to name a tool.
 fn tool_list(known: &[&str]) -> String {
+    if known.is_empty() {
+        return "none yet: write a custom `{ command = [...] }`".to_owned();
+    }
     known
         .iter()
         .map(|name| format!("`{name}`"))
@@ -724,6 +736,8 @@ struct Languages {
     yaml: Table,
     /// `[features.code-blocks.toml]`.
     toml: Table,
+    /// `[features.code-blocks.dockerfile]`.
+    dockerfile: Table,
     /// `[features.code-blocks.go]`.
     go: Table,
     /// The nearest shell `dialect` written.
@@ -734,7 +748,7 @@ struct Languages {
 
 impl Languages {
     /// Every language, in the order the chain's checks report them.
-    const ORDER: [Language; 11] = [
+    const ORDER: [Language; 12] = [
         Language::Rust,
         Language::Shell,
         Language::Python,
@@ -744,6 +758,7 @@ impl Languages {
         Language::Css,
         Language::Yaml,
         Language::Toml,
+        Language::Dockerfile,
         Language::Markdown,
         Language::Go,
     ];
@@ -761,6 +776,7 @@ impl Languages {
             Language::Css => &self.css,
             Language::Yaml => &self.yaml,
             Language::Toml => &self.toml,
+            Language::Dockerfile => &self.dockerfile,
             Language::Go => &self.go,
         }
     }
@@ -806,6 +822,8 @@ pub(crate) struct RawCodeBlocks {
     yaml: Option<RawYaml>,
     /// `[features.code-blocks.toml]`, when written.
     toml: Option<RawToml>,
+    /// `[features.code-blocks.dockerfile]`, when written.
+    dockerfile: Option<RawDockerfile>,
     /// `[features.code-blocks.go]`, when written.
     go: Option<RawGo>,
 }
@@ -829,7 +847,7 @@ impl Written {
     /// # Errors
     ///
     /// [`ConfigError::ToolNotSelected`] for the first tool table, Rust, shell, Python,
-    /// TypeScript, JavaScript, JSON, CSS, YAML, TOML, Markdown then Go, whose tool the merged chain
+    /// TypeScript, JavaScript, JSON, CSS, YAML, TOML, Dockerfile, Markdown then Go, whose tool the merged chain
     /// doesn't select.
     pub(super) fn resolve(
         self,
@@ -958,6 +976,7 @@ pub(super) fn merge(
         css,
         yaml,
         toml,
+        dockerfile,
         go,
         ..
     }) = raw
@@ -1019,6 +1038,10 @@ pub(super) fn merge(
                 .languages
                 .toml
                 .behind(toml.as_ref().map(RawToml::selection), file),
+            dockerfile: nearer
+                .languages
+                .dockerfile
+                .behind(dockerfile.as_ref().map(RawDockerfile::selection), file),
             go: nearer
                 .languages
                 .go
@@ -1380,6 +1403,59 @@ mod tests {
                 .choice(Language::Css, Step::Lint)
                 .and_then(known_name),
             Some("biome-lint")
+        );
+    }
+
+    #[test]
+    fn the_dockerfile_and_containerfile_tags_in_both_cases_name_dockerfile_and_docker_names_none() {
+        let cases = [
+            ("dockerfile", Some(Language::Dockerfile)),
+            ("Dockerfile", Some(Language::Dockerfile)),
+            ("containerfile", Some(Language::Dockerfile)),
+            ("Containerfile", Some(Language::Dockerfile)),
+            ("docker", None),
+            ("DOCKERFILE", None),
+        ];
+        for (tag, expected) in cases {
+            assert_eq!(Language::from_tag(tag), expected, "tag `{tag}`");
+        }
+        assert_eq!(Language::Dockerfile.table(), "dockerfile");
+    }
+
+    #[test]
+    fn a_dockerfile_table_selects_hadolint_and_no_formatter() {
+        let dir = tree(&[(
+            "supdoc.config.toml",
+            "[features.code-blocks.dockerfile]\n[features.code-blocks.dockerfile.hadolint]\nlint = \"full\"\n",
+        )]);
+
+        let config = Config::load(&at(&dir, ".")).expect("the fixture config should load");
+        let code_blocks = config.code_blocks().expect("the table is written");
+
+        assert!(code_blocks.checks(Language::Dockerfile));
+        assert!(
+            code_blocks
+                .choice(Language::Dockerfile, Step::Format)
+                .is_none()
+        );
+        assert!(
+            crate::code_blocks::tools::default_for(Language::Dockerfile, Step::Format).is_none()
+        );
+        assert_eq!(
+            crate::code_blocks::tools::default_for(Language::Dockerfile, Step::Lint)
+                .map(|tool| tool.name),
+            Some("hadolint")
+        );
+    }
+
+    #[test]
+    fn a_named_dockerfile_formatter_is_refused_pointing_at_a_custom_command() {
+        let message = refused("dockerfile", "formatter = \"dockerfmt\"");
+
+        assert!(
+            message.contains("`dockerfmt` isn't a known dockerfile formatter")
+                && message.contains("none yet: write a custom `{ command = [...] }`"),
+            "got {message}"
         );
     }
 

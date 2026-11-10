@@ -358,6 +358,10 @@ pub(crate) mod fixed {
     pub(crate) const DOT_YAMLFMT: FixedPath = FixedPath::new(".yamlfmt");
     /// yamllint's private config file name.
     pub(crate) const CONFIG_YAML: FixedPath = FixedPath::new("config.yaml");
+    /// hadolint's private config directory beneath the cache base.
+    pub(crate) const HADOLINT_CONFIG_DIR: FixedPath = FixedPath::new("hadolint-config");
+    /// hadolint's private config file name.
+    pub(crate) const HADOLINT_YAML: FixedPath = FixedPath::new("hadolint.yaml");
     /// The default state base beneath `HOME`.
     pub(crate) const LOCAL_STATE: FixedPath = FixedPath::new(".local/state");
     /// The trust store file.
@@ -406,6 +410,11 @@ pub(crate) mod fixed {
         FixedPath::new("tombi.toml"),
         FixedPath::new(".config/tombi.toml"),
         FixedPath::new("pyproject.toml"),
+    ];
+    /// The config names supdoc looks for hadolint's project config by in a directory.
+    pub(crate) const HADOLINT_CONFIG_FILES: [FixedPath; 2] = [
+        FixedPath::new(".hadolint.yaml"),
+        FixedPath::new(".hadolint.yml"),
     ];
     /// The config names rustfmt looks for in a directory.
     pub(crate) const RUST_CONFIG_FILES: [FixedPath; 2] = [
@@ -1275,6 +1284,8 @@ mod tests {
             fixed::YAMLLINT_CONFIG_DIR,
             fixed::DOT_YAMLFMT,
             fixed::CONFIG_YAML,
+            fixed::HADOLINT_CONFIG_DIR,
+            fixed::HADOLINT_YAML,
             fixed::LOCAL_STATE,
             fixed::TRUSTED_ROOTS,
             fixed::TRUSTED_ROOTS_LOCK,
@@ -1286,11 +1297,12 @@ mod tests {
             fixed::DOT_IGNORE,
             fixed::DOT_GITIGNORE,
         ];
-        let lists: [&[FixedPath]; 17] = [
+        let lists: [&[FixedPath]; 18] = [
             &fixed::BIOME_CONFIG_FILES,
             &fixed::RUMDL_CONFIG_FILES,
             &fixed::RUMDL_TOOL_CONFIG_FILES,
             &fixed::TOMBI_CONFIG_FILES,
+            &fixed::HADOLINT_CONFIG_FILES,
             &fixed::RUST_CONFIG_FILES,
             &fixed::CLIPPY_FILES,
             &fixed::TOOLCHAIN_FILES,

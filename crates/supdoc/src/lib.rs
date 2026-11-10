@@ -252,6 +252,8 @@ pub(crate) mod code_blocks {
 
     /// TypeScript, JavaScript, JSON and CSS's format and lint steps, run by biome.
     mod biome;
+    /// Dockerfile's lint step, run by hadolint.
+    mod hadolint;
     /// Markdown's format and lint steps, run by rumdl.
     mod rumdl;
     /// TOML's format and lint steps, run by tombi.
