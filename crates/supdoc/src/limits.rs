@@ -610,7 +610,6 @@ fn pick<T: Ceiling>(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
 
     use super::*;
 
@@ -655,8 +654,7 @@ mod tests {
 
     #[test]
     fn flag_beats_env_beats_config_beats_default() {
-        let file = AbsolutePath::new(Path::new(std::path::MAIN_SEPARATOR_STR))
-            .expect("the root should be absolute");
+        let file = crate::path::fixture("/");
         let config = ConfigLimits {
             parse_timeout: Some((time("30s").expect("30s"), file.clone())),
             code_block_timeout: Some((time("20s").expect("20s"), file.clone())),
@@ -694,8 +692,7 @@ mod tests {
 
     #[test]
     fn code_block_timeout_takes_flag_then_env_then_config() {
-        let file = AbsolutePath::new(Path::new(std::path::MAIN_SEPARATOR_STR))
-            .expect("the root should be absolute");
+        let file = crate::path::fixture("/");
         let config = ConfigLimits {
             code_block_timeout: Some((time("3s").expect("3s"), file.clone())),
             ..ConfigLimits::default()
@@ -724,8 +721,7 @@ mod tests {
 
     #[test]
     fn code_block_build_timeout_takes_flag_then_env_then_config() {
-        let file = AbsolutePath::new(Path::new(std::path::MAIN_SEPARATOR_STR))
-            .expect("the root should be absolute");
+        let file = crate::path::fixture("/");
         let config = ConfigLimits {
             code_block_build_timeout: Some((time("20s").expect("20s"), file.clone())),
             ..ConfigLimits::default()
@@ -749,8 +745,7 @@ mod tests {
 
     #[test]
     fn max_file_size_takes_flag_then_env_then_config_then_its_default() {
-        let file = AbsolutePath::new(Path::new(std::path::MAIN_SEPARATOR_STR))
-            .expect("the root should be absolute");
+        let file = crate::path::fixture("/");
         let defaults = Limits::resolve(&CommandLineLimits::default(), &ConfigLimits::default());
         assert_eq!(defaults.max_file_size.value, Limits::MAX_FILE_SIZE);
         assert_eq!(defaults.max_file_size.source, Source::Default);
@@ -795,8 +790,7 @@ mod tests {
 
     #[test]
     fn the_key_path_limits_take_flag_then_env_then_config_then_default() {
-        let file = AbsolutePath::new(Path::new(std::path::MAIN_SEPARATOR_STR))
-            .expect("the root should be absolute");
+        let file = crate::path::fixture("/");
         let config = ConfigLimits {
             max_key_segments: Some((CountLimit(Some(5)), file.clone())),
             max_key_path_size: Some((size("1MiB").expect("1MiB"), file.clone())),
@@ -839,8 +833,7 @@ mod tests {
 
     /// A config file to attribute config values to.
     fn config_file() -> AbsolutePath {
-        AbsolutePath::new(Path::new(std::path::MAIN_SEPARATOR_STR))
-            .expect("the root should be absolute")
+        crate::path::fixture("/")
     }
 
     /// A config that sets every key in [`CONFIG_KEYS`] to the value at the same index.

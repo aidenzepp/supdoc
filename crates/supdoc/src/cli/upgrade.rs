@@ -287,6 +287,9 @@ pub(crate) struct UpgradeReport {
     /// The SHA-256 the archive must have, from `SHA256SUMS`; only with `asset`.
     #[serde(skip_serializing_if = "Option::is_none")]
     sha256: Option<String>,
+    /// Files an earlier upgrade left beside the binary that this run could not remove, one
+    /// sentence each; empty when there are none.
+    notes: Vec<String>,
 }
 
 impl Report for UpgradeReport {
@@ -457,6 +460,7 @@ fn run_cargo(
         method: Method::Cargo,
         asset: None,
         sha256: None,
+        notes: Vec::new(),
     };
     output
         .report(&report, true)
@@ -523,10 +527,11 @@ fn run_release_binary(
     let direction = running.direction_to(&target);
     let applied = args.confirm.mode() == WriteMode::Apply;
 
+    let mut notes = Vec::new();
     let (outcome, asset, sha256) = match found {
         Some((asset, digest)) if direction != Direction::Same => {
             if applied {
-                install_release(&target, exe, &asset, &digest, context)?;
+                notes = install_release(&target, exe, &asset, &digest, context, output)?;
                 (UpgradeOutcome::Installed, Some(asset), Some(digest))
             } else {
                 (UpgradeOutcome::Previewed, Some(asset), Some(digest))
@@ -545,6 +550,7 @@ fn run_release_binary(
         method: Method::ReleaseBinary,
         asset,
         sha256,
+        notes,
     };
     output
         .report(&report, true)
@@ -568,20 +574,26 @@ fn run_release_binary(
 /// Fetches the archive at `asset`, checks it against `digest`, and replaces `exe` with its
 /// binary.
 ///
-/// Effect: one fetch of the archive, then the file changes of [`install::replace_exe`].
+/// Returns the notes about files an earlier upgrade left that could not be removed.
+///
+/// Effect: one fetch of the archive, the removals of [`install::remove_leftovers`], the file
+/// changes of [`install::replace_exe`], then the notes written to `output`. When the replace
+/// fails the notes travel in its error instead, so no output mode drops them.
 ///
 /// # Errors
 ///
 /// Returns `cli-upgrade-fetch-failed` when the archive cannot be fetched,
 /// `cli-upgrade-verify-failed` when it fails the checksum or lacks the binary, and
-/// `cli-upgrade-replace-failed` when the binary cannot be put in place.
+/// `cli-upgrade-replace-failed` when the binary cannot be put in place, and `cli-output-failed`
+/// when a note cannot be written.
 fn install_release(
     target: &ReleaseVersion,
     exe: Option<&Path>,
     asset: &str,
     digest: &str,
     context: &Context,
-) -> Result<(), CliError> {
+    output: &mut Output,
+) -> Result<Vec<String>, CliError> {
     let retry = command_line(context, "upgrade", &[target.release()], &["--yes"]);
     let exe = exe.ok_or_else(|| cannot_tell("its own path could not be found"))?;
     let triple = release::running_triple().ok_or_else(no_asset_for_platform)?;
@@ -607,20 +619,42 @@ fn install_release(
             ExitStatus::Failed,
         )
     })?;
-    install::replace_exe(exe, &binary).map_err(|error| {
-        CliError::new(
-            "cli-upgrade-replace-failed",
-            format!(
-                "could not replace {}: {error}",
-                visible(&exe.display().to_string())
-            ),
-            format!(
-                "Make the binary's directory writable for your user and run `{retry}` again; \
-                 the old binary was left in place"
-            ),
-            ExitStatus::Io,
-        )
-    })
+    let notes = install::remove_leftovers(exe);
+    install::replace_exe(exe, &binary)
+        .map_err(|error| replace_failed(exe, &error, &notes, &retry))?;
+    for note in &notes {
+        output
+            .note(note)
+            .map_err(|error| CliError::output_failed("the upgrade report", &error))?;
+    }
+    Ok(notes)
+}
+
+/// The `cli-upgrade-replace-failed` error for `exe`, naming each leftover in `notes` that could
+/// not be removed, so the text and the JSON error both carry them.
+fn replace_failed(
+    exe: &Path,
+    error: &install::ReplaceError,
+    notes: &[String],
+    retry: &str,
+) -> CliError {
+    let mut message = format!(
+        "could not replace {}: {error}",
+        visible(&exe.display().to_string())
+    );
+    for note in notes {
+        message.push_str("; ");
+        message.push_str(note);
+    }
+    CliError::new(
+        "cli-upgrade-replace-failed",
+        message,
+        format!(
+            "Make the binary's directory writable for your user and run `{retry}` again; \
+             the old binary was left in place"
+        ),
+        ExitStatus::Io,
+    )
 }
 
 /// The version to install and, when it differs from the running one, the archive URL and digest
@@ -1208,6 +1242,47 @@ mod tests {
         assert_eq!(code(status(403)), "cli-upgrade-fetch-failed");
         assert_eq!(code(status(500)), "cli-upgrade-fetch-failed");
         assert_eq!(code(transport), "cli-upgrade-fetch-failed");
+    }
+
+    #[test]
+    fn a_replace_failure_names_every_leftover_that_could_not_be_removed() {
+        let error = install::ReplaceError::NoDirectory(PathBuf::from("/dist/supdoc"));
+        let notes = vec![
+            "Could not remove /dist/.supdoc-upgrade-1-2, left by an earlier upgrade: denied"
+                .to_owned(),
+        ];
+
+        let failure = replace_failed(Path::new("/dist/supdoc"), &error, &notes, "supdoc upgrade");
+
+        assert_eq!(failure.code(), "cli-upgrade-replace-failed");
+        assert!(
+            failure.message().contains(".supdoc-upgrade-1-2"),
+            "the leftover should be named: {}",
+            failure.message()
+        );
+    }
+
+    #[test]
+    fn the_report_serializes_its_notes() {
+        let report = UpgradeReport {
+            current: "1.0.0".to_owned(),
+            target: "2.0.0".to_owned(),
+            direction: Direction::Upgrade,
+            command: Vec::new(),
+            ran: true,
+            outcome: UpgradeOutcome::Installed,
+            method: Method::ReleaseBinary,
+            asset: None,
+            sha256: None,
+            notes: vec!["Could not remove x".to_owned()],
+        };
+
+        let json = serde_json::to_value(&report).expect("the report should serialize");
+
+        assert_eq!(
+            json.get("notes"),
+            Some(&serde_json::json!(["Could not remove x"]))
+        );
     }
 
     fn version(text: &str) -> ReleaseVersion {

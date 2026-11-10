@@ -195,7 +195,7 @@
           "type": "boolean"
         },
         "changes": {
-          "description": "One per destination: the shared agents copy, then Claude Code's.",
+          "description": "One per selected destination: the shared agents copy, then Claude Code's.",
           "items": {
             "$ref": "#/$defs/SkillChange"
           },

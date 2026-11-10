@@ -272,6 +272,22 @@ fn abort(child: &mut std::process::Child) {
     let _reaped = child.wait();
 }
 
+/// Runs `spawn`, trying again while it fails with a busy executable, and pausing between tries.
+///
+/// Fetch takes no `Spawning` guard, so nothing is held across `pause`.
+///
+/// # Errors
+///
+/// The error of the last `spawn`.
+///
+/// Effect: calls `pause` between tries.
+fn spawn_curl<T>(
+    spawn: impl FnMut() -> std::io::Result<T>,
+    pause: impl FnMut(),
+) -> std::io::Result<T> {
+    crate::process::retry_busy(|| (), spawn, pause).map(|((), spawned)| spawned)
+}
+
 /// Runs curl once for `url` and reads at most `cap` body bytes.
 ///
 /// Stdout and stderr are drained at the same time, so a curl that writes a lot to stderr cannot
@@ -280,7 +296,7 @@ fn abort(child: &mut std::process::Child) {
 /// # Errors
 ///
 /// Returns [`FetchError::TooLarge`] when the body passes `cap`, and [`FetchError::Transport`]
-/// when curl cannot start, a read fails, curl exits with an error, or it is too old to print the
+/// when curl cannot start (a busy executable is tried again first), a read fails, curl exits with an error, or it is too old to print the
 /// status line.
 fn run_curl(curl: &Path, url: &str, cap: u64) -> Result<Hop, FetchError> {
     let transport = |message: String| FetchError::Transport {
@@ -296,9 +312,11 @@ fn run_curl(curl: &Path, url: &str, cap: u64) -> Result<Hop, FetchError> {
         .stderr(Stdio::piped());
     #[cfg(windows)]
     let _root = command.env("SystemRoot", crate::process::recorded_system_root());
-    let mut child = command
-        .spawn()
-        .map_err(|error| transport(error.to_string()))?;
+    let mut child = spawn_curl(
+        || command.spawn(),
+        || std::thread::sleep(crate::process::BUSY_DELAY),
+    )
+    .map_err(|error| transport(error.to_string()))?;
     let stderr_reader = child.stderr.take().map(|mut pipe| {
         std::thread::spawn(move || {
             let mut kept: Vec<u8> = Vec::new();
@@ -722,6 +740,39 @@ mod tests {
         assert_eq!(seen.len(), 6, "the seventh request must not run: {seen:?}");
     }
 
+    #[test]
+    fn a_busy_curl_spawn_is_retried_but_no_other_error_is() {
+        use std::io::{Error, ErrorKind};
+
+        let mut tries = 0;
+        let spawned = spawn_curl(
+            || {
+                tries += 1;
+                if tries <= 2 {
+                    Err(Error::from(ErrorKind::ExecutableFileBusy))
+                } else {
+                    Ok(tries)
+                }
+            },
+            || (),
+        );
+        assert_eq!(spawned.expect("the third try succeeds"), 3);
+
+        let mut tries = 0;
+        let refused: std::io::Result<()> = spawn_curl(
+            || {
+                tries += 1;
+                Err(Error::from(ErrorKind::NotFound))
+            },
+            || (),
+        );
+        assert_eq!(
+            refused.expect_err("not found is not retried").kind(),
+            ErrorKind::NotFound
+        );
+        assert_eq!(tries, 1, "a non-busy error is tried once");
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_body_past_the_cap_is_refused() {
@@ -731,10 +782,11 @@ mod tests {
             &[("https://github.com/big", 200, "", "123456789")],
             "",
         );
-        assert!(matches!(
-            fetch_with(&curl, "https://github.com/big", 4),
-            Err(FetchError::TooLarge { .. })
-        ));
+        let refused = fetch_with(&curl, "https://github.com/big", 4);
+        assert!(
+            matches!(refused, Err(FetchError::TooLarge { .. })),
+            "{refused:?}"
+        );
         assert_eq!(
             fetch_with(&curl, "https://github.com/big", 9).expect("a body at the cap is served"),
             b"123456789"
