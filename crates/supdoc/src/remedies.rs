@@ -32,10 +32,36 @@ pub(crate) fn quote(text: &str, windows: bool) -> String {
     if plain {
         text.to_owned()
     } else if windows {
-        format!("'{}'", text.replace('\'', "''"))
+        powershell_quote(text)
     } else {
         format!("'{}'", text.replace('\'', "'\\''"))
     }
+}
+
+/// The characters PowerShell reads as a single quote: ASCII `'` and the four typographic quotes
+/// U+2018, U+2019, U+201A and U+201B.
+const POWERSHELL_QUOTES: [char; 5] = ['\'', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'];
+
+/// `text` as one PowerShell word: bare when plain, else in ASCII single quotes with every
+/// character PowerShell reads as a single quote doubled, so none of them ends the string early.
+pub(crate) fn powershell_quote(text: &str) -> String {
+    let plain = !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+=:,@%".contains(c));
+    if plain {
+        return text.to_owned();
+    }
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('\'');
+    for c in text.chars() {
+        quoted.push(c);
+        if POWERSHELL_QUOTES.contains(&c) {
+            quoted.push(c);
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 /// The command that gives the current user `access` to `target` (already quoted): `chmod` on Unix,
@@ -129,6 +155,25 @@ mod tests {
                 "{access:?} on Windows"
             );
         }
+    }
+
+    #[test]
+    fn powershell_quote_doubles_every_single_quote_character() {
+        for quote_char in ['\'', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'] {
+            let text = format!("a{quote_char}b");
+            assert_eq!(
+                powershell_quote(&text),
+                format!("'a{quote_char}{quote_char}b'"),
+                "U+{:04X} must be doubled",
+                u32::from(quote_char)
+            );
+        }
+        assert_eq!(
+            powershell_quote("a'\u{2018}\u{2019}\u{201A}\u{201B}b"),
+            "'a''\u{2018}\u{2018}\u{2019}\u{2019}\u{201A}\u{201A}\u{201B}\u{201B}b'"
+        );
+        assert_eq!(powershell_quote("plain/path.md"), "plain/path.md");
+        assert_eq!(quote("it\u{2019}s", true), "'it\u{2019}\u{2019}s'");
     }
 
     #[test]
