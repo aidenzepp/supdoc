@@ -16,7 +16,7 @@
 
 use std::ffi::OsStr;
 use std::io::{self, IsTerminal, Write};
-use std::path::{MAIN_SEPARATOR_STR, Path};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Mutex, PoisonError, RwLock, RwLockReadGuard};
@@ -321,13 +321,7 @@ fn parse_run_and_report() -> u8 {
     };
     let Cli { global, command } = cli;
 
-    let (cwd, failure) = match current_dir() {
-        Ok(cwd) => (cwd, None),
-        Err(error) => match AbsolutePath::new(Path::new(MAIN_SEPARATOR_STR)) {
-            Some(root) => (root, Some(error)),
-            None => return ExitStatus::Io.code(),
-        },
-    };
+    let (cwd, failure) = cwd_or_naming_root(current_dir());
     let mut output = Output::stdio(settings(&global, cwd.clone()), choice(global.color));
     let result = if let Some(error) = failure {
         Err(error)
@@ -352,6 +346,17 @@ fn parse_run_and_report() -> u8 {
     match result {
         Ok(outcome) => outcome.exit_code(),
         Err(error) => report(&mut output, &error),
+    }
+}
+
+/// Splits the working-directory lookup into the root the run uses and the error to report.
+///
+/// When the lookup failed the root is [`AbsolutePath::name_root`], which only renders the error:
+/// the failure branch runs no command, so nothing is read or written beneath it.
+fn cwd_or_naming_root(lookup: Result<AbsolutePath, CliError>) -> (AbsolutePath, Option<CliError>) {
+    match lookup {
+        Ok(cwd) => (cwd, None),
+        Err(error) => (AbsolutePath::name_root(), Some(error)),
     }
 }
 
@@ -622,8 +627,7 @@ mod tests {
 
     /// Reports `error` in `format` and returns what reached stderr.
     fn stderr_of(format: OutputFormat, error: &CliError) -> String {
-        let cwd = AbsolutePath::new(Path::new(MAIN_SEPARATOR_STR))
-            .expect("the filesystem root should be absolute");
+        let cwd = AbsolutePath::name_root();
         let settings = OutputSettings {
             format,
             verbosity: Verbosity::Normal,
@@ -670,6 +674,30 @@ mod tests {
             error.get("location"),
             Some(&serde_json::json!({"file": "supdoc.config.toml", "line": 2, "column": 11})),
             "the JSON error should carry its location: {text}"
+        );
+    }
+
+    #[test]
+    fn a_failed_cwd_lookup_keeps_the_error_and_names_an_absolute_root() {
+        let (cwd, failure) = cwd_or_naming_root(Err(syntax_error()));
+
+        assert_eq!(
+            (cwd, failure.map(|error| error.code())),
+            (AbsolutePath::name_root(), Some("config-parse")),
+            "a failed lookup should keep its error and fall back to the naming root"
+        );
+    }
+
+    #[test]
+    fn a_found_cwd_is_used_without_a_failure() {
+        let found = AbsolutePath::name_root();
+
+        let (cwd, failure) = cwd_or_naming_root(Ok(found.clone()));
+
+        assert_eq!(cwd, found, "a found directory should be used as is");
+        assert!(
+            failure.is_none(),
+            "a found directory should report no error"
         );
     }
 
