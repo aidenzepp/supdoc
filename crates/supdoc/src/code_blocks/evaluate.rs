@@ -14,7 +14,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::config::Config;
-use crate::config::code_blocks::{CodeBlocks, Dialect, Edition, Language};
+use crate::config::code_blocks::{CodeBlocks, Dialect, Edition, Language, SqlDialect};
 use crate::finding::{Finding, Location, Severity};
 use crate::hash::Hash;
 use crate::link::SourcePath;
@@ -47,6 +47,7 @@ use super::rumdl;
 use super::runner::{self, Call, Ran};
 use super::rust::{self, Scan};
 use super::source::{self, SourceText, Unresolved};
+use super::sqruff;
 use super::states::{
     self, Excerpt, NotChecked, StepState, Steps, block_fragment, state_of, tag_of,
     unsupported_reason,
@@ -119,6 +120,8 @@ pub(crate) struct BlockRecord {
     linter: Option<Tool>,
     /// The shell dialect shfmt parses it as and shellcheck checks it as.
     dialect: Dialect,
+    /// The SQL dialect sqruff parses it as: the one its tag names, else the config's `dialect`.
+    sql_dialect: SqlDialect,
     /// The edition its `edition20xx` attribute or the config's `edition` names, if either does.
     edition: Option<Edition>,
     /// The config and virtual path biome is given for it. `None` until the tools are looked up, and for
@@ -254,6 +257,10 @@ pub(crate) fn evaluate(
             tool,
             linter,
             dialect: code_blocks.dialect(),
+            sql_dialect: language
+                .as_deref()
+                .and_then(SqlDialect::from_tag)
+                .unwrap_or_else(|| code_blocks.sql_dialect()),
             edition: block_edition(block).or_else(|| code_blocks.edition()),
             given: None,
             tombi: None,
@@ -325,6 +332,7 @@ impl Evaluation {
         let mut configs = ToolConfigs::default();
         configs.tombi.timeout = timeout;
         configs.hadolint.timeout = timeout;
+        configs.sqruff.timeout = timeout;
         configs.yamllint.timeout = timeout;
         configs.prettier.timeout = timeout;
         let mut toolchain_warned = false;
@@ -1312,6 +1320,8 @@ struct ToolConfigs {
     tombi: TombiConfigs,
     /// hadolint's.
     hadolint: HadolintConfigs,
+    /// sqruff's.
+    sqruff: SqruffConfigs,
     /// yamlfmt's.
     yamlfmt: YamlfmtConfigs,
     /// yamllint's.
@@ -1323,6 +1333,7 @@ struct ToolConfigs {
 impl ToolConfigs {
     /// Gives `record` the config its tools get, as [`BiomeConfigs::give`],
     /// [`RumdlConfigs::give`], [`TombiConfigs::give`], [`HadolintConfigs::give`],
+    /// [`SqruffConfigs::give`],
     /// [`YamlfmtConfigs::give`] and
     /// [`YamllintConfigs::give`] do, whichever of its formatter and linter runs the tool, so a
     /// custom formatter beside a cartridge linter leaves the linter its config. Whether the block
@@ -1340,6 +1351,7 @@ impl ToolConfigs {
                 .is_none_or(|tool| self.rumdl.give(record, tool, place, slots).is_ok())
             && running("tombi").is_none_or(|tool| self.tombi.give(record, tool, place, slots))
             && running("hadolint").is_none_or(|tool| self.hadolint.give(record, tool, place, slots))
+            && running("sqruff").is_none_or(|tool| self.sqruff.give(record, tool, place, slots))
             && self.yamlfmt.give(record, place, slots).is_ok()
             && self.yamllint.give(record, place, slots)
             && self.prettier.verified(record, place, slots)
@@ -2066,6 +2078,231 @@ fn hadolint_refusal(
 /// Why hadolint didn't run when supdoc had no private directory to keep its config in.
 fn hadolint_no_private_dir(windows: bool) -> String {
     no_private_dir("hadolint", "for its config", windows)
+}
+
+/// The sqruff config found for each doc directory, the refusals already warned about, and the
+/// sqruff version once read.
+#[derive(Debug, Default)]
+struct SqruffConfigs {
+    /// Each doc directory's result, in the order they were asked for.
+    found: Vec<(PathBuf, Result<sqruff::Project, sqruff::Refusal>)>,
+    /// The refusals a warning has been added for.
+    warned: Vec<sqruff::Refusal>,
+    /// How long `sqruff --version` may run: the run's tool timeout.
+    timeout: Option<Duration>,
+    /// The sqruff version once read (see [`sqruff::version_of`]), and whether its warning has
+    /// been given. `None` until a block needs it.
+    version: Option<(Result<String, String>, bool)>,
+}
+
+impl SqruffConfigs {
+    /// Gives `record`, an SQL block, the `--config` and `--dialect` flags sqruff gets for it: its
+    /// doc's private config, found once per directory (see [`sqruff::project_args`]), and the
+    /// block's own dialect. Then checks sqruff's version (see [`Self::verified`]). A refused
+    /// config takes only the format step off, as an unverified sqruff does, with its one warning
+    /// per refusal added to `slots`: a block with another lint step goes on to it, and one
+    /// without is settled as not checked. A block holding an inline sqruff directive (see
+    /// [`sqruff::directive_line`]) has its sqruff format step taken off first, with a warning of
+    /// its own naming the line, so it is never given to sqruff. Whether the block goes on to its
+    /// tools.
+    ///
+    /// Effect: reads the config and may create supdoc's private directory and file for it.
+    fn give(
+        &mut self,
+        record: &mut BlockRecord,
+        tool: &Tool,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> bool {
+        if !tool.runs("sqruff") {
+            return true;
+        }
+        if record
+            .tool
+            .as_ref()
+            .is_some_and(|format| format.runs("sqruff"))
+            && let Some(at) = sqruff_directive_at(record)
+        {
+            slots.push(Slot::Found(sqruff_directive(&at)));
+            return take_format_off(record, SQRUFF_DIRECTIVE);
+        }
+        let doc = doc_beneath(root, &record.at.file);
+        let dir = doc.parent().unwrap_or(root).to_path_buf();
+        let found = if let Some((_, found)) = self.found.iter().find(|(known, _)| *known == dir) {
+            found.clone()
+        } else {
+            let found = sqruff::project_args(env, root, &doc);
+            self.found.push((dir, found.clone()));
+            found
+        };
+        match found {
+            Ok(project) => {
+                record.given = Some(biome::Given {
+                    mirror: None,
+                    flags: project.flags(record.sql_dialect),
+                    config: None,
+                    names: None,
+                });
+                self.verified(record, (env, root), slots)
+            }
+            Err(refusal) => {
+                let (reason, warning) = sqruff_refusal(&refusal, &record.at, ON_WINDOWS);
+                if !self.warned.contains(&refusal) {
+                    self.warned.push(refusal);
+                    slots.push(Slot::Found(warning));
+                }
+                if lints_without_sqruff(record) {
+                    return take_format_off(record, SQRUFF_REFUSED);
+                }
+                record.state = BlockState::NotChecked(NotChecked::ToolConfig);
+                record.reason = Some(reason);
+                false
+            }
+        }
+    }
+
+    /// Whether `record` goes on to its tools once the sqruff on `PATH` has been checked against
+    /// the versions supdoc is verified against (see [`sqruff::VERIFIED`]), read once per run.
+    /// When it isn't one, or can't be read, `record`'s format step doesn't run, with
+    /// [`SQRUFF_UNVERIFIED`] as its reason, and the run's one warning goes to `slots`; a lint
+    /// step by another tool still runs. A sqruff that isn't on `PATH`, or is inside the checkout,
+    /// is left to the usual lookup.
+    ///
+    /// Effect: runs `sqruff --version` the first time.
+    fn verified(
+        &mut self,
+        record: &mut BlockRecord,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> bool {
+        let Found::OnPath(program) = find("sqruff", env, root) else {
+            return true;
+        };
+        let timeout = self.timeout;
+        let (version, warned) = self
+            .version
+            .get_or_insert_with(|| (sqruff::version_of(&program, env, root, timeout), false));
+        let Err(shown) = version else {
+            return true;
+        };
+        if !*warned {
+            *warned = true;
+            slots.push(Slot::Found(
+                Finding::new(
+                    NOT_CHECKED,
+                    Severity::Warning,
+                    format!(
+                        "sqruff {shown} isn't a version supdoc's checks are verified against \
+                         ({}); its SQL blocks' format steps didn't run",
+                        sqruff::VERIFIED.join(", ")
+                    ),
+                )
+                .with_help(format!(
+                    "install a verified sqruff: {}",
+                    tools::SQRUFF_INSTALL
+                ))
+                .with_location(record.at.clone()),
+            ));
+        }
+        take_format_off(record, SQRUFF_UNVERIFIED)
+    }
+}
+
+/// Takes `record`'s format step off with `reason`. Whether the block goes on to its tools: only
+/// when it still has a lint step.
+fn take_format_off(record: &mut BlockRecord, reason: &'static str) -> bool {
+    if record.tool.take().is_some() {
+        record.steps.format = StepState::Unrunnable { reason };
+    }
+    record.linter.is_some()
+}
+
+/// Whether `record` has a lint step that sqruff doesn't run, which goes on when sqruff's format
+/// step is taken off.
+fn lints_without_sqruff(record: &BlockRecord) -> bool {
+    record
+        .linter
+        .as_ref()
+        .is_some_and(|tool| !tool.runs("sqruff"))
+}
+
+/// Why an SQL block's format step didn't run when supdoc couldn't give sqruff the project's
+/// config.
+const SQRUFF_REFUSED: &str = "supdoc couldn't give sqruff the project's config";
+
+/// Why an SQL block's format step didn't run when the sqruff on `PATH` isn't a verified version.
+const SQRUFF_UNVERIFIED: &str = "the sqruff on `PATH` isn't a version supdoc is verified against";
+
+/// Why an SQL block's format step didn't run when it holds an inline sqruff directive (see
+/// [`sqruff::directive_line`]).
+const SQRUFF_DIRECTIVE: &str = "the block holds an inline sqruff directive, which would override \
+                                the config supdoc gives sqruff";
+
+/// Where in its doc the first line of `record`'s block that may hold an inline sqruff directive
+/// is (see [`sqruff::directive_line`]): that body line, or the block's fence when the line can't
+/// be placed. `None` when no line may hold one, or the block isn't pending.
+fn sqruff_directive_at(record: &BlockRecord) -> Option<Location> {
+    let pending = record.pending.as_ref()?;
+    let line = sqruff::directive_line(&pending.input)?;
+    let placed = pending.block.body.get(line).and_then(|body| {
+        Location::in_text(
+            record.at.file.clone(),
+            pending.doc.text(),
+            body.content.clone(),
+        )
+    });
+    Some(placed.unwrap_or_else(|| record.at.clone()))
+}
+
+/// The `code-block-not-checked` warning, at `at`, for an SQL block that wasn't given to sqruff
+/// because the line at `at` may hold an inline sqruff directive.
+fn sqruff_directive(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        format!(
+            "line {} holds an inline sqruff directive (a `-- sqruff:` or `-- sqlfluff:` comment, \
+             in any spelling), which would override the config supdoc gives sqruff, so the SQL \
+             block wasn't given to sqruff and its format step didn't run",
+            at.line
+        ),
+    )
+    .with_help(
+        "drop the comment, or mark the block `format(off: <reason>)` to leave it unformatted",
+    )
+    .with_location(at.clone())
+}
+
+/// The state reason and the `code-block-not-checked` warning, at `at`, for a block sqruff isn't
+/// given because of `refusal`.
+fn sqruff_refusal(refusal: &sqruff::Refusal, at: &Location, windows: bool) -> (String, Finding) {
+    let (reason, message, help) = match refusal {
+        sqruff::Refusal::Config { file, why } => (
+            format!("sqruff config `{file}` {why}"),
+            format!("the project's `{file}` {why}, so its SQL blocks aren't formatted"),
+            format!(
+                "fix `{file}` as it says, keeping it a plain INI file of at most 256 KiB inside \
+                 the project, or mark the blocks `ignore(<why>)`"
+            ),
+        ),
+        sqruff::Refusal::NoPrivateDir => (
+            sqruff_no_private_dir(windows),
+            format!(
+                "{}, so its blocks aren't checked",
+                sqruff_no_private_dir(windows)
+            ),
+            set_cache_help(windows),
+        ),
+    };
+    let finding = Finding::new(NOT_CHECKED, Severity::Warning, message)
+        .with_help(help)
+        .with_location(at.clone());
+    (reason, finding)
+}
+
+/// Why sqruff didn't run when supdoc had no private directory to keep its config in.
+fn sqruff_no_private_dir(windows: bool) -> String {
+    no_private_dir("sqruff", "for its config", windows)
 }
 
 /// The yamlfmt config flags found for each doc directory, and the refusals already warned about.
@@ -4947,7 +5184,7 @@ mod tests {
         CARTRIDGES, Found, Held, Invocation, Tier, Tool, ToolCartridge, ToolEnv, find,
     };
     use crate::code_blocks::{biome, rumdl, tombi, yaml};
-    use crate::config::code_blocks::{Dialect, Edition};
+    use crate::config::code_blocks::{Dialect, Edition, SqlDialect};
     use crate::finding::Location;
     use crate::path::AbsolutePath;
     use crate::read::cartridge::SourceFile;
@@ -5178,6 +5415,7 @@ mod tests {
                 tool: None,
                 linter: Some(Tool::Cartridge(clippy())),
                 dialect: Dialect::default(),
+                sql_dialect: SqlDialect::default(),
                 edition: None,
                 given: None,
                 tombi: None,

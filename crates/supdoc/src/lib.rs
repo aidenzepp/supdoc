@@ -256,6 +256,8 @@ pub(crate) mod code_blocks {
     mod hadolint;
     /// Markdown's format and lint steps, run by rumdl.
     mod rumdl;
+    /// SQL's format step, run by sqruff.
+    mod sqruff;
     /// TOML's format and lint steps, run by tombi.
     mod tombi;
     /// YAML's format step, run by yamlfmt.
