@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use ignore::gitignore::Gitignore;
 
 use crate::limits::SizeLimit;
-use crate::path::{Pointer, is_git_dir};
+use crate::path::{Pointer, beneath, fixed, is_git_dir};
 use crate::read::source::{open_without_blocking, read_up_to};
 use crate::scan::ignore::{ReadFailure, rules_in};
 
@@ -49,7 +49,7 @@ impl ExcludeFile {
 ///
 /// Effect: reads file metadata in `dir`, a `.git` file and its `commondir`, and the exclude file.
 pub(super) fn git_exclude(dir: &Path, limit: SizeLimit) -> ExcludeFile {
-    let dot_git = dir.join(".git");
+    let dot_git = beneath(dir, &fixed::DOT_GIT);
     let Ok(metadata) = fs::metadata(&dot_git) else {
         return ExcludeFile::none();
     };
@@ -69,9 +69,9 @@ pub(super) fn git_exclude(dir: &Path, limit: SizeLimit) -> ExcludeFile {
     } else {
         return ExcludeFile::none();
     };
-    let exclude = git_dir.join("info").join("exclude");
+    let exclude = beneath(&git_dir, &fixed::INFO_EXCLUDE);
     let quotable = is_real_dir(&dot_git)
-        && is_real_dir(&dot_git.join("info"))
+        && is_real_dir(&beneath(&dot_git, &fixed::INFO))
         && fs::symlink_metadata(&exclude).is_ok_and(|metadata| metadata.is_file());
     let (rules, failure) = rules_in(dir, &exclude, limit);
     ExcludeFile {
@@ -121,7 +121,7 @@ fn shared_dir(dir: &Path, dot_git: &Path) -> Shared {
     else {
         return Shared::Absent;
     };
-    let commondir = git_dir.join("commondir");
+    let commondir = beneath(&git_dir, &fixed::COMMONDIR);
     if fs::symlink_metadata(&commondir).is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
     {
         return Shared::Dir(git_dir);
