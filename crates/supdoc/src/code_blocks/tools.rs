@@ -26,7 +26,9 @@ use super::runner::{Cwd, Failure, Ran};
 use crate::config::confine::Boundary;
 use crate::path::{self, FixedPath, NativeName, Suffix, fixed};
 
-use super::{biome, eslint, go, prettier, pylint, python, rumdl, rust, shell, tombi, yaml};
+use super::{
+    biome, eslint, go, hadolint, prettier, pylint, python, rumdl, rust, shell, tombi, yaml,
+};
 
 /// The variables a tool gets from supdoc's own environment, and no others. Windows adds the
 /// names a process needs to start (`SystemRoot`, `SystemDrive`, `PATHEXT`, `TEMP`, `TMP`,
@@ -664,6 +666,11 @@ pub(crate) fn searched(bins: &[FixedPath]) -> String {
 /// [`tombi::VERIFIED`]).
 pub(crate) const TOMBI_INSTALL: &str = "pipx install 'tombi==1.10.*'";
 
+/// How to install a hadolint supdoc's checks are verified against (see [`hadolint::VERIFIED`]):
+/// hadolint ships a binary per platform, and no package manager supdoc can name pins its version.
+pub(crate) const HADOLINT_INSTALL: &str = "download hadolint 2.15.1 from https://github.com/hadolint/hadolint/releases/tag/v2.15.1 \
+     and put it on PATH";
+
 /// The values every cartridge's mode accepts today.
 const FULL_OR_OFF: &[&str] = &["full", "off"];
 
@@ -914,7 +921,7 @@ fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'sta
 }
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 31] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 32] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -1213,6 +1220,22 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 31] = [
         positions: own_positions,
         argv: tombi_lint_args,
         reader: Reader::Lint(tombi::lint_verdict),
+    },
+    ToolCartridge {
+        name: "hadolint",
+        language: Language::Dockerfile,
+        binary: "hadolint",
+        loads: Loads::Static,
+        install: HADOLINT_INSTALL,
+        // hadolint reads only supdoc's private copy, named by its hash in the args.
+        config_files: &[],
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        holds: every_tag,
+        vars: &[],
+        positions: own_positions,
+        argv: hadolint_args,
+        reader: Reader::Lint(hadolint::lint_verdict),
     },
     ToolCartridge {
         name: "yamlfmt",
@@ -1938,6 +1961,22 @@ fn tombi_lint_args(invocation: &Invocation<'_>) -> Vec<OsString> {
     ]
 }
 
+/// `hadolint`'s arguments: JSON on stdout with no colour, every finding's level counted as
+/// failing, the private config the project contributes (`--config <file>`, see
+/// [`hadolint::project_args`]), then `-` for the block on stdin. supdoc reads the JSON, never the
+/// exit status (see [`hadolint::lint_verdict`]).
+fn hadolint_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec![
+        OsString::from("--no-color"),
+        OsString::from("-f"),
+        OsString::from("json"),
+        OsString::from("--failure-threshold=style"),
+    ];
+    args.extend(invocation.project.iter().cloned());
+    args.push(OsString::from("-"));
+    args
+}
+
 /// The lints clippy leaves off for a block, which a snippet breaks for lack of context, as
 /// `-A` flags after the project's own so they win.
 const CLIPPY_RELAXED: [&str; 4] = [
@@ -2433,6 +2472,7 @@ mod tests {
                 "rumdl Markdown Lint rumdl Static",
                 "tombi-format Toml Format tombi Static",
                 "tombi-lint Toml Lint tombi Static",
+                "hadolint Dockerfile Lint hadolint Static",
                 "yamlfmt Yaml Format yamlfmt Static",
                 "yamllint Yaml Lint yamllint Static",
                 "gofmt Go Format gofmt Static",
@@ -2446,6 +2486,24 @@ mod tests {
                 "eslint TypeScript Lint eslint Project",
                 "eslint JavaScript Lint eslint Project",
             ]
+        );
+    }
+
+    #[test]
+    fn hadolint_reads_stdin_as_json_counting_every_level_with_the_private_config_before_the_dash() {
+        let config = ["--config", "/c/hadolint.yaml"].map(OsString::from);
+        assert_eq!(
+            args_of("hadolint", 1, &config),
+            [
+                "--no-color",
+                "-f",
+                "json",
+                "--failure-threshold=style",
+                "--config",
+                "/c/hadolint.yaml",
+                "-",
+            ]
+            .map(OsString::from)
         );
     }
 
