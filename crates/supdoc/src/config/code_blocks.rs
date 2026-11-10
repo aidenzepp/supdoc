@@ -1718,6 +1718,28 @@ mod tests {
     }
 
     #[test]
+    fn markdownlint_cli2_is_refused_naming_rumdl_and_the_custom_command() {
+        let message = refused("markdown", "linter = \"markdownlint-cli2\"");
+
+        assert!(
+            message.contains("stdin")
+                && message.contains("`linter = \"rumdl\"`")
+                && message.contains("linter = { command = ["),
+            "got {message}"
+        );
+    }
+
+    #[test]
+    fn another_unknown_markdown_linter_keeps_the_known_tools_message() {
+        let message = refused("markdown", "linter = \"mdl\"");
+
+        assert!(
+            message.contains("isn't a known markdown linter") && message.contains("`rumdl`"),
+            "got {message}"
+        );
+    }
+
+    #[test]
     fn a_linter_from_another_language_is_refused() {
         let message = refused("shell", "linter = \"clippy\"");
 
