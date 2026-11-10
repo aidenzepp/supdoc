@@ -51,6 +51,7 @@ use super::states::{
     self, Excerpt, NotChecked, StepState, Steps, block_fragment, state_of, tag_of,
     unsupported_reason,
 };
+use super::superhtml;
 use super::tombi;
 use super::toolchain::{self, Refusal, Toolchain};
 use super::tools::{
@@ -327,6 +328,7 @@ impl Evaluation {
         configs.hadolint.timeout = timeout;
         configs.yamllint.timeout = timeout;
         configs.prettier.timeout = timeout;
+        configs.superhtml.timeout = timeout;
         let mut toolchain_warned = false;
         let mut slots: Vec<Slot> = Vec::new();
         let mut jobs: Vec<Job> = Vec::new();
@@ -585,8 +587,8 @@ fn run_jobs(
         let record = records.get(job.record)?;
         let format = job.format.as_ref().and_then(|run| match &run.tool {
             Tool::Custom(custom) => run_custom_formatter(custom, &run.program, record, session),
-            Tool::Cartridge(tool) if format_switched_off(tool, record) => {
-                Some(Err(PRETTIER_SWITCHED_OFF.into()))
+            Tool::Cartridge(tool) if let Some(reason) = format_not_given(tool, record) => {
+                Some(Err(reason.into()))
             }
             Tool::Cartridge(tool) => {
                 let rust = rust.filter(|_| run.tool.is("rustfmt"));
@@ -892,6 +894,19 @@ fn prettier_switched_off(at: &Location) -> Finding {
     .with_location(at.clone())
 }
 
+/// The run's one `code-block-not-checked` warning, at `at`, the first HTML block superhtml isn't
+/// given because it holds only whitespace (see [`superhtml::not_given`]).
+fn superhtml_blank(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "this HTML block holds only whitespace, for which superhtml prints nothing, so its format \
+         step didn't run",
+    )
+    .with_help("write the HTML the block stands for, or mark the block `format(off: <reason>)`")
+    .with_location(at.clone())
+}
+
 /// The run's one `code-block-not-checked` warning, at `at`, the first Go block whose `go vet`
 /// step didn't run because it imports a package outside the standard library.
 fn vet_offline(at: &Location) -> Finding {
@@ -1085,6 +1100,7 @@ impl NotRunWarnings {
             BIOME_FORMATTER_OFF => biome_formatter_off(at),
             PYLINT_SWITCHED_OFF => pylint_switched_off(at),
             PRETTIER_SWITCHED_OFF => prettier_switched_off(at),
+            superhtml::BLANK => superhtml_blank(at),
             ESLINT_SWITCHED_OFF => eslint_switched_off(at),
             ESLINT_IGNORED => eslint_ignored(at),
             YAMLLINT_REJECTED => yamllint_rejected(at, said),
@@ -1318,6 +1334,8 @@ struct ToolConfigs {
     yamllint: YamllintConfigs,
     /// prettier's version.
     prettier: PrettierVersion,
+    /// superhtml's version.
+    superhtml: SuperhtmlVersion,
 }
 
 impl ToolConfigs {
@@ -1343,8 +1361,79 @@ impl ToolConfigs {
             && self.yamlfmt.give(record, place, slots).is_ok()
             && self.yamllint.give(record, place, slots)
             && self.prettier.verified(record, place, slots)
+            && self.superhtml.verified(record, place, slots)
     }
 }
+
+/// The version of the superhtml a run's blocks use, read once.
+#[derive(Debug, Default)]
+struct SuperhtmlVersion {
+    /// How long `superhtml version` may run: the run's tool timeout.
+    timeout: Option<Duration>,
+    /// The version once read (see [`superhtml::version_of`]), and whether its warning has been
+    /// given. `None` until a block needs it.
+    version: Option<(Result<String, String>, bool)>,
+}
+
+impl SuperhtmlVersion {
+    /// Whether `record` goes on to its tools once the superhtml on `PATH` its format step would
+    /// run has been checked against the versions supdoc is verified against (see
+    /// [`superhtml::VERIFIED`]), read once per run. When it isn't one, or can't be read, only the
+    /// format step doesn't run, with [`SUPERHTML_UNVERIFIED`] as its reason, and the run's one
+    /// warning goes to `slots`: a lint step still runs. A block whose formatter isn't superhtml,
+    /// or whose superhtml isn't on `PATH` or is inside the checkout, is left to the usual lookup.
+    ///
+    /// Effect: runs `superhtml version` the first time.
+    fn verified(
+        &mut self,
+        record: &mut BlockRecord,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> bool {
+        if !record.tool.as_ref().is_some_and(|tool| tool.is(SUPERHTML)) {
+            return true;
+        }
+        let Found::OnPath(program) = find(SUPERHTML, env, root) else {
+            return true;
+        };
+        let timeout = self.timeout;
+        let (version, warned) = self
+            .version
+            .get_or_insert_with(|| (superhtml::version_of(&program, env, root, timeout), false));
+        let Err(shown) = version else {
+            return true;
+        };
+        if !*warned {
+            *warned = true;
+            slots.push(Slot::Found(
+                Finding::new(
+                    NOT_CHECKED,
+                    Severity::Warning,
+                    format!(
+                        "superhtml {shown} isn't a version supdoc's checks are verified against \
+                         ({}); its HTML blocks' format steps didn't run",
+                        superhtml::VERIFIED.join(", ")
+                    ),
+                )
+                .with_help(format!(
+                    "install a verified superhtml: {}",
+                    tools::SUPERHTML_INSTALL
+                ))
+                .with_location(record.at.clone()),
+            ));
+        }
+        record.tool = None;
+        record.steps.format = StepState::Unrunnable {
+            reason: SUPERHTML_UNVERIFIED,
+        };
+        record.linter.is_some()
+    }
+}
+
+/// Why an HTML block's format step didn't run when the superhtml on `PATH` isn't a verified
+/// version.
+const SUPERHTML_UNVERIFIED: &str =
+    "the superhtml on `PATH` isn't a version supdoc is verified against";
 
 /// The version of the prettier a run's blocks use, read once.
 #[derive(Debug, Default)]
@@ -3666,14 +3755,20 @@ const PRETTIER_SWITCHED_OFF: &str = "the block holds `prettier-ignore`, so supdo
                                      prettier formats all of it; drop the comment, or mark the \
                                      block `format(off: <reason>)`";
 
-/// Whether `tool` is prettier and `record`'s block holds `prettier-ignore` (see
-/// [`prettier::switches_format_off`]), so the step doesn't run and prettier is never spawned.
-fn format_switched_off(tool: &ToolCartridge, record: &BlockRecord) -> bool {
-    tool.name == PRETTIER
-        && record
-            .pending
-            .as_ref()
-            .is_some_and(|pending| prettier::switches_format_off(&pending.input))
+/// The name of superhtml's cartridge.
+const SUPERHTML: &str = "superhtml";
+
+/// Why `tool`'s format step doesn't run on `record`'s block, so the tool is never spawned: it is
+/// prettier and the block holds `prettier-ignore` (see [`prettier::switches_format_off`]), or it
+/// is superhtml and the block is one superhtml isn't given (see [`superhtml::not_given`]).
+/// `None` otherwise.
+fn format_not_given(tool: &ToolCartridge, record: &BlockRecord) -> Option<&'static str> {
+    let input = &record.pending.as_ref()?.input;
+    match tool.name {
+        PRETTIER => prettier::switches_format_off(input).then_some(PRETTIER_SWITCHED_OFF),
+        SUPERHTML => superhtml::not_given(input),
+        _ => None,
+    }
 }
 
 /// The name of eslint's cartridges.

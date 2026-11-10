@@ -9,7 +9,7 @@
 //! linking reads.
 //!
 //! A language is on exactly when its table, `[features.code-blocks.rust]`, `.shell`, `.python`,
-//! `.typescript`, `.javascript`, `.json`, `.css`, `.yaml`, `.toml`, `.dockerfile`, `.markdown` or `.go`, is written in some file of the chain; an empty
+//! `.typescript`, `.javascript`, `.json`, `.css`, `.html`, `.yaml`, `.toml`, `.dockerfile`, `.markdown` or `.go`, is written in some file of the chain; an empty
 //! table turns it on. The language
 //! table selects tools (`formatter`, `linter`) and holds the language's own settings; each
 //! tool's options, its step's mode, live in the tool's own table,
@@ -18,6 +18,7 @@
 mod css;
 mod dockerfile;
 mod go;
+mod html;
 mod javascript;
 mod json;
 mod markdown;
@@ -36,6 +37,7 @@ use crate::path::AbsolutePath;
 use self::css::RawCss;
 use self::dockerfile::RawDockerfile;
 use self::go::RawGo;
+use self::html::RawHtml;
 use self::javascript::RawJavaScript;
 use self::json::RawJson;
 use self::markdown::RawMarkdown;
@@ -69,6 +71,8 @@ pub(crate) enum Language {
     Json,
     /// CSS: tagged `css`, or `scss` for SCSS, which biome reads as part of its CSS family.
     Css,
+    /// HTML: tagged `html` or `htm`.
+    Html,
     /// YAML: tagged `yaml` or `yml`.
     Yaml,
     /// TOML: tagged `toml`.
@@ -92,6 +96,7 @@ impl Language {
             "js" | "javascript" | "mjs" | "cjs" | "jsx" => Some(Self::JavaScript),
             "json" | "jsonc" => Some(Self::Json),
             "css" | "scss" => Some(Self::Css),
+            "html" | "htm" => Some(Self::Html),
             "yaml" | "yml" => Some(Self::Yaml),
             "toml" => Some(Self::Toml),
             "dockerfile" | "Dockerfile" | "containerfile" | "Containerfile" => {
@@ -103,7 +108,7 @@ impl Language {
     }
 
     /// The name of its table: `rust`, `shell`, `python`, `typescript`, `javascript`, `json`,
-    /// `css`, `yaml`, `toml`, `dockerfile`, `markdown` or `go`.
+    /// `css`, `html`, `yaml`, `toml`, `dockerfile`, `markdown` or `go`.
     #[must_use]
     pub(crate) const fn table(self) -> &'static str {
         match self {
@@ -115,6 +120,7 @@ impl Language {
             Self::JavaScript => "javascript",
             Self::Json => "json",
             Self::Css => "css",
+            Self::Html => "html",
             Self::Yaml => "yaml",
             Self::Toml => "toml",
             Self::Dockerfile => "dockerfile",
@@ -732,6 +738,8 @@ struct Languages {
     json: Table,
     /// `[features.code-blocks.css]`.
     css: Table,
+    /// `[features.code-blocks.html]`.
+    html: Table,
     /// `[features.code-blocks.yaml]`.
     yaml: Table,
     /// `[features.code-blocks.toml]`.
@@ -748,7 +756,7 @@ struct Languages {
 
 impl Languages {
     /// Every language, in the order the chain's checks report them.
-    const ORDER: [Language; 12] = [
+    const ORDER: [Language; 13] = [
         Language::Rust,
         Language::Shell,
         Language::Python,
@@ -756,6 +764,7 @@ impl Languages {
         Language::JavaScript,
         Language::Json,
         Language::Css,
+        Language::Html,
         Language::Yaml,
         Language::Toml,
         Language::Dockerfile,
@@ -774,6 +783,7 @@ impl Languages {
             Language::JavaScript => &self.javascript,
             Language::Json => &self.json,
             Language::Css => &self.css,
+            Language::Html => &self.html,
             Language::Yaml => &self.yaml,
             Language::Toml => &self.toml,
             Language::Dockerfile => &self.dockerfile,
@@ -818,6 +828,8 @@ pub(crate) struct RawCodeBlocks {
     json: Option<RawJson>,
     /// `[features.code-blocks.css]`, when written.
     css: Option<RawCss>,
+    /// `[features.code-blocks.html]`, when written.
+    html: Option<RawHtml>,
     /// `[features.code-blocks.yaml]`, when written.
     yaml: Option<RawYaml>,
     /// `[features.code-blocks.toml]`, when written.
@@ -847,7 +859,7 @@ impl Written {
     /// # Errors
     ///
     /// [`ConfigError::ToolNotSelected`] for the first tool table, Rust, shell, Python,
-    /// TypeScript, JavaScript, JSON, CSS, YAML, TOML, Dockerfile, Markdown then Go, whose tool the merged chain
+    /// TypeScript, JavaScript, JSON, CSS, HTML, YAML, TOML, Dockerfile, Markdown then Go, whose tool the merged chain
     /// doesn't select.
     pub(super) fn resolve(
         self,
@@ -974,6 +986,7 @@ pub(super) fn merge(
         javascript,
         json,
         css,
+        html,
         yaml,
         toml,
         dockerfile,
@@ -1030,6 +1043,10 @@ pub(super) fn merge(
                 .languages
                 .css
                 .behind(css.as_ref().map(RawCss::selection), file),
+            html: nearer
+                .languages
+                .html
+                .behind(html.as_ref().map(RawHtml::selection), file),
             yaml: nearer
                 .languages
                 .yaml
@@ -1403,6 +1420,58 @@ mod tests {
                 .choice(Language::Css, Step::Lint)
                 .and_then(known_name),
             Some("biome-lint")
+        );
+    }
+
+    #[test]
+    fn html_and_htm_tags_name_html_and_xhtml_svg_and_vue_name_no_language() {
+        let cases = [
+            ("html", Some(Language::Html)),
+            ("htm", Some(Language::Html)),
+            ("xhtml", None),
+            ("svg", None),
+            ("vue", None),
+            ("HTML", None),
+        ];
+        for (tag, expected) in cases {
+            assert_eq!(Language::from_tag(tag), expected, "tag `{tag}`");
+        }
+        assert_eq!(Language::Html.table(), "html");
+    }
+
+    #[test]
+    fn an_html_table_defaults_to_superhtml_and_no_linter() {
+        let dir = tree(&[(
+            "supdoc.config.toml",
+            "[features.code-blocks.html]\n[features.code-blocks.html.superhtml]\nformat = \"full\"\n",
+        )]);
+
+        let config = Config::load(&at(&dir, ".")).expect("the fixture config should load");
+        let code_blocks = config.code_blocks().expect("the table is written");
+
+        assert!(code_blocks.checks(Language::Html));
+        assert_eq!(
+            crate::code_blocks::tools::default_for(Language::Html, Step::Format)
+                .map(|tool| tool.name),
+            Some("superhtml")
+        );
+        assert!(crate::code_blocks::tools::default_for(Language::Html, Step::Lint).is_none());
+    }
+
+    #[test]
+    fn superhtml_is_a_known_html_formatter_and_a_named_linter_is_refused() {
+        let formatter = refused("html", "formatter = \"prettier\"");
+        let linter = refused("html", "linter = \"biome-lint\"");
+
+        assert!(
+            formatter.contains("`prettier` isn't a known html formatter")
+                && formatter.contains("`superhtml`"),
+            "got {formatter}"
+        );
+        assert!(
+            linter.contains("`biome-lint` isn't a known html linter")
+                && linter.contains("none yet: write a custom `{ command = [...] }`"),
+            "got {linter}"
         );
     }
 
