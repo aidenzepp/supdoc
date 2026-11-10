@@ -65,6 +65,9 @@ pub(crate) fn extension(language: Language, tag: &str) -> &'static str {
         (Language::Dockerfile, _) => "dockerfile",
         (Language::Makefile, _) => "mk",
         (Language::Sql, _) => "sql",
+        (Language::Xml, "svg") => "svg",
+        (Language::Xml, "xsl" | "xslt") => "xsl",
+        (Language::Xml, _) => "xml",
         (Language::Markdown, _) => "md",
         (Language::Go, _) => "go",
     }
@@ -457,6 +460,12 @@ mod tests {
             (Language::Dockerfile, "containerfile", "dockerfile"),
             (Language::Makefile, "Makefile", "mk"),
             (Language::Sql, "pgsql", "sql"),
+            (Language::Xml, "xml", "xml"),
+            (Language::Xml, "xhtml", "xml"),
+            (Language::Xml, "xsd", "xml"),
+            (Language::Xml, "svg", "svg"),
+            (Language::Xml, "xsl", "xsl"),
+            (Language::Xml, "xslt", "xsl"),
             (Language::Markdown, "markdown", "md"),
             (Language::Go, "golang", "go"),
         ];

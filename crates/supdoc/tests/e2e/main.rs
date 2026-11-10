@@ -115,6 +115,8 @@ mod code_blocks_toml;
 #[cfg(test)]
 mod code_blocks_ts;
 #[cfg(test)]
+mod code_blocks_xml;
+#[cfg(test)]
 mod code_blocks_yaml;
 #[cfg(test)]
 mod commands;
