@@ -200,7 +200,10 @@ pub(crate) fn kill_tree(pid: u32) {
     #[cfg(windows)]
     let mut kill = {
         let root = SYSTEM_ROOT.get_or_init(|| system_root(None));
-        let mut kill = Command::new(root.join("System32").join("taskkill.exe"));
+        let mut kill = Command::new(crate::path::beneath(
+            root,
+            &crate::path::fixed::SYSTEM32_TASKKILL,
+        ));
         let _same = kill
             .args(["/T", "/F", "/PID", &pid.to_string()])
             .env("SystemRoot", root);
