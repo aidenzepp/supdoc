@@ -29,7 +29,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::config::confine::{self, Admitted, Boundary};
-use crate::path::{Pointer, holds_git};
+use crate::path::{Component as NameComponent, Pointer, beneath, fixed, holds_git};
 use crate::read::source::open_without_blocking;
 use crate::scan::git::{common_dir, first_line};
 
@@ -86,13 +86,13 @@ impl TrustEnv {
                     absolute(self.local_app_data.as_ref()).map(|local| (local, "LOCALAPPDATA"))
                 } else {
                     home.as_ref()
-                        .map(|home| (home.join(".local").join("state"), "HOME"))
+                        .map(|home| (beneath(home, &fixed::LOCAL_STATE), "HOME"))
                 }
             })?;
-        let dir = base.join("supdoc");
+        let dir = beneath(&base, &fixed::SUPDOC);
         Some(Store {
             boundary: Boundary::resolve(&dir),
-            file: dir.join("trusted-roots"),
+            file: beneath(&dir, &fixed::TRUSTED_ROOTS),
             home,
             variable,
         })
@@ -394,7 +394,7 @@ impl Store {
     fn lock(&self) -> io::Result<fs::File> {
         let dir = self.dir()?;
         confine::create_dir_all(&self.admit(dir)?, 0o700)?;
-        let path = self.admit(&dir.join("trusted-roots.lock"))?;
+        let path = self.admit(&beneath(dir, &fixed::TRUSTED_ROOTS_LOCK))?;
         let file = match confine::create_new(&path, 0o600) {
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 confine::open_existing(&self.admit(path.as_path())?)?
@@ -579,11 +579,18 @@ impl Store {
     /// as it was.
     fn write(&self, roots: &[PathBuf]) -> io::Result<()> {
         let dir = self.dir()?;
-        let temp = dir.join(format!(
+        let name = format!(
             ".trusted-roots.{}.{}.tmp",
             std::process::id(),
             WRITES.fetch_add(1, Ordering::Relaxed)
-        ));
+        );
+        let name = NameComponent::new(&name).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the trust store's temporary file name is not one path component",
+            )
+        })?;
+        let temp = beneath(dir, &name);
         let mut file = confine::create_new(&self.admit(&temp)?, 0o600)?;
         let written = (|| {
             for root in roots {
@@ -645,7 +652,7 @@ impl Place {
     /// Effect: reads `.git` metadata up from `real`, the `.git` file and its `commondir`.
     fn of(real: &Path) -> Option<Self> {
         let top = real.ancestors().find(|dir| holds_git(dir))?;
-        let dot_git = top.join(".git");
+        let dot_git = beneath(top, &fixed::DOT_GIT);
         let common = if fs::metadata(&dot_git).ok()?.is_file() {
             common_dir(top, &dot_git)?
         } else {
@@ -668,7 +675,7 @@ impl Place {
     /// `commondir` and `gitdir` files.
     fn linked(real: &Path) -> Option<Self> {
         let top = real.ancestors().find(|dir| holds_git(dir))?;
-        let dot_git = top.join(".git");
+        let dot_git = beneath(top, &fixed::DOT_GIT);
         if !fs::symlink_metadata(&dot_git).ok()?.is_file() {
             return None;
         }
@@ -678,9 +685,11 @@ impl Place {
             .canonicalize()
             .ok()?;
         let place = Self::of(real)?;
-        let back = Pointer::new(&first_line(&git_dir.join("gitdir"))?)?.resolve_from(&git_dir);
+        let back =
+            Pointer::new(&first_line(&beneath(&git_dir, &fixed::GITDIR))?)?.resolve_from(&git_dir);
         let names_back = back.canonicalize().ok()? == dot_git.canonicalize().ok()?;
-        let in_worktrees = git_dir.parent() == Some(place.common.join("worktrees").as_path());
+        let in_worktrees =
+            git_dir.parent() == Some(beneath(&place.common, &fixed::WORKTREES).as_path());
         (names_back && in_worktrees).then_some(place)
     }
 }

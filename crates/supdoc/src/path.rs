@@ -305,10 +305,8 @@ pub(crate) mod fixed {
     /// The Go file a block is written to.
     pub(crate) const MAIN_GO: FixedPath = FixedPath::new("main.go");
     /// supdoc's directory beneath a cache or state base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const SUPDOC: FixedPath = FixedPath::new("supdoc");
     /// The code-block directory beneath [`SUPDOC`].
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CODE_BLOCKS: FixedPath = FixedPath::new("code-blocks");
     /// Cargo's private target directory beneath a cache base.
     #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
@@ -340,55 +338,38 @@ pub(crate) mod fixed {
     /// A tool's config file name inside its config directory.
     pub(crate) const CONFIG_TOML: FixedPath = FixedPath::new("config.toml");
     /// rustc's private emit directory beneath the cache base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const EMIT: FixedPath = FixedPath::new("emit");
     /// The metadata file rustc emits for a block.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const BLOCK_RMETA: FixedPath = FixedPath::new("block.rmeta");
     /// A private working directory name.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CWD: FixedPath = FixedPath::new("cwd");
     /// yamlfmt's private config directory beneath the cache base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const YAMLFMT_CONFIG_DIR: FixedPath = FixedPath::new("yamlfmt-config");
     /// yamllint's private config directory beneath the cache base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const YAMLLINT_CONFIG_DIR: FixedPath = FixedPath::new("yamllint-config");
     /// yamlfmt's private config file name.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const DOT_YAMLFMT: FixedPath = FixedPath::new(".yamlfmt");
     /// yamllint's private config file name.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CONFIG_YAML: FixedPath = FixedPath::new("config.yaml");
     /// The default state base beneath `HOME`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const LOCAL_STATE: FixedPath = FixedPath::new(".local/state");
     /// The trust store file.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const TRUSTED_ROOTS: FixedPath = FixedPath::new("trusted-roots");
     /// The trust store's lock file.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const TRUSTED_ROOTS_LOCK: FixedPath = FixedPath::new("trusted-roots.lock");
     /// A worktree's back-pointer file.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const GITDIR: FixedPath = FixedPath::new("gitdir");
     /// A git directory's worktrees directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const WORKTREES: FixedPath = FixedPath::new("worktrees");
     /// A worktree git directory's pointer to the common directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const COMMONDIR: FixedPath = FixedPath::new("commondir");
     /// A git directory's info directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const INFO: FixedPath = FixedPath::new("info");
     /// A git directory's exclude file.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const INFO_EXCLUDE: FixedPath = FixedPath::new("info/exclude");
     /// An `.ignore` file.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const DOT_IGNORE: FixedPath = FixedPath::new(".ignore");
     /// A `.gitignore` file.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const DOT_GITIGNORE: FixedPath = FixedPath::new(".gitignore");
     /// The config names biome looks for in a directory.
     pub(crate) const BIOME_CONFIG_FILES: [FixedPath; 4] = [
@@ -420,13 +401,11 @@ pub(crate) mod fixed {
         FixedPath::new("pyproject.toml"),
     ];
     /// The config names rustfmt looks for in a directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const RUST_CONFIG_FILES: [FixedPath; 2] = [
         FixedPath::new(".rustfmt.toml"),
         FixedPath::new("rustfmt.toml"),
     ];
     /// The config names clippy looks for in a directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CLIPPY_FILES: [FixedPath; 2] = [
         FixedPath::new(".clippy.toml"),
         FixedPath::new("clippy.toml"),
@@ -438,7 +417,6 @@ pub(crate) mod fixed {
         FixedPath::new("rust-toolchain.toml"),
     ];
     /// The config names yamlfmt looks for in a directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const YAMLFMT_CONFIG_FILES: [FixedPath; 5] = [
         FixedPath::new(".yamlfmt"),
         FixedPath::new("yamlfmt.yml"),
@@ -447,7 +425,6 @@ pub(crate) mod fixed {
         FixedPath::new(".yamlfmt.yml"),
     ];
     /// The config names yamllint looks for in a directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const YAMLLINT_CONFIG_FILES: [FixedPath; 3] = [
         FixedPath::new(".yamllint"),
         FixedPath::new(".yamllint.yaml"),
@@ -663,13 +640,6 @@ impl Pointer {
     /// Wraps a path the operating system or a library handed back, such as a `read_link` pointee
     /// or git's `core.excludesFile`, or `None` when it holds a NUL byte, as [`Pointer::new`].
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the sweep units wrap handed-back paths from V5-P3"
-        )
-    )]
     pub(crate) fn from_path(path: PathBuf) -> Option<Self> {
         (!path.as_os_str().as_encoded_bytes().contains(&0)).then_some(Self(path))
     }
