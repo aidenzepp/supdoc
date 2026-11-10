@@ -168,6 +168,34 @@ jobs:
           cp "target/${TARGET}/release/$bin" LICENSE README.md "dist/$name/"
           tar -C dist -czf "dist/${name}.tar.gz" "$name"
           tar -tzf "dist/${name}.tar.gz"
+      - name: Smoke the built binary
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --locked --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "supdoc"))')"
+          bin="$PWD/target/${TARGET}/release/supdoc"
+          case "$TARGET" in *-windows-*) bin="$bin.exe" ;; esac
+          fixture="$PWD/crates/supdoc/tests/fixtures/basic"
+          reported="$("$bin" --version)"
+          echo "$reported"
+          if [ "$reported" != "supdoc $version" ]; then
+            echo "expected 'supdoc $version', got '$reported'" >&2
+            exit 1
+          fi
+          # Copy the fixture outside the checkout so it is its own project, then record its links and check them.
+          work="$(mktemp -d "${RUNNER_TEMP}/smoke.XXXXXX")"
+          cp -R "$fixture/." "$work/"
+          cd "$work"
+          "$bin" init
+          "$bin" update --yes
+          out="$("$bin" check)"
+          echo "$out"
+          if ! echo "$out" | grep -qE '^Links +[0-9]+ passed$'; then
+            echo "check did not print a 'Links N passed' line" >&2
+            exit 1
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: archive-${{ matrix.target }}
