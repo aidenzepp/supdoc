@@ -845,7 +845,7 @@ fn private_dir(parent: &Boundary, dir: &AbsolutePath) -> Option<Boundary> {
 mod tests {
 
     use super::{
-        LintFile, Refusal, diagnostics, extension, find, formatter_off, holds_comment,
+        LintFile, Refusal, checked, diagnostics, extension, find, formatter_off, holds_comment,
         lint_verdict, linted_nothing, parse_error, project_args, without_exclusions, write_new,
     };
     use crate::code_blocks::format::{ParseError, Verdict as FormatVerdict};
@@ -1721,6 +1721,77 @@ mod tests {
         assert!(
             matches!(refused, Err(Refusal::Config { ref why, .. }) if why.contains("names a path outside the project")),
             "got {refused:?}"
+        );
+    }
+
+    /// The reason `refused` gives, when it is a [`Refusal::Config`].
+    fn why_of<T>(refused: Result<T, Refusal>) -> Option<String> {
+        match refused {
+            Err(Refusal::Config { why, .. }) => Some(why),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_config_under_a_root_that_doesnt_resolve_is_unreadable_before_a_path_it_names_is_judged() {
+        // No config is found under such a root, so the guard is reached directly. The value guard
+        // shares this boundary, so the config's own refusal comes first.
+        let dir = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let config = dir.path().join("biome.json");
+        fs::write(&config, "{\"tailwind\":{\"stylesheet\":\"./app.css\"}}").expect("the config");
+        fs::write(dir.path().join("app.css"), "").expect("the stylesheet");
+        let dangling = dir.path().join("linked");
+        crate::cli::testing::symlink(dir.path().join("gone"), &dangling).expect("the link");
+
+        for root in [dir.path().join("missing"), dangling] {
+            assert_eq!(
+                why_of(checked(&root, &config)).as_deref(),
+                Some("couldn't be read"),
+                "{}",
+                root.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_config_is_unreadable() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+
+        assert_eq!(
+            why_of(checked(root.path(), &root.path().join("biome.json"))).as_deref(),
+            Some("couldn't be read")
+        );
+    }
+
+    #[test]
+    fn a_stylesheet_that_doesnt_exist_is_refused_as_missing() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        fs::write(
+            root.path().join("biome.json"),
+            "{\"tailwind\":{\"stylesheet\":\"./app.css\"}}",
+        )
+        .expect("the config");
+
+        assert_eq!(
+            why_of(project_in(root.path())).as_deref(),
+            Some("sets `tailwind.stylesheet`, which names a path that doesn't exist")
+        );
+    }
+
+    #[test]
+    fn a_dangling_in_root_stylesheet_link_is_refused_as_missing() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        crate::cli::testing::symlink(root.path().join("gone.css"), root.path().join("app.css"))
+            .expect("the link");
+        fs::write(
+            root.path().join("biome.json"),
+            "{\"tailwind\":{\"stylesheet\":\"./app.css\"}}",
+        )
+        .expect("the config");
+
+        assert_eq!(
+            why_of(project_in(root.path())).as_deref(),
+            Some("sets `tailwind.stylesheet`, which names a path that doesn't exist")
         );
     }
 

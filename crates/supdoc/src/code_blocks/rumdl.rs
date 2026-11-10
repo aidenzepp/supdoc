@@ -410,7 +410,8 @@ fn nested(value: &toml::Value) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Project, Refusal, candidates, diagnostics, pattern_root, project_args, unsafe_part,
+        Project, ReadError, Refusal, candidates, diagnostics, pattern_root, project_args,
+        read_table, unsafe_part,
     };
     use crate::code_blocks::lint::Diagnostic;
     use crate::code_blocks::tools::ToolEnv;
@@ -604,6 +605,37 @@ mod tests {
             matches!(&refused, Err(Refusal::Config { why, .. }) if why.contains("couldn't be resolved")),
             "got {refused:?}"
         );
+    }
+
+    #[test]
+    fn a_config_under_a_root_that_doesnt_resolve_is_refused_as_unresolvable() {
+        // No candidate is found under such a root, so the guard is reached directly.
+        let dir = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let config = dir.path().join(".rumdl.toml");
+        fs::write(&config, "[global]\n").expect("the config");
+        let dangling = dir.path().join("linked");
+        crate::cli::testing::symlink(dir.path().join("gone"), &dangling).expect("the link");
+
+        for root in [dir.path().join("missing"), dangling] {
+            assert!(
+                matches!(
+                    read_table(&root, &config),
+                    Err(ReadError::Other("couldn't be resolved"))
+                ),
+                "{}",
+                root.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_config_is_refused_as_unresolvable() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+
+        assert!(matches!(
+            read_table(root.path(), &root.path().join(".rumdl.toml")),
+            Err(ReadError::Other("couldn't be resolved"))
+        ));
     }
 
     #[test]
