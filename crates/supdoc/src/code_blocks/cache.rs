@@ -101,10 +101,7 @@ impl Cache {
             ),
             &name,
         );
-        let existing = dir
-            .ancestors()
-            .find_map(|ancestor| ancestor.canonicalize().ok());
-        if existing.is_none_or(|existing| existing.starts_with(&real_root)) {
+        if !runner::nearest_ancestor_outside(&Boundary::resolve(root), &dir) {
             return None;
         }
         Self::at(&real_base, dir, MAX_ENTRIES)
@@ -1078,5 +1075,26 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o700);
+    }
+
+    #[test]
+    fn a_base_linked_into_or_a_root_that_is_missing_opens_no_cache_and_creates_nothing() {
+        use crate::cli::testing::symlink;
+        let dir = temp();
+        let root = dir.path().join("root");
+        fs::create_dir(&root).expect("the root should be creatable");
+        let linked = dir.path().join("linked");
+        symlink(&root, &linked).expect("the link should be creatable");
+        let home = dir.path().join("home");
+
+        let through_link = Cache::open(&xdg(&linked), &root);
+        let missing = Cache::open(&xdg(&home), &dir.path().join("gone"));
+
+        assert!(through_link.is_none() && missing.is_none());
+        assert!(
+            !home.exists(),
+            "nothing should be created for a missing root"
+        );
+        assert_eq!(names(&root), Vec::<OsString>::new(), "nothing in the root");
     }
 }

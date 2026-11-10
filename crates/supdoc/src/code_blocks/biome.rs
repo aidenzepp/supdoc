@@ -1,4 +1,5 @@
-//! biome, for TypeScript, JavaScript and JSON blocks: the extension a tag selects, its syntax-error report, its lint diagnostics, the
+//! biome, for TypeScript, JavaScript, JSON and CSS blocks: the extension a tag selects, its syntax-error report, the
+//! notice that its formatter is off, its lint diagnostics, the
 //! project config supdoc finds for it, and the private file a block is linted from.
 //!
 //! biome finds its config from the directory it runs in, never from the block's virtual path,
@@ -30,8 +31,9 @@ const MAX_CONFIG: u64 = 64 * 1024;
 const EMPTY_CONFIG: &str = "{}";
 
 /// The file extension biome reads a block tagged `tag` by: the tag itself when it names a
-/// module or JSX flavor (`mts`, `cts`, `tsx`, `mjs`, `cjs`, `jsx`) or JSON (`json`, or `jsonc`,
-/// whose comments biome parses), else `ts` or `js`.
+/// module or JSX flavor (`mts`, `cts`, `tsx`, `mjs`, `cjs`, `jsx`), JSON (`json`, or `jsonc`,
+/// whose comments biome parses) or CSS (`css`, or `scss`, which biome reads as SCSS), else `ts`
+/// or `js`.
 #[must_use]
 pub(crate) fn extension(tag: &str) -> &'static str {
     match tag {
@@ -44,6 +46,8 @@ pub(crate) fn extension(tag: &str) -> &'static str {
         "js" | "javascript" => "js",
         "json" => "json",
         "jsonc" => "jsonc",
+        "css" => "css",
+        "scss" => "scss",
         _ => "ts",
     }
 }
@@ -71,12 +75,28 @@ pub(crate) fn parse_error(stderr: &str) -> Option<ParseError> {
     let (_, index) = rest.rsplit_once('.')?;
     let virtual_path = index.parse::<usize>().is_ok()
         && [
-            "ts", "mts", "cts", "tsx", "js", "mjs", "cjs", "jsx", "json", "jsonc",
+            "ts", "mts", "cts", "tsx", "js", "mjs", "cjs", "jsx", "json", "jsonc", "css", "scss",
         ]
         .contains(&extension);
     virtual_path.then_some(ParseError {
         line: line.checked_sub(1),
     })
+}
+
+/// The line `biome format` begins its stderr with when the project's config turns the formatter
+/// off for the block's language: it exits 1 and prints the block back unchanged.
+const FORMATTER_OFF: &str =
+    "The content was not formatted because the formatter is currently disabled.";
+
+/// Whether `stderr`, from a `biome format` run, says the project's config turns the
+/// formatter off for the block's language (`css.formatter.enabled: false`): the run says
+/// nothing about the block's format.
+#[must_use]
+pub(crate) fn formatter_off(stderr: &[u8]) -> bool {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .next()
+        .is_some_and(|line| line.trim_end() == FORMATTER_OFF)
 }
 
 /// One diagnostic of `biome lint --reporter=json`.
@@ -825,8 +845,8 @@ fn private_dir(parent: &Boundary, dir: &AbsolutePath) -> Option<Boundary> {
 mod tests {
 
     use super::{
-        LintFile, Refusal, diagnostics, extension, find, holds_comment, lint_verdict,
-        linted_nothing, parse_error, project_args, without_exclusions, write_new,
+        LintFile, Refusal, diagnostics, extension, find, formatter_off, holds_comment,
+        lint_verdict, linted_nothing, parse_error, project_args, without_exclusions, write_new,
     };
     use crate::code_blocks::format::{ParseError, Verdict as FormatVerdict};
     use crate::code_blocks::lint::{Diagnostic, Verdict};
@@ -1371,6 +1391,8 @@ mod tests {
             "jsx",
             "json",
             "jsonc",
+            "css",
+            "scss",
         ]
         .map(extension)
         .into();
@@ -1378,7 +1400,8 @@ mod tests {
         assert_eq!(
             picked,
             [
-                "ts", "ts", "mts", "cts", "tsx", "js", "js", "mjs", "cjs", "jsx", "json", "jsonc"
+                "ts", "ts", "mts", "cts", "tsx", "js", "js", "mjs", "cjs", "jsx", "json", "jsonc",
+                "css", "scss"
             ]
         );
     }
@@ -1388,6 +1411,49 @@ mod tests {
         let stderr = "/x/doc.md.1.ts:3:11 parse ━━━━━━━━\n\n  × Expected an expression\n";
 
         assert_eq!(parse_error(stderr), Some(ParseError { line: Some(2) }));
+    }
+
+    #[test]
+    fn a_parse_header_of_a_css_or_scss_block_names_its_body_line() {
+        for extension in ["css", "scss"] {
+            let stderr = format!(
+                "/x/doc.md.3.{extension}:2:1 parse ━━━━━━━━\n\n  × expected `;` but instead the file ends\n"
+            );
+
+            assert_eq!(
+                parse_error(&stderr),
+                Some(ParseError { line: Some(1) }),
+                "a .{extension} block's parse header should place the error on body line 1"
+            );
+        }
+    }
+
+    #[test]
+    fn biomes_formatter_off_notice_is_told_from_any_other_failed_format() {
+        let off = "The content was not formatted because the formatter is currently disabled.\n\
+                   stdin ━━━━━━━━\n\n  × The contents aren't fixed. Use the `--write` flag to fix them.\n";
+        let unformatted = "stdin ━━━━━━━━\n\n  × The contents aren't fixed. Use the `--write` flag to fix them.\n";
+        let parse =
+            "/x/doc.md.1.css:2:1 parse ━━━━━━━━\n\n  × expected `;` but instead the file ends\n";
+
+        assert!(
+            formatter_off(off.as_bytes()),
+            "biome's formatter-off notice should be read as off"
+        );
+        assert!(
+            !formatter_off(unformatted.as_bytes()),
+            "a failed format without the notice is not the formatter being off"
+        );
+        assert!(
+            !formatter_off(parse.as_bytes()),
+            "a parse error is not the formatter being off"
+        );
+        for later in [format!("note: {off}"), format!("{unformatted}{off}")] {
+            assert!(
+                !formatter_off(later.as_bytes()),
+                "the notice counts only as stderr's whole first line: {later:?}"
+            );
+        }
     }
 
     #[test]

@@ -19,7 +19,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::tools::ToolEnv;
-use crate::config::confine::{self, Boundary};
+use crate::config::confine::{self, Boundary, ReadEscape};
 use crate::path::{self, AbsolutePath, fixed};
 use crate::process::{self, LiveGroup, Spawning, TERMINATING};
 
@@ -243,12 +243,12 @@ pub(crate) fn private_dir(env: &ToolEnv, root: &Path, dir: &Path) -> Option<Path
     }
     let cache = neutral.canonicalize().ok()?.parent()?.to_path_buf();
     let real = dir.canonicalize().ok()?;
-    let real_root = root.canonicalize().ok()?;
+    let root = Boundary::resolve(root);
     let meta = std::fs::symlink_metadata(&real).ok()?;
     let owned = reaches_only_owner(&meta, &std::fs::metadata(&cache).ok()?);
     let private = real.starts_with(&cache)
         && real != cache
-        && !real.starts_with(&real_root)
+        && lies_outside(&root, &real)
         && meta.is_dir()
         && owned;
     private.then_some(real)
@@ -406,13 +406,8 @@ fn holds_parent(path: &Path) -> bool {
 ///
 /// Effect: reads metadata along `dir`, then creates the directory and reads its entries.
 fn usable(cache: &Path, dir: &Path, root: &Path) -> bool {
-    let Ok(real_root) = root.canonicalize() else {
-        return false;
-    };
-    let existing = dir
-        .ancestors()
-        .find_map(|ancestor| ancestor.canonicalize().ok());
-    if existing.is_none_or(|existing| existing.starts_with(&real_root)) {
+    let root = Boundary::resolve(root);
+    if !nearest_ancestor_outside(&root, dir) {
         return false;
     }
     let (Some(cache), Some(given)) = (exact(cache), exact(dir)) else {
@@ -421,11 +416,30 @@ fn usable(cache: &Path, dir: &Path, root: &Path) -> bool {
     if create_private(&Boundary::resolve(&cache), &given).is_none() {
         return false;
     }
-    let Ok(real) = dir.canonicalize() else {
-        return false;
-    };
-    !real.starts_with(&real_root)
+    lies_outside(&root, dir)
         && std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_none())
+}
+
+/// Whether the real location of `path` lies outside `root`. `false` when `path` or `root` can't
+/// be resolved.
+///
+/// Effect: reads metadata and symlinks along `path` and `root`.
+#[must_use]
+pub(crate) fn lies_outside(root: &Boundary, path: &Path) -> bool {
+    matches!(root.real_inside(path), Err(ReadEscape::Outside { .. }))
+}
+
+/// Whether the deepest existing ancestor of `dir` (itself included) really lies outside `root`,
+/// the check that decides whether a private directory may be created there. `false` when no
+/// ancestor exists or `root` can't be resolved, so nothing is created.
+///
+/// Effect: reads metadata and symlinks along `dir` and `root`.
+#[must_use]
+pub(crate) fn nearest_ancestor_outside(root: &Boundary, dir: &Path) -> bool {
+    dir.ancestors()
+        .map(|ancestor| root.real_inside(ancestor))
+        .find(|found| !matches!(found, Err(ReadEscape::Unresolved)))
+        .is_some_and(|found| matches!(found, Err(ReadEscape::Outside { .. })))
 }
 
 /// `path` as an [`AbsolutePath`] when normalizing doesn't move it: it is absolute and holds no
@@ -1255,5 +1269,56 @@ mod tests {
             disk.join("supdoc/code-blocks/cwd").is_dir(),
             "the neutral directory should be created where the base leads"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_base_linked_into_or_a_root_that_is_missing_gives_no_neutral_or_private_directory() {
+        let fixture = fixture("true");
+        let linked = fixture.root.join("linked");
+        std::os::unix::fs::symlink(&fixture.root, &linked).expect("the link should be creatable");
+        let env = ToolEnv::from_vars(|name| (name == "HOME").then(|| linked.clone().into()));
+        let private = private_beside_neutral(&fixture, "private");
+        let gone = fixture.root.with_file_name("gone");
+
+        assert_eq!(neutral_dir(&env, &fixture.root), Path::new("/"));
+        assert_eq!(neutral_dir(&fixture.env, &gone), Path::new("/"));
+        assert_eq!(private_dir(&fixture.env, &gone, &private), None);
+        assert_eq!(
+            fs::read_dir(&fixture.root)
+                .expect("the root should list")
+                .count(),
+            1,
+            "only the link should be in the root"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_private_directory_inside_a_root_nested_in_the_cache_is_refused() {
+        use std::os::unix::fs::DirBuilderExt as _;
+        let dir = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let home = dir.path().join("home");
+        let env = ToolEnv::from_vars(|name| (name == "HOME").then(|| home.clone().into()));
+        let cache = home.join(".cache/supdoc/code-blocks");
+        let root = cache.join("proj");
+        let inside = root.join("inner");
+        let beside = cache.join("beside");
+        for path in [&inside, &beside] {
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(path)
+                .expect("the private directory should be creatable");
+        }
+
+        let neutral = neutral_dir(&env, &root);
+
+        assert_eq!(neutral.parent(), Some(cache.as_path()), "{neutral:?}");
+        assert!(
+            private_dir(&env, &root, &beside).is_some(),
+            "a directory beside the root should be accepted"
+        );
+        assert_eq!(private_dir(&env, &root, &inside), None);
     }
 }

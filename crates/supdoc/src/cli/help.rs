@@ -72,6 +72,7 @@ top-level keys, and never change which files links are read from. A language's t
   typescript    formatter \"biome-format\" (the default) or \"prettier\", linter \"biome-lint\" (the default) or \"eslint\"
   javascript    formatter \"biome-format\" (the default) or \"prettier\", linter \"biome-lint\" (the default) or \"eslint\"
   json          formatter \"biome-format\" (the default) or \"prettier\", linter biome-lint; tag a block with comments jsonc
+  css           formatter biome-format, linter biome-lint; tag an SCSS block scss
   yaml          formatter \"yamlfmt\" (the default) or \"prettier\", linter yamllint
   toml          formatter tombi-format, linter tombi-lint
   markdown      formatter \"rumdl-format\" (the default) or \"prettier\", linter rumdl

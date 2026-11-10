@@ -39,7 +39,7 @@ const STDIN_NAMES: [&str; 3] = ["<stdin>", "-", "stdin"];
 const QUOTED_LINES: usize = 20;
 
 /// The extension of the virtual file a block tagged `tag`, in `language`, is named by: the tag
-/// itself where it names a flavor (`tsx`, `mts`, `cts`, `jsx`, `mjs`, `cjs`, `jsonc`), else the
+/// itself where it names a flavor (`tsx`, `mts`, `cts`, `jsx`, `mjs`, `cjs`, `jsonc`, `scss`), else the
 /// language's own.
 #[must_use]
 pub(crate) fn extension(language: Language, tag: &str) -> &'static str {
@@ -54,6 +54,8 @@ pub(crate) fn extension(language: Language, tag: &str) -> &'static str {
         (Language::JavaScript, _) => "js",
         (Language::Json, "jsonc") => "jsonc",
         (Language::Json, _) => "json",
+        (Language::Css, "scss") => "scss",
+        (Language::Css, _) => "css",
         (Language::Rust, _) => "rs",
         (Language::Shell, _) => "sh",
         (Language::Python, _) => "py",
@@ -442,6 +444,8 @@ mod tests {
             (Language::JavaScript, "cjs", "cjs"),
             (Language::Json, "json", "json"),
             (Language::Json, "jsonc", "jsonc"),
+            (Language::Css, "css", "css"),
+            (Language::Css, "scss", "scss"),
             (Language::Yaml, "yml", "yaml"),
             (Language::Toml, "toml", "toml"),
             (Language::Markdown, "markdown", "md"),
