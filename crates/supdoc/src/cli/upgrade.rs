@@ -13,7 +13,9 @@
 //! install this command knows. Its preview reads one `SHA256SUMS` from the GitHub release and
 //! names the archive and digest that would be installed. Under `--yes` it fetches that archive,
 //! checks its SHA-256 against `SHA256SUMS`, and only then replaces itself, atomically, beside
-//! the old file.
+//! the old file. On Windows the running `supdoc.exe` is renamed to `supdoc.exe.old` first; if
+//! the process dies between that rename and the move-in, no `supdoc.exe` is on disk, and
+//! `supdoc.exe.old` is the copy to rename back.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -661,7 +663,8 @@ fn replace_failed_help(retry: &str, windows: bool) -> String {
         format!(
             "Close anything using supdoc.exe or its directory, such as another supdoc or a virus \
              scanner, and make the directory writable for your user, then run `{retry}` again; \
-             if supdoc.exe is missing and {aside} is beside it, rename {aside} back to supdoc.exe"
+             if supdoc.exe is missing (a crash between the two renames leaves it so) and {aside} is \
+             beside it, rename {aside} back to supdoc.exe"
         )
     } else {
         format!(

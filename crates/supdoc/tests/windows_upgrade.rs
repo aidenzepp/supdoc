@@ -86,11 +86,12 @@ fn publish(releases: &Path, bytes: &[u8]) {
 fn installed() -> tempfile::TempDir {
     let root = tempfile::tempdir().expect("a scratch directory should be creatable");
     fs::create_dir(root.path().join("bin")).expect("the bin directory should create");
-    fs::copy(
+    let copied = fs::copy(
         env!("CARGO_BIN_EXE_supdoc"),
         root.path().join("bin").join("supdoc.exe"),
     )
     .expect("the binary should copy");
+    assert_ne!(copied, 0, "the copied binary should not be empty");
     root
 }
 
