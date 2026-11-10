@@ -1099,16 +1099,162 @@ fn a_release_without_the_host_platform_is_refused_as_no_asset() {
     );
 }
 
+/// What the stub binary inside a fixture archive prints, so a run shows which file is installed.
+const STUB: &[u8] = b"#!/bin/sh\necho stub-installed\n";
+
+/// A `.tar.gz` holding each `(path, bytes)` as a regular file.
+fn archive_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut tar = tar::Builder::new(Vec::new());
+    for (path, bytes) in entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(u64::try_from(bytes.len()).expect("the entry size should fit"));
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, path, *bytes)
+            .expect("the entry should append");
+    }
+    let tarball = tar.into_inner().expect("the tar should finish");
+    let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut gzip, &tarball).expect("the tar should compress");
+    gzip.finish().expect("the gzip should finish")
+}
+
+/// The SHA-256 of `bytes` as 64 lowercase hex digits.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::new(), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
+}
+
+/// The names in `dir`, sorted.
+fn names_in(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("the directory should list")
+        .map(|entry| {
+            entry
+                .expect("the entry should read")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+impl Fixture {
+    /// Publishes `archive` as the host's archive of [`NEWER`], with `digest` as its line in
+    /// `SHA256SUMS`.
+    fn publish(&self, archive: &[u8], digest: &str) {
+        let host = host_triple();
+        let sums = sums_for(&[NEWER]).replace(&digest_of(host), digest);
+        self.write(&format!("releases/{NEWER}/SHA256SUMS"), &sums);
+        let path = self.path(&format!("releases/{NEWER}/supdoc-{NEWER}-{host}.tar.gz"));
+        std::fs::write(path, archive).expect("the archive should write");
+    }
+
+    /// Publishes the stub in a well-formed archive with its true digest.
+    fn publish_stub(&self) {
+        let host = host_triple();
+        let entry = format!("supdoc-{NEWER}-{host}/supdoc");
+        let archive = archive_of(&[(entry.as_str(), STUB)]);
+        self.publish(&archive, &sha256_hex(&archive));
+    }
+}
+
 #[test]
-fn yes_on_a_release_binary_says_it_is_not_built_yet_and_changes_nothing() {
+fn yes_replaces_the_binary_with_the_archives_and_leaves_nothing_beside_it() {
     let fixture = released();
+    fixture.publish_stub();
+
+    let run = fixture.run_released(&["upgrade", NEWER, "--yes"]);
+
+    let _ = run.assert_exit(0);
+    assert!(
+        run.stderr.contains("Installed supdoc 99.0.0."),
+        "{}",
+        run.stderr
+    );
+    let installed = fixture.path("dist/supdoc");
+    assert_eq!(
+        std::fs::read(&installed).expect("the binary should read"),
+        STUB
+    );
+    let mode = std::fs::metadata(&installed)
+        .expect("the binary should have metadata")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o755, "the installed binary's mode");
+    assert_eq!(names_in(&fixture.path("dist")), ["supdoc"]);
+    let ran = retry_busy(|| Command::new(&installed).output()).expect("the stub should run");
+    assert_eq!(String::from_utf8_lossy(&ran.stdout), "stub-installed\n");
+}
+
+#[test]
+fn json_for_an_applied_release_binary_upgrade_says_installed() {
+    let fixture = released();
+    fixture.publish_stub();
+
+    let run = fixture.run_released(&["--json", "upgrade", NEWER, "--yes"]);
+
+    let _ = run.assert_exit(0);
+    assert!(
+        run.stdout.contains(r#""outcome":"installed""#),
+        "{}",
+        run.stdout
+    );
+    assert!(run.stdout.contains(r#""ran":true"#), "{}", run.stdout);
+}
+
+#[test]
+fn a_digest_mismatch_is_refused_before_the_archive_is_read_and_changes_nothing() {
+    let fixture = released();
+    fixture.publish(
+        b"not an archive at all",
+        &digest_of("x86_64-unknown-linux-gnu"),
+    );
     let before = std::fs::read(fixture.path("dist/supdoc")).expect("the binary should read");
 
     let run = fixture.run_released(&["upgrade", NEWER, "--yes"]);
 
     let _ = run.assert_exit(1);
     assert!(
-        run.stderr.contains("cli-upgrade-binary-not-yet"),
+        run.stderr.contains("cli-upgrade-verify-failed"),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("SHA256SUMS lists"),
+        "a bad digest should be reported before the archive is opened: {}",
+        run.stderr
+    );
+    assert_eq!(
+        std::fs::read(fixture.path("dist/supdoc")).expect("the binary should read"),
+        before,
+        "the binary must be untouched"
+    );
+    assert_eq!(names_in(&fixture.path("dist")), ["supdoc"]);
+}
+
+#[test]
+fn an_archive_without_the_expected_entry_is_refused_and_changes_nothing() {
+    let fixture = released();
+    let host = host_triple();
+    let wrong = format!("supdoc-{NEWER}-{host}/other");
+    let archive = archive_of(&[(wrong.as_str(), STUB)]);
+    fixture.publish(&archive, &sha256_hex(&archive));
+    let before = std::fs::read(fixture.path("dist/supdoc")).expect("the binary should read");
+
+    let run = fixture.run_released(&["upgrade", NEWER, "--yes"]);
+
+    let _ = run.assert_exit(1);
+    assert!(
+        run.stderr.contains("cli-upgrade-verify-failed"),
         "{}",
         run.stderr
     );
@@ -1117,6 +1263,86 @@ fn yes_on_a_release_binary_says_it_is_not_built_yet_and_changes_nothing() {
         before,
         "the binary must be untouched"
     );
+    assert_eq!(names_in(&fixture.path("dist")), ["supdoc"]);
+}
+
+#[test]
+fn a_missing_archive_is_a_fetch_failure_and_changes_nothing() {
+    let fixture = released();
+    let before = std::fs::read(fixture.path("dist/supdoc")).expect("the binary should read");
+
+    let run = fixture.run_released(&["upgrade", NEWER, "--yes"]);
+
+    let _ = run.assert_exit(74);
+    assert!(
+        run.stderr.contains("cli-upgrade-fetch-failed"),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(
+        std::fs::read(fixture.path("dist/supdoc")).expect("the binary should read"),
+        before,
+        "the binary must be untouched"
+    );
+}
+
+#[test]
+fn an_unwritable_directory_leaves_the_binary_byte_identical_and_no_temp_file() {
+    let fixture = released();
+    fixture.publish_stub();
+    let dist = fixture.path("dist");
+    let before = std::fs::read(dist.join("supdoc")).expect("the binary should read");
+    std::fs::set_permissions(&dist, std::fs::Permissions::from_mode(0o555))
+        .expect("the directory should lock");
+    let restricted = std::fs::write(dist.join("probe"), "").is_err();
+
+    let run = fixture.run_released(&["upgrade", NEWER, "--yes"]);
+
+    std::fs::set_permissions(&dist, std::fs::Permissions::from_mode(0o755))
+        .expect("the directory should unlock");
+    if !restricted {
+        std::fs::remove_file(dist.join("probe")).expect("the probe should remove");
+        return;
+    }
+    let _ = run.assert_exit(74);
+    assert!(
+        run.stderr.contains("cli-upgrade-replace-failed"),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(
+        std::fs::read(dist.join("supdoc")).expect("the binary should read"),
+        before,
+        "the binary must be untouched"
+    );
+    assert_eq!(names_in(&dist), ["supdoc"]);
+}
+
+#[test]
+fn a_symlinked_directory_is_replaced_at_its_real_location() {
+    let fixture = released();
+    fixture.publish_stub();
+    let real = fixture.path("elsewhere");
+    std::fs::rename(fixture.path("dist"), &real).expect("the directory should move");
+    std::os::unix::fs::symlink(&real, fixture.path("dist"))
+        .expect("the fixture symlink should be creatable");
+
+    let run = fixture.run_released(&["upgrade", NEWER, "--yes"]);
+
+    let _ = run.assert_exit(0);
+    assert_eq!(
+        std::fs::read(real.join("supdoc")).expect("the binary should read"),
+        STUB
+    );
+    assert!(
+        fixture
+            .path("dist")
+            .symlink_metadata()
+            .expect("the link should exist")
+            .is_symlink(),
+        "the symlink itself must stay a symlink"
+    );
+    assert_eq!(names_in(&real), ["supdoc"]);
 }
 
 #[test]

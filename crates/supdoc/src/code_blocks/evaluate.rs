@@ -1668,7 +1668,7 @@ impl TombiConfigs {
                     mirror: Some(project.doc_as_seen(&doc)),
                     flags: Vec::new(),
                     config: None,
-                    names: Some(project.names()),
+                    names: Some(project.names(&doc, record.index)),
                 });
                 record.tombi = Some(project);
                 self.verified(record, (env, root), slots)

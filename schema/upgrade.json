@@ -190,7 +190,7 @@
         },
         {
           "const": "installed",
-          "description": "Cargo installed the target.",
+          "description": "The target version was installed.",
           "type": "string"
         },
         {
@@ -234,7 +234,7 @@
           "description": "How the run ended."
         },
         "ran": {
-          "description": "Whether the command ran.",
+          "description": "Whether the upgrade ran, by cargo or by replacing the binary.",
           "type": "boolean"
         },
         "sha256": {
