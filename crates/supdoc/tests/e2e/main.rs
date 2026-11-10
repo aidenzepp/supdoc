@@ -83,6 +83,8 @@ mod code_blocks_css;
 #[cfg(test)]
 mod code_blocks_custom;
 #[cfg(test)]
+mod code_blocks_dockerfile;
+#[cfg(test)]
 mod code_blocks_fix;
 mod code_blocks_fragment;
 #[cfg(test)]

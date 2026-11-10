@@ -34,6 +34,7 @@ use super::excerpt;
 use super::format::{self, FixDoc};
 use super::fragment::{Frame, Kind};
 use super::go;
+use super::hadolint;
 use super::info::{
     KNOWN_ATTRIBUTES, SourceKind, StepValue, fragment_kind, is_fragment_word, is_known_attribute,
     parenthesized_spelling, reasoned, replacement_for_removed, source_attributes, step_attribute,
@@ -323,6 +324,7 @@ impl Evaluation {
         let timeout = self.timeout;
         let mut configs = ToolConfigs::default();
         configs.tombi.timeout = timeout;
+        configs.hadolint.timeout = timeout;
         configs.yamllint.timeout = timeout;
         configs.prettier.timeout = timeout;
         let mut toolchain_warned = false;
@@ -1308,6 +1310,8 @@ struct ToolConfigs {
     rumdl: RumdlConfigs,
     /// tombi's.
     tombi: TombiConfigs,
+    /// hadolint's.
+    hadolint: HadolintConfigs,
     /// yamlfmt's.
     yamlfmt: YamlfmtConfigs,
     /// yamllint's.
@@ -1318,7 +1322,8 @@ struct ToolConfigs {
 
 impl ToolConfigs {
     /// Gives `record` the config its tools get, as [`BiomeConfigs::give`],
-    /// [`RumdlConfigs::give`], [`TombiConfigs::give`], [`YamlfmtConfigs::give`] and
+    /// [`RumdlConfigs::give`], [`TombiConfigs::give`], [`HadolintConfigs::give`],
+    /// [`YamlfmtConfigs::give`] and
     /// [`YamllintConfigs::give`] do, whichever of its formatter and linter runs the tool, so a
     /// custom formatter beside a cartridge linter leaves the linter its config. Whether the block
     /// goes on to its tools: not when it or its config was refused.
@@ -1334,6 +1339,7 @@ impl ToolConfigs {
             && running("rumdl")
                 .is_none_or(|tool| self.rumdl.give(record, tool, place, slots).is_ok())
             && running("tombi").is_none_or(|tool| self.tombi.give(record, tool, place, slots))
+            && running("hadolint").is_none_or(|tool| self.hadolint.give(record, tool, place, slots))
             && self.yamlfmt.give(record, place, slots).is_ok()
             && self.yamllint.give(record, place, slots)
             && self.prettier.verified(record, place, slots)
@@ -1885,6 +1891,162 @@ fn tombi_refusal(refusal: &tombi::Refusal, at: &Location, windows: bool) -> (Str
 /// Why tombi didn't run when supdoc had no private directory to keep its config in.
 fn tombi_no_private_dir(windows: bool) -> String {
     no_private_dir("tombi", "for its config", windows)
+}
+
+/// The hadolint config found for each doc directory, the refusals already warned about, and the
+/// hadolint version once read.
+#[derive(Debug, Default)]
+struct HadolintConfigs {
+    /// Each doc directory's result, in the order they were asked for.
+    found: Vec<(PathBuf, Result<hadolint::Project, hadolint::Refusal>)>,
+    /// The refusals a warning has been added for.
+    warned: Vec<hadolint::Refusal>,
+    /// How long `hadolint --version` may run: the run's tool timeout.
+    timeout: Option<Duration>,
+    /// The hadolint version once read (see [`hadolint::version_of`]), and whether its warning has
+    /// been given. `None` until a block needs it.
+    version: Option<(Result<String, String>, bool)>,
+}
+
+impl HadolintConfigs {
+    /// Gives `record`, a Dockerfile block, the `--config` flags hadolint gets for its doc, found
+    /// once per directory (see [`hadolint::project_args`]), then checks hadolint's version (see
+    /// [`Self::verified`]). A refused config settles the block as not checked, with its one
+    /// warning per refusal added to `slots`. Whether the block goes on to its tools.
+    ///
+    /// Effect: reads the config and may create supdoc's private directory and file for it.
+    fn give(
+        &mut self,
+        record: &mut BlockRecord,
+        tool: &Tool,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> bool {
+        if !tool.runs("hadolint") {
+            return true;
+        }
+        let doc = doc_beneath(root, &record.at.file);
+        let dir = doc.parent().unwrap_or(root).to_path_buf();
+        let found = if let Some((_, found)) = self.found.iter().find(|(known, _)| *known == dir) {
+            found.clone()
+        } else {
+            let found = hadolint::project_args(env, root, &doc);
+            self.found.push((dir, found.clone()));
+            found
+        };
+        match found {
+            Ok(project) => {
+                record.given = Some(biome::Given {
+                    mirror: None,
+                    flags: project.flags,
+                    config: None,
+                    names: None,
+                });
+                self.verified(record, (env, root), slots)
+            }
+            Err(refusal) => {
+                let (reason, warning) = hadolint_refusal(&refusal, &record.at, ON_WINDOWS);
+                if !self.warned.contains(&refusal) {
+                    self.warned.push(refusal);
+                    slots.push(Slot::Found(warning));
+                }
+                record.state = BlockState::NotChecked(NotChecked::ToolConfig);
+                record.reason = Some(reason);
+                false
+            }
+        }
+    }
+
+    /// Whether the hadolint on `PATH` is a version supdoc is verified against (see
+    /// [`hadolint::VERIFIED`]), read once per run. When it isn't, or can't be read, `record`'s
+    /// lint step doesn't run, with [`HADOLINT_UNVERIFIED`] as its reason, and the run's one
+    /// warning goes to `slots`. A hadolint that isn't on `PATH`, or is inside the checkout, is
+    /// left to the usual lookup.
+    ///
+    /// Effect: runs `hadolint --version` the first time.
+    fn verified(
+        &mut self,
+        record: &mut BlockRecord,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> bool {
+        let Found::OnPath(program) = find("hadolint", env, root) else {
+            return true;
+        };
+        let timeout = self.timeout;
+        let (version, warned) = self
+            .version
+            .get_or_insert_with(|| (hadolint::version_of(&program, env, root, timeout), false));
+        let Err(shown) = version else {
+            return true;
+        };
+        if !*warned {
+            *warned = true;
+            slots.push(Slot::Found(
+                Finding::new(
+                    NOT_CHECKED,
+                    Severity::Warning,
+                    format!(
+                        "hadolint {shown} isn't a version supdoc's checks are verified against \
+                         ({}); its Dockerfile blocks' lint steps didn't run",
+                        hadolint::VERIFIED.join(", ")
+                    ),
+                )
+                .with_help(format!(
+                    "install a verified hadolint: {}",
+                    tools::HADOLINT_INSTALL
+                ))
+                .with_location(record.at.clone()),
+            ));
+        }
+        if record.linter.take().is_some() {
+            record.steps.lint = StepState::Unrunnable {
+                reason: HADOLINT_UNVERIFIED,
+            };
+        }
+        false
+    }
+}
+
+/// Why a Dockerfile block's lint step didn't run when the hadolint on `PATH` isn't a verified
+/// version.
+const HADOLINT_UNVERIFIED: &str =
+    "the hadolint on `PATH` isn't a version supdoc is verified against";
+
+/// The state reason and the `code-block-not-checked` warning, at `at`, for a block hadolint isn't
+/// given because of `refusal`.
+fn hadolint_refusal(
+    refusal: &hadolint::Refusal,
+    at: &Location,
+    windows: bool,
+) -> (String, Finding) {
+    let (reason, message, help) = match refusal {
+        hadolint::Refusal::Config { file, why } => (
+            format!("hadolint config `{file}` {why}"),
+            format!("the project's `{file}` {why}, so its Dockerfile blocks aren't checked"),
+            format!(
+                "make `{file}` a plain YAML mapping of at most 256 KiB inside the project, or mark \
+                 the blocks `ignore(<why>)`"
+            ),
+        ),
+        hadolint::Refusal::NoPrivateDir => (
+            hadolint_no_private_dir(windows),
+            format!(
+                "{}, so its blocks aren't checked",
+                hadolint_no_private_dir(windows)
+            ),
+            set_cache_help(windows),
+        ),
+    };
+    let finding = Finding::new(NOT_CHECKED, Severity::Warning, message)
+        .with_help(help)
+        .with_location(at.clone());
+    (reason, finding)
+}
+
+/// Why hadolint didn't run when supdoc had no private directory to keep its config in.
+fn hadolint_no_private_dir(windows: bool) -> String {
+    no_private_dir("hadolint", "for its config", windows)
 }
 
 /// The yamlfmt config flags found for each doc directory, and the refusals already warned about.
