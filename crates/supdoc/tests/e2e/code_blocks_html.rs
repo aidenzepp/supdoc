@@ -573,6 +573,25 @@ fn html_a_block_biome_cant_parse_is_not_linted_never_a_finding_and_never_passed(
 }
 
 #[test]
+fn html_only_an_html_blocks_parse_diagnostic_is_not_run_and_a_css_blocks_stays_a_parse_error() {
+    let css = config_project(
+        "[features.code-blocks]\n[features.code-blocks.css]\n\
+         [features.code-blocks.css.biome-format]\nformat = \"off\"\n",
+        "# Blocks\n\n```css\na {\n\tcolor: red\n```\n",
+    );
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    stub_biome(
+        outside.path(),
+        "css",
+        r#"{"summary":{"changed":0,"unchanged":1},"diagnostics":[{"severity":"error","message":"expected `}` but instead the file ends","category":"parse","location":{"path":"x","start":{"line":2,"column":12}},"advices":[]}],"command":"lint"}"#,
+    );
+
+    let json = check_exit(&css, outside.path(), 1);
+
+    assert_eq!(finding_kinds(&json), ["code-block-parse"], "{json}");
+}
+
+#[test]
 fn html_a_linter_the_projects_biome_config_turns_off_is_not_run_never_passed() {
     let project = lint_project("html", "<img src=\"a.png\">");
     project.write("biome.json", r#"{"html":{"linter":{"enabled":false}}}"#);
