@@ -5,6 +5,7 @@
 //! file, so callers turn them into findings rather than stopping the run. The one exception is
 //! [`ReadError::CartridgeLoad`], a supdoc bug that fails the run with exit code 70.
 
+use crate::remedies::{self, Access};
 use std::fmt::{self, Display, Formatter};
 
 use crate::limits::{SizeLimit, TimeLimit};
@@ -203,16 +204,22 @@ fn io_help(kind: std::io::ErrorKind) -> String {
 
     match kind {
         ErrorKind::PermissionDenied => {
-            "Check that the current user can read the file, for example with `chmod u+r` on it"
-                .to_owned()
+            format!(
+                "Check that the current user can read the file, for example with `{}` on it",
+                remedies::grant(Access::Read, remedies::WINDOWS)
+            )
         }
         ErrorKind::NotADirectory => {
-            "A part of the path that should be a directory is a file. Check the path with `ls -l`"
-                .to_owned()
+            format!(
+                "A part of the path that should be a directory is a file. Check the path with `{}`",
+                remedies::inspect(remedies::WINDOWS)
+            )
         }
-        _ => "Check the file, any symlink loop on its path and the filesystem it is on (`ls -l` \
-              on each part of the path), then run supdoc again"
-            .to_owned(),
+        _ => format!(
+            "Check the file, any symlink loop on its path and the filesystem it is on (`{}` \
+             on each part of the path), then run supdoc again",
+            remedies::inspect(remedies::WINDOWS)
+        ),
     }
 }
 
@@ -655,6 +662,13 @@ mod tests {
     #[test]
     fn not_found_names_the_query_and_suggests_nearest_paths() {
         let file = absolute("/repo/src/lib.rs").display().to_string();
+        // A Windows path holds a backslash, so the shell word is single-quoted, which PowerShell
+        // runs as written; a Unix path needs no quotes.
+        let quoted = if cfg!(windows) {
+            format!("'{file}'")
+        } else {
+            file.clone()
+        };
         let error = ResolveError::NotFound {
             file: absolute("/repo/src/lib.rs"),
             query: symbol("Config.fmt"),
@@ -671,7 +685,7 @@ mod tests {
             error.help(),
             format!(
                 "did you mean `Config.Display.fmt`, `Config.port`? \
-                 `supdoc resolve {file}` lists every symbol"
+                 `supdoc resolve {quoted}` lists every symbol"
             ),
         );
     }

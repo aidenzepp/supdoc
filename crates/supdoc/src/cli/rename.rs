@@ -12,6 +12,7 @@
 //! prefix inside each link's written destination changes, and a reference definition that
 //! several links share is edited once.
 
+use crate::remedies::{self, Access};
 use std::fs;
 use std::io::{self, Write};
 use std::ops::Range;
@@ -910,9 +911,10 @@ fn unread_dir(dir: &UnreadDir, root: &AbsolutePath, rerun: &str) -> CliError {
 /// What to do about a directory the rename couldn't read, before running it again.
 fn unread_dir_help(cause: UnreadCause) -> String {
     match cause {
-        UnreadCause::Io(_) => "Check that the current user can list the directory, for example \
-                               with `chmod u+rx` on it"
-            .to_owned(),
+        UnreadCause::Io(_) => format!(
+            "Check that the current user can list the directory, for example with `{}` on it",
+            remedies::grant(Access::ReadSearch, remedies::WINDOWS)
+        ),
     }
 }
 
@@ -1886,8 +1888,11 @@ Write `[x](auth:login.rs)` to link, or auth:login.rs in prose.
         );
         assert_eq!(
             error.help(),
-            "Check that the current user can list the directory, for example with `chmod u+rx` \
-             on it. Then run `supdoc namespace rename auth identity --yes` again",
+            format!(
+                "Check that the current user can list the directory, for example with `{}` on \
+                 it. Then run `supdoc namespace rename auth identity --yes` again",
+                remedies::grant(Access::ReadSearch, remedies::WINDOWS)
+            ),
             "the help should offer only fixing the directory, then the rerun hint as its own \
              sentence"
         );
