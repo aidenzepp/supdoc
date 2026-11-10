@@ -29,16 +29,7 @@ use super::runner::{self, Failure, Ran};
 use super::tools::{Step, ToolEnv};
 use crate::config::confine::Boundary;
 use crate::hash::Hash;
-use crate::path::AbsolutePath;
-
-/// The config names tombi looks for in a directory, in its own order. `pyproject.toml` counts
-/// only when it has a `[tool.tombi]` table.
-const CONFIG_FILES: [&str; 4] = [
-    ".tombi.toml",
-    "tombi.toml",
-    ".config/tombi.toml",
-    "pyproject.toml",
-];
+use crate::path::{self, Component, fixed};
 
 /// The most bytes of a config supdoc reads.
 const MAX_CONFIG: u64 = 256 * 1024;
@@ -321,10 +312,12 @@ impl Project {
     /// `[[overrides]]` patterns match as they do in the project. The file need not exist.
     #[must_use]
     pub(crate) fn doc_as_seen(&self, doc: &Path) -> PathBuf {
-        self.config_home.join(
-            doc.strip_prefix(&self.from)
-                .unwrap_or_else(|_| Path::new(doc.file_name().unwrap_or_default())),
-        )
+        path::rebase(doc, &self.from, &self.config_home)
+            .or_else(|| {
+                let name = doc.file_name()?.to_str().and_then(Component::new)?;
+                Some(path::beneath(&self.config_home, &name))
+            })
+            .unwrap_or_else(|| self.config_home.clone())
     }
 
     /// The variables tombi gets beyond the passed environment: `XDG_CONFIG_HOME`, the private
@@ -454,7 +447,7 @@ fn candidates(root: &Path, doc: &Path) -> impl Iterator<Item = PathBuf> {
         .map(Path::to_path_buf)
         .collect();
     dirs.into_iter()
-        .flat_map(|dir| CONFIG_FILES.map(|name| dir.join(name)))
+        .flat_map(|dir| fixed::TOMBI_CONFIG_FILES.map(|name| path::beneath(&dir, &name)))
         .filter(|candidate| fs::symlink_metadata(candidate).is_ok())
 }
 
@@ -632,20 +625,28 @@ fn private_config(
     }
     let text = toml::to_string(table).map_err(|_| Some("couldn't be written again as TOML"))?;
     let cache = runner::exact(neutral.parent().ok_or(None)?).ok_or(None)?;
-    let child = |dir: &AbsolutePath, name: &str| AbsolutePath::new(&dir.as_path().join(name));
-    let parent = child(&cache, "tombi-config").ok_or(None)?;
-    let home = child(&parent, &Hash::digest(text.as_bytes()).to_string()).ok_or(None)?;
-    let xdg = child(&home, "tombi").ok_or(None)?;
+    let parent = cache.beneath(&fixed::TOMBI_CONFIG_DIR);
+    let digest = Component::new(&Hash::digest(text.as_bytes()).to_string()).ok_or(None)?;
+    let home = parent.beneath(&digest);
+    let xdg = home.beneath(&fixed::TOMBI);
     let parent_boundary =
         runner::create_private(&Boundary::resolve(&cache), &parent).ok_or(None)?;
     let home_boundary = runner::create_private(&parent_boundary, &home).ok_or(None)?;
     let xdg_boundary = runner::create_private(&home_boundary, &xdg).ok_or(None)?;
     for (dir, file, content) in [
-        (&parent_boundary, child(&parent, ".tombi.toml"), ""),
-        (&home_boundary, child(&home, ".tombi.toml"), text.as_str()),
-        (&xdg_boundary, child(&xdg, "config.toml"), text.as_str()),
+        (&parent_boundary, parent.beneath(&fixed::DOT_TOMBI_TOML), ""),
+        (
+            &home_boundary,
+            home.beneath(&fixed::DOT_TOMBI_TOML),
+            text.as_str(),
+        ),
+        (
+            &xdg_boundary,
+            xdg.beneath(&fixed::CONFIG_TOML),
+            text.as_str(),
+        ),
     ] {
-        runner::write_private(dir, &file.ok_or(None)?, content).ok_or(None)?;
+        runner::write_private(dir, &file, content).ok_or(None)?;
     }
     // Its real path: tombi resolves the working directory's, and matches override patterns
     // against the doc only when the doc's path, which can't be resolved, starts with it.
@@ -681,6 +682,19 @@ mod tests {
         let copy = read(".tombi.toml");
         assert_eq!(copy, read("tombi/config.toml"), "the two copies differ");
         copy
+    }
+
+    #[test]
+    fn a_doc_outside_the_pattern_root_is_seen_by_its_file_name_in_the_private_directory() {
+        let given = Project {
+            config_home: PathBuf::from("/private/home"),
+            from: PathBuf::from("/project/docs"),
+        };
+
+        assert_eq!(
+            given.doc_as_seen(Path::new("/elsewhere/a.md")),
+            PathBuf::from("/private/home/a.md")
+        );
     }
 
     #[test]

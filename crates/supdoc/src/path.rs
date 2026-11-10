@@ -304,10 +304,8 @@ pub(crate) mod fixed {
     /// The Go file a block is written to.
     pub(crate) const MAIN_GO: FixedPath = FixedPath::new("main.go");
     /// supdoc's directory beneath a cache or state base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const SUPDOC: FixedPath = FixedPath::new("supdoc");
     /// The code-block directory beneath [`SUPDOC`].
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CODE_BLOCKS: FixedPath = FixedPath::new("code-blocks");
     /// Cargo's private target directory beneath a cache base.
     #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
@@ -325,46 +323,32 @@ pub(crate) mod fixed {
     #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const DOT_CACHE: FixedPath = FixedPath::new(".cache");
     /// rumdl's config file name.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const RUMDL_TOML: FixedPath = FixedPath::new("rumdl.toml");
     /// rumdl's private config directory beneath the cache base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const RUMDL_CONFIG_DIR: FixedPath = FixedPath::new("rumdl-config");
     /// A git work tree's marker.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const DOT_GIT: FixedPath = FixedPath::new(".git");
     /// tombi's config directory name.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const TOMBI: FixedPath = FixedPath::new("tombi");
     /// tombi's private config directory beneath the cache base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const TOMBI_CONFIG_DIR: FixedPath = FixedPath::new("tombi-config");
     /// tombi's private config file name.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const DOT_TOMBI_TOML: FixedPath = FixedPath::new(".tombi.toml");
     /// A tool's config file name inside its config directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CONFIG_TOML: FixedPath = FixedPath::new("config.toml");
     /// rustc's private emit directory beneath the cache base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const EMIT: FixedPath = FixedPath::new("emit");
     /// The metadata file rustc emits for a block.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const BLOCK_RMETA: FixedPath = FixedPath::new("block.rmeta");
     /// A private working directory name.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CWD: FixedPath = FixedPath::new("cwd");
     /// yamlfmt's private config directory beneath the cache base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const YAMLFMT_CONFIG_DIR: FixedPath = FixedPath::new("yamlfmt-config");
     /// yamllint's private config directory beneath the cache base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const YAMLLINT_CONFIG_DIR: FixedPath = FixedPath::new("yamllint-config");
     /// yamlfmt's private config file name.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const DOT_YAMLFMT: FixedPath = FixedPath::new(".yamlfmt");
     /// yamllint's private config file name.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CONFIG_YAML: FixedPath = FixedPath::new("config.yaml");
     /// The default state base beneath `HOME`.
     #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
@@ -404,7 +388,6 @@ pub(crate) mod fixed {
         FixedPath::new(".biome.jsonc"),
     ];
     /// The config names rumdl looks for in a directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const RUMDL_CONFIG_FILES: [FixedPath; 4] = [
         FixedPath::new(".rumdl.toml"),
         FixedPath::new("rumdl.toml"),
@@ -412,7 +395,6 @@ pub(crate) mod fixed {
         FixedPath::new("pyproject.toml"),
     ];
     /// The files rumdl's cached results depend on.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const RUMDL_TOOL_CONFIG_FILES: [FixedPath; 5] = [
         FixedPath::new(".rumdl.toml"),
         FixedPath::new("rumdl.toml"),
@@ -421,7 +403,6 @@ pub(crate) mod fixed {
         FixedPath::new(".editorconfig"),
     ];
     /// The config names tombi looks for in a directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const TOMBI_CONFIG_FILES: [FixedPath; 4] = [
         FixedPath::new(".tombi.toml"),
         FixedPath::new("tombi.toml"),
@@ -429,13 +410,11 @@ pub(crate) mod fixed {
         FixedPath::new("pyproject.toml"),
     ];
     /// The config names rustfmt looks for in a directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const RUST_CONFIG_FILES: [FixedPath; 2] = [
         FixedPath::new(".rustfmt.toml"),
         FixedPath::new("rustfmt.toml"),
     ];
     /// The config names clippy looks for in a directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CLIPPY_FILES: [FixedPath; 2] = [
         FixedPath::new(".clippy.toml"),
         FixedPath::new("clippy.toml"),
@@ -447,7 +426,6 @@ pub(crate) mod fixed {
         FixedPath::new("rust-toolchain.toml"),
     ];
     /// The config names yamlfmt looks for in a directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const YAMLFMT_CONFIG_FILES: [FixedPath; 5] = [
         FixedPath::new(".yamlfmt"),
         FixedPath::new("yamlfmt.yml"),
@@ -456,49 +434,49 @@ pub(crate) mod fixed {
         FixedPath::new(".yamlfmt.yml"),
     ];
     /// The config names yamllint looks for in a directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const YAMLLINT_CONFIG_FILES: [FixedPath; 3] = [
         FixedPath::new(".yamllint"),
         FixedPath::new(".yamllint.yaml"),
         FixedPath::new(".yamllint.yml"),
     ];
     /// The files rustfmt's cached results depend on.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const RUSTFMT_TOOL_CONFIG_FILES: [FixedPath; 2] = [
         FixedPath::new("rustfmt.toml"),
         FixedPath::new(".rustfmt.toml"),
     ];
     /// The files clippy's cached results depend on.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CLIPPY_TOOL_CONFIG_FILES: [FixedPath; 3] = [
         FixedPath::new("clippy.toml"),
         FixedPath::new(".clippy.toml"),
         FixedPath::new("Cargo.toml"),
     ];
     /// The files ruff's cached results depend on.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const RUFF_TOOL_CONFIG_FILES: [FixedPath; 3] = [
         FixedPath::new("ruff.toml"),
         FixedPath::new(".ruff.toml"),
         FixedPath::new("pyproject.toml"),
     ];
     /// The files a pyproject-configured tool's cached results depend on.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const PYPROJECT_TOOL_CONFIG_FILES: [FixedPath; 1] =
         [FixedPath::new("pyproject.toml")];
     /// The files an editorconfig-configured tool's cached results depend on.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const EDITORCONFIG_TOOL_CONFIG_FILES: [FixedPath; 1] =
         [FixedPath::new(".editorconfig")];
     /// The files shellcheck's cached results depend on.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const SHELLCHECK_TOOL_CONFIG_FILES: [FixedPath; 1] =
         [FixedPath::new(".shellcheckrc")];
     /// The local binary directories a Python tool searches.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const VENV_BINS: [FixedPath; 1] = [FixedPath::new(".venv/bin")];
-    /// The local binary directories a Node tool searches.
+    /// Windows' system directory beneath the Windows root.
     #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const SYSTEM32: FixedPath = FixedPath::new("System32");
+    /// The Windows `curl` binary name.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const CURL_EXE: FixedPath = FixedPath::new("curl.exe");
+    /// The Windows `taskkill` binary name.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    pub(crate) const TASKKILL_EXE: FixedPath = FixedPath::new("taskkill.exe");
+    /// The local binary directories a Node tool searches.
     pub(crate) const NODE_BINS: [FixedPath; 1] = [FixedPath::new("node_modules/.bin")];
 }
 
@@ -510,7 +488,8 @@ impl Beneath for FixedPath {
 
 /// One normal path component, checked when it is built: not empty, not `.` or `..`, and free of
 /// `/`, `\\`, `:` and NUL, so it is exactly one component on every platform. For a name computed
-/// at run time: a digest, a cache key, a fresh temp name, a `read_dir` entry or a binary name.
+/// at run time: a digest, a cache key, a fresh temp name or a `read_dir` entry. A program name a user wrote goes through
+/// [`NativeName`] instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Component(String);
 
@@ -530,6 +509,42 @@ impl Beneath for Component {
     }
 }
 
+/// One file name that stays inside the directory it is joined to on the running platform: not
+/// empty, not `.` or `..`, free of NUL and of the platform's separators (`/` everywhere, `\\`
+/// and `:` too on Windows, where `C:x` would leave the directory and `x:s` names a stream). For
+/// a program name a user wrote, which an OS accepts as one file name even when [`Component`]
+/// would not: `my:fmt` is an ordinary name on Unix.
+///
+/// Not [`Beneath`]: that trait promises one component on every platform.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeName(String);
+
+impl NativeName {
+    /// Wraps `name`, or returns `None` when joining it could leave the directory on this
+    /// platform.
+    #[must_use]
+    pub(crate) fn new(name: &str) -> Option<Self> {
+        (!Self::refused(name, cfg!(windows))).then(|| Self(name.to_owned()))
+    }
+
+    /// Whether `name` is refused on Windows (`windows`) or on a Unix platform.
+    fn refused(name: &str, windows: bool) -> bool {
+        let separators: &[char] = if windows { &['/', '\\', ':'] } else { &['/'] };
+        name.is_empty()
+            || name == "."
+            || name == ".."
+            || name.contains(separators)
+            || name.contains('\0')
+    }
+}
+
+/// `dir` with the platform-native `name` appended, as [`Path::join`] does. Refuses nothing: the
+/// type holds the proof.
+#[must_use]
+pub(crate) fn within(dir: &Path, name: &NativeName) -> PathBuf {
+    raw_join(dir, Path::new(&name.0))
+}
+
 /// The one raw join in this module's typed joins: `base` with `tail` appended, as
 /// [`Path::join`] does. Every typed join below calls it, so the lint that bans raw joins
 /// elsewhere has one function here to mark.
@@ -543,6 +558,56 @@ fn raw_join(base: &Path, tail: &Path) -> PathBuf {
 #[must_use]
 pub(crate) fn beneath(base: &Path, rel: &impl Beneath) -> PathBuf {
     raw_join(base, Path::new(rel.segments()))
+}
+
+/// A checked tail for a file name: not empty, and free of `/`, `\\`, `:`, `..` and NUL, so
+/// appending it to a name never adds a component and never makes the name a traversal. For a
+/// constant or computed extension such as `.1.toml`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Suffix(String);
+
+impl Suffix {
+    /// Wraps `tail`, or returns `None` when it is empty or holds `/`, `\\`, `:`, `..` or NUL.
+    #[must_use]
+    pub(crate) fn new(tail: &str) -> Option<Self> {
+        let refused =
+            tail.is_empty() || tail.contains(['/', '\\', ':', '\0']) || tail.contains("..");
+        (!refused).then(|| Self(tail.to_owned()))
+    }
+}
+
+/// `path` with `suffix` appended to its file name, in the same directory: `a.md` and `.1.toml`
+/// give `a.md.1.toml`. The existing name is not re-checked, so a Unix name holding `:` is kept.
+/// `None` when `path` has no file name, such as a root or one ending in `..`.
+#[must_use]
+pub(crate) fn with_suffix(path: &Path, suffix: &Suffix) -> Option<PathBuf> {
+    let name = path.file_name()?;
+    let mut joined = name.to_owned();
+    joined.push(&suffix.0);
+    Some(raw_join(path.parent()?, Path::new(&joined)))
+}
+
+/// `path` with its whole file name replaced by `name`, in the same directory. `None` when `path`
+/// has no file name or parent, such as a root.
+#[must_use]
+#[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+pub(crate) fn sibling(path: &Path, name: &Component) -> Option<PathBuf> {
+    let _name = path.file_name()?;
+    Some(raw_join(path.parent()?, Path::new(name.segments())))
+}
+
+/// `path` with its existing file name wrapped by `prefix` and `suffix`, in the same directory:
+/// `a.md` with `.` and `.7.tmp` gives `.a.md.7.tmp`. Both wrappers are [`Suffix`] values, so each
+/// is checked; the existing name is not re-checked, so a Unix name holding `:` is kept. `None` when
+/// `path` has no file name, such as a root or one ending in `..`.
+#[must_use]
+#[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+pub(crate) fn with_affixes(path: &Path, prefix: &Suffix, suffix: &Suffix) -> Option<PathBuf> {
+    let name = path.file_name()?;
+    let mut joined = std::ffi::OsString::from(&prefix.0);
+    joined.push(name);
+    joined.push(&suffix.0);
+    Some(raw_join(path.parent()?, Path::new(&joined)))
 }
 
 /// `path` moved from under `from` to the same place under `onto`: `onto` joined with what
@@ -853,6 +918,47 @@ mod tests {
         assert_eq!(AbsolutePath::new(root.as_path()), Some(root));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn a_native_name_applies_the_windows_rules_on_windows() {
+        for refused in ["C:x", "a:b", "a\\b"] {
+            assert_eq!(NativeName::new(refused), None, "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn a_native_name_refuses_what_leaves_the_directory_on_each_platform() {
+        for refused in ["", ".", "..", "a/b", "a\0b"] {
+            assert!(NativeName::refused(refused, false), "{refused:?} on Unix");
+            assert!(NativeName::refused(refused, true), "{refused:?} on Windows");
+        }
+        for windows_only in ["a\\b", "a:b", "C:x"] {
+            assert!(
+                !NativeName::refused(windows_only, false),
+                "{windows_only:?} on Unix"
+            );
+            assert!(
+                NativeName::refused(windows_only, true),
+                "{windows_only:?} on Windows"
+            );
+        }
+        for accepted in ["my-fmt", "a.b", "..x"] {
+            assert!(
+                !NativeName::refused(accepted, false),
+                "{accepted:?} on Unix"
+            );
+            assert!(
+                !NativeName::refused(accepted, true),
+                "{accepted:?} on Windows"
+            );
+        }
+        assert_eq!(NativeName::new("a/b"), None);
+        assert_eq!(
+            NativeName::new("my-fmt").map(|name| within(Path::new("/d"), &name)),
+            Some(PathBuf::from("/d/my-fmt"))
+        );
+    }
+
     #[test]
     fn a_component_refuses_anything_but_one_normal_name() {
         for refused in ["", ".", "..", "a/b", "a\\b", "a:b", "a\0b"] {
@@ -864,6 +970,108 @@ mod tests {
         }
         let accepted = Component::new("x-1").expect("`x-1` is one normal component");
         assert_eq!(accepted.segments(), "x-1");
+    }
+
+    #[test]
+    fn a_suffix_refuses_a_separator_a_traversal_or_nul() {
+        for refused in ["", "/x", "x/y", "\\x", "..", ".1..toml", ":x", "a\0b"] {
+            assert_eq!(Suffix::new(refused), None, "{refused:?} is not a suffix");
+        }
+        assert!(Suffix::new(".1.toml").is_some());
+    }
+
+    #[test]
+    fn with_suffix_keeps_the_directory_and_extends_the_name() {
+        let suffix = Suffix::new(".1.toml").expect("a plain suffix");
+        assert_eq!(
+            with_suffix(Path::new("/d/e/a.md"), &suffix),
+            Some(PathBuf::from("/d/e/a.md.1.toml"))
+        );
+        assert_eq!(
+            with_suffix(Path::new("a.md"), &suffix),
+            Some(PathBuf::from("a.md.1.toml"))
+        );
+        assert_eq!(with_suffix(Path::new("/"), &suffix), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn with_suffix_keeps_a_colon_in_the_existing_name_on_unix() {
+        let suffix = Suffix::new(".1.toml").expect("a plain suffix");
+        assert_eq!(
+            with_suffix(Path::new("/d/a:b.md"), &suffix),
+            Some(PathBuf::from("/d/a:b.md.1.toml"))
+        );
+    }
+
+    #[test]
+    fn sibling_replaces_the_name_and_refuses_what_a_component_refuses() {
+        let name = Component::new("b.toml").expect("one normal name");
+        assert_eq!(
+            sibling(Path::new("/d/a.md"), &name),
+            Some(PathBuf::from("/d/b.toml"))
+        );
+        assert_eq!(sibling(Path::new("/"), &name), None);
+        for refused in ["", ".", "..", "a/b", "a\\b", "a:b", "a\0b"] {
+            assert_eq!(Component::new(refused), None, "{refused:?} reaches sibling");
+        }
+    }
+
+    #[test]
+    fn sibling_is_none_for_a_path_with_no_file_name() {
+        let name = Component::new("b.toml").expect("one normal name");
+        assert_eq!(sibling(Path::new("/d/.."), &name), None);
+        assert_eq!(sibling(Path::new("/"), &name), None);
+    }
+
+    #[test]
+    fn with_affixes_keeps_the_directory_and_wraps_the_name() {
+        let prefix = Suffix::new(".").expect("a plain prefix");
+        let suffix = Suffix::new(".7.tmp").expect("a plain suffix");
+        assert_eq!(
+            with_affixes(Path::new("/d/e/a.md"), &prefix, &suffix),
+            Some(PathBuf::from("/d/e/.a.md.7.tmp"))
+        );
+        assert_eq!(
+            with_affixes(Path::new("a.md"), &prefix, &suffix),
+            Some(PathBuf::from(".a.md.7.tmp"))
+        );
+    }
+
+    #[test]
+    fn with_affixes_is_none_for_a_path_with_no_file_name() {
+        let wrap = Suffix::new(".x").expect("a plain wrapper");
+        assert_eq!(with_affixes(Path::new("/d/.."), &wrap, &wrap), None);
+        assert_eq!(with_affixes(Path::new("/"), &wrap, &wrap), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn with_affixes_keeps_a_colon_in_the_existing_name_on_unix() {
+        let prefix = Suffix::new(".").expect("a plain prefix");
+        let suffix = Suffix::new(".7.tmp").expect("a plain suffix");
+        assert_eq!(
+            with_affixes(Path::new("/d/a:b.md"), &prefix, &suffix),
+            Some(PathBuf::from("/d/.a:b.md.7.tmp"))
+        );
+    }
+
+    #[test]
+    fn with_affixes_wrappers_refuse_each_bad_input_independently() {
+        for refused in ["", "/", "\\", ":", "..", "\0"] {
+            assert_eq!(
+                Suffix::new(refused),
+                None,
+                "{refused:?} would reach a with_affixes wrapper"
+            );
+        }
+    }
+
+    #[test]
+    fn the_windows_name_constants_expose_their_text() {
+        assert_eq!(fixed::SYSTEM32.as_str(), "System32");
+        assert_eq!(fixed::CURL_EXE.as_str(), "curl.exe");
+        assert_eq!(fixed::TASKKILL_EXE.as_str(), "taskkill.exe");
     }
 
     #[test]

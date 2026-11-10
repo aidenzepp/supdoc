@@ -126,6 +126,10 @@ A `[features.code-blocks]` table, even an empty one, turns on code-block checkin
 like a link. A language's table, such as `[features.code-blocks.rust]`, turns on that language's
 formatter and linter. `supdoc check --help` lists every tool, attribute and how to opt a block out.
 
+markdownlint-cli2 is not a built-in Markdown linter: supdoc passes each block on stdin, which it cannot name, so
+its per-directory configs and path-scoped overrides or ignores would not apply. Use rumdl, or a custom
+`linter = { command = [...] }`.
+
 ## Safety
 
 - Outside the project root, supdoc reads only its own inputs: its config chain, ignore files, the git

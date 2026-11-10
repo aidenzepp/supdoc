@@ -109,11 +109,10 @@ pub(crate) enum Failure {
 /// writes past its cap.
 pub(crate) fn run(call: &Call<'_>, env: &ToolEnv, root: &Path) -> Result<Ran, Failure> {
     let cwd = working_dir(call.cwd, env, root)?;
+    let deadline = call.timeout.map(|timeout| Instant::now() + timeout);
     // No new tool once a termination signal has arrived, and until the group is registered the
     // signal thread can't copy the live groups, so it can't miss this tool.
-    let spawning = Spawning::begin();
-    let deadline = call.timeout.map(|timeout| Instant::now() + timeout);
-    let mut child = spawn_tool(call, env, cwd).map_err(Failure::Spawn)?;
+    let (spawning, mut child) = spawn_tool(call, env, cwd).map_err(Failure::Spawn)?;
     // Held until this function returns, by which point every path has reaped the tool.
     let _live = LiveGroup::register(child.id());
     // Released before any wait on the tool, so the signal thread never waits on one.
@@ -255,14 +254,15 @@ pub(crate) fn private_dir(env: &ToolEnv, root: &Path, dir: &Path) -> Option<Path
     private.then_some(real)
 }
 
-/// Starts the tool `call` names in `cwd`, as the leader of its own process group.
+/// Starts the tool `call` names in `cwd`, as the leader of its own process group, and returns the
+/// [`Spawning`] that covers the spawn with it. The caller drops that once the group is registered.
 ///
 /// # Errors
 ///
 /// The spawn failure, such as a program that does not exist.
 ///
-/// Effect: spawns the tool.
-fn spawn_tool(call: &Call<'_>, env: &ToolEnv, cwd: PathBuf) -> std::io::Result<Child> {
+/// Effect: spawns the tool, sleeping between tries of a busy executable.
+fn spawn_tool(call: &Call<'_>, env: &ToolEnv, cwd: PathBuf) -> std::io::Result<(Spawning, Child)> {
     let mut command = Command::new(call.program);
     // Unix runs a multi-call binary reached through a symlink as the tool it was looked up as.
     // Windows has no `arg0`: its proxies are hard links named per tool, so the program path
@@ -284,7 +284,11 @@ fn spawn_tool(call: &Call<'_>, env: &ToolEnv, cwd: PathBuf) -> std::io::Result<C
     let _same = command.process_group(0);
     #[cfg(windows)]
     let _same = command.creation_flags(CREATE_NEW_PROCESS_GROUP);
-    command.spawn()
+    process::retry_busy(
+        Spawning::begin,
+        || command.spawn(),
+        || thread::sleep(process::BUSY_DELAY),
+    )
 }
 
 /// Whether `meta` is mode 0700 or narrower and owned by whoever owns `cache`.
@@ -489,6 +493,7 @@ mod tests {
     };
     use crate::code_blocks::tools::ToolEnv;
     use crate::config::confine::Boundary;
+    use crate::process::{BUSY_ATTEMPTS, retry_busy};
 
     /// A fresh directory holding a `root` project, a `home` and a `bin` with the stub `script`.
     struct Fixture {
@@ -533,9 +538,6 @@ mod tests {
         }
     }
 
-    /// How many times [`run_stub`] spawns a stub that Linux reports busy.
-    const BUSY_ATTEMPTS: u32 = 5;
-
     /// Runs the fixture's stub on `stdin` with `extra` and `timeout`, from the neutral directory
     /// with the default cap.
     fn run_stub(
@@ -548,9 +550,6 @@ mod tests {
     }
 
     /// Runs the fixture's stub on `stdin` with `extra`, `timeout`, `cwd` and `cap`.
-    ///
-    /// On Linux a stub just written can fail to spawn with `ETXTBSY` while another test's fork
-    /// still holds the write descriptor, so a busy spawn is retried a few times, 20 ms apart.
     fn run_stub_with(
         fixture: &Fixture,
         stdin: &[u8],
@@ -569,18 +568,110 @@ mod tests {
             cwd,
             cap,
         };
-        let mut attempt = 1;
-        loop {
-            match run(&call, &fixture.env, &fixture.root) {
-                Err(Failure::Spawn(error))
-                    if error.kind() == ErrorKind::ExecutableFileBusy && attempt < BUSY_ATTEMPTS =>
-                {
-                    attempt += 1;
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                result => return result,
-            }
+        run(&call, &fixture.env, &fixture.root)
+    }
+
+    fn busy() -> std::io::Error {
+        std::io::Error::from(ErrorKind::ExecutableFileBusy)
+    }
+
+    #[test]
+    fn a_busy_spawn_is_retried_until_it_succeeds() {
+        let mut tries = 0;
+
+        let result = retry_busy(
+            || (),
+            || {
+                tries += 1;
+                if tries <= 2 { Err(busy()) } else { Ok(tries) }
+            },
+            || (),
+        );
+
+        assert_eq!(result.expect("the third try succeeds").1, 3);
+        assert_eq!(tries, 3, "busy twice then Ok is three tries");
+    }
+
+    #[test]
+    fn a_spawn_busy_past_the_limit_returns_the_busy_error() {
+        let mut tries = 0;
+
+        let result: std::io::Result<((), ())> = retry_busy(
+            || (),
+            || {
+                tries += 1;
+                Err(busy())
+            },
+            || (),
+        );
+
+        let error = result.expect_err("every try is busy");
+        assert_eq!(error.kind(), ErrorKind::ExecutableFileBusy);
+        assert_eq!(tries, BUSY_ATTEMPTS, "the tries stop at the limit");
+    }
+
+    #[test]
+    fn any_other_spawn_error_returns_without_a_retry() {
+        let mut tries = 0;
+
+        let result: std::io::Result<((), ())> = retry_busy(
+            || (),
+            || {
+                tries += 1;
+                Err(std::io::Error::from(ErrorKind::NotFound))
+            },
+            || (),
+        );
+
+        let error = result.expect_err("not found is not retried");
+        assert_eq!(error.kind(), ErrorKind::NotFound);
+        assert_eq!(tries, 1, "a non-busy error is tried once");
+    }
+
+    /// A guard that counts how many are alive.
+    struct Counted<'live>(&'live std::cell::Cell<u32>);
+
+    impl<'live> Counted<'live> {
+        fn begin(live: &'live std::cell::Cell<u32>) -> Self {
+            live.set(live.get() + 1);
+            Self(live)
         }
+    }
+
+    impl Drop for Counted<'_> {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() - 1);
+        }
+    }
+
+    #[test]
+    fn no_guard_is_alive_while_a_busy_spawn_pauses() {
+        let live = std::cell::Cell::new(0);
+        let mut pauses = 0;
+        let mut tries = 0;
+
+        let result = retry_busy(
+            || Counted::begin(&live),
+            || {
+                tries += 1;
+                assert_eq!(live.get(), 1, "each try runs under exactly one guard");
+                if tries <= 2 { Err(busy()) } else { Ok(()) }
+            },
+            || {
+                pauses += 1;
+                assert_eq!(live.get(), 0, "a pause must not run under a guard");
+            },
+        );
+
+        let (guard, ()) = result.expect("the third try succeeds");
+        assert_eq!(pauses, 2, "two busy tries pause twice");
+        assert_eq!(
+            live.get(),
+            1,
+            "the successful try's guard is returned alive"
+        );
+        drop(guard);
+        assert_eq!(live.get(), 0, "dropping it ends the last guard");
     }
 
     #[cfg(unix)]

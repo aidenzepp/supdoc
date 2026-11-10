@@ -1718,6 +1718,28 @@ mod tests {
     }
 
     #[test]
+    fn markdownlint_cli2_is_refused_naming_rumdl_and_the_custom_command() {
+        let message = refused("markdown", "linter = \"markdownlint-cli2\"");
+
+        assert!(
+            message.contains("stdin")
+                && message.contains("`linter = \"rumdl\"`")
+                && message.contains("linter = { command = ["),
+            "got {message}"
+        );
+    }
+
+    #[test]
+    fn another_unknown_markdown_linter_keeps_the_known_tools_message() {
+        let message = refused("markdown", "linter = \"mdl\"");
+
+        assert!(
+            message.contains("isn't a known markdown linter") && message.contains("`rumdl`"),
+            "got {message}"
+        );
+    }
+
+    #[test]
     fn a_linter_from_another_language_is_refused() {
         let message = refused("shell", "linter = \"clippy\"");
 
@@ -1866,8 +1888,11 @@ mod tests {
         assert_eq!(error.code(), "config-parse", "got {error:?}");
         assert_eq!(error.status(), ExitStatus::Config);
         let message = error.to_string();
+        let child = std::path::Path::new("apps")
+            .join("web")
+            .join("supdoc.config.toml");
         assert!(
-            message.contains("apps/web/supdoc.config.toml")
+            message.contains(&child.display().to_string())
                 && message.contains("[features.code-blocks.python.black]"),
             "the message should name the child's file and the table: {message}"
         );

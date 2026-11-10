@@ -217,7 +217,10 @@ impl Rule<'_> {
             (Origin::Inside, Some(file)) => format!(
                 "`{}` in {}",
                 self.glob.original(),
-                file.strip_prefix(root.as_path()).unwrap_or(file).display()
+                AbsolutePath::new(file).map_or_else(
+                    || file.display().to_string(),
+                    |file| relative_to(root, &file)
+                )
             ),
             (Origin::Inside, None) => format!("`{}`", self.glob.original()),
             _ => "an ignore file".to_owned(),
