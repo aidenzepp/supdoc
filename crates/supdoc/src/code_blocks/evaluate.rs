@@ -763,12 +763,29 @@ fn linted_nothing(at: &Location) -> Finding {
     Finding::new(
         NOT_CHECKED,
         Severity::Warning,
-        "biome lint checked no file for this block, so its TypeScript, JavaScript and JSON blocks' \
-         lint step didn't run: the project's biome config leaves them out",
+        "biome lint checked no file for this block, so its TypeScript, JavaScript, JSON and CSS \
+         blocks' lint step didn't run: the project's biome config leaves them out",
     )
     .with_help(
         "find the setting in the project's biome config that excludes the doc's blocks, or mark \
          the blocks `lint(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first CSS block whose biome
+/// format step didn't run because the project's biome config turns the CSS formatter off.
+fn biome_formatter_off(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "the project's biome config turns the CSS formatter off, so biome printed this block back \
+         as written and its CSS blocks' format step didn't run",
+    )
+    .with_help(
+        "turn the formatter back on in the project's biome config, where the top-level \
+         `formatter.enabled: false`, `css.formatter.enabled: false` or an `overrides` entry \
+         matching the blocks turns it off, or mark the blocks `format(off: <reason>)`",
     )
     .with_location(at.clone())
 }
@@ -1063,6 +1080,7 @@ impl NotRunWarnings {
             YAML_EMPTY => yaml_empty(at),
             FRAME_RESHAPED => frame_reshaped(at),
             BIOME_LINTED_NOTHING => linted_nothing(at),
+            BIOME_FORMATTER_OFF => biome_formatter_off(at),
             PYLINT_SWITCHED_OFF => pylint_switched_off(at),
             PRETTIER_SWITCHED_OFF => prettier_switched_off(at),
             ESLINT_SWITCHED_OFF => eslint_switched_off(at),
@@ -1527,8 +1545,8 @@ fn biome_refusal(refusal: &biome::Refusal, at: &Location, windows: bool) -> (Str
         biome::Refusal::Config { file, why, help } => (
             format!("biome config `{file}` {why}"),
             format!(
-                "the project's `{file}` {why}, so its TypeScript, JavaScript and JSON blocks aren't \
-                 checked"
+                "the project's `{file}` {why}, so its TypeScript, JavaScript, JSON and CSS blocks \
+                 aren't checked"
             ),
             format!("in `{file}`: {help}"),
         ),
@@ -3418,6 +3436,21 @@ const YAML_CONTROL_REFUSED: &str = "the block holds a control character supdoc d
 /// The linter that reads the block from a private file rather than stdin.
 const BIOME_LINT: &str = "biome-lint";
 
+/// biome's formatter.
+const BIOME_FORMAT: &str = "biome-format";
+
+/// Why biome format's step on a CSS block didn't run when biome said the project's config turns
+/// its CSS formatter off: it printed the block back as written, which passes no block.
+pub(super) const BIOME_FORMATTER_OFF: &str =
+    "biome format didn't run: the project's biome config turns the CSS formatter off";
+
+/// Whether `ran`, a finished run of `tool`, is biome's CSS formatter saying the project's config
+/// turns the CSS formatter off (see [`biome::formatter_off`]), whatever its exit. Other
+/// languages' biome format runs keep their verdict.
+fn css_formatter_off(tool: &ToolCartridge, ran: &Ran) -> bool {
+    tool.name == BIOME_FORMAT && tool.language == Language::Css && biome::formatter_off(&ran.stderr)
+}
+
 /// Why biome lint's step counts as not run when its report says it checked no file: something
 /// in the project's config still left the block out, so the run says nothing about it.
 pub(super) const BIOME_LINTED_NOTHING: &str =
@@ -3796,13 +3829,18 @@ fn run_clippy(
 /// that it skipped the step (see [`tombi::skip`]). The reason quotes what it said, without the
 /// path. Or, from yamllint's run, that it rejected the config supdoc gave it (see
 /// [`rejected_by_yamllint`]): the reason names the project's config, never what yamllint said.
-/// `None` for any other run, and for a block neither tool is given.
+/// Or, from biome's CSS formatter, that the project's config turns it off (see
+/// [`css_formatter_off`]). `None` for any other run, and for a block none of these tools is
+/// given.
 fn config_skipped_by(
     record: &BlockRecord,
     tool: &ToolCartridge,
     result: &Result<Ran, runner::Failure>,
 ) -> Option<NotRun> {
     let ran = result.as_ref().ok()?;
+    if css_formatter_off(tool, ran) {
+        return Some(BIOME_FORMATTER_OFF.into());
+    }
     if let Some(lint) = record.yamllint.as_ref().filter(|_| tool.name == YAMLLINT) {
         if !ran.success && yaml::locale_failed(&ran.stderr) {
             let locale = lint.locale.as_deref().unwrap_or_default().replace('`', "'");
