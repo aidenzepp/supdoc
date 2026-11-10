@@ -1043,3 +1043,53 @@ fn a_global_excludes_rule_from_the_xdg_config_home_hides_a_file() {
         "the global rule hides the guide and nothing else\n{sources:?}"
     );
 }
+
+/// A git work tree whose top `.gitignore` holds `outer_rules`, with a supdoc project in `p/`
+/// that has its own config, a source file, and the docs `a.md` and `x.gen.md`, each with one link.
+fn project_beneath_outer_rules(outer_rules: &str) -> Project {
+    let project = web_project();
+    make_git_dir(&project, ".git");
+    project.write(".gitignore", outer_rules);
+    project.write("p/supdoc.config.toml", "include = [\"**\"]\n");
+    project.write("p/src.rs", "pub fn handler() {}\n");
+    project.write("p/a.md", "The [`handler`](src.rs#handler) function.\n");
+    project.write("p/x.gen.md", "The [`handler`](src.rs#handler) function.\n");
+    project
+}
+
+#[test]
+fn a_root_inside_a_directory_an_outer_gitignore_ignores_is_still_checked() {
+    let project = project_beneath_outer_rules("p/\n");
+
+    let list = project.supdoc_in("p", &["--json", "list"]);
+    let named = project.supdoc_in("p", &["--json", "check", "a.md"]);
+
+    let _ = list.assert_exit(0);
+    assert!(
+        listed_sources(&list).contains(&"a.md".to_owned()),
+        "git ignores `p/`, but supdoc never judges the root, so `a.md` is still listed\n{}",
+        list.stdout
+    );
+    assert_eq!(
+        count_of(&named, "scan-explicit-path-ignored"),
+        0,
+        "a named file beneath an ignored root draws no ignored-path warning\n{}",
+        named.stdout
+    );
+}
+
+#[test]
+fn an_outer_rule_still_hides_files_beneath_a_root_it_does_not_ignore() {
+    let project = project_beneath_outer_rules("p/\n*.gen.md\n");
+
+    let sources = listed_sources(&project.supdoc_in("p", &["--json", "list"]));
+
+    assert!(
+        sources.contains(&"a.md".to_owned()),
+        "the ignored root is still scanned\n{sources:?}"
+    );
+    assert!(
+        !sources.contains(&"x.gen.md".to_owned()),
+        "the outer `*.gen.md` rule applies to files beneath the root\n{sources:?}"
+    );
+}
