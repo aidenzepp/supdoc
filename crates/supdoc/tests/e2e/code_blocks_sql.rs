@@ -374,6 +374,9 @@ fn sql_noqa_on_every_line_or_a_disable_all_range_leaves_both_sqruff_steps_not_ru
         "-- noqa: disable=all\nSELECT 1;",
         "SELECT 1; -- NOQA: All",
         "SELECT 1; -- noqa: core",
+        "/*\nnoqa: disable=all\n*/\nSELECT 1;",
+        "/* noqa: disable=LT01\n, all */\nSELECT 1;",
+        "SELECT 1;\n/* noqa",
     ] {
         let project = sql_project("", "sql", body);
         let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
@@ -411,7 +414,11 @@ fn sql_noqa_on_every_line_or_a_disable_all_range_leaves_both_sqruff_steps_not_ru
 
 #[test]
 fn sql_noqa_naming_rules_or_on_some_lines_still_lints_the_block() {
-    for body in ["SELECT 1; -- noqa: LT01", "SELECT a, -- noqa\n  b FROM t;"] {
+    for body in [
+        "SELECT 1; -- noqa: LT01",
+        "SELECT a, -- noqa\n  b FROM t;",
+        "/* plain comment */\nSELECT 1;",
+    ] {
         let project = sql_project("", "sql", body);
         let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
         stub_sqruff(outside.path(), "sqruff 0.44.0");
@@ -733,6 +740,67 @@ fn sql_the_real_sqruff_never_passes_a_block_whose_noqa_names_more_than_rule_code
             "{body:?}: {json}"
         );
     }
+}
+
+#[test]
+fn sql_the_real_sqruff_never_sees_a_block_whose_block_comment_holds_noqa() {
+    let Some(dir) =
+        real_sqruff("sql_the_real_sqruff_never_sees_a_block_whose_block_comment_holds_noqa")
+    else {
+        return;
+    };
+    // sqruff reads each block comment as one directive, its list continued across lines, so each
+    // switches every rule off and, linted and fixed, the badly spaced block would pass.
+    for body in [
+        "/*\nnoqa: disable=all\n*/\nSELECT  a  FROM t",
+        "/* noqa: disable=LT01\n, all */\nSELECT  a  FROM t",
+        "SELECT  a  FROM t /* noqa: LT01\n, core */",
+        "SELECT  a  FROM t;\n/* noqa",
+    ] {
+        let project = sql_project("", "sql", body);
+
+        let json = check(&project, &dir);
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-not-checked"],
+            "{body:?}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/lint_not_run"),
+            1,
+            "{body:?}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/format_not_run"),
+            1,
+            "{body:?}: sqruff fix ran, and it obeys the comment too: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/passed"),
+            0,
+            "{body:?}: {json}"
+        );
+    }
+}
+
+#[test]
+fn sql_the_real_sqruff_still_lints_a_block_whose_block_comment_holds_no_noqa() {
+    let Some(dir) =
+        real_sqruff("sql_the_real_sqruff_still_lints_a_block_whose_block_comment_holds_no_noqa")
+    else {
+        return;
+    };
+    let project = sql_project(
+        "[features.code-blocks.sql.sqruff-format]\nformat = \"off\"\n",
+        "sql",
+        "/* plain comment\n-- with a dash comment inside */\nSELECT a  FROM t;",
+    );
+
+    let json = check(&project, &dir);
+
+    assert_eq!(finding_kinds(&json), ["code-block-lint"], "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/failed"), 1, "{json}");
 }
 
 #[test]

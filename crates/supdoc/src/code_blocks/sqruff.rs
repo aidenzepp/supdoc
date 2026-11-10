@@ -267,9 +267,14 @@ enum Noqa {
     Rules,
 }
 
-/// Whether `-- noqa` comments in `block` may switch sqruff's every rule off for all of it, so a
-/// lint run would pass whatever the block holds, a syntax error too: every line holding more
-/// than whitespace holds a [`Noqa::Line`] comment or comes at or after a [`Noqa::Range`] one.
+/// Whether `noqa` comments in `block` may switch sqruff's every rule off for all of it, so a
+/// lint run would pass whatever the block holds, a syntax error too: a block comment holds
+/// `noqa` (see [`block_comment_noqa`]), or every line holding more than whitespace holds a
+/// [`Noqa::Line`] comment or comes at or after a [`Noqa::Range`] one.
+///
+/// A `noqa` is honored only in a line comment whose rule list, on that same line, is plain rule
+/// codes. sqruff reads a `/* */` comment, one spanning lines too, as one directive, its rule
+/// list continued across lines, so any block comment holding `noqa` counts as every rule off.
 ///
 /// sqruff 0.44 reads `-- noqa`, `--noqa` and `/* noqa */` with no rule list as every rule off on
 /// that line, its syntax error too, and `-- noqa: disable=all` as every rule off on the lines
@@ -284,6 +289,9 @@ enum Noqa {
 /// being called linted, never passes it; a block with no `noqa` comment is never switched off.
 #[must_use]
 pub(crate) fn switches_lint_off(block: &str) -> bool {
+    if block_comment_noqa(block) {
+        return true;
+    }
     let mut any = false;
     let mut range = false;
     let covered = block.split('\n').all(|line| {
@@ -293,6 +301,38 @@ pub(crate) fn switches_lint_off(block: &str) -> bool {
         range || found.contains(&Noqa::Line) || line.trim().is_empty()
     });
     any && covered
+}
+
+/// Whether a `/* */` comment in `block` holds `noqa` in any case anywhere inside it, an unclosed
+/// `/*` running to the block's end. The scan reads comments, not lines: an open `/*` carries
+/// across lines, and a `--` inside it is part of it. It matches more than sqruff reads: a `/*`
+/// opens a comment wherever it stands, inside a string or a `--` comment too, and comments nest,
+/// so a `*/` closes only the innermost (as Postgres reads them; a dialect that doesn't nest ends
+/// the comment sooner, inside this one).
+fn block_comment_noqa(block: &str) -> bool {
+    let lower = block.to_ascii_lowercase();
+    let holds_noqa = |comment: Option<&str>| comment.is_some_and(|text| text.contains("noqa"));
+    let mut depth = 0_usize;
+    let mut opened = 0;
+    let mut at = 0;
+    while let Some(rest) = lower.get(at..).filter(|rest| !rest.is_empty()) {
+        if rest.starts_with("/*") {
+            if depth == 0 {
+                opened = at;
+            }
+            depth += 1;
+            at += 2;
+        } else if depth > 0 && rest.starts_with("*/") {
+            depth -= 1;
+            at += 2;
+            if depth == 0 && holds_noqa(lower.get(opened..at)) {
+                return true;
+            }
+        } else {
+            at += rest.chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    depth > 0 && holds_noqa(lower.get(opened..))
 }
 
 /// How each `noqa` in `line` that follows a comment opener (`--`, `/*` or `#`) reads, in order.
@@ -1123,6 +1163,36 @@ mod tests {
     }
 
     #[test]
+    fn any_block_comment_holding_noqa_switches_lint_off() {
+        for block in [
+            "select 1 /* noqa: LT01 */\nselect  2\n",
+            "/*\nnoqa: disable=all\n*/\nselect  a from t\n",
+            "/* noqa: disable=LT01\n, all */\nselect  a from t\n",
+            "select 1;\n/* NOQA",
+            "select 1;\n/* see\nthe docs\n-- noqa: LT01\n*/\nselect  2\n",
+            "/* a /* b */\nnoqa: disable=all\n*/\nselect 1\n",
+            "select '/* noqa */'\nselect  2\n",
+            "select 1 -- see /* noqa: LT01 */\nselect  2\n",
+            "select 1; /* é */ /* noqa */\nselect  2\n",
+        ] {
+            assert!(switches_lint_off(block), "{block:?} should switch lint off");
+        }
+    }
+
+    #[test]
+    fn a_block_comment_without_noqa_leaves_lint_on() {
+        for block in [
+            "/* plain comment */\nselect 1\n",
+            "/*\n-- a dash comment inside\n*/\nselect 1\n",
+            "select 1 /* closed */ -- noqa: LT01\n",
+            "/* one */ /* two */\nselect noqa from t\n",
+            "select 1 */ -- noqa: LT01\n",
+        ] {
+            assert!(!switches_lint_off(block), "{block:?} should leave lint on");
+        }
+    }
+
+    #[test]
     fn noqa_naming_rules_or_missing_from_a_line_leaves_lint_on() {
         for block in [
             "select 1\n",
@@ -1131,7 +1201,6 @@ mod tests {
             "select 1 -- noqa: LT01\n",
             "select 1 -- noqa: LT01,AL03\n",
             "select 1 -- noqa: lt01 , al03\n",
-            "select 1 /* noqa: LT01 */\n",
             "-- noqa: disable=LT01\nselect 1\n",
             "-- noqa: disable=LT01,AL03\nselect 1\n-- noqa: enable=LT01\n",
             "select a, -- noqa\nb from t\n",
