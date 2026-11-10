@@ -9,7 +9,7 @@
 //! linking reads.
 //!
 //! A language is on exactly when its table, `[features.code-blocks.rust]`, `.shell`, `.python`,
-//! `.typescript`, `.javascript`, `.json`, `.css`, `.html`, `.yaml`, `.toml`, `.dockerfile`, `.markdown` or `.go`, is written in some file of the chain; an empty
+//! `.typescript`, `.javascript`, `.json`, `.css`, `.html`, `.yaml`, `.toml`, `.dockerfile`, `.sql`, `.markdown` or `.go`, is written in some file of the chain; an empty
 //! table turns it on. The language
 //! table selects tools (`formatter`, `linter`) and holds the language's own settings; each
 //! tool's options, its step's mode, live in the tool's own table,
@@ -25,6 +25,7 @@ mod markdown;
 mod python;
 mod rust;
 mod shell;
+mod sql;
 mod toml;
 mod typescript;
 mod yaml;
@@ -46,6 +47,8 @@ pub(crate) use self::rust::Edition;
 use self::rust::RawRust;
 pub(crate) use self::shell::Dialect;
 use self::shell::RawShell;
+use self::sql::RawSql;
+pub(crate) use self::sql::SqlDialect;
 use self::toml::RawToml;
 use self::typescript::RawTypeScript;
 use self::yaml::RawYaml;
@@ -79,6 +82,9 @@ pub(crate) enum Language {
     Toml,
     /// Dockerfile: tagged `dockerfile`, `Dockerfile`, `containerfile` or `Containerfile`.
     Dockerfile,
+    /// SQL: tagged `sql`, or a dialect's own name: `postgresql`, `postgres`, `pgsql`, `tsql`,
+    /// `mssql`, `mysql`, `mariadb`, `sqlite`, `bigquery`, `snowflake` or `duckdb`.
+    Sql,
     /// Go: tagged `go` or `golang`.
     Go,
 }
@@ -102,13 +108,15 @@ impl Language {
             "dockerfile" | "Dockerfile" | "containerfile" | "Containerfile" => {
                 Some(Self::Dockerfile)
             }
+            "sql" | "postgresql" | "postgres" | "pgsql" | "tsql" | "mssql" | "mysql"
+            | "mariadb" | "sqlite" | "bigquery" | "snowflake" | "duckdb" => Some(Self::Sql),
             "go" | "golang" => Some(Self::Go),
             _ => None,
         }
     }
 
     /// The name of its table: `rust`, `shell`, `python`, `typescript`, `javascript`, `json`,
-    /// `css`, `html`, `yaml`, `toml`, `dockerfile`, `markdown` or `go`.
+    /// `css`, `html`, `yaml`, `toml`, `dockerfile`, `sql`, `markdown` or `go`.
     #[must_use]
     pub(crate) const fn table(self) -> &'static str {
         match self {
@@ -124,6 +132,7 @@ impl Language {
             Self::Yaml => "yaml",
             Self::Toml => "toml",
             Self::Dockerfile => "dockerfile",
+            Self::Sql => "sql",
             Self::Go => "go",
         }
     }
@@ -746,17 +755,21 @@ struct Languages {
     toml: Table,
     /// `[features.code-blocks.dockerfile]`.
     dockerfile: Table,
+    /// `[features.code-blocks.sql]`.
+    sql: Table,
     /// `[features.code-blocks.go]`.
     go: Table,
     /// The nearest shell `dialect` written.
     dialect: Option<Dialect>,
+    /// The nearest SQL `dialect` written.
+    sql_dialect: Option<SqlDialect>,
     /// The nearest Rust `edition` written.
     edition: Option<Edition>,
 }
 
 impl Languages {
     /// Every language, in the order the chain's checks report them.
-    const ORDER: [Language; 13] = [
+    const ORDER: [Language; 14] = [
         Language::Rust,
         Language::Shell,
         Language::Python,
@@ -768,6 +781,7 @@ impl Languages {
         Language::Yaml,
         Language::Toml,
         Language::Dockerfile,
+        Language::Sql,
         Language::Markdown,
         Language::Go,
     ];
@@ -787,6 +801,7 @@ impl Languages {
             Language::Yaml => &self.yaml,
             Language::Toml => &self.toml,
             Language::Dockerfile => &self.dockerfile,
+            Language::Sql => &self.sql,
             Language::Go => &self.go,
         }
     }
@@ -836,6 +851,8 @@ pub(crate) struct RawCodeBlocks {
     toml: Option<RawToml>,
     /// `[features.code-blocks.dockerfile]`, when written.
     dockerfile: Option<RawDockerfile>,
+    /// `[features.code-blocks.sql]`, when written.
+    sql: Option<RawSql>,
     /// `[features.code-blocks.go]`, when written.
     go: Option<RawGo>,
 }
@@ -859,7 +876,7 @@ impl Written {
     /// # Errors
     ///
     /// [`ConfigError::ToolNotSelected`] for the first tool table, Rust, shell, Python,
-    /// TypeScript, JavaScript, JSON, CSS, HTML, YAML, TOML, Dockerfile, Markdown then Go, whose tool the merged chain
+    /// TypeScript, JavaScript, JSON, CSS, HTML, YAML, TOML, Dockerfile, SQL, Markdown then Go, whose tool the merged chain
     /// doesn't select.
     pub(super) fn resolve(
         self,
@@ -943,6 +960,13 @@ impl CodeBlocks {
         self.languages.dialect.unwrap_or_default()
     }
 
+    /// The SQL dialect a `sql` block is read in: `ansi` unless `dialect` says otherwise. A block
+    /// tagged with a dialect's name is read in that one instead (see [`SqlDialect::from_tag`]).
+    #[must_use]
+    pub(crate) fn sql_dialect(&self) -> SqlDialect {
+        self.languages.sql_dialect.unwrap_or_default()
+    }
+
     /// `language`'s table as written.
     const fn table(&self, language: Language) -> &Table {
         self.languages.table(language)
@@ -990,6 +1014,7 @@ pub(super) fn merge(
         yaml,
         toml,
         dockerfile,
+        sql,
         go,
         ..
     }) = raw
@@ -1059,6 +1084,14 @@ pub(super) fn merge(
                 .languages
                 .dockerfile
                 .behind(dockerfile.as_ref().map(RawDockerfile::selection), file),
+            sql_dialect: nearer
+                .languages
+                .sql_dialect
+                .or(sql.as_ref().and_then(|raw| raw.dialect)),
+            sql: nearer
+                .languages
+                .sql
+                .behind(sql.as_ref().map(RawSql::selection), file),
             go: nearer
                 .languages
                 .go
@@ -1073,7 +1106,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{Choice, Diagnostics, Dialect, Edition, Language, Mode, Step, Tier};
+    use super::{Choice, Diagnostics, Dialect, Edition, Language, Mode, SqlDialect, Step, Tier};
     use crate::config::Config;
     use crate::exit::ExitStatus;
     use crate::path::AbsolutePath;
@@ -2016,6 +2049,134 @@ mod tests {
     #[test]
     fn an_unknown_dialect_is_refused() {
         let _message = refused("shell", "dialect = \"zsh\"");
+    }
+
+    #[test]
+    fn sql_and_each_dialect_tag_name_sql_and_procedural_or_console_tags_name_none() {
+        for tag in [
+            "sql",
+            "postgresql",
+            "postgres",
+            "pgsql",
+            "tsql",
+            "mssql",
+            "mysql",
+            "mariadb",
+            "sqlite",
+            "bigquery",
+            "snowflake",
+            "duckdb",
+        ] {
+            assert_eq!(Language::from_tag(tag), Some(Language::Sql), "tag `{tag}`");
+        }
+        for tag in ["plsql", "plpgsql", "sqlpl", "psql", "SQL"] {
+            assert_eq!(Language::from_tag(tag), None, "tag `{tag}`");
+        }
+        assert_eq!(Language::Sql.table(), "sql");
+    }
+
+    #[test]
+    fn a_dialect_tag_names_its_dialect_and_sql_names_none() {
+        let cases = [
+            ("sql", None),
+            ("postgresql", Some(SqlDialect::Postgres)),
+            ("postgres", Some(SqlDialect::Postgres)),
+            ("pgsql", Some(SqlDialect::Postgres)),
+            ("tsql", Some(SqlDialect::Tsql)),
+            ("mssql", Some(SqlDialect::Tsql)),
+            ("mysql", Some(SqlDialect::Mysql)),
+            ("mariadb", Some(SqlDialect::Mariadb)),
+            ("sqlite", Some(SqlDialect::Sqlite)),
+            ("bigquery", Some(SqlDialect::Bigquery)),
+            ("snowflake", Some(SqlDialect::Snowflake)),
+            ("duckdb", Some(SqlDialect::Duckdb)),
+        ];
+        for (tag, expected) in cases {
+            assert_eq!(SqlDialect::from_tag(tag), expected, "tag `{tag}`");
+        }
+    }
+
+    #[test]
+    fn the_sql_dialect_defaults_to_ansi_and_takes_sqruffs_names() {
+        for (line, expected) in [
+            ("", SqlDialect::Ansi),
+            ("dialect = \"tsql\"", SqlDialect::Tsql),
+            ("dialect = \"postgres\"", SqlDialect::Postgres),
+            ("dialect = \"sparksql\"", SqlDialect::Sparksql),
+        ] {
+            let dir = tree(&[(
+                "supdoc.config.toml",
+                &format!("[features.code-blocks.sql]\n{line}\n"),
+            )]);
+            let config = Config::load(&at(&dir, ".")).expect("the fixture config should load");
+
+            let code_blocks = config.code_blocks().expect("the table is written");
+
+            assert_eq!(code_blocks.sql_dialect(), expected, "`{line}`");
+            assert_eq!(
+                code_blocks.dialect(),
+                Dialect::Bash,
+                "the shell dialect stays its own"
+            );
+        }
+    }
+
+    #[test]
+    fn the_child_sql_dialect_overrides_the_parent_and_the_parent_holds_when_the_child_is_silent() {
+        let dir = tree(&[
+            (
+                "supdoc.config.toml",
+                "[features.code-blocks.sql]\ndialect = \"tsql\"\n",
+            ),
+            (
+                "a/b/supdoc.config.toml",
+                "extends = \"../../supdoc.config.toml\"\n[features.code-blocks.sql]\ndialect = \"mysql\"\n",
+            ),
+            (
+                "c/d/supdoc.config.toml",
+                "extends = \"../../supdoc.config.toml\"\n[features.code-blocks.sql]\n",
+            ),
+        ]);
+
+        let child = Config::load(&at(&dir, "a/b")).expect("the child config should load");
+        let silent = Config::load(&at(&dir, "c/d")).expect("the silent child should load");
+
+        assert_eq!(
+            child.code_blocks().map(super::CodeBlocks::sql_dialect),
+            Some(SqlDialect::Mysql)
+        );
+        assert_eq!(
+            silent.code_blocks().map(super::CodeBlocks::sql_dialect),
+            Some(SqlDialect::Tsql)
+        );
+    }
+
+    #[test]
+    fn an_unknown_sql_dialect_is_refused_naming_the_values() {
+        let message = refused("sql", "dialect = \"postgresql\"");
+
+        assert!(
+            message.contains("postgresql")
+                && message.contains("`postgres`")
+                && message.contains("`tsql`"),
+            "got {message}"
+        );
+    }
+
+    #[test]
+    fn an_sql_table_selects_sqruff_format_and_no_linter() {
+        let dir = tree(&[("supdoc.config.toml", "[features.code-blocks.sql]\n")]);
+
+        let config = Config::load(&at(&dir, ".")).expect("the fixture config should load");
+        let code_blocks = config.code_blocks().expect("the table is written");
+
+        assert!(code_blocks.checks(Language::Sql));
+        assert_eq!(
+            crate::code_blocks::tools::default_for(Language::Sql, Step::Format)
+                .map(|tool| tool.name),
+            Some("sqruff-format")
+        );
+        assert!(crate::code_blocks::tools::default_for(Language::Sql, Step::Lint).is_none());
     }
 
     #[test]

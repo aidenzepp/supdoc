@@ -63,6 +63,7 @@ pub(crate) fn extension(language: Language, tag: &str) -> &'static str {
         (Language::Yaml, _) => "yaml",
         (Language::Toml, _) => "toml",
         (Language::Dockerfile, _) => "dockerfile",
+        (Language::Sql, _) => "sql",
         (Language::Markdown, _) => "md",
         (Language::Go, _) => "go",
     }
@@ -453,6 +454,7 @@ mod tests {
             (Language::Toml, "toml", "toml"),
             (Language::Dockerfile, "Dockerfile", "dockerfile"),
             (Language::Dockerfile, "containerfile", "dockerfile"),
+            (Language::Sql, "pgsql", "sql"),
             (Language::Markdown, "markdown", "md"),
             (Language::Go, "golang", "go"),
         ];
