@@ -77,6 +77,7 @@ top-level keys, and never change which files links are read from. A language's t
   yaml          formatter \"yamlfmt\" (the default) or \"prettier\", linter yamllint
   toml          formatter tombi-format, linter tombi-lint
   dockerfile    formatter dockerfmt, linter hadolint; also tagged containerfile
+  makefile      formatter mbake, linter: a custom command only; also tagged make, Makefile and mk
   sql           formatter sqruff-format, linter sqruff-lint; dialect \"ansi\" unless set; a tag such as pgsql or tsql names its own
   xml           formatter: a custom command only, linter xmllint; also tagged svg, xsd, xsl, xslt or xhtml
   markdown      formatter \"rumdl-format\" (the default) or \"prettier\", linter rumdl

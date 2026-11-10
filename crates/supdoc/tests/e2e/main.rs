@@ -101,6 +101,8 @@ mod code_blocks_html;
 #[cfg(test)]
 mod code_blocks_json;
 #[cfg(test)]
+mod code_blocks_makefile;
+#[cfg(test)]
 mod code_blocks_md;
 #[cfg(test)]
 mod code_blocks_python;

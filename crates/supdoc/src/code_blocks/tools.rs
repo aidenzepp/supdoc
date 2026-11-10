@@ -27,8 +27,8 @@ use crate::config::confine::Boundary;
 use crate::path::{self, FixedPath, NativeName, Suffix, fixed};
 
 use super::{
-    biome, dockerfmt, eslint, go, hadolint, prettier, pylint, python, rumdl, rust, shell, sqruff,
-    superhtml, tombi, xmllint, yaml,
+    biome, dockerfmt, eslint, go, hadolint, mbake, prettier, pylint, python, rumdl, rust, shell,
+    sqruff, superhtml, tombi, xmllint, yaml,
 };
 
 /// The variables a tool gets from supdoc's own environment, and no others. Windows adds the
@@ -667,6 +667,10 @@ pub(crate) fn searched(bins: &[FixedPath]) -> String {
 /// [`tombi::VERIFIED`]).
 pub(crate) const TOMBI_INSTALL: &str = "pipx install 'tombi==1.10.*'";
 
+/// The command that installs an mbake supdoc's checks are verified against (see
+/// [`mbake::VERIFIED`]).
+pub(crate) const MBAKE_INSTALL: &str = "pipx install 'mbake==1.5.*'";
+
 /// How to install a dockerfmt supdoc's checks are verified against (see
 /// [`dockerfmt::VERIFIED`]): dockerfmt ships a binary per platform, and no package manager supdoc
 /// can name pins its version.
@@ -945,7 +949,7 @@ fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'sta
 }
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 38] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 39] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -1323,6 +1327,22 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 38] = [
         positions: own_positions,
         argv: sqruff_lint_args,
         reader: Reader::Lint(sqruff::lint_verdict),
+    },
+    ToolCartridge {
+        name: "mbake",
+        language: Language::Makefile,
+        binary: "mbake",
+        loads: Loads::Static,
+        install: MBAKE_INSTALL,
+        // mbake reads only supdoc's private copy, named by its hash in the args.
+        config_files: &[],
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        holds: every_tag,
+        vars: &[],
+        positions: own_positions,
+        argv: mbake_args,
+        reader: Reader::Format(mbake::parse_error),
     },
     ToolCartridge {
         name: "superhtml",
@@ -2098,6 +2118,16 @@ fn superhtml_args(_invocation: &Invocation<'_>) -> Vec<OsString> {
         .to_vec()
 }
 
+/// `mbake`'s arguments: `format --stdin`, the block on stdin and the formatted Makefile on
+/// stdout, then the private config the project contributes (`--config <file>`, see
+/// [`mbake::project_args`]), so mbake searches for no config. Never `--version`, which asks the
+/// package index for a newer release, and never `validate` or `--validate`, which run `make`.
+fn mbake_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    let mut args = vec![OsString::from("format"), OsString::from("--stdin")];
+    args.extend(invocation.project.iter().cloned());
+    args
+}
+
 /// `hadolint`'s arguments: JSON on stdout with no colour, every finding's level counted as
 /// failing, the private config the project contributes (`--config <file>`, see
 /// [`hadolint::project_args`]), then `-` for the block on stdin. supdoc reads the JSON, never the
@@ -2662,6 +2692,7 @@ mod tests {
                 "hadolint Dockerfile Lint hadolint Static",
                 "sqruff-format Sql Format sqruff Static",
                 "sqruff-lint Sql Lint sqruff Static",
+                "mbake Makefile Format mbake Static",
                 "superhtml Html Format superhtml Static",
                 "xmllint Xml Lint xmllint Static",
                 "yamlfmt Yaml Format yamlfmt Static",
@@ -2713,6 +2744,23 @@ mod tests {
                 !forbidden.iter().any(|flag| arg.to_str() == Some(flag))
                     && !arg.to_string_lossy().contains("c14n"),
                 "xmllint got the forbidden flag {arg:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mbake_formats_stdin_with_the_private_config_and_never_asks_for_its_version_or_validates() {
+        let config = ["--config", "/c/bake.toml"].map(OsString::from);
+        let args = args_of("mbake", 1, &config);
+
+        assert_eq!(
+            args,
+            ["format", "--stdin", "--config", "/c/bake.toml"].map(OsString::from)
+        );
+        for banned in ["--version", "validate", "--validate", "update"] {
+            assert!(
+                !args.iter().any(|arg| arg == banned),
+                "mbake must never be run with `{banned}`"
             );
         }
     }
