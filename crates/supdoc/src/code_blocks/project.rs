@@ -1023,6 +1023,44 @@ mod tests {
     }
 
     #[test]
+    fn a_target_dir_that_doesnt_resolve_is_a_failure_before_any_artifact_is_judged() {
+        let (dir, target) = target_with_files();
+        let file = target.join("debug/deps/libp-1.rmeta");
+        let dangling = dir.path().join("linked");
+        crate::cli::testing::symlink(dir.path().join("gone"), &dangling)
+            .expect("the symlink should be creatable");
+
+        for target in [dir.path().join("missing"), dangling] {
+            let result = locate(vec![lib_at(file.clone(), false)], &target);
+
+            assert!(
+                result.as_ref().is_err_and(
+                    |detail| detail.starts_with("couldn't resolve supdoc's target directory")
+                ),
+                "{}: {result:?}",
+                target.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_dangling_artifact_link_in_the_target_dir_is_a_failure() {
+        let (_dir, target) = target_with_files();
+        let file = target.join("debug/deps/libgone.rmeta");
+        crate::cli::testing::symlink(target.join("debug/deps/libnone.rmeta"), &file)
+            .expect("the symlink should be creatable");
+
+        let result = locate(vec![lib_at(file, false)], &target);
+
+        assert!(
+            result.as_ref().is_err_and(
+                |detail| detail.contains("isn't a file inside supdoc's target directory")
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[test]
     fn the_deps_dir_is_where_the_libs_are_not_the_host_proc_macros() {
         let (_dir, target) = target_with_files();
         let triple = target.join("aarch64-unknown-none/debug/deps");
@@ -1120,6 +1158,30 @@ mod tests {
     fn a_dangling_in_root_manifest_link_is_refused_as_unreadable() {
         let (_dir, root) = root_dir();
         crate::cli::testing::symlink(root.join("missing.toml"), root.join("Cargo.toml"))
+            .expect("the symlink should be creatable");
+
+        assert_eq!(
+            plan(&root),
+            Plan::Refused(Refused::Manifest(Refusal::Unreadable))
+        );
+    }
+
+    #[test]
+    fn a_root_that_doesnt_resolve_has_no_manifest_to_plan() {
+        let (dir, _root) = root_dir();
+        let dangling = dir.path().join("linked");
+        crate::cli::testing::symlink(dir.path().join("gone"), &dangling)
+            .expect("the symlink should be creatable");
+
+        for root in [dir.path().join("missing"), dangling] {
+            assert_eq!(plan(&root), Plan::None, "{}", root.display());
+        }
+    }
+
+    #[test]
+    fn a_manifest_that_links_to_itself_is_refused_as_unreadable() {
+        let (_dir, root) = root_dir();
+        crate::cli::testing::symlink("Cargo.toml", root.join("Cargo.toml"))
             .expect("the symlink should be creatable");
 
         assert_eq!(

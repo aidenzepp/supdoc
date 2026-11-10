@@ -1777,6 +1777,76 @@ mod tests {
         );
     }
 
+    /// A temporary directory, a `missing` path in it, and a `linked` symlink in it to a path that
+    /// doesn't exist: two roots that don't resolve.
+    fn unresolvable_roots() -> (tempfile::TempDir, [std::path::PathBuf; 2]) {
+        let dir = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let dangling = dir.path().join("linked");
+        crate::cli::testing::symlink(dir.path().join("gone"), &dangling)
+            .expect("the link should be creatable");
+        let roots = [dir.path().join("missing"), dangling];
+        (dir, roots)
+    }
+
+    #[test]
+    fn no_rustfmt_config_is_found_under_a_root_that_doesnt_resolve() {
+        let (_dir, roots) = unresolvable_roots();
+
+        for root in roots {
+            assert_eq!(
+                config_args(&root),
+                Vec::<std::ffi::OsString>::new(),
+                "{}",
+                root.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_rustfmt_toml_that_links_to_itself_is_not_passed() {
+        let root = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        crate::cli::testing::symlink(".rustfmt.toml", root.path().join(".rustfmt.toml"))
+            .expect("the link should be creatable");
+
+        assert_eq!(config_args(root.path()), Vec::<std::ffi::OsString>::new());
+    }
+
+    #[test]
+    fn a_dangling_in_root_rustfmt_toml_is_not_passed() {
+        let root = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        crate::cli::testing::symlink("missing.toml", root.path().join(".rustfmt.toml"))
+            .expect("the link should be creatable");
+
+        assert_eq!(config_args(root.path()), Vec::<std::ffi::OsString>::new());
+    }
+
+    #[test]
+    fn clippy_conf_dir_is_none_for_a_root_that_doesnt_resolve() {
+        let (_dir, roots) = unresolvable_roots();
+
+        for root in roots {
+            assert_eq!(clippy_conf_dir(&root), None, "{}", root.display());
+        }
+    }
+
+    #[test]
+    fn a_clippy_toml_that_links_to_itself_gives_no_conf_dir() {
+        let root = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        crate::cli::testing::symlink("clippy.toml", root.path().join("clippy.toml"))
+            .expect("the link should be creatable");
+
+        assert_eq!(clippy_conf_dir(root.path()), None);
+    }
+
+    #[test]
+    fn a_dangling_in_root_clippy_toml_gives_no_conf_dir() {
+        let root = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        crate::cli::testing::symlink("missing.toml", root.path().join("clippy.toml"))
+            .expect("the link should be creatable");
+
+        assert_eq!(clippy_conf_dir(root.path()), None);
+    }
+
     /// One `clippy-driver --error-format=json` line.
     fn rustc_line(level: &str, code: Option<&str>, spans: &str) -> String {
         let code = code.map_or("null".to_owned(), |code| {
