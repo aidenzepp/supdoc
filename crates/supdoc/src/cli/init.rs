@@ -167,6 +167,12 @@ fn require_parent_directory(target: &AbsolutePath, context: &Context) -> Result<
             &io::Error::from(io::ErrorKind::NotADirectory),
             context,
         )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            // The real run's create reports the error `metadata(target)` does: on Windows a
+            // missing parent is `ERROR_PATH_NOT_FOUND` there, not `ERROR_FILE_NOT_FOUND`.
+            let error = std::fs::metadata(target.as_path()).err().unwrap_or(error);
+            Err(write_failed(target, &error, context))
+        }
         Err(error) => Err(write_failed(target, &error, context)),
     }
 }
@@ -649,6 +655,16 @@ mod tests {
         assert_eq!(after, "# mine\n", "the existing file is untouched");
     }
 
+    /// The OS's own words for failing to create `path`, as `init` words them.
+    fn create_failure_cause(path: &Path) -> String {
+        let error = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .expect_err("the create should fail");
+        cause(&error)
+    }
+
     #[test]
     fn refusal_and_write_failure_name_the_path_from_the_current_directory() {
         let dir = tempfile::tempdir().expect("a temp directory should be created");
@@ -667,7 +683,10 @@ mod tests {
             [exists.message(), missing.message()],
             [
                 "sub/x.toml already exists",
-                "cannot write nope/x.toml: no such file or directory",
+                &format!(
+                    "cannot write nope/x.toml: {}",
+                    create_failure_cause(&dir.path().join("nope/x.toml"))
+                ),
             ],
             "the messages should name the file as typed, not by its absolute path"
         );
@@ -695,7 +714,10 @@ mod tests {
             [exists.message(), missing.message()],
             [
                 "../supdoc.config.toml already exists",
-                "cannot write ../nope/x.toml: no such file or directory",
+                &format!(
+                    "cannot write ../nope/x.toml: {}",
+                    create_failure_cause(&dir.path().join("nope/x.toml"))
+                ),
             ],
             "from a subdirectory the messages should name the file as typed, not absolutely"
         );
@@ -756,8 +778,9 @@ mod tests {
         let missing = missing.expect_err("a missing directory cannot hold a config");
         let blocked = blocked.expect_err("a file cannot hold a config");
         let root = dir.path().to_string_lossy();
+        let nope = shell_quote(&dir.path().join("nope").to_string_lossy());
         assert!(
-            missing.help().contains(&format!("mkdir -p {root}/nope")),
+            missing.help().contains(&format!("mkdir -p {nope}")),
             "help was: {}",
             missing.help()
         );
@@ -921,6 +944,9 @@ mod tests {
         );
     }
 
+    // Windows refuses to rename a directory holding the open temporary file, so the swap this
+    // simulates cannot happen there.
+    #[cfg(unix)]
     #[test]
     fn a_directory_swapped_out_after_the_create_leaves_the_outside_file_of_the_temporarys_name() {
         let (dir, project) = project_and_outside();
