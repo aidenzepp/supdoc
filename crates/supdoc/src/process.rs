@@ -118,7 +118,6 @@ fn live_groups_once_spawned() -> Vec<u32> {
         .clone()
 }
 
-/// Whether `pgid` is registered as live.
 /// How many times a spawn that Linux reports busy is tried before its error is returned.
 pub(crate) const BUSY_ATTEMPTS: u32 = 5;
 
@@ -161,6 +160,7 @@ pub(crate) fn retry_busy<G, T>(
     }
 }
 
+/// Whether `pgid` is registered as live.
 #[cfg(test)]
 fn is_live(pgid: u32) -> bool {
     LIVE_GROUPS

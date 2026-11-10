@@ -782,10 +782,11 @@ mod tests {
             &[("https://github.com/big", 200, "", "123456789")],
             "",
         );
-        assert!(matches!(
-            fetch_with(&curl, "https://github.com/big", 4),
-            Err(FetchError::TooLarge { .. })
-        ));
+        let refused = fetch_with(&curl, "https://github.com/big", 4);
+        assert!(
+            matches!(refused, Err(FetchError::TooLarge { .. })),
+            "{refused:?}"
+        );
         assert_eq!(
             fetch_with(&curl, "https://github.com/big", 9).expect("a body at the cap is served"),
             b"123456789"
