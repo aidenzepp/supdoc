@@ -510,6 +510,21 @@ pub(crate) fn rename_into(from: &Admitted<'_>, to: &Admitted<'_>) -> io::Result<
     fs::rename(&from.path, &to.path)
 }
 
+/// [`rename_into`], rerun briefly on Windows while the target is transiently denied.
+///
+/// Effect: renames a file, sleeping between tries.
+///
+/// # Errors
+///
+/// Fails when the last try does.
+pub(crate) fn rename_into_retrying(from: &Admitted<'_>, to: &Admitted<'_>) -> io::Result<()> {
+    rename_retrying(
+        || fs::rename(&from.path, &to.path),
+        cfg!(windows),
+        thread::sleep,
+    )
+}
+
 /// Opens the existing file `file` for writing, without creating or truncating it.
 ///
 /// Effect: opens a file.

@@ -1888,8 +1888,11 @@ mod tests {
         assert_eq!(error.code(), "config-parse", "got {error:?}");
         assert_eq!(error.status(), ExitStatus::Config);
         let message = error.to_string();
+        let child = std::path::Path::new("apps")
+            .join("web")
+            .join("supdoc.config.toml");
         assert!(
-            message.contains("apps/web/supdoc.config.toml")
+            message.contains(&child.display().to_string())
                 && message.contains("[features.code-blocks.python.black]"),
             "the message should name the child's file and the table: {message}"
         );

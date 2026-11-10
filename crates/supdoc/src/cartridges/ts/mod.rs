@@ -442,4 +442,34 @@ function local() {
             "renaming `.ts` to `.tsx` must not change which symbols a file has",
         );
     }
+
+    #[test]
+    fn ts_default_exported_object_members_are_default_symbols() {
+        let text = "export default {\n  lint: 1,\n  a: { b: 2 },\n};\n";
+        let file = parse(text);
+        let table = symbols(&file);
+
+        assert_eq!(paths(&table), ["default.lint", "default.a", "default.a.b"]);
+        assert_eq!(
+            text_of(&file, resolved(&file, &table, "default.lint")),
+            "lint: 1"
+        );
+        assert_eq!(
+            text_of(&file, resolved(&file, &table, "default.a.b")),
+            "b: 2"
+        );
+    }
+
+    #[test]
+    fn ts_default_exported_call_names_the_first_object_argument_only() {
+        let text = "export default defineConfig({ lint: 1, a: { b: 2 } }, { other: 3 });\n";
+        let file = parse(text);
+        let table = symbols(&file);
+
+        assert_eq!(paths(&table), ["default.lint", "default.a", "default.a.b"]);
+        assert_eq!(
+            text_of(&file, resolved(&file, &table, "default.lint")),
+            "lint: 1"
+        );
+    }
 }
