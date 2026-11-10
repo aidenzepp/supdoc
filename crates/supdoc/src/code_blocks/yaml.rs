@@ -2358,7 +2358,7 @@ mod tests {
             fs::read_to_string(&conf).expect("the private copy"),
             "rules:\n  truthy: enable\n  document-start: disable\n"
         );
-        assert_eq!(lint.file, "docs/.yamllint.yaml");
+        assert_eq!(Path::new(&lint.file), Path::new("docs/.yamllint.yaml"));
         assert!(
             lint.cwd.starts_with(cache.path()),
             "{:?} should be private",
