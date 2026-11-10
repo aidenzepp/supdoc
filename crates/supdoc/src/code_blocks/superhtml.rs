@@ -12,9 +12,11 @@
 //! prints nothing for it and exits 0, and `fix` would write that nothing over the block. And a
 //! block holding text superhtml rewrites though HTML keeps it as written: superhtml 0.7.1 keeps
 //! only `<pre>` content verbatim, and re-indents the content of `<textarea>` (the field's value),
-//! `<xmp>`, `<listing>` and `<plaintext>`, and each line of a `<script>` or `<style>` body, which
-//! changes a multi-line template literal or a backslash-continued string. That is a limit of
-//! superhtml's formatter, so supdoc withholds the block rather than judge or write its output.
+//! `<xmp>`, `<listing>`, `<plaintext>` and `<noscript>` (a `<pre>` inside it too), and each line
+//! of a `<script>` or `<style>` body, which changes a multi-line template literal or a
+//! backslash-continued string, and trims a one-line body's edge whitespace, which a data script
+//! keeps. That is a limit of superhtml's formatter, so supdoc withholds the block rather than
+//! judge or write its output.
 
 use std::path::Path;
 
@@ -57,17 +59,19 @@ impl Withheld {
 }
 
 /// The elements whose whole content superhtml re-indents though HTML keeps it as written: a
-/// `<textarea>`'s content is the field's value, and the others render preformatted.
-const VERBATIM: [&str; 4] = ["textarea", "xmp", "listing", "plaintext"];
+/// `<textarea>`'s content is the field's value, `<xmp>`, `<listing>` and `<plaintext>` render
+/// preformatted, and `<noscript>` renders its content, a `<pre>` in it too, with scripting off.
+const VERBATIM: [&str; 5] = ["textarea", "xmp", "listing", "plaintext", "noscript"];
 
-/// The elements whose body superhtml re-indents line by line: one that spans lines can hold a
-/// string literal whose inner whitespace is its value.
+/// The elements whose body superhtml re-indents line by line and trims at its edges: a body of
+/// more than one non-blank line can hold a string literal whose inner whitespace is its value,
+/// and a one-line body's edge whitespace is a data script's value.
 const INDENTED: [&str; 2] = ["script", "style"];
 
 /// Why `input`, an HTML block as its formatter reads it, isn't given to superhtml: it is empty
 /// or holds only whitespace ([`Withheld::Blank`]), or it holds, first in the block, a start tag
-/// of a [`VERBATIM`] element or of an [`INDENTED`] element whose body spans lines
-/// ([`Withheld::Rewritten`]). `None` when superhtml may run.
+/// of a [`VERBATIM`] element or of an [`INDENTED`] element whose body superhtml rewrites (see
+/// [`body_rewritten`]) ([`Withheld::Rewritten`]). `None` when superhtml may run.
 ///
 /// The scan is a superset of what superhtml parses as those elements: a start tag counts anywhere
 /// (in a comment, a string, another element's content), in any case, with or without attributes,
@@ -86,7 +90,7 @@ pub(crate) fn not_given(input: &str) -> Option<Withheld> {
         }
         let element = opened(after, &INDENTED)?;
         let body = after.get(element.len()..)?;
-        spans_lines(body, element).then_some(Withheld::Rewritten { element, line })
+        body_rewritten(body, element).then_some(Withheld::Rewritten { element, line })
     })
 }
 
@@ -104,12 +108,16 @@ fn opened(after: &str, names: &[&'static str]) -> Option<&'static str> {
     })
 }
 
-/// Whether the body of `element`, a `<script>` or `<style>` whose start tag `rest` follows the
-/// name of, spans more than one line. The body starts after the first `>`, or, in a start tag
-/// never closed, right after the name, and ends at the element's end tag ([`end_tag`]), else at
-/// the end of the block. A `<script>` body that holds `<!--` runs to the end of the block: there
-/// a `</script>` may only close a script the comment opens, not the element.
-fn spans_lines(rest: &str, element: &str) -> bool {
+/// Whether superhtml would change the meaning of the body of `element`, a `<script>` or `<style>`
+/// whose start tag `rest` follows the name of: the body holds more than one non-blank line, or it
+/// is on one line and starts or ends with whitespace. A body of one non-blank line spread over
+/// several, the shape superhtml gives a body it moves onto its own line, is still given, so a
+/// block `supdoc fix` formatted stays checkable. The body starts after the first `>`, or, in a
+/// start tag never closed, right after the name, and ends at the element's end tag
+/// ([`end_tag`]), else at the end of the block. A `<script>` body that holds `<!--` runs to the
+/// end of the block: there a `</script>` may only close a script the comment opens, not the
+/// element.
+fn body_rewritten(rest: &str, element: &str) -> bool {
     let body = rest
         .find('>')
         .map_or(rest, |open| rest.get(open + 1..).unwrap_or_default());
@@ -120,7 +128,14 @@ fn spans_lines(rest: &str, element: &str) -> bool {
     } else {
         closed
     };
-    body.contains(['\n', '\r'])
+    if body.contains(['\n', '\r']) {
+        body.split(['\n', '\r'])
+            .filter(|line| !line.trim().is_empty())
+            .count()
+            > 1
+    } else {
+        body.starts_with(char::is_whitespace) || body.ends_with(char::is_whitespace)
+    }
 }
 
 /// Where in `body` the first end tag of `element` starts: `</`, the name in any ASCII case, then
@@ -265,6 +280,10 @@ mod tests {
             ("a\nb\n<XMP>a</XMP>", "xmp", 2),
             ("<listing>\n  a\n</listing>", "listing", 0),
             ("<plaintext>", "plaintext", 0),
+            ("<noscript><p>a</p></noscript>", "noscript", 0),
+            ("<p>a</p>\n<NoScript >\n<pre>  a</pre>", "noscript", 1),
+            ("<noscript/>", "noscript", 0),
+            ("<noscript", "noscript", 0),
             (
                 "<p title='a'>\n<script>let s = '<textarea>';</script>",
                 "textarea",
@@ -284,17 +303,18 @@ mod tests {
             "<p>textarea</p>",
             "<pre>\n  a\n</pre>",
             "<plain>",
+            "<noscripts>",
         ] {
             assert_eq!(not_given(input), None, "{input:?}");
         }
     }
 
     #[test]
-    fn a_script_or_style_body_spanning_lines_withholds_the_block() {
+    fn a_script_or_style_body_of_two_non_blank_lines_or_with_edge_space_withholds_the_block() {
         for (input, element, line) in [
             ("<script>\nconst s = `a\n  b`;\n</script>", "script", 0),
             (
-                "<div>\n<SCRIPT type=\"module\">\nx()\n</SCRIPT>\n</div>",
+                "<div>\n<SCRIPT type=\"module\">\nx()\ny()\n</SCRIPT>\n</div>",
                 "script",
                 1,
             ),
@@ -305,16 +325,25 @@ mod tests {
             ),
             ("<style media=\"print\">a{}\nb{}</style>", "style", 0),
             ("<script>a()\nb()", "script", 0),
-            ("<script\nsrc=a", "script", 0),
+            ("<script\na()\nb()", "script", 0),
             ("<script>a()\rb()</script>", "script", 0),
-            ("<script>a() </scripts>\n</script>", "script", 0),
+            ("<script>a() </scripts>\nb()</script>", "script", 0),
             ("<script>a() </script\r>\n</script>", "script", 0),
             (
                 "<script><!--<script></script>\nb()\n--></script>",
                 "script",
                 0,
             ),
-            ("<script>a()</script>\n<style>\na{}</style>", "style", 1),
+            (
+                "<script>a()</script>\n<style>\na{}\nb{}</style>",
+                "style",
+                1,
+            ),
+            ("<script type=\"text/plain\"> x </script>", "script", 0),
+            ("<script> a()</script>", "script", 0),
+            ("<style>a{}\t</style>", "style", 0),
+            ("<script> </script>", "script", 0),
+            ("<script> a()", "script", 0),
         ] {
             assert_eq!(
                 not_given(input),
@@ -332,6 +361,12 @@ mod tests {
             "<script",
             "<scripts>\na\n</scripts>",
             "<style>a{}<!--</style>\nb",
+            "<script></script>",
+            "<script>\n\ta()\n</script>",
+            "<div>\n\t<script type=\"text/plain\">\n\t\tx\n\t</script>\n</div>",
+            "<script>\n\na()\n\n</script>",
+            "<script>a()\n</script>",
+            "<style>\r\na{}\r\n</style>",
         ] {
             assert_eq!(not_given(input), None, "{input:?}");
         }

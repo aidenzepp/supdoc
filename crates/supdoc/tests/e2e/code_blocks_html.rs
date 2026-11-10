@@ -283,7 +283,7 @@ fn html_the_real_superhtml_is_never_given_a_blank_block() {
 /// Blocks holding an element whose content superhtml 0.7.1 rewrites though HTML keeps it as
 /// written, each with the element's name and the doc line its start tag is on, when the body's
 /// first line is the doc's line 4 (see [`html_project`]).
-const REWRITTEN: [(&str, &str, u32); 4] = [
+const REWRITTEN: [(&str, &str, u32); 7] = [
     (
         "<form>\n<textarea name=\"msg\">  Dear team,\n    indented line</textarea>\n</form>",
         "textarea",
@@ -300,6 +300,21 @@ const REWRITTEN: [(&str, &str, u32); 4] = [
         5,
     ),
     ("<p>a</p>\n\n<xmp>  a   b </xmp>", "xmp", 6),
+    (
+        "<noscript>\n<pre>  Enable\n    scripts</pre>\n</noscript>",
+        "noscript",
+        4,
+    ),
+    (
+        "<div>\n<script type=\"text/plain\"> keep  these edges </script>\n</div>",
+        "script",
+        5,
+    ),
+    (
+        "<script>\nconst a = 1;\nconst b = 2;\n</script>",
+        "script",
+        4,
+    ),
 ];
 
 /// Asserts that `json`, a check of a [`REWRITTEN`] block holding `element` at doc line `line`,
@@ -393,4 +408,29 @@ fn html_the_real_superhtml_still_formats_a_block_with_a_one_line_script() {
         "# Blocks\n\n```html\n<div>\n\t<script>let s = 'a';</script>\n</div>\n```\n"
     );
     assert!(finding_kinds(&again).is_empty(), "{again}");
+}
+
+#[test]
+fn html_the_real_superhtml_formats_a_one_line_script_body_and_the_fixed_block_stays_checkable() {
+    let Some(dir) = real_tool_dir(
+        "superhtml",
+        "html_the_real_superhtml_formats_a_one_line_script_body_and_the_fixed_block_stays_checkable",
+    ) else {
+        return;
+    };
+    // One non-blank body line spread over three: superhtml moves and re-indents it, and the
+    // block it writes holds the same shape, so the next check passes instead of withholding it.
+    let project = html_project("html", "<div>\n<script>\n  a();\n</script>\n</div>");
+
+    let json = check(&project, &dir);
+    let _fixed = project.supdoc_in_with(".", &["fix", "--yes"], &[("PATH", &dir)]);
+    let again = check(&project, &dir);
+
+    assert_eq!(finding_kinds(&json), ["code-block-unformatted"], "{json}");
+    assert_eq!(
+        project.read("docs/blocks.md"),
+        "# Blocks\n\n```html\n<div>\n\t<script>\n\t\ta();\n\t</script>\n</div>\n```\n"
+    );
+    assert!(finding_kinds(&again).is_empty(), "{again}");
+    assert_eq!(at(&again, "/data/summary/code_blocks/passed"), 1, "{again}");
 }

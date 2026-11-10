@@ -925,8 +925,9 @@ fn superhtml_rewritten(at: &Location, said: Option<&str>) -> Finding {
     )
     .with_help(
         "superhtml keeps only `<pre>` content as written: it re-indents `<textarea>`, `<xmp>`, \
-         `<listing>` and `<plaintext>` content and each line of a `<script>` or `<style>` body; \
-         mark the block `format(off: <reason>)` to leave it as written",
+         `<listing>`, `<plaintext>` and `<noscript>` content and each line of a `<script>` or \
+         `<style>` body, and trims a one-line body's edge whitespace; mark the block \
+         `format(off: <reason>)` to leave it as written",
     )
     .with_location(at.clone())
 }
