@@ -64,6 +64,11 @@ const PACKAGE: &str = "supdoc";
 /// The shape of cargo's error when the pinned version is not on crates.io.
 const NOT_FOUND_SHAPE: &str = "could not find `supdoc` in registry";
 
+/// The shape of cargo's error when it cannot move a built binary over the installed one, which on
+/// Windows is what a running `supdoc.exe` causes (cargo `ops/cargo_install.rs` renames the staged
+/// binary onto the existing one).
+const MOVE_FAILED_SHAPE: &str = "failed to move `";
+
 /// The source cargo records for a package installed from crates.io, over the git index.
 const CRATES_IO_GIT: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
@@ -339,7 +344,7 @@ pub(crate) fn schema() -> schemars::Schema {
 /// A supdoc that cargo installed from crates.io upgrades with cargo. A release binary previews
 /// the archive and digest from the release's `SHA256SUMS`.
 ///
-/// Effect: reads `CARGO_HOME`, `HOME`, the install records and this binary's path. The cargo
+/// Effect: reads `CARGO_HOME`, `HOME` (`USERPROFILE` on Windows), the install records and this binary's path. The cargo
 /// route runs `cargo search` when no version is given, and `cargo install` under `--yes`, both
 /// with `$CARGO_HOME` as the working directory and standard input closed. The release-binary
 /// route fetches one `SHA256SUMS`.
@@ -835,11 +840,13 @@ fn install_argv(target: &ReleaseVersion, cargo_home: &Path) -> Vec<String> {
 struct Environment {
     /// This binary's path with symlinks resolved, when it can be found.
     exe: Option<PathBuf>,
-    /// The cargo home: `CARGO_HOME` when absolute, else `$HOME/.cargo`, or why there is none.
+    /// The cargo home: `CARGO_HOME` when absolute, else `<home>/.cargo`, or why there is none.
     cargo_home: Result<PathBuf, CargoHomeProblem>,
     /// The file name cargo gives the binary in `$CARGO_HOME/bin`: `supdoc`, or `supdoc.exe` on
     /// Windows.
     cargo_bin: String,
+    /// Whether the platform is Windows, which names `USERPROFILE` in the refusals and the syntax of their remedies.
+    windows: bool,
 }
 
 /// Why no usable cargo home was found.
@@ -847,15 +854,17 @@ struct Environment {
 enum CargoHomeProblem {
     /// `CARGO_HOME` is set to a relative path.
     RelativeSet,
-    /// `CARGO_HOME` is unset or empty, and `HOME` is not an absolute path.
+    /// `CARGO_HOME` is unset or empty, and the home variable (`HOME`, `USERPROFILE` on Windows) is
+    /// not an absolute path.
     Unset,
     /// The cargo home is not valid UTF-8, so it cannot be shown or passed to cargo faithfully.
     NotUtf8,
 }
 
-/// The cargo home that `CARGO_HOME` and `HOME` name, or why they name none.
+/// The cargo home that `CARGO_HOME` and the home variable name, or why they name none.
 ///
-/// An unset or empty `CARGO_HOME` falls back to `$HOME/.cargo`. A relative `CARGO_HOME` or `HOME`
+/// An unset or empty `CARGO_HOME` falls back to `<home>/.cargo`, where `<home>` is `HOME` (or
+/// `USERPROFILE` on Windows). A relative `CARGO_HOME` or home
 /// is no cargo home, since cargo would read it from wherever supdoc happens to run.
 ///
 /// # Errors
@@ -894,12 +903,18 @@ impl Environment {
     /// Reads the current executable, `CARGO_HOME`, and `USERPROFILE` on Windows or `HOME`
     /// elsewhere.
     fn read() -> Self {
+        Self::read_with(std::env::current_exe().ok(), |name| std::env::var_os(name))
+    }
+
+    /// [`Self::read`] with the environment looked up through `lookup`, so a test can see which
+    /// variables are asked for.
+    fn read_with(exe: Option<PathBuf>, lookup: impl Fn(&str) -> Option<OsString>) -> Self {
         let windows = cfg!(windows);
         Self::from_parts(
             windows,
-            std::env::current_exe().ok(),
-            std::env::var_os("CARGO_HOME"),
-            std::env::var_os(home_variable(windows)),
+            exe,
+            lookup("CARGO_HOME"),
+            lookup(home_variable(windows)),
         )
     }
 
@@ -918,6 +933,7 @@ impl Environment {
             exe: exe.and_then(|exe| fs::canonicalize(exe).ok()),
             cargo_home,
             cargo_bin: format!("{PACKAGE}{suffix}"),
+            windows,
         }
     }
 }
@@ -946,7 +962,7 @@ fn installed_by_cargo(environment: &Environment) -> Result<CargoInstall, CliErro
     let (Some(exe), Ok(cargo_home)) = (&environment.exe, &environment.cargo_home) else {
         return Err(match (&environment.exe, &environment.cargo_home) {
             (Some(exe), Err(problem)) => {
-                known_location(exe).unwrap_or_else(|| no_cargo_home(*problem))
+                known_location(exe).unwrap_or_else(|| no_cargo_home(*problem, environment.windows))
             }
             _ => cannot_tell(&seen),
         });
@@ -964,7 +980,7 @@ fn installed_by_cargo(environment: &Environment) -> Result<CargoInstall, CliErro
             ),
         )
     })?;
-    let version = recorded_version(&record, &seen)?;
+    let version = recorded_version(&record, &seen, &environment.cargo_bin)?;
     Ok(CargoInstall {
         version,
         cargo_home: cargo_home.clone(),
@@ -1001,28 +1017,51 @@ fn known_location(exe: &Path) -> Option<CliError> {
 }
 
 /// The refusal when no usable cargo home can be found, so cargo's install records cannot be read.
-fn no_cargo_home(problem: CargoHomeProblem) -> CliError {
+///
+/// Names `USERPROFILE` and PowerShell syntax when `windows`, else `HOME` and `export`.
+fn no_cargo_home(problem: CargoHomeProblem, windows: bool) -> CliError {
+    let home = home_variable(windows);
+    let set = set_cargo_home(windows);
     let (message, help) = match problem {
         CargoHomeProblem::RelativeSet => (
             "CARGO_HOME is set but is not an absolute path, so supdoc can't find cargo's install \
-             records",
-            "Set CARGO_HOME to an absolute path, such as `export CARGO_HOME=$HOME/.cargo`, then \
-             run `supdoc upgrade` again",
+             records"
+                .to_owned(),
+            format!(
+                "Set CARGO_HOME to an absolute path, such as `{set}`, then run `supdoc upgrade` again"
+            ),
         ),
         CargoHomeProblem::Unset => (
-            "CARGO_HOME is not set and HOME is not an absolute path, so supdoc can't find \
-             cargo's install records",
-            "Set CARGO_HOME to an absolute path, such as `export CARGO_HOME=$HOME/.cargo`, then \
-             run `supdoc upgrade` again",
+            format!(
+                "CARGO_HOME is not set and {home} is not an absolute path, so supdoc can't find \
+                 cargo's install records"
+            ),
+            format!(
+                "Set CARGO_HOME to an absolute path, such as `{set}`, then run `supdoc upgrade` again"
+            ),
         ),
         CargoHomeProblem::NotUtf8 => (
-            "CARGO_HOME (or the HOME it comes from) is not valid UTF-8, so supdoc can't pass it \
-             to cargo",
-            "Move cargo's home to a UTF-8 path and set CARGO_HOME to it, such as `export \
-             CARGO_HOME=$HOME/.cargo`, then run `supdoc upgrade` again",
+            format!(
+                "CARGO_HOME (or the {home} it comes from) is not valid UTF-8, so supdoc can't pass \
+                 it to cargo"
+            ),
+            format!(
+                "Move cargo's home to a UTF-8 path and set CARGO_HOME to it, such as `{set}`, then \
+                 run `supdoc upgrade` again"
+            ),
         ),
     };
-    not_cargo(message.to_owned(), help)
+    not_cargo(message, &help)
+}
+
+/// A shell command that sets `CARGO_HOME` to the default cargo home, in PowerShell syntax when
+/// `windows`, else POSIX.
+const fn set_cargo_home(windows: bool) -> &'static str {
+    if windows {
+        "$env:CARGO_HOME = \"$env:USERPROFILE\\.cargo\""
+    } else {
+        "export CARGO_HOME=$HOME/.cargo"
+    }
 }
 
 /// The refusal for a binary whose origin supdoc cannot establish.
@@ -1047,14 +1086,15 @@ fn not_cargo(message: String, help: &str) -> CliError {
 }
 
 /// The version cargo recorded for the `supdoc` binary in `record` (`.crates2.json`), checked
-/// against this binary's own version.
+/// against this binary's own version. `cargo_bin` is the binary's name as cargo records it:
+/// `supdoc`, or `supdoc.exe` on Windows.
 ///
 /// # Errors
 ///
 /// Returns `cli-upgrade-not-cargo` when the record is not JSON, holds no `supdoc` that installed
 /// the `supdoc` binary, holds more than one, names a source other than crates.io, or names a
 /// version other than the one running.
-fn recorded_version(record: &str, seen: &str) -> Result<ReleaseVersion, CliError> {
+fn recorded_version(record: &str, seen: &str, cargo_bin: &str) -> Result<ReleaseVersion, CliError> {
     let document: serde_json::Value = serde_json::from_str(record).map_err(|error| {
         cannot_tell_with(
             seen,
@@ -1073,7 +1113,7 @@ fn recorded_version(record: &str, seen: &str) -> Result<ReleaseVersion, CliError
             let installs_binary = install
                 .get("bins")
                 .and_then(serde_json::Value::as_array)
-                .is_some_and(|bins| bins.iter().any(|bin| bin.as_str() == Some(PACKAGE)));
+                .is_some_and(|bins| bins.iter().any(|bin| bin.as_str() == Some(cargo_bin)));
             (name == PACKAGE && installs_binary).then(|| (version.to_owned(), source.to_owned()))
         });
     let (Some((version, source)), None) = (entries.next(), entries.next()) else {
@@ -1136,7 +1176,7 @@ fn latest(cargo_home: &Path) -> Result<ReleaseVersion, CliError> {
         let stderr = String::from_utf8_lossy(&result.stderr);
         // Writing cargo's own message is best effort: the error that follows names the failure.
         let _written = io::stderr().write_all(stderr.as_bytes());
-        return Err(cargo_failed(&argv, result.status, &stderr));
+        return Err(cargo_failed(&argv, result.status, &stderr, cfg!(windows)));
     }
     parse_search(&stdout).ok_or_else(|| {
         CliError::new(
@@ -1224,7 +1264,12 @@ fn install(argv: &[String], cargo_home: &Path, json: bool) -> Result<(), CliErro
     if status.success() {
         Ok(())
     } else {
-        Err(cargo_failed(argv, status, &String::from_utf8_lossy(&shown)))
+        Err(cargo_failed(
+            argv,
+            status,
+            &String::from_utf8_lossy(&shown),
+            cfg!(windows),
+        ))
     }
 }
 
@@ -1239,19 +1284,37 @@ fn no_cargo(error: &io::Error) -> CliError {
 }
 
 /// The error for a cargo that failed. When `stderr` has cargo's not-found shape, the help adds
-/// that the version is not on crates.io; cargo's own message is never rewritten.
-fn cargo_failed(argv: &[String], status: std::process::ExitStatus, stderr: &str) -> CliError {
-    let help = if stderr.contains(NOT_FOUND_SHAPE) {
-        "That version does not exist on crates.io; run `supdoc upgrade` with no version for the latest"
-    } else {
-        "Read cargo's message above, fix what it names, then run `supdoc upgrade` again"
-    };
+/// that the version is not on crates.io; when `windows` and cargo could not move the new binary
+/// into place, that supdoc.exe is running. Cargo's own message is never rewritten.
+fn cargo_failed(
+    argv: &[String],
+    status: std::process::ExitStatus,
+    stderr: &str,
+    windows: bool,
+) -> CliError {
     CliError::new(
         "cli-upgrade-cargo-failed",
         format!("`{}` failed: {status}", shell_line(argv)),
-        help,
+        cargo_failed_help(argv, stderr, windows),
         ExitStatus::Failed,
     )
+}
+
+/// The remedy for a failed cargo: what its `stderr` shape names, with the Windows
+/// running-binary remedy when `windows`.
+fn cargo_failed_help(argv: &[String], stderr: &str, windows: bool) -> String {
+    if stderr.contains(NOT_FOUND_SHAPE) {
+        "That version does not exist on crates.io; run `supdoc upgrade` with no version for the latest"
+            .to_owned()
+    } else if windows && stderr.contains(MOVE_FAILED_SHAPE) {
+        format!(
+            "Windows cannot replace supdoc.exe while it is running, and cargo moves the new one \
+             over it; run `{}` from a shell where supdoc is not running",
+            shell_line(argv)
+        )
+    } else {
+        "Read cargo's message above, fix what it names, then run `supdoc upgrade` again".to_owned()
+    }
 }
 
 #[cfg(test)]
@@ -1302,6 +1365,107 @@ mod tests {
     fn the_home_variable_is_userprofile_on_windows_and_home_elsewhere() {
         assert_eq!(home_variable(true), "USERPROFILE");
         assert_eq!(home_variable(false), "HOME");
+    }
+
+    /// Writes cargo's install record for the running version, listing `bins`, into the cargo home
+    /// that `home` holds.
+    fn write_record(home: &tempfile::TempDir, bins: &[&str]) {
+        let key = format!("supdoc {} ({CRATES_IO_SPARSE})", env!("CARGO_PKG_VERSION"));
+        let record = serde_json::json!({ "installs": { key: { "bins": bins } } });
+        fs::write(
+            home.path().join(".cargo").join(".crates2.json"),
+            record.to_string(),
+        )
+        .expect("the install record should be written");
+    }
+
+    #[test]
+    fn a_windows_cargo_install_is_accepted_when_cargo_recorded_supdoc_exe() {
+        let (home, environment) = environment_running(true, "supdoc.exe");
+        write_record(&home, &["supdoc.exe"]);
+
+        let install = installed_by_cargo(&environment)
+            .expect("a Windows install recorded as supdoc.exe should be a cargo install");
+
+        assert_eq!(install.cargo_home, home.path().join(".cargo"));
+    }
+
+    #[test]
+    fn a_windows_record_naming_the_extensionless_binary_is_refused() {
+        let (home, environment) = environment_running(true, "supdoc.exe");
+        write_record(&home, &["supdoc"]);
+
+        assert!(installed_by_cargo(&environment).is_err());
+    }
+
+    #[test]
+    fn a_unix_cargo_install_is_accepted_only_for_the_extensionless_record() {
+        let (home, environment) = environment_running(false, "supdoc");
+        write_record(&home, &["supdoc"]);
+        assert!(installed_by_cargo(&environment).is_ok());
+
+        write_record(&home, &["supdoc.exe"]);
+        assert!(installed_by_cargo(&environment).is_err());
+    }
+
+    #[test]
+    fn reading_the_environment_asks_for_this_platforms_home_variable() {
+        let home = tempfile::tempdir().expect("a temporary home should be created");
+        let wanted = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        let given = home.path().as_os_str().to_owned();
+
+        let environment =
+            Environment::read_with(None, |name| (name == wanted).then(|| given.clone()));
+
+        assert_eq!(environment.cargo_home, Ok(home.path().join(".cargo")));
+    }
+
+    #[test]
+    fn the_no_cargo_home_refusals_name_the_platforms_variable_and_syntax() {
+        for problem in [
+            CargoHomeProblem::RelativeSet,
+            CargoHomeProblem::Unset,
+            CargoHomeProblem::NotUtf8,
+        ] {
+            let windows = no_cargo_home(problem, true);
+            let unix = no_cargo_home(problem, false);
+
+            assert!(
+                windows.help().contains("$env:CARGO_HOME") && !windows.help().contains("export"),
+                "{windows:?}"
+            );
+            assert!(
+                unix.help().contains("export CARGO_HOME=$HOME/.cargo")
+                    && !unix.help().contains("$env:"),
+                "{unix:?}"
+            );
+        }
+        let unset_windows = no_cargo_home(CargoHomeProblem::Unset, true);
+        let unset_unix = no_cargo_home(CargoHomeProblem::Unset, false);
+        assert!(
+            unset_windows.message().contains("USERPROFILE"),
+            "{unset_windows}"
+        );
+        assert!(unset_unix.message().contains("HOME is not"), "{unset_unix}");
+    }
+
+    #[test]
+    fn a_failed_move_on_windows_says_to_run_cargo_where_supdoc_is_not_running() {
+        let argv = ["cargo", "install", "supdoc", "--locked"].map(str::to_owned);
+        let stderr = "error: failed to move `C:\\a\\supdoc.exe` to `C:\\b\\supdoc.exe`";
+
+        let windows = cargo_failed_help(&argv, stderr, true);
+        let unix = cargo_failed_help(&argv, stderr, false);
+
+        assert!(
+            windows.contains("not running") && windows.contains("cargo install supdoc --locked"),
+            "{windows}"
+        );
+        assert!(!unix.contains("not running"), "{unix}");
+        assert!(
+            !cargo_failed_help(&argv, "error: other", true).contains("not running"),
+            "only a failed move names the running binary"
+        );
     }
 
     #[test]
@@ -1494,7 +1658,7 @@ mod tests {
             Err(CargoHomeProblem::NotUtf8)
         );
         assert!(
-            no_cargo_home(CargoHomeProblem::NotUtf8)
+            no_cargo_home(CargoHomeProblem::NotUtf8, false)
                 .message()
                 .contains("CARGO_HOME")
         );
@@ -1503,7 +1667,8 @@ mod tests {
     #[test]
     fn a_source_with_spaces_is_named_whole_and_quoted() {
         let record = r#"{"installs":{"supdoc 0.3.1 (path+file:///Users/x/my dir/supdoc)":{"bins":["supdoc"]}}}"#;
-        let error = recorded_version(record, "/x").expect_err("a path install should be refused");
+        let error =
+            recorded_version(record, "/x", "supdoc").expect_err("a path install should be refused");
         assert!(
             error
                 .message()
@@ -1515,7 +1680,8 @@ mod tests {
     #[test]
     fn a_record_from_git_is_refused_naming_its_source() {
         let record = r#"{"installs":{"supdoc 0.3.1 (git+https://example.com/supdoc#abc)":{"bins":["supdoc"]}}}"#;
-        let error = recorded_version(record, "/x").expect_err("a git install should be refused");
+        let error =
+            recorded_version(record, "/x", "supdoc").expect_err("a git install should be refused");
         assert!(
             error
                 .message()
