@@ -76,7 +76,7 @@ top-level keys, and never change which files links are read from. A language's t
   html          formatter superhtml, linter: a custom command only; also tagged htm
   yaml          formatter \"yamlfmt\" (the default) or \"prettier\", linter yamllint
   toml          formatter tombi-format, linter tombi-lint
-  dockerfile    formatter: a custom command only, linter hadolint; also tagged containerfile
+  dockerfile    formatter dockerfmt, linter hadolint; also tagged containerfile
   sql           formatter sqruff-format; dialect \"ansi\" unless set; a tag such as pgsql or tsql names its own
   markdown      formatter \"rumdl-format\" (the default) or \"prettier\", linter rumdl
   go            formatter gofmt, linter go-vet; tag a block go or golang

@@ -29,7 +29,7 @@ jobs:
         # Pinned shfmt and ruff binaries, checked against ci/tools.sha256, and black with every
         # dependency hash-pinned in ci/requirements-black.txt. Those files name the sources.
         # shellcheck is pinned the same way, so the runner's own older one is never used.
-        # biome, tombi, yamlfmt, rumdl, hadolint, sqruff, superhtml, Go and Node are pinned the same way; yamllint and pylint
+        # biome, tombi, yamlfmt, rumdl, hadolint, dockerfmt, sqruff, superhtml, Go and Node are pinned the same way; yamllint and pylint
         # like black. prettier and eslint come from ci/node-tools/package-lock.json, whose
         # integrity hashes `npm ci` checks; --ignore-scripts keeps their install scripts from running.
         run: |
@@ -45,6 +45,7 @@ jobs:
           curl --retry 8 --retry-all-errors --retry-max-time 300 -fsSLO https://github.com/google/yamlfmt/releases/download/v0.21.0/yamlfmt_0.21.0_Linux_x86_64.tar.gz
           curl --retry 8 --retry-all-errors --retry-max-time 300 -fsSLO https://github.com/rvben/rumdl/releases/download/v0.3.2/rumdl-v0.3.2-x86_64-unknown-linux-gnu.tar.gz
           curl --retry 8 --retry-all-errors --retry-max-time 300 -fsSLO https://github.com/hadolint/hadolint/releases/download/v2.15.1/hadolint-linux-x86_64
+          curl --retry 8 --retry-all-errors --retry-max-time 300 -fsSLO https://github.com/reteps/dockerfmt/releases/download/v0.6.0/dockerfmt-v0.6.0-linux-amd64.tar.gz
           curl --retry 8 --retry-all-errors --retry-max-time 300 -fsSLO https://github.com/quarylabs/sqruff/releases/download/v0.44.0/sqruff-linux-x86_64-musl.tar.gz
           curl --retry 8 --retry-all-errors --retry-max-time 300 -fsSLo superhtml-0.7.1-x86_64-linux-musl.tar.xz https://github.com/kristoff-it/superhtml/releases/download/v0.7.1/x86_64-linux-musl.tar.xz
           curl --retry 8 --retry-all-errors --retry-max-time 300 -fsSLO https://go.dev/dl/go1.27.3.linux-amd64.tar.gz
@@ -63,6 +64,8 @@ jobs:
           tar -xzf rumdl-v0.3.2-x86_64-unknown-linux-gnu.tar.gz rumdl
           install -m 0755 rumdl "$tools/bin/rumdl"
           install -m 0755 hadolint-linux-x86_64 "$tools/bin/hadolint"
+          tar -xzf dockerfmt-v0.6.0-linux-amd64.tar.gz dockerfmt
+          install -m 0755 dockerfmt "$tools/bin/dockerfmt"
           tar -xzf sqruff-linux-x86_64-musl.tar.gz sqruff
           install -m 0755 sqruff "$tools/bin/sqruff"
           tar -xJf superhtml-0.7.1-x86_64-linux-musl.tar.xz superhtml
@@ -98,6 +101,7 @@ jobs:
           "$tools/bin/yamlfmt" -version
           "$tools/bin/rumdl" --version
           "$tools/bin/hadolint" --version
+          "$tools/bin/dockerfmt" version
           "$tools/bin/sqruff" --version
           "$tools/bin/superhtml" version
           "$tools/bin/yamllint" --version
@@ -113,6 +117,9 @@ jobs:
           # A real-tool test whose tool is missing fails here instead of skipping.
           SUPDOC_REQUIRE_REAL_TOOLS: "1"
         run: cargo test --workspace
+      # The two skill copies must stay byte-identical to SKILL.md: edit SKILL.md, then copy it to both.
+      - name: Check the skill copies match SKILL.md
+        run: cmp SKILL.md .agents/skills/supdoc/SKILL.md && cmp SKILL.md .claude/skills/supdoc/SKILL.md
       - name: Check supdoc's own docs
         env:
           # supdoc's own repo: CI already runs this PR's code, so trusting its config adds no risk.

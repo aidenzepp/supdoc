@@ -41,6 +41,12 @@
 #   sum:    the hadolint-linux-x86_64 line of https://github.com/hadolint/hadolint/releases/download/v2.15.1/checksums.sha256
 #           (the same as GitHub's asset digest for it; cross-checked against a local download on 2026-11-10)
 #
+# dockerfmt v0.6.0
+#   tarball: https://github.com/reteps/dockerfmt/releases/download/v0.6.0/dockerfmt-v0.6.0-linux-amd64.tar.gz
+#   sum:     the release publishes only an md5 file; this is the asset digest GitHub publishes
+#            for it, https://api.github.com/repos/reteps/dockerfmt/releases/tags/v0.6.0 (assets[].digest)
+#            (cross-checked against a local download on 2026-11-10)
+#
 # sqruff v0.44.0 (the release binary, which has no jinja or python templater; never the pip wheel)
 #   tarball: https://github.com/quarylabs/sqruff/releases/download/v0.44.0/sqruff-linux-x86_64-musl.tar.gz
 #   sum:     https://github.com/quarylabs/sqruff/releases/download/v0.44.0/sqruff-linux-x86_64-musl.tar.gz.sha256
@@ -73,6 +79,7 @@ b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6  shellcheck-v0.
 1f300d9257b232bb3b541d7fb1b0e6b3c121bcbab381c86cd38cb8722be8a566  yamlfmt_0.21.0_Linux_x86_64.tar.gz
 f527d1374765d826c1627ceab3d1f46e548268731a495b5b12a3af529b3d79e8  rumdl-v0.3.2-x86_64-unknown-linux-gnu.tar.gz
 c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507  hadolint-linux-x86_64
+c77c7fe6c068de8d2132cbc00b3d17e53e8bcd0ae2bb14f0dadf42c8f6206247  dockerfmt-v0.6.0-linux-amd64.tar.gz
 3d0dd223770e99fb17199c16327bdf15bf238261a001815aa172f140817d7e9a  sqruff-linux-x86_64-musl.tar.gz
 e5493cb412ea50e3686972f6e114137f0d4f612388d8041a294c8314efa55b35  superhtml-0.7.1-x86_64-linux-musl.tar.xz
 65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40  go1.27.3.linux-amd64.tar.gz

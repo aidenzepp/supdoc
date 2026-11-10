@@ -27,8 +27,8 @@ use crate::config::confine::Boundary;
 use crate::path::{self, FixedPath, NativeName, Suffix, fixed};
 
 use super::{
-    biome, eslint, go, hadolint, prettier, pylint, python, rumdl, rust, shell, sqruff, superhtml,
-    tombi, yaml,
+    biome, dockerfmt, eslint, go, hadolint, prettier, pylint, python, rumdl, rust, shell, sqruff,
+    superhtml, tombi, yaml,
 };
 
 /// The variables a tool gets from supdoc's own environment, and no others. Windows adds the
@@ -667,6 +667,12 @@ pub(crate) fn searched(bins: &[FixedPath]) -> String {
 /// [`tombi::VERIFIED`]).
 pub(crate) const TOMBI_INSTALL: &str = "pipx install 'tombi==1.10.*'";
 
+/// How to install a dockerfmt supdoc's checks are verified against (see
+/// [`dockerfmt::VERIFIED`]): dockerfmt ships a binary per platform, and no package manager supdoc
+/// can name pins its version.
+pub(crate) const DOCKERFMT_INSTALL: &str = "download dockerfmt 0.6.0 from https://github.com/reteps/dockerfmt/releases/tag/v0.6.0 \
+     and put it on PATH";
+
 /// How to install a superhtml supdoc's checks are verified against (see [`superhtml::VERIFIED`]):
 /// superhtml ships a binary per platform, and no package manager supdoc can name pins its version.
 pub(crate) const SUPERHTML_INSTALL: &str = "download superhtml 0.7.1 from https://github.com/kristoff-it/superhtml/releases/tag/v0.7.1 \
@@ -932,7 +938,7 @@ fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'sta
 }
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 34] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 35] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -1231,6 +1237,22 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 34] = [
         positions: own_positions,
         argv: tombi_lint_args,
         reader: Reader::Lint(tombi::lint_verdict),
+    },
+    ToolCartridge {
+        name: "dockerfmt",
+        language: Language::Dockerfile,
+        binary: "dockerfmt",
+        loads: Loads::Static,
+        install: DOCKERFMT_INSTALL,
+        // dockerfmt reads `.editorconfig` only for a file path, never for stdin.
+        config_files: &[],
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        holds: every_tag,
+        vars: &[],
+        positions: own_positions,
+        argv: dockerfmt_args,
+        reader: Reader::Format(dockerfmt::parse_error),
     },
     ToolCartridge {
         name: "hadolint",
@@ -2004,6 +2026,12 @@ fn tombi_lint_args(invocation: &Invocation<'_>) -> Vec<OsString> {
     ]
 }
 
+/// `dockerfmt`'s arguments: a four-space indent and one final newline, with no file, so it reads
+/// the block on stdin and no `.editorconfig`. Without `-n` it drops the block's final newline.
+fn dockerfmt_args(_invocation: &Invocation<'_>) -> Vec<OsString> {
+    ["-i", "4", "-n"].map(OsString::from).to_vec()
+}
+
 /// `superhtml`'s arguments: format the block on stdin, printing it on stdout, with element and
 /// attribute validation off (`--syntax-only`). Validation changes neither the output nor the exit
 /// status, only what goes to stderr, so with it off every error superhtml prints on a failed run
@@ -2540,6 +2568,7 @@ mod tests {
                 "rumdl Markdown Lint rumdl Static",
                 "tombi-format Toml Format tombi Static",
                 "tombi-lint Toml Lint tombi Static",
+                "dockerfmt Dockerfile Format dockerfmt Static",
                 "hadolint Dockerfile Lint hadolint Static",
                 "sqruff-format Sql Format sqruff Static",
                 "superhtml Html Format superhtml Static",
@@ -2556,6 +2585,14 @@ mod tests {
                 "eslint TypeScript Lint eslint Project",
                 "eslint JavaScript Lint eslint Project",
             ]
+        );
+    }
+
+    #[test]
+    fn dockerfmt_reads_stdin_with_a_four_space_indent_keeping_the_final_newline() {
+        assert_eq!(
+            args_of("dockerfmt", 1, &[]),
+            ["-i", "4", "-n"].map(OsString::from)
         );
     }
 

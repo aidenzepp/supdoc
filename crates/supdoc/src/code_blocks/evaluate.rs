@@ -29,6 +29,7 @@ use super::biome;
 use super::block::{CodeBlock, Info};
 use super::cache::{self, Cache};
 use super::custom;
+use super::dockerfmt;
 use super::eslint;
 use super::excerpt;
 use super::format::{self, FixDoc};
@@ -330,7 +331,7 @@ impl Evaluation {
         let mut against: Option<Against> = None;
         let build_timeout = self.build_timeout;
         let timeout = self.timeout;
-        let mut configs = ToolConfigs::timed(timeout);
+        let mut configs = ToolConfigs::with_timeout(timeout);
         let mut toolchain_warned = false;
         let mut slots: Vec<Slot> = Vec::new();
         let mut jobs: Vec<Job> = Vec::new();
@@ -930,6 +931,39 @@ fn superhtml_rewritten(at: &Location, said: Option<&str>) -> Finding {
     .with_location(at.clone())
 }
 
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose dockerfmt step
+/// didn't run because it holds `dockerfmt-ignore` (see [`dockerfmt::not_given`]).
+fn dockerfmt_switched_off(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "the block holds `dockerfmt-ignore`, which leaves an instruction as written, so supdoc \
+         can't confirm dockerfmt formats the block, and its format step didn't run",
+    )
+    .with_help(
+        "drop the `dockerfmt-ignore` comment, or mark the block `format(off: <reason>)` to leave \
+         it unformatted",
+    )
+    .with_location(at.clone())
+}
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first Dockerfile block that
+/// `what` describes, which isn't given to dockerfmt (see [`dockerfmt::not_given`]).
+fn dockerfmt_not_given(at: &Location, what: &str) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        format!(
+            "this Dockerfile block {what}, so dockerfmt has nothing to format and its format \
+             step didn't run"
+        ),
+    )
+    .with_help(
+        "write the Dockerfile the block stands for, or mark the block `format(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
 /// The run's one `code-block-not-checked` warning, at `at`, the first Go block whose `go vet`
 /// step didn't run because it imports a package outside the standard library.
 fn vet_offline(at: &Location) -> Finding {
@@ -1125,6 +1159,11 @@ impl NotRunWarnings {
             PRETTIER_SWITCHED_OFF => prettier_switched_off(at),
             superhtml::BLANK => superhtml_blank(at),
             superhtml::REWRITTEN => superhtml_rewritten(at, said),
+            dockerfmt::TOO_SHORT => dockerfmt_not_given(at, "is at most one byte long"),
+            dockerfmt::SWITCHED_OFF => dockerfmt_switched_off(at),
+            dockerfmt::NO_INSTRUCTION => {
+                dockerfmt_not_given(at, "holds no instruction, only comments or blank lines")
+            }
             ESLINT_SWITCHED_OFF => eslint_switched_off(at),
             ESLINT_IGNORED => eslint_ignored(at),
             YAMLLINT_REJECTED => yamllint_rejected(at, said),
@@ -1360,14 +1399,16 @@ struct ToolConfigs {
     yamllint: YamllintConfigs,
     /// prettier's version.
     prettier: PrettierVersion,
+    /// dockerfmt's version.
+    dockerfmt: DockerfmtVersion,
     /// superhtml's version.
     superhtml: SuperhtmlVersion,
 }
 
 impl ToolConfigs {
-    /// No config read yet, with `timeout`, the run's tool timeout, as how long each version or
-    /// config probe may run.
-    fn timed(timeout: Option<Duration>) -> Self {
+    /// Nothing found yet, with `timeout` limiting each tool run made to find a config or a
+    /// version: tombi's, hadolint's, sqruff's, yamllint's, prettier's, dockerfmt's and superhtml's.
+    fn with_timeout(timeout: Option<Duration>) -> Self {
         let mut configs = Self::default();
         configs.tombi.timeout = timeout;
         configs.hadolint.timeout = timeout;
@@ -1375,6 +1416,7 @@ impl ToolConfigs {
         configs.yamllint.timeout = timeout;
         configs.prettier.timeout = timeout;
         configs.superhtml.timeout = timeout;
+        configs.dockerfmt.timeout = timeout;
         configs
     }
 
@@ -1402,9 +1444,80 @@ impl ToolConfigs {
             && self.yamlfmt.give(record, place, slots).is_ok()
             && self.yamllint.give(record, place, slots)
             && self.prettier.verified(record, place, slots)
+            && self.dockerfmt.verified(record, place, slots)
             && self.superhtml.verified(record, place, slots)
     }
 }
+
+/// The version of the dockerfmt a run's blocks use, read once.
+#[derive(Debug, Default)]
+struct DockerfmtVersion {
+    /// How long `dockerfmt version` may run: the run's tool timeout.
+    timeout: Option<Duration>,
+    /// The version once read (see [`dockerfmt::version_of`]), and whether its warning has been
+    /// given. `None` until a block needs it.
+    version: Option<(Result<String, String>, bool)>,
+}
+
+impl DockerfmtVersion {
+    /// Whether `record` goes on to its tools once the dockerfmt on `PATH` its format step would
+    /// run has been checked against the versions supdoc is verified against (see
+    /// [`dockerfmt::VERIFIED`]), read once per run. When it isn't one, or can't be read, only the
+    /// format step doesn't run, with [`DOCKERFMT_UNVERIFIED`] as its reason, and the run's one
+    /// warning goes to `slots`: the lint step still runs. A block whose formatter isn't dockerfmt,
+    /// or whose dockerfmt isn't on `PATH` or is inside the checkout, is left to the usual lookup.
+    ///
+    /// Effect: runs `dockerfmt version` the first time.
+    fn verified(
+        &mut self,
+        record: &mut BlockRecord,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> bool {
+        if !record.tool.as_ref().is_some_and(|tool| tool.is(DOCKERFMT)) {
+            return true;
+        }
+        let Found::OnPath(program) = find(DOCKERFMT, env, root) else {
+            return true;
+        };
+        let timeout = self.timeout;
+        let (version, warned) = self
+            .version
+            .get_or_insert_with(|| (dockerfmt::version_of(&program, env, root, timeout), false));
+        let Err(shown) = version else {
+            return true;
+        };
+        if !*warned {
+            *warned = true;
+            slots.push(Slot::Found(
+                Finding::new(
+                    NOT_CHECKED,
+                    Severity::Warning,
+                    format!(
+                        "dockerfmt {shown} isn't a version supdoc's checks are verified against \
+                         ({}); its Dockerfile blocks' format steps didn't run",
+                        dockerfmt::VERIFIED.join(", ")
+                    ),
+                )
+                .with_help(format!(
+                    "install a verified dockerfmt: {}",
+                    tools::DOCKERFMT_INSTALL
+                ))
+                .with_location(record.at.clone()),
+            ));
+        }
+        record.tool = None;
+        record.steps.format = StepState::Unrunnable {
+            reason: DOCKERFMT_UNVERIFIED,
+        };
+        record.linter.is_some()
+    }
+}
+
+/// Why a Dockerfile block's format step didn't run when the dockerfmt on `PATH` isn't a verified
+/// version.
+const DOCKERFMT_UNVERIFIED: &str =
+    "the dockerfmt on `PATH` isn't a version supdoc is verified against";
 
 /// The version of the superhtml a run's blocks use, read once.
 #[derive(Debug, Default)]
@@ -4021,11 +4134,15 @@ const PRETTIER_SWITCHED_OFF: &str = "the block holds `prettier-ignore`, so supdo
                                      prettier formats all of it; drop the comment, or mark the \
                                      block `format(off: <reason>)`";
 
+/// The name of dockerfmt's cartridge.
+const DOCKERFMT: &str = "dockerfmt";
+
 /// The name of superhtml's cartridge.
 const SUPERHTML: &str = "superhtml";
 
 /// Why `tool`'s format step doesn't run on `record`'s block, so the tool is never spawned: it is
-/// prettier and the block holds `prettier-ignore` (see [`prettier::switches_format_off`]), or it
+/// prettier and the block holds `prettier-ignore` (see [`prettier::switches_format_off`]), it is
+/// dockerfmt and the block is one dockerfmt isn't given (see [`dockerfmt::not_given`]), or it
 /// is superhtml and the block is one superhtml isn't given (see [`superhtml::not_given`]),
 /// naming, for an element whose content superhtml rewrites, the element and its doc line.
 /// `None` otherwise.
@@ -4034,6 +4151,7 @@ fn format_not_given(tool: &ToolCartridge, record: &BlockRecord) -> Option<NotRun
     let input = &pending.input;
     match tool.name {
         PRETTIER => prettier::switches_format_off(input).then(|| PRETTIER_SWITCHED_OFF.into()),
+        DOCKERFMT => dockerfmt::not_given(input).map(Into::into),
         SUPERHTML => superhtml::not_given(input).map(|withheld| NotRun {
             reason: withheld.reason(),
             said: match withheld {
