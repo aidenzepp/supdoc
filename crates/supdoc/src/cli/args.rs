@@ -450,8 +450,8 @@ impl<'a> OperatorPath<'a> {
         paths.iter().map(|path| Self(path)).collect()
     }
 
-    /// The path exactly as typed, for messages.
-    pub(in crate::cli) fn as_path(self) -> &'a Path {
+    /// The path exactly as typed: for messages, and as the input to `path::as_typed`.
+    pub(crate) fn as_path(self) -> &'a Path {
         self.0
     }
 }
@@ -754,9 +754,50 @@ pub(crate) struct SkillInstallArgs {
     /// Install into the user's home instead of the current project
     #[arg(short, long, env = "SUPDOC_GLOBAL", value_parser = FalseyValueParser::new())]
     pub(crate) global: bool,
+    /// Which copy to write
+    #[arg(
+        long,
+        env = "SUPDOC_SKILL_TARGET",
+        value_enum,
+        default_value_t = SkillTarget::All,
+        value_name = "TARGET"
+    )]
+    pub(crate) target: SkillTarget,
     /// Preview or apply.
     #[command(flatten)]
     pub(crate) confirm: Confirm,
+}
+
+/// Which copies of `SKILL.md` `supdoc skill install` writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum SkillTarget {
+    /// Both the shared agents copy and Claude Code's
+    All,
+    /// Only `.agents/skills/supdoc/SKILL.md`, for agents that read the shared directory
+    Agents,
+    /// Only `.claude/skills/supdoc/SKILL.md`, for Claude Code
+    Claude,
+}
+
+impl SkillTarget {
+    /// Whether the shared agents copy is written.
+    pub(crate) const fn writes_agents(self) -> bool {
+        matches!(self, Self::All | Self::Agents)
+    }
+
+    /// Whether Claude Code's copy is written.
+    pub(crate) const fn writes_claude(self) -> bool {
+        matches!(self, Self::All | Self::Claude)
+    }
+
+    /// The flag a rerun command needs to select this target, or `None` for the default `all`.
+    pub(crate) const fn rerun_flag(self) -> Option<&'static str> {
+        match self {
+            Self::All => None,
+            Self::Agents => Some("--target agents"),
+            Self::Claude => Some("--target claude"),
+        }
+    }
 }
 
 #[cfg(test)]

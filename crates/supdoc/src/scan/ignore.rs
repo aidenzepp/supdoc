@@ -14,7 +14,7 @@ use crate::finding::{Finding, Severity};
 use crate::limits::SizeLimit;
 use crate::lock::error::shell_quote;
 use crate::output::paths::relative_to;
-use crate::path::{AbsolutePath, holds_git};
+use crate::path::{AbsolutePath, FixedPath, beneath, fixed, holds_git, rebase};
 use crate::scan::git::{ExcludeFile, git_exclude};
 use crate::scan::walk::GlobalExcludes;
 
@@ -33,10 +33,10 @@ pub(super) enum IgnoreFile {
 
 impl IgnoreFile {
     /// Its path, relative to the directory it applies to.
-    const fn path(self) -> &'static str {
+    const fn path(self) -> FixedPath {
         match self {
-            Self::Ignore => ".ignore",
-            Self::Gitignore => ".gitignore",
+            Self::Ignore => fixed::DOT_IGNORE,
+            Self::Gitignore => fixed::DOT_GITIGNORE,
         }
     }
 }
@@ -217,7 +217,10 @@ impl Rule<'_> {
             (Origin::Inside, Some(file)) => format!(
                 "`{}` in {}",
                 self.glob.original(),
-                file.strip_prefix(root.as_path()).unwrap_or(file).display()
+                AbsolutePath::new(file).map_or_else(
+                    || file.display().to_string(),
+                    |file| relative_to(root, &file)
+                )
             ),
             (Origin::Inside, None) => format!("`{}`", self.glob.original()),
             _ => "an ignore file".to_owned(),
@@ -345,8 +348,7 @@ impl IgnoreRules {
         let resolved = self
             .canonical_root
             .as_deref()
-            .zip(path.strip_prefix(self.root.as_path()).ok())
-            .map(|(canonical, relative)| canonical.join(relative));
+            .and_then(|canonical| rebase(path, self.root.as_path(), canonical));
         let (mut ignore, mut gitignore, mut exclude) = (Match::None, Match::None, Match::None);
         let mut current = level;
         let mut passed_top = false;
@@ -397,7 +399,7 @@ impl IgnoreRules {
                 level
                     .symlinked
                     .iter()
-                    .filter_map(|file| AbsolutePath::new(&level.dir.as_path().join(file.path())))
+                    .map(|file| level.dir.beneath(&file.path()))
             })
             .collect()
     }
@@ -539,13 +541,14 @@ pub(super) fn unreadable_in(
     files: Origin,
     exclude_origin: Origin,
 ) -> Vec<UnreadableFile> {
-    let own = own.unreadable.iter().filter_map(|&(file, failure)| {
-        Some(UnreadableFile {
-            path: AbsolutePath::new(&dir.as_path().join(file.path()))?,
+    let own = own
+        .unreadable
+        .iter()
+        .map(|&(file, failure)| UnreadableFile {
+            path: dir.beneath(&file.path()),
             origin: files,
             failure,
-        })
-    });
+        });
     let exclude = exclude
         .unreadable
         .iter()
@@ -579,7 +582,7 @@ pub(super) fn own_ignore_files(dir: &Path, limit: SizeLimit) -> OwnIgnoreFiles {
     let mut symlinked = Vec::new();
     let mut unreadable = Vec::new();
     let mut own = |file: IgnoreFile| {
-        let path = dir.join(file.path());
+        let path = beneath(dir, &file.path());
         match fs::symlink_metadata(&path) {
             Err(_) => Gitignore::empty(),
             Ok(metadata) if metadata.file_type().is_symlink() => {

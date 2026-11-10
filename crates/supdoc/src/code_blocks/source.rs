@@ -463,6 +463,9 @@ mod tests {
         assert!(unknown.is_err(), "{unknown:?}");
     }
 
+    // Windows refuses `:` in a file name (it names an NTFS stream), so the file can't exist there;
+    // `a_colon_after_a_slash_is_refused_on_windows` covers that rule.
+    #[cfg(unix)]
     #[test]
     fn a_colon_after_a_slash_is_part_of_the_path_not_a_namespace() {
         let fixture = Fixture::new("[namespaces]\nsrc = \"src\"\n");
@@ -477,6 +480,19 @@ mod tests {
         let found = fixture.read(SourceKind::From, "src/a:b.rs#ab");
 
         assert_eq!(found.as_deref(), Ok("pub fn ab() {}"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_colon_after_a_slash_is_refused_on_windows() {
+        let fixture = Fixture::new("[namespaces]\nsrc = \"src\"\n");
+
+        let found = fixture.read(SourceKind::From, "src/a:b.rs#ab");
+
+        assert!(
+            found.is_err(),
+            "`:` is not a file-name character: {found:?}"
+        );
     }
 
     #[test]

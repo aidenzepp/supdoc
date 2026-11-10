@@ -1196,6 +1196,59 @@ fn yes_replaces_the_binary_with_the_archives_and_leaves_nothing_beside_it() {
 }
 
 #[test]
+fn yes_removes_the_files_an_earlier_upgrade_left_and_only_those() {
+    let fixture = released();
+    fixture.publish_stub();
+    let dist = fixture.path("dist");
+    std::fs::write(dist.join(".supdoc-upgrade-123-456"), "stale")
+        .expect("the leftover should write");
+    std::fs::write(dist.join("supdoc.exe.old"), "aside").expect("the aside should write");
+    std::fs::write(dist.join("supdoc-upgrade"), "foreign").expect("the foreign file should write");
+    std::fs::write(dist.join(".supdoc-upgrade"), "foreign").expect("the bare prefix should write");
+    std::fs::write(dist.join(".supdoc-upgrade-notes.txt"), "foreign")
+        .expect("the near-miss name should write");
+    std::fs::create_dir(dist.join(".supdoc-upgrade-5-6")).expect("the directory should create");
+    std::fs::write(dist.join("target-of-link"), "keep").expect("the link target should write");
+    std::os::unix::fs::symlink(
+        dist.join("target-of-link"),
+        dist.join(".supdoc-upgrade-7-8"),
+    )
+    .expect("the symlink should be creatable");
+
+    let run = fixture.run_released(&["upgrade", NEWER, "--yes"]);
+
+    let _ = run.assert_exit(0);
+    assert!(
+        !run.stderr.contains("Could not"),
+        "skipping a directory or a link is not a failure to report: {}",
+        run.stderr
+    );
+    assert_eq!(
+        names_in(&dist),
+        [
+            ".supdoc-upgrade",
+            ".supdoc-upgrade-5-6",
+            ".supdoc-upgrade-7-8",
+            ".supdoc-upgrade-notes.txt",
+            "supdoc",
+            "supdoc-upgrade",
+            "target-of-link"
+        ]
+    );
+    assert_eq!(
+        std::fs::read(dist.join("target-of-link")).expect("the target should read"),
+        b"keep"
+    );
+    let installed = dist.join("supdoc");
+    assert_eq!(
+        std::fs::read(&installed).expect("the binary should read"),
+        STUB
+    );
+    let ran = retry_busy(|| Command::new(&installed).output()).expect("the stub should run");
+    assert_eq!(String::from_utf8_lossy(&ran.stdout), "stub-installed\n");
+}
+
+#[test]
 fn json_for_an_applied_release_binary_upgrade_says_installed() {
     let fixture = released();
     fixture.publish_stub();
@@ -1209,6 +1262,46 @@ fn json_for_an_applied_release_binary_upgrade_says_installed() {
         run.stdout
     );
     assert!(run.stdout.contains(r#""ran":true"#), "{}", run.stdout);
+    let json = run.json();
+    assert_eq!(
+        super::support::at(&json, "/data/notes"),
+        &serde_json::json!([]),
+        "a clean run carries an empty notes array"
+    );
+}
+
+#[test]
+fn a_failed_replace_names_the_leftover_it_could_not_remove_in_text_and_json() {
+    if !crate::permissions_restrict_this_user("a_failed_replace_names_the_leftover") {
+        return;
+    }
+    let fixture = released();
+    fixture.publish_stub();
+    let dist = fixture.path("dist");
+    std::fs::write(dist.join(".supdoc-upgrade-123-456"), "stale")
+        .expect("the leftover should write");
+    std::fs::set_permissions(&dist, std::fs::Permissions::from_mode(0o555))
+        .expect("the directory should lock");
+
+    let text = fixture.run_released(&["upgrade", NEWER, "--yes"]);
+    let json = fixture.run_released(&["--json", "upgrade", NEWER, "--yes"]);
+
+    std::fs::set_permissions(&dist, std::fs::Permissions::from_mode(0o755))
+        .expect("the directory should unlock");
+    let _ = text.assert_exit(74);
+    assert!(
+        text.stderr.contains("cli-upgrade-replace-failed")
+            && text.stderr.contains(".supdoc-upgrade-123-456"),
+        "{}",
+        text.stderr
+    );
+    let _ = json.assert_exit(74);
+    assert!(
+        json.stderr.contains("cli-upgrade-replace-failed")
+            && json.stderr.contains(".supdoc-upgrade-123-456"),
+        "{}",
+        json.stderr
+    );
 }
 
 #[test]
@@ -1219,6 +1312,8 @@ fn a_digest_mismatch_is_refused_before_the_archive_is_read_and_changes_nothing()
         &digest_of("x86_64-unknown-linux-gnu"),
     );
     let before = std::fs::read(fixture.path("dist/supdoc")).expect("the binary should read");
+    std::fs::write(fixture.path("dist/.supdoc-upgrade-123-456"), "stale")
+        .expect("the leftover should write");
 
     let run = fixture.run_released(&["upgrade", NEWER, "--yes"]);
 
@@ -1227,6 +1322,11 @@ fn a_digest_mismatch_is_refused_before_the_archive_is_read_and_changes_nothing()
         run.stderr.contains("cli-upgrade-verify-failed"),
         "{}",
         run.stderr
+    );
+    assert_eq!(
+        names_in(&fixture.path("dist")),
+        [".supdoc-upgrade-123-456", "supdoc"],
+        "a refused archive must not remove anything"
     );
     assert!(
         run.stderr.contains("SHA256SUMS lists"),
@@ -1238,7 +1338,6 @@ fn a_digest_mismatch_is_refused_before_the_archive_is_read_and_changes_nothing()
         before,
         "the binary must be untouched"
     );
-    assert_eq!(names_in(&fixture.path("dist")), ["supdoc"]);
 }
 
 #[test]

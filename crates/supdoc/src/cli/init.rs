@@ -10,13 +10,13 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::config::confine::{self, Admitted, Boundary, Escape};
-use crate::config::{CONFIG_FILE_NAME, discover_config};
+use crate::config::discover_config;
 use crate::exit::ExitStatus;
 use crate::lock::error::shell_quote;
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
 use crate::output::{Output, Report, TextContext};
-use crate::path::{AbsolutePath, fixed};
+use crate::path::{self, AbsolutePath, Suffix, fixed};
 
 use super::args::{InitArgs, OperatorPath};
 use super::{CliError, Context, Outcome, cause};
@@ -167,6 +167,12 @@ fn require_parent_directory(target: &AbsolutePath, context: &Context) -> Result<
             &io::Error::from(io::ErrorKind::NotADirectory),
             context,
         )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            // The real run's create reports the error `metadata(target)` does: on Windows a
+            // missing parent is `ERROR_PATH_NOT_FOUND` there, not `ERROR_FILE_NOT_FOUND`.
+            let error = std::fs::metadata(target.as_path()).err().unwrap_or(error);
+            Err(write_failed(target, &error, context))
+        }
         Err(error) => Err(write_failed(target, &error, context)),
     }
 }
@@ -385,16 +391,12 @@ fn refusal(path: &AbsolutePath, escape: &Escape) -> io::Error {
 
 /// A hidden file beside `target` that this run alone writes before linking it into place.
 ///
-/// `None` only when the sibling isn't absolute, which an absolute `target` rules out.
+/// `None` when `target` has no file name, such as a root. The name is kept byte for byte, so an
+/// operator's `-c` file name holding `:` on Unix still gets its sibling.
 fn temporary_sibling(target: &AbsolutePath) -> Option<AbsolutePath> {
-    let name = target
-        .as_path()
-        .file_name()
-        .map_or_else(|| CONFIG_FILE_NAME.into(), |name| name.to_string_lossy());
-    let sibling = target
-        .as_path()
-        .with_file_name(format!(".{name}.{}.tmp", std::process::id()));
-    AbsolutePath::new(&sibling)
+    let prefix = Suffix::new(".")?;
+    let suffix = Suffix::new(&format!(".{}.tmp", std::process::id()))?;
+    AbsolutePath::new(&path::with_affixes(target.as_path(), &prefix, &suffix)?)
 }
 
 /// The refusal for an existing config, naming it as the notes do.
@@ -427,8 +429,27 @@ fn temporary_taken(temporary: &AbsolutePath, context: &Context) -> CliError {
     )
 }
 
+/// Whether the nearest existing ancestor of `target` is a file rather than a directory.
+///
+/// Windows reports a create beneath a file as not found, so a missing-path failure is checked
+/// against this before it is taken to mean the directory can be created.
+fn file_in_the_way(target: &AbsolutePath) -> bool {
+    target
+        .as_path()
+        .ancestors()
+        .skip(1)
+        .find_map(|ancestor| std::fs::metadata(ancestor).ok())
+        .is_some_and(|metadata| !metadata.is_dir())
+}
+
 /// The error for a config that could not be written, naming it as the notes do.
 fn write_failed(target: &AbsolutePath, error: &io::Error, context: &Context) -> CliError {
+    let not_a_directory = io::Error::from(io::ErrorKind::NotADirectory);
+    let error = if error.kind() == io::ErrorKind::NotFound && file_in_the_way(target) {
+        &not_a_directory
+    } else {
+        error
+    };
     let directory = target
         .as_path()
         .parent()
@@ -467,7 +488,7 @@ mod tests {
 
     use crate::cli::args::{Cli, Command};
     use crate::cli::testing::{Capture, ClosedPipe, symlink};
-    use crate::config::Config;
+    use crate::config::{CONFIG_FILE_NAME, Config};
     use crate::output::{OutputFormat, OutputSettings, PathStyle, Verbosity};
     use crate::scan::walk::GlobalExcludes;
 
@@ -649,6 +670,16 @@ mod tests {
         assert_eq!(after, "# mine\n", "the existing file is untouched");
     }
 
+    /// The OS's own words for failing to create `path`, as `init` words them.
+    fn create_failure_cause(path: &Path) -> String {
+        let error = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .expect_err("the create should fail");
+        cause(&error)
+    }
+
     #[test]
     fn refusal_and_write_failure_name_the_path_from_the_current_directory() {
         let dir = tempfile::tempdir().expect("a temp directory should be created");
@@ -667,7 +698,10 @@ mod tests {
             [exists.message(), missing.message()],
             [
                 "sub/x.toml already exists",
-                "cannot write nope/x.toml: no such file or directory",
+                &format!(
+                    "cannot write nope/x.toml: {}",
+                    create_failure_cause(&dir.path().join("nope/x.toml"))
+                ),
             ],
             "the messages should name the file as typed, not by its absolute path"
         );
@@ -695,7 +729,10 @@ mod tests {
             [exists.message(), missing.message()],
             [
                 "../supdoc.config.toml already exists",
-                "cannot write ../nope/x.toml: no such file or directory",
+                &format!(
+                    "cannot write ../nope/x.toml: {}",
+                    create_failure_cause(&dir.path().join("nope/x.toml"))
+                ),
             ],
             "from a subdirectory the messages should name the file as typed, not absolutely"
         );
@@ -755,15 +792,15 @@ mod tests {
 
         let missing = missing.expect_err("a missing directory cannot hold a config");
         let blocked = blocked.expect_err("a file cannot hold a config");
-        let root = dir.path().to_string_lossy();
+        let nope = shell_quote(&dir.path().join("nope").to_string_lossy());
         assert!(
-            missing.help().contains(&format!("mkdir -p {root}/nope")),
+            missing.help().contains(&format!("mkdir -p {nope}")),
             "help was: {}",
             missing.help()
         );
+        let file = shell_quote(&dir.path().join("file").to_string_lossy());
         assert!(
-            blocked.help().contains(&format!("{root}/file"))
-                && blocked.help().contains("in the way"),
+            blocked.help().contains(&file) && blocked.help().contains("in the way"),
             "help was: {}",
             blocked.help()
         );
@@ -771,6 +808,32 @@ mod tests {
             .expect("the directory should be readable")
             .count();
         assert_eq!(leftovers, 1, "only the blocking file remains");
+    }
+
+    #[test]
+    fn a_missing_path_under_a_file_is_a_file_in_the_way_on_every_platform() {
+        let dir = tempfile::tempdir().expect("a temp directory should be created");
+        std::fs::write(dir.path().join("file"), "").expect("the blocking file should be written");
+        let (_, context) = context_in(&dir, &[]);
+        let under_file = AbsolutePath::new(&dir.path().join("file").join("deep").join("x.toml"))
+            .expect("the target should be absolute");
+        let under_nothing = AbsolutePath::new(&dir.path().join("nope").join("x.toml"))
+            .expect("the target should be absolute");
+        let not_found = io::Error::from(io::ErrorKind::NotFound);
+
+        let blocked = write_failed(&under_file, &not_found, &context);
+        let missing = write_failed(&under_nothing, &not_found, &context);
+
+        assert!(
+            blocked.help().contains("in the way") && !blocked.help().contains("mkdir"),
+            "help was: {}",
+            blocked.help()
+        );
+        assert!(
+            missing.help().contains("mkdir -p") && !missing.help().contains("in the way"),
+            "help was: {}",
+            missing.help()
+        );
     }
 
     #[test]
@@ -859,6 +922,20 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn the_temporary_sibling_keeps_a_name_holding_a_colon_byte_for_byte() {
+        let target = AbsolutePath::new(Path::new("/p/a:b.toml")).expect("an absolute path");
+
+        let temporary = temporary_sibling(&target).expect("a named target has a sibling");
+
+        assert_eq!(
+            temporary.as_path(),
+            Path::new(&format!("/p/.a:b.toml.{}.tmp", std::process::id())),
+            "the sibling is the dot, the name as typed, the pid and .tmp"
+        );
+    }
+
     #[test]
     fn the_temporary_sibling_is_admitted_under_the_targets_directory() {
         let (dir, project) = project_and_outside();
@@ -921,6 +998,9 @@ mod tests {
         );
     }
 
+    // Windows refuses to rename a directory holding the open temporary file, so the swap this
+    // simulates cannot happen there.
+    #[cfg(unix)]
     #[test]
     fn a_directory_swapped_out_after_the_create_leaves_the_outside_file_of_the_temporarys_name() {
         let (dir, project) = project_and_outside();
