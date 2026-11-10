@@ -144,12 +144,112 @@ pub(super) fn replace_exe(exe: &Path, binary: &[u8]) -> Result<(), ReplaceError>
     finished
 }
 
+/// The prefix of the temporary files an upgrade creates beside the binary.
+const TEMP_PREFIX: &str = ".supdoc-upgrade-";
+
+/// The name the running `supdoc.exe` is moved aside to on Windows while its replacement goes in.
+const ASIDE_NAME: &str = "supdoc.exe.old";
+
 /// A name for the temporary file that no earlier run is likely to have used.
 fn temp_name() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.subsec_nanos());
-    format!(".supdoc-upgrade-{}-{nanos}", std::process::id())
+    format_temp_name(std::process::id(), nanos)
+}
+
+/// The temporary file name for process `pid` and `nanos`: [`TEMP_PREFIX`], `pid`, `-`, `nanos`.
+///
+/// [`is_leftover_name`] matches exactly this shape, so the two stay in step.
+fn format_temp_name(pid: u32, nanos: u32) -> String {
+    format!("{TEMP_PREFIX}{pid}-{nanos}")
+}
+
+/// Whether `text` is one or more ASCII digits and nothing else.
+fn all_digits(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Whether `name` is exactly what [`format_temp_name`] makes, or exactly [`ASIDE_NAME`].
+fn is_leftover_name(name: &str) -> bool {
+    name == ASIDE_NAME
+        || name
+            .strip_prefix(TEMP_PREFIX)
+            .and_then(|rest| rest.split_once('-'))
+            .is_some_and(|(pid, nanos)| all_digits(pid) && all_digits(nanos))
+}
+
+/// Removes the files an earlier upgrade left beside `exe`, and says what it could not remove.
+///
+/// Only regular files named exactly like [`temp_name`]'s output (`.supdoc-upgrade-<digits>-<digits>`)
+/// or [`ASIDE_NAME`] go: a symlink, a directory, any other name, and `exe` itself stay. Each
+/// removal is admitted against `exe`'s directory first. A failed removal, an entry that cannot be
+/// read and a directory that cannot be listed each come back as a note, never as an error.
+///
+/// Effect: lists the directory beside `exe` and removes the leftover files in it.
+pub(super) fn remove_leftovers(exe: &Path) -> Vec<String> {
+    remove_leftovers_with(exe, confine::remove_file)
+}
+
+/// [`remove_leftovers`] with the removal itself supplied, so a failing removal can be tested.
+fn remove_leftovers_with(
+    exe: &Path,
+    remove: impl Fn(&confine::Admitted<'_>) -> io::Result<()>,
+) -> Vec<String> {
+    let Some(dir) = exe.parent() else {
+        return Vec::new();
+    };
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return vec![format!(
+                "Could not look for files an earlier upgrade left in {}: {error}",
+                shown(dir)
+            )];
+        }
+    };
+    let boundary = Boundary::resolve(dir);
+    let mut notes = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                notes.push(format!(
+                    "Could not read an entry of {} while looking for files an earlier upgrade \
+                     left: {error}",
+                    shown(dir)
+                ));
+                continue;
+            }
+        };
+        let path = entry.path();
+        if !entry.file_name().to_str().is_some_and(is_leftover_name) || path == exe {
+            continue;
+        }
+        match entry.file_type() {
+            Ok(kind) if kind.is_file() => {}
+            Ok(_) => continue,
+            Err(error) => {
+                notes.push(format!(
+                    "Could not tell what {} is, so it was left: {error}",
+                    shown(&path)
+                ));
+                continue;
+            }
+        }
+        let removed = match boundary.admit(&path) {
+            Ok(admitted) => remove(&admitted).map_err(|error| error.to_string()),
+            Err(_) => Err("it lies outside the binary's directory".to_owned()),
+        };
+        if let Err(reason) = removed {
+            notes.push(format!(
+                "Could not remove {}, left by an earlier upgrade: {reason}",
+                shown(&path)
+            ));
+        }
+    }
+    notes.sort();
+    notes
 }
 
 /// Gives `file` exactly [`BINARY_MODE`], whatever the umask was at creation.
@@ -178,6 +278,86 @@ fn set_mode(_file: &fs::File) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_exact_leftover_shapes_are_leftover_names() {
+        for name in [
+            ".supdoc-upgrade-123-456",
+            ".supdoc-upgrade-0-0",
+            "supdoc.exe.old",
+        ] {
+            assert!(is_leftover_name(name), "{name} should be a leftover");
+        }
+        for name in [
+            ".supdoc-upgrade-notes.txt",
+            ".supdoc-upgrade-x",
+            ".supdoc-upgrade-123",
+            ".supdoc-upgrade-123-",
+            ".supdoc-upgrade--456",
+            ".supdoc-upgrade-123-456-789",
+            ".supdoc-upgrade-123-456.bak",
+            ".supdoc-upgrade-1a-456",
+            "supdoc-upgrade",
+            ".supdoc-upgrade",
+            ".supdoc-upgrade-",
+            "supdoc",
+            "supdoc.exe",
+            "supdoc.exe.old.bak",
+        ] {
+            assert!(!is_leftover_name(name), "{name} should not be a leftover");
+        }
+    }
+
+    #[test]
+    fn a_name_temp_name_makes_is_a_leftover_name() {
+        assert!(is_leftover_name(&temp_name()));
+        assert!(is_leftover_name(&format_temp_name(u32::MAX, 999_999_999)));
+    }
+
+    #[test]
+    fn a_failed_removal_is_reported_as_a_note_and_the_rest_are_still_tried() {
+        let dir = tempfile::tempdir().expect("a scratch directory should be creatable");
+        let exe = dir.path().join("supdoc");
+        fs::write(&exe, "bin").expect("the binary should write");
+        let first = dir.path().join(".supdoc-upgrade-1-1");
+        let second = dir.path().join(".supdoc-upgrade-2-2");
+        fs::write(&first, "a").expect("the first leftover should write");
+        fs::write(&second, "b").expect("the second leftover should write");
+
+        let notes = remove_leftovers_with(&exe, |admitted| {
+            if admitted.as_path().ends_with(".supdoc-upgrade-1-1") {
+                Err(io::Error::other("injected failure"))
+            } else {
+                confine::remove_file(admitted)
+            }
+        });
+
+        assert_eq!(notes.len(), 1, "one removal failed: {notes:?}");
+        let note = notes.concat();
+        assert!(
+            note.contains(".supdoc-upgrade-1-1") && note.contains("injected failure"),
+            "{notes:?}"
+        );
+        assert!(first.exists(), "the failed one stays");
+        assert!(!second.exists(), "the next one is still removed");
+    }
+
+    #[test]
+    fn a_directory_with_a_leftover_name_is_left_without_a_note() {
+        let dir = tempfile::tempdir().expect("a scratch directory should be creatable");
+        let exe = dir.path().join("supdoc");
+        fs::write(&exe, "bin").expect("the binary should write");
+        let folder = dir.path().join(".supdoc-upgrade-1-1");
+        fs::create_dir(&folder).expect("the directory should create");
+
+        let notes = remove_leftovers_with(&exe, |_| Err(io::Error::other("must not be called")));
+
+        assert!(
+            notes.is_empty(),
+            "a directory is skipped silently: {notes:?}"
+        );
+        assert!(folder.is_dir());
+    }
 
     #[test]
     fn a_failed_rename_removes_the_temp_file_and_keeps_the_target() {
