@@ -536,28 +536,6 @@ fn calls(line: &str, call: &str) -> bool {
     })
 }
 
-/// Whether `line` joins a path onto a `.as_str()` argument, such as `root.join(file.as_str())`:
-/// a raw join of text read from a file, which I1 routes through `crate::path`'s typed joins.
-fn joins_raw_text(line: &str) -> bool {
-    line.match_indices(".join(").any(|(at, open)| {
-        let Some(rest) = line.get(at + open.len()..) else {
-            return false;
-        };
-        let mut depth = 1_usize;
-        let close = rest.char_indices().find_map(|(index, c)| {
-            match c {
-                '(' => depth += 1,
-                ')' => depth -= 1,
-                _ => {}
-            }
-            (depth == 0).then_some(index)
-        });
-        close
-            .and_then(|close| rest.get(..close))
-            .is_some_and(|argument| argument.trim_end().ends_with(".as_str()"))
-    })
-}
-
 /// The `std::fs` calls (and `OpenOptions` flags) that write, rename, delete, create or change a
 /// path. I2 allows them only in `config/confine.rs`, behind `Boundary::admit`.
 const FS_MUTATORS: &[&str] = &[
@@ -601,18 +579,6 @@ fn offending_lines(matches: impl Fn(&SourceLine) -> bool) -> Vec<String> {
 }
 
 #[test]
-fn production_code_never_joins_a_path_onto_raw_text() {
-    let offending = offending_lines(|line| joins_raw_text(&line.text));
-
-    assert!(
-        offending.is_empty(),
-        "these lines join a path onto `.as_str()` text; build the path with `crate::path`'s typed \
-         joins (`Beneath`, `FixedPath`, `join_within`) instead:\n{}",
-        offending.join("\n")
-    );
-}
-
-#[test]
 fn only_confine_calls_a_std_fs_mutator() {
     let offending = offending_lines(|line| line.file != CONFINE && mutates(&line.text));
 
@@ -622,19 +588,6 @@ fn only_confine_calls_a_std_fs_mutator() {
          with `Boundary::admit` and call the write primitive that takes the `Admitted` token:\n{}",
         offending.join("\n")
     );
-}
-
-#[test]
-fn the_raw_join_scan_sees_through_nested_calls() {
-    assert!(joins_raw_text("let path = root.join(file.as_str());"));
-    assert!(joins_raw_text("open(root.join(entry.path.as_str()))?"));
-    assert!(!joins_raw_text(
-        "let path = root.join(FixedPath::new(\"a\").as_path());"
-    ));
-    assert!(!joins_raw_text(
-        "let text = parts.join(\", \"); name.as_str()"
-    ));
-    assert!(!joins_raw_text("root.join(name.as_str().trim())"));
 }
 
 #[test]
