@@ -59,8 +59,12 @@ impl AbsolutePath {
     /// beneath `self`.
     #[must_use]
     pub(crate) fn beneath(&self, rel: &impl Beneath) -> Self {
-        let mut joined = self.0.clone();
-        joined.extend(rel.segments().split('/'));
+        let joined = rel
+            .segments()
+            .split('/')
+            .fold(self.0.clone(), |base, segment| {
+                raw_join(&base, Path::new(segment))
+            });
         Self(joined)
     }
 
@@ -92,6 +96,18 @@ impl AbsolutePath {
     pub(crate) fn join_within(&self, rel: &RelativePath, boundary: &AbsolutePath) -> Option<Self> {
         let joined = self.join(rel);
         joined.strip_prefix(boundary).is_some().then_some(joined)
+    }
+
+    /// `path` made absolute against `self` and normalized: a relative `path` is appended, and an
+    /// absolute one replaces `self`, as [`Path::join`] does.
+    ///
+    /// The one join of an unchecked path: it may climb out of `self`, which the operator is free
+    /// to ask for. A caller that must stay inside the project still checks the result. Any code
+    /// may call it, but only command-line parsing can build an [`OperatorPath`].
+    #[must_use]
+    pub(crate) fn resolve_operator(&self, path: &OperatorPath<'_>) -> Self {
+        // Anything joined onto an absolute path is absolute, so `new` never refuses it.
+        Self::new(&raw_join(&self.0, path.as_path())).unwrap_or_else(|| self.clone())
     }
 
     /// The directory containing this path, or `None` at the filesystem root.
@@ -314,6 +330,12 @@ pub(crate) mod fixed {
     pub(crate) const RUMDL_CONFIG_DIR: FixedPath = FixedPath::new("rumdl-config");
     /// A git work tree's marker.
     pub(crate) const DOT_GIT: FixedPath = FixedPath::new(".git");
+    /// A git directory's `HEAD` file.
+    pub(crate) const GIT_HEAD: FixedPath = FixedPath::new("HEAD");
+    /// A git directory's object store.
+    pub(crate) const GIT_OBJECTS: FixedPath = FixedPath::new("objects");
+    /// A git directory's refs directory.
+    pub(crate) const GIT_REFS: FixedPath = FixedPath::new("refs");
     /// tombi's config directory name.
     pub(crate) const TOMBI: FixedPath = FixedPath::new("tombi");
     /// tombi's private config directory beneath the cache base.
@@ -395,7 +417,8 @@ pub(crate) mod fixed {
         FixedPath::new(".clippy.toml"),
         FixedPath::new("clippy.toml"),
     ];
-    /// The toolchain file names rustup looks for.
+    /// The toolchain file names rustup looks for, in its precedence order: this is the lookup
+    /// order, and the first that exists wins, so `rust-toolchain` beats `rust-toolchain.toml`.
     pub(crate) const TOOLCHAIN_FILES: [FixedPath; 2] = [
         FixedPath::new("rust-toolchain"),
         FixedPath::new("rust-toolchain.toml"),
@@ -519,10 +542,24 @@ pub(crate) fn within(dir: &Path, name: &NativeName) -> PathBuf {
 }
 
 /// The one raw join in this module's typed joins: `base` with `tail` appended, as
-/// [`Path::join`] does. Every typed join below calls it, so the lint that bans raw joins
-/// elsewhere has one function here to mark.
+/// [`Path::join`] does. Every typed join here calls it, so the lint that bans raw joins has one
+/// function to mark; [`raw_push`] is its in-place sibling.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the one raw join: every typed join in `crate::path` reaches `Path::join` through it"
+)]
 fn raw_join(base: &Path, tail: &Path) -> PathBuf {
     base.join(tail)
+}
+
+/// [`raw_join`] in place: `tail` appended to `base`, as [`PathBuf::push`] does. Only
+/// [`push_normalized`] calls it, one already-split component at a time.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the one raw push: `push_normalized` appends each checked component through it"
+)]
+fn raw_push(base: &mut PathBuf, tail: &Path) {
+    base.push(tail);
 }
 
 /// `base` with `rel` appended: beneath `base` as written, because [`Beneath`] proves `rel` has no
@@ -558,15 +595,6 @@ pub(crate) fn with_suffix(path: &Path, suffix: &Suffix) -> Option<PathBuf> {
     let mut joined = name.to_owned();
     joined.push(&suffix.0);
     Some(raw_join(path.parent()?, Path::new(&joined)))
-}
-
-/// `path` with its whole file name replaced by `name`, in the same directory. `None` when `path`
-/// has no file name or parent, such as a root.
-#[must_use]
-#[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
-pub(crate) fn sibling(path: &Path, name: &Component) -> Option<PathBuf> {
-    let _name = path.file_name()?;
-    Some(raw_join(path.parent()?, Path::new(name.segments())))
 }
 
 /// `path` with its existing file name wrapped by `prefix` and `suffix`, in the same directory:
@@ -630,7 +658,7 @@ impl Pointer {
     /// when it is absolute. Not normalized, and not confined: the result may lie outside `dir`.
     #[must_use]
     pub(crate) fn resolve_from(&self, dir: &Path) -> PathBuf {
-        dir.join(&self.0)
+        raw_join(dir, &self.0)
     }
 }
 
@@ -654,7 +682,7 @@ pub(crate) fn is_regular_file(path: &Path) -> std::io::Result<bool> {
 ///
 /// Effect: reads file metadata in `dir` and its `.git` directory.
 pub(crate) fn holds_git(dir: &Path) -> bool {
-    let dot_git = dir.join(".git");
+    let dot_git = beneath(dir, &fixed::DOT_GIT);
     match std::fs::metadata(&dot_git) {
         Err(_) => false,
         Ok(metadata) if metadata.is_file() => true,
@@ -670,10 +698,13 @@ pub(crate) fn holds_git(dir: &Path) -> bool {
 ///
 /// Effect: reads file metadata in `git_dir`.
 pub(crate) fn is_git_dir(git_dir: &Path) -> bool {
-    std::fs::symlink_metadata(git_dir.join("HEAD"))
+    let is_dir = |name: &FixedPath| {
+        std::fs::metadata(beneath(git_dir, name)).is_ok_and(|meta| meta.is_dir())
+    };
+    std::fs::symlink_metadata(beneath(git_dir, &fixed::GIT_HEAD))
         .is_ok_and(|metadata| metadata.is_file() || metadata.is_symlink())
-        && std::fs::metadata(git_dir.join("objects")).is_ok_and(|metadata| metadata.is_dir())
-        && std::fs::metadata(git_dir.join("refs")).is_ok_and(|metadata| metadata.is_dir())
+        && is_dir(&fixed::GIT_OBJECTS)
+        && is_dir(&fixed::GIT_REFS)
 }
 
 /// Where a project file such as `supdoc.config.toml` or `supdoc.lock` really is, judged against
@@ -732,7 +763,7 @@ fn push_normalized(base: &mut PathBuf, path: &Path) {
     for component in path.components() {
         match component {
             PathComponent::Prefix(_) | PathComponent::RootDir | PathComponent::Normal(_) => {
-                base.push(component.as_os_str());
+                raw_push(base, Path::new(component.as_os_str()));
             }
             PathComponent::CurDir => {}
             PathComponent::ParentDir => {
@@ -969,26 +1000,6 @@ mod tests {
             with_suffix(Path::new("/d/a:b.md"), &suffix),
             Some(PathBuf::from("/d/a:b.md.1.toml"))
         );
-    }
-
-    #[test]
-    fn sibling_replaces_the_name_and_refuses_what_a_component_refuses() {
-        let name = Component::new("b.toml").expect("one normal name");
-        assert_eq!(
-            sibling(Path::new("/d/a.md"), &name),
-            Some(PathBuf::from("/d/b.toml"))
-        );
-        assert_eq!(sibling(Path::new("/"), &name), None);
-        for refused in ["", ".", "..", "a/b", "a\\b", "a:b", "a\0b"] {
-            assert_eq!(Component::new(refused), None, "{refused:?} reaches sibling");
-        }
-    }
-
-    #[test]
-    fn sibling_is_none_for_a_path_with_no_file_name() {
-        let name = Component::new("b.toml").expect("one normal name");
-        assert_eq!(sibling(Path::new("/d/.."), &name), None);
-        assert_eq!(sibling(Path::new("/"), &name), None);
     }
 
     #[test]
@@ -1250,6 +1261,9 @@ mod tests {
             fixed::RUMDL_TOML,
             fixed::RUMDL_CONFIG_DIR,
             fixed::DOT_GIT,
+            fixed::GIT_HEAD,
+            fixed::GIT_OBJECTS,
+            fixed::GIT_REFS,
             fixed::TOMBI,
             fixed::TOMBI_CONFIG_DIR,
             fixed::DOT_TOMBI_TOML,
@@ -1299,6 +1313,17 @@ mod tests {
                 "fixed path `{raw}`"
             );
         }
+    }
+
+    #[test]
+    fn fixed_toolchain_files_keep_rustups_precedence_with_the_first_match_winning() {
+        let order = fixed::TOOLCHAIN_FILES.map(|file| file.as_str());
+        assert_eq!(
+            order,
+            ["rust-toolchain", "rust-toolchain.toml"],
+            "rustup reads `rust-toolchain` over `rust-toolchain.toml` when both exist, and \
+             `toolchain::read` takes the first name that exists"
+        );
     }
 
     #[test]

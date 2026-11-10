@@ -47,6 +47,13 @@
         reason = "tests report failures rather than document callable contracts"
     )
 )]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::disallowed_methods,
+        reason = "tests build fixture and hostile paths with raw joins on purpose"
+    )
+)]
 
 #[cfg(test)]
 mod support;

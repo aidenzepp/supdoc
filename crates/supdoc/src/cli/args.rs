@@ -25,7 +25,6 @@ use crate::limits::{CommandLineLimits, CountLimit, Given, Limits, SizeLimit, Tim
 use crate::link::SymbolPath;
 use crate::namespace::NamespaceName;
 use crate::output::OutputFormat;
-use crate::path::AbsolutePath;
 use crate::state::LinkState;
 
 /// Keep documentation in step with the code it describes.
@@ -432,7 +431,8 @@ pub(crate) struct ListArgs {
 }
 
 /// A path the operator typed on the command line, such as `-c PATH`, `resolve FILE` or the
-/// `rest` of `ns:rest`. Only `crate::cli` can build one, so [`AbsolutePath::resolve_operator`],
+/// `rest` of `ns:rest`. Only `crate::cli` can build one, so
+/// [`AbsolutePath::resolve_operator`](crate::path::AbsolutePath::resolve_operator),
 /// the one join that lets a path climb out of or replace its base, never sees a path read from a
 /// file. Code outside `crate::cli` can name the type but never build one, so it can't reach that
 /// join through a helper that takes one.
@@ -450,21 +450,10 @@ impl<'a> OperatorPath<'a> {
         paths.iter().map(|path| Self(path)).collect()
     }
 
-    /// The path exactly as typed: for messages, and as the input to `path::as_typed`.
+    /// The path exactly as typed: for messages, and as the input to `path::as_typed` and
+    /// `AbsolutePath::resolve_operator`.
     pub(crate) fn as_path(self) -> &'a Path {
         self.0
-    }
-}
-
-impl AbsolutePath {
-    /// `path` made absolute against `self` and normalized: a relative `path` is appended, and an
-    /// absolute one replaces `self`, as [`Path::join`] does.
-    ///
-    /// The one join of an unchecked path: it may climb out of `self`, which the operator is free
-    /// to ask for. A caller that must stay inside the project still checks the result.
-    pub(in crate::cli) fn resolve_operator(&self, path: &OperatorPath<'_>) -> Self {
-        // Anything joined onto an absolute path is absolute, so `new` never refuses it.
-        Self::new(&self.as_path().join(path.0)).unwrap_or_else(|| self.clone())
     }
 }
 
@@ -803,6 +792,7 @@ impl SkillTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::path::AbsolutePath;
 
     fn absolute(raw: &str) -> AbsolutePath {
         crate::path::fixture(raw)

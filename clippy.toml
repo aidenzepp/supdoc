@@ -5,3 +5,11 @@ allow-panic-in-tests = true
 # Keep this explicit: tests may use expect with context, but never unwrap.
 allow-unwrap-in-tests = false
 allow-expect-in-tests = true
+# Only `crate::path` joins or renames raw: its typed joins prove where a joined path can go.
+disallowed-methods = [
+    { path = "std::path::Path::join", reason = "join through `AbsolutePath::beneath` with a `FixedPath`, or another typed join in `crate::path`" },
+    { path = "std::path::PathBuf::push", reason = "join through `AbsolutePath::beneath` with a `FixedPath`, or another typed join in `crate::path`" },
+    { path = "std::path::Path::with_file_name", reason = "name a sibling through `crate::path::with_suffix` or `with_affixes`, or join a checked `Component` onto the parent" },
+    { path = "std::path::Path::with_extension", reason = "name a sibling through `crate::path::with_suffix` or `with_affixes`, or join a checked `Component` onto the parent" },
+    { path = "std::path::PathBuf::set_file_name", reason = "name a sibling through `crate::path::with_suffix` or `with_affixes`, or join a checked `Component` onto the parent" },
+]
