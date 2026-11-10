@@ -295,8 +295,9 @@ pub(crate) const SKILL_INSTALL_LONG_ABOUT: &str = "\
 Install SKILL.md for agent runtimes (writes; previews unless --yes)
 
 Writes two copies of the SKILL.md embedded in this binary: .agents/skills/supdoc/SKILL.md for \
-agents that read the shared directory, and .claude/skills/supdoc/SKILL.md for Claude Code. With \
---global they go under $HOME, and Claude Code's copy under $CLAUDE_CONFIG_DIR when it's set. An \
+agents that read the shared directory, and .claude/skills/supdoc/SKILL.md for Claude Code. \
+--target agents or --target claude writes only that one. With --global they go under $HOME, and \
+Claude Code's copy under $CLAUDE_CONFIG_DIR when it's set; --target agents never reads it. An \
 existing SKILL.md with different contents is replaced only with --yes. A project install writes \
 nothing outside the project: a symlinked .agents or .claude that leads out of it is named and \
 refused.";

@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::config::code_blocks::Edition;
 use crate::config::confine::{self, Boundary};
 use crate::finding::{IndexedText, Location};
-use crate::path::AbsolutePath;
+use crate::path::{self, AbsolutePath, Component, fixed};
 
 use super::block::CodeBlock;
 use super::format::{self, ParseError, first_line};
@@ -23,9 +23,6 @@ const COMPILE_TIME_READS: [&str; 5] = [
     "env",
     "option_env",
 ];
-
-/// The `rustfmt.toml` names rustfmt reads, in its own order.
-const CONFIG_FILES: [&str; 2] = [".rustfmt.toml", "rustfmt.toml"];
 
 /// The edition a block's own `edition20xx` attribute names; the first one wins.
 #[must_use]
@@ -45,9 +42,9 @@ pub(crate) fn config_args(root: &Path) -> Vec<OsString> {
     let Ok(real_root) = root.canonicalize() else {
         return Vec::new();
     };
-    let Some(file) = CONFIG_FILES
+    let Some(file) = fixed::RUST_CONFIG_FILES
         .iter()
-        .map(|name| root.join(name))
+        .map(|name| path::beneath(root, name))
         .find(|path| std::fs::symlink_metadata(path).is_ok())
     else {
         return Vec::new();
@@ -63,9 +60,6 @@ pub(crate) fn config_args(root: &Path) -> Vec<OsString> {
     }
 }
 
-/// The clippy config names clippy reads from a directory, in its own order.
-const CLIPPY_FILES: [&str; 2] = [".clippy.toml", "clippy.toml"];
-
 /// The value for `CLIPPY_CONF_DIR`: `root`'s real path, when it holds a `.clippy.toml` or
 /// `clippy.toml` and each of those that exists is a regular file whose real path is inside
 /// `root`'s. `None` otherwise, so clippy never follows a link out of the checkout.
@@ -74,9 +68,9 @@ const CLIPPY_FILES: [&str; 2] = [".clippy.toml", "clippy.toml"];
 #[must_use]
 pub(crate) fn clippy_conf_dir(root: &Path) -> Option<OsString> {
     let real_root = root.canonicalize().ok()?;
-    let present: Vec<_> = CLIPPY_FILES
+    let present: Vec<_> = fixed::CLIPPY_FILES
         .iter()
-        .map(|name| root.join(name))
+        .map(|name| path::beneath(root, name))
         .filter(|path| std::fs::symlink_metadata(path).is_ok())
         .collect();
     let inside = |path: &PathBuf| {
@@ -110,13 +104,12 @@ impl EmitDir {
     #[must_use]
     pub(crate) fn create(neutral: &Path) -> Option<Self> {
         let cache = runner::exact(neutral.canonicalize().ok()?.parent()?)?;
-        let parent = AbsolutePath::new(&cache.as_path().join("emit"))?;
+        let parent = AbsolutePath::new(&path::beneath(cache.as_path(), &fixed::EMIT))?;
         let base = runner::create_private(&Boundary::resolve(&cache), &parent)?;
         (0..16).find_map(|_| {
             let count = EMITS.fetch_add(1, Ordering::Relaxed);
-            let path = parent
-                .as_path()
-                .join(format!("{}-{count}", std::process::id()));
+            let name = Component::new(&format!("{}-{count}", std::process::id()))?;
+            let path = path::beneath(parent.as_path(), &name);
             confine::create_dir(&base.admit(&path).ok()?, 0o700).ok()?;
             Some(Self {
                 base: base.clone(),
@@ -128,7 +121,7 @@ impl EmitDir {
     /// The metadata file clippy writes in this directory.
     #[must_use]
     pub(crate) fn file(&self) -> PathBuf {
-        self.path.join("block.rmeta")
+        path::beneath(&self.path, &fixed::BLOCK_RMETA)
     }
 }
 

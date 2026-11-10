@@ -7,13 +7,17 @@
 //! `$CARGO_HOME/.crates2.json`). Any other install is refused with the right manual step. Cargo
 //! runs from `$CARGO_HOME`, so no `.cargo/config.toml` or `rust-toolchain.toml` near the
 //! directory supdoc was started in can redirect it. Without `--yes` the command only previews.
-//! With no version, `cargo search supdoc --limit 1` names the latest release.
+//! With no version, `cargo search supdoc --limit 1` names the latest release. On Windows cargo
+//! cannot replace the running `supdoc.exe`, so `--yes` does not run cargo there: it names the
+//! command to run from another shell.
 //!
 //! A binary built by the release workflow (it carries `SUPDOC_RELEASE_BINARY=1`) is the other
 //! install this command knows. Its preview reads one `SHA256SUMS` from the GitHub release and
 //! names the archive and digest that would be installed. Under `--yes` it fetches that archive,
 //! checks its SHA-256 against `SHA256SUMS`, and only then replaces itself, atomically, beside
-//! the old file.
+//! the old file. On Windows the running `supdoc.exe` is renamed to `supdoc.exe.old` first; if
+//! the process dies between that rename and the move-in, no `supdoc.exe` is on disk, and
+//! `supdoc.exe.old` is the copy to rename back.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -287,6 +291,9 @@ pub(crate) struct UpgradeReport {
     /// The SHA-256 the archive must have, from `SHA256SUMS`; only with `asset`.
     #[serde(skip_serializing_if = "Option::is_none")]
     sha256: Option<String>,
+    /// Files an earlier upgrade left beside the binary that this run could not remove, one
+    /// sentence each; empty when there are none.
+    notes: Vec<String>,
 }
 
 impl Report for UpgradeReport {
@@ -334,15 +341,17 @@ pub(crate) fn schema() -> schemars::Schema {
 /// A supdoc that cargo installed from crates.io upgrades with cargo. A release binary previews
 /// the archive and digest from the release's `SHA256SUMS`.
 ///
-/// Effect: reads `CARGO_HOME`, `HOME`, the install records and this binary's path. The cargo
-/// route runs `cargo search` when no version is given, and `cargo install` under `--yes`, both
-/// with `$CARGO_HOME` as the working directory and standard input closed. The release-binary
+/// Effect: reads `CARGO_HOME`, `HOME` (`USERPROFILE` on Windows), the install records and this binary's path. The cargo
+/// route runs `cargo search` when no version is given, and, off Windows, `cargo install` under
+/// `--yes`, both with `$CARGO_HOME` as the working directory and standard input closed. The
+/// release-binary
 /// route fetches one `SHA256SUMS`.
 ///
 /// # Errors
 ///
 /// Returns `cli-upgrade-not-cargo` (78) when this binary is neither a release binary nor the one
-/// cargo installed from crates.io, `cli-upgrade-no-cargo` (74) when `cargo` cannot be started,
+/// cargo installed from crates.io, `cli-upgrade-cargo-manual` (78) when `--yes` would run cargo
+/// on Windows, which cannot replace the running `supdoc.exe`, `cli-upgrade-no-cargo` (74) when `cargo` cannot be started,
 /// `cli-upgrade-cargo-failed` (1) when cargo exits with a failure, `cli-upgrade-latest-unknown`
 /// (1) when `cargo search` names no version, `cli-upgrade-fetch-failed` (74) when `SHA256SUMS`
 /// cannot be fetched or read, `cli-upgrade-no-asset` (1) when the release has no archive for
@@ -354,9 +363,34 @@ pub(crate) fn run(
     context: &Context,
     output: &mut Output,
 ) -> Result<Outcome, CliError> {
-    let environment = Environment::read();
-    match detect(&environment, release_marker())? {
-        Install::Cargo(installed) => run_cargo(args, context, output, &installed),
+    run_in(
+        args,
+        context,
+        output,
+        &Environment::read(),
+        release_marker(),
+        install,
+    )
+}
+
+/// [`run`] in `environment`, with the cargo install started through `spawn`, so a test can run
+/// the Windows route on any host and see that nothing is started.
+///
+/// # Errors
+///
+/// Returns what [`run`] lists.
+fn run_in(
+    args: &UpgradeArgs,
+    context: &Context,
+    output: &mut Output,
+    environment: &Environment,
+    marker: bool,
+    spawn: impl FnOnce(&[String], &Path, bool) -> Result<(), CliError>,
+) -> Result<Outcome, CliError> {
+    match detect(environment, marker)? {
+        Install::Cargo(installed) => {
+            run_cargo(args, context, output, &installed, environment, spawn)
+        }
         Install::ReleaseBinary => {
             run_release_binary(args, context, output, environment.exe.as_deref())
         }
@@ -401,18 +435,19 @@ fn detect(environment: &Environment, marker: bool) -> Result<Install, CliError> 
     installed_by_cargo(environment).map(Install::Cargo)
 }
 
-/// Whether this binary is the file at `$CARGO_HOME/bin/supdoc`.
+/// Whether this binary is the file at `$CARGO_HOME/bin/supdoc` (`supdoc.exe` on Windows).
 fn cargo_owns_exe(environment: &Environment) -> bool {
     let (Some(exe), Ok(cargo_home)) = (&environment.exe, &environment.cargo_home) else {
         return false;
     };
-    fs::canonicalize(cargo_home.join("bin").join(PACKAGE))
+    fs::canonicalize(cargo_home.join("bin").join(&environment.cargo_bin))
         .ok()
         .as_deref()
         == Some(exe.as_path())
 }
 
-/// The cargo route of [`run`]: previews, or under `--yes` runs, the cargo install of the target.
+/// The cargo route of [`run`]: previews, or under `--yes` runs, the cargo install of the target;
+/// on Windows (`environment.windows`) `--yes` names the command instead of running it.
 ///
 /// # Errors
 ///
@@ -423,10 +458,13 @@ fn run_cargo(
     context: &Context,
     output: &mut Output,
     installed: &CargoInstall,
+    environment: &Environment,
+    spawn: impl FnOnce(&[String], &Path, bool) -> Result<(), CliError>,
 ) -> Result<Outcome, CliError> {
+    let windows = environment.windows;
     let target = match &args.release {
         Some(version) => version.clone(),
-        None => latest(&installed.cargo_home)?,
+        None => latest(&installed.cargo_home, windows)?,
     };
     let direction = installed.version.direction_to(&target);
     let applied = args.confirm.mode() == WriteMode::Apply;
@@ -436,10 +474,12 @@ fn run_cargo(
     } else {
         let words = install_argv(&target, &installed.cargo_home);
         if applied {
-            install(
+            install_or_hand_over(
+                windows,
                 &words,
                 &installed.cargo_home,
                 context.global.format().is_json(),
+                spawn,
             )?;
             (words, true, UpgradeOutcome::Installed)
         } else {
@@ -457,6 +497,7 @@ fn run_cargo(
         method: Method::Cargo,
         asset: None,
         sha256: None,
+        notes: Vec::new(),
     };
     output
         .report(&report, true)
@@ -464,9 +505,12 @@ fn run_cargo(
     let note = match outcome {
         UpgradeOutcome::AlreadyCurrent => None,
         UpgradeOutcome::Installed => Some(format!("Installed supdoc {target}.")),
-        UpgradeOutcome::Previewed => Some(preview_note(
+        UpgradeOutcome::Previewed => Some(cargo_preview_note(
+            windows,
             args.confirm.dry_run,
             &command_line(context, "upgrade", &[target.release()], &["--yes"]),
+            &report.command,
+            &installed.cargo_home,
         )),
     };
     if let Some(note) = note {
@@ -475,6 +519,102 @@ fn run_cargo(
             .map_err(|error| CliError::output_failed("the upgrade report", &error))?;
     }
     Ok(Outcome::Clean)
+}
+
+/// The note under a cargo preview: the usual one, or on Windows (`windows`) that `--yes` cannot
+/// run cargo there and the `command` to run from `cargo_home` in another shell.
+fn cargo_preview_note(
+    windows: bool,
+    dry_run: bool,
+    apply: &str,
+    command: &[String],
+    cargo_home: &Path,
+) -> String {
+    if windows {
+        format!(
+            "Nothing written. On Windows supdoc cannot run cargo for you, because it cannot \
+             replace the running supdoc.exe: run `{}` with cargo from another shell, where \
+             supdoc is not running.",
+            powershell_command(command, cargo_home)
+        )
+    } else {
+        preview_note(dry_run, apply)
+    }
+}
+
+/// Runs the cargo install `argv` through `spawn`, except on Windows (`windows`), where it is
+/// never spawned: cargo installs by renaming the new binary onto `supdoc.exe`, and Windows
+/// refuses that while supdoc runs, so the command is named for the user to run instead.
+///
+/// # Errors
+///
+/// Returns `cli-upgrade-cargo-manual` on Windows, else what `spawn` returns.
+fn install_or_hand_over(
+    windows: bool,
+    argv: &[String],
+    cargo_home: &Path,
+    json: bool,
+    spawn: impl FnOnce(&[String], &Path, bool) -> Result<(), CliError>,
+) -> Result<(), CliError> {
+    if windows {
+        Err(cargo_manual(argv, cargo_home))
+    } else {
+        spawn(argv, cargo_home, json)
+    }
+}
+
+/// `argv` as a PowerShell command run from `cargo_home`, as the Unix route runs it, so a
+/// `rust-toolchain.toml` or `.cargo/config.toml` in the current directory cannot change the
+/// toolchain or registry.
+fn powershell_command(argv: &[String], cargo_home: &Path) -> String {
+    let line = argv
+        .iter()
+        .map(|word| powershell_quote(word))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "Set-Location {}; {line}",
+        powershell_quote(&cargo_home.display().to_string())
+    )
+}
+
+/// `text` as one PowerShell word: bare when plain, else single-quoted with `'` doubled.
+fn powershell_quote(text: &str) -> String {
+    let plain = !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+=:,@%".contains(c));
+    if plain {
+        text.to_owned()
+    } else {
+        format!("'{}'", text.replace('\'', "''"))
+    }
+}
+
+/// The finding that `--yes` cannot run cargo on Windows, exit 78 as for any step the user takes.
+fn cargo_manual(argv: &[String], cargo_home: &Path) -> CliError {
+    let command = powershell_command(argv, cargo_home);
+    CliError::new(
+        "cli-upgrade-cargo-manual",
+        format!(
+            "supdoc did not run `{command}`: cargo replaces supdoc.exe by renaming the new binary \
+             onto it, and Windows will not replace a program while it runs"
+        ),
+        format!("Run `{command}` from a shell where supdoc is not running"),
+        ExitStatus::Config,
+    )
+}
+
+/// The `cli-upgrade-cargo-manual` finding for a fixed target and cargo home, for the test seam.
+pub(crate) fn cargo_manual_example(cargo_home: &Path) -> CliError {
+    let target = ReleaseVersion {
+        text: "9.9.9".to_owned(),
+        major: 9,
+        minor: 9,
+        patch: 9,
+        pre: Vec::new(),
+    };
+    cargo_manual(&install_argv(&target, cargo_home), cargo_home)
 }
 
 /// The first release that has downloadable binaries.
@@ -523,10 +663,11 @@ fn run_release_binary(
     let direction = running.direction_to(&target);
     let applied = args.confirm.mode() == WriteMode::Apply;
 
+    let mut notes = Vec::new();
     let (outcome, asset, sha256) = match found {
         Some((asset, digest)) if direction != Direction::Same => {
             if applied {
-                install_release(&target, exe, &asset, &digest, context)?;
+                notes = install_release(&target, exe, &asset, &digest, context, output)?;
                 (UpgradeOutcome::Installed, Some(asset), Some(digest))
             } else {
                 (UpgradeOutcome::Previewed, Some(asset), Some(digest))
@@ -545,6 +686,7 @@ fn run_release_binary(
         method: Method::ReleaseBinary,
         asset,
         sha256,
+        notes,
     };
     output
         .report(&report, true)
@@ -568,20 +710,26 @@ fn run_release_binary(
 /// Fetches the archive at `asset`, checks it against `digest`, and replaces `exe` with its
 /// binary.
 ///
-/// Effect: one fetch of the archive, then the file changes of [`install::replace_exe`].
+/// Returns the notes about files an earlier upgrade left that could not be removed.
+///
+/// Effect: one fetch of the archive, the removals of [`install::remove_leftovers`], the file
+/// changes of [`install::replace_exe`], then the notes written to `output`. When the replace
+/// fails the notes travel in its error instead, so no output mode drops them.
 ///
 /// # Errors
 ///
 /// Returns `cli-upgrade-fetch-failed` when the archive cannot be fetched,
 /// `cli-upgrade-verify-failed` when it fails the checksum or lacks the binary, and
-/// `cli-upgrade-replace-failed` when the binary cannot be put in place.
+/// `cli-upgrade-replace-failed` when the binary cannot be put in place, and `cli-output-failed`
+/// when a note cannot be written.
 fn install_release(
     target: &ReleaseVersion,
     exe: Option<&Path>,
     asset: &str,
     digest: &str,
     context: &Context,
-) -> Result<(), CliError> {
+    output: &mut Output,
+) -> Result<Vec<String>, CliError> {
     let retry = command_line(context, "upgrade", &[target.release()], &["--yes"]);
     let exe = exe.ok_or_else(|| cannot_tell("its own path could not be found"))?;
     let triple = release::running_triple().ok_or_else(no_asset_for_platform)?;
@@ -607,20 +755,57 @@ fn install_release(
             ExitStatus::Failed,
         )
     })?;
-    install::replace_exe(exe, &binary).map_err(|error| {
-        CliError::new(
-            "cli-upgrade-replace-failed",
-            format!(
-                "could not replace {}: {error}",
-                visible(&exe.display().to_string())
-            ),
-            format!(
-                "Make the binary's directory writable for your user and run `{retry}` again; \
-                 the old binary was left in place"
-            ),
-            ExitStatus::Io,
+    let notes = install::remove_leftovers(exe);
+    install::replace_exe(exe, &binary)
+        .map_err(|error| replace_failed(exe, &error, &notes, &retry))?;
+    for note in &notes {
+        output
+            .note(note)
+            .map_err(|error| CliError::output_failed("the upgrade report", &error))?;
+    }
+    Ok(notes)
+}
+
+/// The `cli-upgrade-replace-failed` error for `exe`, naming each leftover in `notes` that could
+/// not be removed, so the text and the JSON error both carry them.
+fn replace_failed(
+    exe: &Path,
+    error: &install::ReplaceError,
+    notes: &[String],
+    retry: &str,
+) -> CliError {
+    let mut message = format!(
+        "could not replace {}: {error}",
+        visible(&exe.display().to_string())
+    );
+    for note in notes {
+        message.push_str("; ");
+        message.push_str(note);
+    }
+    CliError::new(
+        "cli-upgrade-replace-failed",
+        message,
+        replace_failed_help(retry, cfg!(windows)),
+        ExitStatus::Io,
+    )
+}
+
+/// The remedy for a failed replacement: Windows remedies when `windows`, else Unix ones.
+fn replace_failed_help(retry: &str, windows: bool) -> String {
+    if windows {
+        let aside = install::ASIDE_NAME;
+        format!(
+            "Close anything using supdoc.exe or its directory, such as another supdoc or a virus \
+             scanner, and make the directory writable for your user, then run `{retry}` again; \
+             if supdoc.exe is missing (a crash between the two renames leaves it so) and {aside} is \
+             beside it, rename {aside} back to supdoc.exe"
         )
-    })
+    } else {
+        format!(
+            "Make the binary's directory writable for your user and run `{retry}` again; \
+             the old binary was left in place"
+        )
+    }
 }
 
 /// The version to install and, when it differs from the running one, the archive URL and digest
@@ -784,8 +969,13 @@ fn install_argv(target: &ReleaseVersion, cargo_home: &Path) -> Vec<String> {
 struct Environment {
     /// This binary's path with symlinks resolved, when it can be found.
     exe: Option<PathBuf>,
-    /// The cargo home: `CARGO_HOME` when absolute, else `$HOME/.cargo`, or why there is none.
+    /// The cargo home: `CARGO_HOME` when absolute, else `<home>/.cargo`, or why there is none.
     cargo_home: Result<PathBuf, CargoHomeProblem>,
+    /// The file name cargo gives the binary in `$CARGO_HOME/bin`: `supdoc`, or `supdoc.exe` on
+    /// Windows.
+    cargo_bin: String,
+    /// Whether the platform is Windows, which names `USERPROFILE` in the refusals and the syntax of their remedies.
+    windows: bool,
 }
 
 /// Why no usable cargo home was found.
@@ -793,15 +983,17 @@ struct Environment {
 enum CargoHomeProblem {
     /// `CARGO_HOME` is set to a relative path.
     RelativeSet,
-    /// `CARGO_HOME` is unset or empty, and `HOME` is not an absolute path.
+    /// `CARGO_HOME` is unset or empty, and the home variable (`HOME`, `USERPROFILE` on Windows) is
+    /// not an absolute path.
     Unset,
     /// The cargo home is not valid UTF-8, so it cannot be shown or passed to cargo faithfully.
     NotUtf8,
 }
 
-/// The cargo home that `CARGO_HOME` and `HOME` name, or why they name none.
+/// The cargo home that `CARGO_HOME` and the home variable name, or why they name none.
 ///
-/// An unset or empty `CARGO_HOME` falls back to `$HOME/.cargo`. A relative `CARGO_HOME` or `HOME`
+/// An unset or empty `CARGO_HOME` falls back to `<home>/.cargo`, where `<home>` is `HOME` (or
+/// `USERPROFILE` on Windows). A relative `CARGO_HOME` or home
 /// is no cargo home, since cargo would read it from wherever supdoc happens to run.
 ///
 /// # Errors
@@ -831,27 +1023,46 @@ fn cargo_home_from(
     }
 }
 
+/// The variable that names the home directory: `USERPROFILE` on Windows, `HOME` elsewhere.
+const fn home_variable(windows: bool) -> &'static str {
+    if windows { "USERPROFILE" } else { "HOME" }
+}
+
 impl Environment {
-    /// Reads the current executable, `CARGO_HOME` and `HOME`.
+    /// Reads the current executable, `CARGO_HOME`, and `USERPROFILE` on Windows or `HOME`
+    /// elsewhere.
     fn read() -> Self {
+        Self::read_with(std::env::current_exe().ok(), |name| std::env::var_os(name))
+    }
+
+    /// [`Self::read`] with the environment looked up through `lookup`, so a test can see which
+    /// variables are asked for.
+    fn read_with(exe: Option<PathBuf>, lookup: impl Fn(&str) -> Option<OsString>) -> Self {
+        let windows = cfg!(windows);
         Self::from_parts(
-            std::env::current_exe().ok(),
-            std::env::var_os("CARGO_HOME"),
-            std::env::var_os("HOME"),
+            windows,
+            exe,
+            lookup("CARGO_HOME"),
+            lookup(home_variable(windows)),
         )
     }
 
-    /// The environment for an executable path and the two variables, as [`cargo_home_from`] reads
-    /// them.
+    /// The environment for an executable path, `CARGO_HOME`, and the home variable of the
+    /// platform (`USERPROFILE` when `windows`, else `HOME`), as [`cargo_home_from`] reads them.
+    /// `windows` also gives the binary the `.exe` suffix cargo adds there.
     fn from_parts(
+        windows: bool,
         exe: Option<PathBuf>,
         cargo_home: Option<OsString>,
         home: Option<OsString>,
     ) -> Self {
         let cargo_home = cargo_home_from(cargo_home, home);
+        let suffix = if windows { ".exe" } else { "" };
         Self {
             exe: exe.and_then(|exe| fs::canonicalize(exe).ok()),
             cargo_home,
+            cargo_bin: format!("{PACKAGE}{suffix}"),
+            windows,
         }
     }
 }
@@ -867,7 +1078,7 @@ struct CargoInstall {
 
 /// Decides how this supdoc was installed, refusing anything but a cargo install from crates.io.
 ///
-/// Effect: reads `$CARGO_HOME/bin/supdoc` and `$CARGO_HOME/.crates2.json`.
+/// Effect: reads `$CARGO_HOME/bin/supdoc` (`supdoc.exe` on Windows) and `$CARGO_HOME/.crates2.json`.
 ///
 /// # Errors
 ///
@@ -880,12 +1091,12 @@ fn installed_by_cargo(environment: &Environment) -> Result<CargoInstall, CliErro
     let (Some(exe), Ok(cargo_home)) = (&environment.exe, &environment.cargo_home) else {
         return Err(match (&environment.exe, &environment.cargo_home) {
             (Some(exe), Err(problem)) => {
-                known_location(exe).unwrap_or_else(|| no_cargo_home(*problem))
+                known_location(exe).unwrap_or_else(|| no_cargo_home(*problem, environment.windows))
             }
             _ => cannot_tell(&seen),
         });
     };
-    let expected = fs::canonicalize(cargo_home.join("bin").join(PACKAGE)).ok();
+    let expected = fs::canonicalize(cargo_home.join("bin").join(&environment.cargo_bin)).ok();
     if expected.as_deref() != Some(exe.as_path()) {
         return Err(by_location(exe));
     }
@@ -898,7 +1109,7 @@ fn installed_by_cargo(environment: &Environment) -> Result<CargoInstall, CliErro
             ),
         )
     })?;
-    let version = recorded_version(&record, &seen)?;
+    let version = recorded_version(&record, &seen, &environment.cargo_bin)?;
     Ok(CargoInstall {
         version,
         cargo_home: cargo_home.clone(),
@@ -935,28 +1146,51 @@ fn known_location(exe: &Path) -> Option<CliError> {
 }
 
 /// The refusal when no usable cargo home can be found, so cargo's install records cannot be read.
-fn no_cargo_home(problem: CargoHomeProblem) -> CliError {
+///
+/// Names `USERPROFILE` and PowerShell syntax when `windows`, else `HOME` and `export`.
+fn no_cargo_home(problem: CargoHomeProblem, windows: bool) -> CliError {
+    let home = home_variable(windows);
+    let set = set_cargo_home(windows);
     let (message, help) = match problem {
         CargoHomeProblem::RelativeSet => (
             "CARGO_HOME is set but is not an absolute path, so supdoc can't find cargo's install \
-             records",
-            "Set CARGO_HOME to an absolute path, such as `export CARGO_HOME=$HOME/.cargo`, then \
-             run `supdoc upgrade` again",
+             records"
+                .to_owned(),
+            format!(
+                "Set CARGO_HOME to an absolute path, such as `{set}`, then run `supdoc upgrade` again"
+            ),
         ),
         CargoHomeProblem::Unset => (
-            "CARGO_HOME is not set and HOME is not an absolute path, so supdoc can't find \
-             cargo's install records",
-            "Set CARGO_HOME to an absolute path, such as `export CARGO_HOME=$HOME/.cargo`, then \
-             run `supdoc upgrade` again",
+            format!(
+                "CARGO_HOME is not set and {home} is not an absolute path, so supdoc can't find \
+                 cargo's install records"
+            ),
+            format!(
+                "Set CARGO_HOME to an absolute path, such as `{set}`, then run `supdoc upgrade` again"
+            ),
         ),
         CargoHomeProblem::NotUtf8 => (
-            "CARGO_HOME (or the HOME it comes from) is not valid UTF-8, so supdoc can't pass it \
-             to cargo",
-            "Move cargo's home to a UTF-8 path and set CARGO_HOME to it, such as `export \
-             CARGO_HOME=$HOME/.cargo`, then run `supdoc upgrade` again",
+            format!(
+                "CARGO_HOME (or the {home} it comes from) is not valid UTF-8, so supdoc can't pass \
+                 it to cargo"
+            ),
+            format!(
+                "Move cargo's home to a UTF-8 path and set CARGO_HOME to it, such as `{set}`, then \
+                 run `supdoc upgrade` again"
+            ),
         ),
     };
-    not_cargo(message.to_owned(), help)
+    not_cargo(message, &help)
+}
+
+/// A shell command that sets `CARGO_HOME` to the default cargo home, in PowerShell syntax when
+/// `windows`, else POSIX.
+const fn set_cargo_home(windows: bool) -> &'static str {
+    if windows {
+        "$env:CARGO_HOME = \"$env:USERPROFILE\\.cargo\""
+    } else {
+        "export CARGO_HOME=$HOME/.cargo"
+    }
 }
 
 /// The refusal for a binary whose origin supdoc cannot establish.
@@ -981,14 +1215,15 @@ fn not_cargo(message: String, help: &str) -> CliError {
 }
 
 /// The version cargo recorded for the `supdoc` binary in `record` (`.crates2.json`), checked
-/// against this binary's own version.
+/// against this binary's own version. `cargo_bin` is the binary's name as cargo records it:
+/// `supdoc`, or `supdoc.exe` on Windows.
 ///
 /// # Errors
 ///
 /// Returns `cli-upgrade-not-cargo` when the record is not JSON, holds no `supdoc` that installed
 /// the `supdoc` binary, holds more than one, names a source other than crates.io, or names a
 /// version other than the one running.
-fn recorded_version(record: &str, seen: &str) -> Result<ReleaseVersion, CliError> {
+fn recorded_version(record: &str, seen: &str, cargo_bin: &str) -> Result<ReleaseVersion, CliError> {
     let document: serde_json::Value = serde_json::from_str(record).map_err(|error| {
         cannot_tell_with(
             seen,
@@ -1007,7 +1242,7 @@ fn recorded_version(record: &str, seen: &str) -> Result<ReleaseVersion, CliError
             let installs_binary = install
                 .get("bins")
                 .and_then(serde_json::Value::as_array)
-                .is_some_and(|bins| bins.iter().any(|bin| bin.as_str() == Some(PACKAGE)));
+                .is_some_and(|bins| bins.iter().any(|bin| bin.as_str() == Some(cargo_bin)));
             (name == PACKAGE && installs_binary).then(|| (version.to_owned(), source.to_owned()))
         });
     let (Some((version, source)), None) = (entries.next(), entries.next()) else {
@@ -1052,9 +1287,9 @@ fn recorded_version(record: &str, seen: &str) -> Result<ReleaseVersion, CliError
 ///
 /// # Errors
 ///
-/// Returns `cli-upgrade-no-cargo` when cargo cannot start, `cli-upgrade-cargo-failed` when it
-/// fails, and `cli-upgrade-latest-unknown` when its output has no `supdoc = "<version>"` line.
-fn latest(cargo_home: &Path) -> Result<ReleaseVersion, CliError> {
+/// Returns `cli-upgrade-no-cargo` when cargo cannot start (`windows` picks the PowerShell remedy),
+/// `cli-upgrade-cargo-failed` when it fails, and `cli-upgrade-latest-unknown` when its output has no `supdoc = "<version>"` line.
+fn latest(cargo_home: &Path, windows: bool) -> Result<ReleaseVersion, CliError> {
     let argv: Vec<String> = [
         "cargo", "search", PACKAGE, "--limit", "1", "--color", "never",
     ]
@@ -1064,7 +1299,7 @@ fn latest(cargo_home: &Path) -> Result<ReleaseVersion, CliError> {
         .current_dir(cargo_home)
         .stdin(Stdio::null())
         .output()
-        .map_err(|error| no_cargo(&error))?;
+        .map_err(|error| no_cargo(&error, windows))?;
     let stdout = String::from_utf8_lossy(&result.stdout).into_owned();
     if !result.status.success() {
         let stderr = String::from_utf8_lossy(&result.stderr);
@@ -1104,7 +1339,7 @@ fn cargo(argv: &[String]) -> Command {
 }
 
 /// Runs the install `argv` from `cargo_home`, standard input closed and standard output left
-/// alone. Cargo's standard error is shown as it arrives and kept to recognize one failure.
+/// alone. Only off Windows: see [`install_or_hand_over`]. Cargo's standard error is shown as it arrives and kept to recognize one failure.
 ///
 /// Effect: runs cargo, which reads and writes the network and `$CARGO_HOME`.
 ///
@@ -1123,7 +1358,7 @@ fn install(argv: &[String], cargo_home: &Path, json: bool) -> Result<(), CliErro
         })
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| no_cargo(&error))?;
+        .map_err(|error| no_cargo(&error, false))?;
     let mut shown = Vec::new();
     std::thread::scope(|scope| {
         // Under JSON, standard output holds the one report, so cargo's goes to standard error.
@@ -1154,7 +1389,7 @@ fn install(argv: &[String], cargo_home: &Path, json: bool) -> Result<(), CliErro
             }
         }
     });
-    let status = child.wait().map_err(|error| no_cargo(&error))?;
+    let status = child.wait().map_err(|error| no_cargo(&error, false))?;
     if status.success() {
         Ok(())
     } else {
@@ -1162,35 +1397,405 @@ fn install(argv: &[String], cargo_home: &Path, json: bool) -> Result<(), CliErro
     }
 }
 
-/// The error for cargo that cannot start.
-fn no_cargo(error: &io::Error) -> CliError {
+/// The error for cargo that cannot start, with the PATH remedy in PowerShell syntax when
+/// `windows`.
+fn no_cargo(error: &io::Error, windows: bool) -> CliError {
     CliError::new(
         "cli-upgrade-no-cargo",
         format!("cannot run `cargo`: {}", cause(error)),
-        "Put `cargo` on PATH (for example `export PATH=$HOME/.cargo/bin:$PATH`), then run `supdoc upgrade` again",
+        format!(
+            "Put `cargo` on PATH (for example `{}`), then run `supdoc upgrade` again",
+            put_cargo_on_path(windows)
+        ),
         ExitStatus::Io,
     )
 }
 
-/// The error for a cargo that failed. When `stderr` has cargo's not-found shape, the help adds
-/// that the version is not on crates.io; cargo's own message is never rewritten.
-fn cargo_failed(argv: &[String], status: std::process::ExitStatus, stderr: &str) -> CliError {
-    let help = if stderr.contains(NOT_FOUND_SHAPE) {
-        "That version does not exist on crates.io; run `supdoc upgrade` with no version for the latest"
+/// A shell command that puts the default cargo `bin` first on `PATH`, in PowerShell syntax when
+/// `windows`.
+const fn put_cargo_on_path(windows: bool) -> &'static str {
+    if windows {
+        "$env:PATH = \"$env:USERPROFILE\\.cargo\\bin;$env:PATH\""
     } else {
-        "Read cargo's message above, fix what it names, then run `supdoc upgrade` again"
-    };
+        "export PATH=$HOME/.cargo/bin:$PATH"
+    }
+}
+
+/// The error for a cargo that failed. When `stderr` has cargo's not-found shape, the help adds
+/// that the version is not on crates.io. Cargo's own message is never rewritten.
+fn cargo_failed(argv: &[String], status: std::process::ExitStatus, stderr: &str) -> CliError {
     CliError::new(
         "cli-upgrade-cargo-failed",
         format!("`{}` failed: {status}", shell_line(argv)),
-        help,
+        cargo_failed_help(stderr),
         ExitStatus::Failed,
     )
+}
+
+/// The remedy for a failed cargo: what its `stderr` shape names.
+fn cargo_failed_help(stderr: &str) -> String {
+    if stderr.contains(NOT_FOUND_SHAPE) {
+        "That version does not exist on crates.io; run `supdoc upgrade` with no version for the latest"
+            .to_owned()
+    } else {
+        "Read cargo's message above, fix what it names, then run `supdoc upgrade` again".to_owned()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cargo home under a new temporary directory with a file named `bin_name` in its `bin`,
+    /// and an environment that reads that file as this binary, with `home` as the home variable.
+    fn environment_running(windows: bool, bin_name: &str) -> (tempfile::TempDir, Environment) {
+        let home = tempfile::tempdir().expect("a temporary home should be created");
+        let bin = home.path().join(".cargo").join("bin");
+        fs::create_dir_all(&bin).expect("the cargo bin directory should be created");
+        let exe = bin.join(bin_name);
+        fs::write(&exe, b"").expect("the stand-in binary should be written");
+        let environment = Environment::from_parts(
+            windows,
+            Some(exe),
+            None,
+            Some(home.path().as_os_str().to_owned()),
+        );
+        (home, environment)
+    }
+
+    #[test]
+    fn a_windows_cargo_install_is_the_exe_under_the_userprofile_cargo_bin() {
+        let (_home, environment) = environment_running(true, "supdoc.exe");
+
+        assert!(cargo_owns_exe(&environment));
+    }
+
+    #[test]
+    fn a_unix_cargo_install_is_the_extensionless_file_under_the_home_cargo_bin() {
+        let (_home, environment) = environment_running(false, "supdoc");
+
+        assert!(cargo_owns_exe(&environment));
+    }
+
+    #[test]
+    fn each_platform_looks_only_for_its_own_binary_name() {
+        let (_home, exe_on_unix) = environment_running(false, "supdoc.exe");
+        let (_other, bare_on_windows) = environment_running(true, "supdoc");
+
+        assert!(!cargo_owns_exe(&exe_on_unix));
+        assert!(!cargo_owns_exe(&bare_on_windows));
+    }
+
+    #[test]
+    fn the_home_variable_is_userprofile_on_windows_and_home_elsewhere() {
+        assert_eq!(home_variable(true), "USERPROFILE");
+        assert_eq!(home_variable(false), "HOME");
+    }
+
+    /// Writes cargo's install record for the running version, listing `bins`, into the cargo home
+    /// that `home` holds.
+    fn write_record(home: &tempfile::TempDir, bins: &[&str]) {
+        let key = format!("supdoc {} ({CRATES_IO_SPARSE})", env!("CARGO_PKG_VERSION"));
+        let record = serde_json::json!({ "installs": { key: { "bins": bins } } });
+        fs::write(
+            home.path().join(".cargo").join(".crates2.json"),
+            record.to_string(),
+        )
+        .expect("the install record should be written");
+    }
+
+    #[test]
+    fn a_windows_cargo_install_is_accepted_when_cargo_recorded_supdoc_exe() {
+        let (home, environment) = environment_running(true, "supdoc.exe");
+        write_record(&home, &["supdoc.exe"]);
+
+        let install = installed_by_cargo(&environment)
+            .expect("a Windows install recorded as supdoc.exe should be a cargo install");
+
+        assert_eq!(install.cargo_home, home.path().join(".cargo"));
+    }
+
+    #[test]
+    fn a_windows_record_naming_the_extensionless_binary_is_refused() {
+        let (home, environment) = environment_running(true, "supdoc.exe");
+        write_record(&home, &["supdoc"]);
+
+        assert!(installed_by_cargo(&environment).is_err());
+    }
+
+    #[test]
+    fn a_unix_cargo_install_is_accepted_only_for_the_extensionless_record() {
+        let (home, environment) = environment_running(false, "supdoc");
+        write_record(&home, &["supdoc"]);
+        assert!(installed_by_cargo(&environment).is_ok());
+
+        write_record(&home, &["supdoc.exe"]);
+        assert!(installed_by_cargo(&environment).is_err());
+    }
+
+    #[test]
+    fn reading_the_environment_asks_for_this_platforms_home_variable() {
+        let home = tempfile::tempdir().expect("a temporary home should be created");
+        let wanted = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        let given = home.path().as_os_str().to_owned();
+
+        let environment =
+            Environment::read_with(None, |name| (name == wanted).then(|| given.clone()));
+
+        assert_eq!(environment.cargo_home, Ok(home.path().join(".cargo")));
+    }
+
+    #[test]
+    fn the_no_cargo_home_refusals_name_the_platforms_variable_and_syntax() {
+        for problem in [
+            CargoHomeProblem::RelativeSet,
+            CargoHomeProblem::Unset,
+            CargoHomeProblem::NotUtf8,
+        ] {
+            let windows = no_cargo_home(problem, true);
+            let unix = no_cargo_home(problem, false);
+
+            assert!(
+                windows.help().contains("$env:CARGO_HOME") && !windows.help().contains("export"),
+                "{windows:?}"
+            );
+            assert!(
+                unix.help().contains("export CARGO_HOME=$HOME/.cargo")
+                    && !unix.help().contains("$env:"),
+                "{unix:?}"
+            );
+        }
+        let unset_windows = no_cargo_home(CargoHomeProblem::Unset, true);
+        let unset_unix = no_cargo_home(CargoHomeProblem::Unset, false);
+        assert!(
+            unset_windows.message().contains("USERPROFILE"),
+            "{unset_windows}"
+        );
+        assert!(unset_unix.message().contains("HOME is not"), "{unset_unix}");
+    }
+
+    /// The install command for `version` into a fixed cargo home.
+    fn argv_for(version: &str) -> Vec<String> {
+        install_argv(
+            &ReleaseVersion::from_str(version).expect("the test version should parse"),
+            Path::new("/home/a/.cargo"),
+        )
+    }
+
+    #[test]
+    fn windows_never_spawns_the_cargo_install() {
+        let spawned = std::cell::Cell::new(false);
+        let argv = argv_for("9.9.9");
+
+        let result = install_or_hand_over(true, &argv, Path::new("/c"), false, |_, _, _| {
+            spawned.set(true);
+            Ok(())
+        });
+
+        assert!(!spawned.get(), "cargo was spawned on Windows");
+        assert_eq!(
+            result.expect_err("Windows should hand over").code(),
+            "cli-upgrade-cargo-manual"
+        );
+    }
+
+    #[test]
+    fn off_windows_the_cargo_install_is_spawned_with_the_argv() {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let argv = argv_for("9.9.9");
+
+        install_or_hand_over(false, &argv, Path::new("/c"), true, |words, home, json| {
+            seen.borrow_mut()
+                .push((words.to_vec(), home.to_owned(), json));
+            Ok(())
+        })
+        .expect("a stand-in spawn that succeeds should succeed");
+
+        assert_eq!(*seen.borrow(), vec![(argv, PathBuf::from("/c"), true)]);
+    }
+
+    #[test]
+    fn the_windows_finding_prints_the_command_the_unix_route_would_run() {
+        let argv = argv_for("9.9.9");
+
+        let finding = cargo_manual(&argv, Path::new("/home/a/.cargo"));
+
+        let command = powershell_command(&argv, Path::new("/home/a/.cargo"));
+        assert!(command.ends_with(&shell_line(&argv)), "{command}");
+        assert!(command.contains("--version =9.9.9") && command.contains("--locked"));
+        assert!(finding.message().contains(&command), "{finding}");
+        assert!(finding.help().contains(&command), "{finding:?}");
+        assert!(finding.message().contains("will not replace"), "{finding}");
+        assert!(finding.help().contains("not running"), "{finding:?}");
+    }
+
+    #[test]
+    fn the_preview_note_sends_windows_to_another_shell_and_leaves_unix_alone() {
+        let argv = argv_for("9.9.9");
+        let apply = "supdoc upgrade 9.9.9 --yes";
+
+        let home = Path::new("/home/a/.cargo");
+        let windows = cargo_preview_note(true, false, apply, &argv, home);
+        let unix = cargo_preview_note(false, false, apply, &argv, home);
+        let unix_dry = cargo_preview_note(false, true, apply, &argv, home);
+
+        assert!(
+            windows.contains(&powershell_command(&argv, home))
+                && windows.contains("another shell")
+                && !windows.contains(apply),
+            "{windows}"
+        );
+        assert_eq!(unix, preview_note(false, apply));
+        assert_eq!(unix_dry, preview_note(true, apply));
+    }
+
+    #[test]
+    fn the_windows_finding_changes_to_the_cargo_home_first_in_powershell_form() {
+        let argv = argv_for("9.9.9");
+
+        let command = powershell_command(&argv, Path::new(r"C:\Users\o'brien\.cargo"));
+
+        assert_eq!(
+            command,
+            format!(
+                "Set-Location 'C:\\Users\\o''brien\\.cargo'; {}",
+                shell_line(&argv)
+            )
+        );
+        assert_eq!(
+            powershell_command(&argv, Path::new("/home/a/.cargo")),
+            format!("Set-Location /home/a/.cargo; {}", shell_line(&argv))
+        );
+    }
+
+    /// Runs `supdoc upgrade 9.9.9 <flag>` as a cargo install in `environment` with a spawn that
+    /// records itself, returning the result, what was printed and whether cargo was started.
+    fn upgrade_in(
+        environment: &Environment,
+        flag: &str,
+    ) -> (Result<Outcome, CliError>, String, bool) {
+        use crate::cli::args::Command;
+        use crate::cli::testing::Session;
+
+        let project = crate::cli::testing::Project::empty();
+        let mut session = Session::new(project.root(), &["upgrade", "9.9.9", flag]);
+        let Command::Upgrade(args) = &session.cli.command else {
+            panic!("`supdoc upgrade` should parse as the upgrade command");
+        };
+        let spawned = std::cell::Cell::new(false);
+        let result = run_in(
+            args,
+            &session.context,
+            &mut session.output,
+            environment,
+            false,
+            |_, _, _| {
+                spawned.set(true);
+                Ok(())
+            },
+        );
+        let run = session.finished(result);
+        (run.result, run.stdout + &run.stderr, spawned.get())
+    }
+
+    #[test]
+    fn a_windows_cargo_install_run_with_yes_hands_over_without_starting_cargo() {
+        let (home, environment) = environment_running(true, "supdoc.exe");
+        write_record(&home, &["supdoc.exe"]);
+
+        let (result, _printed, spawned) = upgrade_in(&environment, "--yes");
+
+        assert!(!spawned, "cargo was started on Windows");
+        assert_eq!(
+            result.expect_err("Windows should hand over").code(),
+            "cli-upgrade-cargo-manual"
+        );
+    }
+
+    #[test]
+    fn a_unix_cargo_install_run_with_yes_starts_cargo() {
+        let (home, environment) = environment_running(false, "supdoc");
+        write_record(&home, &["supdoc"]);
+
+        let (result, _printed, spawned) = upgrade_in(&environment, "--yes");
+
+        assert!(spawned, "cargo was not started off Windows");
+        assert_eq!(
+            result.expect("a spawn that succeeds should finish the upgrade"),
+            Outcome::Clean
+        );
+    }
+
+    #[test]
+    fn a_windows_cargo_install_previews_the_command_for_another_shell() {
+        let (home, environment) = environment_running(true, "supdoc.exe");
+        write_record(&home, &["supdoc.exe"]);
+
+        let (result, printed, spawned) = upgrade_in(&environment, "--dry-run");
+
+        assert_eq!(result.expect("a preview should finish"), Outcome::Clean);
+        assert!(!spawned, "a preview started cargo");
+        assert!(
+            printed.contains("another shell") && printed.contains("Set-Location"),
+            "{printed}"
+        );
+    }
+
+    #[test]
+    fn reading_the_environment_takes_the_platform_from_the_host() {
+        assert_eq!(Environment::read().windows, cfg!(windows));
+    }
+
+    #[test]
+    fn a_missing_cargo_names_the_platforms_path_syntax() {
+        let error = io::Error::from(io::ErrorKind::NotFound);
+
+        let windows = no_cargo(&error, true);
+        let unix = no_cargo(&error, false);
+
+        assert!(
+            windows.help().contains("$env:USERPROFILE") && !windows.help().contains("export"),
+            "{windows:?}"
+        );
+        assert!(
+            unix.help().contains("export PATH=$HOME/.cargo/bin:$PATH")
+                && !unix.help().contains("$env:"),
+            "{unix:?}"
+        );
+    }
+
+    #[test]
+    fn cargo_failure_help_names_only_the_missing_version() {
+        assert!(
+            cargo_failed_help("error: could not find `supdoc` in registry").contains("crates.io")
+        );
+        assert!(
+            cargo_failed_help("error: failed to move `a` to `b`").contains("Read cargo's message")
+        );
+    }
+
+    #[test]
+    fn this_host_names_the_cargo_binary_with_its_own_exe_suffix() {
+        let expected = format!("supdoc{}", std::env::consts::EXE_SUFFIX);
+
+        assert_eq!(Environment::read().cargo_bin, expected);
+    }
+
+    #[test]
+    fn the_replace_failed_help_names_windows_remedies_only_on_windows() {
+        let windows = replace_failed_help("supdoc upgrade 1.0.0 --yes", true);
+        let unix = replace_failed_help("supdoc upgrade 1.0.0 --yes", false);
+
+        assert!(
+            windows.contains("supdoc.exe.old") && windows.contains("virus scanner"),
+            "{windows}"
+        );
+        assert!(!windows.contains("chmod"), "{windows}");
+        assert!(
+            !unix.contains("supdoc.exe") && unix.contains("the old binary was left in place"),
+            "{unix}"
+        );
+    }
 
     #[test]
     fn a_404_for_sha256sums_is_no_asset_and_every_other_failure_is_a_fetch_failure() {
@@ -1208,6 +1813,47 @@ mod tests {
         assert_eq!(code(status(403)), "cli-upgrade-fetch-failed");
         assert_eq!(code(status(500)), "cli-upgrade-fetch-failed");
         assert_eq!(code(transport), "cli-upgrade-fetch-failed");
+    }
+
+    #[test]
+    fn a_replace_failure_names_every_leftover_that_could_not_be_removed() {
+        let error = install::ReplaceError::NoDirectory(PathBuf::from("/dist/supdoc"));
+        let notes = vec![
+            "Could not remove /dist/.supdoc-upgrade-1-2, left by an earlier upgrade: denied"
+                .to_owned(),
+        ];
+
+        let failure = replace_failed(Path::new("/dist/supdoc"), &error, &notes, "supdoc upgrade");
+
+        assert_eq!(failure.code(), "cli-upgrade-replace-failed");
+        assert!(
+            failure.message().contains(".supdoc-upgrade-1-2"),
+            "the leftover should be named: {}",
+            failure.message()
+        );
+    }
+
+    #[test]
+    fn the_report_serializes_its_notes() {
+        let report = UpgradeReport {
+            current: "1.0.0".to_owned(),
+            target: "2.0.0".to_owned(),
+            direction: Direction::Upgrade,
+            command: Vec::new(),
+            ran: true,
+            outcome: UpgradeOutcome::Installed,
+            method: Method::ReleaseBinary,
+            asset: None,
+            sha256: None,
+            notes: vec!["Could not remove x".to_owned()],
+        };
+
+        let json = serde_json::to_value(&report).expect("the report should serialize");
+
+        assert_eq!(
+            json.get("notes"),
+            Some(&serde_json::json!(["Could not remove x"]))
+        );
     }
 
     fn version(text: &str) -> ReleaseVersion {
@@ -1318,7 +1964,7 @@ mod tests {
             Err(CargoHomeProblem::NotUtf8)
         );
         assert!(
-            no_cargo_home(CargoHomeProblem::NotUtf8)
+            no_cargo_home(CargoHomeProblem::NotUtf8, false)
                 .message()
                 .contains("CARGO_HOME")
         );
@@ -1327,7 +1973,8 @@ mod tests {
     #[test]
     fn a_source_with_spaces_is_named_whole_and_quoted() {
         let record = r#"{"installs":{"supdoc 0.3.1 (path+file:///Users/x/my dir/supdoc)":{"bins":["supdoc"]}}}"#;
-        let error = recorded_version(record, "/x").expect_err("a path install should be refused");
+        let error =
+            recorded_version(record, "/x", "supdoc").expect_err("a path install should be refused");
         assert!(
             error
                 .message()
@@ -1339,7 +1986,8 @@ mod tests {
     #[test]
     fn a_record_from_git_is_refused_naming_its_source() {
         let record = r#"{"installs":{"supdoc 0.3.1 (git+https://example.com/supdoc#abc)":{"bins":["supdoc"]}}}"#;
-        let error = recorded_version(record, "/x").expect_err("a git install should be refused");
+        let error =
+            recorded_version(record, "/x", "supdoc").expect_err("a git install should be refused");
         assert!(
             error
                 .message()

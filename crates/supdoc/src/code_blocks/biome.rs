@@ -21,7 +21,7 @@ use super::lint::{self, Diagnostic};
 use super::runner::{self, Failure, Ran};
 use super::tools::ToolEnv;
 use crate::config::confine::{self, Admitted, Boundary};
-use crate::path::{self, AbsolutePath, Component, Pointer, fixed};
+use crate::path::{self, AbsolutePath, Component, Pointer, Suffix, fixed};
 
 /// The most bytes of a config supdoc reads.
 const MAX_CONFIG: u64 = 64 * 1024;
@@ -345,10 +345,9 @@ impl LintFile {
                 || PathBuf::from(doc.file_name().unwrap_or_default()),
                 Path::to_path_buf,
             );
-        let mut name = placed.file_name()?.to_os_string();
-        name.push(format!(".{index}.{}", extension(tag)));
+        let suffix = Suffix::new(&format!(".{index}.{}", extension(tag)))?;
         let file = AbsolutePath::new(&path::rebase(
-            &placed.with_file_name(name),
+            &path::with_suffix(&placed, &suffix)?,
             Path::new(""),
             run.dir.as_path(),
         )?)?;
@@ -819,8 +818,8 @@ fn private_dir(parent: &Boundary, dir: &AbsolutePath) -> Option<Boundary> {
 mod tests {
 
     use super::{
-        LintFile, Refusal, diagnostics, extension, holds_comment, lint_verdict, linted_nothing,
-        parse_error, project_args, without_exclusions, write_new,
+        LintFile, Refusal, diagnostics, extension, find, holds_comment, lint_verdict,
+        linted_nothing, parse_error, project_args, without_exclusions, write_new,
     };
     use crate::code_blocks::format::{ParseError, Verdict as FormatVerdict};
     use crate::code_blocks::lint::{Diagnostic, Verdict};
@@ -1387,6 +1386,18 @@ mod tests {
     #[test]
     fn other_stderr_is_no_parse_error() {
         assert_eq!(parse_error("biome.json configuration ━━━\n  × bad\n"), None);
+    }
+
+    #[test]
+    fn the_first_config_name_in_a_directory_wins_when_it_holds_two() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        fs::write(root.path().join(".biome.jsonc"), "{}").expect("the later config");
+        fs::write(root.path().join("biome.jsonc"), "{}").expect("the earlier config");
+
+        assert_eq!(
+            find(root.path(), &root.path().join("a.md")),
+            Some(root.path().join("biome.jsonc"))
+        );
     }
 
     /// The config supdoc gives biome for a root holding `config`, as a project at `root` with

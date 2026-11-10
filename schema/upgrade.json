@@ -229,6 +229,13 @@
           "$ref": "#/$defs/Method",
           "description": "How this supdoc was installed: `cargo` or `release-binary`."
         },
+        "notes": {
+          "description": "Files an earlier upgrade left beside the binary that this run could not remove, one\nsentence each; empty when there are none.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "outcome": {
           "$ref": "#/$defs/UpgradeOutcome",
           "description": "How the run ended."
@@ -256,7 +263,8 @@
         "command",
         "ran",
         "outcome",
-        "method"
+        "method",
+        "notes"
       ],
       "type": "object"
     }
