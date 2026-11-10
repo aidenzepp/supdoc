@@ -134,6 +134,9 @@ pub(crate) struct BlockRecord {
     /// What yamllint is given for it: its `-c <private copy>` and the private directory it runs
     /// in (see [`yaml::lint_args`]). `None` for every other tool.
     yamllint: Option<yaml::Lint>,
+    /// The flags sqruff's lint step is given for it: its own private config and the block's
+    /// dialect (see [`sqruff::Project::lint_flags`]). `None` for every other tool.
+    sqruff_lint: Option<Vec<OsString>>,
     /// What the format step needs, kept while the block is pending.
     pending: Option<Pending>,
 }
@@ -266,6 +269,7 @@ pub(crate) fn evaluate(
             given: None,
             tombi: None,
             yamllint: None,
+            sqruff_lint: None,
             language,
             state,
             steps,
@@ -814,6 +818,28 @@ fn pylint_switched_off(at: &Location) -> Finding {
     .with_location(at.clone())
 }
 
+/// Why sqruff's lint step didn't run on a block whose `noqa` comments may switch every rule off
+/// for all of it (see [`sqruff::switches_lint_off`]).
+const SQRUFF_SWITCHED_OFF: &str = "the block's `noqa` comments may switch every sqruff rule off \
+                                   for all of it";
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose sqruff lint
+/// step didn't run because its `noqa` comments may switch every rule off for all of it.
+fn sqruff_switched_off(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "the block's `noqa` comments (one naming no rule, or `all`, on every line, or a \
+         `disable=all` range) may switch every sqruff rule off for all of it, a syntax error too, \
+         so its lint step didn't run",
+    )
+    .with_help(
+        "name the rules each `-- noqa:` comment switches off, such as `-- noqa: LT05`; or mark \
+         the block `lint(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
 /// The run's one `code-block-not-checked` warning, at `at`, the first block whose eslint step
 /// didn't run because an `eslint-disable` comment in it names no rule, or more than rule names
 /// (see [`eslint::switches_lint_off`]).
@@ -1128,6 +1154,7 @@ impl NotRunWarnings {
                 dockerfmt_not_given(at, "holds no instruction, only comments or blank lines")
             }
             ESLINT_SWITCHED_OFF => eslint_switched_off(at),
+            SQRUFF_SWITCHED_OFF => sqruff_switched_off(at),
             ESLINT_IGNORED => eslint_ignored(at),
             YAMLLINT_REJECTED => yamllint_rejected(at, said),
             YAMLLINT_LOCALE => yamllint_locale(at, said),
@@ -2216,15 +2243,16 @@ struct SqruffConfigs {
 }
 
 impl SqruffConfigs {
-    /// Gives `record`, an SQL block, the `--config` and `--dialect` flags sqruff gets for it: its
-    /// doc's private config, found once per directory (see [`sqruff::project_args`]), and the
-    /// block's own dialect. Then checks sqruff's version (see [`Self::verified`]). A refused
-    /// config takes only the format step off, as an unverified sqruff does, with its one warning
-    /// per refusal added to `slots`: a block with another lint step goes on to it, and one
-    /// without is settled as not checked. A block holding an inline sqruff directive (see
-    /// [`sqruff::directive_line`]) has its sqruff format step taken off first, with a warning of
-    /// its own naming the line, so it is never given to sqruff. Whether the block goes on to its
-    /// tools.
+    /// Gives `record`, an SQL block, the `--config` and `--dialect` flags sqruff gets for each
+    /// step it runs: its doc's private configs, found once per directory (see
+    /// [`sqruff::project_args`]), and the block's own dialect. Then checks sqruff's version (see
+    /// [`Self::verified`]). A refused config takes only sqruff's steps off, as an unverified
+    /// sqruff does, with its one warning per refusal added to `slots`: a block with a step by
+    /// another tool goes on to it, and one without is settled as not checked. A block holding an
+    /// inline sqruff directive (see [`sqruff::directive_line`]) has its sqruff steps, format and
+    /// lint alike, taken off first, with a warning of its own naming the line, so it is never
+    /// given to sqruff. The scan runs once per block, whatever runs its other step. Whether the
+    /// block goes on to its tools.
     ///
     /// Effect: reads the config and may create supdoc's private directory and file for it.
     fn give(
@@ -2237,14 +2265,9 @@ impl SqruffConfigs {
         if !tool.runs("sqruff") {
             return true;
         }
-        if record
-            .tool
-            .as_ref()
-            .is_some_and(|format| format.runs("sqruff"))
-            && let Some(at) = sqruff_directive_at(record)
-        {
-            slots.push(Slot::Found(sqruff_directive(&at)));
-            return take_format_off(record, SQRUFF_DIRECTIVE);
+        if let Some(at) = sqruff_directive_at(record) {
+            slots.push(Slot::Found(sqruff_directive(&at, sqruff_steps(record))));
+            return take_sqruff_off(record, SQRUFF_DIRECTIVE);
         }
         let doc = doc_beneath(root, &record.at.file);
         let dir = doc.parent().unwrap_or(root).to_path_buf();
@@ -2263,6 +2286,7 @@ impl SqruffConfigs {
                     config: None,
                     names: None,
                 });
+                record.sqruff_lint = Some(project.lint_flags(record.sql_dialect));
                 self.verified(record, (env, root), slots)
             }
             Err(refusal) => {
@@ -2271,8 +2295,8 @@ impl SqruffConfigs {
                     self.warned.push(refusal);
                     slots.push(Slot::Found(warning));
                 }
-                if lints_without_sqruff(record) {
-                    return take_format_off(record, SQRUFF_REFUSED);
+                if steps_without_sqruff(record) {
+                    return take_sqruff_off(record, SQRUFF_REFUSED);
                 }
                 record.state = BlockState::NotChecked(NotChecked::ToolConfig);
                 record.reason = Some(reason);
@@ -2283,9 +2307,9 @@ impl SqruffConfigs {
 
     /// Whether `record` goes on to its tools once the sqruff on `PATH` has been checked against
     /// the versions supdoc is verified against (see [`sqruff::VERIFIED`]), read once per run.
-    /// When it isn't one, or can't be read, `record`'s format step doesn't run, with
-    /// [`SQRUFF_UNVERIFIED`] as its reason, and the run's one warning goes to `slots`; a lint
-    /// step by another tool still runs. A sqruff that isn't on `PATH`, or is inside the checkout,
+    /// When it isn't one, or can't be read, `record`'s sqruff steps don't run, with
+    /// [`SQRUFF_UNVERIFIED`] as their reason, and the run's one warning goes to `slots`; a step
+    /// by another tool still runs. A sqruff that isn't on `PATH`, or is inside the checkout,
     /// is left to the usual lookup.
     ///
     /// Effect: runs `sqruff --version` the first time.
@@ -2313,7 +2337,7 @@ impl SqruffConfigs {
                     Severity::Warning,
                     format!(
                         "sqruff {shown} isn't a version supdoc's checks are verified against \
-                         ({}); its SQL blocks' format steps didn't run",
+                         ({}); its SQL blocks' sqruff steps didn't run",
                         sqruff::VERIFIED.join(", ")
                     ),
                 )
@@ -2324,36 +2348,49 @@ impl SqruffConfigs {
                 .with_location(record.at.clone()),
             ));
         }
-        take_format_off(record, SQRUFF_UNVERIFIED)
+        take_sqruff_off(record, SQRUFF_UNVERIFIED)
     }
 }
 
-/// Takes `record`'s format step off with `reason`. Whether the block goes on to its tools: only
-/// when it still has a lint step.
-fn take_format_off(record: &mut BlockRecord, reason: &'static str) -> bool {
-    if record.tool.take().is_some() {
+/// Takes each of `record`'s steps sqruff runs off with `reason`. Whether the block goes on to
+/// its tools: only when it still has a step.
+fn take_sqruff_off(record: &mut BlockRecord, reason: &'static str) -> bool {
+    if record.tool.take_if(|tool| tool.runs("sqruff")).is_some() {
         record.steps.format = StepState::Unrunnable { reason };
     }
-    record.linter.is_some()
+    if record.linter.take_if(|tool| tool.runs("sqruff")).is_some() {
+        record.steps.lint = StepState::Unrunnable { reason };
+    }
+    record.tool.is_some() || record.linter.is_some()
 }
 
-/// Whether `record` has a lint step that sqruff doesn't run, which goes on when sqruff's format
-/// step is taken off.
-fn lints_without_sqruff(record: &BlockRecord) -> bool {
-    record
-        .linter
-        .as_ref()
-        .is_some_and(|tool| !tool.runs("sqruff"))
+/// Whether `record` has a step that sqruff doesn't run, which goes on when sqruff's steps are
+/// taken off.
+fn steps_without_sqruff(record: &BlockRecord) -> bool {
+    [&record.tool, &record.linter]
+        .into_iter()
+        .flatten()
+        .any(|tool| !tool.runs("sqruff"))
 }
 
-/// Why an SQL block's format step didn't run when supdoc couldn't give sqruff the project's
+/// Which of `record`'s steps sqruff runs, as a warning names them.
+fn sqruff_steps(record: &BlockRecord) -> &'static str {
+    let runs = |tool: &Option<Tool>| tool.as_ref().is_some_and(|tool| tool.runs("sqruff"));
+    match (runs(&record.tool), runs(&record.linter)) {
+        (true, true) => "format and lint steps",
+        (false, true) => "lint step",
+        _ => "format step",
+    }
+}
+
+/// Why an SQL block's sqruff steps didn't run when supdoc couldn't give sqruff the project's
 /// config.
 const SQRUFF_REFUSED: &str = "supdoc couldn't give sqruff the project's config";
 
-/// Why an SQL block's format step didn't run when the sqruff on `PATH` isn't a verified version.
+/// Why an SQL block's sqruff steps didn't run when the sqruff on `PATH` isn't a verified version.
 const SQRUFF_UNVERIFIED: &str = "the sqruff on `PATH` isn't a version supdoc is verified against";
 
-/// Why an SQL block's format step didn't run when it holds an inline sqruff directive (see
+/// Why an SQL block's sqruff steps didn't run when it holds an inline sqruff directive (see
 /// [`sqruff::directive_line`]).
 const SQRUFF_DIRECTIVE: &str = "the block holds an inline sqruff directive, which would override \
                                 the config supdoc gives sqruff";
@@ -2375,20 +2412,22 @@ fn sqruff_directive_at(record: &BlockRecord) -> Option<Location> {
 }
 
 /// The `code-block-not-checked` warning, at `at`, for an SQL block that wasn't given to sqruff
-/// because the line at `at` may hold an inline sqruff directive.
-fn sqruff_directive(at: &Location) -> Finding {
+/// because the line at `at` may hold an inline sqruff directive, naming the `steps` that didn't
+/// run.
+fn sqruff_directive(at: &Location, steps: &str) -> Finding {
     Finding::new(
         NOT_CHECKED,
         Severity::Warning,
         format!(
             "line {} holds an inline sqruff directive (a `-- sqruff:` or `-- sqlfluff:` comment, \
              in any spelling), which would override the config supdoc gives sqruff, so the SQL \
-             block wasn't given to sqruff and its format step didn't run",
+             block wasn't given to sqruff and its {steps} didn't run",
             at.line
         ),
     )
     .with_help(
-        "drop the comment, or mark the block `format(off: <reason>)` to leave it unformatted",
+        "drop the comment, or mark the block `format(off: <reason>)` or `lint(off: <reason>)` \
+         to leave that step off",
     )
     .with_location(at.clone())
 }
@@ -2399,7 +2438,7 @@ fn sqruff_refusal(refusal: &sqruff::Refusal, at: &Location, windows: bool) -> (S
     let (reason, message, help) = match refusal {
         sqruff::Refusal::Config { file, why } => (
             format!("sqruff config `{file}` {why}"),
-            format!("the project's `{file}` {why}, so its SQL blocks aren't formatted"),
+            format!("the project's `{file}` {why}, so its SQL blocks aren't given to sqruff"),
             format!(
                 "fix `{file}` as it says, keeping it a plain INI file of at most 256 KiB inside \
                  the project, or mark the blocks `ignore(<why>)`"
@@ -3923,18 +3962,25 @@ fn placed(
         .collect()
 }
 
-/// The flags `record`'s project gives `tool`: yamllint's `-c <private copy>` for yamllint, the
-/// flags of [`biome::Given`] for any other tool, none without either.
+/// The flags `record`'s project gives `tool`: yamllint's `-c <private copy>` for yamllint,
+/// sqruff's lint flags for sqruff-lint, the flags of [`biome::Given`] for any other tool, none
+/// without them.
 fn project_flags<'record>(
     record: &'record BlockRecord,
     tool: &ToolCartridge,
 ) -> &'record [OsString] {
+    if tool.name == SQRUFF_LINT {
+        return record.sqruff_lint.as_deref().unwrap_or_default();
+    }
     match (&record.yamllint, &record.given) {
         (Some(lint), _) if tool.name == YAMLLINT => &lint.flags,
         (_, Some(given)) => &given.flags,
         (_, None) => &[],
     }
 }
+
+/// The name of sqruff's lint cartridge.
+const SQRUFF_LINT: &str = "sqruff-lint";
 
 /// Whether `ran`, a failed yamllint run that reported no diagnostics, says yamllint rejected the
 /// config supdoc gave it (see [`yaml::rejected_config`]).
@@ -4066,6 +4112,7 @@ fn switched_off(tool: &ToolCartridge, record: &BlockRecord) -> Option<&'static s
     let (switches_off, reason): (fn(&str) -> bool, _) = match tool.name {
         PYLINT => (pylint::switches_lint_off, PYLINT_SWITCHED_OFF),
         ESLINT => (eslint::switches_lint_off, ESLINT_SWITCHED_OFF),
+        SQRUFF_LINT => (sqruff::switches_lint_off, SQRUFF_SWITCHED_OFF),
         _ => return None,
     };
     record
@@ -5546,6 +5593,7 @@ mod tests {
                 given: None,
                 tombi: None,
                 yamllint: None,
+                sqruff_lint: None,
                 pending: Pending::of(block, &doc),
             })
             .collect()

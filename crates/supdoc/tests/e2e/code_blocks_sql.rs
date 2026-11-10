@@ -1,5 +1,6 @@
 //! Checking SQL code blocks, tagged `sql` or a dialect's name, formatted by `sqruff fix` under a
-//! private config that keeps only the layout and capitalisation rules.
+//! private config that keeps only the layout and capitalisation rules, and linted by `sqruff lint`
+//! under a second private config with sqruff's own rule set.
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
@@ -31,11 +32,23 @@ fn sql_project(table: &str, tag: &str, body: &str) -> Project {
     project
 }
 
+/// The report `sqruff lint -f json` prints for a block with no findings.
+const NO_FINDINGS: &str = "{\"<string>\":[]}";
+
+/// Writes an executable `#!/bin/sh` stub named `sqruff` in `dir`, as [`stub_sqruff_reporting`]
+/// does, whose lint run reports no findings.
+fn stub_sqruff(dir: &Path, version: &str) {
+    stub_sqruff_reporting(dir, version, NO_FINDINGS);
+}
+
 /// Writes an executable `#!/bin/sh` stub named `sqruff` in `dir`: it prints `version` for
 /// `--version`; otherwise it refuses (exit 5) a run without `--ignore-local-config` or a
-/// `--config` naming a file, appends that config to `seen` and the `--dialect` to `dialects`
-/// beside itself, and prints the block back unchanged.
-fn stub_sqruff(dir: &Path, version: &str) {
+/// `--config` naming a file. A `lint` run, refused too without `--parsing-errors`, appends that
+/// config to `lint-seen` and the `--dialect` to `lint-dialects` beside itself and prints
+/// `report`; any other run appends them to `seen` and `dialects` and prints the block back
+/// unchanged.
+fn stub_sqruff_reporting(dir: &Path, version: &str, report: &str) {
+    std::fs::write(dir.join("report"), report).expect("the stub's report should be writable");
     let script = format!(
         "#!/bin/sh\n\
          [ \"$1\" = --version ] && {{ echo '{version}'; exit 0; }}\n\
@@ -47,6 +60,14 @@ fn stub_sqruff(dir: &Path, version: &str) {
          prev=\"$arg\"\n\
          done\n\
          [ -f \"$config\" ] || exit 5\n\
+         if [ \"$1\" = lint ]; then\n\
+         case \" $* \" in *' --parsing-errors '*) ;; *) exit 5;; esac\n\
+         /bin/cat \"$config\" >> \"${{0%/*}}/lint-seen\"\n\
+         echo \"$dialect\" >> \"${{0%/*}}/lint-dialects\"\n\
+         /bin/cat > /dev/null\n\
+         /bin/cat \"${{0%/*}}/report\"\n\
+         exit 0\n\
+         fi\n\
          /bin/cat \"$config\" >> \"${{0%/*}}/seen\"\n\
          echo \"$dialect\" >> \"${{0%/*}}/dialects\"\n\
          /bin/cat\n"
@@ -57,8 +78,11 @@ fn stub_sqruff(dir: &Path, version: &str) {
         .expect("the stub should be made executable");
 }
 
-/// What every private config opens with.
+/// What every private format config opens with.
 const FORCED: &str = "[sqruff]\ntemplater = raw\nrules = layout,capitalisation\n";
+
+/// What every private lint config opens with: no `rules`, so sqruff's own set.
+const LINT_FORCED: &str = "[sqruff]\ntemplater = raw\n";
 
 /// Runs `check --json` on `project` with `dir` as `PATH`.
 fn check(project: &Project, dir: &Path) -> serde_json::Value {
@@ -88,6 +112,9 @@ fn sql_a_dialect_tag_overrides_the_setting_and_sql_reads_it() {
         let dialects = std::fs::read_to_string(outside.path().join("dialects"))
             .expect("the stub should have run");
         assert_eq!(dialects, format!("{dialect}\n"), "{table:?} {tag}");
+        let linted = std::fs::read_to_string(outside.path().join("lint-dialects"))
+            .expect("the stub should have linted");
+        assert_eq!(linted, format!("{dialect}\n"), "{table:?} {tag}: lint");
     }
 }
 
@@ -103,6 +130,9 @@ fn sql_with_no_project_config_sqruff_gets_only_raw_layout_and_capitalisation() {
     let seen = std::fs::read_to_string(outside.path().join("seen"))
         .expect("the stub should have seen a config");
     assert_eq!(seen, FORCED);
+    let linted = std::fs::read_to_string(outside.path().join("lint-seen"))
+        .expect("the stub should have linted with a config");
+    assert_eq!(linted, LINT_FORCED);
 }
 
 #[test]
@@ -121,13 +151,12 @@ fn sql_the_copy_replaces_rules_and_dialect_and_keeps_rule_settings() {
     assert!(finding_kinds(&json).is_empty(), "{json}");
     let seen = std::fs::read_to_string(outside.path().join("seen"))
         .expect("the stub should have seen a config");
-    assert_eq!(
-        seen,
-        format!(
-            "{FORCED}exclude_rules = LT05\n[sqruff:rules:capitalisation.keywords]\n\
-             capitalisation_policy = lower\n"
-        )
-    );
+    let kept = "exclude_rules = LT05\n[sqruff:rules:capitalisation.keywords]\n\
+                capitalisation_policy = lower\n";
+    assert_eq!(seen, format!("{FORCED}{kept}"));
+    let linted = std::fs::read_to_string(outside.path().join("lint-seen"))
+        .expect("the stub should have linted with a config");
+    assert_eq!(linted, format!("{LINT_FORCED}{kept}"));
     let dialects =
         std::fs::read_to_string(outside.path().join("dialects")).expect("the stub should have run");
     assert_eq!(
@@ -182,15 +211,17 @@ fn sql_a_templater_library_path_cr_or_unsorted_line_leaves_the_blocks_unchecked(
             1,
             "{config:?}: {json}"
         );
-        assert!(
-            !outside.path().join("seen").exists(),
-            "{config:?}: sqruff ran"
-        );
+        for ran in ["seen", "lint-seen"] {
+            assert!(
+                !outside.path().join(ran).exists(),
+                "{config:?}: sqruff ran ({ran})"
+            );
+        }
     }
 }
 
 #[test]
-fn sql_only_a_verified_sqruff_version_runs_the_format_step() {
+fn sql_only_a_verified_sqruff_version_runs_the_sqruff_steps() {
     for (version, runs) in [
         ("sqruff 0.44.3", true),
         ("sqruff 0.45.0", false),
@@ -209,6 +240,10 @@ fn sql_only_a_verified_sqruff_version_runs_the_format_step() {
         if runs {
             assert!(finding_kinds(&json).is_empty(), "{version}: {json}");
             assert!(outside.path().join("seen").exists(), "{version}: no run");
+            assert!(
+                outside.path().join("lint-seen").exists(),
+                "{version}: no lint run"
+            );
         } else {
             assert_eq!(
                 finding_kinds(&json),
@@ -222,10 +257,12 @@ fn sql_only_a_verified_sqruff_version_runs_the_format_step() {
                         .contains("isn't a version supdoc's checks are verified against (0.44)")),
                 "{version}: {json}"
             );
-            assert!(
-                !outside.path().join("seen").exists(),
-                "{version}: the format step ran"
-            );
+            for ran in ["seen", "lint-seen"] {
+                assert!(
+                    !outside.path().join(ran).exists(),
+                    "{version}: a sqruff step ran ({ran})"
+                );
+            }
         }
     }
 }
@@ -273,11 +310,166 @@ fn sql_a_block_holding_an_inline_directive_is_never_given_to_sqruff() {
         let json = check(&project, outside.path());
 
         assert_directive_skipped(&json, 5, directive);
+        for ran in ["seen", "lint-seen"] {
+            assert!(
+                !outside.path().join(ran).exists(),
+                "{directive}: sqruff was given the block ({ran})"
+            );
+        }
+    }
+}
+
+#[test]
+fn sql_a_directive_keeps_the_block_from_sqruff_lint_whatever_formats_it() {
+    for (table, vars) in [
+        (
+            "formatter = { command = [\"/bin/cat\"] }\n",
+            vec![("SUPDOC_TRUST", Path::new("1"))],
+        ),
+        (
+            "[features.code-blocks.sql.sqruff-format]\nformat = \"off\"\n",
+            vec![],
+        ),
+    ] {
+        let project = sql_project(table, "sql", "SELECT 1;\n-- sqruff:rules:all");
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        stub_sqruff(outside.path(), "sqruff 0.44.0");
+        let mut vars = vars;
+        vars.push(("PATH", outside.path()));
+
+        let json = project
+            .supdoc_in_with(".", &["check", "--json"], &vars)
+            .json();
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-not-checked"],
+            "{table}: {json}"
+        );
         assert!(
-            !outside.path().join("seen").exists(),
-            "{directive}: sqruff was given the block"
+            at(&json, "/findings/0/message")
+                .as_str()
+                .is_some_and(|message| message.contains("line 5 ")
+                    && message.contains("its lint step didn't run")),
+            "{table}: {json}"
+        );
+        assert!(
+            !outside.path().join("lint-seen").exists(),
+            "{table}: sqruff lint was given the block"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/lint_not_run"),
+            1,
+            "{table}: {json}"
         );
     }
+}
+
+#[test]
+fn sql_noqa_on_every_line_or_a_disable_all_range_leaves_lint_not_run() {
+    for body in [
+        "SELECT 1; -- noqa",
+        "SELECT a, -- noqa\n  b FROM t; /* noqa */",
+        "-- noqa: disable=all\nSELECT 1;",
+        "SELECT 1; -- NOQA: All",
+    ] {
+        let project = sql_project("", "sql", body);
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        stub_sqruff(outside.path(), "sqruff 0.44.0");
+
+        let json = check(&project, outside.path());
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-not-checked"],
+            "{body:?}: {json}"
+        );
+        assert!(
+            at(&json, "/findings/0/message")
+                .as_str()
+                .is_some_and(|message| message.contains("`noqa`")
+                    && message.contains("its lint step didn't run")),
+            "{body:?}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/lint_not_run"),
+            1,
+            "{body:?}: {json}"
+        );
+        assert!(
+            !outside.path().join("lint-seen").exists(),
+            "{body:?}: sqruff lint ran"
+        );
+        assert!(
+            outside.path().join("seen").exists(),
+            "{body:?}: the format step should still run"
+        );
+    }
+}
+
+#[test]
+fn sql_noqa_naming_rules_or_on_some_lines_still_lints_the_block() {
+    for body in ["SELECT 1; -- noqa: LT01", "SELECT a, -- noqa\n  b FROM t;"] {
+        let project = sql_project("", "sql", body);
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        stub_sqruff(outside.path(), "sqruff 0.44.0");
+
+        let json = check(&project, outside.path());
+
+        assert!(finding_kinds(&json).is_empty(), "{body:?}: {json}");
+        assert!(
+            outside.path().join("lint-seen").exists(),
+            "{body:?}: sqruff lint didn't run"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/passed"),
+            1,
+            "{body:?}: {json}"
+        );
+    }
+}
+
+#[test]
+fn sql_a_lint_report_supdoc_cant_read_is_a_tool_failure() {
+    for report in ["", "not json", "[]", "{\"x.sql\":[]}"] {
+        let project = sql_project("", "sql", "SELECT 1;");
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        stub_sqruff_reporting(outside.path(), "sqruff 0.44.0", report);
+
+        let json = check(&project, outside.path());
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-tool-failed"],
+            "{report:?}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/passed"),
+            0,
+            "{report:?}: {json}"
+        );
+    }
+}
+
+#[test]
+fn sql_a_lint_finding_fails_the_block_at_its_doc_line() {
+    let report = "{\"<string>\":[{\"range\":{\"start\":{\"line\":2,\"character\":8},\
+                  \"end\":{\"line\":2,\"character\":8}},\"message\":\"Alias 'X' is never used.\",\
+                  \"severity\":\"Warning\",\"source\":\"sqruff\",\"code\":\"AL05\"}]}";
+    let project = sql_project("", "sql", "SELECT a\nFROM t x;");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    stub_sqruff_reporting(outside.path(), "sqruff 0.44.0", report);
+
+    let json = check(&project, outside.path());
+
+    assert_eq!(finding_kinds(&json), ["code-block-lint"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 5, "{json}");
+    assert!(
+        at(&json, "/findings/0/message")
+            .as_str()
+            .is_some_and(|message| message.contains("AL05")),
+        "{json}"
+    );
 }
 
 /// The real sqruff's directory, or `None` (the test is skipped) when it isn't on `PATH`.
@@ -295,7 +487,16 @@ fn sql_the_real_sqruff_fails_an_unformatted_block_and_fix_rewrites_it() {
     let project = sql_project("", "sql", "select a,b from t where x=1");
 
     let json = check(&project, &dir);
-    assert_eq!(finding_kinds(&json), ["code-block-unformatted"], "{json}");
+    let kinds = finding_kinds(&json);
+    assert_eq!(
+        kinds.first().map(String::as_str),
+        Some("code-block-unformatted"),
+        "{json}"
+    );
+    assert!(
+        kinds.iter().skip(1).all(|kind| kind == "code-block-lint"),
+        "sqruff lint flags the spacing too: {json}"
+    );
 
     let _fixed = project.supdoc_in_with(".", &["fix", "--yes"], &[("PATH", &dir)]);
     assert_eq!(
@@ -353,17 +554,20 @@ fn sql_the_real_sqruff_never_changes_a_block_through_a_rule_outside_layout_and_c
         )
         .json();
 
-    assert!(finding_kinds(&json).is_empty(), "{json}");
+    // sqruff lint flags the unused alias (a rule outside formatting), but fix never drops it.
+    assert_eq!(finding_kinds(&json), ["code-block-lint"], "{json}");
+    assert!(json.pointer("/findings/0/fix").is_none(), "{json}");
 }
 
 #[test]
-fn sql_the_real_sqruff_passes_a_block_whose_only_violation_it_cant_fix() {
-    let Some(dir) =
-        real_sqruff("sql_the_real_sqruff_passes_a_block_whose_only_violation_it_cant_fix")
-    else {
+fn sql_the_real_sqruff_formats_a_block_whose_only_violation_it_cant_fix_and_lint_flags_it() {
+    let Some(dir) = real_sqruff(
+        "sql_the_real_sqruff_formats_a_block_whose_only_violation_it_cant_fix_and_lint_flags_it",
+    ) else {
         return;
     };
-    // sqruff exits 0 and prints the block unchanged, still reporting the long line on stderr.
+    // fix exits 0 and prints the block unchanged, still reporting the long line on stderr; lint
+    // reports it.
     let project = sql_project(
         "",
         "sql",
@@ -373,8 +577,14 @@ fn sql_the_real_sqruff_passes_a_block_whose_only_violation_it_cant_fix() {
 
     let json = check(&project, &dir);
 
-    assert!(finding_kinds(&json).is_empty(), "{json}");
-    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+    assert_eq!(finding_kinds(&json), ["code-block-lint"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 6, "{json}");
+    assert!(
+        at(&json, "/findings/0/message")
+            .as_str()
+            .is_some_and(|message| message.contains("LT05")),
+        "{json}"
+    );
 }
 
 #[test]
@@ -413,5 +623,74 @@ fn sql_the_real_sqruff_never_sees_a_block_whose_directive_changes_the_dialect() 
     let json = check(&project, &dir);
 
     assert_directive_skipped(&json, 4, "dialect:tsql");
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 0, "{json}");
+}
+
+#[test]
+fn sql_the_real_sqruff_lint_fails_a_finding_at_its_doc_line() {
+    let Some(dir) = real_sqruff("sql_the_real_sqruff_lint_fails_a_finding_at_its_doc_line") else {
+        return;
+    };
+    let project = sql_project("", "sql", "SELECT a\nFROM t x;");
+
+    let json = check(&project, &dir);
+
+    assert_eq!(finding_kinds(&json), ["code-block-lint"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 5, "{json}");
+    assert!(
+        at(&json, "/findings/0/message")
+            .as_str()
+            .is_some_and(|message| message.contains("AL05")),
+        "{json}"
+    );
+}
+
+#[test]
+fn sql_the_real_sqruff_lint_reports_a_block_it_cant_parse() {
+    let Some(dir) = real_sqruff("sql_the_real_sqruff_lint_reports_a_block_it_cant_parse") else {
+        return;
+    };
+    // With the format step off, only lint's `--parsing-errors` catches the T-SQL under ansi; an
+    // unframed block's syntax error is a lint finding, as hadolint's is.
+    let project = sql_project(
+        "[features.code-blocks.sql.sqruff-format]\nformat = \"off\"\n",
+        "sql",
+        "SELECT TOP 5 * FROM t;",
+    );
+
+    let json = check(&project, &dir);
+
+    assert_eq!(finding_kinds(&json), ["code-block-lint"], "{json}");
+    assert_eq!(at(&json, "/findings/0/location/line"), 4, "{json}");
+    assert!(
+        at(&json, "/findings/0/message")
+            .as_str()
+            .is_some_and(|message| message.contains("Unparsable section")),
+        "{json}"
+    );
+    assert_eq!(at(&json, "/data/summary/code_blocks/failed"), 1, "{json}");
+}
+
+#[test]
+fn sql_the_real_sqruff_never_passes_a_block_noqa_switches_off() {
+    let Some(dir) = real_sqruff("sql_the_real_sqruff_never_passes_a_block_noqa_switches_off")
+    else {
+        return;
+    };
+    // Linted, the bare noqa would hide the unparsable T-SQL and the block would pass.
+    let project = sql_project(
+        "[features.code-blocks.sql.sqruff-format]\nformat = \"off\"\n",
+        "sql",
+        "SELECT TOP 5 * FROM t; -- noqa",
+    );
+
+    let json = check(&project, &dir);
+
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+    assert_eq!(
+        at(&json, "/data/summary/code_blocks/lint_not_run"),
+        1,
+        "{json}"
+    );
     assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 0, "{json}");
 }

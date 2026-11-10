@@ -2111,7 +2111,7 @@ mod tests {
     }
 
     #[test]
-    fn an_sql_table_selects_sqruff_format_and_no_linter() {
+    fn an_sql_table_selects_sqruff_format_and_sqruff_lint() {
         let dir = tree(&[("supdoc.config.toml", "[features.code-blocks.sql]\n")]);
 
         let config = Config::load(&at(&dir, ".")).expect("the fixture config should load");
@@ -2123,7 +2123,10 @@ mod tests {
                 .map(|tool| tool.name),
             Some("sqruff-format")
         );
-        assert!(crate::code_blocks::tools::default_for(Language::Sql, Step::Lint).is_none());
+        assert_eq!(
+            crate::code_blocks::tools::default_for(Language::Sql, Step::Lint).map(|tool| tool.name),
+            Some("sqruff-lint")
+        );
     }
 
     #[test]
