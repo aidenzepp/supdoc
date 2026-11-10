@@ -12,7 +12,7 @@ use crate::finding::{Finding, Severity};
 use crate::link::{LinkPathError, SourcePath};
 use crate::lock::error::shell_quote;
 use crate::output::paths::relative_to;
-use crate::path::AbsolutePath;
+use crate::path::{AbsolutePath, Pointer};
 use crate::read::cartridge::Languages;
 use crate::scan::explicit::explicit_path_warnings;
 pub(crate) use crate::scan::ignore::CODE_IGNORE_TOO_LARGE;
@@ -162,7 +162,9 @@ impl GlobalExcludes {
     #[must_use]
     pub(crate) fn find(cwd: &AbsolutePath) -> Self {
         Self {
-            file: ignore::gitignore::gitconfig_excludes_path().map(|file| cwd.as_path().join(file)),
+            file: ignore::gitignore::gitconfig_excludes_path()
+                .and_then(Pointer::from_path)
+                .map(|file| file.resolve_from(cwd.as_path())),
         }
     }
 }

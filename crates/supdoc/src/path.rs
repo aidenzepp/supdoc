@@ -304,7 +304,6 @@ pub(crate) mod fixed {
     /// The Go file a block is written to.
     pub(crate) const MAIN_GO: FixedPath = FixedPath::new("main.go");
     /// supdoc's directory beneath a cache or state base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const SUPDOC: FixedPath = FixedPath::new("supdoc");
     /// The code-block directory beneath [`SUPDOC`].
     #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
@@ -331,7 +330,6 @@ pub(crate) mod fixed {
     #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const RUMDL_CONFIG_DIR: FixedPath = FixedPath::new("rumdl-config");
     /// A git work tree's marker.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const DOT_GIT: FixedPath = FixedPath::new(".git");
     /// tombi's config directory name.
     #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
@@ -367,34 +365,24 @@ pub(crate) mod fixed {
     #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CONFIG_YAML: FixedPath = FixedPath::new("config.yaml");
     /// The default state base beneath `HOME`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const LOCAL_STATE: FixedPath = FixedPath::new(".local/state");
     /// The trust store file.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const TRUSTED_ROOTS: FixedPath = FixedPath::new("trusted-roots");
     /// The trust store's lock file.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const TRUSTED_ROOTS_LOCK: FixedPath = FixedPath::new("trusted-roots.lock");
     /// A worktree's back-pointer file.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const GITDIR: FixedPath = FixedPath::new("gitdir");
     /// A git directory's worktrees directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const WORKTREES: FixedPath = FixedPath::new("worktrees");
     /// A worktree git directory's pointer to the common directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const COMMONDIR: FixedPath = FixedPath::new("commondir");
     /// A git directory's info directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const INFO: FixedPath = FixedPath::new("info");
     /// A git directory's exclude file.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const INFO_EXCLUDE: FixedPath = FixedPath::new("info/exclude");
     /// An `.ignore` file.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const DOT_IGNORE: FixedPath = FixedPath::new(".ignore");
     /// A `.gitignore` file.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const DOT_GITIGNORE: FixedPath = FixedPath::new(".gitignore");
     /// The config names biome looks for in a directory.
     pub(crate) const BIOME_CONFIG_FILES: [FixedPath; 4] = [
@@ -576,13 +564,6 @@ impl Pointer {
     /// Wraps a path the operating system or a library handed back, such as a `read_link` pointee
     /// or git's `core.excludesFile`, or `None` when it holds a NUL byte, as [`Pointer::new`].
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the sweep units wrap handed-back paths from V5-P3"
-        )
-    )]
     pub(crate) fn from_path(path: PathBuf) -> Option<Self> {
         (!path.as_os_str().as_encoded_bytes().contains(&0)).then_some(Self(path))
     }
