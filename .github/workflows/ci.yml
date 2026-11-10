@@ -168,3 +168,16 @@ jobs:
         # Runs even when an earlier step failed, so the log inventories failing tests too.
         if: always()
         run: cargo test --workspace --no-fail-fast
+      - name: Loop the rumdl concurrency test (diagnostic)
+        if: always()
+        shell: bash
+        run: |
+          fails=0
+          for i in $(seq 1 30); do
+            if ! cargo test -p supdoc --lib code_blocks::rumdl::tests::concurrent_first_runs_all_get_the_config -- --exact --nocapture > loop.out 2>&1; then
+              fails=$((fails+1))
+              echo "=== LOOP FAILURE run $i ==="
+              grep -v "^\s*Compiling" loop.out
+            fi
+          done
+          echo "LOOP RESULT: $fails failures out of 30 on ${{ matrix.os }}"
