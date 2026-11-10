@@ -832,13 +832,14 @@ fn sqruff_switched_off(at: &Location) -> Finding {
         NOT_CHECKED,
         Severity::Warning,
         "the block holds a `noqa` comment supdoc can't confirm names only rule codes (a `noqa` in \
-         a block with a `/* */` comment, or one not followed by `: ` and rule codes alone), so \
-         sqruff may switch more rules off, a syntax error's too, and its sqruff steps didn't run",
+         a block with a `/* */` comment or a carriage return inside a line, or one not followed \
+         by `: ` and rule codes alone), so sqruff may switch more rules off, a syntax error's \
+         too, and its sqruff steps didn't run",
     )
     .with_help(
         "write each `noqa` as a line comment naming rule codes, such as `-- noqa: LT05`, in a \
-         block with no `/* */` comment; or mark the block `lint(off: <reason>)` and \
-         `format(off: <reason>)`",
+         block with no `/* */` comment and no carriage return inside a line; or mark the block \
+         `lint(off: <reason>)` and `format(off: <reason>)`",
     )
     .with_location(at.clone())
 }

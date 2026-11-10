@@ -381,6 +381,7 @@ fn sql_a_noqa_supdoc_cant_confirm_names_only_rule_codes_leaves_both_sqruff_steps
         "/*\nnoqa: disable=all\n*/\nSELECT 1;",
         "/* noqa: disable=LT01\n, all */\nSELECT 1;",
         "SELECT 1;\n/* noqa",
+        "select a FROM t WHERE b = -- noqa\r    :LT01",
     ] {
         let project = sql_project("", "sql", body);
         let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
@@ -945,6 +946,66 @@ fn sql_the_real_sqruff_never_sees_a_string_hidden_block_comment_or_a_cr_joined_n
             "{body:?}: {json}"
         );
     }
+}
+
+#[test]
+fn sql_the_real_sqruff_never_sees_a_noqa_block_holding_a_carriage_return_inside_a_line() {
+    let Some(dir) = real_sqruff(
+        "sql_the_real_sqruff_never_sees_a_noqa_block_holding_a_carriage_return_inside_a_line",
+    ) else {
+        return;
+    };
+    // sqruff ends the comment at the lone CR, so it reads a bare `noqa` that masks the badly
+    // spaced line, a syntax error's too.
+    let project = sql_project(
+        "",
+        "postgres",
+        "SELECT  a  FROM t;\nselect a FROM t WHERE b = -- noqa\r    :LT01\nSELECT  b  FROM t;",
+    );
+
+    let json = check(&project, &dir);
+
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+    assert_eq!(
+        at(&json, "/data/summary/code_blocks/lint_not_run"),
+        1,
+        "{json}"
+    );
+    assert_eq!(
+        at(&json, "/data/summary/code_blocks/format_not_run"),
+        1,
+        "sqruff fix ran, and it obeys the comment too: {json}"
+    );
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 0, "{json}");
+}
+
+#[test]
+fn sql_the_real_sqruff_still_lints_a_plain_code_noqa_in_a_crlf_doc() {
+    let Some(dir) = real_sqruff("sql_the_real_sqruff_still_lints_a_plain_code_noqa_in_a_crlf_doc")
+    else {
+        return;
+    };
+    // The block's line-end CRs are gone before the noqa scan, so only a CR inside a line withholds
+    // a block; if this one is withheld, CRLF reached the scan.
+    let project = sql_project(
+        "[features.code-blocks.sql.sqruff-format]\nformat = \"off\"\n",
+        "sql",
+        "SELECT a  FROM t; -- noqa: LT01",
+    );
+    project.write(
+        "docs/blocks.md",
+        "# Blocks\r\n\r\n```sql\r\nSELECT a  FROM t; -- noqa: LT01\r\n```\r\n",
+    );
+
+    let json = check(&project, &dir);
+
+    assert!(finding_kinds(&json).is_empty(), "{json}");
+    assert_eq!(
+        at(&json, "/data/summary/code_blocks/lint_not_run"),
+        0,
+        "{json}"
+    );
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
 }
 
 #[test]

@@ -4,8 +4,8 @@
 //! [`lint_verdict`]), with `--parsing-errors` so a block sqruff can't parse is reported, never
 //! passed. sqruff honors `noqa` comments, which can hide any finding, a parse error too; a block
 //! holding a `noqa` supdoc can't confirm names only rule codes (one in a block with a `/* */`
-//! comment, or one not followed by `:` and rule codes alone) is never given to sqruff, format or
-//! lint (see [`switches_lint_off`]), and a block holding `noqa` is linted a second time with every
+//! comment or a carriage return inside a line, or one not followed by `:` and rule codes alone) is
+//! never given to sqruff, format or lint (see [`switches_lint_off`]), and a block holding `noqa` is linted a second time with every
 //! `noqa` comment off, so a parse error one hides still fails it (see [`holds_noqa`]).
 //!
 //! sqruff has no `format` command; supdoc's format step runs `sqruff fix` on the block on stdin
@@ -255,27 +255,32 @@ pub(crate) fn lint_verdict(
     }
 }
 
-/// Whether `noqa` comments in `block` may switch more of sqruff's rules off than plain rule
-/// codes name, so a lint or fix run could pass what the block holds, a syntax error too. Read
-/// lowercase (ASCII), the block may when it holds `noqa` and either holds `/*` anywhere, or holds
-/// a `noqa` not followed, for the whole rest of its line (up to the next LF), by `:`, an optional
-/// `disable=` or `enable=`, and a comma-separated list of plain rule codes (see [`rule_codes`]),
-/// whitespace allowed around each part and at the line's end.
+/// Whether `noqa` comments in `block` may switch more of sqruff's rules off than plain rule codes
+/// name, so a lint or fix run could pass what the block holds, a syntax error too. Read lowercase
+/// (ASCII), the block may when it holds `noqa` and holds `/*` anywhere, holds a carriage return
+/// (CR) anywhere, or holds a `noqa` not followed, for the whole rest of its line (up to the next
+/// LF), by `:`, an optional `disable=` or `enable=`, and a comma-separated list of plain rule codes
+/// (see [`rule_codes`]), whitespace allowed around each part and at the line's end.
 ///
-/// sqruff 0.44 reads a directive from one comment's text, `/*` and `*/` stripped at its ends,
-/// after its last `--`, trimmed, then `noqa` (`parse_from_comment` in
+/// sqruff 0.44 reads a directive from one comment's text, `/*` and `*/` stripped at its ends, after
+/// its last `--`, trimmed, then `noqa` (`parse_from_comment` in
 /// `crates/lib/src/core/rules/noqa.rs`), and reads each rule-list entry as a pattern over its rule
 /// codes, names and groups, so `all`, `core` or `*` may name every rule and a bare `noqa` masks a
 /// parse error. Every block comment starts with `/*`, so any block comment withholds the block,
-/// however a dialect lexes, nests or quotes it. Without one, every comment ends at LF, so a
-/// directive sqruff reads is the rest of some `noqa`'s line, and when that rest is plain codes
-/// sqruff masks only those rules, never a parse error. The scan reads text, not SQL: a `noqa` in
-/// a string or an identifier counts too, so a near miss withholds the block, never passes it.
+/// however a dialect lexes, nests or quotes it. sqruff 0.44 ends a line comment at a lone CR in
+/// every dialect, so `-- noqa\r:LT01` is a bare `noqa` to sqruff; supdoc doesn't model CR, it
+/// withholds any `noqa` block holding one, as [`sorted`] refuses one in config. Callers pass
+/// [`super::format::input`], whose line-final CRs are already gone, so only a lone CR withholds.
+/// Without `/*` or a CR, every comment ends at LF, so a directive sqruff reads is the rest of some
+/// `noqa`'s line, and when that rest is plain codes sqruff masks only those rules, never a parse
+/// error. The scan reads text, not SQL: a `noqa` in a string or an identifier counts too, so a near
+/// miss withholds the block, never passes it.
 #[must_use]
 pub(crate) fn switches_lint_off(block: &str) -> bool {
     let block = block.to_ascii_lowercase();
     block.contains("noqa")
         && (block.contains("/*")
+            || block.contains('\r')
             || block.split('\n').any(|line| {
                 line.match_indices("noqa").any(|(at, word)| {
                     !names_rule_codes(line.get(at + word.len()..).unwrap_or_default())
@@ -1091,6 +1096,18 @@ mod tests {
     }
 
     #[test]
+    fn noqa_in_a_block_holding_a_carriage_return_switches_lint_off() {
+        for block in [
+            "select a FROM t WHERE b = -- noqa\r    :LT01\n",
+            "SELECT  a,  b -- noqa\r:LT01\nFROM t;\n",
+            "SELECT  a,  b -- noqa\r: LT01\nFROM t;\n",
+            "select 1 --noqa:LT01\r\n",
+        ] {
+            assert!(switches_lint_off(block), "{block:?} should switch lint off");
+        }
+    }
+
+    #[test]
     fn noqa_in_a_block_holding_a_block_comment_switches_lint_off() {
         for block in [
             "SELECT TOP 5 * FROM t /* noqa */\n",
@@ -1119,7 +1136,7 @@ mod tests {
             "/* plain comment */\nselect 1\n",
             "/*\n-- a dash comment inside\n*/\nselect 1\n",
             "select 1 -- noqa: LT01\n",
-            "select 1 --noqa:LT01\r\n",
+            "select 1 --noqa:LT01\n",
             "select 1 -- noqa: LT01,AL03\n",
             "select 1 -- noqa: lt01 , al03\n",
             "-- noqa: disable=LT01\nselect 1\n",
@@ -1353,6 +1370,130 @@ mod tests {
     #[test]
     fn every_audit_probe_but_the_plain_code_ones_is_withheld() {
         for (probe, withheld, block) in AUDIT_PROBES {
+            assert_eq!(
+                switches_lint_off(block),
+                withheld,
+                "probe {probe} should be {}",
+                if withheld { "withheld" } else { "linted" }
+            );
+        }
+    }
+
+    /// Every auditor probe of PR #452 round 3 (`work/auditor-452/r3/`): each but the controls holds a
+    /// `noqa` with a carriage return inside its line, and all of those are withheld.
+    const CR_PROBES: [(&str, bool, &str); 23] = [
+        (
+            "r3/cr1.sql",
+            true,
+            "SELECT  a,  b -- noqa\r: LT01\nFROM t;\n",
+        ),
+        (
+            "r3/cr1ctl.sql",
+            false,
+            "SELECT  a,  b -- noqa: LT01\nFROM t;\n",
+        ),
+        (
+            "r3/cr2.sql",
+            true,
+            "SELECT  a,  b -- noqa\r:LT01\nFROM t;\n",
+        ),
+        ("r3/cr3.sql", true, "select a, b -- noqa\r:LT01\nfrom t;\n"),
+        (
+            "r3/cr4.sql",
+            true,
+            "SELECT a  FROM t WHERE b = -- noqa\r:LT01\n",
+        ),
+        (
+            "r3/cr5.sql",
+            true,
+            "select a FROM t WHERE b = -- noqa\r:LT01\n",
+        ),
+        (
+            "r3/cr6.sql",
+            true,
+            "SELECT a AS x, b AS y FROM t WHERE b = -- noqa\r:LT01\n",
+        ),
+        (
+            "r3/cr7.sql",
+            true,
+            "select a from t where b = -- noqa\r:lt01\n",
+        ),
+        (
+            "r3/cr8_2.sql",
+            true,
+            "select a FROM t WHERE b = -- noqa\r  :LT01\n",
+        ),
+        (
+            "r3/cr8_4.sql",
+            true,
+            "select a FROM t WHERE b = -- noqa\r    :LT01\n",
+        ),
+        (
+            "r3/cr8_8.sql",
+            true,
+            "select a FROM t WHERE b = -- noqa\r        :LT01\n",
+        ),
+        (
+            "r3/cr9_2.sql",
+            true,
+            "SELECT a FROM t WHERE b = -- noqa\r  :LT01\n",
+        ),
+        (
+            "r3/cr9_4.sql",
+            true,
+            "SELECT a FROM t WHERE b = -- noqa\r    :LT01\n",
+        ),
+        (
+            "r3/cr9_8.sql",
+            true,
+            "SELECT a FROM t WHERE b = -- noqa\r        :LT01\n",
+        ),
+        (
+            "r3/ora1.sql",
+            true,
+            "SELECT  a  FROM t PROMPT -- noqa\r: LT01\n;\nSELECT  b  FROM t;\n",
+        ),
+        (
+            "r3/ora2.sql",
+            true,
+            "PROMPT -- noqa\r: LT01\nSELECT  b  FROM t;\n",
+        ),
+        (
+            "r3/ora3.sql",
+            true,
+            "SELECT  a,  PROMPT -- noqa\r:LT01\nFROM t;\n",
+        ),
+        (
+            "r3/ora3ctl.sql",
+            false,
+            "SELECT  a,  PROMPT -- noqa:LT01\nFROM t;\n",
+        ),
+        (
+            "r3/pg1.sql",
+            true,
+            "SELECT  a  FROM t; \\x -- noqa\r: LT01\nSELECT  b  FROM t;\n",
+        ),
+        (
+            "r3/pg2.sql",
+            true,
+            "SELECT  a,  \\x -- noqa\r:LT01\nFROM t;\n",
+        ),
+        ("r3/pg2base.sql", false, "SELECT  a,  :LT01\nFROM t;\n"),
+        (
+            "r3/pg2ctl.sql",
+            false,
+            "SELECT  a,  \\x -- noqa: LT01\nFROM t;\n",
+        ),
+        (
+            "r3/sep.sql",
+            true,
+            "select a FROM t WHERE b = -- noqa\r    :LT01\n",
+        ),
+    ];
+
+    #[test]
+    fn every_carriage_return_probe_but_the_controls_is_withheld() {
+        for (probe, withheld, block) in CR_PROBES {
             assert_eq!(
                 switches_lint_off(block),
                 withheld,
