@@ -96,10 +96,6 @@ struct Dir {
     real: PathBuf,
     /// `given` with every symlink followed, or `None` when that can't be worked out. Only
     /// [`Boundary::real_inside`] reads it.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used once its #371 callers land")
-    )]
     strict: Option<PathBuf>,
 }
 
@@ -132,10 +128,6 @@ pub(crate) enum Escape {
 /// Why [`Boundary::real_inside`] refused a path, with the boundary's failure kept apart from the
 /// path's.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used once its #371 callers land")
-)]
 pub(crate) enum ReadEscape {
     /// The boundary itself was refused by [`Boundary::resolve`] or its real location can't be
     /// worked out, so no path can be judged against it.
@@ -206,10 +198,6 @@ impl Boundary {
     /// [`ReadEscape::BoundaryUnresolved`] when the boundary was refused or its directory can't be
     /// resolved; [`ReadEscape::Unresolved`] when `path` can't be; [`ReadEscape::Outside`] naming
     /// where it lies when that is outside the boundary.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used once its #371 callers land")
-    )]
     pub(crate) fn real_inside(&self, path: &Path) -> Result<PathBuf, ReadEscape> {
         let root = self
             .dir
