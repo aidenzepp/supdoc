@@ -3,7 +3,9 @@
 //! The lint step runs `sqruff lint` on the block on stdin and reads its JSON report (see
 //! [`lint_verdict`]), with `--parsing-errors` so a block sqruff can't parse is reported, never
 //! passed. sqruff honors `-- noqa` comments, which can hide every finding, a parse error too; a
-//! block they may switch off entirely is never linted (see [`switches_lint_off`]).
+//! block they may switch off entirely is never given to sqruff, format or lint (see
+//! [`switches_lint_off`]), and a block holding one is linted a second time with every `noqa`
+//! comment off, so a parse error one hides still fails it (see [`holds_noqa`]).
 //!
 //! sqruff has no `format` command; supdoc's format step runs `sqruff fix` on the block on stdin
 //! and reads the fixed SQL from stdout. `fix` applies every rule its config turns on, so supdoc
@@ -23,7 +25,9 @@
 //! root (sqruff's other names, `.sqruff.ini`, `sqruff.toml`, `.sqlfluff` and `pyproject.toml`, are
 //! never read), and writes again only what it sorted (see [`sorted`]) into both copies:
 //!
-//! - `[sqruff]`: `exclude_rules` and `max_line_length` are kept; `templater` must be `raw`
+//! - `[sqruff]`: `exclude_rules`, when it lists only rule codes, and `max_line_length` are kept
+//!   (sqruff reads an `exclude_rules` entry as a pattern, so `core` would exclude every rule);
+//!   `templater` must be `raw`
 //!   (the release binary has no other, and a pip install's jinja or python templater loads
 //!   code); `library_path`, `load_macros_from_path` and `loader_search_path` are refused;
 //!   `dialect` and `rules` are replaced by supdoc's own, and the keys that choose files or
@@ -69,7 +73,8 @@ const KEPT: [&str; 2] = ["exclude_rules", "max_line_length"];
 
 /// The `[sqruff]` keys supdoc drops: its own `dialect` and `rules` replace the project's, and
 /// the rest choose files or change only how sqruff runs and reports. `disable_noqa` is dropped
-/// too: supdoc reads the block's `noqa` comments itself (see [`switches_lint_off`]).
+/// too: supdoc reads the block's `noqa` comments itself (see [`switches_lint_off`]) and passes
+/// [`DISABLE_NOQA`] when it wants them off.
 const DROPPED: [&str; 14] = [
     "dialect",
     "rules",
@@ -252,12 +257,13 @@ pub(crate) fn lint_verdict(
 /// How a `noqa` comment on one line reads to supdoc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Noqa {
-    /// It may switch every rule off on its line: no rule list, an empty one, or one naming `all`.
+    /// It may switch every rule off on its line: no rule list, or one with an entry that isn't a
+    /// plain rule code (see [`rule_code`]), such as `all`, `core`, `*` or an empty entry.
     Line,
-    /// It may switch every rule off from its line to the block's end: a list naming `disable`
-    /// and `all`.
+    /// It may switch every rule off from its line to the block's end: a list naming `disable` or
+    /// `enable` with an entry that isn't a plain rule code, such as `disable=all`.
     Range,
-    /// It names rules, which sqruff alone switches off.
+    /// It names only plain rule codes, which sqruff alone switches off.
     Rules,
 }
 
@@ -267,12 +273,15 @@ enum Noqa {
 ///
 /// sqruff 0.44 reads `-- noqa`, `--noqa` and `/* noqa */` with no rule list as every rule off on
 /// that line, its syntax error too, and `-- noqa: disable=all` as every rule off on the lines
-/// after it, up to a `-- noqa: enable=all`. This scan matches more: `noqa` in any case anywhere
-/// after a `--`, `/*` or `#` on the line, followed by anything but `:` and a rule list; a rule
-/// list naming `all` anywhere, in any case; and a range from any list naming both `disable` and
-/// `all`. It reads no `enable=all`, so a range runs to the block's end. It reads text, not SQL,
-/// so a string counts too, and lines split at LF alone. A near miss keeps the block from being
-/// called linted, never passes it; a block with no `noqa` comment is never switched off.
+/// after it, up to a `-- noqa: enable=all`. It reads each entry of a rule list, `disable=` and
+/// `enable=` lists too, as a pattern over its rule codes, names and groups
+/// (`IgnoreMask::expand_rule_references` in `crates/lib/src/core/rules/noqa.rs`), so `*`, `????`,
+/// `core` or `layout` may name every rule. This scan matches more: `noqa` in any case anywhere
+/// after a `--`, `/*` or `#` on the line, followed by anything but `:` and a list of plain rule
+/// codes (see [`rule_code`]); and a range from any list naming `disable` or `enable` with any
+/// other entry. It reads no `enable=all`, so a range runs to the block's end. It reads text, not
+/// SQL, so a string counts too, and lines split at LF alone. A near miss keeps the block from
+/// being called linted, never passes it; a block with no `noqa` comment is never switched off.
 #[must_use]
 pub(crate) fn switches_lint_off(block: &str) -> bool {
     let mut any = false;
@@ -303,20 +312,75 @@ fn noqa_comments(line: &str) -> Vec<Noqa> {
         .collect()
 }
 
-/// How a `noqa` followed by `rest`, lowercase, reads (see [`Noqa`]).
+/// How a `noqa` followed by `rest`, lowercase, reads (see [`Noqa`]): a rule list, up to a `*/`,
+/// names rules only when each of its comma-separated entries is a plain rule code; a list naming
+/// `disable` or `enable` is a range, its entries those after the first `=`.
 fn noqa_kind(rest: &str) -> Noqa {
     let Some(list) = rest.trim_start().strip_prefix(':') else {
         return Noqa::Line;
     };
-    let names_all = list.contains("all");
-    if list.contains("disable") {
-        return if names_all { Noqa::Range } else { Noqa::Rules };
-    }
-    let listed = list.trim().trim_end_matches("*/").trim();
-    if names_all || listed.is_empty() {
-        Noqa::Line
+    let list = list.split("*/").next().unwrap_or_default();
+    let ranged = list.contains("disable") || list.contains("enable");
+    let entries = if ranged {
+        list.split_once('=').map_or("", |(_, entries)| entries)
     } else {
+        list
+    };
+    if rule_codes(entries) {
         Noqa::Rules
+    } else if ranged {
+        Noqa::Range
+    } else {
+        Noqa::Line
+    }
+}
+
+/// Whether `entry` is a plain sqruff rule code: two ASCII letters, then two ASCII digits, such
+/// as `LT01`, in any case. sqruff reads it as a pattern too, but one matching only that code.
+fn rule_code(entry: &str) -> bool {
+    matches!(
+        entry.as_bytes(),
+        [first, second, third, fourth]
+            if first.is_ascii_alphabetic()
+                && second.is_ascii_alphabetic()
+                && third.is_ascii_digit()
+                && fourth.is_ascii_digit()
+    )
+}
+
+/// Whether `list`, comma-separated, holds only plain rule codes (see [`rule_code`]). sqruff reads
+/// each entry of an `exclude_rules` setting or a `noqa` list as a pattern over its rule codes,
+/// names and groups (`crates/lib/src/core/rules.rs` and `crates/lib/src/core/rules/noqa.rs`), so
+/// `core`, `all` or `*` would name every rule.
+fn rule_codes(list: &str) -> bool {
+    list.split(',').all(|entry| rule_code(entry.trim()))
+}
+
+/// The flag that makes sqruff ignore every inline `noqa` comment (`disable_noqa` in
+/// `crates/cli-lib/src/commands.rs` and `crates/cli-lib/src/lib.rs` of sqruff 0.44).
+pub(crate) const DISABLE_NOQA: &str = "--disable-noqa";
+
+/// Whether `block` may hold a `noqa` comment: it holds `noqa` anywhere, in any case. sqruff lets
+/// one with no rule list hide a parse error on its line, and a parse error is never suppressible,
+/// so the lint step lints such a block a second time with [`DISABLE_NOQA`] and fails it on any
+/// parse error that run reports (see [`parse_errors`]).
+#[must_use]
+pub(crate) fn holds_noqa(block: &str) -> bool {
+    block.to_ascii_lowercase().contains("noqa")
+}
+
+/// What `verdict`, a lint run's with every `noqa` comment off (see [`holds_noqa`]), adds to the
+/// block's own lint run: its parse errors alone, or its failure. `None` when it reports no parse
+/// error, so the block's own run judges it, its `noqa` comments honored.
+#[must_use]
+pub(crate) fn parse_errors(verdict: lint::Verdict) -> Option<lint::Verdict> {
+    match verdict {
+        lint::Verdict::Clean => None,
+        lint::Verdict::Diagnostics(found) => {
+            let syntax: Vec<Diagnostic> = found.into_iter().filter(|found| found.syntax).collect();
+            (!syntax.is_empty()).then_some(lint::Verdict::Diagnostics(syntax))
+        }
+        failed => Some(failed),
     }
 }
 
@@ -556,7 +620,8 @@ fn kept(text: &str) -> Result<String, &'static str> {
 /// line (sqruff reads it as part of the value above, which supdoc doesn't sort), a section or a
 /// `[sqruff]` key it doesn't know, a templater other than `raw` or a templater section other
 /// than `raw`'s or `placeholder`'s, a key that names files to read, a key before the first
-/// section, or a line that is none of a section header, a `key = value` or a comment.
+/// section, a line that is none of a section header, a `key = value` or a comment, or an
+/// `exclude_rules` that lists more than rule codes (see [`rule_codes`]).
 fn sorted(text: &str) -> Result<String, &'static str> {
     let text = text.replace("\r\n", "\n");
     if text.contains('\r') {
@@ -568,6 +633,7 @@ fn sorted(text: &str) -> Result<String, &'static str> {
     let mut core = String::new();
     let mut sections = String::new();
     let mut section = Section::Top;
+    let mut unplain = false;
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with(['#', ';']) {
@@ -596,6 +662,7 @@ fn sorted(text: &str) -> Result<String, &'static str> {
                 return Err("holds a setting before its first `[section]`");
             }
             Section::Core => {
+                unplain |= key == "exclude_rules" && !rule_codes(value);
                 if core_key(&key, value)? {
                     core.push_str(line.trim_end());
                     core.push('\n');
@@ -607,6 +674,13 @@ fn sorted(text: &str) -> Result<String, &'static str> {
             }
             Section::Dropped => {}
         }
+    }
+    if unplain {
+        return Err(
+            "sets `exclude_rules` to more than rule codes, and sqruff reads each entry as a \
+             pattern that may name every rule (`core`, `all`, `*`): list each rule by its code, \
+             such as `exclude_rules = LT05, AL03`",
+        );
     }
     core.push_str(&sections);
     Ok(core)
@@ -1026,6 +1100,23 @@ mod tests {
             "select 1 -- noqa\n-- noqa: disable=all\nselect 2\n-- noqa: enable=all\nselect 3\n",
             "select 1 -- noqa: LT01 -- noqa\n",
             "select 1 -- noqa\r\n",
+            "select 1 -- noqa: *\n",
+            "select 1 -- noqa: ????\n",
+            "select 1 -- noqa: [A-Z]*\n",
+            "select 1 -- noqa: core\n",
+            "select 1 -- noqa: layout\n",
+            "select 1 -- noqa: layout.spacing\n",
+            "select 1 -- noqa: PRS\n",
+            "select 1 -- noqa: LT01,\n",
+            "select 1 -- noqa: LT01,,AL03\n",
+            "select 1 -- noqa: LT1\n",
+            "select 1 -- noqa: LT001\n",
+            "select 1 -- noqa: 01LT\n",
+            "-- noqa: disable=*\nselect 1\n",
+            "-- noqa: disable=core\nselect 1\n",
+            "-- noqa: disable=LT01,*\nselect 1\n",
+            "-- noqa: disable\nselect 1\n",
+            "-- noqa: enable=*\nselect 1\n",
         ] {
             assert!(switches_lint_off(block), "{block:?} should switch lint off");
         }
@@ -1039,7 +1130,10 @@ mod tests {
             "\n\n",
             "select 1 -- noqa: LT01\n",
             "select 1 -- noqa: LT01,AL03\n",
+            "select 1 -- noqa: lt01 , al03\n",
+            "select 1 /* noqa: LT01 */\n",
             "-- noqa: disable=LT01\nselect 1\n",
+            "-- noqa: disable=LT01,AL03\nselect 1\n-- noqa: enable=LT01\n",
             "select a, -- noqa\nb from t\n",
             "select 1\n-- noqa: disable=all\n",
             "select 1 -- no qa\n",
@@ -1047,5 +1141,82 @@ mod tests {
         ] {
             assert!(!switches_lint_off(block), "{block:?} should leave lint on");
         }
+    }
+
+    #[test]
+    fn only_two_letters_then_two_digits_are_a_plain_rule_code() {
+        for code in ["LT01", "al03", "Cp02"] {
+            assert!(rule_code(code), "{code:?} should be a plain rule code");
+        }
+        for entry in [
+            "", "LT1", "LT001", "L01", "LTT01", "01LT", "L?01", "LT0*", "PRS", "all", "core",
+        ] {
+            assert!(
+                !rule_code(entry),
+                "{entry:?} shouldn't be a plain rule code"
+            );
+        }
+    }
+
+    #[test]
+    fn any_noqa_in_any_case_marks_the_block_for_the_unmasked_run() {
+        for block in [
+            "select 1 -- noqa: LT01\n",
+            "select 1 /* NoQa */\n",
+            "select 'noqa'\n",
+        ] {
+            assert!(holds_noqa(block), "{block:?} should hold noqa");
+        }
+        assert!(!holds_noqa("select 1 -- no qa\n"));
+    }
+
+    #[test]
+    fn the_unmasked_run_adds_only_its_parse_errors_or_its_failure() {
+        let found = |syntax, rule: &str| Diagnostic {
+            line: 1,
+            column: 1,
+            end_line: 1,
+            syntax,
+            rule: rule.to_owned(),
+            message: String::new(),
+        };
+        assert_eq!(parse_errors(lint::Verdict::Clean), None);
+        assert_eq!(
+            parse_errors(lint::Verdict::Diagnostics(vec![found(false, "LT01")])),
+            None
+        );
+        assert_eq!(
+            parse_errors(lint::Verdict::Diagnostics(vec![
+                found(false, "LT01"),
+                found(true, PARSE_RULE),
+            ])),
+            Some(lint::Verdict::Diagnostics(vec![found(true, PARSE_RULE)]))
+        );
+        let failed = lint::Verdict::Failed(format::Verdict::ToolFailed("x".to_owned()));
+        assert_eq!(parse_errors(failed.clone()), Some(failed));
+    }
+
+    #[test]
+    fn exclude_rules_naming_more_than_rule_codes_is_refused() {
+        for value in [
+            "core",
+            "all",
+            "*",
+            "LT*",
+            "LT05, core",
+            "layout",
+            "LT05,",
+            "PRS",
+        ] {
+            let refused = sorted(&format!("[sqruff]\nexclude_rules = {value}\n"));
+            assert!(
+                refused.is_err_and(|why| why.contains("`exclude_rules`")),
+                "exclude_rules = {value} should be refused"
+            );
+        }
+        assert_eq!(
+            sorted("[sqruff]\nexclude_rules = LT05, AL03,CP02\n"),
+            Ok("exclude_rules = LT05, AL03,CP02\n".to_owned())
+        );
     }
 }

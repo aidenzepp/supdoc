@@ -177,6 +177,7 @@ fn sql_a_templater_library_path_cr_or_unsorted_line_leaves_the_blocks_unchecked(
         ),
         ("[sqruff]\nexclude_rules = LT05,\n  LT01\n", "indented line"),
         ("[sqlfluff]\n", "section supdoc doesn't read"),
+        ("[sqruff]\nexclude_rules = core\n", "`exclude_rules`"),
     ] {
         let project = sql_project("", "sql", "SELECT 1;");
         project.write(".sqruff", config);
@@ -366,12 +367,13 @@ fn sql_a_directive_keeps_the_block_from_sqruff_lint_whatever_formats_it() {
 }
 
 #[test]
-fn sql_noqa_on_every_line_or_a_disable_all_range_leaves_lint_not_run() {
+fn sql_noqa_on_every_line_or_a_disable_all_range_leaves_both_sqruff_steps_not_run() {
     for body in [
         "SELECT 1; -- noqa",
         "SELECT a, -- noqa\n  b FROM t; /* noqa */",
         "-- noqa: disable=all\nSELECT 1;",
         "SELECT 1; -- NOQA: All",
+        "SELECT 1; -- noqa: core",
     ] {
         let project = sql_project("", "sql", body);
         let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
@@ -388,7 +390,7 @@ fn sql_noqa_on_every_line_or_a_disable_all_range_leaves_lint_not_run() {
             at(&json, "/findings/0/message")
                 .as_str()
                 .is_some_and(|message| message.contains("`noqa`")
-                    && message.contains("its lint step didn't run")),
+                    && message.contains("its sqruff steps didn't run")),
             "{body:?}: {json}"
         );
         assert_eq!(
@@ -401,8 +403,8 @@ fn sql_noqa_on_every_line_or_a_disable_all_range_leaves_lint_not_run() {
             "{body:?}: sqruff lint ran"
         );
         assert!(
-            outside.path().join("seen").exists(),
-            "{body:?}: the format step should still run"
+            !outside.path().join("seen").exists(),
+            "{body:?}: sqruff fix ran, and it obeys noqa too"
         );
     }
 }
@@ -693,4 +695,131 @@ fn sql_the_real_sqruff_never_passes_a_block_noqa_switches_off() {
         "{json}"
     );
     assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 0, "{json}");
+}
+
+#[test]
+fn sql_the_real_sqruff_never_passes_a_block_whose_noqa_names_more_than_rule_codes() {
+    let Some(dir) = real_sqruff(
+        "sql_the_real_sqruff_never_passes_a_block_whose_noqa_names_more_than_rule_codes",
+    ) else {
+        return;
+    };
+    // Each list is a pattern sqruff matches against every rule, so linted the block would pass.
+    for body in [
+        "SELECT a  FROM t; -- noqa: *",
+        "SELECT a  FROM t; -- noqa: ????",
+        "SELECT a  FROM t; -- noqa: [A-Z]*",
+        "SELECT a  FROM t; -- noqa: core",
+        "-- noqa: disable=*\nSELECT a  FROM t;",
+        "-- noqa: disable=core\nSELECT a  FROM t;",
+    ] {
+        let project = sql_project("", "sql", body);
+
+        let json = check(&project, &dir);
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-not-checked"],
+            "{body:?}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/lint_not_run"),
+            1,
+            "{body:?}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/passed"),
+            0,
+            "{body:?}: {json}"
+        );
+    }
+}
+
+#[test]
+fn sql_the_real_sqruff_still_honors_a_noqa_naming_rule_codes() {
+    let Some(dir) = real_sqruff("sql_the_real_sqruff_still_honors_a_noqa_naming_rule_codes") else {
+        return;
+    };
+    // The block is linted twice, the second time with every noqa off for parse errors alone, so
+    // the LT01 finding the comment names stays hidden.
+    let project = sql_project(
+        "[features.code-blocks.sql.sqruff-format]\nformat = \"off\"\n",
+        "sql",
+        "SELECT a  FROM t; -- noqa: LT01",
+    );
+
+    let json = check(&project, &dir);
+
+    assert!(finding_kinds(&json).is_empty(), "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+}
+
+#[test]
+fn sql_the_real_sqruff_fails_a_parse_error_a_bare_noqa_hides() {
+    let Some(dir) = real_sqruff("sql_the_real_sqruff_fails_a_parse_error_a_bare_noqa_hides") else {
+        return;
+    };
+    for table in [
+        "",
+        "[features.code-blocks.sql.sqruff-format]\nformat = \"off\"\n",
+    ] {
+        let project = sql_project(table, "sql", "SELECT 1;\nSELECT a FROM t WHERE -- noqa");
+
+        let json = check(&project, &dir);
+
+        let kinds = finding_kinds(&json);
+        assert!(
+            kinds.iter().any(|kind| kind == "code-block-lint"),
+            "{table:?}: {json}"
+        );
+        assert!(
+            array_at(&json, "/findings").iter().any(|finding| finding
+                .pointer("/message")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|message| message.contains("Unparsable section"))
+                && finding
+                    .pointer("/location/line")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(5)),
+            "{table:?}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/passed"),
+            0,
+            "{table:?}: {json}"
+        );
+    }
+}
+
+#[test]
+fn sql_the_real_sqruff_never_runs_on_an_exclude_rules_naming_more_than_rule_codes() {
+    let Some(dir) = real_sqruff(
+        "sql_the_real_sqruff_never_runs_on_an_exclude_rules_naming_more_than_rule_codes",
+    ) else {
+        return;
+    };
+    // sqruff expands `core` and `all` here, so lint and format would pass anything.
+    for value in ["core", "all", "LT05, *"] {
+        let project = sql_project("", "sql", "select a,b from t where x=1");
+        project.write(".sqruff", &format!("[sqruff]\nexclude_rules = {value}\n"));
+
+        let json = check(&project, &dir);
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-not-checked"],
+            "{value:?}: {json}"
+        );
+        assert!(
+            at(&json, "/findings/0/message")
+                .as_str()
+                .is_some_and(|message| message.contains("`exclude_rules`")),
+            "{value:?}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/not_checked"),
+            1,
+            "{value:?}: {json}"
+        );
+    }
 }

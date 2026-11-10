@@ -818,24 +818,24 @@ fn pylint_switched_off(at: &Location) -> Finding {
     .with_location(at.clone())
 }
 
-/// Why sqruff's lint step didn't run on a block whose `noqa` comments may switch every rule off
-/// for all of it (see [`sqruff::switches_lint_off`]).
+/// Why sqruff's steps, format and lint, didn't run on a block whose `noqa` comments may switch
+/// every rule off for all of it (see [`sqruff::switches_lint_off`]): `sqruff fix` obeys them too.
 const SQRUFF_SWITCHED_OFF: &str = "the block's `noqa` comments may switch every sqruff rule off \
                                    for all of it";
 
-/// The run's one `code-block-not-checked` warning, at `at`, the first block whose sqruff lint
-/// step didn't run because its `noqa` comments may switch every rule off for all of it.
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose sqruff steps
+/// didn't run because its `noqa` comments may switch every rule off for all of it.
 fn sqruff_switched_off(at: &Location) -> Finding {
     Finding::new(
         NOT_CHECKED,
         Severity::Warning,
-        "the block's `noqa` comments (one naming no rule, or `all`, on every line, or a \
-         `disable=all` range) may switch every sqruff rule off for all of it, a syntax error too, \
-         so its lint step didn't run",
+        "the block's `noqa` comments (one naming no rule, or more than rule codes such as `all`, \
+         `core` or `*`, on every line, or such a `disable=` range) may switch every sqruff rule \
+         off for all of it, a syntax error too, so its sqruff steps didn't run",
     )
     .with_help(
-        "name the rules each `-- noqa:` comment switches off, such as `-- noqa: LT05`; or mark \
-         the block `lint(off: <reason>)`",
+        "name each rule a `-- noqa:` comment switches off by its code, such as `-- noqa: LT05`; \
+         or mark the block `lint(off: <reason>)` and `format(off: <reason>)`",
     )
     .with_location(at.clone())
 }
@@ -3911,15 +3911,14 @@ fn run_linter(
             }),
         }
     };
-    let verdict = if let Some(early) = forbidden_by_yaml(tool, input).or(unruled) {
-        early
-    } else {
-        match cached_run(&run, session, spawn, judge, |judged| {
-            judged.as_ref().is_ok_and(lint::Verdict::cacheable)
-        }) {
+    let early = forbidden_by_yaml(tool, input).or(unruled);
+    let cacheable = |judged: &Result<_, _>| judged.as_ref().is_ok_and(lint::Verdict::cacheable);
+    let verdict = match early.or_else(|| sqruff_unmasked(tool, &run, record, session)) {
+        Some(early) => early,
+        None => match cached_run(&run, session, spawn, judge, cacheable) {
             Ok(verdict) => verdict,
             Err(not_run) => return Some(Err(not_run)),
-        }
+        },
     };
     let read = lint::Read {
         tool,
@@ -3981,6 +3980,44 @@ fn project_flags<'record>(
 
 /// The name of sqruff's lint cartridge.
 const SQRUFF_LINT: &str = "sqruff-lint";
+
+/// The name of sqruff's format cartridge.
+const SQRUFF_FORMAT: &str = "sqruff-format";
+
+/// When `tool` is sqruff's linter and `run`'s block may hold a `noqa` comment (see
+/// [`sqruff::holds_noqa`]), what `run` with [`sqruff::DISABLE_NOQA`] added, through the cache,
+/// adds to the block's own run: its parse errors or its failure (see [`sqruff::parse_errors`]).
+/// A bare `-- noqa` hides a parse error on its line from the block's own run, and a parse error
+/// is never suppressible. `None` otherwise, and when that run reports no parse error.
+///
+/// Effect: reads the cache, runs sqruff, killing it at the timeout, and writes the cache.
+fn sqruff_unmasked(
+    tool: &ToolCartridge,
+    run: &cache::Run<'_>,
+    record: &BlockRecord,
+    session: &Session<'_>,
+) -> Option<lint::Verdict> {
+    if tool.name != SQRUFF_LINT || !sqruff::holds_noqa(run.input) {
+        return None;
+    }
+    let args: Vec<&OsStr> = run
+        .args
+        .iter()
+        .copied()
+        .chain([OsStr::new(sqruff::DISABLE_NOQA)])
+        .collect();
+    let unmasked = cache::Run {
+        args: &args,
+        ..*run
+    };
+    cached_run(
+        &unmasked,
+        session,
+        |call| run_in_place(call, record, session),
+        |result| sqruff::parse_errors(sqruff::lint_verdict(run.input, false, result)),
+        |verdict| verdict.as_ref().is_none_or(lint::Verdict::cacheable),
+    )
+}
 
 /// Whether `ran`, a failed yamllint run that reported no diagnostics, says yamllint rejected the
 /// config supdoc gave it (see [`yaml::rejected_config`]).
@@ -4073,14 +4110,16 @@ const PRETTIER_SWITCHED_OFF: &str = "the block holds `prettier-ignore`, so supdo
 const DOCKERFMT: &str = "dockerfmt";
 
 /// Why `tool`'s format step doesn't run on `record`'s block, so the tool is never spawned: it is
-/// prettier and the block holds `prettier-ignore` (see [`prettier::switches_format_off`]), or it
-/// is dockerfmt and the block is one dockerfmt isn't given (see [`dockerfmt::not_given`]).
-/// `None` otherwise.
+/// prettier and the block holds `prettier-ignore` (see [`prettier::switches_format_off`]), it
+/// is dockerfmt and the block is one dockerfmt isn't given (see [`dockerfmt::not_given`]), or it
+/// is sqruff and the block's `noqa` comments may switch every rule off for all of it, as for its
+/// lint step (see [`sqruff::switches_lint_off`]). `None` otherwise.
 fn format_not_given(tool: &ToolCartridge, record: &BlockRecord) -> Option<&'static str> {
     let input = &record.pending.as_ref()?.input;
     match tool.name {
         PRETTIER => prettier::switches_format_off(input).then_some(PRETTIER_SWITCHED_OFF),
         DOCKERFMT => dockerfmt::not_given(input),
+        SQRUFF_FORMAT => sqruff::switches_lint_off(input).then_some(SQRUFF_SWITCHED_OFF),
         _ => None,
     }
 }
