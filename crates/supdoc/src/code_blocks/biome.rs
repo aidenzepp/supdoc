@@ -1448,10 +1448,12 @@ mod tests {
             !formatter_off(parse.as_bytes()),
             "a parse error is not the formatter being off"
         );
-        assert!(
-            !formatter_off(format!("note: {off}").as_bytes()),
-            "the notice counts only as stderr's first line"
-        );
+        for later in [format!("note: {off}"), format!("{unformatted}{off}")] {
+            assert!(
+                !formatter_off(later.as_bytes()),
+                "the notice counts only as stderr's whole first line: {later:?}"
+            );
+        }
     }
 
     #[test]

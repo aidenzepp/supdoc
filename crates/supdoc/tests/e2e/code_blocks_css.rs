@@ -255,6 +255,27 @@ fn css_a_linter_the_projects_config_turns_off_is_not_run_never_passed() {
 }
 
 #[test]
+fn css_the_off_notice_never_turns_a_lint_finding_into_not_run() {
+    let project = project_with(LINT_ONLY, "css", "a {\n\tcolor: red;\n\tcolor: blue;\n}");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    let report = r#"{"summary":{"changed":0,"unchanged":1},"diagnostics":[{"severity":"error","message":"Duplicate properties.","category":"lint/suspicious/noDuplicateProperties","location":{"path":"x","start":{"line":3,"column":2}},"advices":[]}],"command":"lint"}"#;
+    stub_biome(
+        outside.path(),
+        &format!(
+            "echo 'The content was not formatted because the formatter is currently disabled.' >&2\n{}",
+            stub_for("css", "exit 7", report)
+        ),
+    );
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", outside.path())])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-lint"], "{json}");
+}
+
+#[test]
 fn css_a_config_with_extends_or_plugins_makes_the_block_not_checked_with_its_own_help() {
     for (config, help) in [
         (r#"{"extends":["./base.json"]}"#, "remove `extends`"),
