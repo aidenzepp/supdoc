@@ -258,7 +258,7 @@ pub(crate) mod code_blocks {
     mod hadolint;
     /// Markdown's format and lint steps, run by rumdl.
     mod rumdl;
-    /// SQL's format step, run by sqruff.
+    /// SQL's format and lint steps, run by sqruff.
     mod sqruff;
     /// HTML's format step, run by superhtml.
     mod superhtml;

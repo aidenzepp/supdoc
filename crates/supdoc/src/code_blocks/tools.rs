@@ -684,9 +684,10 @@ pub(crate) const HADOLINT_INSTALL: &str = "download hadolint 2.15.1 from https:/
      and put it on PATH";
 
 /// How to install a sqruff supdoc's checks are verified against (see [`sqruff::VERIFIED`]):
-/// sqruff ships a binary per platform with a `.sha256` beside it.
-pub(crate) const SQRUFF_INSTALL: &str = "download sqruff 0.44.0 from https://github.com/quarylabs/sqruff/releases/tag/v0.44.0, \
-     check it against its `.sha256`, and put it on PATH";
+/// sqruff ships a binary per platform with a `.sha256` beside it. The release binary, never the
+/// pip package, which carries the jinja and python templaters.
+pub(crate) const SQRUFF_INSTALL: &str = "download sqruff 0.44.0 from https://github.com/quarylabs/sqruff/releases/tag/v0.44.0 \
+     (the release binary, not the pip package), check it against its `.sha256`, and put it on PATH";
 
 /// The values every cartridge's mode accepts today.
 const FULL_OR_OFF: &[&str] = &["full", "off"];
@@ -938,7 +939,7 @@ fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'sta
 }
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 35] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 36] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -1285,6 +1286,22 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 35] = [
         positions: own_positions,
         argv: sqruff_format_args,
         reader: Reader::Format(sqruff::parse_error),
+    },
+    ToolCartridge {
+        name: "sqruff-lint",
+        language: Language::Sql,
+        binary: "sqruff",
+        loads: Loads::Static,
+        install: SQRUFF_INSTALL,
+        // sqruff reads only supdoc's private copy, named by its hash in the args.
+        config_files: &[],
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        holds: every_tag,
+        vars: &[],
+        positions: own_positions,
+        argv: sqruff_lint_args,
+        reader: Reader::Lint(sqruff::lint_verdict),
     },
     ToolCartridge {
         name: "superhtml",
@@ -2063,12 +2080,35 @@ fn hadolint_args(invocation: &Invocation<'_>) -> Vec<OsString> {
 /// the one supdoc names (`--ignore-local-config`), then the private config and the block's
 /// dialect the project contributes (`--config <file> --dialect <name>`, see
 /// [`sqruff::project_args`]). The private config keeps only the layout and capitalisation rules,
-/// so `fix` changes nothing else; the format step compares the output with the block, never the
+/// so `fix` changes nothing else, but only because no block holding an inline sqruff directive,
+/// which sqruff applies over the config, is ever given to sqruff (see
+/// [`sqruff::directive_line`]). The format step compares the output with the block, never the
 /// exit status (see [`super::format::judge`]).
 fn sqruff_format_args(invocation: &Invocation<'_>) -> Vec<OsString> {
     let mut args: Vec<OsString> = ["fix", "-", "--ignore-local-config"]
         .map(OsString::from)
         .to_vec();
+    args.extend(invocation.project.iter().cloned());
+    args
+}
+
+/// `sqruff lint`'s arguments: the block on stdin (`-`), its findings as JSON on stdout, a section
+/// sqruff can't parse reported among them (`--parsing-errors`; without it such a block passes),
+/// no config but the one supdoc names (`--ignore-local-config`), then the lint step's private
+/// config and the block's dialect the project contributes (`--config <file> --dialect <name>`,
+/// see [`sqruff::project_args`]). supdoc reads the JSON, never the exit status (see
+/// [`sqruff::lint_verdict`]).
+fn sqruff_lint_args(invocation: &Invocation<'_>) -> Vec<OsString> {
+    let mut args: Vec<OsString> = [
+        "lint",
+        "-",
+        "-f",
+        "json",
+        "--parsing-errors",
+        "--ignore-local-config",
+    ]
+    .map(OsString::from)
+    .to_vec();
     args.extend(invocation.project.iter().cloned());
     args
 }
@@ -2571,6 +2611,7 @@ mod tests {
                 "dockerfmt Dockerfile Format dockerfmt Static",
                 "hadolint Dockerfile Lint hadolint Static",
                 "sqruff-format Sql Format sqruff Static",
+                "sqruff-lint Sql Lint sqruff Static",
                 "superhtml Html Format superhtml Static",
                 "yamlfmt Yaml Format yamlfmt Static",
                 "yamllint Yaml Lint yamllint Static",
@@ -2635,6 +2676,27 @@ mod tests {
                 "/c/sqruff.cfg",
                 "--dialect",
                 "tsql",
+            ]
+            .map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn sqruff_lints_stdin_as_json_with_parse_errors_ignoring_every_local_config() {
+        let project = ["--config", "/l/sqruff.cfg", "--dialect", "postgres"].map(OsString::from);
+        assert_eq!(
+            args_of("sqruff-lint", 1, &project),
+            [
+                "lint",
+                "-",
+                "-f",
+                "json",
+                "--parsing-errors",
+                "--ignore-local-config",
+                "--config",
+                "/l/sqruff.cfg",
+                "--dialect",
+                "postgres",
             ]
             .map(OsString::from)
         );
