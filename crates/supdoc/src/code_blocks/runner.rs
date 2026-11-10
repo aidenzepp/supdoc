@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use super::tools::ToolEnv;
 use crate::config::confine::{self, Boundary};
-use crate::path::AbsolutePath;
+use crate::path::{self, AbsolutePath, fixed};
 use crate::process::{self, LiveGroup, Spawning, TERMINATING};
 
 /// The most bytes supdoc reads from each of a tool's stdout and stderr, unless its call sets its
@@ -374,7 +374,7 @@ pub(crate) fn cache_bases(env: &ToolEnv) -> impl Iterator<Item = PathBuf> {
         if windows {
             var("LOCALAPPDATA")
         } else {
-            var("HOME").map(|home| home.join(".cache"))
+            var("HOME").map(|home| path::beneath(&home, &fixed::DOT_CACHE))
         },
     ]
     .into_iter()
@@ -389,7 +389,7 @@ pub(crate) fn cache_bases(env: &ToolEnv) -> impl Iterator<Item = PathBuf> {
 #[must_use]
 pub(crate) fn neutral_dir(env: &ToolEnv, root: &Path) -> PathBuf {
     cache_bases(env)
-        .map(|cache| (cache.join("supdoc/code-blocks/cwd"), cache))
+        .map(|cache| (path::beneath(&cache, &fixed::CODE_BLOCKS_CWD), cache))
         .find(|(dir, cache)| usable(cache, dir, root))
         .map_or_else(|| PathBuf::from("/"), |(dir, _)| dir)
 }
