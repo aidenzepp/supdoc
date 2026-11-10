@@ -406,12 +406,12 @@ fn detect(environment: &Environment, marker: bool) -> Result<Install, CliError> 
     installed_by_cargo(environment).map(Install::Cargo)
 }
 
-/// Whether this binary is the file at `$CARGO_HOME/bin/supdoc`.
+/// Whether this binary is the file at `$CARGO_HOME/bin/supdoc` (`supdoc.exe` on Windows).
 fn cargo_owns_exe(environment: &Environment) -> bool {
     let (Some(exe), Ok(cargo_home)) = (&environment.exe, &environment.cargo_home) else {
         return false;
     };
-    fs::canonicalize(cargo_home.join("bin").join(PACKAGE))
+    fs::canonicalize(cargo_home.join("bin").join(&environment.cargo_bin))
         .ok()
         .as_deref()
         == Some(exe.as_path())
@@ -837,6 +837,9 @@ struct Environment {
     exe: Option<PathBuf>,
     /// The cargo home: `CARGO_HOME` when absolute, else `$HOME/.cargo`, or why there is none.
     cargo_home: Result<PathBuf, CargoHomeProblem>,
+    /// The file name cargo gives the binary in `$CARGO_HOME/bin`: `supdoc`, or `supdoc.exe` on
+    /// Windows.
+    cargo_bin: String,
 }
 
 /// Why no usable cargo home was found.
@@ -882,27 +885,39 @@ fn cargo_home_from(
     }
 }
 
+/// The variable that names the home directory: `USERPROFILE` on Windows, `HOME` elsewhere.
+const fn home_variable(windows: bool) -> &'static str {
+    if windows { "USERPROFILE" } else { "HOME" }
+}
+
 impl Environment {
-    /// Reads the current executable, `CARGO_HOME` and `HOME`.
+    /// Reads the current executable, `CARGO_HOME`, and `USERPROFILE` on Windows or `HOME`
+    /// elsewhere.
     fn read() -> Self {
+        let windows = cfg!(windows);
         Self::from_parts(
+            windows,
             std::env::current_exe().ok(),
             std::env::var_os("CARGO_HOME"),
-            std::env::var_os("HOME"),
+            std::env::var_os(home_variable(windows)),
         )
     }
 
-    /// The environment for an executable path and the two variables, as [`cargo_home_from`] reads
-    /// them.
+    /// The environment for an executable path, `CARGO_HOME`, and the home variable of the
+    /// platform (`USERPROFILE` when `windows`, else `HOME`), as [`cargo_home_from`] reads them.
+    /// `windows` also gives the binary the `.exe` suffix cargo adds there.
     fn from_parts(
+        windows: bool,
         exe: Option<PathBuf>,
         cargo_home: Option<OsString>,
         home: Option<OsString>,
     ) -> Self {
         let cargo_home = cargo_home_from(cargo_home, home);
+        let suffix = if windows { ".exe" } else { "" };
         Self {
             exe: exe.and_then(|exe| fs::canonicalize(exe).ok()),
             cargo_home,
+            cargo_bin: format!("{PACKAGE}{suffix}"),
         }
     }
 }
@@ -918,7 +933,7 @@ struct CargoInstall {
 
 /// Decides how this supdoc was installed, refusing anything but a cargo install from crates.io.
 ///
-/// Effect: reads `$CARGO_HOME/bin/supdoc` and `$CARGO_HOME/.crates2.json`.
+/// Effect: reads `$CARGO_HOME/bin/supdoc` (`supdoc.exe` on Windows) and `$CARGO_HOME/.crates2.json`.
 ///
 /// # Errors
 ///
@@ -936,7 +951,7 @@ fn installed_by_cargo(environment: &Environment) -> Result<CargoInstall, CliErro
             _ => cannot_tell(&seen),
         });
     };
-    let expected = fs::canonicalize(cargo_home.join("bin").join(PACKAGE)).ok();
+    let expected = fs::canonicalize(cargo_home.join("bin").join(&environment.cargo_bin)).ok();
     if expected.as_deref() != Some(exe.as_path()) {
         return Err(by_location(exe));
     }
@@ -1242,6 +1257,59 @@ fn cargo_failed(argv: &[String], status: std::process::ExitStatus, stderr: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cargo home under a new temporary directory with a file named `bin_name` in its `bin`,
+    /// and an environment that reads that file as this binary, with `home` as the home variable.
+    fn environment_running(windows: bool, bin_name: &str) -> (tempfile::TempDir, Environment) {
+        let home = tempfile::tempdir().expect("a temporary home should be created");
+        let bin = home.path().join(".cargo").join("bin");
+        fs::create_dir_all(&bin).expect("the cargo bin directory should be created");
+        let exe = bin.join(bin_name);
+        fs::write(&exe, b"").expect("the stand-in binary should be written");
+        let environment = Environment::from_parts(
+            windows,
+            Some(exe),
+            None,
+            Some(home.path().as_os_str().to_owned()),
+        );
+        (home, environment)
+    }
+
+    #[test]
+    fn a_windows_cargo_install_is_the_exe_under_the_userprofile_cargo_bin() {
+        let (_home, environment) = environment_running(true, "supdoc.exe");
+
+        assert!(cargo_owns_exe(&environment));
+    }
+
+    #[test]
+    fn a_unix_cargo_install_is_the_extensionless_file_under_the_home_cargo_bin() {
+        let (_home, environment) = environment_running(false, "supdoc");
+
+        assert!(cargo_owns_exe(&environment));
+    }
+
+    #[test]
+    fn each_platform_looks_only_for_its_own_binary_name() {
+        let (_home, exe_on_unix) = environment_running(false, "supdoc.exe");
+        let (_other, bare_on_windows) = environment_running(true, "supdoc");
+
+        assert!(!cargo_owns_exe(&exe_on_unix));
+        assert!(!cargo_owns_exe(&bare_on_windows));
+    }
+
+    #[test]
+    fn the_home_variable_is_userprofile_on_windows_and_home_elsewhere() {
+        assert_eq!(home_variable(true), "USERPROFILE");
+        assert_eq!(home_variable(false), "HOME");
+    }
+
+    #[test]
+    fn this_host_names_the_cargo_binary_with_its_own_exe_suffix() {
+        let expected = format!("supdoc{}", std::env::consts::EXE_SUFFIX);
+
+        assert_eq!(Environment::read().cargo_bin, expected);
+    }
 
     #[test]
     fn the_replace_failed_help_names_windows_remedies_only_on_windows() {
