@@ -986,6 +986,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn real_location_of_a_dangling_leaf_symlink_is_its_pointee_byte_for_byte() {
+        let fixture = Fixture::new();
+        let outside = fs::canonicalize(fixture.path("outside"))
+            .expect("the outside dir should be canonicalizable");
+        fixture.link(
+            outside
+                .join("missing")
+                .to_str()
+                .expect("the temp path should be UTF-8"),
+            "root/dangling",
+        );
+
+        let real = real_location(&fixture.path("root/dangling"))
+            .expect("a dangling link to a missing file should still resolve");
+
+        assert_eq!(
+            real.as_os_str(),
+            outside.join("missing").as_os_str(),
+            "the link's own location must add nothing, not even a trailing separator"
+        );
+    }
+
+    #[test]
+    fn write_atomically_replaces_an_existing_file_and_leaves_no_temp_file() {
+        let fixture = Fixture::new();
+        fixture.write("root/out.txt", "old");
+        let boundary = fixture.boundary();
+        let target = boundary
+            .admit(&fixture.absolute("root/out.txt"))
+            .expect("an existing file inside the root should be admitted");
+
+        write_atomically(&target, b"new", None).expect("the replacing write should succeed");
+
+        assert_eq!(
+            fs::read_to_string(target.as_path()).expect("the written file should be readable"),
+            "new"
+        );
+        assert_eq!(
+            fixture.names("root"),
+            names(&["out.txt"]),
+            "no temp file should remain beside the target"
+        );
+    }
+
+    #[test]
+    fn temp_path_beside_keeps_the_directory_and_extends_the_file_name() {
+        let target = Path::new("dir").join("out.txt");
+
+        let temp = temp_path_beside(&target, 3);
+
+        assert_eq!(
+            temp.parent(),
+            target.parent(),
+            "the temp file stays beside the target"
+        );
+        let name = temp
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("the temp name should be UTF-8");
+        assert!(
+            name.starts_with("out.txt.") && name.ends_with(".3.tmp"),
+            "the temp name should extend the target's name and carry the attempt, got {name}"
+        );
+        assert_ne!(temp, target);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temp_path_beside_a_root_falls_back_to_the_root_itself() {
+        assert_eq!(temp_path_beside(Path::new("/"), 0), Path::new("/"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn create_dir_all_creates_only_the_admitted_dirs_with_the_mode() {
