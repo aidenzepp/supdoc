@@ -1043,3 +1043,24 @@ fn a_global_excludes_rule_from_the_xdg_config_home_hides_a_file() {
         "the global rule hides the guide and nothing else\n{sources:?}"
     );
 }
+
+#[test]
+fn a_global_excludes_path_holding_a_nul_byte_warns_that_the_file_is_unreadable() {
+    let project = web_project();
+    let home = tempfile::tempdir().expect("a home directory should be creatable");
+    fs::write(
+        home.path().join(".gitconfig"),
+        b"[core]\n\texcludesFile = /nonexistent\0b\n",
+    )
+    .expect("the user git config should be writable");
+
+    let run = project.supdoc_in_with("services/web", &["list"], &[("HOME", home.path())]);
+
+    let _ = run.assert_exit(0);
+    let output = format!("{}\n{}", run.stdout, run.stderr);
+    assert!(
+        output.contains("scan-ignore-file-unreadable")
+            && output.contains("the global excludes file"),
+        "an unopenable global excludes path is reported, not skipped\n{output}"
+    );
+}

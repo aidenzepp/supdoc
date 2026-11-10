@@ -162,9 +162,14 @@ impl GlobalExcludes {
     #[must_use]
     pub(crate) fn find(cwd: &AbsolutePath) -> Self {
         Self {
-            file: ignore::gitignore::gitconfig_excludes_path()
-                .and_then(Pointer::from_path)
-                .map(|file| file.resolve_from(cwd.as_path())),
+            file: ignore::gitignore::gitconfig_excludes_path().map(|file| {
+                // A path the typed pointer refuses, such as one holding a NUL byte, is kept so
+                // opening it fails and the walk warns that the global excludes file is unreadable.
+                match Pointer::from_path(file.clone()) {
+                    Some(pointer) => pointer.resolve_from(cwd.as_path()),
+                    None => cwd.as_path().join(file),
+                }
+            }),
         }
     }
 }
@@ -1479,6 +1484,58 @@ mod tests {
         assert!(
             findings.is_empty(),
             "no warning is given above the root: {findings:?}"
+        );
+    }
+
+    /// A git work tree `top` holding `sub/proj` with `a.rs`, `b.rs` and `c.rs`, and `alias`, a
+    /// symlink to `top` in another directory, so the project root is reached through a symlink.
+    /// Returns the directories (kept alive) and the project's config under `alias`.
+    #[cfg(unix)]
+    fn project_through_symlink(gitignore: &str) -> (TempDir, TempDir, Config) {
+        let top = TempDir::new().expect("a temporary work tree should be creatable");
+        let holder = TempDir::new().expect("a temporary link directory should be creatable");
+        let project = top.path().join("sub/proj");
+        fs::create_dir_all(&project).expect("the project directory should be creatable");
+        for file in ["a.rs", "b.rs", "c.rs", CONFIG_FILE_NAME] {
+            fs::write(project.join(file), "").expect("the fixture file should be writable");
+        }
+        make_git_dir(&top.path().join(".git"));
+        fs::write(top.path().join(".gitignore"), gitignore)
+            .expect("the gitignore should be writable");
+        let alias = holder.path().join("alias");
+        std::os::unix::fs::symlink(top.path(), &alias)
+            .expect("the fixture symlink should be creatable");
+        let config_path = AbsolutePath::new(&alias.join("sub/proj").join(CONFIG_FILE_NAME))
+            .expect("the temporary directory should be absolute");
+        let config = Config::load_file(&config_path).expect("the fixture config should be valid");
+        (top, holder, config)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn anchored_rules_above_a_root_reached_through_a_symlink_hide_their_files() {
+        let (_top, holder, config) = project_through_symlink("/sub/proj/a.rs\n");
+        let global = holder.path().join("global-excludes");
+        fs::write(&global, "/sub/proj/b.rs\n").expect("the global excludes should be writable");
+
+        let walked = walk(
+            &config,
+            Languages::builtin().expect("the built-in cartridges should load"),
+            &Scope::All,
+            &GlobalExcludes { file: Some(global) },
+        );
+
+        let names: Vec<_> = walked
+            .sources
+            .iter()
+            .filter_map(|walked| walked.path.as_path().file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            ["c.rs"],
+            "the `.gitignore` above the root hides a.rs and the global file hides b.rs, though the \
+             root is reached through a symlink"
         );
     }
 
