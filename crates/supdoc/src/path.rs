@@ -69,13 +69,6 @@ impl AbsolutePath {
     /// Built from `path`'s own ancestors, so nothing is joined and no component is new: the
     /// walk that creates or checks each directory on the way down needs no raw join.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the walks in scan and cli use it from V5-P5 and V5-P6"
-        )
-    )]
     pub(crate) fn steps_to(&self, path: &Self) -> Option<impl Iterator<Item = Self> + use<>> {
         let _under = path.strip_prefix(self)?;
         let mut steps: Vec<Self> = path
@@ -563,7 +556,6 @@ pub(crate) struct Suffix(String);
 impl Suffix {
     /// Wraps `tail`, or returns `None` when it is empty or holds `/`, `\\`, `:`, `..` or NUL.
     #[must_use]
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) fn new(tail: &str) -> Option<Self> {
         let refused =
             tail.is_empty() || tail.contains(['/', '\\', ':', '\0']) || tail.contains("..");
@@ -575,7 +567,6 @@ impl Suffix {
 /// give `a.md.1.toml`. The existing name is not re-checked, so a Unix name holding `:` is kept.
 /// `None` when `path` has no file name, such as a root or one ending in `..`.
 #[must_use]
-#[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
 pub(crate) fn with_suffix(path: &Path, suffix: &Suffix) -> Option<PathBuf> {
     let name = path.file_name()?;
     let mut joined = name.to_owned();
@@ -637,13 +628,6 @@ impl Pointer {
     /// Wraps a path the operating system or a library handed back, such as a `read_link` pointee
     /// or git's `core.excludesFile`, or `None` when it holds a NUL byte, as [`Pointer::new`].
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the sweep units wrap handed-back paths from V5-P3"
-        )
-    )]
     pub(crate) fn from_path(path: PathBuf) -> Option<Self> {
         (!path.as_os_str().as_encoded_bytes().contains(&0)).then_some(Self(path))
     }
@@ -778,13 +762,6 @@ impl RelativePath {
 
     /// `self` with `rel` appended, keeping `self` as written, `..` included.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the config chain's suggestion joins with it from V5-P5"
-        )
-    )]
     pub(crate) fn beneath(&self, rel: &impl Beneath) -> Self {
         Self(raw_join(&self.0, Path::new(rel.segments())))
     }
