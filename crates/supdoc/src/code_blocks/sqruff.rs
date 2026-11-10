@@ -3,7 +3,9 @@
 //! sqruff has no `format` command; supdoc's format step runs `sqruff fix` on the block on stdin
 //! and reads the fixed SQL from stdout. `fix` applies every rule its config turns on, so supdoc
 //! always gives it a private config whose `rules` are only the layout and capitalisation groups
-//! (see [`FORCED`]): a rule that renames an alias or rewrites a join never changes a block.
+//! (see [`FORCED`]), so a rule that renames an alias or rewrites a join is off. sqruff also reads
+//! config from comments inside the SQL (`-- sqruff:rules:all`), after `--config`, and no flag
+//! turns that off, so a block holding one is never given to sqruff (see [`directive_line`]).
 //! `fix` exits 0 even when a violation it can't fix remains (a long comment line), and 1 only on
 //! a block it can't parse, so the step judges the output against the block, never the exit
 //! status (see [`super::format::judge`]).
@@ -82,6 +84,44 @@ const READS_FILES: [&str; 3] = [
 /// The templater sections supdoc drops: `raw` is forced, and `placeholder` only matters when
 /// chosen as the templater.
 const INERT_TEMPLATERS: [&str; 2] = ["sqruff:templater:raw", "sqruff:templater:placeholder"];
+
+/// The names sqruff reads an inline config directive under, lowercase: `-- sqruff:<key>:<value>`
+/// and `-- sqlfluff:<key>:<value>`.
+const DIRECTIVES: [&str; 2] = ["sqruff", "sqlfluff"];
+
+/// The 0-based index of the first line of `block` that may hold an inline config directive, which
+/// sqruff applies over supdoc's private config: it can turn every rule on, change the dialect, or
+/// pick another templater. `None` when no line may.
+///
+/// sqruff 0.44 reads a directive from a line that, trimmed, starts with `-- sqruff:` or
+/// `-- sqlfluff:` (`Linter::with_inline_config` in `crates/lib/src/core/linter/core.rs` and
+/// `FluffConfig::process_raw_file_for_config` in `crates/lib/src/core/config.rs`), and from no
+/// `/* */` comment. This scan matches more: a line with `--` anywhere whose text after it names
+/// either, in any case, followed by `:` after any whitespace, with lines split at LF alone (so a
+/// stray CR joins, never hides, a line). It reads text, not SQL, so a string or a trailing comment
+/// counts too: a near miss keeps the block from sqruff, never passes it. Line `n` of `block` is
+/// line `n` of the block's body.
+#[must_use]
+pub(crate) fn directive_line(block: &str) -> Option<usize> {
+    block.split('\n').position(holds_directive)
+}
+
+/// Whether `line` has a `--` followed, anywhere after it, by a name in [`DIRECTIVES`] and then
+/// `:` after any whitespace, in any case.
+fn holds_directive(line: &str) -> bool {
+    let line = line.to_ascii_lowercase();
+    let Some((_, comment)) = line.split_once("--") else {
+        return false;
+    };
+    DIRECTIVES.iter().any(|name| {
+        comment.match_indices(name).any(|(at, _)| {
+            comment
+                .get(at..)
+                .and_then(|rest| rest.strip_prefix(name))
+                .is_some_and(|rest| rest.trim_start().starts_with(':'))
+        })
+    })
+}
 
 /// What sqruff puts where a rule code goes for a section it can't parse.
 const UNPARSABLE: &str = "????";
@@ -609,6 +649,49 @@ mod tests {
             "[tool]\n",
         ] {
             assert!(kept(config).is_err(), "{config:?} should be refused");
+        }
+    }
+
+    #[test]
+    fn a_line_sqruff_reads_as_a_directive_is_found() {
+        for (block, line) in [
+            ("-- sqruff:rules:all\nselect 1\n", 0),
+            ("select 1\n-- sqlfluff:dialect:tsql\n", 1),
+            ("select 1\n   \t-- sqruff:templater:jinja\n", 1),
+            ("select 1\r\n-- sqruff:rules:all\r\n", 1),
+        ] {
+            assert_eq!(directive_line(block), Some(line), "{block:?}");
+        }
+    }
+
+    #[test]
+    fn a_near_miss_counts_as_a_directive() {
+        for block in [
+            "--sqruff:rules:all",
+            "--   SQRUFF:rules:all",
+            "-- SqlFluff : dialect:tsql",
+            "---- sqruff:rules:all",
+            "select 1 -- sqruff:rules:all",
+            "select '-- sqruff:rules:all'",
+            "-- note sqlfluff:dialect:tsql",
+            "select 1\r-- sqruff:rules:all",
+            "-- sqruff\t:rules:all",
+        ] {
+            assert!(directive_line(block).is_some(), "{block:?} should count");
+        }
+    }
+
+    #[test]
+    fn a_block_without_a_directive_goes_to_sqruff() {
+        for block in [
+            "select 1\n",
+            "-- formatted by sqruff\nselect 1\n",
+            "select a - - b from sqruff_table\n",
+            "/* sqruff:rules:all */ select 1\n",
+            "-\n- sqruff:rules:all\n",
+            "",
+        ] {
+            assert_eq!(directive_line(block), None, "{block:?}");
         }
     }
 

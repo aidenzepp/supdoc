@@ -230,6 +230,56 @@ fn sql_only_a_verified_sqruff_version_runs_the_format_step() {
     }
 }
 
+/// Asserts `json` holds one `code-block-not-checked` warning for an inline sqruff directive on
+/// doc line `line`, and the block not checked.
+fn assert_directive_skipped(json: &serde_json::Value, line: u32, case: &str) {
+    assert_eq!(
+        finding_kinds(json),
+        ["code-block-not-checked"],
+        "{case}: {json}"
+    );
+    assert_eq!(
+        at(json, "/findings/0/location/line"),
+        line,
+        "{case}: {json}"
+    );
+    assert!(
+        at(json, "/findings/0/message")
+            .as_str()
+            .is_some_and(|message| message.contains(&format!("line {line} "))
+                && message.contains("inline sqruff directive")),
+        "{case}: {json}"
+    );
+    assert_eq!(
+        at(json, "/data/summary/code_blocks/not_checked"),
+        1,
+        "{case}: {json}"
+    );
+}
+
+#[test]
+fn sql_a_block_holding_an_inline_directive_is_never_given_to_sqruff() {
+    for directive in [
+        "-- sqruff:rules:all",
+        "-- sqlfluff:dialect:tsql",
+        "   -- sqruff:templater:jinja",
+        "--SQRUFF : rules:all",
+        "SELECT 2; -- sqlfluff:rules:all",
+    ] {
+        let project = sql_project("", "sql", &format!("SELECT 1;\n{directive}"));
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        stub_sqruff(outside.path(), "sqruff 0.44.0");
+
+        let json = check(&project, outside.path());
+
+        assert_directive_skipped(&json, 5, directive);
+        assert!(
+            !outside.path().join("seen").exists(),
+            "{directive}: sqruff was given the block"
+        );
+    }
+}
+
 /// The real sqruff's directory, or `None` (the test is skipped) when it isn't on `PATH`.
 fn real_sqruff(test: &str) -> Option<std::path::PathBuf> {
     real_tool_dir("sqruff", test)
@@ -325,4 +375,43 @@ fn sql_the_real_sqruff_passes_a_block_whose_only_violation_it_cant_fix() {
 
     assert!(finding_kinds(&json).is_empty(), "{json}");
     assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+}
+
+#[test]
+fn sql_the_real_sqruff_never_sees_a_block_whose_directive_turns_every_rule_on() {
+    let Some(dir) =
+        real_sqruff("sql_the_real_sqruff_never_sees_a_block_whose_directive_turns_every_rule_on")
+    else {
+        return;
+    };
+    // Given to sqruff, the directive would turn the aliasing rules on and fix would add `as`.
+    let doc = "# Blocks\n\n```sql\n-- sqruff:rules:all\nselect a.x from tbl a\n```\n";
+    let project = sql_project("", "sql", "-- sqruff:rules:all\nselect a.x from tbl a");
+
+    let json = check(&project, &dir);
+    assert_directive_skipped(&json, 4, "rules:all");
+    assert!(json.pointer("/findings/0/fix").is_none(), "{json}");
+
+    let _fixed = project.supdoc_in_with(".", &["fix", "--yes"], &[("PATH", &dir)]);
+    assert_eq!(project.read("docs/blocks.md"), doc);
+}
+
+#[test]
+fn sql_the_real_sqruff_never_sees_a_block_whose_directive_changes_the_dialect() {
+    let Some(dir) =
+        real_sqruff("sql_the_real_sqruff_never_sees_a_block_whose_directive_changes_the_dialect")
+    else {
+        return;
+    };
+    // Given to sqruff, the directive would beat the tag and pass the block as T-SQL.
+    let project = sql_project(
+        "",
+        "postgres",
+        "-- sqruff:dialect:tsql\nSELECT TOP 5 * FROM t;",
+    );
+
+    let json = check(&project, &dir);
+
+    assert_directive_skipped(&json, 4, "dialect:tsql");
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 0, "{json}");
 }

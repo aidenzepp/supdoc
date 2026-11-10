@@ -2101,7 +2101,10 @@ impl SqruffConfigs {
     /// block's own dialect. Then checks sqruff's version (see [`Self::verified`]). A refused
     /// config takes only the format step off, as an unverified sqruff does, with its one warning
     /// per refusal added to `slots`: a block with another lint step goes on to it, and one
-    /// without is settled as not checked. Whether the block goes on to its tools.
+    /// without is settled as not checked. A block holding an inline sqruff directive (see
+    /// [`sqruff::directive_line`]) has its sqruff format step taken off first, with a warning of
+    /// its own naming the line, so it is never given to sqruff. Whether the block goes on to its
+    /// tools.
     ///
     /// Effect: reads the config and may create supdoc's private directory and file for it.
     fn give(
@@ -2113,6 +2116,15 @@ impl SqruffConfigs {
     ) -> bool {
         if !tool.runs("sqruff") {
             return true;
+        }
+        if record
+            .tool
+            .as_ref()
+            .is_some_and(|format| format.runs("sqruff"))
+            && let Some(at) = sqruff_directive_at(record)
+        {
+            slots.push(Slot::Found(sqruff_directive(&at)));
+            return take_format_off(record, SQRUFF_DIRECTIVE);
         }
         let doc = doc_beneath(root, &record.at.file);
         let dir = doc.parent().unwrap_or(root).to_path_buf();
@@ -2220,6 +2232,46 @@ const SQRUFF_REFUSED: &str = "supdoc couldn't give sqruff the project's config";
 
 /// Why an SQL block's format step didn't run when the sqruff on `PATH` isn't a verified version.
 const SQRUFF_UNVERIFIED: &str = "the sqruff on `PATH` isn't a version supdoc is verified against";
+
+/// Why an SQL block's format step didn't run when it holds an inline sqruff directive (see
+/// [`sqruff::directive_line`]).
+const SQRUFF_DIRECTIVE: &str = "the block holds an inline sqruff directive, which would override \
+                                the config supdoc gives sqruff";
+
+/// Where in its doc the first line of `record`'s block that may hold an inline sqruff directive
+/// is (see [`sqruff::directive_line`]): that body line, or the block's fence when the line can't
+/// be placed. `None` when no line may hold one, or the block isn't pending.
+fn sqruff_directive_at(record: &BlockRecord) -> Option<Location> {
+    let pending = record.pending.as_ref()?;
+    let line = sqruff::directive_line(&pending.input)?;
+    let placed = pending.block.body.get(line).and_then(|body| {
+        Location::in_text(
+            record.at.file.clone(),
+            pending.doc.text(),
+            body.content.clone(),
+        )
+    });
+    Some(placed.unwrap_or_else(|| record.at.clone()))
+}
+
+/// The `code-block-not-checked` warning, at `at`, for an SQL block that wasn't given to sqruff
+/// because the line at `at` may hold an inline sqruff directive.
+fn sqruff_directive(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        format!(
+            "line {} holds an inline sqruff directive (a `-- sqruff:` or `-- sqlfluff:` comment, \
+             in any spelling), which would override the config supdoc gives sqruff, so the SQL \
+             block wasn't given to sqruff and its format step didn't run",
+            at.line
+        ),
+    )
+    .with_help(
+        "drop the comment, or mark the block `format(off: <reason>)` to leave it unformatted",
+    )
+    .with_location(at.clone())
+}
 
 /// The state reason and the `code-block-not-checked` warning, at `at`, for a block sqruff isn't
 /// given because of `refusal`.
