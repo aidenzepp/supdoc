@@ -3,8 +3,9 @@
 //! It always writes two copies, one for the shared agents directory and one for Claude Code, and
 //! nothing else. The project scope puts them under the project root, the config's directory or
 //! the current directory when there is no config. `--global` puts them under the home directory
-//! (`HOME`, or `USERPROFILE` on Windows) and Claude Code's config directory. Each copy is a real file written atomically. A copy that already
-//! holds the embedded text is left alone; a different one is replaced only under `--yes`. A
+//! (`HOME`, or `USERPROFILE` on Windows) and Claude Code's config directory. Each copy is a real
+//! file written atomically. A copy that already holds the embedded text is left alone; a different
+//! one is replaced only under `--yes`. A
 //! project install writes nothing outside the project: it refuses a symlinked directory on the
 //! way to either copy that leads out of the root, and follows one that stays inside. Either
 //! scope refuses a `SKILL.md` that is itself a symlink leading out of where the copy belongs,
@@ -1031,6 +1032,38 @@ mod tests {
             crate::path::fixture("/windows/profile")
                 .beneath(&fixed::DEFAULT_CLAUDE_DIR)
                 .beneath(&fixed::CLAUDE_DIR_SKILL)
+        );
+    }
+
+    #[test]
+    fn from_vars_reads_the_home_variable_this_platform_uses() {
+        let dirs = SkillDirs::from_vars(|name| match name {
+            "HOME" => Some(text("/unix/home")),
+            "USERPROFILE" => Some(text("/windows/profile")),
+            _ => None,
+        });
+
+        let (expected, variable) = if cfg!(windows) {
+            ("/windows/profile", "USERPROFILE")
+        } else {
+            ("/unix/home", "HOME")
+        };
+        assert_eq!(dirs.home, Some(crate::path::fixture(expected)));
+        assert_eq!(dirs.home_var, variable);
+    }
+
+    #[test]
+    fn the_windows_no_home_hint_names_userprofile() {
+        let root = crate::path::fixture("/work");
+        let dirs = SkillDirs::for_platform(|_| None, true);
+
+        let error = destinations(true, &root, &dirs).expect_err("--global needs a home");
+
+        assert_eq!(error.code(), "cli-skill-no-home");
+        assert!(
+            error.help().contains("set USERPROFILE=C:\\Users\\you"),
+            "the hint should show how to set USERPROFILE: {}",
+            error.help()
         );
     }
 
