@@ -1205,20 +1205,31 @@ fn yes_removes_the_files_an_earlier_upgrade_left_and_only_those() {
     std::fs::write(dist.join("supdoc.exe.old"), "aside").expect("the aside should write");
     std::fs::write(dist.join("supdoc-upgrade"), "foreign").expect("the foreign file should write");
     std::fs::write(dist.join(".supdoc-upgrade"), "foreign").expect("the bare prefix should write");
-    std::fs::create_dir(dist.join(".supdoc-upgrade-dir")).expect("the directory should create");
+    std::fs::write(dist.join(".supdoc-upgrade-notes.txt"), "foreign")
+        .expect("the near-miss name should write");
+    std::fs::create_dir(dist.join(".supdoc-upgrade-5-6")).expect("the directory should create");
     std::fs::write(dist.join("target-of-link"), "keep").expect("the link target should write");
-    std::os::unix::fs::symlink(dist.join("target-of-link"), dist.join(".supdoc-upgrade-x"))
-        .expect("the symlink should be creatable");
+    std::os::unix::fs::symlink(
+        dist.join("target-of-link"),
+        dist.join(".supdoc-upgrade-7-8"),
+    )
+    .expect("the symlink should be creatable");
 
     let run = fixture.run_released(&["upgrade", NEWER, "--yes"]);
 
     let _ = run.assert_exit(0);
+    assert!(
+        !run.stderr.contains("Could not"),
+        "skipping a directory or a link is not a failure to report: {}",
+        run.stderr
+    );
     assert_eq!(
         names_in(&dist),
         [
             ".supdoc-upgrade",
-            ".supdoc-upgrade-dir",
-            ".supdoc-upgrade-x",
+            ".supdoc-upgrade-5-6",
+            ".supdoc-upgrade-7-8",
+            ".supdoc-upgrade-notes.txt",
             "supdoc",
             "supdoc-upgrade",
             "target-of-link"
@@ -1261,6 +1272,8 @@ fn a_digest_mismatch_is_refused_before_the_archive_is_read_and_changes_nothing()
         &digest_of("x86_64-unknown-linux-gnu"),
     );
     let before = std::fs::read(fixture.path("dist/supdoc")).expect("the binary should read");
+    std::fs::write(fixture.path("dist/.supdoc-upgrade-123-456"), "stale")
+        .expect("the leftover should write");
 
     let run = fixture.run_released(&["upgrade", NEWER, "--yes"]);
 
@@ -1269,6 +1282,11 @@ fn a_digest_mismatch_is_refused_before_the_archive_is_read_and_changes_nothing()
         run.stderr.contains("cli-upgrade-verify-failed"),
         "{}",
         run.stderr
+    );
+    assert_eq!(
+        names_in(&fixture.path("dist")),
+        [".supdoc-upgrade-123-456", "supdoc"],
+        "a refused archive must not remove anything"
     );
     assert!(
         run.stderr.contains("SHA256SUMS lists"),
@@ -1280,7 +1298,6 @@ fn a_digest_mismatch_is_refused_before_the_archive_is_read_and_changes_nothing()
         before,
         "the binary must be untouched"
     );
-    assert_eq!(names_in(&fixture.path("dist")), ["supdoc"]);
 }
 
 #[test]

@@ -287,6 +287,9 @@ pub(crate) struct UpgradeReport {
     /// The SHA-256 the archive must have, from `SHA256SUMS`; only with `asset`.
     #[serde(skip_serializing_if = "Option::is_none")]
     sha256: Option<String>,
+    /// Files an earlier upgrade left beside the binary that this run could not remove, one
+    /// sentence each; empty when there are none.
+    notes: Vec<String>,
 }
 
 impl Report for UpgradeReport {
@@ -457,6 +460,7 @@ fn run_cargo(
         method: Method::Cargo,
         asset: None,
         sha256: None,
+        notes: Vec::new(),
     };
     output
         .report(&report, true)
@@ -523,14 +527,11 @@ fn run_release_binary(
     let direction = running.direction_to(&target);
     let applied = args.confirm.mode() == WriteMode::Apply;
 
+    let mut notes = Vec::new();
     let (outcome, asset, sha256) = match found {
         Some((asset, digest)) if direction != Direction::Same => {
             if applied {
-                for note in install_release(&target, exe, &asset, &digest, context)? {
-                    output
-                        .note(&note)
-                        .map_err(|error| CliError::output_failed("the upgrade report", &error))?;
-                }
+                notes = install_release(&target, exe, &asset, &digest, context, output)?;
                 (UpgradeOutcome::Installed, Some(asset), Some(digest))
             } else {
                 (UpgradeOutcome::Previewed, Some(asset), Some(digest))
@@ -549,6 +550,7 @@ fn run_release_binary(
         method: Method::ReleaseBinary,
         asset,
         sha256,
+        notes,
     };
     output
         .report(&report, true)
@@ -572,22 +574,26 @@ fn run_release_binary(
 /// Fetches the archive at `asset`, checks it against `digest`, and replaces `exe` with its
 /// binary.
 ///
-/// Returns the notes about files an earlier upgrade left that could not be removed.
+/// Returns the notes about files an earlier upgrade left that could not be removed. They are
+/// also written to `output` before the binary is replaced, so a failed replacement does not
+/// lose them.
 ///
-/// Effect: one fetch of the archive, the removals of [`install::remove_leftovers`], then the
-/// file changes of [`install::replace_exe`].
+/// Effect: one fetch of the archive, the removals of [`install::remove_leftovers`], the notes
+/// written to `output`, then the file changes of [`install::replace_exe`].
 ///
 /// # Errors
 ///
 /// Returns `cli-upgrade-fetch-failed` when the archive cannot be fetched,
 /// `cli-upgrade-verify-failed` when it fails the checksum or lacks the binary, and
-/// `cli-upgrade-replace-failed` when the binary cannot be put in place.
+/// `cli-upgrade-replace-failed` when the binary cannot be put in place, and `cli-output-failed`
+/// when a note cannot be written.
 fn install_release(
     target: &ReleaseVersion,
     exe: Option<&Path>,
     asset: &str,
     digest: &str,
     context: &Context,
+    output: &mut Output,
 ) -> Result<Vec<String>, CliError> {
     let retry = command_line(context, "upgrade", &[target.release()], &["--yes"]);
     let exe = exe.ok_or_else(|| cannot_tell("its own path could not be found"))?;
@@ -615,6 +621,11 @@ fn install_release(
         )
     })?;
     let notes = install::remove_leftovers(exe);
+    for note in &notes {
+        output
+            .note(note)
+            .map_err(|error| CliError::output_failed("the upgrade report", &error))?;
+    }
     install::replace_exe(exe, &binary).map_err(|error| {
         CliError::new(
             "cli-upgrade-replace-failed",
