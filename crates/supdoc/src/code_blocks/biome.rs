@@ -1,6 +1,7 @@
-//! biome, for TypeScript, JavaScript, JSON and CSS blocks: the extension a tag selects, its syntax-error report, the
-//! notice that its formatter is off, its lint diagnostics, the
-//! project config supdoc finds for it, and the private file a block is linted from.
+//! biome, for TypeScript, JavaScript, JSON and CSS blocks and the lint step of HTML ones: the
+//! extension a tag selects, its syntax-error report, the notice that its formatter is off, its
+//! lint diagnostics, the HTML it can't parse or is told to leave unlinted, the project config
+//! supdoc finds for it, and the private file a block is linted from.
 //!
 //! biome finds its config from the directory it runs in, never from the block's virtual path,
 //! and supdoc runs it from an empty directory of its own. So supdoc walks up from the doc inside
@@ -32,8 +33,8 @@ const EMPTY_CONFIG: &str = "{}";
 
 /// The file extension biome reads a block tagged `tag` by: the tag itself when it names a
 /// module or JSX flavor (`mts`, `cts`, `tsx`, `mjs`, `cjs`, `jsx`), JSON (`json`, or `jsonc`,
-/// whose comments biome parses) or CSS (`css`, or `scss`, which biome reads as SCSS), else `ts`
-/// or `js`.
+/// whose comments biome parses), CSS (`css`, or `scss`, which biome reads as SCSS) or HTML
+/// (`html`, or `htm`, which biome reads as HTML), else `ts` or `js`.
 #[must_use]
 pub(crate) fn extension(tag: &str) -> &'static str {
     match tag {
@@ -48,6 +49,8 @@ pub(crate) fn extension(tag: &str) -> &'static str {
         "jsonc" => "jsonc",
         "css" => "css",
         "scss" => "scss",
+        "html" => "html",
+        "htm" => "htm",
         _ => "ts",
     }
 }
@@ -254,6 +257,96 @@ pub(crate) fn linted_nothing(stdout: &[u8]) -> bool {
     serde_json::from_slice::<BiomeReport>(stdout).is_ok_and(|report| {
         report.diagnostics.is_empty() && report.summary.changed + report.summary.unchanged == 0
     })
+}
+
+/// Whether `stdout`, biome lint's JSON report, holds a `parse` diagnostic: biome couldn't parse
+/// the block. For HTML that says nothing about the block, since biome 2.6.5 refuses valid HTML
+/// that omits an optional end tag (`<li>`, `<p>`, `<td>`), so its lint step counts as not run.
+#[must_use]
+pub(crate) fn unparsed(stdout: &[u8]) -> bool {
+    serde_json::from_slice::<BiomeReport>(stdout).is_ok_and(|report| {
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.category == "parse")
+    })
+}
+
+/// Whether the HTML `block` holds a biome suppression comment that may silence more than the
+/// rules it names, so supdoc can't confirm biome lints all of it: `biome-ignore`,
+/// `biome-ignore-all`, `biome-ignore-start` or `biome-ignore-end` with a category that isn't one
+/// rule (`lint`, `lint/a11y`), with none, or with anything supdoc doesn't read as a rule list.
+/// One naming only rules (`<!-- biome-ignore lint/a11y/useAltText: why -->`) silences just those
+/// rules, which biome reports on if it silences nothing. supdoc's own `lint(off: ...)` is the way
+/// to switch the step off.
+///
+/// biome 2.6.5 reads an HTML comment's text inside `<!--` and `-->`
+/// (`crates/biome_suppression/src/lib.rs:112-130`) line by line, a suppression at the start of a
+/// line after whitespace and `*`s (`:135-142`), matching `biome[-_]ignore` in any case
+/// (`:147-171`), then `-all`, `-start` or `-end` (`:173-192`), then categories split at
+/// whitespace, `(` or `:` up to the first `:` (`:348-414`). The scan is conservative: it reads every `biome[-_]ignore` in the
+/// text in any case, wherever it stands, so one in an attribute, a `<script>` or prose counts, as
+/// does a near miss such as `biome-ignored`. It reads its categories up to the first `:`, the
+/// comment's `-->` or the line's end at a `\n`, the only break biome splits a comment at (a `\r`
+/// is whitespace to it).
+#[must_use]
+pub(crate) fn switches_html_lint_off(block: &str) -> bool {
+    let lower = block.to_ascii_lowercase();
+    lower
+        .match_indices("biome")
+        .filter(|(at, keyword)| {
+            let rest = lower.get(at + keyword.len()..).unwrap_or_default();
+            rest.strip_prefix(['-', '_'])
+                .is_some_and(|rest| rest.starts_with("ignore"))
+        })
+        .any(|(at, _)| {
+            let rest = block.get(at + "biome-ignore".len()..).unwrap_or_default();
+            let line = rest.split('\n').next().unwrap_or_default();
+            let comment = line.split("-->").next().unwrap_or_default();
+            !names_rules(comment)
+        })
+}
+
+/// Whether `line`, what follows a `biome-ignore` keyword, is an optional `-all`, `-start` or
+/// `-end`, then a list of one or more rules, each `lint/<group>/<rule>` with an optional
+/// `(value)`, split at whitespace, up to a `:` or the line's end. biome needs no whitespace
+/// before the first: `biome-ignorelint/a11y/useAltText` names that rule to it too.
+fn names_rules(line: &str) -> bool {
+    let line = ["-all", "-start", "-end"]
+        .into_iter()
+        .find_map(|kind| line.strip_prefix(kind))
+        .unwrap_or(line);
+    let list = line.split(':').next().unwrap_or_default();
+    let mut rest = list.trim_start();
+    let mut rules = 0_usize;
+    while !rest.is_empty() {
+        let end = rest
+            .find(|c: char| c == '(' || c.is_whitespace())
+            .unwrap_or(rest.len());
+        let (category, after) = rest.split_at(end);
+        if !is_rule(category) {
+            return false;
+        }
+        rules = rules.saturating_add(1);
+        let after = match after.strip_prefix('(') {
+            Some(value) => match value.split_once(')') {
+                Some((_, after)) => after,
+                None => return false,
+            },
+            None => after,
+        };
+        rest = after.trim_start();
+    }
+    rules > 0
+}
+
+/// Whether `category` names one lint rule: `lint/<group>/<rule>`, each part ASCII letters and
+/// digits.
+fn is_rule(category: &str) -> bool {
+    let mut parts = category.split('/');
+    parts.next() == Some("lint")
+        && parts.clone().count() == 2
+        && parts.all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric()))
 }
 
 /// The settings that leave files out of linting, as `(section, key)` at the config's top level:
@@ -846,7 +939,8 @@ mod tests {
 
     use super::{
         LintFile, Refusal, checked, diagnostics, extension, find, formatter_off, holds_comment,
-        lint_verdict, linted_nothing, parse_error, project_args, without_exclusions, write_new,
+        lint_verdict, linted_nothing, parse_error, project_args, switches_html_lint_off, unparsed,
+        without_exclusions, write_new,
     };
     use crate::code_blocks::format::{ParseError, Verdict as FormatVerdict};
     use crate::code_blocks::lint::{Diagnostic, Verdict};
@@ -1393,6 +1487,8 @@ mod tests {
             "jsonc",
             "css",
             "scss",
+            "html",
+            "htm",
         ]
         .map(extension)
         .into();
@@ -1401,9 +1497,78 @@ mod tests {
             picked,
             [
                 "ts", "ts", "mts", "cts", "tsx", "js", "js", "mjs", "cjs", "jsx", "json", "jsonc",
-                "css", "scss"
+                "css", "scss", "html", "htm"
             ]
         );
+    }
+
+    #[test]
+    fn a_report_holding_a_parse_diagnostic_is_unparsed_whatever_else_it_holds() {
+        // biome 2.6.5 on `<ul>\n<li>one\n<li>two\n</ul>\n<img src="a.png">` (valid HTML).
+        let parse = r#"{"severity":"error","message":"Expected a matching closing tag but instead found '</ul>'.","category":"parse","location":{"path":"x","start":{"line":4,"column":1}},"advices":[]}"#;
+        let rule = r#"{"severity":"error","message":"Provide a text alternative.","category":"lint/a11y/useAltText","location":{"path":"x","start":{"line":5,"column":1}},"advices":[]}"#;
+
+        assert!(unparsed(&report(&format!("{parse},{rule}"))));
+        assert!(unparsed(&report(parse)));
+        assert!(
+            !unparsed(&report(rule)),
+            "a rule's finding is no parse error"
+        );
+        assert!(
+            !unparsed(&report(&parse.replace(r#""parse""#, r#""syntax/x/y""#))),
+            "only the `parse` category"
+        );
+        assert!(!unparsed(&report("")));
+        assert!(!unparsed(b"not json"));
+    }
+
+    #[test]
+    fn a_biome_ignore_naming_only_rules_leaves_htmls_lint_step_on() {
+        for block in [
+            "<img src=\"a.png\">\n",
+            "<!-- biome-ignore lint/a11y/useAltText: decorative -->\n<img src=\"a.png\">",
+            "<!-- biome-ignore-all lint/a11y/useAltText: decorative -->",
+            "<!-- biome-ignore-start lint/a11y/useAltText lint/a11y/useButtonType: x -->",
+            "<!-- biome-ignore-end lint/a11y/useAltText: x -->",
+            "<!-- biome_ignore lint/a11y/useAltText: x -->",
+            "<!-- biome-ignorelint/a11y/useAltText: x -->",
+            "<!-- biome-ignore lint/style/useX(value) lint/a11y/useAltText: x -->",
+            "<!-- biome-ignore lint/a11y/useAltText -->",
+            "<!-- biome-ignore lint/a11y/useAltText --> lint: x",
+            "<p>biome lints this</p>",
+        ] {
+            assert!(!switches_html_lint_off(block), "{block:?}");
+        }
+    }
+
+    #[test]
+    fn a_biome_ignore_that_may_silence_more_than_named_rules_switches_htmls_lint_step_off() {
+        for block in [
+            "<!-- biome-ignore lint: x -->\n<img src=\"a.png\">",
+            "<!-- biome-ignore-all lint: x -->",
+            "<!-- biome-ignore-start lint: x -->\n<img>\n<!-- biome-ignore-end lint: x -->",
+            "<!-- biome-ignore lint/a11y: x -->",
+            "<!-- biome-ignore: x -->",
+            "<!-- biome-ignore -->",
+            "<!--\n  * BIOME-IGNORE-ALL lint: x\n-->",
+            "<!-- Biome_Ignore lint: x -->",
+            "<!-- biome-ignore-ALL lint/a11y/useAltText: x -->",
+            "<!-- biome-ignore-all-start lint/a11y/useAltText: x -->",
+            "<!-- biome-ignorelint: x -->",
+            "<!-- biome-ignored lint/a11y/useAltText: x -->",
+            "<!-- biome-ignore lint/a11y/useAltText lint: x -->",
+            "<!-- biome-ignore lint/a11y/useAltText\r lint: x -->",
+            "<!-- biome-ignore lint/a11y/useAltText\u{a0}lint: x -->",
+            "<!-- biome-ignore lint/a/b(value lint: x -->",
+            "<!-- biome-ignore lint/a/b(value)lint: x -->",
+            "<!-- biome-ignore lint/plugin/my-plugin: x -->",
+            "<!-- biome-ignore format: x -->",
+            "<!-- biome-ignore lint/a11y/useAltText: x -->\n<!-- biome-ignore-all lint: x -->",
+            "<script>// biome-ignore-all lint: x\n</script>",
+            "<p title=\"biome-ignore lint: x\">a</p>",
+        ] {
+            assert!(switches_html_lint_off(block), "{block:?}");
+        }
     }
 
     #[test]
