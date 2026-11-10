@@ -1,5 +1,6 @@
 //! Walking the project tree to find the files a scan reads links from.
 
+use crate::remedies::{self, Access};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -106,9 +107,9 @@ impl UnreadDir {
     pub(crate) fn finding(&self, root: &AbsolutePath) -> Finding {
         let shown = relative_to(root, &self.path);
         self.warning(&shown).with_help(format!(
-            "Links in that directory weren't checked. Run `chmod u+rx {dir}`, or add `exclude = \
+            "Links in that directory weren't checked. Run `{grant}`, or add `exclude = \
              [{pattern:?}]` to {CONFIG_FILE_NAME}",
-            dir = shell_quote(&shown),
+            grant = remedies::grant_on(Access::ReadSearch, &shell_quote(&shown), remedies::WINDOWS),
             pattern = shown,
         ))
     }
@@ -118,9 +119,9 @@ impl UnreadDir {
     pub(crate) fn code_blocks_finding(&self, root: &AbsolutePath) -> Finding {
         let shown = relative_to(root, &self.path);
         self.warning(&shown).with_help(format!(
-            "Code blocks in that directory weren't checked. Run `chmod u+rx {dir}`, or add \
+            "Code blocks in that directory weren't checked. Run `{grant}`, or add \
              {pattern:?} to `[features.code-blocks] exclude` in {CONFIG_FILE_NAME}",
-            dir = shell_quote(&shown),
+            grant = remedies::grant_on(Access::ReadSearch, &shell_quote(&shown), remedies::WINDOWS),
             pattern = shown,
         ))
     }
@@ -1753,7 +1754,13 @@ mod tests {
             "`.gitignore` can't be read, so its rules don't apply"
         );
         let help = finding.help.as_deref().unwrap_or_default();
-        assert!(help.contains("`chmod u+r .gitignore`"), "{help}");
+        assert!(
+            help.contains(&format!(
+                "`{}`",
+                remedies::grant_on(Access::Read, ".gitignore", remedies::WINDOWS)
+            )),
+            "{help}"
+        );
         assert_eq!(
             walk.sources
                 .iter()

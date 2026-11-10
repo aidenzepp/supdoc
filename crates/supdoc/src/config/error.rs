@@ -1,5 +1,6 @@
 //! Config errors: a stable code, a one-line message and a separate hint for each.
 
+use crate::remedies::{self, Access};
 use std::fmt;
 use std::io::ErrorKind;
 use std::ops::Range;
@@ -450,7 +451,10 @@ const GLOB_OR_SYNTAX_HELP: &str = "Fix the text at the line shown. A list is wri
 fn read_help(file: &str, kind: ErrorKind) -> String {
     match kind {
         ErrorKind::PermissionDenied => {
-            format!("Give the current user read access, for example `chmod u+r {file}`")
+            format!(
+                "Give the current user read access, for example `{}`",
+                remedies::grant_on(Access::Read, file, remedies::WINDOWS)
+            )
         }
         ErrorKind::InvalidData => {
             format!("Save {file} as UTF-8 text: supdoc cannot read any other encoding")

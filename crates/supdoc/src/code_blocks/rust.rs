@@ -39,9 +39,7 @@ pub(crate) fn attribute_edition(attributes: &[&str]) -> Option<Edition> {
 /// Effect: reads file metadata and resolves symlinks.
 #[must_use]
 pub(crate) fn config_args(root: &Path) -> Vec<OsString> {
-    let Ok(real_root) = root.canonicalize() else {
-        return Vec::new();
-    };
+    let boundary = Boundary::resolve(root);
     let Some(file) = fixed::RUST_CONFIG_FILES
         .iter()
         .map(|name| path::beneath(root, name))
@@ -49,11 +47,8 @@ pub(crate) fn config_args(root: &Path) -> Vec<OsString> {
     else {
         return Vec::new();
     };
-    match file.canonicalize() {
-        Ok(real)
-            if real.starts_with(&real_root)
-                && std::fs::metadata(&real).is_ok_and(|meta| meta.is_file()) =>
-        {
+    match boundary.real_inside(&file) {
+        Ok(real) if std::fs::metadata(&real).is_ok_and(|meta| meta.is_file()) => {
             vec![OsString::from("--config-path"), real.into_os_string()]
         }
         _ => Vec::new(),
@@ -73,10 +68,11 @@ pub(crate) fn clippy_conf_dir(root: &Path) -> Option<OsString> {
         .map(|name| path::beneath(root, name))
         .filter(|path| std::fs::symlink_metadata(path).is_ok())
         .collect();
+    let boundary = Boundary::resolve(root);
     let inside = |path: &PathBuf| {
-        path.canonicalize().is_ok_and(|real| {
-            real.starts_with(&real_root) && std::fs::metadata(&real).is_ok_and(|m| m.is_file())
-        })
+        boundary
+            .real_inside(path)
+            .is_ok_and(|real| std::fs::metadata(&real).is_ok_and(|m| m.is_file()))
     };
     (!present.is_empty() && present.iter().all(inside)).then(|| real_root.into_os_string())
 }

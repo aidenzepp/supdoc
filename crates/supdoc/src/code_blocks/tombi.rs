@@ -27,7 +27,7 @@ use super::format::{self, ParseError};
 use super::lint::{self, Diagnostic};
 use super::runner::{self, Failure, Ran};
 use super::tools::{Step, ToolEnv};
-use crate::config::confine::Boundary;
+use crate::config::confine::{Boundary, ReadEscape};
 use crate::hash::Hash;
 use crate::path::{self, Component, fixed};
 
@@ -566,15 +566,14 @@ enum ReadError {
 /// What is wrong with the file.
 fn read_table(root: &Path, found: &Path) -> Result<toml::Table, ReadError> {
     let other = ReadError::Other;
-    let real_root = root
-        .canonicalize()
-        .map_err(|_| other("couldn't be resolved"))?;
-    let real = found
-        .canonicalize()
-        .map_err(|_| other("couldn't be resolved"))?;
-    if !real.starts_with(&real_root) {
-        return Err(other("is a link that resolves outside the project"));
-    }
+    let real = Boundary::resolve(root)
+        .real_inside(found)
+        .map_err(|escape| match escape {
+            ReadEscape::Outside { .. } => other("is a link that resolves outside the project"),
+            ReadEscape::BoundaryUnresolved | ReadEscape::Unresolved => {
+                other("couldn't be resolved")
+            }
+        })?;
     let meta = fs::metadata(&real).map_err(|_| other("couldn't be read"))?;
     if !meta.is_file() {
         return Err(other("isn't a regular file of at most 256 KiB"));
@@ -1089,6 +1088,28 @@ mod tests {
 
         assert!(
             matches!(refused, Err(Refusal::Config { .. })),
+            "got {refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_dangling_in_root_config_link_is_refused_as_unresolvable() {
+        let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
+        crate::cli::testing::symlink(
+            root.path().join("missing.toml"),
+            root.path().join("tombi.toml"),
+        )
+        .expect("the link");
+
+        let refused = project(
+            &env_in(cache.path()),
+            root.path(),
+            &root.path().join("a.md"),
+        );
+
+        assert!(
+            matches!(&refused, Err(Refusal::Config { why, .. }) if why.contains("couldn't be resolved")),
             "got {refused:?}"
         );
     }

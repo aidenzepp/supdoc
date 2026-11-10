@@ -94,6 +94,9 @@ struct Dir {
     given: PathBuf,
     /// `given` with every symlink followed, or `given` as written when that can't be worked out.
     real: PathBuf,
+    /// `given` with every symlink followed, or `None` when that can't be worked out. Only
+    /// [`Boundary::real_inside`] reads it.
+    strict: Option<PathBuf>,
 }
 
 /// A path [`Boundary::admit`] passed: the only argument the write primitives take.
@@ -122,6 +125,23 @@ pub(crate) enum Escape {
     },
 }
 
+/// Why [`Boundary::real_inside`] refused a path, with the boundary's failure kept apart from the
+/// path's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReadEscape {
+    /// The boundary itself was refused by [`Boundary::resolve`] or its real location can't be
+    /// worked out, so no path can be judged against it.
+    BoundaryUnresolved,
+    /// The path's real location can't be worked out: it is missing, a dangling symlink, or a
+    /// symlink loop.
+    Unresolved,
+    /// The path resolves, but outside the boundary.
+    Outside {
+        /// The path's real location.
+        real: PathBuf,
+    },
+}
+
 impl Boundary {
     /// The boundary at `dir`, its real location worked out now.
     ///
@@ -138,6 +158,7 @@ impl Boundary {
         let accepted = plain(dir).then(|| Dir {
             given: dir.to_path_buf(),
             real: real_location(dir).unwrap_or_else(|| dir.to_path_buf()),
+            strict: fs::canonicalize(dir).ok(),
         });
         Self { dir: accepted }
     }
@@ -165,6 +186,32 @@ impl Boundary {
             .is_some_and(|dir| real_location(path).is_some_and(|real| real.starts_with(&dir.real)))
     }
 
+    /// The real location of `path`, once checked to lie inside the boundary: the strict read
+    /// check. It refuses exactly what `canonicalize(root)`, `canonicalize(path)` and `starts_with`
+    /// refuse, so a missing path or a dangling symlink is refused even where
+    /// [`Boundary::contains`] counts it inside.
+    ///
+    /// Effect: reads file metadata and symlinks along the boundary's directory and `path`.
+    ///
+    /// # Errors
+    ///
+    /// [`ReadEscape::BoundaryUnresolved`] when the boundary was refused or its directory can't be
+    /// resolved; [`ReadEscape::Unresolved`] when `path` can't be; [`ReadEscape::Outside`] naming
+    /// where it lies when that is outside the boundary.
+    pub(crate) fn real_inside(&self, path: &Path) -> Result<PathBuf, ReadEscape> {
+        let root = self
+            .dir
+            .as_ref()
+            .and_then(|dir| dir.strict.as_deref())
+            .ok_or(ReadEscape::BoundaryUnresolved)?;
+        let real = fs::canonicalize(path).map_err(|_| ReadEscape::Unresolved)?;
+        if real.starts_with(root) {
+            Ok(real)
+        } else {
+            Err(ReadEscape::Outside { real })
+        }
+    }
+
     /// `target`, once it is checked to lie inside the boundary both as written and once every
     /// symlink along it is followed. A missing tail counts where it would be.
     ///
@@ -190,13 +237,17 @@ impl Boundary {
         if !plain(target) || !target.starts_with(&dir.given) {
             return Err(Escape::Lexical);
         }
-        match real_location(target) {
-            Some(real) if real.starts_with(&dir.real) => Ok(Admitted {
-                path: target.to_path_buf(),
-                boundary: PhantomData,
-            }),
-            real => Err(Escape::Real { real }),
-        }
+        admit_real(
+            target,
+            &dir.real,
+            cfg!(windows),
+            real_location,
+            std::thread::sleep,
+        )
+        .map(|path| Admitted {
+            path,
+            boundary: PhantomData,
+        })
     }
 
     /// [`Boundary::admit`] for `real`, a file whose symlinks were already followed, such as the
@@ -222,6 +273,57 @@ impl Boundary {
         })?;
         self.admit(&named)
     }
+}
+
+/// Checks that `target`'s real location, found by `locate`, lies beneath `real_dir`, and returns
+/// `target` as written. On Windows a real location under the volume's `$Extend\$Deleted` directory
+/// is retried up to [`RENAME_ATTEMPTS`] times, pausing [`RENAME_PAUSE`] between tries; see
+/// [`is_delete_pending`]. Every other outcome is final.
+///
+/// Effect: runs `locate` and sleeps through `pause`.
+///
+/// # Errors
+///
+/// [`Escape::Real`] naming the last real location `locate` returned.
+fn admit_real(
+    target: &Path,
+    real_dir: &Path,
+    windows: bool,
+    mut locate: impl FnMut(&Path) -> Option<PathBuf>,
+    mut pause: impl FnMut(Duration),
+) -> Result<PathBuf, Escape> {
+    let mut tried = 1;
+    loop {
+        match locate(target) {
+            Some(real) if real.starts_with(real_dir) => return Ok(target.to_path_buf()),
+            Some(real) if tried < RENAME_ATTEMPTS && is_delete_pending(&real, windows) => {
+                pause(RENAME_PAUSE);
+                tried += 1;
+            }
+            real => return Err(Escape::Real { real }),
+        }
+    }
+}
+
+/// Whether `real` lies under a volume's `$Extend\$Deleted` directory, where NTFS moves a file
+/// that another thread is mid-replace on, so a path canonicalized then resolves outside its
+/// directory for a moment. Only on Windows. Any drive letter, verbatim (`\\?\`) or not; the
+/// match is on whole components, so a file merely named `$Deleted` doesn't count.
+fn is_delete_pending(real: &Path, windows: bool) -> bool {
+    if !windows {
+        return false;
+    }
+    let text = real.to_string_lossy();
+    let rest = text.strip_prefix(r"\\?\").unwrap_or(&text);
+    let mut parts = rest.split(['\\', '/']);
+    let drive = parts.next().unwrap_or("");
+    matches!(drive.as_bytes(), [letter, b':'] if letter.is_ascii_alphabetic())
+        && parts
+            .next()
+            .is_some_and(|name| name.eq_ignore_ascii_case("$Extend"))
+        && parts
+            .next()
+            .is_some_and(|name| name.eq_ignore_ascii_case("$Deleted"))
 }
 
 /// Whether `path` is absolute and holds no `..`, so the directory it names as written is the one
@@ -827,6 +929,100 @@ mod tests {
         );
     }
 
+    const PENDING: &str = r"\\?\C:\$Extend\$Deleted\007900000014E5647C212B9E";
+
+    fn admit_with_reals(
+        reals: &[Option<&str>],
+        windows: bool,
+    ) -> (Result<PathBuf, Escape>, usize, usize) {
+        let mut seen = 0;
+        let mut pauses = 0;
+        let result = admit_real(
+            Path::new("/in/target"),
+            Path::new("/in"),
+            windows,
+            |_| {
+                let real = reals
+                    .get(seen)
+                    .or(reals.last())
+                    .copied()
+                    .flatten()
+                    .map(PathBuf::from);
+                seen += 1;
+                real
+            },
+            |_| pauses += 1,
+        );
+        (result, seen, pauses)
+    }
+
+    #[test]
+    fn a_delete_pending_real_path_is_retried_on_windows_and_admitted_once_inside() {
+        let (result, locates, pauses) =
+            admit_with_reals(&[Some(PENDING), Some(PENDING), Some("/in/target")], true);
+
+        assert_eq!(result, Ok(PathBuf::from("/in/target")));
+        assert_eq!((locates, pauses), (3, 2), "two pending tries, two pauses");
+    }
+
+    #[test]
+    fn a_delete_pending_real_path_is_refused_after_the_attempt_bound() {
+        let (result, locates, _) = admit_with_reals(&[Some(PENDING)], true);
+
+        assert_eq!(
+            result,
+            Err(Escape::Real {
+                real: Some(PathBuf::from(PENDING))
+            })
+        );
+        assert_eq!(locates, usize::try_from(RENAME_ATTEMPTS).expect("fits"));
+    }
+
+    #[test]
+    fn a_delete_pending_real_path_is_not_retried_off_windows() {
+        let (result, locates, pauses) =
+            admit_with_reals(&[Some(PENDING), Some("/in/target")], false);
+
+        assert!(result.is_err(), "refused at once: {result:?}");
+        assert_eq!((locates, pauses), (1, 0));
+    }
+
+    #[test]
+    fn an_ordinary_outside_real_path_is_refused_at_once_everywhere() {
+        for windows in [true, false] {
+            for real in [Some("/out/target"), Some(r"C:\out\target"), None] {
+                let (result, locates, pauses) =
+                    admit_with_reals(&[real, Some("/in/target")], windows);
+
+                assert!(result.is_err(), "{real:?} refused: {result:?}");
+                assert_eq!((locates, pauses), (1, 0), "{real:?} on windows={windows}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_delete_pending_detector_matches_only_the_extend_deleted_directory() {
+        let cases = [
+            (r"\\?\C:\$Extend\$Deleted\0079", true),
+            (r"c:\$Extend\$Deleted\0079", true),
+            (r"\\?\d:\$extend\$deleted", true),
+            (r"C:\$Extend\$Deleted\a\b", true),
+            (r"C:\work\$Deleted", false),
+            (r"C:\$Deleted\x", false),
+            (r"C:\$Extend\x", false),
+            (r"C:\$Extend\$DeletedMore\x", false),
+            (r"\\?\C:\work\$Extend\$Deleted\x", false),
+            (r"\\?\UNC\host\share\$Extend\$Deleted\x", false),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(is_delete_pending(Path::new(path), true), expected, "{path}");
+            assert!(
+                !is_delete_pending(Path::new(path), false),
+                "{path} off windows"
+            );
+        }
+    }
+
     #[test]
     fn a_denied_rename_is_retried_on_windows_until_it_succeeds() {
         let mut calls = 0;
@@ -1251,6 +1447,64 @@ mod tests {
         assert_eq!(
             again.map_err(|error| error.kind()),
             Err(io::ErrorKind::AlreadyExists)
+        );
+    }
+
+    #[test]
+    fn real_inside_returns_the_real_path_of_an_inside_file() {
+        let fixture = Fixture::new();
+        fixture.write("root/real.txt", "inside");
+        fixture.link("real.txt", "root/leaf");
+
+        let real = fixture.boundary().real_inside(&fixture.path("root/leaf"));
+
+        assert_eq!(
+            real,
+            Ok(canonical(&fixture, "root/real.txt").as_path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn real_inside_refuses_a_dangling_in_root_symlink_as_unresolved_where_contains_accepts() {
+        let fixture = Fixture::new();
+        fixture.link("missing", "root/leaf");
+        let boundary = fixture.boundary();
+        let leaf = fixture.path("root/leaf");
+
+        assert!(
+            boundary.contains(&leaf),
+            "contains should count a dangling link pointing inside as inside"
+        );
+        assert_eq!(boundary.real_inside(&leaf), Err(ReadEscape::Unresolved));
+    }
+
+    #[test]
+    fn real_inside_refuses_every_path_under_a_missing_root_as_boundary_unresolved() {
+        let fixture = Fixture::new();
+        let boundary = Boundary::resolve(&fixture.path("missing-root"));
+
+        assert_eq!(
+            boundary.real_inside(&fixture.path("root")),
+            Err(ReadEscape::BoundaryUnresolved),
+            "the root failure should win over the path's resolving"
+        );
+    }
+
+    #[test]
+    fn real_inside_names_where_an_in_root_symlink_to_an_outside_file_lands() {
+        let fixture = Fixture::new();
+        fixture.write("outside/secret", "outside");
+        fixture.link("../outside/secret", "root/leaf");
+
+        let escape = fixture.boundary().real_inside(&fixture.path("root/leaf"));
+
+        assert_eq!(
+            escape,
+            Err(ReadEscape::Outside {
+                real: canonical(&fixture, "outside/secret")
+                    .as_path()
+                    .to_path_buf(),
+            })
         );
     }
 
