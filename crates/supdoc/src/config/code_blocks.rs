@@ -1463,7 +1463,7 @@ mod tests {
     }
 
     #[test]
-    fn an_html_table_defaults_to_superhtml_and_no_linter() {
+    fn an_html_table_defaults_to_superhtml_and_biome_lint() {
         let dir = tree(&[(
             "supdoc.config.toml",
             "[features.code-blocks.html]\n[features.code-blocks.html.superhtml]\nformat = \"full\"\n",
@@ -1478,13 +1478,17 @@ mod tests {
                 .map(|tool| tool.name),
             Some("superhtml")
         );
-        assert!(crate::code_blocks::tools::default_for(Language::Html, Step::Lint).is_none());
+        assert_eq!(
+            crate::code_blocks::tools::default_for(Language::Html, Step::Lint)
+                .map(|tool| tool.name),
+            Some("biome-lint")
+        );
     }
 
     #[test]
-    fn superhtml_is_a_known_html_formatter_and_a_named_linter_is_refused() {
+    fn superhtml_and_biome_lint_are_the_known_html_tools_and_another_is_refused() {
         let formatter = refused("html", "formatter = \"prettier\"");
-        let linter = refused("html", "linter = \"biome-lint\"");
+        let linter = refused("html", "linter = \"eslint\"");
 
         assert!(
             formatter.contains("`prettier` isn't a known html formatter")
@@ -1492,8 +1496,8 @@ mod tests {
             "got {formatter}"
         );
         assert!(
-            linter.contains("`biome-lint` isn't a known html linter")
-                && linter.contains("none yet: write a custom `{ command = [...] }`"),
+            linter.contains("`eslint` isn't a known html linter")
+                && linter.contains("`biome-lint`"),
             "got {linter}"
         );
     }
@@ -2224,7 +2228,7 @@ mod tests {
     }
 
     #[test]
-    fn an_sql_table_selects_sqruff_format_and_no_linter() {
+    fn an_sql_table_selects_sqruff_format_and_sqruff_lint() {
         let dir = tree(&[("supdoc.config.toml", "[features.code-blocks.sql]\n")]);
 
         let config = Config::load(&at(&dir, ".")).expect("the fixture config should load");
@@ -2236,7 +2240,10 @@ mod tests {
                 .map(|tool| tool.name),
             Some("sqruff-format")
         );
-        assert!(crate::code_blocks::tools::default_for(Language::Sql, Step::Lint).is_none());
+        assert_eq!(
+            crate::code_blocks::tools::default_for(Language::Sql, Step::Lint).map(|tool| tool.name),
+            Some("sqruff-lint")
+        );
     }
 
     #[test]

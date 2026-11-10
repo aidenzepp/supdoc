@@ -11,8 +11,8 @@ use crate::code_blocks::tools::Step;
 /// The SQL formatters supdoc knows.
 const KNOWN: &[&str] = &["sqruff-format"];
 
-/// The SQL linters supdoc knows: none yet, so only a custom command lints a block.
-const LINTERS: &[&str] = &[];
+/// The SQL linters supdoc knows.
+const LINTERS: &[&str] = &["sqruff-lint"];
 
 /// The SQL dialect sqruff parses a block as, named as sqruff names it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
@@ -131,7 +131,7 @@ impl SqlDialect {
 }
 
 /// The `[features.code-blocks.sql]` table, exactly as written. Its keys are `formatter`,
-/// `linter` and `dialect`, plus sqruff-format's options table; any other key is refused as
+/// `linter` and `dialect`, plus one options table per tool; any other key is refused as
 /// `config-parse`, and an empty table turns the language on.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -139,8 +139,8 @@ pub(crate) struct RawSql {
     /// `"sqruff-format"` or a custom `{ command = [...] }`; unset takes the default.
     #[serde(default, deserialize_with = "formatter")]
     pub(super) formatter: Option<Choice>,
-    /// A custom `{ command = [...], diagnostics = "gnu" }`; unset leaves the lint step without a
-    /// tool.
+    /// `"sqruff-lint"`, or a custom `{ command = [...], diagnostics = "gnu" }`; unset takes the
+    /// default.
     #[serde(default, deserialize_with = "linter")]
     pub(super) linter: Option<Choice>,
     /// One of sqruff's dialect names; unset is `ansi`.
@@ -148,6 +148,9 @@ pub(crate) struct RawSql {
     /// `[features.code-blocks.sql.sqruff-format]`, when written.
     #[serde(default, rename = "sqruff-format", deserialize_with = "sqruff_format")]
     pub(super) sqruff_format: Option<ToolTable>,
+    /// `[features.code-blocks.sql.sqruff-lint]`, when written.
+    #[serde(default, rename = "sqruff-lint", deserialize_with = "sqruff_lint")]
+    pub(super) sqruff_lint: Option<ToolTable>,
 }
 
 /// Reads `formatter` against SQL's known tools.
@@ -159,11 +162,11 @@ fn formatter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D
     deserialize_choice(d, Language::Sql, Step::Format, KNOWN)
 }
 
-/// Reads `linter` against SQL's known tools, of which there are none yet.
+/// Reads `linter` against SQL's known tools.
 ///
 /// # Errors
 ///
-/// The deserializer's error for any value but a valid custom command.
+/// The deserializer's error for any value but `"sqruff-lint"` or a valid custom command.
 fn linter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Choice>, D::Error> {
     deserialize_choice(d, Language::Sql, Step::Lint, LINTERS)
 }
@@ -177,18 +180,28 @@ fn sqruff_format<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<ToolTa
     deserialize_tool(d, "sqruff-format")
 }
 
+/// Reads `[features.code-blocks.sql.sqruff-lint]` against its cartridge.
+///
+/// # Errors
+///
+/// The deserializer's error for a key or value the cartridge doesn't accept.
+fn sqruff_lint<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<ToolTable>, D::Error> {
+    deserialize_tool(d, "sqruff-lint")
+}
+
 impl RawSql {
     /// What this table selects and the tool tables it writes.
     pub(super) fn selection(&self) -> Selection<'_> {
         Selection {
             formatter: self.formatter.as_ref(),
             linter: self.linter.as_ref(),
-            tools: self
-                .sqruff_format
-                .as_ref()
-                .map(|table| ("sqruff-format", table))
-                .into_iter()
-                .collect(),
+            tools: [
+                ("sqruff-format", &self.sqruff_format),
+                ("sqruff-lint", &self.sqruff_lint),
+            ]
+            .into_iter()
+            .filter_map(|(name, table)| Some((name, table.as_ref()?)))
+            .collect(),
         }
     }
 }

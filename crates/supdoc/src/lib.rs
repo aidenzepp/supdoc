@@ -260,7 +260,7 @@ pub(crate) mod code_blocks {
     mod mbake;
     /// Markdown's format and lint steps, run by rumdl.
     mod rumdl;
-    /// SQL's format step, run by sqruff.
+    /// SQL's format and lint steps, run by sqruff.
     mod sqruff;
     /// HTML's format step, run by superhtml.
     mod superhtml;

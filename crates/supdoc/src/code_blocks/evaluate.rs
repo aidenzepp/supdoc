@@ -136,6 +136,9 @@ pub(crate) struct BlockRecord {
     /// What yamllint is given for it: its `-c <private copy>` and the private directory it runs
     /// in (see [`yaml::lint_args`]). `None` for every other tool.
     yamllint: Option<yaml::Lint>,
+    /// The flags sqruff's lint step is given for it: its own private config and the block's
+    /// dialect (see [`sqruff::Project::lint_flags`]). `None` for every other tool.
+    sqruff_lint: Option<Vec<OsString>>,
     /// What the format step needs, kept while the block is pending.
     pending: Option<Pending>,
 }
@@ -268,6 +271,7 @@ pub(crate) fn evaluate(
             given: None,
             tombi: None,
             yamllint: None,
+            sqruff_lint: None,
             language,
             state,
             steps,
@@ -771,8 +775,8 @@ fn linted_nothing(at: &Location) -> Finding {
     Finding::new(
         NOT_CHECKED,
         Severity::Warning,
-        "biome lint checked no file for this block, so its TypeScript, JavaScript, JSON and CSS \
-         blocks' lint step didn't run: the project's biome config leaves them out",
+        "biome lint checked no file for this block, so its TypeScript, JavaScript, JSON, CSS and \
+         HTML blocks' lint step didn't run: the project's biome config leaves them out",
     )
     .with_help(
         "find the setting in the project's biome config that excludes the doc's blocks, or mark \
@@ -798,6 +802,39 @@ fn biome_formatter_off(at: &Location) -> Finding {
     .with_location(at.clone())
 }
 
+/// The run's one `code-block-not-checked` warning, at `at`, the first HTML block biome lint
+/// couldn't parse (see [`biome::unparsed`]), so its lint step didn't run.
+fn biome_html_unparsed(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "biome can't parse this HTML, such as an element whose optional end tag it omits \
+         (`<li>`, `<p>`, `<td>`), so its lint step didn't run",
+    )
+    .with_help(
+        "superhtml's format step reports the block's syntax errors; write each end tag biome \
+         expects, or mark the block `lint(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first HTML block whose biome
+/// lint step didn't run because a `biome-ignore` comment in it may silence more than the rules
+/// it names (see [`biome::switches_html_lint_off`]).
+fn biome_html_switched_off(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "the block holds a `biome-ignore` comment that names something other than rules, so \
+         supdoc can't confirm biome lints all of it, and its lint step didn't run",
+    )
+    .with_help(
+        "name each rule the comment silences, such as `<!-- biome-ignore lint/a11y/useAltText: \
+         <reason> -->`, or mark the block `lint(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
 /// The run's one `code-block-not-checked` warning, at `at`, the first Python block whose pylint
 /// step didn't run because a `pylint:` comment in it names something other than message codes
 /// and hyphenated message names (see [`pylint::switches_lint_off`]).
@@ -812,6 +849,31 @@ fn pylint_switched_off(at: &Location) -> Finding {
     .with_help(
         "name each message by its code, such as `W0511` for `fixme`, or by a hyphenated name, \
          such as `unused-import`; or mark the block `lint(off: <reason>)`",
+    )
+    .with_location(at.clone())
+}
+
+/// Why sqruff's steps, format and lint, didn't run on a block holding a `noqa` supdoc can't
+/// confirm names only rule codes (see [`sqruff::switches_lint_off`]): `sqruff fix` obeys `noqa`
+/// too.
+const SQRUFF_SWITCHED_OFF: &str = "the block holds a `noqa` comment supdoc can't confirm names \
+                                   only rule codes";
+
+/// The run's one `code-block-not-checked` warning, at `at`, the first block whose sqruff steps
+/// didn't run because it holds a `noqa` comment supdoc can't confirm names only rule codes.
+fn sqruff_switched_off(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "the block holds a `noqa` comment supdoc can't confirm names only rule codes (a `noqa` in \
+         a block with a `/* */` comment or a carriage return inside a line, or one not followed \
+         by `: ` and rule codes alone), so sqruff may switch more rules off, a syntax error's \
+         too, and its sqruff steps didn't run",
+    )
+    .with_help(
+        "write each `noqa` as a line comment naming rule codes, such as `-- noqa: LT05`, in a \
+         block with no `/* */` comment and no carriage return inside a line; or mark the block \
+         `lint(off: <reason>)` and `format(off: <reason>)`",
     )
     .with_location(at.clone())
 }
@@ -1188,6 +1250,8 @@ impl NotRunWarnings {
             YAML_EMPTY => yaml_empty(at),
             FRAME_RESHAPED => frame_reshaped(at),
             BIOME_LINTED_NOTHING => linted_nothing(at),
+            BIOME_HTML_UNPARSED => biome_html_unparsed(at),
+            BIOME_HTML_SWITCHED_OFF => biome_html_switched_off(at),
             BIOME_FORMATTER_OFF => biome_formatter_off(at),
             PYLINT_SWITCHED_OFF => pylint_switched_off(at),
             PRETTIER_SWITCHED_OFF => prettier_switched_off(at),
@@ -1201,6 +1265,7 @@ impl NotRunWarnings {
                 dockerfmt_not_given(at, "holds no instruction, only comments or blank lines")
             }
             ESLINT_SWITCHED_OFF => eslint_switched_off(at),
+            SQRUFF_SWITCHED_OFF => sqruff_switched_off(at),
             ESLINT_IGNORED => eslint_ignored(at),
             YAMLLINT_REJECTED => yamllint_rejected(at, said),
             YAMLLINT_LOCALE => yamllint_locale(at, said),
@@ -1833,8 +1898,8 @@ fn biome_refusal(refusal: &biome::Refusal, at: &Location, windows: bool) -> (Str
         biome::Refusal::Config { file, why, help } => (
             format!("biome config `{file}` {why}"),
             format!(
-                "the project's `{file}` {why}, so its TypeScript, JavaScript, JSON and CSS blocks \
-                 aren't checked"
+                "the project's `{file}` {why}, so its TypeScript, JavaScript, JSON, CSS and HTML \
+                 blocks aren't checked"
             ),
             format!("in `{file}`: {help}"),
         ),
@@ -2366,15 +2431,16 @@ struct SqruffConfigs {
 }
 
 impl SqruffConfigs {
-    /// Gives `record`, an SQL block, the `--config` and `--dialect` flags sqruff gets for it: its
-    /// doc's private config, found once per directory (see [`sqruff::project_args`]), and the
-    /// block's own dialect. Then checks sqruff's version (see [`Self::verified`]). A refused
-    /// config takes only the format step off, as an unverified sqruff does, with its one warning
-    /// per refusal added to `slots`: a block with another lint step goes on to it, and one
-    /// without is settled as not checked. A block holding an inline sqruff directive (see
-    /// [`sqruff::directive_line`]) has its sqruff format step taken off first, with a warning of
-    /// its own naming the line, so it is never given to sqruff. Whether the block goes on to its
-    /// tools.
+    /// Gives `record`, an SQL block, the `--config` and `--dialect` flags sqruff gets for each
+    /// step it runs: its doc's private configs, found once per directory (see
+    /// [`sqruff::project_args`]), and the block's own dialect. Then checks sqruff's version (see
+    /// [`Self::verified`]). A refused config takes only sqruff's steps off, as an unverified
+    /// sqruff does, with its one warning per refusal added to `slots`: a block with a step by
+    /// another tool goes on to it, and one without is settled as not checked. A block holding an
+    /// inline sqruff directive (see [`sqruff::directive_line`]) has its sqruff steps, format and
+    /// lint alike, taken off first, with a warning of its own naming the line, so it is never
+    /// given to sqruff. The scan runs once per block, whatever runs its other step. Whether the
+    /// block goes on to its tools.
     ///
     /// Effect: reads the config and may create supdoc's private directory and file for it.
     fn give(
@@ -2387,14 +2453,9 @@ impl SqruffConfigs {
         if !tool.runs("sqruff") {
             return true;
         }
-        if record
-            .tool
-            .as_ref()
-            .is_some_and(|format| format.runs("sqruff"))
-            && let Some(at) = sqruff_directive_at(record)
-        {
-            slots.push(Slot::Found(sqruff_directive(&at)));
-            return take_format_off(record, SQRUFF_DIRECTIVE);
+        if let Some(at) = sqruff_directive_at(record) {
+            slots.push(Slot::Found(sqruff_directive(&at, sqruff_steps(record))));
+            return take_sqruff_off(record, SQRUFF_DIRECTIVE);
         }
         let doc = doc_beneath(root, &record.at.file);
         let dir = doc.parent().unwrap_or(root).to_path_buf();
@@ -2413,6 +2474,7 @@ impl SqruffConfigs {
                     config: None,
                     names: None,
                 });
+                record.sqruff_lint = Some(project.lint_flags(record.sql_dialect));
                 self.verified(record, (env, root), slots)
             }
             Err(refusal) => {
@@ -2421,8 +2483,8 @@ impl SqruffConfigs {
                     self.warned.push(refusal);
                     slots.push(Slot::Found(warning));
                 }
-                if lints_without_sqruff(record) {
-                    return take_format_off(record, SQRUFF_REFUSED);
+                if steps_without_sqruff(record) {
+                    return take_sqruff_off(record, SQRUFF_REFUSED);
                 }
                 record.state = BlockState::NotChecked(NotChecked::ToolConfig);
                 record.reason = Some(reason);
@@ -2433,9 +2495,9 @@ impl SqruffConfigs {
 
     /// Whether `record` goes on to its tools once the sqruff on `PATH` has been checked against
     /// the versions supdoc is verified against (see [`sqruff::VERIFIED`]), read once per run.
-    /// When it isn't one, or can't be read, `record`'s format step doesn't run, with
-    /// [`SQRUFF_UNVERIFIED`] as its reason, and the run's one warning goes to `slots`; a lint
-    /// step by another tool still runs. A sqruff that isn't on `PATH`, or is inside the checkout,
+    /// When it isn't one, or can't be read, `record`'s sqruff steps don't run, with
+    /// [`SQRUFF_UNVERIFIED`] as their reason, and the run's one warning goes to `slots`; a step
+    /// by another tool still runs. A sqruff that isn't on `PATH`, or is inside the checkout,
     /// is left to the usual lookup.
     ///
     /// Effect: runs `sqruff --version` the first time.
@@ -2463,7 +2525,7 @@ impl SqruffConfigs {
                     Severity::Warning,
                     format!(
                         "sqruff {shown} isn't a version supdoc's checks are verified against \
-                         ({}); its SQL blocks' format steps didn't run",
+                         ({}); its SQL blocks' sqruff steps didn't run",
                         sqruff::VERIFIED.join(", ")
                     ),
                 )
@@ -2474,36 +2536,49 @@ impl SqruffConfigs {
                 .with_location(record.at.clone()),
             ));
         }
-        take_format_off(record, SQRUFF_UNVERIFIED)
+        take_sqruff_off(record, SQRUFF_UNVERIFIED)
     }
 }
 
-/// Takes `record`'s format step off with `reason`. Whether the block goes on to its tools: only
-/// when it still has a lint step.
-fn take_format_off(record: &mut BlockRecord, reason: &'static str) -> bool {
-    if record.tool.take().is_some() {
+/// Takes each of `record`'s steps sqruff runs off with `reason`. Whether the block goes on to
+/// its tools: only when it still has a step.
+fn take_sqruff_off(record: &mut BlockRecord, reason: &'static str) -> bool {
+    if record.tool.take_if(|tool| tool.runs("sqruff")).is_some() {
         record.steps.format = StepState::Unrunnable { reason };
     }
-    record.linter.is_some()
+    if record.linter.take_if(|tool| tool.runs("sqruff")).is_some() {
+        record.steps.lint = StepState::Unrunnable { reason };
+    }
+    record.tool.is_some() || record.linter.is_some()
 }
 
-/// Whether `record` has a lint step that sqruff doesn't run, which goes on when sqruff's format
-/// step is taken off.
-fn lints_without_sqruff(record: &BlockRecord) -> bool {
-    record
-        .linter
-        .as_ref()
-        .is_some_and(|tool| !tool.runs("sqruff"))
+/// Whether `record` has a step that sqruff doesn't run, which goes on when sqruff's steps are
+/// taken off.
+fn steps_without_sqruff(record: &BlockRecord) -> bool {
+    [&record.tool, &record.linter]
+        .into_iter()
+        .flatten()
+        .any(|tool| !tool.runs("sqruff"))
 }
 
-/// Why an SQL block's format step didn't run when supdoc couldn't give sqruff the project's
+/// Which of `record`'s steps sqruff runs, as a warning names them.
+fn sqruff_steps(record: &BlockRecord) -> &'static str {
+    let runs = |tool: &Option<Tool>| tool.as_ref().is_some_and(|tool| tool.runs("sqruff"));
+    match (runs(&record.tool), runs(&record.linter)) {
+        (true, true) => "format and lint steps",
+        (false, true) => "lint step",
+        _ => "format step",
+    }
+}
+
+/// Why an SQL block's sqruff steps didn't run when supdoc couldn't give sqruff the project's
 /// config.
 const SQRUFF_REFUSED: &str = "supdoc couldn't give sqruff the project's config";
 
-/// Why an SQL block's format step didn't run when the sqruff on `PATH` isn't a verified version.
+/// Why an SQL block's sqruff steps didn't run when the sqruff on `PATH` isn't a verified version.
 const SQRUFF_UNVERIFIED: &str = "the sqruff on `PATH` isn't a version supdoc is verified against";
 
-/// Why an SQL block's format step didn't run when it holds an inline sqruff directive (see
+/// Why an SQL block's sqruff steps didn't run when it holds an inline sqruff directive (see
 /// [`sqruff::directive_line`]).
 const SQRUFF_DIRECTIVE: &str = "the block holds an inline sqruff directive, which would override \
                                 the config supdoc gives sqruff";
@@ -2525,20 +2600,22 @@ fn sqruff_directive_at(record: &BlockRecord) -> Option<Location> {
 }
 
 /// The `code-block-not-checked` warning, at `at`, for an SQL block that wasn't given to sqruff
-/// because the line at `at` may hold an inline sqruff directive.
-fn sqruff_directive(at: &Location) -> Finding {
+/// because the line at `at` may hold an inline sqruff directive, naming the `steps` that didn't
+/// run.
+fn sqruff_directive(at: &Location, steps: &str) -> Finding {
     Finding::new(
         NOT_CHECKED,
         Severity::Warning,
         format!(
             "line {} holds an inline sqruff directive (a `-- sqruff:` or `-- sqlfluff:` comment, \
              in any spelling), which would override the config supdoc gives sqruff, so the SQL \
-             block wasn't given to sqruff and its format step didn't run",
+             block wasn't given to sqruff and its {steps} didn't run",
             at.line
         ),
     )
     .with_help(
-        "drop the comment, or mark the block `format(off: <reason>)` to leave it unformatted",
+        "drop the comment, or mark the block `format(off: <reason>)` or `lint(off: <reason>)` \
+         to leave that step off",
     )
     .with_location(at.clone())
 }
@@ -2549,7 +2626,7 @@ fn sqruff_refusal(refusal: &sqruff::Refusal, at: &Location, windows: bool) -> (S
     let (reason, message, help) = match refusal {
         sqruff::Refusal::Config { file, why } => (
             format!("sqruff config `{file}` {why}"),
-            format!("the project's `{file}` {why}, so its SQL blocks aren't formatted"),
+            format!("the project's `{file}` {why}, so its SQL blocks aren't given to sqruff"),
             format!(
                 "fix `{file}` as it says, keeping it a plain INI file of at most 256 KiB inside \
                  the project, or mark the blocks `ignore(<why>)`"
@@ -2686,6 +2763,15 @@ impl MbakeConfigs {
         }
         take_format_off(record, MBAKE_UNVERIFIED)
     }
+}
+
+/// Takes `record`'s format step off with `reason`. Whether the block goes on to its tools: only
+/// when it still has a lint step.
+fn take_format_off(record: &mut BlockRecord, reason: &'static str) -> bool {
+    if record.tool.take().is_some() {
+        record.steps.format = StepState::Unrunnable { reason };
+    }
+    record.linter.is_some()
 }
 
 /// Why a Makefile block's format step didn't run when supdoc couldn't give mbake the project's
@@ -4171,15 +4257,14 @@ fn run_linter(
             }),
         }
     };
-    let verdict = if let Some(early) = forbidden_by_yaml(tool, input).or(unruled) {
-        early
-    } else {
-        match cached_run(&run, session, spawn, judge, |judged| {
-            judged.as_ref().is_ok_and(lint::Verdict::cacheable)
-        }) {
+    let early = forbidden_by_yaml(tool, input).or(unruled);
+    let cacheable = |judged: &Result<_, _>| judged.as_ref().is_ok_and(lint::Verdict::cacheable);
+    let verdict = match early.or_else(|| sqruff_unmasked(tool, &run, record, session)) {
+        Some(early) => early,
+        None => match cached_run(&run, session, spawn, judge, cacheable) {
             Ok(verdict) => verdict,
             Err(not_run) => return Some(Err(not_run)),
-        }
+        },
     };
     let read = lint::Read {
         tool,
@@ -4222,17 +4307,62 @@ fn placed(
         .collect()
 }
 
-/// The flags `record`'s project gives `tool`: yamllint's `-c <private copy>` for yamllint, the
-/// flags of [`biome::Given`] for any other tool, none without either.
+/// The flags `record`'s project gives `tool`: yamllint's `-c <private copy>` for yamllint,
+/// sqruff's lint flags for sqruff-lint, the flags of [`biome::Given`] for any other tool, none
+/// without them.
 fn project_flags<'record>(
     record: &'record BlockRecord,
     tool: &ToolCartridge,
 ) -> &'record [OsString] {
+    if tool.name == SQRUFF_LINT {
+        return record.sqruff_lint.as_deref().unwrap_or_default();
+    }
     match (&record.yamllint, &record.given) {
         (Some(lint), _) if tool.name == YAMLLINT => &lint.flags,
         (_, Some(given)) => &given.flags,
         (_, None) => &[],
     }
+}
+
+/// The name of sqruff's lint cartridge.
+const SQRUFF_LINT: &str = "sqruff-lint";
+
+/// The name of sqruff's format cartridge.
+const SQRUFF_FORMAT: &str = "sqruff-format";
+
+/// When `tool` is sqruff's linter and `run`'s block may hold a `noqa` comment (see
+/// [`sqruff::holds_noqa`]), what `run` with [`sqruff::DISABLE_NOQA`] added, through the cache,
+/// adds to the block's own run: its parse errors or its failure (see [`sqruff::parse_errors`]).
+/// A bare `-- noqa` hides a parse error on its line from the block's own run, and a parse error
+/// is never suppressible. `None` otherwise, and when that run reports no parse error.
+///
+/// Effect: reads the cache, runs sqruff, killing it at the timeout, and writes the cache.
+fn sqruff_unmasked(
+    tool: &ToolCartridge,
+    run: &cache::Run<'_>,
+    record: &BlockRecord,
+    session: &Session<'_>,
+) -> Option<lint::Verdict> {
+    if tool.name != SQRUFF_LINT || !sqruff::holds_noqa(run.input) {
+        return None;
+    }
+    let args: Vec<&OsStr> = run
+        .args
+        .iter()
+        .copied()
+        .chain([OsStr::new(sqruff::DISABLE_NOQA)])
+        .collect();
+    let unmasked = cache::Run {
+        args: &args,
+        ..*run
+    };
+    cached_run(
+        &unmasked,
+        session,
+        |call| run_in_place(call, record, session),
+        |result| sqruff::parse_errors(sqruff::lint_verdict(run.input, false, result)),
+        |verdict| verdict.as_ref().is_none_or(lint::Verdict::cacheable),
+    )
 }
 
 /// Whether `ran`, a failed yamllint run that reported no diagnostics, says yamllint rejected the
@@ -4293,6 +4423,20 @@ fn css_formatter_off(tool: &ToolCartridge, ran: &Ran) -> bool {
 pub(super) const BIOME_LINTED_NOTHING: &str =
     "biome lint checked no file: the project's biome config leaves the block out";
 
+/// Why biome lint's step on an HTML block counts as not run when its report holds a `parse`
+/// diagnostic (see [`biome::unparsed`]): biome refuses valid HTML that omits an optional end tag,
+/// and superhtml's format step already reports the block's syntax errors.
+const BIOME_HTML_UNPARSED: &str = "biome can't parse the HTML block, such as one omitting an \
+                                   optional end tag, so its lint step didn't run";
+
+/// Why biome lint's step doesn't run on an HTML block holding a `biome-ignore` comment supdoc
+/// can't tell from one that silences every rule for the block (see
+/// [`biome::switches_html_lint_off`]).
+const BIOME_HTML_SWITCHED_OFF: &str = "the block holds a `biome-ignore` comment that names \
+                                       something other than rules, so supdoc can't confirm biome \
+                                       lints all of it; name the rules, or mark the block \
+                                       `lint(off: <reason>)`";
+
 /// The name of tombi's lint cartridge.
 const TOMBI_LINT: &str = "tombi-lint";
 
@@ -4333,10 +4477,11 @@ const SUPERHTML: &str = "superhtml";
 
 /// Why `tool`'s format step doesn't run on `record`'s block, so the tool is never spawned: it is
 /// prettier and the block holds `prettier-ignore` (see [`prettier::switches_format_off`]), it is
-/// dockerfmt and the block is one dockerfmt isn't given (see [`dockerfmt::not_given`]), or it
-/// is superhtml and the block is one superhtml isn't given (see [`superhtml::not_given`]),
-/// naming, for an element whose content superhtml rewrites, the element and its doc line.
-/// `None` otherwise.
+/// dockerfmt and the block is one dockerfmt isn't given (see [`dockerfmt::not_given`]), it is
+/// superhtml and the block is one superhtml isn't given (see [`superhtml::not_given`]), naming,
+/// for an element whose content superhtml rewrites, the element and its doc line, or it is sqruff
+/// and the block holds a `noqa` supdoc can't confirm names only rule codes, as for its lint step
+/// (see [`sqruff::switches_lint_off`]). `None` otherwise.
 fn format_not_given(tool: &ToolCartridge, record: &BlockRecord) -> Option<NotRun> {
     let pending = record.pending.as_ref()?;
     let input = &pending.input;
@@ -4356,6 +4501,7 @@ fn format_not_given(tool: &ToolCartridge, record: &BlockRecord) -> Option<NotRun
                 }
             },
         }),
+        SQRUFF_FORMAT => sqruff::switches_lint_off(input).then(|| SQRUFF_SWITCHED_OFF.into()),
         _ => None,
     }
 }
@@ -4381,12 +4527,19 @@ const ESLINT_SWITCHED_OFF: &str = "the block holds an `eslint-disable` comment t
 
 /// Why `tool`'s lint step doesn't run on `record`'s block, so the tool is never spawned: it is
 /// pylint and the block holds a `pylint:` comment supdoc can't tell from one that switches it
-/// off for the whole block (see [`pylint::switches_lint_off`]), or it is eslint and the block
-/// holds such an `eslint-disable` comment (see [`eslint::switches_lint_off`]). `None` otherwise.
+/// off for the whole block (see [`pylint::switches_lint_off`]), it is eslint and the block holds
+/// such an `eslint-disable` comment (see [`eslint::switches_lint_off`]), it is sqruff and the
+/// block holds a `noqa` supdoc can't confirm names only rule codes (see
+/// [`sqruff::switches_lint_off`]), or it is biome lint on an HTML block holding such a
+/// `biome-ignore` comment (see [`biome::switches_html_lint_off`]). `None` otherwise.
 fn switched_off(tool: &ToolCartridge, record: &BlockRecord) -> Option<&'static str> {
     let (switches_off, reason): (fn(&str) -> bool, _) = match tool.name {
         PYLINT => (pylint::switches_lint_off, PYLINT_SWITCHED_OFF),
         ESLINT => (eslint::switches_lint_off, ESLINT_SWITCHED_OFF),
+        SQRUFF_LINT => (sqruff::switches_lint_off, SQRUFF_SWITCHED_OFF),
+        BIOME_LINT if tool.language == Language::Html => {
+            (biome::switches_html_lint_off, BIOME_HTML_SWITCHED_OFF)
+        }
         _ => return None,
     };
     record
@@ -4397,7 +4550,8 @@ fn switched_off(tool: &ToolCartridge, record: &BlockRecord) -> Option<&'static s
 }
 
 /// Why `tool`'s finished run `ran` says nothing about its block, so its step counts as not run:
-/// biome lint, given the block as a file (`biome_file`), checked no file; tombi lint didn't
+/// biome lint, given the block as a file (`biome_file`), checked no file, or couldn't parse an
+/// HTML block (see [`biome::unparsed`]); tombi lint didn't
 /// report linting it; pylint linted no module; eslint ignored the block's file; or go vet couldn't load the block `input` (see
 /// [`go::vet_not_run`]). `None` otherwise.
 fn said_nothing(
@@ -4408,7 +4562,12 @@ fn said_nothing(
 ) -> Option<&'static str> {
     match tool.name {
         BIOME_LINT if biome_file => {
-            biome::linted_nothing(&ran.stdout).then_some(BIOME_LINTED_NOTHING)
+            if biome::linted_nothing(&ran.stdout) {
+                Some(BIOME_LINTED_NOTHING)
+            } else {
+                (tool.language == Language::Html && biome::unparsed(&ran.stdout))
+                    .then_some(BIOME_HTML_UNPARSED)
+            }
         }
         TOMBI_LINT => tombi::linted_nothing(ran).then_some(TOMBI_LINTED_NOTHING),
         PYLINT => pylint::linted_nothing(&ran.stdout).then_some(PYLINT_LINTED_NOTHING),
@@ -5867,6 +6026,7 @@ mod tests {
                 given: None,
                 tombi: None,
                 yamllint: None,
+                sqruff_lint: None,
                 pending: Pending::of(block, &doc),
             })
             .collect()
