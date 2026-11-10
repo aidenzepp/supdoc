@@ -1,9 +1,19 @@
-//! sqruff: its syntax-error report, its version, and the config supdoc gives it.
+//! sqruff: its syntax-error report, its lint JSON, its version, and the configs supdoc gives it.
+//!
+//! The lint step runs `sqruff lint` on the block on stdin and reads its JSON report (see
+//! [`lint_verdict`]), with `--parsing-errors` so a block sqruff can't parse is reported, never
+//! passed. sqruff honors `noqa` comments, which can hide any finding, a parse error too; a block
+//! holding a `noqa` supdoc can't confirm names only rule codes (one in a block with a `/* */`
+//! comment or a carriage return inside a line, or one not followed by `:` and rule codes alone) is
+//! never given to sqruff, format or lint (see [`switches_lint_off`]), and a block holding `noqa` is linted a second time with every
+//! `noqa` comment off, so a parse error one hides still fails it (see [`holds_noqa`]).
 //!
 //! sqruff has no `format` command; supdoc's format step runs `sqruff fix` on the block on stdin
 //! and reads the fixed SQL from stdout. `fix` applies every rule its config turns on, so supdoc
 //! always gives it a private config whose `rules` are only the layout and capitalisation groups
-//! (see [`FORCED`]), so a rule that renames an alias or rewrites a join is off. sqruff also reads
+//! (see [`FORCED`]), so a rule that renames an alias or rewrites a join is off. The lint step gets
+//! a second private config, the same but with sqruff's own rule set (see [`LINT_FORCED`]). sqruff
+//! also reads
 //! config from comments inside the SQL (`-- sqruff:rules:all`), after `--config`, and no flag
 //! turns that off, so a block holding one is never given to sqruff (see [`directive_line`]).
 //! `fix` exits 0 even when a violation it can't fix remains (a long comment line), and 1 only on
@@ -14,9 +24,11 @@
 //! no config in the directory it runs in, its ancestors, the home directory or
 //! `~/.config/sqruff`. supdoc finds the project's `.sqruff` itself, walking up from the doc to the
 //! root (sqruff's other names, `.sqruff.ini`, `sqruff.toml`, `.sqlfluff` and `pyproject.toml`, are
-//! never read), and writes again only what it sorted (see [`kept`]):
+//! never read), and writes again only what it sorted (see [`sorted`]) into both copies:
 //!
-//! - `[sqruff]`: `exclude_rules` and `max_line_length` are kept; `templater` must be `raw`
+//! - `[sqruff]`: `exclude_rules`, when it lists only rule codes, and `max_line_length` are kept
+//!   (sqruff reads an `exclude_rules` entry as a pattern, so `core` would exclude every rule);
+//!   `templater` must be `raw`
 //!   (the release binary has no other, and a pip install's jinja or python templater loads
 //!   code); `library_path`, `load_macros_from_path` and `loader_search_path` are refused;
 //!   `dialect` and `rules` are replaced by supdoc's own, and the keys that choose files or
@@ -35,8 +47,9 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::format::ParseError;
-use super::runner;
+use super::format::{self, ParseError};
+use super::lint::{self, Diagnostic};
+use super::runner::{self, Failure, Ran};
 use super::tools::ToolEnv;
 use crate::config::code_blocks::SqlDialect;
 use crate::config::confine::{Boundary, ReadEscape};
@@ -52,11 +65,17 @@ const MAX_CONFIG: u64 = 256 * 1024;
 /// `capitalisation`; `LT` and `CP` are rule-code prefixes it refuses as unknown rules.
 const FORCED: &str = "[sqruff]\ntemplater = raw\nrules = layout,capitalisation\n";
 
+/// What supdoc's lint copy always opens with: the raw templater, and no `rules`, so sqruff lints
+/// with its own default rule set (its `core` rules) less the project's `exclude_rules`.
+const LINT_FORCED: &str = "[sqruff]\ntemplater = raw\n";
+
 /// The `[sqruff]` keys supdoc keeps: they can only turn a rule off or set a rule's limit.
 const KEPT: [&str; 2] = ["exclude_rules", "max_line_length"];
 
 /// The `[sqruff]` keys supdoc drops: its own `dialect` and `rules` replace the project's, and
-/// the rest choose files or change only how sqruff runs and reports.
+/// the rest choose files or change only how sqruff runs and reports. `disable_noqa` is dropped
+/// too: supdoc reads the block's `noqa` comments itself (see [`switches_lint_off`]) and passes
+/// [`DISABLE_NOQA`] when it wants them off.
 const DROPPED: [&str; 14] = [
     "dialect",
     "rules",
@@ -146,6 +165,192 @@ pub(crate) fn parse_error(stderr: &str) -> Option<ParseError> {
     })
 }
 
+/// The one file name `sqruff lint -f json` reports a block read on stdin under.
+const STDIN_NAME: &str = "<string>";
+
+/// One finding of `sqruff lint -f json`.
+#[derive(serde::Deserialize)]
+struct Entry {
+    /// Where it starts and ends.
+    range: Range,
+    /// What sqruff says.
+    message: String,
+    /// Its rule, such as `LT01`; `null` for a section sqruff can't parse.
+    code: Option<String>,
+}
+
+/// Where a finding of `sqruff lint -f json` lies.
+#[derive(serde::Deserialize)]
+struct Range {
+    /// Its start.
+    start: Position,
+    /// Its end.
+    end: Position,
+}
+
+/// A place in the block `sqruff lint -f json` names.
+#[derive(serde::Deserialize)]
+struct Position {
+    /// Its 1-based line.
+    line: usize,
+    /// Its 1-based column.
+    character: usize,
+}
+
+/// What a finding sqruff can't parse the block at is named by, as sqlfluff names it.
+const PARSE_RULE: &str = "PRS";
+
+/// The diagnostics in `sqruff lint -f json`'s `stdout`: an object with one key, the stdin name
+/// `<string>`, holding the findings. A finding with no rule code is a syntax error. `None` when
+/// `stdout` is anything else.
+#[must_use]
+pub(crate) fn diagnostics(stdout: &[u8]) -> Option<Vec<Diagnostic>> {
+    let report: std::collections::BTreeMap<String, Vec<Entry>> =
+        serde_json::from_slice(stdout).ok()?;
+    let mut files = report.into_iter();
+    let (name, entries) = files.next()?;
+    if name != STDIN_NAME || files.next().is_some() {
+        return None;
+    }
+    Some(
+        entries
+            .into_iter()
+            .map(|entry| Diagnostic {
+                line: entry.range.start.line,
+                column: entry.range.start.character,
+                end_line: entry.range.end.line.max(entry.range.start.line),
+                syntax: entry.code.is_none(),
+                rule: entry.code.unwrap_or_else(|| PARSE_RULE.to_owned()),
+                message: entry.message,
+            })
+            .collect(),
+    )
+}
+
+/// Judges a `sqruff lint` run by its output alone, never its exit status: anything on stderr is a
+/// tool failure (sqruff says there that it refused its config, then prints no report); else a
+/// report with no findings is clean, one with findings gives them, and any other stdout, empty
+/// or unreadable, is a tool failure. sqruff checks no fragments, so no run is framed.
+#[must_use]
+pub(crate) fn lint_verdict(
+    _input: &str,
+    _framed: bool,
+    result: Result<Ran, Failure>,
+) -> lint::Verdict {
+    let failed = |detail| lint::Verdict::Failed(format::Verdict::ToolFailed(detail));
+    let ran = match result {
+        Ok(ran) => ran,
+        Err(failure) => return lint::Verdict::Failed(format::failed(failure)),
+    };
+    if !String::from_utf8_lossy(&ran.stderr).trim().is_empty() {
+        return failed(format::exit_detail(&ran.stderr));
+    }
+    match diagnostics(&ran.stdout) {
+        Some(found) if found.is_empty() => lint::Verdict::Clean,
+        Some(found) => lint::Verdict::Diagnostics(found),
+        None => failed(
+            "sqruff's lint report wasn't the JSON supdoc reads (an object naming `<string>`)"
+                .to_owned(),
+        ),
+    }
+}
+
+/// Whether `noqa` comments in `block` may switch more of sqruff's rules off than plain rule codes
+/// name, so a lint or fix run could pass what the block holds, a syntax error too. Read lowercase
+/// (ASCII), the block may when it holds `noqa` and holds `/*` anywhere, holds a carriage return
+/// (CR) anywhere, or holds a `noqa` not followed, for the whole rest of its line (up to the next
+/// LF), by `:`, an optional `disable=` or `enable=`, and a comma-separated list of plain rule codes
+/// (see [`rule_codes`]), whitespace allowed around each part and at the line's end.
+///
+/// sqruff 0.44 reads a directive from one comment's text, `/*` and `*/` stripped at its ends, after
+/// its last `--`, trimmed, then `noqa` (`parse_from_comment` in
+/// `crates/lib/src/core/rules/noqa.rs`), and reads each rule-list entry as a pattern over its rule
+/// codes, names and groups, so `all`, `core` or `*` may name every rule and a bare `noqa` masks a
+/// parse error. Every block comment starts with `/*`, so any block comment withholds the block,
+/// however a dialect lexes, nests or quotes it. sqruff 0.44 ends a line comment at a lone CR in
+/// every dialect, so `-- noqa\r:LT01` is a bare `noqa` to sqruff; supdoc doesn't model CR, it
+/// withholds any `noqa` block holding one, as [`sorted`] refuses one in config. Callers pass
+/// [`super::format::input`], whose line-final CRs are already gone, so only a lone CR withholds.
+/// Without `/*` or a CR, every comment ends at LF, so a directive sqruff reads is the rest of some
+/// `noqa`'s line, and when that rest is plain codes sqruff masks only those rules, never a parse
+/// error. The scan reads text, not SQL: a `noqa` in a string or an identifier counts too, so a near
+/// miss withholds the block, never passes it.
+#[must_use]
+pub(crate) fn switches_lint_off(block: &str) -> bool {
+    let block = block.to_ascii_lowercase();
+    block.contains("noqa")
+        && (block.contains("/*")
+            || block.contains('\r')
+            || block.split('\n').any(|line| {
+                line.match_indices("noqa").any(|(at, word)| {
+                    !names_rule_codes(line.get(at + word.len()..).unwrap_or_default())
+                })
+            }))
+}
+
+/// Whether `rest`, what follows a `noqa` to the end of its line, lowercase, is `:`, an optional
+/// `disable=` or `enable=`, and a list of plain rule codes only (see [`rule_codes`]).
+fn names_rule_codes(rest: &str) -> bool {
+    let Some(list) = rest.trim_start().strip_prefix(':') else {
+        return false;
+    };
+    let list = list.trim_start();
+    let list = ["disable=", "enable="]
+        .iter()
+        .find_map(|range| list.strip_prefix(range))
+        .unwrap_or(list);
+    rule_codes(list)
+}
+
+/// Whether `entry` is a plain sqruff rule code: two ASCII letters, then two ASCII digits, such
+/// as `LT01`, in any case. sqruff reads it as a pattern too, but one matching only that code.
+fn rule_code(entry: &str) -> bool {
+    matches!(
+        entry.as_bytes(),
+        [first, second, third, fourth]
+            if first.is_ascii_alphabetic()
+                && second.is_ascii_alphabetic()
+                && third.is_ascii_digit()
+                && fourth.is_ascii_digit()
+    )
+}
+
+/// Whether `list`, comma-separated, holds only plain rule codes (see [`rule_code`]). sqruff reads
+/// each entry of an `exclude_rules` setting or a `noqa` list as a pattern over its rule codes,
+/// names and groups (`crates/lib/src/core/rules.rs` and `crates/lib/src/core/rules/noqa.rs`), so
+/// `core`, `all` or `*` would name every rule.
+fn rule_codes(list: &str) -> bool {
+    list.split(',').all(|entry| rule_code(entry.trim()))
+}
+
+/// The flag that makes sqruff ignore every inline `noqa` comment (`disable_noqa` in
+/// `crates/cli-lib/src/commands.rs` and `crates/cli-lib/src/lib.rs` of sqruff 0.44).
+pub(crate) const DISABLE_NOQA: &str = "--disable-noqa";
+
+/// Whether `block` may hold a `noqa` comment: it holds `noqa` anywhere, in any case. sqruff lets
+/// one with no rule list hide a parse error on its line, and a parse error is never suppressible,
+/// so the lint step lints such a block a second time with [`DISABLE_NOQA`] and fails it on any
+/// parse error that run reports (see [`parse_errors`]).
+#[must_use]
+pub(crate) fn holds_noqa(block: &str) -> bool {
+    block.to_ascii_lowercase().contains("noqa")
+}
+
+/// What `verdict`, a lint run's with every `noqa` comment off (see [`holds_noqa`]), adds to the
+/// block's own lint run: its parse errors alone, or its failure. `None` when it reports no parse
+/// error, so the block's own run judges it, its `noqa` comments honored.
+#[must_use]
+pub(crate) fn parse_errors(verdict: lint::Verdict) -> Option<lint::Verdict> {
+    match verdict {
+        lint::Verdict::Clean => None,
+        lint::Verdict::Diagnostics(found) => {
+            let syntax: Vec<Diagnostic> = found.into_iter().filter(|found| found.syntax).collect();
+            (!syntax.is_empty()).then_some(lint::Verdict::Diagnostics(syntax))
+        }
+        failed => Some(failed),
+    }
+}
+
 /// The sqruff versions, as `<major>.<minor>`, supdoc's checks are verified against: supdoc
 /// writes sqruff's config and reads its output, and another version may read or write either
 /// differently. A minor is added only after the SQL e2e suite passes against it.
@@ -233,38 +438,54 @@ pub(crate) enum Refusal {
     NoPrivateDir,
 }
 
-/// What sqruff is given for the blocks of one doc directory: the private config, always, so
-/// sqruff never searches for one.
+/// What sqruff is given for the blocks of one doc directory: a private config for each step,
+/// always, so sqruff never searches for one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Project {
-    /// The private config file.
+    /// The format step's private config file.
     config: PathBuf,
+    /// The lint step's private config file.
+    lint: PathBuf,
 }
 
 impl Project {
-    /// The flags a block read in `dialect` gets: `--config <private file> --dialect <name>`.
+    /// The flags a block read in `dialect` gets for its format step: `--config <private file>
+    /// --dialect <name>`.
     #[must_use]
     pub(crate) fn flags(&self, dialect: SqlDialect) -> Vec<OsString> {
-        vec![
-            OsString::from("--config"),
-            self.config.clone().into_os_string(),
-            OsString::from("--dialect"),
-            OsString::from(dialect.name()),
-        ]
+        flags(&self.config, dialect)
+    }
+
+    /// The flags a block read in `dialect` gets for its lint step: `--config <private lint file>
+    /// --dialect <name>`.
+    #[must_use]
+    pub(crate) fn lint_flags(&self, dialect: SqlDialect) -> Vec<OsString> {
+        flags(&self.lint, dialect)
     }
 }
 
+/// `--config <config> --dialect <name of dialect>`.
+fn flags(config: &Path, dialect: SqlDialect) -> Vec<OsString> {
+    vec![
+        OsString::from("--config"),
+        config.as_os_str().to_owned(),
+        OsString::from("--dialect"),
+        OsString::from(dialect.name()),
+    ]
+}
+
 /// The [`Project`] sqruff is given for `doc`: the project's `.sqruff`, found walking up from
-/// `doc`'s directory to `root`, sorted (see [`kept`]) behind [`FORCED`] into a private file named
-/// by the hash of what is written; with no config, a private file holding [`FORCED`] alone.
+/// `doc`'s directory to `root`, sorted (see [`sorted`]) behind [`FORCED`] for the format step and
+/// behind [`LINT_FORCED`] for the lint step, each into a private file named by the hash of what
+/// is written; with no config, private files holding those alone.
 ///
 /// Effect: reads file metadata and the config, resolves symlinks, and may create supdoc's
-/// private directory and the config file in it.
+/// private directory and the config files in it.
 ///
 /// # Errors
 ///
 /// [`Refusal::Config`] when the config found is a link out of the root, isn't a readable UTF-8
-/// file of at most 256 KiB, or holds a line supdoc refuses (see [`kept`]);
+/// file of at most 256 KiB, or holds a line supdoc refuses (see [`sorted`]);
 /// [`Refusal::NoPrivateDir`] when there is nowhere private to put it.
 pub(crate) fn project_args(env: &ToolEnv, root: &Path, doc: &Path) -> Result<Project, Refusal> {
     let (file, text) = match candidates(root, doc).next() {
@@ -275,18 +496,20 @@ pub(crate) fn project_args(env: &ToolEnv, root: &Path, doc: &Path) -> Result<Pro
                 why,
             };
             let text = read_text(root, &found).map_err(refuse)?;
-            (Some(file.clone()), kept(&text).map_err(refuse)?)
+            (Some(file.clone()), sorted(&text).map_err(refuse)?)
         }
-        None => (None, FORCED.to_owned()),
+        None => (None, String::new()),
     };
-    let config = private_config(env, root, &text).ok_or(match file {
+    let unwritten = || match &file {
         Some(file) => Refusal::Config {
-            file,
+            file: file.clone(),
             why: "couldn't be written again into supdoc's private directory",
         },
         None => Refusal::NoPrivateDir,
-    })?;
-    Ok(Project { config })
+    };
+    let config = private_config(env, root, &format!("{FORCED}{text}")).ok_or_else(unwritten)?;
+    let lint = private_config(env, root, &format!("{LINT_FORCED}{text}")).ok_or_else(unwritten)?;
+    Ok(Project { config, lint })
 }
 
 /// `path` relative to `root`, as shown to the user.
@@ -343,9 +566,20 @@ enum Section {
     Dropped,
 }
 
-/// What supdoc writes again of the `.sqruff` `text`: [`FORCED`], then the kept `[sqruff]` keys
-/// in order, then each kept section with its keys, with `\n` ending every line. Blank and
-/// comment (`#`, `;`) lines are dropped.
+/// What supdoc writes again of the `.sqruff` `text` for the format step: [`FORCED`], then what
+/// [`sorted`] keeps.
+///
+/// # Errors
+///
+/// Why supdoc doesn't read the config, as [`sorted`] gives it.
+#[cfg(test)]
+fn kept(text: &str) -> Result<String, &'static str> {
+    sorted(text).map(|kept| format!("{FORCED}{kept}"))
+}
+
+/// What supdoc keeps of the `.sqruff` `text`, to write behind [`FORCED`] or [`LINT_FORCED`]: the
+/// kept `[sqruff]` keys in order, then each kept section with its keys, with `\n` ending every
+/// line. Blank and comment (`#`, `;`) lines are dropped.
 ///
 /// # Errors
 ///
@@ -353,8 +587,9 @@ enum Section {
 /// line (sqruff reads it as part of the value above, which supdoc doesn't sort), a section or a
 /// `[sqruff]` key it doesn't know, a templater other than `raw` or a templater section other
 /// than `raw`'s or `placeholder`'s, a key that names files to read, a key before the first
-/// section, or a line that is none of a section header, a `key = value` or a comment.
-fn kept(text: &str) -> Result<String, &'static str> {
+/// section, a line that is none of a section header, a `key = value` or a comment, or an
+/// `exclude_rules` that lists more than rule codes (see [`rule_codes`]).
+fn sorted(text: &str) -> Result<String, &'static str> {
     let text = text.replace("\r\n", "\n");
     if text.contains('\r') {
         return Err(
@@ -362,9 +597,10 @@ fn kept(text: &str) -> Result<String, &'static str> {
              break: end each line with `\\n` or `\\r\\n`",
         );
     }
-    let mut core = String::from(FORCED);
+    let mut core = String::new();
     let mut sections = String::new();
     let mut section = Section::Top;
+    let mut unplain = false;
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with(['#', ';']) {
@@ -393,6 +629,7 @@ fn kept(text: &str) -> Result<String, &'static str> {
                 return Err("holds a setting before its first `[section]`");
             }
             Section::Core => {
+                unplain |= key == "exclude_rules" && !rule_codes(value);
                 if core_key(&key, value)? {
                     core.push_str(line.trim_end());
                     core.push('\n');
@@ -404,6 +641,13 @@ fn kept(text: &str) -> Result<String, &'static str> {
             }
             Section::Dropped => {}
         }
+    }
+    if unplain {
+        return Err(
+            "sets `exclude_rules` to more than rule codes, and sqruff reads each entry as a \
+             pattern that may name every rule (`core`, `all`, `*`): list each rule by its code, \
+             such as `exclude_rules = LT05, AL03`",
+        );
     }
     core.push_str(&sections);
     Ok(core)
@@ -701,14 +945,638 @@ mod tests {
     }
 
     #[test]
-    fn the_flags_name_the_private_config_and_the_dialect() {
+    fn each_step_gets_its_own_private_config_and_the_dialect() {
         let project = Project {
             config: PathBuf::from("/c/sqruff.cfg"),
+            lint: PathBuf::from("/l/sqruff.cfg"),
         };
 
         assert_eq!(
             project.flags(SqlDialect::Tsql),
             ["--config", "/c/sqruff.cfg", "--dialect", "tsql"].map(OsString::from)
+        );
+        assert_eq!(
+            project.lint_flags(SqlDialect::Postgres),
+            ["--config", "/l/sqruff.cfg", "--dialect", "postgres"].map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn the_lint_copy_keeps_what_the_format_copy_keeps_without_its_rules() {
+        let body =
+            sorted("[sqruff]\nrules = all\nexclude_rules = AL03\n[sqruff:indentation]\nx = 1\n")
+                .expect("a plain config should be read");
+
+        assert_eq!(body, "exclude_rules = AL03\n[sqruff:indentation]\nx = 1\n");
+        assert!(
+            !LINT_FORCED.contains("rules"),
+            "the lint copy should take sqruff's own rule set"
+        );
+    }
+
+    /// A finished sqruff run that printed `stdout` and `stderr`.
+    fn ran(stdout: &str, stderr: &str) -> Ran {
+        Ran {
+            success: stdout.contains("\"code\""),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_finding_is_a_diagnostic_at_its_line_and_column_and_a_null_code_a_syntax_error() {
+        let stdout = r#"{"<string>":[{"range":{"start":{"line":2,"character":7},"end":{"line":2,"character":7}},"message":"Expected only single space.","severity":"Warning","source":"sqruff","code":"LT01"},{"range":{"start":{"line":4,"character":12},"end":{"line":5,"character":1}},"message":"Unparsable section","severity":"Warning","source":"sqruff","code":null}]}"#;
+
+        let lint::Verdict::Diagnostics(found) = lint_verdict("", false, Ok(ran(stdout, ""))) else {
+            panic!("a report with findings should give them");
+        };
+
+        assert_eq!(
+            found,
+            [
+                Diagnostic {
+                    line: 2,
+                    column: 7,
+                    end_line: 2,
+                    syntax: false,
+                    rule: "LT01".to_owned(),
+                    message: "Expected only single space.".to_owned(),
+                },
+                Diagnostic {
+                    line: 4,
+                    column: 12,
+                    end_line: 5,
+                    syntax: true,
+                    rule: PARSE_RULE.to_owned(),
+                    message: "Unparsable section".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_report_is_clean() {
+        assert_eq!(
+            lint_verdict("", false, Ok(ran(r#"{"<string>":[]}"#, ""))),
+            lint::Verdict::Clean
+        );
+    }
+
+    #[test]
+    fn unreadable_json_or_anything_on_stderr_is_a_tool_failure() {
+        for (stdout, stderr) in [
+            ("", ""),
+            ("not json", ""),
+            ("[]", ""),
+            ("{}", ""),
+            (r#"{"x.sql":[]}"#, ""),
+            (r#"{"<string>":[],"x.sql":[]}"#, ""),
+            (r#"{"<string>":[{"message":"m","code":"LT01"}]}"#, ""),
+            (
+                r#"{"<string>":[]}"#,
+                "Unknown rule(s) in configuration: ZZ.",
+            ),
+            ("", "thread 'main' panicked at config.rs:75:68"),
+        ] {
+            assert!(
+                matches!(
+                    lint_verdict("", false, Ok(ran(stdout, stderr))),
+                    lint::Verdict::Failed(format::Verdict::ToolFailed(_))
+                ),
+                "{stdout:?} / {stderr:?} should be a tool failure"
+            );
+        }
+    }
+
+    #[test]
+    fn a_noqa_supdoc_cant_confirm_names_only_rule_codes_switches_lint_off() {
+        for block in [
+            "select 1 -- noqa\n",
+            "select a, -- noqa\n\n  b from t --noqa\n",
+            "select a, -- noqa\nb from t\n",
+            "select 1 -- NOQA\n",
+            "select 1 -- noqa extra words\n",
+            "select 1 -- noqa:\n",
+            "select 1 -- noqa: all\n",
+            "select 1 -- noqa: LT01, ALL\n",
+            "select 1 # noqa\n",
+            "select '-- noqa'\n",
+            "select noqa from t\n",
+            "-- noqa: disable=all\nselect  a from t\n",
+            "select 1\n-- noqa: disable=all\n",
+            "--noqa:disable=all\nselect 1\n",
+            "-- NOQA: Disable = All\nselect 1\n",
+            "-- noqa: disable = LT01\nselect 1\n",
+            "-- noqa: disable=LT01 enable=LT02\nselect 1\n",
+            "select 1 -- noqa\n-- noqa: disable=all\nselect 2\n-- noqa: enable=all\nselect 3\n",
+            "select 1 -- noqa: LT01 -- noqa\n",
+            "select 1 -- noqa: LT01 */\n",
+            "select 1 -- noqa\r\n",
+            "SELECT 1; -- x\r-- noqa: disable=all\nSELECT  b  FROM t;\n",
+            "select 1 -- noqa: *\n",
+            "select 1 -- noqa: ????\n",
+            "select 1 -- noqa: [A-Z]*\n",
+            "select 1 -- noqa: core\n",
+            "select 1 -- noqa: layout\n",
+            "select 1 -- noqa: layout.spacing\n",
+            "select 1 -- noqa: PRS\n",
+            "select 1 -- noqa: LT01,\n",
+            "select 1 -- noqa: LT01,,AL03\n",
+            "select 1 -- noqa: LT1\n",
+            "select 1 -- noqa: LT001\n",
+            "select 1 -- noqa: 01LT\n",
+            "-- noqa: disable=*\nselect 1\n",
+            "-- noqa: disable=core\nselect 1\n",
+            "-- noqa: disable=LT01,*\nselect 1\n",
+            "-- noqa: disable\nselect 1\n",
+            "-- noqa: enable=*\nselect 1\n",
+        ] {
+            assert!(switches_lint_off(block), "{block:?} should switch lint off");
+        }
+    }
+
+    #[test]
+    fn noqa_in_a_block_holding_a_carriage_return_switches_lint_off() {
+        for block in [
+            "select a FROM t WHERE b = -- noqa\r    :LT01\n",
+            "SELECT  a,  b -- noqa\r:LT01\nFROM t;\n",
+            "SELECT  a,  b -- noqa\r: LT01\nFROM t;\n",
+            "select 1 --noqa:LT01\r\n",
+        ] {
+            assert!(switches_lint_off(block), "{block:?} should switch lint off");
+        }
+    }
+
+    #[test]
+    fn noqa_in_a_block_holding_a_block_comment_switches_lint_off() {
+        for block in [
+            "SELECT TOP 5 * FROM t /* noqa */\n",
+            "select 1 /* noqa: LT01 */\nselect  2\n",
+            "select 1 /* closed */ -- noqa: LT01\n",
+            "/* one */ /* two */\nselect noqa from t\n",
+            "/*\nnoqa: disable=all\n*/\nselect  a from t\n",
+            "/* noqa: disable=LT01\n, all */\nselect  a from t\n",
+            "select 1;\n/* NOQA",
+            "select 1;\n/* see\nthe docs\n-- noqa: LT01\n*/\nselect  2\n",
+            "/* a /* b */\nnoqa: disable=all\n*/\nselect 1\n",
+            "select '/* noqa */'\nselect  2\n",
+            "select 1 -- see /* noqa: LT01 */\nselect  2\n",
+            "select 1; /* é */ /* noqa */\nselect  2\n",
+        ] {
+            assert!(switches_lint_off(block), "{block:?} should switch lint off");
+        }
+    }
+
+    #[test]
+    fn noqa_naming_only_rule_codes_or_no_noqa_leaves_lint_on() {
+        for block in [
+            "select 1\n",
+            "",
+            "\n\n",
+            "/* plain comment */\nselect 1\n",
+            "/*\n-- a dash comment inside\n*/\nselect 1\n",
+            "select 1 -- noqa: LT01\n",
+            "select 1 --noqa:LT01\n",
+            "select 1 -- noqa: LT01,AL03\n",
+            "select 1 -- noqa: lt01 , al03\n",
+            "-- noqa: disable=LT01\nselect 1\n",
+            "-- noqa:enable=lt01\nselect 1\n",
+            "-- noqa: disable=LT01,AL03\nselect 1\n-- noqa: enable=LT01\n",
+            "select 1 -- no qa\n",
+            "select 1 */ -- noqa: LT01\n",
+        ] {
+            assert!(!switches_lint_off(block), "{block:?} should leave lint on");
+        }
+    }
+
+    /// Every auditor probe of PR #452 that holds `noqa` (`work/auditor-452/`, `r1/` and `r2/`),
+    /// whether supdoc withholds it, and its body: all are withheld but the two naming plain rule
+    /// codes.
+    const AUDIT_PROBES: [(&str, bool, &str); 48] = [
+        ("pu.sql", true, "select 1;\nselect a from t where -- noqa\n"),
+        (
+            "r1/line1.sql",
+            true,
+            "SELECT  a  FROM t -- noqa\nselect a from t where -- noqa\n",
+        ),
+        (
+            "r1/line10.sql",
+            true,
+            "SELECT  a  FROM t -- noqa: LT01,\nselect a from t where -- noqa: LT01,\n",
+        ),
+        (
+            "r1/line11.sql",
+            false,
+            "SELECT  a  FROM t -- noqa: LT01\nselect a from t where -- noqa: LT01\n",
+        ),
+        (
+            "r1/line2.sql",
+            true,
+            "SELECT  a  FROM t -- noqa: *\nselect a from t where -- noqa: *\n",
+        ),
+        (
+            "r1/line3.sql",
+            true,
+            "SELECT  a  FROM t -- noqa: ????\nselect a from t where -- noqa: ????\n",
+        ),
+        (
+            "r1/line4.sql",
+            true,
+            "SELECT  a  FROM t -- noqa: [A-Z]*\nselect a from t where -- noqa: [A-Z]*\n",
+        ),
+        (
+            "r1/line5.sql",
+            true,
+            "SELECT  a  FROM t -- noqa: core\nselect a from t where -- noqa: core\n",
+        ),
+        (
+            "r1/line6.sql",
+            true,
+            "SELECT  a  FROM t -- noqa: layout\nselect a from t where -- noqa: layout\n",
+        ),
+        (
+            "r1/line7.sql",
+            true,
+            "SELECT  a  FROM t -- noqa: all\nselect a from t where -- noqa: all\n",
+        ),
+        (
+            "r1/line8.sql",
+            true,
+            "SELECT  a  FROM t -- noqa: PRS\nselect a from t where -- noqa: PRS\n",
+        ),
+        (
+            "r1/line9.sql",
+            true,
+            "SELECT  a  FROM t -- noqa: LT01,,AL03\nselect a from t where -- noqa: LT01,,AL03\n",
+        ),
+        ("r1/mal1.sql", true, "select a from t -- noqa?\n"),
+        ("r1/mal2.sql", true, "select a from t -- noqa:\n"),
+        (
+            "r1/ml1.sql",
+            true,
+            "select 1 /*\nnoqa: disable=all\n*/\nSELECT  a  FROM t\nSELECT  b  FROM t\n",
+        ),
+        (
+            "r1/ml2.sql",
+            true,
+            "/*\nnoqa: disable=all\n*/\nSELECT  a  FROM t\nselect a from t where\n",
+        ),
+        ("r1/ml3.sql", true, "SELECT  a  FROM t /*\nnoqa */\n"),
+        (
+            "r1/ml4.sql",
+            true,
+            "/*\nnoqa: disable=all\n*/\nSELECT  a  FROM t\n",
+        ),
+        (
+            "r1/ml5.sql",
+            true,
+            "/* noqa: disable=all\n*/\nSELECT  a  FROM t\n",
+        ),
+        (
+            "r1/ml6.sql",
+            true,
+            "SELECT  a  FROM t; /*\n  noqa: disable=all */\nSELECT  b  FROM t\n",
+        ),
+        (
+            "r1/ml7.sql",
+            true,
+            "/* noqa: disable=LT01\n, all */\nSELECT  a  FROM t\n",
+        ),
+        (
+            "r1/ml8.sql",
+            true,
+            "SELECT  a  FROM t /* noqa: LT01\n, core */\n",
+        ),
+        (
+            "r1/range1.sql",
+            true,
+            "-- noqa: disable=all\nSELECT  a  FROM t\nselect a from t where\n",
+        ),
+        (
+            "r1/range2.sql",
+            true,
+            "-- noqa: disable=*\nSELECT  a  FROM t\nselect a from t where\n",
+        ),
+        (
+            "r1/range3.sql",
+            true,
+            "-- noqa: disable=core\nSELECT  a  FROM t\nselect a from t where\n",
+        ),
+        (
+            "r1/range4.sql",
+            true,
+            "-- noqa: disable=????\nSELECT  a  FROM t\nselect a from t where\n",
+        ),
+        (
+            "r1/range5.sql",
+            true,
+            "-- noqa: disable=LT01,*\nSELECT  a  FROM t\nselect a from t where\n",
+        ),
+        (
+            "r1/range6.sql",
+            true,
+            "-- noqa: disable=layout\nSELECT  a  FROM t\nselect a from t where\n",
+        ),
+        (
+            "r1/range7.sql",
+            true,
+            "-- noqa: disable=\nSELECT  a  FROM t\nselect a from t where\n",
+        ),
+        (
+            "r1/range8.sql",
+            false,
+            "-- noqa: disable=LT01\nSELECT  a  FROM t\nselect a from t where\n",
+        ),
+        ("r1/str.sql", true, "select 'noqa' as a from t\n"),
+        ("r1/up.sql", true, "select a from t -- NOQA\n"),
+        (
+            "r2/ctl_star.sql",
+            true,
+            "SELECT 2*/* noqa: disable=LT01\n, all */ 3 AS y\nSELECT  a  FROM t\n",
+        ),
+        (
+            "r2/ctl_star2.sql",
+            true,
+            "SELECT 2 */* noqa: disable=LT01\n, all */ 3 AS y;\nSELECT  a  FROM t;\n",
+        ),
+        (
+            "r2/dash_in_block.sql",
+            true,
+            "/* x\n-- noqa: disable=all\n*/\nSELECT  a  FROM t\n",
+        ),
+        (
+            "r2/miss_dash.sql",
+            true,
+            "-- see /*\nSELECT */* noqa: disable=LT01\n, all */ FROM t\nSELECT  a  FROM t\n",
+        ),
+        (
+            "r2/miss_dash2.sql",
+            true,
+            "-- see /*\nSELECT 2 */* noqa: disable=LT01\n, all */ 3 AS y;\nSELECT  a  FROM t;\n",
+        ),
+        (
+            "r2/miss_dash3.sql",
+            true,
+            "-- see /*\nSELECT */* noqa: disable=LT01\n, all */\nFROM t;\nSELECT  a  FROM t;\n",
+        ),
+        (
+            "r2/miss_dollar.sql",
+            true,
+            "SELECT $$/*$$ AS x, 2*/* noqa: disable=LT01\n, all */ 3 AS y\nSELECT  a  FROM t\n",
+        ),
+        (
+            "r2/miss_dollar2.sql",
+            true,
+            "SELECT $$/*$$ AS x, 2 */* noqa: disable=LT01\n, all */ 3 AS y;\nSELECT  a  FROM t;\n",
+        ),
+        (
+            "r2/miss_str.sql",
+            true,
+            "SELECT '/*' AS x, 2*/* noqa: disable=LT01\n, all */ 3 AS y\nSELECT  a  FROM t\n",
+        ),
+        (
+            "r2/miss_str2.sql",
+            true,
+            "SELECT '/*' AS x, 2 */* noqa: disable=LT01\n, all */ 3 AS y;\nSELECT  a  FROM t;\n",
+        ),
+        (
+            "r2/miss_str3.sql",
+            true,
+            "SELECT '/*' AS x;\nSELECT */* noqa: disable=LT01\n, all */\nFROM t;\nSELECT  a  FROM t;\n",
+        ),
+        (
+            "r2/ml4.sql",
+            true,
+            "/*\nnoqa: disable=all\n*/\nSELECT  a  FROM t\n",
+        ),
+        (
+            "r2/ml7.sql",
+            true,
+            "/* noqa: disable=LT01\n, all */\nSELECT  a  FROM t\n",
+        ),
+        (
+            "r2/ml8.sql",
+            true,
+            "SELECT  a  FROM t /* noqa: LT01\n, core */\n",
+        ),
+        (
+            "r2/nested.sql",
+            true,
+            "/* a /* b */\nnoqa: disable=all\n*/\nSELECT  a  FROM t\n",
+        ),
+        ("r2/unclosed.sql", true, "SELECT  a  FROM t;\n/* noqa"),
+    ];
+
+    #[test]
+    fn every_audit_probe_but_the_plain_code_ones_is_withheld() {
+        for (probe, withheld, block) in AUDIT_PROBES {
+            assert_eq!(
+                switches_lint_off(block),
+                withheld,
+                "probe {probe} should be {}",
+                if withheld { "withheld" } else { "linted" }
+            );
+        }
+    }
+
+    /// Every auditor probe of PR #452 round 3 (`work/auditor-452/r3/`): each but the controls holds a
+    /// `noqa` with a carriage return inside its line, and all of those are withheld.
+    const CR_PROBES: [(&str, bool, &str); 23] = [
+        (
+            "r3/cr1.sql",
+            true,
+            "SELECT  a,  b -- noqa\r: LT01\nFROM t;\n",
+        ),
+        (
+            "r3/cr1ctl.sql",
+            false,
+            "SELECT  a,  b -- noqa: LT01\nFROM t;\n",
+        ),
+        (
+            "r3/cr2.sql",
+            true,
+            "SELECT  a,  b -- noqa\r:LT01\nFROM t;\n",
+        ),
+        ("r3/cr3.sql", true, "select a, b -- noqa\r:LT01\nfrom t;\n"),
+        (
+            "r3/cr4.sql",
+            true,
+            "SELECT a  FROM t WHERE b = -- noqa\r:LT01\n",
+        ),
+        (
+            "r3/cr5.sql",
+            true,
+            "select a FROM t WHERE b = -- noqa\r:LT01\n",
+        ),
+        (
+            "r3/cr6.sql",
+            true,
+            "SELECT a AS x, b AS y FROM t WHERE b = -- noqa\r:LT01\n",
+        ),
+        (
+            "r3/cr7.sql",
+            true,
+            "select a from t where b = -- noqa\r:lt01\n",
+        ),
+        (
+            "r3/cr8_2.sql",
+            true,
+            "select a FROM t WHERE b = -- noqa\r  :LT01\n",
+        ),
+        (
+            "r3/cr8_4.sql",
+            true,
+            "select a FROM t WHERE b = -- noqa\r    :LT01\n",
+        ),
+        (
+            "r3/cr8_8.sql",
+            true,
+            "select a FROM t WHERE b = -- noqa\r        :LT01\n",
+        ),
+        (
+            "r3/cr9_2.sql",
+            true,
+            "SELECT a FROM t WHERE b = -- noqa\r  :LT01\n",
+        ),
+        (
+            "r3/cr9_4.sql",
+            true,
+            "SELECT a FROM t WHERE b = -- noqa\r    :LT01\n",
+        ),
+        (
+            "r3/cr9_8.sql",
+            true,
+            "SELECT a FROM t WHERE b = -- noqa\r        :LT01\n",
+        ),
+        (
+            "r3/ora1.sql",
+            true,
+            "SELECT  a  FROM t PROMPT -- noqa\r: LT01\n;\nSELECT  b  FROM t;\n",
+        ),
+        (
+            "r3/ora2.sql",
+            true,
+            "PROMPT -- noqa\r: LT01\nSELECT  b  FROM t;\n",
+        ),
+        (
+            "r3/ora3.sql",
+            true,
+            "SELECT  a,  PROMPT -- noqa\r:LT01\nFROM t;\n",
+        ),
+        (
+            "r3/ora3ctl.sql",
+            false,
+            "SELECT  a,  PROMPT -- noqa:LT01\nFROM t;\n",
+        ),
+        (
+            "r3/pg1.sql",
+            true,
+            "SELECT  a  FROM t; \\x -- noqa\r: LT01\nSELECT  b  FROM t;\n",
+        ),
+        (
+            "r3/pg2.sql",
+            true,
+            "SELECT  a,  \\x -- noqa\r:LT01\nFROM t;\n",
+        ),
+        ("r3/pg2base.sql", false, "SELECT  a,  :LT01\nFROM t;\n"),
+        (
+            "r3/pg2ctl.sql",
+            false,
+            "SELECT  a,  \\x -- noqa: LT01\nFROM t;\n",
+        ),
+        (
+            "r3/sep.sql",
+            true,
+            "select a FROM t WHERE b = -- noqa\r    :LT01\n",
+        ),
+    ];
+
+    #[test]
+    fn every_carriage_return_probe_but_the_controls_is_withheld() {
+        for (probe, withheld, block) in CR_PROBES {
+            assert_eq!(
+                switches_lint_off(block),
+                withheld,
+                "probe {probe} should be {}",
+                if withheld { "withheld" } else { "linted" }
+            );
+        }
+    }
+
+    #[test]
+    fn only_two_letters_then_two_digits_are_a_plain_rule_code() {
+        for code in ["LT01", "al03", "Cp02"] {
+            assert!(rule_code(code), "{code:?} should be a plain rule code");
+        }
+        for entry in [
+            "", "LT1", "LT001", "L01", "LTT01", "01LT", "L?01", "LT0*", "PRS", "all", "core",
+        ] {
+            assert!(
+                !rule_code(entry),
+                "{entry:?} shouldn't be a plain rule code"
+            );
+        }
+    }
+
+    #[test]
+    fn any_noqa_in_any_case_marks_the_block_for_the_unmasked_run() {
+        for block in [
+            "select 1 -- noqa: LT01\n",
+            "select 1 /* NoQa */\n",
+            "select 'noqa'\n",
+        ] {
+            assert!(holds_noqa(block), "{block:?} should hold noqa");
+        }
+        assert!(!holds_noqa("select 1 -- no qa\n"));
+    }
+
+    #[test]
+    fn the_unmasked_run_adds_only_its_parse_errors_or_its_failure() {
+        let found = |syntax, rule: &str| Diagnostic {
+            line: 1,
+            column: 1,
+            end_line: 1,
+            syntax,
+            rule: rule.to_owned(),
+            message: String::new(),
+        };
+        assert_eq!(parse_errors(lint::Verdict::Clean), None);
+        assert_eq!(
+            parse_errors(lint::Verdict::Diagnostics(vec![found(false, "LT01")])),
+            None
+        );
+        assert_eq!(
+            parse_errors(lint::Verdict::Diagnostics(vec![
+                found(false, "LT01"),
+                found(true, PARSE_RULE),
+            ])),
+            Some(lint::Verdict::Diagnostics(vec![found(true, PARSE_RULE)]))
+        );
+        let failed = lint::Verdict::Failed(format::Verdict::ToolFailed("x".to_owned()));
+        assert_eq!(parse_errors(failed.clone()), Some(failed));
+    }
+
+    #[test]
+    fn exclude_rules_naming_more_than_rule_codes_is_refused() {
+        for value in [
+            "core",
+            "all",
+            "*",
+            "LT*",
+            "LT05, core",
+            "layout",
+            "LT05,",
+            "PRS",
+        ] {
+            let refused = sorted(&format!("[sqruff]\nexclude_rules = {value}\n"));
+            assert!(
+                refused.is_err_and(|why| why.contains("`exclude_rules`")),
+                "exclude_rules = {value} should be refused"
+            );
+        }
+        assert_eq!(
+            sorted("[sqruff]\nexclude_rules = LT05, AL03,CP02\n"),
+            Ok("exclude_rules = LT05, AL03,CP02\n".to_owned())
         );
     }
 }
