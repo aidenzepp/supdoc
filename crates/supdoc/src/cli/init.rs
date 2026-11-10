@@ -10,13 +10,13 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::config::confine::{self, Admitted, Boundary, Escape};
-use crate::config::{CONFIG_FILE_NAME, discover_config};
+use crate::config::discover_config;
 use crate::exit::ExitStatus;
 use crate::lock::error::shell_quote;
 use crate::output::json::Envelope;
 use crate::output::paths::relative_to;
 use crate::output::{Output, Report, TextContext};
-use crate::path::{AbsolutePath, fixed};
+use crate::path::{self, AbsolutePath, Suffix, fixed};
 
 use super::args::{InitArgs, OperatorPath};
 use super::{CliError, Context, Outcome, cause};
@@ -391,16 +391,12 @@ fn refusal(path: &AbsolutePath, escape: &Escape) -> io::Error {
 
 /// A hidden file beside `target` that this run alone writes before linking it into place.
 ///
-/// `None` only when the sibling isn't absolute, which an absolute `target` rules out.
+/// `None` when `target` has no file name, such as a root. The name is kept byte for byte, so an
+/// operator's `-c` file name holding `:` on Unix still gets its sibling.
 fn temporary_sibling(target: &AbsolutePath) -> Option<AbsolutePath> {
-    let name = target
-        .as_path()
-        .file_name()
-        .map_or_else(|| CONFIG_FILE_NAME.into(), |name| name.to_string_lossy());
-    let sibling = target
-        .as_path()
-        .with_file_name(format!(".{name}.{}.tmp", std::process::id()));
-    AbsolutePath::new(&sibling)
+    let prefix = Suffix::new(".")?;
+    let suffix = Suffix::new(&format!(".{}.tmp", std::process::id()))?;
+    AbsolutePath::new(&path::with_affixes(target.as_path(), &prefix, &suffix)?)
 }
 
 /// The refusal for an existing config, naming it as the notes do.
@@ -492,7 +488,7 @@ mod tests {
 
     use crate::cli::args::{Cli, Command};
     use crate::cli::testing::{Capture, ClosedPipe, symlink};
-    use crate::config::Config;
+    use crate::config::{CONFIG_FILE_NAME, Config};
     use crate::output::{OutputFormat, OutputSettings, PathStyle, Verbosity};
     use crate::scan::walk::GlobalExcludes;
 
@@ -923,6 +919,20 @@ mod tests {
             names_in(project.path()),
             [CONFIG_FILE_NAME],
             "only the planted symlink remains; no temporary file is left"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_temporary_sibling_keeps_a_name_holding_a_colon_byte_for_byte() {
+        let target = AbsolutePath::new(Path::new("/p/a:b.toml")).expect("an absolute path");
+
+        let temporary = temporary_sibling(&target).expect("a named target has a sibling");
+
+        assert_eq!(
+            temporary.as_path(),
+            Path::new(&format!("/p/.a:b.toml.{}.tmp", std::process::id())),
+            "the sibling is the dot, the name as typed, the pid and .tmp"
         );
     }
 

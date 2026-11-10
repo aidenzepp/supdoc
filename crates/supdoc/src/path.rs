@@ -11,6 +11,7 @@
 use std::fmt;
 use std::path::{Component as PathComponent, Path, PathBuf};
 
+use crate::cli::args::OperatorPath;
 use crate::config::CONFIG_FILE_NAME;
 use crate::lock::model::LOCK_FILE_NAME;
 
@@ -458,13 +459,13 @@ pub(crate) mod fixed {
     /// The local binary directories a Python tool searches.
     pub(crate) const VENV_BINS: [FixedPath; 1] = [FixedPath::new(".venv/bin")];
     /// Windows' system directory beneath the Windows root.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    #[cfg(any(windows, test))]
     pub(crate) const SYSTEM32: FixedPath = FixedPath::new("System32");
     /// The Windows `curl` binary name.
     #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CURL_EXE: FixedPath = FixedPath::new("curl.exe");
     /// The Windows `taskkill` binary name.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
+    #[cfg(any(windows, test))]
     pub(crate) const TASKKILL_EXE: FixedPath = FixedPath::new("taskkill.exe");
     /// The local binary directories a Node tool searches.
     pub(crate) const NODE_BINS: [FixedPath; 1] = [FixedPath::new("node_modules/.bin")];
@@ -591,13 +592,21 @@ pub(crate) fn sibling(path: &Path, name: &Component) -> Option<PathBuf> {
 /// is checked; the existing name is not re-checked, so a Unix name holding `:` is kept. `None` when
 /// `path` has no file name, such as a root or one ending in `..`.
 #[must_use]
-#[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
 pub(crate) fn with_affixes(path: &Path, prefix: &Suffix, suffix: &Suffix) -> Option<PathBuf> {
     let name = path.file_name()?;
     let mut joined = std::ffi::OsString::from(&prefix.0);
     joined.push(name);
     joined.push(&suffix.0);
     Some(raw_join(path.parent()?, Path::new(&joined)))
+}
+
+/// `cwd` with the path the operator typed appended exactly as typed: `..` stays in place and an
+/// absolute path replaces `cwd`, as [`Path::join`] does. Not normalized and not confined, so the
+/// result names what `ls typed` would, for a caller that asks whether each component exists. Only
+/// an [`OperatorPath`] is accepted, so a path read from a file never reaches this join.
+#[must_use]
+pub(crate) fn as_typed(cwd: &AbsolutePath, typed: OperatorPath<'_>) -> PathBuf {
+    raw_join(cwd.as_path(), typed.as_path())
 }
 
 /// `path` moved from under `from` to the same place under `onto`: `onto` joined with what
