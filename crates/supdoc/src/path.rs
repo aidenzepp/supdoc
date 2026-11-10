@@ -325,25 +325,18 @@ pub(crate) mod fixed {
     #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const DOT_CACHE: FixedPath = FixedPath::new(".cache");
     /// rumdl's config file name.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const RUMDL_TOML: FixedPath = FixedPath::new("rumdl.toml");
     /// rumdl's private config directory beneath the cache base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const RUMDL_CONFIG_DIR: FixedPath = FixedPath::new("rumdl-config");
     /// A git work tree's marker.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const DOT_GIT: FixedPath = FixedPath::new(".git");
     /// tombi's config directory name.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const TOMBI: FixedPath = FixedPath::new("tombi");
     /// tombi's private config directory beneath the cache base.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const TOMBI_CONFIG_DIR: FixedPath = FixedPath::new("tombi-config");
     /// tombi's private config file name.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const DOT_TOMBI_TOML: FixedPath = FixedPath::new(".tombi.toml");
     /// A tool's config file name inside its config directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CONFIG_TOML: FixedPath = FixedPath::new("config.toml");
     /// rustc's private emit directory beneath the cache base.
     #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
@@ -404,7 +397,6 @@ pub(crate) mod fixed {
         FixedPath::new(".biome.jsonc"),
     ];
     /// The config names rumdl looks for in a directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const RUMDL_CONFIG_FILES: [FixedPath; 4] = [
         FixedPath::new(".rumdl.toml"),
         FixedPath::new("rumdl.toml"),
@@ -412,7 +404,6 @@ pub(crate) mod fixed {
         FixedPath::new("pyproject.toml"),
     ];
     /// The files rumdl's cached results depend on.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const RUMDL_TOOL_CONFIG_FILES: [FixedPath; 5] = [
         FixedPath::new(".rumdl.toml"),
         FixedPath::new("rumdl.toml"),
@@ -421,7 +412,6 @@ pub(crate) mod fixed {
         FixedPath::new(".editorconfig"),
     ];
     /// The config names tombi looks for in a directory.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const TOMBI_CONFIG_FILES: [FixedPath; 4] = [
         FixedPath::new(".tombi.toml"),
         FixedPath::new("tombi.toml"),
@@ -463,39 +453,32 @@ pub(crate) mod fixed {
         FixedPath::new(".yamllint.yml"),
     ];
     /// The files rustfmt's cached results depend on.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const RUSTFMT_TOOL_CONFIG_FILES: [FixedPath; 2] = [
         FixedPath::new("rustfmt.toml"),
         FixedPath::new(".rustfmt.toml"),
     ];
     /// The files clippy's cached results depend on.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const CLIPPY_TOOL_CONFIG_FILES: [FixedPath; 3] = [
         FixedPath::new("clippy.toml"),
         FixedPath::new(".clippy.toml"),
         FixedPath::new("Cargo.toml"),
     ];
     /// The files ruff's cached results depend on.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const RUFF_TOOL_CONFIG_FILES: [FixedPath; 3] = [
         FixedPath::new("ruff.toml"),
         FixedPath::new(".ruff.toml"),
         FixedPath::new("pyproject.toml"),
     ];
     /// The files a pyproject-configured tool's cached results depend on.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const PYPROJECT_TOOL_CONFIG_FILES: [FixedPath; 1] =
         [FixedPath::new("pyproject.toml")];
     /// The files an editorconfig-configured tool's cached results depend on.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const EDITORCONFIG_TOOL_CONFIG_FILES: [FixedPath; 1] =
         [FixedPath::new(".editorconfig")];
     /// The files shellcheck's cached results depend on.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const SHELLCHECK_TOOL_CONFIG_FILES: [FixedPath; 1] =
         [FixedPath::new(".shellcheckrc")];
     /// The local binary directories a Python tool searches.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const VENV_BINS: [FixedPath; 1] = [FixedPath::new(".venv/bin")];
     /// Windows' system directory beneath the Windows root.
     #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
@@ -507,7 +490,6 @@ pub(crate) mod fixed {
     #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const TASKKILL_EXE: FixedPath = FixedPath::new("taskkill.exe");
     /// The local binary directories a Node tool searches.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) const NODE_BINS: [FixedPath; 1] = [FixedPath::new("node_modules/.bin")];
 }
 
@@ -563,7 +545,6 @@ pub(crate) struct Suffix(String);
 impl Suffix {
     /// Wraps `tail`, or returns `None` when it is empty or holds `/`, `\\`, `:`, `..` or NUL.
     #[must_use]
-    #[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
     pub(crate) fn new(tail: &str) -> Option<Self> {
         let refused =
             tail.is_empty() || tail.contains(['/', '\\', ':', '\0']) || tail.contains("..");
@@ -575,7 +556,6 @@ impl Suffix {
 /// give `a.md.1.toml`. The existing name is not re-checked, so a Unix name holding `:` is kept.
 /// `None` when `path` has no file name, such as a root or one ending in `..`.
 #[must_use]
-#[cfg_attr(not(test), expect(dead_code, reason = "used once its #357 unit lands"))]
 pub(crate) fn with_suffix(path: &Path, suffix: &Suffix) -> Option<PathBuf> {
     let name = path.file_name()?;
     let mut joined = name.to_owned();
