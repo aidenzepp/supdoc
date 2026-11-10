@@ -118,8 +118,9 @@ pub(crate) enum ConfigError {
         directory: AbsolutePath,
         /// Byte range of the namespace's value inside `file`.
         span: Range<usize>,
-        /// The project root.
-        root: AbsolutePath,
+        /// The project root. Boxed to keep `ConfigError` small where a path is large, as on
+        /// Windows.
+        root: Box<AbsolutePath>,
         /// How `directory` ends up outside the root. Where a symlink leads is never printed.
         escape: NamespaceEscape,
     },

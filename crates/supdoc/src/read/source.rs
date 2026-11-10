@@ -618,6 +618,7 @@ mod tests {
 
     /// `SourceFile::read(path)`, run on its own thread so an open that blocks fails the test
     /// after five seconds instead of hanging it.
+    #[cfg(unix)]
     fn read_within_five_seconds(path: AbsolutePath) -> Result<SourceFile, ReadError> {
         let (sender, receiver) = std::sync::mpsc::channel();
         let _reader = std::thread::spawn(move || {

@@ -704,7 +704,7 @@ mod tests {
         )
     )]
 
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     use tempfile::TempDir;
 
@@ -1388,8 +1388,11 @@ mod tests {
     fn link_through_symlinked_target_file_resolves() {
         let project = Project::new();
         project.write("src/real.rs", LIB);
-        std::os::unix::fs::symlink(Path::new("real.rs"), project.root.join("src/alias.rs"))
-            .expect("the fixture symlink should be creatable");
+        std::os::unix::fs::symlink(
+            std::path::Path::new("real.rs"),
+            project.root.join("src/alias.rs"),
+        )
+        .expect("the fixture symlink should be creatable");
         project.write("docs/guide.md", "See [add](../src/alias.rs#add).\n");
 
         let scan = project.scan();

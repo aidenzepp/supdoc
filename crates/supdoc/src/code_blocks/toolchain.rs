@@ -500,13 +500,17 @@ mod tests {
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
+    #[cfg(unix)]
     use std::time::Duration;
 
+    #[cfg(unix)]
+    use super::active;
     use super::{
-        Cause, Refusal, Toolchain, Unresolved, active, active_channel, cargo_edition, edition_in,
+        Cause, Refusal, Toolchain, Unresolved, active_channel, cargo_edition, edition_in,
         is_valid_channel, judge, parse, read,
     };
     use crate::code_blocks::runner::{Failure, Ran};
+    #[cfg(unix)]
     use crate::code_blocks::tools::ToolEnv;
     use crate::config::code_blocks::Edition;
 

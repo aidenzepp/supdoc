@@ -1456,10 +1456,11 @@ mod tests {
     }
 
     #[test]
-    fn a_dockerfile_table_selects_hadolint_and_no_formatter() {
+    fn a_dockerfile_table_defaults_to_dockerfmt_and_hadolint() {
         let dir = tree(&[(
             "supdoc.config.toml",
-            "[features.code-blocks.dockerfile]\n[features.code-blocks.dockerfile.hadolint]\nlint = \"full\"\n",
+            "[features.code-blocks.dockerfile]\n[features.code-blocks.dockerfile.hadolint]\nlint = \"full\"\n\
+             [features.code-blocks.dockerfile.dockerfmt]\nformat = \"full\"\n",
         )]);
 
         let config = Config::load(&at(&dir, ".")).expect("the fixture config should load");
@@ -1471,8 +1472,10 @@ mod tests {
                 .choice(Language::Dockerfile, Step::Format)
                 .is_none()
         );
-        assert!(
-            crate::code_blocks::tools::default_for(Language::Dockerfile, Step::Format).is_none()
+        assert_eq!(
+            crate::code_blocks::tools::default_for(Language::Dockerfile, Step::Format)
+                .map(|tool| tool.name),
+            Some("dockerfmt")
         );
         assert_eq!(
             crate::code_blocks::tools::default_for(Language::Dockerfile, Step::Lint)
@@ -1482,12 +1485,25 @@ mod tests {
     }
 
     #[test]
-    fn a_named_dockerfile_formatter_is_refused_pointing_at_a_custom_command() {
-        let message = refused("dockerfile", "formatter = \"dockerfmt\"");
+    fn dockerfmt_is_a_known_dockerfile_formatter_and_another_name_is_refused() {
+        let dir = tree(&[(
+            "supdoc.config.toml",
+            "[features.code-blocks.dockerfile]\nformatter = \"dockerfmt\"\n",
+        )]);
+        let config = Config::load(&at(&dir, ".")).expect("`dockerfmt` should be accepted");
+        assert_eq!(
+            config
+                .code_blocks()
+                .expect("the table is written")
+                .choice(Language::Dockerfile, Step::Format)
+                .and_then(known_name),
+            Some("dockerfmt")
+        );
 
+        let message = refused("dockerfile", "formatter = \"hadolint\"");
         assert!(
-            message.contains("`dockerfmt` isn't a known dockerfile formatter")
-                && message.contains("none yet: write a custom `{ command = [...] }`"),
+            message.contains("`hadolint` isn't a known dockerfile formatter")
+                && message.contains("`dockerfmt`"),
             "got {message}"
         );
     }
