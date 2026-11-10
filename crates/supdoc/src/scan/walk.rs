@@ -12,7 +12,7 @@ use crate::finding::{Finding, Severity};
 use crate::link::{LinkPathError, SourcePath};
 use crate::lock::error::shell_quote;
 use crate::output::paths::relative_to;
-use crate::path::AbsolutePath;
+use crate::path::{AbsolutePath, Pointer};
 use crate::read::cartridge::Languages;
 use crate::scan::explicit::explicit_path_warnings;
 pub(crate) use crate::scan::ignore::CODE_IGNORE_TOO_LARGE;
@@ -143,13 +143,19 @@ pub(crate) struct GlobalExcludes {
     /// Kept as git names it, not lexically normalized, so the operating system resolves a `..`
     /// after a symlink as git does.
     pub(super) file: Option<PathBuf>,
+    /// The configured value of `core.excludesFile` when the typed pointer refused it, such as one
+    /// holding a NUL byte. It names no file the walk can open, so the walk only reports it.
+    refused: Option<PathBuf>,
 }
 
 impl GlobalExcludes {
     /// No global excludes file, for runs that must not depend on the user's git config.
     #[must_use]
     pub(crate) const fn none() -> Self {
-        Self { file: None }
+        Self {
+            file: None,
+            refused: None,
+        }
     }
 
     /// The file git reads as the global excludes, found as the walker's own lookup finds it:
@@ -161,9 +167,42 @@ impl GlobalExcludes {
     /// Effect: reads environment variables and the user's and system git config.
     #[must_use]
     pub(crate) fn find(cwd: &AbsolutePath) -> Self {
-        Self {
-            file: ignore::gitignore::gitconfig_excludes_path().map(|file| cwd.as_path().join(file)),
+        let Some(configured) = ignore::gitignore::gitconfig_excludes_path() else {
+            return Self::none();
+        };
+        // A path the typed pointer refuses, such as one holding a NUL byte, names no file to open:
+        // it is kept as configured so the walk warns that the global excludes file is unreadable.
+        match Pointer::from_path(configured.clone()) {
+            Some(pointer) => Self {
+                file: Some(pointer.resolve_from(cwd.as_path())),
+                refused: None,
+            },
+            None => Self {
+                file: None,
+                refused: Some(configured),
+            },
         }
+    }
+
+    /// The `scan-ignore-file-unreadable` warning for a configured global excludes path the typed
+    /// pointer refused, worded as for any ignore file that can't be fully read.
+    fn refused_warning(&self) -> Option<Finding> {
+        let configured = self.refused.as_ref()?;
+        Some(
+            Finding::new(
+                "scan-ignore-file-unreadable",
+                Severity::Warning,
+                format!(
+                    "the global excludes file `{}` could not be fully read, so some of its rules \
+                     may not apply",
+                    configured.display()
+                ),
+            )
+            .with_help(format!(
+                "The files its later rules would hide may have been checked. Make it a regular \
+                 UTF-8 text file, or add those files to `exclude` in `{CONFIG_FILE_NAME}`"
+            )),
+        )
     }
 }
 
@@ -231,6 +270,7 @@ pub(crate) fn walk(
             .iter()
             .map(|file| unreadable_ignore_file(root, file)),
     );
+    findings.extend(excludes.refused_warning());
     findings.extend(explicit_path_warnings(
         config,
         languages,
@@ -463,7 +503,7 @@ mod tests {
             )
         }
 
-        /// The walked sources, relative to the root.
+        /// The walked sources, relative to the root, written with `/` on every platform.
         fn sources(&self, scope: &Scope) -> Vec<String> {
             self.walk(scope)
                 .sources
@@ -478,8 +518,10 @@ mod tests {
                     .expect("the temporary directory should be absolute"),
             )
             .expect("a walked source should be under the root")
-            .to_string_lossy()
-            .into_owned()
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/")
         }
     }
 
@@ -1475,6 +1517,61 @@ mod tests {
         assert!(
             findings.is_empty(),
             "no warning is given above the root: {findings:?}"
+        );
+    }
+
+    /// A git work tree `top` holding `sub/proj` with `a.rs`, `b.rs` and `c.rs`, and `alias`, a
+    /// symlink to `top` in another directory, so the project root is reached through a symlink.
+    /// Returns the directories (kept alive) and the project's config under `alias`.
+    #[cfg(unix)]
+    fn project_through_symlink(gitignore: &str) -> (TempDir, TempDir, Config) {
+        let top = TempDir::new().expect("a temporary work tree should be creatable");
+        let holder = TempDir::new().expect("a temporary link directory should be creatable");
+        let project = top.path().join("sub/proj");
+        fs::create_dir_all(&project).expect("the project directory should be creatable");
+        for file in ["a.rs", "b.rs", "c.rs", CONFIG_FILE_NAME] {
+            fs::write(project.join(file), "").expect("the fixture file should be writable");
+        }
+        make_git_dir(&top.path().join(".git"));
+        fs::write(top.path().join(".gitignore"), gitignore)
+            .expect("the gitignore should be writable");
+        let alias = holder.path().join("alias");
+        std::os::unix::fs::symlink(top.path(), &alias)
+            .expect("the fixture symlink should be creatable");
+        let config_path = AbsolutePath::new(&alias.join("sub/proj").join(CONFIG_FILE_NAME))
+            .expect("the temporary directory should be absolute");
+        let config = Config::load_file(&config_path).expect("the fixture config should be valid");
+        (top, holder, config)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn anchored_rules_above_a_root_reached_through_a_symlink_hide_their_files() {
+        let (_top, holder, config) = project_through_symlink("/sub/proj/a.rs\n");
+        let global = holder.path().join("global-excludes");
+        fs::write(&global, "/sub/proj/b.rs\n").expect("the global excludes should be writable");
+
+        let walked = walk(
+            &config,
+            Languages::builtin().expect("the built-in cartridges should load"),
+            &Scope::All,
+            &GlobalExcludes {
+                file: Some(global),
+                refused: None,
+            },
+        );
+
+        let names: Vec<_> = walked
+            .sources
+            .iter()
+            .filter_map(|walked| walked.path.as_path().file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            ["c.rs"],
+            "the `.gitignore` above the root hides a.rs and the global file hides b.rs, though the \
+             root is reached through a symlink"
         );
     }
 

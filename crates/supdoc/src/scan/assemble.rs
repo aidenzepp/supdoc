@@ -1316,14 +1316,18 @@ mod tests {
 
     #[test]
     fn unreadable_root_help_gives_chmod_with_the_root_and_no_other_directory_advice() {
+        let root = crate::path::fixture("/work/my repo");
         let error = ScanError::RootUnreadable {
-            root: crate::path::fixture("/work/my repo"),
+            root: root.clone(),
             error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
         };
 
         let help = error.help();
 
-        assert!(help.contains("`chmod u+rx '/work/my repo'`"), "got: {help}");
+        assert!(
+            help.contains(&format!("`chmod u+rx '{}'`", root.display())),
+            "got: {help}"
+        );
         assert!(!help.contains("another directory"), "got: {help}");
     }
 

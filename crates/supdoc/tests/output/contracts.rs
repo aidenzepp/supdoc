@@ -840,6 +840,13 @@ mod helps {
             build: file_changed_during_fix,
         },
         UnitCase {
+            kind: "cli-upgrade-cargo-manual",
+            build: || {
+                let message = supdoc::testing::upgrade_cargo_manual();
+                (message.code, message.help)
+            },
+        },
+        UnitCase {
             kind: "cli-rename-file-changed",
             build: || {
                 let message = supdoc::testing::rename_file_changed();

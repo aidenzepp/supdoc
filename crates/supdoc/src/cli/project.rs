@@ -20,7 +20,7 @@ use crate::lock::model::Lockfile;
 use crate::namespace::NamespaceName;
 use crate::output::Output;
 use crate::output::paths::relative_to;
-use crate::path::{AbsolutePath, fixed};
+use crate::path::{self, AbsolutePath, fixed};
 use crate::scan::model::Scope;
 use crate::trust::Grant;
 
@@ -361,7 +361,7 @@ pub(crate) fn ensure_exists_as_typed(
     typed: OperatorPath<'_>,
     cwd: &AbsolutePath,
 ) -> Result<(), CliError> {
-    match cwd.as_path().join(typed.as_path()).symlink_metadata() {
+    match path::as_typed(cwd, typed).symlink_metadata() {
         Ok(_) => Ok(()),
         Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
             Err(path_missing(typed, cwd))

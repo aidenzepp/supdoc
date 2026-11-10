@@ -57,18 +57,8 @@ use crate::cartridges::yaml as yaml_cartridge;
 use crate::config::confine::Boundary;
 use crate::hash::Hash;
 use crate::limits::TimeLimit;
-use crate::path::{AbsolutePath, Component};
+use crate::path::{self, AbsolutePath, Component, FixedPath, fixed};
 use crate::read::cartridge::{Deadline, SourceFile};
-
-/// The config names yamlfmt looks for in a directory. When more than one is there, yamlfmt
-/// 0.21.0 takes one at random.
-pub(crate) const CONFIG_FILES: [&str; 5] = [
-    ".yamlfmt",
-    "yamlfmt.yml",
-    "yamlfmt.yaml",
-    ".yamlfmt.yaml",
-    ".yamlfmt.yml",
-];
 
 /// The most bytes of a config supdoc reads.
 const MAX_CONFIG: u64 = 256 * 1024;
@@ -191,7 +181,7 @@ fn relative(root: &Path, path: &Path) -> String {
 }
 
 /// The config yamlfmt would find for `doc` were it run in `doc`'s directory: the one in the
-/// nearest directory at or above it, never above `root`, that holds any of [`CONFIG_FILES`].
+/// nearest directory at or above it, never above `root`, that holds any of [`fixed::YAMLFMT_CONFIG_FILES`].
 ///
 /// Effect: reads file metadata.
 ///
@@ -206,9 +196,9 @@ fn found_config(root: &Path, doc: &Path) -> Result<Option<PathBuf>, Refusal> {
         .flat_map(Path::ancestors)
         .take_while(|dir| dir.starts_with(root))
     {
-        let present: Vec<PathBuf> = CONFIG_FILES
+        let present: Vec<PathBuf> = fixed::YAMLFMT_CONFIG_FILES
             .iter()
-            .map(|name| dir.join(name))
+            .map(|name| path::beneath(dir, name))
             .filter(|candidate| fs::symlink_metadata(candidate).is_ok())
             .collect();
         match present.as_slice() {
@@ -501,7 +491,13 @@ fn checked(setting: &Setting) -> Result<String, String> {
 
 /// Writes yamlfmt's config `text` into `.yamlfmt` in a private directory (see [`private_file`]).
 fn private_config(env: &ToolEnv, root: &Path, text: &str) -> Option<PathBuf> {
-    private_file(env, root, ("yamlfmt-config", ".yamlfmt"), text).map(|(_, file)| file)
+    private_file(
+        env,
+        root,
+        (fixed::YAMLFMT_CONFIG_DIR, fixed::DOT_YAMLFMT),
+        text,
+    )
+    .map(|(_, file)| file)
 }
 
 /// Writes `text` into the file `name` in a private directory named by the hash of `text`, under
@@ -516,7 +512,7 @@ fn private_config(env: &ToolEnv, root: &Path, text: &str) -> Option<PathBuf> {
 fn private_file(
     env: &ToolEnv,
     root: &Path,
-    (kind, name): (&str, &str),
+    (kind, name): (FixedPath, FixedPath),
     text: &str,
 ) -> Option<(Boundary, PathBuf)> {
     let neutral = runner::neutral_dir(env, root);
@@ -524,13 +520,10 @@ fn private_file(
         return None;
     }
     let cache = runner::exact(neutral.parent()?)?;
-    let parent = AbsolutePath::new(&cache.as_path().join(kind))?;
-    let dir = AbsolutePath::new(
-        &parent
-            .as_path()
-            .join(Hash::digest(text.as_bytes()).to_string()),
-    )?;
-    let file = AbsolutePath::new(&dir.as_path().join(name))?;
+    let parent = AbsolutePath::new(&path::beneath(cache.as_path(), &kind))?;
+    let digest = Component::new(&Hash::digest(text.as_bytes()).to_string())?;
+    let dir = AbsolutePath::new(&path::beneath(parent.as_path(), &digest))?;
+    let file = AbsolutePath::new(&path::beneath(dir.as_path(), &name))?;
     let parent_boundary = runner::create_private(&Boundary::resolve(&cache), &parent)?;
     let own = runner::create_private(&parent_boundary, &dir)?;
     runner::write_private(&own, &file, text)?;
@@ -841,10 +834,6 @@ pub(crate) fn holds_no_yaml(input: &str) -> bool {
     })
 }
 
-/// The config names yamllint 1.38.0 looks for in a directory, in its own order: the first one
-/// there is the one it reads.
-pub(crate) const LINT_CONFIG_FILES: [&str; 3] = [".yamllint", ".yamllint.yaml", ".yamllint.yml"];
-
 /// The rules yamllint 1.38.0 knows.
 const LINT_RULES: [&str; 23] = [
     "anchors",
@@ -962,9 +951,14 @@ pub(crate) fn lint_args(env: &ToolEnv, root: &Path, doc: &Path) -> Result<Lint, 
             String::new(),
         ),
     };
-    let (dir, private) = private_file(env, root, ("yamllint-config", "config.yaml"), &text.text)
-        .ok_or(Refusal::NoPrivateDir)?;
-    let cwd = AbsolutePath::new(&dir.dir().join("cwd"))
+    let (dir, private) = private_file(
+        env,
+        root,
+        (fixed::YAMLLINT_CONFIG_DIR, fixed::CONFIG_YAML),
+        &text.text,
+    )
+    .ok_or(Refusal::NoPrivateDir)?;
+    let cwd = AbsolutePath::new(&path::beneath(dir.dir(), &fixed::CWD))
         .and_then(|cwd| empty_private_dir(&dir, &cwd))
         .ok_or(Refusal::NoPrivateDir)?;
     Ok(Lint {
@@ -987,7 +981,7 @@ fn empty_private_dir(parent: &Boundary, dir: &AbsolutePath) -> Option<PathBuf> {
 }
 
 /// The config yamllint would read for `doc` were it run in `doc`'s directory: the first of
-/// [`LINT_CONFIG_FILES`] in the nearest directory at or above it, never above `root`, that holds
+/// [`fixed::YAMLLINT_CONFIG_FILES`] in the nearest directory at or above it, never above `root`, that holds
 /// any.
 ///
 /// Effect: reads file metadata.
@@ -997,9 +991,9 @@ fn found_lint_config(root: &Path, doc: &Path) -> Option<PathBuf> {
         .flat_map(Path::ancestors)
         .take_while(|dir| dir.starts_with(root))
         .find_map(|dir| {
-            LINT_CONFIG_FILES
+            fixed::YAMLLINT_CONFIG_FILES
                 .iter()
-                .map(|name| dir.join(name))
+                .map(|name| path::beneath(dir, name))
                 .find(|candidate| fs::symlink_metadata(candidate).is_ok())
         })
 }
@@ -1734,16 +1728,18 @@ pub(crate) fn locale_failed(stderr: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CONFIG_FILES, LINT_CONFIG_FILES, LINT_RULES, MAX_NESTING, Refusal, forbidden_char,
-        holds_no_yaml, internal_error, lint_args, lint_config, lint_diagnostics, lint_verdict,
-        locale_failed, parse_error, project_args, read_config, rejected_config, same_structure,
-        shape, switches_lint_off,
+        LINT_RULES, MAX_NESTING, Refusal, forbidden_char, holds_no_yaml, internal_error, lint_args,
+        lint_config, lint_diagnostics, lint_verdict, locale_failed, parse_error, project_args,
+        read_config, rejected_config, same_structure, shape, switches_lint_off,
     };
     use crate::code_blocks::format::{self, ParseError};
     use crate::code_blocks::lint::{self, Diagnostic};
     use crate::code_blocks::runner::Ran;
     use crate::code_blocks::tools::ToolEnv;
     use crate::limits::TimeLimit;
+    use crate::path::fixed::{
+        YAMLFMT_CONFIG_FILES as CONFIG_FILES, YAMLLINT_CONFIG_FILES as LINT_CONFIG_FILES,
+    };
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -1887,7 +1883,7 @@ mod tests {
     fn two_configs_in_one_directory_are_refused_since_yamlfmt_picks_one_at_random() {
         let root = tempfile::TempDir::new().expect("a temp dir should be creatable");
         let cache = tempfile::TempDir::new().expect("a temp dir should be creatable");
-        for name in [CONFIG_FILES[0], CONFIG_FILES[4]] {
+        for name in [CONFIG_FILES[0].as_str(), CONFIG_FILES[4].as_str()] {
             fs::write(root.path().join(name), "").expect("a config");
         }
 
@@ -2339,12 +2335,12 @@ mod tests {
         fs::create_dir_all(root.path().join("docs/deep")).expect("the fixture dirs");
         fs::write(root.path().join(".yamllint"), "bogus: 1\n").expect("root config");
         fs::write(
-            root.path().join("docs").join(LINT_CONFIG_FILES[1]),
+            root.path().join("docs").join(LINT_CONFIG_FILES[1].as_str()),
             "rules:\n  truthy: enable\n",
         )
         .expect("nearer config");
         fs::write(
-            root.path().join("docs").join(LINT_CONFIG_FILES[2]),
+            root.path().join("docs").join(LINT_CONFIG_FILES[2].as_str()),
             "bogus: 1\n",
         )
         .expect("a later name beside it");
@@ -2362,7 +2358,7 @@ mod tests {
             fs::read_to_string(&conf).expect("the private copy"),
             "rules:\n  truthy: enable\n  document-start: disable\n"
         );
-        assert_eq!(lint.file, "docs/.yamllint.yaml");
+        assert_eq!(Path::new(&lint.file), Path::new("docs/.yamllint.yaml"));
         assert!(
             lint.cwd.starts_with(cache.path()),
             "{:?} should be private",

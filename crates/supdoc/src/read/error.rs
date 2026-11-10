@@ -654,6 +654,7 @@ mod tests {
 
     #[test]
     fn not_found_names_the_query_and_suggests_nearest_paths() {
+        let file = absolute("/repo/src/lib.rs").display().to_string();
         let error = ResolveError::NotFound {
             file: absolute("/repo/src/lib.rs"),
             query: symbol("Config.fmt"),
@@ -664,12 +665,14 @@ mod tests {
         assert_eq!(error.code(), "resolve-not-found");
         assert_eq!(
             error.to_string(),
-            "no symbol `Config.fmt` in /repo/src/lib.rs"
+            format!("no symbol `Config.fmt` in {file}")
         );
         assert_eq!(
             error.help(),
-            "did you mean `Config.Display.fmt`, `Config.port`? \
-             `supdoc resolve /repo/src/lib.rs` lists every symbol",
+            format!(
+                "did you mean `Config.Display.fmt`, `Config.port`? \
+                 `supdoc resolve {file}` lists every symbol"
+            ),
         );
     }
 
@@ -714,7 +717,10 @@ mod tests {
         assert_eq!(error.code(), "resolve-ambiguous");
         assert_eq!(
             error.to_string(),
-            "`new` matches 2 symbols in /repo/src/lib.rs"
+            format!(
+                "`new` matches 2 symbols in {}",
+                absolute("/repo/src/lib.rs").display()
+            )
         );
         assert_eq!(
             error.help(),
@@ -780,7 +786,10 @@ mod tests {
         assert_eq!(error.code(), "read-unsupported-language");
         assert_eq!(
             error.to_string(),
-            "no language for `.png` files (/repo/logo.png)"
+            format!(
+                "no language for `.png` files ({})",
+                absolute("/repo/logo.png").display()
+            )
         );
         assert_eq!(
             error.help(ReadRole::Target, "logo.png"),
