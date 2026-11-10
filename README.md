@@ -23,7 +23,44 @@ From a checkout:
 cargo install --path crates/supdoc --locked
 ```
 
-`supdoc upgrade --yes` installs the latest release. It works only for a `cargo install` from crates.io.
+`cargo binstall supdoc` downloads the release binary instead of building it.
+
+Or download a release archive. Each release has one `supdoc-VERSION-TARGET.tar.gz` per platform and a
+`SHA256SUMS` file; the release page lists the targets. On macOS or Linux:
+
+```bash
+VERSION=0.5.0
+TARGET=aarch64-apple-darwin
+BASE=https://github.com/aidenzepp/supdoc/releases/download/v$VERSION
+curl -fsSLO "$BASE/supdoc-$VERSION-$TARGET.tar.gz"
+curl -fsSLO "$BASE/SHA256SUMS"
+sha256sum -c --ignore-missing SHA256SUMS  # macOS without sha256sum: shasum -a 256 -c --ignore-missing SHA256SUMS
+gh attestation verify "supdoc-$VERSION-$TARGET.tar.gz" -R aidenzepp/supdoc  # optional
+tar -xzf "supdoc-$VERSION-$TARGET.tar.gz"
+install -m 755 "supdoc-$VERSION-$TARGET/supdoc" ~/.local/bin/  # any directory on PATH
+```
+
+On Windows, in PowerShell:
+
+```powershell
+$Version = "0.5.0"; $Target = "x86_64-pc-windows-msvc"
+$Base = "https://github.com/aidenzepp/supdoc/releases/download/v$Version"
+$Archive = "supdoc-$Version-$Target.tar.gz"
+Invoke-WebRequest "$Base/$Archive" -OutFile $Archive
+Invoke-WebRequest "$Base/SHA256SUMS" -OutFile SHA256SUMS
+$Want = ((Select-String -Path SHA256SUMS -SimpleMatch $Archive).Line -split " ")[0]
+if ((Get-FileHash $Archive -Algorithm SHA256).Hash.ToLower() -ne $Want) { throw "checksum mismatch" }
+tar -xzf $Archive
+New-Item -ItemType Directory -Force "$HOME\.local\bin" | Out-Null
+Copy-Item "supdoc-$Version-$Target\supdoc.exe" "$HOME\.local\bin\"
+```
+
+Put that directory on your `PATH`.
+
+`supdoc upgrade --yes` installs the latest release the way you installed supdoc. A `cargo install` from
+crates.io upgrades through cargo, and a release binary is replaced after its archive passes the
+checksum. On Windows a `cargo install` can't be replaced while supdoc runs, so `upgrade` prints the
+cargo command to run from another shell. Any other install is refused with the manual step.
 
 ## Start
 
@@ -78,7 +115,7 @@ Commit `supdoc.config.toml` and `supdoc.lock`, and run `supdoc check` in CI.
 | `schema [COMMAND]` | no | Prints the JSON Schema of a command's `--json` output |
 | `completions SHELL` | no | Prints a shell completion script |
 | `skill install` | skill files | Installs supdoc's agent skill |
-| `upgrade [VERSION]` | the binary | Installs a newer or older supdoc with cargo |
+| `upgrade [VERSION]` | the binary | Installs a newer or older supdoc, through cargo or from a release archive |
 | `trust [PATH]` | the trust store | Trusts a checkout to run code-block tools that load its code; `--revoke` undoes it |
 
 `update`, `fix`, `namespace rename`, `skill install` and `upgrade` preview unless given `--yes`. `init`
@@ -136,7 +173,12 @@ its per-directory configs and path-scoped overrides or ignores would not apply. 
   config that names the global excludes file, a linked worktree's `.git` and `commondir`, the trust
   store, its result cache, and, for `upgrade`, cargo's `.crates2.json`. It never reads, hashes or quotes
   a linked file outside the root, and never quotes an ignore rule or git config line from there.
-- `supdoc upgrade` is the only command that uses the network. Nothing checks for updates on its own.
+- `supdoc upgrade` is the only command that uses the network: cargo for a `cargo install`, and the
+  system curl over HTTPS to GitHub for a release binary. Nothing checks for updates on its own.
+- Release assets can't be replaced after publishing. A checksum, whether from `upgrade` or by hand, shows
+  that the archive matches `SHA256SUMS` from that same release. It doesn't show who built either file;
+  `gh attestation verify` checks that. Neither covers the code inside, which you still trust the project
+  for.
 - Each write supdoc makes is checked to land inside the directory that owns it, just before it
   happens, and an ignore file that is a symlink isn't read. Both checks hold when they are made: a
   file or directory swapped for a symlink while supdoc runs can still send a write outside, or make
