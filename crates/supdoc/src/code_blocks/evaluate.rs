@@ -1469,7 +1469,7 @@ impl BiomeConfigs {
                 Ok(())
             }
             Err(refusal) => {
-                let (reason, warning) = biome_refusal(&refusal, &record.at);
+                let (reason, warning) = biome_refusal(&refusal, &record.at, ON_WINDOWS);
                 if self.first_warning(&refusal) {
                     slots.push(Slot::Found(warning));
                 }
@@ -1490,9 +1490,39 @@ impl BiomeConfigs {
     }
 }
 
+/// Whether this build runs on Windows: the one place the platform picks the cache variables the
+/// no-private-directory texts name, matching `runner::cache_bases`.
+const ON_WINDOWS: bool = cfg!(windows);
+
+/// The environment variables [`runner::cache_bases`] reads for a private directory: `LOCALAPPDATA`
+/// on Windows where Unix reads `HOME`.
+fn cache_variables(windows: bool) -> &'static str {
+    if windows {
+        "`XDG_CACHE_HOME` or `LOCALAPPDATA`"
+    } else {
+        "`XDG_CACHE_HOME` or `HOME`"
+    }
+}
+
+/// Why `tool` didn't run when supdoc had no private directory for `purpose`.
+fn no_private_dir(tool: &str, purpose: &str, windows: bool) -> String {
+    format!(
+        "{tool} needs a private directory under {} {purpose}, and there is none",
+        cache_variables(windows)
+    )
+}
+
+/// What to do about a missing private directory.
+fn set_cache_help(windows: bool) -> String {
+    format!(
+        "set {} to a directory outside the project",
+        cache_variables(windows)
+    )
+}
+
 /// The state reason and the `code-block-not-checked` warning, at `at`, for a block biome isn't
 /// given because of `refusal`.
-fn biome_refusal(refusal: &biome::Refusal, at: &Location) -> (String, Finding) {
+fn biome_refusal(refusal: &biome::Refusal, at: &Location, windows: bool) -> (String, Finding) {
     let (reason, message, help) = match refusal {
         biome::Refusal::Config { file, why, help } => (
             format!("biome config `{file}` {why}"),
@@ -1503,9 +1533,12 @@ fn biome_refusal(refusal: &biome::Refusal, at: &Location) -> (String, Finding) {
             format!("in `{file}`: {help}"),
         ),
         biome::Refusal::NoPrivateDir => (
-            BIOME_NO_PRIVATE_DIR.to_owned(),
-            format!("{BIOME_NO_PRIVATE_DIR}, so its blocks aren't checked"),
-            "set `XDG_CACHE_HOME` or `HOME` to a directory outside the project".to_owned(),
+            biome_no_private_dir(windows),
+            format!(
+                "{}, so its blocks aren't checked",
+                biome_no_private_dir(windows)
+            ),
+            set_cache_help(windows),
         ),
     };
     let finding = Finding::new(NOT_CHECKED, Severity::Warning, message)
@@ -1515,7 +1548,9 @@ fn biome_refusal(refusal: &biome::Refusal, at: &Location) -> (String, Finding) {
 }
 
 /// Why biome didn't run when supdoc had no private directory to keep the config it gives biome in.
-const BIOME_NO_PRIVATE_DIR: &str = "biome needs a private directory under `XDG_CACHE_HOME` or `HOME` for the config supdoc gives it, and there is none";
+fn biome_no_private_dir(windows: bool) -> String {
+    no_private_dir("biome", "for the config supdoc gives it", windows)
+}
 
 /// The rumdl config flags found for each doc directory, and the refusals already warned about.
 #[derive(Debug, Default)]
@@ -1566,7 +1601,7 @@ impl RumdlConfigs {
                 Ok(())
             }
             Err(refusal) => {
-                let (reason, warning) = rumdl_refusal(&refusal, &record.at);
+                let (reason, warning) = rumdl_refusal(&refusal, &record.at, ON_WINDOWS);
                 if !self.warned.contains(&refusal) {
                     self.warned.push(refusal.clone());
                     slots.push(Slot::Found(warning));
@@ -1581,7 +1616,7 @@ impl RumdlConfigs {
 
 /// The state reason and the `code-block-not-checked` warning, at `at`, for a block rumdl isn't
 /// given because of `refusal`.
-fn rumdl_refusal(refusal: &rumdl::Refusal, at: &Location) -> (String, Finding) {
+fn rumdl_refusal(refusal: &rumdl::Refusal, at: &Location, windows: bool) -> (String, Finding) {
     let (reason, message, help) = match refusal {
         rumdl::Refusal::Config { file, why } => (
             format!("rumdl config `{file}` {why}"),
@@ -1591,9 +1626,12 @@ fn rumdl_refusal(refusal: &rumdl::Refusal, at: &Location) -> (String, Finding) {
             ),
         ),
         rumdl::Refusal::NoPrivateDir => (
-            RUMDL_NO_PRIVATE_DIR.to_owned(),
-            format!("{RUMDL_NO_PRIVATE_DIR}, so its blocks aren't checked"),
-            "set `XDG_CACHE_HOME` or `HOME` to a directory outside the project".to_owned(),
+            rumdl_no_private_dir(windows),
+            format!(
+                "{}, so its blocks aren't checked",
+                rumdl_no_private_dir(windows)
+            ),
+            set_cache_help(windows),
         ),
     };
     let finding = Finding::new(NOT_CHECKED, Severity::Warning, message)
@@ -1603,7 +1641,9 @@ fn rumdl_refusal(refusal: &rumdl::Refusal, at: &Location) -> (String, Finding) {
 }
 
 /// Why rumdl didn't run when supdoc had no private directory to keep its config in.
-const RUMDL_NO_PRIVATE_DIR: &str = "rumdl needs a private directory under `XDG_CACHE_HOME` or `HOME` for its config, and there is none";
+fn rumdl_no_private_dir(windows: bool) -> String {
+    no_private_dir("rumdl", "for its config", windows)
+}
 
 /// The tombi config found for each doc directory, and the refusals already warned about.
 #[derive(Debug, Default)]
@@ -1674,7 +1714,7 @@ impl TombiConfigs {
                 self.verified(record, (env, root), slots)
             }
             Err(refusal) => {
-                let (reason, warning) = tombi_refusal(&refusal, &record.at);
+                let (reason, warning) = tombi_refusal(&refusal, &record.at, ON_WINDOWS);
                 if !self.warned.contains(&refusal) {
                     self.warned.push(refusal);
                     slots.push(Slot::Found(warning));
@@ -1802,7 +1842,7 @@ fn schema_warning(at: &Location) -> Finding {
 
 /// The state reason and the `code-block-not-checked` warning, at `at`, for a block tombi isn't
 /// given because of `refusal`.
-fn tombi_refusal(refusal: &tombi::Refusal, at: &Location) -> (String, Finding) {
+fn tombi_refusal(refusal: &tombi::Refusal, at: &Location, windows: bool) -> (String, Finding) {
     let (reason, message, help) = match refusal {
         tombi::Refusal::Config { file, why, help } => (
             format!("tombi config `{file}` {why}"),
@@ -1810,9 +1850,12 @@ fn tombi_refusal(refusal: &tombi::Refusal, at: &Location) -> (String, Finding) {
             format!("in `{file}`: {help}, or mark the blocks `ignore(<why>)`"),
         ),
         tombi::Refusal::NoPrivateDir => (
-            TOMBI_NO_PRIVATE_DIR.to_owned(),
-            format!("{TOMBI_NO_PRIVATE_DIR}, so its blocks aren't checked"),
-            "set `XDG_CACHE_HOME` or `HOME` to a directory outside the project".to_owned(),
+            tombi_no_private_dir(windows),
+            format!(
+                "{}, so its blocks aren't checked",
+                tombi_no_private_dir(windows)
+            ),
+            set_cache_help(windows),
         ),
     };
     let finding = Finding::new(NOT_CHECKED, Severity::Warning, message)
@@ -1822,7 +1865,9 @@ fn tombi_refusal(refusal: &tombi::Refusal, at: &Location) -> (String, Finding) {
 }
 
 /// Why tombi didn't run when supdoc had no private directory to keep its config in.
-const TOMBI_NO_PRIVATE_DIR: &str = "tombi needs a private directory under `XDG_CACHE_HOME` or `HOME` for its config, and there is none";
+fn tombi_no_private_dir(windows: bool) -> String {
+    no_private_dir("tombi", "for its config", windows)
+}
 
 /// The yamlfmt config flags found for each doc directory, and the refusals already warned about.
 #[derive(Debug, Default)]
@@ -1878,7 +1923,7 @@ impl YamlfmtConfigs {
                 Ok(())
             }
             Err(refusal) => {
-                let (reason, warning) = yamlfmt_refusal(&refusal, &record.at);
+                let (reason, warning) = yamlfmt_refusal(&refusal, &record.at, ON_WINDOWS);
                 if !self.warned.contains(&refusal) {
                     self.warned.push(refusal.clone());
                     slots.push(Slot::Found(warning));
@@ -1901,7 +1946,7 @@ impl YamlfmtConfigs {
 
 /// The state reason and the `code-block-not-checked` warning, at `at`, for a block yamlfmt isn't
 /// given because of `refusal`.
-fn yamlfmt_refusal(refusal: &yaml::Refusal, at: &Location) -> (String, Finding) {
+fn yamlfmt_refusal(refusal: &yaml::Refusal, at: &Location, windows: bool) -> (String, Finding) {
     let (reason, message, help) = match refusal {
         yaml::Refusal::Config { file, why } => (
             format!("yamlfmt config `{file}` {why}"),
@@ -1911,9 +1956,12 @@ fn yamlfmt_refusal(refusal: &yaml::Refusal, at: &Location) -> (String, Finding) 
             ),
         ),
         yaml::Refusal::NoPrivateDir => (
-            YAMLFMT_NO_PRIVATE_DIR.to_owned(),
-            format!("{YAMLFMT_NO_PRIVATE_DIR}, so its blocks aren't formatted"),
-            "set `XDG_CACHE_HOME` or `HOME` to a directory outside the project".to_owned(),
+            yamlfmt_no_private_dir(windows),
+            format!(
+                "{}, so its blocks aren't formatted",
+                yamlfmt_no_private_dir(windows)
+            ),
+            set_cache_help(windows),
         ),
     };
     let finding = Finding::new(NOT_CHECKED, Severity::Warning, message)
@@ -1998,7 +2046,9 @@ impl YamllintConfigs {
             }
             Err(refusal) => {
                 if !self.warned.contains(&refusal) {
-                    slots.push(Slot::Found(yamllint_refusal(&refusal, &record.at)));
+                    slots.push(Slot::Found(yamllint_refusal(
+                        &refusal, &record.at, ON_WINDOWS,
+                    )));
                     self.warned.push(refusal);
                 }
                 take_lint_off(record, YAMLLINT_REFUSED)
@@ -2132,7 +2182,7 @@ const YAMLLINT_REFUSED: &str = "supdoc couldn't give yamllint the project's conf
 
 /// The `code-block-not-checked` warning, at `at`, for the blocks yamllint isn't given because of
 /// `refusal`.
-fn yamllint_refusal(refusal: &yaml::Refusal, at: &Location) -> Finding {
+fn yamllint_refusal(refusal: &yaml::Refusal, at: &Location, windows: bool) -> Finding {
     let (message, help) = match refusal {
         yaml::Refusal::Config { file, why } => (
             format!("the project's `{file}` {why}, so its YAML blocks aren't linted"),
@@ -2142,8 +2192,11 @@ fn yamllint_refusal(refusal: &yaml::Refusal, at: &Location) -> Finding {
             ),
         ),
         yaml::Refusal::NoPrivateDir => (
-            format!("{YAMLLINT_NO_PRIVATE_DIR}, so its blocks aren't linted"),
-            "set `XDG_CACHE_HOME` or `HOME` to a directory outside the project".to_owned(),
+            format!(
+                "{}, so its blocks aren't linted",
+                yamllint_no_private_dir(windows)
+            ),
+            set_cache_help(windows),
         ),
     };
     Finding::new(NOT_CHECKED, Severity::Warning, message)
@@ -2152,24 +2205,39 @@ fn yamllint_refusal(refusal: &yaml::Refusal, at: &Location) -> Finding {
 }
 
 /// Why yamllint didn't run when supdoc had no private directory to keep its config in.
-const YAMLLINT_NO_PRIVATE_DIR: &str = "yamllint needs a private directory under `XDG_CACHE_HOME` or `HOME` for its config, and there is none";
+fn yamllint_no_private_dir(windows: bool) -> String {
+    no_private_dir("yamllint", "for its config", windows)
+}
 
 /// Why a YAML block's format step didn't run when supdoc couldn't give yamlfmt the project's
 /// config.
 const YAMLFMT_REFUSED: &str = "supdoc couldn't give yamlfmt the project's config";
 
 /// Why yamlfmt didn't run when supdoc had no private directory to keep its config in.
-const YAMLFMT_NO_PRIVATE_DIR: &str = "yamlfmt needs a private directory under `XDG_CACHE_HOME` or `HOME` for its config, and there is none";
+fn yamlfmt_no_private_dir(windows: bool) -> String {
+    no_private_dir("yamlfmt", "for its config", windows)
+}
 
 /// Why clippy didn't run on a block when [`runner::neutral_dir`] found no private working
-/// directory: its metadata would have nowhere private to go.
-const NO_PRIVATE_DIR: &str =
-    "clippy needs a private working directory under `XDG_CACHE_HOME` or `HOME`, and there is none";
+/// directory: its metadata would have nowhere private to go. Names the cache variables for
+/// `windows`, as [`cache_variables`] does.
+fn no_private_dir_clippy(windows: bool) -> &'static str {
+    if windows {
+        "clippy needs a private working directory under `XDG_CACHE_HOME` or `LOCALAPPDATA`, and there is none"
+    } else {
+        "clippy needs a private working directory under `XDG_CACHE_HOME` or `HOME`, and there is none"
+    }
+}
 
 /// Why clippy didn't run on a block when [`project::target_dir`] found no private directory to
 /// build the project in.
-const NO_PRIVATE_BUILD_DIR: &str =
-    "clippy needs a private build directory under `XDG_CACHE_HOME` or `HOME`, and there is none";
+fn no_private_build_dir(windows: bool) -> &'static str {
+    if windows {
+        "clippy needs a private build directory under `XDG_CACHE_HOME` or `LOCALAPPDATA`, and there is none"
+    } else {
+        "clippy needs a private build directory under `XDG_CACHE_HOME` or `HOME`, and there is none"
+    }
+}
 
 /// Why clippy didn't run on a block when the root's `Cargo.toml` resolves outside the root.
 const MANIFEST_OUTSIDE: &str = "`Cargo.toml` links outside the checkout";
@@ -2303,7 +2371,7 @@ fn link_against(
         Found::InsideRoot(_) => return Against::CargoRefused { inside_root: true },
     };
     let Some(target) = project::target_dir(env, root) else {
-        return Against::Unrunnable(NO_PRIVATE_BUILD_DIR);
+        return Against::Unrunnable(no_private_build_dir(ON_WINDOWS));
     };
     let toolchain = rust.toolchain.env();
     let builder = project::Builder {
@@ -3624,7 +3692,7 @@ fn biome_lint(
 ///
 /// # Errors
 ///
-/// [`NO_PRIVATE_DIR`] when [`runner::neutral_dir`] falls back to `/`, so clippy isn't run.
+/// [`no_private_dir_clippy`] when [`runner::neutral_dir`] falls back to `/`, so clippy isn't run.
 ///
 /// Effect: reads the cache, creates and removes the emit directory, runs clippy, killing it at
 /// the timeout, and writes the cache.
@@ -3638,7 +3706,7 @@ fn run_clippy(
 ) -> LintRan {
     let neutral = runner::neutral_dir(session.env, session.root);
     if neutral == Path::new("/") {
-        return Err(NO_PRIVATE_DIR.into());
+        return Err(no_private_dir_clippy(ON_WINDOWS).into());
     }
     let doc = doc_beneath(session.root, &record.at.file);
     let edition = rust.edition_of(record);
@@ -4638,9 +4706,10 @@ mod tests {
     use super::PROJECT_UNBUILT;
     use super::{
         BlockRecord, Linked, LintRan, MANIFEST_AMBIGUOUS, MANIFEST_OUTSIDE, MANIFEST_UNREADABLE,
-        MAX_WORKERS, OUTSIDE_WORKSPACE, Pending, RustSetup, Session, TIER_LOWERED, in_parallel,
-        not_trusted, refused_build, run_clippy, rust_refusal, tier_gate, trust_warning,
-        unresolved_warning,
+        MAX_WORKERS, OUTSIDE_WORKSPACE, Pending, RustSetup, Session, TIER_LOWERED, biome_refusal,
+        in_parallel, no_private_build_dir, no_private_dir_clippy, not_trusted, refused_build,
+        rumdl_refusal, run_clippy, rust_refusal, tier_gate, tombi_refusal, trust_warning,
+        unresolved_warning, yamlfmt_refusal, yamllint_refusal,
     };
     use crate::cartridges::markdown::cartridge::cartridge as markdown;
     use crate::code_blocks::block::blocks_in;
@@ -4655,6 +4724,7 @@ mod tests {
     use crate::code_blocks::tools::{
         CARTRIDGES, Found, Held, Invocation, Tier, Tool, ToolCartridge, ToolEnv, find,
     };
+    use crate::code_blocks::{biome, rumdl, tombi, yaml};
     use crate::config::code_blocks::{Dialect, Edition};
     use crate::finding::Location;
     use crate::path::AbsolutePath;
@@ -6612,6 +6682,96 @@ mod tests {
                 finding.location.as_ref().map(|at| at.line),
                 Some(4),
                 "at the block line rustfmt named: {finding:?}"
+            );
+        }
+    }
+
+    /// The cache variables each no-private-directory text names, for Windows and elsewhere:
+    /// `LOCALAPPDATA` stands where Unix reads `HOME`, as `runner::cache_bases` does.
+    #[test]
+    fn no_private_dir_texts_name_the_cache_variables_of_the_platform() {
+        let at = Location::in_text(
+            "docs/a.md"
+                .parse()
+                .expect("the fixture source should be valid"),
+            "text",
+            0..4,
+        )
+        .expect("the range should lie in the text");
+        for (windows, variables, fallback) in [
+            (true, "`XDG_CACHE_HOME` or `LOCALAPPDATA`", "LOCALAPPDATA"),
+            (false, "`XDG_CACHE_HOME` or `HOME`", "HOME"),
+        ] {
+            let help = format!("set {variables} to a directory outside the project");
+            let config = |tool: &str, purpose: &str| {
+                format!(
+                    "{tool} needs a private directory under {variables} {purpose}, and there is none"
+                )
+            };
+            let (biome, biome_finding) = biome_refusal(&biome::Refusal::NoPrivateDir, &at, windows);
+            let (rumdl, rumdl_finding) = rumdl_refusal(&rumdl::Refusal::NoPrivateDir, &at, windows);
+            let (tombi, tombi_finding) = tombi_refusal(&tombi::Refusal::NoPrivateDir, &at, windows);
+            let (yamlfmt, yamlfmt_finding) =
+                yamlfmt_refusal(&yaml::Refusal::NoPrivateDir, &at, windows);
+            let yamllint_finding = yamllint_refusal(&yaml::Refusal::NoPrivateDir, &at, windows);
+            assert_eq!(
+                biome,
+                config("biome", "for the config supdoc gives it"),
+                "biome, windows={windows}"
+            );
+            assert_eq!(
+                rumdl,
+                config("rumdl", "for its config"),
+                "rumdl, windows={windows}"
+            );
+            assert_eq!(
+                tombi,
+                config("tombi", "for its config"),
+                "tombi, windows={windows}"
+            );
+            assert_eq!(
+                yamlfmt,
+                config("yamlfmt", "for its config"),
+                "yamlfmt, windows={windows}"
+            );
+            assert_eq!(
+                yamllint_finding.message,
+                format!(
+                    "{}, so its blocks aren't linted",
+                    config("yamllint", "for its config")
+                ),
+                "yamllint message, windows={windows}"
+            );
+            for finding in [
+                &biome_finding,
+                &rumdl_finding,
+                &tombi_finding,
+                &yamlfmt_finding,
+                &yamllint_finding,
+            ] {
+                assert_eq!(
+                    finding.help.as_deref(),
+                    Some(help.as_str()),
+                    "help, windows={windows}"
+                );
+            }
+            assert_eq!(
+                no_private_dir_clippy(windows),
+                format!(
+                    "clippy needs a private working directory under {variables}, and there is none"
+                ),
+                "clippy working directory, windows={windows}"
+            );
+            assert_eq!(
+                no_private_build_dir(windows),
+                format!(
+                    "clippy needs a private build directory under {variables}, and there is none"
+                ),
+                "clippy build directory, windows={windows}"
+            );
+            assert!(
+                biome.contains(fallback),
+                "the text should name {fallback}: {biome}"
             );
         }
     }
