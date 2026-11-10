@@ -60,6 +60,7 @@ use super::tools::{
     self, CustomTool, Found, Invocation, Step, Tier, Tool, ToolCartridge, ToolEnv, find,
 };
 use super::uses::{self, UseState, Written};
+use super::xmllint;
 use super::yaml;
 
 pub(crate) use super::states::{BlockState, CodeBlockCounts};
@@ -1469,11 +1470,14 @@ struct ToolConfigs {
     dockerfmt: DockerfmtVersion,
     /// superhtml's version.
     superhtml: SuperhtmlVersion,
+    /// The blocks xmllint isn't given, and its version.
+    xmllint: XmllintGate,
 }
 
 impl ToolConfigs {
     /// Nothing found yet, with `timeout` limiting each tool run made to find a config or a
-    /// version: tombi's, hadolint's, sqruff's, yamllint's, prettier's, dockerfmt's and superhtml's.
+    /// version: tombi's, hadolint's, sqruff's, yamllint's, prettier's, dockerfmt's, superhtml's
+    /// and xmllint's.
     fn with_timeout(timeout: Option<Duration>) -> Self {
         let mut configs = Self::default();
         configs.tombi.timeout = timeout;
@@ -1483,6 +1487,7 @@ impl ToolConfigs {
         configs.prettier.timeout = timeout;
         configs.superhtml.timeout = timeout;
         configs.dockerfmt.timeout = timeout;
+        configs.xmllint.timeout = timeout;
         configs
     }
 
@@ -1512,6 +1517,7 @@ impl ToolConfigs {
             && self.prettier.verified(record, place, slots)
             && self.dockerfmt.verified(record, place, slots)
             && self.superhtml.verified(record, place, slots)
+            && self.xmllint.give(record, place, slots)
     }
 }
 
@@ -1654,6 +1660,111 @@ impl SuperhtmlVersion {
 /// version.
 const SUPERHTML_UNVERIFIED: &str =
     "the superhtml on `PATH` isn't a version supdoc is verified against";
+
+/// The name of xmllint's cartridge.
+const XMLLINT: &str = "xmllint";
+
+/// The version of the xmllint a run's blocks use, read once.
+#[derive(Debug, Default)]
+struct XmllintGate {
+    /// How long `xmllint --version` may run: the run's tool timeout.
+    timeout: Option<Duration>,
+    /// The version once read (see [`xmllint::version_of`]), and whether its warning has been
+    /// given. `None` until a block needs it.
+    version: Option<(Result<String, String>, bool)>,
+}
+
+impl XmllintGate {
+    /// Whether `record` goes on to its tools once its xmllint lint step has passed two gates. A
+    /// block supdoc never gives xmllint (see [`xmllint::withheld`]) gets its lint step taken off,
+    /// with the reason, and one `code-block-not-checked` warning at the block goes to `slots`;
+    /// xmllint never sees it. Then the xmllint on `PATH` is checked against the versions supdoc
+    /// is verified against (see [`xmllint::VERIFIED`]), read once per run: when it isn't one, or
+    /// can't be read, the lint step doesn't run, with [`XMLLINT_UNVERIFIED`] as its reason, and
+    /// the run's one warning goes to `slots`. Either way a format step by another tool still
+    /// runs. A block whose linter isn't xmllint, or whose xmllint isn't on `PATH` or is inside the
+    /// checkout, is left to the usual lookup.
+    ///
+    /// Effect: runs `xmllint --version` the first time.
+    fn give(
+        &mut self,
+        record: &mut BlockRecord,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> bool {
+        if !record.linter.as_ref().is_some_and(|tool| tool.is(XMLLINT)) {
+            return true;
+        }
+        let withheld = record
+            .pending
+            .as_ref()
+            .and_then(|pending| xmllint::withheld(&pending.input));
+        if let Some(withheld) = withheld {
+            slots.push(Slot::Found(xmllint_withheld(withheld, &record.at)));
+            return take_lint_off(record, withheld.reason());
+        }
+        let Found::OnPath(program) = find(XMLLINT, env, root) else {
+            return true;
+        };
+        let timeout = self.timeout;
+        let (version, warned) = self
+            .version
+            .get_or_insert_with(|| (xmllint::version_of(&program, env, root, timeout), false));
+        let Err(shown) = version else {
+            return true;
+        };
+        if !*warned {
+            *warned = true;
+            slots.push(Slot::Found(
+                Finding::new(
+                    NOT_CHECKED,
+                    Severity::Warning,
+                    format!(
+                        "xmllint from libxml2 {shown} isn't a version supdoc's checks are verified \
+                         against ({}); its XML blocks' lint steps didn't run",
+                        xmllint::VERIFIED.join(", ")
+                    ),
+                )
+                .with_help(format!(
+                    "install a verified xmllint: {}",
+                    tools::XMLLINT_INSTALL
+                ))
+                .with_location(record.at.clone()),
+            ));
+        }
+        take_lint_off(record, XMLLINT_UNVERIFIED)
+    }
+}
+
+/// Why an XML block's lint step didn't run when the xmllint on `PATH` isn't a verified version.
+const XMLLINT_UNVERIFIED: &str = "the xmllint on `PATH` isn't a version supdoc is verified against";
+
+/// The `code-block-not-checked` warning, at `at`, for a block xmllint isn't given because of
+/// `withheld` (see [`xmllint::withheld`]).
+fn xmllint_withheld(withheld: xmllint::Withheld, at: &Location) -> Finding {
+    let help = match withheld {
+        xmllint::Withheld::External => {
+            "supdoc never lets xmllint near a file or URL a block names: drop the DOCTYPE's \
+             `SYSTEM` or `PUBLIC` identifier (a plain `<!DOCTYPE name>` is checked), or mark the \
+             block `lint(off: <reason>)`"
+        }
+        xmllint::Withheld::Entity => {
+            "an entity can expand without bound: replace each entity reference with its text, or \
+             mark the block `lint(off: <reason>)`"
+        }
+        xmllint::Withheld::Encoding => {
+            "write the block in UTF-8, declaring `encoding=\"UTF-8\"` or no encoding, with no \
+             NUL character, or mark the block `lint(off: <reason>)`"
+        }
+    };
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        format!("{}, so its lint step didn't run", withheld.reason()),
+    )
+    .with_help(help)
+    .with_location(at.clone())
+}
 
 /// The version of the prettier a run's blocks use, read once.
 #[derive(Debug, Default)]

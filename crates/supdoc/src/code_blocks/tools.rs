@@ -28,7 +28,7 @@ use crate::path::{self, FixedPath, NativeName, Suffix, fixed};
 
 use super::{
     biome, dockerfmt, eslint, go, hadolint, prettier, pylint, python, rumdl, rust, shell, sqruff,
-    superhtml, tombi, yaml,
+    superhtml, tombi, xmllint, yaml,
 };
 
 /// The variables a tool gets from supdoc's own environment, and no others. Windows adds the
@@ -683,6 +683,12 @@ pub(crate) const SUPERHTML_INSTALL: &str = "download superhtml 0.7.1 from https:
 pub(crate) const HADOLINT_INSTALL: &str = "download hadolint 2.15.1 from https://github.com/hadolint/hadolint/releases/tag/v2.15.1 \
      and put it on PATH";
 
+/// How to install an xmllint supdoc's checks are verified against (see [`xmllint::VERIFIED`]):
+/// xmllint comes with libxml2, which no release supdoc can name ships as a pinned binary, so it is
+/// the system's package.
+pub(crate) const XMLLINT_INSTALL: &str = "install xmllint from libxml2 2.9 with the system's package manager \
+     (`libxml2-utils` on Debian and Ubuntu; macOS ships it in /usr/bin)";
+
 /// How to install a sqruff supdoc's checks are verified against (see [`sqruff::VERIFIED`]):
 /// sqruff ships a binary per platform with a `.sha256` beside it. The release binary, never the
 /// pip package, which carries the jinja and python templaters.
@@ -939,7 +945,7 @@ fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'sta
 }
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 37] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 38] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -1333,6 +1339,23 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 37] = [
         positions: own_positions,
         argv: superhtml_args,
         reader: Reader::Format(superhtml::parse_error),
+    },
+    ToolCartridge {
+        name: "xmllint",
+        language: Language::Xml,
+        binary: "xmllint",
+        loads: Loads::Static,
+        install: XMLLINT_INSTALL,
+        // xmllint reads no config file; `--nocatalogs` keeps it from the system's catalogs, and
+        // `XML_CATALOG_FILES` and the other `XML*` variables never reach it.
+        config_files: &[],
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        holds: every_tag,
+        vars: &[],
+        positions: own_positions,
+        argv: xmllint_args,
+        reader: Reader::Lint(xmllint::lint_verdict),
     },
     ToolCartridge {
         name: "yamlfmt",
@@ -2091,6 +2114,17 @@ fn hadolint_args(invocation: &Invocation<'_>) -> Vec<OsString> {
     args
 }
 
+/// `xmllint`'s arguments, always exactly these whatever the invocation: no output tree
+/// (`--noout`), no network (`--nonet`, which libxml2 2.9 still honors), no catalog
+/// (`--nocatalogs`), then `-` for the block on stdin. Never a flag that loads an external DTD or
+/// entity or expands one (`--loaddtd`, `--valid`, `--dtdvalid`, `--noent`, `--dtdattr`,
+/// `--xinclude`, `--c14n*`, `--huge`): without them libxml2 loads no file and no URL the block
+/// names. supdoc reads the diagnostics on stderr, never the exit status alone (see
+/// [`xmllint::lint_verdict`]).
+fn xmllint_args(_invocation: &Invocation<'_>) -> Vec<OsString> {
+    xmllint::ARGS.map(OsString::from).to_vec()
+}
+
 /// `sqruff fix`'s arguments: the block on stdin (`-`), the fixed SQL on stdout, no config but
 /// the one supdoc names (`--ignore-local-config`), then the private config and the block's
 /// dialect the project contributes (`--config <file> --dialect <name>`, see
@@ -2629,6 +2663,7 @@ mod tests {
                 "sqruff-format Sql Format sqruff Static",
                 "sqruff-lint Sql Lint sqruff Static",
                 "superhtml Html Format superhtml Static",
+                "xmllint Xml Lint xmllint Static",
                 "yamlfmt Yaml Format yamlfmt Static",
                 "yamllint Yaml Lint yamllint Static",
                 "gofmt Go Format gofmt Static",
@@ -2651,6 +2686,35 @@ mod tests {
             args_of("dockerfmt", 1, &[]),
             ["-i", "4", "-n"].map(OsString::from)
         );
+    }
+
+    #[test]
+    fn xmllint_gets_exactly_noout_nonet_nocatalogs_and_stdin_whatever_the_project_or_tag() {
+        let expected = ["--noout", "--nonet", "--nocatalogs", "-"].map(OsString::from);
+        let project = ["--loaddtd", "--noent"].map(OsString::from);
+        for flags in [&[][..], &project[..]] {
+            assert_eq!(args_of("xmllint", 3, flags), expected);
+        }
+        let forbidden = [
+            "--loaddtd",
+            "--valid",
+            "--dtdvalid",
+            "--dtdattr",
+            "--noent",
+            "--xinclude",
+            "--huge",
+            "--c14n",
+            "--c14n11",
+            "--exc-c14n",
+            "--format",
+        ];
+        for arg in args_of("xmllint", 1, &project) {
+            assert!(
+                !forbidden.iter().any(|flag| arg.to_str() == Some(flag))
+                    && !arg.to_string_lossy().contains("c14n"),
+                "xmllint got the forbidden flag {arg:?}"
+            );
+        }
     }
 
     #[test]

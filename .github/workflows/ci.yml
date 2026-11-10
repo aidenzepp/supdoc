@@ -32,6 +32,8 @@ jobs:
         # biome, tombi, yamlfmt, rumdl, hadolint, dockerfmt, sqruff, superhtml, Go and Node are pinned the same way; yamllint and pylint
         # like black. prettier and eslint come from ci/node-tools/package-lock.json, whose
         # integrity hashes `npm ci` checks; --ignore-scripts keeps their install scripts from running.
+        # xmllint has no pinned binary download: it is the runner's libxml2-utils, its version
+        # printed below; supdoc runs only the libxml2 minors in xmllint::VERIFIED.
         run: |
           set -euo pipefail
           tools="$RUNNER_TEMP/code-block-tools"
@@ -92,6 +94,8 @@ jobs:
           ln -s "$tools/pylint/bin/pylint" "$tools/bin/pylint"
           echo "$tools/bin" >> "$GITHUB_PATH"
           echo "$tools/go/bin" >> "$GITHUB_PATH"
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libxml2-utils
           "$tools/bin/shfmt" --version
           "$tools/bin/ruff" --version
           "$tools/bin/black" --version
@@ -104,6 +108,7 @@ jobs:
           "$tools/bin/dockerfmt" version
           "$tools/bin/sqruff" --version
           "$tools/bin/superhtml" version
+          xmllint --version
           "$tools/bin/yamllint" --version
           "$tools/go/bin/go" version
           "$tools/bin/node" --version
