@@ -90,12 +90,14 @@ pub(super) fn verified_binary(
     )?)
 }
 
-/// Replaces the file at `exe` with `binary`, mode 0755, atomically.
+/// Replaces the file at `exe` with `binary`, mode 0755.
 ///
-/// `exe` is the binary's real path. The new bytes go to a fresh file in the same directory, are
-/// synced, and renamed over `exe`; the running process keeps its open image. Every write,
-/// rename and remove is admitted against that directory first. On failure the temporary file is
-/// removed and `exe` is untouched.
+/// `exe` is the binary's real path. The new bytes go to a fresh file in the same directory and
+/// are synced. On Unix the file is renamed over `exe` atomically; the running process keeps its
+/// open image. On Windows a running `.exe` cannot be overwritten but can be renamed, so `exe`
+/// is renamed aside to [`ASIDE_NAME`], the new file is moved to `exe`, and a failed move puts
+/// the original back. Every write, rename and remove is admitted against that directory first.
+/// On failure the temporary file is removed and `exe` is the original.
 ///
 /// Effect: creates, renames and removes files beside `exe`.
 ///
@@ -104,6 +106,23 @@ pub(super) fn verified_binary(
 /// [`ReplaceError`] when `exe` has no directory, a path leaves the directory, or a file
 /// operation fails.
 pub(super) fn replace_exe(exe: &Path, binary: &[u8]) -> Result<(), ReplaceError> {
+    replace_exe_with(exe, binary, cfg!(windows), confine::rename_into)
+}
+
+/// [`replace_exe`] with the way the file is put in place chosen, and the move of the new file
+/// onto `exe` supplied, so a failing move can be tested on any platform.
+///
+/// Effect: creates, renames and removes files beside `exe`.
+///
+/// # Errors
+///
+/// As [`replace_exe`].
+fn replace_exe_with(
+    exe: &Path,
+    binary: &[u8],
+    aside: bool,
+    move_in: impl Fn(&confine::Admitted<'_>, &confine::Admitted<'_>) -> io::Result<()>,
+) -> Result<(), ReplaceError> {
     let dir = exe
         .parent()
         .ok_or_else(|| ReplaceError::NoDirectory(exe.to_path_buf()))?;
@@ -133,7 +152,21 @@ pub(super) fn replace_exe(exe: &Path, binary: &[u8]) -> Result<(), ReplaceError>
         let temp = boundary
             .admit(&temp_path)
             .map_err(|escape| outside(&temp_path, escape))?;
-        confine::rename_into(&temp, &target).map_err(io_error("could not replace", exe))
+        if aside {
+            let aside_path = dir.join(ASIDE_NAME);
+            let aside = boundary
+                .admit(&aside_path)
+                .map_err(|escape| outside(&aside_path, escape))?;
+            confine::rename_into(&target, &aside).map_err(io_error("could not move aside", exe))?;
+            move_in(&temp, &target).map_err(|error| match confine::rename_into(&aside, &target) {
+                Ok(()) => io_error("could not replace", exe)(error),
+                Err(restore) => {
+                    io_error("could not put the original back, it is at", &aside_path)(restore)
+                }
+            })
+        } else {
+            move_in(&temp, &target).map_err(io_error("could not replace", exe))
+        }
     })();
     drop(file);
     if finished.is_err()
@@ -148,7 +181,7 @@ pub(super) fn replace_exe(exe: &Path, binary: &[u8]) -> Result<(), ReplaceError>
 const TEMP_PREFIX: &str = ".supdoc-upgrade-";
 
 /// The name the running `supdoc.exe` is moved aside to on Windows while its replacement goes in.
-const ASIDE_NAME: &str = "supdoc.exe.old";
+pub(super) const ASIDE_NAME: &str = "supdoc.exe.old";
 
 /// A name for the temporary file that no earlier run is likely to have used.
 fn temp_name() -> String {
@@ -357,6 +390,94 @@ mod tests {
             "a directory is skipped silently: {notes:?}"
         );
         assert!(folder.is_dir());
+    }
+
+    #[test]
+    fn a_failed_move_in_after_moving_aside_restores_the_original_and_removes_the_temp_file() {
+        let dir = tempfile::tempdir().expect("a scratch directory should be creatable");
+        let exe = dir.path().join("supdoc");
+        fs::write(&exe, "old").expect("the binary should write");
+
+        let result = replace_exe_with(&exe, b"new binary", true, |_, _| {
+            Err(io::Error::other("injected failure"))
+        });
+
+        assert!(
+            matches!(
+                &result,
+                Err(ReplaceError::Io {
+                    action: "could not replace",
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+        assert_eq!(fs::read(&exe).expect("the original should read"), b"old");
+        assert_eq!(
+            names_in(dir.path()),
+            ["supdoc"],
+            "no aside or temp file may remain"
+        );
+    }
+
+    #[test]
+    fn moving_aside_then_in_leaves_the_new_binary_and_the_old_one_aside() {
+        let dir = tempfile::tempdir().expect("a scratch directory should be creatable");
+        let exe = dir.path().join("supdoc");
+        fs::write(&exe, "old").expect("the binary should write");
+
+        replace_exe_with(&exe, b"new binary", true, confine::rename_into)
+            .expect("the replacement should succeed");
+
+        assert_eq!(
+            fs::read(&exe).expect("the new binary should read"),
+            b"new binary"
+        );
+        assert_eq!(
+            fs::read(dir.path().join(ASIDE_NAME)).expect("the aside file should read"),
+            b"old"
+        );
+        assert_eq!(names_in(dir.path()), ["supdoc", ASIDE_NAME]);
+    }
+
+    #[test]
+    fn a_failed_move_aside_leaves_the_original_in_place() {
+        let dir = tempfile::tempdir().expect("a scratch directory should be creatable");
+        let exe = dir.path().join("supdoc");
+        fs::write(&exe, "old").expect("the binary should write");
+        let blocker = dir.path().join(ASIDE_NAME);
+        fs::create_dir(&blocker).expect("the blocking directory should create");
+        fs::write(blocker.join("keep"), "x").expect("the blocker content should write");
+
+        let result = replace_exe_with(&exe, b"new binary", true, confine::rename_into);
+
+        assert!(
+            matches!(
+                &result,
+                Err(ReplaceError::Io {
+                    action: "could not move aside",
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+        assert_eq!(fs::read(&exe).expect("the original should read"), b"old");
+        assert_eq!(names_in(dir.path()), ["supdoc", ASIDE_NAME]);
+    }
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .expect("the directory should list")
+            .map(|entry| {
+                entry
+                    .expect("the entry should read")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
     }
 
     #[test]

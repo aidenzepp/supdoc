@@ -649,12 +649,26 @@ fn replace_failed(
     CliError::new(
         "cli-upgrade-replace-failed",
         message,
+        replace_failed_help(retry, cfg!(windows)),
+        ExitStatus::Io,
+    )
+}
+
+/// The remedy for a failed replacement: Windows remedies when `windows`, else Unix ones.
+fn replace_failed_help(retry: &str, windows: bool) -> String {
+    if windows {
+        let aside = install::ASIDE_NAME;
+        format!(
+            "Close anything using supdoc.exe or its directory, such as another supdoc or a virus \
+             scanner, and make the directory writable for your user, then run `{retry}` again; \
+             if supdoc.exe is missing and {aside} is beside it, rename {aside} back to supdoc.exe"
+        )
+    } else {
         format!(
             "Make the binary's directory writable for your user and run `{retry}` again; \
              the old binary was left in place"
-        ),
-        ExitStatus::Io,
-    )
+        )
+    }
 }
 
 /// The version to install and, when it differs from the running one, the archive URL and digest
@@ -1225,6 +1239,22 @@ fn cargo_failed(argv: &[String], status: std::process::ExitStatus, stderr: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_replace_failed_help_names_windows_remedies_only_on_windows() {
+        let windows = replace_failed_help("supdoc upgrade 1.0.0 --yes", true);
+        let unix = replace_failed_help("supdoc upgrade 1.0.0 --yes", false);
+
+        assert!(
+            windows.contains("supdoc.exe.old") && windows.contains("virus scanner"),
+            "{windows}"
+        );
+        assert!(!windows.contains("chmod"), "{windows}");
+        assert!(
+            !unix.contains("supdoc.exe") && unix.contains("the old binary was left in place"),
+            "{unix}"
+        );
+    }
 
     #[test]
     fn a_404_for_sha256sums_is_no_asset_and_every_other_failure_is_a_fetch_failure() {
