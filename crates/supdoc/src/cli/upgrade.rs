@@ -35,6 +35,7 @@ use crate::lock::error::shell_quote;
 use crate::output::json::Envelope;
 use crate::output::text::visible;
 use crate::output::{Output, Report, TextContext, preview_note};
+use crate::path::{self, Suffix, fixed};
 
 use super::args::{UpgradeArgs, WriteMode};
 use super::project::command_line;
@@ -435,12 +436,23 @@ fn detect(environment: &Environment, marker: bool) -> Result<Install, CliError> 
     installed_by_cargo(environment).map(Install::Cargo)
 }
 
+/// Where cargo puts the binary named `cargo_bin`: `bin/supdoc` under `cargo_home`, with whatever
+/// follows [`PACKAGE`] in the name (`.exe` on Windows) appended to its file name.
+fn cargo_bin_path(cargo_home: &Path, cargo_bin: &str) -> PathBuf {
+    let bare = path::beneath(cargo_home, &fixed::CARGO_BIN_SUPDOC);
+    cargo_bin
+        .strip_prefix(PACKAGE)
+        .and_then(Suffix::new)
+        .and_then(|suffix| path::with_suffix(&bare, &suffix))
+        .unwrap_or(bare)
+}
+
 /// Whether this binary is the file at `$CARGO_HOME/bin/supdoc` (`supdoc.exe` on Windows).
 fn cargo_owns_exe(environment: &Environment) -> bool {
     let (Some(exe), Ok(cargo_home)) = (&environment.exe, &environment.cargo_home) else {
         return false;
     };
-    fs::canonicalize(cargo_home.join("bin").join(&environment.cargo_bin))
+    fs::canonicalize(cargo_bin_path(cargo_home, &environment.cargo_bin))
         .ok()
         .as_deref()
         == Some(exe.as_path())
@@ -1013,8 +1025,8 @@ fn cargo_home_from(
         home.filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
-            .ok_or(CargoHomeProblem::Unset)?
-            .join(".cargo")
+            .ok_or(CargoHomeProblem::Unset)
+            .map(|home| path::beneath(&home, &fixed::CARGO_DIR))?
     };
     if found.to_str().is_some() {
         Ok(found)
@@ -1096,19 +1108,20 @@ fn installed_by_cargo(environment: &Environment) -> Result<CargoInstall, CliErro
             _ => cannot_tell(&seen),
         });
     };
-    let expected = fs::canonicalize(cargo_home.join("bin").join(&environment.cargo_bin)).ok();
+    let expected = fs::canonicalize(cargo_bin_path(cargo_home, &environment.cargo_bin)).ok();
     if expected.as_deref() != Some(exe.as_path()) {
         return Err(by_location(exe));
     }
-    let record = fs::read_to_string(cargo_home.join(".crates2.json")).map_err(|error| {
-        cannot_tell_with(
-            &seen,
-            &format!(
-                "cargo's install record could not be read: {}",
-                cause(&error)
-            ),
-        )
-    })?;
+    let record =
+        fs::read_to_string(path::beneath(cargo_home, &fixed::CRATES2_JSON)).map_err(|error| {
+            cannot_tell_with(
+                &seen,
+                &format!(
+                    "cargo's install record could not be read: {}",
+                    cause(&error)
+                ),
+            )
+        })?;
     let version = recorded_version(&record, &seen, &environment.cargo_bin)?;
     Ok(CargoInstall {
         version,
@@ -1993,6 +2006,21 @@ mod tests {
                 .message()
                 .contains("git+https://example.com/supdoc#abc"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn cargo_bin_path_appends_what_follows_the_package_name_to_the_bin_file() {
+        let home = Path::new("cargo-home");
+        assert_eq!(
+            cargo_bin_path(home, "supdoc"),
+            home.join("bin").join("supdoc"),
+            "the Unix binary has no suffix"
+        );
+        assert_eq!(
+            cargo_bin_path(home, "supdoc.exe"),
+            home.join("bin").join("supdoc.exe"),
+            "the Windows binary keeps its `.exe`"
         );
     }
 }
