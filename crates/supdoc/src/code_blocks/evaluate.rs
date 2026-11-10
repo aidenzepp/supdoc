@@ -4706,10 +4706,10 @@ mod tests {
     use super::PROJECT_UNBUILT;
     use super::{
         BlockRecord, Linked, LintRan, MANIFEST_AMBIGUOUS, MANIFEST_OUTSIDE, MANIFEST_UNREADABLE,
-        MAX_WORKERS, OUTSIDE_WORKSPACE, Pending, RustSetup, Session, TIER_LOWERED, biome_refusal,
-        in_parallel, no_private_build_dir, no_private_dir_clippy, not_trusted, refused_build,
-        rumdl_refusal, run_clippy, rust_refusal, tier_gate, tombi_refusal, trust_warning,
-        unresolved_warning, yamlfmt_refusal, yamllint_refusal,
+        MAX_WORKERS, ON_WINDOWS, OUTSIDE_WORKSPACE, Pending, RustSetup, Session, TIER_LOWERED,
+        biome_refusal, in_parallel, no_private_build_dir, no_private_dir_clippy, not_trusted,
+        refused_build, rumdl_refusal, run_clippy, rust_refusal, tier_gate, tombi_refusal,
+        trust_warning, unresolved_warning, yamlfmt_refusal, yamllint_refusal,
     };
     use crate::cartridges::markdown::cartridge::cartridge as markdown;
     use crate::code_blocks::block::blocks_in;
@@ -6774,5 +6774,18 @@ mod tests {
                 "the text should name {fallback}: {biome}"
             );
         }
+    }
+
+    /// The platform production picks: the host's own cache variable.
+    #[test]
+    fn production_names_the_cache_variable_of_the_host() {
+        let named = no_private_dir_clippy(ON_WINDOWS);
+        let (present, absent) = if cfg!(windows) {
+            ("`LOCALAPPDATA`", "`HOME`")
+        } else {
+            ("`HOME`", "`LOCALAPPDATA`")
+        };
+        assert!(named.contains(present), "should name {present}: {named}");
+        assert!(!named.contains(absent), "should not name {absent}: {named}");
     }
 }
