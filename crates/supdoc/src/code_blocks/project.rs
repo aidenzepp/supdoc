@@ -314,10 +314,8 @@ pub(crate) fn target_dir(env: &ToolEnv, root: &Path) -> Option<TargetDir> {
 ///
 /// Effect: reads metadata along `dir`, then creates the directory.
 fn private(cache: &Path, dir: &Path, real_root: &Path) -> bool {
-    let existing = dir
-        .ancestors()
-        .find_map(|ancestor| ancestor.canonicalize().ok());
-    if existing.is_none_or(|existing| existing.starts_with(real_root)) {
+    let root = Boundary::resolve(real_root);
+    if !runner::nearest_ancestor_outside(&root, dir) {
         return false;
     }
     let (Some(cache), Some(given)) = (runner::exact(cache), runner::exact(dir)) else {
@@ -326,8 +324,7 @@ fn private(cache: &Path, dir: &Path, real_root: &Path) -> bool {
     if runner::create_private(&Boundary::resolve(&cache), &given).is_none() {
         return false;
     }
-    dir.canonicalize()
-        .is_ok_and(|real| !real.starts_with(real_root))
+    runner::lies_outside(&root, dir)
 }
 
 /// `bytes` as lowercase hex.
@@ -1851,6 +1848,29 @@ mod tests {
         assert!(
             disk.join("supdoc/code-blocks/target").is_dir(),
             "the target dir should be created where the base leads"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_base_linked_into_or_a_root_that_is_missing_gives_no_target_dir() {
+        let (dir, root) = root_dir();
+        let linked = dir.path().join("linked");
+        std::os::unix::fs::symlink(&root, &linked).expect("the link should be creatable");
+        let env = env_of(&[("XDG_CACHE_HOME", linked.into_os_string())]);
+        let home = dir.path().join("home");
+        let env_home = env_of(&[("HOME", home.clone().into_os_string())]);
+
+        assert_eq!(target_dir(&env, &root), None);
+        assert_eq!(target_dir(&env_home, &dir.path().join("gone")), None);
+        assert!(
+            !home.exists(),
+            "nothing should be created for a missing root"
+        );
+        assert_eq!(
+            fs::read_dir(&root).expect("the root should list").count(),
+            1,
+            "only src should be in the root"
         );
     }
 }
