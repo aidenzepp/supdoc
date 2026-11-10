@@ -163,15 +163,12 @@ jobs:
           if [ "$status" -ge 2 ]; then exit "$status"; fi
 
   windows:
-    name: windows build (inventory, not required) (${{ matrix.os }})
+    name: windows build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [windows-2025, windows-11-arm]
-    # Measures the Windows port; failures are bucketed by cause, never gating. Remove once the
-    # port is repaired and this job becomes required.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
