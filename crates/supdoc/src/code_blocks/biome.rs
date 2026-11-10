@@ -21,7 +21,7 @@ use super::lint::{self, Diagnostic};
 use super::runner::{self, Failure, Ran};
 use super::tools::ToolEnv;
 use crate::config::confine::{self, Admitted, Boundary};
-use crate::path::{self, AbsolutePath, Component, Pointer, fixed};
+use crate::path::{self, AbsolutePath, Component, Pointer, Suffix, fixed};
 
 /// The most bytes of a config supdoc reads.
 const MAX_CONFIG: u64 = 64 * 1024;
@@ -345,10 +345,9 @@ impl LintFile {
                 || PathBuf::from(doc.file_name().unwrap_or_default()),
                 Path::to_path_buf,
             );
-        let mut name = placed.file_name()?.to_os_string();
-        name.push(format!(".{index}.{}", extension(tag)));
+        let suffix = Suffix::new(&format!(".{index}.{}", extension(tag)))?;
         let file = AbsolutePath::new(&path::rebase(
-            &placed.with_file_name(name),
+            &path::with_suffix(&placed, &suffix)?,
             Path::new(""),
             run.dir.as_path(),
         )?)?;
