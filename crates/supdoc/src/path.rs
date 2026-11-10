@@ -340,6 +340,14 @@ pub(crate) mod fixed {
     pub(crate) const HADOLINT_CONFIG_DIR: FixedPath = FixedPath::new("hadolint-config");
     /// hadolint's private config file name.
     pub(crate) const HADOLINT_YAML: FixedPath = FixedPath::new("hadolint.yaml");
+    /// sqruff's private config directory beneath the cache base.
+    pub(crate) const SQRUFF_CONFIG_DIR: FixedPath = FixedPath::new("sqruff-config");
+    /// sqruff's private config file name.
+    pub(crate) const SQRUFF_CFG: FixedPath = FixedPath::new("sqruff.cfg");
+    /// The one config name supdoc looks for sqruff's project config by in a directory: sqruff's
+    /// own `.sqruff`. Its other names (`.sqruff.ini`, `sqruff.toml`, `.sqlfluff`,
+    /// `pyproject.toml`) are never read.
+    pub(crate) const DOT_SQRUFF: FixedPath = FixedPath::new(".sqruff");
     /// The default state base beneath `HOME`.
     pub(crate) const LOCAL_STATE: FixedPath = FixedPath::new(".local/state");
     /// The trust store file.
@@ -1272,6 +1280,9 @@ mod tests {
             fixed::CONFIG_YAML,
             fixed::HADOLINT_CONFIG_DIR,
             fixed::HADOLINT_YAML,
+            fixed::SQRUFF_CONFIG_DIR,
+            fixed::SQRUFF_CFG,
+            fixed::DOT_SQRUFF,
             fixed::LOCAL_STATE,
             fixed::TRUSTED_ROOTS,
             fixed::TRUSTED_ROOTS_LOCK,
