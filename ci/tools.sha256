@@ -52,6 +52,13 @@
 #   sum:     https://github.com/quarylabs/sqruff/releases/download/v0.44.0/sqruff-linux-x86_64-musl.tar.gz.sha256
 #            (the same as GitHub's asset digest for it; cross-checked against a local download on 2026-11-10)
 #
+# superhtml v0.7.1
+#   tarball: https://github.com/kristoff-it/superhtml/releases/download/v0.7.1/x86_64-linux-musl.tar.xz
+#            (saved as superhtml-0.7.1-x86_64-linux-musl.tar.xz)
+#   sum:     the release publishes no checksum file; this is the asset digest GitHub publishes
+#            for it, https://api.github.com/repos/kristoff-it/superhtml/releases/tags/v0.7.1 (assets[].digest)
+#            (cross-checked against a local download on 2026-11-10)
+#
 # Go 1.27.3 (gofmt and go vet; actions/setup-go does not verify toolchain checksums)
 #   tarball: https://go.dev/dl/go1.27.3.linux-amd64.tar.gz
 #   sum:     the sha256 for go1.27.3.linux-amd64.tar.gz in https://go.dev/dl/?mode=json
@@ -74,5 +81,6 @@ f527d1374765d826c1627ceab3d1f46e548268731a495b5b12a3af529b3d79e8  rumdl-v0.3.2-x
 c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507  hadolint-linux-x86_64
 c77c7fe6c068de8d2132cbc00b3d17e53e8bcd0ae2bb14f0dadf42c8f6206247  dockerfmt-v0.6.0-linux-amd64.tar.gz
 3d0dd223770e99fb17199c16327bdf15bf238261a001815aa172f140817d7e9a  sqruff-linux-x86_64-musl.tar.gz
+e5493cb412ea50e3686972f6e114137f0d4f612388d8041a294c8314efa55b35  superhtml-0.7.1-x86_64-linux-musl.tar.xz
 65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40  go1.27.3.linux-amd64.tar.gz
 48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75  node-v24.22.2-linux-x64.tar.xz
