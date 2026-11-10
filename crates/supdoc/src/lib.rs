@@ -240,7 +240,7 @@ pub(crate) mod code_blocks {
     /// eslint's lint step, a project-tier TypeScript and JavaScript linter.
     mod eslint;
 
-    /// TypeScript, JavaScript and JSON's format and lint steps, run by biome.
+    /// TypeScript, JavaScript, JSON and CSS's format and lint steps, run by biome.
     mod biome;
     /// Markdown's format and lint steps, run by rumdl.
     mod rumdl;
