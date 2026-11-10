@@ -2221,6 +2221,7 @@ fn executable(_meta: &std::fs::Metadata) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use crate::cli::testing::symlink;
     use std::ffi::{OsStr, OsString};
     use std::fs;
@@ -2229,9 +2230,11 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        CARTRIDGES, Cwd, Found, Hold, Invocation, Tier, ToolCartridge, ToolEnv, find, find_in,
-        hold, search_dirs, under_same_file,
+        CARTRIDGES, Cwd, Found, Hold, Invocation, Tier, ToolCartridge, ToolEnv, find, hold,
+        search_dirs,
     };
+    #[cfg(unix)]
+    use super::{find_in, under_same_file};
     use crate::code_blocks::fragment::{Frame, Kind};
     use crate::config::code_blocks::{Dialect, Edition, Language};
     use crate::path::{FixedPath, fixed};
