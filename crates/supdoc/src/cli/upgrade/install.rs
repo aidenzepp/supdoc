@@ -144,12 +144,71 @@ pub(super) fn replace_exe(exe: &Path, binary: &[u8]) -> Result<(), ReplaceError>
     finished
 }
 
+/// The prefix of the temporary files an upgrade creates beside the binary.
+const TEMP_PREFIX: &str = ".supdoc-upgrade-";
+
+/// The name the running `supdoc.exe` is moved aside to on Windows while its replacement goes in.
+const ASIDE_NAME: &str = "supdoc.exe.old";
+
 /// A name for the temporary file that no earlier run is likely to have used.
 fn temp_name() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.subsec_nanos());
-    format!(".supdoc-upgrade-{}-{nanos}", std::process::id())
+    format!("{TEMP_PREFIX}{}-{nanos}", std::process::id())
+}
+
+/// Whether `name` has the shape of a file an earlier upgrade left: the temporary prefix followed
+/// by something, or exactly the Windows aside name.
+fn is_leftover_name(name: &str) -> bool {
+    name == ASIDE_NAME
+        || name
+            .strip_prefix(TEMP_PREFIX)
+            .is_some_and(|rest| !rest.is_empty())
+}
+
+/// Removes the files an earlier upgrade left beside `exe`, and says what it could not remove.
+///
+/// Only regular files named like [`temp_name`]'s output or [`ASIDE_NAME`] go: a symlink, a
+/// directory, any other name, and `exe` itself stay. Each removal is admitted against `exe`'s
+/// directory first. A failure is returned as a note, never as an error.
+///
+/// Effect: lists the directory beside `exe` and removes the leftover files in it.
+pub(super) fn remove_leftovers(exe: &Path) -> Vec<String> {
+    let Some(dir) = exe.parent() else {
+        return Vec::new();
+    };
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return vec![format!(
+                "Could not look for files an earlier upgrade left in {}: {error}",
+                shown(dir)
+            )];
+        }
+    };
+    let boundary = Boundary::resolve(dir);
+    let mut notes = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let leftover = entry.file_name().to_str().is_some_and(is_leftover_name);
+        let regular = entry.file_type().is_ok_and(|kind| kind.is_file());
+        if !leftover || !regular || path == exe {
+            continue;
+        }
+        let removed = match boundary.admit(&path) {
+            Ok(admitted) => confine::remove_file(&admitted).map_err(|error| error.to_string()),
+            Err(_) => Err("it lies outside the binary's directory".to_owned()),
+        };
+        if let Err(reason) = removed {
+            notes.push(format!(
+                "Could not remove {}, left by an earlier upgrade: {reason}",
+                shown(&path)
+            ));
+        }
+    }
+    notes.sort();
+    notes
 }
 
 /// Gives `file` exactly [`BINARY_MODE`], whatever the umask was at creation.
@@ -178,6 +237,26 @@ fn set_mode(_file: &fs::File) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_exact_leftover_shapes_are_leftover_names() {
+        for name in [
+            ".supdoc-upgrade-123-456",
+            ".supdoc-upgrade-x",
+            "supdoc.exe.old",
+        ] {
+            assert!(is_leftover_name(name), "{name} should be a leftover");
+        }
+        for name in [
+            "supdoc-upgrade",
+            ".supdoc-upgrade",
+            ".supdoc-upgrade-",
+            "supdoc",
+            "supdoc.exe",
+        ] {
+            assert!(!is_leftover_name(name), "{name} should not be a leftover");
+        }
+    }
 
     #[test]
     fn a_failed_rename_removes_the_temp_file_and_keeps_the_target() {
