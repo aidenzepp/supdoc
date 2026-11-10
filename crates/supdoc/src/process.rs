@@ -118,6 +118,48 @@ fn live_groups_once_spawned() -> Vec<u32> {
         .clone()
 }
 
+/// How many times a spawn that Linux reports busy is tried before its error is returned.
+pub(crate) const BUSY_ATTEMPTS: u32 = 5;
+
+/// The pause between two tries of a busy spawn.
+pub(crate) const BUSY_DELAY: Duration = Duration::from_millis(20);
+
+/// Runs `spawn` under a guard from `begin`, trying again up to [`BUSY_ATTEMPTS`] times in all
+/// while it fails with [`io::ErrorKind::ExecutableFileBusy`]. A success returns its guard.
+///
+/// On Linux an executable just written can fail to spawn with `ETXTBSY` while another thread's
+/// fork still holds its write descriptor; the hold ends within moments. Each try begins its own
+/// guard, and a busy try drops its guard before `pause` runs, so no guard is alive while this
+/// sleeps. Any other error returns at once, and the last busy error returns once the tries run
+/// out.
+///
+/// # Errors
+///
+/// The error of the last `spawn`.
+///
+/// Effect: calls `pause` between tries.
+pub(crate) fn retry_busy<G, T>(
+    mut begin: impl FnMut() -> G,
+    mut spawn: impl FnMut() -> io::Result<T>,
+    mut pause: impl FnMut(),
+) -> io::Result<(G, T)> {
+    let mut attempt = 1;
+    loop {
+        let guard = begin();
+        match spawn() {
+            Ok(spawned) => return Ok((guard, spawned)),
+            Err(error)
+                if error.kind() == io::ErrorKind::ExecutableFileBusy && attempt < BUSY_ATTEMPTS =>
+            {
+                drop(guard);
+                attempt += 1;
+                pause();
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// Whether `pgid` is registered as live.
 #[cfg(test)]
 fn is_live(pgid: u32) -> bool {
