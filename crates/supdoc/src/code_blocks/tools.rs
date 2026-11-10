@@ -23,6 +23,8 @@ use super::format::{ParseError, Positions};
 use super::fragment::{Kind, Support};
 use super::lint;
 use super::runner::{Cwd, Failure, Ran};
+use crate::path::{self, FixedPath, NativeName, Suffix, fixed};
+
 use super::{biome, eslint, go, prettier, pylint, python, rumdl, rust, shell, tombi, yaml};
 
 /// The variables a tool gets from supdoc's own environment, and no others. Windows adds the
@@ -140,7 +142,7 @@ enum Loads {
         cwd: Cwd<'static>,
         /// The directories, relative to the root, searched for its binary before `PATH`, such as
         /// `node_modules/.bin`: where the project installs its own copy.
-        bins: &'static [&'static str],
+        bins: &'static [FixedPath],
     },
 }
 
@@ -252,7 +254,7 @@ pub(crate) struct ToolCartridge {
     pub(crate) install: &'static str,
     /// The config files it reads, by name at the project root: each one's content is part of
     /// its cached results' key.
-    pub(crate) config_files: &'static [&'static str],
+    pub(crate) config_files: &'static [FixedPath],
     /// The values its step's mode accepts, in config and in a block attribute.
     pub(crate) modes: &'static [&'static str],
     /// The fragment kinds it checks, and how.
@@ -293,7 +295,7 @@ impl ToolCartridge {
     /// The root-relative directories searched for its binary before `PATH`: none for a
     /// [`Tier::Static`] tool.
     #[must_use]
-    pub(crate) const fn bins(&self) -> &'static [&'static str] {
+    pub(crate) const fn bins(&self) -> &'static [FixedPath] {
         match self.loads {
             Loads::Static => &[],
             Loads::Project { bins, .. } => bins,
@@ -557,7 +559,7 @@ impl Tool {
     /// The root-relative directories searched for its binary before `PATH`: a cartridge's, and
     /// none for a custom command.
     #[must_use]
-    pub(crate) const fn bins(&self) -> &'static [&'static str] {
+    pub(crate) const fn bins(&self) -> &'static [FixedPath] {
         match self {
             Self::Cartridge(cartridge) => cartridge.bins(),
             Self::Custom(_) => &[],
@@ -642,11 +644,18 @@ impl Tool {
 /// Where a binary was looked for: `on PATH`, after each of the root's `bins` when it has any, as
 /// `in .venv/bin or on PATH`.
 #[must_use]
-pub(crate) fn searched(bins: &[&str]) -> String {
+pub(crate) fn searched(bins: &[FixedPath]) -> String {
     match bins.split_last() {
         None => "on PATH".to_owned(),
-        Some((last, [])) => format!("in {last} or on PATH"),
-        Some((last, rest)) => format!("in {}, {last} or on PATH", rest.join(", ")),
+        Some((last, [])) => format!("in {} or on PATH", last.as_str()),
+        Some((last, rest)) => format!(
+            "in {}, {} or on PATH",
+            rest.iter()
+                .map(FixedPath::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+            last.as_str()
+        ),
     }
 }
 
@@ -911,7 +920,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 29] = [
         binary: "rustfmt",
         loads: Loads::Static,
         install: "rustup component add rustfmt",
-        config_files: &["rustfmt.toml", ".rustfmt.toml"],
+        config_files: &fixed::RUSTFMT_TOOL_CONFIG_FILES,
         modes: FULL_OR_OFF,
         fragments: RUSTFMT_FRAGMENTS,
         holds: every_tag,
@@ -926,7 +935,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 29] = [
         binary: "shfmt",
         loads: Loads::Static,
         install: "go install mvdan.cc/sh/v3/cmd/shfmt@latest",
-        config_files: &[".editorconfig"],
+        config_files: &fixed::EDITORCONFIG_TOOL_CONFIG_FILES,
         modes: FULL_OR_OFF,
         fragments: SHELL_FRAGMENTS,
         holds: every_tag,
@@ -941,7 +950,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 29] = [
         binary: "ruff",
         loads: Loads::Static,
         install: "pipx install ruff",
-        config_files: &["ruff.toml", ".ruff.toml", "pyproject.toml"],
+        config_files: &fixed::RUFF_TOOL_CONFIG_FILES,
         modes: FULL_OR_OFF,
         fragments: PYTHON_FORMAT_FRAGMENTS,
         holds: every_tag,
@@ -956,7 +965,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 29] = [
         binary: "black",
         loads: Loads::Static,
         install: "pipx install black",
-        config_files: &["pyproject.toml"],
+        config_files: &fixed::PYPROJECT_TOOL_CONFIG_FILES,
         modes: FULL_OR_OFF,
         fragments: PYTHON_FORMAT_FRAGMENTS,
         holds: every_tag,
@@ -971,7 +980,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 29] = [
         binary: "ruff",
         loads: Loads::Static,
         install: "pipx install ruff",
-        config_files: &["ruff.toml", ".ruff.toml", "pyproject.toml"],
+        config_files: &fixed::RUFF_TOOL_CONFIG_FILES,
         modes: FULL_OR_OFF,
         fragments: RUFF_FRAGMENTS,
         holds: every_tag,
@@ -986,7 +995,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 29] = [
         binary: "shellcheck",
         loads: Loads::Static,
         install: "cabal install ShellCheck",
-        config_files: &[".shellcheckrc"],
+        config_files: &fixed::SHELLCHECK_TOOL_CONFIG_FILES,
         modes: FULL_OR_OFF,
         fragments: SHELL_FRAGMENTS,
         holds: every_tag,
@@ -1013,7 +1022,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 29] = [
             bins: &[],
         },
         install: "rustup component add clippy",
-        config_files: &["clippy.toml", ".clippy.toml", "Cargo.toml"],
+        config_files: &fixed::CLIPPY_TOOL_CONFIG_FILES,
         modes: FULL_OR_OFF,
         fragments: CLIPPY_FRAGMENTS,
         holds: every_tag,
@@ -1028,7 +1037,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 29] = [
         binary: "biome",
         loads: Loads::Static,
         install: "npm install --global @biomejs/biome",
-        config_files: BIOME_CONFIGS,
+        config_files: &fixed::BIOME_CONFIG_FILES,
         modes: FULL_OR_OFF,
         fragments: BIOME_FORMAT_TS_FRAGMENTS,
         holds: biome::holds,
@@ -1043,7 +1052,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 29] = [
         binary: "biome",
         loads: Loads::Static,
         install: "npm install --global @biomejs/biome",
-        config_files: BIOME_CONFIGS,
+        config_files: &fixed::BIOME_CONFIG_FILES,
         modes: FULL_OR_OFF,
         fragments: BIOME_FORMAT_FRAGMENTS,
         holds: biome::holds,
@@ -1058,7 +1067,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 29] = [
         binary: "biome",
         loads: Loads::Static,
         install: "npm install --global @biomejs/biome",
-        config_files: BIOME_CONFIGS,
+        config_files: &fixed::BIOME_CONFIG_FILES,
         modes: FULL_OR_OFF,
         fragments: BIOME_JSON_FRAGMENTS,
         holds: every_tag,
@@ -1073,7 +1082,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 29] = [
         binary: "biome",
         loads: Loads::Static,
         install: "npm install --global @biomejs/biome",
-        config_files: BIOME_CONFIGS,
+        config_files: &fixed::BIOME_CONFIG_FILES,
         modes: FULL_OR_OFF,
         fragments: BIOME_LINT_TS_FRAGMENTS,
         holds: biome::holds,
@@ -1088,7 +1097,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 29] = [
         binary: "biome",
         loads: Loads::Static,
         install: "npm install --global @biomejs/biome",
-        config_files: BIOME_CONFIGS,
+        config_files: &fixed::BIOME_CONFIG_FILES,
         modes: FULL_OR_OFF,
         fragments: BIOME_LINT_FRAGMENTS,
         holds: biome::holds,
@@ -1103,7 +1112,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 29] = [
         binary: "biome",
         loads: Loads::Static,
         install: "npm install --global @biomejs/biome",
-        config_files: BIOME_CONFIGS,
+        config_files: &fixed::BIOME_CONFIG_FILES,
         modes: FULL_OR_OFF,
         fragments: BIOME_JSON_FRAGMENTS,
         holds: every_tag,
@@ -1118,7 +1127,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 29] = [
         binary: "rumdl",
         loads: Loads::Static,
         install: "pipx install rumdl",
-        config_files: RUMDL_CONFIGS,
+        config_files: &fixed::RUMDL_TOOL_CONFIG_FILES,
         modes: FULL_OR_OFF,
         fragments: &[],
         holds: every_tag,
@@ -1133,7 +1142,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 29] = [
         binary: "rumdl",
         loads: Loads::Static,
         install: "pipx install rumdl",
-        config_files: RUMDL_CONFIGS,
+        config_files: &fixed::RUMDL_TOOL_CONFIG_FILES,
         modes: FULL_OR_OFF,
         fragments: &[],
         holds: every_tag,
@@ -1252,7 +1261,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 29] = [
             },
             // It reads the project's config and imports its modules as its command line would.
             cwd: Cwd::Root,
-            bins: &[".venv/bin"],
+            bins: &fixed::VENV_BINS,
         },
         install: "pipx install 'pylint==4.1.3'",
         // Never cached (see [`ToolCartridge::cacheable`]), so no config file keys its results.
@@ -1283,7 +1292,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 29] = [
             },
             // It reads the project's config and loads its plugins as its command line would.
             cwd: Cwd::Root,
-            bins: &["node_modules/.bin"],
+            bins: &fixed::NODE_BINS,
         },
         install: "npm install --global prettier@3.9.10",
         // Never cached (see [`ToolCartridge::cacheable`]), so no config file keys its results.
@@ -1314,7 +1323,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 29] = [
             },
             // It reads the project's config and loads its plugins as its command line would.
             cwd: Cwd::Root,
-            bins: &["node_modules/.bin"],
+            bins: &fixed::NODE_BINS,
         },
         install: "npm install --global prettier@3.9.10",
         // Never cached (see [`ToolCartridge::cacheable`]), so no config file keys its results.
@@ -1345,7 +1354,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 29] = [
             },
             // It reads the project's config and loads its plugins as its command line would.
             cwd: Cwd::Root,
-            bins: &["node_modules/.bin"],
+            bins: &fixed::NODE_BINS,
         },
         install: "npm install --global prettier@3.9.10",
         // Never cached (see [`ToolCartridge::cacheable`]), so no config file keys its results.
@@ -1376,7 +1385,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 29] = [
             },
             // It reads the project's config and loads its plugins as its command line would.
             cwd: Cwd::Root,
-            bins: &["node_modules/.bin"],
+            bins: &fixed::NODE_BINS,
         },
         install: "npm install --global prettier@3.9.10",
         // Never cached (see [`ToolCartridge::cacheable`]), so no config file keys its results.
@@ -1407,7 +1416,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 29] = [
             },
             // It reads the project's config and loads its plugins as its command line would.
             cwd: Cwd::Root,
-            bins: &["node_modules/.bin"],
+            bins: &fixed::NODE_BINS,
         },
         install: "npm install --global prettier@3.9.10",
         // Never cached (see [`ToolCartridge::cacheable`]), so no config file keys its results.
@@ -1438,7 +1447,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 29] = [
             },
             // It reads the project's config and loads its plugins as its command line would.
             cwd: Cwd::Root,
-            bins: &["node_modules/.bin"],
+            bins: &fixed::NODE_BINS,
         },
         install: "npm install --global eslint@10.14.0",
         // Never cached (see [`ToolCartridge::cacheable`]), so no config file keys its results.
@@ -1469,7 +1478,7 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 29] = [
             },
             // It reads the project's config and loads its plugins as its command line would.
             cwd: Cwd::Root,
-            bins: &["node_modules/.bin"],
+            bins: &fixed::NODE_BINS,
         },
         install: "npm install --global eslint@10.14.0",
         // Never cached (see [`ToolCartridge::cacheable`]), so no config file keys its results.
@@ -1483,19 +1492,6 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 29] = [
         reader: Reader::Lint(eslint::lint_verdict),
     },
 ];
-
-/// The files rumdl's results depend on: its config names (see [`rumdl::CONFIG_FILES`]) and the
-/// `.editorconfig` it reads line lengths from.
-const RUMDL_CONFIGS: &[&str] = &[
-    ".rumdl.toml",
-    "rumdl.toml",
-    ".config/rumdl.toml",
-    "pyproject.toml",
-    ".editorconfig",
-];
-
-/// The config files biome reads, which its cached results are keyed on.
-const BIOME_CONFIGS: &[&str] = &["biome.json", "biome.jsonc", ".biome.json", ".biome.jsonc"];
 
 /// `language`'s default formatter: its first format cartridge, whatever its tier.
 #[must_use]
@@ -1539,9 +1535,9 @@ pub(crate) fn named(language: Language, step: Step, name: &str) -> Option<&'stat
 /// `<doc dir>/<doc file name>.<index>.<extension>`, so the tool finds its config walking up from
 /// the doc's real directory while the block itself arrives on stdin.
 pub(crate) fn virtual_path(doc: &Path, index: usize, extension: &str) -> OsString {
-    let mut name = doc.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".{index}.{extension}"));
-    doc.with_file_name(name).into_os_string()
+    Suffix::new(&format!(".{index}.{extension}"))
+        .and_then(|suffix| path::with_suffix(doc, &suffix))
+        .map_or_else(|| doc.as_os_str().to_owned(), PathBuf::into_os_string)
 }
 
 /// `rustfmt`'s arguments: `--edition <year> --emit stdout`, then the project's `--config-path`.
@@ -1973,7 +1969,7 @@ pub(crate) fn find(binary: &str, env: &ToolEnv, root: &Path) -> Found {
 ///
 /// Effect: reads file metadata in `bins` and along `PATH`, and resolves symlinks.
 #[must_use]
-pub(crate) fn find_in(binary: &str, bins: &[&str], env: &ToolEnv, root: &Path) -> Found {
+pub(crate) fn find_in(binary: &str, bins: &[FixedPath], env: &ToolEnv, root: &Path) -> Found {
     lookup(binary, bins, env.path(), env.pathext(), root)
 }
 
@@ -1982,18 +1978,21 @@ pub(crate) fn find_in(binary: &str, bins: &[&str], env: &ToolEnv, root: &Path) -
 /// Effect: reads file metadata in `bins` and along `path`, and resolves symlinks.
 fn lookup(
     binary: &str,
-    bins: &[&str],
+    bins: &[FixedPath],
     path: Option<&OsStr>,
     pathext: Option<&OsStr>,
     root: &Path,
 ) -> Found {
-    let local = bins.iter().map(|dir| root.join(dir)).find_map(|dir| {
-        candidate_names(binary, pathext)
-            .into_iter()
-            .map(|name| dir.join(name))
-            .find(|candidate| is_executable_file(candidate))
-            .and_then(|candidate| candidate.canonicalize().ok())
-    });
+    let local = bins
+        .iter()
+        .map(|dir| path::beneath(root, dir))
+        .find_map(|dir| {
+            candidate_names(binary, pathext)
+                .iter()
+                .filter_map(|name| in_dir(&dir, name))
+                .find(|candidate| is_executable_file(candidate))
+                .and_then(|candidate| candidate.canonicalize().ok())
+        });
     if let Some(real) = local {
         return Found::InsideRoot(real);
     }
@@ -2046,6 +2045,13 @@ fn candidate_names(binary: &str, pathext: Option<&OsStr>) -> Vec<OsString> {
         .collect()
 }
 
+/// `dir` joined with the candidate `name`, or `None` when `name` would leave `dir` on this
+/// platform.
+fn in_dir(dir: &Path, name: &OsStr) -> Option<PathBuf> {
+    let name = NativeName::new(name.to_str()?)?;
+    Some(path::within(dir, &name))
+}
+
 /// The real path of the first executable regular file named `binary` (or, with `pathext`, one of
 /// its [`candidate_names`]) in [`search_dirs`].
 ///
@@ -2053,7 +2059,7 @@ fn candidate_names(binary: &str, pathext: Option<&OsStr>) -> Vec<OsString> {
 fn first_on_path(binary: &str, path: &OsStr, pathext: Option<&OsStr>) -> Option<PathBuf> {
     let names = candidate_names(binary, pathext);
     search_dirs(path)
-        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
+        .flat_map(|dir| names.iter().filter_map(move |name| in_dir(&dir, name)))
         .filter(|candidate| is_executable_file(candidate))
         .find_map(|candidate| candidate.canonicalize().ok())
 }
@@ -2124,6 +2130,7 @@ mod tests {
     };
     use crate::code_blocks::fragment::{Frame, Kind};
     use crate::config::code_blocks::{Dialect, Edition, Language};
+    use crate::path::{FixedPath, fixed};
 
     /// The cartridge named `name`.
     fn cartridge(name: &str) -> &'static ToolCartridge {
@@ -2246,6 +2253,37 @@ mod tests {
     }
 
     #[test]
+    fn a_name_that_would_leave_the_directory_is_not_looked_up() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let bin = dir.path().join("bin");
+        fs::create_dir(&bin).expect("bin dir");
+        exe(dir.path(), "outside");
+        let path = std::env::join_paths([bin.canonicalize().expect("bin path")]).expect("path");
+        for name in ["../outside", "..", ".", "a/b"] {
+            assert_eq!(super::first_on_path(name, &path, None), None, "{name:?}");
+        }
+        #[cfg(windows)]
+        for name in ["a\\b", "C:x", "a:b"] {
+            assert_eq!(super::first_on_path(name, &path, None), None, "{name:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn on_unix_a_name_with_a_colon_or_backslash_is_found_on_path() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let bin = dir.path().canonicalize().expect("bin path");
+        exe(&bin, "my:fmt");
+        exe(&bin, "a\\b");
+        let path = std::env::join_paths([&bin]).expect("path");
+        for name in ["my:fmt", "a\\b"] {
+            let found = super::first_on_path(name, &path, None)
+                .unwrap_or_else(|| panic!("{name:?} should be found"));
+            assert_eq!(found.file_name(), Some(OsStr::new(name)), "{found:?}");
+        }
+    }
+
+    #[test]
     fn lookup_passes_pathext_to_the_path_search() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let root = dir.path().join("root");
@@ -2264,17 +2302,18 @@ mod tests {
     fn a_root_bin_directory_holding_only_tool_exe_is_the_checkouts_choice_when_pathext_is_given() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let root = dir.path().canonicalize().expect("root path");
-        fs::create_dir(root.join("node_modules")).expect("bin dir");
-        exe(&root.join("node_modules"), "tool.EXE");
+        let bin = root.join("node_modules/.bin");
+        fs::create_dir_all(&bin).expect("bin dir");
+        exe(&bin, "tool.EXE");
         let found = super::lookup(
             "tool",
-            &["node_modules"],
+            &fixed::NODE_BINS,
             None,
             Some(OsStr::new(".EXE")),
             &root,
         );
         assert!(matches!(found, Found::InsideRoot(_)), "{found:?}");
-        let without = super::lookup("tool", &["node_modules"], None, None, &root);
+        let without = super::lookup("tool", &fixed::NODE_BINS, None, None, &root);
         assert_eq!(without, Found::Missing);
     }
 
@@ -2727,7 +2766,7 @@ mod tests {
         let keyed = cartridge("rumdl").config_files;
 
         assert!(
-            crate::code_blocks::rumdl::CONFIG_FILES
+            fixed::RUMDL_CONFIG_FILES
                 .iter()
                 .all(|name| keyed.contains(name)),
             "{keyed:?}"
@@ -2956,7 +2995,7 @@ mod tests {
         stub(&outside, "prettier");
         let env = env_with_path(&[&outside]);
 
-        let found = find_in("prettier", &["node_modules/.bin"], &env, &root);
+        let found = find_in("prettier", &fixed::NODE_BINS, &env, &root);
         let real = root
             .join("node_modules/.bin/prettier")
             .canonicalize()
@@ -2977,7 +3016,7 @@ mod tests {
         fs::create_dir_all(&bin).expect("the bin dir should be creatable");
         symlink(outside.join("eslint"), bin.join("eslint")).expect("the symlink should be made");
 
-        let found = find_in("eslint", &["node_modules/.bin"], &env_with_path(&[]), &root);
+        let found = find_in("eslint", &fixed::NODE_BINS, &env_with_path(&[]), &root);
         assert!(matches!(found, Found::InsideRoot(_)), "{found:?}");
     }
 
@@ -2987,7 +3026,12 @@ mod tests {
         let (_dir, root, outside) = dirs();
         stub(&outside, "pylint");
 
-        let found = find_in("pylint", &[".venv/bin"], &env_with_path(&[&outside]), &root);
+        let found = find_in(
+            "pylint",
+            &fixed::VENV_BINS,
+            &env_with_path(&[&outside]),
+            &root,
+        );
         assert!(matches!(found, Found::OnPath(_)), "{found:?}");
     }
 
@@ -2995,9 +3039,9 @@ mod tests {
     fn only_pylint_prettier_and_eslint_search_a_bin_dir_and_run_from_the_root_so_are_never_cached()
     {
         for tool in &CARTRIDGES {
-            let (bins, cwd): (&[&str], _) = match tool.name {
-                "pylint" => (&[".venv/bin"], Cwd::Root),
-                "prettier" | "eslint" => (&["node_modules/.bin"], Cwd::Root),
+            let (bins, cwd): (&[FixedPath], _) = match tool.name {
+                "pylint" => (&fixed::VENV_BINS, Cwd::Root),
+                "prettier" | "eslint" => (&fixed::NODE_BINS, Cwd::Root),
                 _ => (&[], Cwd::Neutral),
             };
             assert_eq!(tool.bins(), bins, "{}", tool.name);
