@@ -157,6 +157,9 @@ impl Cache {
         }
         field(run.project.map_or(&[][..], |fingerprint| &fingerprint[..]));
         let boundary = Boundary::resolve(root);
+        if boundary.real_inside(root) == Err(ReadEscape::BoundaryUnresolved) {
+            return None;
+        }
         for dir in run.doc.parent().into_iter().flat_map(Path::ancestors) {
             for name in run.tool.config_files {
                 let candidate = crate::path::beneath(dir, name);
@@ -576,6 +579,32 @@ mod tests {
             stdout: b"echo hi\n".to_vec(),
             stderr: b"note\n".to_vec(),
         }
+    }
+
+    #[test]
+    fn a_root_that_stops_resolving_gives_no_key() {
+        let dir = temp();
+        let root = dir.path().join("project");
+        fs::create_dir(&root).expect("the root should be creatable");
+        let program = program(dir.path());
+        let doc = root.join("docs/a.md");
+        let run = Run {
+            tool: shfmt(),
+            program: &program,
+            args: &[],
+            extra: &[],
+            input: "echo hi\n",
+            doc: &doc,
+            project: None,
+        };
+        assert!(
+            Cache::key(&run, &root).is_some(),
+            "a resolving root should give a key"
+        );
+
+        fs::remove_dir(&root).expect("the root should be removable");
+
+        assert_eq!(Cache::key(&run, &root), None);
     }
 
     #[test]
