@@ -733,7 +733,7 @@ mod tests {
 
     use super::{
         BUILD_CAP, Build, BuildFailed, Builder, Lib, OutsideWorkspace, Plan, Refused, Select, argv,
-        artifacts, build, locate, plan, target_dir,
+        artifacts, build, locate, plan, private, target_dir,
     };
     use crate::code_blocks::toolchain::{Refusal, Toolchain};
     use crate::code_blocks::tools::ToolEnv;
@@ -1861,10 +1861,18 @@ mod tests {
         let home = dir.path().join("home");
         let env_home = env_of(&[("HOME", home.clone().into_os_string())]);
 
+        let cache = dir.path().join("cache");
+
         assert_eq!(target_dir(&env, &root), None);
         assert_eq!(target_dir(&env_home, &dir.path().join("gone")), None);
+        // target_dir stops at resolving the root for its hash, so the guard is reached directly.
+        assert!(!private(
+            &cache,
+            &cache.join("target"),
+            &dir.path().join("gone")
+        ));
         assert!(
-            !home.exists(),
+            !home.exists() && !cache.exists(),
             "nothing should be created for a missing root"
         );
         assert_eq!(

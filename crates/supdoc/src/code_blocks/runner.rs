@@ -1292,4 +1292,33 @@ mod tests {
             "only the link should be in the root"
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_private_directory_inside_a_root_nested_in_the_cache_is_refused() {
+        use std::os::unix::fs::DirBuilderExt as _;
+        let dir = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let home = dir.path().join("home");
+        let env = ToolEnv::from_vars(|name| (name == "HOME").then(|| home.clone().into()));
+        let cache = home.join(".cache/supdoc/code-blocks");
+        let root = cache.join("proj");
+        let inside = root.join("inner");
+        let beside = cache.join("beside");
+        for path in [&inside, &beside] {
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(path)
+                .expect("the private directory should be creatable");
+        }
+
+        let neutral = neutral_dir(&env, &root);
+
+        assert_eq!(neutral.parent(), Some(cache.as_path()), "{neutral:?}");
+        assert!(
+            private_dir(&env, &root, &beside).is_some(),
+            "a directory beside the root should be accepted"
+        );
+        assert_eq!(private_dir(&env, &root, &inside), None);
+    }
 }
