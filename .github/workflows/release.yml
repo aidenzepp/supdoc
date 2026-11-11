@@ -14,6 +14,8 @@ on:
         description: "Existing tag to build and draft, for example v0.4.0"
         required: true
         type: string
+  release:
+    types: [published]
   pull_request:
     paths:
       - ".github/workflows/release.yml"
@@ -24,7 +26,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.event_name == 'pull_request' && github.ref || inputs.tag || github.ref_name }}
+  group: release-${{ github.event_name == 'pull_request' && github.ref || github.event_name == 'release' && github.event.release.tag_name || inputs.tag || github.ref_name }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -33,6 +35,7 @@ env:
 jobs:
   build:
     name: build ${{ matrix.target }}
+    if: github.event_name != 'release'
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -211,6 +214,7 @@ jobs:
 
   checksums:
     name: checksums
+    if: github.event_name != 'release'
     needs: build
     runs-on: ubuntu-24.04
     permissions:
@@ -245,7 +249,7 @@ jobs:
 
   publish:
     name: attest and draft release
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && github.event_name != 'release'
     needs: checksums
     runs-on: ubuntu-24.04
     permissions:
@@ -301,3 +305,34 @@ jobs:
             gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
               --title "supdoc $tag" --notes "" assets/supdoc-*.tar.gz assets/SHA256SUMS
           fi
+
+  npm:
+    name: publish to npm
+    if: github.event_name == 'release' && !github.event.release.prerelease && vars.NPM_TRUSTED_PUBLISHING == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      attestations: read
+      contents: read
+      id-token: write
+    env:
+      TAG: ${{ github.event.release.tag_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ format('refs/tags/{0}', github.event.release.tag_name) }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm 11.5.1 or newer.
+      - name: Ensure npm supports trusted publishing
+        run: |
+          set -euo pipefail
+          if ! node -e 'const [a, b, c] = process.argv[1].split(".").map(Number); process.exit(a > 11 || (a === 11 && (b > 5 || (b === 5 && c >= 1))) ? 0 : 1)' "$(npm --version)"; then
+            npm install -g npm@11.6.2
+          fi
+          npm --version
+      - name: Publish the npm packages
+        run: npm/publish.sh "${TAG#v}" --provenance
