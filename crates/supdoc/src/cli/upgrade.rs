@@ -18,6 +18,13 @@
 //! the old file. On Windows the running `supdoc.exe` is renamed to `supdoc.exe.old` first; if
 //! the process dies between that rename and the move-in, no `supdoc.exe` is on disk, and
 //! `supdoc.exe.old` is the copy to rename back.
+//!
+//! A binary another tool owns is refused even with the release marker, naming that tool's own
+//! command: Homebrew, a build from source in a `target/` directory, and an npm package. The npm
+//! packages ship the release binary itself, so supdoc treats a binary as theirs when its path
+//! has a `node_modules` component (npm, npx, pnpm, Bun, Yarn) or an `installed-by-npm` file sits
+//! beside it (an npm cache with no `node_modules`, such as Deno's). Replacing that file would
+//! leave it out of step with the project's lockfile.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -388,7 +395,7 @@ fn run_in(
     marker: bool,
     spawn: impl FnOnce(&[String], &Path, bool) -> Result<(), CliError>,
 ) -> Result<Outcome, CliError> {
-    match detect(environment, marker)? {
+    match detect(environment, marker, args.release.as_ref())? {
         Install::Cargo(installed) => {
             run_cargo(args, context, output, &installed, environment, spawn)
         }
@@ -415,25 +422,36 @@ fn release_marker() -> bool {
 }
 
 /// Decides how this supdoc was installed. Order: the binary is the one cargo recorded (the cargo
-/// route, checked as before); a location another tool owns (Homebrew, a `target/` build), which
-/// is refused even with the release marker, since supdoc never takes over a file another tool
-/// owns; the release marker; then the unknown-location refusal of [`installed_by_cargo`].
+/// route, checked as before); a location another tool owns (an npm package, Homebrew, a
+/// `target/` build), which is refused even with the release marker, since supdoc never takes
+/// over a file another tool owns; the release marker; then the unknown-location refusal of
+/// [`installed_by_cargo`]. `requested` is the version asked for, which an npm refusal names.
+///
+/// Effect: reads the file system, as [`known_location`] and [`installed_by_cargo`] do.
 ///
 /// # Errors
 ///
 /// Returns `cli-upgrade-not-cargo` as [`installed_by_cargo`] does, for a known owner or, with no
 /// marker, an unknown origin.
-fn detect(environment: &Environment, marker: bool) -> Result<Install, CliError> {
+fn detect(
+    environment: &Environment,
+    marker: bool,
+    requested: Option<&ReleaseVersion>,
+) -> Result<Install, CliError> {
     if cargo_owns_exe(environment) {
-        return installed_by_cargo(environment).map(Install::Cargo);
+        return installed_by_cargo(environment, requested).map(Install::Cargo);
     }
-    if let Some(refusal) = environment.exe.as_deref().and_then(known_location) {
+    if let Some(refusal) = environment
+        .exe
+        .as_deref()
+        .and_then(|exe| known_location(exe, requested))
+    {
         return Err(refusal);
     }
     if marker {
         return Ok(Install::ReleaseBinary);
     }
-    installed_by_cargo(environment).map(Install::Cargo)
+    installed_by_cargo(environment, requested).map(Install::Cargo)
 }
 
 /// Where cargo puts the binary named `cargo_bin`: `bin/supdoc` under `cargo_home`, with whatever
@@ -1076,28 +1094,31 @@ struct CargoInstall {
 }
 
 /// Decides how this supdoc was installed, refusing anything but a cargo install from crates.io.
+/// `requested` is the version asked for, which an npm refusal names.
 ///
 /// Effect: reads `$CARGO_HOME/bin/supdoc` (`supdoc.exe` on Windows) and `$CARGO_HOME/.crates2.json`.
 ///
 /// # Errors
 ///
 /// Returns `cli-upgrade-not-cargo` naming what it saw and the manual step for it.
-fn installed_by_cargo(environment: &Environment) -> Result<CargoInstall, CliError> {
+fn installed_by_cargo(
+    environment: &Environment,
+    requested: Option<&ReleaseVersion>,
+) -> Result<CargoInstall, CliError> {
     let seen = environment.exe.as_deref().map_or_else(
         || "an unknown location".to_owned(),
         |exe| exe.display().to_string(),
     );
     let (Some(exe), Ok(cargo_home)) = (&environment.exe, &environment.cargo_home) else {
         return Err(match (&environment.exe, &environment.cargo_home) {
-            (Some(exe), Err(problem)) => {
-                known_location(exe).unwrap_or_else(|| no_cargo_home(*problem, environment.windows))
-            }
+            (Some(exe), Err(problem)) => known_location(exe, requested)
+                .unwrap_or_else(|| no_cargo_home(*problem, environment.windows)),
             _ => cannot_tell(&seen),
         });
     };
     let expected = fs::canonicalize(cargo_bin_path(cargo_home, &environment.cargo_bin)).ok();
     if expected.as_deref() != Some(exe.as_path()) {
-        return Err(by_location(exe));
+        return Err(by_location(exe, requested));
     }
     let record =
         fs::read_to_string(path::beneath(cargo_home, &fixed::CRATES2_JSON)).map_err(|error| {
@@ -1116,14 +1137,35 @@ fn installed_by_cargo(environment: &Environment) -> Result<CargoInstall, CliErro
     })
 }
 
-/// The refusal for a binary outside `$CARGO_HOME/bin`: Homebrew, a build, or unknown.
-fn by_location(exe: &Path) -> CliError {
-    known_location(exe).unwrap_or_else(|| cannot_tell(&exe.display().to_string()))
+/// The refusal for a binary outside `$CARGO_HOME/bin`: an npm package, Homebrew, a build, or
+/// unknown. `requested` is the version asked for, which an npm refusal names.
+///
+/// Effect: reads the file system, as [`known_location`] does.
+fn by_location(exe: &Path, requested: Option<&ReleaseVersion>) -> CliError {
+    known_location(exe, requested).unwrap_or_else(|| cannot_tell(&exe.display().to_string()))
 }
 
-/// The refusal for a binary that is plainly a Homebrew install or a build from source, if it is.
-fn known_location(exe: &Path) -> Option<CliError> {
+/// The refusal for a binary that is plainly an npm package, a Homebrew install or a build from
+/// source, if it is. npm comes first: a global npm install under a Homebrew Node lives in
+/// `/opt/homebrew/lib/node_modules`, and npm, not Homebrew, owns that file. `requested` is the
+/// version asked for, which the npm refusal names.
+///
+/// Effect: checks whether [`fixed::NPM_MARKER`] exists beside `exe`.
+fn known_location(exe: &Path, requested: Option<&ReleaseVersion>) -> Option<CliError> {
     let shown = exe.display().to_string();
+    if from_npm(exe) {
+        let package = requested.map_or_else(
+            || format!("{PACKAGE}@latest"),
+            |version| format!("{PACKAGE}@{}", version.release()),
+        );
+        return Some(not_cargo(
+            format!("supdoc was installed from npm ({shown}), not by cargo"),
+            &format!(
+                "Update the `supdoc` package with the package manager that installed it, such as \
+                 `npm install {package}` (`npm install -g {package}` for a global install)"
+            ),
+        ));
+    }
     let homebrew = exe.components().any(|part| part.as_os_str() == "Cellar")
         || exe.starts_with("/opt/homebrew")
         || exe.starts_with("/home/linuxbrew/.linuxbrew");
@@ -1143,6 +1185,21 @@ fn known_location(exe: &Path) -> Option<CliError> {
     } else {
         None
     }
+}
+
+/// Whether `exe` is the binary of an npm package: a `node_modules` component in its path, or
+/// [`fixed::NPM_MARKER`] beside it. A copy taken out of the package without the marker is no
+/// longer the package's, so it is not refused here.
+///
+/// Effect: checks whether [`fixed::NPM_MARKER`] exists beside `exe`.
+fn from_npm(exe: &Path) -> bool {
+    let in_node_modules = exe
+        .components()
+        .any(|part| matches!(part, Component::Normal(name) if name == "node_modules"));
+    in_node_modules
+        || exe
+            .parent()
+            .is_some_and(|dir| path::beneath(dir, &fixed::NPM_MARKER).is_file())
 }
 
 /// The refusal when no usable cargo home can be found, so cargo's install records cannot be read.
@@ -1509,7 +1566,7 @@ mod tests {
         let (home, environment) = environment_running(true, "supdoc.exe");
         write_record(&home, &["supdoc.exe"]);
 
-        let install = installed_by_cargo(&environment)
+        let install = installed_by_cargo(&environment, None)
             .expect("a Windows install recorded as supdoc.exe should be a cargo install");
 
         assert_eq!(install.cargo_home, home.path().join(".cargo"));
@@ -1520,17 +1577,17 @@ mod tests {
         let (home, environment) = environment_running(true, "supdoc.exe");
         write_record(&home, &["supdoc"]);
 
-        assert!(installed_by_cargo(&environment).is_err());
+        assert!(installed_by_cargo(&environment, None).is_err());
     }
 
     #[test]
     fn a_unix_cargo_install_is_accepted_only_for_the_extensionless_record() {
         let (home, environment) = environment_running(false, "supdoc");
         write_record(&home, &["supdoc"]);
-        assert!(installed_by_cargo(&environment).is_ok());
+        assert!(installed_by_cargo(&environment, None).is_ok());
 
         write_record(&home, &["supdoc.exe"]);
-        assert!(installed_by_cargo(&environment).is_err());
+        assert!(installed_by_cargo(&environment, None).is_err());
     }
 
     #[test]
