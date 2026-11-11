@@ -23,7 +23,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { after, afterEach, before, describe, test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { BuildError, checkManifests, makeExecutable, PLATFORMS } from "../build.mjs";
 
@@ -482,9 +482,9 @@ describe("makeExecutable", () => {
   });
 });
 
-test("extracts from a private copy of the verified bytes, never the original archive", { skip: process.platform === "win32" }, () => {
+test("packages the bytes it hashed even if an archive is swapped right after it is read", { skip: process.platform === "win32" }, () => {
   const fixture = releaseAssets();
-  // A second set of archives whose binaries are evil, with the same names.
+  // A second set of archives with the same names whose binaries are evil.
   const evil = path.join(fixture.root, "evil");
   mkdirSync(evil);
   for (const { target, binary } of EXPECTED) {
@@ -494,27 +494,37 @@ test("extracts from a private copy of the verified bytes, never the original arc
     writeFileSync(path.join(staging, name, binary), "evil\n");
     tar(staging, ["-czf", path.join(evil, `${name}.tar.gz`), name]);
   }
-  // A tar on PATH that swaps the evil archives over the originals, after hashing, then runs tar.
-  const realTar = spawnSync("sh", ["-c", "command -v tar"], { encoding: "utf8" }).stdout.trim();
-  const bin = path.join(fixture.root, "bin");
-  mkdirSync(bin);
-  const log = path.join(fixture.root, "tar-cwd.log");
+  // Preloaded into the build: once the build has read an archive, overwrite it with the evil one.
+  const preload = path.join(fixture.root, "swap.mjs");
   writeFileSync(
-    path.join(bin, "tar"),
-    `#!/bin/sh\npwd >> '${log}'\ncp '${evil}'/*.tar.gz '${fixture.assets}'/\nexec '${realTar}' "$@"\n`,
+    preload,
+    `import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import path from "node:path";
+const read = fs.readFileSync;
+fs.readFileSync = function (file, ...rest) {
+  const bytes = read.call(this, file, ...rest);
+  if (typeof file === "string" && path.dirname(file) === ${JSON.stringify(fixture.assets)} && file.endsWith(".tar.gz")) {
+    fs.copyFileSync(path.join(${JSON.stringify(evil)}, path.basename(file)), file);
+  }
+  return bytes;
+};
+syncBuiltinESMExports();
+`,
   );
-  chmodSync(path.join(bin, "tar"), 0o755);
   const out = path.join(fixture.root, "out");
 
-  const result = runBuild({ ...fixture, out, env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` } });
+  const result = spawnSync(
+    process.execPath,
+    ["--import", pathToFileURL(preload).href, BUILD, "--tag", TAG, "--assets", fixture.assets, "--license", fixture.license, "--out", out],
+    { encoding: "utf8" },
+  );
 
   assert.equal(result.status, 0, `build failed: ${result.stderr}`);
-  const cwds = new Set(readFileSync(log, "utf8").trim().split("\n"));
-  assert.deepEqual([...cwds], [path.join(out, "archives")], "tar should run only on the private copies");
   assert.equal(modeOf(path.join(out, "archives")), 0o700, "the private copies should be in a 0700 directory");
   for (const { name, target, binary } of EXPECTED) {
     const dir = path.join(out, "packages", name.replace("/", "-").replace("@", ""));
-    assert.equal(readFileSync(path.join(dir, "bin", binary), "utf8"), fakeBinary(target), `${name} should hold the verified binary`);
+    assert.equal(readFileSync(path.join(dir, "bin", binary), "utf8"), fakeBinary(target), `${name} should hold the hashed binary`);
   }
 });
 
