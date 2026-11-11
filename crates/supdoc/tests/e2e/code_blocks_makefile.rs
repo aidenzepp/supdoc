@@ -1,5 +1,5 @@
 //! Checking Makefile code blocks, tagged `make`, `makefile`, `Makefile` or `mk`, formatted by
-//! mbake.
+//! mbake and linted by checkmake.
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
@@ -14,9 +14,15 @@ fn finding_kinds(json: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-/// A `makefile` table: mbake formats, and no linter is known yet, so the format step alone
-/// decides a block.
-const MAKEFILE: &str = "[features.code-blocks]\n[features.code-blocks.makefile]\n";
+/// A `makefile` table with checkmake's lint step off, so mbake's format step alone decides a
+/// block.
+const MAKEFILE: &str = "[features.code-blocks]\n[features.code-blocks.makefile]\n\
+                        [features.code-blocks.makefile.checkmake]\nlint = \"off\"\n";
+
+/// A `makefile` table with mbake's format step off, so checkmake's lint step alone decides a
+/// block.
+const LINT_ONLY: &str = "[features.code-blocks]\n[features.code-blocks.makefile]\n\
+                         [features.code-blocks.makefile.mbake]\nformat = \"off\"\n";
 
 /// A recorded `basic` project with [`MAKEFILE`] and `docs/blocks.md` holding `doc`.
 fn project_with(doc: &str) -> Project {
@@ -505,4 +511,467 @@ fn makefile_the_real_mbake_is_never_given_a_block_that_switches_its_format_off()
 
     assert_not_run(&json, "holds `bake-format`");
     assert_eq!(project.read("docs/blocks.md"), doc);
+}
+
+/// A [`makefile_project`] whose table is [`LINT_ONLY`].
+fn lint_project(tag: &str, body: &str) -> Project {
+    let project = makefile_project(tag, body);
+    project.write("supdoc.config.toml", LINT_ONLY);
+    project
+}
+
+/// A fake checkmake in its own directory: an executable `#!/bin/sh` stub at `bin/checkmake` that
+/// prints `checkmake v<version> built at ...` for `--version`. Any other run appends its arguments
+/// to `args`, refuses (exit 5) any but `-o json --config <file> <file>`, copies the config to
+/// `config` and the block file to `block`, writes the block file's path to `path` and the modes
+/// of it and its directory to `modes`, then runs `lint`.
+struct Checkmake {
+    /// Keeps the directory alive until the stub is dropped.
+    dir: tempfile::TempDir,
+}
+
+impl Checkmake {
+    /// The stub, as [`Checkmake`] describes it.
+    fn new(version: &str, lint: &str) -> Self {
+        let dir = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).expect("the stub's bin should be creatable");
+        let script = bin.join("checkmake");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n\
+                 top=\"${{0%/bin/*}}\"\n\
+                 if [ \"$1\" = --version ]; then echo 'checkmake v{version} built at x by y with go'; exit 0; fi\n\
+                 printf '%s\\n' \"$*\" >> \"$top/args\"\n\
+                 [ $# -eq 5 ] && [ \"$1 $2 $3\" = '-o json --config' ] && [ -f \"$4\" ] && [ -f \"$5\" ] || exit 5\n\
+                 /bin/cp \"$4\" \"$top/config\"\n\
+                 /bin/cp \"$5\" \"$top/block\"\n\
+                 printf '%s' \"$5\" > \"$top/path\"\n\
+                 /bin/ls -ld \"${{5%/*}}\" \"${{5%/*/*}}\" \"$5\" > \"$top/modes\"\n\
+                 {lint}\n"
+            ),
+        )
+        .expect("the stub should be writable");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("the stub should be made executable");
+        Self { dir }
+    }
+
+    /// The `PATH` directory holding the stub.
+    fn bin(&self) -> PathBuf {
+        self.dir.path().join("bin")
+    }
+
+    /// What the stub wrote to `name`, empty when it wrote nothing there.
+    fn read(&self, name: &str) -> String {
+        std::fs::read_to_string(self.dir.path().join(name)).unwrap_or_default()
+    }
+}
+
+/// A verified checkmake's version.
+const CHECKMAKE: &str = "0.3.2";
+
+/// A checkmake stub's lint: two `uniquetargets` findings and a `maxbodylength` one, out of order,
+/// with the count on stderr, exit 1.
+const THREE_FINDINGS: &str = "printf '%s' '[{\"rule\":\"uniquetargets\",\"violation\":\"Target \\\"b\\\" defined multiple times (lines 3 and 5).\",\"file_name\":\"x\",\"line_number\":5},{\"rule\":\"uniquetargets\",\"violation\":\"Target \\\"a\\\" defined multiple times (lines 1 and 3).\",\"file_name\":\"x\",\"line_number\":3},{\"rule\":\"maxbodylength\",\"violation\":\"long\",\"file_name\":\"x\",\"line_number\":3}]'; echo 'Error: violations found (3)' >&2; exit 1";
+
+/// The `(line, message)` of each finding in `json`, in order.
+fn lines_and_messages(json: &serde_json::Value) -> Vec<(u64, String)> {
+    array_at(json, "/findings")
+        .iter()
+        .map(|finding| {
+            (
+                finding
+                    .pointer("/location/line")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default(),
+                finding
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn makefile_every_tag_is_linted_and_findings_fail_at_their_doc_lines_sorted_by_line_then_rule() {
+    for tag in ["make", "makefile", "Makefile", "mk"] {
+        let project = lint_project(tag, "a:\n\tx\na:\n\ty\nb:\n\tz");
+        let stub = Checkmake::new(CHECKMAKE, THREE_FINDINGS);
+
+        let json = project
+            .supdoc_in_with(".", &["check", "--json"], &[("PATH", &stub.bin())])
+            .assert_exit(1)
+            .json();
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-lint", "code-block-lint", "code-block-lint"],
+            "{tag}: {json}"
+        );
+        let found = lines_and_messages(&json);
+        let [(6, first), (6, second), (8, _)] = found.as_slice() else {
+            panic!("{tag}: the findings should be at doc lines 6, 6 and 8: {json}");
+        };
+        assert!(
+            first.contains("long") && second.contains("\"a\""),
+            "maxbodylength sorts before uniquetargets on one line: {json}"
+        );
+        assert_eq!(stub.read("block"), "a:\n\tx\na:\n\ty\nb:\n\tz\n", "{tag}");
+    }
+}
+
+#[test]
+fn makefile_checkmake_reads_one_private_file_in_a_private_directory_removed_after_the_run() {
+    let project = lint_project("make", "all:\n\techo");
+    let stub = Checkmake::new(CHECKMAKE, "exit 0");
+
+    let json = check(&project, &stub.bin());
+
+    assert!(finding_kinds(&json).is_empty(), "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+    let path = stub.read("path");
+    assert!(path.ends_with("/block.mk"), "the block file was {path:?}");
+    assert!(
+        !Path::new(&path).exists() && !Path::new(&path).parent().is_some_and(Path::exists),
+        "the block file and its directory should be removed: {path}"
+    );
+    assert!(
+        !path.starts_with(&*project.path("").to_string_lossy()),
+        "the block file should sit outside the project: {path}"
+    );
+    let modes = stub.read("modes");
+    let kinds: Vec<&str> = modes
+        .lines()
+        .map(|line| line.split(' ').next().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|mode| mode.starts_with("drwx------"))
+            .count(),
+        2,
+        "the run's directory and checkmake-lint are 0700: {modes}"
+    );
+    assert!(
+        kinds.iter().any(|mode| mode.starts_with("-rw-------")),
+        "the block file is 0600: {modes}"
+    );
+}
+
+#[test]
+fn makefile_an_error_exit_without_the_json_array_is_a_tool_failure_not_a_pass() {
+    for lint in [
+        "echo 'Error: failed to parse \"x\"' >&2; exit 1",
+        "exit 1",
+        "echo 'RULE  DESCRIPTION'; echo 'Error: violations found (1)' >&2; exit 1",
+        "printf '[]'; echo 'Error: violations found (0)' >&2; exit 1",
+        "echo 'Usage: checkmake'; exit 0",
+    ] {
+        let project = lint_project("make", "all:\n\techo");
+        let stub = Checkmake::new(CHECKMAKE, lint);
+
+        let json = check(&project, &stub.bin());
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-tool-failed"],
+            "{lint}: {json}"
+        );
+        assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 0, "{json}");
+    }
+}
+
+#[test]
+fn makefile_a_minphony_finding_is_a_tool_failure_since_supdoc_switches_it_off() {
+    let project = lint_project("make", "all:\n\techo");
+    let stub = Checkmake::new(
+        CHECKMAKE,
+        "printf '%s' '[{\"rule\":\"minphony\",\"violation\":\"Required target \\\"clean\\\" is missing from the Makefile.\",\"file_name\":\"x\",\"line_number\":1}]'; echo 'Error: violations found (1)' >&2; exit 1",
+    );
+
+    let json = check(&project, &stub.bin());
+
+    assert_eq!(finding_kinds(&json), ["code-block-tool-failed"], "{json}");
+    assert!(
+        at(&json, "/findings/0/message")
+            .as_str()
+            .is_some_and(|message| message.contains("minphony")),
+        "{json}"
+    );
+}
+
+#[test]
+fn makefile_checkmake_always_gets_a_private_config_switching_minphony_off() {
+    let project = lint_project("make", "all:\n\techo");
+    project.write(
+        "checkmake.ini",
+        "output = text\n[default]\nformat = x\n[minphony]\ndisabled = false\nrequired = all\n\
+         [maxbodylength]\nmaxBodyLength = 2\n[uniquetargets]\nignore = a, b\n",
+    );
+    let stub = Checkmake::new(CHECKMAKE, "exit 0");
+    let bare = lint_project("make", "all:\n\techo");
+    let bare_stub = Checkmake::new(CHECKMAKE, "exit 0");
+
+    let json = check(&project, &stub.bin());
+    let bare_json = check(&bare, &bare_stub.bin());
+
+    assert!(finding_kinds(&json).is_empty(), "{json}");
+    assert!(finding_kinds(&bare_json).is_empty(), "{bare_json}");
+    assert_eq!(
+        stub.read("config"),
+        "[minphony]\ndisabled = true\n\n[maxbodylength]\nmaxBodyLength = 2\n\n\
+         [uniquetargets]\nignore = a, b\n"
+    );
+    assert_eq!(bare_stub.read("config"), "[minphony]\ndisabled = true\n");
+}
+
+#[test]
+fn makefile_a_config_switching_off_every_rule_or_one_supdoc_cant_read_leaves_the_blocks_unlinted() {
+    let every = "[maxbodylength]\ndisabled = true\n[phonydeclared]\ndisabled = true\n\
+                 [timestampexpanded]\ndisabled = true\n[uniquetargets]\ndisabled = true\n";
+    let unbounded = "[maxbodylength]\nmaxBodyLength = 999999999\n[phonydeclared]\ndisabled = true\n\
+                     [timestampexpanded]\ndisabled = true\n[uniquetargets]\ndisabled = true\n";
+    for (config, said) in [
+        (every, "switches off every checkmake rule"),
+        (unbounded, "switches off every checkmake rule"),
+        ("[uniquetargets]\ndisabled = TRUE\n", "doesn't accept"),
+        (
+            "[uniqueTargets]\ndisabled = true\n",
+            "isn't a checkmake rule",
+        ),
+        ("[uniquetargets]\ndisabled: true\n", "neither a section"),
+    ] {
+        let project = lint_project("make", "all:\n\techo");
+        project.write("docs/checkmake.ini", config);
+        let stub = Checkmake::new(CHECKMAKE, "exit 0");
+
+        let json = project
+            .supdoc_in_with(".", &["check", "--json"], &[("PATH", &stub.bin())])
+            .assert_exit(0)
+            .json();
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-not-checked"],
+            "{config:?}: {json}"
+        );
+        assert!(
+            at(&json, "/findings/0/message")
+                .as_str()
+                .is_some_and(|message| {
+                    message.contains("the project's `docs/checkmake.ini`") && message.contains(said)
+                }),
+            "{config:?}: {json}"
+        );
+        assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 0, "{json}");
+        assert!(stub.read("args").is_empty(), "{config:?}: checkmake ran");
+    }
+}
+
+#[test]
+fn makefile_only_a_verified_checkmake_version_runs_the_lint_step() {
+    for (version, runs) in [
+        ("0.3.9", true),
+        ("0.4.0", false),
+        ("0.2.2", false),
+        ("1.3.2", false),
+        ("0.3", false),
+    ] {
+        let project = lint_project("make", "all:\n\techo");
+        let stub = Checkmake::new(version, "exit 0");
+
+        let json = project
+            .supdoc_in_with(".", &["check", "--json"], &[("PATH", &stub.bin())])
+            .assert_exit(0)
+            .json();
+
+        if runs {
+            assert!(finding_kinds(&json).is_empty(), "{version}: {json}");
+            assert_eq!(
+                at(&json, "/data/summary/code_blocks/passed"),
+                1,
+                "{version}: {json}"
+            );
+        } else {
+            assert_eq!(
+                finding_kinds(&json),
+                ["code-block-not-checked"],
+                "{version}: {json}"
+            );
+            assert!(
+                at(&json, "/findings/0/message")
+                    .as_str()
+                    .is_some_and(|message| message
+                        .contains("isn't a version supdoc's checks are verified against (0.3)")),
+                "{version}: {json}"
+            );
+            assert_eq!(
+                at(&json, "/data/summary/code_blocks/lint_not_run"),
+                1,
+                "{version}: {json}"
+            );
+            assert!(stub.read("args").is_empty(), "{version}: the lint step ran");
+        }
+    }
+}
+
+#[test]
+fn makefile_a_line_longer_than_checkmake_reads_is_never_given_to_it() {
+    let project = lint_project("make", &format!("A = {}", "x".repeat(65_532)));
+    let stub = Checkmake::new(CHECKMAKE, "exit 0");
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", &stub.bin())])
+        .assert_exit(0)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+    assert!(
+        at(&json, "/findings/0/message")
+            .as_str()
+            .is_some_and(|message| message.contains("longer than 65535 bytes")),
+        "{json}"
+    );
+    assert!(
+        stub.read("args").is_empty(),
+        "checkmake was given the block"
+    );
+}
+
+#[test]
+fn makefile_the_real_checkmake_reports_a_duplicate_target_at_its_doc_line() {
+    let Some(dir) = real_tool_dir(
+        "checkmake",
+        "makefile_the_real_checkmake_reports_a_duplicate_target_at_its_doc_line",
+    ) else {
+        return;
+    };
+    let project = lint_project("make", "foo:\n\ta\nfoo:\n\tb\nNOW = $(shell date)");
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", &dir)])
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(
+        finding_kinds(&json),
+        ["code-block-lint", "code-block-lint"],
+        "{json}"
+    );
+    let found = lines_and_messages(&json);
+    let [(6, duplicate), (8, timestamp)] = found.as_slice() else {
+        panic!("the findings should be at doc lines 6 and 8: {json}");
+    };
+    assert!(duplicate.contains("defined multiple times"), "{json}");
+    assert!(timestamp.contains("\"NOW\""), "{json}");
+}
+
+#[test]
+fn makefile_the_real_checkmake_reports_a_repeated_special_target_at_its_doc_line() {
+    let Some(dir) = real_tool_dir(
+        "checkmake",
+        "makefile_the_real_checkmake_reports_a_repeated_special_target_at_its_doc_line",
+    ) else {
+        return;
+    };
+    // checkmake counts a special target's line one past its own: mid-block that is the variable's
+    // line after it, at the block's end the closing fence's.
+    for (body, line) in [
+        (
+            "all:\n\techo\n.SUFFIXES:\nfoo:\n\tx\n.SUFFIXES: .c\nY = 2",
+            9,
+        ),
+        ("all:\n\techo\n.SUFFIXES:\n.SUFFIXES:", 7),
+    ] {
+        let project = lint_project("make", body);
+
+        let json = project
+            .supdoc_in_with(".", &["check", "--json"], &[("PATH", &dir)])
+            .assert_exit(1)
+            .json();
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-lint"],
+            "{body:?}: {json}"
+        );
+        let found = lines_and_messages(&json);
+        let [(found_line, message)] = found.as_slice() else {
+            panic!("{body:?}: one finding: {json}");
+        };
+        assert_eq!(*found_line, line, "{body:?}: {json}");
+        assert!(
+            message.contains("\".SUFFIXES\" defined multiple times"),
+            "{json}"
+        );
+    }
+}
+
+#[test]
+fn makefile_the_real_checkmake_never_runs_minphony_on_a_block() {
+    let Some(dir) = real_tool_dir(
+        "checkmake",
+        "makefile_the_real_checkmake_never_runs_minphony_on_a_block",
+    ) else {
+        return;
+    };
+    let project = lint_project("make", "build:\n\tcc -o app main.c");
+    project.write(
+        "checkmake.ini",
+        "[minphony]\ndisabled = false\nrequired = all, clean, test\n",
+    );
+    let empty = lint_project("make", "");
+
+    let json = project
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", &dir)])
+        .assert_exit(0)
+        .json();
+    let empty_json = empty
+        .supdoc_in_with(".", &["check", "--json"], &[("PATH", &dir)])
+        .assert_exit(0)
+        .json();
+
+    assert!(finding_kinds(&json).is_empty(), "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+    assert!(finding_kinds(&empty_json).is_empty(), "{empty_json}");
+}
+
+#[test]
+fn makefile_the_real_checkmake_reads_the_projects_config_and_never_one_from_home() {
+    let Some(dir) = real_tool_dir(
+        "checkmake",
+        "makefile_the_real_checkmake_reads_the_projects_config_and_never_one_from_home",
+    ) else {
+        return;
+    };
+    // The project allows two-line bodies; the home config would allow one.
+    let body = "a:\n\tx\n\ty\nb:\n\tx\n\ty\n\tz";
+    let project = lint_project("make", body);
+    project.write("checkmake.ini", "[maxbodylength]\nmaxBodyLength = 2\n");
+    let home = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    std::fs::write(
+        home.path().join("checkmake.ini"),
+        "[maxbodylength]\nmaxBodyLength = 1\n",
+    )
+    .expect("the canary should be writable");
+
+    let json = project
+        .supdoc_in_with(
+            ".",
+            &["check", "--json"],
+            &[("PATH", &dir), ("HOME", home.path())],
+        )
+        .assert_exit(1)
+        .json();
+
+    assert_eq!(finding_kinds(&json), ["code-block-lint"], "{json}");
+    let found = lines_and_messages(&json);
+    let [(7, message)] = found.as_slice() else {
+        panic!("the finding should be at doc line 7: {json}");
+    };
+    assert!(message.contains("allowed length of 2 lines (3)"), "{json}");
 }

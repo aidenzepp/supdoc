@@ -28,6 +28,7 @@ use crate::trust::{Grant, Unread};
 use super::biome;
 use super::block::{CodeBlock, Info};
 use super::cache::{self, Cache};
+use super::checkmake;
 use super::custom;
 use super::dockerfmt;
 use super::eslint;
@@ -140,6 +141,9 @@ pub(crate) struct BlockRecord {
     /// The flags sqruff's lint step is given for it: its own private config and the block's
     /// dialect (see [`sqruff::Project::lint_flags`]). `None` for every other tool.
     sqruff_lint: Option<Vec<OsString>>,
+    /// The flags checkmake is given for it: its own private config (see
+    /// [`checkmake::project_args`]). `None` for every other tool.
+    checkmake: Option<Vec<OsString>>,
     /// What the format step needs, kept while the block is pending.
     pending: Option<Pending>,
 }
@@ -273,6 +277,7 @@ pub(crate) fn evaluate(
             tombi: None,
             yamllint: None,
             sqruff_lint: None,
+            checkmake: None,
             language,
             state,
             steps,
@@ -1065,6 +1070,19 @@ fn mbake_switched_off(at: &Location) -> Finding {
     .with_location(at.clone())
 }
 
+/// The run's one `code-block-not-checked` warning, at `at`, the first Makefile block checkmake
+/// isn't given because it holds a line longer than it reads (see [`checkmake::too_long`]).
+fn checkmake_long_line(at: &Location) -> Finding {
+    Finding::new(
+        NOT_CHECKED,
+        Severity::Warning,
+        "this Makefile block holds a line longer than 65535 bytes, which checkmake can't read \
+         (it never returns), so its lint step didn't run",
+    )
+    .with_help("break the line with `\\` continuations, or mark the block `lint(off: <reason>)`")
+    .with_location(at.clone())
+}
+
 /// The run's one `code-block-not-checked` warning, at `at`, the first Makefile block mbake isn't
 /// given because it holds a control or separator character (see [`mbake::not_given`]).
 fn mbake_control(at: &Location) -> Finding {
@@ -1304,6 +1322,7 @@ impl NotRunWarnings {
             dockerfmt::SWITCHED_OFF => dockerfmt_switched_off(at),
             mbake::SWITCHED_OFF => mbake_switched_off(at),
             mbake::CONTROL => mbake_control(at),
+            checkmake::LONG_LINE => checkmake_long_line(at),
             dockerfmt::NO_INSTRUCTION => {
                 dockerfmt_not_given(at, "holds no instruction, only comments or blank lines")
             }
@@ -1539,6 +1558,8 @@ struct ToolConfigs {
     sqruff: SqruffConfigs,
     /// mbake's.
     mbake: MbakeConfigs,
+    /// checkmake's.
+    checkmake: CheckmakeConfigs,
     /// yamlfmt's.
     yamlfmt: YamlfmtConfigs,
     /// yamllint's.
@@ -1555,12 +1576,13 @@ struct ToolConfigs {
 
 impl ToolConfigs {
     /// Nothing found yet, with `timeout` limiting each tool run made to find a config or a
-    /// version: tombi's, hadolint's, sqruff's, yamllint's, prettier's, dockerfmt's, superhtml's
-    /// and xmllint's.
+    /// version: tombi's, hadolint's, checkmake's, sqruff's, yamllint's, prettier's, dockerfmt's,
+    /// superhtml's and xmllint's.
     fn with_timeout(timeout: Option<Duration>) -> Self {
         let mut configs = Self::default();
         configs.tombi.timeout = timeout;
         configs.hadolint.timeout = timeout;
+        configs.checkmake.timeout = timeout;
         configs.sqruff.timeout = timeout;
         configs.yamllint.timeout = timeout;
         configs.prettier.timeout = timeout;
@@ -1572,7 +1594,7 @@ impl ToolConfigs {
 
     /// Gives `record` the config its tools get, as [`BiomeConfigs::give`],
     /// [`RumdlConfigs::give`], [`TombiConfigs::give`], [`HadolintConfigs::give`],
-    /// [`SqruffConfigs::give`], [`MbakeConfigs::give`],
+    /// [`SqruffConfigs::give`], [`MbakeConfigs::give`], [`CheckmakeConfigs::give`],
     /// [`YamlfmtConfigs::give`] and
     /// [`YamllintConfigs::give`] do, whichever of its formatter and linter runs the tool, so a
     /// custom formatter beside a cartridge linter leaves the linter its config. Whether the block
@@ -1592,6 +1614,7 @@ impl ToolConfigs {
             && running("hadolint").is_none_or(|tool| self.hadolint.give(record, tool, place, slots))
             && running("sqruff").is_none_or(|tool| self.sqruff.give(record, tool, place, slots))
             && running("mbake").is_none_or(|tool| self.mbake.give(record, tool, place, slots))
+            && running(CHECKMAKE).is_none_or(|tool| self.checkmake.give(record, tool, place, slots))
             && self.yamlfmt.give(record, place, slots).is_ok()
             && self.yamllint.give(record, place, slots)
             && self.prettier.verified(record, place, slots)
@@ -2998,6 +3021,166 @@ fn mbake_refusal(refusal: &mbake::Refusal, at: &Location, windows: bool) -> (Str
             format!(
                 "{}, so its blocks aren't checked",
                 no_private_dir(MBAKE, "for its config", windows)
+            ),
+            set_cache_help(windows),
+        ),
+    };
+    let finding = Finding::new(NOT_CHECKED, Severity::Warning, message)
+        .with_help(help)
+        .with_location(at.clone());
+    (reason, finding)
+}
+
+/// The checkmake config found for each doc directory, the refusals already warned about, and the
+/// checkmake version once read.
+#[derive(Debug, Default)]
+struct CheckmakeConfigs {
+    /// Each doc directory's result, in the order they were asked for.
+    found: Vec<(PathBuf, Result<checkmake::Project, checkmake::Refusal>)>,
+    /// The refusals a warning has been added for.
+    warned: Vec<checkmake::Refusal>,
+    /// How long `checkmake --version` may run: the run's tool timeout.
+    timeout: Option<Duration>,
+    /// The checkmake version once read (see [`checkmake::version_of`]), and whether its warning
+    /// has been given. `None` until a block needs it.
+    version: Option<(Result<String, String>, bool)>,
+}
+
+impl CheckmakeConfigs {
+    /// Gives `record`, a Makefile block, the `--config` flags checkmake gets for its doc, found
+    /// once per directory (see [`checkmake::project_args`]), then checks checkmake's version (see
+    /// [`Self::verified`]). A refused config takes only the lint step off, as an unverified
+    /// checkmake does, with its one warning per refusal added to `slots`: a block with another
+    /// format step goes on to it, and one without is settled as not checked. Whether the block
+    /// goes on to its tools.
+    ///
+    /// Effect: reads the config and may create supdoc's private directory and file for it.
+    fn give(
+        &mut self,
+        record: &mut BlockRecord,
+        tool: &Tool,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> bool {
+        if !tool.runs(CHECKMAKE) {
+            return true;
+        }
+        let doc = doc_beneath(root, &record.at.file);
+        let dir = doc.parent().unwrap_or(root).to_path_buf();
+        let found = if let Some((_, found)) = self.found.iter().find(|(known, _)| *known == dir) {
+            found.clone()
+        } else {
+            let found = checkmake::project_args(env, root, &doc);
+            self.found.push((dir, found.clone()));
+            found
+        };
+        match found {
+            Ok(project) => {
+                record.checkmake = Some(project.flags);
+                self.verified(record, (env, root), slots)
+            }
+            Err(refusal) => {
+                let (reason, warning) = checkmake_refusal(&refusal, &record.at, ON_WINDOWS);
+                if !self.warned.contains(&refusal) {
+                    self.warned.push(refusal);
+                    slots.push(Slot::Found(warning));
+                }
+                if formats_without_checkmake(record) {
+                    return take_lint_off(record, CHECKMAKE_REFUSED);
+                }
+                record.state = BlockState::NotChecked(NotChecked::ToolConfig);
+                record.reason = Some(reason);
+                false
+            }
+        }
+    }
+
+    /// Whether `record` goes on to its tools once the checkmake on `PATH` has been checked
+    /// against the versions supdoc is verified against (see [`checkmake::VERIFIED`]), read once
+    /// per run. When it isn't one, or can't be read, `record`'s lint step doesn't run, with
+    /// [`CHECKMAKE_UNVERIFIED`] as its reason, and the run's one warning goes to `slots`; a format
+    /// step by another tool still runs. A checkmake that isn't on `PATH`, or is inside the
+    /// checkout, is left to the usual lookup.
+    ///
+    /// Effect: runs `checkmake --version` the first time.
+    fn verified(
+        &mut self,
+        record: &mut BlockRecord,
+        (env, root): (&ToolEnv, &Path),
+        slots: &mut Vec<Slot>,
+    ) -> bool {
+        let Found::OnPath(program) = find(CHECKMAKE, env, root) else {
+            return true;
+        };
+        let timeout = self.timeout;
+        let (version, warned) = self
+            .version
+            .get_or_insert_with(|| (checkmake::version_of(&program, env, root, timeout), false));
+        let Err(shown) = version else {
+            return true;
+        };
+        if !*warned {
+            *warned = true;
+            slots.push(Slot::Found(
+                Finding::new(
+                    NOT_CHECKED,
+                    Severity::Warning,
+                    format!(
+                        "checkmake {shown} isn't a version supdoc's checks are verified against \
+                         ({}); its Makefile blocks' lint steps didn't run",
+                        checkmake::VERIFIED.join(", ")
+                    ),
+                )
+                .with_help(format!(
+                    "install a verified checkmake: {}",
+                    tools::CHECKMAKE_INSTALL
+                ))
+                .with_location(record.at.clone()),
+            ));
+        }
+        take_lint_off(record, CHECKMAKE_UNVERIFIED)
+    }
+}
+
+/// Whether `record` has a format step that checkmake doesn't run, which goes on when checkmake's
+/// lint step is taken off.
+fn formats_without_checkmake(record: &BlockRecord) -> bool {
+    record
+        .tool
+        .as_ref()
+        .is_some_and(|tool| !tool.runs(CHECKMAKE))
+}
+
+/// Why a Makefile block's lint step didn't run when supdoc couldn't give checkmake the project's
+/// config.
+const CHECKMAKE_REFUSED: &str = "supdoc couldn't give checkmake the project's config";
+
+/// Why a Makefile block's lint step didn't run when the checkmake on `PATH` isn't a verified
+/// version.
+const CHECKMAKE_UNVERIFIED: &str =
+    "the checkmake on `PATH` isn't a version supdoc is verified against";
+
+/// The state reason and the `code-block-not-checked` warning, at `at`, for a block checkmake
+/// isn't given because of `refusal`.
+fn checkmake_refusal(
+    refusal: &checkmake::Refusal,
+    at: &Location,
+    windows: bool,
+) -> (String, Finding) {
+    let (reason, message, help) = match refusal {
+        checkmake::Refusal::Config { file, why } => (
+            format!("checkmake config `{file}` {why}"),
+            format!("the project's `{file}` {why}, so its Makefile blocks aren't linted"),
+            format!(
+                "fix `{file}` as it says, keeping it an INI file of at most 256 KiB inside the \
+                 project, or mark the blocks `ignore(<why>)`"
+            ),
+        ),
+        checkmake::Refusal::NoPrivateDir => (
+            no_private_dir(CHECKMAKE, "for its config", windows),
+            format!(
+                "{}, so its blocks aren't checked",
+                no_private_dir(CHECKMAKE, "for its config", windows)
             ),
             set_cache_help(windows),
         ),
@@ -4431,7 +4614,7 @@ fn run_linter(
     let spawn = |call: &Call<'_>| match (biome, &release) {
         (Some(given), _) => biome_lint(tool, call, &invocation, given, input, session),
         (None, Some(release)) => vet_in_module(call, input, release, session),
-        (None, None) => run_in_place(call, record, session),
+        (None, None) => run_alone(tool, call, &invocation, input, record, session),
     };
     let named = given.filter(|_| record.tombi.is_some());
     let judge = |result: Result<Ran, runner::Failure>| {
@@ -4514,6 +4697,9 @@ fn project_flags<'record>(
 ) -> &'record [OsString] {
     if tool.name == SQRUFF_LINT {
         return record.sqruff_lint.as_deref().unwrap_or_default();
+    }
+    if tool.name == CHECKMAKE {
+        return record.checkmake.as_deref().unwrap_or_default();
     }
     match (&record.yamllint, &record.given) {
         (Some(lint), _) if tool.name == YAMLLINT => &lint.flags,
@@ -4670,6 +4856,9 @@ const DOCKERFMT: &str = "dockerfmt";
 /// The name of mbake's cartridge.
 const MBAKE: &str = "mbake";
 
+/// The name of checkmake's cartridge.
+const CHECKMAKE: &str = "checkmake";
+
 /// The name of superhtml's cartridge.
 const SUPERHTML: &str = "superhtml";
 
@@ -4732,13 +4921,15 @@ const ESLINT_SWITCHED_OFF: &str = "the block holds an `eslint-disable` comment t
 /// off for the whole block (see [`pylint::switches_lint_off`]), it is eslint and the block holds
 /// such an `eslint-disable` comment (see [`eslint::switches_lint_off`]), it is sqruff and the
 /// block holds a `noqa` supdoc can't confirm names only rule codes (see
-/// [`sqruff::switches_lint_off`]), or it is biome lint on an HTML block holding such a
-/// `biome-ignore` comment (see [`biome::switches_html_lint_off`]). `None` otherwise.
+/// [`sqruff::switches_lint_off`]), it is biome lint on an HTML block holding such a
+/// `biome-ignore` comment (see [`biome::switches_html_lint_off`]), or it is checkmake and the
+/// block holds a line too long for it to read (see [`checkmake::too_long`]). `None` otherwise.
 fn switched_off(tool: &ToolCartridge, record: &BlockRecord) -> Option<&'static str> {
     let (switches_off, reason): (fn(&str) -> bool, _) = match tool.name {
         PYLINT => (pylint::switches_lint_off, PYLINT_SWITCHED_OFF),
         ESLINT => (eslint::switches_lint_off, ESLINT_SWITCHED_OFF),
         SQRUFF_LINT => (sqruff::switches_lint_off, SQRUFF_SWITCHED_OFF),
+        CHECKMAKE => (checkmake::too_long, checkmake::LONG_LINE),
         BIOME_LINT if tool.language == Language::Html => {
             (biome::switches_html_lint_off, BIOME_HTML_SWITCHED_OFF)
         }
@@ -4888,6 +5079,76 @@ fn vet_in_module(
     )
     .map(|ran| module.unnamed(&ran));
     drop(module);
+    result
+}
+
+/// Runs `call` for `record`'s block, read as `input`: checkmake, `tool`, reads it from a private
+/// file (see [`checkmake_lint`]); any other tool runs in place (see [`run_in_place`]).
+///
+/// # Errors
+///
+/// The run's failure, as either gives it.
+///
+/// Effect: runs the tool, and for checkmake creates and removes its private directory.
+fn run_alone(
+    tool: &ToolCartridge,
+    call: &Call<'_>,
+    invocation: &Invocation<'_>,
+    input: &str,
+    record: &BlockRecord,
+    session: &Session<'_>,
+) -> Result<Ran, runner::Failure> {
+    if tool.name == CHECKMAKE {
+        checkmake_lint(tool, call, invocation, input, session)
+    } else {
+        run_in_place(call, record, session)
+    }
+}
+
+/// Runs `call`, `tool` being checkmake, on the block `input`, written to a fresh
+/// [`checkmake::BlockFile`] beside the neutral directory, since checkmake reads no stdin, with the
+/// private path it prints named as the block's virtual path. The directory is removed after the
+/// run whatever its outcome.
+///
+/// # Errors
+///
+/// The run's failure, or a failed start when there is no private directory to write the block
+/// to.
+///
+/// Effect: creates and removes the private directory, and runs checkmake, killing it at the
+/// timeout.
+fn checkmake_lint(
+    tool: &ToolCartridge,
+    call: &Call<'_>,
+    invocation: &Invocation<'_>,
+    input: &str,
+    session: &Session<'_>,
+) -> Result<Ran, runner::Failure> {
+    let neutral = runner::neutral_dir(session.env, session.root);
+    let file = checkmake::BlockFile::create(&neutral, input).ok_or_else(|| {
+        runner::Failure::Spawn(std::io::Error::other(
+            "supdoc couldn't create a private directory for the block checkmake lints",
+        ))
+    })?;
+    let args = tool.args(&Invocation {
+        emit: Some(file.file()),
+        ..*invocation
+    });
+    let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
+    let block = tools::virtual_path(invocation.doc, invocation.index, "mk");
+    let result = runner::run(
+        &Call {
+            args: &args,
+            ..*call
+        },
+        session.env,
+        session.root,
+    )
+    .map(|ran| Ran {
+        stderr: file.named(&ran.stderr, &block),
+        ..ran
+    });
+    drop(file);
     result
 }
 
@@ -6252,6 +6513,7 @@ mod tests {
                 tombi: None,
                 yamllint: None,
                 sqruff_lint: None,
+                checkmake: None,
                 pending: Pending::of(block, &doc),
             })
             .collect()
