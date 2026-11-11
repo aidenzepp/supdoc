@@ -1,0 +1,25 @@
+{
+  "name": "supdoc",
+  "description": "Track links from documentation to code and report when the linked code changes",
+  "license": "MIT",
+  "homepage": "https://github.com/aidenzepp/supdoc",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aidenzepp/supdoc.git"
+  },
+  "bugs": {
+    "url": "https://github.com/aidenzepp/supdoc/issues"
+  },
+  "keywords": ["documentation", "links", "markdown", "tree-sitter", "cli"],
+  "bin": {
+    "supdoc": "bin/supdoc.js"
+  },
+  "files": ["bin/supdoc.js", "README.md", "LICENSE"],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}
