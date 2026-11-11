@@ -949,7 +949,7 @@ fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'sta
 }
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 39] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 40] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
@@ -1359,6 +1359,24 @@ pub(crate) static CARTRIDGES: [ToolCartridge; 39] = [
         positions: own_positions,
         argv: superhtml_args,
         reader: Reader::Format(superhtml::parse_error),
+    },
+    ToolCartridge {
+        name: "xmllint-format",
+        language: Language::Xml,
+        binary: "xmllint",
+        loads: Loads::Static,
+        install: XMLLINT_INSTALL,
+        // xmllint reads no config file; `--nocatalogs` keeps it from the system's catalogs, and
+        // `XMLLINT_INDENT` and the other `XML*` variables never reach it, so it indents by two
+        // spaces.
+        config_files: &[],
+        modes: FULL_OR_OFF,
+        fragments: &[],
+        holds: every_tag,
+        vars: &[],
+        positions: own_positions,
+        argv: xmllint_format_args,
+        reader: Reader::Format(xmllint::parse_error),
     },
     ToolCartridge {
         name: "xmllint",
@@ -2155,6 +2173,14 @@ fn xmllint_args(_invocation: &Invocation<'_>) -> Vec<OsString> {
     xmllint::ARGS.map(OsString::from).to_vec()
 }
 
+/// `xmllint --format`'s arguments, always exactly these whatever the invocation: the block
+/// indented on stdout (`--format`), no network, no catalog, then `-` for the block on stdin, with
+/// none of the flags [`xmllint_args`] never passes either. supdoc reads its stderr and takes off
+/// the XML declaration it adds (see [`xmllint::format_verdict`]).
+fn xmllint_format_args(_invocation: &Invocation<'_>) -> Vec<OsString> {
+    xmllint::FORMAT_ARGS.map(OsString::from).to_vec()
+}
+
 /// `sqruff fix`'s arguments: the block on stdin (`-`), the fixed SQL on stdout, no config but
 /// the one supdoc names (`--ignore-local-config`), then the private config and the block's
 /// dialect the project contributes (`--config <file> --dialect <name>`, see
@@ -2410,7 +2436,7 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        CARTRIDGES, Cwd, Found, Hold, Invocation, Tier, ToolCartridge, ToolEnv, find, hold,
+        CARTRIDGES, Cwd, Found, Hold, Invocation, Step, Tier, ToolCartridge, ToolEnv, find, hold,
         search_dirs,
     };
     #[cfg(unix)]
@@ -2694,6 +2720,7 @@ mod tests {
                 "sqruff-lint Sql Lint sqruff Static",
                 "mbake Makefile Format mbake Static",
                 "superhtml Html Format superhtml Static",
+                "xmllint-format Xml Format xmllint Static",
                 "xmllint Xml Lint xmllint Static",
                 "yamlfmt Yaml Format yamlfmt Static",
                 "yamllint Yaml Lint yamllint Static",
@@ -2746,6 +2773,21 @@ mod tests {
                 "xmllint got the forbidden flag {arg:?}"
             );
         }
+    }
+
+    #[test]
+    fn xmllint_format_gets_exactly_format_nonet_nocatalogs_and_stdin_whatever_the_project() {
+        let expected = ["--format", "--nonet", "--nocatalogs", "-"].map(OsString::from);
+        let project = ["--loaddtd", "--noent", "--noout"].map(OsString::from);
+        for flags in [&[][..], &project[..]] {
+            assert_eq!(args_of("xmllint-format", 2, flags), expected);
+        }
+        let format = cartridge("xmllint-format");
+        assert_eq!(
+            (format.binary, format.step(), format.vars().len()),
+            ("xmllint", Step::Format, 0),
+            "xmllint-format runs xmllint as a formatter, passing no variable (no XMLLINT_INDENT)"
+        );
     }
 
     #[test]

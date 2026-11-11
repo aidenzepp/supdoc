@@ -1,11 +1,14 @@
-//! xmllint: its diagnostics, its version, and the blocks supdoc never gives it.
+//! xmllint: its diagnostics, its formatted output, its version, and the blocks supdoc never
+//! gives it.
 //!
-//! xmllint (libxml2) reads the block on stdin and checks only that it is well-formed XML with
-//! well-formed namespaces: it always gets exactly [`ARGS`], so it builds no output tree, uses no
-//! network, reads no catalog, and never loads or expands an external DTD or entity (no
-//! `--loaddtd`, `--valid`, `--noent`, `--dtdattr`, `--xinclude`, `--c14n*` or `--huge`). It reads
-//! no config file, and its variables (`XML_CATALOG_FILES`, `XMLLINT_INDENT` and the rest) never
-//! reach it (see [`super::tools::ToolEnv`]).
+//! As a linter, xmllint (libxml2) reads the block on stdin and checks only that it is well-formed
+//! XML with well-formed namespaces: it always gets exactly [`ARGS`], so it builds no output tree,
+//! uses no network, reads no catalog, and never loads or expands an external DTD or entity (no
+//! `--loaddtd`, `--valid`, `--noent`, `--dtdattr`, `--xinclude`, `--c14n*` or `--huge`). As a
+//! formatter it always gets exactly [`FORMAT_ARGS`], the same but `--format` in place of
+//! `--noout`, and indents by two spaces. It reads no config file, and its variables
+//! (`XML_CATALOG_FILES`, `XMLLINT_INDENT` and the rest) never reach it (see
+//! [`super::tools::ToolEnv`]).
 //!
 //! xmllint honors nothing in the block that switches its checks off: its man page lists only
 //! command-line options (`--nowarning`, `--recover`, which supdoc never passes), and libxml2's
@@ -19,12 +22,14 @@
 //! block xmllint would read in an encoding other than UTF-8 (an XML declaration naming another
 //! encoding, or a NUL character, by which libxml2 detects UTF-16), in which supdoc's own search
 //! for the first two can't see what xmllint reads. A plain `<!DOCTYPE name>` is given to it.
+//! Three more never reach its format step (see [`format_withheld`]), whose output would change
+//! what they mean or how they are written beyond their layout.
 //!
 //! supdoc reads xmllint's stderr, never its exit status alone: a namespace error exits 0.
 
 use std::path::Path;
 
-use super::format;
+use super::format::{self, ParseError};
 use super::lint::{self, Diagnostic};
 use super::runner::{self, Failure, Ran};
 use super::tools::ToolEnv;
@@ -32,6 +37,30 @@ use super::tools::ToolEnv;
 /// Every argument xmllint gets, in order: no output tree, no network, no catalog, the block on
 /// stdin.
 pub(crate) const ARGS: [&str; 4] = ["--noout", "--nonet", "--nocatalogs", "-"];
+
+/// Every argument xmllint's format step gets, in order: the block indented by two spaces on
+/// stdout, no network, no catalog, the block on stdin.
+pub(crate) const FORMAT_ARGS: [&str; 4] = ["--format", "--nonet", "--nocatalogs", "-"];
+
+/// The line `xmllint --format` starts its output with when the block has no XML declaration,
+/// which supdoc takes off (see [`format_verdict`]).
+const DECLARATION: &str = "<?xml version=\"1.0\"?>\n";
+
+/// Why an XML block's format step didn't run when it is tagged `xhtml`.
+pub(crate) const XHTML: &str = "xmllint writes an empty element as `<b/>`, which an XHTML page \
+                                served as HTML reads as an open tag, so supdoc doesn't format \
+                                blocks tagged `xhtml`";
+
+/// Why an XML block's format step didn't run when it sets `xml:space`.
+pub(crate) const SPACE: &str = "the block sets `xml:space`, whose preserved whitespace xmllint \
+                                re-indents, so supdoc doesn't format it";
+
+/// Why an XML block's format step didn't run when it holds a non-ASCII character without
+/// declaring UTF-8.
+pub(crate) const ESCAPED: &str = "the block holds a non-ASCII character but no XML declaration \
+                                  naming `encoding=\"UTF-8\"`, so xmllint would write each such \
+                                  character as a character reference, and supdoc doesn't format \
+                                  it";
 
 /// Why an XML block's lint step didn't run when its DOCTYPE names an external identifier.
 pub(crate) const EXTERNAL: &str = "the block's DOCTYPE names an external identifier (`SYSTEM` or \
@@ -127,6 +156,78 @@ fn quoted(text: &str) -> Option<&str> {
     let mut chars = text.chars();
     let quote = chars.next().filter(|c| matches!(c, '"' | '\''))?;
     chars.as_str().split_once(quote).map(|(inner, _)| inner)
+}
+
+/// Why `input`, a block tagged `tag`, is never given to xmllint's format step, beyond
+/// [`withheld`], checked in this order: it is tagged `xhtml` ([`XHTML`]); it names `xml:space`
+/// in any ASCII case anywhere ([`SPACE`]), since xmllint indents an element of only elements
+/// inside a preserved region too; it holds a character outside ASCII and doesn't start with an
+/// XML declaration naming `encoding="UTF-8"` ([`ESCAPED`]). `None` for any other block.
+#[must_use]
+pub(crate) fn format_withheld(tag: &str, input: &str) -> Option<&'static str> {
+    let lower = input.to_ascii_lowercase();
+    if tag == "xhtml" {
+        Some(XHTML)
+    } else if lower.contains("xml:space") {
+        Some(SPACE)
+    } else if !input.is_ascii() && !declares_utf_8(&lower) {
+        Some(ESCAPED)
+    } else {
+        None
+    }
+}
+
+/// Whether `input` starts with an XML declaration: `<?xml` then whitespace.
+fn declares(input: &str) -> bool {
+    input
+        .strip_prefix("<?xml")
+        .is_some_and(|rest| rest.starts_with([' ', '\t', '\n', '\r']))
+}
+
+/// Whether `lower` starts with an XML declaration (see [`declares`]) whose `encoding` is
+/// `"utf-8"` or `'utf-8'`.
+fn declares_utf_8(lower: &str) -> bool {
+    if !declares(lower) {
+        return false;
+    }
+    let declaration = lower.split_once("?>").map_or(lower, |(head, _)| head);
+    declaration.split("encoding").skip(1).any(|after| {
+        after
+            .trim_start()
+            .strip_prefix('=')
+            .is_some_and(|value| quoted(value.trim_start()) == Some("utf-8"))
+    })
+}
+
+/// xmllint's format step reports no syntax error supdoc places: every stderr is a tool failure
+/// (see [`format_verdict`]).
+#[must_use]
+pub(crate) const fn parse_error(_stderr: &str) -> Option<ParseError> {
+    None
+}
+
+/// Judges `ran`, `xmllint --format` on `input`: any stderr, a namespace error's after exit 0 too,
+/// and an unsuccessful exit are a tool failure, never a rewrite. For a block that doesn't start
+/// with an XML declaration (see [`declares`]), the output's first line must be exactly the one
+/// xmllint adds ([`DECLARATION`]), which is taken off; output that doesn't start with it is a
+/// tool failure. What is left is compared with the block as any formatter's output is (see
+/// [`format::printed`]).
+#[must_use]
+pub(crate) fn format_verdict(input: &str, ran: &Ran) -> format::Verdict {
+    if !ran.success || !ran.stderr.is_empty() {
+        return format::Verdict::ToolFailed(format::exit_detail(&ran.stderr));
+    }
+    if declares(input) {
+        return format::printed(input, ran.stdout.clone());
+    }
+    match ran.stdout.strip_prefix(DECLARATION.as_bytes()) {
+        Some(rest) => format::printed(input, rest.to_vec()),
+        None => format::Verdict::ToolFailed(format!(
+            "xmllint didn't start its output with `{}`, as it does for a block with no XML \
+             declaration",
+            DECLARATION.trim_end()
+        )),
+    }
 }
 
 /// The diagnostic a line of xmllint's stderr starts: `-:<line>: <kind> : <message>`, where kind
@@ -358,6 +459,121 @@ mod tests {
         assert_eq!(Withheld::External.reason(), EXTERNAL);
         assert_eq!(Withheld::Entity.reason(), ENTITY);
         assert_eq!(Withheld::Encoding.reason(), ENCODING);
+    }
+
+    #[test]
+    fn an_xhtml_tag_xml_space_or_unescaped_non_ascii_withholds_only_the_format_step() {
+        assert_eq!(format_withheld("xhtml", "<html/>\n"), Some(XHTML));
+        for tag in ["xml", "svg", "xsd", "xsl", "xslt"] {
+            assert_eq!(format_withheld(tag, "<a><b/></a>\n"), None, "tag {tag}");
+        }
+        for block in [
+            "<a xml:space=\"preserve\"><b/></a>\n",
+            "<a><b XML:Space='default'/></a>\n",
+        ] {
+            assert_eq!(
+                format_withheld("xml", block),
+                Some(SPACE),
+                "block {block:?}"
+            );
+        }
+        for block in [
+            "<a>\u{e9}</a>\n",
+            "<a b=\"\u{2713}\"/>\n",
+            "<?xml version=\"1.0\"?>\n<a>\u{e9}</a>\n",
+            "<a/>\n<?xml version=\"1.0\" encoding=\"UTF-8\"?><!-- \u{e9} -->\n",
+        ] {
+            assert_eq!(
+                format_withheld("xml", block),
+                Some(ESCAPED),
+                "block {block:?}"
+            );
+        }
+        for block in [
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<a>\u{e9}</a>\n",
+            "<?xml version='1.0' encoding='utf-8'?><a>\u{e9}</a>\n",
+            "<a>&#xE9;</a>\n",
+        ] {
+            assert_eq!(format_withheld("xml", block), None, "block {block:?}");
+        }
+    }
+
+    #[test]
+    fn the_added_declaration_line_comes_off_only_when_the_block_had_none() {
+        let declared = "<?xml version=\"1.0\"?>\n";
+        let judged = |input: &str, stdout: &str| format_verdict(input, &ran(true, stdout, ""));
+
+        assert_eq!(
+            judged(
+                "<a>\n  <b/>\n</a>\n",
+                &format!("{declared}<a>\n  <b/>\n</a>\n")
+            ),
+            format::Verdict::Formatted
+        );
+        assert_eq!(
+            judged("<a><b/></a>\n", &format!("{declared}<a>\n  <b/>\n</a>\n")),
+            format::Verdict::Unformatted("<a>\n  <b/>\n</a>\n".to_owned())
+        );
+        assert_eq!(
+            judged(&format!("{declared}<a/>\n"), &format!("{declared}<a/>\n")),
+            format::Verdict::Formatted,
+            "a block's own declaration is kept and compared"
+        );
+        assert_eq!(
+            judged(
+                "<?xml version=\"1.0\"  ?>\n<a/>\n",
+                &format!("{declared}<a/>\n")
+            ),
+            format::Verdict::Unformatted(format!("{declared}<a/>\n")),
+            "a block's own declaration is never taken off, even when xmllint rewrites it"
+        );
+        assert_eq!(
+            judged("<a/>\n", &format!("{declared}{declared}<a/>\n")),
+            format::Verdict::Unformatted(format!("{declared}<a/>\n")),
+            "only one line comes off"
+        );
+        assert_eq!(
+            judged(
+                "<?xml-stylesheet href=\"s\"?>\n<a/>\n",
+                &format!("{declared}<?xml-stylesheet href=\"s\"?>\n<a/>\n")
+            ),
+            format::Verdict::Formatted,
+            "a processing instruction named like the declaration isn't one"
+        );
+        for stdout in [
+            "<a/>\n",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<a/>\n",
+            "",
+        ] {
+            assert!(
+                matches!(
+                    judged("<a/>\n", stdout),
+                    format::Verdict::ToolFailed(detail) if detail.contains("didn't start its output")
+                ),
+                "stdout {stdout:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn any_stderr_or_an_unsuccessful_exit_is_a_tool_failure_never_a_rewrite() {
+        let output = "<?xml version=\"1.0\"?>\n<x:a/>\n";
+        let cases = [
+            (
+                true,
+                "-:1: namespace error : Namespace prefix x on a is not defined\n",
+            ),
+            (false, "-:1: parser error : Document is empty\n"),
+            (false, ""),
+        ];
+        for (success, stderr) in cases {
+            let verdict = format_verdict("<x:a/>\n", &ran(success, output, stderr));
+            assert!(
+                matches!(verdict, format::Verdict::ToolFailed(_)),
+                "exit {success}, stderr {stderr:?}: got {verdict:?}"
+            );
+        }
+        assert_eq!(parse_error("-:1: parser error : x\n"), None);
     }
 
     #[test]

@@ -1,5 +1,5 @@
-//! Checking XML code blocks, tagged `xml`, `svg`, `xsd`, `xsl`, `xslt` or `xhtml`, linted by
-//! xmllint.
+//! Checking XML code blocks, tagged `xml`, `svg`, `xsd`, `xsl`, `xslt` or `xhtml`, formatted by
+//! `xmllint --format` and linted by xmllint.
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
@@ -31,15 +31,29 @@ fn lint_rules(json: &serde_json::Value) -> Vec<(String, u64)> {
         .collect()
 }
 
-/// An `xml` table: no formatter, xmllint's lint step on.
-const XML: &str = "[features.code-blocks]\n[features.code-blocks.xml]\n";
+/// An `xml` table with only xmllint's lint step on, its format step off.
+const XML: &str = "[features.code-blocks]\n[features.code-blocks.xml]\n\
+                   [features.code-blocks.xml.xmllint-format]\nformat = \"off\"\n";
+
+/// An `xml` table as written bare: `xmllint-format`'s format step and xmllint's lint step on.
+const XML_BOTH: &str = "[features.code-blocks]\n[features.code-blocks.xml]\n";
+
+/// An `xml` table with only `xmllint-format`'s format step on, xmllint's lint step off.
+const XML_FORMAT: &str = "[features.code-blocks]\n[features.code-blocks.xml]\n\
+                          [features.code-blocks.xml.xmllint]\nlint = \"off\"\n";
 
 /// A recorded `basic` project with [`XML`] and `docs/blocks.md` holding one block tagged `tag`
 /// holding `body`, whose first body line is the doc's line 4.
 fn xml_project(tag: &str, body: &str) -> Project {
+    project_with(XML, tag, body)
+}
+
+/// A recorded `basic` project with `config` and `docs/blocks.md` holding one block tagged `tag`
+/// holding `body`, whose first body line is the doc's line 4.
+fn project_with(config: &str, tag: &str, body: &str) -> Project {
     let project = Project::fixture("basic");
     project.record();
-    project.write("supdoc.config.toml", XML);
+    project.write("supdoc.config.toml", config);
     project.write(
         "docs/blocks.md",
         &format!("# Blocks\n\n```{tag}\n{body}\n```\n"),
@@ -289,7 +303,7 @@ fn xml_the_real_xmllint_fails_each_malformed_block_at_its_doc_line_and_passes_a_
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
     ];
     for body in good {
-        let json = check(&xml_project("xml", body), &dir, &[]);
+        let json = check(&project_with(XML_BOTH, "xml", body), &dir, &[]);
         assert!(finding_kinds(&json).is_empty(), "{body:?}: {json}");
         assert_eq!(
             at(&json, "/data/summary/code_blocks/passed"),
@@ -307,7 +321,7 @@ fn xml_the_real_xmllint_fails_each_malformed_block_at_its_doc_line_and_passes_a_
         ("<?xml version=\"1.1\"?><a/>", "parser warning", 4),
     ];
     for (body, rule, line) in bad {
-        let json = check(&xml_project("xml", body), &dir, &[]);
+        let json = check(&project_with(XML_BOTH, "xml", body), &dir, &[]);
         let rules = lint_rules(&json);
         assert!(
             rules.first() == Some(&(rule.to_owned(), line)),
@@ -330,7 +344,7 @@ fn xml_the_real_xmllint_never_passes_an_odd_block() {
     let long = format!("<a b=\"{}\">", "x".repeat(1024 * 1024));
     let bodies = ["", "   ", "\u{feff}", "<a>\u{fffd}<", long.as_str()];
     for body in bodies {
-        let json = check(&xml_project("xml", body), &dir, &[]);
+        let json = check(&project_with(XML_BOTH, "xml", body), &dir, &[]);
         let shown = body.get(..40).unwrap_or(body);
         assert_eq!(
             at(&json, "/data/summary/code_blocks/failed"),
@@ -379,7 +393,7 @@ fn xml_the_real_xmllint_never_sees_a_block_naming_a_file() {
         ),
     ];
     for (body, reason) in blocks {
-        let json = check(&xml_project("xml", body), &dir, &[]);
+        let json = check(&project_with(XML_BOTH, "xml", body), &dir, &[]);
 
         assert_eq!(
             finding_kinds(&json),
@@ -396,6 +410,372 @@ fn xml_the_real_xmllint_never_sees_a_block_naming_a_file() {
             at(&json, "/data/summary/code_blocks/passed"),
             0,
             "{body:?}: {json}"
+        );
+    }
+}
+
+/// What `stub_xmllint` runs when its format step should print `stdout` for any block: the format
+/// run prints it, the lint run prints nothing; both exit 0.
+fn formats_as(stdout: &str) -> String {
+    format!("[ \"$1\" = --format ] && printf '%s' '{stdout}'; exit 0")
+}
+
+/// The stub's `args` file: one argument per line, every run's in order.
+fn args_of(dir: &Path) -> String {
+    std::fs::read_to_string(dir.join("args")).unwrap_or_default()
+}
+
+#[test]
+fn xml_the_format_step_gets_exactly_its_four_arguments_after_the_lint_step_and_no_xml_variable() {
+    let project = project_with(XML_BOTH, "xml", "<a>\n  <b>x</b>\n</a>");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    stub_xmllint(
+        outside.path(),
+        VERIFIED,
+        &formats_as("<?xml version=\"1.0\"?>\n<a>\n  <b>x</b>\n</a>\n"),
+    );
+
+    let json = project
+        .supdoc_in_with(
+            ".",
+            &["check", "--json"],
+            &[
+                ("PATH", outside.path()),
+                ("XMLLINT_INDENT", Path::new("\t")),
+                ("XML_CATALOG_FILES", &outside.path().join("catalog.xml")),
+            ],
+        )
+        .assert_exit(0)
+        .json();
+
+    assert!(finding_kinds(&json).is_empty(), "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+    assert_eq!(
+        args_of(outside.path()),
+        "--noout\n--nonet\n--nocatalogs\n-\n--format\n--nonet\n--nocatalogs\n-\n",
+        "the lint step runs first, then the format step"
+    );
+    let env = std::fs::read_to_string(outside.path().join("env"))
+        .expect("the stub should have written `env`");
+    assert!(
+        !env.lines()
+            .any(|line| line.starts_with("XML") || line.starts_with("SGML")),
+        "an XML variable reached xmllint: {env}"
+    );
+}
+
+#[test]
+fn xml_a_block_the_lint_step_rejects_is_never_formatted() {
+    let project = project_with(XML_BOTH, "xml", "<a xmlns:p=\"u\">\n<q:c/></a>");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    stub_xmllint(outside.path(), VERIFIED, NAMESPACE_EXIT_0);
+
+    let json = check(&project, outside.path(), &[]);
+    let _fixed = project.supdoc_in_with(".", &["fix", "--yes"], &[("PATH", outside.path())]);
+
+    assert_eq!(finding_kinds(&json), ["code-block-lint"], "{json}");
+    assert_eq!(at(&json, "/data/code_blocks/0/format"), "not_run", "{json}");
+    assert!(
+        !args_of(outside.path()).contains("--format"),
+        "the format step ran: {}",
+        args_of(outside.path())
+    );
+    assert_eq!(
+        project.read("docs/blocks.md"),
+        "# Blocks\n\n```xml\n<a xmlns:p=\"u\">\n<q:c/></a>\n```\n"
+    );
+}
+
+#[test]
+fn xml_the_added_declaration_comes_off_and_fix_writes_only_the_indented_block() {
+    let project = project_with(XML_FORMAT, "xml", "<a><b>x</b></a>");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    stub_xmllint(
+        outside.path(),
+        VERIFIED,
+        &formats_as("<?xml version=\"1.0\"?>\n<a>\n  <b>x</b>\n</a>\n"),
+    );
+
+    let json = check(&project, outside.path(), &[]);
+    let _fixed = project.supdoc_in_with(".", &["fix", "--yes"], &[("PATH", outside.path())]);
+
+    assert_eq!(finding_kinds(&json), ["code-block-unformatted"], "{json}");
+    assert_eq!(
+        project.read("docs/blocks.md"),
+        "# Blocks\n\n```xml\n<a>\n  <b>x</b>\n</a>\n```\n"
+    );
+}
+
+#[test]
+fn xml_a_declaration_the_block_writes_is_kept_and_output_without_the_added_one_fails() {
+    let declared = "<?xml version=\"1.0\"?>\n<a/>";
+    let project = project_with(XML_FORMAT, "xml", declared);
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    stub_xmllint(
+        outside.path(),
+        VERIFIED,
+        &formats_as(&format!("{declared}\n")),
+    );
+    let json = check(&project, outside.path(), &[]);
+    assert!(finding_kinds(&json).is_empty(), "{json}");
+    assert_eq!(at(&json, "/data/summary/code_blocks/passed"), 1, "{json}");
+
+    let project = project_with(XML_FORMAT, "xml", "<a/>");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    stub_xmllint(outside.path(), VERIFIED, &formats_as("<a/>\n"));
+    let json = check(&project, outside.path(), &[]);
+    assert_eq!(finding_kinds(&json), ["code-block-tool-failed"], "{json}");
+}
+
+#[test]
+fn xml_format_stderr_after_exit_0_or_a_failed_exit_is_a_tool_failure_never_a_rewrite() {
+    let cases = [
+        "[ \"$1\" = --format ] && { printf '<?xml version=\"1.0\"?>\\n<q:a/>\\n'; \
+         echo '-:1: namespace error : Namespace prefix q on a is not defined' >&2; }; exit 0",
+        "[ \"$1\" = --format ] && printf '<?xml version=\"1.0\"?>\\n<q:a/>\\n'; exit 1",
+    ];
+    for script in cases {
+        let project = project_with(XML_FORMAT, "xml", "<q:a></q:a>");
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        stub_xmllint(outside.path(), VERIFIED, script);
+
+        let json = check(&project, outside.path(), &[]);
+        let _fixed = project.supdoc_in_with(".", &["fix", "--yes"], &[("PATH", outside.path())]);
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-tool-failed"],
+            "{script}: {json}"
+        );
+        assert_eq!(
+            project.read("docs/blocks.md"),
+            "# Blocks\n\n```xml\n<q:a></q:a>\n```\n",
+            "{script}"
+        );
+    }
+}
+
+#[test]
+fn xml_a_block_xmllint_is_never_given_withholds_its_format_step_too() {
+    let project = project_with(XML_BOTH, "xml", "<!DOCTYPE a SYSTEM \"a.dtd\">\n<a/>");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    stub_xmllint(outside.path(), VERIFIED, &formats_as("<a/>\n"));
+
+    let json = check(&project, outside.path(), &[]);
+
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+    assert!(
+        at(&json, "/findings/0/message")
+            .as_str()
+            .is_some_and(|message| message.contains("so its format and lint steps didn't run")),
+        "{json}"
+    );
+    assert!(!outside.path().join("ran").exists(), "xmllint ran");
+}
+
+#[test]
+fn xml_an_unverified_xmllint_runs_neither_step() {
+    let project = project_with(XML_BOTH, "xml", "<a/>");
+    let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+    stub_xmllint(
+        outside.path(),
+        "21600",
+        &formats_as("<?xml version=\"1.0\"?>\n<a/>\n"),
+    );
+
+    let json = check(&project, outside.path(), &[]);
+
+    assert_eq!(finding_kinds(&json), ["code-block-not-checked"], "{json}");
+    assert_eq!(
+        at(&json, "/data/summary/code_blocks/format_not_run"),
+        1,
+        "{json}"
+    );
+    assert_eq!(
+        at(&json, "/data/summary/code_blocks/lint_not_run"),
+        1,
+        "{json}"
+    );
+    assert!(!outside.path().join("args").exists(), "a step ran");
+}
+
+#[test]
+fn xml_an_xhtml_block_xml_space_or_unescaped_non_ascii_is_never_formatted() {
+    let cases = [
+        ("xhtml", "<html><br></br></html>", "tagged `xhtml`"),
+        (
+            "xml",
+            "<a xml:space=\"preserve\"><b/><c/></a>",
+            "`xml:space`",
+        ),
+        ("svg", "<svg><text>\u{e9}</text></svg>", "non-ASCII"),
+    ];
+    for (tag, body, reason) in cases {
+        let project = project_with(XML_BOTH, tag, body);
+        let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
+        stub_xmllint(
+            outside.path(),
+            VERIFIED,
+            &formats_as("<?xml version=\"1.0\"?>\n<x/>\n"),
+        );
+
+        let json = check(&project, outside.path(), &[]);
+        let _fixed = project.supdoc_in_with(".", &["fix", "--yes"], &[("PATH", outside.path())]);
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-not-checked"],
+            "{tag}: {json}"
+        );
+        assert!(
+            at(&json, "/findings/0/message")
+                .as_str()
+                .is_some_and(|said| said.contains(reason)),
+            "{tag}: expected a warning naming {reason:?}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/format_not_run"),
+            1,
+            "{tag}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/passed"),
+            1,
+            "{tag}: {json}"
+        );
+        assert!(
+            !args_of(outside.path()).contains("--format"),
+            "{tag}: the format step ran"
+        );
+        assert_eq!(
+            project.read("docs/blocks.md"),
+            format!("# Blocks\n\n```{tag}\n{body}\n```\n"),
+            "{tag}"
+        );
+    }
+}
+
+#[test]
+fn xml_the_real_xmllint_formats_odd_blocks_keeping_their_content_and_fix_settles_them() {
+    let Some(dir) = real_tool_dir(
+        "xmllint",
+        "xml_the_real_xmllint_formats_odd_blocks_keeping_their_content_and_fix_settles_them",
+    ) else {
+        return;
+    };
+    // Each block xmllint rewrites, and what supdoc fix writes: only indentation between elements
+    // changes, and `<a></a>` becomes `<a/>`; every text, comment, CDATA and attribute value is
+    // kept.
+    let rewritten = [
+        ("<a><b>x</b></a>", "<a>\n  <b>x</b>\n</a>"),
+        ("<a></a>", "<a/>"),
+        ("<a><!-- c --></a>", "<a>\n  <!-- c -->\n</a>"),
+        ("<a><?pi d?></a>", "<a>\n  <?pi d?>\n</a>"),
+        ("<a> <!-- c --> <b/></a>", "<a>\n  <!-- c -->\n  <b/>\n</a>"),
+        (
+            "<p><b>x</b> <i>y</i></p>",
+            "<p>\n  <b>x</b>\n  <i>y</i>\n</p>",
+        ),
+        (
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<a><b>\u{e9}</b></a>",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<a>\n  <b>\u{e9}</b>\n</a>",
+        ),
+    ];
+    for (body, fixed) in rewritten {
+        let project = project_with(XML_BOTH, "xml", body);
+
+        let json = check(&project, &dir, &[]);
+        let _fixed = project.supdoc_in_with(".", &["fix", "--yes"], &[("PATH", &dir)]);
+        let again = check(&project, &dir, &[]);
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-unformatted"],
+            "{body:?}: {json}"
+        );
+        assert_eq!(
+            project.read("docs/blocks.md"),
+            format!("# Blocks\n\n```xml\n{fixed}\n```\n"),
+            "{body:?}"
+        );
+        assert!(
+            finding_kinds(&again).is_empty(),
+            "{body:?} after fix: {again}"
+        );
+        assert_eq!(
+            at(&again, "/data/summary/code_blocks/passed"),
+            1,
+            "{body:?}: {again}"
+        );
+    }
+    // Each block xmllint leaves as written: text, CDATA and attribute values xq used to damage.
+    let kept = [
+        "<a>]]&gt;</a>",
+        "<a>  x  </a>",
+        "<a><![CDATA[ <x>  y ]]></a>",
+        "<a b=\"&lt;&#10;x\"/>",
+        "<p>text <b>bold</b> tail</p>",
+        "<a>&amp;&lt;</a>",
+        "<!DOCTYPE a>\n<a/>",
+        "<!-- top -->\n<a/>\n<!-- tail -->",
+        "<?xml version=\"1.0\" standalone=\"yes\"?>\n<a/>",
+    ];
+    for body in kept {
+        let project = project_with(XML_BOTH, "xml", body);
+
+        let json = check(&project, &dir, &[]);
+
+        assert!(finding_kinds(&json).is_empty(), "{body:?}: {json}");
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/passed"),
+            1,
+            "{body:?}: {json}"
+        );
+    }
+}
+
+#[test]
+fn xml_the_real_xmllint_never_formats_a_block_whose_meaning_or_spelling_it_would_change() {
+    let Some(dir) = real_tool_dir(
+        "xmllint",
+        "xml_the_real_xmllint_never_formats_a_block_whose_meaning_or_spelling_it_would_change",
+    ) else {
+        return;
+    };
+    // xmllint indents inside `xml:space="preserve"`, writes `é` as `&#xE9;` without a UTF-8
+    // declaration, and writes `<br></br>` as `<br/>`, which XHTML served as HTML misreads.
+    let cases = [
+        ("xml", "<a xml:space=\"preserve\"><b/><c/></a>"),
+        ("xml", "<a xml:space=\"preserve\"><b>\n <c/></b></a>"),
+        ("xml", "<a><b>\u{e9}</b></a>"),
+        ("xml", "<?xml version=\"1.0\"?>\n<a b=\"\u{2713}\"/>"),
+        ("xhtml", "<html><body><br></br></body></html>"),
+    ];
+    for (tag, body) in cases {
+        let project = project_with(XML_BOTH, tag, body);
+
+        let json = check(&project, &dir, &[]);
+        let _fixed = project.supdoc_in_with(".", &["fix", "--yes"], &[("PATH", &dir)]);
+
+        assert_eq!(
+            finding_kinds(&json),
+            ["code-block-not-checked"],
+            "{body:?}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/format_not_run"),
+            1,
+            "{body:?}: {json}"
+        );
+        assert_eq!(
+            at(&json, "/data/summary/code_blocks/passed"),
+            1,
+            "{body:?}: {json}"
+        );
+        assert_eq!(
+            project.read("docs/blocks.md"),
+            format!("# Blocks\n\n```{tag}\n{body}\n```\n"),
+            "{body:?}"
         );
     }
 }
