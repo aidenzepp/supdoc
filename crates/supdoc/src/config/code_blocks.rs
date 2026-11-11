@@ -1531,7 +1531,7 @@ mod tests {
     }
 
     #[test]
-    fn a_makefile_table_defaults_to_mbake_and_no_linter() {
+    fn a_makefile_table_defaults_to_mbake_and_checkmake() {
         let dir = tree(&[(
             "supdoc.config.toml",
             "[features.code-blocks.makefile]\n[features.code-blocks.makefile.mbake]\nformat = \"full\"\n",
@@ -1546,13 +1546,17 @@ mod tests {
                 .map(|tool| tool.name),
             Some("mbake")
         );
-        assert!(crate::code_blocks::tools::default_for(Language::Makefile, Step::Lint).is_none());
+        assert_eq!(
+            crate::code_blocks::tools::default_for(Language::Makefile, Step::Lint)
+                .map(|tool| tool.name),
+            Some("checkmake")
+        );
     }
 
     #[test]
-    fn mbake_is_a_known_makefile_formatter_and_a_named_linter_is_refused() {
+    fn mbake_and_checkmake_are_the_known_makefile_tools_and_another_name_is_refused() {
         let formatter = refused("makefile", "formatter = \"bake\"");
-        let linter = refused("makefile", "linter = \"checkmake\"");
+        let linter = refused("makefile", "linter = \"unmake\"");
 
         assert!(
             formatter.contains("`bake` isn't a known makefile formatter")
@@ -1560,8 +1564,8 @@ mod tests {
             "got {formatter}"
         );
         assert!(
-            linter.contains("`checkmake` isn't a known makefile linter")
-                && linter.contains("none yet: write a custom `{ command = [...] }`"),
+            linter.contains("`unmake` isn't a known makefile linter")
+                && linter.contains("`checkmake`"),
             "got {linter}"
         );
     }

@@ -252,6 +252,8 @@ pub(crate) mod code_blocks {
 
     /// TypeScript, JavaScript, JSON and CSS's format and lint steps, run by biome.
     mod biome;
+    /// The Makefile's lint step, run by checkmake.
+    mod checkmake;
     /// Dockerfile's format step, run by dockerfmt.
     mod dockerfmt;
     /// Dockerfile's lint step, run by hadolint.
