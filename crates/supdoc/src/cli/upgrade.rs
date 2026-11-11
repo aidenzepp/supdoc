@@ -71,10 +71,6 @@ Examples:
 /// The package cargo installs.
 const PACKAGE: &str = "supdoc";
 
-/// The file every npm platform package ships beside the binary, so an install from npm is known
-/// even where no `node_modules` directory holds it.
-const NPM_MARKER: &str = "installed-by-npm";
-
 /// The shape of cargo's error when the pinned version is not on crates.io.
 const NOT_FOUND_SHAPE: &str = "could not find `supdoc` in registry";
 
@@ -1154,13 +1150,13 @@ fn by_location(exe: &Path, requested: Option<&ReleaseVersion>) -> CliError {
 /// `/opt/homebrew/lib/node_modules`, and npm, not Homebrew, owns that file. `requested` is the
 /// version asked for, which the npm refusal names.
 ///
-/// Effect: checks whether [`NPM_MARKER`] exists beside `exe`.
+/// Effect: checks whether [`fixed::NPM_MARKER`] exists beside `exe`.
 fn known_location(exe: &Path, requested: Option<&ReleaseVersion>) -> Option<CliError> {
     let shown = exe.display().to_string();
     if from_npm(exe) {
         let package = requested.map_or_else(
             || format!("{PACKAGE}@latest"),
-            |version| format!("{PACKAGE}@{version}"),
+            |version| format!("{PACKAGE}@{}", version.release()),
         );
         return Some(not_cargo(
             format!("supdoc was installed from npm ({shown}), not by cargo"),
@@ -1192,10 +1188,10 @@ fn known_location(exe: &Path, requested: Option<&ReleaseVersion>) -> Option<CliE
 }
 
 /// Whether `exe` is the binary of an npm package: a `node_modules` component in its path, or
-/// [`NPM_MARKER`] beside it. A copy taken out of the package without the marker is no longer
-/// the package's, so it is not refused here.
+/// [`fixed::NPM_MARKER`] beside it. A copy taken out of the package without the marker is no
+/// longer the package's, so it is not refused here.
 ///
-/// Effect: checks whether [`NPM_MARKER`] exists beside `exe`.
+/// Effect: checks whether [`fixed::NPM_MARKER`] exists beside `exe`.
 fn from_npm(exe: &Path) -> bool {
     let in_node_modules = exe
         .components()
@@ -1203,8 +1199,7 @@ fn from_npm(exe: &Path) -> bool {
     in_node_modules
         || exe
             .parent()
-            .zip(path::Component::new(NPM_MARKER))
-            .is_some_and(|(dir, marker)| path::beneath(dir, &marker).is_file())
+            .is_some_and(|dir| path::beneath(dir, &fixed::NPM_MARKER).is_file())
 }
 
 /// The refusal when no usable cargo home can be found, so cargo's install records cannot be read.

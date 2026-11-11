@@ -290,6 +290,9 @@ pub(crate) mod fixed {
     pub(crate) const CARGO_BIN_SUPDOC: FixedPath = FixedPath::new("bin/supdoc");
     /// Cargo's install record beneath its home.
     pub(crate) const CRATES2_JSON: FixedPath = FixedPath::new(".crates2.json");
+    /// The file every npm platform package ships beside the binary, so an install from npm is
+    /// known even where no `node_modules` directory holds it.
+    pub(crate) const NPM_MARKER: FixedPath = FixedPath::new("installed-by-npm");
     /// Biome's private lint directory beneath the cache base.
     pub(crate) const BIOME_LINT_DIR: FixedPath = FixedPath::new("biome-lint");
     /// Biome's private config directory beneath the cache base.
@@ -1277,6 +1280,7 @@ mod tests {
             fixed::CARGO_DIR,
             fixed::CARGO_BIN_SUPDOC,
             fixed::CRATES2_JSON,
+            fixed::NPM_MARKER,
             fixed::BIOME_LINT_DIR,
             fixed::BIOME_CONFIG_DIR,
             fixed::BIOME_JSON,

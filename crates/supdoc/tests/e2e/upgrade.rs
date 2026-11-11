@@ -504,6 +504,48 @@ fn an_npm_refusal_without_a_version_names_the_latest_package() {
 }
 
 #[test]
+fn an_npm_refusal_drops_build_metadata_from_the_npm_command() {
+    let fixture = Fixture::installed("0.0.0");
+    fixture.place_binary(NPM_BINARY);
+
+    let run = fixture.run_at(NPM_BINARY, &["upgrade", &format!("{NEWER}+build"), "--yes"]);
+
+    let _ = run.assert_exit(78);
+    assert!(
+        run.stderr.contains(&format!("npm install supdoc@{NEWER}`")),
+        "the npm command should name the release without `+build`: {}",
+        run.stderr
+    );
+    assert!(!run.stderr.contains("+build"), "{}", run.stderr);
+    assert_eq!(fixture.cargo_calls(), Vec::<String>::new());
+}
+
+#[test]
+fn a_directory_only_named_like_node_modules_is_not_taken_for_npm() {
+    for relative in [
+        "proj/my_node_modules/@supdoc/linux-x64/bin/supdoc",
+        "proj/node_modules.bak/@supdoc/linux-x64/bin/supdoc",
+    ] {
+        let fixture = Fixture::installed("0.0.0");
+        fixture.place_binary(relative);
+
+        let run = fixture.run_at(relative, &["upgrade", NEWER, "--yes"]);
+
+        let _ = run.assert_exit(78);
+        assert!(
+            !run.stderr.contains(NPM_SAW),
+            "`{relative}` has no `node_modules` component: {}",
+            run.stderr
+        );
+        assert!(
+            run.stderr.contains("can't tell how this copy"),
+            "`{relative}` should be refused as unknown: {}",
+            run.stderr
+        );
+    }
+}
+
+#[test]
 fn a_binary_that_cargo_did_not_install_is_refused_as_unknown() {
     let fixture = Fixture::installed("0.0.0");
     fixture.place_binary("somewhere/bin/supdoc");
