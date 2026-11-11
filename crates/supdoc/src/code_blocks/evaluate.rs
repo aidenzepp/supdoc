@@ -1002,12 +1002,21 @@ fn superhtml_blank(at: &Location) -> Finding {
 }
 
 /// The run's one `code-block-not-checked` warning for `reason`, at `at`, the first XML block
-/// whose format step xmllint isn't given because of it (see [`xmllint::format_withheld`]).
+/// whose format step xmllint isn't given because of it (see [`xmllint::format_withheld`]), or
+/// whose rewrite supdoc doesn't keep (see [`xmllint::format_verdict`]).
 fn xmllint_format_withheld(at: &Location, reason: &'static str) -> Finding {
     let help = match reason {
         xmllint::ESCAPED => {
             "start the block with `<?xml version=\"1.0\" encoding=\"UTF-8\"?>`, or mark it \
              `format(off: <reason>)` to leave it as written"
+        }
+        xmllint::BOM => {
+            "remove the byte order mark from the start of the block, or mark it \
+             `format(off: <reason>)` to leave it as written"
+        }
+        xmllint::CHANGED => {
+            "xmllint may only re-indent whitespace the block already has between its nodes: \
+             lay the block out by hand, or mark it `format(off: <reason>)` to leave it as written"
         }
         _ => "mark the block `format(off: <reason>)` to leave it as written",
     };
@@ -1314,9 +1323,14 @@ impl NotRunWarnings {
             PYLINT_SWITCHED_OFF => pylint_switched_off(at),
             PRETTIER_SWITCHED_OFF => prettier_switched_off(at),
             superhtml::BLANK => superhtml_blank(at),
-            xmllint::XHTML | xmllint::SPACE | xmllint::ESCAPED => {
-                xmllint_format_withheld(at, not_run.reason)
-            }
+            xmllint::XHTML
+            | xmllint::FOREIGN
+            | xmllint::SUBSET
+            | xmllint::SPACE
+            | xmllint::BOM
+            | xmllint::ESCAPED
+            | xmllint::CHANGED
+            | xmllint::UNREAD => xmllint_format_withheld(at, not_run.reason),
             superhtml::REWRITTEN => superhtml_rewritten(at, said),
             dockerfmt::TOO_SHORT => dockerfmt_not_given(at, "is at most one byte long"),
             dockerfmt::SWITCHED_OFF => dockerfmt_switched_off(at),
@@ -5315,8 +5329,9 @@ fn run_clippy(
 /// before its output is judged: the step not run, as [`config_skipped_by`] says, a tool
 /// failure when mbake printed its upgrade notice (see [`mbake::noticed`]), whose stdout is never
 /// the formatted block, or, for `xmllint --format`, every verdict (see
-/// [`xmllint::format_verdict`]), since its stderr after exit 0 is a failure and its output
-/// starts with a declaration supdoc takes off.
+/// [`xmllint::format_verdict`]), since its stderr after exit 0 is a failure, its output starts
+/// with a declaration supdoc takes off, and a rewrite that changes the block's content is the
+/// step not run.
 fn settled_before_judging(
     record: &BlockRecord,
     tool: &ToolCartridge,
@@ -5328,7 +5343,7 @@ fn settled_before_judging(
     }
     let ran = result.as_ref().ok()?;
     if tool.name == XMLLINT_FORMAT {
-        return Some(Ok(xmllint::format_verdict(input, ran)));
+        return Some(xmllint::format_verdict(input, ran).map_err(Into::into));
     }
     (tool.name == MBAKE && mbake::noticed(input, &ran.stdout))
         .then(|| Ok(format::Verdict::ToolFailed(mbake::NOTICED.to_owned())))

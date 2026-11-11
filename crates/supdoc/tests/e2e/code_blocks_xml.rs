@@ -488,7 +488,7 @@ fn xml_a_block_the_lint_step_rejects_is_never_formatted() {
 
 #[test]
 fn xml_the_added_declaration_comes_off_and_fix_writes_only_the_indented_block() {
-    let project = project_with(XML_FORMAT, "xml", "<a><b>x</b></a>");
+    let project = project_with(XML_FORMAT, "xml", "<a>\n<b>x</b>\n</a>");
     let outside = tempfile::TempDir::new().expect("a temporary directory should be creatable");
     stub_xmllint(
         outside.path(),
@@ -609,6 +609,21 @@ fn xml_an_xhtml_block_xml_space_or_unescaped_non_ascii_is_never_formatted() {
             "`xml:space`",
         ),
         ("svg", "<svg><text>\u{e9}</text></svg>", "non-ASCII"),
+        (
+            "svg",
+            "<svg><foreignObject><div></div></foreignObject></svg>",
+            "`foreignObject`",
+        ),
+        (
+            "xml",
+            "<!DOCTYPE a [<!ELEMENT a ANY>]>\n<a/>",
+            "internal subset",
+        ),
+        (
+            "xml",
+            "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<a/>",
+            "byte order mark",
+        ),
     ];
     for (tag, body, reason) in cases {
         let project = project_with(XML_BOTH, tag, body);
@@ -633,6 +648,14 @@ fn xml_an_xhtml_block_xml_space_or_unescaped_non_ascii_is_never_formatted() {
                 .is_some_and(|said| said.contains(reason)),
             "{tag}: expected a warning naming {reason:?}: {json}"
         );
+        if reason == "byte order mark" {
+            assert!(
+                at(&json, "/findings/0/help")
+                    .as_str()
+                    .is_some_and(|help| help.starts_with("remove the byte order mark")),
+                "the help names the byte order mark, not a declaration the block has: {json}"
+            );
+        }
         assert_eq!(
             at(&json, "/data/summary/code_blocks/format_not_run"),
             1,
@@ -663,21 +686,21 @@ fn xml_the_real_xmllint_formats_odd_blocks_keeping_their_content_and_fix_settles
     ) else {
         return;
     };
-    // Each block xmllint rewrites, and what supdoc fix writes: only indentation between elements
-    // changes, and `<a></a>` becomes `<a/>`; every text, comment, CDATA and attribute value is
-    // kept.
+    // Each block xmllint rewrites, and what supdoc fix writes: only whitespace already between
+    // nodes is re-indented, `<a></a>` becomes `<a/>`, and a character reference becomes its
+    // character, the same parsed text; every text, comment and attribute value is kept.
     let rewritten = [
-        ("<a><b>x</b></a>", "<a>\n  <b>x</b>\n</a>"),
+        ("<a>\n<b>x</b>\n</a>", "<a>\n  <b>x</b>\n</a>"),
         ("<a></a>", "<a/>"),
-        ("<a><!-- c --></a>", "<a>\n  <!-- c -->\n</a>"),
-        ("<a><?pi d?></a>", "<a>\n  <?pi d?>\n</a>"),
-        ("<a> <!-- c --> <b/></a>", "<a>\n  <!-- c -->\n  <b/>\n</a>"),
+        ("<a>\n<!-- c -->\n</a>", "<a>\n  <!-- c -->\n</a>"),
+        ("<a>\n<?pi d?>\n</a>", "<a>\n  <?pi d?>\n</a>"),
         (
-            "<p><b>x</b> <i>y</i></p>",
-            "<p>\n  <b>x</b>\n  <i>y</i>\n</p>",
+            "<a>\n<b>\n<c/>\n</b>\n</a>",
+            "<a>\n  <b>\n    <c/>\n  </b>\n</a>",
         ),
+        ("<a>&#65;</a>", "<a>A</a>"),
         (
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<a><b>\u{e9}</b></a>",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<a>\n<b>\u{e9}</b>\n</a>",
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<a>\n  <b>\u{e9}</b>\n</a>",
         ),
     ];
@@ -743,13 +766,31 @@ fn xml_the_real_xmllint_never_formats_a_block_whose_meaning_or_spelling_it_would
         return;
     };
     // xmllint indents inside `xml:space="preserve"`, writes `é` as `&#xE9;` without a UTF-8
-    // declaration, and writes `<br></br>` as `<br/>`, which XHTML served as HTML misreads.
+    // declaration, writes `<br></br>` as `<br/>`, which XHTML served as HTML misreads, and
+    // rewrites an internal subset. It adds whitespace where the block has none (between adjacent
+    // tspans it renders as a space), and drops whitespace beside CDATA or a comment, which
+    // supdoc's comparison of the two trees catches.
     let cases = [
         ("xml", "<a xml:space=\"preserve\"><b/><c/></a>"),
         ("xml", "<a xml:space=\"preserve\"><b>\n <c/></b></a>"),
         ("xml", "<a><b>\u{e9}</b></a>"),
         ("xml", "<?xml version=\"1.0\"?>\n<a b=\"\u{2713}\"/>"),
         ("xhtml", "<html><body><br></br></body></html>"),
+        (
+            "svg",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><foreignObject>\
+             <div xmlns=\"http://www.w3.org/1999/xhtml\"></div></foreignObject></svg>",
+        ),
+        ("xml", "<!DOCTYPE a [<!ELEMENT a ( b | c )* >]>\n<a/>"),
+        (
+            "svg",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><text><tspan>Hel</tspan>\
+             <tspan>lo</tspan></text></svg>",
+        ),
+        ("xml", "<a>\n  <![CDATA[x]]>\n</a>"),
+        ("xml", "<a>\n  <!-- c -->\n  text\n</a>"),
+        ("xml", "<a><b>x</b></a>"),
+        ("xml", "<p><b>x</b> <i>y</i></p>"),
     ];
     for (tag, body) in cases {
         let project = project_with(XML_BOTH, tag, body);

@@ -955,7 +955,7 @@ fn relaxed(fragments: &[(Kind, Support)], kind: Option<Kind>) -> &'static [&'sta
 }
 
 /// The known tools. A language's first cartridge for a step is its default for that step.
-pub(crate) static CARTRIDGES: [ToolCartridge; 40] = [
+pub(crate) static CARTRIDGES: [ToolCartridge; 41] = [
     ToolCartridge {
         name: "rustfmt",
         language: Language::Rust,
