@@ -9,12 +9,23 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { after, afterEach, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { BuildError, checkManifests, PLATFORMS } from "../build.mjs";
+import { BuildError, checkManifests, makeExecutable, PLATFORMS } from "../build.mjs";
 
 const BUILD = fileURLToPath(new URL("../build.mjs", import.meta.url));
 const SCRATCH = fileURLToPath(new URL("../../work/npm-build-test/", import.meta.url));
@@ -94,12 +105,37 @@ function releaseAssets({ version = VERSION, targets = TARGETS } = {}) {
   return { assets, license, root };
 }
 
+/**
+ * Rebuilds the archive for `target` in `assets` from a staging tree `populate(dir)` fills, where
+ * `dir` is the archive's top directory, then fixes up its line in SHA256SUMS.
+ */
+function replaceArchive({ assets, root }, target, populate) {
+  const name = `supdoc-${VERSION}-${target}`;
+  const staging = mkdtempSync(path.join(root, "replace-"));
+  mkdirSync(path.join(staging, name));
+  populate(path.join(staging, name));
+  const archive = path.join(assets, `${name}.tar.gz`);
+  tar(staging, ["-czf", archive, name]);
+  const digest = createHash("sha256").update(readFileSync(archive)).digest("hex");
+  const sums = path.join(assets, "SHA256SUMS");
+  writeFileSync(
+    sums,
+    readFileSync(sums, "utf8").replace(new RegExp(`^[0-9a-f]{64}(  ${name}\\.tar\\.gz)$`, "m"), `${digest}$1`),
+  );
+  return name;
+}
+
+/** The permission bits of `file`. */
+function modeOf(file) {
+  return statSync(file).mode & 0o777;
+}
+
 /** Runs build.mjs as the workflow does. */
-function runBuild({ assets, license, out, tag = TAG, extra = [] }) {
+function runBuild({ assets, license, out, tag = TAG, extra = [], cwd, env }) {
   return spawnSync(
     process.execPath,
     [BUILD, "--tag", tag, "--assets", assets, "--license", license, "--out", out, ...extra],
-    { encoding: "utf8" },
+    { encoding: "utf8", cwd, env },
   );
 }
 
@@ -313,24 +349,16 @@ test("refuses an archive that names another version", () => {
 });
 
 test("refuses an archive that holds no binary at the release layout's path", () => {
-  const { assets, license, root } = releaseAssets();
-  // Rebuild one archive with its binary under the wrong name, then fix up its checksum.
-  const name = `supdoc-${VERSION}-aarch64-apple-darwin`;
-  const staging = path.join(root, "wrong");
-  mkdirSync(path.join(staging, name), { recursive: true });
-  writeFileSync(path.join(staging, name, "supdoc-cli"), fakeBinary("aarch64-apple-darwin"));
-  tar(staging, ["-czf", path.join(assets, `${name}.tar.gz`), name]);
-  const digest = createHash("sha256").update(readFileSync(path.join(assets, `${name}.tar.gz`))).digest("hex");
-  const sums = path.join(assets, "SHA256SUMS");
-  writeFileSync(
-    sums,
-    readFileSync(sums, "utf8").replace(new RegExp(`^[0-9a-f]{64}(  ${name}\\.tar\\.gz)$`, "m"), `${digest}$1`),
-  );
+  const fixture = releaseAssets();
+  const { assets, license, root } = fixture;
+  const name = replaceArchive(fixture, "aarch64-apple-darwin", (dir) => {
+    writeFileSync(path.join(dir, "supdoc-cli"), fakeBinary("aarch64-apple-darwin"));
+  });
   const out = path.join(root, "out");
 
   const result = runBuild({ assets, license, out });
 
-  assertRefused(result, out, new RegExp(`could not extract ${name}/supdoc from ${name}\\.tar\\.gz`));
+  assertRefused(result, out, new RegExp(`could not list ${name}/supdoc in ${name}\\.tar\\.gz: .+`));
 });
 
 test("refuses a tag that is not vMAJOR.MINOR.PATCH", () => {
@@ -360,6 +388,178 @@ test("refuses an unknown option", () => {
   const result = runBuild({ assets, license, out, extra: ["--publish"] });
 
   assertRefused(result, out, /Unknown option '--publish'.*Usage: node npm\/build\.mjs/);
+});
+
+describe("an archive whose binary member is not a regular file", () => {
+  const unix = { skip: process.platform === "win32" && "symbolic links and FIFOs need a Unix tar" };
+
+  test("refuses a symbolic link member, naming it", unix, () => {
+    const fixture = releaseAssets();
+    const name = replaceArchive(fixture, "x86_64-apple-darwin", (dir) => symlinkSync("LICENSE", path.join(dir, "supdoc")));
+    const out = path.join(fixture.root, "out");
+
+    const result = runBuild({ ...fixture, out });
+
+    assertRefused(result, out, new RegExp(`${name}/supdoc in ${name}\\.tar\\.gz is a symbolic link, not a regular file`));
+  });
+
+  test("refuses a directory member, naming it", () => {
+    const fixture = releaseAssets();
+    const name = replaceArchive(fixture, "x86_64-unknown-linux-musl", (dir) => {
+      mkdirSync(path.join(dir, "supdoc"));
+      writeFileSync(path.join(dir, "supdoc", "inner"), "not a binary\n");
+    });
+    const out = path.join(fixture.root, "out");
+
+    const result = runBuild({ ...fixture, out });
+
+    assertRefused(result, out, new RegExp(`${name}/supdoc in ${name}\\.tar\\.gz is a directory, not a regular file`));
+  });
+
+  test("refuses a FIFO member, naming it", unix, () => {
+    const fixture = releaseAssets();
+    const name = replaceArchive(fixture, "aarch64-unknown-linux-musl", (dir) => {
+      const made = spawnSync("mkfifo", [path.join(dir, "supdoc")], { encoding: "utf8" });
+      assert.equal(made.status, 0, `mkfifo failed: ${made.stderr}`);
+    });
+    const out = path.join(fixture.root, "out");
+
+    const result = runBuild({ ...fixture, out });
+
+    assertRefused(result, out, new RegExp(`${name}/supdoc in ${name}\\.tar\\.gz is a FIFO, not a regular file`));
+  });
+
+  test("refuses a symbolic link to a file outside --out and leaves that file's mode alone", unix, () => {
+    const fixture = releaseAssets();
+    const outside = path.join(fixture.root, "outside");
+    writeFileSync(outside, "a file the build must not touch\n");
+    chmodSync(outside, 0o644);
+    const name = replaceArchive(fixture, "aarch64-apple-darwin", (dir) => symlinkSync(outside, path.join(dir, "supdoc")));
+    const out = path.join(fixture.root, "out");
+
+    const result = runBuild({ ...fixture, out });
+
+    assertRefused(result, out, new RegExp(`${name}/supdoc in ${name}\\.tar\\.gz is a symbolic link`));
+    assert.equal(modeOf(outside), 0o644, "the file the link points at should keep mode 0644");
+  });
+});
+
+describe("makeExecutable", () => {
+  test("refuses a symbolic link and leaves the file it points at alone", { skip: process.platform === "win32" }, () => {
+    const root = scratch("make-executable-");
+    const outside = path.join(root, "outside");
+    writeFileSync(outside, "a file the build must not touch\n");
+    chmodSync(outside, 0o644);
+    const link = path.join(root, "supdoc");
+    symlinkSync(outside, link);
+
+    assert.throws(
+      () => makeExecutable(link, "the extracted supdoc"),
+      (error) => error instanceof BuildError && error.message === "the extracted supdoc is not a regular file; refusing to package it.",
+    );
+    assert.equal(modeOf(outside), 0o644, "the file the link points at should keep mode 0644");
+  });
+
+  test("refuses a directory", () => {
+    const root = scratch("make-executable-");
+    mkdirSync(path.join(root, "supdoc"));
+
+    assert.throws(
+      () => makeExecutable(path.join(root, "supdoc"), "the extracted supdoc"),
+      (error) => error instanceof BuildError && error.message === "the extracted supdoc is not a regular file; refusing to package it.",
+    );
+  });
+
+  test("sets mode 0755 on a regular file", { skip: process.platform === "win32" }, () => {
+    const root = scratch("make-executable-");
+    const file = path.join(root, "supdoc");
+    writeFileSync(file, "binary\n");
+    chmodSync(file, 0o644);
+
+    makeExecutable(file, "the extracted supdoc");
+
+    assert.equal(modeOf(file), 0o755);
+  });
+});
+
+test("extracts from a private copy of the verified bytes, never the original archive", { skip: process.platform === "win32" }, () => {
+  const fixture = releaseAssets();
+  // A second set of archives whose binaries are evil, with the same names.
+  const evil = path.join(fixture.root, "evil");
+  mkdirSync(evil);
+  for (const { target, binary } of EXPECTED) {
+    const name = `supdoc-${VERSION}-${target}`;
+    const staging = mkdtempSync(path.join(fixture.root, "evil-staging-"));
+    mkdirSync(path.join(staging, name));
+    writeFileSync(path.join(staging, name, binary), "evil\n");
+    tar(staging, ["-czf", path.join(evil, `${name}.tar.gz`), name]);
+  }
+  // A tar on PATH that swaps the evil archives over the originals, after hashing, then runs tar.
+  const realTar = spawnSync("sh", ["-c", "command -v tar"], { encoding: "utf8" }).stdout.trim();
+  const bin = path.join(fixture.root, "bin");
+  mkdirSync(bin);
+  const log = path.join(fixture.root, "tar-cwd.log");
+  writeFileSync(
+    path.join(bin, "tar"),
+    `#!/bin/sh\npwd >> '${log}'\ncp '${evil}'/*.tar.gz '${fixture.assets}'/\nexec '${realTar}' "$@"\n`,
+  );
+  chmodSync(path.join(bin, "tar"), 0o755);
+  const out = path.join(fixture.root, "out");
+
+  const result = runBuild({ ...fixture, out, env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` } });
+
+  assert.equal(result.status, 0, `build failed: ${result.stderr}`);
+  const cwds = new Set(readFileSync(log, "utf8").trim().split("\n"));
+  assert.deepEqual([...cwds], [path.join(out, "archives")], "tar should run only on the private copies");
+  assert.equal(modeOf(path.join(out, "archives")), 0o700, "the private copies should be in a 0700 directory");
+  for (const { name, target, binary } of EXPECTED) {
+    const dir = path.join(out, "packages", name.replace("/", "-").replace("@", ""));
+    assert.equal(readFileSync(path.join(dir, "bin", binary), "utf8"), fakeBinary(target), `${name} should hold the verified binary`);
+  }
+});
+
+describe("path options", () => {
+  test("accepts a relative --out, resolved against the working directory", () => {
+    const fixture = releaseAssets();
+
+    const result = runBuild({ ...fixture, out: "out", cwd: fixture.root });
+
+    assert.equal(result.status, 0, `build failed: ${result.stderr}`);
+    const tarballs = result.stdout.trim().split("\n");
+    assert.equal(tarballs.length, 7);
+    for (const tarball of tarballs) {
+      assert.ok(existsSync(path.join(fixture.root, "out", tarball)), `${tarball} should be in <cwd>/out`);
+    }
+  });
+
+  test("refuses an empty --out", () => {
+    const fixture = releaseAssets();
+
+    const result = runBuild({ ...fixture, out: "", cwd: fixture.root });
+
+    assertRefused(result, path.join(fixture.root, "out"), /^npm\/build\.mjs: --out must not be empty\. Usage: /);
+  });
+
+  test("refuses an --out that names a file", () => {
+    const fixture = releaseAssets();
+    const out = path.join(fixture.root, "out");
+    writeFileSync(out, "not a directory\n");
+
+    const result = runBuild({ ...fixture, out });
+
+    assertRefused(result, fixture.root, /^npm\/build\.mjs: output directory .*out exists and is not a directory\.\n$/);
+  });
+
+  test("refuses a --license that names a directory", () => {
+    const fixture = releaseAssets();
+    const license = path.join(fixture.root, "license-dir");
+    mkdirSync(license);
+    const out = path.join(fixture.root, "out");
+
+    const result = runBuild({ ...fixture, license, out });
+
+    assertRefused(result, out, /^npm\/build\.mjs: license file .*license-dir is not a regular file\.\n$/);
+  });
 });
 
 describe("checkManifests", () => {

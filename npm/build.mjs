@@ -4,8 +4,9 @@
 //   node npm/build.mjs --tag vV --assets <dir> --license <file> --out <dir>
 //
 // <dir> holds the release archives and SHA256SUMS as `gh release download` wrote them. The script
-// re-checks every archive it uses against SHA256SUMS, takes each binary out of its archive with the
-// system `tar`, writes six platform packages and the `supdoc` wrapper under <out>/packages, packs
+// reads each archive it uses once, checks those bytes against SHA256SUMS, writes them to a private
+// copy under <out>/archives, takes each binary out of that copy with the system `tar` (refusing any
+// member that is not a regular file), writes six platform packages and the `supdoc` wrapper under <out>/packages, packs
 // each into <out>, and prints the seven tarball names. Nothing is compiled, and no generated package
 // has a `scripts` key. Any disagreement stops the build before a tarball exists.
 
@@ -13,11 +14,17 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
+  closeSync,
+  constants,
   copyFileSync,
   existsSync,
+  fchmodSync,
+  lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -55,7 +62,11 @@ const PLATFORM_README = path.join(HERE, "platform", "README.md");
 /** A refusal: the message names what disagreed, and the build exits 1 without packing. */
 export class BuildError extends Error {}
 
-/** Parses the command line into `{ tag, assets, license, out }`, refusing anything else. */
+/**
+ * Parses the command line into `{ tag, assets, license, out }`, refusing anything else. The three
+ * paths come back absolute, resolved against the working directory, so `tar` and `npm pack` never
+ * see a relative one.
+ */
 export function parseCommandLine(argv) {
   let values;
   try {
@@ -75,8 +86,14 @@ export function parseCommandLine(argv) {
   }
   for (const option of ["tag", "assets", "license", "out"]) {
     if (values[option] === undefined) throw new BuildError(`--${option} is required. Usage: ${USAGE}`);
+    if (values[option] === "") throw new BuildError(`--${option} must not be empty. Usage: ${USAGE}`);
   }
-  return values;
+  return {
+    tag: values.tag,
+    assets: path.resolve(values.assets),
+    license: path.resolve(values.license),
+    out: path.resolve(values.out),
+  };
 }
 
 const USAGE = "node npm/build.mjs --tag vV --assets <dir> --license <file> --out <dir>";
@@ -123,32 +140,85 @@ function archiveName(version, target) {
   return `supdoc-${version}-${target}.tar.gz`;
 }
 
-/** Refuses an archive that is missing, absent from SHA256SUMS, or whose bytes do not match it. */
+/**
+ * Reads an archive once and returns its bytes, refusing one that is missing, absent from SHA256SUMS,
+ * or whose bytes do not match it. The caller works only from the returned bytes, so the file the
+ * hash covered is never opened again by name.
+ */
 function verifyArchive(assets, name, sums) {
   const file = path.join(assets, name);
   if (!existsSync(file)) throw new BuildError(`${name} is missing from ${assets}.`);
   const expected = sums.get(name);
   if (expected === undefined) throw new BuildError(`${name} is not listed in SHA256SUMS.`);
-  const actual = createHash("sha256").update(readFileSync(file)).digest("hex");
+  const bytes = readFileSync(file);
+  const actual = createHash("sha256").update(bytes).digest("hex");
   if (actual !== expected) {
     throw new BuildError(`${name} has SHA-256 ${actual}, but SHA256SUMS lists ${expected}.`);
   }
+  return bytes;
 }
 
-/** Extracts `<archive dir>/<binary>` from the archive into `binDir` and makes it executable. */
-function extractBinary(assets, name, member, binDir) {
+/** What a `tar -tv` mode string's first character says an entry is, for refusals. */
+const ENTRY_KINDS = {
+  l: "a symbolic link",
+  h: "a hard link",
+  d: "a directory",
+  p: "a FIFO",
+  c: "a character device",
+  b: "a block device",
+  s: "a socket",
+};
+
+/** Runs the system `tar` in `cwd`; refuses if it cannot start. */
+function runTar(cwd, args, name) {
+  // Run in the archive's directory with a relative archive name: GNU tar reads `C:\...` as a remote host.
+  const result = spawnSync("tar", args, { cwd, encoding: "utf8" });
+  if (result.error) throw new BuildError(`could not run tar on ${name}: ${result.error.message}`);
+  return result;
+}
+
+/** Refuses unless every entry the archive lists for `member` is a regular file. */
+function checkMember(cwd, name, member) {
+  const result = runTar(cwd, ["-tvzf", name, member], name);
+  if (result.status !== 0) {
+    throw new BuildError(`could not list ${member} in ${name}: ${result.stderr.trim() || `tar exited ${result.status}`}`);
+  }
+  for (const line of result.stdout.split("\n").filter((entry) => entry.trim() !== "")) {
+    if (line[0] !== "-") {
+      const kind = ENTRY_KINDS[line[0]] ?? `an entry of type ${line[0]}`;
+      throw new BuildError(`${member} in ${name} is ${kind}, not a regular file; refusing to package it.`);
+    }
+  }
+}
+
+/**
+ * Sets mode 0755 on `file`, refusing unless it is a regular file. The path is checked without
+ * following a symbolic link, and the mode is set through a descriptor opened without following one.
+ */
+export function makeExecutable(file, description) {
+  if (!lstatSync(file, { throwIfNoEntry: false })?.isFile()) {
+    throw new BuildError(`${description} is not a regular file; refusing to package it.`);
+  }
+  const descriptor = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    fchmodSync(descriptor, 0o755);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+/**
+ * Extracts `<archive dir>/<binary>` from the private archive copy in `workDir` into `binDir` and
+ * makes it executable, refusing a member that is not a regular file before and after extraction.
+ */
+function extractBinary(workDir, name, member, binDir) {
+  checkMember(workDir, name, member);
   mkdirSync(binDir, { recursive: true });
-  // Run in the assets directory with a relative archive name: GNU tar reads `C:\...` as a remote host.
-  const result = spawnSync("tar", ["-xzf", name, "-C", binDir, "--strip-components=1", member], {
-    cwd: assets,
-    encoding: "utf8",
-  });
-  const binary = path.join(binDir, path.basename(member));
-  if (result.error) throw new BuildError(`could not run tar to extract ${name}: ${result.error.message}`);
-  if (result.status !== 0 || !existsSync(binary)) {
+  const result = runTar(workDir, ["-xzf", name, "-C", binDir, "--strip-components=1", member], name);
+  if (result.status !== 0) {
     throw new BuildError(`could not extract ${member} from ${name}: ${result.stderr.trim() || `tar exited ${result.status}`}`);
   }
-  chmodSync(binary, 0o755);
+  makeExecutable(path.join(binDir, path.basename(member)), `the extracted ${member} from ${name}`);
 }
 
 /** Writes `value` as two-space JSON with a trailing newline. */
@@ -157,9 +227,9 @@ function writeJson(file, value) {
 }
 
 /** Writes one platform package into `dir` and returns its manifest. */
-function writePlatformPackage({ platform, version, assets, license, wrapper, dir }) {
+function writePlatformPackage({ platform, version, workDir, license, wrapper, dir }) {
   const archive = archiveName(version, platform.target);
-  extractBinary(assets, archive, `supdoc-${version}-${platform.target}/${platform.binary}`, path.join(dir, "bin"));
+  extractBinary(workDir, archive, `supdoc-${version}-${platform.target}/${platform.binary}`, path.join(dir, "bin"));
   writeFileSync(
     path.join(dir, "bin", MARKER),
     "This supdoc binary was installed by an npm package. Update it with the package manager, not supdoc upgrade.\n",
@@ -250,21 +320,36 @@ function pack(dir, out) {
 /** Builds and packs all seven packages; returns the tarball file names, platform packages first. */
 export function build({ tag, assets, license, out }) {
   const version = versionFromTag(tag);
-  if (!existsSync(license)) throw new BuildError(`license file ${license} does not exist.`);
-  if (existsSync(out) && readdirSync(out).length > 0) {
+  const licenseStat = statSync(license, { throwIfNoEntry: false });
+  if (!licenseStat) throw new BuildError(`license file ${license} does not exist.`);
+  if (!licenseStat.isFile()) throw new BuildError(`license file ${license} is not a regular file.`);
+  const outStat = statSync(out, { throwIfNoEntry: false });
+  if (outStat && !outStat.isDirectory()) {
+    throw new BuildError(`output directory ${out} exists and is not a directory.`);
+  }
+  if (outStat && readdirSync(out).length > 0) {
     throw new BuildError(`output directory ${out} is not empty; give the build an empty or new directory.`);
   }
 
   const sums = readChecksums(assets);
   checkArchiveNames(assets, version);
-  for (const platform of PLATFORMS) verifyArchive(assets, archiveName(version, platform.target), sums);
+  const archives = PLATFORMS.map((platform) => {
+    const name = archiveName(version, platform.target);
+    return { name, bytes: verifyArchive(assets, name, sums) };
+  });
+
+  // Extract only from copies of the verified bytes, in a directory no other user can write.
+  const workDir = path.join(out, "archives");
+  mkdirSync(out, { recursive: true });
+  mkdirSync(workDir, { mode: 0o700 });
+  for (const { name, bytes } of archives) writeFileSync(path.join(workDir, name), bytes, { flag: "wx", mode: 0o600 });
 
   const template = JSON.parse(readFileSync(path.join(WRAPPER_DIR, "package.json"), "utf8"));
   const packages = path.join(out, "packages");
   const built = PLATFORMS.map((platform) => {
     const dir = path.join(packages, platform.name.replace("/", "-").replace("@", ""));
     mkdirSync(dir, { recursive: true });
-    return { dir, manifest: writePlatformPackage({ platform, version, assets, license, wrapper: template, dir }) };
+    return { dir, manifest: writePlatformPackage({ platform, version, workDir, license, wrapper: template, dir }) };
   });
   const wrapperDir = path.join(packages, "supdoc");
   built.push({ dir: wrapperDir, manifest: writeWrapperPackage({ template, version, license, dir: wrapperDir }) });
