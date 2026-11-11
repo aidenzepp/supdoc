@@ -588,7 +588,9 @@ fn runs_rust(tools: [Option<&Tool>; 2]) -> bool {
 
 /// Runs each of `jobs` on its block in `records` with `session`, in parallel (see
 /// [`in_parallel`]): its formatter, then its linter unless the formatter found the block doesn't
-/// parse, each Rust tool with `rust`'s setup. One result per job, in order.
+/// parse, each Rust tool with `rust`'s setup. A block xmllint both formats and lints is linted
+/// first, and formatted only when its lint step ran clean (see [`lints_first`]). One result per
+/// job, in order.
 ///
 /// Effect: reads and writes the result cache and runs the tools, killing each at its timeout.
 fn run_jobs(
@@ -599,8 +601,25 @@ fn run_jobs(
 ) -> Vec<Option<StepsRan>> {
     in_parallel(jobs, |job| {
         let record = records.get(job.record)?;
+        let run_lint = || {
+            job.lint.as_ref().and_then(|run| match &run.tool {
+                Tool::Custom(custom) => run_custom_linter(custom, &run.program, record, session),
+                Tool::Cartridge(tool) => {
+                    if let Some(reason) = switched_off(tool, record) {
+                        return Some(Err(reason.into()));
+                    }
+                    let rust = rust.filter(|_| run.tool.is("clippy"));
+                    run_linter(tool, &run.program, record, session, rust)
+                }
+            })
+        };
+        let linted_first = lints_first(job).then(run_lint);
+        let rejected = linted_first.as_ref().is_some_and(
+            |linted| matches!(linted, Some(Ok((verdict, _))) if *verdict != lint::Verdict::Clean),
+        );
         let format = job.format.as_ref().and_then(|run| match &run.tool {
             Tool::Custom(custom) => run_custom_formatter(custom, &run.program, record, session),
+            Tool::Cartridge(_) if rejected => Some(Err(XMLLINT_REJECTED.into())),
             Tool::Cartridge(tool) if let Some(not_run) = format_not_given(tool, record) => {
                 Some(Err(not_run))
             }
@@ -610,24 +629,27 @@ fn run_jobs(
                 run_formatter(tool, &run.program, record, frame, session, rust)
             }
         });
-        let parses = parses(format.as_ref());
-        let lint = job
-            .lint
-            .as_ref()
-            .filter(|_| parses)
-            .and_then(|run| match &run.tool {
-                Tool::Custom(custom) => run_custom_linter(custom, &run.program, record, session),
-                Tool::Cartridge(tool) => {
-                    if let Some(reason) = switched_off(tool, record) {
-                        return Some(Err(reason.into()));
-                    }
-                    let rust = rust.filter(|_| run.tool.is("clippy"));
-                    run_linter(tool, &run.program, record, session, rust)
-                }
-            });
+        let lint = match linted_first {
+            Some(linted) => linted,
+            None if parses(format.as_ref()) => run_lint(),
+            None => None,
+        };
         Some(StepsRan { format, lint })
     })
 }
+
+/// Whether `job` lints its block before formatting it: its formatter is `xmllint-format` and its
+/// linter `xmllint`, so the format step runs only on a block xmllint's lint step accepted.
+fn lints_first(job: &Job) -> bool {
+    job.format
+        .as_ref()
+        .is_some_and(|run| run.tool.is(XMLLINT_FORMAT))
+        && job.lint.as_ref().is_some_and(|run| run.tool.is(XMLLINT))
+}
+
+/// Why an XML block's format step didn't run when xmllint's lint step didn't accept it.
+const XMLLINT_REJECTED: &str =
+    "xmllint's lint step didn't accept the block, so supdoc doesn't format it";
 
 /// `state`'s reason as [`evaluate`] first records it, for `steps` and the formatter `tool`.
 /// `None` while the block is pending: [`Evaluation::settle_pending`] gives it one.
@@ -979,6 +1001,30 @@ fn superhtml_blank(at: &Location) -> Finding {
     .with_location(at.clone())
 }
 
+/// The run's one `code-block-not-checked` warning for `reason`, at `at`, the first XML block
+/// whose format step xmllint isn't given because of it (see [`xmllint::format_withheld`]), or
+/// whose rewrite supdoc doesn't keep (see [`xmllint::format_verdict`]).
+fn xmllint_format_withheld(at: &Location, reason: &'static str) -> Finding {
+    let help = match reason {
+        xmllint::ESCAPED => {
+            "start the block with `<?xml version=\"1.0\" encoding=\"UTF-8\"?>`, or mark it \
+             `format(off: <reason>)` to leave it as written"
+        }
+        xmllint::BOM => {
+            "remove the byte order mark from the start of the block, or mark it \
+             `format(off: <reason>)` to leave it as written"
+        }
+        xmllint::CHANGED => {
+            "xmllint may only re-indent whitespace the block already has between its nodes: \
+             lay the block out by hand, or mark it `format(off: <reason>)` to leave it as written"
+        }
+        _ => "mark the block `format(off: <reason>)` to leave it as written",
+    };
+    Finding::new(NOT_CHECKED, Severity::Warning, reason)
+        .with_help(help)
+        .with_location(at.clone())
+}
+
 /// The run's one `code-block-not-checked` warning, at `at`, the first HTML block superhtml isn't
 /// given because it holds an element whose content superhtml rewrites (see
 /// [`superhtml::not_given`]): `said` names the element and its doc line.
@@ -1277,6 +1323,14 @@ impl NotRunWarnings {
             PYLINT_SWITCHED_OFF => pylint_switched_off(at),
             PRETTIER_SWITCHED_OFF => prettier_switched_off(at),
             superhtml::BLANK => superhtml_blank(at),
+            xmllint::XHTML
+            | xmllint::FOREIGN
+            | xmllint::SUBSET
+            | xmllint::SPACE
+            | xmllint::BOM
+            | xmllint::ESCAPED
+            | xmllint::CHANGED
+            | xmllint::UNREAD => xmllint_format_withheld(at, not_run.reason),
             superhtml::REWRITTEN => superhtml_rewritten(at, said),
             dockerfmt::TOO_SHORT => dockerfmt_not_given(at, "is at most one byte long"),
             dockerfmt::SWITCHED_OFF => dockerfmt_switched_off(at),
@@ -1724,8 +1778,11 @@ impl SuperhtmlVersion {
 const SUPERHTML_UNVERIFIED: &str =
     "the superhtml on `PATH` isn't a version supdoc is verified against";
 
-/// The name of xmllint's cartridge.
+/// The name of xmllint's lint cartridge.
 const XMLLINT: &str = "xmllint";
+
+/// The name of xmllint's format cartridge.
+const XMLLINT_FORMAT: &str = "xmllint-format";
 
 /// The version of the xmllint a run's blocks use, read once.
 #[derive(Debug, Default)]
@@ -1738,15 +1795,15 @@ struct XmllintGate {
 }
 
 impl XmllintGate {
-    /// Whether `record` goes on to its tools once its xmllint lint step has passed two gates. A
-    /// block supdoc never gives xmllint (see [`xmllint::withheld`]) gets its lint step taken off,
-    /// with the reason, and one `code-block-not-checked` warning at the block goes to `slots`;
-    /// xmllint never sees it. Then the xmllint on `PATH` is checked against the versions supdoc
-    /// is verified against (see [`xmllint::VERIFIED`]), read once per run: when it isn't one, or
-    /// can't be read, the lint step doesn't run, with [`XMLLINT_UNVERIFIED`] as its reason, and
-    /// the run's one warning goes to `slots`. Either way a format step by another tool still
-    /// runs. A block whose linter isn't xmllint, or whose xmllint isn't on `PATH` or is inside the
-    /// checkout, is left to the usual lookup.
+    /// Whether `record` goes on to its tools once the steps xmllint runs on it, its format step
+    /// (`xmllint-format`) and its lint step (`xmllint`), have passed two gates. A block supdoc
+    /// never gives xmllint (see [`xmllint::withheld`]) gets both taken off, with the reason, and
+    /// one `code-block-not-checked` warning at the block goes to `slots`; xmllint never sees it.
+    /// Then the xmllint on `PATH` is checked against the versions supdoc is verified against (see
+    /// [`xmllint::VERIFIED`]), read once per run: when it isn't one, or can't be read, neither
+    /// step runs, with [`XMLLINT_UNVERIFIED`] as its reason, and the run's one warning goes to
+    /// `slots`. Either way a step by another tool still runs. A block xmllint runs no step on, or
+    /// whose xmllint isn't on `PATH` or is inside the checkout, is left to the usual lookup.
     ///
     /// Effect: runs `xmllint --version` the first time.
     fn give(
@@ -1755,7 +1812,14 @@ impl XmllintGate {
         (env, root): (&ToolEnv, &Path),
         slots: &mut Vec<Slot>,
     ) -> bool {
-        if !record.linter.as_ref().is_some_and(|tool| tool.is(XMLLINT)) {
+        let steps = XmllintSteps {
+            format: record
+                .tool
+                .as_ref()
+                .is_some_and(|tool| tool.is(XMLLINT_FORMAT)),
+            lint: record.linter.as_ref().is_some_and(|tool| tool.is(XMLLINT)),
+        };
+        if !steps.format && !steps.lint {
             return true;
         }
         let withheld = record
@@ -1763,8 +1827,8 @@ impl XmllintGate {
             .as_ref()
             .and_then(|pending| xmllint::withheld(&pending.input));
         if let Some(withheld) = withheld {
-            slots.push(Slot::Found(xmllint_withheld(withheld, &record.at)));
-            return take_lint_off(record, withheld.reason());
+            slots.push(Slot::Found(xmllint_withheld(withheld, steps, &record.at)));
+            return steps.take_off(record, withheld.reason());
         }
         let Found::OnPath(program) = find(XMLLINT, env, root) else {
             return true;
@@ -1784,7 +1848,7 @@ impl XmllintGate {
                     Severity::Warning,
                     format!(
                         "xmllint from libxml2 {shown} isn't a version supdoc's checks are verified \
-                         against ({}); its XML blocks' lint steps didn't run",
+                         against ({}); the steps it runs on XML blocks didn't run",
                         xmllint::VERIFIED.join(", ")
                     ),
                 )
@@ -1795,35 +1859,70 @@ impl XmllintGate {
                 .with_location(record.at.clone()),
             ));
         }
-        take_lint_off(record, XMLLINT_UNVERIFIED)
+        steps.take_off(record, XMLLINT_UNVERIFIED)
     }
 }
 
-/// Why an XML block's lint step didn't run when the xmllint on `PATH` isn't a verified version.
+/// Which of a block's steps xmllint runs.
+#[derive(Debug, Clone, Copy)]
+struct XmllintSteps {
+    /// Its format step, by `xmllint-format`.
+    format: bool,
+    /// Its lint step, by `xmllint`.
+    lint: bool,
+}
+
+impl XmllintSteps {
+    /// Takes each of these steps off `record` with `reason`. Whether a step is left to run.
+    fn take_off(self, record: &mut BlockRecord, reason: &'static str) -> bool {
+        if self.format {
+            let _taken = take_format_off(record, reason);
+        }
+        if self.lint {
+            let _taken = take_lint_off(record, reason);
+        }
+        record.tool.is_some() || record.linter.is_some()
+    }
+
+    /// The steps, as a sentence names them, and the attributes that turn them off.
+    const fn named(self) -> (&'static str, &'static str) {
+        match (self.format, self.lint) {
+            (true, true) => (
+                "format and lint steps",
+                "`format(off: <reason>)` and `lint(off: <reason>)`",
+            ),
+            (true, false) => ("format step", "`format(off: <reason>)`"),
+            _ => ("lint step", "`lint(off: <reason>)`"),
+        }
+    }
+}
+
+/// Why an XML block's steps didn't run when the xmllint on `PATH` isn't a verified version.
 const XMLLINT_UNVERIFIED: &str = "the xmllint on `PATH` isn't a version supdoc is verified against";
 
 /// The `code-block-not-checked` warning, at `at`, for a block xmllint isn't given because of
-/// `withheld` (see [`xmllint::withheld`]).
-fn xmllint_withheld(withheld: xmllint::Withheld, at: &Location) -> Finding {
+/// `withheld` (see [`xmllint::withheld`]), naming the `steps` it would have run.
+fn xmllint_withheld(withheld: xmllint::Withheld, steps: XmllintSteps, at: &Location) -> Finding {
+    let (named, marks) = steps.named();
     let help = match withheld {
-        xmllint::Withheld::External => {
+        xmllint::Withheld::External => format!(
             "supdoc never lets xmllint near a file or URL a block names: drop the DOCTYPE's \
              `SYSTEM` or `PUBLIC` identifier (a plain `<!DOCTYPE name>` is checked), or mark the \
-             block `lint(off: <reason>)`"
-        }
-        xmllint::Withheld::Entity => {
+             block {marks}"
+        ),
+        xmllint::Withheld::Entity => format!(
             "an entity can expand without bound: replace each entity reference with its text, or \
-             mark the block `lint(off: <reason>)`"
-        }
-        xmllint::Withheld::Encoding => {
+             mark the block {marks}"
+        ),
+        xmllint::Withheld::Encoding => format!(
             "write the block in UTF-8, declaring `encoding=\"UTF-8\"` or no encoding, with no \
-             NUL character, or mark the block `lint(off: <reason>)`"
-        }
+             NUL character, or mark the block {marks}"
+        ),
     };
     Finding::new(
         NOT_CHECKED,
         Severity::Warning,
-        format!("{}, so its lint step didn't run", withheld.reason()),
+        format!("{}, so its {named} didn't run", withheld.reason()),
     )
     .with_help(help)
     .with_location(at.clone())
@@ -4804,6 +4903,10 @@ fn format_not_given(tool: &ToolCartridge, record: &BlockRecord) -> Option<NotRun
             },
         }),
         SQRUFF_FORMAT => sqruff::switches_lint_off(input).then(|| SQRUFF_SWITCHED_OFF.into()),
+        XMLLINT_FORMAT => {
+            xmllint::format_withheld(record.language.as_deref().unwrap_or_default(), input)
+                .map(Into::into)
+        }
         _ => None,
     }
 }
@@ -5223,9 +5326,12 @@ fn run_clippy(
 }
 
 /// What `result`, `tool`'s finished format run on the block whose body is `input`, settles
-/// before its output is judged: the step not run, as [`config_skipped_by`] says, or a tool
+/// before its output is judged: the step not run, as [`config_skipped_by`] says, a tool
 /// failure when mbake printed its upgrade notice (see [`mbake::noticed`]), whose stdout is never
-/// the formatted block.
+/// the formatted block, or, for `xmllint --format`, every verdict (see
+/// [`xmllint::format_verdict`]), since its stderr after exit 0 is a failure, its output starts
+/// with a declaration supdoc takes off, and a rewrite that changes the block's content is the
+/// step not run.
 fn settled_before_judging(
     record: &BlockRecord,
     tool: &ToolCartridge,
@@ -5236,6 +5342,9 @@ fn settled_before_judging(
         return Some(Err(not_run));
     }
     let ran = result.as_ref().ok()?;
+    if tool.name == XMLLINT_FORMAT {
+        return Some(xmllint::format_verdict(input, ran).map_err(Into::into));
+    }
     (tool.name == MBAKE && mbake::noticed(input, &ran.stdout))
         .then(|| Ok(format::Verdict::ToolFailed(mbake::NOTICED.to_owned())))
 }

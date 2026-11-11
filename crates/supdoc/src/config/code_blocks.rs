@@ -1607,10 +1607,11 @@ mod tests {
     }
 
     #[test]
-    fn an_xml_table_selects_xmllint_and_no_formatter() {
+    fn an_xml_table_defaults_to_xmllint_format_and_xmllint() {
         let dir = tree(&[(
             "supdoc.config.toml",
-            "[features.code-blocks.xml]\n[features.code-blocks.xml.xmllint]\nlint = \"full\"\n",
+            "[features.code-blocks.xml]\n[features.code-blocks.xml.xmllint]\nlint = \"full\"\n\
+             [features.code-blocks.xml.xmllint-format]\nformat = \"off\"\n",
         )]);
 
         let config = Config::load(&at(&dir, ".")).expect("the fixture config should load");
@@ -1618,20 +1619,20 @@ mod tests {
 
         assert!(code_blocks.checks(Language::Xml));
         assert!(code_blocks.choice(Language::Xml, Step::Format).is_none());
-        assert!(crate::code_blocks::tools::default_for(Language::Xml, Step::Format).is_none());
-        assert_eq!(
-            crate::code_blocks::tools::default_for(Language::Xml, Step::Lint).map(|tool| tool.name),
-            Some("xmllint")
-        );
+        let default = |step| {
+            crate::code_blocks::tools::default_for(Language::Xml, step).map(|tool| tool.name)
+        };
+        assert_eq!(default(Step::Format), Some("xmllint-format"));
+        assert_eq!(default(Step::Lint), Some("xmllint"));
     }
 
     #[test]
-    fn a_named_xml_formatter_is_refused_pointing_at_a_custom_command() {
+    fn an_xml_formatter_named_as_the_linter_is_refused_naming_xmllint_format() {
         let message = refused("xml", "formatter = \"xmllint\"");
 
         assert!(
             message.contains("`xmllint` isn't a known xml formatter")
-                && message.contains("none yet: write a custom `{ command = [...] }`"),
+                && message.contains("xmllint-format"),
             "got {message}"
         );
     }

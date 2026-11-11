@@ -1,11 +1,14 @@
-//! xmllint: its diagnostics, its version, and the blocks supdoc never gives it.
+//! xmllint: its diagnostics, its formatted output, its version, and the blocks supdoc never
+//! gives it.
 //!
-//! xmllint (libxml2) reads the block on stdin and checks only that it is well-formed XML with
-//! well-formed namespaces: it always gets exactly [`ARGS`], so it builds no output tree, uses no
-//! network, reads no catalog, and never loads or expands an external DTD or entity (no
-//! `--loaddtd`, `--valid`, `--noent`, `--dtdattr`, `--xinclude`, `--c14n*` or `--huge`). It reads
-//! no config file, and its variables (`XML_CATALOG_FILES`, `XMLLINT_INDENT` and the rest) never
-//! reach it (see [`super::tools::ToolEnv`]).
+//! As a linter, xmllint (libxml2) reads the block on stdin and checks only that it is well-formed
+//! XML with well-formed namespaces: it always gets exactly [`ARGS`], so it builds no output tree,
+//! uses no network, reads no catalog, and never loads or expands an external DTD or entity (no
+//! `--loaddtd`, `--valid`, `--noent`, `--dtdattr`, `--xinclude`, `--c14n*` or `--huge`). As a
+//! formatter it always gets exactly [`FORMAT_ARGS`], the same but `--format` in place of
+//! `--noout`, and indents by two spaces. It reads no config file, and its variables
+//! (`XML_CATALOG_FILES`, `XMLLINT_INDENT` and the rest) never reach it (see
+//! [`super::tools::ToolEnv`]).
 //!
 //! xmllint honors nothing in the block that switches its checks off: its man page lists only
 //! command-line options (`--nowarning`, `--recover`, which supdoc never passes), and libxml2's
@@ -19,12 +22,18 @@
 //! block xmllint would read in an encoding other than UTF-8 (an XML declaration naming another
 //! encoding, or a NUL character, by which libxml2 detects UTF-16), in which supdoc's own search
 //! for the first two can't see what xmllint reads. A plain `<!DOCTYPE name>` is given to it.
+//! Six more never reach its format step (see [`format_withheld`]), whose output would change
+//! what they mean or how they are written beyond their layout. Every rewrite it does print is
+//! read back as XML and kept only when it holds the block's own tree, with nothing changed but
+//! whitespace the block already had between its nodes (see [`content`]).
 //!
 //! supdoc reads xmllint's stderr, never its exit status alone: a namespace error exits 0.
 
 use std::path::Path;
 
-use super::format;
+use roxmltree::{Document, Node, NodeType, ParsingOptions};
+
+use super::format::{self, ParseError};
 use super::lint::{self, Diagnostic};
 use super::runner::{self, Failure, Ran};
 use super::tools::ToolEnv;
@@ -32,6 +41,54 @@ use super::tools::ToolEnv;
 /// Every argument xmllint gets, in order: no output tree, no network, no catalog, the block on
 /// stdin.
 pub(crate) const ARGS: [&str; 4] = ["--noout", "--nonet", "--nocatalogs", "-"];
+
+/// Every argument xmllint's format step gets, in order: the block indented by two spaces on
+/// stdout, no network, no catalog, the block on stdin.
+pub(crate) const FORMAT_ARGS: [&str; 4] = ["--format", "--nonet", "--nocatalogs", "-"];
+
+/// The line `xmllint --format` starts its output with when the block has no XML declaration,
+/// which supdoc takes off (see [`format_verdict`]).
+const DECLARATION: &str = "<?xml version=\"1.0\"?>\n";
+
+/// Why an XML block's format step didn't run when it is tagged `xhtml`.
+pub(crate) const XHTML: &str = "xmllint writes an empty element as `<b/>`, which an XHTML page \
+                                served as HTML reads as an open tag, so supdoc doesn't format \
+                                blocks tagged `xhtml`";
+
+/// Why an XML block's format step didn't run when it holds HTML content that an HTML parser may
+/// read.
+pub(crate) const FOREIGN: &str = "the block holds `foreignObject` or names the XHTML namespace, \
+                                  whose empty elements xmllint writes as `<b/>`, which an HTML \
+                                  parser reads as an open tag, so supdoc doesn't format it";
+
+/// Why an XML block's format step didn't run when its DOCTYPE has an internal subset.
+pub(crate) const SUBSET: &str = "the block's DOCTYPE has an internal subset (`[`), whose \
+                                 declarations xmllint rewrites, so supdoc doesn't format it";
+
+/// Why an XML block's format step didn't run when it starts with a byte order mark.
+pub(crate) const BOM: &str = "the block starts with a byte order mark, which xmllint leaves out \
+                              of its output, so supdoc doesn't format it";
+
+/// Why an XML block's format step didn't run when xmllint's output holds another tree than the
+/// block's (see [`content`]).
+pub(crate) const CHANGED: &str = "xmllint would change the block's content, not only the \
+                                  whitespace between its nodes, so supdoc doesn't format it";
+
+/// Why an XML block's format step didn't run when supdoc couldn't read the block itself as XML
+/// to compare xmllint's output with it (see [`content`]).
+pub(crate) const UNREAD: &str = "supdoc couldn't read the block as XML to confirm xmllint keeps \
+                                 its content, so supdoc doesn't format it";
+
+/// Why an XML block's format step didn't run when it sets `xml:space`.
+pub(crate) const SPACE: &str = "the block sets `xml:space`, whose preserved whitespace xmllint \
+                                re-indents, so supdoc doesn't format it";
+
+/// Why an XML block's format step didn't run when it holds a non-ASCII character without
+/// declaring UTF-8.
+pub(crate) const ESCAPED: &str = "the block holds a non-ASCII character but no XML declaration \
+                                  naming `encoding=\"UTF-8\"`, so xmllint would write each such \
+                                  character as a character reference, and supdoc doesn't format \
+                                  it";
 
 /// Why an XML block's lint step didn't run when its DOCTYPE names an external identifier.
 pub(crate) const EXTERNAL: &str = "the block's DOCTYPE names an external identifier (`SYSTEM` or \
@@ -127,6 +184,225 @@ fn quoted(text: &str) -> Option<&str> {
     let mut chars = text.chars();
     let quote = chars.next().filter(|c| matches!(c, '"' | '\''))?;
     chars.as_str().split_once(quote).map(|(inner, _)| inner)
+}
+
+/// Why `input`, a block tagged `tag`, is never given to xmllint's format step, beyond
+/// [`withheld`], checked in this order: it is tagged `xhtml` ([`XHTML`]); it names
+/// `foreignObject` or the XHTML namespace URI in any ASCII case anywhere ([`FOREIGN`]); a
+/// DOCTYPE holds `[` before its first `>` ([`SUBSET`]), as every internal subset does; it names
+/// `xml:space` in any ASCII case anywhere ([`SPACE`]), since xmllint indents an element of only
+/// elements inside a preserved region too; it starts with a byte order mark ([`BOM`]); it holds
+/// a character outside ASCII and doesn't start with an XML declaration naming `encoding="UTF-8"`
+/// ([`ESCAPED`]). `None` for any other block.
+#[must_use]
+pub(crate) fn format_withheld(tag: &str, input: &str) -> Option<&'static str> {
+    let lower = input.to_ascii_lowercase();
+    let has_subset = declarations(&lower, "doctype").any(|rest| {
+        rest.split_once('>')
+            .map_or(rest, |(head, _)| head)
+            .contains('[')
+    });
+    if tag == "xhtml" {
+        Some(XHTML)
+    } else if lower.contains("foreignobject") || lower.contains("http://www.w3.org/1999/xhtml") {
+        Some(FOREIGN)
+    } else if has_subset {
+        Some(SUBSET)
+    } else if lower.contains("xml:space") {
+        Some(SPACE)
+    } else if input.starts_with('\u{feff}') {
+        Some(BOM)
+    } else if !input.is_ascii() && !declares_utf_8(&lower) {
+        Some(ESCAPED)
+    } else {
+        None
+    }
+}
+
+/// Whether `input` starts with an XML declaration: `<?xml` then whitespace.
+fn declares(input: &str) -> bool {
+    input
+        .strip_prefix("<?xml")
+        .is_some_and(|rest| rest.starts_with([' ', '\t', '\n', '\r']))
+}
+
+/// Whether `lower` starts with an XML declaration (see [`declares`]) whose `encoding` is
+/// `"utf-8"` or `'utf-8'`.
+fn declares_utf_8(lower: &str) -> bool {
+    if !declares(lower) {
+        return false;
+    }
+    let declaration = lower.split_once("?>").map_or(lower, |(head, _)| head);
+    declaration.split("encoding").skip(1).any(|after| {
+        after
+            .trim_start()
+            .strip_prefix('=')
+            .is_some_and(|value| quoted(value.trim_start()) == Some("utf-8"))
+    })
+}
+
+/// xmllint's format step reports no syntax error supdoc places: every stderr is a tool failure
+/// (see [`format_verdict`]).
+#[must_use]
+pub(crate) const fn parse_error(_stderr: &str) -> Option<ParseError> {
+    None
+}
+
+/// Judges `ran`, `xmllint --format` on `input`: any stderr, a namespace error's after exit 0 too,
+/// and an unsuccessful exit are a tool failure, never a rewrite. For a block that doesn't start
+/// with an XML declaration (see [`declares`]), the output's first line must be exactly the one
+/// xmllint adds ([`DECLARATION`]), which is taken off; output that doesn't start with it is a
+/// tool failure. What is left is compared with the block as any formatter's output is (see
+/// [`format::printed`]), and a rewrite is kept only when it holds the block's content (see
+/// [`content`]), and output that isn't XML is a tool failure.
+///
+/// # Errors
+///
+/// Why the step didn't run when the rewrite changes the block's content ([`CHANGED`]) or the
+/// block can't be read as XML to compare it ([`UNREAD`]).
+pub(crate) fn format_verdict(input: &str, ran: &Ran) -> Result<format::Verdict, &'static str> {
+    if !ran.success || !ran.stderr.is_empty() {
+        return Ok(format::Verdict::ToolFailed(format::exit_detail(
+            &ran.stderr,
+        )));
+    }
+    let stdout = if declares(input) {
+        ran.stdout.clone()
+    } else if let Some(rest) = ran.stdout.strip_prefix(DECLARATION.as_bytes()) {
+        rest.to_vec()
+    } else {
+        return Ok(format::Verdict::ToolFailed(format!(
+            "xmllint didn't start its output with `{}`, as it does for a block with no XML \
+             declaration",
+            DECLARATION.trim_end()
+        )));
+    };
+    let output = match format::printed(input, stdout) {
+        format::Verdict::Unformatted(output) => output,
+        verdict => return Ok(verdict),
+    };
+    match content(input, &output) {
+        Content::Kept => Ok(format::Verdict::Unformatted(output)),
+        Content::Changed => Err(CHANGED),
+        Content::InputUnread => Err(UNREAD),
+        Content::OutputUnread(error) => Ok(format::Verdict::ToolFailed(format!(
+            "xmllint printed output supdoc can't read as XML: {error}"
+        ))),
+    }
+}
+
+/// What reading a block and xmllint's rewrite of it back as XML found (see [`content`]).
+#[derive(Debug, PartialEq, Eq)]
+enum Content {
+    /// The rewrite holds the block's tree.
+    Kept,
+    /// The rewrite holds another tree than the block's.
+    Changed,
+    /// The block itself isn't XML supdoc can read.
+    InputUnread,
+    /// The rewrite isn't XML supdoc can read; the detail says why.
+    OutputUnread(String),
+}
+
+/// Reads `input` and `output`, xmllint's rewrite of it, as XML (see [`read`]) and compares their
+/// trees node by node in document order: the same kind of node with as many children; elements
+/// with the same expanded name, the same namespaces in scope, and the same attributes by expanded
+/// name and parsed value, in any order; comments and processing instructions with the same text;
+/// text nodes with the same parsed text, except that a text node of only XML whitespace may hold
+/// other XML whitespace. So no text node is added or taken away, and a character reference
+/// written as its character, or an attribute quoted another way, is the same content.
+fn content(input: &str, output: &str) -> Content {
+    let Ok(before) = read(input) else {
+        return Content::InputUnread;
+    };
+    let after = match read(output) {
+        Ok(after) => after,
+        Err(error) => return Content::OutputUnread(error.to_string()),
+    };
+    let mut was = before.root().descendants();
+    let mut is = after.root().descendants();
+    loop {
+        match (was.next(), is.next()) {
+            (None, None) => return Content::Kept,
+            (Some(was), Some(is)) if same_node(was, is) => {}
+            _ => return Content::Changed,
+        }
+    }
+}
+
+/// Reads `text` as XML for [`content`], with a DOCTYPE allowed.
+///
+/// # Errors
+///
+/// roxmltree's error when `text` isn't XML it reads.
+fn read(text: &str) -> Result<Document<'_>, roxmltree::Error> {
+    Document::parse_with_options(
+        text,
+        ParsingOptions {
+            allow_dtd: true,
+            ..ParsingOptions::default()
+        },
+    )
+}
+
+/// Whether `was`, a node of the block, and `is`, the node at its place in xmllint's rewrite, are
+/// the same apart from what their children hold (see [`content`]).
+fn same_node(was: Node<'_, '_>, is: Node<'_, '_>) -> bool {
+    if was.node_type() != is.node_type() || was.children().count() != is.children().count() {
+        return false;
+    }
+    match was.node_type() {
+        NodeType::Root => true,
+        NodeType::Element => {
+            expanded(was) == expanded(is)
+                && namespaces(was) == namespaces(is)
+                && attributes(was) == attributes(is)
+        }
+        NodeType::PI => was.pi() == is.pi(),
+        NodeType::Comment => was.text() == is.text(),
+        NodeType::Text => {
+            let (was, is) = (
+                was.text().unwrap_or_default(),
+                is.text().unwrap_or_default(),
+            );
+            was == is || (only_space(was) && only_space(is))
+        }
+    }
+}
+
+/// An element's expanded name: its namespace URI, if any, and its local name.
+fn expanded<'a>(element: Node<'a, '_>) -> (Option<&'a str>, &'a str) {
+    let name = element.tag_name();
+    (name.namespace(), name.name())
+}
+
+/// The namespaces `element` has in scope, as prefix and URI, sorted.
+fn namespaces<'a>(element: Node<'a, '_>) -> Vec<(Option<&'a str>, &'a str)> {
+    let mut all: Vec<_> = element
+        .namespaces()
+        .map(|namespace| (namespace.name(), namespace.uri()))
+        .collect();
+    all.sort_unstable();
+    all
+}
+
+/// The attributes of `element`, as namespace URI, local name and parsed value, sorted.
+fn attributes<'a>(element: Node<'a, '_>) -> Vec<(Option<&'a str>, &'a str, &'a str)> {
+    let mut all: Vec<_> = element
+        .attributes()
+        .map(|attribute| (attribute.namespace(), attribute.name(), attribute.value()))
+        .collect();
+    all.sort_unstable();
+    all
+}
+
+/// Whether `text` holds only XML whitespace (space, tab, line feed, carriage return), at least
+/// one.
+fn only_space(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .bytes()
+            .all(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
 }
 
 /// The diagnostic a line of xmllint's stderr starts: `-:<line>: <kind> : <message>`, where kind
@@ -358,6 +634,279 @@ mod tests {
         assert_eq!(Withheld::External.reason(), EXTERNAL);
         assert_eq!(Withheld::Entity.reason(), ENTITY);
         assert_eq!(Withheld::Encoding.reason(), ENCODING);
+    }
+
+    #[test]
+    fn an_xhtml_tag_xml_space_or_unescaped_non_ascii_withholds_only_the_format_step() {
+        assert_eq!(format_withheld("xhtml", "<html/>\n"), Some(XHTML));
+        for tag in ["xml", "svg", "xsd", "xsl", "xslt"] {
+            assert_eq!(format_withheld(tag, "<a><b/></a>\n"), None, "tag {tag}");
+        }
+        for block in [
+            "<svg><foreignObject><p>x</p></foreignObject></svg>\n",
+            "<svg><FOREIGNOBJECT/></svg>\n",
+            "<a xmlns:h=\"http://www.w3.org/1999/xhtml\"><h:br></h:br></a>\n",
+        ] {
+            assert_eq!(
+                format_withheld("svg", block),
+                Some(FOREIGN),
+                "block {block:?}"
+            );
+        }
+        for block in [
+            "<!DOCTYPE a [<!ELEMENT a ANY>]>\n<a/>\n",
+            "<! doctype a[]><a/>\n",
+        ] {
+            assert_eq!(
+                format_withheld("xml", block),
+                Some(SUBSET),
+                "block {block:?}"
+            );
+        }
+        assert_eq!(format_withheld("xml", "<!DOCTYPE a>\n<a>[x]</a>\n"), None);
+        assert_eq!(
+            format_withheld(
+                "xml",
+                "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<a/>\n"
+            ),
+            Some(BOM)
+        );
+        for block in [
+            "<a xml:space=\"preserve\"><b/></a>\n",
+            "<a><b XML:Space='default'/></a>\n",
+        ] {
+            assert_eq!(
+                format_withheld("xml", block),
+                Some(SPACE),
+                "block {block:?}"
+            );
+        }
+        for block in [
+            "<a>\u{e9}</a>\n",
+            "<a b=\"\u{2713}\"/>\n",
+            "<?xml version=\"1.0\"?>\n<a>\u{e9}</a>\n",
+            "<a/>\n<?xml version=\"1.0\" encoding=\"UTF-8\"?><!-- \u{e9} -->\n",
+        ] {
+            assert_eq!(
+                format_withheld("xml", block),
+                Some(ESCAPED),
+                "block {block:?}"
+            );
+        }
+        for block in [
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<a>\u{e9}</a>\n",
+            "<?xml version='1.0' encoding='utf-8'?><a>\u{e9}</a>\n",
+            "<a>&#xE9;</a>\n",
+        ] {
+            assert_eq!(format_withheld("xml", block), None, "block {block:?}");
+        }
+    }
+
+    #[test]
+    fn the_added_declaration_line_comes_off_only_when_the_block_had_none() {
+        let declared = "<?xml version=\"1.0\"?>\n";
+        let judged = |input: &str, stdout: &str| format_verdict(input, &ran(true, stdout, ""));
+
+        assert_eq!(
+            judged(
+                "<a>\n  <b/>\n</a>\n",
+                &format!("{declared}<a>\n  <b/>\n</a>\n")
+            ),
+            Ok(format::Verdict::Formatted)
+        );
+        assert_eq!(
+            judged(
+                "<a>\n<b/>\n</a>\n",
+                &format!("{declared}<a>\n  <b/>\n</a>\n")
+            ),
+            Ok(format::Verdict::Unformatted(
+                "<a>\n  <b/>\n</a>\n".to_owned()
+            ))
+        );
+        assert_eq!(
+            judged(&format!("{declared}<a/>\n"), &format!("{declared}<a/>\n")),
+            Ok(format::Verdict::Formatted),
+            "a block's own declaration is kept and compared"
+        );
+        assert_eq!(
+            judged(
+                "<?xml version=\"1.0\"  ?>\n<a/>\n",
+                &format!("{declared}<a/>\n")
+            ),
+            Ok(format::Verdict::Unformatted(format!("{declared}<a/>\n"))),
+            "a block's own declaration is never taken off, even when xmllint rewrites it"
+        );
+        assert_eq!(
+            judged("<a/>\n", &format!("{declared}{declared}<a/>\n")),
+            Ok(format::Verdict::Unformatted(format!("{declared}<a/>\n"))),
+            "only one line comes off"
+        );
+        assert_eq!(
+            judged(
+                "<?xml-stylesheet href=\"s\"?>\n<a/>\n",
+                &format!("{declared}<?xml-stylesheet href=\"s\"?>\n<a/>\n")
+            ),
+            Ok(format::Verdict::Formatted),
+            "a processing instruction named like the declaration isn't one"
+        );
+        for stdout in [
+            "<a/>\n",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<a/>\n",
+            "",
+        ] {
+            assert!(
+                matches!(
+                    judged("<a/>\n", stdout),
+                    Ok(format::Verdict::ToolFailed(detail)) if detail.contains("didn't start its output")
+                ),
+                "stdout {stdout:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn any_stderr_or_an_unsuccessful_exit_is_a_tool_failure_never_a_rewrite() {
+        let output = "<?xml version=\"1.0\"?>\n<x:a/>\n";
+        let cases = [
+            (
+                true,
+                "-:1: namespace error : Namespace prefix x on a is not defined\n",
+            ),
+            (false, "-:1: parser error : Document is empty\n"),
+            (false, ""),
+        ];
+        for (success, stderr) in cases {
+            let verdict = format_verdict("<x:a/>\n", &ran(success, output, stderr));
+            assert!(
+                matches!(verdict, Ok(format::Verdict::ToolFailed(_))),
+                "exit {success}, stderr {stderr:?}: got {verdict:?}"
+            );
+        }
+        assert_eq!(parse_error("-:1: parser error : x\n"), None);
+    }
+
+    #[test]
+    fn a_rewrite_that_only_changes_whitespace_between_nodes_keeps_the_content() {
+        let kept = [
+            ("<a>\n<b>x</b>\n</a>", "<a>\n  <b>x</b>\n</a>\n"),
+            ("<a></a>", "<a/>"),
+            ("<a b=\"1\" c=\"2\"/>", "<a c=\"2\" b=\"1\"/>"),
+            ("<a b='x\"y'>&#65;&quot;</a>", "<a b=\"x&quot;y\">A\"</a>"),
+            ("<a b=\"x\ty\"/>", "<a b=\"x y\"/>"),
+            (
+                "<a>\r\n<!-- c -->\n<?p d?></a>",
+                "<a>\n  <!-- c -->\n  <?p d?></a>",
+            ),
+            ("<a><![CDATA[<x>]]></a>", "<a>&lt;x&gt;</a>"),
+            (
+                "<p:a xmlns:p=\"u\">\n<p:b/>\n</p:a>",
+                "<p:a xmlns:p=\"u\">\n  <p:b/>\n</p:a>",
+            ),
+            ("<!DOCTYPE a>\n<a/>", "<!DOCTYPE a>\n<a/>\n"),
+        ];
+        for (input, output) in kept {
+            assert_eq!(
+                content(input, output),
+                Content::Kept,
+                "{input:?} -> {output:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rewrite_that_adds_removes_or_changes_a_node_changes_the_content() {
+        let changed = [
+            (
+                "<a><b/></a>",
+                "<a>\n  <b/>\n</a>",
+                "a whitespace text node added",
+            ),
+            (
+                "<text><tspan>Hel</tspan><tspan>lo</tspan></text>",
+                "<text>\n  <tspan>Hel</tspan>\n  <tspan>lo</tspan>\n</text>",
+                "whitespace added between inline elements",
+            ),
+            (
+                "<a>\n  <![CDATA[x]]>\n</a>",
+                "<a><![CDATA[x]]></a>",
+                "whitespace beside CDATA dropped",
+            ),
+            (
+                "<a>\n<!-- c -->\n  t\n</a>",
+                "<a><!-- c -->\n  t\n</a>",
+                "a whitespace node removed",
+            ),
+            ("<a> </a>", "<a>x</a>", "whitespace turned into text"),
+            ("<a>x</a>", "<a> </a>", "text turned into whitespace"),
+            ("<a>x y</a>", "<a>x  y</a>", "text changed"),
+            ("<a b=\"1\"/>", "<a b=\"2\"/>", "an attribute value changed"),
+            (
+                "<a b=\"x&#9;y\"/>",
+                "<a b=\"x\ty\"/>",
+                "a tab reference written as a tab, which an attribute reads as a space",
+            ),
+            ("<a b=\"1\"/>", "<a/>", "an attribute removed"),
+            ("<a/>", "<a b=\"1\"/>", "an attribute added"),
+            ("<a><b/></a>", "<a><c/></a>", "an element renamed"),
+            (
+                "<a><b/><c/></a>",
+                "<a><b><c/></b></a>",
+                "an element moved under another",
+            ),
+            ("<a><b/></a>", "<a><b/><b/></a>", "an element added"),
+            (
+                "<a xmlns=\"u\"/>",
+                "<a xmlns=\"v\"/>",
+                "a namespace changed",
+            ),
+            (
+                "<a xmlns:p=\"u\" b=\"p:c\"/>",
+                "<a xmlns:p=\"v\" b=\"p:c\"/>",
+                "a prefix bound to another namespace",
+            ),
+            ("<a><!-- c --></a>", "<a><!--c--></a>", "a comment changed"),
+            (
+                "<a><!-- c --></a>",
+                "<a> c </a>",
+                "a comment turned into text",
+            ),
+            (
+                "<a><?p d?></a>",
+                "<a><?p e?></a>",
+                "a processing instruction changed",
+            ),
+            (
+                "<!-- c -->\n<a/>",
+                "<a/>",
+                "a comment outside the root removed",
+            ),
+        ];
+        for (input, output, what) in changed {
+            assert_eq!(
+                content(input, output),
+                Content::Changed,
+                "{what}: {input:?} -> {output:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_block_or_rewrite_supdoc_cant_read_as_xml_is_never_kept() {
+        assert_eq!(content("<a>", "<a/>"), Content::InputUnread);
+        assert!(matches!(content("<a/>", "<a>"), Content::OutputUnread(_)));
+        let judged = |stdout: &str| format_verdict("<a/>\n", &ran(true, stdout, ""));
+        assert_eq!(
+            judged("<?xml version=\"1.0\"?>\n<a>\n  <b/>\n</a>\n"),
+            Err(CHANGED)
+        );
+        assert_eq!(
+            format_verdict("<a>\n", &ran(true, "<?xml version=\"1.0\"?>\n<a/>\n", "")),
+            Err(UNREAD)
+        );
+        assert!(matches!(
+            judged("<?xml version=\"1.0\"?>\n<a>\n"),
+            Ok(format::Verdict::ToolFailed(detail)) if detail.contains("can't read as XML")
+        ));
     }
 
     #[test]
