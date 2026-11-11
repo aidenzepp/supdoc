@@ -41,6 +41,13 @@ else
   (cd "$work/assets" && shasum -a 256 -c SHA256SUMS)
 fi
 
+# SHA256SUMS comes from the same release as the archives, so it can't catch a swapped asset. The
+# release workflow attests each archive it builds; refuse any archive without that attestation.
+for archive in "$work/assets"/supdoc-*.tar.gz; do
+  gh attestation verify "$archive" --repo aidenzepp/supdoc >/dev/null
+  echo "attested: $(basename "$archive")"
+done
+
 tarballs=()
 while IFS= read -r line; do tarballs+=("$line"); done < <(
   node npm/build.mjs --tag "$tag" --assets "$work/assets" --license LICENSE --out "$work/out"
@@ -55,7 +62,13 @@ if [ "$provenance" = true ]; then flags+=(--provenance); else flags+=(--provenan
 if [ "$dry_run" = true ]; then flags+=(--dry-run); fi
 
 for tarball in "${tarballs[@]}"; do
-  echo "== $tarball"
+  name="$(tar -xzOf "$work/out/$tarball" package/package.json | node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0, "utf8")).name)')"
+  # A re-run after a partial publish skips what is already on the registry.
+  if npm view "$name@$version" version >/dev/null 2>&1; then
+    echo "== $name@$version is already published; skipping"
+    continue
+  fi
+  echo "== $name@$version"
   npm publish "${flags[@]}" "$work/out/$tarball"
 done
 
