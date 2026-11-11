@@ -451,6 +451,58 @@ fn a_build_in_a_target_directory_is_refused_with_pull_and_rebuild() {
     );
 }
 
+/// Where npm puts the platform package's binary in a project.
+const NPM_BINARY: &str = "proj/node_modules/@supdoc/linux-x64/bin/supdoc";
+
+/// Where pnpm puts it: in its content store, under a second `node_modules`.
+const PNPM_BINARY: &str =
+    "proj/node_modules/.pnpm/@supdoc+linux-x64@0.6.0/node_modules/@supdoc/linux-x64/bin/supdoc";
+
+/// What an npm refusal names: the owner, and the npm command for the version asked for.
+const NPM_SAW: &str = "installed from npm";
+const NPM_STEP: &str = "npm install supdoc@99.0.0";
+
+#[test]
+fn a_binary_in_an_npm_package_is_refused_with_npm_install() {
+    let fixture = Fixture::installed("0.0.0");
+    fixture.place_binary(NPM_BINARY);
+
+    assert_refused(&fixture, NPM_BINARY, NPM_SAW, NPM_STEP);
+}
+
+#[test]
+fn a_binary_in_a_pnpm_store_is_refused_with_npm_install() {
+    let fixture = Fixture::installed("0.0.0");
+    fixture.place_binary(PNPM_BINARY);
+
+    assert_refused(&fixture, PNPM_BINARY, NPM_SAW, NPM_STEP);
+}
+
+#[test]
+fn a_global_npm_install_under_a_homebrew_node_is_refused_as_npm_not_homebrew() {
+    let fixture = Fixture::installed("0.0.0");
+    let binary = "prefix/Cellar/node/24.0.0/lib/node_modules/@supdoc/linux-x64/bin/supdoc";
+    fixture.place_binary(binary);
+
+    assert_refused(&fixture, binary, NPM_SAW, NPM_STEP);
+}
+
+#[test]
+fn an_npm_refusal_without_a_version_names_the_latest_package() {
+    let fixture = Fixture::installed("0.0.0");
+    fixture.place_binary(NPM_BINARY);
+
+    let run = fixture.run_at(NPM_BINARY, &["upgrade", "--yes"]);
+
+    let _ = run.assert_exit(78);
+    assert!(
+        run.stderr.contains("npm install supdoc@latest"),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(fixture.cargo_calls(), Vec::<String>::new());
+}
+
 #[test]
 fn a_binary_that_cargo_did_not_install_is_refused_as_unknown() {
     let fixture = Fixture::installed("0.0.0");
@@ -1035,8 +1087,18 @@ fn build_metadata_does_not_name_a_release() {
 
 /// A marked binary at `relative` that another tool owns is refused as before.
 fn assert_marked_refused(relative: &str, saw: &str, step: &str) {
+    assert_marked_refused_beside(relative, &[], saw, step);
+}
+
+/// [`assert_marked_refused`] with each of `beside` written as an empty file in the binary's
+/// directory, and no cargo call allowed.
+fn assert_marked_refused_beside(relative: &str, beside: &[&str], saw: &str, step: &str) {
     let fixture = Fixture::empty();
     fixture.place_binary(relative);
+    let dir = relative.rsplit_once('/').map_or("", |(dir, _name)| dir);
+    for name in beside {
+        fixture.write(&format!("{dir}/{name}"), "");
+    }
     fixture.write("releases/99.0.0/SHA256SUMS", &sums_for(&[NEWER]));
     let releases = fixture.path("releases");
 
@@ -1052,6 +1114,11 @@ fn assert_marked_refused(relative: &str, saw: &str, step: &str) {
     let _ = run.assert_exit(78);
     assert!(run.stderr.contains(saw), "{}", run.stderr);
     assert!(run.stderr.contains(step), "{}", run.stderr);
+    assert_eq!(
+        fixture.cargo_calls(),
+        Vec::<String>::new(),
+        "a refusal must not run cargo"
+    );
 }
 
 #[test]
@@ -1069,6 +1136,26 @@ fn a_marked_binary_under_target_is_still_refused() {
         "checkout/target/debug/supdoc",
         "build from source",
         "cargo install supdoc --locked",
+    );
+}
+
+#[test]
+fn a_marked_binary_in_an_npm_package_is_still_refused() {
+    assert_marked_refused(NPM_BINARY, NPM_SAW, NPM_STEP);
+}
+
+#[test]
+fn a_marked_binary_in_a_pnpm_store_is_still_refused() {
+    assert_marked_refused(PNPM_BINARY, NPM_SAW, NPM_STEP);
+}
+
+#[test]
+fn a_marked_binary_beside_the_npm_marker_is_refused_outside_node_modules() {
+    assert_marked_refused_beside(
+        "deno/npm/registry.npmjs.org/@supdoc/linux-x64/0.6.0/bin/supdoc",
+        &["installed-by-npm"],
+        NPM_SAW,
+        NPM_STEP,
     );
 }
 
