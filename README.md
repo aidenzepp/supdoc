@@ -13,6 +13,15 @@ supdoc can also check the code blocks in your docs. It is pre-1.0 and published 
 
 ## Install
 
+From v0.6.0 on, npm carries the release binary:
+
+```bash
+npx supdoc --version   # run without installing
+npm i -g supdoc        # or install it
+```
+
+With cargo:
+
 ```bash
 cargo install supdoc --locked
 ```
@@ -29,7 +38,7 @@ Or download a release archive. Each release has one `supdoc-VERSION-TARGET.tar.g
 `SHA256SUMS` file; the release page lists the targets. On macOS or Linux:
 
 ```bash
-VERSION=0.5.0
+VERSION=0.6.0
 TARGET=aarch64-apple-darwin
 BASE=https://github.com/aidenzepp/supdoc/releases/download/v$VERSION
 curl -fsSLO "$BASE/supdoc-$VERSION-$TARGET.tar.gz"
@@ -43,7 +52,7 @@ install -m 755 "supdoc-$VERSION-$TARGET/supdoc" ~/.local/bin/  # any directory o
 On Windows, in PowerShell:
 
 ```powershell
-$Version = "0.5.0"; $Target = "x86_64-pc-windows-msvc"
+$Version = "0.6.0"; $Target = "x86_64-pc-windows-msvc"
 $Base = "https://github.com/aidenzepp/supdoc/releases/download/v$Version"
 $Archive = "supdoc-$Version-$Target.tar.gz"
 Invoke-WebRequest "$Base/$Archive" -OutFile $Archive
@@ -60,7 +69,8 @@ Put that directory on your `PATH`.
 `supdoc upgrade --yes` installs the latest release the way you installed supdoc. A `cargo install` from
 crates.io upgrades through cargo, and a release binary is replaced after its archive passes the
 checksum. On Windows a `cargo install` can't be replaced while supdoc runs, so `upgrade` prints the
-cargo command to run from another shell. Any other install is refused with the manual step.
+cargo command to run from another shell. An npm install is refused with the npm command to run instead.
+Any other install is refused with the manual step.
 
 ## Start
 
